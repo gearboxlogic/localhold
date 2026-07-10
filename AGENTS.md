@@ -47,6 +47,16 @@ implementation plans, session notes, or historical audits. Track unfinished
 work in GitHub issues and preserve durable decisions in current architecture or
 policy documentation.
 
+## Pull Request Workflow
+
+- Open a focused pull request after local verification and report its URL.
+- Do not merge a pull request immediately after CI passes. Leave it open for
+  the configured cloud-agent reviews.
+- Inspect and address actionable review findings, then rerun the affected
+  checks and push the fixes to the same pull request.
+- Merge only after required CI and review activity are complete. Green CI by
+  itself is not merge authorization.
+
 ## Definition Of Done
 
 - Behavior and public contracts are covered by focused tests.
@@ -54,3 +64,4 @@ policy documentation.
 - Required checks pass, or the exact gap is reported.
 - The diff contains no generated output, secrets, personal paths, or unrelated
   files.
+- Required cloud-agent review findings have been resolved before merge.

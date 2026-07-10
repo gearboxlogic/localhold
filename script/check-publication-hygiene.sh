@@ -4,8 +4,9 @@ set -euo pipefail
 failed=0
 
 while IFS= read -r path; do
+  [[ -e "$path" || -L "$path" ]] || continue
   case "$path" in
-    .agents/*|.claude/*|.codex/*|tasks/*|docs/plans/*|docs/review/*|CLAUDE.md|script/promote-mcp-local.sh)
+    .agents/*|.claude/*|.codex/*|tasks/*|docs/plans/*|docs/review/*|CLAUDE.md|recall.example.toml|script/promote-mcp-local.sh)
       printf 'forbidden publication path: %s\n' "$path" >&2
       failed=1
       ;;

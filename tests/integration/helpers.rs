@@ -8,7 +8,7 @@ use localhold::{
     engine::RecallEngine,
     error::EmbeddingError,
     http_transport::build_router,
-    server::RecallServer,
+    server::{HttpPrincipalSource, RecallServer},
     store::{MemoryWriter as _, SqliteStore},
     types::{AccessPolicy, Memory, MemoryId, Provenance},
 };
@@ -514,7 +514,7 @@ pub(crate) async fn spawn_http_server_with(embedding: Arc<dyn EmbeddingProvider>
         None,
         AnonymousPolicy::PublicReadOnly,
         Some(TEST_HTTP_AUTH_TOKEN.to_owned()),
-        DEFAULT_HTTP_PRINCIPAL_HEADER.to_owned(),
+        HttpPrincipalSource::fixed(TEST_HTTP_PRINCIPAL),
     );
     spawn_http_server_inner(server, localhold::config::DEFAULT_HTTP_MAX_BODY_BYTES, Some(TEST_HTTP_AUTH_TOKEN), None).await
 }
@@ -524,7 +524,7 @@ pub(crate) async fn spawn_http_server_with(embedding: Arc<dyn EmbeddingProvider>
 pub(crate) async fn spawn_http_noop_server_with_body_limit(max_body_bytes: usize) -> (String, CancellationToken, RecallServer) {
     let store = SqliteStore::in_memory().unwrap();
     let engine = RecallEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine_with_auth_and_http(engine, None, AnonymousPolicy::PublicReadWrite, None, DEFAULT_HTTP_PRINCIPAL_HEADER.to_owned());
+    let server = RecallServer::from_engine_with_auth_and_http(engine, None, AnonymousPolicy::PublicReadWrite, None, HttpPrincipalSource::fixed(TEST_HTTP_PRINCIPAL));
     spawn_http_server_inner(server, max_body_bytes, None, None).await
 }
 
@@ -532,7 +532,7 @@ pub(crate) async fn spawn_http_noop_server_with_body_limit(max_body_bytes: usize
 pub(crate) async fn spawn_http_noop_server_with_allowed_hosts(http_allowed_hosts: Vec<String>) -> (String, CancellationToken, RecallServer) {
     let store = SqliteStore::in_memory().unwrap();
     let engine = RecallEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine_with_auth_and_http(engine, None, AnonymousPolicy::PublicReadWrite, None, DEFAULT_HTTP_PRINCIPAL_HEADER.to_owned());
+    let server = RecallServer::from_engine_with_auth_and_http(engine, None, AnonymousPolicy::PublicReadWrite, None, HttpPrincipalSource::fixed(TEST_HTTP_PRINCIPAL));
     spawn_http_server_inner(server, localhold::config::DEFAULT_HTTP_MAX_BODY_BYTES, None, Some(http_allowed_hosts)).await
 }
 
@@ -551,9 +551,31 @@ pub(crate) async fn spawn_http_server_with_auth(
         principal.map(ToOwned::to_owned),
         anonymous_policy,
         http_auth_token.map(ToOwned::to_owned),
-        DEFAULT_HTTP_PRINCIPAL_HEADER.to_owned(),
+        HttpPrincipalSource::fixed(TEST_HTTP_PRINCIPAL),
     );
     spawn_http_server_inner(server, localhold::config::DEFAULT_HTTP_MAX_BODY_BYTES, http_auth_token, None).await
+}
+
+/// Spawn an HTTP MCP server that trusts a proxy-only identity header.
+///
+/// Tests using this helper model a deployment where clients cannot bypass the
+/// proxy and the proxy strips client-supplied copies of the principal header.
+pub(crate) async fn spawn_http_server_with_trusted_proxy_auth(
+    embedding: Arc<dyn EmbeddingProvider>,
+    principal: Option<&str>,
+    anonymous_policy: AnonymousPolicy,
+    http_auth_token: &str,
+) -> (String, CancellationToken, RecallServer) {
+    let store = SqliteStore::in_memory().unwrap();
+    let engine = RecallEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default());
+    let server = RecallServer::from_engine_with_auth_and_http(
+        engine,
+        principal.map(ToOwned::to_owned),
+        anonymous_policy,
+        Some(http_auth_token.to_owned()),
+        HttpPrincipalSource::trusted_proxy_header(DEFAULT_HTTP_PRINCIPAL_HEADER),
+    );
+    spawn_http_server_inner(server, localhold::config::DEFAULT_HTTP_MAX_BODY_BYTES, Some(http_auth_token), None).await
 }
 
 /// Spawn an HTTP MCP server with a caller-supplied embedding provider and clock.
@@ -566,7 +588,7 @@ pub(crate) async fn spawn_http_server_with_clock(embedding: Arc<dyn EmbeddingPro
         None,
         AnonymousPolicy::PublicReadOnly,
         Some(TEST_HTTP_AUTH_TOKEN.to_owned()),
-        DEFAULT_HTTP_PRINCIPAL_HEADER.to_owned(),
+        HttpPrincipalSource::fixed(TEST_HTTP_PRINCIPAL),
     );
     spawn_http_server_inner(server, localhold::config::DEFAULT_HTTP_MAX_BODY_BYTES, Some(TEST_HTTP_AUTH_TOKEN), None).await
 }
@@ -600,7 +622,7 @@ async fn spawn_http_server_inner(
 
 /// Connect an MCP client to the HTTP server at the given URL.
 pub(crate) async fn connect_http_client(url: &str) -> RunningService<rmcp::RoleClient, ()> {
-    connect_http_client_with_auth(url, TEST_HTTP_AUTH_TOKEN, TEST_HTTP_PRINCIPAL).await
+    connect_http_client_with_bearer(url, TEST_HTTP_AUTH_TOKEN).await
 }
 
 /// Connect an MCP client without HTTP authorization headers.
@@ -609,7 +631,17 @@ pub(crate) async fn connect_http_client_unauthenticated(url: &str) -> RunningSer
     ().serve(transport).await.unwrap()
 }
 
-/// Connect an MCP client with bearer auth and a v2 principal header.
+/// Connect an MCP client with bearer auth and no caller-controlled identity.
+pub(crate) async fn connect_http_client_with_bearer(url: &str, token: &str) -> RunningService<rmcp::RoleClient, ()> {
+    let config = StreamableHttpClientTransportConfig::with_uri(url).auth_header(token);
+    let transport = StreamableHttpClientTransport::from_config(config);
+    ().serve(transport).await.unwrap()
+}
+
+/// Connect an MCP client with bearer auth and a principal header.
+///
+/// Fixed-identity servers ignore this header. Trusted-proxy tests use it to
+/// model the identity header after the proxy has authenticated the caller.
 pub(crate) async fn connect_http_client_with_auth(url: &str, token: &str, principal: &str) -> RunningService<rmcp::RoleClient, ()> {
     let mut headers = HashMap::new();
     headers.insert(HeaderName::from_static(DEFAULT_HTTP_PRINCIPAL_HEADER), HeaderValue::from_str(principal).unwrap());
@@ -630,6 +662,15 @@ pub(crate) async fn setup_http_noop_server_with_auth(
     http_auth_token: Option<&str>,
 ) -> (String, CancellationToken, RecallServer) {
     spawn_http_server_with_auth(Arc::new(NoopEmbedding::new()), principal, anonymous_policy, http_auth_token).await
+}
+
+/// Spawn an HTTP MCP server with `NoopEmbedding` behind a modeled trusted proxy.
+pub(crate) async fn setup_http_noop_server_with_trusted_proxy_auth(
+    principal: Option<&str>,
+    anonymous_policy: AnonymousPolicy,
+    http_auth_token: &str,
+) -> (String, CancellationToken, RecallServer) {
+    spawn_http_server_with_trusted_proxy_auth(Arc::new(NoopEmbedding::new()), principal, anonymous_policy, http_auth_token).await
 }
 
 /// Spawn an HTTP MCP server with `NoopEmbedding` and a custom clock.

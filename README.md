@@ -47,9 +47,12 @@ in this beta snapshot.
 
 ## Configuration
 
-LocalHold reads `./recall.toml` first, then
-`~/.config/localhold/recall.toml`. Runtime overrides use `RECALL_*` environment
-variables. See [recall.example.toml](recall.example.toml) for the complete
+LocalHold reads `~/.config/localhold/localhold.toml` on Linux and the
+equivalent platform user-config directory elsewhere. It never loads config
+implicitly from the current working directory. Existing
+`~/.config/localhold/recall.toml` files remain a temporary fallback when the
+canonical file is absent. Runtime overrides use `RECALL_*` environment
+variables. See [localhold.example.toml](localhold.example.toml) for the complete
 configuration surface.
 
 The default provider is `noop`, which keeps search local and text-only. To use
@@ -128,6 +131,8 @@ host = "127.0.0.1"
 port = 8080
 path = "/mcp"
 http_auth_token = "replace-with-a-secret"
+http_principal_mode = "fixed"
+http_principal = "http"
 http_allowed_hosts = ["localhost", "127.0.0.1", "::1"]
 ```
 
@@ -135,10 +140,11 @@ The MCP endpoint is `http://127.0.0.1:8080/mcp`. HTTP requests never inherit
 the stdio principal. Without `http_auth_token`, requests are anonymous and the
 default policy allows public reads but denies writes.
 
-The bearer token protects the endpoint but does not establish independently
-verified user identity. A deployment that accepts caller-specific principal
-headers must place LocalHold behind a trusted identity proxy and restrict direct
-access to the server.
+The default `fixed` mode assigns every valid bearer token the configured
+`http_principal`; caller-supplied identity headers are ignored. For distinct
+caller identities, select `trusted_proxy` mode only behind an authenticating
+proxy that overwrites `x-localhold-principal` and prevents direct access to
+LocalHold.
 
 ## Storage
 

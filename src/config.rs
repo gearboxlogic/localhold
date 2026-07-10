@@ -27,8 +27,8 @@ pub const DEFAULT_RERANKER_MODEL: &str = "cross-encoder/ms-marco-MiniLM-L-6-v2";
 pub const DEFAULT_RERANKER_MODEL_CANONICAL: &str = "cross-encoder/ms-marco-MiniLM-L6-v2";
 /// Pinned immutable revision for the default reranker model.
 pub const DEFAULT_RERANKER_REVISION: &str = "c5ee24cb16019beea0893ab7796b1df96625c6b8";
-/// Default HTTP header that carries the trusted v2 principal after bearer auth.
-pub const DEFAULT_HTTP_PRINCIPAL_HEADER: &str = "x-recall-principal";
+/// Default HTTP header that carries a principal asserted by a trusted proxy.
+pub const DEFAULT_HTTP_PRINCIPAL_HEADER: &str = "x-localhold-principal";
 /// Default maximum HTTP request body size for streamable HTTP transport.
 pub const DEFAULT_HTTP_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 /// Maximum candidate-pool size supported by all current search backends.
@@ -94,6 +94,39 @@ impl FromStr for Transport {
             "stdio" => Ok(Self::Stdio),
             "http" => Ok(Self::Http),
             other => Err(ParseEnumError(format!("unknown transport {other:?}, expected \"stdio\" or \"http\""))),
+        }
+    }
+}
+
+/// Source of the authenticated principal for HTTP requests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HttpPrincipalMode {
+    /// Every valid endpoint bearer token receives one configured identity.
+    #[default]
+    Fixed,
+    /// A separately authenticated reverse proxy asserts identity in a header.
+    TrustedProxy,
+}
+
+impl fmt::Display for HttpPrincipalMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fixed => f.write_str("fixed"),
+            Self::TrustedProxy => f.write_str("trusted_proxy"),
+        }
+    }
+}
+
+impl FromStr for HttpPrincipalMode {
+    type Err = ParseEnumError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "fixed" => Ok(Self::Fixed),
+            "trusted_proxy" => Ok(Self::TrustedProxy),
+            other => Err(ParseEnumError(format!("unknown HTTP principal mode {other:?}, expected \"fixed\" or \"trusted_proxy\""))),
         }
     }
 }
@@ -352,7 +385,7 @@ pub struct SqliteDatabaseConfig {
 }
 
 /// `PostgreSQL` database configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[non_exhaustive]
 pub struct PostgresDatabaseConfig {
@@ -362,6 +395,16 @@ pub struct PostgresDatabaseConfig {
     pub max_connections: u32,
     /// Whether startup should create/migrate the schema.
     pub auto_migrate: bool,
+}
+
+impl fmt::Debug for PostgresDatabaseConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PostgresDatabaseConfig")
+            .field("url", &"[REDACTED]")
+            .field("max_connections", &self.max_connections)
+            .field("auto_migrate", &self.auto_migrate)
+            .finish()
+    }
 }
 
 /// Provider-agnostic embedding configuration.
@@ -408,7 +451,7 @@ const fn default_embedding_dimensions() -> usize {
 }
 
 /// OpenAI-compatible embedding endpoint parameters.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[non_exhaustive]
 pub struct OpenAiCompatibleConfig {
@@ -418,6 +461,16 @@ pub struct OpenAiCompatibleConfig {
     pub model: String,
     /// Optional bearer token. Local servers may ignore this, but some require it.
     pub api_key: Option<String>,
+}
+
+impl fmt::Debug for OpenAiCompatibleConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenAiCompatibleConfig")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 impl Default for OpenAiCompatibleConfig {
@@ -475,7 +528,11 @@ pub struct ServerConfig {
     /// Empty or omitted leaves the endpoint unauthenticated; `anonymous_policy`
     /// then governs access because HTTP never inherits the launch principal.
     pub http_auth_token: Option<String>,
-    /// HTTP header whose value becomes the trusted v2 principal after bearer auth.
+    /// How bearer-authenticated HTTP requests obtain their principal.
+    pub http_principal_mode: HttpPrincipalMode,
+    /// Fixed principal assigned in `fixed` mode.
+    pub http_principal: String,
+    /// Identity header trusted only in `trusted_proxy` mode.
     pub http_principal_header: String,
     /// Host header values accepted by the HTTP transport's DNS-rebinding guard.
     pub http_allowed_hosts: Vec<String>,
@@ -639,6 +696,8 @@ impl Default for ServerConfig {
             port: 8080,
             path: "/mcp".into(),
             http_auth_token: None,
+            http_principal_mode: HttpPrincipalMode::Fixed,
+            http_principal: "http".into(),
             http_principal_header: DEFAULT_HTTP_PRINCIPAL_HEADER.into(),
             http_allowed_hosts: vec!["localhost".into(), "127.0.0.1".into(), "::1".into()],
             max_body_bytes: DEFAULT_HTTP_MAX_BODY_BYTES,
@@ -721,19 +780,19 @@ pub(crate) fn expand_tilde(path: &str) -> Result<PathBuf, EngineError> {
 }
 
 impl Config {
-    /// Load config from file search path + env overrides.
+    /// Load config from the platform user config directory + env overrides.
     ///
-    /// Search order: `./recall.toml` → `~/.config/localhold/recall.toml`.
-    /// Missing files are not an error — defaults apply.
+    /// Search order within the platform config directory is
+    /// `localhold/localhold.toml`, then the legacy
+    /// `localhold/recall.toml` compatibility path. Files in the current
+    /// working directory are never loaded implicitly. Missing files are not
+    /// an error — defaults apply.
     ///
     /// # Errors
     ///
     /// Returns `EngineError::Config` if a config file exists but cannot be read or parsed.
     pub fn load() -> Result<Self, EngineError> {
-        let candidates: Vec<PathBuf> = [Some(PathBuf::from("./recall.toml")), dirs::config_dir().map(|d| d.join("localhold").join("recall.toml"))]
-            .into_iter()
-            .flatten()
-            .collect();
+        let candidates = user_config_candidates(dirs::config_dir().as_deref());
 
         let env_map = collect_recall_env_vars();
         Self::load_from_sources(&candidates, &env_map)
@@ -802,6 +861,10 @@ impl Config {
         }
         if let Some(v) = env.get("RECALL_HTTP_AUTH_TOKEN") {
             self.server.http_auth_token = Some(v.clone());
+        }
+        apply_parsed_env(env, "RECALL_HTTP_PRINCIPAL_MODE", &mut self.server.http_principal_mode);
+        if let Some(v) = env.get("RECALL_HTTP_PRINCIPAL") {
+            self.server.http_principal.clone_from(v);
         }
         if let Some(v) = env.get("RECALL_HTTP_PRINCIPAL_HEADER") {
             self.server.http_principal_header.clone_from(v);
@@ -909,6 +972,7 @@ impl Config {
             .map(str::trim)
             .filter(|token| !token.is_empty())
             .map(ToOwned::to_owned);
+        self.server.http_principal = self.server.http_principal.trim().to_owned();
         self.server.http_principal_header = normalize_http_header_name(&self.server.http_principal_header)?;
         self.server.http_allowed_hosts = self
             .server
@@ -937,6 +1001,13 @@ impl Config {
     }
 }
 
+fn user_config_candidates(config_dir: Option<&Path>) -> Vec<PathBuf> {
+    config_dir.map_or_else(Vec::new, |dir| {
+        let localhold_dir = dir.join("localhold");
+        vec![localhold_dir.join("localhold.toml"), localhold_dir.join("recall.toml")]
+    })
+}
+
 pub(crate) fn validate_server_config(config: &ServerConfig) -> Result<(), EngineError> {
     if config.max_body_bytes == 0 {
         return Err(EngineError::config("server.max_body_bytes must be greater than zero"));
@@ -947,6 +1018,14 @@ pub(crate) fn validate_server_config(config: &ServerConfig) -> Result<(), Engine
         .is_some_and(|token| token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_graphic()))
     {
         return Err(EngineError::config("server.http_auth_token must contain only visible ASCII characters"));
+    }
+    if config.http_principal_mode == HttpPrincipalMode::Fixed && config.http_principal.is_empty() {
+        return Err(EngineError::config("server.http_principal must not be empty in fixed mode"));
+    }
+    if config.transport == Transport::Http && config.http_principal_mode == HttpPrincipalMode::TrustedProxy && config.http_auth_token.is_none() {
+        return Err(EngineError::config(
+            "server.http_auth_token is required in trusted_proxy principal mode to prevent direct anonymous access",
+        ));
     }
     validate_http_path(&config.path)?;
     if config.http_allowed_hosts.is_empty() {
@@ -1223,6 +1302,8 @@ fn collect_recall_env_vars() -> HashMap<String, String> {
         "RECALL_HTTP_PORT",
         "RECALL_HTTP_PATH",
         "RECALL_HTTP_AUTH_TOKEN",
+        "RECALL_HTTP_PRINCIPAL_MODE",
+        "RECALL_HTTP_PRINCIPAL",
         "RECALL_HTTP_PRINCIPAL_HEADER",
         "RECALL_HTTP_ALLOWED_HOSTS",
         "RECALL_HTTP_MAX_BODY_BYTES",
@@ -1311,6 +1392,8 @@ mod tests {
         assert_eq!(config.server.principal.as_deref(), Some("stdio"));
         assert_eq!(config.server.anonymous_policy, AnonymousPolicy::PublicReadOnly);
         assert_eq!(config.server.http_auth_token, None);
+        assert_eq!(config.server.http_principal_mode, HttpPrincipalMode::Fixed);
+        assert_eq!(config.server.http_principal, "http");
         assert_eq!(config.server.http_principal_header, DEFAULT_HTTP_PRINCIPAL_HEADER);
         assert_eq!(config.server.http_allowed_hosts, ["localhost", "127.0.0.1", "::1"]);
         assert_eq!(config.server.max_body_bytes, DEFAULT_HTTP_MAX_BODY_BYTES);
@@ -1344,6 +1427,38 @@ mod tests {
         assert_eq!(parsed.limits.max_search_limit, config.limits.max_search_limit);
         assert_eq!(parsed.limits.embedding_timeout_secs, config.limits.embedding_timeout_secs);
         assert_eq!(parsed.limits.max_history_limit, config.limits.max_history_limit);
+    }
+
+    #[test]
+    fn debug_redacts_openai_api_key_but_keeps_endpoint_and_model() {
+        let config = OpenAiCompatibleConfig {
+            base_url: "https://embeddings.example/v1".into(),
+            model: "useful-model-name".into(),
+            api_key: Some("super-secret-api-key".into()),
+        };
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("https://embeddings.example/v1"));
+        assert!(debug.contains("useful-model-name"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("super-secret-api-key"));
+    }
+
+    #[test]
+    fn debug_redacts_postgres_url_credentials_but_keeps_pool_settings() {
+        let config = PostgresDatabaseConfig {
+            url: "postgres://private-user:private-password@db.example/localhold".into(),
+            max_connections: 17,
+            auto_migrate: false,
+        };
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("max_connections: 17"));
+        assert!(debug.contains("auto_migrate: false"));
+        assert!(!debug.contains("private-user"));
+        assert!(!debug.contains("private-password"));
+        assert!(!debug.contains("db.example"));
     }
 
     #[test]
@@ -1395,6 +1510,8 @@ mod tests {
             ("RECALL_HTTP_PORT", "invalid-http-port"),
             ("RECALL_HTTP_PATH", "/memory"),
             ("RECALL_HTTP_AUTH_TOKEN", "secret-token"),
+            ("RECALL_HTTP_PRINCIPAL_MODE", "trusted_proxy"),
+            ("RECALL_HTTP_PRINCIPAL", "proxy-fallback"),
             ("RECALL_HTTP_PRINCIPAL_HEADER", "X-Agent-Principal"),
             ("RECALL_HTTP_ALLOWED_HOSTS", "recall.internal, 10.0.0.4:8080"),
             ("RECALL_HTTP_MAX_BODY_BYTES", "4096"),
@@ -1421,6 +1538,8 @@ mod tests {
         assert_eq!(config.server.port, original_http_port);
         assert_eq!(config.server.path, "/memory");
         assert_eq!(config.server.http_auth_token.as_deref(), Some("secret-token"));
+        assert_eq!(config.server.http_principal_mode, HttpPrincipalMode::TrustedProxy);
+        assert_eq!(config.server.http_principal, "proxy-fallback");
         assert_eq!(config.server.http_principal_header, "X-Agent-Principal");
         assert_eq!(config.server.http_allowed_hosts, ["recall.internal", "10.0.0.4:8080"]);
         assert_eq!(config.server.max_body_bytes, 4096);
@@ -1614,52 +1733,60 @@ mod tests {
     }
 
     #[test]
-    fn load_from_sources_prefers_first_existing_path() {
+    fn user_config_candidates_prefer_canonical_file_over_legacy_file() {
         let root = unique_temp_dir("config-sources-precedence");
-        let dir_a = root.join("a");
-        let dir_b = root.join("b");
-        fs::create_dir_all(&dir_a).unwrap();
-        fs::create_dir_all(&dir_b).unwrap();
+        let localhold_dir = root.join("localhold");
+        fs::create_dir_all(&localhold_dir).unwrap();
 
         fs::write(
-            dir_a.join("recall.toml"),
-            "[embedding]\nprovider = \"openai_compatible\"\n\n[embedding.openai_compatible]\nmodel = \"from-a\"\n",
+            localhold_dir.join("localhold.toml"),
+            "[embedding]\nprovider = \"openai_compatible\"\n\n[embedding.openai_compatible]\nmodel = \"canonical\"\n",
         )
         .unwrap();
         fs::write(
-            dir_b.join("recall.toml"),
-            "[embedding]\nprovider = \"openai_compatible\"\n\n[embedding.openai_compatible]\nmodel = \"from-b\"\n",
+            localhold_dir.join("recall.toml"),
+            "[embedding]\nprovider = \"openai_compatible\"\n\n[embedding.openai_compatible]\nmodel = \"legacy\"\n",
         )
         .unwrap();
 
-        let paths = vec![dir_a.join("recall.toml"), dir_b.join("recall.toml")];
+        let paths = user_config_candidates(Some(&root));
         let config = Config::load_from_sources(&paths, &no_env()).unwrap();
-        assert_eq!(config.embedding.openai_compatible().unwrap().model, "from-a");
+        assert_eq!(config.embedding.openai_compatible().unwrap().model, "canonical");
 
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn load_from_sources_skips_missing_paths() {
-        let root = unique_temp_dir("config-sources-skip");
-        let dir_b = root.join("b");
-        fs::create_dir_all(&dir_b).unwrap();
+    fn user_config_candidates_fall_back_to_legacy_file() {
+        let root = unique_temp_dir("config-sources-legacy");
+        let localhold_dir = root.join("localhold");
+        fs::create_dir_all(&localhold_dir).unwrap();
         fs::write(
-            dir_b.join("recall.toml"),
-            "[embedding]\nprovider = \"openai_compatible\"\n\n[embedding.openai_compatible]\nmodel = \"from-b\"\n",
+            localhold_dir.join("recall.toml"),
+            "[embedding]\nprovider = \"openai_compatible\"\n\n[embedding.openai_compatible]\nmodel = \"legacy\"\n",
         )
         .unwrap();
 
-        let paths = vec![root.join("nonexistent").join("recall.toml"), dir_b.join("recall.toml")];
+        let paths = user_config_candidates(Some(&root));
         let config = Config::load_from_sources(&paths, &no_env()).unwrap();
-        assert_eq!(config.embedding.openai_compatible().unwrap().model, "from-b");
+        assert_eq!(config.embedding.openai_compatible().unwrap().model, "legacy");
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn user_config_candidates_never_include_current_directory_files() {
+        let root = unique_temp_dir("config-sources-no-cwd");
+        let paths = user_config_candidates(Some(&root));
+
+        assert_eq!(paths, [root.join("localhold/localhold.toml"), root.join("localhold/recall.toml")]);
+        assert!(paths.iter().all(|path| path.is_absolute()));
+        assert!(!paths.iter().any(|path| path == Path::new("localhold.toml") || path == Path::new("recall.toml")));
     }
 
     #[test]
     fn load_from_sources_uses_defaults_when_no_paths_exist() {
-        let paths: Vec<PathBuf> = vec![PathBuf::from("/nonexistent/recall.toml")];
+        let paths: Vec<PathBuf> = vec![PathBuf::from("/nonexistent/localhold.toml")];
         let config = Config::load_from_sources(&paths, &no_env()).unwrap();
         assert!(config.embedding.openai_compatible().is_none());
     }
@@ -1671,14 +1798,14 @@ mod tests {
             ("RECALL_MAX_BATCH_SIZE", "25"),
             ("RECALL_PRINCIPAL", " "),
             ("RECALL_HTTP_AUTH_TOKEN", "  "),
-            ("RECALL_HTTP_PRINCIPAL_HEADER", " X-Recall-Principal "),
+            ("RECALL_HTTP_PRINCIPAL_HEADER", " X-LocalHold-Principal "),
         ]);
         let config = Config::load_from_sources(&[], &env).unwrap();
         assert_eq!(config.embedding.openai_compatible().unwrap().model, "env-model");
         assert_eq!(config.limits.max_batch_size, 25);
         assert_eq!(config.server.principal, None);
         assert_eq!(config.server.http_auth_token, None);
-        assert_eq!(config.server.http_principal_header, "x-recall-principal");
+        assert_eq!(config.server.http_principal_header, "x-localhold-principal");
     }
 
     #[test]
@@ -1693,12 +1820,12 @@ mod tests {
         let root = unique_temp_dir("config-sources-env-override");
         fs::create_dir_all(&root).unwrap();
         fs::write(
-            root.join("recall.toml"),
+            root.join("localhold.toml"),
             "[embedding]\nprovider = \"openai_compatible\"\n\n[embedding.openai_compatible]\nmodel = \"from-file\"\n",
         )
         .unwrap();
 
-        let paths = vec![root.join("recall.toml")];
+        let paths = vec![root.join("localhold.toml")];
         let env = env_with(&[("RECALL_EMBEDDING_MODEL", "from-env")]);
         let config = Config::load_from_sources(&paths, &env).unwrap();
         assert_eq!(config.embedding.openai_compatible().unwrap().model, "from-env");
@@ -1710,14 +1837,14 @@ mod tests {
     fn load_from_sources_returns_parse_error_for_malformed_file() {
         let root = unique_temp_dir("config-sources-parse-error");
         fs::create_dir_all(&root).unwrap();
-        fs::write(root.join("recall.toml"), "embedding = [").unwrap();
+        fs::write(root.join("localhold.toml"), "embedding = [").unwrap();
 
-        let paths = vec![root.join("recall.toml")];
+        let paths = vec![root.join("localhold.toml")];
         let err = Config::load_from_sources(&paths, &no_env()).unwrap_err();
         assert!(matches!(err, EngineError::Config(_)));
         let msg = err.to_string();
         assert!(msg.contains("parsing"));
-        assert!(msg.contains("recall.toml"));
+        assert!(msg.contains("localhold.toml"));
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -1725,14 +1852,14 @@ mod tests {
     #[test]
     fn load_from_sources_returns_read_error_when_path_is_directory() {
         let root = unique_temp_dir("config-sources-read-error");
-        fs::create_dir_all(root.join("recall.toml")).unwrap();
+        fs::create_dir_all(root.join("localhold.toml")).unwrap();
 
-        let paths = vec![root.join("recall.toml")];
+        let paths = vec![root.join("localhold.toml")];
         let err = Config::load_from_sources(&paths, &no_env()).unwrap_err();
         assert!(matches!(err, EngineError::Config(_)));
         let msg = err.to_string();
         assert!(msg.contains("reading"));
-        assert!(msg.contains("recall.toml"));
+        assert!(msg.contains("localhold.toml"));
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -1832,6 +1959,28 @@ mod tests {
             let error = validate_server_config(&config).unwrap_err();
             assert!(error.to_string().contains("http_auth_token"), "unexpected error: {error}");
         }
+    }
+
+    #[test]
+    fn validate_server_config_rejects_empty_fixed_http_principal() {
+        let config = ServerConfig {
+            http_principal: String::new(),
+            ..ServerConfig::default()
+        };
+        let error = validate_server_config(&config).unwrap_err();
+        assert!(error.to_string().contains("http_principal"));
+    }
+
+    #[test]
+    fn validate_server_config_requires_auth_for_http_trusted_proxy_mode() {
+        let config = ServerConfig {
+            transport: Transport::Http,
+            http_principal_mode: HttpPrincipalMode::TrustedProxy,
+            http_auth_token: None,
+            ..ServerConfig::default()
+        };
+        let error = validate_server_config(&config).unwrap_err();
+        assert!(error.to_string().contains("http_auth_token"));
     }
 
     #[test]

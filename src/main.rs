@@ -8,12 +8,12 @@ use std::{
 };
 
 use localhold::{
-    config::{Config, DatabaseBackend, EmbeddingConfig, ServerConfig, Transport},
+    config::{Config, DatabaseBackend, EmbeddingConfig, HttpPrincipalMode, ServerConfig, Transport},
     embedding::{EmbeddingProvider, NoopEmbedding, OpenAiEmbedding, ResilientEmbedding, resilient::ResilientConfig},
     engine::{RecallEngine, ReembedOutcome, ReembedRequest},
     error::EngineError,
     http_transport::build_router,
-    server::RecallServer,
+    server::{HttpPrincipalSource, RecallServer},
     store::{
         MemoryStore, PostgresStore, SqliteStore,
         migration::{MigrationError, SqliteToPostgresOptions, migrate_sqlite_to_postgres},
@@ -58,7 +58,7 @@ async fn main() -> AppResult {
         }
         DatabaseBackend::Postgres => {
             let store = PostgresStore::open(&config.database.postgres, config.embedding.dimensions()).await?;
-            info!("postgres database opened at {}", config.database.postgres.url);
+            info!("postgres database opened");
             run_with_store(store, config).await
         }
         other => return Err(EngineError::config(format!("unsupported database backend: {other}")).into()),
@@ -147,7 +147,11 @@ where
     let server_principal = config.server.principal.clone();
     let anonymous_policy = config.server.anonymous_policy;
     let http_auth_token = config.server.http_auth_token.clone();
-    let http_principal_header = config.server.http_principal_header.clone();
+    let http_principal_source = match config.server.http_principal_mode {
+        HttpPrincipalMode::Fixed => HttpPrincipalSource::fixed(config.server.http_principal.clone()),
+        HttpPrincipalMode::TrustedProxy => HttpPrincipalSource::trusted_proxy_header(config.server.http_principal_header.clone()),
+        _ => return Err("unsupported HTTP principal mode".into()),
+    };
 
     let engine = RecallEngine::new(store, embedding, config.limits, config.search);
 
@@ -168,7 +172,7 @@ where
     // Spawn auto-reembed watcher: when embeddings recover, re-embed memories that lack embeddings.
     spawn_recovery_reembed(engine.clone(), recovery_notify);
 
-    let server = RecallServer::from_engine_with_auth_and_http(engine, server_principal, anonymous_policy, http_auth_token, http_principal_header);
+    let server = RecallServer::from_engine_with_auth_and_http(engine, server_principal, anonymous_policy, http_auth_token, http_principal_source);
 
     match config.server.transport {
         Transport::Stdio => Box::pin(serve_stdio(server)).await,

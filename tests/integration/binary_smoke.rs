@@ -23,6 +23,26 @@ fn base_binary_command(db_path: &std::path::Path) -> Command {
     cmd
 }
 
+fn isolate_user_config_dir(command: &mut Command, root: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let config_dir = root.join("user-config");
+        command.env("XDG_CONFIG_HOME", &config_dir);
+        config_dir
+    }
+    #[cfg(target_os = "macos")]
+    {
+        command.env("HOME", root);
+        root.join("Library/Application Support")
+    }
+    #[cfg(windows)]
+    {
+        let config_dir = root.join("AppData/Roaming");
+        command.env("APPDATA", &config_dir);
+        config_dir
+    }
+}
+
 fn assert_child_stays_running(child: &mut Child, label: &str) {
     // Startup should succeed and keep serving until explicitly terminated.
     thread::sleep(Duration::from_millis(300));
@@ -205,19 +225,43 @@ fn binary_migrates_sqlite_to_postgres() {
 #[test]
 fn binary_exits_for_invalid_config_file() {
     let db_path = unique_db_path("bin-invalid-config");
-    let config_dir = db_path.with_extension("config");
+    let root = db_path.with_extension("config");
+    let mut cmd = base_binary_command(&db_path);
+    let config_dir = isolate_user_config_dir(&mut cmd, &root).join("localhold");
     std::fs::create_dir_all(&config_dir).unwrap();
-    let config_file = config_dir.join("recall.toml");
+    let config_file = config_dir.join("localhold.toml");
     std::fs::write(&config_file, "[server]\ntransport = \"websocket\"\n").unwrap();
 
-    let mut cmd = base_binary_command(&db_path);
-    cmd.current_dir(&config_dir);
+    cmd.current_dir(&root);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
 
     let status = cmd.status().unwrap();
     assert!(!status.success());
-    let _cleanup = std::fs::remove_dir_all(config_dir);
+    let _cleanup = std::fs::remove_dir_all(root);
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn binary_ignores_config_files_in_current_directory() {
+    let db_path = unique_db_path("bin-ignore-cwd-config");
+    let root = db_path.with_extension("cwd");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("localhold.toml"), "[server]\ntransport = \"websocket\"\n").unwrap();
+    std::fs::write(root.join("recall.toml"), "[server]\ntransport = \"websocket\"\n").unwrap();
+
+    let mut cmd = base_binary_command(&db_path);
+    let _config_dir = isolate_user_config_dir(&mut cmd, &root);
+    cmd.current_dir(&root);
+    cmd.env("RECALL_TRANSPORT", "stdio");
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::null());
+
+    let mut child = cmd.spawn().unwrap();
+    assert_child_stays_running(&mut child, "stdio with untrusted CWD configs");
+    terminate_child(&mut child);
+    let _cleanup = std::fs::remove_dir_all(root);
     let _cleanup = std::fs::remove_file(db_path);
 }

@@ -19,8 +19,8 @@ use serde_json::json;
 
 use super::helpers::{
     TEST_HTTP_AUTH_TOKEN, TEST_HTTP_PRINCIPAL, await_embeddings, call_tool, call_tool_error, connect_http_client, connect_http_client_unauthenticated,
-    connect_http_client_with_auth, setup_http_embedding_server, setup_http_noop_server, setup_http_noop_server_with_auth, spawn_http_noop_server_with_allowed_hosts,
-    spawn_http_noop_server_with_body_limit,
+    connect_http_client_with_auth, connect_http_client_with_bearer, setup_http_embedding_server, setup_http_noop_server, setup_http_noop_server_with_auth,
+    setup_http_noop_server_with_trusted_proxy_auth, spawn_http_noop_server_with_allowed_hosts, spawn_http_noop_server_with_body_limit,
 };
 
 // ===========================================================================
@@ -102,14 +102,14 @@ async fn http_multiple_sessions_share_data() {
 }
 
 #[tokio::test]
-async fn http_v2_authenticated_principal_enables_write_without_launch_principal() {
+async fn http_v2_fixed_bearer_principal_enables_write_without_launch_principal() {
     let (url, ct, server) = setup_http_noop_server_with_auth(None, AnonymousPolicy::PublicReadOnly, Some("secret-token")).await;
 
     let unauthenticated = raw_mcp_post(&url, RAW_INITIALIZE).send().await.unwrap();
     assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(unauthenticated.headers().get(WWW_AUTHENTICATE).unwrap(), "Bearer");
 
-    let authenticated_client = connect_http_client_with_auth(&url, "secret-token", "alice").await;
+    let authenticated_client = connect_http_client_with_bearer(&url, "secret-token").await;
     let remembered: RememberResponse = call_tool(
         &authenticated_client,
         "remember",
@@ -117,7 +117,7 @@ async fn http_v2_authenticated_principal_enables_write_without_launch_principal(
     )
     .await;
     let read: ReadResponse = call_tool(&authenticated_client, "read", json!({"id": remembered.id})).await;
-    assert_eq!(read.agent_label.as_deref(), Some("alice"));
+    assert_eq!(read.agent_label.as_deref(), Some(TEST_HTTP_PRINCIPAL));
     assert_eq!(read.scope.as_deref(), Some("gearboxlogic/localhold"));
 
     ct.cancel();
@@ -152,13 +152,16 @@ async fn http_v2_migration_tools_require_local_admin_context() {
 }
 
 #[tokio::test]
-async fn http_v2_authenticated_principal_overrides_launch_principal() {
+async fn http_v2_forged_principal_header_cannot_override_fixed_identity() {
     let (url, ct, server) = setup_http_noop_server_with_auth(Some("launch"), AnonymousPolicy::PublicReadOnly, Some("secret-token")).await;
 
     let client = connect_http_client_with_auth(&url, "secret-token", "alice").await;
     let remembered: RememberResponse = call_tool(&client, "remember", json!({"content": "trusted http override"})).await;
     let read: ReadResponse = call_tool(&client, "read", json!({"id": remembered.id})).await;
-    assert_eq!(read.agent_label.as_deref(), Some("alice"));
+    assert_eq!(read.agent_label.as_deref(), Some(TEST_HTTP_PRINCIPAL));
+    assert_eq!(read.created_by_principal.as_deref(), Some(TEST_HTTP_PRINCIPAL));
+    assert_ne!(read.created_by_principal.as_deref(), Some("alice"));
+    assert_ne!(read.created_by_principal.as_deref(), Some("launch"));
 
     ct.cancel();
     server.shutdown().await;
@@ -236,7 +239,7 @@ async fn http_delete_closes_session_and_reuse_returns_not_found() {
 
 #[tokio::test]
 async fn http_deleted_memory_history_uses_authenticated_tombstone_authorization() {
-    let (url, ct, server) = setup_http_noop_server_with_auth(None, AnonymousPolicy::PublicReadOnly, Some("secret-token")).await;
+    let (url, ct, server) = setup_http_noop_server_with_trusted_proxy_auth(None, AnonymousPolicy::PublicReadOnly, "secret-token").await;
     let owner = connect_http_client_with_auth(&url, "secret-token", "owner").await;
 
     let remembered: RememberResponse = call_tool(

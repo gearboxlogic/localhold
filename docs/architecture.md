@@ -127,5 +127,5 @@ The ranking and search behavior in code should be treated as authoritative over 
 
 ## Related Docs
 
-- Example configuration: [../recall.example.toml](../recall.example.toml)
+- Example configuration: [../localhold.example.toml](../localhold.example.toml)
 - V2 agent API: [agent-api-v2.md](agent-api-v2.md)

@@ -12,6 +12,9 @@ use crate::{
     types::MemoryId,
 };
 
+/// Keep each `IN` query below SQLite's default 999 bind-parameter limit.
+const FETCH_MANY_CHUNK_SIZE: usize = 900;
+
 /// sqlite-vec backed vector index for the SQLite store.
 #[derive(Debug, Clone)]
 pub(crate) struct SqliteVecIndex {
@@ -137,36 +140,26 @@ impl VectorIndex<Connection> for SqliteVecIndex {
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
-        let id_strs: Vec<String> = ids.iter().map(ToString::to_string).collect();
         let mut result = HashMap::new();
-        #[expect(clippy::arithmetic_side_effects, reason = "enumerate index + 1 cannot overflow for realistic ID counts")]
-        let placeholders: String = id_strs.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect::<Vec<_>>().join(", ");
-        let sql = format!(
-            "SELECT em.memory_id, e.embedding FROM memory_embedding_map em \
-             JOIN memory_embeddings e ON e.rowid = em.vec_rowid \
-             WHERE em.memory_id IN ({placeholders})"
-        );
-        let mut stmt = db.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::types::ToSql> = id_strs.iter().map(coerce_to_sql).collect();
-        let rows = stmt.query_map(params.as_slice(), |row| {
-            let id_str: String = row.get(0)?;
-            let blob: Vec<u8> = row.get(1)?;
-            Ok((id_str, blob))
-        })?;
-        for row in rows {
-            let (id_str, blob) = row?;
-            let Ok(id) = id_str.parse::<MemoryId>() else { continue };
-            let Some(floats) = decode_embedding(&blob, self.dimensions) else {
-                tracing::warn!(
-                    memory_id = %id,
-                    blob_len = blob.len(),
-                    expected_bytes = self.dimensions.saturating_mul(size_of::<f32>()),
-                    "invalid embedding blob in fetch_many"
-                );
-                continue;
-            };
-            if !floats.is_empty() {
-                let _prev = result.insert(id, floats);
+        for id_chunk in ids.chunks(FETCH_MANY_CHUNK_SIZE) {
+            let id_strs: Vec<String> = id_chunk.iter().map(ToString::to_string).collect();
+            #[expect(clippy::arithmetic_side_effects, reason = "chunk length is capped at 900, so index + 1 cannot overflow")]
+            let placeholders = id_strs.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect::<Vec<_>>().join(", ");
+            let sql = format!(
+                "SELECT em.memory_id, e.embedding FROM memory_embedding_map em \
+                 JOIN memory_embeddings e ON e.rowid = em.vec_rowid \
+                 WHERE em.memory_id IN ({placeholders})"
+            );
+            let mut stmt = db.prepare(&sql)?;
+            let params: Vec<&dyn rusqlite::types::ToSql> = id_strs.iter().map(coerce_to_sql).collect();
+            let rows = stmt.query_map(params.as_slice(), |row| {
+                let id_str: String = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((id_str, blob))
+            })?;
+            for row in rows {
+                let (id_str, blob) = row?;
+                insert_fetched_embedding(&mut result, &id_str, &blob, self.dimensions);
             }
         }
         Ok(result)
@@ -200,4 +193,100 @@ fn decode_embedding(blob: &[u8], dimensions: usize) -> Option<Vec<f32>> {
 
 fn coerce_to_sql(s: &String) -> &dyn rusqlite::types::ToSql {
     s
+}
+
+fn insert_fetched_embedding(result: &mut EmbeddingMap, id_str: &str, blob: &[u8], dimensions: usize) {
+    let Ok(id) = id_str.parse::<MemoryId>() else {
+        return;
+    };
+    let Some(floats) = decode_embedding(blob, dimensions) else {
+        tracing::warn!(
+            memory_id = %id,
+            blob_len = blob.len(),
+            expected_bytes = dimensions.saturating_mul(size_of::<f32>()),
+            "invalid embedding blob in fetch_many"
+        );
+        return;
+    };
+    if !floats.is_empty() {
+        let _previous = result.insert(id, floats);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_DIMENSIONS: usize = 2;
+    type TestEmbedding = (MemoryId, [f32; TEST_DIMENSIONS]);
+
+    fn test_db() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE memory_embeddings (embedding BLOB NOT NULL);
+             CREATE TABLE memory_embedding_map (
+                 memory_id TEXT PRIMARY KEY,
+                 vec_rowid INTEGER NOT NULL UNIQUE
+             );",
+        )
+        .unwrap();
+        db
+    }
+
+    fn insert_embeddings(index: &SqliteVecIndex, db: &Connection, entries: &[TestEmbedding]) {
+        for (id, embedding) in entries {
+            index.upsert(db, &id.to_string(), embedding).unwrap();
+        }
+    }
+
+    #[test]
+    fn fetch_many_preserves_mapping_across_chunk_boundary() {
+        let db = test_db();
+        let index = SqliteVecIndex::new(TEST_DIMENSIONS);
+        let ids = std::iter::repeat_with(MemoryId::new).take(FETCH_MANY_CHUNK_SIZE + 1).collect::<Vec<_>>();
+        let entries = [
+            (ids[0], [1.0_f32, 1.5_f32]),
+            (ids[FETCH_MANY_CHUNK_SIZE - 2], [2.0_f32, 2.5_f32]),
+            (ids[FETCH_MANY_CHUNK_SIZE - 1], [3.0_f32, 3.5_f32]),
+            (ids[FETCH_MANY_CHUNK_SIZE], [4.0_f32, 4.5_f32]),
+        ];
+        insert_embeddings(&index, &db, &entries);
+
+        let at_boundary = index.fetch_many(&db, &ids[..FETCH_MANY_CHUNK_SIZE]).unwrap();
+        assert_eq!(at_boundary.len(), 3);
+        for (id, embedding) in &entries[..3] {
+            assert_eq!(at_boundary.get(id), Some(&embedding.to_vec()));
+        }
+
+        let over_boundary = index.fetch_many(&db, &ids).unwrap();
+        assert_eq!(over_boundary.len(), entries.len());
+        for (id, embedding) in entries {
+            assert_eq!(over_boundary.get(&id), Some(&embedding.to_vec()));
+        }
+    }
+
+    #[test]
+    fn fetch_many_handles_input_larger_than_sqlite_variable_limit() {
+        const ID_COUNT: usize = 40_000;
+
+        let db = test_db();
+        let index = SqliteVecIndex::new(TEST_DIMENSIONS);
+        let ids = std::iter::repeat_with(MemoryId::new).take(ID_COUNT).collect::<Vec<_>>();
+        let entries = [
+            (ids[0], [1.0_f32, 1.5_f32]),
+            (ids[FETCH_MANY_CHUNK_SIZE - 1], [2.0_f32, 2.5_f32]),
+            (ids[FETCH_MANY_CHUNK_SIZE], [3.0_f32, 3.5_f32]),
+            (ids[FETCH_MANY_CHUNK_SIZE * 2 - 1], [4.0_f32, 4.5_f32]),
+            (ids[FETCH_MANY_CHUNK_SIZE * 2], [5.0_f32, 5.5_f32]),
+            (ids[ID_COUNT - 1], [6.0_f32, 6.5_f32]),
+        ];
+        insert_embeddings(&index, &db, &entries);
+
+        let fetched = index.fetch_many(&db, &ids).unwrap();
+
+        assert_eq!(fetched.len(), entries.len());
+        for (id, embedding) in entries {
+            assert_eq!(fetched.get(&id), Some(&embedding.to_vec()));
+        }
+    }
 }

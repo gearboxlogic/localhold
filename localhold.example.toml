@@ -1,5 +1,7 @@
 # LocalHold -- example configuration
-# Copy to ./recall.toml or ~/.config/localhold/recall.toml
+# Copy to ~/.config/localhold/localhold.toml (or the platform equivalent).
+# Existing ~/.config/localhold/recall.toml files remain supported as a legacy fallback.
+# Configuration files in the current working directory are not loaded implicitly.
 # Values below document the complete configuration surface. Omitted fields use
 # code defaults, and runtime settings can be overridden via RECALL_* variables.
 
@@ -41,12 +43,15 @@ host = "127.0.0.1"    # HTTP bind address (ignored for stdio)
 port = 8080           # HTTP port (ignored for stdio)
 path = "/mcp"         # Exact HTTP endpoint path (ignored for stdio)
 http_auth_token = ""  # When set, every HTTP endpoint request must authenticate
-http_principal_header = "x-recall-principal" # Trusted only after endpoint bearer auth
+http_principal_mode = "fixed" # "fixed" or "trusted_proxy"
+http_principal = "http" # Identity assigned to every valid token in fixed mode
+http_principal_header = "x-localhold-principal" # Trusted only in trusted_proxy mode
 http_allowed_hosts = ["localhost", "127.0.0.1", "::1"] # Add proxy/public Host values explicitly
 max_body_bytes = 8388608 # Max HTTP request body size; stdio is bounded by tool limits
 # Env: RECALL_TRANSPORT, RECALL_LOG_LEVEL, RECALL_PRINCIPAL, RECALL_ANONYMOUS_POLICY,
 #      RECALL_HTTP_HOST, RECALL_HTTP_PORT, RECALL_HTTP_PATH,
-#      RECALL_HTTP_AUTH_TOKEN, RECALL_HTTP_PRINCIPAL_HEADER,
+#      RECALL_HTTP_AUTH_TOKEN, RECALL_HTTP_PRINCIPAL_MODE,
+#      RECALL_HTTP_PRINCIPAL, RECALL_HTTP_PRINCIPAL_HEADER,
 #      RECALL_HTTP_ALLOWED_HOSTS, RECALL_HTTP_MAX_BODY_BYTES
 
 [limits]

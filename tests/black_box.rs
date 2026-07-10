@@ -527,8 +527,9 @@ impl BlackBoxConfig {
 }
 
 fn base_command(db_path: &Path, cwd: &Path, config: &BlackBoxConfig) -> Command {
-    write_config(cwd, &config.config_toml.replace("__DB_PATH__", &escape_toml_string(db_path)));
     let mut command = Command::new(binary_path());
+    let config_dir = isolate_user_config_dir(&mut command, cwd);
+    write_config(&config_dir, &config.config_toml.replace("__DB_PATH__", &escape_toml_string(db_path)));
     let _cwd = command.current_dir(cwd);
     for (key, value) in &config.env {
         let _env = command.env(key, value);
@@ -537,7 +538,29 @@ fn base_command(db_path: &Path, cwd: &Path, config: &BlackBoxConfig) -> Command 
 }
 
 fn write_config(dir: &Path, contents: &str) {
-    std::fs::write(dir.join("recall.toml"), contents).unwrap();
+    let localhold_dir = dir.join("localhold");
+    std::fs::create_dir_all(&localhold_dir).unwrap();
+    std::fs::write(localhold_dir.join("localhold.toml"), contents).unwrap();
+}
+
+fn isolate_user_config_dir(command: &mut Command, root: &Path) -> PathBuf {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let config_dir = root.join("user-config");
+        let _env = command.env("XDG_CONFIG_HOME", &config_dir);
+        config_dir
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _env = command.env("HOME", root);
+        root.join("Library/Application Support")
+    }
+    #[cfg(windows)]
+    {
+        let config_dir = root.join("AppData/Roaming");
+        let _env = command.env("APPDATA", &config_dir);
+        config_dir
+    }
 }
 
 fn escape_toml_string(path: &Path) -> String {

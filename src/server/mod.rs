@@ -30,7 +30,7 @@ use rmcp::{
 
 use crate::{
     clock::Clock,
-    config::{AnonymousPolicy, DEFAULT_HTTP_PRINCIPAL_HEADER, LimitsConfig, SearchConfig},
+    config::{AnonymousPolicy, LimitsConfig, SearchConfig},
     embedding::EmbeddingProvider,
     engine::{BulkUpdateFields, RecallEngine, ReembedOutcome, ReembedRequest, SearchRequest, StoreMemoryInput},
     error::EngineError,
@@ -45,6 +45,7 @@ use crate::{
 const V2_UNRESOLVED_SCOPE: &str = "inbox/unresolved";
 const V2_REDACTED_SCOPE: &str = "[redacted]";
 const V2_SERVER_PRINCIPAL: &str = "stdio";
+const V2_HTTP_PRINCIPAL: &str = "http";
 const V2_ANONYMOUS_PRINCIPAL: &str = "anonymous";
 const V2_READ_EVENT_WEIGHT: f64 = 1.0;
 
@@ -185,6 +186,36 @@ impl From<EngineError> for rmcp::ErrorData {
     }
 }
 
+/// Source of the authenticated identity used by HTTP requests.
+///
+/// [`Self::Fixed`] is the safe default for shared bearer-token authentication:
+/// request headers cannot change the configured identity. [`Self::TrustedProxyHeader`]
+/// is only safe when the HTTP endpoint is inaccessible to untrusted clients and
+/// the named header is overwritten by a separately authenticated reverse proxy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HttpPrincipalSource {
+    /// Every valid bearer token resolves to this fixed identity.
+    Fixed(String),
+    /// Resolve identity from a header asserted by a trusted reverse proxy.
+    TrustedProxyHeader(String),
+}
+
+impl HttpPrincipalSource {
+    /// Configure one fixed identity for all bearer-authenticated HTTP requests.
+    pub fn fixed<P: Into<String>>(principal: P) -> Self {
+        Self::Fixed(principal.into())
+    }
+
+    /// Trust a reverse proxy to assert identity in `header_name`.
+    ///
+    /// The deployment must prevent direct client access to this endpoint, and
+    /// the proxy must remove any client-supplied copy of the identity header.
+    pub fn trusted_proxy_header<H: Into<String>>(header_name: H) -> Self {
+        Self::TrustedProxyHeader(header_name.into())
+    }
+}
+
 /// The MCP server for `LocalHold` memory operations.
 ///
 /// Generic over the store backend `S`, which must implement the full
@@ -196,7 +227,7 @@ pub struct RecallServer<S: MemoryStore + Clone + std::fmt::Debug + 'static = cra
     principal: Option<Arc<str>>,
     anonymous_policy: AnonymousPolicy,
     http_auth_token: Option<Arc<str>>,
-    http_principal_header: Arc<str>,
+    http_principal_source: HttpPrincipalSource,
 }
 
 impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> std::fmt::Debug for RecallServer<S> {
@@ -215,7 +246,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
             principal: Some(Arc::<str>::from(V2_SERVER_PRINCIPAL)),
             anonymous_policy: AnonymousPolicy::PublicReadOnly,
             http_auth_token: None,
-            http_principal_header: Arc::<str>::from(DEFAULT_HTTP_PRINCIPAL_HEADER),
+            http_principal_source: HttpPrincipalSource::fixed(V2_HTTP_PRINCIPAL),
         }
     }
 
@@ -228,7 +259,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
             principal: Some(Arc::<str>::from(V2_SERVER_PRINCIPAL)),
             anonymous_policy: AnonymousPolicy::PublicReadOnly,
             http_auth_token: None,
-            http_principal_header: Arc::<str>::from(DEFAULT_HTTP_PRINCIPAL_HEADER),
+            http_principal_source: HttpPrincipalSource::fixed(V2_HTTP_PRINCIPAL),
         }
     }
 
@@ -241,18 +272,20 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
             principal: principal.map(Arc::<str>::from),
             anonymous_policy,
             http_auth_token: None,
-            http_principal_header: Arc::<str>::from(DEFAULT_HTTP_PRINCIPAL_HEADER),
+            http_principal_source: HttpPrincipalSource::fixed(V2_HTTP_PRINCIPAL),
         }
     }
 
     /// Create a server from a pre-built engine with explicit v2 and HTTP authorization settings.
+    ///
+    /// Use [`HttpPrincipalSource::TrustedProxyHeader`] only behind a trusted proxy.
     #[must_use]
     pub fn from_engine_with_auth_and_http(
         engine: RecallEngine<S>,
         principal: Option<String>,
         anonymous_policy: AnonymousPolicy,
         http_auth_token: Option<String>,
-        http_principal_header: String,
+        http_principal_source: HttpPrincipalSource,
     ) -> Self {
         Self {
             engine,
@@ -260,7 +293,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
             principal: principal.map(Arc::<str>::from),
             anonymous_policy,
             http_auth_token: http_auth_token.map(Arc::<str>::from),
-            http_principal_header: Arc::<str>::from(http_principal_header),
+            http_principal_source,
         }
     }
 
@@ -273,7 +306,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
             principal: Some(Arc::<str>::from(V2_SERVER_PRINCIPAL)),
             anonymous_policy: AnonymousPolicy::PublicReadOnly,
             http_auth_token: None,
-            http_principal_header: Arc::<str>::from(DEFAULT_HTTP_PRINCIPAL_HEADER),
+            http_principal_source: HttpPrincipalSource::fixed(V2_HTTP_PRINCIPAL),
         }
     }
 
@@ -300,8 +333,13 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
         if !crate::http_auth::bearer_matches(&parts.headers, token) {
             return None;
         }
-        let principal = parts.headers.get(self.http_principal_header.as_ref())?.to_str().ok()?.trim();
-        if principal.is_empty() { None } else { Some(principal.to_owned()) }
+        match &self.http_principal_source {
+            HttpPrincipalSource::Fixed(principal) => {
+                let principal = principal.trim();
+                (!principal.is_empty()).then(|| principal.to_owned())
+            }
+            HttpPrincipalSource::TrustedProxyHeader(header_name) => crate::http_auth::trusted_proxy_principal(&parts.headers, header_name).map(ToOwned::to_owned),
+        }
     }
 
     const fn anonymous_read_allowed(&self) -> bool {

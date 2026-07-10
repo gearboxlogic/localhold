@@ -58,6 +58,10 @@ policy documentation.
 - Inspect and address actionable review findings, then rerun the affected
   checks and push the fixes to the same pull request. The push requires another
   review, even if an earlier commit received a thumbs-up.
+- Reply to every review comment before resolving its thread. When addressed,
+  summarize the fix and validation in the reply. When intentionally not
+  addressed, explain the technical rationale in the reply. Resolve the thread
+  after posting either response.
 - Merge only when all required CI checks are green and the cloud bot has given
   the latest head commit a thumbs-up. Neither condition is sufficient alone.
 

@@ -24,7 +24,8 @@ fn make_engine() -> RecallEngine<SqliteStore> {
 }
 
 async fn run_batch_store(engine: &RecallEngine<SqliteStore>, memories: Vec<Memory>) {
-    let _ids = engine.batch_store(memories, vec![]).await.expect("batch store");
+    let supersedes = vec![None; memories.len()];
+    let _ids = engine.batch_store(memories, supersedes).await.expect("batch store");
 }
 
 #[expect(unused_results, reason = "criterion bench_with_input returns a builder ref we do not chain")]

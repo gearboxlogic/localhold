@@ -407,6 +407,27 @@ mod tests {
         (StatusCode::BAD_REQUEST, "x".repeat(5_000))
     }
 
+    async fn batch_contract_handler(request: Request) -> (StatusCode, [(&'static str, &'static str); 1], String) {
+        let body = to_bytes(request.into_body(), 1_048_576).await.unwrap();
+        let request: Value = serde_json::from_slice(&body).unwrap();
+        let valid = request.get("model") == Some(&json!("test-model"))
+            && request.get("input") == Some(&json!(["first", "second"]))
+            && request.get("encoding_format") == Some(&json!("float"))
+            && request.get("dimensions").is_none();
+        if !valid {
+            return (
+                StatusCode::BAD_REQUEST,
+                [("content-type", "application/json")],
+                json!({"error": "unexpected batch request", "request": request}).to_string(),
+            );
+        }
+        (
+            StatusCode::OK,
+            [("content-type", "application/json")],
+            r#"{"data":[{"index":1,"embedding":[0.0,5.0,0.0]},{"index":0,"embedding":[3.0,4.0,0.0]}]}"#.to_owned(),
+        )
+    }
+
     async fn provider_for_router(app: Router) -> (OpenAiEmbedding, JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -497,6 +518,16 @@ mod tests {
     #[tokio::test]
     async fn embeds_batch_and_restores_response_order() {
         let (provider, server) = setup_provider(r#"{"data":[{"index":1,"embedding":[0.0,5.0,0.0]},{"index":0,"embedding":[3.0,4.0,0.0]}]}"#, 3).await;
+        let embeddings = provider.embed_batch(&["first", "second"]).await.unwrap();
+        assert_eq!(embeddings, vec![vec![0.6, 0.8, 0.0], vec![0.0, 1.0, 0.0]]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn batch_request_uses_openai_array_input_contract() {
+        let app = Router::new().route("/v1/embeddings", post(batch_contract_handler));
+        let (provider, server) = provider_for_router(app).await;
+
         let embeddings = provider.embed_batch(&["first", "second"]).await.unwrap();
         assert_eq!(embeddings, vec![vec![0.6, 0.8, 0.0], vec![0.0, 1.0, 0.0]]);
         server.abort();

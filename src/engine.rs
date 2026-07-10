@@ -19,7 +19,7 @@ use crate::{
     clock::{Clock, SystemClock},
     config::{LimitsConfig, SearchConfig},
     consolidation::{NeighborPair, cosine_to_l2_threshold, find_duplicate_groups_from_pairs, l2_to_cosine},
-    embedding::{EmbeddingProvider, orchestrator::EmbeddingOrchestrator},
+    embedding::{EmbeddingProvider, limited::ConcurrencyLimitedEmbedding, orchestrator::EmbeddingOrchestrator},
     error::{EngineError, ValidationError},
     scoring::{apply_composite_scoring, seed_retrieval_scores},
     store::{MemoryStore, RecordUseOutcome},
@@ -254,6 +254,8 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallEngine<S> {
     #[must_use]
     pub fn new_with_clock(store: S, embedding: Arc<dyn EmbeddingProvider>, limits: LimitsConfig, search_config: SearchConfig, clock: Arc<dyn Clock>) -> Self {
         let background_tasks = BackgroundTasks::new();
+        let max_concurrent_embedding_requests = limits.max_concurrent_embedding_requests;
+        let embedding: Arc<dyn EmbeddingProvider> = Arc::new(ConcurrencyLimitedEmbedding::new(embedding, max_concurrent_embedding_requests));
         Self {
             orchestrator: EmbeddingOrchestrator::new(store, embedding, background_tasks),
             clock,

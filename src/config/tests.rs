@@ -52,6 +52,7 @@ fn default_config_has_sane_values() {
     assert_eq!(config.limits.max_batch_size, 100);
     assert_eq!(config.limits.max_reembed_limit, 100);
     assert_eq!(config.limits.embedding_timeout_secs, 30);
+    assert_eq!(config.limits.max_concurrent_embedding_requests, 8);
     assert_eq!(config.limits.shutdown_timeout_secs, 10);
     assert_eq!(config.limits.max_top_tags_limit, 100);
     assert_eq!(config.limits.max_history_limit, 500);
@@ -104,11 +105,12 @@ fn debug_redacts_postgres_url_credentials_but_keeps_pool_settings() {
 
 #[test]
 fn limits_config_loadable_from_toml() {
-    let toml_str = "[limits]\nmax_search_limit = 42\nmax_candidate_pool_size = 500\nembedding_timeout_secs = 60\n";
+    let toml_str = "[limits]\nmax_search_limit = 42\nmax_candidate_pool_size = 500\nembedding_timeout_secs = 60\nmax_concurrent_embedding_requests = 4\n";
     let config: Config = toml::from_str(toml_str).unwrap();
     assert_eq!(config.limits.max_search_limit, 42);
     assert_eq!(config.limits.max_candidate_pool_size, 500);
     assert_eq!(config.limits.embedding_timeout_secs, 60);
+    assert_eq!(config.limits.max_concurrent_embedding_requests, 4);
     // Other limits retain defaults
     assert_eq!(config.limits.max_batch_size, 100);
 }
@@ -212,6 +214,7 @@ fn env_overrides_apply_limits() {
         ("RECALL_MAX_BATCH_SIZE", "50"),
         ("RECALL_MAX_REEMBED_LIMIT", "75"),
         ("RECALL_EMBEDDING_TIMEOUT", "60"),
+        ("RECALL_MAX_CONCURRENT_EMBEDDING_REQUESTS", "3"),
         ("RECALL_SHUTDOWN_TIMEOUT", "15"),
         ("RECALL_MAX_TOP_TAGS_LIMIT", "50"),
         ("RECALL_MAX_HISTORY_LIMIT", "250"),
@@ -229,6 +232,7 @@ fn env_overrides_apply_limits() {
     assert_eq!(config.limits.max_batch_size, 50);
     assert_eq!(config.limits.max_reembed_limit, 75);
     assert_eq!(config.limits.embedding_timeout_secs, 60);
+    assert_eq!(config.limits.max_concurrent_embedding_requests, 3);
     assert_eq!(config.limits.shutdown_timeout_secs, 15);
     assert_eq!(config.limits.max_top_tags_limit, 50);
     assert_eq!(config.limits.max_history_limit, 250);
@@ -545,6 +549,7 @@ fn validate_limits_config_rejects_zero_operational_limits() {
     assert_zero_limit_rejected("max_batch_size", |limits| limits.max_batch_size = 0);
     assert_zero_limit_rejected("max_reembed_limit", |limits| limits.max_reembed_limit = 0);
     assert_zero_limit_rejected("embedding_timeout_secs", |limits| limits.embedding_timeout_secs = 0);
+    assert_zero_limit_rejected("max_concurrent_embedding_requests", |limits| limits.max_concurrent_embedding_requests = 0);
     assert_zero_limit_rejected("shutdown_timeout_secs", |limits| limits.shutdown_timeout_secs = 0);
     assert_zero_limit_rejected("max_top_tags_limit", |limits| limits.max_top_tags_limit = 0);
     assert_zero_limit_rejected("max_history_limit", |limits| limits.max_history_limit = 0);

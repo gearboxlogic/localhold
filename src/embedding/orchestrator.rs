@@ -8,7 +8,6 @@
 use std::{collections::HashSet, sync::Arc};
 
 use parking_lot::Mutex;
-use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 use crate::{
@@ -18,9 +17,6 @@ use crate::{
     store::{MemoryStore, MemoryWithEmbedding, ReembedClaim},
     types::{AuditDraft, AuthorizedUpdateOutcome, Memory, MemoryId, MemoryUpdate, V2MemoryMetadata, V2MetadataPatch, WriteOutcome},
 };
-
-/// Default maximum concurrent embedding tasks.
-const DEFAULT_MAX_CONCURRENT_EMBEDS: usize = 8;
 
 type EmbedKey = (MemoryId, i64);
 
@@ -34,8 +30,6 @@ pub(crate) struct EmbeddingOrchestrator<S: MemoryStore + Clone + std::fmt::Debug
     store: S,
     embedding: Arc<dyn EmbeddingProvider>,
     background_tasks: Arc<BackgroundTasks>,
-    /// Bounds the number of concurrent embedding tasks to prevent fan-out overload.
-    embed_semaphore: Arc<Semaphore>,
     /// Coalesces duplicate in-process attempts to embed the same memory revision.
     inflight_embeds: Arc<Mutex<HashSet<EmbedKey>>>,
     /// Tracks durable claims owned by currently running embed tasks so shutdown
@@ -79,13 +73,12 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> std::fmt::Debug for Emb
 }
 
 impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S> {
-    /// Create a new orchestrator with default concurrency limit.
+    /// Create an orchestrator for store-then-embed operations.
     pub(crate) fn new(store: S, embedding: Arc<dyn EmbeddingProvider>, background_tasks: Arc<BackgroundTasks>) -> Self {
         Self {
             store,
             embedding,
             background_tasks,
-            embed_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_EMBEDS)),
             inflight_embeds: Arc::new(Mutex::new(HashSet::new())),
             active_claimed_embeds: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -350,11 +343,10 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
 
         let store = self.store.clone();
         let embedding_provider = Arc::clone(&self.embedding);
-        let semaphore = Arc::clone(&self.embed_semaphore);
         let spawned_content = Arc::clone(&content);
         if admission.spawn(BackgroundTaskKind::Embed, async move {
             let _inflight = inflight;
-            run_embed_task(embedding_provider, store, semaphore, id, spawned_content, expected_revision, None).await;
+            run_embed_task(embedding_provider, store, id, spawned_content, expected_revision, None).await;
         }) {
             return true;
         }
@@ -364,16 +356,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
             info!(memory_id = %id, expected_revision, "embed task already in flight, skipping duplicate");
             return false;
         };
-        run_embed_task(
-            Arc::clone(&self.embedding),
-            self.store.clone(),
-            Arc::clone(&self.embed_semaphore),
-            id,
-            content,
-            expected_revision,
-            None,
-        )
-        .await;
+        run_embed_task(Arc::clone(&self.embedding), self.store.clone(), id, content, expected_revision, None).await;
         drop(inflight);
         true
     }
@@ -392,13 +375,12 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
         let claim_token = claim.claim_token;
         let store = self.store.clone();
         let embedding_provider = Arc::clone(&self.embedding);
-        let semaphore = Arc::clone(&self.embed_semaphore);
         let spawned_content = Arc::clone(&content);
         let spawned_claim_token = claim_token.clone();
         if admission.spawn(BackgroundTaskKind::Embed, async move {
             let _inflight = inflight;
             let _active_claim = active_claim;
-            run_embed_task(embedding_provider, store, semaphore, id, spawned_content, expected_revision, Some(spawned_claim_token)).await;
+            run_embed_task(embedding_provider, store, id, spawned_content, expected_revision, Some(spawned_claim_token)).await;
         }) {
             return true;
         }
@@ -456,24 +438,16 @@ async fn release_embedding_claim<S: MemoryStore>(store: &S, id: MemoryId, expect
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "embed execution needs provider, store, semaphore, id, content, and revision — all semantically distinct"
+    reason = "embed execution needs provider, store, identity, content, revision, and optional durable claim"
 )]
 async fn run_embed_task<S: MemoryStore>(
     embedding_provider: Arc<dyn EmbeddingProvider>,
     store: S,
-    semaphore: Arc<Semaphore>,
     id: MemoryId,
     content: Arc<str>,
     expected_revision: i64,
     claim_token: Option<String>,
 ) {
-    let Ok(_guard) = semaphore.acquire().await else {
-        tracing::error!("embed semaphore closed unexpectedly, skipping embed task");
-        if let Some(token) = claim_token.as_deref() {
-            release_embedding_claim(&store, id, expected_revision, token).await;
-        }
-        return;
-    };
     embed_and_store(embedding_provider, store, id, &content, expected_revision, claim_token).await;
 }
 

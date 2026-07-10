@@ -69,6 +69,12 @@ text retrieval while periodically checking for recovery. Authentication,
 request-shape, and response-shape failures are treated as permanent and are not
 retried.
 
+`limits.max_concurrent_embedding_requests` bounds simultaneous provider calls
+across semantic queries, health checks, background indexing, batch requests,
+and recovery work. Lower it for constrained local hardware or strict
+hosted-provider quotas; raise it only after measuring model capacity and
+rate-limit behavior.
+
 Changing the endpoint, model, or dimensions changes the stored vector-space
 identity. Follow the reindex procedure in [Operations](operations.md) before
 starting LocalHold with the new identity.

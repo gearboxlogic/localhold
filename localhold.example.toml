@@ -78,12 +78,14 @@ max_batch_size = 100           # Max items per remember_many or handoff commit
 max_reembed_limit = 100        # Max memories per admin_reembed bulk call
 consolidation_neighbor_limit = 20  # ANN neighbors per memory during consolidation
 embedding_timeout_secs = 30    # Timeout for embedding HTTP requests
+max_concurrent_embedding_requests = 8 # Bound local load or hosted-provider pressure
 shutdown_timeout_secs = 10     # Graceful shutdown timeout for background tasks
 max_entities_per_memory = 50   # Max entities per memory
 max_entity_field_length = 256  # Max length of entity name/type (bytes)
 max_top_tags_limit = 100       # Max tags in admin_count stats
 max_history_limit = 500        # Max audit-history rows per admin_history call
-# Env: RECALL_MAX_SEARCH_LIMIT, RECALL_MAX_CANDIDATE_POOL_SIZE, RECALL_MAX_LIST_LIMIT, etc.
+# Env: RECALL_MAX_SEARCH_LIMIT, RECALL_MAX_CANDIDATE_POOL_SIZE,
+#      RECALL_MAX_CONCURRENT_EMBEDDING_REQUESTS, RECALL_MAX_LIST_LIMIT, etc.
 
 [search]
 # Default search mode when caller doesn't specify: auto, semantic, keyword, text

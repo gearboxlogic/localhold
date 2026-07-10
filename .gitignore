@@ -4,7 +4,6 @@
 /.rustup
 *.snap.new
 *:Zone.Identifier
-/recall.toml
 /localhold.toml
 /.env
 *.db

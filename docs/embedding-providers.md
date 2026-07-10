@@ -79,9 +79,9 @@ caller to decide when to try again without holding a task indefinitely.
 may be set to zero. `limits.embedding_retry_initial_backoff_ms` controls the
 first client delay; later delays double up to
 `limits.embedding_retry_max_backoff_ms`. The corresponding environment
-variables are `RECALL_EMBEDDING_MAX_RETRIES`,
-`RECALL_EMBEDDING_RETRY_INITIAL_BACKOFF_MS`, and
-`RECALL_EMBEDDING_RETRY_MAX_BACKOFF_MS`.
+variables are `LOCALHOLD_EMBEDDING_MAX_RETRIES`,
+`LOCALHOLD_EMBEDDING_RETRY_INITIAL_BACKOFF_MS`, and
+`LOCALHOLD_EMBEDDING_RETRY_MAX_BACKOFF_MS`.
 
 `limits.max_concurrent_embedding_requests` bounds simultaneous provider calls
 across semantic queries, health checks, background indexing, batch requests,

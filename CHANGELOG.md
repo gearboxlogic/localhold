@@ -11,6 +11,9 @@ requirements explicitly.
 - Established the curated LocalHold public source tree.
 - Reset the public version stream to `0.1.0-beta.1`.
 - Renamed the package to `localhold` and the executable to `hold`.
+- Standardized runtime naming on `LocalHoldEngine`, `LocalHoldServer`,
+  `LOCALHOLD_*` environment variables, and the `localhold_migrations` table;
+  removed the legacy alternate config filename.
 - Made text-only search the default until an OpenAI-compatible embedding
   endpoint is configured.
 - Added a formal source installer with CPU and CUDA reranker profiles.

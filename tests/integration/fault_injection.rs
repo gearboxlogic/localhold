@@ -124,7 +124,7 @@ impl EmbeddingProvider for ChaosEmbedding {
 /// Store wrapper that injects faults into specific operations.
 ///
 /// Each plan is wrapped in `Arc` so that `ChaosStore` can be `Clone`
-/// (required by `RecallEngine<S: Clone>`), with clones sharing the
+/// (required by `LocalHoldEngine<S: Clone>`), with clones sharing the
 /// same fault state.
 #[non_exhaustive]
 pub(crate) struct ChaosStore<S> {

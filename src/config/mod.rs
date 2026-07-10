@@ -718,11 +718,9 @@ pub(crate) fn expand_tilde(path: &str) -> Result<PathBuf, EngineError> {
 impl Config {
     /// Load config from the platform user config directory + env overrides.
     ///
-    /// Search order within the platform config directory is
-    /// `localhold/localhold.toml`, then the legacy
-    /// `localhold/recall.toml` compatibility path. Files in the current
-    /// working directory are never loaded implicitly. Missing files are not
-    /// an error — defaults apply.
+    /// Reads `localhold/localhold.toml` within the platform config directory.
+    /// Files in the current working directory are never loaded implicitly.
+    /// A missing file is not an error; defaults apply.
     ///
     /// # Errors
     ///
@@ -730,7 +728,7 @@ impl Config {
     pub fn load() -> Result<Self, EngineError> {
         let candidates = user_config_candidates(dirs::config_dir().as_deref());
 
-        let env_map = collect_recall_env_vars();
+        let env_map = collect_localhold_env_vars();
         Self::load_from_sources(&candidates, &env_map)
     }
 
@@ -770,115 +768,115 @@ impl Config {
 
     #[expect(clippy::too_many_lines, reason = "centralized config env override table is intentionally linear")]
     fn apply_env_from_map(&mut self, env: &HashMap<String, String>) {
-        apply_parsed_env(env, "RECALL_DB_BACKEND", &mut self.database.backend);
-        if let Some(v) = env.get("RECALL_DB_PATH") {
+        apply_parsed_env(env, "LOCALHOLD_DB_BACKEND", &mut self.database.backend);
+        if let Some(v) = env.get("LOCALHOLD_DB_PATH") {
             self.database.path = Some(PathBuf::from(v));
         }
-        if let Some(v) = env.get("RECALL_POSTGRES_URL") {
+        if let Some(v) = env.get("LOCALHOLD_POSTGRES_URL") {
             self.database.postgres.url.clone_from(v);
         }
-        apply_parsed_env(env, "RECALL_POSTGRES_MAX_CONNECTIONS", &mut self.database.postgres.max_connections);
-        apply_parsed_env(env, "RECALL_POSTGRES_AUTO_MIGRATE", &mut self.database.postgres.auto_migrate);
+        apply_parsed_env(env, "LOCALHOLD_POSTGRES_MAX_CONNECTIONS", &mut self.database.postgres.max_connections);
+        apply_parsed_env(env, "LOCALHOLD_POSTGRES_AUTO_MIGRATE", &mut self.database.postgres.auto_migrate);
         apply_embedding_env(&mut self.embedding, env);
-        if let Some(v) = env.get("RECALL_LOG_LEVEL") {
+        if let Some(v) = env.get("LOCALHOLD_LOG_LEVEL") {
             self.server.log_level.clone_from(v);
         }
-        if let Some(v) = env.get("RECALL_PRINCIPAL") {
+        if let Some(v) = env.get("LOCALHOLD_PRINCIPAL") {
             self.server.principal = Some(v.clone());
         }
-        apply_parsed_env(env, "RECALL_ANONYMOUS_POLICY", &mut self.server.anonymous_policy);
-        apply_parsed_env(env, "RECALL_TRANSPORT", &mut self.server.transport);
-        if let Some(v) = env.get("RECALL_HTTP_HOST") {
+        apply_parsed_env(env, "LOCALHOLD_ANONYMOUS_POLICY", &mut self.server.anonymous_policy);
+        apply_parsed_env(env, "LOCALHOLD_TRANSPORT", &mut self.server.transport);
+        if let Some(v) = env.get("LOCALHOLD_HTTP_HOST") {
             self.server.host.clone_from(v);
         }
-        apply_parsed_env(env, "RECALL_HTTP_PORT", &mut self.server.port);
-        if let Some(v) = env.get("RECALL_HTTP_PATH") {
+        apply_parsed_env(env, "LOCALHOLD_HTTP_PORT", &mut self.server.port);
+        if let Some(v) = env.get("LOCALHOLD_HTTP_PATH") {
             self.server.path.clone_from(v);
         }
-        if let Some(v) = env.get("RECALL_HTTP_AUTH_TOKEN") {
+        if let Some(v) = env.get("LOCALHOLD_HTTP_AUTH_TOKEN") {
             self.server.http_auth_token = Some(v.clone());
         }
-        apply_parsed_env(env, "RECALL_HTTP_PRINCIPAL_MODE", &mut self.server.http_principal_mode);
-        if let Some(v) = env.get("RECALL_HTTP_PRINCIPAL") {
+        apply_parsed_env(env, "LOCALHOLD_HTTP_PRINCIPAL_MODE", &mut self.server.http_principal_mode);
+        if let Some(v) = env.get("LOCALHOLD_HTTP_PRINCIPAL") {
             self.server.http_principal.clone_from(v);
         }
-        if let Some(v) = env.get("RECALL_HTTP_PRINCIPAL_HEADER") {
+        if let Some(v) = env.get("LOCALHOLD_HTTP_PRINCIPAL_HEADER") {
             self.server.http_principal_header.clone_from(v);
         }
-        if let Some(v) = env.get("RECALL_HTTP_ALLOWED_HOSTS") {
+        if let Some(v) = env.get("LOCALHOLD_HTTP_ALLOWED_HOSTS") {
             self.server.http_allowed_hosts = v.split(',').map(str::trim).filter(|host| !host.is_empty()).map(ToOwned::to_owned).collect();
         }
-        apply_parsed_env(env, "RECALL_HTTP_MAX_BODY_BYTES", &mut self.server.max_body_bytes);
-        apply_parsed_env(env, "RECALL_HTTP_MAX_SESSIONS", &mut self.server.http_max_sessions);
-        apply_parsed_env(env, "RECALL_HTTP_SESSION_IDLE_TIMEOUT_SECS", &mut self.server.http_session_idle_timeout_secs);
-        apply_parsed_env(env, "RECALL_ADMIN_TOOLS_ENABLED", &mut self.server.admin_tools_enabled);
-        apply_parsed_env(env, "RECALL_MAX_SEARCH_LIMIT", &mut self.limits.max_search_limit);
-        apply_parsed_env(env, "RECALL_MAX_CANDIDATE_POOL_SIZE", &mut self.limits.max_candidate_pool_size);
-        apply_parsed_env(env, "RECALL_MAX_LIST_LIMIT", &mut self.limits.max_list_limit);
-        apply_parsed_env(env, "RECALL_MAX_CONTENT_LENGTH", &mut self.limits.max_content_length);
-        apply_parsed_env(env, "RECALL_MAX_TAGS_PER_MEMORY", &mut self.limits.max_tags_per_memory);
-        apply_parsed_env(env, "RECALL_MAX_TAG_LENGTH", &mut self.limits.max_tag_length);
-        apply_parsed_env(env, "RECALL_MAX_BATCH_SIZE", &mut self.limits.max_batch_size);
-        apply_parsed_env(env, "RECALL_MAX_REEMBED_LIMIT", &mut self.limits.max_reembed_limit);
-        apply_parsed_env(env, "RECALL_EMBEDDING_TIMEOUT", &mut self.limits.embedding_timeout_secs);
-        apply_parsed_env(env, "RECALL_MAX_CONCURRENT_EMBEDDING_REQUESTS", &mut self.limits.max_concurrent_embedding_requests);
-        apply_parsed_env(env, "RECALL_EMBEDDING_BATCH_SIZE", &mut self.limits.embedding_batch_size);
-        apply_parsed_env(env, "RECALL_EMBEDDING_MAX_RETRIES", &mut self.limits.embedding_max_retries);
-        apply_parsed_env(env, "RECALL_EMBEDDING_RETRY_INITIAL_BACKOFF_MS", &mut self.limits.embedding_retry_initial_backoff_ms);
-        apply_parsed_env(env, "RECALL_EMBEDDING_RETRY_MAX_BACKOFF_MS", &mut self.limits.embedding_retry_max_backoff_ms);
-        apply_parsed_env(env, "RECALL_SHUTDOWN_TIMEOUT", &mut self.limits.shutdown_timeout_secs);
-        apply_parsed_env(env, "RECALL_MAX_TOP_TAGS_LIMIT", &mut self.limits.max_top_tags_limit);
-        apply_parsed_env(env, "RECALL_MAX_HISTORY_LIMIT", &mut self.limits.max_history_limit);
-        apply_parsed_env(env, "RECALL_CONSOLIDATION_NEIGHBOR_LIMIT", &mut self.limits.consolidation_neighbor_limit);
-        apply_parsed_env(env, "RECALL_MAX_ENTITIES_PER_MEMORY", &mut self.limits.max_entities_per_memory);
-        apply_parsed_env(env, "RECALL_MAX_ENTITY_FIELD_LENGTH", &mut self.limits.max_entity_field_length);
-        apply_parsed_env(env, "RECALL_RRF_K", &mut self.search.rrf_k);
-        apply_parsed_env(env, "RECALL_RRF_SEMANTIC_WEIGHT", &mut self.search.rrf_semantic_weight);
-        apply_parsed_env(env, "RECALL_RRF_KEYWORD_WEIGHT", &mut self.search.rrf_keyword_weight);
-        apply_parsed_env(env, "RECALL_DEFAULT_SEARCH_MODE", &mut self.search.default_mode);
-        apply_parsed_env(env, "RECALL_SEMANTIC_CANDIDATE_K", &mut self.search.semantic_candidate_k);
-        apply_parsed_env(env, "RECALL_KEYWORD_CANDIDATE_K", &mut self.search.keyword_candidate_k);
-        apply_parsed_env(env, "RECALL_RERANK_TOP_M", &mut self.search.rerank_top_m);
-        apply_parsed_env(env, "RECALL_RERANKER_POOL_SIZE", &mut self.search.reranker.pool_size);
-        apply_parsed_env(env, "RECALL_RELEVANCE_WEIGHT", &mut self.search.relevance_weight);
+        apply_parsed_env(env, "LOCALHOLD_HTTP_MAX_BODY_BYTES", &mut self.server.max_body_bytes);
+        apply_parsed_env(env, "LOCALHOLD_HTTP_MAX_SESSIONS", &mut self.server.http_max_sessions);
+        apply_parsed_env(env, "LOCALHOLD_HTTP_SESSION_IDLE_TIMEOUT_SECS", &mut self.server.http_session_idle_timeout_secs);
+        apply_parsed_env(env, "LOCALHOLD_ADMIN_TOOLS_ENABLED", &mut self.server.admin_tools_enabled);
+        apply_parsed_env(env, "LOCALHOLD_MAX_SEARCH_LIMIT", &mut self.limits.max_search_limit);
+        apply_parsed_env(env, "LOCALHOLD_MAX_CANDIDATE_POOL_SIZE", &mut self.limits.max_candidate_pool_size);
+        apply_parsed_env(env, "LOCALHOLD_MAX_LIST_LIMIT", &mut self.limits.max_list_limit);
+        apply_parsed_env(env, "LOCALHOLD_MAX_CONTENT_LENGTH", &mut self.limits.max_content_length);
+        apply_parsed_env(env, "LOCALHOLD_MAX_TAGS_PER_MEMORY", &mut self.limits.max_tags_per_memory);
+        apply_parsed_env(env, "LOCALHOLD_MAX_TAG_LENGTH", &mut self.limits.max_tag_length);
+        apply_parsed_env(env, "LOCALHOLD_MAX_BATCH_SIZE", &mut self.limits.max_batch_size);
+        apply_parsed_env(env, "LOCALHOLD_MAX_REEMBED_LIMIT", &mut self.limits.max_reembed_limit);
+        apply_parsed_env(env, "LOCALHOLD_EMBEDDING_TIMEOUT", &mut self.limits.embedding_timeout_secs);
+        apply_parsed_env(env, "LOCALHOLD_MAX_CONCURRENT_EMBEDDING_REQUESTS", &mut self.limits.max_concurrent_embedding_requests);
+        apply_parsed_env(env, "LOCALHOLD_EMBEDDING_BATCH_SIZE", &mut self.limits.embedding_batch_size);
+        apply_parsed_env(env, "LOCALHOLD_EMBEDDING_MAX_RETRIES", &mut self.limits.embedding_max_retries);
+        apply_parsed_env(env, "LOCALHOLD_EMBEDDING_RETRY_INITIAL_BACKOFF_MS", &mut self.limits.embedding_retry_initial_backoff_ms);
+        apply_parsed_env(env, "LOCALHOLD_EMBEDDING_RETRY_MAX_BACKOFF_MS", &mut self.limits.embedding_retry_max_backoff_ms);
+        apply_parsed_env(env, "LOCALHOLD_SHUTDOWN_TIMEOUT", &mut self.limits.shutdown_timeout_secs);
+        apply_parsed_env(env, "LOCALHOLD_MAX_TOP_TAGS_LIMIT", &mut self.limits.max_top_tags_limit);
+        apply_parsed_env(env, "LOCALHOLD_MAX_HISTORY_LIMIT", &mut self.limits.max_history_limit);
+        apply_parsed_env(env, "LOCALHOLD_CONSOLIDATION_NEIGHBOR_LIMIT", &mut self.limits.consolidation_neighbor_limit);
+        apply_parsed_env(env, "LOCALHOLD_MAX_ENTITIES_PER_MEMORY", &mut self.limits.max_entities_per_memory);
+        apply_parsed_env(env, "LOCALHOLD_MAX_ENTITY_FIELD_LENGTH", &mut self.limits.max_entity_field_length);
+        apply_parsed_env(env, "LOCALHOLD_RRF_K", &mut self.search.rrf_k);
+        apply_parsed_env(env, "LOCALHOLD_RRF_SEMANTIC_WEIGHT", &mut self.search.rrf_semantic_weight);
+        apply_parsed_env(env, "LOCALHOLD_RRF_KEYWORD_WEIGHT", &mut self.search.rrf_keyword_weight);
+        apply_parsed_env(env, "LOCALHOLD_DEFAULT_SEARCH_MODE", &mut self.search.default_mode);
+        apply_parsed_env(env, "LOCALHOLD_SEMANTIC_CANDIDATE_K", &mut self.search.semantic_candidate_k);
+        apply_parsed_env(env, "LOCALHOLD_KEYWORD_CANDIDATE_K", &mut self.search.keyword_candidate_k);
+        apply_parsed_env(env, "LOCALHOLD_RERANK_TOP_M", &mut self.search.rerank_top_m);
+        apply_parsed_env(env, "LOCALHOLD_RERANKER_POOL_SIZE", &mut self.search.reranker.pool_size);
+        apply_parsed_env(env, "LOCALHOLD_RELEVANCE_WEIGHT", &mut self.search.relevance_weight);
         // Backward compat: apply deprecated aliases first so the new name
         // takes precedence when both are set during migration.
-        apply_parsed_env(env, "RECALL_RECENCY_WEIGHT", &mut self.search.activity_weight);
-        apply_parsed_env(env, "RECALL_ACTIVITY_WEIGHT", &mut self.search.activity_weight);
-        apply_parsed_env(env, "RECALL_IMPORTANCE_WEIGHT", &mut self.search.importance_weight);
-        apply_parsed_env(env, "RECALL_RECENCY_HALF_LIFE_HOURS", &mut self.search.activity_half_life_hours);
-        apply_parsed_env(env, "RECALL_ACTIVITY_HALF_LIFE_HOURS", &mut self.search.activity_half_life_hours);
-        apply_parsed_env(env, "RECALL_ACTIVITY_SATURATION", &mut self.search.activity_saturation);
-        apply_parsed_env(env, "RECALL_FRESHNESS_WEIGHT", &mut self.search.freshness_weight);
-        apply_parsed_env(env, "RECALL_FRESHNESS_HALF_LIFE_SEMANTIC_DAYS", &mut self.search.freshness_half_life_semantic_days);
-        apply_parsed_env(env, "RECALL_FRESHNESS_HALF_LIFE_EPISODIC_DAYS", &mut self.search.freshness_half_life_episodic_days);
-        apply_parsed_env(env, "RECALL_FRESHNESS_HALF_LIFE_PROCEDURAL_DAYS", &mut self.search.freshness_half_life_procedural_days);
-        apply_parsed_env(env, "RECALL_CONFIDENCE_WEIGHT", &mut self.search.confidence_weight);
-        apply_parsed_env(env, "RECALL_RELEVANCE_FLOOR", &mut self.search.relevance_floor);
-        apply_parsed_env(env, "RECALL_RELEVANCE_FLOOR_PENALTY", &mut self.search.relevance_floor_penalty);
-        apply_parsed_env(env, "RECALL_SUPERSEDED_PENALTY", &mut self.search.superseded_penalty);
-        apply_parsed_env(env, "RECALL_RERANKER_ENABLED", &mut self.search.reranker.enabled);
-        if let Some(v) = env.get("RECALL_RERANKER_MODEL") {
+        apply_parsed_env(env, "LOCALHOLD_RECENCY_WEIGHT", &mut self.search.activity_weight);
+        apply_parsed_env(env, "LOCALHOLD_ACTIVITY_WEIGHT", &mut self.search.activity_weight);
+        apply_parsed_env(env, "LOCALHOLD_IMPORTANCE_WEIGHT", &mut self.search.importance_weight);
+        apply_parsed_env(env, "LOCALHOLD_RECENCY_HALF_LIFE_HOURS", &mut self.search.activity_half_life_hours);
+        apply_parsed_env(env, "LOCALHOLD_ACTIVITY_HALF_LIFE_HOURS", &mut self.search.activity_half_life_hours);
+        apply_parsed_env(env, "LOCALHOLD_ACTIVITY_SATURATION", &mut self.search.activity_saturation);
+        apply_parsed_env(env, "LOCALHOLD_FRESHNESS_WEIGHT", &mut self.search.freshness_weight);
+        apply_parsed_env(env, "LOCALHOLD_FRESHNESS_HALF_LIFE_SEMANTIC_DAYS", &mut self.search.freshness_half_life_semantic_days);
+        apply_parsed_env(env, "LOCALHOLD_FRESHNESS_HALF_LIFE_EPISODIC_DAYS", &mut self.search.freshness_half_life_episodic_days);
+        apply_parsed_env(env, "LOCALHOLD_FRESHNESS_HALF_LIFE_PROCEDURAL_DAYS", &mut self.search.freshness_half_life_procedural_days);
+        apply_parsed_env(env, "LOCALHOLD_CONFIDENCE_WEIGHT", &mut self.search.confidence_weight);
+        apply_parsed_env(env, "LOCALHOLD_RELEVANCE_FLOOR", &mut self.search.relevance_floor);
+        apply_parsed_env(env, "LOCALHOLD_RELEVANCE_FLOOR_PENALTY", &mut self.search.relevance_floor_penalty);
+        apply_parsed_env(env, "LOCALHOLD_SUPERSEDED_PENALTY", &mut self.search.superseded_penalty);
+        apply_parsed_env(env, "LOCALHOLD_RERANKER_ENABLED", &mut self.search.reranker.enabled);
+        if let Some(v) = env.get("LOCALHOLD_RERANKER_MODEL") {
             self.search.reranker.model.clone_from(v);
         }
-        if let Some(v) = env.get("RECALL_RERANKER_REVISION") {
+        if let Some(v) = env.get("LOCALHOLD_RERANKER_REVISION") {
             self.search.reranker.revision.clone_from(v);
         }
-        if let Some(v) = env.get("RECALL_RERANKER_MODEL_PATH") {
+        if let Some(v) = env.get("LOCALHOLD_RERANKER_MODEL_PATH") {
             self.search.reranker.model_path.clone_from(v);
         }
-        if let Some(v) = env.get("RECALL_RERANKER_MODEL_SHA256") {
+        if let Some(v) = env.get("LOCALHOLD_RERANKER_MODEL_SHA256") {
             self.search.reranker.model_sha256.clone_from(v);
         }
-        if let Some(v) = env.get("RECALL_RERANKER_TOKENIZER_SHA256") {
+        if let Some(v) = env.get("LOCALHOLD_RERANKER_TOKENIZER_SHA256") {
             self.search.reranker.tokenizer_sha256.clone_from(v);
         }
-        apply_parsed_env(env, "RECALL_RERANKER_BLEND_WEIGHT", &mut self.search.reranker.blend_weight);
-        if let Some(v) = env.get("RECALL_RERANKER_CACHE_DIR") {
+        apply_parsed_env(env, "LOCALHOLD_RERANKER_BLEND_WEIGHT", &mut self.search.reranker.blend_weight);
+        if let Some(v) = env.get("LOCALHOLD_RERANKER_CACHE_DIR") {
             self.search.reranker.cache_dir.clone_from(v);
         }
-        apply_parsed_env(env, "RECALL_DUPLICATE_SUPPRESSION_ENABLED", &mut self.search.duplicate_suppression.enabled);
-        apply_parsed_env(env, "RECALL_DUPLICATE_SUPPRESSION_LAMBDA", &mut self.search.duplicate_suppression.lambda);
+        apply_parsed_env(env, "LOCALHOLD_DUPLICATE_SUPPRESSION_ENABLED", &mut self.search.duplicate_suppression.enabled);
+        apply_parsed_env(env, "LOCALHOLD_DUPLICATE_SUPPRESSION_LAMBDA", &mut self.search.duplicate_suppression.lambda);
     }
 
     fn resolve_paths(&mut self) -> Result<(), EngineError> {
@@ -926,7 +924,7 @@ impl Config {
         self.search.reranker.cache_dir = self.search.reranker.cache_dir.trim().to_owned();
         // Backward compat: honor deprecated pool_size when rerank_top_m
         // was not explicitly set via TOML or env var.
-        let rerank_top_m_explicit = self.search.rerank_top_m != SearchConfig::default().rerank_top_m || env.contains_key("RECALL_RERANK_TOP_M");
+        let rerank_top_m_explicit = self.search.rerank_top_m != SearchConfig::default().rerank_top_m || env.contains_key("LOCALHOLD_RERANK_TOP_M");
         if !rerank_top_m_explicit && self.search.reranker.pool_size != RerankerConfig::default().pool_size {
             self.search.rerank_top_m = self.search.reranker.pool_size;
         }
@@ -937,10 +935,7 @@ impl Config {
 }
 
 fn user_config_candidates(config_dir: Option<&Path>) -> Vec<PathBuf> {
-    config_dir.map_or_else(Vec::new, |dir| {
-        let localhold_dir = dir.join("localhold");
-        vec![localhold_dir.join("localhold.toml"), localhold_dir.join("recall.toml")]
-    })
+    config_dir.map_or_else(Vec::new, |dir| vec![dir.join("localhold/localhold.toml")])
 }
 
 pub(crate) fn validate_server_config(config: &ServerConfig) -> Result<(), EngineError> {
@@ -1174,92 +1169,92 @@ pub(crate) fn is_builtin_default_reranker_model(model: &str) -> bool {
     model == DEFAULT_RERANKER_MODEL || model == DEFAULT_RERANKER_MODEL_CANONICAL
 }
 
-/// Collect all `RECALL_*` env vars into a map for [`Config::load_from_sources`].
+/// Collect all `LOCALHOLD_*` env vars into a map for [`Config::load_from_sources`].
 #[expect(clippy::too_many_lines, reason = "explicit environment allowlist is intentionally centralized")]
-fn collect_recall_env_vars() -> HashMap<String, String> {
+fn collect_localhold_env_vars() -> HashMap<String, String> {
     let keys = [
-        "RECALL_DB_BACKEND",
-        "RECALL_DB_PATH",
-        "RECALL_POSTGRES_URL",
-        "RECALL_POSTGRES_MAX_CONNECTIONS",
-        "RECALL_POSTGRES_AUTO_MIGRATE",
-        "RECALL_EMBEDDING_BASE_URL",
-        "RECALL_EMBEDDING_MODEL",
-        "RECALL_EMBEDDING_API_KEY",
-        "RECALL_EMBEDDING_AUTH_MODE",
-        "RECALL_EMBEDDING_SEND_DIMENSIONS",
-        "RECALL_EMBEDDING_HEALTH_CHECK",
-        "RECALL_EMBEDDING_ALLOW_INSECURE_HTTP",
-        "RECALL_EMBEDDING_DIMENSIONS",
-        "RECALL_LOG_LEVEL",
-        "RECALL_PRINCIPAL",
-        "RECALL_ANONYMOUS_POLICY",
-        "RECALL_TRANSPORT",
-        "RECALL_HTTP_HOST",
-        "RECALL_HTTP_PORT",
-        "RECALL_HTTP_PATH",
-        "RECALL_HTTP_AUTH_TOKEN",
-        "RECALL_HTTP_PRINCIPAL_MODE",
-        "RECALL_HTTP_PRINCIPAL",
-        "RECALL_HTTP_PRINCIPAL_HEADER",
-        "RECALL_HTTP_ALLOWED_HOSTS",
-        "RECALL_HTTP_MAX_BODY_BYTES",
-        "RECALL_HTTP_MAX_SESSIONS",
-        "RECALL_HTTP_SESSION_IDLE_TIMEOUT_SECS",
-        "RECALL_ADMIN_TOOLS_ENABLED",
-        "RECALL_MAX_SEARCH_LIMIT",
-        "RECALL_MAX_CANDIDATE_POOL_SIZE",
-        "RECALL_MAX_LIST_LIMIT",
-        "RECALL_MAX_CONTENT_LENGTH",
-        "RECALL_MAX_TAGS_PER_MEMORY",
-        "RECALL_MAX_TAG_LENGTH",
-        "RECALL_MAX_BATCH_SIZE",
-        "RECALL_MAX_REEMBED_LIMIT",
-        "RECALL_EMBEDDING_TIMEOUT",
-        "RECALL_MAX_CONCURRENT_EMBEDDING_REQUESTS",
-        "RECALL_EMBEDDING_BATCH_SIZE",
-        "RECALL_EMBEDDING_MAX_RETRIES",
-        "RECALL_EMBEDDING_RETRY_INITIAL_BACKOFF_MS",
-        "RECALL_EMBEDDING_RETRY_MAX_BACKOFF_MS",
-        "RECALL_SHUTDOWN_TIMEOUT",
-        "RECALL_MAX_TOP_TAGS_LIMIT",
-        "RECALL_MAX_HISTORY_LIMIT",
-        "RECALL_CONSOLIDATION_NEIGHBOR_LIMIT",
-        "RECALL_MAX_ENTITIES_PER_MEMORY",
-        "RECALL_MAX_ENTITY_FIELD_LENGTH",
-        "RECALL_RRF_K",
-        "RECALL_RRF_SEMANTIC_WEIGHT",
-        "RECALL_RRF_KEYWORD_WEIGHT",
-        "RECALL_DEFAULT_SEARCH_MODE",
-        "RECALL_SEMANTIC_CANDIDATE_K",
-        "RECALL_KEYWORD_CANDIDATE_K",
-        "RECALL_RERANK_TOP_M",
-        "RECALL_RERANKER_POOL_SIZE",
-        "RECALL_RELEVANCE_WEIGHT",
-        "RECALL_RECENCY_WEIGHT",
-        "RECALL_IMPORTANCE_WEIGHT",
-        "RECALL_RECENCY_HALF_LIFE_HOURS",
-        "RECALL_ACTIVITY_WEIGHT",
-        "RECALL_ACTIVITY_HALF_LIFE_HOURS",
-        "RECALL_ACTIVITY_SATURATION",
-        "RECALL_FRESHNESS_WEIGHT",
-        "RECALL_FRESHNESS_HALF_LIFE_SEMANTIC_DAYS",
-        "RECALL_FRESHNESS_HALF_LIFE_EPISODIC_DAYS",
-        "RECALL_FRESHNESS_HALF_LIFE_PROCEDURAL_DAYS",
-        "RECALL_CONFIDENCE_WEIGHT",
-        "RECALL_RELEVANCE_FLOOR",
-        "RECALL_RELEVANCE_FLOOR_PENALTY",
-        "RECALL_SUPERSEDED_PENALTY",
-        "RECALL_RERANKER_ENABLED",
-        "RECALL_RERANKER_MODEL",
-        "RECALL_RERANKER_REVISION",
-        "RECALL_RERANKER_MODEL_PATH",
-        "RECALL_RERANKER_MODEL_SHA256",
-        "RECALL_RERANKER_TOKENIZER_SHA256",
-        "RECALL_RERANKER_BLEND_WEIGHT",
-        "RECALL_RERANKER_CACHE_DIR",
-        "RECALL_DUPLICATE_SUPPRESSION_ENABLED",
-        "RECALL_DUPLICATE_SUPPRESSION_LAMBDA",
+        "LOCALHOLD_DB_BACKEND",
+        "LOCALHOLD_DB_PATH",
+        "LOCALHOLD_POSTGRES_URL",
+        "LOCALHOLD_POSTGRES_MAX_CONNECTIONS",
+        "LOCALHOLD_POSTGRES_AUTO_MIGRATE",
+        "LOCALHOLD_EMBEDDING_BASE_URL",
+        "LOCALHOLD_EMBEDDING_MODEL",
+        "LOCALHOLD_EMBEDDING_API_KEY",
+        "LOCALHOLD_EMBEDDING_AUTH_MODE",
+        "LOCALHOLD_EMBEDDING_SEND_DIMENSIONS",
+        "LOCALHOLD_EMBEDDING_HEALTH_CHECK",
+        "LOCALHOLD_EMBEDDING_ALLOW_INSECURE_HTTP",
+        "LOCALHOLD_EMBEDDING_DIMENSIONS",
+        "LOCALHOLD_LOG_LEVEL",
+        "LOCALHOLD_PRINCIPAL",
+        "LOCALHOLD_ANONYMOUS_POLICY",
+        "LOCALHOLD_TRANSPORT",
+        "LOCALHOLD_HTTP_HOST",
+        "LOCALHOLD_HTTP_PORT",
+        "LOCALHOLD_HTTP_PATH",
+        "LOCALHOLD_HTTP_AUTH_TOKEN",
+        "LOCALHOLD_HTTP_PRINCIPAL_MODE",
+        "LOCALHOLD_HTTP_PRINCIPAL",
+        "LOCALHOLD_HTTP_PRINCIPAL_HEADER",
+        "LOCALHOLD_HTTP_ALLOWED_HOSTS",
+        "LOCALHOLD_HTTP_MAX_BODY_BYTES",
+        "LOCALHOLD_HTTP_MAX_SESSIONS",
+        "LOCALHOLD_HTTP_SESSION_IDLE_TIMEOUT_SECS",
+        "LOCALHOLD_ADMIN_TOOLS_ENABLED",
+        "LOCALHOLD_MAX_SEARCH_LIMIT",
+        "LOCALHOLD_MAX_CANDIDATE_POOL_SIZE",
+        "LOCALHOLD_MAX_LIST_LIMIT",
+        "LOCALHOLD_MAX_CONTENT_LENGTH",
+        "LOCALHOLD_MAX_TAGS_PER_MEMORY",
+        "LOCALHOLD_MAX_TAG_LENGTH",
+        "LOCALHOLD_MAX_BATCH_SIZE",
+        "LOCALHOLD_MAX_REEMBED_LIMIT",
+        "LOCALHOLD_EMBEDDING_TIMEOUT",
+        "LOCALHOLD_MAX_CONCURRENT_EMBEDDING_REQUESTS",
+        "LOCALHOLD_EMBEDDING_BATCH_SIZE",
+        "LOCALHOLD_EMBEDDING_MAX_RETRIES",
+        "LOCALHOLD_EMBEDDING_RETRY_INITIAL_BACKOFF_MS",
+        "LOCALHOLD_EMBEDDING_RETRY_MAX_BACKOFF_MS",
+        "LOCALHOLD_SHUTDOWN_TIMEOUT",
+        "LOCALHOLD_MAX_TOP_TAGS_LIMIT",
+        "LOCALHOLD_MAX_HISTORY_LIMIT",
+        "LOCALHOLD_CONSOLIDATION_NEIGHBOR_LIMIT",
+        "LOCALHOLD_MAX_ENTITIES_PER_MEMORY",
+        "LOCALHOLD_MAX_ENTITY_FIELD_LENGTH",
+        "LOCALHOLD_RRF_K",
+        "LOCALHOLD_RRF_SEMANTIC_WEIGHT",
+        "LOCALHOLD_RRF_KEYWORD_WEIGHT",
+        "LOCALHOLD_DEFAULT_SEARCH_MODE",
+        "LOCALHOLD_SEMANTIC_CANDIDATE_K",
+        "LOCALHOLD_KEYWORD_CANDIDATE_K",
+        "LOCALHOLD_RERANK_TOP_M",
+        "LOCALHOLD_RERANKER_POOL_SIZE",
+        "LOCALHOLD_RELEVANCE_WEIGHT",
+        "LOCALHOLD_RECENCY_WEIGHT",
+        "LOCALHOLD_IMPORTANCE_WEIGHT",
+        "LOCALHOLD_RECENCY_HALF_LIFE_HOURS",
+        "LOCALHOLD_ACTIVITY_WEIGHT",
+        "LOCALHOLD_ACTIVITY_HALF_LIFE_HOURS",
+        "LOCALHOLD_ACTIVITY_SATURATION",
+        "LOCALHOLD_FRESHNESS_WEIGHT",
+        "LOCALHOLD_FRESHNESS_HALF_LIFE_SEMANTIC_DAYS",
+        "LOCALHOLD_FRESHNESS_HALF_LIFE_EPISODIC_DAYS",
+        "LOCALHOLD_FRESHNESS_HALF_LIFE_PROCEDURAL_DAYS",
+        "LOCALHOLD_CONFIDENCE_WEIGHT",
+        "LOCALHOLD_RELEVANCE_FLOOR",
+        "LOCALHOLD_RELEVANCE_FLOOR_PENALTY",
+        "LOCALHOLD_SUPERSEDED_PENALTY",
+        "LOCALHOLD_RERANKER_ENABLED",
+        "LOCALHOLD_RERANKER_MODEL",
+        "LOCALHOLD_RERANKER_REVISION",
+        "LOCALHOLD_RERANKER_MODEL_PATH",
+        "LOCALHOLD_RERANKER_MODEL_SHA256",
+        "LOCALHOLD_RERANKER_TOKENIZER_SHA256",
+        "LOCALHOLD_RERANKER_BLEND_WEIGHT",
+        "LOCALHOLD_RERANKER_CACHE_DIR",
+        "LOCALHOLD_DUPLICATE_SUPPRESSION_ENABLED",
+        "LOCALHOLD_DUPLICATE_SUPPRESSION_LAMBDA",
     ];
     keys.into_iter().filter_map(|key| std::env::var(key).ok().map(|v| (key.to_owned(), v))).collect()
 }

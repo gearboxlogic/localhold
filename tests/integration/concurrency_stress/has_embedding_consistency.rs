@@ -8,7 +8,7 @@ use std::{sync::Arc, time::Duration};
 
 use localhold::{
     config::{LimitsConfig, SearchConfig},
-    engine::RecallEngine,
+    engine::LocalHoldEngine,
     server::params::{ReadResponse, RememberResponse},
     store::SqliteStore,
     types::{MemoryFilter, MemoryId, QueryContext},
@@ -18,9 +18,9 @@ use serde_json::json;
 use super::workload::{QUICK_OPS, QUICK_TASKS, build_memory};
 use crate::helpers::{SlowDeterministicEmbedding, await_embeddings, call_tool, setup_server_with};
 
-fn make_engine(embedding: Arc<dyn localhold::embedding::EmbeddingProvider>) -> RecallEngine<SqliteStore> {
+fn make_engine(embedding: Arc<dyn localhold::embedding::EmbeddingProvider>) -> LocalHoldEngine<SqliteStore> {
     let store = SqliteStore::in_memory().unwrap();
-    RecallEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
+    LocalHoldEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
 }
 
 #[tokio::test]

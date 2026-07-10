@@ -22,7 +22,7 @@ failed=0
 while IFS= read -r path; do
   [[ -e "$path" || -L "$path" ]] || continue
   case "$path" in
-    .agents/*|.cache/*|.cargo/*|.claude/*|.codex/*|.rustup/*|target/*|tasks/*|docs/plans/*|docs/review/*|CLAUDE.md|recall.example.toml|script/promote-mcp-local.sh)
+    .agents/*|.cache/*|.cargo/*|.claude/*|.codex/*|.rustup/*|target/*|tasks/*|docs/plans/*|docs/review/*|CLAUDE.md|script/promote-mcp-local.sh)
       printf 'forbidden publication path: %s\n' "$path" >&2
       failed=1
       ;;
@@ -37,7 +37,7 @@ while IFS= read -r entry; do
 done < <(git ls-files --stage)
 
 markers=(
-  'gizmo'
+  'giz''mo'
   'Gearbox-Logic'
   'github-gbl'
   '/home/[^/]+/(dev|src|projects)/'
@@ -46,11 +46,24 @@ markers=(
 
 for marker in "${markers[@]}"; do
   pathspecs=(. ':(exclude)script/check-publication-hygiene.sh')
-  if [[ "$marker" == gizmo ]]; then
-    pathspecs+=(':(exclude)docs/migrating-from-private-recall.md')
-  fi
   if matches="$(git grep -n -I -i -E "$marker" -- "${pathspecs[@]}" || true)" && [[ -n "$matches" ]]; then
     printf 'forbidden publication marker %q:\n%s\n' "$marker" "$matches" >&2
+    failed=1
+  fi
+done
+
+retired_names=(
+  'Recall''Engine'
+  'Recall''Server'
+  'RECALL''_'
+  'recall_''migrations'
+  'recall[.]toml'
+  'recall[.]db'
+)
+
+for marker in "${retired_names[@]}"; do
+  if matches="$(git grep -n -I -E "$marker" -- . ':(exclude)script/check-publication-hygiene.sh' || true)" && [[ -n "$matches" ]]; then
+    printf 'retired LocalHold name %q:\n%s\n' "$marker" "$matches" >&2
     failed=1
   fi
 done

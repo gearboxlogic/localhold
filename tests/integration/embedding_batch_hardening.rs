@@ -10,7 +10,7 @@ use std::{
 use localhold::{
     config::{LimitsConfig, SearchConfig},
     embedding::{BoxFuture, EmbeddingProvider},
-    engine::{RecallEngine, ReembedOutcome, ReembedRequest},
+    engine::{LocalHoldEngine, ReembedOutcome, ReembedRequest},
     error::EmbeddingError,
     store::{MemoryReader as _, MemoryWriter as _, SqliteStore},
     types::{AccessPolicy, Memory, Provenance},
@@ -147,8 +147,8 @@ async fn two_instances_partition_durable_reembed_claims() {
     limits.embedding_batch_size = 8;
     let first_provider: Arc<dyn EmbeddingProvider> = Arc::<RecordingBatchProvider>::clone(&provider);
     let second_provider: Arc<dyn EmbeddingProvider> = Arc::<RecordingBatchProvider>::clone(&provider);
-    let first_engine = RecallEngine::new(first_store.clone(), first_provider, limits.clone(), SearchConfig::default());
-    let second_engine = RecallEngine::new(second_store, second_provider, limits, SearchConfig::default());
+    let first_engine = LocalHoldEngine::new(first_store.clone(), first_provider, limits.clone(), SearchConfig::default());
+    let second_engine = LocalHoldEngine::new(second_store, second_provider, limits, SearchConfig::default());
 
     let (first, second) = tokio::join!(
         first_engine.reembed(ReembedRequest::Bulk { limit: contents.len() }),
@@ -177,7 +177,7 @@ async fn explicit_batch_chunks_obey_global_request_concurrency() {
     limits.embedding_batch_size = 10;
     limits.max_concurrent_embedding_requests = 2;
     let engine_provider: Arc<dyn EmbeddingProvider> = Arc::<BlockingBatchProvider>::clone(&provider);
-    let engine = RecallEngine::new(store, engine_provider, limits, SearchConfig::default());
+    let engine = LocalHoldEngine::new(store, engine_provider, limits, SearchConfig::default());
     let memories: Vec<Memory> = (0_usize..50).map(|index| test_memory(format!("load item {index}"))).collect();
 
     let ids = engine.batch_store(memories, vec![None; 50]).await.unwrap();

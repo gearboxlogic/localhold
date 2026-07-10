@@ -41,7 +41,7 @@ const EMBEDDING_CLAIM_LEASE_SECS: i64 = 300;
 const EMBEDDING_PROFILE_ADVISORY_LOCK: i64 = 5_499_250_768_369_920_844;
 
 const CREATE_MIGRATIONS_TABLE: &str = "
-    CREATE TABLE IF NOT EXISTS recall_migrations (
+    CREATE TABLE IF NOT EXISTS localhold_migrations (
         version    BIGINT PRIMARY KEY,
         name       TEXT NOT NULL UNIQUE,
         applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -3255,7 +3255,7 @@ fn parse_vector_dimensions(formatted_type: &str) -> Option<usize> {
 async fn record_migration(pool: &PgPool, version: i64, name: &'static str) -> Result<(), StoreError> {
     let _result = sqlx::query(
         "
-        INSERT INTO recall_migrations (version, name)
+        INSERT INTO localhold_migrations (version, name)
         VALUES ($1, $2)
         ON CONFLICT (version) DO NOTHING
         ",
@@ -3352,9 +3352,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set RECALL_POSTGRES_URL if not using the default smoke URL"]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn open_bootstraps_schema_against_postgres() {
-        let url = std::env::var("RECALL_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
+        let url = std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
         let config = PostgresDatabaseConfig {
             url,
             max_connections: 1,
@@ -3380,7 +3380,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set RECALL_POSTGRES_URL if not using the default smoke URL"]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn store_get_list_and_delete_against_postgres() {
         let store = open_postgres_smoke_store().await;
         let memory = test_memory();
@@ -3421,7 +3421,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set RECALL_POSTGRES_URL if not using the default smoke URL"]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn text_and_fts_search_against_postgres() {
         let store = open_postgres_smoke_store().await;
         reset_postgres_smoke_database(&store).await;
@@ -3479,7 +3479,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set RECALL_POSTGRES_URL if not using the default smoke URL"]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn filtered_list_count_and_text_search_find_rows_beyond_old_scan_window_against_postgres() {
         let store = open_postgres_smoke_store().await;
         reset_postgres_smoke_database(&store).await;
@@ -3524,7 +3524,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set RECALL_POSTGRES_URL if not using the default smoke URL"]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn semantic_search_against_postgres() {
         let store = open_postgres_smoke_store().await;
         reset_postgres_smoke_database(&store).await;
@@ -3576,7 +3576,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set RECALL_POSTGRES_URL if not using the default smoke URL"]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn postgres_store_satisfies_memory_store_conformance() {
         let store = open_postgres_smoke_store().await;
         reset_postgres_smoke_database(&store).await;
@@ -3585,7 +3585,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set RECALL_POSTGRES_URL if not using the default smoke URL"]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn postgres_store_rejects_non_finite_embeddings() {
         let store = open_postgres_smoke_store().await;
         reset_postgres_smoke_database(&store).await;
@@ -3594,7 +3594,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set RECALL_POSTGRES_URL if not using the default smoke URL"]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn reembed_embeddings_and_neighbors_against_postgres() {
         let store = open_postgres_smoke_store().await;
         reset_postgres_smoke_database(&store).await;
@@ -3673,7 +3673,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set RECALL_POSTGRES_URL if not using the default smoke URL"]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn write_authorization_and_embedding_against_postgres() {
         let store = open_postgres_smoke_store().await;
         let mut memory = test_memory_with_content("postgres writable memory");
@@ -3760,7 +3760,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set RECALL_POSTGRES_URL if not using the default smoke URL"]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn batch_and_bulk_write_authorization_against_postgres() {
         let store = open_postgres_smoke_store().await;
         let batch_one = test_memory_with_content("postgres batch one");
@@ -3805,7 +3805,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set RECALL_POSTGRES_URL if not using the default smoke URL"]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn supersession_against_postgres() {
         let store = open_postgres_smoke_store().await;
         let old_memory = test_memory_with_content("postgres old superseded memory");
@@ -3853,7 +3853,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set RECALL_POSTGRES_URL if not using the default smoke URL"]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn batch_supersession_rejects_missing_target_against_postgres() {
         let store = open_postgres_smoke_store().await;
         let new_memory = test_memory_with_content("postgres rejected batch supersession new");
@@ -3873,7 +3873,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set RECALL_POSTGRES_URL if not using the default smoke URL"]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn audit_and_scope_registry_against_postgres() {
         let store = open_postgres_smoke_store().await;
         reset_postgres_smoke_database(&store).await;
@@ -3917,7 +3917,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set RECALL_POSTGRES_URL if not using the default smoke URL"]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn v2_metadata_and_migration_against_postgres() {
         let store = open_postgres_smoke_store().await;
         reset_postgres_smoke_database(&store).await;
@@ -3989,7 +3989,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set RECALL_POSTGRES_URL if not using the default smoke URL"]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn postgres_store_batch_with_v2_metadata_rejects_supersedes_length_mismatch() {
         let store = open_postgres_smoke_store().await;
         reset_postgres_smoke_database(&store).await;
@@ -4032,7 +4032,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set RECALL_POSTGRES_URL if not using the default smoke URL"]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn memory_store_traits_and_admin_helpers_against_postgres() {
         let store = open_postgres_smoke_store().await;
         reset_postgres_smoke_database(&store).await;
@@ -4122,7 +4122,7 @@ mod tests {
     }
 
     async fn open_postgres_smoke_store() -> PostgresStore {
-        let url = std::env::var("RECALL_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
+        let url = std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
         let config = PostgresDatabaseConfig {
             url,
             max_connections: 1,

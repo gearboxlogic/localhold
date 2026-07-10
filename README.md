@@ -49,11 +49,10 @@ prefixes and the CUDA preview profile.
 
 LocalHold reads `~/.config/localhold/localhold.toml` on Linux and the
 equivalent platform user-config directory elsewhere. It never loads config
-implicitly from the current working directory. Existing
-`~/.config/localhold/recall.toml` files remain a temporary fallback when the
-canonical file is absent. Runtime overrides use `RECALL_*` environment
-variables. See [localhold.example.toml](localhold.example.toml) for the complete
-configuration surface.
+implicitly from the current working directory. Runtime overrides use
+`LOCALHOLD_*` environment variables. See
+[localhold.example.toml](localhold.example.toml) for the complete configuration
+surface.
 
 The default provider is `noop`, which keeps search local and text-only. To use
 semantic search, configure an OpenAI-compatible `/v1` endpoint:
@@ -192,8 +191,7 @@ removed from discovery and dispatch by default; operators must set
 See [docs/agent-api-v2.md](docs/agent-api-v2.md) for tool semantics and
 [docs/architecture.md](docs/architecture.md) for the current system design.
 Operators should also read [Operations](docs/operations.md) and the
-[Compatibility Policy](docs/compatibility.md). Existing private installations
-should follow [Migrating From The Private Predecessor](docs/migrating-from-private-recall.md).
+[Compatibility Policy](docs/compatibility.md).
 
 ## Development
 

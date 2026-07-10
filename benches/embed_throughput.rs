@@ -9,7 +9,7 @@ use std::{sync::Arc, time::Duration};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use localhold::{
     config::{LimitsConfig, SearchConfig},
-    engine::RecallEngine,
+    engine::LocalHoldEngine,
     store::SqliteStore,
     types::Memory,
 };
@@ -89,15 +89,15 @@ fn fnv1a(s: &str) -> u64 {
 
 /// Build an engine with `DeterministicEmbedding` to measure the full
 /// store-then-embed pipeline overhead (without network).
-fn make_engine(embedding_batch_size: usize) -> RecallEngine<SqliteStore> {
+fn make_engine(embedding_batch_size: usize) -> LocalHoldEngine<SqliteStore> {
     let store = SqliteStore::in_memory().expect("in-memory store");
     let embedding: Arc<dyn localhold::embedding::EmbeddingProvider> = Arc::new(DeterministicEmbedding);
     let mut limits = LimitsConfig::default();
     limits.embedding_batch_size = embedding_batch_size;
-    RecallEngine::new(store, embedding, limits, SearchConfig::default())
+    LocalHoldEngine::new(store, embedding, limits, SearchConfig::default())
 }
 
-async fn run_store_and_embed(engine: &RecallEngine<SqliteStore>, memories: Vec<Memory>) {
+async fn run_store_and_embed(engine: &LocalHoldEngine<SqliteStore>, memories: Vec<Memory>) {
     let supersedes = vec![None; memories.len()];
     let _ids = engine.batch_store(memories, supersedes).await.expect("batch store");
     // Wait for background embedding tasks to complete so we

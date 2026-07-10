@@ -1,6 +1,6 @@
 //! Composite scoring — relevance, importance, freshness, and activity reranking.
 //!
-//! Pure function with no dependency on [`RecallEngine`](crate::engine::RecallEngine).
+//! Pure function with no dependency on [`LocalHoldEngine`](crate::engine::LocalHoldEngine).
 
 use crate::{
     config::SearchConfig,

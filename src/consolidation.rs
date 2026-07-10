@@ -1,6 +1,6 @@
 //! Consolidation — duplicate group discovery via union-find clustering.
 //!
-//! Pure algorithmic functions with zero dependency on [`RecallEngine`](crate::engine::RecallEngine).
+//! Pure algorithmic functions with zero dependency on [`LocalHoldEngine`](crate::engine::LocalHoldEngine).
 //! Operates on `&[MemoryWithEmbedding]` and produces [`ConsolidateResult`].
 
 use std::collections::HashMap;

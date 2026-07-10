@@ -9,10 +9,10 @@ use localhold::{
     clock::MockClock,
     config::{AnonymousPolicy, LimitsConfig, SearchConfig},
     embedding::NoopEmbedding,
-    engine::RecallEngine,
+    engine::LocalHoldEngine,
     reranker::{RerankerError, RerankerProvider, RerankerScore},
     server::{
-        RecallServer,
+        LocalHoldServer,
         params::{
             AdminListResponse, AdminV2MigrateMetadataResponse, AdminV2MigrationReportResponse, BriefResponse, BulkDeleteResponse, BulkUpdateResponse, ConsolidateResponse,
             CountResponse, HandoffResponse, HistoryResponse, MatchAction, MatchQuality, OperationStatus, QualityWarning, QualityWarningSeverity, ReadManyResponse, ReadManyStatus,
@@ -60,12 +60,12 @@ fn parse_tool_error(text: &str) -> ToolErrorResponse {
     serde_json::from_str(text).unwrap_or_else(|err| panic!("expected structured tool error JSON: {err}; raw: {text}"))
 }
 
-async fn setup_low_rerank_server() -> (RunningService<rmcp::RoleClient, ()>, RecallServer) {
+async fn setup_low_rerank_server() -> (RunningService<rmcp::RoleClient, ()>, LocalHoldServer) {
     let store = SqliteStore::in_memory().unwrap();
     let mut search_config = SearchConfig::default();
     search_config.reranker.blend_weight = 1.0_f64;
-    let engine = RecallEngine::new(store, Arc::new(DeterministicEmbedding), LimitsConfig::default(), search_config).with_reranker(Arc::new(LowScoreReranker));
-    let server = RecallServer::from_engine(engine).with_admin_tools();
+    let engine = LocalHoldEngine::new(store, Arc::new(DeterministicEmbedding), LimitsConfig::default(), search_config).with_reranker(Arc::new(LowScoreReranker));
+    let server = LocalHoldServer::from_engine(engine).with_admin_tools();
     let server_ref = server.clone();
     let (server_transport, client_transport) = tokio::io::duplex(4096);
 
@@ -90,7 +90,7 @@ async fn register_localhold_scope(client: &RunningService<rmcp::RoleClient, ()>)
     .await;
 }
 
-async fn seed_reassign_memory(server: &RecallServer, content: &str, source_agent: &str, source_conversation: &str, origin_conversation: &str) -> MemoryId {
+async fn seed_reassign_memory(server: &LocalHoldServer, content: &str, source_agent: &str, source_conversation: &str, origin_conversation: &str) -> MemoryId {
     let provenance = Provenance::new_for_test(Some(source_agent.to_owned()), Some(source_conversation.to_owned()), Some(origin_conversation.to_owned()));
     let memory = Memory::new_for_test(content.to_owned(), Vec::new(), provenance, AccessPolicy::Public);
     server.store().store(&memory, None).await.unwrap()
@@ -793,8 +793,8 @@ async fn v2_admin_history_hides_current_memory_not_visible_to_principal() {
     let id = store.store(&memory, None).await.unwrap();
     store.write_audit_entry(&id, AuditAction::Store, Some("owner"), Utc::now(), None).await.unwrap();
 
-    let engine = RecallEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine_with_auth(engine, Some("other".to_owned()), AnonymousPolicy::PublicReadOnly).with_admin_tools();
+    let engine = LocalHoldEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
+    let server = LocalHoldServer::from_engine_with_auth(engine, Some("other".to_owned()), AnonymousPolicy::PublicReadOnly).with_admin_tools();
     let (server_transport, client_transport) = tokio::io::duplex(4096);
     let _server_task = tokio::spawn(async move {
         let svc = server.serve(server_transport).await.unwrap();
@@ -2199,8 +2199,8 @@ async fn v2_handoff_commit_validates_all_candidates_before_writing() {
 async fn v2_handoff_commit_batch_store_failure_does_not_write_candidates() {
     let inner = SqliteStore::in_memory().unwrap();
     let store = chaos_store_fail_batch_and_store_call(inner, 2_usize);
-    let engine = RecallEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine(engine).with_admin_tools();
+    let engine = LocalHoldEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
+    let server = LocalHoldServer::from_engine(engine).with_admin_tools();
     let (server_transport, client_transport) = tokio::io::duplex(4096);
 
     let _server_task = tokio::spawn(async move {
@@ -2229,8 +2229,8 @@ async fn v2_handoff_commit_batch_store_failure_does_not_write_candidates() {
 async fn v2_handoff_commit_uses_one_batch_store_call() {
     let inner = SqliteStore::in_memory().unwrap();
     let store = chaos_store_fail_on_store_call(inner, 2_usize);
-    let engine = RecallEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine(engine).with_admin_tools();
+    let engine = LocalHoldEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
+    let server = LocalHoldServer::from_engine(engine).with_admin_tools();
     let (server_transport, client_transport) = tokio::io::duplex(4096);
 
     let _server_task = tokio::spawn(async move {

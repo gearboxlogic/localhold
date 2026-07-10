@@ -9,7 +9,7 @@ rehearsal before the first stable release.
 Release notes identify changes to these contracts:
 
 - the `hold` command and exit behavior;
-- `localhold.toml` and documented `RECALL_*` settings;
+- `localhold.toml` and documented `LOCALHOLD_*` settings;
 - MCP tool names, input schemas, response schemas, and authorization behavior;
 - SQLite and PostgreSQL schemas and migrations; and
 - stored embedding compatibility requirements.

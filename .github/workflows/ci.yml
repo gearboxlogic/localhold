@@ -58,17 +58,17 @@ jobs:
             --tag "$tag" \
             --target x86_64-unknown-linux-gnu \
             --binary target/release/hold \
-            --format tar.gz \
+            --format tar.zst \
             --output-dir "$RUNNER_TEMP/release"
           mkdir "$RUNNER_TEMP/extracted"
-          tar -xzf "$RUNNER_TEMP"/release/*.tar.gz -C "$RUNNER_TEMP/extracted"
+          tar --zstd -xf "$RUNNER_TEMP"/release/*.tar.zst -C "$RUNNER_TEMP/extracted"
 
       - name: Smoke installed and archived CPU binaries
         run: |
           "$RUNNER_TEMP/localhold/bin/hold" --version
           "$RUNNER_TEMP/localhold/bin/hold" --help
-          archive="$(find "$RUNNER_TEMP/release" -maxdepth 1 -name '*.tar.gz' -print -quit)"
-          archive_root="$(basename "$archive" .tar.gz)"
+          archive="$(find "$RUNNER_TEMP/release" -maxdepth 1 -name '*.tar.zst' -print -quit)"
+          archive_root="$(basename "$archive" .tar.zst)"
           archive_binary="$RUNNER_TEMP/extracted/$archive_root/bin/hold"
           "$archive_binary" --version
           "$archive_binary" --help

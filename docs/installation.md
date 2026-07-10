@@ -10,16 +10,19 @@ Download the archive for the release and its `SHA256SUMS` file from
 [GitHub Releases](https://github.com/gearboxlogic/localhold/releases). Release
 archives use these names:
 
-- `localhold-vVERSION-x86_64-unknown-linux-gnu.tar.gz`
+- `localhold-vVERSION-x86_64-unknown-linux-gnu.tar.zst`
 - `localhold-vVERSION-x86_64-pc-windows-msvc.zip` (preview)
 
 Verify and extract the Linux archive:
 
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS
-tar -xzf localhold-vVERSION-x86_64-unknown-linux-gnu.tar.gz
+tar --zstd -xf localhold-vVERSION-x86_64-unknown-linux-gnu.tar.zst
 ./localhold-vVERSION-x86_64-unknown-linux-gnu/bin/hold --help
 ```
+
+Linux archive extraction requires `zstd` and a tar implementation with zstd
+support. This is separate from the dependencies needed to build from source.
 
 On Windows, compare the value from `Get-FileHash -Algorithm SHA256` with the
 corresponding `SHA256SUMS` entry, then use `Expand-Archive`. Every archive has a

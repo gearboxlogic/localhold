@@ -30,7 +30,7 @@ jobs:
           key: ${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'mise.lock') }}
           restore-keys: ${{ runner.os }}-rust-
 
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v4
 
       - name: Install nightly rustfmt
         run: mise x -- rustup toolchain install nightly -c rustfmt
@@ -60,7 +60,7 @@ jobs:
           key: ${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'mise.lock') }}
           restore-keys: ${{ runner.os }}-rust-
 
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v4
 
       - name: Clippy
         run: mise x -- just clippy

@@ -255,9 +255,10 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallEngine<S> {
     pub fn new_with_clock(store: S, embedding: Arc<dyn EmbeddingProvider>, limits: LimitsConfig, search_config: SearchConfig, clock: Arc<dyn Clock>) -> Self {
         let background_tasks = BackgroundTasks::new();
         let max_concurrent_embedding_requests = limits.max_concurrent_embedding_requests;
+        let embedding_batch_size = limits.embedding_batch_size;
         let embedding: Arc<dyn EmbeddingProvider> = Arc::new(ConcurrencyLimitedEmbedding::new(embedding, max_concurrent_embedding_requests));
         Self {
-            orchestrator: EmbeddingOrchestrator::new(store, embedding, background_tasks),
+            orchestrator: EmbeddingOrchestrator::new(store, embedding, background_tasks, embedding_batch_size),
             clock,
             limits,
             search_config,
@@ -1082,11 +1083,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallEngine<S> {
             ReembedRequest::Bulk { limit } => {
                 let embed_admission = self.orchestrator.begin_embed_admission()?;
                 let claims = store.claim_for_reembed(limit).await?;
-                let mut count = 0_usize;
-                for claim in claims {
-                    let queued = self.orchestrator.spawn_claimed_embed_task_or_run_inline(&embed_admission, claim).await;
-                    count = count.saturating_add(usize::from(queued));
-                }
+                let count = self.orchestrator.spawn_claimed_embed_batches_or_run_inline(&embed_admission, claims).await;
                 Ok(ReembedOutcome::Queued(count))
             }
         }
@@ -1381,6 +1378,7 @@ mod tests {
     };
 
     use chrono::TimeZone as _;
+    use parking_lot::Mutex;
 
     use super::*;
     use crate::{
@@ -1408,6 +1406,86 @@ mod tests {
 
     struct CountingEmbedding {
         embed_calls: AtomicUsize,
+    }
+
+    struct BatchCountingEmbedding {
+        batch_sizes: Mutex<Vec<usize>>,
+        single_calls: AtomicUsize,
+    }
+
+    impl BatchCountingEmbedding {
+        const fn new() -> Self {
+            Self {
+                batch_sizes: Mutex::new(Vec::new()),
+                single_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn sorted_batch_sizes(&self) -> Vec<usize> {
+            let mut sizes = self.batch_sizes.lock().clone();
+            sizes.sort_unstable();
+            sizes
+        }
+
+        fn embedding() -> Vec<f32> {
+            let mut embedding = vec![0.0_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS];
+            embedding[0] = 1.0;
+            embedding
+        }
+    }
+
+    impl EmbeddingProvider for BatchCountingEmbedding {
+        fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, EmbeddingError>> {
+            let _previous = self.single_calls.fetch_add(1, Ordering::AcqRel);
+            Box::pin(async { Ok(Self::embedding()) })
+        }
+
+        fn health_check(&self) -> BoxFuture<'_, Result<(), EmbeddingError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn embed_batch<'a>(&'a self, texts: &'a [&'a str]) -> BoxFuture<'a, Result<Vec<Vec<f32>>, EmbeddingError>> {
+            self.batch_sizes.lock().push(texts.len());
+            Box::pin(async move { Ok(texts.iter().map(|_text| Self::embedding()).collect()) })
+        }
+    }
+
+    struct InputIsolatingEmbedding {
+        batch_calls: AtomicUsize,
+        single_calls: AtomicUsize,
+    }
+
+    impl InputIsolatingEmbedding {
+        const fn new() -> Self {
+            Self {
+                batch_calls: AtomicUsize::new(0),
+                single_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn embed_sync(text: &str) -> Result<Vec<f32>, EmbeddingError> {
+            if text == "invalid" {
+                Err(EmbeddingError::Permanent("invalid input".into()))
+            } else {
+                Ok(BatchCountingEmbedding::embedding())
+            }
+        }
+    }
+
+    impl EmbeddingProvider for InputIsolatingEmbedding {
+        fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, EmbeddingError>> {
+            let _previous = self.single_calls.fetch_add(1, Ordering::AcqRel);
+            Box::pin(async move { Self::embed_sync(text) })
+        }
+
+        fn health_check(&self) -> BoxFuture<'_, Result<(), EmbeddingError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn embed_batch<'a>(&'a self, _texts: &'a [&'a str]) -> BoxFuture<'a, Result<Vec<Vec<f32>>, EmbeddingError>> {
+            let _previous = self.batch_calls.fetch_add(1, Ordering::AcqRel);
+            Box::pin(async { Err(EmbeddingError::Permanent("batch contains invalid input".into())) })
+        }
     }
 
     impl CountingEmbedding {
@@ -2310,6 +2388,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_store_uses_configured_embedding_chunks() {
+        let store = SqliteStore::in_memory().unwrap();
+        let provider = Arc::new(BatchCountingEmbedding::new());
+        let limits = LimitsConfig {
+            max_batch_size: 10,
+            embedding_batch_size: 2,
+            ..LimitsConfig::default()
+        };
+        let engine_provider: Arc<dyn EmbeddingProvider> = Arc::<BatchCountingEmbedding>::clone(&provider);
+        let engine = RecallEngine::new(store.clone(), engine_provider, limits, SearchConfig::default());
+        let now = engine.now();
+        let memories: Vec<Memory> = (0_i32..5_i32).map(|i| engine.build_memory(test_input(&format!("item {i}")), now).unwrap()).collect();
+
+        let ids = engine.batch_store(memories, vec![None; 5]).await.unwrap();
+        engine.shutdown_for_test(Duration::from_secs(1)).await;
+
+        assert_eq!(provider.sorted_batch_sizes(), vec![1, 2, 2]);
+        assert_eq!(provider.single_calls.load(Ordering::Acquire), 0);
+        for id in ids {
+            assert!(store.get(&id, None).await.unwrap().unwrap().has_embedding);
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_store_isolates_permanent_input_failures() {
+        let store = SqliteStore::in_memory().unwrap();
+        let provider = Arc::new(InputIsolatingEmbedding::new());
+        let engine_provider: Arc<dyn EmbeddingProvider> = Arc::<InputIsolatingEmbedding>::clone(&provider);
+        let engine = RecallEngine::new(store.clone(), engine_provider, LimitsConfig::default(), SearchConfig::default());
+        let now = engine.now();
+        let memories: Vec<Memory> = ["valid first", "invalid", "valid second"]
+            .into_iter()
+            .map(|content| engine.build_memory(test_input(content), now).unwrap())
+            .collect();
+
+        let ids = engine.batch_store(memories, vec![None; 3]).await.unwrap();
+        engine.shutdown_for_test(Duration::from_secs(1)).await;
+
+        assert_eq!(provider.batch_calls.load(Ordering::Acquire), 1);
+        assert_eq!(provider.single_calls.load(Ordering::Acquire), 3);
+        assert!(store.get(&ids[0], None).await.unwrap().unwrap().has_embedding);
+        assert!(!store.get(&ids[1], None).await.unwrap().unwrap().has_embedding);
+        assert!(store.get(&ids[2], None).await.unwrap().unwrap().has_embedding);
+    }
+
+    #[tokio::test]
     async fn batch_store_rejects_empty() {
         let engine = make_engine();
         let err = engine.batch_store(vec![], vec![]).await.unwrap_err();
@@ -2362,6 +2486,34 @@ mod tests {
         let engine = make_engine_with_limits(limits);
         let err = engine.reembed(ReembedRequest::Bulk { limit: 10 }).await.unwrap_err();
         assert!(matches!(err, EngineError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn reembed_bulk_uses_configured_embedding_chunks() {
+        let store = SqliteStore::in_memory().unwrap();
+        let mut ids = Vec::new();
+        for index in 0_i32..5_i32 {
+            let memory = Memory::new_for_test(format!("backlog {index}"), Vec::new(), Provenance::default(), AccessPolicy::Public);
+            ids.push(store.store(&memory, None).await.unwrap());
+        }
+        let provider = Arc::new(BatchCountingEmbedding::new());
+        let limits = LimitsConfig {
+            max_reembed_limit: 10,
+            embedding_batch_size: 2,
+            ..LimitsConfig::default()
+        };
+        let engine_provider: Arc<dyn EmbeddingProvider> = Arc::<BatchCountingEmbedding>::clone(&provider);
+        let engine = RecallEngine::new(store.clone(), engine_provider, limits, SearchConfig::default());
+
+        let outcome = engine.reembed(ReembedRequest::Bulk { limit: 5 }).await.unwrap();
+        assert!(matches!(outcome, ReembedOutcome::Queued(5)));
+        engine.shutdown_for_test(Duration::from_secs(1)).await;
+
+        assert_eq!(provider.sorted_batch_sizes(), vec![1, 2, 2]);
+        assert_eq!(provider.single_calls.load(Ordering::Acquire), 0);
+        for id in ids {
+            assert!(store.get(&id, None).await.unwrap().unwrap().has_embedding);
+        }
     }
 
     // -- reassign_scope tests (#9) -------------------------------------------

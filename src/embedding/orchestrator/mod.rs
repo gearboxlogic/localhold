@@ -5,6 +5,8 @@
 //! a background embed task. This makes it structurally impossible to forget
 //! the embed step.
 
+mod batch;
+
 use std::{collections::HashSet, sync::Arc};
 
 use parking_lot::Mutex;
@@ -12,9 +14,9 @@ use tracing::{info, warn};
 
 use crate::{
     background_tasks::{BackgroundTaskKind, BackgroundTasks, EmbedAdmission},
-    embedding::EmbeddingProvider,
+    embedding::{EmbeddingProvider, batch::BatchEmbeddingExecutor},
     error::{EngineError, StoreError, ValidationError},
-    store::{MemoryStore, MemoryWithEmbedding, ReembedClaim},
+    store::{MemoryStore, MemoryWithEmbedding},
     types::{AuditDraft, AuthorizedUpdateOutcome, Memory, MemoryId, MemoryUpdate, V2MemoryMetadata, V2MetadataPatch, WriteOutcome},
 };
 
@@ -28,7 +30,7 @@ type EmbedKey = (MemoryId, i64);
 #[derive(Clone)]
 pub(crate) struct EmbeddingOrchestrator<S: MemoryStore + Clone + std::fmt::Debug + 'static> {
     store: S,
-    embedding: Arc<dyn EmbeddingProvider>,
+    batch_executor: BatchEmbeddingExecutor,
     background_tasks: Arc<BackgroundTasks>,
     /// Coalesces duplicate in-process attempts to embed the same memory revision.
     inflight_embeds: Arc<Mutex<HashSet<EmbedKey>>>,
@@ -54,6 +56,14 @@ struct ActiveEmbedClaimGuard {
     active_claimed_embeds: Arc<Mutex<HashSet<ActiveEmbedClaim>>>,
 }
 
+#[derive(Clone)]
+struct EmbedWork {
+    id: MemoryId,
+    content: Arc<str>,
+    expected_revision: i64,
+    claim_token: Option<String>,
+}
+
 impl Drop for InFlightEmbed {
     fn drop(&mut self) {
         let _removed = self.inflight_embeds.lock().remove(&self.key);
@@ -74,10 +84,10 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> std::fmt::Debug for Emb
 
 impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S> {
     /// Create an orchestrator for store-then-embed operations.
-    pub(crate) fn new(store: S, embedding: Arc<dyn EmbeddingProvider>, background_tasks: Arc<BackgroundTasks>) -> Self {
+    pub(crate) fn new(store: S, embedding: Arc<dyn EmbeddingProvider>, background_tasks: Arc<BackgroundTasks>, embedding_batch_size: usize) -> Self {
         Self {
             store,
-            embedding,
+            batch_executor: BatchEmbeddingExecutor::new(embedding, embedding_batch_size),
             background_tasks,
             inflight_embeds: Arc::new(Mutex::new(HashSet::new())),
             active_claimed_embeds: Arc::new(Mutex::new(HashSet::new())),
@@ -180,9 +190,18 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
             self.store.store_batch_audited(&memories_for_store, audits).await?
         };
 
-        for (content, &id) in contents.iter().zip(ids.iter()) {
-            let _queued = self.spawn_embed_task_shared_or_run_inline(admission, id, Arc::clone(content), 0).await;
-        }
+        let work = ids
+            .iter()
+            .copied()
+            .zip(contents)
+            .map(|(id, content)| EmbedWork {
+                id,
+                content,
+                expected_revision: 0,
+                claim_token: None,
+            })
+            .collect();
+        let _queued = self.spawn_embed_batches_or_run_inline(admission, work).await;
 
         Ok(ids)
     }
@@ -222,9 +241,18 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
             .store_batch_with_v2_metadata_audited(&memories_for_store, supersedes_list, metadata, audits)
             .await?;
 
-        for (content, &id) in contents.iter().zip(ids.iter()) {
-            let _queued = self.spawn_embed_task_shared_or_run_inline(admission, id, Arc::clone(content), 0).await;
-        }
+        let work = ids
+            .iter()
+            .copied()
+            .zip(contents)
+            .map(|(id, content)| EmbedWork {
+                id,
+                content,
+                expected_revision: 0,
+                claim_token: None,
+            })
+            .collect();
+        let _queued = self.spawn_embed_batches_or_run_inline(admission, work).await;
 
         Ok(ids)
     }
@@ -280,7 +308,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
 
     /// Borrow the embedding provider.
     pub(crate) fn embedding(&self) -> &Arc<dyn EmbeddingProvider> {
-        &self.embedding
+        self.batch_executor.provider()
     }
 
     /// Borrow the shared background task coordinator.
@@ -310,11 +338,11 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
         })
     }
 
-    fn track_active_claim(&self, claim: &ReembedClaim) -> ActiveEmbedClaimGuard {
+    fn track_active_claim(&self, id: MemoryId, embedding_revision: i64, claim_token: &str) -> ActiveEmbedClaimGuard {
         let active_claim = ActiveEmbedClaim {
-            id: claim.id,
-            embedding_revision: claim.embedding_revision,
-            claim_token: claim.claim_token.clone(),
+            id,
+            embedding_revision,
+            claim_token: claim_token.to_owned(),
         };
         let _inserted = self.active_claimed_embeds.lock().insert(active_claim.clone());
         ActiveEmbedClaimGuard {
@@ -342,7 +370,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
         };
 
         let store = self.store.clone();
-        let embedding_provider = Arc::clone(&self.embedding);
+        let embedding_provider = Arc::clone(self.batch_executor.provider());
         let spawned_content = Arc::clone(&content);
         if admission.spawn(BackgroundTaskKind::Embed, async move {
             let _inflight = inflight;
@@ -356,77 +384,40 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
             info!(memory_id = %id, expected_revision, "embed task already in flight, skipping duplicate");
             return false;
         };
-        run_embed_task(Arc::clone(&self.embedding), self.store.clone(), id, content, expected_revision, None).await;
+        run_embed_task(Arc::clone(self.batch_executor.provider()), self.store.clone(), id, content, expected_revision, None).await;
         drop(inflight);
         true
     }
-
-    pub(crate) async fn spawn_claimed_embed_task_or_run_inline(&self, admission: &EmbedAdmission, claim: ReembedClaim) -> bool {
-        let Some(inflight) = self.begin_inflight_embed(claim.id, claim.embedding_revision) else {
-            info!(memory_id = %claim.id, expected_revision = claim.embedding_revision, "embed task already in flight, releasing duplicate claim");
-            release_embedding_claim(&self.store, claim.id, claim.embedding_revision, &claim.claim_token).await;
-            return false;
-        };
-
-        let id = claim.id;
-        let expected_revision = claim.embedding_revision;
-        let active_claim = self.track_active_claim(&claim);
-        let content = Arc::<str>::from(claim.content);
-        let claim_token = claim.claim_token;
-        let store = self.store.clone();
-        let embedding_provider = Arc::clone(&self.embedding);
-        let spawned_content = Arc::clone(&content);
-        let spawned_claim_token = claim_token.clone();
-        if admission.spawn(BackgroundTaskKind::Embed, async move {
-            let _inflight = inflight;
-            let _active_claim = active_claim;
-            run_embed_task(embedding_provider, store, id, spawned_content, expected_revision, Some(spawned_claim_token)).await;
-        }) {
-            return true;
-        }
-
-        warn!(memory_id = %id, "embed task admission timed out during shutdown; releasing claim");
-        release_embedding_claim(&self.store, id, expected_revision, &claim_token).await;
-        false
-    }
 }
 
-/// Embed content and store the resulting vector, with retry for transient failures.
-#[expect(clippy::too_many_arguments, reason = "embed execution needs provider, store, id, content, revision, and optional claim token")]
-async fn embed_and_store<S: MemoryStore>(
-    embedding_provider: Arc<dyn EmbeddingProvider>,
-    store: S,
-    id: MemoryId,
-    content: &str,
-    expected_revision: i64,
-    claim_token: Option<String>,
-) {
-    let emb = match embedding_provider.embed(content).await {
-        Ok(emb) => emb,
-        Err(e) => {
-            warn!(memory_id = %id, error = %e, "embedding failed after retries");
-            if let Some(token) = claim_token.as_deref() {
-                release_embedding_claim(&store, id, expected_revision, token).await;
-            }
+async fn apply_embedding_result<S: MemoryStore>(store: &S, work: &EmbedWork, result: Result<Vec<f32>, crate::error::EmbeddingError>) {
+    let embedding = match result {
+        Ok(embedding) => embedding,
+        Err(error) => {
+            warn!(memory_id = %work.id, error = %error, "embedding failed after retries");
+            release_work_claim(store, work).await;
             return;
         }
     };
-    match store.set_embedding(&id, &emb, expected_revision).await {
+
+    match store.set_embedding(&work.id, &embedding, work.expected_revision).await {
         Ok(()) => {
-            info!(memory_id = %id, "embedded memory");
+            info!(memory_id = %work.id, "embedded memory");
         }
         Err(StoreError::Conflict(reason)) => {
-            info!(memory_id = %id, reason = %reason, "revision mismatch, skipping");
-            if let Some(token) = claim_token.as_deref() {
-                release_embedding_claim(&store, id, expected_revision, token).await;
-            }
+            info!(memory_id = %work.id, reason = %reason, "revision mismatch, skipping");
+            release_work_claim(store, work).await;
         }
-        Err(e) => {
-            warn!(memory_id = %id, error = %e, "failed to store embedding");
-            if let Some(token) = claim_token.as_deref() {
-                release_embedding_claim(&store, id, expected_revision, token).await;
-            }
+        Err(error) => {
+            warn!(memory_id = %work.id, error = %error, "failed to store embedding");
+            release_work_claim(store, work).await;
         }
+    }
+}
+
+async fn release_work_claim<S: MemoryStore>(store: &S, work: &EmbedWork) {
+    if let Some(token) = work.claim_token.as_deref() {
+        release_embedding_claim(store, work.id, work.expected_revision, token).await;
     }
 }
 
@@ -448,7 +439,14 @@ async fn run_embed_task<S: MemoryStore>(
     expected_revision: i64,
     claim_token: Option<String>,
 ) {
-    embed_and_store(embedding_provider, store, id, &content, expected_revision, claim_token).await;
+    let work = EmbedWork {
+        id,
+        content,
+        expected_revision,
+        claim_token,
+    };
+    let result = embedding_provider.embed(&work.content).await;
+    apply_embedding_result(&store, &work, result).await;
 }
 
 /// Spawn a re-embed task when content changed and the update was applied.
@@ -560,7 +558,7 @@ mod tests {
     async fn spawn_embed_task_runs_inline_when_admitted_spawn_times_out() {
         let store = SqliteStore::in_memory().unwrap();
         let background_tasks = BackgroundTasks::new();
-        let orchestrator = EmbeddingOrchestrator::new(store.clone(), Arc::new(FixedSizeProvider), Arc::clone(&background_tasks));
+        let orchestrator = EmbeddingOrchestrator::new(store.clone(), Arc::new(FixedSizeProvider), Arc::clone(&background_tasks), 32);
         let admission = background_tasks.begin_embed_admission().unwrap();
 
         background_tasks.shutdown(Duration::from_millis(10)).await;
@@ -600,7 +598,7 @@ mod tests {
         let background_tasks = BackgroundTasks::new();
         let provider = StdArc::new(BlockingProvider::new());
         let provider_for_orchestrator = StdArc::clone(&provider);
-        let orchestrator = EmbeddingOrchestrator::new(store.clone(), provider_for_orchestrator, StdArc::clone(&background_tasks));
+        let orchestrator = EmbeddingOrchestrator::new(store.clone(), provider_for_orchestrator, StdArc::clone(&background_tasks), 32);
         let admission = background_tasks.begin_embed_admission().unwrap();
 
         let memory = Memory {
@@ -648,7 +646,7 @@ mod tests {
         let background_tasks = BackgroundTasks::new();
         let provider = StdArc::new(BlockingProvider::new());
         let provider_for_orchestrator = StdArc::clone(&provider);
-        let orchestrator = EmbeddingOrchestrator::new(store.clone(), provider_for_orchestrator, StdArc::clone(&background_tasks));
+        let orchestrator = EmbeddingOrchestrator::new(store.clone(), provider_for_orchestrator, StdArc::clone(&background_tasks), 32);
         let admission = background_tasks.begin_embed_admission().unwrap();
 
         let memory = test_memory("duplicate claimed embed");
@@ -662,7 +660,7 @@ mod tests {
 
         let claim = store.claim_for_reembed(1).await.unwrap().pop().unwrap();
         let original_token = claim.claim_token.clone();
-        assert!(!orchestrator.spawn_claimed_embed_task_or_run_inline(&admission, claim).await);
+        assert_eq!(orchestrator.spawn_claimed_embed_batches_or_run_inline(&admission, vec![claim]).await, 0);
 
         let available = store.claim_for_reembed(1).await.unwrap();
         assert_eq!(available.len(), 1);
@@ -684,7 +682,7 @@ mod tests {
         let background_tasks = BackgroundTasks::new();
         let provider = StdArc::new(BlockingProvider::new());
         let provider_for_orchestrator = StdArc::clone(&provider);
-        let orchestrator = EmbeddingOrchestrator::new(store.clone(), provider_for_orchestrator, StdArc::clone(&background_tasks));
+        let orchestrator = EmbeddingOrchestrator::new(store.clone(), provider_for_orchestrator, StdArc::clone(&background_tasks), 32);
         let admission = background_tasks.begin_embed_admission().unwrap();
 
         let memory = test_memory("shutdown claimed embed");
@@ -695,7 +693,7 @@ mod tests {
         let started = provider.started.notified();
         tokio::pin!(started);
         let _already_registered = started.as_mut().enable();
-        assert!(orchestrator.spawn_claimed_embed_task_or_run_inline(&admission, claim).await);
+        assert_eq!(orchestrator.spawn_claimed_embed_batches_or_run_inline(&admission, vec![claim]).await, 1);
         started.await;
         drop(admission);
 

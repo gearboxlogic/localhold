@@ -53,6 +53,7 @@ fn default_config_has_sane_values() {
     assert_eq!(config.limits.max_reembed_limit, 100);
     assert_eq!(config.limits.embedding_timeout_secs, 30);
     assert_eq!(config.limits.max_concurrent_embedding_requests, 8);
+    assert_eq!(config.limits.embedding_batch_size, 32);
     assert_eq!(config.limits.embedding_max_retries, 2);
     assert_eq!(config.limits.embedding_retry_initial_backoff_ms, 500);
     assert_eq!(config.limits.embedding_retry_max_backoff_ms, 30_000);
@@ -108,12 +109,13 @@ fn debug_redacts_postgres_url_credentials_but_keeps_pool_settings() {
 
 #[test]
 fn limits_config_loadable_from_toml() {
-    let toml_str = "[limits]\nmax_search_limit = 42\nmax_candidate_pool_size = 500\nembedding_timeout_secs = 60\nmax_concurrent_embedding_requests = 4\nembedding_max_retries = 5\nembedding_retry_initial_backoff_ms = 750\nembedding_retry_max_backoff_ms = 45000\n";
+    let toml_str = "[limits]\nmax_search_limit = 42\nmax_candidate_pool_size = 500\nembedding_timeout_secs = 60\nmax_concurrent_embedding_requests = 4\nembedding_batch_size = 16\nembedding_max_retries = 5\nembedding_retry_initial_backoff_ms = 750\nembedding_retry_max_backoff_ms = 45000\n";
     let config: Config = toml::from_str(toml_str).unwrap();
     assert_eq!(config.limits.max_search_limit, 42);
     assert_eq!(config.limits.max_candidate_pool_size, 500);
     assert_eq!(config.limits.embedding_timeout_secs, 60);
     assert_eq!(config.limits.max_concurrent_embedding_requests, 4);
+    assert_eq!(config.limits.embedding_batch_size, 16);
     assert_eq!(config.limits.embedding_max_retries, 5);
     assert_eq!(config.limits.embedding_retry_initial_backoff_ms, 750);
     assert_eq!(config.limits.embedding_retry_max_backoff_ms, 45_000);
@@ -221,6 +223,7 @@ fn env_overrides_apply_limits() {
         ("RECALL_MAX_REEMBED_LIMIT", "75"),
         ("RECALL_EMBEDDING_TIMEOUT", "60"),
         ("RECALL_MAX_CONCURRENT_EMBEDDING_REQUESTS", "3"),
+        ("RECALL_EMBEDDING_BATCH_SIZE", "12"),
         ("RECALL_EMBEDDING_MAX_RETRIES", "4"),
         ("RECALL_EMBEDDING_RETRY_INITIAL_BACKOFF_MS", "250"),
         ("RECALL_EMBEDDING_RETRY_MAX_BACKOFF_MS", "12000"),
@@ -242,6 +245,7 @@ fn env_overrides_apply_limits() {
     assert_eq!(config.limits.max_reembed_limit, 75);
     assert_eq!(config.limits.embedding_timeout_secs, 60);
     assert_eq!(config.limits.max_concurrent_embedding_requests, 3);
+    assert_eq!(config.limits.embedding_batch_size, 12);
     assert_eq!(config.limits.embedding_max_retries, 4);
     assert_eq!(config.limits.embedding_retry_initial_backoff_ms, 250);
     assert_eq!(config.limits.embedding_retry_max_backoff_ms, 12_000);
@@ -562,6 +566,7 @@ fn validate_limits_config_rejects_zero_operational_limits() {
     assert_zero_limit_rejected("max_reembed_limit", |limits| limits.max_reembed_limit = 0);
     assert_zero_limit_rejected("embedding_timeout_secs", |limits| limits.embedding_timeout_secs = 0);
     assert_zero_limit_rejected("max_concurrent_embedding_requests", |limits| limits.max_concurrent_embedding_requests = 0);
+    assert_zero_limit_rejected("embedding_batch_size", |limits| limits.embedding_batch_size = 0);
     assert_zero_limit_rejected("embedding_retry_initial_backoff_ms", |limits| limits.embedding_retry_initial_backoff_ms = 0);
     assert_zero_limit_rejected("embedding_retry_max_backoff_ms", |limits| limits.embedding_retry_max_backoff_ms = 0);
     assert_zero_limit_rejected("shutdown_timeout_secs", |limits| limits.shutdown_timeout_secs = 0);

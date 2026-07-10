@@ -1,5 +1,7 @@
 //! Embedding provider abstraction with OpenAI-compatible HTTP, noop, and resilient implementations.
 
+/// Explicit bulk-request execution and per-input fallback.
+pub(crate) mod batch;
 /// Configured provider construction and vector-space identity.
 pub mod factory;
 /// Shared provider request concurrency limit.

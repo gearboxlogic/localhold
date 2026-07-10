@@ -89,6 +89,15 @@ and recovery work. Lower it for constrained local hardware or strict
 hosted-provider quotas; raise it only after measuring model capacity and
 rate-limit behavior.
 
+`remember_many` and bulk/startup re-embedding send explicit provider batches
+of up to `limits.embedding_batch_size` texts. Separate chunks may run
+concurrently, subject to `limits.max_concurrent_embedding_requests`. Single
+writes, updates, and semantic search queries remain immediate and are never
+held for microbatching. If a provider permanently rejects a batch or returns
+the wrong number of vectors, LocalHold retries that chunk one input at a time
+so one invalid record does not block valid records. Transient and rate-limit
+failures are not expanded into individual requests.
+
 Changing the endpoint, model, or dimensions changes the stored vector-space
 identity. Follow the reindex procedure in [Operations](operations.md) before
 starting LocalHold with the new identity.

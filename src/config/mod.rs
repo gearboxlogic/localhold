@@ -503,6 +503,9 @@ pub struct LimitsConfig {
     /// Maximum embedding requests allowed to run concurrently.
     /// Default: 8 (bounds local accelerator load and hosted-provider pressure).
     pub max_concurrent_embedding_requests: usize,
+    /// Maximum texts sent in one embedding provider request.
+    /// Default: 32 (amortizes request overhead without oversized payloads).
+    pub embedding_batch_size: usize,
     /// Number of retries after an initial retryable embedding failure.
     pub embedding_max_retries: u32,
     /// Delay before the first embedding retry, in milliseconds.
@@ -547,6 +550,7 @@ impl Default for LimitsConfig {
             max_reembed_limit: 100,
             embedding_timeout_secs: 30,
             max_concurrent_embedding_requests: 8,
+            embedding_batch_size: 32,
             embedding_max_retries: 2,
             embedding_retry_initial_backoff_ms: 500,
             embedding_retry_max_backoff_ms: 30_000,
@@ -818,6 +822,7 @@ impl Config {
         apply_parsed_env(env, "RECALL_MAX_REEMBED_LIMIT", &mut self.limits.max_reembed_limit);
         apply_parsed_env(env, "RECALL_EMBEDDING_TIMEOUT", &mut self.limits.embedding_timeout_secs);
         apply_parsed_env(env, "RECALL_MAX_CONCURRENT_EMBEDDING_REQUESTS", &mut self.limits.max_concurrent_embedding_requests);
+        apply_parsed_env(env, "RECALL_EMBEDDING_BATCH_SIZE", &mut self.limits.embedding_batch_size);
         apply_parsed_env(env, "RECALL_EMBEDDING_MAX_RETRIES", &mut self.limits.embedding_max_retries);
         apply_parsed_env(env, "RECALL_EMBEDDING_RETRY_INITIAL_BACKOFF_MS", &mut self.limits.embedding_retry_initial_backoff_ms);
         apply_parsed_env(env, "RECALL_EMBEDDING_RETRY_MAX_BACKOFF_MS", &mut self.limits.embedding_retry_max_backoff_ms);
@@ -990,6 +995,7 @@ fn validate_limits_config(config: &LimitsConfig) -> Result<(), EngineError> {
         ("limits.max_reembed_limit", config.max_reembed_limit),
         ("limits.embedding_timeout_secs", usize::try_from(config.embedding_timeout_secs).unwrap_or(usize::MAX)),
         ("limits.max_concurrent_embedding_requests", config.max_concurrent_embedding_requests),
+        ("limits.embedding_batch_size", config.embedding_batch_size),
         (
             "limits.embedding_retry_initial_backoff_ms",
             usize::try_from(config.embedding_retry_initial_backoff_ms).unwrap_or(usize::MAX),
@@ -1211,6 +1217,7 @@ fn collect_recall_env_vars() -> HashMap<String, String> {
         "RECALL_MAX_REEMBED_LIMIT",
         "RECALL_EMBEDDING_TIMEOUT",
         "RECALL_MAX_CONCURRENT_EMBEDDING_REQUESTS",
+        "RECALL_EMBEDDING_BATCH_SIZE",
         "RECALL_EMBEDDING_MAX_RETRIES",
         "RECALL_EMBEDDING_RETRY_INITIAL_BACKOFF_MS",
         "RECALL_EMBEDDING_RETRY_MAX_BACKOFF_MS",

@@ -4,7 +4,7 @@ LocalHold is not published to crates.io. The beta installation path builds a
 locked checkout and installs the `hold` binary plus its example configuration
 and notices.
 
-## Prerequisites
+## Standard CPU Build Requirements
 
 - Git
 - Rust 1.97 with Cargo
@@ -34,6 +34,23 @@ brew install cmake pkg-config
 The checked-in `rust-toolchain.toml` pins Rust 1.97 for rustup users. Project
 contributors may instead install the complete pinned development toolset with
 `mise install`; `mise` is not required by the release installer.
+
+## Optional Dependencies
+
+The following are not required for the standard CPU installation:
+
+- `mise`, `just`, nextest, cargo-deny, gitleaks, and ShellCheck are development
+  or CI tools. See [Contributing](../CONTRIBUTING.md) when working on the source.
+- A PostgreSQL server with `pgvector` is required only when selecting the
+  PostgreSQL backend. SQLite is bundled and remains the default.
+- An OpenAI-compatible embedding endpoint is required only for semantic or
+  hybrid vector search. The default `noop` provider supports local text search
+  without a model server.
+- The NVIDIA driver, CUDA, cuDNN, and CUDA-enabled ONNX Runtime are required
+  only for the CUDA reranker profile described below. The CPU reranker does not
+  require them.
+- Docker and PostgreSQL client tools are used only by the PostgreSQL smoke-test
+  workflow; they are not application dependencies.
 
 Clone a tagged release, review the tag and release notes, then install the CPU
 build for the current user:

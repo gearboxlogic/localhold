@@ -18,14 +18,31 @@ documents.
 
 ## Development Setup
 
+First install the standard source-build requirements from
+[Installation](docs/installation.md). To run the repository's complete local
+check suite, also install [mise](https://mise.jdx.dev/); the bootstrap script
+uses it to install tools including the pinned Rust toolchain, `just`, nextest,
+cargo-deny, cargo-audit, cargo-machete, gitleaks, and the nightly rustfmt
+component used by the formatting gate.
+
 ```sh
 ./script/bootstrap.sh
 just test
 just check
 ```
 
-The toolchain and development utilities are pinned by `mise.toml` and
-`mise.lock`. Windows support is preview and is validated in GitHub Actions.
+The development utilities are pinned by `mise.toml` and `mise.lock`. They are
+required for full local CI parity, not for building or running LocalHold.
+
+Additional tools are workflow-specific:
+
+- ShellCheck is optional for manually linting changes to shell scripts.
+- Docker and PostgreSQL client tools are required only for
+  `just test-postgres-smoke`.
+- NVIDIA/CUDA dependencies are required only when validating the CUDA reranker
+  profile.
+
+Windows support is preview and is validated in GitHub Actions.
 
 ## Pull Requests
 

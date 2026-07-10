@@ -27,7 +27,7 @@ does not start or manage model servers.
 
 ## Build From Source
 
-Prerequisites:
+Required for the standard CPU source install:
 
 - Git
 - Rust 1.97 with Cargo (the checked-in toolchain file pins this version)
@@ -44,6 +44,12 @@ sudo dnf install gcc gcc-c++ cmake make pkgconf-pkg-config openssl-devel
 # Debian/Ubuntu
 sudo apt install build-essential cmake pkg-config libssl-dev
 ```
+
+These are build requirements, not runtime service dependencies. `mise`, `just`,
+ShellCheck, nextest, cargo-deny, and gitleaks are contributor/CI tools and are
+not required to install or run `hold`. CUDA, PostgreSQL/pgvector, and an
+OpenAI-compatible embedding endpoint are needed only when their corresponding
+optional features are used.
 
 ```sh
 git clone https://github.com/gearboxlogic/localhold.git
@@ -84,7 +90,7 @@ The endpoint must implement `POST /embeddings` beneath the configured base URL.
 The default startup check also requires `GET /models`; set
 `health_check = "disabled"` for providers that omit that route. vLLM,
 llama.cpp, Ollama, and hosted services can be used when they expose this
-contract. Ollama is one optional implementation; it is not required or assumed.
+contract.
 See [Embedding Providers](docs/embedding-providers.md) for cloud authentication,
 dimensions, health checks, and transport security.
 

@@ -37,6 +37,9 @@ install_mise_tools() {
     say "No mise.lock found — installing without lockfile, then generating one"
     MISE_LOCKED=0 mise install && mise lock
   fi
+
+  say "Installing nightly rustfmt for the formatting gate"
+  mise x -- rustup toolchain install nightly -c rustfmt
 }
 
 sanity() {

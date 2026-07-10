@@ -38,10 +38,10 @@ jobs:
           version: 2026.7.5
 
       - name: Install nightly rustfmt
-        run: mise x -- rustup toolchain install nightly -c rustfmt
+        run: rustup toolchain install nightly -c rustfmt
 
       - name: Run CI gate
-        run: mise x -- just check
+        run: just check
 
       - name: Stage CPU installation
         run: ./script/install.sh --profile cpu --prefix "$RUNNER_TEMP/localhold"
@@ -52,7 +52,7 @@ jobs:
           "$RUNNER_TEMP/localhold/bin/hold" --help
 
       - name: Build CUDA preview artifact
-        run: mise x -- just build-release-reranker-cuda
+        run: just build-release-reranker-cuda
 
   check-windows:
     name: Clippy + Test (Windows)
@@ -83,7 +83,7 @@ jobs:
           version: 2026.7.5
 
       - name: Clippy
-        run: mise x -- just clippy
+        run: just clippy
 
       - name: Test
-        run: mise x -- just test
+        run: just test

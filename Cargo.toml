@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 # MCP server — official Rust SDK
-rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "2.2", features = ["server", "transport-io", "transport-streamable-http-server"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -68,7 +68,7 @@ reranker = ["dep:ort", "dep:tokenizers", "dep:sha2"]
 reranker-cuda = ["reranker", "ort/cuda", "ort/load-dynamic"]
 
 [dev-dependencies]
-rmcp = { version = "1.7", features = ["client", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "2.2", features = ["client", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest"] }
 localhold = { path = ".", features = ["testing"] }
 pastey = "0.2"
 proptest = "1"

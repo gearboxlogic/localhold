@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/gearboxlogic/localhold/security/policy
+    about: Report suspected vulnerabilities privately.
+  - name: Support
+    url: https://github.com/gearboxlogic/localhold/blob/main/SUPPORT.md
+    about: Review supported usage and where to ask questions.
+

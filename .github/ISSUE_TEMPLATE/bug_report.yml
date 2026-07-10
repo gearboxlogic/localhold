@@ -1,0 +1,72 @@
+name: Bug report
+description: Report a reproducible LocalHold problem
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Do not include secrets, memory content, or private endpoint credentials. Report security issues through the security policy instead.
+  - type: textarea
+    id: description
+    attributes:
+      label: Problem
+      description: Describe what happened and what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest configuration and sequence of steps that reproduces the problem, with secrets removed.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: LocalHold version
+      placeholder: hold 0.1.0-beta.1
+    validations:
+      required: true
+  - type: dropdown
+    id: install_profile
+    attributes:
+      label: Install profile
+      options:
+        - CPU
+        - CUDA preview
+        - Development build
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options:
+        - stdio
+        - streamable HTTP
+    validations:
+      required: true
+  - type: dropdown
+    id: storage
+    attributes:
+      label: Storage backend
+      options:
+        - SQLite
+        - PostgreSQL preview
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system and architecture
+      placeholder: Fedora 43, x86_64
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste a minimal redacted log excerpt. Remove tokens, credentials, memory content, and private URLs.
+      render: text
+

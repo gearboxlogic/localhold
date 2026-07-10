@@ -10,7 +10,7 @@ use std::sync::Arc;
 use localhold::{
     config::{LimitsConfig, SearchConfig},
     embedding::NoopEmbedding,
-    engine::RecallEngine,
+    engine::LocalHoldEngine,
     store::SqliteStore,
     types::Memory,
 };
@@ -43,14 +43,14 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn make_engine() -> RecallEngine<SqliteStore> {
+fn make_engine() -> LocalHoldEngine<SqliteStore> {
     let store = SqliteStore::in_memory().expect("in-memory store");
     let embedding: Arc<dyn localhold::embedding::EmbeddingProvider> = Arc::new(NoopEmbedding::new());
-    RecallEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
+    LocalHoldEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
 }
 
 #[expect(unused_results, reason = "batch_store IDs are not needed during footprint seeding")]
-async fn seed_memories(engine: &RecallEngine<SqliteStore>, memories: Vec<Memory>) {
+async fn seed_memories(engine: &LocalHoldEngine<SqliteStore>, memories: Vec<Memory>) {
     for chunk in memories.chunks(100_usize) {
         let batch: Vec<_> = chunk.to_vec();
         engine.batch_store(batch, vec![]).await.expect("batch store");

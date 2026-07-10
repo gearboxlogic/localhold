@@ -25,9 +25,9 @@ use crate::{
 };
 
 const DEFAULT_BATCH_SIZE: usize = 500;
-const DEFAULT_POSTGRES_URL_ENV: &str = "RECALL_POSTGRES_URL";
+const DEFAULT_POSTGRES_URL_ENV: &str = "LOCALHOLD_POSTGRES_URL";
 const SQLITE_EMBEDDING_FETCH_CHUNK_SIZE: usize = 500;
-const POSTGRES_MIGRATIONS_TABLE: &str = "recall_migrations";
+const POSTGRES_MIGRATIONS_TABLE: &str = "localhold_migrations";
 const POSTGRES_LOCK_TIMEOUT: &str = "5s";
 const POSTGRES_USER_TABLES: &[&str] = &[
     "memories",
@@ -40,9 +40,9 @@ const POSTGRES_USER_TABLES: &[&str] = &[
     "embedding_profile",
 ];
 const POSTGRES_REQUIRED_COLUMNS: &[PostgresColumnExpectation] = &[
-    PostgresColumnExpectation::new("recall_migrations", "version", "bigint"),
-    PostgresColumnExpectation::new("recall_migrations", "name", "text"),
-    PostgresColumnExpectation::new("recall_migrations", "applied_at", "timestamp with time zone"),
+    PostgresColumnExpectation::new("localhold_migrations", "version", "bigint"),
+    PostgresColumnExpectation::new("localhold_migrations", "name", "text"),
+    PostgresColumnExpectation::new("localhold_migrations", "applied_at", "timestamp with time zone"),
     PostgresColumnExpectation::new("memories", "id", "text"),
     PostgresColumnExpectation::new("memories", "content", "text"),
     PostgresColumnExpectation::new("memories", "tags", "jsonb"),
@@ -105,7 +105,7 @@ const POSTGRES_OPTIONAL_COLUMNS: &[PostgresColumnExpectation] = &[
     PostgresColumnExpectation::new("memories", "embedding_claim_token", "text"),
 ];
 const POSTGRES_REQUIRED_KEYS: &[PostgresKeyExpectation] = &[
-    PostgresKeyExpectation::new("recall_migrations", &["version"]),
+    PostgresKeyExpectation::new("localhold_migrations", &["version"]),
     PostgresKeyExpectation::new("memories", &["id"]),
     PostgresKeyExpectation::new("memory_entities", &["memory_id", "entity", "entity_type"]),
     PostgresKeyExpectation::new("memory_embeddings", &["memory_id"]),
@@ -488,7 +488,7 @@ fn append_counts(output: &mut String, counts: MigrationTableCounts) {
 /// Usage text for the migration subcommand.
 #[must_use]
 pub const fn usage() -> &'static str {
-    "Usage: hold migrate sqlite-to-postgres --sqlite PATH [--postgres-url URL | --postgres-url-env NAME] --embedding-dimensions N [--batch-size N] [--dry-run | --yes]\n       If no PostgreSQL URL option is supplied, RECALL_POSTGRES_URL is used."
+    "Usage: hold migrate sqlite-to-postgres --sqlite PATH [--postgres-url URL | --postgres-url-env NAME] --embedding-dimensions N [--batch-size N] [--dry-run | --yes]\n       If no PostgreSQL URL option is supplied, LOCALHOLD_POSTGRES_URL is used."
 }
 
 /// Migrate a SQLite source database into an empty `PostgreSQL` target.
@@ -2211,7 +2211,7 @@ mod tests {
 
         let err = SqliteToPostgresOptions::parse_args_with_env(&args, |_| Ok("  ".into())).unwrap_err();
 
-        assert!(err.to_string().contains("environment variable RECALL_POSTGRES_URL is empty"));
+        assert!(err.to_string().contains("environment variable LOCALHOLD_POSTGRES_URL is empty"));
     }
 
     #[test]
@@ -2748,7 +2748,7 @@ mod tests {
         let err = migrate_sqlite_to_postgres(&options).await.unwrap_err();
 
         assert!(err.to_string().contains("partial managed schema"));
-        let migrations_table_exists: bool = query_scalar("SELECT to_regclass('recall_migrations') IS NOT NULL").fetch_one(&pool).await.unwrap();
+        let migrations_table_exists: bool = query_scalar("SELECT to_regclass('localhold_migrations') IS NOT NULL").fetch_one(&pool).await.unwrap();
         assert!(!migrations_table_exists, "non-empty target should be refused before schema bootstrap");
         drop_postgres_migration_schema().await;
     }
@@ -2767,7 +2767,7 @@ mod tests {
         let err = migrate_sqlite_to_postgres(&options).await.unwrap_err();
 
         assert!(err.to_string().contains("partial managed schema"));
-        let migrations_table_exists: bool = query_scalar("SELECT to_regclass('recall_migrations') IS NOT NULL").fetch_one(&pool).await.unwrap();
+        let migrations_table_exists: bool = query_scalar("SELECT to_regclass('localhold_migrations') IS NOT NULL").fetch_one(&pool).await.unwrap();
         assert!(!migrations_table_exists, "malformed target should be refused before schema bootstrap");
         drop_postgres_migration_schema().await;
     }
@@ -2780,12 +2780,12 @@ mod tests {
         let _fixture = seed_sqlite_source(&source_path).await;
         drop_postgres_migration_schema().await;
         let pool = open_postgres_pool(&postgres_smoke_url()).await.unwrap();
-        let _created = query("CREATE TABLE recall_migrations (version TEXT PRIMARY KEY)").execute(&pool).await.unwrap();
+        let _created = query("CREATE TABLE localhold_migrations (version TEXT PRIMARY KEY)").execute(&pool).await.unwrap();
 
         let options = sqlite_options(&source_path, false, true);
         let err = migrate_sqlite_to_postgres(&options).await.unwrap_err();
 
-        assert!(err.to_string().contains("recall_migrations.version"));
+        assert!(err.to_string().contains("localhold_migrations.version"));
         let memories_table_exists: bool = query_scalar("SELECT to_regclass('memories') IS NOT NULL").fetch_one(&pool).await.unwrap();
         assert!(!memories_table_exists, "malformed migrations table should be refused before user table bootstrap");
         drop_postgres_migration_schema().await;
@@ -2801,7 +2801,7 @@ mod tests {
         let pool = open_postgres_pool(&postgres_smoke_url()).await.unwrap();
         let _created = query(
             "
-            CREATE TABLE recall_migrations (
+            CREATE TABLE localhold_migrations (
                 version BIGINT,
                 name TEXT,
                 applied_at TIMESTAMPTZ
@@ -2815,7 +2815,7 @@ mod tests {
         let options = sqlite_options(&source_path, false, true);
         let err = migrate_sqlite_to_postgres(&options).await.unwrap_err();
 
-        assert!(err.to_string().contains("recall_migrations.version"));
+        assert!(err.to_string().contains("localhold_migrations.version"));
         let memories_table_exists: bool = query_scalar("SELECT to_regclass('memories') IS NOT NULL").fetch_one(&pool).await.unwrap();
         assert!(!memories_table_exists, "malformed migrations table should be refused before user table bootstrap");
         drop_postgres_migration_schema().await;
@@ -3259,7 +3259,7 @@ mod tests {
                 memory_embeddings,
                 memories,
                 scope_registry,
-                recall_migrations
+                localhold_migrations
             CASCADE
             ",
         )
@@ -3276,7 +3276,7 @@ mod tests {
     }
 
     fn postgres_smoke_url() -> String {
-        std::env::var("RECALL_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into())
+        std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into())
     }
 
     fn assert_destructive_postgres_smoke_allowed() {

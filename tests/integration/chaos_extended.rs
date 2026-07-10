@@ -5,7 +5,7 @@ use std::sync::Arc;
 use localhold::{
     config::{LimitsConfig, SearchConfig},
     embedding::NoopEmbedding,
-    engine::RecallEngine,
+    engine::LocalHoldEngine,
     store::SqliteStore,
     types::{AccessPolicy, Memory, MemoryFilter, Provenance, QueryContext},
 };
@@ -24,10 +24,10 @@ fn make_memory(content: &str) -> Memory {
     )
 }
 
-fn make_engine(store: ChaosStore<SqliteStore>, embedding: Arc<dyn localhold::embedding::EmbeddingProvider>) -> RecallEngine<ChaosStore<SqliteStore>> {
+fn make_engine(store: ChaosStore<SqliteStore>, embedding: Arc<dyn localhold::embedding::EmbeddingProvider>) -> LocalHoldEngine<ChaosStore<SqliteStore>> {
     let mut limits = LimitsConfig::default();
     limits.max_list_limit = 2000_usize;
-    RecallEngine::new(store, embedding, limits, SearchConfig::default())
+    LocalHoldEngine::new(store, embedding, limits, SearchConfig::default())
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +114,7 @@ async fn chaos_embedding_cascade_failure() {
     // Embedding always fails
     let chaos_embed = ChaosEmbedding::new(Arc::new(DeterministicEmbedding), FaultPlan::Always);
 
-    let engine = RecallEngine::new(store, Arc::new(chaos_embed), LimitsConfig::default(), SearchConfig::default());
+    let engine = LocalHoldEngine::new(store, Arc::new(chaos_embed), LimitsConfig::default(), SearchConfig::default());
 
     // Store many memories -- all should succeed despite embedding cascade failures
     let total = 200_usize;

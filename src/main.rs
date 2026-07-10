@@ -10,10 +10,10 @@ use std::{
 use localhold::{
     config::{Config, DatabaseBackend, HttpPrincipalMode, ServerConfig, Transport},
     embedding::factory::{active_embedding_profile, create_embedding_provider},
-    engine::{RecallEngine, ReembedOutcome, ReembedRequest},
+    engine::{LocalHoldEngine, ReembedOutcome, ReembedRequest},
     error::EngineError,
     http_transport::build_router,
-    server::{HttpPrincipalSource, RecallServer},
+    server::{HttpPrincipalSource, LocalHoldServer},
     store::{
         MemoryStore, PostgresStore, SqliteStore,
         migration::{MigrationError, SqliteToPostgresOptions, migrate_sqlite_to_postgres},
@@ -214,7 +214,7 @@ where
     let recovery_notify = Arc::new(Notify::new());
     let embedding = create_embedding_provider(&config.embedding, &config.limits, Some(Arc::clone(&recovery_notify))).await;
 
-    // Clone reranker config before search config is consumed by RecallEngine::new
+    // Clone reranker config before search config is consumed by LocalHoldEngine::new
     #[cfg(feature = "reranker")]
     let reranker_config = config.search.reranker.clone();
 
@@ -234,7 +234,7 @@ where
         _ => return Err("unsupported HTTP principal mode".into()),
     };
 
-    let engine = RecallEngine::new(store, embedding, config.limits, config.search);
+    let engine = LocalHoldEngine::new(store, embedding, config.limits, config.search);
 
     // Optionally attach a cross-encoder reranker (reranker feature)
     #[cfg(feature = "reranker")]
@@ -253,7 +253,7 @@ where
     // Spawn auto-reembed watcher: when embeddings recover, re-embed memories that lack embeddings.
     spawn_recovery_reembed(engine.clone(), recovery_notify);
 
-    let server = RecallServer::from_engine_with_auth_and_http(engine, server_principal, anonymous_policy, http_auth_token, http_principal_source);
+    let server = LocalHoldServer::from_engine_with_auth_and_http(engine, server_principal, anonymous_policy, http_auth_token, http_principal_source);
     let server = if admin_tools_enabled { server.with_admin_tools() } else { server };
 
     match config.server.transport {
@@ -305,7 +305,7 @@ async fn create_reranker_with_retry(config: &localhold::config::RerankerConfig) 
 
 /// Spawn a background task that re-embeds unembedded memories whenever the
 /// embedding provider recovers from an outage.
-fn spawn_recovery_reembed<S>(engine: RecallEngine<S>, notify: Arc<Notify>)
+fn spawn_recovery_reembed<S>(engine: LocalHoldEngine<S>, notify: Arc<Notify>)
 where
     S: MemoryStore + Clone + std::fmt::Debug + 'static,
 {
@@ -327,7 +327,7 @@ where
 }
 
 /// Re-embed all unembedded memories in batches, returning the total queued.
-async fn drain_unembedded<S>(engine: &RecallEngine<S>) -> usize
+async fn drain_unembedded<S>(engine: &LocalHoldEngine<S>) -> usize
 where
     S: MemoryStore + Clone + std::fmt::Debug + 'static,
 {
@@ -373,7 +373,7 @@ where
     result
 }
 
-async fn serve_stdio<S>(server: RecallServer<S>) -> AppResult
+async fn serve_stdio<S>(server: LocalHoldServer<S>) -> AppResult
 where
     S: MemoryStore + Clone + std::fmt::Debug + 'static,
 {
@@ -395,7 +395,7 @@ where
     serve_result
 }
 
-async fn serve_http<S>(server: RecallServer<S>, config: &ServerConfig) -> AppResult
+async fn serve_http<S>(server: LocalHoldServer<S>, config: &ServerConfig) -> AppResult
 where
     S: MemoryStore + Clone + std::fmt::Debug + 'static,
 {
@@ -445,7 +445,7 @@ mod tests {
     use localhold::{
         config::{LimitsConfig, SearchConfig},
         embedding::{BoxFuture, EmbeddingProvider},
-        engine::RecallEngine,
+        engine::LocalHoldEngine,
         error::EmbeddingError,
         store::{MemoryReader as _, MemoryWriter as _, SqliteStore},
         types::{AccessPolicy, Memory, Provenance},
@@ -498,7 +498,7 @@ mod tests {
         let store = SqliteStore::in_memory().unwrap();
         let memory = Memory::new_for_test("startup backlog".into(), Vec::new(), Provenance::default(), AccessPolicy::Public);
         let id = store.store(&memory, None).await.unwrap();
-        let engine = RecallEngine::new(store.clone(), Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
+        let engine = LocalHoldEngine::new(store.clone(), Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
 
         let queued = drain_unembedded(&engine).await;
         assert_eq!(queued, 1_usize);

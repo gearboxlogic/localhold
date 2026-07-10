@@ -5,7 +5,7 @@ use std::sync::Arc;
 use localhold::{
     config::{LimitsConfig, SearchConfig},
     embedding::NoopEmbedding,
-    engine::RecallEngine,
+    engine::LocalHoldEngine,
     store::{MemoryReader as _, SqliteStore},
     types::{AccessPolicy, Memory, MemoryFilter, Provenance, QueryContext},
 };
@@ -29,8 +29,8 @@ fn make_memory(content: &str) -> Memory {
     )
 }
 
-fn make_engine(store: ChaosStore<SqliteStore>, embedding: Arc<dyn localhold::embedding::EmbeddingProvider>) -> RecallEngine<ChaosStore<SqliteStore>> {
-    RecallEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
+fn make_engine(store: ChaosStore<SqliteStore>, embedding: Arc<dyn localhold::embedding::EmbeddingProvider>) -> LocalHoldEngine<ChaosStore<SqliteStore>> {
+    LocalHoldEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
 }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +165,7 @@ async fn chaos_probabilistic_embedding_failures() {
         rng: parking_lot::Mutex::new(rand::rngs::StdRng::seed_from_u64(SEED)),
     });
 
-    let engine = RecallEngine::new(store, Arc::new(chaos_embed), LimitsConfig::default(), SearchConfig::default());
+    let engine = LocalHoldEngine::new(store, Arc::new(chaos_embed), LimitsConfig::default(), SearchConfig::default());
 
     let mut stored_ids = Vec::new();
     for i in 0_usize..10_usize {

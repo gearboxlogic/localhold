@@ -32,7 +32,7 @@ use crate::{
     clock::Clock,
     config::{AnonymousPolicy, LimitsConfig, SearchConfig},
     embedding::EmbeddingProvider,
-    engine::{BulkUpdateFields, RecallEngine, ReembedOutcome, ReembedRequest, SearchRequest, StoreMemoryInput},
+    engine::{BulkUpdateFields, LocalHoldEngine, ReembedOutcome, ReembedRequest, SearchRequest, StoreMemoryInput},
     error::EngineError,
     store::{MemoryStore, RecordUseOutcome},
     types::{
@@ -237,8 +237,8 @@ impl HttpPrincipalSource {
 /// Generic over the store backend `S`, which must implement the full
 /// [`MemoryStore`] trait (read, write, and admin operations).
 #[derive(Clone)]
-pub struct RecallServer<S: MemoryStore + Clone + std::fmt::Debug + 'static = crate::store::SqliteStore> {
-    engine: RecallEngine<S>,
+pub struct LocalHoldServer<S: MemoryStore + Clone + std::fmt::Debug + 'static = crate::store::SqliteStore> {
+    engine: LocalHoldEngine<S>,
     tool_router: ToolRouter<Self>,
     principal: Option<Arc<str>>,
     anonymous_policy: AnonymousPolicy,
@@ -246,13 +246,13 @@ pub struct RecallServer<S: MemoryStore + Clone + std::fmt::Debug + 'static = cra
     http_principal_source: HttpPrincipalSource,
 }
 
-impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> std::fmt::Debug for RecallServer<S> {
+impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> std::fmt::Debug for LocalHoldServer<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RecallServer").field("engine", &self.engine).finish_non_exhaustive()
+        f.debug_struct("LocalHoldServer").field("engine", &self.engine).finish_non_exhaustive()
     }
 }
 
-impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
+impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
     fn standard_tool_router() -> ToolRouter<Self> {
         let mut router = Self::tool_router();
         for name in ADMIN_TOOLS {
@@ -281,7 +281,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
     #[must_use]
     pub fn new(store: S, embedding: Arc<dyn EmbeddingProvider>, limits: LimitsConfig, search_config: SearchConfig) -> Self {
         Self {
-            engine: RecallEngine::new(store, embedding, limits, search_config),
+            engine: LocalHoldEngine::new(store, embedding, limits, search_config),
             tool_router: Self::standard_tool_router(),
             principal: Some(Arc::<str>::from(V2_SERVER_PRINCIPAL)),
             anonymous_policy: AnonymousPolicy::PublicReadOnly,
@@ -292,7 +292,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
 
     /// Create a server from a pre-built engine (allows sharing the engine with other tasks).
     #[must_use]
-    pub fn from_engine(engine: RecallEngine<S>) -> Self {
+    pub fn from_engine(engine: LocalHoldEngine<S>) -> Self {
         Self {
             engine,
             tool_router: Self::standard_tool_router(),
@@ -305,7 +305,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
 
     /// Create a server from a pre-built engine with explicit v2 authorization settings.
     #[must_use]
-    pub fn from_engine_with_auth(engine: RecallEngine<S>, principal: Option<String>, anonymous_policy: AnonymousPolicy) -> Self {
+    pub fn from_engine_with_auth(engine: LocalHoldEngine<S>, principal: Option<String>, anonymous_policy: AnonymousPolicy) -> Self {
         Self {
             engine,
             tool_router: Self::standard_tool_router(),
@@ -321,7 +321,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
     /// Use [`HttpPrincipalSource::TrustedProxyHeader`] only behind a trusted proxy.
     #[must_use]
     pub fn from_engine_with_auth_and_http(
-        engine: RecallEngine<S>,
+        engine: LocalHoldEngine<S>,
         principal: Option<String>,
         anonymous_policy: AnonymousPolicy,
         http_auth_token: Option<String>,
@@ -341,7 +341,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
     #[must_use]
     pub fn new_with_clock(store: S, embedding: Arc<dyn EmbeddingProvider>, limits: LimitsConfig, search_config: SearchConfig, clock: Arc<dyn Clock>) -> Self {
         Self {
-            engine: RecallEngine::new_with_clock(store, embedding, limits, search_config, clock),
+            engine: LocalHoldEngine::new_with_clock(store, embedding, limits, search_config, clock),
             tool_router: Self::standard_tool_router(),
             principal: Some(Arc::<str>::from(V2_SERVER_PRINCIPAL)),
             anonymous_policy: AnonymousPolicy::PublicReadOnly,
@@ -1146,7 +1146,7 @@ fn normalize_optional_access_policy(policy: Option<params::AccessPolicyInput>) -
 
 #[expect(clippy::multiple_inherent_impl, reason = "tool router macro methods are kept separate from constructors and helpers")]
 #[tool_router]
-impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
+impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
     #[tool(
         description = "Remember durable information. Write authorization uses the server-resolved principal; scope may be a key, alias, matcher-containing value, or context_hints; entities/access_policy accept shorthand or full objects."
     )]
@@ -2252,7 +2252,7 @@ impl TryFrom<params::MemoryInput> for StoreMemoryInput {
     }
 }
 
-impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> ServerHandler for RecallServer<S> {
+impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> ServerHandler for LocalHoldServer<S> {
     async fn call_tool(&self, request: CallToolRequestParams, context: RequestContext<RoleServer>) -> Result<CallToolResult, rmcp::ErrorData> {
         let context = ToolCallContext::new(self, request, context);
         self.tool_router.call(context).await

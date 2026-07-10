@@ -10,7 +10,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use localhold::{
     config::{LimitsConfig, SearchConfig},
     embedding::NoopEmbedding,
-    engine::RecallEngine,
+    engine::LocalHoldEngine,
     store::{MemoryReader as _, SqliteStore},
     types::{MemoryFilter, QueryContext},
 };
@@ -21,10 +21,10 @@ use crate::common::seeder::BenchSeeder;
 ///
 /// Uses `tempfile` for realistic I/O characteristics.
 #[expect(unused_results, reason = "batch_store IDs are not needed during setup seeding")]
-fn seeded_engine(count: usize, tmp_path: &std::path::Path) -> RecallEngine<SqliteStore> {
+fn seeded_engine(count: usize, tmp_path: &std::path::Path) -> LocalHoldEngine<SqliteStore> {
     let store = SqliteStore::open(tmp_path, 768_usize).expect("open file-backed store");
     let embedding: Arc<dyn localhold::embedding::EmbeddingProvider> = Arc::new(NoopEmbedding::new());
-    let engine = RecallEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default());
+    let engine = LocalHoldEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default());
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let mut seeder = BenchSeeder::new(42_u64);

@@ -125,7 +125,7 @@ fn limits_config_loadable_from_toml() {
 
 #[test]
 fn env_overrides_apply() {
-    let env = env_with(&[("RECALL_EMBEDDING_MODEL", "test-model")]);
+    let env = env_with(&[("LOCALHOLD_EMBEDDING_MODEL", "test-model")]);
     let mut config = Config::default();
     config.apply_env_from_map(&env);
     assert_eq!(config.embedding.openai_compatible().unwrap().model, "test-model");
@@ -133,7 +133,7 @@ fn env_overrides_apply() {
 
 #[test]
 fn env_overrides_keep_rerank_top_m_and_deprecated_pool_size_separate() {
-    let env = env_with(&[("RECALL_RERANK_TOP_M", "25"), ("RECALL_RERANKER_POOL_SIZE", "40")]);
+    let env = env_with(&[("LOCALHOLD_RERANK_TOP_M", "25"), ("LOCALHOLD_RERANKER_POOL_SIZE", "40")]);
     let mut config = Config::default();
     config.apply_env_from_map(&env);
     config.validate(&std::collections::HashMap::new()).unwrap();
@@ -145,34 +145,34 @@ fn env_overrides_keep_rerank_top_m_and_deprecated_pool_size_separate() {
 #[test]
 fn env_overrides_apply_all_fields_and_ignore_unparseable_values() {
     let env = env_with(&[
-        ("RECALL_DB_BACKEND", "postgres"),
-        ("RECALL_DB_PATH", "/tmp/recall-test.db"),
-        ("RECALL_POSTGRES_URL", "postgresql://recall:secret@localhost:5433/recall_test"),
-        ("RECALL_POSTGRES_MAX_CONNECTIONS", "12"),
-        ("RECALL_POSTGRES_AUTO_MIGRATE", "false"),
-        ("RECALL_EMBEDDING_BASE_URL", "http://example.local/v1"),
-        ("RECALL_EMBEDDING_MODEL", "embed-model"),
-        ("RECALL_EMBEDDING_API_KEY", "embed-key"),
-        ("RECALL_EMBEDDING_AUTH_MODE", "api_key"),
-        ("RECALL_EMBEDDING_SEND_DIMENSIONS", "true"),
-        ("RECALL_EMBEDDING_HEALTH_CHECK", "disabled"),
-        ("RECALL_EMBEDDING_ALLOW_INSECURE_HTTP", "true"),
-        ("RECALL_LOG_LEVEL", "debug"),
-        ("RECALL_PRINCIPAL", "configured-agent"),
-        ("RECALL_ANONYMOUS_POLICY", "deny_all"),
-        ("RECALL_TRANSPORT", "http"),
-        ("RECALL_HTTP_HOST", "0.0.0.0"),
-        ("RECALL_HTTP_PORT", "invalid-http-port"),
-        ("RECALL_HTTP_PATH", "/memory"),
-        ("RECALL_HTTP_AUTH_TOKEN", "secret-token"),
-        ("RECALL_HTTP_PRINCIPAL_MODE", "trusted_proxy"),
-        ("RECALL_HTTP_PRINCIPAL", "proxy-fallback"),
-        ("RECALL_HTTP_PRINCIPAL_HEADER", "X-Agent-Principal"),
-        ("RECALL_HTTP_ALLOWED_HOSTS", "localhold.internal, 10.0.0.4:8080"),
-        ("RECALL_HTTP_MAX_BODY_BYTES", "4096"),
-        ("RECALL_HTTP_MAX_SESSIONS", "24"),
-        ("RECALL_HTTP_SESSION_IDLE_TIMEOUT_SECS", "600"),
-        ("RECALL_ADMIN_TOOLS_ENABLED", "true"),
+        ("LOCALHOLD_DB_BACKEND", "postgres"),
+        ("LOCALHOLD_DB_PATH", "/tmp/localhold-test.db"),
+        ("LOCALHOLD_POSTGRES_URL", "postgresql://localhold:secret@localhost:5433/localhold_test"),
+        ("LOCALHOLD_POSTGRES_MAX_CONNECTIONS", "12"),
+        ("LOCALHOLD_POSTGRES_AUTO_MIGRATE", "false"),
+        ("LOCALHOLD_EMBEDDING_BASE_URL", "http://example.local/v1"),
+        ("LOCALHOLD_EMBEDDING_MODEL", "embed-model"),
+        ("LOCALHOLD_EMBEDDING_API_KEY", "embed-key"),
+        ("LOCALHOLD_EMBEDDING_AUTH_MODE", "api_key"),
+        ("LOCALHOLD_EMBEDDING_SEND_DIMENSIONS", "true"),
+        ("LOCALHOLD_EMBEDDING_HEALTH_CHECK", "disabled"),
+        ("LOCALHOLD_EMBEDDING_ALLOW_INSECURE_HTTP", "true"),
+        ("LOCALHOLD_LOG_LEVEL", "debug"),
+        ("LOCALHOLD_PRINCIPAL", "configured-agent"),
+        ("LOCALHOLD_ANONYMOUS_POLICY", "deny_all"),
+        ("LOCALHOLD_TRANSPORT", "http"),
+        ("LOCALHOLD_HTTP_HOST", "0.0.0.0"),
+        ("LOCALHOLD_HTTP_PORT", "invalid-http-port"),
+        ("LOCALHOLD_HTTP_PATH", "/memory"),
+        ("LOCALHOLD_HTTP_AUTH_TOKEN", "secret-token"),
+        ("LOCALHOLD_HTTP_PRINCIPAL_MODE", "trusted_proxy"),
+        ("LOCALHOLD_HTTP_PRINCIPAL", "proxy-fallback"),
+        ("LOCALHOLD_HTTP_PRINCIPAL_HEADER", "X-Agent-Principal"),
+        ("LOCALHOLD_HTTP_ALLOWED_HOSTS", "localhold.internal, 10.0.0.4:8080"),
+        ("LOCALHOLD_HTTP_MAX_BODY_BYTES", "4096"),
+        ("LOCALHOLD_HTTP_MAX_SESSIONS", "24"),
+        ("LOCALHOLD_HTTP_SESSION_IDLE_TIMEOUT_SECS", "600"),
+        ("LOCALHOLD_ADMIN_TOOLS_ENABLED", "true"),
     ]);
 
     let mut config = Config::default();
@@ -181,8 +181,8 @@ fn env_overrides_apply_all_fields_and_ignore_unparseable_values() {
 
     let embedding = config.embedding.openai_compatible().unwrap();
     assert_eq!(config.database.backend, DatabaseBackend::Postgres);
-    assert_eq!(config.database.sqlite_path(), Path::new("/tmp/recall-test.db"));
-    assert_eq!(config.database.postgres.url, "postgresql://recall:secret@localhost:5433/recall_test");
+    assert_eq!(config.database.sqlite_path(), Path::new("/tmp/localhold-test.db"));
+    assert_eq!(config.database.postgres.url, "postgresql://localhold:secret@localhost:5433/localhold_test");
     assert_eq!(config.database.postgres.max_connections, 12);
     assert!(!config.database.postgres.auto_migrate);
     assert_eq!(embedding.base_url, "http://example.local/v1");
@@ -213,23 +213,23 @@ fn env_overrides_apply_all_fields_and_ignore_unparseable_values() {
 #[test]
 fn env_overrides_apply_limits() {
     let env = env_with(&[
-        ("RECALL_MAX_SEARCH_LIMIT", "42"),
-        ("RECALL_MAX_CANDIDATE_POOL_SIZE", "500"),
-        ("RECALL_MAX_LIST_LIMIT", "1000"),
-        ("RECALL_MAX_CONTENT_LENGTH", "131072"),
-        ("RECALL_MAX_TAGS_PER_MEMORY", "25"),
-        ("RECALL_MAX_TAG_LENGTH", "128"),
-        ("RECALL_MAX_BATCH_SIZE", "50"),
-        ("RECALL_MAX_REEMBED_LIMIT", "75"),
-        ("RECALL_EMBEDDING_TIMEOUT", "60"),
-        ("RECALL_MAX_CONCURRENT_EMBEDDING_REQUESTS", "3"),
-        ("RECALL_EMBEDDING_BATCH_SIZE", "12"),
-        ("RECALL_EMBEDDING_MAX_RETRIES", "4"),
-        ("RECALL_EMBEDDING_RETRY_INITIAL_BACKOFF_MS", "250"),
-        ("RECALL_EMBEDDING_RETRY_MAX_BACKOFF_MS", "12000"),
-        ("RECALL_SHUTDOWN_TIMEOUT", "15"),
-        ("RECALL_MAX_TOP_TAGS_LIMIT", "50"),
-        ("RECALL_MAX_HISTORY_LIMIT", "250"),
+        ("LOCALHOLD_MAX_SEARCH_LIMIT", "42"),
+        ("LOCALHOLD_MAX_CANDIDATE_POOL_SIZE", "500"),
+        ("LOCALHOLD_MAX_LIST_LIMIT", "1000"),
+        ("LOCALHOLD_MAX_CONTENT_LENGTH", "131072"),
+        ("LOCALHOLD_MAX_TAGS_PER_MEMORY", "25"),
+        ("LOCALHOLD_MAX_TAG_LENGTH", "128"),
+        ("LOCALHOLD_MAX_BATCH_SIZE", "50"),
+        ("LOCALHOLD_MAX_REEMBED_LIMIT", "75"),
+        ("LOCALHOLD_EMBEDDING_TIMEOUT", "60"),
+        ("LOCALHOLD_MAX_CONCURRENT_EMBEDDING_REQUESTS", "3"),
+        ("LOCALHOLD_EMBEDDING_BATCH_SIZE", "12"),
+        ("LOCALHOLD_EMBEDDING_MAX_RETRIES", "4"),
+        ("LOCALHOLD_EMBEDDING_RETRY_INITIAL_BACKOFF_MS", "250"),
+        ("LOCALHOLD_EMBEDDING_RETRY_MAX_BACKOFF_MS", "12000"),
+        ("LOCALHOLD_SHUTDOWN_TIMEOUT", "15"),
+        ("LOCALHOLD_MAX_TOP_TAGS_LIMIT", "50"),
+        ("LOCALHOLD_MAX_HISTORY_LIMIT", "250"),
     ]);
 
     let mut config = Config::default();
@@ -298,28 +298,27 @@ fn serde_accepts_known_database_backends() {
 
 #[test]
 fn database_config_sqlite_from_toml() {
-    let toml_str = "[database]\nbackend = \"sqlite\"\n\n[database.sqlite]\npath = \"/tmp/custom-recall.db\"\n";
+    let toml_str = "[database]\nbackend = \"sqlite\"\n\n[database.sqlite]\npath = \"/tmp/custom-localhold.db\"\n";
     let config: Config = toml::from_str(toml_str).unwrap();
     assert_eq!(config.database.backend, DatabaseBackend::Sqlite);
-    assert_eq!(config.database.sqlite_path(), Path::new("/tmp/custom-recall.db"));
+    assert_eq!(config.database.sqlite_path(), Path::new("/tmp/custom-localhold.db"));
 }
 
 #[test]
 fn database_config_legacy_path_alias_from_toml() {
-    let toml_str = "[database]\npath = \"/tmp/legacy-recall.db\"\n";
+    let toml_str = "[database]\npath = \"/tmp/legacy-localhold.db\"\n";
     let config: Config = toml::from_str(toml_str).unwrap();
     assert_eq!(config.database.backend, DatabaseBackend::Sqlite);
-    assert_eq!(config.database.sqlite_path(), Path::new("/tmp/legacy-recall.db"));
+    assert_eq!(config.database.sqlite_path(), Path::new("/tmp/legacy-localhold.db"));
 }
 
 #[test]
 fn database_config_postgres_from_toml() {
-    let toml_str =
-        "[database]\nbackend = \"postgres\"\n\n[database.postgres]\nurl = \"postgresql://recall:secret@localhost:5433/recall_test\"\nmax_connections = 9\nauto_migrate = false\n";
+    let toml_str = "[database]\nbackend = \"postgres\"\n\n[database.postgres]\nurl = \"postgresql://localhold:secret@localhost:5433/localhold_test\"\nmax_connections = 9\nauto_migrate = false\n";
     let mut config: Config = toml::from_str(toml_str).unwrap();
     config.validate(&no_env()).unwrap();
     assert_eq!(config.database.backend, DatabaseBackend::Postgres);
-    assert_eq!(config.database.postgres.url, "postgresql://recall:secret@localhost:5433/recall_test");
+    assert_eq!(config.database.postgres.url, "postgresql://localhold:secret@localhost:5433/localhold_test");
     assert_eq!(config.database.postgres.max_connections, 9);
     assert!(!config.database.postgres.auto_migrate);
 }
@@ -356,8 +355,8 @@ fn embedding_config_rejects_unknown_provider() {
 #[test]
 fn tilde_expansion() {
     let mut config = Config::default();
-    config.database.path = Some(PathBuf::from("~/data/legacy-recall.db"));
-    config.database.sqlite.path = PathBuf::from("~/data/recall.db");
+    config.database.path = Some(PathBuf::from("~/data/legacy-localhold.db"));
+    config.database.sqlite.path = PathBuf::from("~/data/localhold.db");
     config.resolve_paths().unwrap();
     assert!(!config.database.path.as_ref().unwrap().to_str().unwrap().starts_with("~/"));
     assert!(!config.database.sqlite.path.to_str().unwrap().starts_with("~/"));
@@ -368,7 +367,7 @@ fn validate_database_config_rejects_bad_active_postgres_url() {
     let mut config = DatabaseConfig {
         backend: DatabaseBackend::Postgres,
         postgres: PostgresDatabaseConfig {
-            url: "http://localhost:5432/recall".into(),
+            url: "http://localhost:5432/localhold".into(),
             ..PostgresDatabaseConfig::default()
         },
         ..DatabaseConfig::default()
@@ -413,8 +412,8 @@ fn validate_trims_model_name() {
 }
 
 #[test]
-fn user_config_candidates_prefer_canonical_file_over_legacy_file() {
-    let root = unique_temp_dir("config-sources-precedence");
+fn user_config_candidates_load_canonical_file() {
+    let root = unique_temp_dir("config-sources-canonical");
     let localhold_dir = root.join("localhold");
     fs::create_dir_all(&localhold_dir).unwrap();
 
@@ -423,33 +422,9 @@ fn user_config_candidates_prefer_canonical_file_over_legacy_file() {
         "[embedding]\nprovider = \"openai_compatible\"\n\n[embedding.openai_compatible]\nmodel = \"canonical\"\n",
     )
     .unwrap();
-    fs::write(
-        localhold_dir.join("recall.toml"),
-        "[embedding]\nprovider = \"openai_compatible\"\n\n[embedding.openai_compatible]\nmodel = \"legacy\"\n",
-    )
-    .unwrap();
-
     let paths = user_config_candidates(Some(&root));
     let config = Config::load_from_sources(&paths, &no_env()).unwrap();
     assert_eq!(config.embedding.openai_compatible().unwrap().model, "canonical");
-
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn user_config_candidates_fall_back_to_legacy_file() {
-    let root = unique_temp_dir("config-sources-legacy");
-    let localhold_dir = root.join("localhold");
-    fs::create_dir_all(&localhold_dir).unwrap();
-    fs::write(
-        localhold_dir.join("recall.toml"),
-        "[embedding]\nprovider = \"openai_compatible\"\n\n[embedding.openai_compatible]\nmodel = \"legacy\"\n",
-    )
-    .unwrap();
-
-    let paths = user_config_candidates(Some(&root));
-    let config = Config::load_from_sources(&paths, &no_env()).unwrap();
-    assert_eq!(config.embedding.openai_compatible().unwrap().model, "legacy");
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -459,9 +434,9 @@ fn user_config_candidates_never_include_current_directory_files() {
     let root = unique_temp_dir("config-sources-no-cwd");
     let paths = user_config_candidates(Some(&root));
 
-    assert_eq!(paths, [root.join("localhold/localhold.toml"), root.join("localhold/recall.toml")]);
+    assert_eq!(paths, [root.join("localhold/localhold.toml")]);
     assert!(paths.iter().all(|path| path.is_absolute()));
-    assert!(!paths.iter().any(|path| path == Path::new("localhold.toml") || path == Path::new("recall.toml")));
+    assert!(!paths.iter().any(|path| path == Path::new("localhold.toml")));
 }
 
 #[test]
@@ -474,11 +449,11 @@ fn load_from_sources_uses_defaults_when_no_paths_exist() {
 #[test]
 fn load_from_sources_applies_env_overrides() {
     let env = env_with(&[
-        ("RECALL_EMBEDDING_MODEL", "env-model"),
-        ("RECALL_MAX_BATCH_SIZE", "25"),
-        ("RECALL_PRINCIPAL", " "),
-        ("RECALL_HTTP_AUTH_TOKEN", "  "),
-        ("RECALL_HTTP_PRINCIPAL_HEADER", " X-LocalHold-Principal "),
+        ("LOCALHOLD_EMBEDDING_MODEL", "env-model"),
+        ("LOCALHOLD_MAX_BATCH_SIZE", "25"),
+        ("LOCALHOLD_PRINCIPAL", " "),
+        ("LOCALHOLD_HTTP_AUTH_TOKEN", "  "),
+        ("LOCALHOLD_HTTP_PRINCIPAL_HEADER", " X-LocalHold-Principal "),
     ]);
     let config = Config::load_from_sources(&[], &env).unwrap();
     assert_eq!(config.embedding.openai_compatible().unwrap().model, "env-model");
@@ -490,7 +465,7 @@ fn load_from_sources_applies_env_overrides() {
 
 #[test]
 fn load_from_sources_rejects_invalid_http_principal_header() {
-    let env = env_with(&[("RECALL_HTTP_PRINCIPAL_HEADER", "bad header")]);
+    let env = env_with(&[("LOCALHOLD_HTTP_PRINCIPAL_HEADER", "bad header")]);
     let err = Config::load_from_sources(&[], &env).unwrap_err();
     assert!(err.to_string().contains("server.http_principal_header"));
 }
@@ -506,7 +481,7 @@ fn load_from_sources_env_overrides_file_values() {
     .unwrap();
 
     let paths = vec![root.join("localhold.toml")];
-    let env = env_with(&[("RECALL_EMBEDDING_MODEL", "from-env")]);
+    let env = env_with(&[("LOCALHOLD_EMBEDDING_MODEL", "from-env")]);
     let config = Config::load_from_sources(&paths, &env).unwrap();
     assert_eq!(config.embedding.openai_compatible().unwrap().model, "from-env");
 

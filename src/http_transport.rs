@@ -35,7 +35,7 @@ use crate::{
     config::{ServerConfig, validate_server_config},
     error::EngineError,
     http_auth::bearer_matches,
-    server::RecallServer,
+    server::LocalHoldServer,
     store::MemoryStore,
 };
 
@@ -50,7 +50,7 @@ type SessionActivityMap = Arc<Mutex<HashMap<SessionId, SessionActivity>>>;
 /// # Errors
 ///
 /// Returns a configuration error if the configured endpoint path is invalid.
-pub fn build_router<S>(server: RecallServer<S>, config: &ServerConfig, cancellation_token: &CancellationToken) -> Result<Router, EngineError>
+pub fn build_router<S>(server: LocalHoldServer<S>, config: &ServerConfig, cancellation_token: &CancellationToken) -> Result<Router, EngineError>
 where
     S: MemoryStore + Clone + std::fmt::Debug + 'static,
 {

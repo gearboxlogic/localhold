@@ -4,7 +4,7 @@ use chrono::{TimeDelta, Utc};
 use localhold::{
     embedding::NoopEmbedding,
     server::{
-        RecallServer,
+        LocalHoldServer,
         params::{AdminListResponse, EvictExpiredResponse, ReadResponse, RecallResponse, ReembedResponse, RememberManyResponse, RememberResponse},
     },
     store::{MemoryWriter as _, SqliteStore},
@@ -25,7 +25,7 @@ struct InventorySeed<'a> {
     origin_conversation: Option<&'a str>,
 }
 
-async fn seed_inventory_memory(server: &RecallServer, seed: InventorySeed<'_>) -> localhold::types::MemoryId {
+async fn seed_inventory_memory(server: &LocalHoldServer, seed: InventorySeed<'_>) -> localhold::types::MemoryId {
     let provenance = Provenance::new_for_test(
         Some(seed.source_agent.to_owned()),
         seed.source_conversation.map(ToOwned::to_owned),

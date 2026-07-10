@@ -8,7 +8,7 @@ use std::{sync::Arc, time::Duration};
 
 use localhold::{
     config::{LimitsConfig, SearchConfig},
-    engine::RecallEngine,
+    engine::LocalHoldEngine,
     store::SqliteStore,
     types::{MemoryId, MemoryUpdate},
 };
@@ -16,9 +16,9 @@ use localhold::{
 use super::workload::{QUICK_OPS, QUICK_TASKS, build_memory};
 use crate::helpers::{DeterministicEmbedding, SlowDeterministicEmbedding};
 
-fn make_engine(embedding: Arc<dyn localhold::embedding::EmbeddingProvider>) -> RecallEngine<SqliteStore> {
+fn make_engine(embedding: Arc<dyn localhold::embedding::EmbeddingProvider>) -> LocalHoldEngine<SqliteStore> {
     let store = SqliteStore::in_memory().unwrap();
-    RecallEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
+    LocalHoldEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
 }
 
 #[tokio::test]

@@ -7,7 +7,7 @@ use crate::{
 #[test]
 fn standard_tool_profile_removes_admin_routes() {
     let store = crate::store::SqliteStore::in_memory().unwrap();
-    let server = RecallServer::new(store, Arc::new(crate::embedding::NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
+    let server = LocalHoldServer::new(store, Arc::new(crate::embedding::NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
 
     for name in ADMIN_TOOLS {
         assert!(server.tool_router.get(name).is_none(), "admin route should be removed: {name}");

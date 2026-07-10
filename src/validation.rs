@@ -1,7 +1,7 @@
 //! Input validation and normalization utilities.
 //!
 //! These are pure functions operating on primitives — they have no dependency
-//! on [`RecallEngine`](crate::engine::RecallEngine) or any store.
+//! on [`LocalHoldEngine`](crate::engine::LocalHoldEngine) or any store.
 
 use crate::{
     error::ValidationError,

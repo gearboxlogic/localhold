@@ -5,10 +5,10 @@ use localhold::{
     clock::Clock,
     config::{AnonymousPolicy, DEFAULT_HTTP_PRINCIPAL_HEADER, LimitsConfig, SearchConfig, ServerConfig},
     embedding::{BoxFuture, EmbeddingProvider, NoopEmbedding},
-    engine::RecallEngine,
+    engine::LocalHoldEngine,
     error::EmbeddingError,
     http_transport::build_router,
-    server::{HttpPrincipalSource, RecallServer},
+    server::{HttpPrincipalSource, LocalHoldServer},
     store::{MemoryWriter as _, SqliteStore},
     types::{AccessPolicy, Memory, MemoryId, Provenance},
 };
@@ -28,7 +28,7 @@ pub(crate) const TEST_HTTP_PRINCIPAL: &str = "localhold-integration-client";
 /// Poll until all background embedding tasks complete or timeout is reached.
 /// Panics if tasks don't complete within the timeout.
 #[expect(clippy::arithmetic_side_effects, reason = "test helper: Instant + Duration cannot overflow in practice")]
-pub(crate) async fn await_embeddings(server: &RecallServer, timeout: Duration) {
+pub(crate) async fn await_embeddings(server: &LocalHoldServer, timeout: Duration) {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let remaining = server.tracked_task_count();
@@ -264,15 +264,15 @@ pub(crate) fn sparse_embedding(entries: &[(usize, f32)]) -> Vec<f32> {
 
 /// Spawn an MCP server with a caller-supplied embedding provider.
 /// Returns `(client, server_ref)` — the server ref can be used for shutdown.
-pub(crate) async fn setup_server_with(embedding: Arc<dyn EmbeddingProvider>) -> (RunningService<rmcp::RoleClient, ()>, RecallServer) {
+pub(crate) async fn setup_server_with(embedding: Arc<dyn EmbeddingProvider>) -> (RunningService<rmcp::RoleClient, ()>, LocalHoldServer) {
     let store = SqliteStore::in_memory().unwrap();
     setup_server_with_store(store, embedding).await
 }
 
 /// Spawn an MCP server with a caller-supplied SQLite store and embedding provider.
 /// Returns `(client, server_ref)` — the server ref can be used for shutdown.
-pub(crate) async fn setup_server_with_store(store: SqliteStore, embedding: Arc<dyn EmbeddingProvider>) -> (RunningService<rmcp::RoleClient, ()>, RecallServer) {
-    let server = RecallServer::new(store, embedding, LimitsConfig::default(), SearchConfig::default()).with_admin_tools();
+pub(crate) async fn setup_server_with_store(store: SqliteStore, embedding: Arc<dyn EmbeddingProvider>) -> (RunningService<rmcp::RoleClient, ()>, LocalHoldServer) {
+    let server = LocalHoldServer::new(store, embedding, LimitsConfig::default(), SearchConfig::default()).with_admin_tools();
     let server_ref = server.clone();
 
     let (server_transport, client_transport) = tokio::io::duplex(4096);
@@ -288,9 +288,9 @@ pub(crate) async fn setup_server_with_store(store: SqliteStore, embedding: Arc<d
 
 /// Spawn an MCP server with caller-supplied embedding provider and limits.
 /// Returns `(client, server_ref)`.
-pub(crate) async fn setup_server_with_limits(embedding: Arc<dyn EmbeddingProvider>, limits: LimitsConfig) -> (RunningService<rmcp::RoleClient, ()>, RecallServer) {
+pub(crate) async fn setup_server_with_limits(embedding: Arc<dyn EmbeddingProvider>, limits: LimitsConfig) -> (RunningService<rmcp::RoleClient, ()>, LocalHoldServer) {
     let store = SqliteStore::in_memory().unwrap();
-    let server = RecallServer::new(store, embedding, limits, SearchConfig::default()).with_admin_tools();
+    let server = LocalHoldServer::new(store, embedding, limits, SearchConfig::default()).with_admin_tools();
     let server_ref = server.clone();
 
     let (server_transport, client_transport) = tokio::io::duplex(4096);
@@ -310,10 +310,10 @@ pub(crate) async fn setup_server_with_auth(
     embedding: Arc<dyn EmbeddingProvider>,
     principal: Option<&str>,
     anonymous_policy: AnonymousPolicy,
-) -> (RunningService<rmcp::RoleClient, ()>, RecallServer) {
+) -> (RunningService<rmcp::RoleClient, ()>, LocalHoldServer) {
     let store = SqliteStore::in_memory().unwrap();
-    let engine = RecallEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine_with_auth(engine, principal.map(ToOwned::to_owned), anonymous_policy).with_admin_tools();
+    let engine = LocalHoldEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default());
+    let server = LocalHoldServer::from_engine_with_auth(engine, principal.map(ToOwned::to_owned), anonymous_policy).with_admin_tools();
     let server_ref = server.clone();
 
     let (server_transport, client_transport) = tokio::io::duplex(4096);
@@ -334,9 +334,9 @@ fn into_dyn_clock<C: Clock>(clock: Arc<C>) -> Arc<dyn Clock> {
 
 /// Spawn an MCP server with a caller-supplied embedding provider and clock.
 /// Returns `(client, server_ref)`.
-pub(crate) async fn setup_server_with_clock(embedding: Arc<dyn EmbeddingProvider>, clock: Arc<dyn Clock>) -> (RunningService<rmcp::RoleClient, ()>, RecallServer) {
+pub(crate) async fn setup_server_with_clock(embedding: Arc<dyn EmbeddingProvider>, clock: Arc<dyn Clock>) -> (RunningService<rmcp::RoleClient, ()>, LocalHoldServer) {
     let store = SqliteStore::in_memory_with_clock(Arc::clone(&clock)).unwrap();
-    let server = RecallServer::new_with_clock(store, embedding, LimitsConfig::default(), SearchConfig::default(), clock).with_admin_tools();
+    let server = LocalHoldServer::new_with_clock(store, embedding, LimitsConfig::default(), SearchConfig::default(), clock).with_admin_tools();
     let server_ref = server.clone();
 
     let (server_transport, client_transport) = tokio::io::duplex(4096);
@@ -358,7 +358,7 @@ pub(crate) async fn setup_noop_server() -> RunningService<rmcp::RoleClient, ()> 
 }
 
 /// Spawn an MCP server with `NoopEmbedding` and caller-supplied limits.
-pub(crate) async fn setup_noop_server_with_limits(limits: LimitsConfig) -> (RunningService<rmcp::RoleClient, ()>, RecallServer) {
+pub(crate) async fn setup_noop_server_with_limits(limits: LimitsConfig) -> (RunningService<rmcp::RoleClient, ()>, LocalHoldServer) {
     setup_server_with_limits(Arc::new(NoopEmbedding::new()), limits).await
 }
 
@@ -370,7 +370,7 @@ pub(crate) async fn setup_noop_server_with_auth(principal: Option<&str>, anonymo
 
 /// Spawn an MCP server with `NoopEmbedding` and a custom clock.
 /// Returns `(client, server_ref)`.
-pub(crate) async fn setup_noop_server_with_clock<C: Clock>(clock: Arc<C>) -> (RunningService<rmcp::RoleClient, ()>, RecallServer) {
+pub(crate) async fn setup_noop_server_with_clock<C: Clock>(clock: Arc<C>) -> (RunningService<rmcp::RoleClient, ()>, LocalHoldServer) {
     setup_server_with_clock(Arc::new(NoopEmbedding::new()), into_dyn_clock(clock)).await
 }
 
@@ -426,8 +426,8 @@ pub(crate) async fn setup_noop_server_with_auth_and_legacy_memories(
         ids.push(id);
     }
 
-    let engine = RecallEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine_with_auth(engine, principal.map(ToOwned::to_owned), anonymous_policy).with_admin_tools();
+    let engine = LocalHoldEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
+    let server = LocalHoldServer::from_engine_with_auth(engine, principal.map(ToOwned::to_owned), anonymous_policy).with_admin_tools();
     let (server_transport, client_transport) = tokio::io::duplex(4096);
     tokio::spawn(async move {
         let svc = server.serve(server_transport).await.unwrap();
@@ -439,7 +439,7 @@ pub(crate) async fn setup_noop_server_with_auth_and_legacy_memories(
 
 /// Spawn an MCP server with `DeterministicEmbedding` (semantic search mode).
 /// Returns `(client, server_ref)` — the server ref can be used for shutdown.
-pub(crate) async fn setup_embedding_server() -> (RunningService<rmcp::RoleClient, ()>, RecallServer) {
+pub(crate) async fn setup_embedding_server() -> (RunningService<rmcp::RoleClient, ()>, LocalHoldServer) {
     setup_server_with(Arc::new(DeterministicEmbedding)).await
 }
 
@@ -506,10 +506,10 @@ fn extract_text(result: &CallToolResult) -> &str {
 
 /// Spawn an HTTP MCP server with a caller-supplied embedding provider.
 /// Returns `(url, cancellation_token, server_ref)`.
-pub(crate) async fn spawn_http_server_with(embedding: Arc<dyn EmbeddingProvider>) -> (String, CancellationToken, RecallServer) {
+pub(crate) async fn spawn_http_server_with(embedding: Arc<dyn EmbeddingProvider>) -> (String, CancellationToken, LocalHoldServer) {
     let store = SqliteStore::in_memory().unwrap();
-    let engine = RecallEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine_with_auth_and_http(
+    let engine = LocalHoldEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default());
+    let server = LocalHoldServer::from_engine_with_auth_and_http(
         engine,
         None,
         AnonymousPolicy::PublicReadOnly,
@@ -521,18 +521,18 @@ pub(crate) async fn spawn_http_server_with(embedding: Arc<dyn EmbeddingProvider>
 
 /// Spawn an HTTP MCP server with `NoopEmbedding` and a custom request body limit.
 /// Returns `(url, cancellation_token, server_ref)`.
-pub(crate) async fn spawn_http_noop_server_with_body_limit(max_body_bytes: usize) -> (String, CancellationToken, RecallServer) {
+pub(crate) async fn spawn_http_noop_server_with_body_limit(max_body_bytes: usize) -> (String, CancellationToken, LocalHoldServer) {
     let store = SqliteStore::in_memory().unwrap();
-    let engine = RecallEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine_with_auth_and_http(engine, None, AnonymousPolicy::PublicReadWrite, None, HttpPrincipalSource::fixed(TEST_HTTP_PRINCIPAL));
+    let engine = LocalHoldEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
+    let server = LocalHoldServer::from_engine_with_auth_and_http(engine, None, AnonymousPolicy::PublicReadWrite, None, HttpPrincipalSource::fixed(TEST_HTTP_PRINCIPAL));
     spawn_http_server_inner(server, max_body_bytes, None, None).await
 }
 
 /// Spawn an HTTP MCP server with a custom DNS-rebinding host allowlist.
-pub(crate) async fn spawn_http_noop_server_with_allowed_hosts(http_allowed_hosts: Vec<String>) -> (String, CancellationToken, RecallServer) {
+pub(crate) async fn spawn_http_noop_server_with_allowed_hosts(http_allowed_hosts: Vec<String>) -> (String, CancellationToken, LocalHoldServer) {
     let store = SqliteStore::in_memory().unwrap();
-    let engine = RecallEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine_with_auth_and_http(engine, None, AnonymousPolicy::PublicReadWrite, None, HttpPrincipalSource::fixed(TEST_HTTP_PRINCIPAL));
+    let engine = LocalHoldEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
+    let server = LocalHoldServer::from_engine_with_auth_and_http(engine, None, AnonymousPolicy::PublicReadWrite, None, HttpPrincipalSource::fixed(TEST_HTTP_PRINCIPAL));
     spawn_http_server_inner(server, localhold::config::DEFAULT_HTTP_MAX_BODY_BYTES, None, Some(http_allowed_hosts)).await
 }
 
@@ -543,10 +543,10 @@ pub(crate) async fn spawn_http_server_with_auth(
     principal: Option<&str>,
     anonymous_policy: AnonymousPolicy,
     http_auth_token: Option<&str>,
-) -> (String, CancellationToken, RecallServer) {
+) -> (String, CancellationToken, LocalHoldServer) {
     let store = SqliteStore::in_memory().unwrap();
-    let engine = RecallEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine_with_auth_and_http(
+    let engine = LocalHoldEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default());
+    let server = LocalHoldServer::from_engine_with_auth_and_http(
         engine,
         principal.map(ToOwned::to_owned),
         anonymous_policy,
@@ -565,10 +565,10 @@ pub(crate) async fn spawn_http_server_with_trusted_proxy_auth(
     principal: Option<&str>,
     anonymous_policy: AnonymousPolicy,
     http_auth_token: &str,
-) -> (String, CancellationToken, RecallServer) {
+) -> (String, CancellationToken, LocalHoldServer) {
     let store = SqliteStore::in_memory().unwrap();
-    let engine = RecallEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine_with_auth_and_http(
+    let engine = LocalHoldEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default());
+    let server = LocalHoldServer::from_engine_with_auth_and_http(
         engine,
         principal.map(ToOwned::to_owned),
         anonymous_policy,
@@ -580,10 +580,10 @@ pub(crate) async fn spawn_http_server_with_trusted_proxy_auth(
 
 /// Spawn an HTTP MCP server with a caller-supplied embedding provider and clock.
 /// Returns `(url, cancellation_token, server_ref)`.
-pub(crate) async fn spawn_http_server_with_clock(embedding: Arc<dyn EmbeddingProvider>, clock: Arc<dyn Clock>) -> (String, CancellationToken, RecallServer) {
+pub(crate) async fn spawn_http_server_with_clock(embedding: Arc<dyn EmbeddingProvider>, clock: Arc<dyn Clock>) -> (String, CancellationToken, LocalHoldServer) {
     let store = SqliteStore::in_memory_with_clock(Arc::clone(&clock)).unwrap();
-    let engine = RecallEngine::new_with_clock(store, embedding, LimitsConfig::default(), SearchConfig::default(), clock);
-    let server = RecallServer::from_engine_with_auth_and_http(
+    let engine = LocalHoldEngine::new_with_clock(store, embedding, LimitsConfig::default(), SearchConfig::default(), clock);
+    let server = LocalHoldServer::from_engine_with_auth_and_http(
         engine,
         None,
         AnonymousPolicy::PublicReadOnly,
@@ -594,11 +594,11 @@ pub(crate) async fn spawn_http_server_with_clock(embedding: Arc<dyn EmbeddingPro
 }
 
 async fn spawn_http_server_inner(
-    server: RecallServer,
+    server: LocalHoldServer,
     max_body_bytes: usize,
     http_auth_token: Option<&str>,
     http_allowed_hosts: Option<Vec<String>>,
-) -> (String, CancellationToken, RecallServer) {
+) -> (String, CancellationToken, LocalHoldServer) {
     let server_ref = server.clone();
 
     let ct = CancellationToken::new();
@@ -652,7 +652,7 @@ pub(crate) async fn connect_http_client_with_auth(url: &str, token: &str, princi
 }
 
 /// Spawn an HTTP MCP server with `NoopEmbedding` (text search fallback mode).
-pub(crate) async fn setup_http_noop_server() -> (String, CancellationToken, RecallServer) {
+pub(crate) async fn setup_http_noop_server() -> (String, CancellationToken, LocalHoldServer) {
     spawn_http_server_with(Arc::new(NoopEmbedding::new())).await
 }
 
@@ -661,7 +661,7 @@ pub(crate) async fn setup_http_noop_server_with_auth(
     principal: Option<&str>,
     anonymous_policy: AnonymousPolicy,
     http_auth_token: Option<&str>,
-) -> (String, CancellationToken, RecallServer) {
+) -> (String, CancellationToken, LocalHoldServer) {
     spawn_http_server_with_auth(Arc::new(NoopEmbedding::new()), principal, anonymous_policy, http_auth_token).await
 }
 
@@ -670,17 +670,17 @@ pub(crate) async fn setup_http_noop_server_with_trusted_proxy_auth(
     principal: Option<&str>,
     anonymous_policy: AnonymousPolicy,
     http_auth_token: &str,
-) -> (String, CancellationToken, RecallServer) {
+) -> (String, CancellationToken, LocalHoldServer) {
     spawn_http_server_with_trusted_proxy_auth(Arc::new(NoopEmbedding::new()), principal, anonymous_policy, http_auth_token).await
 }
 
 /// Spawn an HTTP MCP server with `NoopEmbedding` and a custom clock.
-pub(crate) async fn setup_http_noop_server_with_clock<C: Clock>(clock: Arc<C>) -> (String, CancellationToken, RecallServer) {
+pub(crate) async fn setup_http_noop_server_with_clock<C: Clock>(clock: Arc<C>) -> (String, CancellationToken, LocalHoldServer) {
     spawn_http_server_with_clock(Arc::new(NoopEmbedding::new()), into_dyn_clock(clock)).await
 }
 
 /// Spawn an HTTP MCP server with `DeterministicEmbedding` (semantic search mode).
-pub(crate) async fn setup_http_embedding_server() -> (String, CancellationToken, RecallServer) {
+pub(crate) async fn setup_http_embedding_server() -> (String, CancellationToken, LocalHoldServer) {
     spawn_http_server_with(Arc::new(DeterministicEmbedding)).await
 }
 
@@ -694,7 +694,7 @@ pub(crate) async fn setup_http_embedding_server() -> (String, CancellationToken,
 /// HTTP transports via the [`transport_test!`] macro.
 pub(crate) struct TestHarness {
     client: RunningService<rmcp::RoleClient, ()>,
-    server: Option<RecallServer>,
+    server: Option<LocalHoldServer>,
     cancellation_token: Option<CancellationToken>,
 }
 
@@ -775,7 +775,7 @@ impl TestHarness {
     #[expect(clippy::panic, reason = "test helper: server must be present for tests that need it")]
     #[expect(clippy::option_if_let_else, reason = "map_or_else with panic closure is less readable than match")]
     #[expect(clippy::ref_patterns, reason = "match ergonomics: ref is clearer than & in this pattern")]
-    pub(crate) fn server(&self) -> &RecallServer {
+    pub(crate) fn server(&self) -> &LocalHoldServer {
         match self.server {
             Some(ref s) => s,
             None => panic!("TestHarness was created without a server reference"),

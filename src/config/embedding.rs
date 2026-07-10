@@ -233,13 +233,13 @@ fn is_loopback_host(host: &str) -> bool {
 
 pub(super) fn apply_embedding_env(config: &mut EmbeddingConfig, env: &HashMap<String, String>) {
     const PROVIDER_KEYS: [&str; 7] = [
-        "RECALL_EMBEDDING_BASE_URL",
-        "RECALL_EMBEDDING_MODEL",
-        "RECALL_EMBEDDING_API_KEY",
-        "RECALL_EMBEDDING_AUTH_MODE",
-        "RECALL_EMBEDDING_SEND_DIMENSIONS",
-        "RECALL_EMBEDDING_HEALTH_CHECK",
-        "RECALL_EMBEDDING_ALLOW_INSECURE_HTTP",
+        "LOCALHOLD_EMBEDDING_BASE_URL",
+        "LOCALHOLD_EMBEDDING_MODEL",
+        "LOCALHOLD_EMBEDDING_API_KEY",
+        "LOCALHOLD_EMBEDDING_AUTH_MODE",
+        "LOCALHOLD_EMBEDDING_SEND_DIMENSIONS",
+        "LOCALHOLD_EMBEDDING_HEALTH_CHECK",
+        "LOCALHOLD_EMBEDDING_ALLOW_INSECURE_HTTP",
     ];
     if PROVIDER_KEYS.iter().any(|key| env.contains_key(*key)) && matches!(config, EmbeddingConfig::Noop { .. }) {
         let dimensions = config.dimensions();
@@ -251,21 +251,21 @@ pub(super) fn apply_embedding_env(config: &mut EmbeddingConfig, env: &HashMap<St
 
     match config {
         EmbeddingConfig::OpenAiCompatible { dimensions, openai_compatible } => {
-            if let Some(value) = env.get("RECALL_EMBEDDING_BASE_URL") {
+            if let Some(value) = env.get("LOCALHOLD_EMBEDDING_BASE_URL") {
                 openai_compatible.base_url.clone_from(value);
             }
-            if let Some(value) = env.get("RECALL_EMBEDDING_MODEL") {
+            if let Some(value) = env.get("LOCALHOLD_EMBEDDING_MODEL") {
                 openai_compatible.model.clone_from(value);
             }
-            if let Some(value) = env.get("RECALL_EMBEDDING_API_KEY") {
+            if let Some(value) = env.get("LOCALHOLD_EMBEDDING_API_KEY") {
                 openai_compatible.api_key = Some(value.clone());
             }
-            apply_parsed_env(env, "RECALL_EMBEDDING_AUTH_MODE", &mut openai_compatible.auth_mode);
-            apply_parsed_env(env, "RECALL_EMBEDDING_SEND_DIMENSIONS", &mut openai_compatible.send_dimensions);
-            apply_parsed_env(env, "RECALL_EMBEDDING_HEALTH_CHECK", &mut openai_compatible.health_check);
-            apply_parsed_env(env, "RECALL_EMBEDDING_ALLOW_INSECURE_HTTP", &mut openai_compatible.allow_insecure_http);
-            apply_parsed_env(env, "RECALL_EMBEDDING_DIMENSIONS", dimensions);
+            apply_parsed_env(env, "LOCALHOLD_EMBEDDING_AUTH_MODE", &mut openai_compatible.auth_mode);
+            apply_parsed_env(env, "LOCALHOLD_EMBEDDING_SEND_DIMENSIONS", &mut openai_compatible.send_dimensions);
+            apply_parsed_env(env, "LOCALHOLD_EMBEDDING_HEALTH_CHECK", &mut openai_compatible.health_check);
+            apply_parsed_env(env, "LOCALHOLD_EMBEDDING_ALLOW_INSECURE_HTTP", &mut openai_compatible.allow_insecure_http);
+            apply_parsed_env(env, "LOCALHOLD_EMBEDDING_DIMENSIONS", dimensions);
         }
-        EmbeddingConfig::Noop { dimensions } => apply_parsed_env(env, "RECALL_EMBEDDING_DIMENSIONS", dimensions),
+        EmbeddingConfig::Noop { dimensions } => apply_parsed_env(env, "LOCALHOLD_EMBEDDING_DIMENSIONS", dimensions),
     }
 }

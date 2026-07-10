@@ -423,11 +423,11 @@ impl BlackBoxHarness {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .env("RECALL_TRANSPORT", "http")
-            .env("RECALL_HTTP_HOST", "127.0.0.1")
-            .env("RECALL_HTTP_PORT", "0")
-            .env("RECALL_HTTP_PATH", "/mcp")
-            .env("RECALL_HTTP_AUTH_TOKEN", HTTP_AUTH_TOKEN);
+            .env("LOCALHOLD_TRANSPORT", "http")
+            .env("LOCALHOLD_HTTP_HOST", "127.0.0.1")
+            .env("LOCALHOLD_HTTP_PORT", "0")
+            .env("LOCALHOLD_HTTP_PATH", "/mcp")
+            .env("LOCALHOLD_HTTP_AUTH_TOKEN", HTTP_AUTH_TOKEN);
 
         let mut child = command.spawn().unwrap();
         if let Some(stderr) = child.stderr.take() {
@@ -555,7 +555,7 @@ fn base_command(db_path: &Path, cwd: &Path, config: &BlackBoxConfig, embedding_u
     }
     write_config(&config_dir, &config_toml);
     let _cwd = command.current_dir(cwd);
-    let _admin_tools = command.env("RECALL_ADMIN_TOOLS_ENABLED", "true");
+    let _admin_tools = command.env("LOCALHOLD_ADMIN_TOOLS_ENABLED", "true");
     for (key, value) in &config.env {
         let _env = command.env(key, value);
     }

@@ -18,8 +18,8 @@ fn unique_db_path(name: &str) -> std::path::PathBuf {
 
 fn base_binary_command(db_path: &std::path::Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_hold"));
-    cmd.env("RECALL_DB_PATH", db_path);
-    cmd.env("RECALL_LOG_LEVEL", "error");
+    cmd.env("LOCALHOLD_DB_PATH", db_path);
+    cmd.env("LOCALHOLD_LOG_LEVEL", "error");
     cmd
 }
 
@@ -56,7 +56,7 @@ fn terminate_child(child: &mut Child) {
 }
 
 fn postgres_smoke_url() -> String {
-    std::env::var("RECALL_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into())
+    std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into())
 }
 
 fn assert_destructive_postgres_smoke_allowed() {
@@ -78,7 +78,7 @@ fn drop_postgres_smoke_schema(url: &str) {
                 memory_embeddings,
                 memories,
                 scope_registry,
-                recall_migrations
+                localhold_migrations
             CASCADE
             ",
         )
@@ -117,7 +117,7 @@ fn migrated_memory_count(url: &str) -> i64 {
 fn binary_starts_in_stdio_mode() {
     let db_path = unique_db_path("bin-stdio");
     let mut cmd = base_binary_command(&db_path);
-    cmd.env("RECALL_TRANSPORT", "stdio");
+    cmd.env("LOCALHOLD_TRANSPORT", "stdio");
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
@@ -132,10 +132,10 @@ fn binary_starts_in_stdio_mode() {
 fn binary_starts_in_http_mode() {
     let db_path = unique_db_path("bin-http");
     let mut cmd = base_binary_command(&db_path);
-    cmd.env("RECALL_TRANSPORT", "http");
-    cmd.env("RECALL_HTTP_HOST", "127.0.0.1");
-    cmd.env("RECALL_HTTP_PORT", "0");
-    cmd.env("RECALL_HTTP_PATH", "/mcp");
+    cmd.env("LOCALHOLD_TRANSPORT", "http");
+    cmd.env("LOCALHOLD_HTTP_HOST", "127.0.0.1");
+    cmd.env("LOCALHOLD_HTTP_PORT", "0");
+    cmd.env("LOCALHOLD_HTTP_PATH", "/mcp");
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
@@ -147,16 +147,16 @@ fn binary_starts_in_http_mode() {
 }
 
 #[test]
-#[ignore = "requires Docker or local PostgreSQL with pgvector; set RECALL_POSTGRES_URL if not using the default smoke URL"]
+#[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
 fn binary_starts_with_postgres_backend() {
     let url = postgres_smoke_url();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_hold"));
-    cmd.env("RECALL_DB_BACKEND", "postgres");
-    cmd.env("RECALL_POSTGRES_URL", url);
-    cmd.env("RECALL_POSTGRES_MAX_CONNECTIONS", "1");
-    cmd.env("RECALL_EMBEDDING_DIMENSIONS", "3");
-    cmd.env("RECALL_TRANSPORT", "stdio");
-    cmd.env("RECALL_LOG_LEVEL", "error");
+    cmd.env("LOCALHOLD_DB_BACKEND", "postgres");
+    cmd.env("LOCALHOLD_POSTGRES_URL", url);
+    cmd.env("LOCALHOLD_POSTGRES_MAX_CONNECTIONS", "1");
+    cmd.env("LOCALHOLD_EMBEDDING_DIMENSIONS", "3");
+    cmd.env("LOCALHOLD_TRANSPORT", "stdio");
+    cmd.env("LOCALHOLD_LOG_LEVEL", "error");
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
@@ -199,7 +199,7 @@ fn binary_migrates_sqlite_to_postgres() {
     drop_postgres_smoke_schema(&url);
 
     let output = Command::new(env!("CARGO_BIN_EXE_hold"))
-        .env("RECALL_POSTGRES_URL", &url)
+        .env("LOCALHOLD_POSTGRES_URL", &url)
         .args([
             "migrate",
             "sqlite-to-postgres",
@@ -249,12 +249,11 @@ fn binary_ignores_config_files_in_current_directory() {
     let root = db_path.with_extension("cwd");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("localhold.toml"), "[server]\ntransport = \"websocket\"\n").unwrap();
-    std::fs::write(root.join("recall.toml"), "[server]\ntransport = \"websocket\"\n").unwrap();
 
     let mut cmd = base_binary_command(&db_path);
     let _config_dir = isolate_user_config_dir(&mut cmd, &root);
     cmd.current_dir(&root);
-    cmd.env("RECALL_TRANSPORT", "stdio");
+    cmd.env("LOCALHOLD_TRANSPORT", "stdio");
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());

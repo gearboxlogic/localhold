@@ -1,11 +1,11 @@
-//! Scripted chaos tests exercising fault injection against `RecallEngine`.
+//! Scripted chaos tests exercising fault injection against `LocalHoldEngine`.
 
 use std::sync::Arc;
 
 use localhold::{
     config::{LimitsConfig, SearchConfig},
     embedding::NoopEmbedding,
-    engine::RecallEngine,
+    engine::LocalHoldEngine,
     error::EngineError,
     store::{MemoryReader as _, MemoryWriter as _, SqliteStore},
     types::{AccessPolicy, Memory, MemoryFilter, Provenance, QueryContext, WriteOutcome},
@@ -28,8 +28,8 @@ fn make_memory(content: &str) -> Memory {
     )
 }
 
-fn make_engine(store: ChaosStore<SqliteStore>, embedding: Arc<dyn localhold::embedding::EmbeddingProvider>) -> RecallEngine<ChaosStore<SqliteStore>> {
-    RecallEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
+fn make_engine(store: ChaosStore<SqliteStore>, embedding: Arc<dyn localhold::embedding::EmbeddingProvider>) -> LocalHoldEngine<ChaosStore<SqliteStore>> {
+    LocalHoldEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
 }
 
 // ---------------------------------------------------------------------------
@@ -118,7 +118,7 @@ async fn chaos_embedding_failure_still_stores_memory() {
 
     let chaos_embed = ChaosEmbedding::new(Arc::new(DeterministicEmbedding), FaultPlan::Always);
 
-    let engine = RecallEngine::new(store, Arc::new(chaos_embed), LimitsConfig::default(), SearchConfig::default());
+    let engine = LocalHoldEngine::new(store, Arc::new(chaos_embed), LimitsConfig::default(), SearchConfig::default());
 
     let memory = make_memory("should still store");
     let id = engine.store_memory(memory, None).await.unwrap();

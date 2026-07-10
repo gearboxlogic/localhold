@@ -50,21 +50,21 @@ main() {
   export LOCALHOLD_ALLOW_DESTRUCTIVE_PG_SMOKE=1
 
   say "Running ignored PostgreSQL bootstrap smoke test"
-  RECALL_POSTGRES_URL="$url" cargo test -p localhold store::postgres::tests:: --locked -- --ignored --test-threads=1
+  LOCALHOLD_POSTGRES_URL="$url" cargo test -p localhold store::postgres::tests:: --locked -- --ignored --test-threads=1
 
   say "Running ignored PostgreSQL migration smoke test"
-  RECALL_POSTGRES_URL="$url" cargo test -p localhold store::migration::tests:: --locked -- --ignored --test-threads=1
+  LOCALHOLD_POSTGRES_URL="$url" cargo test -p localhold store::migration::tests:: --locked -- --ignored --test-threads=1
 
   say "Resetting PostgreSQL schema before binary smoke tests"
   docker exec -e PGPASSWORD=localhold "$container" \
     psql -h 127.0.0.1 -U localhold -d localhold -v ON_ERROR_STOP=1 \
-    -c "DROP TABLE IF EXISTS memory_audit_log, memory_tombstones, memory_v2_metadata, memory_entities, memory_embeddings, memories, scope_registry, recall_migrations CASCADE" >/dev/null
+    -c "DROP TABLE IF EXISTS memory_audit_log, memory_tombstones, memory_v2_metadata, memory_entities, memory_embeddings, memories, scope_registry, localhold_migrations CASCADE" >/dev/null
 
   say "Running ignored PostgreSQL binary startup smoke test"
-  RECALL_POSTGRES_URL="$url" cargo test -p localhold --test integration binary_smoke::binary_starts_with_postgres_backend --locked -- --ignored --test-threads=1
+  LOCALHOLD_POSTGRES_URL="$url" cargo test -p localhold --test integration binary_smoke::binary_starts_with_postgres_backend --locked -- --ignored --test-threads=1
 
   say "Running ignored PostgreSQL binary migration smoke test"
-  RECALL_POSTGRES_URL="$url" cargo test -p localhold --test integration binary_smoke::binary_migrates_sqlite_to_postgres --locked -- --ignored --test-threads=1
+  LOCALHOLD_POSTGRES_URL="$url" cargo test -p localhold --test integration binary_smoke::binary_migrates_sqlite_to_postgres --locked -- --ignored --test-threads=1
 }
 
 main "$@"

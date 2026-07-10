@@ -3,8 +3,8 @@ use std::sync::Arc;
 use localhold::{
     config::{AnonymousPolicy, LimitsConfig, SearchConfig},
     embedding::NoopEmbedding,
-    engine::RecallEngine,
-    server::{RecallServer, params::ReadResponse},
+    engine::LocalHoldEngine,
+    server::{LocalHoldServer, params::ReadResponse},
     store::{MemoryWriter as _, SqliteStore},
     types::{AccessPolicy, Memory, MemoryId, Provenance},
 };
@@ -30,8 +30,8 @@ async fn setup_seeded_server(principal: Option<&str>, access_policy: AccessPolic
     let memory = Memory::new_for_test(content.to_owned(), Vec::new(), provenance, access_policy);
     let id = store.store(&memory, None).await.unwrap();
 
-    let engine = RecallEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine_with_auth(engine, principal.map(ToOwned::to_owned), AnonymousPolicy::PublicReadOnly).with_admin_tools();
+    let engine = LocalHoldEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
+    let server = LocalHoldServer::from_engine_with_auth(engine, principal.map(ToOwned::to_owned), AnonymousPolicy::PublicReadOnly).with_admin_tools();
 
     let (server_transport, client_transport) = tokio::io::duplex(4096);
     let _server_task = tokio::spawn(async move {

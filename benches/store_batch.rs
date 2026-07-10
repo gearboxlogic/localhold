@@ -10,20 +10,20 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use localhold::{
     config::{LimitsConfig, SearchConfig},
     embedding::NoopEmbedding,
-    engine::RecallEngine,
+    engine::LocalHoldEngine,
     store::SqliteStore,
     types::Memory,
 };
 
 use crate::common::seeder::BenchSeeder;
 
-fn make_engine() -> RecallEngine<SqliteStore> {
+fn make_engine() -> LocalHoldEngine<SqliteStore> {
     let store = SqliteStore::in_memory().expect("in-memory store");
     let embedding: Arc<dyn localhold::embedding::EmbeddingProvider> = Arc::new(NoopEmbedding::new());
-    RecallEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
+    LocalHoldEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
 }
 
-async fn run_batch_store(engine: &RecallEngine<SqliteStore>, memories: Vec<Memory>) {
+async fn run_batch_store(engine: &LocalHoldEngine<SqliteStore>, memories: Vec<Memory>) {
     let supersedes = vec![None; memories.len()];
     let _ids = engine.batch_store(memories, supersedes).await.expect("batch store");
 }

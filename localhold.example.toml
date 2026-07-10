@@ -1,9 +1,8 @@
 # LocalHold -- example configuration
 # Copy to ~/.config/localhold/localhold.toml (or the platform equivalent).
-# Existing ~/.config/localhold/recall.toml files remain supported as a legacy fallback.
 # Configuration files in the current working directory are not loaded implicitly.
 # Values below document the complete configuration surface. Omitted fields use
-# code defaults, and runtime settings can be overridden via RECALL_* variables.
+# code defaults, and runtime settings can be overridden via LOCALHOLD_* variables.
 
 [database]
 backend = "sqlite" # "sqlite" or "postgres"
@@ -15,15 +14,15 @@ path = "~/.local/share/localhold/localhold.db"
 url = "postgres://localhold:localhold@localhost:5432/localhold"
 max_connections = 5
 auto_migrate = true
-# Env: RECALL_DB_BACKEND, RECALL_DB_PATH,
-#      RECALL_POSTGRES_URL, RECALL_POSTGRES_MAX_CONNECTIONS,
-#      RECALL_POSTGRES_AUTO_MIGRATE
+# Env: LOCALHOLD_DB_BACKEND, LOCALHOLD_DB_PATH,
+#      LOCALHOLD_POSTGRES_URL, LOCALHOLD_POSTGRES_MAX_CONNECTIONS,
+#      LOCALHOLD_POSTGRES_AUTO_MIGRATE
 
 [embedding]
 # Provider: "noop" (default, text-only search) or "openai_compatible".
 provider = "noop"
 dimensions = 768
-# Env: RECALL_EMBEDDING_DIMENSIONS
+# Env: LOCALHOLD_EMBEDDING_DIMENSIONS
 
 [embedding.openai_compatible]
 # Used when provider = "openai_compatible". Configure any compatible local or
@@ -36,10 +35,10 @@ auth_mode = "bearer" # "bearer" or Azure-compatible "api_key"
 send_dimensions = false # Enable only when the selected API/model accepts this field
 health_check = "models" # "models" or "disabled" when GET /models is unavailable
 allow_insecure_http = false # Non-loopback HTTP requires an explicit trusted-network opt-in
-# Env: RECALL_EMBEDDING_BASE_URL, RECALL_EMBEDDING_MODEL,
-#      RECALL_EMBEDDING_API_KEY, RECALL_EMBEDDING_AUTH_MODE,
-#      RECALL_EMBEDDING_SEND_DIMENSIONS, RECALL_EMBEDDING_HEALTH_CHECK,
-#      RECALL_EMBEDDING_ALLOW_INSECURE_HTTP
+# Env: LOCALHOLD_EMBEDDING_BASE_URL, LOCALHOLD_EMBEDDING_MODEL,
+#      LOCALHOLD_EMBEDDING_API_KEY, LOCALHOLD_EMBEDDING_AUTH_MODE,
+#      LOCALHOLD_EMBEDDING_SEND_DIMENSIONS, LOCALHOLD_EMBEDDING_HEALTH_CHECK,
+#      LOCALHOLD_EMBEDDING_ALLOW_INSECURE_HTTP
 
 [server]
 transport = "stdio"   # "stdio" or "http"
@@ -58,14 +57,14 @@ max_body_bytes = 8388608 # Max HTTP request body size; stdio is bounded by tool 
 http_max_sessions = 128 # Max retained stateful MCP sessions; clients should send DELETE when done
 http_session_idle_timeout_secs = 900 # Reap abandoned sessions after 15 idle minutes
 admin_tools_enabled = false # Explicitly expose privileged admin_* maintenance tools
-# Env: RECALL_TRANSPORT, RECALL_LOG_LEVEL, RECALL_PRINCIPAL, RECALL_ANONYMOUS_POLICY,
-#      RECALL_HTTP_HOST, RECALL_HTTP_PORT, RECALL_HTTP_PATH,
-#      RECALL_HTTP_AUTH_TOKEN, RECALL_HTTP_PRINCIPAL_MODE,
-#      RECALL_HTTP_PRINCIPAL, RECALL_HTTP_PRINCIPAL_HEADER,
-#      RECALL_HTTP_ALLOWED_HOSTS, RECALL_HTTP_MAX_BODY_BYTES,
-#      RECALL_HTTP_MAX_SESSIONS,
-#      RECALL_HTTP_SESSION_IDLE_TIMEOUT_SECS,
-#      RECALL_ADMIN_TOOLS_ENABLED
+# Env: LOCALHOLD_TRANSPORT, LOCALHOLD_LOG_LEVEL, LOCALHOLD_PRINCIPAL, LOCALHOLD_ANONYMOUS_POLICY,
+#      LOCALHOLD_HTTP_HOST, LOCALHOLD_HTTP_PORT, LOCALHOLD_HTTP_PATH,
+#      LOCALHOLD_HTTP_AUTH_TOKEN, LOCALHOLD_HTTP_PRINCIPAL_MODE,
+#      LOCALHOLD_HTTP_PRINCIPAL, LOCALHOLD_HTTP_PRINCIPAL_HEADER,
+#      LOCALHOLD_HTTP_ALLOWED_HOSTS, LOCALHOLD_HTTP_MAX_BODY_BYTES,
+#      LOCALHOLD_HTTP_MAX_SESSIONS,
+#      LOCALHOLD_HTTP_SESSION_IDLE_TIMEOUT_SECS,
+#      LOCALHOLD_ADMIN_TOOLS_ENABLED
 
 [limits]
 max_search_limit = 50          # Max results per recall/search operation
@@ -88,11 +87,11 @@ max_entities_per_memory = 50   # Max entities per memory
 max_entity_field_length = 256  # Max length of entity name/type (bytes)
 max_top_tags_limit = 100       # Max tags in admin_count stats
 max_history_limit = 500        # Max audit-history rows per admin_history call
-# Env: RECALL_MAX_SEARCH_LIMIT, RECALL_MAX_CANDIDATE_POOL_SIZE,
-#      RECALL_MAX_CONCURRENT_EMBEDDING_REQUESTS, RECALL_EMBEDDING_BATCH_SIZE,
-#      RECALL_EMBEDDING_MAX_RETRIES,
-#      RECALL_EMBEDDING_RETRY_INITIAL_BACKOFF_MS,
-#      RECALL_EMBEDDING_RETRY_MAX_BACKOFF_MS, RECALL_MAX_LIST_LIMIT, etc.
+# Env: LOCALHOLD_MAX_SEARCH_LIMIT, LOCALHOLD_MAX_CANDIDATE_POOL_SIZE,
+#      LOCALHOLD_MAX_CONCURRENT_EMBEDDING_REQUESTS, LOCALHOLD_EMBEDDING_BATCH_SIZE,
+#      LOCALHOLD_EMBEDDING_MAX_RETRIES,
+#      LOCALHOLD_EMBEDDING_RETRY_INITIAL_BACKOFF_MS,
+#      LOCALHOLD_EMBEDDING_RETRY_MAX_BACKOFF_MS, LOCALHOLD_MAX_LIST_LIMIT, etc.
 
 [search]
 # Default search mode when caller doesn't specify: auto, semantic, keyword, text
@@ -120,18 +119,18 @@ freshness_half_life_procedural_days = 365.0
 relevance_floor = 0.15         # Query relevance below this is penalized
 relevance_floor_penalty = 0.25 # Multiplier for below-floor results
 superseded_penalty = 0.05      # Multiplier for superseded memories when included
-# Env: RECALL_RRF_K, RECALL_RRF_SEMANTIC_WEIGHT, RECALL_RRF_KEYWORD_WEIGHT,
-#      RECALL_DEFAULT_SEARCH_MODE, RECALL_SEMANTIC_CANDIDATE_K,
-#      RECALL_KEYWORD_CANDIDATE_K, RECALL_RERANK_TOP_M,
-#      RECALL_RELEVANCE_WEIGHT, RECALL_IMPORTANCE_WEIGHT,
-#      RECALL_FRESHNESS_WEIGHT, RECALL_ACTIVITY_WEIGHT,
-#      RECALL_CONFIDENCE_WEIGHT, RECALL_ACTIVITY_HALF_LIFE_HOURS,
-#      RECALL_ACTIVITY_SATURATION,
-#      RECALL_FRESHNESS_HALF_LIFE_SEMANTIC_DAYS,
-#      RECALL_FRESHNESS_HALF_LIFE_EPISODIC_DAYS,
-#      RECALL_FRESHNESS_HALF_LIFE_PROCEDURAL_DAYS,
-#      RECALL_RELEVANCE_FLOOR, RECALL_RELEVANCE_FLOOR_PENALTY,
-#      RECALL_SUPERSEDED_PENALTY
+# Env: LOCALHOLD_RRF_K, LOCALHOLD_RRF_SEMANTIC_WEIGHT, LOCALHOLD_RRF_KEYWORD_WEIGHT,
+#      LOCALHOLD_DEFAULT_SEARCH_MODE, LOCALHOLD_SEMANTIC_CANDIDATE_K,
+#      LOCALHOLD_KEYWORD_CANDIDATE_K, LOCALHOLD_RERANK_TOP_M,
+#      LOCALHOLD_RELEVANCE_WEIGHT, LOCALHOLD_IMPORTANCE_WEIGHT,
+#      LOCALHOLD_FRESHNESS_WEIGHT, LOCALHOLD_ACTIVITY_WEIGHT,
+#      LOCALHOLD_CONFIDENCE_WEIGHT, LOCALHOLD_ACTIVITY_HALF_LIFE_HOURS,
+#      LOCALHOLD_ACTIVITY_SATURATION,
+#      LOCALHOLD_FRESHNESS_HALF_LIFE_SEMANTIC_DAYS,
+#      LOCALHOLD_FRESHNESS_HALF_LIFE_EPISODIC_DAYS,
+#      LOCALHOLD_FRESHNESS_HALF_LIFE_PROCEDURAL_DAYS,
+#      LOCALHOLD_RELEVANCE_FLOOR, LOCALHOLD_RELEVANCE_FLOOR_PENALTY,
+#      LOCALHOLD_SUPERSEDED_PENALTY
 
 [search.reranker]
 # Release builds ship with reranker support compiled in; runtime enablement is opt-in.
@@ -148,12 +147,12 @@ tokenizer_sha256 = ""         # Optional override; required for custom auto-down
 blend_weight = 0.7
 cache_dir = "~/.cache/localhold/models"
 
-# Env: RECALL_RERANKER_ENABLED, RECALL_RERANKER_MODEL, RECALL_RERANKER_REVISION,
-#      RECALL_RERANKER_MODEL_PATH, RECALL_RERANKER_MODEL_SHA256,
-#      RECALL_RERANKER_TOKENIZER_SHA256, RECALL_RERANKER_BLEND_WEIGHT,
-#      RECALL_RERANKER_CACHE_DIR, RECALL_RERANKER_POOL_SIZE
+# Env: LOCALHOLD_RERANKER_ENABLED, LOCALHOLD_RERANKER_MODEL, LOCALHOLD_RERANKER_REVISION,
+#      LOCALHOLD_RERANKER_MODEL_PATH, LOCALHOLD_RERANKER_MODEL_SHA256,
+#      LOCALHOLD_RERANKER_TOKENIZER_SHA256, LOCALHOLD_RERANKER_BLEND_WEIGHT,
+#      LOCALHOLD_RERANKER_CACHE_DIR, LOCALHOLD_RERANKER_POOL_SIZE
 
 [search.duplicate_suppression]
 enabled = false
 lambda = 0.10                  # Near-duplicate penalty coefficient
-# Env: RECALL_DUPLICATE_SUPPRESSION_ENABLED, RECALL_DUPLICATE_SUPPRESSION_LAMBDA
+# Env: LOCALHOLD_DUPLICATE_SUPPRESSION_ENABLED, LOCALHOLD_DUPLICATE_SUPPRESSION_LAMBDA

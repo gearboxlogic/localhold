@@ -1,6 +1,6 @@
 //! Business logic layer — store operations, embedding orchestration, and task tracking.
 //!
-//! [`RecallEngine`] owns an [`EmbeddingOrchestrator`] (store + embedding + tasks),
+//! [`LocalHoldEngine`] owns an [`EmbeddingOrchestrator`] (store + embedding + tasks),
 //! a clock, and operational limits. The MCP server delegates all domain operations
 //! here and converts the returned `Result<T, EngineError>` into wire-protocol
 //! responses.
@@ -103,7 +103,7 @@ fn hybrid_path_candidates(strict: bool, semantic: Vec<SearchResult>, keyword: Ve
     }
 }
 
-/// Request payload for [`RecallEngine::search_memories`], keeping the arg count under 5.
+/// Request payload for [`LocalHoldEngine::search_memories`], keeping the arg count under 5.
 #[derive(Debug)]
 pub(crate) struct SearchRequest {
     /// The raw query text.
@@ -144,7 +144,7 @@ pub enum ReembedRequest {
     },
 }
 
-/// Input fields for building a new memory via [`RecallEngine::build_memory`].
+/// Input fields for building a new memory via [`LocalHoldEngine::build_memory`].
 ///
 /// Keeps the argument count under the `too-many-arguments=5` threshold.
 #[derive(Debug)]
@@ -213,7 +213,7 @@ pub(crate) struct BulkUpdateResult {
 }
 
 // ---------------------------------------------------------------------------
-// RecallEngine
+// LocalHoldEngine
 // ---------------------------------------------------------------------------
 
 /// Core business-logic layer for `LocalHold`.
@@ -224,7 +224,7 @@ pub(crate) struct BulkUpdateResult {
 /// Generic over the store backend `S`, which must implement the full
 /// [`MemoryStore`] trait.
 #[derive(Clone)]
-pub struct RecallEngine<S: MemoryStore + Clone + std::fmt::Debug + 'static> {
+pub struct LocalHoldEngine<S: MemoryStore + Clone + std::fmt::Debug + 'static> {
     orchestrator: EmbeddingOrchestrator<S>,
     clock: Arc<dyn Clock>,
     limits: LimitsConfig,
@@ -232,14 +232,14 @@ pub struct RecallEngine<S: MemoryStore + Clone + std::fmt::Debug + 'static> {
     reranker: Option<Arc<dyn crate::reranker::RerankerProvider>>,
 }
 
-impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> std::fmt::Debug for RecallEngine<S> {
+impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> std::fmt::Debug for LocalHoldEngine<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RecallEngine").field("orchestrator", &self.orchestrator).finish_non_exhaustive()
+        f.debug_struct("LocalHoldEngine").field("orchestrator", &self.orchestrator).finish_non_exhaustive()
     }
 }
 
 #[expect(clippy::multiple_inherent_impl, reason = "separate constructors/accessors from the large operation impl for readability")]
-impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallEngine<S> {
+impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
     const MAX_CONSOLIDATION_FETCH: usize = 1_000_000;
 
     // -- constructors -------------------------------------------------------
@@ -352,7 +352,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallEngine<S> {
     // -- engine methods -----------------------------------------------------
 }
 
-impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallEngine<S> {
+impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
     /// Build a validated, normalized [`Memory`] from raw input fields.
     ///
     /// Validates content (non-blank, length), tags (count, length, no blanks),
@@ -1352,7 +1352,7 @@ fn collect_bfs_neighbors(
     }
 }
 
-/// Outcome of a [`RecallEngine::reembed`] call.
+/// Outcome of a [`LocalHoldEngine::reembed`] call.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ReembedOutcome {
@@ -1546,31 +1546,31 @@ mod tests {
         }
     }
 
-    fn make_engine() -> RecallEngine<SqliteStore> {
+    fn make_engine() -> LocalHoldEngine<SqliteStore> {
         let store = SqliteStore::in_memory().unwrap();
         let embedding = Arc::new(NoopEmbedding::new());
-        RecallEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
+        LocalHoldEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
     }
 
-    fn make_engine_with_embedding(embedding: Arc<dyn EmbeddingProvider>) -> RecallEngine<SqliteStore> {
+    fn make_engine_with_embedding(embedding: Arc<dyn EmbeddingProvider>) -> LocalHoldEngine<SqliteStore> {
         let store = SqliteStore::in_memory().unwrap();
-        RecallEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
+        LocalHoldEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
     }
 
-    fn make_engine_with_store(store: SqliteStore, embedding: Arc<dyn EmbeddingProvider>) -> RecallEngine<SqliteStore> {
-        RecallEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
+    fn make_engine_with_store(store: SqliteStore, embedding: Arc<dyn EmbeddingProvider>) -> LocalHoldEngine<SqliteStore> {
+        LocalHoldEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
     }
 
-    fn make_engine_with_limits(limits: LimitsConfig) -> RecallEngine<SqliteStore> {
-        let store = SqliteStore::in_memory().unwrap();
-        let embedding = Arc::new(NoopEmbedding::new());
-        RecallEngine::new(store, embedding, limits, SearchConfig::default())
-    }
-
-    fn make_engine_with_search_config(search_config: SearchConfig) -> RecallEngine<SqliteStore> {
+    fn make_engine_with_limits(limits: LimitsConfig) -> LocalHoldEngine<SqliteStore> {
         let store = SqliteStore::in_memory().unwrap();
         let embedding = Arc::new(NoopEmbedding::new());
-        RecallEngine::new(store, embedding, LimitsConfig::default(), search_config)
+        LocalHoldEngine::new(store, embedding, limits, SearchConfig::default())
+    }
+
+    fn make_engine_with_search_config(search_config: SearchConfig) -> LocalHoldEngine<SqliteStore> {
+        let store = SqliteStore::in_memory().unwrap();
+        let embedding = Arc::new(NoopEmbedding::new());
+        LocalHoldEngine::new(store, embedding, LimitsConfig::default(), search_config)
     }
 
     fn fixed_id(value: &str) -> MemoryId {
@@ -1595,7 +1595,7 @@ mod tests {
         }
     }
 
-    async fn begin_shutdown(engine: &RecallEngine<SqliteStore>) -> (tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+    async fn begin_shutdown(engine: &LocalHoldEngine<SqliteStore>) -> (tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         engine.spawn_tracked_task(async move {
             #[expect(clippy::let_underscore_must_use, reason = "test task only holds shutdown open")]
@@ -2136,7 +2136,7 @@ mod tests {
             ..SearchConfig::default()
         };
         let store = SqliteStore::in_memory().unwrap();
-        let engine = RecallEngine::new(store, Arc::new(NoopEmbedding::new()), limits, search_config);
+        let engine = LocalHoldEngine::new(store, Arc::new(NoopEmbedding::new()), limits, search_config);
 
         let candidate_limits = engine.candidate_pool_limits(5);
 
@@ -2158,7 +2158,7 @@ mod tests {
             ..SearchConfig::default()
         };
         let store = SqliteStore::in_memory().unwrap();
-        let engine = RecallEngine::new(store, Arc::new(NoopEmbedding::new()), limits, search_config);
+        let engine = LocalHoldEngine::new(store, Arc::new(NoopEmbedding::new()), limits, search_config);
 
         let candidate_limits = engine.candidate_pool_limits(5);
 
@@ -2246,7 +2246,7 @@ mod tests {
             confidence_weight: 0.0,
             ..SearchConfig::default()
         };
-        let engine = RecallEngine::new(store, Arc::new(HealthyEmbedding), LimitsConfig::default(), search_config);
+        let engine = LocalHoldEngine::new(store, Arc::new(HealthyEmbedding), LimitsConfig::default(), search_config);
 
         let outcome = engine
             .search_memories(SearchRequest {
@@ -2397,7 +2397,7 @@ mod tests {
             ..LimitsConfig::default()
         };
         let engine_provider: Arc<dyn EmbeddingProvider> = Arc::<BatchCountingEmbedding>::clone(&provider);
-        let engine = RecallEngine::new(store.clone(), engine_provider, limits, SearchConfig::default());
+        let engine = LocalHoldEngine::new(store.clone(), engine_provider, limits, SearchConfig::default());
         let now = engine.now();
         let memories: Vec<Memory> = (0_i32..5_i32).map(|i| engine.build_memory(test_input(&format!("item {i}")), now).unwrap()).collect();
 
@@ -2416,7 +2416,7 @@ mod tests {
         let store = SqliteStore::in_memory().unwrap();
         let provider = Arc::new(InputIsolatingEmbedding::new());
         let engine_provider: Arc<dyn EmbeddingProvider> = Arc::<InputIsolatingEmbedding>::clone(&provider);
-        let engine = RecallEngine::new(store.clone(), engine_provider, LimitsConfig::default(), SearchConfig::default());
+        let engine = LocalHoldEngine::new(store.clone(), engine_provider, LimitsConfig::default(), SearchConfig::default());
         let now = engine.now();
         let memories: Vec<Memory> = ["valid first", "invalid", "valid second"]
             .into_iter()
@@ -2503,7 +2503,7 @@ mod tests {
             ..LimitsConfig::default()
         };
         let engine_provider: Arc<dyn EmbeddingProvider> = Arc::<BatchCountingEmbedding>::clone(&provider);
-        let engine = RecallEngine::new(store.clone(), engine_provider, limits, SearchConfig::default());
+        let engine = LocalHoldEngine::new(store.clone(), engine_provider, limits, SearchConfig::default());
 
         let outcome = engine.reembed(ReembedRequest::Bulk { limit: 5 }).await.unwrap();
         assert!(matches!(outcome, ReembedOutcome::Queued(5)));

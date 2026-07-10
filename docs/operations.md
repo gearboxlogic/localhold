@@ -14,9 +14,7 @@ configuration directory:
 - Windows: `%APPDATA%\localhold\localhold.toml`
 
 LocalHold does not load configuration from the current working directory.
-Existing `recall.toml` files in the same user configuration directory remain a
-temporary fallback when `localhold.toml` is absent. Runtime overrides continue
-to use the documented `RECALL_*` environment variables.
+Runtime overrides use the documented `LOCALHOLD_*` environment variables.
 
 Start from [the example configuration](../localhold.example.toml). Restrict
 config-file permissions because embedding API keys, HTTP bearer tokens, and
@@ -31,7 +29,7 @@ or cloud endpoint. LocalHold does not start or manage that service.
 
 Review the endpoint operator's retention, logging, residency, and access
 policies before enabling it. Do not place API keys in URLs; use
-`embedding.openai_compatible.api_key` or `RECALL_EMBEDDING_API_KEY`.
+`embedding.openai_compatible.api_key` or `LOCALHOLD_EMBEDDING_API_KEY`.
 Provider-specific request and authentication settings are documented in
 [Embedding Providers](embedding-providers.md).
 
@@ -97,7 +95,7 @@ Use the PostgreSQL tools that match the server version and follow the database
 operator's normal encryption and retention policy. A typical logical backup is:
 
 ```sh
-pg_dump --format=custom --file=localhold.dump "$RECALL_POSTGRES_URL"
+pg_dump --format=custom --file=localhold.dump "$LOCALHOLD_POSTGRES_URL"
 ```
 
 Restore into an empty database and run LocalHold against it only after the
@@ -105,7 +103,7 @@ restore succeeds:
 
 ```sh
 pg_restore --exit-on-error --clean --if-exists \
-  --dbname="$RECALL_POSTGRES_URL" localhold.dump
+  --dbname="$LOCALHOLD_POSTGRES_URL" localhold.dump
 ```
 
 Test restore procedures on a disposable database. PostgreSQL preview support

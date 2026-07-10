@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use localhold::{
     config::{LimitsConfig, SearchConfig},
-    engine::RecallEngine,
+    engine::LocalHoldEngine,
     store::SqliteStore,
     types::MemoryId,
 };
@@ -16,9 +16,9 @@ use crate::helpers::DeterministicEmbedding;
 /// Items per batch in quick tests.
 const BATCH_SIZE: usize = 5;
 
-fn make_engine() -> RecallEngine<SqliteStore> {
+fn make_engine() -> LocalHoldEngine<SqliteStore> {
     let store = SqliteStore::in_memory().unwrap();
-    RecallEngine::new(store, Arc::new(DeterministicEmbedding), LimitsConfig::default(), SearchConfig::default())
+    LocalHoldEngine::new(store, Arc::new(DeterministicEmbedding), LimitsConfig::default(), SearchConfig::default())
 }
 
 #[tokio::test]

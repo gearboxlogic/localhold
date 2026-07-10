@@ -11,7 +11,7 @@ small, reviewable, and grounded in the current repository.
 - Do not revert changes you did not make.
 - Never commit credentials, local configuration, databases, model files, build
   output, personal paths, or internal planning material.
-- Treat `RECALL_*` values and memory content as potentially sensitive.
+- Treat `LOCALHOLD_*` values and memory content as potentially sensitive.
 
 ## Repository Map
 

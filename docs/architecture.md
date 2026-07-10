@@ -6,16 +6,16 @@ LocalHold is a standalone Rust MCP server for long-term agent memory. It stores 
 
 ```text
 MCP client
-  -> RecallServer
-      -> RecallEngine
+  -> LocalHoldServer
+      -> LocalHoldEngine
           -> EmbeddingOrchestrator
           -> MemoryStore
               -> SqliteStore
               -> PostgresStore
 ```
 
-- `RecallServer` in `src/server/` owns the MCP tool handlers and request/response schemas.
-- `RecallEngine` in `src/engine.rs` owns validation, search orchestration, audit behavior, and write flows.
+- `LocalHoldServer` in `src/server/` owns the MCP tool handlers and request/response schemas.
+- `LocalHoldEngine` in `src/engine.rs` owns validation, search orchestration, audit behavior, and write flows.
 - `EmbeddingOrchestrator` in `src/embedding/orchestrator.rs` enforces the store-then-embed invariant and coordinates background embedding work.
 - `SqliteStore` in `src/store/sqlite.rs` is the default persistence backend and delegates to focused store modules for CRUD, query building, search, schema, and admin work.
 - `PostgresStore` in `src/store/postgres.rs` is the opt-in PostgreSQL backend with async pooling, schema bootstrap, PostgreSQL full-text search, and `pgvector` vector search.

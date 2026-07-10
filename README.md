@@ -69,9 +69,13 @@ model = "nomic-embed-text"
 # api_key = "..."
 ```
 
-The endpoint must implement `GET /v1/models` and `POST /v1/embeddings`.
-vLLM, llama.cpp, Ollama, and hosted services can be used when they expose this
+The endpoint must implement `POST /embeddings` beneath the configured base URL.
+The default startup check also requires `GET /models`; set
+`health_check = "disabled"` for providers that omit that route. vLLM,
+llama.cpp, Ollama, and hosted services can be used when they expose this
 contract. Ollama is one optional implementation; it is not required or assumed.
+See [Embedding Providers](docs/embedding-providers.md) for cloud authentication,
+dimensions, health checks, and transport security.
 
 LocalHold records the endpoint, model, and dimensions that produced stored
 vectors and refuses to mix a different vector space. To change any of them,

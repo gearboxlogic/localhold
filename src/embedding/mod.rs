@@ -1,5 +1,7 @@
 //! Embedding provider abstraction with OpenAI-compatible HTTP, noop, and resilient implementations.
 
+/// Configured provider construction and vector-space identity.
+pub mod factory;
 /// Fallback embedding provider (always returns errors).
 pub mod noop;
 /// OpenAI-compatible embedding provider.

@@ -4,7 +4,10 @@ use reqwest::{StatusCode, header::AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 
 use super::{BoxFuture, EmbeddingProvider};
-use crate::{config::OpenAiCompatibleConfig, error::EmbeddingError};
+use crate::{
+    config::{EmbeddingHealthCheck, OpenAiAuthMode, OpenAiCompatibleConfig},
+    error::EmbeddingError,
+};
 
 /// Embedding provider backed by an OpenAI-compatible `/v1/embeddings` endpoint.
 pub struct OpenAiEmbedding {
@@ -12,6 +15,9 @@ pub struct OpenAiEmbedding {
     base_url: String,
     model: String,
     api_key: Option<String>,
+    auth_mode: OpenAiAuthMode,
+    send_dimensions: bool,
+    health_check: EmbeddingHealthCheck,
     dimensions: usize,
 }
 
@@ -30,6 +36,8 @@ struct EmbeddingRequest<'a, T> {
     model: &'a str,
     input: T,
     encoding_format: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dimensions: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -139,12 +147,19 @@ impl OpenAiEmbedding {
     ///
     /// Returns a transient embedding error if the HTTP client cannot be built.
     pub fn new(config: &OpenAiCompatibleConfig, dimensions: usize, timeout: Duration) -> Result<Self, EmbeddingError> {
-        let client = reqwest::Client::builder().timeout(timeout).build().map_err(classify_reqwest_error)?;
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(classify_reqwest_error)?;
         Ok(Self {
             client,
             base_url: config.base_url.trim().trim_end_matches('/').to_owned(),
             model: config.model.clone(),
             api_key: config.api_key.clone(),
+            auth_mode: config.auth_mode,
+            send_dimensions: config.send_dimensions,
+            health_check: config.health_check,
             dimensions,
         })
     }
@@ -156,7 +171,10 @@ impl OpenAiEmbedding {
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let request = self.client.request(method, self.endpoint(path));
         if let Some(api_key) = self.api_key.as_deref().filter(|api_key| !api_key.is_empty()) {
-            request.header(AUTHORIZATION, format!("Bearer {api_key}"))
+            match self.auth_mode {
+                OpenAiAuthMode::Bearer => request.header(AUTHORIZATION, format!("Bearer {api_key}")),
+                OpenAiAuthMode::ApiKey => request.header("api-key", api_key),
+            }
         } else {
             request
         }
@@ -167,6 +185,7 @@ impl OpenAiEmbedding {
             model: &self.model,
             input,
             encoding_format: "float",
+            dimensions: self.send_dimensions.then_some(self.dimensions),
         };
         let response = self
             .request(reqwest::Method::POST, "embeddings")
@@ -209,6 +228,10 @@ impl OpenAiEmbedding {
     }
 
     async fn health_check_impl(&self) -> Result<(), EmbeddingError> {
+        if self.health_check == EmbeddingHealthCheck::Disabled {
+            return Ok(());
+        }
+
         let response = self.request(reqwest::Method::GET, "models").send().await.map_err(classify_reqwest_error)?;
 
         let status = response.status();
@@ -245,26 +268,39 @@ impl EmbeddingProvider for OpenAiEmbedding {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use axum::{
         Router,
         body::to_bytes,
         extract::{Request, State},
         http::{StatusCode, header::AUTHORIZATION as AXUM_AUTHORIZATION},
+        response::Redirect,
         routing::{get, post},
     };
     use serde_json::{Value, json};
     use tokio::task::JoinHandle;
 
     use super::OpenAiEmbedding;
-    use crate::{config::OpenAiCompatibleConfig, embedding::EmbeddingProvider as _, error::EmbeddingError};
+    use crate::{
+        config::{EmbeddingHealthCheck, OpenAiAuthMode, OpenAiCompatibleConfig},
+        embedding::EmbeddingProvider as _,
+        error::EmbeddingError,
+    };
 
     #[derive(Clone)]
     struct MockState {
         embed_status: StatusCode,
         embed_body: Arc<str>,
         expected_auth: Option<Arc<str>>,
+        expected_api_key: Option<Arc<str>>,
+        expected_dimensions: Option<u64>,
         models_status: StatusCode,
         models_body: Arc<str>,
     }
@@ -277,10 +313,14 @@ mod tests {
         models_body: &'a str,
         dimensions: usize,
         api_key: Option<&'a str>,
+        auth_mode: OpenAiAuthMode,
+        send_dimensions: bool,
+        health_check: EmbeddingHealthCheck,
     }
 
     async fn embeddings_handler(State(state): State<MockState>, request: Request) -> (StatusCode, [(&'static str, &'static str); 1], String) {
         let authorization = request.headers().get(AXUM_AUTHORIZATION).and_then(|value| value.to_str().ok()).map(ToOwned::to_owned);
+        let api_key = request.headers().get("api-key").and_then(|value| value.to_str().ok()).map(ToOwned::to_owned);
         if authorization.as_deref() != state.expected_auth.as_deref() {
             return (
                 StatusCode::BAD_REQUEST,
@@ -288,8 +328,22 @@ mod tests {
                 format!(r#"{{"error":"unexpected authorization header: {authorization:?}"}}"#),
             );
         }
+        if api_key.as_deref() != state.expected_api_key.as_deref() {
+            return (
+                StatusCode::BAD_REQUEST,
+                [("content-type", "application/json")],
+                format!(r#"{{"error":"unexpected api-key header: {api_key:?}"}}"#),
+            );
+        }
         let body = to_bytes(request.into_body(), 1_048_576).await.unwrap();
         let request: Value = serde_json::from_slice(&body).unwrap();
+        if request.get("dimensions").and_then(Value::as_u64) != state.expected_dimensions {
+            return (
+                StatusCode::BAD_REQUEST,
+                [("content-type", "application/json")],
+                format!(r#"{{"error":"unexpected dimensions field: {:?}"}}"#, request.get("dimensions")),
+            );
+        }
         let body = if state.embed_body.as_ref() == "__echo_request__" {
             json!({ "request": request }).to_string()
         } else {
@@ -300,6 +354,11 @@ mod tests {
 
     async fn models_handler(State(state): State<MockState>) -> (StatusCode, [(&'static str, &'static str); 1], String) {
         (state.models_status, [("content-type", "application/json")], (*state.models_body).to_owned())
+    }
+
+    async fn redirected_embeddings_handler(State(counter): State<Arc<AtomicUsize>>) -> (StatusCode, &'static str) {
+        let _previous = counter.fetch_add(1, Ordering::Relaxed);
+        (StatusCode::OK, r#"{"data":[{"index":0,"embedding":[1.0,0.0,0.0]}]}"#)
     }
 
     fn build_router(state: MockState) -> Router {
@@ -327,6 +386,9 @@ mod tests {
             models_body,
             dimensions,
             api_key: Some("test-key"),
+            auth_mode: OpenAiAuthMode::Bearer,
+            send_dimensions: false,
+            health_check: EmbeddingHealthCheck::Models,
         })
         .await
     }
@@ -337,7 +399,11 @@ mod tests {
         let app = build_router(MockState {
             embed_status: setup.embed_status,
             embed_body: Arc::from(setup.embed_body),
-            expected_auth: setup.api_key.map(|key| Arc::from(format!("Bearer {key}"))),
+            expected_auth: (setup.auth_mode == OpenAiAuthMode::Bearer)
+                .then(|| setup.api_key.map(|key| Arc::from(format!("Bearer {key}"))))
+                .flatten(),
+            expected_api_key: (setup.auth_mode == OpenAiAuthMode::ApiKey).then(|| setup.api_key.map(Arc::from)).flatten(),
+            expected_dimensions: setup.send_dimensions.then_some(setup.dimensions).and_then(|dimensions| u64::try_from(dimensions).ok()),
             models_status: setup.models_status,
             models_body: Arc::from(setup.models_body),
         });
@@ -352,6 +418,10 @@ mod tests {
             base_url: format!("http://127.0.0.1:{port}/v1"),
             model: "test-model".into(),
             api_key: setup.api_key.map(ToOwned::to_owned),
+            auth_mode: setup.auth_mode,
+            send_dimensions: setup.send_dimensions,
+            health_check: setup.health_check,
+            ..OpenAiCompatibleConfig::default()
         };
         (OpenAiEmbedding::new(&config, setup.dimensions, Duration::from_secs(30)).unwrap(), server)
     }
@@ -381,10 +451,67 @@ mod tests {
             models_body: r#"{"data":[{"id":"test-model:latest"}]}"#,
             dimensions: 3,
             api_key: None,
+            auth_mode: OpenAiAuthMode::Bearer,
+            send_dimensions: false,
+            health_check: EmbeddingHealthCheck::Models,
         })
         .await;
         let embedding = provider.embed("hello").await.unwrap();
         assert_eq!(embedding, vec![0.6, 0.8, 0.0]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn api_key_auth_mode_uses_azure_header() {
+        let (provider, server) = setup_provider_with(ProviderSetup {
+            embed_status: StatusCode::OK,
+            embed_body: r#"{"data":[{"index":0,"embedding":[3.0,4.0,0.0]}]}"#,
+            models_status: StatusCode::OK,
+            models_body: r#"{"data":[{"id":"test-model"}]}"#,
+            dimensions: 3,
+            api_key: Some("azure-key"),
+            auth_mode: OpenAiAuthMode::ApiKey,
+            send_dimensions: false,
+            health_check: EmbeddingHealthCheck::Models,
+        })
+        .await;
+        let _embedding = provider.embed("hello").await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn configured_dimensions_are_included_in_request() {
+        let (provider, server) = setup_provider_with(ProviderSetup {
+            embed_status: StatusCode::OK,
+            embed_body: r#"{"data":[{"index":0,"embedding":[3.0,4.0,0.0]}]}"#,
+            models_status: StatusCode::OK,
+            models_body: r#"{"data":[{"id":"test-model"}]}"#,
+            dimensions: 3,
+            api_key: Some("test-key"),
+            auth_mode: OpenAiAuthMode::Bearer,
+            send_dimensions: true,
+            health_check: EmbeddingHealthCheck::Models,
+        })
+        .await;
+        let _embedding = provider.embed("hello").await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn disabled_health_check_does_not_require_models_endpoint() {
+        let (provider, server) = setup_provider_with(ProviderSetup {
+            embed_status: StatusCode::OK,
+            embed_body: r#"{"data":[{"index":0,"embedding":[3.0,4.0,0.0]}]}"#,
+            models_status: StatusCode::NOT_FOUND,
+            models_body: "models endpoint unavailable",
+            dimensions: 3,
+            api_key: Some("test-key"),
+            auth_mode: OpenAiAuthMode::Bearer,
+            send_dimensions: false,
+            health_check: EmbeddingHealthCheck::Disabled,
+        })
+        .await;
+        provider.health_check().await.unwrap();
         server.abort();
     }
 
@@ -411,6 +538,33 @@ mod tests {
         let (provider, server) = setup_provider_with_status(StatusCode::SERVICE_UNAVAILABLE, "upstream down", StatusCode::OK, r#"{"data":[{"id":"test-model"}]}"#, 3).await;
         let err = provider.embed("hello").await.unwrap_err();
         assert!(matches!(err, EmbeddingError::Transient(_)));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn redirects_are_not_followed() {
+        let redirected_requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&redirected_requests);
+        let app = Router::new()
+            .route("/v1/embeddings", post(|| async { Redirect::temporary("/redirected") }))
+            .route("/redirected", post(redirected_embeddings_handler))
+            .with_state(counter);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let _result = axum::serve(listener, app).await;
+        });
+        let config = OpenAiCompatibleConfig {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            model: "test-model".into(),
+            api_key: Some("must-not-be-forwarded".into()),
+            ..OpenAiCompatibleConfig::default()
+        };
+        let provider = OpenAiEmbedding::new(&config, 3, Duration::from_secs(30)).unwrap();
+
+        let error = provider.embed("hello").await.unwrap_err();
+        assert!(matches!(error, EmbeddingError::Permanent(_)));
+        assert_eq!(redirected_requests.load(Ordering::Relaxed), 0);
         server.abort();
     }
 

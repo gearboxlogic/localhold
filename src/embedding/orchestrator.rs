@@ -14,16 +14,10 @@ use tracing::{info, warn};
 use crate::{
     background_tasks::{BackgroundTaskKind, BackgroundTasks, EmbedAdmission},
     embedding::EmbeddingProvider,
-    error::{EmbeddingError, EngineError, StoreError, ValidationError},
+    error::{EngineError, StoreError, ValidationError},
     store::{MemoryStore, MemoryWithEmbedding, ReembedClaim},
     types::{AuditDraft, AuthorizedUpdateOutcome, Memory, MemoryId, MemoryUpdate, V2MemoryMetadata, V2MetadataPatch, WriteOutcome},
 };
-
-/// Maximum number of embed retry attempts for transient failures.
-const MAX_EMBED_RETRIES: u32 = 2;
-
-/// Initial backoff duration for embed retries (doubles on each attempt).
-const INITIAL_BACKOFF_MS: u64 = 500;
 
 /// Default maximum concurrent embedding tasks.
 const DEFAULT_MAX_CONCURRENT_EMBEDS: usize = 8;
@@ -425,7 +419,7 @@ async fn embed_and_store<S: MemoryStore>(
     expected_revision: i64,
     claim_token: Option<String>,
 ) {
-    let emb = match embed_with_retry(&embedding_provider, content, id).await {
+    let emb = match embedding_provider.embed(content).await {
         Ok(emb) => emb,
         Err(e) => {
             warn!(memory_id = %id, error = %e, "embedding failed after retries");
@@ -458,38 +452,6 @@ async fn release_embedding_claim<S: MemoryStore>(store: &S, id: MemoryId, expect
     if let Err(e) = store.release_embedding_claim(&id, expected_revision, claim_token).await {
         warn!(memory_id = %id, error = %e, "failed to release embedding claim");
     }
-}
-
-/// Attempt embedding with retry for transient failures.
-///
-/// Retries up to `MAX_EMBED_RETRIES` times with exponential backoff
-/// for `EmbeddingError::Transient` errors. Permanent and disabled
-/// errors are returned immediately.
-async fn embed_with_retry(provider: &Arc<dyn EmbeddingProvider>, content: &str, id: MemoryId) -> Result<Vec<f32>, EmbeddingError> {
-    let mut backoff_ms = INITIAL_BACKOFF_MS;
-    for attempt in 0..=MAX_EMBED_RETRIES {
-        match provider.embed(content).await {
-            Ok(emb) => return Ok(emb),
-            Err(EmbeddingError::Transient(msg)) if attempt < MAX_EMBED_RETRIES => {
-                #[expect(clippy::arithmetic_side_effects, reason = "attempt + 1 cannot overflow: attempt < MAX_EMBED_RETRIES (2)")]
-                let display_attempt = attempt + 1;
-                let total_attempts = MAX_EMBED_RETRIES.saturating_add(1);
-                warn!(
-                    memory_id = %id,
-                    attempt = display_attempt,
-                    max_attempts = total_attempts,
-                    backoff_ms,
-                    error = %msg,
-                    "transient embed failure, retrying"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-                backoff_ms = backoff_ms.saturating_mul(2);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    // Unreachable due to loop structure, but satisfy the compiler.
-    provider.embed(content).await
 }
 
 #[expect(
@@ -540,7 +502,7 @@ mod tests {
     use std::{
         sync::{
             Arc as StdArc,
-            atomic::{AtomicU32, AtomicUsize, Ordering},
+            atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -548,57 +510,10 @@ mod tests {
     use super::*;
     use crate::{
         background_tasks::BackgroundTasks,
+        error::EmbeddingError,
         store::{MemoryReader as _, MemoryWriter as _, SqliteStore},
         types::{AccessPolicy, Importance, Memory, MemoryType, Provenance},
     };
-
-    /// Mock embedding provider that fails `failures` times with Transient, then succeeds.
-    struct TransientFailProvider {
-        failures: AtomicU32,
-    }
-
-    impl TransientFailProvider {
-        fn new(fail_count: u32) -> Self {
-            Self {
-                failures: AtomicU32::new(fail_count),
-            }
-        }
-
-        fn try_fail(&self) -> Result<(), EmbeddingError> {
-            let remaining = self.failures.load(Ordering::Relaxed);
-            if remaining > 0 {
-                let _ = self.failures.fetch_sub(1, Ordering::Relaxed);
-                return Err(EmbeddingError::Transient("test transient failure".into()));
-            }
-            Ok(())
-        }
-    }
-
-    impl EmbeddingProvider for TransientFailProvider {
-        fn embed<'a>(&'a self, _text: &'a str) -> crate::embedding::BoxFuture<'a, Result<Vec<f32>, EmbeddingError>> {
-            Box::pin(async move {
-                self.try_fail()?;
-                Ok(vec![1.0_f32, 0.0, 0.0])
-            })
-        }
-
-        fn health_check(&self) -> crate::embedding::BoxFuture<'_, Result<(), EmbeddingError>> {
-            Box::pin(async { Ok(()) })
-        }
-    }
-
-    /// Mock provider that always fails permanently.
-    struct PermanentFailProvider;
-
-    impl EmbeddingProvider for PermanentFailProvider {
-        fn embed<'a>(&'a self, _text: &'a str) -> crate::embedding::BoxFuture<'a, Result<Vec<f32>, EmbeddingError>> {
-            Box::pin(async { Err(EmbeddingError::Permanent("permanent test failure".into())) })
-        }
-
-        fn health_check(&self) -> crate::embedding::BoxFuture<'_, Result<(), EmbeddingError>> {
-            Box::pin(async { Ok(()) })
-        }
-    }
 
     struct FixedSizeProvider;
 
@@ -665,44 +580,6 @@ mod tests {
             entities: Vec::new(),
             was_redacted: false,
         }
-    }
-
-    // -- RR-123: embed_with_retry retry behavior tests -----------------------
-
-    #[tokio::test]
-    async fn embed_with_retry_succeeds_on_first_attempt() {
-        let provider: Arc<dyn EmbeddingProvider> = Arc::new(TransientFailProvider::new(0));
-        let id = MemoryId::new();
-        let result = embed_with_retry(&provider, "test", id).await;
-        assert!(result.is_ok(), "should succeed on first attempt");
-        assert_eq!(result.unwrap(), vec![1.0_f32, 0.0, 0.0]);
-    }
-
-    #[tokio::test]
-    async fn embed_with_retry_succeeds_after_transient_failures() {
-        // MAX_EMBED_RETRIES is 2, so 2 transient failures + 1 success should work.
-        let provider: Arc<dyn EmbeddingProvider> = Arc::new(TransientFailProvider::new(2));
-        let id = MemoryId::new();
-        let result = embed_with_retry(&provider, "test", id).await;
-        assert!(result.is_ok(), "should succeed after 2 transient failures");
-    }
-
-    #[tokio::test]
-    async fn embed_with_retry_fails_after_max_retries() {
-        // 3 transient failures exceeds MAX_EMBED_RETRIES (2), so should fail.
-        let provider: Arc<dyn EmbeddingProvider> = Arc::new(TransientFailProvider::new(10));
-        let id = MemoryId::new();
-        let result = embed_with_retry(&provider, "test", id).await;
-        assert!(result.is_err(), "should fail when all retries exhausted");
-    }
-
-    #[tokio::test]
-    async fn embed_with_retry_permanent_error_no_retry() {
-        let provider: Arc<dyn EmbeddingProvider> = Arc::new(PermanentFailProvider);
-        let id = MemoryId::new();
-        let result = embed_with_retry(&provider, "test", id).await;
-        assert!(result.is_err(), "permanent errors should not be retried");
-        assert!(matches!(result.unwrap_err(), EmbeddingError::Permanent(_)));
     }
 
     #[tokio::test]

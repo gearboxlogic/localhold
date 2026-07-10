@@ -44,11 +44,11 @@ clippy:
 
 # Format all code (requires nightly: `rustup toolchain install nightly -c rustfmt`)
 fmt:
-    RUSTUP_TOOLCHAIN=nightly rustup run nightly cargo fmt --all
+    rustup run nightly cargo-fmt --all
 
 # Check formatting (requires nightly)
 fmt-check:
-    RUSTUP_TOOLCHAIN=nightly rustup run nightly cargo fmt --check
+    rustup run nightly cargo-fmt --all -- --check
 
 # Run cargo-deny supply chain audit
 deny:

@@ -136,6 +136,16 @@ pub enum EmbeddingError {
     #[error("transient embedding error: {0}")]
     Transient(#[source] Box<dyn std::error::Error + Send + Sync>),
 
+    /// The provider rejected work because its current capacity or quota was exhausted.
+    #[error("embedding provider rate limited the request: {source}")]
+    RateLimited {
+        /// Provider or HTTP error describing the rejection.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+        /// Provider-requested delay before another attempt, when supplied.
+        retry_after: Option<std::time::Duration>,
+    },
+
     /// A permanent error (bad model name, invalid input) — retrying won't help.
     #[error("permanent embedding error: {0}")]
     Permanent(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -143,4 +153,21 @@ pub enum EmbeddingError {
     /// Embedding is intentionally disabled (noop provider).
     #[error("embedding is disabled")]
     Disabled,
+}
+
+impl EmbeddingError {
+    /// Return the provider-requested retry delay for rate-limit errors.
+    #[must_use]
+    pub const fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::RateLimited { retry_after, .. } => *retry_after,
+            Self::Transient(_) | Self::Permanent(_) | Self::Disabled => None,
+        }
+    }
+
+    /// Whether this error is eligible for retry.
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        matches!(self, Self::Transient(_) | Self::RateLimited { .. })
+    }
 }

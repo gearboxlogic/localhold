@@ -48,6 +48,8 @@ tokio-util = { version = "0.7", features = ["rt"] }
 
 # Misc
 dirs = "6"
+fastrand = "2"
+httpdate = "1"
 parking_lot = "0.12"
 
 # Cross-encoder reranker (optional)

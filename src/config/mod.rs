@@ -503,6 +503,12 @@ pub struct LimitsConfig {
     /// Maximum embedding requests allowed to run concurrently.
     /// Default: 8 (bounds local accelerator load and hosted-provider pressure).
     pub max_concurrent_embedding_requests: usize,
+    /// Number of retries after an initial retryable embedding failure.
+    pub embedding_max_retries: u32,
+    /// Delay before the first embedding retry, in milliseconds.
+    pub embedding_retry_initial_backoff_ms: u64,
+    /// Maximum client or provider-directed retry delay, in milliseconds.
+    pub embedding_retry_max_backoff_ms: u64,
     /// Graceful shutdown timeout in seconds for draining background tasks.
     /// Default: 10 (long enough for in-flight embeddings to finish while
     /// preventing indefinite hangs on unresponsive providers).
@@ -541,6 +547,9 @@ impl Default for LimitsConfig {
             max_reembed_limit: 100,
             embedding_timeout_secs: 30,
             max_concurrent_embedding_requests: 8,
+            embedding_max_retries: 2,
+            embedding_retry_initial_backoff_ms: 500,
+            embedding_retry_max_backoff_ms: 30_000,
             shutdown_timeout_secs: 10,
             max_top_tags_limit: 100,
             max_history_limit: 500,
@@ -809,6 +818,9 @@ impl Config {
         apply_parsed_env(env, "RECALL_MAX_REEMBED_LIMIT", &mut self.limits.max_reembed_limit);
         apply_parsed_env(env, "RECALL_EMBEDDING_TIMEOUT", &mut self.limits.embedding_timeout_secs);
         apply_parsed_env(env, "RECALL_MAX_CONCURRENT_EMBEDDING_REQUESTS", &mut self.limits.max_concurrent_embedding_requests);
+        apply_parsed_env(env, "RECALL_EMBEDDING_MAX_RETRIES", &mut self.limits.embedding_max_retries);
+        apply_parsed_env(env, "RECALL_EMBEDDING_RETRY_INITIAL_BACKOFF_MS", &mut self.limits.embedding_retry_initial_backoff_ms);
+        apply_parsed_env(env, "RECALL_EMBEDDING_RETRY_MAX_BACKOFF_MS", &mut self.limits.embedding_retry_max_backoff_ms);
         apply_parsed_env(env, "RECALL_SHUTDOWN_TIMEOUT", &mut self.limits.shutdown_timeout_secs);
         apply_parsed_env(env, "RECALL_MAX_TOP_TAGS_LIMIT", &mut self.limits.max_top_tags_limit);
         apply_parsed_env(env, "RECALL_MAX_HISTORY_LIMIT", &mut self.limits.max_history_limit);
@@ -978,6 +990,14 @@ fn validate_limits_config(config: &LimitsConfig) -> Result<(), EngineError> {
         ("limits.max_reembed_limit", config.max_reembed_limit),
         ("limits.embedding_timeout_secs", usize::try_from(config.embedding_timeout_secs).unwrap_or(usize::MAX)),
         ("limits.max_concurrent_embedding_requests", config.max_concurrent_embedding_requests),
+        (
+            "limits.embedding_retry_initial_backoff_ms",
+            usize::try_from(config.embedding_retry_initial_backoff_ms).unwrap_or(usize::MAX),
+        ),
+        (
+            "limits.embedding_retry_max_backoff_ms",
+            usize::try_from(config.embedding_retry_max_backoff_ms).unwrap_or(usize::MAX),
+        ),
         ("limits.shutdown_timeout_secs", usize::try_from(config.shutdown_timeout_secs).unwrap_or(usize::MAX)),
         ("limits.max_top_tags_limit", config.max_top_tags_limit),
         ("limits.max_history_limit", config.max_history_limit),
@@ -993,6 +1013,14 @@ fn validate_limits_config(config: &LimitsConfig) -> Result<(), EngineError> {
     }
     if config.max_candidate_pool_size < config.max_search_limit {
         return Err(EngineError::config("limits.max_candidate_pool_size must be >= limits.max_search_limit"));
+    }
+    if config.embedding_max_retries > 10 {
+        return Err(EngineError::config("limits.embedding_max_retries must be <= 10"));
+    }
+    if config.embedding_retry_max_backoff_ms < config.embedding_retry_initial_backoff_ms {
+        return Err(EngineError::config(
+            "limits.embedding_retry_max_backoff_ms must be >= limits.embedding_retry_initial_backoff_ms",
+        ));
     }
     Ok(())
 }
@@ -1183,6 +1211,9 @@ fn collect_recall_env_vars() -> HashMap<String, String> {
         "RECALL_MAX_REEMBED_LIMIT",
         "RECALL_EMBEDDING_TIMEOUT",
         "RECALL_MAX_CONCURRENT_EMBEDDING_REQUESTS",
+        "RECALL_EMBEDDING_MAX_RETRIES",
+        "RECALL_EMBEDDING_RETRY_INITIAL_BACKOFF_MS",
+        "RECALL_EMBEDDING_RETRY_MAX_BACKOFF_MS",
         "RECALL_SHUTDOWN_TIMEOUT",
         "RECALL_MAX_TOP_TAGS_LIMIT",
         "RECALL_MAX_HISTORY_LIMIT",

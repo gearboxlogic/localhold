@@ -36,7 +36,12 @@ pub async fn create_embedding_provider(config: &EmbeddingConfig, limits: &Limits
                     return Arc::new(NoopEmbedding::new());
                 }
             };
-            let mut resilient_config = ResilientConfig::default();
+            let mut resilient_config = ResilientConfig {
+                max_retries: limits.embedding_max_retries,
+                initial_backoff: Duration::from_millis(limits.embedding_retry_initial_backoff_ms),
+                max_backoff: Duration::from_millis(limits.embedding_retry_max_backoff_ms),
+                ..ResilientConfig::default()
+            };
             if let Some(notify) = recovery_notify {
                 resilient_config = resilient_config.with_recovery_notify(notify);
             }

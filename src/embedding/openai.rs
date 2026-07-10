@@ -1,6 +1,9 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use reqwest::{StatusCode, header::AUTHORIZATION};
+use reqwest::{
+    StatusCode,
+    header::{AUTHORIZATION, HeaderMap, RETRY_AFTER},
+};
 use serde::{Deserialize, Serialize};
 
 use super::{BoxFuture, EmbeddingProvider};
@@ -92,12 +95,45 @@ fn classify_reqwest_error(err: reqwest::Error) -> EmbeddingError {
     }
 }
 
-fn classify_http_status(status: StatusCode, context: &str, body: &str) -> EmbeddingError {
+fn classify_http_status(status: StatusCode, context: &str, body: &str, retry_after: Option<Duration>) -> EmbeddingError {
     let message = format!("openai-compatible {context} failed with HTTP {status}: {body}");
-    if status.is_server_error() || matches!(status, StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS) {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        EmbeddingError::RateLimited {
+            source: message.into(),
+            retry_after,
+        }
+    } else if status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT {
         EmbeddingError::Transient(message.into())
     } else {
         EmbeddingError::Permanent(message.into())
+    }
+}
+
+fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
+    let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let retry_at = httpdate::parse_http_date(value).ok()?;
+    Some(retry_at.duration_since(SystemTime::now()).unwrap_or_default())
+}
+
+async fn read_error_body(mut response: reqwest::Response) -> String {
+    const MAX_ERROR_BODY_BYTES: usize = 4_096;
+
+    let mut body = Vec::with_capacity(MAX_ERROR_BODY_BYTES);
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = MAX_ERROR_BODY_BYTES.saturating_sub(body.len());
+                body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                if chunk.len() > remaining {
+                    return format!("{}<truncated>", String::from_utf8_lossy(&body));
+                }
+            }
+            Ok(None) => return String::from_utf8_lossy(&body).into_owned(),
+            Err(error) => return format!("<failed to read response body: {error}>"),
+        }
     }
 }
 
@@ -196,8 +232,9 @@ impl OpenAiEmbedding {
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_else(|e| format!("<failed to read response body: {e}>"));
-            return Err(classify_http_status(status, context, &body));
+            let retry_after = parse_retry_after(response.headers());
+            let body = read_error_body(response).await;
+            return Err(classify_http_status(status, context, &body, retry_after));
         }
 
         let response = response.json::<EmbeddingResponse>().await.map_err(classify_reqwest_error)?;
@@ -236,8 +273,9 @@ impl OpenAiEmbedding {
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_else(|e| format!("<failed to read response body: {e}>"));
-            return Err(classify_http_status(status, "health check", &body));
+            let retry_after = parse_retry_after(response.headers());
+            let body = read_error_body(response).await;
+            return Err(classify_http_status(status, "health check", &body, retry_after));
         }
 
         let models = response.json::<ModelsResponse>().await.map_err(classify_reqwest_error)?;
@@ -359,6 +397,28 @@ mod tests {
     async fn redirected_embeddings_handler(State(counter): State<Arc<AtomicUsize>>) -> (StatusCode, &'static str) {
         let _previous = counter.fetch_add(1, Ordering::Relaxed);
         (StatusCode::OK, r#"{"data":[{"index":0,"embedding":[1.0,0.0,0.0]}]}"#)
+    }
+
+    async fn rate_limited_embeddings_handler() -> (StatusCode, [(&'static str, &'static str); 1], &'static str) {
+        (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "4")], "quota exceeded")
+    }
+
+    async fn oversized_error_handler() -> (StatusCode, String) {
+        (StatusCode::BAD_REQUEST, "x".repeat(5_000))
+    }
+
+    async fn provider_for_router(app: Router) -> (OpenAiEmbedding, JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let _result = axum::serve(listener, app).await;
+        });
+        let config = OpenAiCompatibleConfig {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            model: "test-model".into(),
+            ..OpenAiCompatibleConfig::default()
+        };
+        (OpenAiEmbedding::new(&config, 3, Duration::from_secs(30)).unwrap(), server)
     }
 
     fn build_router(state: MockState) -> Router {
@@ -538,6 +598,45 @@ mod tests {
         let (provider, server) = setup_provider_with_status(StatusCode::SERVICE_UNAVAILABLE, "upstream down", StatusCode::OK, r#"{"data":[{"id":"test-model"}]}"#, 3).await;
         let err = provider.embed("hello").await.unwrap_err();
         assert!(matches!(err, EmbeddingError::Transient(_)));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn http_429_preserves_retry_after() {
+        let app = Router::new().route("/v1/embeddings", post(rate_limited_embeddings_handler));
+        let (provider, server) = provider_for_router(app).await;
+
+        let error = provider.embed("hello").await.unwrap_err();
+        assert!(matches!(
+            error,
+            EmbeddingError::RateLimited {
+                retry_after: Some(delay),
+                ..
+            } if delay == Duration::from_secs(4)
+        ));
+        server.abort();
+    }
+
+    #[test]
+    fn retry_after_accepts_http_dates() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        let retry_at = std::time::SystemTime::now() + Duration::from_secs(10);
+        let _previous = headers.insert(reqwest::header::RETRY_AFTER, httpdate::fmt_http_date(retry_at).parse().unwrap());
+
+        let delay = super::parse_retry_after(&headers).unwrap();
+        assert!(delay >= Duration::from_secs(8));
+        assert!(delay <= Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn oversized_error_body_is_truncated() {
+        let app = Router::new().route("/v1/embeddings", post(oversized_error_handler));
+        let (provider, server) = provider_for_router(app).await;
+
+        let error = provider.embed("hello").await.unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("<truncated>"));
+        assert!(message.len() < 4_300);
         server.abort();
     }
 

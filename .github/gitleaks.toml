@@ -5,7 +5,7 @@ useDefault = true
 
 [[allowlists]]
 description = "Generated Git and Rust build data are scanned separately or reproducible"
-paths = ['''(^|/)\.git/''', '''^target/''']
+paths = ['''(^|/)\.git/''', '''^\.cache/''', '''^\.cargo/''', '''^\.rustup/''', '''^target/''']
 
 [[rules]]
 id = "generic-api-key"

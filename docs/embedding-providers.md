@@ -98,6 +98,21 @@ the wrong number of vectors, LocalHold retries that chunk one input at a time
 so one invalid record does not block valid records. Transient and rate-limit
 failures are not expanded into individual requests.
 
+Concurrency and retry limits are per LocalHold process. When several instances
+share a database and one hosted endpoint, size
+`max_concurrent_embedding_requests` for their aggregate traffic; LocalHold does
+not provide a distributed provider-rate limiter. Durable re-embedding claims
+prevent instances from selecting the same pending revision during normal bulk
+recovery. Revision-checked writes remain the final guard if a lease expires or
+an immediate write races with recovery, so duplicate inference is possible but
+a stale vector cannot replace a current one.
+
+To compare explicit batch sizes against the local store and task scheduler, run
+`cargo bench --bench embed_throughput`. The benchmark includes chunk sizes 1
+and 32 across several workload sizes with fixed simulated request latency.
+Provider-specific network and model latency should still be measured in the
+intended deployment before changing the defaults.
+
 Changing the endpoint, model, or dimensions changes the stored vector-space
 identity. Follow the reindex procedure in [Operations](operations.md) before
 starting LocalHold with the new identity.

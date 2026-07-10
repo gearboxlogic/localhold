@@ -4,7 +4,7 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use localhold::{
@@ -20,20 +20,32 @@ use crate::common::seeder::BenchSeeder;
 // Deterministic embedding provider (local to this benchmark)
 // ---------------------------------------------------------------------------
 
-/// Deterministic embedding provider for benchmarks.
+/// Deterministic embedding provider with fixed simulated request latency.
 ///
 /// Uses FNV-1a hash of the input text to seed a 768-dim vector, so identical
-/// text produces identical embeddings. This avoids network calls while
-/// exercising the full store+embed pipeline.
+/// text produces identical embeddings. One fixed delay per provider call
+/// approximates remote request overhead without network variance.
 struct DeterministicEmbedding;
+
+const SIMULATED_REQUEST_LATENCY: Duration = Duration::from_millis(2);
 
 impl localhold::embedding::EmbeddingProvider for DeterministicEmbedding {
     fn embed<'a>(&'a self, text: &'a str) -> localhold::embedding::BoxFuture<'a, Result<Vec<f32>, localhold::error::EmbeddingError>> {
-        Box::pin(async move { Ok(deterministic_embed(text)) })
+        Box::pin(async move {
+            tokio::time::sleep(SIMULATED_REQUEST_LATENCY).await;
+            Ok(deterministic_embed(text))
+        })
     }
 
     fn health_check(&self) -> localhold::embedding::BoxFuture<'_, Result<(), localhold::error::EmbeddingError>> {
         Box::pin(async { Ok(()) })
+    }
+
+    fn embed_batch<'a>(&'a self, texts: &'a [&'a str]) -> localhold::embedding::BoxFuture<'a, Result<Vec<Vec<f32>>, localhold::error::EmbeddingError>> {
+        Box::pin(async move {
+            tokio::time::sleep(SIMULATED_REQUEST_LATENCY).await;
+            Ok(texts.iter().map(|text| deterministic_embed(text)).collect())
+        })
     }
 }
 
@@ -77,29 +89,33 @@ fn fnv1a(s: &str) -> u64 {
 
 /// Build an engine with `DeterministicEmbedding` to measure the full
 /// store-then-embed pipeline overhead (without network).
-fn make_engine() -> RecallEngine<SqliteStore> {
+fn make_engine(embedding_batch_size: usize) -> RecallEngine<SqliteStore> {
     let store = SqliteStore::in_memory().expect("in-memory store");
     let embedding: Arc<dyn localhold::embedding::EmbeddingProvider> = Arc::new(DeterministicEmbedding);
-    RecallEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
+    let mut limits = LimitsConfig::default();
+    limits.embedding_batch_size = embedding_batch_size;
+    RecallEngine::new(store, embedding, limits, SearchConfig::default())
 }
 
 async fn run_store_and_embed(engine: &RecallEngine<SqliteStore>, memories: Vec<Memory>) {
-    let _ids = engine.batch_store(memories, vec![]).await.expect("batch store");
+    let supersedes = vec![None; memories.len()];
+    let _ids = engine.batch_store(memories, supersedes).await.expect("batch store");
     // Wait for background embedding tasks to complete so we
     // measure the full pipeline cost.
-    engine.shutdown_for_test(std::time::Duration::from_secs(30_u64)).await;
+    engine.shutdown_for_test(Duration::from_secs(30_u64)).await;
 }
 
 #[expect(unused_results, reason = "criterion bench_with_input returns a builder ref we do not chain")]
 fn embed_throughput_benchmark(c: &mut Criterion) {
-    let mut group = c.benchmark_group("embed_throughput");
+    let mut group = c.benchmark_group("simulated_remote_embed_throughput");
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
-    for count in [1_usize, 10_usize, 50_usize] {
-        let engine = make_engine();
+    for (embedding_batch_size, count) in [(1_usize, 10_usize), (1, 50), (1, 100), (32, 10), (32, 50), (32, 100)] {
+        let engine = make_engine(embedding_batch_size);
         let mut seeder = BenchSeeder::new(77_u64);
+        let benchmark = BenchmarkId::new(format!("chunk-{embedding_batch_size}"), count);
 
-        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
+        group.bench_with_input(benchmark, &count, |b, &count| {
             b.to_async(&rt).iter(|| {
                 let memories = seeder.memories(count);
                 run_store_and_embed(&engine, memories)

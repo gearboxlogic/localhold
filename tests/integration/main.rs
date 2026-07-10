@@ -9,6 +9,7 @@ mod chaos_quick;
 mod chaos_standard;
 mod concurrency_stress;
 mod edge_cases;
+mod embedding_batch_hardening;
 mod embedding_races;
 mod fault_injection;
 #[expect(unused_results, reason = "test helpers discard intermediate results intentionally")]

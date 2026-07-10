@@ -25,6 +25,17 @@ Storage is local by default. When an external embedding provider is enabled,
 memory content and search queries are sent to the configured endpoint. LocalHold
 does not start or manage model servers.
 
+## Install A Release
+
+GitHub prereleases provide a Linux x86_64 CPU archive and a Windows x86_64
+preview archive. Each archive contains `hold`, the example configuration,
+current documentation, and license notices. Verify the downloaded archive with
+the accompanying `SHA256SUMS` file before extracting it. See
+[Installation](docs/installation.md) for the archive layout and commands.
+
+CUDA reranking remains a source-build preview and is not included in the
+binary archives.
+
 ## Build From Source
 
 Required for the standard CPU source install:

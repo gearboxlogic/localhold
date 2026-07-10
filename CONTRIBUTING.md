@@ -41,6 +41,7 @@ Additional tools are workflow-specific:
   `just test-postgres-smoke`.
 - NVIDIA/CUDA dependencies are required only when validating the CUDA reranker
   profile.
+- Python 3 is required only for release validation and archive packaging.
 
 Windows support is preview and is validated in GitHub Actions.
 
@@ -60,4 +61,4 @@ Windows support is preview and is validated in GitHub Actions.
 - Preserve compatibility unless the change is explicitly approved as breaking.
 
 See [AGENTS.md](AGENTS.md) for additional guidance used by automated coding
-agents.
+agents. Release maintainers must also follow [Releasing](docs/releasing.md).

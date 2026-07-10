@@ -1,7 +1,7 @@
 # Operations
 
 This guide covers configuration, privacy boundaries, backup, and recovery for
-operators running LocalHold from source. Release installers and managed service
+operators running LocalHold from a release archive or source. Managed service
 definitions are not available during the early beta.
 
 ## Configuration

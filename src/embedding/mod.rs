@@ -2,6 +2,8 @@
 
 /// Configured provider construction and vector-space identity.
 pub mod factory;
+/// Shared provider request concurrency limit.
+pub(crate) mod limited;
 /// Fallback embedding provider (always returns errors).
 pub mod noop;
 /// OpenAI-compatible embedding provider.

@@ -53,6 +53,8 @@ Windows support is preview and is validated in GitHub Actions.
 - Every push receives a fresh automated cloud review. Address actionable
   findings and wait for approval of the latest commit. If review does not
   start, comment `@codex` on the pull request to request it.
+- Reply to each review comment with the applied fix or the rationale for not
+  changing it, then resolve the review thread.
 - Merge only when required CI is green and the cloud bot has approved the
   latest commit; neither condition is sufficient alone.
 - Preserve compatibility unless the change is explicitly approved as breaking.

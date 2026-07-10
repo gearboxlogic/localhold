@@ -1,0 +1,26 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MatchAction",
+  "description": "Recommended agent action for a matched card.",
+  "oneOf": [
+    {
+      "description": "Read the full memory.",
+      "type": "string",
+      "const": "read"
+    },
+    {
+      "description": "Consider reading if more context is needed.",
+      "type": "string",
+      "const": "consider"
+    },
+    {
+      "description": "Ignore unless explicitly debugging retrieval.",
+      "type": "string",
+      "const": "ignore"
+    }
+  ]
+}

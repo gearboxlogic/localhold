@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4aa565eafc1041ca95a4bb8845403ba6a825439333eb7d8bcc07b66c2e5b8812 # shrinks to input = Object {"content": String("-"), "tags": Array [], "source_conversation": String("b"), "origin_conversation": String("zzBLNwOC5 OY-j -zo_h"), "ttl_seconds": Number(64344)}

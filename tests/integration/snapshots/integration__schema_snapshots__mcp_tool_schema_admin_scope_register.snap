@@ -1,0 +1,60 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: tool
+---
+{
+  "name": "admin_scope_register",
+  "description": "Write/admin: register or replace a v2 scope definition using the server-resolved principal. Defines scope_key plus aliases and matcher substrings for context_hints.",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "AdminScopeRegisterParams",
+    "description": "Register or replace a scope definition.",
+    "type": "object",
+    "properties": {
+      "scope_key": {
+        "description": "Stable scope key, e.g. `gearboxlogic/localhold`.",
+        "type": "string"
+      },
+      "display_name": {
+        "description": "Display name for humans and agents.",
+        "type": "string"
+      },
+      "description": {
+        "description": "Optional scope description.",
+        "type": "string"
+      },
+      "aliases": {
+        "description": "Alternate aliases that resolve to this scope key.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      },
+      "matchers": {
+        "description": "Substrings matched against explicit scope values or `context_hints` to resolve this scope key.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      },
+      "parent": {
+        "description": "Optional parent scope key.",
+        "type": "string"
+      },
+      "related": {
+        "description": "Optional related scope keys.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      }
+    },
+    "required": [
+      "scope_key",
+      "display_name"
+    ]
+  }
+}

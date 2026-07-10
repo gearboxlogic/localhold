@@ -1,0 +1,14 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: tool
+---
+{
+  "name": "admin_cleanup_expired",
+  "description": "Write/admin: destructively evict all expired TTL memories using the server-resolved principal.",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "AdminCleanupExpiredParams",
+    "description": "Parameters for v2 admin expired-memory cleanup.",
+    "type": "object"
+  }
+}

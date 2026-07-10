@@ -1,0 +1,199 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: tool
+---
+{
+  "name": "revise",
+  "description": "Revise an existing memory using the server-resolved principal for write authorization. Scope accepts key/alias/matcher/context_hints; entities and access_policy accept shorthand or full objects.",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "ReviseParams",
+    "description": "Parameters for the v2 `revise` tool.",
+    "type": "object",
+    "properties": {
+      "id": {
+        "description": "The memory ID to revise.",
+        "$ref": "#/$defs/MemoryId"
+      },
+      "content": {
+        "description": "Replacement content. When set, embeddings are regenerated in the background.",
+        "type": "string"
+      },
+      "summary": {
+        "description": "Replacement compact summary for v2 cards.",
+        "type": "string"
+      },
+      "agent_label": {
+        "description": "Replacement human-readable agent label. This does not grant access.",
+        "type": "string"
+      },
+      "scope": {
+        "description": "Replacement scope: registered scope key, alias, or value containing a registered matcher.",
+        "type": "string"
+      },
+      "context_hints": {
+        "description": "Optional context hints matched against registered scope matchers when `scope` is omitted.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      },
+      "tags": {
+        "description": "Replacement tags.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "access_policy": {
+        "description": "Replacement access policy: `\"public\"` shorthand or a full policy object.",
+        "$ref": "#/$defs/AccessPolicyInput"
+      },
+      "importance": {
+        "description": "Replacement importance score.",
+        "type": "number",
+        "format": "double"
+      },
+      "confidence": {
+        "description": "Replacement confidence score.",
+        "type": "number",
+        "format": "double"
+      },
+      "entities": {
+        "description": "Replacement entities: each item may be a string name shorthand or a full `{name, type}` object.",
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/EntityInputItem"
+        }
+      }
+    },
+    "required": [
+      "id"
+    ],
+    "$defs": {
+      "MemoryId": {
+        "description": "A ULID-formatted unique memory identifier",
+        "type": "string"
+      },
+      "AccessPolicyInput": {
+        "description": "One request access policy accepted by v2 write/update tools.",
+        "anyOf": [
+          {
+            "description": "String shorthand; currently only `\"public\"` is accepted.",
+            "$ref": "#/$defs/AccessPolicyShorthand"
+          },
+          {
+            "description": "Full object for `public`, `restricted`, or `redacted` access.",
+            "$ref": "#/$defs/AccessPolicy"
+          }
+        ]
+      },
+      "AccessPolicyShorthand": {
+        "description": "String shorthand accepted by request access policy fields.",
+        "oneOf": [
+          {
+            "description": "Visible to all callers.",
+            "type": "string",
+            "const": "public"
+          }
+        ]
+      },
+      "AccessPolicy": {
+        "description": "Controls who can see a memory.",
+        "oneOf": [
+          {
+            "description": "Visible to all callers.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "public"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "description": "Visible only to the listed agents.",
+            "type": "object",
+            "properties": {
+              "allowed": {
+                "description": "Agent identifiers permitted to access this memory.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "type": {
+                "type": "string",
+                "const": "restricted"
+              }
+            },
+            "required": [
+              "type",
+              "allowed"
+            ]
+          },
+          {
+            "description": "Visible but with some fields hidden from unauthorized callers.",
+            "type": "object",
+            "properties": {
+              "visible_fields": {
+                "description": "Field names that remain visible to unauthorized callers.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/RedactableField"
+                }
+              },
+              "type": {
+                "type": "string",
+                "const": "redacted"
+              }
+            },
+            "required": [
+              "type",
+              "visible_fields"
+            ]
+          }
+        ]
+      },
+      "RedactableField": {
+        "description": "A redactable field name (e.g. content, tags, provenance, entities, importance)",
+        "type": "string"
+      },
+      "EntityInputItem": {
+        "description": "One request entity accepted by v2 write/update tools.",
+        "anyOf": [
+          {
+            "description": "String shorthand for an entity name; the entity type defaults to `unknown`.",
+            "type": "string"
+          },
+          {
+            "description": "Full object with explicit `name` and `type`.",
+            "$ref": "#/$defs/Entity"
+          }
+        ]
+      },
+      "Entity": {
+        "description": "A caller-provided typed entity attached to a memory for entity-based retrieval.",
+        "type": "object",
+        "properties": {
+          "name": {
+            "description": "The entity name (e.g., \"Alice\", \"example-agent\", \"RFC 9110\").",
+            "type": "string"
+          },
+          "type": {
+            "description": "The entity type (e.g., \"person\", \"project\", \"document\").",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type"
+        ]
+      }
+    }
+  }
+}

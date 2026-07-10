@@ -1,0 +1,45 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: tool
+---
+{
+  "name": "admin_consolidate",
+  "description": "Write/admin: find near-duplicate memories using the server-resolved principal. dry_run=true previews; dry_run=false merges by superseding duplicates.",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "AdminConsolidateParams",
+    "description": "Parameters for v2 admin duplicate consolidation.",
+    "type": "object",
+    "properties": {
+      "scope": {
+        "description": "Optional scope filter: registered scope key, alias, or value containing a registered matcher.",
+        "type": "string"
+      },
+      "scopes": {
+        "description": "Optional any-match scope filter: scope keys, aliases, or matcher-containing values.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "similarity_threshold": {
+        "description": "Cosine similarity threshold for grouping (0.0–1.0). Default is 0.85.",
+        "type": "number",
+        "format": "double",
+        "default": 0.85
+      },
+      "limit": {
+        "description": "Maximum number of duplicate groups to return. Default is 10.",
+        "type": "integer",
+        "format": "uint",
+        "minimum": 0,
+        "default": 10
+      },
+      "dry_run": {
+        "description": "When `true` (default), report duplicates without merging.\nWhen `false`, merge by superseding duplicate members.",
+        "type": "boolean",
+        "default": true
+      }
+    }
+  }
+}

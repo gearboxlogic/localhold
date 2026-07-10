@@ -1,0 +1,26 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AgentCount",
+  "description": "An agent label and its associated memory count.",
+  "type": "object",
+  "properties": {
+    "agent_label": {
+      "description": "The agent provenance label.",
+      "type": "string"
+    },
+    "count": {
+      "description": "Number of memories with this label.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "agent_label",
+    "count"
+  ]
+}

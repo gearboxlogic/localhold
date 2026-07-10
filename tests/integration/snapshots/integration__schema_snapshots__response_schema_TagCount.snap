@@ -1,0 +1,26 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TagCount",
+  "description": "A tag and its associated memory count.",
+  "type": "object",
+  "properties": {
+    "tag": {
+      "description": "The tag name.",
+      "type": "string"
+    },
+    "count": {
+      "description": "Number of memories with this tag.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "tag",
+    "count"
+  ]
+}

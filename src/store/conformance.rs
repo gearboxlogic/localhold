@@ -1,0 +1,568 @@
+//! Shared store contract checks for every `MemoryStore` backend.
+
+use chrono::{DateTime, Duration, TimeZone as _, Utc};
+use serde_json::json;
+
+use super::{MemoryStore, MemoryWithEmbedding};
+use crate::{
+    error::StoreError,
+    types::{
+        AccessPolicy, AuditAction, AuditDraft, Confidence, Entity, Importance, Memory, MemoryFilter, MemoryId, MemoryType, MemoryUpdate, Provenance, QueryContext, RedactableField,
+        ScopeDefinition, SearchResult, V2MemoryMetadata, V2MetadataPatch, WriteOutcome,
+    },
+};
+
+const OWNER: &str = "conformance-owner";
+const ALLOWED: &str = "conformance-allowed";
+const VIEWER: &str = "conformance-viewer";
+
+struct MemorySpec {
+    content: String,
+    tags: Vec<String>,
+    source_agent: &'static str,
+    scope: String,
+    origin: String,
+    access_policy: AccessPolicy,
+    created_at: DateTime<Utc>,
+}
+
+/// Exercise the backend-neutral store contract for remediated v2 behavior.
+#[expect(clippy::too_many_lines, reason = "single shared fixture intentionally exercises the full backend-neutral MemoryStore contract")]
+pub(crate) async fn assert_memory_store_contract<S>(store: &S, embedding_dimensions: usize)
+where
+    S: MemoryStore,
+{
+    assert!(embedding_dimensions > 0, "conformance requires positive embedding dimensions");
+
+    let case = MemoryId::new().to_string();
+    let case_tag = format!("contract-{case}");
+    let scope = format!("contract/scope/{case}");
+    let origin = format!("contract/origin/{case}");
+    let owner_ctx = QueryContext { principal: Some(OWNER.into()) };
+    let viewer_ctx = QueryContext { principal: Some(VIEWER.into()) };
+    let base = fixed_time();
+
+    let scope_def = ScopeDefinition {
+        scope_key: scope.clone(),
+        display_name: format!("Contract {case}"),
+        description: Some("store conformance fixture".into()),
+        aliases: vec![format!("alias-{case}")],
+        matchers: vec![case.clone()],
+        parent: Some("contract".into()),
+        related: vec![format!("contract/related/{case}")],
+    };
+    store.register_scope(scope_def.clone()).await.unwrap();
+    assert!(store.list_scopes().await.unwrap().contains(&scope_def));
+
+    let primary_token = format!("contractneedlealpha{case}");
+    let entity_name = format!("ContractEntity{case}");
+    let mut primary = memory(MemorySpec {
+        content: format!("primary searchable memory {primary_token}"),
+        tags: vec![case_tag.clone(), "primary".into()],
+        source_agent: OWNER,
+        scope: scope.clone(),
+        origin: origin.clone(),
+        access_policy: AccessPolicy::Public,
+        created_at: base,
+    });
+    primary.memory_type = MemoryType::Procedural;
+    primary.entities = vec![Entity::new(entity_name.clone(), "project").unwrap()];
+    let primary_embedding = embedding(embedding_dimensions, 0.0_f32);
+    let primary_id = store.store(&primary, Some(&primary_embedding)).await.unwrap();
+    assert_eq!(primary_id, primary.id);
+
+    let retrieved = store.get(&primary_id, None).await.unwrap().unwrap();
+    assert_eq!(retrieved.content, primary.content);
+    assert_eq!(retrieved.entities, primary.entities);
+
+    let filter = MemoryFilter {
+        tags: Some(vec![case_tag.clone(), "primary".into()]),
+        scope: Some(scope.clone()),
+        origin_scope: Some(origin.clone()),
+        text_search: Some(primary_token.clone()),
+        has_embedding: Some(true),
+        memory_type: Some(MemoryType::Procedural),
+        entity: Some(entity_name.clone()),
+        entity_type: Some("project".into()),
+        limit: Some(10),
+        ..MemoryFilter::default()
+    };
+    let listed = store.list(filter.clone(), owner_ctx.clone()).await.unwrap();
+    assert_eq!(ids(&listed), vec![primary_id]);
+    let stats = store.count(filter.clone(), owner_ctx.clone(), 10).await.unwrap();
+    assert_eq!(stats.total, 1_u64);
+    assert_eq!(stats.with_embedding, 1_u64);
+    assert_eq!(stats.without_embedding, 0_u64);
+    assert!(stats.by_tag.iter().any(|(tag, count)| tag == "primary" && *count == 1_u64));
+
+    let text_results = store.search_by_text(&primary_token, 10, &case_filter(&case_tag), &owner_ctx).await.unwrap();
+    assert_search_contains(&text_results, primary_id);
+    if store.fts_available() {
+        let fts_results = store.search_by_fts(&primary_token, 10, &case_filter(&case_tag), &owner_ctx, None).await.unwrap();
+        assert_search_contains(&fts_results, primary_id);
+    }
+
+    let semantic_results = store.search_by_embedding(&primary_embedding, 10, &filter, &owner_ctx, Some(0.001_f64)).await.unwrap();
+    assert_eq!(search_ids(&semantic_results), vec![primary_id]);
+    let fetched_embeddings = store.fetch_embeddings_for_ids(&[primary_id]).await.unwrap();
+    assert_eq!(fetched_embeddings.get(&primary_id).map(Vec::len), Some(embedding_dimensions));
+    assert_eq!(fetched_embeddings.get(&primary_id).and_then(|v| v.first()).copied(), Some(0.0_f32));
+
+    let scoped_embeddings = store.list_with_embeddings(Some(std::slice::from_ref(&scope)), 10).await.unwrap();
+    assert!(scoped_embeddings.iter().any(|entry| entry.memory.id == primary_id && entry.embedding.is_some()));
+
+    let restricted = memory(MemorySpec {
+        content: format!("restricted memory {case}"),
+        tags: vec![case_tag.clone(), "restricted".into()],
+        source_agent: OWNER,
+        scope: scope.clone(),
+        origin: origin.clone(),
+        access_policy: AccessPolicy::Restricted { allowed: vec![ALLOWED.into()] },
+        created_at: time_after(base, 1),
+    });
+    let restricted_id = store.store(&restricted, Some(&embedding(embedding_dimensions, 3.0_f32))).await.unwrap();
+    assert!(store.get(&restricted_id, Some("intruder")).await.unwrap().is_none());
+    assert!(store.get(&restricted_id, Some(ALLOWED)).await.unwrap().is_some());
+
+    let hidden_token = format!("hiddencontractneedle{case}");
+    let redacted = memory(MemorySpec {
+        content: format!("redacted hidden content {hidden_token}"),
+        tags: vec![case_tag.clone(), "redacted".into()],
+        source_agent: OWNER,
+        scope: scope.clone(),
+        origin: origin.clone(),
+        access_policy: AccessPolicy::Redacted {
+            visible_fields: vec![RedactableField::Tags],
+        },
+        created_at: time_after(base, 2),
+    });
+    let redacted_id = store.store(&redacted, Some(&embedding(embedding_dimensions, 5.0_f32))).await.unwrap();
+    let redacted_view = store.get(&redacted_id, Some(VIEWER)).await.unwrap().unwrap();
+    assert!(redacted_view.was_redacted);
+    assert_eq!(redacted_view.content, "[redacted]");
+    assert_eq!(redacted_view.tags, redacted.tags);
+    let redacted_filter = MemoryFilter {
+        tags: Some(vec![case_tag.clone(), "redacted".into()]),
+        ..MemoryFilter::default()
+    };
+    let viewer_hidden_results = store.search_by_text(&hidden_token, 10, &redacted_filter, &viewer_ctx).await.unwrap();
+    assert!(!search_ids(&viewer_hidden_results).contains(&redacted_id));
+    let owner_hidden_results = store.search_by_text(&hidden_token, 10, &redacted_filter, &owner_ctx).await.unwrap();
+    assert_search_contains(&owner_hidden_results, redacted_id);
+
+    let old = memory(MemorySpec {
+        content: format!("superseded old {case}"),
+        tags: vec![case_tag.clone(), "supersession".into()],
+        source_agent: OWNER,
+        scope: scope.clone(),
+        origin: origin.clone(),
+        access_policy: AccessPolicy::Public,
+        created_at: time_after(base, 3),
+    });
+    let old_id = store.store(&old, Some(&embedding(embedding_dimensions, 6.0_f32))).await.unwrap();
+    let new = memory(MemorySpec {
+        content: format!("superseded new {case}"),
+        tags: vec![case_tag.clone(), "supersession".into()],
+        source_agent: OWNER,
+        scope: scope.clone(),
+        origin: origin.clone(),
+        access_policy: AccessPolicy::Public,
+        created_at: time_after(base, 4),
+    });
+    let new_id = store.store_with_supersession(&new, Some(&embedding(embedding_dimensions, 6.1_f32)), &old_id).await.unwrap();
+    let supersession_filter = MemoryFilter {
+        tags: Some(vec![case_tag.clone(), "supersession".into()]),
+        ..MemoryFilter::default()
+    };
+    let live_supersession_ids = ids(&store.list(supersession_filter.clone(), owner_ctx.clone()).await.unwrap());
+    assert!(live_supersession_ids.contains(&new_id));
+    assert!(!live_supersession_ids.contains(&old_id));
+    let all_supersession_ids = ids(&store
+        .list(
+            MemoryFilter {
+                include_superseded: Some(true),
+                ..supersession_filter
+            },
+            owner_ctx.clone(),
+        )
+        .await
+        .unwrap());
+    assert!(all_supersession_ids.contains(&old_id));
+    assert_eq!(store.get(&old_id, Some(OWNER)).await.unwrap().unwrap().superseded_by, Some(new_id));
+
+    let neighbor = memory(MemorySpec {
+        content: format!("near vector neighbor {case}"),
+        tags: vec![case_tag.clone(), "neighbor".into()],
+        source_agent: OWNER,
+        scope: scope.clone(),
+        origin: origin.clone(),
+        access_policy: AccessPolicy::Public,
+        created_at: time_after(base, 5),
+    });
+    let neighbor_id = store.store(&neighbor, Some(&embedding(embedding_dimensions, 0.1_f32))).await.unwrap();
+    let superseded_neighbor = memory(MemorySpec {
+        content: format!("superseded vector neighbor {case}"),
+        tags: vec![case_tag.clone(), "neighbor".into()],
+        source_agent: OWNER,
+        scope: scope.clone(),
+        origin: origin.clone(),
+        access_policy: AccessPolicy::Public,
+        created_at: time_after(base, 6),
+    });
+    let superseded_neighbor_id = store.store(&superseded_neighbor, Some(&embedding(embedding_dimensions, 0.05_f32))).await.unwrap();
+    assert!(store.mark_superseded_by(&superseded_neighbor_id, &primary_id).await.unwrap());
+    let neighbors = store.find_embedding_neighbors(&primary_embedding, 0.2_f64, 10).await.unwrap();
+    assert!(neighbors.iter().any(|(id, distance)| *id == neighbor_id && *distance <= 0.2_f64));
+    assert!(!neighbors.iter().any(|(id, _)| *id == superseded_neighbor_id));
+
+    let batch_a = memory(MemorySpec {
+        content: format!("batch a {case}"),
+        tags: vec![case_tag.clone(), "batch".into()],
+        source_agent: OWNER,
+        scope: scope.clone(),
+        origin: origin.clone(),
+        access_policy: AccessPolicy::Public,
+        created_at: time_after(base, 7),
+    });
+    let batch_b = memory(MemorySpec {
+        content: format!("batch b {case}"),
+        tags: vec![case_tag.clone(), "batch".into()],
+        source_agent: OWNER,
+        scope: scope.clone(),
+        origin: origin.clone(),
+        access_policy: AccessPolicy::Public,
+        created_at: time_after(base, 8),
+    });
+    let batch_ids = store
+        .store_batch(&[
+            MemoryWithEmbedding {
+                memory: batch_a.clone(),
+                embedding: Some(embedding(embedding_dimensions, 7.0_f32)),
+            },
+            MemoryWithEmbedding {
+                memory: batch_b.clone(),
+                embedding: Some(embedding(embedding_dimensions, 7.1_f32)),
+            },
+        ])
+        .await
+        .unwrap();
+    assert_eq!(batch_ids, vec![batch_a.id, batch_b.id]);
+
+    let v2_memory = memory(MemorySpec {
+        content: format!("v2 metadata {case}"),
+        tags: vec![case_tag.clone(), "v2".into()],
+        source_agent: OWNER,
+        scope: scope.clone(),
+        origin: origin.clone(),
+        access_policy: AccessPolicy::Public,
+        created_at: time_after(base, 9),
+    });
+    let v2_metadata = V2MemoryMetadata {
+        memory_id: v2_memory.id,
+        scope_key: Some(scope.clone()),
+        summary: Some("contract summary".into()),
+        agent_label: Some("contract-agent-label".into()),
+        created_by_principal: Some(OWNER.into()),
+        quality_flags: vec!["contract_flag".into()],
+        schema_version: 2,
+    };
+    let v2_id = store
+        .store_with_v2_metadata(&v2_memory, Some(&embedding(embedding_dimensions, 8.0_f32)), None, &v2_metadata)
+        .await
+        .unwrap();
+    assert_eq!(store.get_v2_metadata(&v2_id).await.unwrap(), Some(v2_metadata));
+
+    let unembedded = memory(MemorySpec {
+        content: format!("needs reembed {case}"),
+        tags: vec![case_tag.clone(), "reembed".into()],
+        source_agent: OWNER,
+        scope: scope.clone(),
+        origin: origin.clone(),
+        access_policy: AccessPolicy::Public,
+        created_at: time_after(base, 10),
+    });
+    let unembedded_id = store.store(&unembedded, None).await.unwrap();
+    assert!(
+        store
+            .list_for_reembed(50)
+            .await
+            .unwrap()
+            .iter()
+            .any(|(id, content, _)| *id == unembedded_id && content == &unembedded.content)
+    );
+    let claims = store.claim_for_reembed(50).await.unwrap().into_iter().collect::<Vec<_>>();
+    assert!(claims.iter().any(|claim| claim.id == unembedded_id), "expected reembed claim for {unembedded_id}");
+    let claim = claims.into_iter().find(|claim| claim.id == unembedded_id).unwrap();
+    assert_eq!(
+        store.get_for_reembed(&unembedded_id, OWNER).await.unwrap(),
+        Some((unembedded.content.clone(), claim.embedding_revision))
+    );
+    store
+        .set_embedding(&unembedded_id, &embedding(embedding_dimensions, 9.0_f32), claim.embedding_revision)
+        .await
+        .unwrap();
+    assert!(!store.release_embedding_claim(&unembedded_id, claim.embedding_revision, &claim.claim_token).await.unwrap());
+    assert!(store.fetch_embeddings_for_ids(&[unembedded_id]).await.unwrap().contains_key(&unembedded_id));
+
+    let update = MemoryUpdate {
+        content: Some(format!("updated content {case}")),
+        ..MemoryUpdate::default()
+    };
+    let updated = store.update_authorized(&primary_id, &update, OWNER).await.unwrap();
+    assert_eq!(updated.outcome, WriteOutcome::Applied);
+    assert!(updated.reembed_revision.is_some());
+
+    let use_now = time_after(base, 11);
+    let use_outcome = store.record_memory_use(&[primary_id, MemoryId::new()], OWNER, 1.0_f64, use_now, 24.0_f64).await.unwrap();
+    assert_eq!(use_outcome.recorded, 1_u64);
+    assert_eq!(use_outcome.not_found, 1_u64);
+    let used = store.get(&primary_id, Some(OWNER)).await.unwrap().unwrap();
+    assert_eq!(used.last_used_at, Some(use_now));
+
+    store.record_search_impression(&[primary_id]).await.unwrap();
+    assert!(store.get(&primary_id, Some(OWNER)).await.unwrap().unwrap().impression_count > 0_u64);
+
+    let audit_time = time_after(base, 12);
+    let details = json!({ "case": case_tag });
+    store
+        .write_audit_entry(&primary_id, AuditAction::Store, Some(OWNER), audit_time, Some(&details))
+        .await
+        .unwrap();
+    let audit = store.query_audit_log(&primary_id, 10).await.unwrap();
+    assert_eq!(audit.len(), 1_usize);
+    assert_eq!(audit[0].action, AuditAction::Store);
+    assert_eq!(audit[0].caller_agent.as_deref(), Some(OWNER));
+
+    let audited = memory(MemorySpec {
+        content: format!("audited transactional store {case}"),
+        tags: vec![format!("audit-{case}")],
+        source_agent: OWNER,
+        scope: scope.clone(),
+        origin: origin.clone(),
+        access_policy: AccessPolicy::Public,
+        created_at: time_after(base, 12),
+    });
+    let audit_draft = AuditDraft {
+        action: AuditAction::Store,
+        caller_agent: Some(OWNER.into()),
+        timestamp: time_after(base, 13),
+        details: Some(json!({ "transactional": true })),
+    };
+    let audited_id = store.store_audited(&audited, None, &audit_draft).await.unwrap();
+    let audited_history = store.query_audit_log(&audited_id, 10).await.unwrap();
+    assert_eq!(audited_history.len(), 1_usize);
+    assert_eq!(audited_history[0].action, AuditAction::Store);
+    assert_eq!(audited_history[0].details, audit_draft.details);
+
+    let original_audited_content = audited.content.clone();
+    let content_after_audit_update = format!("audited transactional update {case}");
+    let content_audit = AuditDraft {
+        action: AuditAction::Update,
+        caller_agent: Some(OWNER.into()),
+        timestamp: time_after(base, 14),
+        details: Some(json!({ "case": case_tag, "old_content_hash": "stale" })),
+    };
+    let content_update = MemoryUpdate {
+        content: Some(content_after_audit_update.clone()),
+        ..MemoryUpdate::default()
+    };
+    let content_outcome = store.update_authorized_audited(&audited_id, &content_update, OWNER, &content_audit).await.unwrap();
+    assert_eq!(content_outcome.outcome, WriteOutcome::Applied);
+    let content_history = store.query_audit_log(&audited_id, 10).await.unwrap();
+    let content_audit_entry = content_history.iter().find(|entry| entry.timestamp == content_audit.timestamp).unwrap();
+    let content_details = content_audit_entry.details.as_ref().and_then(serde_json::Value::as_object).unwrap();
+    assert_eq!(content_details.get("old_content_hash"), Some(&json!(super::crud::content_hash(&original_audited_content))));
+    assert_eq!(content_details.get("case"), Some(&json!(case_tag)));
+
+    let metadata_patch = V2MetadataPatch {
+        scope_key: Some(format!("contract/revised/{case}")),
+        summary: Some(format!("revised summary {case}")),
+        agent_label: Some("conformance-agent".into()),
+    };
+    let metadata_audit = AuditDraft {
+        action: AuditAction::Update,
+        caller_agent: Some(OWNER.into()),
+        timestamp: time_after(base, 15),
+        details: Some(json!({ "v2_metadata": true, "old_content_hash": "stale" })),
+    };
+    let metadata_update = MemoryUpdate {
+        content: Some(format!("audited transactional metadata update {case}")),
+        tags: Some(vec![format!("revised-{case}")]),
+        ..MemoryUpdate::default()
+    };
+    let metadata_outcome = store
+        .update_authorized_with_v2_metadata_audited(&audited_id, &metadata_update, Some(&metadata_patch), OWNER, &metadata_audit)
+        .await
+        .unwrap();
+    assert_eq!(metadata_outcome.outcome, WriteOutcome::Applied);
+    let revised_metadata = store.get_v2_metadata(&audited_id).await.unwrap().unwrap();
+    assert_eq!(revised_metadata.scope_key, metadata_patch.scope_key);
+    assert_eq!(revised_metadata.summary, metadata_patch.summary);
+    let metadata_history = store.query_audit_log(&audited_id, 10).await.unwrap();
+    let metadata_audit_entry = metadata_history.iter().find(|entry| entry.timestamp == metadata_audit.timestamp).unwrap();
+    let metadata_details = metadata_audit_entry.details.as_ref().and_then(serde_json::Value::as_object).unwrap();
+    assert_eq!(metadata_details.get("v2_metadata"), Some(&json!(true)));
+    assert_eq!(
+        metadata_details.get("old_content_hash"),
+        Some(&json!(super::crud::content_hash(&content_after_audit_update)))
+    );
+
+    let from_scope = format!("contract/from/{case}");
+    let to_scope = format!("contract/to/{case}");
+    let movable = memory(MemorySpec {
+        content: format!("movable scope {case}"),
+        tags: vec![case_tag.clone(), "move".into()],
+        source_agent: OWNER,
+        scope: from_scope.clone(),
+        origin,
+        access_policy: AccessPolicy::Public,
+        created_at: time_after(base, 13),
+    });
+    let movable_id = store.store(&movable, Some(&embedding(embedding_dimensions, 10.0_f32))).await.unwrap();
+    let reassigned = store.reassign_scope(&from_scope, &to_scope, None, OWNER).await.unwrap();
+    assert_eq!(reassigned.applied_ids, vec![movable_id]);
+    assert_eq!(
+        store.get(&movable_id, Some(OWNER)).await.unwrap().unwrap().provenance.source_conversation.as_deref(),
+        Some(to_scope.as_str())
+    );
+
+    let delete_me = memory(MemorySpec {
+        content: format!("delete me {case}"),
+        tags: vec![case_tag, "delete".into()],
+        source_agent: OWNER,
+        scope,
+        origin: format!("contract/delete-origin/{case}"),
+        access_policy: AccessPolicy::Restricted { allowed: vec![ALLOWED.into()] },
+        created_at: time_after(base, 14),
+    });
+    let delete_id = store.store(&delete_me, Some(&embedding(embedding_dimensions, 11.0_f32))).await.unwrap();
+    assert_eq!(store.delete_authorized(&delete_id, OWNER).await.unwrap(), WriteOutcome::Applied);
+    assert!(store.get(&delete_id, Some(OWNER)).await.unwrap().is_none());
+    let tombstone = store.get_tombstone(&delete_id).await.unwrap().unwrap();
+    assert_eq!(tombstone.memory_id, delete_id);
+    assert_eq!(tombstone.deleted_by_principal.as_deref(), Some(OWNER));
+}
+
+/// Exercise invalid vector values consistently across every backend entry point.
+pub(crate) async fn assert_non_finite_embeddings_rejected<S>(store: &S, embedding_dimensions: usize)
+where
+    S: MemoryStore,
+{
+    assert!(embedding_dimensions > 0, "conformance requires positive embedding dimensions");
+
+    let case = MemoryId::new().to_string();
+    let scope = format!("contract/invalid/{case}");
+    let origin = format!("contract/invalid-origin/{case}");
+    let ctx = QueryContext { principal: Some(OWNER.into()) };
+
+    for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let mut bad = embedding(embedding_dimensions, 0.0_f32);
+        bad[0] = value;
+        let memory = memory(MemorySpec {
+            content: format!("invalid embedding {value} {case}"),
+            tags: vec![format!("invalid-{case}")],
+            source_agent: OWNER,
+            scope: scope.clone(),
+            origin: origin.clone(),
+            access_policy: AccessPolicy::Public,
+            created_at: fixed_time(),
+        });
+
+        let err = store.store(&memory, Some(&bad)).await.unwrap_err();
+        assert_non_finite_error(err);
+        assert!(store.get(&memory.id, Some(OWNER)).await.unwrap().is_none());
+
+        let err = store.search_by_embedding(&bad, 1, &MemoryFilter::default(), &ctx, None).await.unwrap_err();
+        assert_non_finite_error(err);
+
+        let err = store.find_embedding_neighbors(&bad, 1.0_f64, 1).await.unwrap_err();
+        assert_non_finite_error(err);
+    }
+
+    let unembedded = memory(MemorySpec {
+        content: format!("invalid set embedding {case}"),
+        tags: vec![format!("invalid-set-{case}")],
+        source_agent: OWNER,
+        scope,
+        origin,
+        access_policy: AccessPolicy::Public,
+        created_at: time_after(fixed_time(), 1),
+    });
+    let unembedded_id = store.store(&unembedded, None).await.unwrap();
+    let (_, revision) = store.get_for_reembed(&unembedded_id, OWNER).await.unwrap().unwrap();
+    let mut bad = embedding(embedding_dimensions, 0.0_f32);
+    bad[0] = f32::NAN;
+    let err = store.set_embedding(&unembedded_id, &bad, revision).await.unwrap_err();
+    assert_non_finite_error(err);
+    assert!(!store.fetch_embeddings_for_ids(&[unembedded_id]).await.unwrap().contains_key(&unembedded_id));
+}
+
+fn fixed_time() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 5, 31, 12, 0, 0).single().unwrap()
+}
+
+fn time_after(base: DateTime<Utc>, seconds: i64) -> DateTime<Utc> {
+    base.checked_add_signed(Duration::seconds(seconds)).unwrap()
+}
+
+fn memory(spec: MemorySpec) -> Memory {
+    Memory {
+        id: MemoryId::new(),
+        content: spec.content,
+        tags: spec.tags,
+        provenance: Provenance {
+            source_agent: Some(spec.source_agent.into()),
+            source_conversation: Some(spec.scope),
+            origin_conversation: Some(spec.origin),
+            source_user: None,
+        },
+        access_policy: spec.access_policy,
+        created_at: spec.created_at,
+        updated_at: spec.created_at,
+        expires_at: None,
+        has_embedding: false,
+        memory_type: MemoryType::Semantic,
+        importance: Importance::new(0.75_f64),
+        confidence: Confidence::new(0.9_f64),
+        impression_count: 0,
+        last_impressed_at: None,
+        superseded_by: None,
+        activity_mass: 0.0_f64,
+        last_used_at: None,
+        entities: Vec::new(),
+        was_redacted: false,
+    }
+}
+
+fn embedding(dimensions: usize, first_value: f32) -> Vec<f32> {
+    let mut values = vec![0.0_f32; dimensions];
+    values[0] = first_value;
+    values
+}
+
+fn case_filter(case_tag: &str) -> MemoryFilter {
+    MemoryFilter {
+        tags: Some(vec![case_tag.into()]),
+        ..MemoryFilter::default()
+    }
+}
+
+fn ids(memories: &[Memory]) -> Vec<MemoryId> {
+    memories.iter().map(|memory| memory.id).collect()
+}
+
+fn search_ids(results: &[SearchResult]) -> Vec<MemoryId> {
+    results.iter().map(|result| result.memory.id).collect()
+}
+
+fn assert_search_contains(results: &[SearchResult], id: MemoryId) {
+    let ids = search_ids(results);
+    assert!(ids.contains(&id), "expected search results to contain {id}, got {ids:?}");
+}
+
+fn assert_non_finite_error(err: StoreError) {
+    let actual = format!("{err:?}");
+    assert!(matches!(&err, StoreError::Conflict(_)), "expected non-finite embedding conflict, got {actual}");
+    let StoreError::Conflict(message) = err else { return };
+    assert!(message.contains("non-finite"), "unexpected conflict: {message}");
+}

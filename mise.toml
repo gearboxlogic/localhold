@@ -1,0 +1,19 @@
+[tools]
+rust = "1.97"
+"cargo:cargo-binstall" = "1.17.4"
+"cargo:just" = "1.46.0"
+"cargo:cargo-nextest" = "0.9.126"
+"cargo:cargo-outdated" = "0.17.0"
+"cargo:cargo-deny" = "0.19.0"
+"cargo:cargo-audit" = "0.22.2"
+"cargo:cargo-machete" = "0.7.0"
+
+[settings]
+experimental = true
+lockfile = true
+
+[env]
+# Share Rust tool caches while keeping build targets isolated per checkout.
+CARGO_HOME = "{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \"/.cache\") }}/localhold/cargo"
+RUSTUP_HOME = "{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \"/.cache\") }}/localhold/rustup"
+_.path = ["{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \"/.cache\") }}/localhold/cargo/bin"]

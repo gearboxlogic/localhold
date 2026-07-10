@@ -1,0 +1,29 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: tool
+---
+{
+  "name": "read",
+  "description": "Read one full memory by id. Trusted principals record a meaningful read activity event; anonymous public reads do not.",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "ReadParams",
+    "description": "Parameters for the v2 `read` tool.",
+    "type": "object",
+    "properties": {
+      "id": {
+        "description": "The memory ID to retrieve.",
+        "$ref": "#/$defs/MemoryId"
+      }
+    },
+    "required": [
+      "id"
+    ],
+    "$defs": {
+      "MemoryId": {
+        "description": "A ULID-formatted unique memory identifier",
+        "type": "string"
+      }
+    }
+  }
+}

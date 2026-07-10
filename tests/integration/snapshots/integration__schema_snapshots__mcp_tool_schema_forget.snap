@@ -1,0 +1,29 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: tool
+---
+{
+  "name": "forget",
+  "description": "Forget a memory by id using the server-resolved principal for write authorization; destructive delete when authorized.",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "ForgetParams",
+    "description": "Parameters for the v2 `forget` tool.",
+    "type": "object",
+    "properties": {
+      "id": {
+        "description": "The memory ID to delete.",
+        "$ref": "#/$defs/MemoryId"
+      }
+    },
+    "required": [
+      "id"
+    ],
+    "$defs": {
+      "MemoryId": {
+        "description": "A ULID-formatted unique memory identifier",
+        "type": "string"
+      }
+    }
+  }
+}

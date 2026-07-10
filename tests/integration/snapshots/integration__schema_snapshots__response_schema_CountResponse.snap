@@ -1,0 +1,185 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CountResponse",
+  "description": "Response from v2 `admin_count`.",
+  "type": "object",
+  "properties": {
+    "total": {
+      "description": "Total number of matching memories.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "with_embedding": {
+      "description": "Count of memories that have an embedding vector.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "without_embedding": {
+      "description": "Count of memories that lack an embedding vector.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "expired": {
+      "description": "Count of memories that have expired.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "by_tag": {
+      "description": "Breakdown of memory counts by tag.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TagCount"
+      }
+    },
+    "by_agent_label": {
+      "description": "Breakdown of memory counts by agent label.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AgentCount"
+      }
+    },
+    "storage_bytes": {
+      "description": "Estimated database storage size in bytes.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "oldest_memory": {
+      "description": "Creation timestamp of the oldest memory (RFC 3339).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "newest_memory": {
+      "description": "Creation timestamp of the newest memory (RFC 3339).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "scope_count": {
+      "description": "Number of distinct scope keys.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "by_memory_type": {
+      "description": "Breakdown of memory counts by memory type.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MemoryTypeCount"
+      }
+    },
+    "superseded_count": {
+      "description": "Number of superseded memories.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "total",
+    "with_embedding",
+    "without_embedding",
+    "expired",
+    "by_tag",
+    "by_agent_label",
+    "scope_count",
+    "by_memory_type",
+    "superseded_count"
+  ],
+  "$defs": {
+    "TagCount": {
+      "description": "A tag and its associated memory count.",
+      "type": "object",
+      "properties": {
+        "tag": {
+          "description": "The tag name.",
+          "type": "string"
+        },
+        "count": {
+          "description": "Number of memories with this tag.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "tag",
+        "count"
+      ]
+    },
+    "AgentCount": {
+      "description": "An agent label and its associated memory count.",
+      "type": "object",
+      "properties": {
+        "agent_label": {
+          "description": "The agent provenance label.",
+          "type": "string"
+        },
+        "count": {
+          "description": "Number of memories with this label.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "agent_label",
+        "count"
+      ]
+    },
+    "MemoryTypeCount": {
+      "description": "A memory type and its associated memory count.",
+      "type": "object",
+      "properties": {
+        "memory_type": {
+          "description": "The memory type classification.",
+          "$ref": "#/$defs/MemoryType"
+        },
+        "count": {
+          "description": "Number of memories of this type.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "memory_type",
+        "count"
+      ]
+    },
+    "MemoryType": {
+      "description": "Classifies the kind of knowledge a memory captures.",
+      "oneOf": [
+        {
+          "description": "Facts, definitions, or general knowledge.",
+          "type": "string",
+          "const": "semantic"
+        },
+        {
+          "description": "Events that happened at a specific time.",
+          "type": "string",
+          "const": "episodic"
+        },
+        {
+          "description": "Step-by-step instructions or how-tos.",
+          "type": "string",
+          "const": "procedural"
+        }
+      ]
+    }
+  }
+}

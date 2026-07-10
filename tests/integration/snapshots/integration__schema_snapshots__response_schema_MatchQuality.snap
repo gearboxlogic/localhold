@@ -1,0 +1,26 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MatchQuality",
+  "description": "Agent-facing match quality label.",
+  "oneOf": [
+    {
+      "description": "Strong match.",
+      "type": "string",
+      "const": "strong"
+    },
+    {
+      "description": "Usable but not definitive.",
+      "type": "string",
+      "const": "possible"
+    },
+    {
+      "description": "Weak match suppressed by default.",
+      "type": "string",
+      "const": "weak"
+    }
+  ]
+}

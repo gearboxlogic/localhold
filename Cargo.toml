@@ -1,0 +1,258 @@
+[package]
+name = "localhold"
+version = "0.1.0-beta.1"
+edition = "2024"
+rust-version = "1.97"
+description = "Local context infrastructure for AI agents"
+repository = "https://github.com/gearboxlogic/localhold"
+readme = "README.md"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "hold"
+path = "src/main.rs"
+
+[dependencies]
+# MCP server — official Rust SDK
+rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# SQLite + vector search
+rusqlite = { version = "0.40", features = ["bundled"] }
+sqlite-vec = "0.1"
+zerocopy = { version = "0.8", features = ["derive"] }
+
+# Serialization & config
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = "1.1"
+schemars = "1"
+
+# Error handling
+thiserror = "2"
+
+# Date/time, IDs, logging
+chrono = { version = "0.4", features = ["serde"] }
+ulid = { version = "1", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# HTTP server (for streamable HTTP transport)
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tower-http = { version = "0.6", default-features = false, features = ["limit", "trace"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# Misc
+dirs = "6"
+parking_lot = "0.12"
+
+# Cross-encoder reranker (optional)
+ort = { version = "2.0.0-rc.12", optional = true }
+tokenizers = { version = "0.23", optional = true, default-features = false, features = ["onig"] }
+sha2 = { version = "0.11", optional = true }
+
+# HTTP client for OpenAI-compatible embeddings and model downloading
+reqwest = { version = "0.13", features = ["blocking", "json", "rustls"], default-features = false }
+
+# PostgreSQL backend implementation. Use the narrow driver crates instead of
+# the `sqlx` meta crate so freshness checks do not resolve unused SQLite/MySQL drivers.
+sqlx-core = { version = "0.9", default-features = false, features = ["_rt-tokio", "chrono", "json"] }
+sqlx-postgres = { version = "0.9", default-features = false, features = ["chrono", "json"] }
+
+[features]
+testing = []
+reranker = ["dep:ort", "dep:tokenizers", "dep:sha2"]
+reranker-cuda = ["reranker", "ort/cuda", "ort/load-dynamic"]
+
+[dev-dependencies]
+rmcp = { version = "1.7", features = ["client", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest"] }
+localhold = { path = ".", features = ["testing"] }
+pastey = "0.2"
+proptest = "1"
+insta = { version = "1", features = ["json"] }
+rand = "0.10"
+criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+# Compiler lints — language-level strictness
+elided_lifetimes_in_paths = "warn"
+keyword_idents_2024 = "warn"
+macro_use_extern_crate = "warn"
+meta_variable_misuse = "warn"
+missing_abi = "warn"
+missing_debug_implementations = "warn"
+non_ascii_idents = "warn"
+noop_method_call = "warn"
+single_use_lifetimes = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unreachable_pub = "warn"
+unused_extern_crates = "warn"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+unused_qualifications = "warn"
+let_underscore_drop = "warn"
+unused_results = "warn"
+variant_size_differences = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+multiple_crate_versions = "allow" # cargo dep resolution is out of project control
+redundant_pub_crate = "allow" # conflicts with rustc unreachable_pub; prefer the compiler lint
+
+# Restriction lints explicitly allowed — fight Rust idioms or are impractical
+absolute_paths = "allow"               # use-imports are idiomatic; absolute paths are verbose
+else_if_without_else = "allow"         # requiring else on all if-chains is anti-idiomatic
+implicit_return = "allow"              # implicit returns are idiomatic Rust
+indexing_slicing = "allow"             # standard collection access; impractical to ban globally
+min_ident_chars = "allow"              # i, e, x are fine in idiomatic Rust
+missing_inline_in_public_items = "allow" # hurts compile times; micro-optimization
+missing_trait_methods = "allow"        # too many false positives with default implementations
+pub_use = "allow"                      # re-exports are idiomatic Rust module design
+question_mark_used = "allow"           # ? operator is the preferred error propagation pattern
+separated_literal_suffix = "allow"     # conflicts with enabled unseparated_literal_suffix
+semicolon_outside_block = "allow"      # conflicts with enabled semicolon_inside_block
+shadow_reuse = "allow"                 # variable shadowing for type refinement is idiomatic
+shadow_unrelated = "allow"             # shadowing for scoping is common Rust practice
+single_call_fn = "allow"              # code organization matters more than call count
+single_char_lifetime_names = "allow"   # 'a, 'b are standard Rust convention
+std_instead_of_alloc = "allow"         # project is not no_std; unnecessary restriction
+std_instead_of_core = "allow"          # project is not no_std; unnecessary restriction
+tests_outside_test_module = "allow"    # integration tests in separate files is the standard pattern
+unwrap_used = "allow"                  # too broad for blanket denial; expect_used covers the important cases
+
+# Hard denials — correctness & hygiene
+print_stdout = "deny"
+print_stderr = "deny"
+dbg_macro = "deny"
+undocumented_unsafe_blocks = "deny"
+allow_attributes_without_reason = "deny"
+allow_attributes = "deny"
+
+arithmetic_side_effects = "warn"
+default_numeric_fallback = "warn"
+
+# Restriction lints — incremental ratchet
+missing_assert_message = "warn"
+non_ascii_literal = "warn"
+assertions_on_result_states = "warn"
+wildcard_enum_match_arm = "warn"
+clone_on_ref_ptr = "warn"
+map_err_ignore = "warn"
+unseparated_literal_suffix = "warn"
+integer_division_remainder_used = "warn"
+let_underscore_must_use = "warn"
+redundant_type_annotations = "warn"
+impl_trait_in_params = "warn"
+as_conversions = "warn"
+unnecessary_safety_comment = "warn"
+semicolon_inside_block = "warn"
+ref_patterns = "warn"
+rc_buffer = "warn"
+multiple_inherent_impl = "warn"
+fn_to_numeric_cast_any = "warn"
+exhaustive_enums = "warn"
+exhaustive_structs = "warn"
+unused_trait_names = "warn"
+str_to_string = "warn"
+string_slice = "warn"
+
+partial_pub_fields = "warn"
+renamed_function_params = "warn"
+unnecessary_self_imports = "warn"
+self_named_module_files = "warn"
+float_cmp_const = "warn"
+
+expect_used = "warn"
+panic = "warn"
+unreachable = "warn"
+
+# Preventive restriction lints — zero current violations
+as_underscore = "warn"
+assertions_on_constants = "warn"
+cfg_not_test = "warn"
+create_dir = "warn"
+disallowed_script_idents = "warn"
+default_union_representation = "warn"
+filetype_is_file = "warn"
+iter_over_hash_type = "warn"
+large_stack_frames = "warn"
+mutex_atomic = "warn"
+panic_in_result_fn = "warn"
+suspicious_xor_used_as_pow = "warn"
+todo = "warn"
+unimplemented = "warn"
+unwrap_in_result = "warn"
+wildcard_dependencies = "warn"
+deref_by_slicing = "warn"
+empty_drop = "warn"
+big_endian_bytes = "warn"
+host_endian_bytes = "warn"
+little_endian_bytes = "warn"
+empty_enum_variants_with_brackets = "warn"
+empty_line_after_doc_comments = "warn"
+empty_line_after_outer_attr = "warn"
+empty_structs_with_brackets = "warn"
+excessive_nesting = "warn"
+field_scoped_visibility_modifiers = "warn"
+exit = "warn"
+error_impl_error = "warn"
+float_arithmetic = "warn"
+four_forward_slashes = "warn"
+format_push_string = "warn"
+integer_division = "warn"
+if_then_some_else_none = "warn"
+infinite_loop = "warn"
+large_include_file = "warn"
+map_with_unused_argument_over_ranges = "warn"
+mem_forget = "warn"
+missing_asserts_for_indexing = "warn"
+modulo_arithmetic = "warn"
+multiple_unsafe_ops_per_block = "warn"
+lossy_float_literal = "warn"
+mixed_read_write_in_expression = "warn"
+needless_raw_strings = "warn"
+pub_without_shorthand = "warn"
+rc_mutex = "warn"
+ref_as_ptr = "warn"
+pathbuf_init_then_push = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+same_name_method = "warn"
+shadow_same = "warn"
+string_add = "warn"
+string_add_assign = "warn"
+struct_field_names = "warn"
+string_lit_chars_any = "warn"
+try_err = "warn"
+unneeded_field_pattern = "warn"
+unnecessary_safety_doc = "warn"
+use_debug = "warn"
+verbose_file_reads = "warn"
+zombie_processes = "warn"
+
+[[bench]]
+name = "search_latency"
+harness = false
+
+[[bench]]
+name = "store_batch"
+harness = false
+
+[[bench]]
+name = "embed_throughput"
+harness = false
+
+[[bench]]
+name = "memory_footprint"
+harness = false

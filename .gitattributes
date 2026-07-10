@@ -1,0 +1,3 @@
+# Force LF line endings everywhere — required for cross-platform CI
+# (rustfmt rejects CRLF as "Incorrect newline style")
+* text=auto eol=lf

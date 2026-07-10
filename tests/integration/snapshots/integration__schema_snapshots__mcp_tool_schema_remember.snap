@@ -1,0 +1,216 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: tool
+---
+{
+  "name": "remember",
+  "description": "Remember durable information. Write authorization uses the server-resolved principal; scope may be a key, alias, matcher-containing value, or context_hints; entities/access_policy accept shorthand or full objects.",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "RememberParams",
+    "description": "Parameters for the v2 `remember` tool.",
+    "type": "object",
+    "properties": {
+      "content": {
+        "description": "The durable memory content to store.",
+        "type": "string"
+      },
+      "summary": {
+        "description": "Optional caller-supplied compact summary. The server stores the original content unchanged.",
+        "type": "string"
+      },
+      "scope": {
+        "description": "Scope key, alias, or value containing a registered matcher. If omitted and `context_hints` do not resolve, writes to `inbox/unresolved`.",
+        "type": "string"
+      },
+      "context_hints": {
+        "description": "Path, git, or workflow hints matched against registered scope matchers when `scope` is omitted.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      },
+      "agent_label": {
+        "description": "Human-readable agent label for provenance. This does not grant access.",
+        "type": "string"
+      },
+      "tags": {
+        "description": "Tags for categorizing this memory.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      },
+      "entities": {
+        "description": "Entities to attach: each item may be a string name shorthand or a full `{name, type}` object.",
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/EntityInputItem"
+        }
+      },
+      "memory_type": {
+        "description": "Memory type classification.",
+        "$ref": "#/$defs/MemoryType"
+      },
+      "importance": {
+        "description": "Importance score from 0.0 (low) to 1.0 (high).",
+        "type": "number",
+        "format": "double"
+      },
+      "confidence": {
+        "description": "Confidence score from 0.0 (low) to 1.0 (high).",
+        "type": "number",
+        "format": "double"
+      },
+      "access_policy": {
+        "description": "Access policy: `\"public\"` shorthand or a full policy object.",
+        "$ref": "#/$defs/AccessPolicyInput"
+      }
+    },
+    "required": [
+      "content"
+    ],
+    "$defs": {
+      "EntityInputItem": {
+        "description": "One request entity accepted by v2 write/update tools.",
+        "anyOf": [
+          {
+            "description": "String shorthand for an entity name; the entity type defaults to `unknown`.",
+            "type": "string"
+          },
+          {
+            "description": "Full object with explicit `name` and `type`.",
+            "$ref": "#/$defs/Entity"
+          }
+        ]
+      },
+      "Entity": {
+        "description": "A caller-provided typed entity attached to a memory for entity-based retrieval.",
+        "type": "object",
+        "properties": {
+          "name": {
+            "description": "The entity name (e.g., \"Alice\", \"example-agent\", \"RFC 9110\").",
+            "type": "string"
+          },
+          "type": {
+            "description": "The entity type (e.g., \"person\", \"project\", \"document\").",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type"
+        ]
+      },
+      "MemoryType": {
+        "description": "Classifies the kind of knowledge a memory captures.",
+        "oneOf": [
+          {
+            "description": "Facts, definitions, or general knowledge.",
+            "type": "string",
+            "const": "semantic"
+          },
+          {
+            "description": "Events that happened at a specific time.",
+            "type": "string",
+            "const": "episodic"
+          },
+          {
+            "description": "Step-by-step instructions or how-tos.",
+            "type": "string",
+            "const": "procedural"
+          }
+        ]
+      },
+      "AccessPolicyInput": {
+        "description": "One request access policy accepted by v2 write/update tools.",
+        "anyOf": [
+          {
+            "description": "String shorthand; currently only `\"public\"` is accepted.",
+            "$ref": "#/$defs/AccessPolicyShorthand"
+          },
+          {
+            "description": "Full object for `public`, `restricted`, or `redacted` access.",
+            "$ref": "#/$defs/AccessPolicy"
+          }
+        ]
+      },
+      "AccessPolicyShorthand": {
+        "description": "String shorthand accepted by request access policy fields.",
+        "oneOf": [
+          {
+            "description": "Visible to all callers.",
+            "type": "string",
+            "const": "public"
+          }
+        ]
+      },
+      "AccessPolicy": {
+        "description": "Controls who can see a memory.",
+        "oneOf": [
+          {
+            "description": "Visible to all callers.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "public"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "description": "Visible only to the listed agents.",
+            "type": "object",
+            "properties": {
+              "allowed": {
+                "description": "Agent identifiers permitted to access this memory.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "type": {
+                "type": "string",
+                "const": "restricted"
+              }
+            },
+            "required": [
+              "type",
+              "allowed"
+            ]
+          },
+          {
+            "description": "Visible but with some fields hidden from unauthorized callers.",
+            "type": "object",
+            "properties": {
+              "visible_fields": {
+                "description": "Field names that remain visible to unauthorized callers.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/RedactableField"
+                }
+              },
+              "type": {
+                "type": "string",
+                "const": "redacted"
+              }
+            },
+            "required": [
+              "type",
+              "visible_fields"
+            ]
+          }
+        ]
+      },
+      "RedactableField": {
+        "description": "A redactable field name (e.g. content, tags, provenance, entities, importance)",
+        "type": "string"
+      }
+    }
+  }
+}

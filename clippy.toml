@@ -1,0 +1,6 @@
+cognitive-complexity-threshold = 1
+excessive-nesting-threshold = 4
+too-many-arguments-threshold = 5
+too-many-lines-threshold = 75
+type-complexity-threshold = 120
+doc-valid-idents = ["SQLite", "MCP", "ULID"]

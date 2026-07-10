@@ -1,0 +1,84 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RecommendedAction",
+  "description": "Deterministic next action recommended by `brief`.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "description": "Tool to call next.",
+      "$ref": "#/$defs/RecommendedActionTool"
+    },
+    "priority": {
+      "description": "Action priority.",
+      "$ref": "#/$defs/RecommendedActionPriority"
+    },
+    "reason": {
+      "description": "Why this action is recommended.",
+      "type": "string"
+    },
+    "arguments": {
+      "description": "Complete tool arguments when the server can construct a valid call."
+    }
+  },
+  "required": [
+    "tool",
+    "priority",
+    "reason"
+  ],
+  "$defs": {
+    "RecommendedActionTool": {
+      "description": "Tool name for a deterministic next action recommended by `brief`.",
+      "oneOf": [
+        {
+          "description": "Read one full memory by ID.",
+          "type": "string",
+          "const": "read"
+        },
+        {
+          "description": "Read multiple full memories by ID.",
+          "type": "string",
+          "const": "read_many"
+        },
+        {
+          "description": "Run a focused recall search.",
+          "type": "string",
+          "const": "recall"
+        },
+        {
+          "description": "Store a new durable memory.",
+          "type": "string",
+          "const": "remember"
+        },
+        {
+          "description": "Register a missing scope definition.",
+          "type": "string",
+          "const": "admin_scope_register"
+        }
+      ]
+    },
+    "RecommendedActionPriority": {
+      "description": "Priority for a deterministic next action recommended by `brief`.",
+      "oneOf": [
+        {
+          "description": "Do this first.",
+          "type": "string",
+          "const": "high"
+        },
+        {
+          "description": "Useful but not urgent.",
+          "type": "string",
+          "const": "normal"
+        },
+        {
+          "description": "Optional follow-up for weak or stale context.",
+          "type": "string",
+          "const": "low"
+        }
+      ]
+    }
+  }
+}

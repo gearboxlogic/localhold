@@ -1,0 +1,551 @@
+---
+source: tests/integration/schema_snapshots.rs
+assertion_line: 124
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UpdateResponse",
+  "description": "Response from v2 `revise` and compatible admin update operations.",
+  "type": "object",
+  "properties": {
+    "operation": {
+      "description": "Action-oriented operation summary.",
+      "$ref": "#/$defs/OperationSummary"
+    },
+    "updated": {
+      "description": "Whether the memory was successfully updated.",
+      "type": "boolean"
+    },
+    "scope_resolution": {
+      "description": "Scope-resolution diagnostics when a scope or context hints were supplied.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ScopeResolution"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "operation",
+    "updated"
+  ],
+  "$defs": {
+    "OperationSummary": {
+      "description": "Shared action-oriented operation metadata.",
+      "type": "object",
+      "properties": {
+        "status": {
+          "description": "Operation status.",
+          "$ref": "#/$defs/OperationStatus"
+        },
+        "changed": {
+          "description": "Number of records changed.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "matched": {
+          "description": "Number of records matched before access checks, when applicable.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "denied": {
+          "description": "Number of matching records denied by authorization, when applicable.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "capped": {
+          "description": "Whether more matching records remain.",
+          "type": "boolean"
+        },
+        "next_action": {
+          "description": "Recommended next action for agents.",
+          "$ref": "#/$defs/NextAction"
+        },
+        "warnings": {
+          "description": "Warnings for this operation.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QualityWarning"
+          }
+        },
+        "affected": {
+          "description": "Affected memories or representative samples.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AffectedMemory"
+          }
+        }
+      },
+      "required": [
+        "status",
+        "changed",
+        "capped",
+        "next_action",
+        "warnings",
+        "affected"
+      ]
+    },
+    "OperationStatus": {
+      "description": "Standard operation status for v2 mutation and admin tools.",
+      "oneOf": [
+        {
+          "description": "The operation changed persistent state.",
+          "type": "string",
+          "const": "applied"
+        },
+        {
+          "description": "The operation changed some, but not all, matching items.",
+          "type": "string",
+          "const": "partial"
+        },
+        {
+          "description": "The operation only previewed changes.",
+          "type": "string",
+          "const": "preview"
+        },
+        {
+          "description": "Work was accepted for asynchronous processing.",
+          "type": "string",
+          "const": "queued"
+        },
+        {
+          "description": "The operation was valid but made no changes.",
+          "type": "string",
+          "const": "no_op"
+        },
+        {
+          "description": "The principal lacked permission.",
+          "type": "string",
+          "const": "denied"
+        },
+        {
+          "description": "The target was not found.",
+          "type": "string",
+          "const": "not_found"
+        }
+      ]
+    },
+    "NextAction": {
+      "description": "Recommended follow-up action for agents after a tool call.",
+      "oneOf": [
+        {
+          "description": "No follow-up is needed.",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "Read the returned or affected memory.",
+          "type": "string",
+          "const": "read"
+        },
+        {
+          "description": "Review duplicate candidates before relying on the write.",
+          "type": "string",
+          "const": "review_duplicates"
+        },
+        {
+          "description": "Classify unresolved scope later.",
+          "type": "string",
+          "const": "classify_scope"
+        },
+        {
+          "description": "Re-run the same maintenance operation to continue a capped batch.",
+          "type": "string",
+          "const": "continue"
+        },
+        {
+          "description": "Inspect warnings before proceeding.",
+          "type": "string",
+          "const": "review_warnings"
+        }
+      ]
+    },
+    "QualityWarning": {
+      "description": "A quality or classification warning returned by v2 write tools.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "Stable warning code.",
+          "type": "string"
+        },
+        "severity": {
+          "description": "Severity for agent triage.",
+          "$ref": "#/$defs/QualityWarningSeverity"
+        },
+        "field": {
+          "description": "Optional request field path associated with this warning.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Human-readable warning message.",
+          "type": "string"
+        },
+        "suggested_fix": {
+          "description": "Optional suggested agent action.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "severity",
+        "message"
+      ]
+    },
+    "QualityWarningSeverity": {
+      "description": "Severity for v2 quality warnings.",
+      "oneOf": [
+        {
+          "description": "Informational hint; the operation is usually usable.",
+          "type": "string",
+          "const": "info"
+        },
+        {
+          "description": "Warning worth reviewing before relying on the result.",
+          "type": "string",
+          "const": "warning"
+        },
+        {
+          "description": "Follow-up action is required for best results.",
+          "type": "string",
+          "const": "action_required"
+        }
+      ]
+    },
+    "AffectedMemory": {
+      "description": "Compact affected item for action-oriented operation responses.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Affected memory ID.",
+          "$ref": "#/$defs/MemoryId"
+        },
+        "card": {
+          "description": "Compact card when the memory still exists and is readable.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecallCard"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "MemoryId": {
+      "description": "A ULID-formatted unique memory identifier",
+      "type": "string"
+    },
+    "RecallCard": {
+      "description": "Compact v2 result card. Full content is available through `read`.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Memory ID.",
+          "$ref": "#/$defs/MemoryId"
+        },
+        "summary_or_excerpt": {
+          "description": "Caller-supplied summary when available, otherwise a deterministic excerpt.",
+          "type": "string"
+        },
+        "scope": {
+          "description": "Scope label/key.",
+          "type": "string"
+        },
+        "agent_label": {
+          "description": "Agent provenance label.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "description": "Creation timestamp.",
+          "type": "string"
+        },
+        "updated_at": {
+          "description": "Last-update timestamp.",
+          "type": "string"
+        },
+        "tags": {
+          "description": "Tags associated with the memory.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "entities": {
+          "description": "Typed entities attached to the memory.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Entity"
+          }
+        },
+        "match": {
+          "description": "Agent-facing match assessment.",
+          "$ref": "#/$defs/MatchAssessment"
+        },
+        "diagnostics": {
+          "description": "Debugging diagnostics for retrieval and ranking.",
+          "$ref": "#/$defs/MatchDiagnostics"
+        }
+      },
+      "required": [
+        "id",
+        "summary_or_excerpt",
+        "scope",
+        "created_at",
+        "updated_at",
+        "tags",
+        "match",
+        "diagnostics"
+      ]
+    },
+    "Entity": {
+      "description": "A caller-provided typed entity attached to a memory for entity-based retrieval.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The entity name (e.g., \"Alice\", \"example-agent\", \"RFC 9110\").",
+          "type": "string"
+        },
+        "type": {
+          "description": "The entity type (e.g., \"person\", \"project\", \"document\").",
+          "$ref": "#/$defs/EntityType"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ]
+    },
+    "EntityType": {
+      "description": "A validated entity type identifier",
+      "type": "string"
+    },
+    "MatchAssessment": {
+      "description": "Agent-facing match assessment for a compact v2 card.",
+      "type": "object",
+      "properties": {
+        "quality": {
+          "description": "Match quality label.",
+          "$ref": "#/$defs/MatchQuality"
+        },
+        "action": {
+          "description": "Recommended action for agents.",
+          "$ref": "#/$defs/MatchAction"
+        },
+        "score": {
+          "description": "Final query relevance on a 0.0-1.0 scale.",
+          "type": "number",
+          "format": "double"
+        },
+        "score_basis": {
+          "description": "Ranking signal used to compute `score`.",
+          "$ref": "#/$defs/MatchScoreBasis"
+        }
+      },
+      "required": [
+        "quality",
+        "action",
+        "score",
+        "score_basis"
+      ]
+    },
+    "MatchQuality": {
+      "description": "Agent-facing match quality label.",
+      "oneOf": [
+        {
+          "description": "Strong match.",
+          "type": "string",
+          "const": "strong"
+        },
+        {
+          "description": "Usable but not definitive.",
+          "type": "string",
+          "const": "possible"
+        },
+        {
+          "description": "Weak match suppressed by default.",
+          "type": "string",
+          "const": "weak"
+        }
+      ]
+    },
+    "MatchAction": {
+      "description": "Recommended agent action for a matched card.",
+      "oneOf": [
+        {
+          "description": "Read the full memory.",
+          "type": "string",
+          "const": "read"
+        },
+        {
+          "description": "Consider reading if more context is needed.",
+          "type": "string",
+          "const": "consider"
+        },
+        {
+          "description": "Ignore unless explicitly debugging retrieval.",
+          "type": "string",
+          "const": "ignore"
+        }
+      ]
+    },
+    "MatchScoreBasis": {
+      "description": "Basis used to compute the agent-facing match score.",
+      "oneOf": [
+        {
+          "description": "Blended cross-encoder reranker score and first-stage retrieval score.",
+          "type": "string",
+          "const": "reranker_blend"
+        },
+        {
+          "description": "First-stage retrieval score only.",
+          "type": "string",
+          "const": "retrieval"
+        },
+        {
+          "description": "Low confidence association score for expanded/contextual candidates.",
+          "type": "string",
+          "const": "association"
+        },
+        {
+          "description": "No ranking signal was available.",
+          "type": "string",
+          "const": "unavailable"
+        }
+      ]
+    },
+    "MatchDiagnostics": {
+      "description": "Ranking diagnostics for a compact v2 card.",
+      "type": "object",
+      "properties": {
+        "retrieval_score": {
+          "description": "First-stage retrieval score.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "reranker_score": {
+          "description": "Reranker score when available.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "reranker_blend_weight": {
+          "description": "Reranker blend weight used when `score_basis` is `reranker_blend`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "vector_distance": {
+          "description": "L2 vector distance when available.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "ranking_score": {
+          "description": "Internal ranking score combining relevance, importance, freshness, activity, and confidence.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      }
+    },
+    "ScopeResolution": {
+      "description": "Diagnostic details for agent-facing scope resolution.",
+      "type": "object",
+      "properties": {
+        "scope": {
+          "description": "Resolved scope key, or `inbox/unresolved`.",
+          "type": "string"
+        },
+        "unresolved_scope": {
+          "description": "Whether the scope still needs classification.",
+          "type": "boolean"
+        },
+        "resolved_by": {
+          "description": "Resolution mechanism.",
+          "$ref": "#/$defs/ScopeResolvedBy"
+        },
+        "matched_hint": {
+          "description": "Input hint or explicit value that matched, when applicable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "matched_value": {
+          "description": "Registry alias or matcher value that matched, when applicable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "scope",
+        "unresolved_scope",
+        "resolved_by"
+      ]
+    },
+    "ScopeResolvedBy": {
+      "description": "Mechanism used to resolve a v2 scope.",
+      "oneOf": [
+        {
+          "description": "Explicit scope key or raw explicit scope value.",
+          "type": "string",
+          "const": "explicit"
+        },
+        {
+          "description": "Scope registry alias matched.",
+          "type": "string",
+          "const": "alias"
+        },
+        {
+          "description": "Scope registry matcher matched an explicit scope or context hint.",
+          "type": "string",
+          "const": "matcher"
+        },
+        {
+          "description": "No scope could be resolved.",
+          "type": "string",
+          "const": "unresolved"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,66 @@
+---
+source: tests/integration/schema_snapshots.rs
+assertion_line: 22
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QualityWarning",
+  "description": "A quality or classification warning returned by v2 write tools.",
+  "type": "object",
+  "properties": {
+    "code": {
+      "description": "Stable warning code.",
+      "type": "string"
+    },
+    "severity": {
+      "description": "Severity for agent triage.",
+      "$ref": "#/$defs/QualityWarningSeverity"
+    },
+    "field": {
+      "description": "Optional request field path associated with this warning.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "message": {
+      "description": "Human-readable warning message.",
+      "type": "string"
+    },
+    "suggested_fix": {
+      "description": "Optional suggested agent action.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "code",
+    "severity",
+    "message"
+  ],
+  "$defs": {
+    "QualityWarningSeverity": {
+      "description": "Severity for v2 quality warnings.",
+      "oneOf": [
+        {
+          "description": "Informational hint; the operation is usually usable.",
+          "type": "string",
+          "const": "info"
+        },
+        {
+          "description": "Warning worth reviewing before relying on the result.",
+          "type": "string",
+          "const": "warning"
+        },
+        {
+          "description": "Follow-up action is required for best results.",
+          "type": "string",
+          "const": "action_required"
+        }
+      ]
+    }
+  }
+}

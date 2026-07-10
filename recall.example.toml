@@ -1,0 +1,132 @@
+# LocalHold -- example configuration
+# Copy to ./recall.toml or ~/.config/localhold/recall.toml
+# Values below document the complete configuration surface. Omitted fields use
+# code defaults, and runtime settings can be overridden via RECALL_* variables.
+
+[database]
+backend = "sqlite" # "sqlite" or "postgres"
+
+[database.sqlite]
+path = "~/.local/share/localhold/recall.db"
+
+[database.postgres]
+url = "postgres://localhold:localhold@localhost:5432/localhold"
+max_connections = 5
+auto_migrate = true
+# Env: RECALL_DB_BACKEND, RECALL_DB_PATH,
+#      RECALL_POSTGRES_URL, RECALL_POSTGRES_MAX_CONNECTIONS,
+#      RECALL_POSTGRES_AUTO_MIGRATE
+
+[embedding]
+# Provider: "noop" (default, text-only search) or "openai_compatible".
+provider = "noop"
+dimensions = 768
+# Env: RECALL_EMBEDDING_DIMENSIONS
+
+[embedding.openai_compatible]
+# Used when provider = "openai_compatible". Configure any compatible local or
+# cloud endpoint. vLLM, llama.cpp, and Ollama are examples of local providers.
+base_url = "http://127.0.0.1:8000/v1"
+model = "nomic-embed-text"
+# Optional bearer token. Omit or leave empty for local no-auth providers.
+# api_key = ""
+# Env: RECALL_EMBEDDING_BASE_URL, RECALL_EMBEDDING_MODEL, RECALL_EMBEDDING_API_KEY
+
+[server]
+transport = "stdio"   # "stdio" or "http"
+log_level = "info"    # trace, debug, info, warn, error
+principal = "stdio"   # Trusted launch principal for stdio; empty = anonymous
+anonymous_policy = "public_read_only" # "public_read_only", "deny_all", or "public_read_write"
+host = "127.0.0.1"    # HTTP bind address (ignored for stdio)
+port = 8080           # HTTP port (ignored for stdio)
+path = "/mcp"         # Exact HTTP endpoint path (ignored for stdio)
+http_auth_token = ""  # When set, every HTTP endpoint request must authenticate
+http_principal_header = "x-recall-principal" # Trusted only after endpoint bearer auth
+http_allowed_hosts = ["localhost", "127.0.0.1", "::1"] # Add proxy/public Host values explicitly
+max_body_bytes = 8388608 # Max HTTP request body size; stdio is bounded by tool limits
+# Env: RECALL_TRANSPORT, RECALL_LOG_LEVEL, RECALL_PRINCIPAL, RECALL_ANONYMOUS_POLICY,
+#      RECALL_HTTP_HOST, RECALL_HTTP_PORT, RECALL_HTTP_PATH,
+#      RECALL_HTTP_AUTH_TOKEN, RECALL_HTTP_PRINCIPAL_HEADER,
+#      RECALL_HTTP_ALLOWED_HOSTS, RECALL_HTTP_MAX_BODY_BYTES
+
+[limits]
+max_search_limit = 50          # Max results per recall/search operation
+max_candidate_pool_size = 1000 # Max first-stage candidates before reranking/scoring
+max_list_limit = 500           # Max results per admin list call
+max_content_length = 65536     # Max memory content size (bytes)
+max_tags_per_memory = 50       # Max tags per memory
+max_tag_length = 256           # Max length of a single tag (bytes)
+max_batch_size = 100           # Max items per remember_many or handoff commit
+max_reembed_limit = 100        # Max memories per admin_reembed bulk call
+consolidation_neighbor_limit = 20  # ANN neighbors per memory during consolidation
+embedding_timeout_secs = 30    # Timeout for embedding HTTP requests
+shutdown_timeout_secs = 10     # Graceful shutdown timeout for background tasks
+max_entities_per_memory = 50   # Max entities per memory
+max_entity_field_length = 256  # Max length of entity name/type (bytes)
+max_top_tags_limit = 100       # Max tags in admin_count stats
+max_history_limit = 500        # Max audit-history rows per admin_history call
+# Env: RECALL_MAX_SEARCH_LIMIT, RECALL_MAX_CANDIDATE_POOL_SIZE, RECALL_MAX_LIST_LIMIT, etc.
+
+[search]
+# Default search mode when caller doesn't specify: auto, semantic, keyword, text
+default_mode = "auto"
+
+# Reciprocal Rank Fusion parameters (for hybrid search)
+rrf_k = 60                     # RRF constant k (dampens rank sensitivity)
+rrf_semantic_weight = 1.0      # Weight for semantic ANN results
+rrf_keyword_weight = 1.0       # Weight for FTS5 keyword results
+semantic_candidate_k = 100     # Candidate depth for semantic retrieval before fusion
+keyword_candidate_k = 100      # Candidate depth for keyword retrieval before fusion
+rerank_top_m = 50              # Top-N fused candidates kept for reranking / scoring
+
+# Composite scoring weights (must sum to 100.0)
+relevance_weight = 60.0        # Query relevance weight
+importance_weight = 15.0       # Memory importance weight
+freshness_weight = 10.0        # Content update freshness weight
+activity_weight = 10.0         # Real-use activity weight (reads/cites/confirms, not impressions)
+confidence_weight = 5.0        # Memory confidence weight
+activity_half_life_hours = 720.0  # Activity decay half-life (720h = 30 days)
+activity_saturation = 8.0      # Effective recent uses that saturate the activity boost
+freshness_half_life_semantic_days = 180.0
+freshness_half_life_episodic_days = 14.0
+freshness_half_life_procedural_days = 365.0
+relevance_floor = 0.15         # Query relevance below this is penalized
+relevance_floor_penalty = 0.25 # Multiplier for below-floor results
+superseded_penalty = 0.05      # Multiplier for superseded memories when included
+# Env: RECALL_RRF_K, RECALL_RRF_SEMANTIC_WEIGHT, RECALL_RRF_KEYWORD_WEIGHT,
+#      RECALL_DEFAULT_SEARCH_MODE, RECALL_SEMANTIC_CANDIDATE_K,
+#      RECALL_KEYWORD_CANDIDATE_K, RECALL_RERANK_TOP_M,
+#      RECALL_RELEVANCE_WEIGHT, RECALL_IMPORTANCE_WEIGHT,
+#      RECALL_FRESHNESS_WEIGHT, RECALL_ACTIVITY_WEIGHT,
+#      RECALL_CONFIDENCE_WEIGHT, RECALL_ACTIVITY_HALF_LIFE_HOURS,
+#      RECALL_ACTIVITY_SATURATION,
+#      RECALL_FRESHNESS_HALF_LIFE_SEMANTIC_DAYS,
+#      RECALL_FRESHNESS_HALF_LIFE_EPISODIC_DAYS,
+#      RECALL_FRESHNESS_HALF_LIFE_PROCEDURAL_DAYS,
+#      RECALL_RELEVANCE_FLOOR, RECALL_RELEVANCE_FLOOR_PENALTY,
+#      RECALL_SUPERSEDED_PENALTY
+
+[search.reranker]
+# Release builds ship with reranker support compiled in; runtime enablement is opt-in.
+enabled = false
+pool_size = 50                 # Deprecated compatibility shim; prefer search.rerank_top_m
+
+# Built-in default model: setting only `enabled = true` is enough.
+# These defaults are pinned in code for the builtin model.
+model = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+revision = ""
+model_path = ""               # Optional local ONNX path; takes precedence over download
+model_sha256 = ""             # Optional override; required for custom auto-downloaded models
+tokenizer_sha256 = ""         # Optional override; required for custom auto-downloaded models
+blend_weight = 0.7
+cache_dir = "~/.cache/localhold/models"
+
+# Env: RECALL_RERANKER_ENABLED, RECALL_RERANKER_MODEL, RECALL_RERANKER_REVISION,
+#      RECALL_RERANKER_MODEL_PATH, RECALL_RERANKER_MODEL_SHA256,
+#      RECALL_RERANKER_TOKENIZER_SHA256, RECALL_RERANKER_BLEND_WEIGHT,
+#      RECALL_RERANKER_CACHE_DIR, RECALL_RERANKER_POOL_SIZE
+
+[search.duplicate_suppression]
+enabled = false
+lambda = 0.10                  # Near-duplicate penalty coefficient
+# Env: RECALL_DUPLICATE_SUPPRESSION_ENABLED, RECALL_DUPLICATE_SUPPRESSION_LAMBDA

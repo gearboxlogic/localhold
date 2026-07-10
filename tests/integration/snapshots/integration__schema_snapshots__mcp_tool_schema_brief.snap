@@ -1,0 +1,39 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: tool
+---
+{
+  "name": "brief",
+  "description": "Return deterministic structured context grouped into relevant memories, decisions, WIP, lessons, stale candidates, suggested reads, and recommended actions. Scope accepts key/alias/matcher/context_hints.",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "BriefParams",
+    "description": "Parameters for the v2 `brief` tool.",
+    "type": "object",
+    "properties": {
+      "query": {
+        "description": "Optional topic or task query.",
+        "type": "string"
+      },
+      "scope": {
+        "description": "Optional scope filter: registered scope key, alias, or value containing a registered matcher.",
+        "type": "string"
+      },
+      "context_hints": {
+        "description": "Optional context hints matched against registered scope matchers when `scope` is omitted.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      },
+      "limit": {
+        "description": "Maximum number of relevant cards to include.",
+        "type": "integer",
+        "format": "uint",
+        "minimum": 0,
+        "default": 8
+      }
+    }
+  }
+}

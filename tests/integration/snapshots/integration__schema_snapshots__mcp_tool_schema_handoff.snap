@@ -1,0 +1,145 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: tool
+---
+{
+  "name": "handoff",
+  "description": "Validate handoff candidate memories. candidates items may be string content shorthand or full objects; caps at max_batch_size; scope accepts key/alias/matcher/context_hints; previews by default and persists only when commit=true.",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "HandoffParams",
+    "description": "Parameters for the v2 `handoff` tool.",
+    "type": "object",
+    "properties": {
+      "candidates": {
+        "description": "Candidate memories to validate. Each item may be a string content shorthand or a full candidate object. Length is capped by `limits.max_batch_size`.",
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/HandoffCandidateItem"
+        }
+      },
+      "commit": {
+        "description": "Persist validated candidates when true. Defaults to preview-only.",
+        "type": "boolean",
+        "default": false
+      }
+    },
+    "required": [
+      "candidates"
+    ],
+    "$defs": {
+      "HandoffCandidateItem": {
+        "description": "One candidate item accepted by the v2 `handoff` tool.",
+        "anyOf": [
+          {
+            "description": "String shorthand for candidate memory content.",
+            "type": "string"
+          },
+          {
+            "description": "Full structured handoff candidate.",
+            "$ref": "#/$defs/HandoffCandidate"
+          }
+        ]
+      },
+      "HandoffCandidate": {
+        "description": "Candidate memory supplied to `handoff`.",
+        "type": "object",
+        "properties": {
+          "content": {
+            "description": "Candidate memory content.",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Optional compact summary.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Optional target scope: registered scope key, alias, or value containing a registered matcher.",
+            "type": "string"
+          },
+          "context_hints": {
+            "description": "Optional context hints matched against registered scope matchers when `scope` is omitted.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "tags": {
+            "description": "Candidate tags.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "entities": {
+            "description": "Candidate entities: each item may be a string name shorthand or a full `{name, type}` object.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/EntityInputItem"
+            }
+          },
+          "memory_type": {
+            "description": "Candidate memory type.",
+            "$ref": "#/$defs/MemoryType"
+          }
+        },
+        "required": [
+          "content"
+        ]
+      },
+      "EntityInputItem": {
+        "description": "One request entity accepted by v2 write/update tools.",
+        "anyOf": [
+          {
+            "description": "String shorthand for an entity name; the entity type defaults to `unknown`.",
+            "type": "string"
+          },
+          {
+            "description": "Full object with explicit `name` and `type`.",
+            "$ref": "#/$defs/Entity"
+          }
+        ]
+      },
+      "Entity": {
+        "description": "A caller-provided typed entity attached to a memory for entity-based retrieval.",
+        "type": "object",
+        "properties": {
+          "name": {
+            "description": "The entity name (e.g., \"Alice\", \"example-agent\", \"RFC 9110\").",
+            "type": "string"
+          },
+          "type": {
+            "description": "The entity type (e.g., \"person\", \"project\", \"document\").",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type"
+        ]
+      },
+      "MemoryType": {
+        "description": "Classifies the kind of knowledge a memory captures.",
+        "oneOf": [
+          {
+            "description": "Facts, definitions, or general knowledge.",
+            "type": "string",
+            "const": "semantic"
+          },
+          {
+            "description": "Events that happened at a specific time.",
+            "type": "string",
+            "const": "episodic"
+          },
+          {
+            "description": "Step-by-step instructions or how-tos.",
+            "type": "string",
+            "const": "procedural"
+          }
+        ]
+      }
+    }
+  }
+}

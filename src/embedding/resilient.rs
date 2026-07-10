@@ -28,6 +28,10 @@ pub struct ResilientConfig {
     /// Optional notifier signalled when the provider transitions from unavailable to available.
     /// Callers can wait on this to trigger recovery actions (e.g. bulk re-embed).
     pub recovery_notify: Option<Arc<Notify>>,
+    /// Number of retries after an initial transient embedding failure.
+    pub max_retries: u32,
+    /// Delay before the first retry. Later retries use exponential backoff.
+    pub initial_backoff: std::time::Duration,
 }
 
 impl Default for ResilientConfig {
@@ -35,6 +39,8 @@ impl Default for ResilientConfig {
         Self {
             probe_interval: std::time::Duration::from_secs(30),
             recovery_notify: None,
+            max_retries: 2,
+            initial_backoff: std::time::Duration::from_millis(500),
         }
     }
 }
@@ -62,6 +68,8 @@ pub struct ResilientEmbedding<P> {
     available: Arc<AtomicBool>,
     probe_handle: JoinHandle<()>,
     cancel: CancellationToken,
+    max_retries: u32,
+    initial_backoff: std::time::Duration,
 }
 
 impl<P: EmbeddingProvider + 'static> ResilientEmbedding<P> {
@@ -82,6 +90,9 @@ impl<P: EmbeddingProvider + 'static> ResilientEmbedding<P> {
         let available = Arc::new(AtomicBool::new(initially_available));
         let cancel = CancellationToken::new();
 
+        let max_retries = config.max_retries;
+        let initial_backoff = config.initial_backoff;
+
         let probe_handle = spawn_health_probe(Arc::clone(&inner), Arc::clone(&available), config.probe_interval, cancel.clone(), config.recovery_notify);
 
         Self {
@@ -89,6 +100,8 @@ impl<P: EmbeddingProvider + 'static> ResilientEmbedding<P> {
             available,
             probe_handle,
             cancel,
+            max_retries,
+            initial_backoff,
         }
     }
 
@@ -107,6 +120,26 @@ impl<P: EmbeddingProvider + 'static> ResilientEmbedding<P> {
             self.available.store(false, Ordering::Release);
         }
         err
+    }
+
+    async fn retry_transient<'a, T, F>(&'a self, mut operation: F) -> Result<T, EmbeddingError>
+    where
+        F: FnMut() -> BoxFuture<'a, Result<T, EmbeddingError>>,
+    {
+        let mut backoff = self.initial_backoff;
+        let mut attempt = 0_u32;
+        loop {
+            match operation().await {
+                Ok(value) => return Ok(value),
+                Err(EmbeddingError::Transient(source)) if attempt < self.max_retries => {
+                    warn!(attempt = attempt.saturating_add(1), max_retries = self.max_retries, ?backoff, error = %source, "transient embedding failure; retrying");
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.saturating_mul(2);
+                    attempt = attempt.saturating_add(1);
+                }
+                Err(error) => return Err(self.handle_embed_error(error)),
+            }
+        }
     }
 }
 
@@ -134,7 +167,7 @@ impl<P: EmbeddingProvider + 'static> EmbeddingProvider for ResilientEmbedding<P>
                 return Err(EmbeddingError::Disabled);
             }
 
-            self.inner.embed(text).await.map_err(|e| self.handle_embed_error(e))
+            self.retry_transient(|| self.inner.embed(text)).await
         })
     }
 
@@ -153,7 +186,7 @@ impl<P: EmbeddingProvider + 'static> EmbeddingProvider for ResilientEmbedding<P>
                 return Err(EmbeddingError::Disabled);
             }
 
-            self.inner.embed_batch(texts).await.map_err(|e| self.handle_embed_error(e))
+            self.retry_transient(|| self.inner.embed_batch(texts)).await
         })
     }
 }
@@ -268,6 +301,14 @@ mod tests {
         }
     }
 
+    fn fast_retry_config() -> ResilientConfig {
+        ResilientConfig {
+            max_retries: 2,
+            initial_backoff: Duration::from_millis(1),
+            ..ResilientConfig::default()
+        }
+    }
+
     #[tokio::test]
     async fn initially_available_when_healthy() {
         let provider = MockProvider::new(true);
@@ -302,7 +343,7 @@ mod tests {
     #[tokio::test]
     async fn transient_error_marks_unavailable() {
         let provider = MockProvider::new(true);
-        let resilient = ResilientEmbedding::new(provider, ResilientConfig::default()).await;
+        let resilient = ResilientEmbedding::new(provider, fast_retry_config()).await;
         assert!(resilient.is_available(), "should start available");
 
         // Make inner provider unhealthy, then embed
@@ -317,6 +358,51 @@ mod tests {
         assert!(matches!(err, EmbeddingError::Disabled), "should return Disabled on subsequent calls");
         let embed_count_after = resilient.inner.embed_count.load(Ordering::Relaxed);
         assert_eq!(embed_count_before, embed_count_after, "should not call inner embed when unavailable");
+    }
+
+    struct FlakyProvider {
+        failures_remaining: AtomicUsize,
+        embed_count: AtomicUsize,
+    }
+
+    impl FlakyProvider {
+        fn embed_sync(&self) -> Result<Vec<f32>, EmbeddingError> {
+            self.embed_count.fetch_add(1, Ordering::Relaxed);
+            let failed = self
+                .failures_remaining
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| remaining.checked_sub(1))
+                .is_ok();
+            if failed {
+                return Err(EmbeddingError::Transient("retryable failure".into()));
+            }
+            Ok(vec![1.0, 0.0, 0.0])
+        }
+    }
+
+    impl EmbeddingProvider for FlakyProvider {
+        fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, EmbeddingError>> {
+            Box::pin(async move { self.embed_sync() })
+        }
+
+        fn health_check(&self) -> BoxFuture<'_, Result<(), EmbeddingError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_transient_failures_before_opening_circuit() {
+        let resilient = ResilientEmbedding::new(
+            FlakyProvider {
+                failures_remaining: AtomicUsize::new(2),
+                embed_count: AtomicUsize::new(0),
+            },
+            fast_retry_config(),
+        )
+        .await;
+
+        assert_eq!(resilient.embed("test").await.unwrap(), vec![1.0, 0.0, 0.0]);
+        assert_eq!(resilient.inner.embed_count.load(Ordering::Relaxed), 3);
+        assert!(resilient.is_available(), "successful retry must keep the circuit closed");
     }
 
     /// Provider that returns permanent errors but is otherwise healthy.
@@ -348,6 +434,7 @@ mod tests {
         let config = ResilientConfig {
             probe_interval: Duration::from_millis(20),
             recovery_notify: None,
+            ..ResilientConfig::default()
         };
         let resilient = ResilientEmbedding::new(HealthProbeWrapper { inner: Arc::clone(&provider) }, config).await;
         assert!(!resilient.is_available(), "should start unavailable");
@@ -399,7 +486,7 @@ mod tests {
     #[tokio::test]
     async fn embed_batch_transient_marks_unavailable() {
         let provider = MockProvider::new(true);
-        let resilient = ResilientEmbedding::new(provider, ResilientConfig::default()).await;
+        let resilient = ResilientEmbedding::new(provider, fast_retry_config()).await;
         assert!(resilient.is_available(), "should start available");
 
         resilient.inner.set_healthy(false);
@@ -415,6 +502,7 @@ mod tests {
         let config = ResilientConfig {
             probe_interval: Duration::from_millis(10),
             recovery_notify: None,
+            ..ResilientConfig::default()
         };
         let resilient = ResilientEmbedding::new(provider, config).await;
 
@@ -434,6 +522,7 @@ mod tests {
         let config = ResilientConfig {
             probe_interval: Duration::from_millis(20),
             recovery_notify: Some(Arc::clone(&notify)),
+            ..ResilientConfig::default()
         };
         let resilient = ResilientEmbedding::new(HealthProbeWrapper { inner: Arc::clone(&provider) }, config).await;
         assert!(!resilient.is_available(), "should start unavailable");
@@ -455,6 +544,7 @@ mod tests {
         let config = ResilientConfig {
             probe_interval: Duration::from_millis(20),
             recovery_notify: Some(Arc::clone(&notify)),
+            ..ResilientConfig::default()
         };
         let _resilient = ResilientEmbedding::new(HealthProbeWrapper { inner: Arc::clone(&provider) }, config).await;
 

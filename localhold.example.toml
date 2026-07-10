@@ -32,7 +32,14 @@ base_url = "http://127.0.0.1:8000/v1"
 model = "nomic-embed-text"
 # Optional bearer token. Omit or leave empty for local no-auth providers.
 # api_key = ""
-# Env: RECALL_EMBEDDING_BASE_URL, RECALL_EMBEDDING_MODEL, RECALL_EMBEDDING_API_KEY
+auth_mode = "bearer" # "bearer" or Azure-compatible "api_key"
+send_dimensions = false # Enable only when the selected API/model accepts this field
+health_check = "models" # "models" or "disabled" when GET /models is unavailable
+allow_insecure_http = false # Non-loopback HTTP requires an explicit trusted-network opt-in
+# Env: RECALL_EMBEDDING_BASE_URL, RECALL_EMBEDDING_MODEL,
+#      RECALL_EMBEDDING_API_KEY, RECALL_EMBEDDING_AUTH_MODE,
+#      RECALL_EMBEDDING_SEND_DIMENSIONS, RECALL_EMBEDDING_HEALTH_CHECK,
+#      RECALL_EMBEDDING_ALLOW_INSECURE_HTTP
 
 [server]
 transport = "stdio"   # "stdio" or "http"

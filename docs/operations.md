@@ -32,6 +32,8 @@ or cloud endpoint. LocalHold does not start or manage that service.
 Review the endpoint operator's retention, logging, residency, and access
 policies before enabling it. Do not place API keys in URLs; use
 `embedding.openai_compatible.api_key` or `RECALL_EMBEDDING_API_KEY`.
+Provider-specific request and authentication settings are documented in
+[Embedding Providers](embedding-providers.md).
 
 The optional reranker runs in the LocalHold process. Its model and tokenizer
 are downloaded into the configured cache on first use unless `model_path`

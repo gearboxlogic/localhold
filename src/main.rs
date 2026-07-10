@@ -8,14 +8,14 @@ use std::{
 };
 
 use localhold::{
-    config::{Config, DatabaseBackend, EmbeddingConfig, HttpPrincipalMode, ServerConfig, Transport},
-    embedding::{EmbeddingProvider, NoopEmbedding, OpenAiEmbedding, ResilientEmbedding, resilient::ResilientConfig},
+    config::{Config, DatabaseBackend, HttpPrincipalMode, ServerConfig, Transport},
+    embedding::factory::{active_embedding_profile, create_embedding_provider},
     engine::{RecallEngine, ReembedOutcome, ReembedRequest},
     error::EngineError,
     http_transport::build_router,
     server::{HttpPrincipalSource, RecallServer},
     store::{
-        EmbeddingProfile, MemoryStore, PostgresStore, SqliteStore,
+        MemoryStore, PostgresStore, SqliteStore,
         migration::{MigrationError, SqliteToPostgresOptions, migrate_sqlite_to_postgres},
     },
 };
@@ -145,17 +145,6 @@ async fn run_embeddings_cli(args: &[OsString]) -> AppResult {
     Ok(())
 }
 
-fn active_embedding_profile(config: &EmbeddingConfig) -> Option<EmbeddingProfile> {
-    match config {
-        EmbeddingConfig::OpenAiCompatible { dimensions, openai_compatible } => Some(EmbeddingProfile::openai_compatible(
-            openai_compatible.base_url.clone(),
-            openai_compatible.model.clone(),
-            *dimensions,
-        )),
-        EmbeddingConfig::Noop { .. } | _ => None,
-    }
-}
-
 async fn try_run_migration_cli() -> Option<AppResult> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     if args.first().is_none_or(|arg| arg != "migrate") {
@@ -223,7 +212,7 @@ where
 {
     // Create embedding provider with recovery notification
     let recovery_notify = Arc::new(Notify::new());
-    let embedding: Arc<dyn EmbeddingProvider> = create_embedding_provider(&config.embedding, &config.limits, Some(Arc::clone(&recovery_notify))).await;
+    let embedding = create_embedding_provider(&config.embedding, &config.limits, Some(Arc::clone(&recovery_notify))).await;
 
     // Clone reranker config before search config is consumed by RecallEngine::new
     #[cfg(feature = "reranker")]
@@ -271,42 +260,6 @@ where
         Transport::Stdio => Box::pin(serve_stdio(server)).await,
         Transport::Http => serve_http(server, &config.server).await,
         other => Err(format!("unsupported transport: {other}").into()),
-    }
-}
-
-async fn create_embedding_provider(config: &EmbeddingConfig, limits: &localhold::config::LimitsConfig, recovery_notify: Option<Arc<Notify>>) -> Arc<dyn EmbeddingProvider> {
-    match config {
-        EmbeddingConfig::OpenAiCompatible { dimensions, openai_compatible } => {
-            let timeout = std::time::Duration::from_secs(limits.embedding_timeout_secs);
-            let provider = match OpenAiEmbedding::new(openai_compatible, *dimensions, timeout) {
-                Ok(provider) => provider,
-                Err(e) => {
-                    tracing::error!("openai-compatible embedding provider could not be created: {e}, falling back to noop");
-                    return Arc::new(NoopEmbedding::new());
-                }
-            };
-            let mut resilient_config = ResilientConfig::default();
-            if let Some(notify) = recovery_notify {
-                resilient_config = resilient_config.with_recovery_notify(notify);
-            }
-            let resilient = ResilientEmbedding::new(provider, resilient_config).await;
-            info!(
-                "openai-compatible embedding provider (base_url: {}, model: {}, dims: {}, available: {})",
-                openai_compatible.base_url,
-                openai_compatible.model,
-                dimensions,
-                resilient.is_available()
-            );
-            Arc::new(resilient)
-        }
-        EmbeddingConfig::Noop { dimensions } => {
-            info!("noop embedding provider (dims: {})", dimensions);
-            Arc::new(NoopEmbedding::new())
-        }
-        other => {
-            tracing::error!("unsupported embedding config variant: {other:?}, falling back to noop");
-            Arc::new(NoopEmbedding::new())
-        }
     }
 }
 

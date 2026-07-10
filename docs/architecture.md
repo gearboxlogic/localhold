@@ -47,6 +47,7 @@ require explicit operator configuration.
 
 `src/embedding/` contains:
 
+- `factory.rs` for configured provider construction and vector-space identity
 - `openai.rs` for OpenAI-compatible embedding endpoints
 - `noop.rs` for text-only mode
 - `resilient.rs` for availability tracking and graceful degradation

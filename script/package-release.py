@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import gzip
 import os
 import re
 import shutil
@@ -85,24 +84,42 @@ def archive_paths(stage_root: Path) -> list[Path]:
     return [stage_root, *sorted(stage_root.rglob("*"), key=lambda path: path.as_posix())]
 
 
-def write_tar_gz(stage_root: Path, destination: Path, epoch: int) -> None:
-    """Write a deterministic gzip-compressed POSIX tar archive."""
-    with destination.open("wb") as raw:
-        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=epoch) as compressed:
-            with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive:
-                for path in archive_paths(stage_root):
-                    arcname = path.relative_to(stage_root.parent).as_posix()
-                    info = archive.gettarinfo(str(path), arcname)
-                    info.uid = 0
-                    info.gid = 0
-                    info.uname = "root"
-                    info.gname = "root"
-                    info.mtime = epoch
-                    if path.is_file():
-                        with path.open("rb") as source:
-                            archive.addfile(info, source)
-                    else:
-                        archive.addfile(info)
+def write_tar(stage_root: Path, destination: Path, epoch: int) -> None:
+    """Write a deterministic uncompressed POSIX tar archive."""
+    with tarfile.open(destination, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        for path in archive_paths(stage_root):
+            arcname = path.relative_to(stage_root.parent).as_posix()
+            info = archive.gettarinfo(str(path), arcname)
+            info.uid = 0
+            info.gid = 0
+            info.uname = "root"
+            info.gname = "root"
+            info.mtime = epoch
+            if path.is_file():
+                with path.open("rb") as source:
+                    archive.addfile(info, source)
+            else:
+                archive.addfile(info)
+
+
+def write_tar_zst(stage_root: Path, destination: Path, epoch: int) -> None:
+    """Compress a deterministic tar archive with reproducible high-ratio zstd."""
+    uncompressed = stage_root.parent / f"{stage_root.name}.tar"
+    write_tar(stage_root, uncompressed, epoch)
+    subprocess.run(
+        [
+            "zstd",
+            "-19",
+            "--threads=1",
+            "--no-progress",
+            "--quiet",
+            "--force",
+            str(uncompressed),
+            "-o",
+            str(destination),
+        ],
+        check=True,
+    )
 
 
 def write_zip(stage_root: Path, destination: Path, epoch: int) -> None:
@@ -135,7 +152,7 @@ def write_zip(stage_root: Path, destination: Path, epoch: int) -> None:
 def package(args: argparse.Namespace) -> Path:
     """Build the selected release archive."""
     validate_inputs(args.tag, args.target, args.binary)
-    extension = "tar.gz" if args.archive_format == "tar.gz" else "zip"
+    extension = "tar.zst" if args.archive_format == "tar.zst" else "zip"
     stem = f"localhold-{args.tag}-{args.target}"
     args.output_dir.mkdir(parents=True, exist_ok=True)
     destination = args.output_dir / f"{stem}.{extension}"
@@ -145,8 +162,8 @@ def package(args: argparse.Namespace) -> Path:
         stage_root = Path(temporary) / stem
         stage_root.mkdir()
         stage_package(stage_root, args.binary.resolve())
-        if args.archive_format == "tar.gz":
-            write_tar_gz(stage_root, destination, epoch)
+        if args.archive_format == "tar.zst":
+            write_tar_zst(stage_root, destination, epoch)
         else:
             write_zip(stage_root, destination, epoch)
 
@@ -161,7 +178,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--target", required=True, help="Rust target triple")
     result.add_argument("--binary", required=True, type=Path, help="compiled hold binary")
     result.add_argument(
-        "--format", required=True, choices=("tar.gz", "zip"), dest="archive_format"
+        "--format", required=True, choices=("tar.zst", "zip"), dest="archive_format"
     )
     result.add_argument("--output-dir", required=True, type=Path)
     return result

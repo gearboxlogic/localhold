@@ -56,13 +56,13 @@ jobs:
             --tag "$GITHUB_REF_NAME" \
             --target x86_64-unknown-linux-gnu \
             --binary target/x86_64-unknown-linux-gnu/release/hold \
-            --format tar.gz \
+            --format tar.zst \
             --output-dir dist
 
       - name: Smoke extracted archive
         run: |
           mkdir extracted
-          tar -xzf dist/*.tar.gz -C extracted
+          tar --zstd -xf dist/*.tar.zst -C extracted
           binary="extracted/localhold-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu/bin/hold"
           test "$("$binary" --version)" = "hold ${GITHUB_REF_NAME#v}"
           "$binary" --help >/dev/null
@@ -70,7 +70,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-linux-x86_64
-          path: dist/*.tar.gz
+          path: dist/*.tar.zst
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
@@ -147,7 +147,7 @@ jobs:
       - name: Create checksums and notes
         run: |
           cd dist
-          sha256sum -- ./*.tar.gz ./*.zip > SHA256SUMS
+          sha256sum -- ./*.tar.zst ./*.zip > SHA256SUMS
           cd ..
           python3 script/release.py notes "$GITHUB_REF_NAME" --output release-notes.md
 
@@ -160,7 +160,7 @@ jobs:
             flags+=(--prerelease)
           fi
           gh release create "$GITHUB_REF_NAME" \
-            dist/*.tar.gz \
+            dist/*.tar.zst \
             dist/*.zip \
             dist/SHA256SUMS \
             --verify-tag \

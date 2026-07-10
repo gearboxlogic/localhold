@@ -1,11 +1,12 @@
 //! Resilient embedding provider with automatic availability recovery.
 //!
 //! [`ResilientEmbedding`] wraps an inner [`EmbeddingProvider`] and tracks its
-//! availability via an [`AtomicBool`]. When a transient error occurs, the
-//! provider is marked unavailable and subsequent calls return
+//! availability via an [`AtomicBool`]. When retries exhaust a transient error,
+//! the provider is marked unavailable and subsequent calls return
 //! [`EmbeddingError::Disabled`] immediately. A background health-probe task
 //! periodically checks connectivity and re-enables the provider when the
-//! inner service recovers.
+//! inner service recovers. Rate limits are retried without changing provider
+//! availability.
 
 use std::sync::{
     Arc,
@@ -16,7 +17,7 @@ use tokio::{sync::Notify, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use super::{BoxFuture, EmbeddingProvider};
+use super::{BoxFuture, EmbeddingProvider, retry::RetryPolicy};
 use crate::error::EmbeddingError;
 
 /// Configuration for the resilient embedding wrapper.
@@ -32,6 +33,8 @@ pub struct ResilientConfig {
     pub max_retries: u32,
     /// Delay before the first retry. Later retries use exponential backoff.
     pub initial_backoff: std::time::Duration,
+    /// Maximum client or provider-directed delay that may be awaited.
+    pub max_backoff: std::time::Duration,
 }
 
 impl Default for ResilientConfig {
@@ -41,6 +44,7 @@ impl Default for ResilientConfig {
             recovery_notify: None,
             max_retries: 2,
             initial_backoff: std::time::Duration::from_millis(500),
+            max_backoff: std::time::Duration::from_secs(30),
         }
     }
 }
@@ -56,9 +60,9 @@ impl ResilientConfig {
 
 /// Embedding provider wrapper that tracks availability and auto-recovers.
 ///
-/// When available, delegates to the inner provider. Transient errors mark the
-/// provider as unavailable. A background task periodically probes health and
-/// re-enables when the inner provider is reachable again.
+/// When available, delegates to the inner provider. Exhausted transient errors
+/// mark the provider as unavailable. A background task periodically probes
+/// health and re-enables when the inner provider is reachable again.
 ///
 /// Permanent errors (input-specific) do NOT affect availability.
 ///
@@ -68,8 +72,7 @@ pub struct ResilientEmbedding<P> {
     available: Arc<AtomicBool>,
     probe_handle: JoinHandle<()>,
     cancel: CancellationToken,
-    max_retries: u32,
-    initial_backoff: std::time::Duration,
+    retry_policy: RetryPolicy,
 }
 
 impl<P: EmbeddingProvider + 'static> ResilientEmbedding<P> {
@@ -79,19 +82,19 @@ impl<P: EmbeddingProvider + 'static> ResilientEmbedding<P> {
     /// background probe task.
     pub async fn new(inner: P, config: ResilientConfig) -> Self {
         let inner = Arc::new(inner);
-        let initially_available = inner.health_check().await.is_ok();
+        let initial_health = inner.health_check().await;
+        let initially_available = matches!(initial_health, Ok(()) | Err(EmbeddingError::RateLimited { .. }));
 
-        if initially_available {
-            info!("resilient embedding: inner provider is available");
-        } else {
-            warn!("resilient embedding: inner provider is unavailable, will probe periodically");
+        match initial_health {
+            Ok(()) => info!("resilient embedding: inner provider is available"),
+            Err(EmbeddingError::RateLimited { .. }) => warn!("resilient embedding: health check was rate limited; treating provider as available"),
+            Err(error) => warn!(%error, "resilient embedding: inner provider is unavailable, will probe periodically"),
         }
 
         let available = Arc::new(AtomicBool::new(initially_available));
         let cancel = CancellationToken::new();
 
-        let max_retries = config.max_retries;
-        let initial_backoff = config.initial_backoff;
+        let retry_policy = RetryPolicy::new(config.max_retries, config.initial_backoff, config.max_backoff);
 
         let probe_handle = spawn_health_probe(Arc::clone(&inner), Arc::clone(&available), config.probe_interval, cancel.clone(), config.recovery_notify);
 
@@ -100,8 +103,7 @@ impl<P: EmbeddingProvider + 'static> ResilientEmbedding<P> {
             available,
             probe_handle,
             cancel,
-            max_retries,
-            initial_backoff,
+            retry_policy,
         }
     }
 
@@ -126,19 +128,23 @@ impl<P: EmbeddingProvider + 'static> ResilientEmbedding<P> {
     where
         F: FnMut() -> BoxFuture<'a, Result<T, EmbeddingError>>,
     {
-        let mut backoff = self.initial_backoff;
         let mut attempt = 0_u32;
         loop {
-            match operation().await {
+            let error = match operation().await {
                 Ok(value) => return Ok(value),
-                Err(EmbeddingError::Transient(source)) if attempt < self.max_retries => {
-                    warn!(attempt = attempt.saturating_add(1), max_retries = self.max_retries, ?backoff, error = %source, "transient embedding failure; retrying");
-                    tokio::time::sleep(backoff).await;
-                    backoff = backoff.saturating_mul(2);
-                    attempt = attempt.saturating_add(1);
-                }
-                Err(error) => return Err(self.handle_embed_error(error)),
+                Err(error) => error,
+            };
+            if !error.is_retryable() || attempt >= self.retry_policy.max_retries() {
+                return Err(self.handle_embed_error(error));
             }
+
+            let Some(delay) = self.retry_policy.delay(attempt, error.retry_after()) else {
+                warn!(%error, max_backoff = ?self.retry_policy.max_backoff(), "provider retry delay exceeds configured maximum; returning without retry");
+                return Err(self.handle_embed_error(error));
+            };
+            warn!(attempt = attempt.saturating_add(1), max_retries = self.retry_policy.max_retries(), ?delay, error = %error, "embedding request failed; retrying");
+            tokio::time::sleep(delay).await;
+            attempt = attempt.saturating_add(1);
         }
     }
 }
@@ -220,8 +226,8 @@ fn spawn_health_probe<P: EmbeddingProvider + 'static>(
             }
 
             let recovered = match inner.health_check().await {
-                Ok(()) => {
-                    info!("resilient embedding: health probe succeeded, marking available");
+                Ok(()) | Err(EmbeddingError::RateLimited { .. }) => {
+                    info!("resilient embedding: health probe reached provider, marking available");
                     available.store(true, Ordering::Release);
                     true
                 }
@@ -365,6 +371,45 @@ mod tests {
         embed_count: AtomicUsize,
     }
 
+    struct RateLimitedProvider {
+        failures_remaining: AtomicUsize,
+        embed_count: AtomicUsize,
+        health_rate_limited: bool,
+        retry_after: Option<Duration>,
+    }
+
+    impl RateLimitedProvider {
+        fn rate_limit_error(&self) -> EmbeddingError {
+            EmbeddingError::RateLimited {
+                source: "quota exceeded".into(),
+                retry_after: self.retry_after,
+            }
+        }
+
+        fn embed_sync(&self) -> Result<Vec<f32>, EmbeddingError> {
+            self.embed_count.fetch_add(1, Ordering::Relaxed);
+            let failed = self
+                .failures_remaining
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| remaining.checked_sub(1))
+                .is_ok();
+            if failed { Err(self.rate_limit_error()) } else { Ok(vec![1.0, 0.0, 0.0]) }
+        }
+
+        fn health_check_sync(&self) -> Result<(), EmbeddingError> {
+            if self.health_rate_limited { Err(self.rate_limit_error()) } else { Ok(()) }
+        }
+    }
+
+    impl EmbeddingProvider for RateLimitedProvider {
+        fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, EmbeddingError>> {
+            Box::pin(async move { self.embed_sync() })
+        }
+
+        fn health_check(&self) -> BoxFuture<'_, Result<(), EmbeddingError>> {
+            Box::pin(async move { self.health_check_sync() })
+        }
+    }
+
     impl FlakyProvider {
         fn embed_sync(&self) -> Result<Vec<f32>, EmbeddingError> {
             self.embed_count.fetch_add(1, Ordering::Relaxed);
@@ -403,6 +448,85 @@ mod tests {
         assert_eq!(resilient.embed("test").await.unwrap(), vec![1.0, 0.0, 0.0]);
         assert_eq!(resilient.inner.embed_count.load(Ordering::Relaxed), 3);
         assert!(resilient.is_available(), "successful retry must keep the circuit closed");
+    }
+
+    #[tokio::test]
+    async fn retries_rate_limits_without_opening_circuit() {
+        let resilient = ResilientEmbedding::new(
+            RateLimitedProvider {
+                failures_remaining: AtomicUsize::new(2),
+                embed_count: AtomicUsize::new(0),
+                health_rate_limited: false,
+                retry_after: None,
+            },
+            fast_retry_config(),
+        )
+        .await;
+
+        assert_eq!(resilient.embed("test").await.unwrap(), vec![1.0, 0.0, 0.0]);
+        assert_eq!(resilient.inner.embed_count.load(Ordering::Relaxed), 3);
+        assert!(resilient.is_available());
+    }
+
+    #[tokio::test]
+    async fn exhausted_rate_limit_keeps_circuit_available() {
+        let resilient = ResilientEmbedding::new(
+            RateLimitedProvider {
+                failures_remaining: AtomicUsize::new(3),
+                embed_count: AtomicUsize::new(0),
+                health_rate_limited: false,
+                retry_after: None,
+            },
+            fast_retry_config(),
+        )
+        .await;
+
+        let error = resilient.embed("test").await.unwrap_err();
+        assert!(matches!(error, EmbeddingError::RateLimited { .. }));
+        assert_eq!(resilient.inner.embed_count.load(Ordering::Relaxed), 3);
+        assert!(resilient.is_available());
+    }
+
+    #[tokio::test]
+    async fn provider_delay_over_cap_skips_retry_without_opening_circuit() {
+        let config = ResilientConfig {
+            max_retries: 2,
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(5),
+            ..ResilientConfig::default()
+        };
+        let resilient = ResilientEmbedding::new(
+            RateLimitedProvider {
+                failures_remaining: AtomicUsize::new(1),
+                embed_count: AtomicUsize::new(0),
+                health_rate_limited: false,
+                retry_after: Some(Duration::from_millis(6)),
+            },
+            config,
+        )
+        .await;
+
+        let error = resilient.embed("test").await.unwrap_err();
+        assert!(matches!(error, EmbeddingError::RateLimited { .. }));
+        assert_eq!(resilient.inner.embed_count.load(Ordering::Relaxed), 1);
+        assert!(resilient.is_available());
+    }
+
+    #[tokio::test]
+    async fn rate_limited_initial_health_is_available() {
+        let resilient = ResilientEmbedding::new(
+            RateLimitedProvider {
+                failures_remaining: AtomicUsize::new(0),
+                embed_count: AtomicUsize::new(0),
+                health_rate_limited: true,
+                retry_after: None,
+            },
+            fast_retry_config(),
+        )
+        .await;
+
+        assert!(resilient.is_available());
+        assert_eq!(resilient.embed("test").await.unwrap(), vec![1.0, 0.0, 0.0]);
     }
 
     /// Provider that returns permanent errors but is otherwise healthy.

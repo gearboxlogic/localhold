@@ -62,12 +62,26 @@ to that network and should not be used across an untrusted boundary.
 
 ## Failure Behavior
 
-Transient network failures, timeouts, HTTP 408, HTTP 429, and server errors are
-retried twice with exponential backoff. The availability circuit opens only
-after those attempts are exhausted. LocalHold then continues with keyword and
-text retrieval while periodically checking for recovery. Authentication,
+Transient network failures, timeouts, HTTP 408, and server errors are retried
+with exponential backoff and jitter. The availability circuit opens only after
+those attempts are exhausted. LocalHold then continues with keyword and text
+retrieval while periodically checking for recovery. Authentication,
 request-shape, and response-shape failures are treated as permanent and are not
 retried.
+
+HTTP 429 is tracked separately from provider outages and never opens the
+availability circuit. LocalHold honors `Retry-After` seconds and HTTP dates as a
+minimum delay. It returns the rate-limit error immediately when the provider's
+requested delay exceeds `limits.embedding_retry_max_backoff_ms`, allowing the
+caller to decide when to try again without holding a task indefinitely.
+
+`limits.embedding_max_retries` controls retries after the initial request and
+may be set to zero. `limits.embedding_retry_initial_backoff_ms` controls the
+first client delay; later delays double up to
+`limits.embedding_retry_max_backoff_ms`. The corresponding environment
+variables are `RECALL_EMBEDDING_MAX_RETRIES`,
+`RECALL_EMBEDDING_RETRY_INITIAL_BACKOFF_MS`, and
+`RECALL_EMBEDDING_RETRY_MAX_BACKOFF_MS`.
 
 `limits.max_concurrent_embedding_requests` bounds simultaneous provider calls
 across semantic queries, health checks, background indexing, batch requests,

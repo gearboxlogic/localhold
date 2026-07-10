@@ -12,6 +12,8 @@ pub mod openai;
 pub(crate) mod orchestrator;
 /// Resilient wrapper with automatic availability recovery.
 pub mod resilient;
+/// Retry-delay policy shared by resilient providers.
+pub(crate) mod retry;
 
 use std::{future::Future, pin::Pin};
 

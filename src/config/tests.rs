@@ -53,6 +53,9 @@ fn default_config_has_sane_values() {
     assert_eq!(config.limits.max_reembed_limit, 100);
     assert_eq!(config.limits.embedding_timeout_secs, 30);
     assert_eq!(config.limits.max_concurrent_embedding_requests, 8);
+    assert_eq!(config.limits.embedding_max_retries, 2);
+    assert_eq!(config.limits.embedding_retry_initial_backoff_ms, 500);
+    assert_eq!(config.limits.embedding_retry_max_backoff_ms, 30_000);
     assert_eq!(config.limits.shutdown_timeout_secs, 10);
     assert_eq!(config.limits.max_top_tags_limit, 100);
     assert_eq!(config.limits.max_history_limit, 500);
@@ -105,12 +108,15 @@ fn debug_redacts_postgres_url_credentials_but_keeps_pool_settings() {
 
 #[test]
 fn limits_config_loadable_from_toml() {
-    let toml_str = "[limits]\nmax_search_limit = 42\nmax_candidate_pool_size = 500\nembedding_timeout_secs = 60\nmax_concurrent_embedding_requests = 4\n";
+    let toml_str = "[limits]\nmax_search_limit = 42\nmax_candidate_pool_size = 500\nembedding_timeout_secs = 60\nmax_concurrent_embedding_requests = 4\nembedding_max_retries = 5\nembedding_retry_initial_backoff_ms = 750\nembedding_retry_max_backoff_ms = 45000\n";
     let config: Config = toml::from_str(toml_str).unwrap();
     assert_eq!(config.limits.max_search_limit, 42);
     assert_eq!(config.limits.max_candidate_pool_size, 500);
     assert_eq!(config.limits.embedding_timeout_secs, 60);
     assert_eq!(config.limits.max_concurrent_embedding_requests, 4);
+    assert_eq!(config.limits.embedding_max_retries, 5);
+    assert_eq!(config.limits.embedding_retry_initial_backoff_ms, 750);
+    assert_eq!(config.limits.embedding_retry_max_backoff_ms, 45_000);
     // Other limits retain defaults
     assert_eq!(config.limits.max_batch_size, 100);
 }
@@ -215,6 +221,9 @@ fn env_overrides_apply_limits() {
         ("RECALL_MAX_REEMBED_LIMIT", "75"),
         ("RECALL_EMBEDDING_TIMEOUT", "60"),
         ("RECALL_MAX_CONCURRENT_EMBEDDING_REQUESTS", "3"),
+        ("RECALL_EMBEDDING_MAX_RETRIES", "4"),
+        ("RECALL_EMBEDDING_RETRY_INITIAL_BACKOFF_MS", "250"),
+        ("RECALL_EMBEDDING_RETRY_MAX_BACKOFF_MS", "12000"),
         ("RECALL_SHUTDOWN_TIMEOUT", "15"),
         ("RECALL_MAX_TOP_TAGS_LIMIT", "50"),
         ("RECALL_MAX_HISTORY_LIMIT", "250"),
@@ -233,6 +242,9 @@ fn env_overrides_apply_limits() {
     assert_eq!(config.limits.max_reembed_limit, 75);
     assert_eq!(config.limits.embedding_timeout_secs, 60);
     assert_eq!(config.limits.max_concurrent_embedding_requests, 3);
+    assert_eq!(config.limits.embedding_max_retries, 4);
+    assert_eq!(config.limits.embedding_retry_initial_backoff_ms, 250);
+    assert_eq!(config.limits.embedding_retry_max_backoff_ms, 12_000);
     assert_eq!(config.limits.shutdown_timeout_secs, 15);
     assert_eq!(config.limits.max_top_tags_limit, 50);
     assert_eq!(config.limits.max_history_limit, 250);
@@ -550,6 +562,8 @@ fn validate_limits_config_rejects_zero_operational_limits() {
     assert_zero_limit_rejected("max_reembed_limit", |limits| limits.max_reembed_limit = 0);
     assert_zero_limit_rejected("embedding_timeout_secs", |limits| limits.embedding_timeout_secs = 0);
     assert_zero_limit_rejected("max_concurrent_embedding_requests", |limits| limits.max_concurrent_embedding_requests = 0);
+    assert_zero_limit_rejected("embedding_retry_initial_backoff_ms", |limits| limits.embedding_retry_initial_backoff_ms = 0);
+    assert_zero_limit_rejected("embedding_retry_max_backoff_ms", |limits| limits.embedding_retry_max_backoff_ms = 0);
     assert_zero_limit_rejected("shutdown_timeout_secs", |limits| limits.shutdown_timeout_secs = 0);
     assert_zero_limit_rejected("max_top_tags_limit", |limits| limits.max_top_tags_limit = 0);
     assert_zero_limit_rejected("max_history_limit", |limits| limits.max_history_limit = 0);
@@ -688,6 +702,36 @@ fn validate_limits_config_rejects_candidate_pool_below_search_limit() {
     let err = validate_limits_config(&limits).unwrap_err();
     assert!(err.to_string().contains("max_candidate_pool_size"));
     assert!(err.to_string().contains("max_search_limit"));
+}
+
+#[test]
+fn validate_limits_config_accepts_zero_embedding_retries() {
+    let limits = LimitsConfig {
+        embedding_max_retries: 0,
+        ..LimitsConfig::default()
+    };
+    validate_limits_config(&limits).unwrap();
+}
+
+#[test]
+fn validate_limits_config_rejects_excessive_embedding_retries() {
+    let limits = LimitsConfig {
+        embedding_max_retries: 11,
+        ..LimitsConfig::default()
+    };
+    let error = validate_limits_config(&limits).unwrap_err();
+    assert!(error.to_string().contains("embedding_max_retries"));
+}
+
+#[test]
+fn validate_limits_config_rejects_inverted_embedding_backoff() {
+    let limits = LimitsConfig {
+        embedding_retry_initial_backoff_ms: 2_000,
+        embedding_retry_max_backoff_ms: 1_000,
+        ..LimitsConfig::default()
+    };
+    let error = validate_limits_config(&limits).unwrap_err();
+    assert!(error.to_string().contains("embedding_retry_max_backoff_ms"));
 }
 
 #[test]

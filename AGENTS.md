@@ -50,12 +50,16 @@ policy documentation.
 ## Pull Request Workflow
 
 - Open a focused pull request after local verification and report its URL.
-- Do not merge a pull request immediately after CI passes. Leave it open for
-  the configured cloud-agent reviews.
+- Every push requires a new cloud-agent review for the resulting head commit.
+  An eyes reaction from the cloud bot means review is in progress; a thumbs-up
+  reaction means that head commit is approved.
+- If a review does not start after a push, comment exactly `@codex` on the pull
+  request to nudge the cloud bot.
 - Inspect and address actionable review findings, then rerun the affected
-  checks and push the fixes to the same pull request.
-- Merge only after required CI and review activity are complete. Green CI by
-  itself is not merge authorization.
+  checks and push the fixes to the same pull request. The push requires another
+  review, even if an earlier commit received a thumbs-up.
+- Merge only when all required CI checks are green and the cloud bot has given
+  the latest head commit a thumbs-up. Neither condition is sufficient alone.
 
 ## Definition Of Done
 
@@ -64,4 +68,4 @@ policy documentation.
 - Required checks pass, or the exact gap is reported.
 - The diff contains no generated output, secrets, personal paths, or unrelated
   files.
-- Required cloud-agent review findings have been resolved before merge.
+- Required CI is green and the latest head commit has cloud-agent approval.

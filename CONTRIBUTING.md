@@ -50,9 +50,11 @@ Windows support is preview and is validated in GitHub Actions.
 - Add regression tests for bugs and contract tests for public surfaces.
 - Update maintained documentation and examples when behavior changes.
 - Run `just check`, or state exactly which checks could not be run.
-- Allow configured automated cloud reviews to complete and address actionable
-  findings before merge; green CI alone does not make a pull request
-  merge-ready.
+- Every push receives a fresh automated cloud review. Address actionable
+  findings and wait for approval of the latest commit. If review does not
+  start, comment `@codex` on the pull request to request it.
+- Merge only when required CI is green and the cloud bot has approved the
+  latest commit; neither condition is sufficient alone.
 - Preserve compatibility unless the change is explicitly approved as breaking.
 
 See [AGENTS.md](AGENTS.md) for additional guidance used by automated coding

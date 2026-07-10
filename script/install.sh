@@ -54,10 +54,37 @@ case "$profile" in
   *) printf 'error: unsupported profile: %s\n' "$profile" >&2; exit 2 ;;
 esac
 
-command -v "${CARGO:-cargo}" >/dev/null 2>&1 || {
-  printf 'error: Cargo is required to build LocalHold\n' >&2
+need_command() {
+  command -v "$1" >/dev/null 2>&1 || {
+    printf 'error: required build command not found: %s\n' "$1" >&2
+    exit 1
+  }
+}
+
+need_one_of() {
+  local description="$1"
+  shift
+  local command
+  for command in "$@"; do
+    command -v "$command" >/dev/null 2>&1 && return 0
+  done
+  printf 'error: %s is required (tried: %s)\n' "$description" "$*" >&2
   exit 1
 }
+
+need_command "${CARGO:-cargo}"
+need_command cmake
+need_one_of "a C compiler" cc gcc clang
+need_one_of "a C++ compiler" c++ g++ clang++
+need_one_of "Make or Ninja" make ninja
+
+if [[ "$(uname -s)" == "Linux" ]]; then
+  need_command pkg-config
+  pkg-config --exists openssl || {
+    printf '%s\n' 'error: OpenSSL development files are required (for example, openssl-devel or libssl-dev)' >&2
+    exit 1
+  }
+fi
 
 cd "$repo_root"
 "${CARGO:-cargo}" build --release --locked --features "$features" --target-dir "$build_dir"

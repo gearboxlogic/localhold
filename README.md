@@ -30,8 +30,20 @@ does not start or manage model servers.
 Prerequisites:
 
 - Git
-- [mise](https://mise.jdx.dev/)
-- a C compiler
+- Rust 1.97 with Cargo (the checked-in toolchain file pins this version)
+- C and C++ compilers, CMake, and Make or Ninja
+- on Linux, `pkg-config` and OpenSSL development headers
+- network access to download Rust crates and the pinned ONNX Runtime artifact
+
+For example, install the native packages with:
+
+```sh
+# Fedora
+sudo dnf install gcc gcc-c++ cmake make pkgconf-pkg-config openssl-devel
+
+# Debian/Ubuntu
+sudo apt install build-essential cmake pkg-config libssl-dev
+```
 
 ```sh
 git clone https://github.com/gearboxlogic/localhold.git
@@ -43,7 +55,7 @@ hold
 
 The standard install includes CPU reranker support, but reranking remains
 disabled until configured. See [Installation](docs/installation.md) for custom
-prefixes and the CUDA preview profile.
+prefixes, macOS and Windows prerequisites, and the CUDA preview profile.
 
 ## Configuration
 

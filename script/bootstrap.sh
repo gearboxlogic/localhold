@@ -12,9 +12,20 @@ check_system_deps() {
   say "Checking system dependencies"
   need_cmd git
   need_cmd mise
+  need_cmd cmake
 
   if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
     die "C compiler not found. Install build tools first (build-essential / gcc / Xcode CLT)."
+  fi
+  if ! command -v c++ >/dev/null 2>&1 && ! command -v g++ >/dev/null 2>&1 && ! command -v clang++ >/dev/null 2>&1; then
+    die "C++ compiler not found. Install build tools first (build-essential / gcc-c++ / Xcode CLT)."
+  fi
+  if ! command -v make >/dev/null 2>&1 && ! command -v ninja >/dev/null 2>&1; then
+    die "Make or Ninja not found. Install a native build backend first."
+  fi
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    need_cmd pkg-config
+    pkg-config --exists openssl || die "OpenSSL development files not found (openssl-devel / libssl-dev)."
   fi
 }
 

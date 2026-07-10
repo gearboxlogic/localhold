@@ -107,8 +107,8 @@ def write_tar_gz(stage_root: Path, destination: Path, epoch: int) -> None:
 
 def write_zip(stage_root: Path, destination: Path, epoch: int) -> None:
     """Write a deterministic ZIP archive with executable mode metadata."""
-    earliest = int(dt.datetime(1980, 1, 1, tzinfo=dt.UTC).timestamp())
-    timestamp = dt.datetime.fromtimestamp(max(epoch, earliest), tz=dt.UTC)
+    earliest = int(dt.datetime(1980, 1, 1, tzinfo=dt.timezone.utc).timestamp())
+    timestamp = dt.datetime.fromtimestamp(max(epoch, earliest), tz=dt.timezone.utc)
     date_time = (
         timestamp.year,
         timestamp.month,

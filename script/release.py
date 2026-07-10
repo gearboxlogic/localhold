@@ -87,7 +87,12 @@ def changelog_notes(version: str) -> str:
         )
 
     end = next(
-        (index for index in range(start, len(lines)) if lines[index].startswith("## ")),
+        (
+            index
+            for index in range(start, len(lines))
+            if lines[index].startswith("## ")
+            or re.match(r"^\[[^]]+\]:\s", lines[index]) is not None
+        ),
         len(lines),
     )
     notes = "\n".join(lines[start:end]).strip()

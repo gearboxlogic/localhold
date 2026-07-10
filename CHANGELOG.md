@@ -23,3 +23,6 @@ requirements explicitly.
   transition for provider, model, endpoint, or dimension changes.
 - Added reproducible Linux CPU and Windows preview release archives with
   extracted-artifact smoke tests, checksums, and automated GitHub prereleases.
+
+[Unreleased]: https://github.com/gearboxlogic/localhold/compare/v0.1.0-beta.1...HEAD
+[0.1.0-beta.1]: https://github.com/gearboxlogic/localhold/releases/tag/v0.1.0-beta.1

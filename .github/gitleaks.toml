@@ -1,0 +1,18 @@
+title = "LocalHold gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Generated Git and Rust build data are scanned separately or reproducible"
+paths = ['''(^|/)\.git/''', '''^target/''']
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "V2 migration sentinel comparison is not a credential"
+condition = "AND"
+regexTarget = "line"
+regexes = ['''^\s*let unresolved_scope = scope_key == V2_UNRESOLVED_SCOPE;\s*$''']
+paths = ['''^src/store/(admin|postgres)\.rs$''']

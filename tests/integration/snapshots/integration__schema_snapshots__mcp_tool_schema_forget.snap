@@ -7,22 +7,20 @@ expression: tool
   "description": "Forget a memory by id using the server-resolved principal for write authorization; destructive delete when authorized.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "ForgetParams",
-    "description": "Parameters for the v2 `forget` tool.",
-    "type": "object",
-    "properties": {
-      "id": {
-        "description": "The memory ID to delete.",
-        "$ref": "#/$defs/MemoryId"
+    "$defs": {
+      "MemoryId": {
+        "description": "A ULID-formatted unique memory identifier",
+        "type": "string"
       }
     },
     "required": [
       "id"
     ],
-    "$defs": {
-      "MemoryId": {
-        "description": "A ULID-formatted unique memory identifier",
-        "type": "string"
+    "type": "object",
+    "properties": {
+      "id": {
+        "description": "The memory ID to delete.",
+        "$ref": "#/$defs/MemoryId"
       }
     }
   }

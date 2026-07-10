@@ -14,7 +14,7 @@ use sqlx_core::{Error as SqlxError, query::query, query_scalar::query_scalar, ro
 use sqlx_postgres::{PgPool, PgPoolOptions, PgRow, Postgres};
 
 use super::{
-    PostgresStore, SqliteStore,
+    EmbeddingProfile, PostgresStore, SqliteStore,
     query::{MEMORY_COLUMN_COUNT, MEMORY_COLUMNS, row_to_memory},
     vector::validate_embedding_vector,
 };
@@ -37,6 +37,7 @@ const POSTGRES_USER_TABLES: &[&str] = &[
     "memory_tombstones",
     "scope_registry",
     "memory_v2_metadata",
+    "embedding_profile",
 ];
 const POSTGRES_REQUIRED_COLUMNS: &[PostgresColumnExpectation] = &[
     PostgresColumnExpectation::new("recall_migrations", "version", "bigint"),
@@ -93,6 +94,11 @@ const POSTGRES_REQUIRED_COLUMNS: &[PostgresColumnExpectation] = &[
     PostgresColumnExpectation::new("memory_v2_metadata", "schema_version", "bigint"),
     PostgresColumnExpectation::new("memory_v2_metadata", "migrated_at", "timestamp with time zone"),
     PostgresColumnExpectation::new("memory_v2_metadata", "updated_at", "timestamp with time zone"),
+    PostgresColumnExpectation::new("embedding_profile", "singleton", "smallint"),
+    PostgresColumnExpectation::new("embedding_profile", "provider", "text"),
+    PostgresColumnExpectation::new("embedding_profile", "endpoint", "text"),
+    PostgresColumnExpectation::new("embedding_profile", "model", "text"),
+    PostgresColumnExpectation::new("embedding_profile", "dimensions", "bigint"),
 ];
 const POSTGRES_OPTIONAL_COLUMNS: &[PostgresColumnExpectation] = &[
     PostgresColumnExpectation::new("memories", "embedding_claimed_at", "timestamp with time zone"),
@@ -107,6 +113,7 @@ const POSTGRES_REQUIRED_KEYS: &[PostgresKeyExpectation] = &[
     PostgresKeyExpectation::new("memory_tombstones", &["memory_id"]),
     PostgresKeyExpectation::new("scope_registry", &["scope_key"]),
     PostgresKeyExpectation::new("memory_v2_metadata", &["memory_id"]),
+    PostgresKeyExpectation::new("embedding_profile", &["singleton"]),
 ];
 const SQLITE_MEMORIES_COLUMNS: &[&str] = &[
     "id",
@@ -147,6 +154,7 @@ const SQLITE_V2_METADATA_COLUMNS: &[&str] = &[
     "migrated_at",
     "updated_at",
 ];
+const SQLITE_EMBEDDING_PROFILE_COLUMNS: &[&str] = &["singleton", "provider", "endpoint", "model", "dimensions"];
 const SQLITE_FTS_COLUMNS: &[&str] = &["content"];
 const SQLITE_REQUIRED_TABLES: &[SqliteTableExpectation] = &[
     SqliteTableExpectation::new("memories", SQLITE_MEMORIES_COLUMNS, &[]),
@@ -158,6 +166,7 @@ const SQLITE_REQUIRED_TABLES: &[SqliteTableExpectation] = &[
     SqliteTableExpectation::new("memory_tombstones", SQLITE_TOMBSTONE_COLUMNS, &[]),
     SqliteTableExpectation::new("scope_registry", SQLITE_SCOPE_REGISTRY_COLUMNS, &[]),
     SqliteTableExpectation::new("memory_v2_metadata", SQLITE_V2_METADATA_COLUMNS, &[]),
+    SqliteTableExpectation::new("embedding_profile", SQLITE_EMBEDDING_PROFILE_COLUMNS, &[]),
 ];
 const SQLITE_REQUIRED_KEYS: &[SqliteKeyExpectation] = &[
     SqliteKeyExpectation::new("memories", &["id"]),
@@ -167,6 +176,7 @@ const SQLITE_REQUIRED_KEYS: &[SqliteKeyExpectation] = &[
     SqliteKeyExpectation::new("memory_tombstones", &["memory_id"]),
     SqliteKeyExpectation::new("scope_registry", &["scope_key"]),
     SqliteKeyExpectation::new("memory_v2_metadata", &["memory_id"]),
+    SqliteKeyExpectation::new("embedding_profile", &["singleton"]),
 ];
 const SQLITE_REQUIRED_INDEXES: &[&str] = &[
     "idx_memories_created_at",
@@ -410,11 +420,20 @@ pub struct MigrationTableCounts {
     pub scopes: u64,
     /// v2 metadata rows.
     pub v2_metadata: u64,
+    /// Embedding vector-space profile rows (zero or one).
+    pub embedding_profiles: u64,
 }
 
 impl MigrationTableCounts {
     const fn is_empty(self) -> bool {
-        self.memories == 0 && self.entities == 0 && self.embeddings == 0 && self.audit_entries == 0 && self.tombstones == 0 && self.scopes == 0 && self.v2_metadata == 0
+        self.memories == 0
+            && self.entities == 0
+            && self.embeddings == 0
+            && self.audit_entries == 0
+            && self.tombstones == 0
+            && self.scopes == 0
+            && self.v2_metadata == 0
+            && self.embedding_profiles == 0
     }
 }
 
@@ -463,6 +482,7 @@ fn append_counts(output: &mut String, counts: MigrationTableCounts) {
     let _write_failed = writeln!(output, "  tombstones: {}", counts.tombstones).is_err();
     let _write_failed = writeln!(output, "  scopes: {}", counts.scopes).is_err();
     let _write_failed = writeln!(output, "  v2_metadata: {}", counts.v2_metadata).is_err();
+    let _write_failed = writeln!(output, "  embedding_profiles: {}", counts.embedding_profiles).is_err();
 }
 
 /// Usage text for the migration subcommand.
@@ -545,6 +565,7 @@ struct MigrationSnapshot {
     tombstones: Vec<MigrationTombstone>,
     scopes: Vec<MigrationScope>,
     v2_metadata: Vec<MigrationV2Metadata>,
+    embedding_profile: Option<EmbeddingProfile>,
     counts: MigrationTableCounts,
 }
 
@@ -656,6 +677,7 @@ fn export_sqlite_conn(conn: &Connection, embedding_dimensions: usize) -> Result<
         tombstones,
         scopes,
         v2_metadata,
+        embedding_profile: export_sqlite_embedding_profile(conn)?,
         counts,
     })
 }
@@ -1027,6 +1049,7 @@ async fn export_postgres_tx(tx: &mut Transaction<'_, Postgres>, embedding_dimens
         tombstones: export_postgres_tombstones_tx(tx).await?,
         scopes: export_postgres_scopes_tx(tx).await?,
         v2_metadata: export_postgres_v2_metadata_tx(tx).await?,
+        embedding_profile: export_postgres_embedding_profile_tx(tx).await?,
         counts: postgres_counts_tx(tx).await?,
     })
 }
@@ -1140,6 +1163,22 @@ async fn export_postgres_v2_metadata_tx(tx: &mut Transaction<'_, Postgres>) -> R
     .fetch_all(&mut **tx)
     .await?;
     rows.iter().map(postgres_row_to_v2_metadata).collect()
+}
+
+async fn export_postgres_embedding_profile_tx(tx: &mut Transaction<'_, Postgres>) -> Result<Option<EmbeddingProfile>, StoreError> {
+    let row = query("SELECT provider, endpoint, model, dimensions FROM embedding_profile WHERE singleton = 1")
+        .fetch_optional(&mut **tx)
+        .await?;
+    row.map(|row| {
+        let dimensions: i64 = row.try_get("dimensions")?;
+        Ok(EmbeddingProfile {
+            provider: row.try_get("provider")?,
+            endpoint: row.try_get("endpoint")?,
+            model: row.try_get("model")?,
+            dimensions: usize::try_from(dimensions).map_err(|error| StoreError::Serialization(Box::new(error)))?,
+        })
+    })
+    .transpose()
 }
 
 fn postgres_row_to_memory(row: &PgRow) -> Result<Memory, StoreError> {
@@ -1280,7 +1319,24 @@ fn sqlite_counts(conn: &Connection) -> Result<MigrationTableCounts, StoreError> 
         tombstones: sqlite_count(conn, "memory_tombstones")?,
         scopes: sqlite_count(conn, "scope_registry")?,
         v2_metadata: sqlite_count(conn, "memory_v2_metadata")?,
+        embedding_profiles: sqlite_count(conn, "embedding_profile")?,
     })
+}
+
+fn export_sqlite_embedding_profile(conn: &Connection) -> Result<Option<EmbeddingProfile>, StoreError> {
+    conn.query_row("SELECT provider, endpoint, model, dimensions FROM embedding_profile WHERE singleton = 1", [], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?))
+    })
+    .optional()?
+    .map(|(provider, endpoint, model, dimensions)| {
+        Ok(EmbeddingProfile {
+            provider,
+            endpoint,
+            model,
+            dimensions: usize::try_from(dimensions).map_err(|error| StoreError::Serialization(Box::new(error)))?,
+        })
+    })
+    .transpose()
 }
 
 fn sqlite_count(conn: &Connection, table: &'static str) -> Result<u64, StoreError> {
@@ -1473,6 +1529,7 @@ async fn postgres_counts_existing(pool: &PgPool) -> Result<MigrationTableCounts,
         tombstones: postgres_count_existing(pool, "memory_tombstones").await?,
         scopes: postgres_count_existing(pool, "scope_registry").await?,
         v2_metadata: postgres_count_existing(pool, "memory_v2_metadata").await?,
+        embedding_profiles: postgres_count_existing(pool, "embedding_profile").await?,
     })
 }
 
@@ -1528,6 +1585,7 @@ async fn postgres_counts_tx(tx: &mut Transaction<'_, Postgres>) -> Result<Migrat
         tombstones: postgres_count_tx(tx, "memory_tombstones").await?,
         scopes: postgres_count_tx(tx, "scope_registry").await?,
         v2_metadata: postgres_count_tx(tx, "memory_v2_metadata").await?,
+        embedding_profiles: postgres_count_tx(tx, "embedding_profile").await?,
     })
 }
 
@@ -1542,7 +1600,8 @@ async fn lock_postgres_user_tables(tx: &mut Transaction<'_, Postgres>) -> Result
             memory_audit_log,
             memory_tombstones,
             scope_registry,
-            memory_v2_metadata
+            memory_v2_metadata,
+            embedding_profile
         IN ACCESS EXCLUSIVE MODE
         ",
     )
@@ -1587,6 +1646,9 @@ async fn import_postgres(tx: &mut Transaction<'_, Postgres>, source: &MigrationS
     }
     for tombstone in &source.tombstones {
         insert_postgres_tombstone(tx, tombstone).await?;
+    }
+    if let Some(profile) = &source.embedding_profile {
+        insert_postgres_embedding_profile(tx, profile).await?;
     }
     reset_postgres_audit_sequence(tx).await?;
     Ok(())
@@ -1757,6 +1819,21 @@ async fn insert_postgres_tombstone(tx: &mut Transaction<'_, Postgres>, tombstone
     Ok(())
 }
 
+async fn insert_postgres_embedding_profile(tx: &mut Transaction<'_, Postgres>, profile: &EmbeddingProfile) -> Result<(), StoreError> {
+    let dimensions = i64::try_from(profile.dimensions).map_err(|error| StoreError::Serialization(Box::new(error)))?;
+    let _result = query(
+        "INSERT INTO embedding_profile (singleton, provider, endpoint, model, dimensions)
+         VALUES (1, $1, $2, $3, $4)",
+    )
+    .bind(&profile.provider)
+    .bind(&profile.endpoint)
+    .bind(&profile.model)
+    .bind(dimensions)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 async fn reset_postgres_audit_sequence(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
     let _new_value: i64 = query_scalar(
         "
@@ -1812,6 +1889,7 @@ struct ComparableSnapshot {
     tombstones: Vec<ComparableTombstone>,
     scopes: Vec<ComparableScope>,
     v2_metadata: Vec<ComparableV2Metadata>,
+    embedding_profile: Option<EmbeddingProfile>,
 }
 
 #[derive(serde::Serialize)]
@@ -1879,6 +1957,7 @@ fn comparable_snapshot(snapshot: &MigrationSnapshot) -> Result<serde_json::Value
         tombstones,
         scopes,
         v2_metadata,
+        embedding_profile: snapshot.embedding_profile.clone(),
     };
     serde_json::to_value(comparable).map_err(StoreError::from)
 }
@@ -2400,7 +2479,7 @@ mod tests {
 
         for (dry_run, yes) in [(true, false), (false, true)] {
             let mut options = sqlite_options(&source_path, dry_run, yes);
-            options.postgres_url = "postgres://target-preflight-should-not-open/gizmo".into();
+            options.postgres_url = "postgres://target-preflight-should-not-open/localhold".into();
 
             let err = migrate_sqlite_to_postgres(&options).await.unwrap_err();
 
@@ -2433,7 +2512,7 @@ mod tests {
 
         for (dry_run, yes) in [(true, false), (false, true)] {
             let mut options = sqlite_options(&source_path, dry_run, yes);
-            options.postgres_url = "postgres://target-preflight-should-not-open/gizmo".into();
+            options.postgres_url = "postgres://target-preflight-should-not-open/localhold".into();
 
             let err = migrate_sqlite_to_postgres(&options).await.unwrap_err();
 
@@ -2914,6 +2993,7 @@ mod tests {
             tombstones: Vec::new(),
             scopes: Vec::new(),
             v2_metadata: Vec::new(),
+            embedding_profile: None,
             counts: MigrationTableCounts::default(),
         }
     }
@@ -2921,6 +3001,14 @@ mod tests {
     #[expect(clippy::too_many_lines, reason = "fixture setup is linear to keep migration field coverage explicit")]
     async fn seed_sqlite_source(path: &Path) -> SqliteFixture {
         let store = SqliteStore::open(path, TEST_EMBEDDING_DIMENSIONS).unwrap();
+        store
+            .verify_embedding_profile(&EmbeddingProfile::openai_compatible(
+                "http://127.0.0.1:8000/v1",
+                "migration-test-model",
+                TEST_EMBEDDING_DIMENSIONS,
+            ))
+            .await
+            .unwrap();
         let entity = Entity::new("Migration Entity", "project").unwrap();
         let old_embedding_revision = 7_i64;
         let new_embedding_revision = 11_i64;
@@ -3063,6 +3151,7 @@ mod tests {
                 tombstones: 1_u64,
                 scopes: 1_u64,
                 v2_metadata: 1_u64,
+                embedding_profiles: 1_u64,
             },
         }
     }

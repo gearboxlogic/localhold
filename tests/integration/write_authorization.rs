@@ -37,7 +37,7 @@ async fn setup_seeded_server(principal: &str, access_policy: AccessPolicy, conte
     let id = store.store(&memory, None).await.unwrap();
 
     let engine = RecallEngine::new(store.clone(), Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine_with_auth(engine, Some(principal.to_owned()), AnonymousPolicy::PublicReadOnly);
+    let server = RecallServer::from_engine_with_auth(engine, Some(principal.to_owned()), AnonymousPolicy::PublicReadOnly).with_admin_tools();
 
     let (server_transport, client_transport) = tokio::io::duplex(4096);
     tokio::spawn(async move {

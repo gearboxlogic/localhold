@@ -7,9 +7,28 @@ expression: tool
   "description": "Write/admin: destructively delete memories matching filters using the server-resolved principal after checking write access per memory; reports matched/deleted/capped.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "AdminBulkDeleteParams",
-    "description": "Parameters for v2 admin bulk deletion.",
-    "type": "object",
+    "$defs": {
+      "MemoryType": {
+        "description": "Classifies the kind of knowledge a memory captures.",
+        "oneOf": [
+          {
+            "description": "Facts, definitions, or general knowledge.",
+            "type": "string",
+            "const": "semantic"
+          },
+          {
+            "description": "Events that happened at a specific time.",
+            "type": "string",
+            "const": "episodic"
+          },
+          {
+            "description": "Step-by-step instructions or how-tos.",
+            "type": "string",
+            "const": "procedural"
+          }
+        ]
+      }
+    },
     "properties": {
       "tags": {
         "description": "Filter to memories with any of these tags.",
@@ -63,27 +82,6 @@ expression: tool
         "default": true
       }
     },
-    "$defs": {
-      "MemoryType": {
-        "description": "Classifies the kind of knowledge a memory captures.",
-        "oneOf": [
-          {
-            "description": "Facts, definitions, or general knowledge.",
-            "type": "string",
-            "const": "semantic"
-          },
-          {
-            "description": "Events that happened at a specific time.",
-            "type": "string",
-            "const": "episodic"
-          },
-          {
-            "description": "Step-by-step instructions or how-tos.",
-            "type": "string",
-            "const": "procedural"
-          }
-        ]
-      }
-    }
+    "type": "object"
   }
 }

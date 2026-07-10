@@ -23,7 +23,7 @@ use rmcp::{
         tool::{ToolCallContext, ToolRouter},
         wrapper::Parameters,
     },
-    model::{CallToolRequestParams, CallToolResult, Content, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool},
+    model::{CallToolRequestParams, CallToolResult, ContentBlock, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool},
     service::RequestContext,
     tool, tool_router,
 };
@@ -48,6 +48,22 @@ const V2_SERVER_PRINCIPAL: &str = "stdio";
 const V2_HTTP_PRINCIPAL: &str = "http";
 const V2_ANONYMOUS_PRINCIPAL: &str = "anonymous";
 const V2_READ_EVENT_WEIGHT: f64 = 1.0;
+
+const ADMIN_TOOLS: &[&str] = &[
+    "admin_bulk_delete",
+    "admin_bulk_update",
+    "admin_cleanup_expired",
+    "admin_consolidate",
+    "admin_count",
+    "admin_history",
+    "admin_list",
+    "admin_reassign_scope",
+    "admin_reembed",
+    "admin_scope_list",
+    "admin_scope_register",
+    "admin_v2_migrate_metadata",
+    "admin_v2_migration_report",
+];
 
 const DEFAULT_DISCOVERY_TOOLS: &[&str] = &[
     "admin_bulk_delete",
@@ -237,12 +253,36 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> std::fmt::Debug for Rec
 }
 
 impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
+    fn standard_tool_router() -> ToolRouter<Self> {
+        let mut router = Self::tool_router();
+        for name in ADMIN_TOOLS {
+            router.remove_route(name);
+        }
+        router
+    }
+
+    /// Remove privileged maintenance tools from discovery and dispatch.
+    #[must_use]
+    pub fn without_admin_tools(mut self) -> Self {
+        self.tool_router = Self::standard_tool_router();
+        self
+    }
+
+    /// Add privileged maintenance tools to discovery and dispatch.
+    ///
+    /// Enable these routes only for an operator-controlled instance.
+    #[must_use]
+    pub fn with_admin_tools(mut self) -> Self {
+        self.tool_router = Self::tool_router();
+        self
+    }
+
     /// Create a new server with the given store, embedding provider, and operational limits.
     #[must_use]
     pub fn new(store: S, embedding: Arc<dyn EmbeddingProvider>, limits: LimitsConfig, search_config: SearchConfig) -> Self {
         Self {
             engine: RecallEngine::new(store, embedding, limits, search_config),
-            tool_router: Self::tool_router(),
+            tool_router: Self::standard_tool_router(),
             principal: Some(Arc::<str>::from(V2_SERVER_PRINCIPAL)),
             anonymous_policy: AnonymousPolicy::PublicReadOnly,
             http_auth_token: None,
@@ -255,7 +295,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
     pub fn from_engine(engine: RecallEngine<S>) -> Self {
         Self {
             engine,
-            tool_router: Self::tool_router(),
+            tool_router: Self::standard_tool_router(),
             principal: Some(Arc::<str>::from(V2_SERVER_PRINCIPAL)),
             anonymous_policy: AnonymousPolicy::PublicReadOnly,
             http_auth_token: None,
@@ -268,7 +308,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
     pub fn from_engine_with_auth(engine: RecallEngine<S>, principal: Option<String>, anonymous_policy: AnonymousPolicy) -> Self {
         Self {
             engine,
-            tool_router: Self::tool_router(),
+            tool_router: Self::standard_tool_router(),
             principal: principal.map(Arc::<str>::from),
             anonymous_policy,
             http_auth_token: None,
@@ -289,7 +329,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
     ) -> Self {
         Self {
             engine,
-            tool_router: Self::tool_router(),
+            tool_router: Self::standard_tool_router(),
             principal: principal.map(Arc::<str>::from),
             anonymous_policy,
             http_auth_token: http_auth_token.map(Arc::<str>::from),
@@ -302,7 +342,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
     pub fn new_with_clock(store: S, embedding: Arc<dyn EmbeddingProvider>, limits: LimitsConfig, search_config: SearchConfig, clock: Arc<dyn Clock>) -> Self {
         Self {
             engine: RecallEngine::new_with_clock(store, embedding, limits, search_config, clock),
-            tool_router: Self::tool_router(),
+            tool_router: Self::standard_tool_router(),
             principal: Some(Arc::<str>::from(V2_SERVER_PRINCIPAL)),
             anonymous_policy: AnonymousPolicy::PublicReadOnly,
             http_auth_token: None,
@@ -631,7 +671,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> RecallServer<S> {
 
 fn success_json<T: serde::Serialize>(val: &T) -> Result<CallToolResult, rmcp::ErrorData> {
     let json = serde_json::to_string(val).map_err(|e| rmcp::ErrorData::internal_error(format!("failed to serialize response: {e}"), None))?;
-    Ok(CallToolResult::success(vec![Content::text(json)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
 }
 
 fn tool_error(code: ToolErrorCode, field: Option<&str>, message: impl Into<String>, suggested_fix: Option<&str>, retryable: bool) -> CallToolResult {
@@ -646,7 +686,7 @@ fn tool_error(code: ToolErrorCode, field: Option<&str>, message: impl Into<Strin
     };
     let text =
         serde_json::to_string(&response).unwrap_or_else(|err| format!(r#"{{"error":{{"code":"internal","message":"failed to serialize tool error: {err}","retryable":false}}}}"#));
-    CallToolResult::error(vec![Content::text(text)])
+    CallToolResult::error(vec![ContentBlock::text(text)])
 }
 
 fn batch_len_tool_error(field_name: &str, len: usize, max_batch_size: usize, suggested_fix: &'static str) -> Option<CallToolResult> {
@@ -2233,16 +2273,19 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> ServerHandler for Recal
 
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
-        info.instructions = Some(
+        let admin_instructions = if self.tool_router.get("admin_list").is_some() {
+            " Privileged admin tools are enabled for migration, repair, statistics, re-embedding, consolidation, scope registry management, and audit history."
+        } else {
+            " Privileged admin tools are disabled by default and require explicit operator configuration."
+        };
+        info.instructions = Some(format!(
             "LocalHold is a deterministic local memory server. For normal agent work, start with \
              brief, use recall to get compact relevant cards, read or read_many to fetch full memory \
              content and record activity, and remember to store durable new information. Use handoff to validate \
              candidate memories before persisting them. revise and forget modify existing memories \
-             using the server-resolved principal. Admin tools are available for migration, repair, \
-             statistics, re-embedding, consolidation, scope registry management, and audit history. \
+             using the server-resolved principal.{admin_instructions} \
              Legacy v1 memory_* names are not part of the public MCP tool surface."
-                .into(),
-        );
+        ));
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info
     }

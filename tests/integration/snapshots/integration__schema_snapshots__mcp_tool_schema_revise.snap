@@ -7,70 +7,6 @@ expression: tool
   "description": "Revise an existing memory using the server-resolved principal for write authorization. Scope accepts key/alias/matcher/context_hints; entities and access_policy accept shorthand or full objects.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "ReviseParams",
-    "description": "Parameters for the v2 `revise` tool.",
-    "type": "object",
-    "properties": {
-      "id": {
-        "description": "The memory ID to revise.",
-        "$ref": "#/$defs/MemoryId"
-      },
-      "content": {
-        "description": "Replacement content. When set, embeddings are regenerated in the background.",
-        "type": "string"
-      },
-      "summary": {
-        "description": "Replacement compact summary for v2 cards.",
-        "type": "string"
-      },
-      "agent_label": {
-        "description": "Replacement human-readable agent label. This does not grant access.",
-        "type": "string"
-      },
-      "scope": {
-        "description": "Replacement scope: registered scope key, alias, or value containing a registered matcher.",
-        "type": "string"
-      },
-      "context_hints": {
-        "description": "Optional context hints matched against registered scope matchers when `scope` is omitted.",
-        "type": "array",
-        "items": {
-          "type": "string"
-        },
-        "default": []
-      },
-      "tags": {
-        "description": "Replacement tags.",
-        "type": "array",
-        "items": {
-          "type": "string"
-        }
-      },
-      "access_policy": {
-        "description": "Replacement access policy: `\"public\"` shorthand or a full policy object.",
-        "$ref": "#/$defs/AccessPolicyInput"
-      },
-      "importance": {
-        "description": "Replacement importance score.",
-        "type": "number",
-        "format": "double"
-      },
-      "confidence": {
-        "description": "Replacement confidence score.",
-        "type": "number",
-        "format": "double"
-      },
-      "entities": {
-        "description": "Replacement entities: each item may be a string name shorthand or a full `{name, type}` object.",
-        "type": "array",
-        "items": {
-          "$ref": "#/$defs/EntityInputItem"
-        }
-      }
-    },
-    "required": [
-      "id"
-    ],
     "$defs": {
       "MemoryId": {
         "description": "A ULID-formatted unique memory identifier",
@@ -193,6 +129,68 @@ expression: tool
           "name",
           "type"
         ]
+      }
+    },
+    "required": [
+      "id"
+    ],
+    "type": "object",
+    "properties": {
+      "id": {
+        "description": "The memory ID to revise.",
+        "$ref": "#/$defs/MemoryId"
+      },
+      "content": {
+        "description": "Replacement content. When set, embeddings are regenerated in the background.",
+        "type": "string"
+      },
+      "summary": {
+        "description": "Replacement compact summary for v2 cards.",
+        "type": "string"
+      },
+      "agent_label": {
+        "description": "Replacement human-readable agent label. This does not grant access.",
+        "type": "string"
+      },
+      "scope": {
+        "description": "Replacement scope: registered scope key, alias, or value containing a registered matcher.",
+        "type": "string"
+      },
+      "context_hints": {
+        "description": "Optional context hints matched against registered scope matchers when `scope` is omitted.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      },
+      "tags": {
+        "description": "Replacement tags.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "access_policy": {
+        "description": "Replacement access policy: `\"public\"` shorthand or a full policy object.",
+        "$ref": "#/$defs/AccessPolicyInput"
+      },
+      "importance": {
+        "description": "Replacement importance score.",
+        "type": "number",
+        "format": "double"
+      },
+      "confidence": {
+        "description": "Replacement confidence score.",
+        "type": "number",
+        "format": "double"
+      },
+      "entities": {
+        "description": "Replacement entities: each item may be a string name shorthand or a full `{name, type}` object.",
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/EntityInputItem"
+        }
       }
     }
   }

@@ -1,5 +1,26 @@
 use super::*;
-use crate::types::{AccessPolicy, Memory, Provenance};
+use crate::{
+    config::{LimitsConfig, SearchConfig},
+    types::{AccessPolicy, Memory, Provenance},
+};
+
+#[test]
+fn standard_tool_profile_removes_admin_routes() {
+    let store = crate::store::SqliteStore::in_memory().unwrap();
+    let server = RecallServer::new(store, Arc::new(crate::embedding::NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
+
+    for name in ADMIN_TOOLS {
+        assert!(server.tool_router.get(name).is_none(), "admin route should be removed: {name}");
+    }
+    for name in ["brief", "recall", "read", "remember", "revise", "forget"] {
+        assert!(server.tool_router.get(name).is_some(), "standard route should remain: {name}");
+    }
+
+    let server = server.with_admin_tools();
+    for name in ADMIN_TOOLS {
+        assert!(server.tool_router.get(name).is_some(), "explicit admin profile should add route: {name}");
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Unit tests for expand_scope_hierarchy

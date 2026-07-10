@@ -29,7 +29,8 @@ MCP client
 The registered MCP surface is the v2 agent API: `brief`, `recall`, `read`,
 `remember`, `remember_many`, `handoff`, `revise`, `forget`, and explicit
 `admin_*` maintenance tools. Legacy `memory_*` tools are not registered as MCP
-tools.
+tools. Privileged admin routes are removed from the router by default and
+require explicit operator configuration.
 
 ### Engine Layer
 
@@ -100,7 +101,9 @@ The ranking and search behavior in code should be treated as authoritative over 
 - v2 authorization uses server-resolved principals rather than caller-provided labels
 - stdio uses one trusted principal per server instance; shared multi-agent
   deployments need distinct trusted principals, typically via separate stdio
-  instances or HTTP behind a trusted identity layer
+  instances or explicit trusted-proxy HTTP mode behind an authenticating proxy
+- bearer-authenticated HTTP uses one fixed principal by default and ignores
+  caller-supplied identity headers
 - scope is retrieval/write context and is resolved from explicit scope values,
   registered aliases, or context matchers
 - mutating memory writes commit audit rows transactionally with the associated

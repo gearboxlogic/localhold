@@ -10,20 +10,20 @@ use std::{
     time::Duration,
 };
 
-use parking_lot::Mutex;
-use rusqlite::{Connection, Transaction, TransactionBehavior, ffi::sqlite3_auto_extension};
+use parking_lot::{Mutex, RwLock};
+use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, ffi::sqlite3_auto_extension};
 use sqlite_vec::sqlite3_vec_init;
 
 use super::{
-    MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter,
+    EmbeddingProfile, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter,
     vector::{SqliteVecIndex, VectorIndex as _},
 };
 use crate::{
     clock::{Clock, SystemClock},
     error::StoreError,
     store::schema::{
-        MAIN_DDL, TRIGGER_DDL, migrate_create_audit_log, migrate_create_fts_index, migrate_create_memory_entities, migrate_create_memory_tombstones, migrate_create_scope_registry,
-        migrate_create_v2_metadata, migrate_memories_add_activity_tracking, migrate_memories_add_confidence, migrate_memories_add_embedding_claims,
+        MAIN_DDL, TRIGGER_DDL, existing_embedding_dimensions, migrate_create_audit_log, migrate_create_fts_index, migrate_create_memory_entities, migrate_create_memory_tombstones,
+        migrate_create_scope_registry, migrate_create_v2_metadata, migrate_memories_add_activity_tracking, migrate_memories_add_confidence, migrate_memories_add_embedding_claims,
         migrate_memories_add_embedding_revision, migrate_memories_add_importance, migrate_memories_add_memory_type, migrate_memories_add_superseded_by,
         migrate_memories_add_updated_at, migrate_memories_align_impression_tracking, migrate_memories_backfill_origin_conversation, migrate_memory_embedding_map_fk,
     },
@@ -45,6 +45,7 @@ struct SqliteInner {
     clock: Arc<dyn Clock>,
     /// Whether FTS5 is available in this SQLite build. Set once during schema init.
     fts_available: AtomicBool,
+    active_embedding_profile: RwLock<Option<EmbeddingProfile>>,
 }
 
 pub(crate) const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -104,6 +105,7 @@ impl SqliteStore {
                 clock,
                 vector_index: SqliteVecIndex::new(embedding_dimensions),
                 fts_available: AtomicBool::new(false),
+                active_embedding_profile: RwLock::new(None),
             }),
         };
         store.init_schema()?;
@@ -137,6 +139,7 @@ impl SqliteStore {
                 clock,
                 vector_index: SqliteVecIndex::new(Self::DEFAULT_TEST_DIMENSIONS),
                 fts_available: AtomicBool::new(false),
+                active_embedding_profile: RwLock::new(None),
             }),
         };
         store.init_schema()?;
@@ -269,11 +272,136 @@ impl SqliteStore {
         self.inner.vector_index.clone()
     }
 
+    pub(crate) fn active_embedding_profile(&self) -> Option<EmbeddingProfile> {
+        self.inner.active_embedding_profile.read().clone()
+    }
+
+    /// Verify that configured embeddings belong to the database's vector space.
+    ///
+    /// A fresh database is stamped automatically. Legacy databases containing
+    /// vectors require an explicit reindex because their model identity cannot
+    /// be inferred safely.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when database access fails or the configured profile
+    /// does not match stored vectors.
+    pub async fn verify_embedding_profile(&self, profile: &EmbeddingProfile) -> Result<(), StoreError> {
+        let configured = profile.clone();
+        let profile_for_query = configured.clone();
+        let result = self.with_conn(move |conn| verify_embedding_profile_conn(conn, &profile_for_query)).await;
+        if result.is_ok() {
+            *self.inner.active_embedding_profile.write() = Some(configured);
+        }
+        result
+    }
+
+    /// Clear all vectors and stamp the configured vector-space identity.
+    ///
+    /// Memory content and metadata are preserved. The normal startup recovery
+    /// worker rebuilds vectors after the server starts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database cannot be opened or its vector table
+    /// cannot be reset atomically.
+    pub async fn reindex_embeddings(path: &Path, profile: &EmbeddingProfile) -> Result<(), StoreError> {
+        let probe = Connection::open(path)?;
+        let existing_dimensions = existing_embedding_dimensions(&probe)?;
+        drop(probe);
+
+        let store = Self::open(path, existing_dimensions.unwrap_or(profile.dimensions))?;
+        let profile = profile.clone();
+        store
+            .with_conn(move |conn| {
+                let tx = sqlite_write_tx(conn)?;
+                let _deleted = tx.execute("DELETE FROM memory_embedding_map", [])?;
+                let _dropped = tx.execute("DROP TABLE memory_embeddings", [])?;
+                let _updated = tx.execute("UPDATE memories SET has_embedding = 0, embedding_claimed_at = NULL, embedding_claim_token = NULL", [])?;
+                let vec_ddl = format!("CREATE VIRTUAL TABLE memory_embeddings USING vec0(embedding float[{}]);", profile.dimensions);
+                tx.execute_batch(&vec_ddl)?;
+                insert_embedding_profile(&tx, &profile)?;
+                tx.commit()?;
+                Ok(())
+            })
+            .await
+    }
+
     /// Override FTS availability in tests to exercise fallback/error branches.
     #[cfg(any(test, feature = "testing"))]
     pub fn set_fts_available_for_test(&self, available: bool) {
         self.inner.fts_available.store(available, Ordering::Release);
     }
+}
+
+pub(crate) fn verify_embedding_profile_conn(conn: &mut Connection, profile: &EmbeddingProfile) -> Result<(), StoreError> {
+    let tx = sqlite_write_tx(conn)?;
+    let existing = read_embedding_profile(&tx)?;
+
+    if let Some(existing) = existing {
+        if existing != *profile {
+            return Err(profile_mismatch(&existing, profile));
+        }
+        tx.commit()?;
+        return Ok(());
+    }
+
+    let vector_count: i64 = tx.query_row("SELECT COUNT(*) FROM memory_embedding_map", [], |row| row.get(0))?;
+    if vector_count > 0 {
+        return Err(StoreError::Conflict(
+            "existing embeddings have no recorded provider/model identity; run `hold embeddings reindex --yes` before starting with an active embedding provider".into(),
+        ));
+    }
+    insert_embedding_profile(&tx, profile)?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub(crate) fn ensure_embedding_profile_matches(conn: &Connection, expected: &EmbeddingProfile) -> Result<(), StoreError> {
+    let current =
+        read_embedding_profile(conn)?.ok_or_else(|| StoreError::Conflict("embedding profile was removed while this server was running; restart before writing vectors".into()))?;
+    if current != *expected {
+        return Err(profile_mismatch(&current, expected));
+    }
+    Ok(())
+}
+
+fn read_embedding_profile(conn: &Connection) -> Result<Option<EmbeddingProfile>, StoreError> {
+    conn.query_row("SELECT provider, endpoint, model, dimensions FROM embedding_profile WHERE singleton = 1", [], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?))
+    })
+    .optional()?
+    .map(|(provider, endpoint, model, dimensions)| {
+        Ok::<EmbeddingProfile, StoreError>(EmbeddingProfile {
+            provider,
+            endpoint,
+            model,
+            dimensions: usize::try_from(dimensions).map_err(|_error| StoreError::Conflict("stored embedding dimensions are invalid".into()))?,
+        })
+    })
+    .transpose()
+}
+
+fn insert_embedding_profile(conn: &Connection, profile: &EmbeddingProfile) -> Result<(), StoreError> {
+    let dimensions = i64::try_from(profile.dimensions).map_err(|_error| StoreError::Conflict("embedding dimensions exceed SQLite INTEGER".into()))?;
+    let _updated = conn.execute(
+        "INSERT INTO embedding_profile (singleton, provider, endpoint, model, dimensions)
+         VALUES (1, ?1, ?2, ?3, ?4)
+         ON CONFLICT(singleton) DO UPDATE SET
+           provider = excluded.provider,
+           endpoint = excluded.endpoint,
+           model = excluded.model,
+           dimensions = excluded.dimensions",
+        (&profile.provider, &profile.endpoint, &profile.model, dimensions),
+    )?;
+    Ok(())
+}
+
+fn profile_mismatch(existing: &EmbeddingProfile, configured: &EmbeddingProfile) -> StoreError {
+    StoreError::Conflict(format!(
+        "embedding profile mismatch: database uses {} model '{}' at '{}' with {} dimensions, but config selects {} model '{}' at '{}' with {} dimensions; run `hold embeddings reindex --yes` to rebuild all vectors",
+        existing.provider, existing.model, existing.endpoint, existing.dimensions, configured.provider, configured.model, configured.endpoint, configured.dimensions
+    ))
 }
 
 impl MemoryReader for SqliteStore {
@@ -629,6 +757,76 @@ mod tests {
             entities: Vec::new(),
             was_redacted: false,
         }
+    }
+
+    fn embedding_profile(model: &str, dimensions: usize) -> EmbeddingProfile {
+        EmbeddingProfile::openai_compatible("http://127.0.0.1:8000/v1", model, dimensions)
+    }
+
+    #[tokio::test]
+    async fn embedding_profile_stamps_fresh_database_and_rejects_mismatch() {
+        let store = SqliteStore::in_memory().unwrap();
+        let original = embedding_profile("model-a", SqliteStore::DEFAULT_TEST_DIMENSIONS);
+        store.verify_embedding_profile(&original).await.unwrap();
+        store.verify_embedding_profile(&original).await.unwrap();
+
+        let error = store
+            .verify_embedding_profile(&embedding_profile("model-b", SqliteStore::DEFAULT_TEST_DIMENSIONS))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("embedding profile mismatch"));
+        assert!(error.to_string().contains("hold embeddings reindex --yes"));
+    }
+
+    #[tokio::test]
+    async fn legacy_vectors_without_profile_require_reindex() {
+        let store = SqliteStore::in_memory().unwrap();
+        let memory = make_memory("legacy vector", &[], base_time());
+        store.store(&memory, Some(&vec![0.25_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS])).await.unwrap();
+
+        let error = store
+            .verify_embedding_profile(&embedding_profile("model-a", SqliteStore::DEFAULT_TEST_DIMENSIONS))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("no recorded provider/model identity"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_profile_writers_cannot_select_different_models() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let first = SqliteStore::open(temp.path(), 3).unwrap();
+        let second = SqliteStore::open(temp.path(), 3).unwrap();
+        let profile_a = embedding_profile("model-a", 3);
+        let profile_b = embedding_profile("model-b", 3);
+
+        let (result_a, result_b) = tokio::join!(first.verify_embedding_profile(&profile_a), second.verify_embedding_profile(&profile_b));
+        assert_ne!(result_a.is_ok(), result_b.is_ok(), "exactly one profile should claim a fresh database");
+        let conflict = result_a.err().or_else(|| result_b.err()).unwrap();
+        assert!(conflict.to_string().contains("embedding profile mismatch"));
+    }
+
+    #[tokio::test]
+    async fn reindex_preserves_memories_and_supports_dimension_change() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let path = temp.path().to_owned();
+        let memory = make_memory("preserved during reindex", &[], base_time());
+        let memory_id = memory.id;
+        let old_store = SqliteStore::open(&path, 3).unwrap();
+        let original = embedding_profile("model-a", 3);
+        old_store.verify_embedding_profile(&original).await.unwrap();
+        old_store.store(&memory, Some(&[0.1_f32, 0.2_f32, 0.3_f32])).await.unwrap();
+
+        let replacement = embedding_profile("model-b", 4);
+        SqliteStore::reindex_embeddings(&path, &replacement).await.unwrap();
+
+        let stale_write = old_store.set_embedding(&memory_id, &[0.3_f32, 0.2_f32, 0.1_f32], 0).await.unwrap_err();
+        assert!(stale_write.to_string().contains("embedding profile mismatch"));
+
+        let reopened = SqliteStore::open(&path, 4).unwrap();
+        reopened.verify_embedding_profile(&replacement).await.unwrap();
+        let preserved = reopened.get(&memory_id, None).await.unwrap().unwrap();
+        assert!(!preserved.has_embedding);
+        assert!(reopened.fetch_embeddings_for_ids(&[memory_id]).await.unwrap().is_empty());
     }
 
     fn make_v2_metadata(memory_id: MemoryId) -> V2MemoryMetadata {

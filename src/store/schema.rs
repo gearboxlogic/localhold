@@ -36,6 +36,14 @@ pub(crate) const MAIN_DDL: &str = "
         vec_rowid INTEGER NOT NULL UNIQUE
     );
 
+    CREATE TABLE IF NOT EXISTS embedding_profile (
+        singleton  INTEGER PRIMARY KEY CHECK (singleton = 1),
+        provider   TEXT NOT NULL,
+        endpoint   TEXT NOT NULL,
+        model      TEXT NOT NULL,
+        dimensions INTEGER NOT NULL CHECK (dimensions > 0)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_memories_source_agent
         ON memories(json_extract(provenance, '$.source_agent'));
 
@@ -136,20 +144,7 @@ pub(crate) const FTS5_DDL: &str = "
 
 /// Warn if an existing vec0 table has a different dimension than configured.
 pub(crate) fn check_dimension_mismatch(conn: &Connection, embedding_dimensions: usize) -> Result<(), StoreError> {
-    let existing_dim: Option<usize> = conn
-        .query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_embeddings'", [], |row| {
-            row.get::<_, String>(0)
-        })
-        .optional()?
-        .and_then(
-            #[expect(clippy::string_slice, reason = "parsing ASCII-only SQLite DDL output — no multi-byte boundary risk")]
-            #[expect(clippy::arithmetic_side_effects, reason = "offsets within a known ASCII DDL string — cannot overflow")]
-            |sql| {
-                let start = sql.find("float[")? + 6;
-                let end = start + sql[start..].find(']')?;
-                sql[start..end].parse().ok()
-            },
-        );
+    let existing_dim = existing_embedding_dimensions(conn)?;
 
     if let Some(dim) = existing_dim
         && dim != embedding_dimensions
@@ -160,6 +155,23 @@ pub(crate) fn check_dimension_mismatch(conn: &Connection, embedding_dimensions: 
         )));
     }
     Ok(())
+}
+
+/// Read the dimensions declared by an existing sqlite-vec table.
+pub(crate) fn existing_embedding_dimensions(conn: &Connection) -> Result<Option<usize>, StoreError> {
+    let dimensions = conn
+        .query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_embeddings'", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()?
+        .and_then(|sql| parse_vec_dimensions(&sql));
+    Ok(dimensions)
+}
+
+fn parse_vec_dimensions(sql: &str) -> Option<usize> {
+    let start = sql.find("float[")?.checked_add(6)?;
+    let end = start.checked_add(sql.get(start..)?.find(']')?)?;
+    sql.get(start..end)?.parse().ok()
 }
 
 /// Add `embedding_revision` column to legacy databases that lack it.

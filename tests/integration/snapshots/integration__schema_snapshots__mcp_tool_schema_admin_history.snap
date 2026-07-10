@@ -7,8 +7,15 @@ expression: tool
   "description": "Read-like admin: query transactional mutation audit history for one memory visible to the server-resolved principal without returning raw memory content.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "AdminHistoryParams",
-    "description": "Parameters for v2 admin audit history reads.",
+    "$defs": {
+      "MemoryId": {
+        "description": "A ULID-formatted unique memory identifier",
+        "type": "string"
+      }
+    },
+    "required": [
+      "id"
+    ],
     "type": "object",
     "properties": {
       "id": {
@@ -21,15 +28,6 @@ expression: tool
         "format": "uint",
         "minimum": 0,
         "default": 50
-      }
-    },
-    "required": [
-      "id"
-    ],
-    "$defs": {
-      "MemoryId": {
-        "description": "A ULID-formatted unique memory identifier",
-        "type": "string"
       }
     }
   }

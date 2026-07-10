@@ -15,7 +15,7 @@ use localhold::{
     http_transport::build_router,
     server::{HttpPrincipalSource, RecallServer},
     store::{
-        MemoryStore, PostgresStore, SqliteStore,
+        EmbeddingProfile, MemoryStore, PostgresStore, SqliteStore,
         migration::{MigrationError, SqliteToPostgresOptions, migrate_sqlite_to_postgres},
     },
 };
@@ -27,12 +27,27 @@ type AppResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 #[tokio::main]
 async fn main() -> AppResult {
+    if let Some(result) = try_run_info_cli() {
+        return result;
+    }
     if let Some(result) = try_run_migration_cli().await {
         if let Err(error) = result {
             write_migration_cli_error(&*error);
             std::process::exit(1);
         }
         return Ok(());
+    }
+
+    if let Some(result) = try_run_embeddings_cli().await {
+        if let Err(error) = result {
+            write_stderr_line(error);
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    if let Some(argument) = std::env::args_os().nth(1) {
+        write_stderr_line(root_usage());
+        return Err(EngineError::config(format!("unknown argument: {}", argument.to_string_lossy())).into());
     }
 
     // Load config
@@ -43,6 +58,7 @@ async fn main() -> AppResult {
     tracing_subscriber::fmt().with_writer(std::io::stderr).with_env_filter(env_filter).init();
 
     info!("localhold starting up");
+    let embedding_profile = active_embedding_profile(&config.embedding);
 
     match config.database.backend {
         DatabaseBackend::Sqlite => {
@@ -53,15 +69,90 @@ async fn main() -> AppResult {
                 std::fs::create_dir_all(parent)?;
             }
             let store = SqliteStore::open(&db_path, config.embedding.dimensions())?;
+            if let Some(profile) = &embedding_profile {
+                store.verify_embedding_profile(profile).await?;
+            }
             info!("sqlite database opened at {}", db_path.display());
             run_with_store(store, config).await
         }
         DatabaseBackend::Postgres => {
             let store = PostgresStore::open(&config.database.postgres, config.embedding.dimensions()).await?;
+            if let Some(profile) = &embedding_profile {
+                store.verify_embedding_profile(profile).await?;
+            }
             info!("postgres database opened");
             run_with_store(store, config).await
         }
         other => return Err(EngineError::config(format!("unsupported database backend: {other}")).into()),
+    }
+}
+
+fn try_run_info_cli() -> Option<AppResult> {
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    match args.as_slice() {
+        [arg] if is_help_arg(arg) => Some(write_stdout(root_usage()).and_then(|()| write_stdout("\n"))),
+        [arg] if arg == "-V" || arg == "--version" => Some(write_stdout(concat!("hold ", env!("CARGO_PKG_VERSION"), "\n"))),
+        _ => None,
+    }
+}
+
+const fn root_usage() -> &'static str {
+    "Usage: hold [COMMAND]\n\nRuns the LocalHold MCP server when no command is supplied.\n\nCommands:\n  embeddings reindex --yes   Clear and rebuild the configured vector space\n  migrate sqlite-to-postgres Migrate storage backends\n\nOptions:\n  -h, --help                 Print help\n  -V, --version              Print version"
+}
+
+async fn try_run_embeddings_cli() -> Option<AppResult> {
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if args.first().is_none_or(|arg| arg != "embeddings") {
+        return None;
+    }
+    Some(run_embeddings_cli(&args[1..]).await)
+}
+
+async fn run_embeddings_cli(args: &[OsString]) -> AppResult {
+    const USAGE: &str = "Usage: hold embeddings reindex --yes\n\nClears stored vectors while preserving memories, then records the embedding provider, endpoint, model, and dimensions from localhold.toml.";
+    if args.iter().any(is_help_arg) {
+        write_stdout(USAGE)?;
+        write_stdout("\n")?;
+        return Ok(());
+    }
+    if args.first().is_none_or(|arg| arg != "reindex") {
+        write_stderr_line(USAGE);
+        return Err(EngineError::config("missing or unknown embeddings command").into());
+    }
+    if !args[1..].iter().any(|arg| arg == "--yes") {
+        return Err(EngineError::config("reindex is destructive to stored vectors; rerun with `--yes` to confirm").into());
+    }
+    if args.len() != 2 {
+        return Err(EngineError::config("unexpected embeddings reindex argument").into());
+    }
+
+    let config = Config::load()?;
+    let profile = active_embedding_profile(&config.embedding).ok_or_else(|| EngineError::config("embeddings reindex requires an active OpenAI-compatible embedding provider"))?;
+    match config.database.backend {
+        DatabaseBackend::Sqlite => {
+            let path = config.database.sqlite_path();
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(parent)?;
+            }
+            SqliteStore::reindex_embeddings(path, &profile).await?;
+        }
+        DatabaseBackend::Postgres => PostgresStore::reindex_embeddings(&config.database.postgres, &profile).await?,
+        other => return Err(EngineError::config(format!("unsupported database backend: {other}")).into()),
+    }
+    write_stdout("Embedding vectors cleared. Start LocalHold to rebuild them with the configured provider.\n")?;
+    Ok(())
+}
+
+fn active_embedding_profile(config: &EmbeddingConfig) -> Option<EmbeddingProfile> {
+    match config {
+        EmbeddingConfig::OpenAiCompatible { dimensions, openai_compatible } => Some(EmbeddingProfile::openai_compatible(
+            openai_compatible.base_url.clone(),
+            openai_compatible.model.clone(),
+            *dimensions,
+        )),
+        EmbeddingConfig::Noop { .. } | _ => None,
     }
 }
 
@@ -147,6 +238,7 @@ where
     let server_principal = config.server.principal.clone();
     let anonymous_policy = config.server.anonymous_policy;
     let http_auth_token = config.server.http_auth_token.clone();
+    let admin_tools_enabled = config.server.admin_tools_enabled;
     let http_principal_source = match config.server.http_principal_mode {
         HttpPrincipalMode::Fixed => HttpPrincipalSource::fixed(config.server.http_principal.clone()),
         HttpPrincipalMode::TrustedProxy => HttpPrincipalSource::trusted_proxy_header(config.server.http_principal_header.clone()),
@@ -173,6 +265,7 @@ where
     spawn_recovery_reembed(engine.clone(), recovery_notify);
 
     let server = RecallServer::from_engine_with_auth_and_http(engine, server_principal, anonymous_policy, http_auth_token, http_principal_source);
+    let server = if admin_tools_enabled { server.with_admin_tools() } else { server };
 
     match config.server.transport {
         Transport::Stdio => Box::pin(serve_stdio(server)).await,

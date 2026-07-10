@@ -7,71 +7,6 @@ expression: tool
   "description": "Remember durable information. Write authorization uses the server-resolved principal; scope may be a key, alias, matcher-containing value, or context_hints; entities/access_policy accept shorthand or full objects.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "RememberParams",
-    "description": "Parameters for the v2 `remember` tool.",
-    "type": "object",
-    "properties": {
-      "content": {
-        "description": "The durable memory content to store.",
-        "type": "string"
-      },
-      "summary": {
-        "description": "Optional caller-supplied compact summary. The server stores the original content unchanged.",
-        "type": "string"
-      },
-      "scope": {
-        "description": "Scope key, alias, or value containing a registered matcher. If omitted and `context_hints` do not resolve, writes to `inbox/unresolved`.",
-        "type": "string"
-      },
-      "context_hints": {
-        "description": "Path, git, or workflow hints matched against registered scope matchers when `scope` is omitted.",
-        "type": "array",
-        "items": {
-          "type": "string"
-        },
-        "default": []
-      },
-      "agent_label": {
-        "description": "Human-readable agent label for provenance. This does not grant access.",
-        "type": "string"
-      },
-      "tags": {
-        "description": "Tags for categorizing this memory.",
-        "type": "array",
-        "items": {
-          "type": "string"
-        },
-        "default": []
-      },
-      "entities": {
-        "description": "Entities to attach: each item may be a string name shorthand or a full `{name, type}` object.",
-        "type": "array",
-        "items": {
-          "$ref": "#/$defs/EntityInputItem"
-        }
-      },
-      "memory_type": {
-        "description": "Memory type classification.",
-        "$ref": "#/$defs/MemoryType"
-      },
-      "importance": {
-        "description": "Importance score from 0.0 (low) to 1.0 (high).",
-        "type": "number",
-        "format": "double"
-      },
-      "confidence": {
-        "description": "Confidence score from 0.0 (low) to 1.0 (high).",
-        "type": "number",
-        "format": "double"
-      },
-      "access_policy": {
-        "description": "Access policy: `\"public\"` shorthand or a full policy object.",
-        "$ref": "#/$defs/AccessPolicyInput"
-      }
-    },
-    "required": [
-      "content"
-    ],
     "$defs": {
       "EntityInputItem": {
         "description": "One request entity accepted by v2 write/update tools.",
@@ -210,6 +145,69 @@ expression: tool
       "RedactableField": {
         "description": "A redactable field name (e.g. content, tags, provenance, entities, importance)",
         "type": "string"
+      }
+    },
+    "required": [
+      "content"
+    ],
+    "type": "object",
+    "properties": {
+      "content": {
+        "description": "The durable memory content to store.",
+        "type": "string"
+      },
+      "summary": {
+        "description": "Optional caller-supplied compact summary. The server stores the original content unchanged.",
+        "type": "string"
+      },
+      "scope": {
+        "description": "Scope key, alias, or value containing a registered matcher. If omitted and `context_hints` do not resolve, writes to `inbox/unresolved`.",
+        "type": "string"
+      },
+      "context_hints": {
+        "description": "Path, git, or workflow hints matched against registered scope matchers when `scope` is omitted.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      },
+      "agent_label": {
+        "description": "Human-readable agent label for provenance. This does not grant access.",
+        "type": "string"
+      },
+      "tags": {
+        "description": "Tags for categorizing this memory.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      },
+      "entities": {
+        "description": "Entities to attach: each item may be a string name shorthand or a full `{name, type}` object.",
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/EntityInputItem"
+        }
+      },
+      "memory_type": {
+        "description": "Memory type classification.",
+        "$ref": "#/$defs/MemoryType"
+      },
+      "importance": {
+        "description": "Importance score from 0.0 (low) to 1.0 (high).",
+        "type": "number",
+        "format": "double"
+      },
+      "confidence": {
+        "description": "Confidence score from 0.0 (low) to 1.0 (high).",
+        "type": "number",
+        "format": "double"
+      },
+      "access_policy": {
+        "description": "Access policy: `\"public\"` shorthand or a full policy object.",
+        "$ref": "#/$defs/AccessPolicyInput"
       }
     }
   }

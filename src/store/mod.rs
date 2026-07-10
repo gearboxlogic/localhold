@@ -15,6 +15,7 @@ pub(crate) mod vector;
 use std::{collections::HashMap, future::Future};
 
 pub use postgres::PostgresStore;
+use serde::{Deserialize, Serialize};
 pub use sqlite::SqliteStore;
 pub(crate) use sqlite::sqlite_write_tx;
 
@@ -34,6 +35,36 @@ pub(crate) type EmbeddingMap = HashMap<MemoryId, Vec<f32>>;
 
 /// An ANN neighbor result: `(memory_id, l2_distance)`.
 pub(crate) type EmbeddingNeighbor = (MemoryId, f64);
+
+/// Secret-free identity for the vector space produced by an embedding provider.
+///
+/// Model names are not globally unique across OpenAI-compatible endpoints, so
+/// the normalized endpoint is part of the identity. API keys are excluded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct EmbeddingProfile {
+    /// Provider protocol used to produce vectors.
+    pub provider: String,
+    /// Normalized provider endpoint.
+    pub endpoint: String,
+    /// Provider-specific model identifier.
+    pub model: String,
+    /// Number of elements in every vector.
+    pub dimensions: usize,
+}
+
+impl EmbeddingProfile {
+    /// Build an OpenAI-compatible embedding profile.
+    #[must_use]
+    pub fn openai_compatible<E: Into<String>, M: Into<String>>(endpoint: E, model: M, dimensions: usize) -> Self {
+        Self {
+            provider: "openai_compatible".into(),
+            endpoint: endpoint.into(),
+            model: model.into(),
+            dimensions,
+        }
+    }
+}
 
 /// Durable claim for one unembedded memory revision selected for re-embedding.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -15,7 +15,7 @@ use localhold::{
 use parking_lot::Mutex;
 use rmcp::{
     ServiceExt as _,
-    model::{CallToolRequestParams, CallToolResult, RawContent},
+    model::{CallToolRequestParams, CallToolResult},
     service::RunningService,
     transport::{StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig},
 };
@@ -272,7 +272,7 @@ pub(crate) async fn setup_server_with(embedding: Arc<dyn EmbeddingProvider>) -> 
 /// Spawn an MCP server with a caller-supplied SQLite store and embedding provider.
 /// Returns `(client, server_ref)` — the server ref can be used for shutdown.
 pub(crate) async fn setup_server_with_store(store: SqliteStore, embedding: Arc<dyn EmbeddingProvider>) -> (RunningService<rmcp::RoleClient, ()>, RecallServer) {
-    let server = RecallServer::new(store, embedding, LimitsConfig::default(), SearchConfig::default());
+    let server = RecallServer::new(store, embedding, LimitsConfig::default(), SearchConfig::default()).with_admin_tools();
     let server_ref = server.clone();
 
     let (server_transport, client_transport) = tokio::io::duplex(4096);
@@ -290,7 +290,7 @@ pub(crate) async fn setup_server_with_store(store: SqliteStore, embedding: Arc<d
 /// Returns `(client, server_ref)`.
 pub(crate) async fn setup_server_with_limits(embedding: Arc<dyn EmbeddingProvider>, limits: LimitsConfig) -> (RunningService<rmcp::RoleClient, ()>, RecallServer) {
     let store = SqliteStore::in_memory().unwrap();
-    let server = RecallServer::new(store, embedding, limits, SearchConfig::default());
+    let server = RecallServer::new(store, embedding, limits, SearchConfig::default()).with_admin_tools();
     let server_ref = server.clone();
 
     let (server_transport, client_transport) = tokio::io::duplex(4096);
@@ -313,7 +313,7 @@ pub(crate) async fn setup_server_with_auth(
 ) -> (RunningService<rmcp::RoleClient, ()>, RecallServer) {
     let store = SqliteStore::in_memory().unwrap();
     let engine = RecallEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine_with_auth(engine, principal.map(ToOwned::to_owned), anonymous_policy);
+    let server = RecallServer::from_engine_with_auth(engine, principal.map(ToOwned::to_owned), anonymous_policy).with_admin_tools();
     let server_ref = server.clone();
 
     let (server_transport, client_transport) = tokio::io::duplex(4096);
@@ -336,7 +336,7 @@ fn into_dyn_clock<C: Clock>(clock: Arc<C>) -> Arc<dyn Clock> {
 /// Returns `(client, server_ref)`.
 pub(crate) async fn setup_server_with_clock(embedding: Arc<dyn EmbeddingProvider>, clock: Arc<dyn Clock>) -> (RunningService<rmcp::RoleClient, ()>, RecallServer) {
     let store = SqliteStore::in_memory_with_clock(Arc::clone(&clock)).unwrap();
-    let server = RecallServer::new_with_clock(store, embedding, LimitsConfig::default(), SearchConfig::default(), clock);
+    let server = RecallServer::new_with_clock(store, embedding, LimitsConfig::default(), SearchConfig::default(), clock).with_admin_tools();
     let server_ref = server.clone();
 
     let (server_transport, client_transport) = tokio::io::duplex(4096);
@@ -427,7 +427,7 @@ pub(crate) async fn setup_noop_server_with_auth_and_legacy_memories(
     }
 
     let engine = RecallEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine_with_auth(engine, principal.map(ToOwned::to_owned), anonymous_policy);
+    let server = RecallServer::from_engine_with_auth(engine, principal.map(ToOwned::to_owned), anonymous_policy).with_admin_tools();
     let (server_transport, client_transport) = tokio::io::duplex(4096);
     tokio::spawn(async move {
         let svc = server.serve(server_transport).await.unwrap();
@@ -491,10 +491,10 @@ pub(crate) async fn assert_invalid_params_contains(client: &RunningService<rmcp:
 
 fn extract_text(result: &CallToolResult) -> &str {
     assert!(!result.content.is_empty(), "MCP result has no content items");
-    let RawContent::Text(t) = &result.content[0].raw else {
+    let Some(t) = result.content[0].as_text() else {
         #[expect(clippy::panic, reason = "test helper: unreachable unless MCP response format changes")]
         {
-            panic!("expected text content, got: {:?}", result.content[0].raw)
+            panic!("expected text content, got: {:?}", result.content[0])
         }
     };
     &t.text
@@ -604,6 +604,7 @@ async fn spawn_http_server_inner(
     let ct = CancellationToken::new();
     let mut config = ServerConfig::default();
     config.max_body_bytes = max_body_bytes;
+    config.admin_tools_enabled = true;
     config.http_auth_token = http_auth_token.map(ToOwned::to_owned);
     if let Some(http_allowed_hosts) = http_allowed_hosts {
         config.http_allowed_hosts = http_allowed_hosts;

@@ -40,8 +40,13 @@ impl SqliteStore {
         let id_str = id.to_string();
         let emb = embedding.to_vec();
         let vector_index = self.vector_index();
+        let active_profile = self.active_embedding_profile();
         self.with_conn(move |conn| {
             let tx = sqlite_write_tx(conn)?;
+
+            if let Some(profile) = &active_profile {
+                super::sqlite::ensure_embedding_profile_matches(&tx, profile)?;
+            }
 
             let current_revision: Option<i64> = tx
                 .query_row("SELECT embedding_revision FROM memories WHERE id = ?1", params![id_str], |row| row.get(0))

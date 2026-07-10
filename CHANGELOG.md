@@ -13,3 +13,6 @@ requirements explicitly.
 - Renamed the package to `localhold` and the executable to `hold`.
 - Made text-only search the default until an OpenAI-compatible embedding
   endpoint is configured.
+- Added a formal source installer with CPU and CUDA reranker profiles.
+- Added persisted embedding vector-space identity and an explicit reindex
+  transition for provider, model, endpoint, or dimension changes.

@@ -223,8 +223,8 @@ Authorization identity is resolved by the server, not by caller-supplied labels.
 
 Resolution order:
 
-1. HTTP authenticated identity from the configured bearer token and principal
-   header
+1. HTTP fixed identity after endpoint bearer authentication, or a verified
+   identity header when explicit trusted-proxy mode is enabled
 2. stdio launch-time principal from config
 3. anonymous policy
 
@@ -233,14 +233,20 @@ endpoint, including initialization and tool discovery. Without that token
 setting, HTTP requests are anonymous and governed by `anonymous_policy`; they
 never inherit the stdio launch principal.
 
+In the default `fixed` HTTP mode, caller-supplied principal headers are ignored
+and every valid endpoint token maps to `server.http_principal`. The
+`trusted_proxy` mode accepts `x-localhold-principal` only for deployments where
+an authenticating proxy overwrites that header and direct access to LocalHold is
+blocked.
+
 `agent_label` and MCP client metadata are provenance only. They never grant
 write, update, delete, admin, or restricted-read access.
 
 Stdio is a single trusted-principal mode: every client connected to one stdio
 server instance shares the configured `server.principal`. Real multi-agent
 isolation requires distinct trusted principals, usually by running separate
-stdio server instances or by placing HTTP behind a trusted identity layer that
-sets the configured principal header after bearer-token validation.
+stdio server instances or by using explicitly configured trusted-proxy HTTP
+mode behind a verified identity layer.
 
 The default anonymous policy is `public_read_only`. Anonymous public reads can
 retrieve visible content but do not record activity ranking events because no
@@ -329,7 +335,9 @@ redaction does not isolate those clients from each other.
 
 ## Admin Tools
 
-Default discovery includes admin tools under `admin_*` names:
+Admin tools are disabled by default. Setting
+`server.admin_tools_enabled = true` explicitly adds these privileged
+`admin_*` routes to discovery and dispatch:
 
 - `admin_scope_register`
 - `admin_scope_list`
@@ -345,7 +353,8 @@ Default discovery includes admin tools under `admin_*` names:
 - `admin_reassign_scope`
 - `admin_cleanup_expired`
 
-Admin tools use the server-resolved principal. `admin_list` and
+Enable them only for an operator-controlled maintenance instance. Admin tools
+use the server-resolved principal. `admin_list` and
 `admin_scope_list` are read-like and follow the configured anonymous read
 policy. Migration reporting and repair tools require a write-capable principal
 because they expose whole-store maintenance state.

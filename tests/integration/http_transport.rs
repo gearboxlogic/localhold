@@ -194,12 +194,12 @@ async fn http_endpoint_path_is_exact() {
 
 #[tokio::test]
 async fn http_host_allowlist_supports_reverse_proxy_hosts() {
-    let (url, ct, server) = spawn_http_noop_server_with_allowed_hosts(vec!["recall.internal".to_owned()]).await;
+    let (url, ct, server) = spawn_http_noop_server_with_allowed_hosts(vec!["localhold.internal".to_owned()]).await;
 
     let rejected = raw_mcp_post(&url, RAW_INITIALIZE).header(HOST, "other.internal").send().await.unwrap();
     assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
 
-    let accepted = raw_mcp_post(&url, RAW_INITIALIZE).header(HOST, "recall.internal").send().await.unwrap();
+    let accepted = raw_mcp_post(&url, RAW_INITIALIZE).header(HOST, "localhold.internal").send().await.unwrap();
     assert_eq!(accepted.status(), StatusCode::OK);
 
     ct.cancel();

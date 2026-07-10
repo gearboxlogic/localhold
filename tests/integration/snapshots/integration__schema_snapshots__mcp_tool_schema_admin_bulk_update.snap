@@ -7,78 +7,6 @@ expression: tool
   "description": "Write/admin: update metadata fields on memories matching filters using the server-resolved principal after checking write access per memory; access_policy accepts shorthand or full object.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "AdminBulkUpdateParams",
-    "description": "Parameters for v2 admin bulk metadata updates.",
-    "type": "object",
-    "properties": {
-      "tags": {
-        "description": "Filter to memories with any of these tags.",
-        "type": "array",
-        "items": {
-          "type": "string"
-        }
-      },
-      "agent_label": {
-        "description": "Filter to memories with this agent provenance label.",
-        "type": "string"
-      },
-      "scope": {
-        "description": "Filter by scope key, alias, or value containing a registered matcher.",
-        "type": "string"
-      },
-      "scopes": {
-        "description": "Filter by any scope key, alias, or matcher-containing value.",
-        "type": "array",
-        "items": {
-          "type": "string"
-        }
-      },
-      "origin_scope": {
-        "description": "Filter to memories whose historical origin scope matches this value.",
-        "type": "string"
-      },
-      "memory_type": {
-        "description": "Filter to memories of this type: `\"semantic\"`, `\"episodic\"`, or `\"procedural\"`.",
-        "$ref": "#/$defs/MemoryType"
-      },
-      "include_superseded": {
-        "description": "When `true`, include memories that have been superseded by newer versions.\nDefault is `false` — superseded memories are hidden.",
-        "type": "boolean"
-      },
-      "entity": {
-        "description": "Filter to memories tagged with this entity name.",
-        "type": "string"
-      },
-      "entity_type": {
-        "description": "Filter to memories tagged with entities of this type.",
-        "type": "string"
-      },
-      "text_search": {
-        "description": "Additional content filter applied to memory text.",
-        "type": "string"
-      },
-      "set_tags": {
-        "description": "New tags to replace existing tags on matching memories.",
-        "type": "array",
-        "items": {
-          "type": "string"
-        }
-      },
-      "importance": {
-        "description": "New importance score in [0.0, 1.0]. Clamped to range.",
-        "type": "number",
-        "format": "double"
-      },
-      "access_policy": {
-        "description": "New access policy to replace existing access policy.",
-        "$ref": "#/$defs/AccessPolicyInput"
-      },
-      "expand_scopes": {
-        "description": "When `true` (the default), scope keys are expanded to include\nall ancestor scopes (e.g., `\"org/project/conv\"` also matches `\"org/project\"` and `\"org\"`).\nSet to `false` to disable hierarchical scoping and match only the exact scope keys provided.",
-        "type": "boolean",
-        "default": true
-      }
-    },
     "$defs": {
       "MemoryType": {
         "description": "Classifies the kind of knowledge a memory captures.",
@@ -187,6 +115,76 @@ expression: tool
         "description": "A redactable field name (e.g. content, tags, provenance, entities, importance)",
         "type": "string"
       }
-    }
+    },
+    "properties": {
+      "tags": {
+        "description": "Filter to memories with any of these tags.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "agent_label": {
+        "description": "Filter to memories with this agent provenance label.",
+        "type": "string"
+      },
+      "scope": {
+        "description": "Filter by scope key, alias, or value containing a registered matcher.",
+        "type": "string"
+      },
+      "scopes": {
+        "description": "Filter by any scope key, alias, or matcher-containing value.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "origin_scope": {
+        "description": "Filter to memories whose historical origin scope matches this value.",
+        "type": "string"
+      },
+      "memory_type": {
+        "description": "Filter to memories of this type: `\"semantic\"`, `\"episodic\"`, or `\"procedural\"`.",
+        "$ref": "#/$defs/MemoryType"
+      },
+      "include_superseded": {
+        "description": "When `true`, include memories that have been superseded by newer versions.\nDefault is `false` — superseded memories are hidden.",
+        "type": "boolean"
+      },
+      "entity": {
+        "description": "Filter to memories tagged with this entity name.",
+        "type": "string"
+      },
+      "entity_type": {
+        "description": "Filter to memories tagged with entities of this type.",
+        "type": "string"
+      },
+      "text_search": {
+        "description": "Additional content filter applied to memory text.",
+        "type": "string"
+      },
+      "set_tags": {
+        "description": "New tags to replace existing tags on matching memories.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "importance": {
+        "description": "New importance score in [0.0, 1.0]. Clamped to range.",
+        "type": "number",
+        "format": "double"
+      },
+      "access_policy": {
+        "description": "New access policy to replace existing access policy.",
+        "$ref": "#/$defs/AccessPolicyInput"
+      },
+      "expand_scopes": {
+        "description": "When `true` (the default), scope keys are expanded to include\nall ancestor scopes (e.g., `\"org/project/conv\"` also matches `\"org/project\"` and `\"org\"`).\nSet to `false` to disable hierarchical scoping and match only the exact scope keys provided.",
+        "type": "boolean",
+        "default": true
+      }
+    },
+    "type": "object"
   }
 }

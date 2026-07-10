@@ -65,7 +65,7 @@ async fn setup_low_rerank_server() -> (RunningService<rmcp::RoleClient, ()>, Rec
     let mut search_config = SearchConfig::default();
     search_config.reranker.blend_weight = 1.0_f64;
     let engine = RecallEngine::new(store, Arc::new(DeterministicEmbedding), LimitsConfig::default(), search_config).with_reranker(Arc::new(LowScoreReranker));
-    let server = RecallServer::from_engine(engine);
+    let server = RecallServer::from_engine(engine).with_admin_tools();
     let server_ref = server.clone();
     let (server_transport, client_transport) = tokio::io::duplex(4096);
 
@@ -794,7 +794,7 @@ async fn v2_admin_history_hides_current_memory_not_visible_to_principal() {
     store.write_audit_entry(&id, AuditAction::Store, Some("owner"), Utc::now(), None).await.unwrap();
 
     let engine = RecallEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine_with_auth(engine, Some("other".to_owned()), AnonymousPolicy::PublicReadOnly);
+    let server = RecallServer::from_engine_with_auth(engine, Some("other".to_owned()), AnonymousPolicy::PublicReadOnly).with_admin_tools();
     let (server_transport, client_transport) = tokio::io::duplex(4096);
     let _server_task = tokio::spawn(async move {
         let svc = server.serve(server_transport).await.unwrap();
@@ -2200,7 +2200,7 @@ async fn v2_handoff_commit_batch_store_failure_does_not_write_candidates() {
     let inner = SqliteStore::in_memory().unwrap();
     let store = chaos_store_fail_batch_and_store_call(inner, 2_usize);
     let engine = RecallEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine(engine);
+    let server = RecallServer::from_engine(engine).with_admin_tools();
     let (server_transport, client_transport) = tokio::io::duplex(4096);
 
     let _server_task = tokio::spawn(async move {
@@ -2230,7 +2230,7 @@ async fn v2_handoff_commit_uses_one_batch_store_call() {
     let inner = SqliteStore::in_memory().unwrap();
     let store = chaos_store_fail_on_store_call(inner, 2_usize);
     let engine = RecallEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine(engine);
+    let server = RecallServer::from_engine(engine).with_admin_tools();
     let (server_transport, client_transport) = tokio::io::duplex(4096);
 
     let _server_task = tokio::spawn(async move {

@@ -7,15 +7,13 @@ expression: tool
   "description": "Write/admin: add v2 metadata rows for existing memories using the server-resolved principal. dry_run=true previews; original memory content is never rewritten.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "AdminV2MigrateMetadataParams",
-    "description": "Parameters for applying non-destructive v2 metadata migration.",
-    "type": "object",
     "properties": {
       "dry_run": {
         "description": "When true, report what would be migrated without inserting metadata rows.",
         "type": "boolean",
         "default": false
       }
-    }
+    },
+    "type": "object"
   }
 }

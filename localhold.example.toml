@@ -9,7 +9,7 @@
 backend = "sqlite" # "sqlite" or "postgres"
 
 [database.sqlite]
-path = "~/.local/share/localhold/recall.db"
+path = "~/.local/share/localhold/localhold.db"
 
 [database.postgres]
 url = "postgres://localhold:localhold@localhost:5432/localhold"
@@ -48,11 +48,17 @@ http_principal = "http" # Identity assigned to every valid token in fixed mode
 http_principal_header = "x-localhold-principal" # Trusted only in trusted_proxy mode
 http_allowed_hosts = ["localhost", "127.0.0.1", "::1"] # Add proxy/public Host values explicitly
 max_body_bytes = 8388608 # Max HTTP request body size; stdio is bounded by tool limits
+http_max_sessions = 128 # Max retained stateful MCP sessions; clients should send DELETE when done
+http_session_idle_timeout_secs = 900 # Reap abandoned sessions after 15 idle minutes
+admin_tools_enabled = false # Explicitly expose privileged admin_* maintenance tools
 # Env: RECALL_TRANSPORT, RECALL_LOG_LEVEL, RECALL_PRINCIPAL, RECALL_ANONYMOUS_POLICY,
 #      RECALL_HTTP_HOST, RECALL_HTTP_PORT, RECALL_HTTP_PATH,
 #      RECALL_HTTP_AUTH_TOKEN, RECALL_HTTP_PRINCIPAL_MODE,
 #      RECALL_HTTP_PRINCIPAL, RECALL_HTTP_PRINCIPAL_HEADER,
-#      RECALL_HTTP_ALLOWED_HOSTS, RECALL_HTTP_MAX_BODY_BYTES
+#      RECALL_HTTP_ALLOWED_HOSTS, RECALL_HTTP_MAX_BODY_BYTES,
+#      RECALL_HTTP_MAX_SESSIONS,
+#      RECALL_HTTP_SESSION_IDLE_TIMEOUT_SECS,
+#      RECALL_ADMIN_TOOLS_ENABLED
 
 [limits]
 max_search_limit = 50          # Max results per recall/search operation

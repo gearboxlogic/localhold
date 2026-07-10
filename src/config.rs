@@ -31,6 +31,10 @@ pub const DEFAULT_RERANKER_REVISION: &str = "c5ee24cb16019beea0893ab7796b1df9662
 pub const DEFAULT_HTTP_PRINCIPAL_HEADER: &str = "x-localhold-principal";
 /// Default maximum HTTP request body size for streamable HTTP transport.
 pub const DEFAULT_HTTP_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+/// Default maximum number of simultaneously retained HTTP MCP sessions.
+pub const DEFAULT_HTTP_MAX_SESSIONS: usize = 128;
+/// Default idle lifetime for stateful HTTP MCP sessions.
+pub const DEFAULT_HTTP_SESSION_IDLE_TIMEOUT_SECS: u64 = 900;
 /// Maximum candidate-pool size supported by all current search backends.
 pub const MAX_CANDIDATE_POOL_SIZE_CEILING: usize = 1000;
 
@@ -538,6 +542,12 @@ pub struct ServerConfig {
     pub http_allowed_hosts: Vec<String>,
     /// Maximum request body size for HTTP transport in bytes.
     pub max_body_bytes: usize,
+    /// Maximum number of active stateful HTTP MCP sessions.
+    pub http_max_sessions: usize,
+    /// Close stateful HTTP MCP sessions after this many idle seconds.
+    pub http_session_idle_timeout_secs: u64,
+    /// Expose privileged `admin_*` maintenance tools.
+    pub admin_tools_enabled: bool,
 }
 
 /// Operational limits and validation caps.
@@ -639,7 +649,7 @@ fn default_sqlite_path() -> PathBuf {
             PathBuf::from(".")
         })
         .join("localhold")
-        .join("recall.db")
+        .join("localhold.db")
 }
 
 impl Default for DatabaseConfig {
@@ -701,6 +711,9 @@ impl Default for ServerConfig {
             http_principal_header: DEFAULT_HTTP_PRINCIPAL_HEADER.into(),
             http_allowed_hosts: vec!["localhost".into(), "127.0.0.1".into(), "::1".into()],
             max_body_bytes: DEFAULT_HTTP_MAX_BODY_BYTES,
+            http_max_sessions: DEFAULT_HTTP_MAX_SESSIONS,
+            http_session_idle_timeout_secs: DEFAULT_HTTP_SESSION_IDLE_TIMEOUT_SECS,
+            admin_tools_enabled: false,
         }
     }
 }
@@ -873,6 +886,9 @@ impl Config {
             self.server.http_allowed_hosts = v.split(',').map(str::trim).filter(|host| !host.is_empty()).map(ToOwned::to_owned).collect();
         }
         apply_parsed_env(env, "RECALL_HTTP_MAX_BODY_BYTES", &mut self.server.max_body_bytes);
+        apply_parsed_env(env, "RECALL_HTTP_MAX_SESSIONS", &mut self.server.http_max_sessions);
+        apply_parsed_env(env, "RECALL_HTTP_SESSION_IDLE_TIMEOUT_SECS", &mut self.server.http_session_idle_timeout_secs);
+        apply_parsed_env(env, "RECALL_ADMIN_TOOLS_ENABLED", &mut self.server.admin_tools_enabled);
         apply_parsed_env(env, "RECALL_MAX_SEARCH_LIMIT", &mut self.limits.max_search_limit);
         apply_parsed_env(env, "RECALL_MAX_CANDIDATE_POOL_SIZE", &mut self.limits.max_candidate_pool_size);
         apply_parsed_env(env, "RECALL_MAX_LIST_LIMIT", &mut self.limits.max_list_limit);
@@ -1012,6 +1028,12 @@ pub(crate) fn validate_server_config(config: &ServerConfig) -> Result<(), Engine
     if config.max_body_bytes == 0 {
         return Err(EngineError::config("server.max_body_bytes must be greater than zero"));
     }
+    if config.http_max_sessions == 0 {
+        return Err(EngineError::config("server.http_max_sessions must be greater than zero"));
+    }
+    if config.http_session_idle_timeout_secs == 0 {
+        return Err(EngineError::config("server.http_session_idle_timeout_secs must be greater than zero"));
+    }
     if config
         .http_auth_token
         .as_deref()
@@ -1124,9 +1146,17 @@ fn validate_openai_compatible_config(config: &OpenAiCompatibleConfig) -> Result<
     if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
         return Err(EngineError::config("embedding.openai_compatible.base_url must start with http:// or https://"));
     }
-
-    if base_url.trim_end_matches('/').is_empty() {
-        return Err(EngineError::config("embedding.openai_compatible.base_url must not be empty"));
+    let parsed = reqwest::Url::parse(base_url).map_err(|error| EngineError::config(format!("embedding.openai_compatible.base_url is invalid: {error}")))?;
+    if parsed.host_str().is_none() {
+        return Err(EngineError::config("embedding.openai_compatible.base_url must include a host"));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(EngineError::config(
+            "embedding.openai_compatible.base_url must not contain credentials; use embedding.openai_compatible.api_key",
+        ));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(EngineError::config("embedding.openai_compatible.base_url must not contain a query string or fragment"));
     }
 
     if config.model.trim().is_empty() {
@@ -1283,6 +1313,7 @@ fn apply_embedding_env(config: &mut EmbeddingConfig, env: &HashMap<String, Strin
 }
 
 /// Collect all `RECALL_*` env vars into a map for [`Config::load_from_sources`].
+#[expect(clippy::too_many_lines, reason = "explicit environment allowlist is intentionally centralized")]
 fn collect_recall_env_vars() -> HashMap<String, String> {
     let keys = [
         "RECALL_DB_BACKEND",
@@ -1307,6 +1338,9 @@ fn collect_recall_env_vars() -> HashMap<String, String> {
         "RECALL_HTTP_PRINCIPAL_HEADER",
         "RECALL_HTTP_ALLOWED_HOSTS",
         "RECALL_HTTP_MAX_BODY_BYTES",
+        "RECALL_HTTP_MAX_SESSIONS",
+        "RECALL_HTTP_SESSION_IDLE_TIMEOUT_SECS",
+        "RECALL_ADMIN_TOOLS_ENABLED",
         "RECALL_MAX_SEARCH_LIMIT",
         "RECALL_MAX_CANDIDATE_POOL_SIZE",
         "RECALL_MAX_LIST_LIMIT",
@@ -1397,9 +1431,12 @@ mod tests {
         assert_eq!(config.server.http_principal_header, DEFAULT_HTTP_PRINCIPAL_HEADER);
         assert_eq!(config.server.http_allowed_hosts, ["localhost", "127.0.0.1", "::1"]);
         assert_eq!(config.server.max_body_bytes, DEFAULT_HTTP_MAX_BODY_BYTES);
+        assert_eq!(config.server.http_max_sessions, DEFAULT_HTTP_MAX_SESSIONS);
+        assert_eq!(config.server.http_session_idle_timeout_secs, DEFAULT_HTTP_SESSION_IDLE_TIMEOUT_SECS);
+        assert!(!config.server.admin_tools_enabled);
         assert_eq!(config.database.backend, DatabaseBackend::Sqlite);
         assert_eq!(config.database.path, None);
-        assert!(config.database.sqlite_path().to_str().unwrap().contains("recall"));
+        assert!(config.database.sqlite_path().ends_with("localhold/localhold.db"));
         assert_eq!(config.database.postgres.url, "postgres://localhold:localhold@localhost:5432/localhold");
         assert_eq!(config.database.postgres.max_connections, 5);
         assert!(config.database.postgres.auto_migrate);
@@ -1513,8 +1550,11 @@ mod tests {
             ("RECALL_HTTP_PRINCIPAL_MODE", "trusted_proxy"),
             ("RECALL_HTTP_PRINCIPAL", "proxy-fallback"),
             ("RECALL_HTTP_PRINCIPAL_HEADER", "X-Agent-Principal"),
-            ("RECALL_HTTP_ALLOWED_HOSTS", "recall.internal, 10.0.0.4:8080"),
+            ("RECALL_HTTP_ALLOWED_HOSTS", "localhold.internal, 10.0.0.4:8080"),
             ("RECALL_HTTP_MAX_BODY_BYTES", "4096"),
+            ("RECALL_HTTP_MAX_SESSIONS", "24"),
+            ("RECALL_HTTP_SESSION_IDLE_TIMEOUT_SECS", "600"),
+            ("RECALL_ADMIN_TOOLS_ENABLED", "true"),
         ]);
 
         let mut config = Config::default();
@@ -1541,8 +1581,11 @@ mod tests {
         assert_eq!(config.server.http_principal_mode, HttpPrincipalMode::TrustedProxy);
         assert_eq!(config.server.http_principal, "proxy-fallback");
         assert_eq!(config.server.http_principal_header, "X-Agent-Principal");
-        assert_eq!(config.server.http_allowed_hosts, ["recall.internal", "10.0.0.4:8080"]);
+        assert_eq!(config.server.http_allowed_hosts, ["localhold.internal", "10.0.0.4:8080"]);
         assert_eq!(config.server.max_body_bytes, 4096);
+        assert_eq!(config.server.http_max_sessions, 24);
+        assert_eq!(config.server.http_session_idle_timeout_secs, 600);
+        assert!(config.server.admin_tools_enabled);
     }
 
     #[test]
@@ -1903,6 +1946,26 @@ mod tests {
     }
 
     #[test]
+    fn validate_server_config_rejects_zero_http_session_limit() {
+        let config = ServerConfig {
+            http_max_sessions: 0,
+            ..ServerConfig::default()
+        };
+        let err = validate_server_config(&config).unwrap_err();
+        assert!(err.to_string().contains("http_max_sessions"));
+    }
+
+    #[test]
+    fn validate_server_config_rejects_zero_http_session_idle_timeout() {
+        let config = ServerConfig {
+            http_session_idle_timeout_secs: 0,
+            ..ServerConfig::default()
+        };
+        let err = validate_server_config(&config).unwrap_err();
+        assert!(err.to_string().contains("http_session_idle_timeout_secs"));
+    }
+
+    #[test]
     fn validate_server_config_accepts_static_http_paths() {
         for path in ["/", "/mcp", "/mcp/v1", "/mcp-v1", "/%6dcp"] {
             let config = ServerConfig {
@@ -1939,7 +2002,7 @@ mod tests {
 
     #[test]
     fn validate_server_config_rejects_invalid_http_allowed_hosts() {
-        for hosts in [vec![], vec!["*".to_owned()], vec!["https://recall.internal".to_owned()], vec!["bad host".to_owned()]] {
+        for hosts in [vec![], vec!["*".to_owned()], vec!["https://localhold.internal".to_owned()], vec!["bad host".to_owned()]] {
             let config = ServerConfig {
                 http_allowed_hosts: hosts,
                 ..ServerConfig::default()
@@ -2052,6 +2115,28 @@ mod tests {
             ..OpenAiCompatibleConfig::default()
         };
         validate_openai_compatible_config(&config).unwrap();
+    }
+
+    #[test]
+    fn validate_openai_compatible_config_rejects_url_credentials() {
+        let config = OpenAiCompatibleConfig {
+            base_url: "https://user:secret@example.com/v1".into(),
+            ..OpenAiCompatibleConfig::default()
+        };
+        let err = validate_openai_compatible_config(&config).unwrap_err();
+        assert!(err.to_string().contains("must not contain credentials"));
+    }
+
+    #[test]
+    fn validate_openai_compatible_config_rejects_query_and_fragment() {
+        for base_url in ["https://example.com/v1?token=secret", "https://example.com/v1#secret"] {
+            let config = OpenAiCompatibleConfig {
+                base_url: base_url.into(),
+                ..OpenAiCompatibleConfig::default()
+            };
+            let err = validate_openai_compatible_config(&config).unwrap_err();
+            assert!(err.to_string().contains("query string or fragment"));
+        }
     }
 
     #[test]

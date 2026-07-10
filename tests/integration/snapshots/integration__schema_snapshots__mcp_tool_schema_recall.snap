@@ -7,8 +7,41 @@ expression: tool
   "description": "Recall compact v2 memory cards and record lightweight search impressions. Scope may be a key, alias, matcher-containing value, or context_hints. Full content is omitted; call read/read_many for IDs.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "RecallParams",
-    "description": "Parameters for the v2 `recall` tool.",
+    "$defs": {
+      "SearchMode": {
+        "description": "Search mode — both the caller's requested intent and the engine's actual execution path.\n\n`Auto` means \"let the engine decide\" (hybrid semantic + keyword with RRF fusion).\nThe remaining variants (`Semantic`, `Keyword`, `Text`, `Hybrid`) describe concrete\nexecution paths. When used as a request, `Auto` is the default; when used in\nresponses, the variant reflects how the search was actually executed.",
+        "oneOf": [
+          {
+            "description": "Let the engine decide (hybrid semantic + keyword, falling back as needed).\nIn responses, this variant is never used — it resolves to one of the concrete modes.",
+            "type": "string",
+            "const": "auto"
+          },
+          {
+            "description": "Embedding-based approximate nearest neighbor search.",
+            "type": "string",
+            "const": "semantic"
+          },
+          {
+            "description": "Substring-based text matching fallback.",
+            "type": "string",
+            "const": "text"
+          },
+          {
+            "description": "FTS5 full-text keyword search with BM25 ranking.",
+            "type": "string",
+            "const": "keyword"
+          },
+          {
+            "description": "Hybrid search: semantic + keyword results fused with Reciprocal Rank Fusion.",
+            "type": "string",
+            "const": "hybrid"
+          }
+        ]
+      }
+    },
+    "required": [
+      "query"
+    ],
     "type": "object",
     "properties": {
       "query": {
@@ -61,41 +94,6 @@ expression: tool
       "query_context": {
         "description": "Optional extra task/query context for semantic and keyword retrieval.",
         "type": "string"
-      }
-    },
-    "required": [
-      "query"
-    ],
-    "$defs": {
-      "SearchMode": {
-        "description": "Search mode — both the caller's requested intent and the engine's actual execution path.\n\n`Auto` means \"let the engine decide\" (hybrid semantic + keyword with RRF fusion).\nThe remaining variants (`Semantic`, `Keyword`, `Text`, `Hybrid`) describe concrete\nexecution paths. When used as a request, `Auto` is the default; when used in\nresponses, the variant reflects how the search was actually executed.",
-        "oneOf": [
-          {
-            "description": "Let the engine decide (hybrid semantic + keyword, falling back as needed).\nIn responses, this variant is never used — it resolves to one of the concrete modes.",
-            "type": "string",
-            "const": "auto"
-          },
-          {
-            "description": "Embedding-based approximate nearest neighbor search.",
-            "type": "string",
-            "const": "semantic"
-          },
-          {
-            "description": "Substring-based text matching fallback.",
-            "type": "string",
-            "const": "text"
-          },
-          {
-            "description": "FTS5 full-text keyword search with BM25 ranking.",
-            "type": "string",
-            "const": "keyword"
-          },
-          {
-            "description": "Hybrid search: semantic + keyword results fused with Reciprocal Rank Fusion.",
-            "type": "string",
-            "const": "hybrid"
-          }
-        ]
       }
     }
   }

@@ -154,7 +154,7 @@ async fn setup_seeded_server(principal: Option<&str>, seeds: Vec<Seed>) -> (Runn
 
 async fn serve_store(principal: Option<&str>, store: SqliteStore) -> RunningService<rmcp::RoleClient, ()> {
     let engine = RecallEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine_with_auth(engine, principal.map(ToOwned::to_owned), AnonymousPolicy::PublicReadOnly);
+    let server = RecallServer::from_engine_with_auth(engine, principal.map(ToOwned::to_owned), AnonymousPolicy::PublicReadOnly).with_admin_tools();
 
     let (server_transport, client_transport) = tokio::io::duplex(4096);
     let _server_task = tokio::spawn(async move {
@@ -391,7 +391,7 @@ async fn admin_history_redacted_view_omits_principal_and_details() {
         .unwrap();
 
     let engine = RecallEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
-    let server = RecallServer::from_engine_with_auth(engine, Some("other".to_owned()), AnonymousPolicy::PublicReadOnly);
+    let server = RecallServer::from_engine_with_auth(engine, Some("other".to_owned()), AnonymousPolicy::PublicReadOnly).with_admin_tools();
     let (server_transport, client_transport) = tokio::io::duplex(4096);
     let _server_task = tokio::spawn(async move {
         let svc = server.serve(server_transport).await.unwrap();

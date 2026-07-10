@@ -8,10 +8,16 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use axum::{
+    Router,
+    body::to_bytes,
+    extract::Request,
+    routing::{get, post},
+};
 use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::{
     ServiceExt as _,
-    model::{CallToolRequestParams, CallToolResult, RawContent},
+    model::{CallToolRequestParams, CallToolResult},
     service::RunningService,
     transport::{StreamableHttpClientTransport, TokioChildProcess, streamable_http_client::StreamableHttpClientTransportConfig},
 };
@@ -22,6 +28,7 @@ use tokio::{
     io::{AsyncBufReadExt as _, BufReader},
     process::{Child, ChildStderr, Command},
     sync::Mutex,
+    task::JoinHandle,
 };
 
 const HTTP_AUTH_TOKEN: &str = "black-box-http-token";
@@ -372,6 +379,7 @@ async fn http_black_box_reranker_emits_scores() {
 struct BlackBoxHarness {
     mode: HarnessMode,
     logs: Arc<Mutex<String>>,
+    embedding_server: Option<JoinHandle<()>>,
     _tempdir: TempDir,
 }
 
@@ -385,8 +393,9 @@ impl BlackBoxHarness {
         let tempdir = tempfile::tempdir().unwrap();
         let db_path = unique_db_path(tempdir.path(), &config.label);
         let logs = Arc::new(Mutex::new(String::new()));
+        let (embedding_url, embedding_server) = start_embedding_server_if_needed(&config).await;
 
-        let command = base_command(&db_path, tempdir.path(), &config);
+        let command = base_command(&db_path, tempdir.path(), &config, embedding_url.as_deref());
         let (transport, stderr) = TokioChildProcess::builder(command).stderr(Stdio::piped()).spawn().unwrap();
 
         if let Some(stderr) = stderr {
@@ -398,6 +407,7 @@ impl BlackBoxHarness {
         Self {
             mode: HarnessMode::Stdio { client },
             logs,
+            embedding_server,
             _tempdir: tempdir,
         }
     }
@@ -406,8 +416,9 @@ impl BlackBoxHarness {
         let tempdir = tempfile::tempdir().unwrap();
         let db_path = unique_db_path(tempdir.path(), &config.label);
         let logs = Arc::new(Mutex::new(String::new()));
+        let (embedding_url, embedding_server) = start_embedding_server_if_needed(&config).await;
 
-        let mut command = base_command(&db_path, tempdir.path(), &config);
+        let mut command = base_command(&db_path, tempdir.path(), &config, embedding_url.as_deref());
         let _configured = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -427,6 +438,7 @@ impl BlackBoxHarness {
         Self {
             mode: HarnessMode::Http { child: Box::new(child), url },
             logs,
+            embedding_server,
             _tempdir: tempdir,
         }
     }
@@ -467,6 +479,9 @@ impl BlackBoxHarness {
                 let _status = child.wait().await;
             }
         }
+        if let Some(server) = self.embedding_server.take() {
+            server.abort();
+        }
         tokio::time::sleep(Duration::from_millis(200)).await;
         self.logs.lock().await.clone()
     }
@@ -477,6 +492,7 @@ struct BlackBoxConfig {
     label: String,
     env: Vec<(String, String)>,
     config_toml: String,
+    mock_embedding: bool,
 }
 
 impl BlackBoxConfig {
@@ -484,6 +500,7 @@ impl BlackBoxConfig {
         Self {
             label: label.to_owned(),
             env: Vec::new(),
+            mock_embedding: false,
             config_toml: format!(
                 "[database]\npath = \"{db_path}\"\n\n[embedding]\nprovider = \"noop\"\ndimensions = 768\n\n[server]\ntransport = \"stdio\"\nlog_level = \"info\"\n",
                 db_path = "__DB_PATH__"
@@ -495,8 +512,9 @@ impl BlackBoxConfig {
         Self {
             label: label.to_owned(),
             env: Vec::new(),
+            mock_embedding: true,
             config_toml: format!(
-                "[database]\npath = \"{db_path}\"\n\n[embedding]\nprovider = \"openai_compatible\"\ndimensions = 768\n\n[embedding.openai_compatible]\nbase_url = \"http://localhost:11434/v1\"\nmodel = \"nomic-embed-text\"\n\n[server]\ntransport = \"stdio\"\nlog_level = \"info\"\n\n[search.reranker]\nenabled = true\n",
+                "[database]\npath = \"{db_path}\"\n\n[embedding]\nprovider = \"openai_compatible\"\ndimensions = 768\n\n[embedding.openai_compatible]\nbase_url = \"__EMBEDDING_BASE_URL__\"\nmodel = \"test-embedding-model\"\n\n[server]\ntransport = \"stdio\"\nlog_level = \"info\"\n\n[search.reranker]\nenabled = true\n",
                 db_path = "__DB_PATH__"
             ),
         }
@@ -506,8 +524,9 @@ impl BlackBoxConfig {
         Self {
             label: label.to_owned(),
             env: Vec::new(),
+            mock_embedding: true,
             config_toml: format!(
-                "[database]\npath = \"{db_path}\"\n\n[embedding]\nprovider = \"openai_compatible\"\ndimensions = 768\n\n[embedding.openai_compatible]\nbase_url = \"http://localhost:11434/v1\"\nmodel = \"nomic-embed-text\"\n\n[server]\ntransport = \"stdio\"\nlog_level = \"info\"\n\n[search.reranker]\nenabled = true\nmodel_path = \"/definitely/missing/model.onnx\"\n",
+                "[database]\npath = \"{db_path}\"\n\n[embedding]\nprovider = \"openai_compatible\"\ndimensions = 768\n\n[embedding.openai_compatible]\nbase_url = \"__EMBEDDING_BASE_URL__\"\nmodel = \"test-embedding-model\"\n\n[server]\ntransport = \"stdio\"\nlog_level = \"info\"\n\n[search.reranker]\nenabled = true\nmodel_path = \"/definitely/missing/model.onnx\"\n",
                 db_path = "__DB_PATH__"
             ),
         }
@@ -517,6 +536,7 @@ impl BlackBoxConfig {
         Self {
             label: label.to_owned(),
             env: Vec::new(),
+            mock_embedding: false,
             config_toml: format!(
                 "[database]\npath = \"{db_path}\"\n\n[embedding]\nprovider = \"openai_compatible\"\ndimensions = 768\n\n[embedding.openai_compatible]\nbase_url = \"http://127.0.0.1:{port}/v1\"\nmodel = \"nomic-embed-text\"\n\n[limits]\nembedding_timeout_secs = 1\n\n[server]\ntransport = \"stdio\"\nlog_level = \"info\"\n",
                 db_path = "__DB_PATH__",
@@ -526,15 +546,52 @@ impl BlackBoxConfig {
     }
 }
 
-fn base_command(db_path: &Path, cwd: &Path, config: &BlackBoxConfig) -> Command {
+fn base_command(db_path: &Path, cwd: &Path, config: &BlackBoxConfig, embedding_url: Option<&str>) -> Command {
     let mut command = Command::new(binary_path());
     let config_dir = isolate_user_config_dir(&mut command, cwd);
-    write_config(&config_dir, &config.config_toml.replace("__DB_PATH__", &escape_toml_string(db_path)));
+    let mut config_toml = config.config_toml.replace("__DB_PATH__", &escape_toml_string(db_path));
+    if let Some(url) = embedding_url {
+        config_toml = config_toml.replace("__EMBEDDING_BASE_URL__", url);
+    }
+    write_config(&config_dir, &config_toml);
     let _cwd = command.current_dir(cwd);
+    let _admin_tools = command.env("RECALL_ADMIN_TOOLS_ENABLED", "true");
     for (key, value) in &config.env {
         let _env = command.env(key, value);
     }
     command
+}
+
+async fn start_embedding_server_if_needed(config: &BlackBoxConfig) -> (Option<String>, Option<JoinHandle<()>>) {
+    if !config.mock_embedding {
+        return (None, None);
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = Router::new().route("/v1/models", get(mock_models)).route("/v1/embeddings", post(mock_embeddings));
+    let server = tokio::spawn(async move {
+        let _result = axum::serve(listener, router).await;
+    });
+    (Some(format!("http://{address}/v1")), Some(server))
+}
+
+async fn mock_models() -> String {
+    json!({"data": [{"id": "test-embedding-model"}]}).to_string()
+}
+
+async fn mock_embeddings(request: Request) -> String {
+    let body = to_bytes(request.into_body(), 1_048_576).await.unwrap();
+    let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let count = request.get("input").and_then(serde_json::Value::as_array).map_or(1, Vec::len);
+    let data = (0..count)
+        .map(|index| {
+            let mut embedding = vec![0.0_f32; 768];
+            embedding[0] = 1.0;
+            json!({"index": index, "embedding": embedding})
+        })
+        .collect::<Vec<_>>();
+    json!({"data": data}).to_string()
 }
 
 fn write_config(dir: &Path, contents: &str) {
@@ -647,7 +704,7 @@ async fn call_tool_error(client: &RunningService<rmcp::RoleClient, ()>, name: &s
 #[expect(clippy::panic, reason = "test helper should fail loudly if MCP response shape changes")]
 fn extract_text(result: &CallToolResult) -> &str {
     assert!(!result.content.is_empty(), "MCP result has no content items");
-    let RawContent::Text(text) = &result.content[0].raw else {
+    let Some(text) = result.content[0].as_text() else {
         panic!("expected text content");
     };
     &text.text

@@ -7,9 +7,6 @@ expression: tool
   "description": "Write/admin: find near-duplicate memories using the server-resolved principal. dry_run=true previews; dry_run=false merges by superseding duplicates.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "AdminConsolidateParams",
-    "description": "Parameters for v2 admin duplicate consolidation.",
-    "type": "object",
     "properties": {
       "scope": {
         "description": "Optional scope filter: registered scope key, alias, or value containing a registered matcher.",
@@ -40,6 +37,7 @@ expression: tool
         "type": "boolean",
         "default": true
       }
-    }
+    },
+    "type": "object"
   }
 }

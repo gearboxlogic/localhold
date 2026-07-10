@@ -36,14 +36,14 @@ Prerequisites:
 ```sh
 git clone https://github.com/gearboxlogic/localhold.git
 cd localhold
-./script/bootstrap.sh
-just build-release
-./target/release/hold
+./script/install.sh
+export PATH="$HOME/.local/bin:$PATH"
+hold
 ```
 
-The release build includes CPU reranker support, but reranking remains disabled
-until configured. Standard binary installers are planned but are not available
-in this beta snapshot.
+The standard install includes CPU reranker support, but reranking remains
+disabled until configured. See [Installation](docs/installation.md) for custom
+prefixes and the CUDA preview profile.
 
 ## Configuration
 
@@ -73,8 +73,10 @@ The endpoint must implement `GET /v1/models` and `POST /v1/embeddings`.
 vLLM, llama.cpp, Ollama, and hosted services can be used when they expose this
 contract. Ollama is one optional implementation; it is not required or assumed.
 
-Embedding dimensions must match both the selected model and stored vectors.
-Changing models or dimensions requires re-embedding existing memories.
+LocalHold records the endpoint, model, and dimensions that produced stored
+vectors and refuses to mix a different vector space. To change any of them,
+preserve a backup and run `hold embeddings reindex --yes`; memory content and
+metadata are retained while vectors are rebuilt after the next start.
 
 ### Reranking
 
@@ -149,7 +151,7 @@ LocalHold.
 ## Storage
 
 SQLite is the default backend and stores data under
-`~/.local/share/localhold/recall.db`. Back up the database and its WAL files as
+`~/.local/share/localhold/localhold.db`. Back up the database and its WAL files as
 a consistent set while the service is stopped or by using SQLite's backup
 facilities.
 
@@ -167,7 +169,7 @@ To migrate an existing SQLite database into an empty PostgreSQL database:
 
 ```sh
 hold migrate sqlite-to-postgres \
-  --sqlite ~/.local/share/localhold/recall.db \
+  --sqlite ~/.local/share/localhold/localhold.db \
   --embedding-dimensions 768 \
   --dry-run
 ```
@@ -179,10 +181,15 @@ contain user data.
 
 The everyday API consists of `brief`, `recall`, `read`, `read_many`,
 `remember`, `remember_many`, `handoff`, `revise`, and `forget`. Maintenance and
-migration operations use explicit `admin_*` tools.
+migration operations use explicit `admin_*` tools. Those privileged routes are
+removed from discovery and dispatch by default; operators must set
+`server.admin_tools_enabled = true` for a dedicated maintenance instance.
 
 See [docs/agent-api-v2.md](docs/agent-api-v2.md) for tool semantics and
 [docs/architecture.md](docs/architecture.md) for the current system design.
+Operators should also read [Operations](docs/operations.md) and the
+[Compatibility Policy](docs/compatibility.md). Existing private installations
+should follow [Migrating From The Private Predecessor](docs/migrating-from-private-recall.md).
 
 ## Development
 

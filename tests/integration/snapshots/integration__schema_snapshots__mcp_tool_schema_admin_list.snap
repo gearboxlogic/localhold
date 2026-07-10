@@ -7,9 +7,28 @@ expression: tool
   "description": "Read-like admin: list compact inventory cards for memories visible to the server-resolved principal without returning full content.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "AdminListParams",
-    "description": "Parameters for the v2 admin inventory listing tool.",
-    "type": "object",
+    "$defs": {
+      "MemoryType": {
+        "description": "Classifies the kind of knowledge a memory captures.",
+        "oneOf": [
+          {
+            "description": "Facts, definitions, or general knowledge.",
+            "type": "string",
+            "const": "semantic"
+          },
+          {
+            "description": "Events that happened at a specific time.",
+            "type": "string",
+            "const": "episodic"
+          },
+          {
+            "description": "Step-by-step instructions or how-tos.",
+            "type": "string",
+            "const": "procedural"
+          }
+        ]
+      }
+    },
     "properties": {
       "tags": {
         "description": "Filter to memories with any of these tags.",
@@ -74,27 +93,6 @@ expression: tool
         "default": true
       }
     },
-    "$defs": {
-      "MemoryType": {
-        "description": "Classifies the kind of knowledge a memory captures.",
-        "oneOf": [
-          {
-            "description": "Facts, definitions, or general knowledge.",
-            "type": "string",
-            "const": "semantic"
-          },
-          {
-            "description": "Events that happened at a specific time.",
-            "type": "string",
-            "const": "episodic"
-          },
-          {
-            "description": "Step-by-step instructions or how-tos.",
-            "type": "string",
-            "const": "procedural"
-          }
-        ]
-      }
-    }
+    "type": "object"
   }
 }

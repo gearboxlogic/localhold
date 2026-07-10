@@ -12,7 +12,7 @@ use localhold::{
 async fn live_onnx_reranker_scores_documents() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut config = RerankerConfig::default();
     config.enabled = true;
-    let reranker = OnnxReranker::new(&config)?;
+    let reranker = tokio::task::spawn_blocking(move || OnnxReranker::new(&config)).await??;
 
     reranker.health_check().await?;
 

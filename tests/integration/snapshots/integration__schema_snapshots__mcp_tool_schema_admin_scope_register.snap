@@ -7,9 +7,10 @@ expression: tool
   "description": "Write/admin: register or replace a v2 scope definition using the server-resolved principal. Defines scope_key plus aliases and matcher substrings for context_hints.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "AdminScopeRegisterParams",
-    "description": "Register or replace a scope definition.",
-    "type": "object",
+    "required": [
+      "scope_key",
+      "display_name"
+    ],
     "properties": {
       "scope_key": {
         "description": "Stable scope key, e.g. `gearboxlogic/localhold`.",
@@ -52,9 +53,6 @@ expression: tool
         "default": []
       }
     },
-    "required": [
-      "scope_key",
-      "display_name"
-    ]
+    "type": "object"
   }
 }

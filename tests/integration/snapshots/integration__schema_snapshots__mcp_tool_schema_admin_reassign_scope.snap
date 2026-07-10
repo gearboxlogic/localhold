@@ -7,9 +7,10 @@ expression: tool
   "description": "Write/admin: reassign memory scope using the server-resolved principal after checking write access per memory. from_scope/to_scope are scope keys; origin_scope is an optional origin filter.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "AdminReassignScopeParams",
-    "description": "Parameters for the v2 admin scope reassignment tool.",
-    "type": "object",
+    "required": [
+      "from_scope",
+      "to_scope"
+    ],
     "properties": {
       "from_scope": {
         "description": "Current scope key to move from.",
@@ -24,9 +25,6 @@ expression: tool
         "type": "string"
       }
     },
-    "required": [
-      "from_scope",
-      "to_scope"
-    ]
+    "type": "object"
   }
 }

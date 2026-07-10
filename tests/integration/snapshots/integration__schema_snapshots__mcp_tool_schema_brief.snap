@@ -7,9 +7,6 @@ expression: tool
   "description": "Return deterministic structured context grouped into relevant memories, decisions, WIP, lessons, stale candidates, suggested reads, and recommended actions. Scope accepts key/alias/matcher/context_hints.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "BriefParams",
-    "description": "Parameters for the v2 `brief` tool.",
-    "type": "object",
     "properties": {
       "query": {
         "description": "Optional topic or task query.",
@@ -34,6 +31,7 @@ expression: tool
         "minimum": 0,
         "default": 8
       }
-    }
+    },
+    "type": "object"
   }
 }

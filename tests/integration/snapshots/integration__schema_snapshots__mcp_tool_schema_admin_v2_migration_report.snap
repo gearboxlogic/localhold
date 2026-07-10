@@ -7,8 +7,6 @@ expression: tool
   "description": "Write/admin: report conservative v2 metadata migration counts using the server-resolved principal; does not rewrite original memory content.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "AdminV2MigrationReportParams",
-    "description": "Parameters for reporting v2 metadata migration state.",
     "type": "object"
   }
 }

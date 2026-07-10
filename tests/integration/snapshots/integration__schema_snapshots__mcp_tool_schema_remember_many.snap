@@ -7,21 +7,6 @@ expression: tool
   "description": "Remember multiple durable memories atomically using the server-resolved principal. memories items may be string content shorthand or full remember objects; caps at max_batch_size; returns per-item scope, duplicate, and warning details.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "RememberManyParams",
-    "description": "Parameters for the v2 `remember_many` tool.",
-    "type": "object",
-    "properties": {
-      "memories": {
-        "description": "Memories to validate and store atomically. Each item may be a string content shorthand or a full `remember` object. Length is capped by `limits.max_batch_size`.",
-        "type": "array",
-        "items": {
-          "$ref": "#/$defs/RememberManyItem"
-        }
-      }
-    },
-    "required": [
-      "memories"
-    ],
     "$defs": {
       "RememberManyItem": {
         "description": "One item accepted by the v2 `remember_many` tool.",
@@ -239,6 +224,19 @@ expression: tool
       "RedactableField": {
         "description": "A redactable field name (e.g. content, tags, provenance, entities, importance)",
         "type": "string"
+      }
+    },
+    "required": [
+      "memories"
+    ],
+    "type": "object",
+    "properties": {
+      "memories": {
+        "description": "Memories to validate and store atomically. Each item may be a string content shorthand or a full `remember` object. Length is capped by `limits.max_batch_size`.",
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/RememberManyItem"
+        }
       }
     }
   }

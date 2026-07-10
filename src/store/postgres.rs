@@ -14,8 +14,8 @@ use sqlx::{AssertSqlSafe, QueryBuilder, Row as _, Transaction, types::Json};
 use sqlx_postgres::{PgPool, PgPoolOptions, PgRow, Postgres};
 
 use super::{
-    BulkAuthOutcome, EmbeddingMap, EmbeddingNeighbor, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter, ReassignScopeOutcome, RecordUseOutcome, ReembedClaim,
-    merge_v2_metadata_patch,
+    BulkAuthOutcome, EmbeddingMap, EmbeddingNeighbor, EmbeddingProfile, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter, ReassignScopeOutcome, RecordUseOutcome,
+    ReembedClaim, merge_v2_metadata_patch,
     query::{
         DEFAULT_LIST_LIMIT, MAX_SCAN_ROWS, MAX_VEC_CANDIDATES, OVERFETCH_FACTOR, apply_access_policy_for_filter, escape_like, normalize_filter, sort_by_distance, usize_to_i64,
     },
@@ -38,6 +38,7 @@ const CREATE_VECTOR_EXTENSION: &str = "CREATE EXTENSION IF NOT EXISTS vector";
 const V2_UNRESOLVED_SCOPE: &str = "inbox/unresolved";
 const POSTGRES_COUNT_PAGE_SIZE: usize = 500;
 const EMBEDDING_CLAIM_LEASE_SECS: i64 = 300;
+const EMBEDDING_PROFILE_ADVISORY_LOCK: i64 = 5_499_250_768_369_920_844;
 
 const CREATE_MIGRATIONS_TABLE: &str = "
     CREATE TABLE IF NOT EXISTS recall_migrations (
@@ -142,6 +143,15 @@ const POSTGRES_SCHEMA_STATEMENTS: &[&str] = &[
     )
     ",
     "CREATE INDEX IF NOT EXISTS idx_memory_v2_metadata_scope_key ON memory_v2_metadata(scope_key)",
+    "
+    CREATE TABLE IF NOT EXISTS embedding_profile (
+        singleton  SMALLINT PRIMARY KEY CHECK (singleton = 1),
+        provider   TEXT NOT NULL,
+        endpoint   TEXT NOT NULL,
+        model      TEXT NOT NULL,
+        dimensions BIGINT NOT NULL CHECK (dimensions > 0)
+    )
+    ",
 ];
 
 const MEMORY_COLUMNS: &str = "
@@ -169,6 +179,7 @@ struct PostgresInner {
     pool: PgPool,
     embedding_dimensions: usize,
     clock: Arc<dyn Clock>,
+    active_embedding_profile: parking_lot::RwLock<Option<EmbeddingProfile>>,
 }
 
 /// `PostgreSQL`-backed memory store bootstrap.
@@ -199,6 +210,7 @@ impl PostgresStore {
                 pool,
                 embedding_dimensions,
                 clock,
+                active_embedding_profile: parking_lot::RwLock::new(None),
             }),
         })
     }
@@ -217,6 +229,63 @@ impl PostgresStore {
 
     pub(crate) fn clock_now(&self) -> DateTime<Utc> {
         self.inner.clock.now()
+    }
+
+    /// Verify that configured embeddings belong to the database's vector space.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when database access fails or the configured profile
+    /// does not match stored vectors.
+    pub async fn verify_embedding_profile(&self, profile: &EmbeddingProfile) -> Result<(), StoreError> {
+        let mut tx = self.pool().begin().await?;
+        lock_embedding_profile(&mut tx).await?;
+        if let Some(existing) = read_embedding_profile_tx(&mut tx).await? {
+            if existing != *profile {
+                return Err(profile_mismatch(&existing, profile));
+            }
+        } else {
+            let vector_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_embeddings").fetch_one(&mut *tx).await?;
+            if vector_count > 0 {
+                return Err(StoreError::Conflict(
+                    "existing embeddings have no recorded provider/model identity; run `hold embeddings reindex --yes` before starting with an active embedding provider".into(),
+                ));
+            }
+            upsert_embedding_profile_executor(&mut tx, profile).await?;
+        }
+        tx.commit().await?;
+        *self.inner.active_embedding_profile.write() = Some(profile.clone());
+        Ok(())
+    }
+
+    /// Clear all vectors and stamp the configured vector-space identity.
+    ///
+    /// Memory content and metadata are preserved. The normal startup recovery
+    /// worker rebuilds vectors after the server starts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database cannot be opened or its vector table
+    /// cannot be reset atomically.
+    pub async fn reindex_embeddings(config: &PostgresDatabaseConfig, profile: &EmbeddingProfile) -> Result<(), StoreError> {
+        validate_bootstrap_inputs(config, profile.dimensions)?;
+        let pool = PgPoolOptions::new().max_connections(config.max_connections).connect(&config.url).await?;
+        execute_statement(&pool, CREATE_VECTOR_EXTENSION).await?;
+        execute_statement(&pool, CREATE_MIGRATIONS_TABLE).await?;
+        execute_statements(&pool, POSTGRES_SCHEMA_STATEMENTS).await?;
+        migrate_embedding_claim_columns(&pool).await?;
+
+        let mut tx = pool.begin().await?;
+        lock_embedding_profile(&mut tx).await?;
+        let _dropped = sqlx::query("DROP TABLE IF EXISTS memory_embeddings").execute(&mut *tx).await?;
+        let _updated = sqlx::query("UPDATE memories SET has_embedding = FALSE, embedding_claimed_at = NULL, embedding_claim_token = NULL")
+            .execute(&mut *tx)
+            .await?;
+        let ddl = memory_embeddings_ddl(profile.dimensions)?;
+        let _created = sqlx::query(AssertSqlSafe(ddl)).execute(&mut *tx).await?;
+        upsert_embedding_profile_executor(&mut tx, profile).await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     pub(crate) async fn store_impl(&self, memory: &Memory, embedding: Option<&[f32]>) -> Result<MemoryId, StoreError> {
@@ -1035,6 +1104,10 @@ impl PostgresStore {
         validate_embedding_dimensions(embedding, self.embedding_dimensions())?;
 
         let mut tx = self.pool().begin().await?;
+        let active_profile = self.inner.active_embedding_profile.read().clone();
+        if let Some(profile) = active_profile {
+            ensure_embedding_profile_matches_tx(&mut tx, &profile).await?;
+        }
         let current_revision: Option<i64> = sqlx::query_scalar("SELECT embedding_revision FROM memories WHERE id = $1")
             .bind(id.to_string())
             .fetch_optional(&mut *tx)
@@ -3066,6 +3139,67 @@ async fn execute_statement(pool: &PgPool, statement: &'static str) -> Result<(),
 async fn execute_dynamic_statement(pool: &PgPool, statement: &str) -> Result<(), StoreError> {
     let _result = sqlx::query(AssertSqlSafe(statement)).execute(pool).await?;
     Ok(())
+}
+
+async fn upsert_embedding_profile_executor(tx: &mut Transaction<'_, Postgres>, profile: &EmbeddingProfile) -> Result<(), StoreError> {
+    let dimensions = i64::try_from(profile.dimensions).map_err(|_error| StoreError::Conflict("embedding dimensions exceed PostgreSQL BIGINT".into()))?;
+    let _result = sqlx::query(
+        "INSERT INTO embedding_profile (singleton, provider, endpoint, model, dimensions)
+         VALUES (1, $1, $2, $3, $4)
+         ON CONFLICT (singleton) DO UPDATE SET
+           provider = EXCLUDED.provider,
+           endpoint = EXCLUDED.endpoint,
+           model = EXCLUDED.model,
+           dimensions = EXCLUDED.dimensions",
+    )
+    .bind(&profile.provider)
+    .bind(&profile.endpoint)
+    .bind(&profile.model)
+    .bind(dimensions)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn lock_embedding_profile(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
+    let _locked = sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(EMBEDDING_PROFILE_ADVISORY_LOCK)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn read_embedding_profile_tx(tx: &mut Transaction<'_, Postgres>) -> Result<Option<EmbeddingProfile>, StoreError> {
+    let row = sqlx::query("SELECT provider, endpoint, model, dimensions FROM embedding_profile WHERE singleton = 1")
+        .fetch_optional(&mut **tx)
+        .await?;
+    row.map(|row| {
+        let dimensions: i64 = row.try_get("dimensions")?;
+        Ok(EmbeddingProfile {
+            provider: row.try_get("provider")?,
+            endpoint: row.try_get("endpoint")?,
+            model: row.try_get("model")?,
+            dimensions: usize::try_from(dimensions).map_err(|error| StoreError::Serialization(Box::new(error)))?,
+        })
+    })
+    .transpose()
+}
+
+async fn ensure_embedding_profile_matches_tx(tx: &mut Transaction<'_, Postgres>, expected: &EmbeddingProfile) -> Result<(), StoreError> {
+    let current = read_embedding_profile_tx(tx)
+        .await?
+        .ok_or_else(|| StoreError::Conflict("embedding profile was removed while this server was running; restart before writing vectors".into()))?;
+    if current != *expected {
+        return Err(profile_mismatch(&current, expected));
+    }
+    Ok(())
+}
+
+fn profile_mismatch(existing: &EmbeddingProfile, configured: &EmbeddingProfile) -> StoreError {
+    StoreError::Conflict(format!(
+        "embedding profile mismatch: database uses {} model '{}' at '{}' with {} dimensions, but config selects {} model '{}' at '{}' with {} dimensions; run `hold embeddings reindex --yes` to rebuild all vectors",
+        existing.provider, existing.model, existing.endpoint, existing.dimensions, configured.provider, configured.model, configured.endpoint, configured.dimensions
+    ))
 }
 
 fn memory_embeddings_ddl(embedding_dimensions: usize) -> Result<String, StoreError> {

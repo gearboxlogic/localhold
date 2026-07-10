@@ -4,6 +4,8 @@ LocalHold accepts contributions under the Apache License 2.0. By intentionally
 submitting a contribution for inclusion, you agree that it may be distributed
 under that license.
 
+Participation is also governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Before Starting
 
 Use a GitHub issue to discuss substantial behavior, protocol, schema, or

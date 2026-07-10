@@ -7,8 +7,15 @@ expression: tool
   "description": "Read multiple full memories by id. Preserves input order, returns per-item not_found for missing/unreadable IDs, caps at max_batch_size, and records one read activity event for found IDs only for trusted principals.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "ReadManyParams",
-    "description": "Parameters for the v2 `read_many` tool.",
+    "$defs": {
+      "MemoryId": {
+        "description": "A ULID-formatted unique memory identifier",
+        "type": "string"
+      }
+    },
+    "required": [
+      "ids"
+    ],
     "type": "object",
     "properties": {
       "ids": {
@@ -17,15 +24,6 @@ expression: tool
         "items": {
           "$ref": "#/$defs/MemoryId"
         }
-      }
-    },
-    "required": [
-      "ids"
-    ],
-    "$defs": {
-      "MemoryId": {
-        "description": "A ULID-formatted unique memory identifier",
-        "type": "string"
       }
     }
   }

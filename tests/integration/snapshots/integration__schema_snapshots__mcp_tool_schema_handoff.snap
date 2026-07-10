@@ -7,26 +7,6 @@ expression: tool
   "description": "Validate handoff candidate memories. candidates items may be string content shorthand or full objects; caps at max_batch_size; scope accepts key/alias/matcher/context_hints; previews by default and persists only when commit=true.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "HandoffParams",
-    "description": "Parameters for the v2 `handoff` tool.",
-    "type": "object",
-    "properties": {
-      "candidates": {
-        "description": "Candidate memories to validate. Each item may be a string content shorthand or a full candidate object. Length is capped by `limits.max_batch_size`.",
-        "type": "array",
-        "items": {
-          "$ref": "#/$defs/HandoffCandidateItem"
-        }
-      },
-      "commit": {
-        "description": "Persist validated candidates when true. Defaults to preview-only.",
-        "type": "boolean",
-        "default": false
-      }
-    },
-    "required": [
-      "candidates"
-    ],
     "$defs": {
       "HandoffCandidateItem": {
         "description": "One candidate item accepted by the v2 `handoff` tool.",
@@ -139,6 +119,24 @@ expression: tool
             "const": "procedural"
           }
         ]
+      }
+    },
+    "required": [
+      "candidates"
+    ],
+    "type": "object",
+    "properties": {
+      "candidates": {
+        "description": "Candidate memories to validate. Each item may be a string content shorthand or a full candidate object. Length is capped by `limits.max_batch_size`.",
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/HandoffCandidateItem"
+        }
+      },
+      "commit": {
+        "description": "Persist validated candidates when true. Defaults to preview-only.",
+        "type": "boolean",
+        "default": false
       }
     }
   }

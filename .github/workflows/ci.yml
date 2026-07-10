@@ -50,10 +50,28 @@ jobs:
       - name: Stage CPU installation
         run: ./script/install.sh --profile cpu --prefix "$RUNNER_TEMP/localhold"
 
-      - name: Smoke installed CPU binary
+      - name: Validate release metadata and archive tooling
+        run: |
+          python3 script/release.py validate
+          tag="$(python3 script/release.py tag)"
+          python3 script/package-release.py \
+            --tag "$tag" \
+            --target x86_64-unknown-linux-gnu \
+            --binary target/release/hold \
+            --format tar.gz \
+            --output-dir "$RUNNER_TEMP/release"
+          mkdir "$RUNNER_TEMP/extracted"
+          tar -xzf "$RUNNER_TEMP"/release/*.tar.gz -C "$RUNNER_TEMP/extracted"
+
+      - name: Smoke installed and archived CPU binaries
         run: |
           "$RUNNER_TEMP/localhold/bin/hold" --version
           "$RUNNER_TEMP/localhold/bin/hold" --help
+          archive="$(find "$RUNNER_TEMP/release" -maxdepth 1 -name '*.tar.gz' -print -quit)"
+          archive_root="$(basename "$archive" .tar.gz)"
+          archive_binary="$RUNNER_TEMP/extracted/$archive_root/bin/hold"
+          "$archive_binary" --version
+          "$archive_binary" --help
 
       - name: Build CUDA preview artifact
         run: just build-release-reranker-cuda
@@ -91,3 +109,27 @@ jobs:
 
       - name: Test
         run: just test
+
+      - name: Build and package Windows preview archive
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo build --release --locked --features reranker --target x86_64-pc-windows-msvc
+          python script/release.py validate
+          tag="$(python script/release.py tag)"
+          python script/package-release.py \
+            --tag "$tag" \
+            --target x86_64-pc-windows-msvc \
+            --binary target/x86_64-pc-windows-msvc/release/hold.exe \
+            --format zip \
+            --output-dir "$RUNNER_TEMP/release"
+
+      - name: Smoke Windows preview archive
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem "$env:RUNNER_TEMP/release/*.zip" | Select-Object -First 1
+          Expand-Archive -Path $archive.FullName -DestinationPath "$env:RUNNER_TEMP/extracted"
+          $archiveRoot = [IO.Path]::GetFileNameWithoutExtension($archive.Name)
+          $binary = "$env:RUNNER_TEMP/extracted/$archiveRoot/bin/hold.exe"
+          & $binary --version
+          & $binary --help | Out-Null

@@ -1,10 +1,40 @@
 # Installation
 
-LocalHold is not published to crates.io. The beta installation path builds a
-locked checkout and installs the `hold` binary plus its example configuration
-and notices.
+LocalHold is not published to crates.io. GitHub prereleases provide CPU binary
+archives for Linux x86_64 and Windows x86_64. Building a locked checkout remains
+available for other prefixes and the CUDA preview profile.
 
-## Standard CPU Build Requirements
+## Release Archives
+
+Download the archive for the release and its `SHA256SUMS` file from
+[GitHub Releases](https://github.com/gearboxlogic/localhold/releases). Release
+archives use these names:
+
+- `localhold-vVERSION-x86_64-unknown-linux-gnu.tar.gz`
+- `localhold-vVERSION-x86_64-pc-windows-msvc.zip` (preview)
+
+Verify and extract the Linux archive:
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS
+tar -xzf localhold-vVERSION-x86_64-unknown-linux-gnu.tar.gz
+./localhold-vVERSION-x86_64-unknown-linux-gnu/bin/hold --help
+```
+
+On Windows, compare the value from `Get-FileHash -Algorithm SHA256` with the
+corresponding `SHA256SUMS` entry, then use `Expand-Archive`. Every archive has a
+single versioned root containing `bin/hold` (or `hold.exe`),
+`localhold.example.toml`, maintained documentation, the changelog, and license
+notices.
+
+Linux archives are built on Ubuntu 22.04 and require glibc 2.35 or newer plus
+the normal C++ runtime library. Windows archives statically link the supported
+MSVC C runtime where the Rust and native dependencies permit it. Both archives
+include CPU reranker support, which remains disabled until configured.
+
+## Build From Source
+
+### Standard CPU Build Requirements
 
 - Git
 - Rust 1.97 with Cargo
@@ -35,7 +65,7 @@ The checked-in `rust-toolchain.toml` pins Rust 1.97 for rustup users. Project
 contributors may instead install the complete pinned development toolset with
 `mise install`; `mise` is not required by the release installer.
 
-## Optional Dependencies
+### Optional Dependencies
 
 The following are not required for the standard CPU installation:
 
@@ -51,6 +81,8 @@ The following are not required for the standard CPU installation:
   require them.
 - Docker and PostgreSQL client tools are used only by the PostgreSQL smoke-test
   workflow; they are not application dependencies.
+- Python 3 is used only by maintainers and CI to create release archives; it is
+  not required to build or run LocalHold.
 
 Clone a tagged release, review the tag and release notes, then install the CPU
 build for the current user:
@@ -72,7 +104,7 @@ The default prefix is `~/.local`. Override it with `--prefix`, for example:
 Packagers can set `DESTDIR`; it is prepended to the selected prefix without
 changing paths embedded in the package staging tree.
 
-## Windows Preview
+### Windows Preview
 
 Install Git, Rust 1.97 with Cargo, CMake, and Visual Studio 2022 Build Tools with
 the **Desktop development with C++** workload. Build the preview binary from a
@@ -87,7 +119,7 @@ The POSIX `script/install.sh` installer is not currently supported on Windows.
 Windows compilation and native tests run in CI, but packaging and installer
 integration remain preview work.
 
-## CUDA Reranker Preview
+### CUDA Reranker Preview
 
 Build and install the CUDA reranker variant with:
 
@@ -115,6 +147,6 @@ Ensure `PREFIX/bin` is on `PATH`, then confirm the installed binary with:
 hold --help
 ```
 
-Release archives and native packages are future distribution surfaces. Their
-contents must use this same binary/profile split and include the license,
-notice, third-party notice, example configuration, and checksums.
+Native operating-system packages remain a future distribution surface. They
+must preserve the documented binary/profile split and include the same notices,
+example configuration, and checksums as release archives.

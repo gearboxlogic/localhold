@@ -1,0 +1,104 @@
+---
+source: tests/integration/schema_snapshots.rs
+assertion_line: 16
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ToolErrorResponse",
+  "description": "Response envelope returned as JSON text when a v2 tool sets `is_error=true`.",
+  "type": "object",
+  "properties": {
+    "error": {
+      "description": "Structured application-level error.",
+      "$ref": "#/$defs/ToolError"
+    }
+  },
+  "required": [
+    "error"
+  ],
+  "$defs": {
+    "ToolError": {
+      "description": "Structured v2 application-level tool error.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "Stable machine-readable error code.",
+          "$ref": "#/$defs/ToolErrorCode"
+        },
+        "field": {
+          "description": "Optional request field path associated with the error.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Human-readable summary.",
+          "type": "string"
+        },
+        "suggested_fix": {
+          "description": "Optional suggested agent action.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retryable": {
+          "description": "Whether retrying the same request may succeed later.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ]
+    },
+    "ToolErrorCode": {
+      "description": "Stable code for structured v2 application-level tool errors.",
+      "oneOf": [
+        {
+          "description": "Input was syntactically valid JSON but failed tool validation.",
+          "type": "string",
+          "const": "invalid_params"
+        },
+        {
+          "description": "Requested memory or resource was not found or was not visible to this principal.",
+          "type": "string",
+          "const": "not_found"
+        },
+        {
+          "description": "Principal lacks the requested access.",
+          "type": "string",
+          "const": "access_denied"
+        },
+        {
+          "description": "Anonymous reads are disabled by server policy.",
+          "type": "string",
+          "const": "anonymous_read_denied"
+        },
+        {
+          "description": "Anonymous writes are disabled by server policy.",
+          "type": "string",
+          "const": "anonymous_write_denied"
+        },
+        {
+          "description": "Required backend capability is unavailable.",
+          "type": "string",
+          "const": "unavailable"
+        },
+        {
+          "description": "Request conflicts with current state.",
+          "type": "string",
+          "const": "conflict"
+        },
+        {
+          "description": "Unexpected internal failure.",
+          "type": "string",
+          "const": "internal"
+        }
+      ]
+    }
+  }
+}

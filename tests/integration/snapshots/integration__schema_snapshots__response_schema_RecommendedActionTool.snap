@@ -1,0 +1,36 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RecommendedActionTool",
+  "description": "Tool name for a deterministic next action recommended by `brief`.",
+  "oneOf": [
+    {
+      "description": "Read one full memory by ID.",
+      "type": "string",
+      "const": "read"
+    },
+    {
+      "description": "Read multiple full memories by ID.",
+      "type": "string",
+      "const": "read_many"
+    },
+    {
+      "description": "Run a focused recall search.",
+      "type": "string",
+      "const": "recall"
+    },
+    {
+      "description": "Store a new durable memory.",
+      "type": "string",
+      "const": "remember"
+    },
+    {
+      "description": "Register a missing scope definition.",
+      "type": "string",
+      "const": "admin_scope_register"
+    }
+  ]
+}

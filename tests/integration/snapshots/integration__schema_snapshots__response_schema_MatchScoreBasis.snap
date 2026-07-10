@@ -1,0 +1,31 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MatchScoreBasis",
+  "description": "Basis used to compute the agent-facing match score.",
+  "oneOf": [
+    {
+      "description": "Blended cross-encoder reranker score and first-stage retrieval score.",
+      "type": "string",
+      "const": "reranker_blend"
+    },
+    {
+      "description": "First-stage retrieval score only.",
+      "type": "string",
+      "const": "retrieval"
+    },
+    {
+      "description": "Low confidence association score for expanded/contextual candidates.",
+      "type": "string",
+      "const": "association"
+    },
+    {
+      "description": "No ranking signal was available.",
+      "type": "string",
+      "const": "unavailable"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: tool
+---
+{
+  "name": "admin_reassign_scope",
+  "description": "Write/admin: reassign memory scope using the server-resolved principal after checking write access per memory. from_scope/to_scope are scope keys; origin_scope is an optional origin filter.",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "AdminReassignScopeParams",
+    "description": "Parameters for the v2 admin scope reassignment tool.",
+    "type": "object",
+    "properties": {
+      "from_scope": {
+        "description": "Current scope key to move from.",
+        "type": "string"
+      },
+      "to_scope": {
+        "description": "New scope key to move into.",
+        "type": "string"
+      },
+      "origin_scope": {
+        "description": "Optional historical origin scope filter; when set, only matching rows are moved.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "from_scope",
+      "to_scope"
+    ]
+  }
+}

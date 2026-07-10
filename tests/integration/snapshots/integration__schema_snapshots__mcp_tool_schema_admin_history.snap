@@ -1,0 +1,36 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: tool
+---
+{
+  "name": "admin_history",
+  "description": "Read-like admin: query transactional mutation audit history for one memory visible to the server-resolved principal without returning raw memory content.",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "AdminHistoryParams",
+    "description": "Parameters for v2 admin audit history reads.",
+    "type": "object",
+    "properties": {
+      "id": {
+        "description": "The memory ID to query audit history for.",
+        "$ref": "#/$defs/MemoryId"
+      },
+      "limit": {
+        "description": "Maximum number of audit entries to return. Default is 50; clamped to the server maximum.",
+        "type": "integer",
+        "format": "uint",
+        "minimum": 0,
+        "default": 50
+      }
+    },
+    "required": [
+      "id"
+    ],
+    "$defs": {
+      "MemoryId": {
+        "description": "A ULID-formatted unique memory identifier",
+        "type": "string"
+      }
+    }
+  }
+}

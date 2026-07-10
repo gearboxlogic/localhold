@@ -1,0 +1,151 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MemoryEntry",
+  "description": "A memory entry returned by list or get operations.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "description": "The memory ID.",
+      "$ref": "#/$defs/MemoryId"
+    },
+    "content": {
+      "description": "The memory content.",
+      "type": "string"
+    },
+    "tags": {
+      "description": "Tags associated with this memory.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "created_at": {
+      "description": "Timestamp when the memory was created.",
+      "type": "string"
+    },
+    "updated_at": {
+      "description": "Timestamp when the memory's content was last modified.",
+      "type": "string"
+    },
+    "memory_type": {
+      "description": "Memory classification: `semantic`, `episodic`, or `procedural`.",
+      "$ref": "#/$defs/MemoryType"
+    },
+    "importance": {
+      "description": "Importance score in the range `[0.0, 1.0]`.",
+      "type": "number",
+      "format": "double"
+    },
+    "confidence": {
+      "description": "Source trustworthiness in the range `[0.0, 1.0]`.",
+      "type": "number",
+      "format": "double"
+    },
+    "has_embedding": {
+      "description": "Whether this memory has a stored embedding vector.",
+      "type": "boolean"
+    },
+    "impression_count": {
+      "description": "Number of times this memory was shown in search results.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "superseded_by": {
+      "description": "ID of the memory that supersedes this one (if any).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MemoryId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "entities": {
+      "description": "Typed entities attached to this memory.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Entity"
+      }
+    },
+    "expires_at": {
+      "description": "When this memory expires (RFC 3339), if a TTL was set.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "last_impressed_at": {
+      "description": "Timestamp of the last time this memory was shown in a search result (RFC 3339).",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "content",
+    "tags",
+    "created_at",
+    "updated_at",
+    "memory_type",
+    "importance",
+    "confidence",
+    "has_embedding",
+    "impression_count"
+  ],
+  "$defs": {
+    "MemoryId": {
+      "description": "A ULID-formatted unique memory identifier",
+      "type": "string"
+    },
+    "MemoryType": {
+      "description": "Classifies the kind of knowledge a memory captures.",
+      "oneOf": [
+        {
+          "description": "Facts, definitions, or general knowledge.",
+          "type": "string",
+          "const": "semantic"
+        },
+        {
+          "description": "Events that happened at a specific time.",
+          "type": "string",
+          "const": "episodic"
+        },
+        {
+          "description": "Step-by-step instructions or how-tos.",
+          "type": "string",
+          "const": "procedural"
+        }
+      ]
+    },
+    "Entity": {
+      "description": "A caller-provided typed entity attached to a memory for entity-based retrieval.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The entity name (e.g., \"Alice\", \"example-agent\", \"RFC 9110\").",
+          "type": "string"
+        },
+        "type": {
+          "description": "The entity type (e.g., \"person\", \"project\", \"document\").",
+          "$ref": "#/$defs/EntityType"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ]
+    },
+    "EntityType": {
+      "description": "A validated entity type identifier",
+      "type": "string"
+    }
+  }
+}

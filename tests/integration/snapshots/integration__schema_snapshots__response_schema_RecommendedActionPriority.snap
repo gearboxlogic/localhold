@@ -1,0 +1,26 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RecommendedActionPriority",
+  "description": "Priority for a deterministic next action recommended by `brief`.",
+  "oneOf": [
+    {
+      "description": "Do this first.",
+      "type": "string",
+      "const": "high"
+    },
+    {
+      "description": "Useful but not urgent.",
+      "type": "string",
+      "const": "normal"
+    },
+    {
+      "description": "Optional follow-up for weak or stale context.",
+      "type": "string",
+      "const": "low"
+    }
+  ]
+}

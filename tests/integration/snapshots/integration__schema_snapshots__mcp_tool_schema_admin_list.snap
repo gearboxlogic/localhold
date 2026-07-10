@@ -1,0 +1,100 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: tool
+---
+{
+  "name": "admin_list",
+  "description": "Read-like admin: list compact inventory cards for memories visible to the server-resolved principal without returning full content.",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "AdminListParams",
+    "description": "Parameters for the v2 admin inventory listing tool.",
+    "type": "object",
+    "properties": {
+      "tags": {
+        "description": "Filter to memories with any of these tags.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "agent_label": {
+        "description": "Filter to memories with this agent provenance label.",
+        "type": "string"
+      },
+      "scope": {
+        "description": "Filter by scope key, alias, or value containing a registered matcher.",
+        "type": "string"
+      },
+      "scopes": {
+        "description": "Filter by any scope key, alias, or matcher-containing value.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "origin_scope": {
+        "description": "Filter to memories whose historical origin scope matches this value.",
+        "type": "string"
+      },
+      "memory_type": {
+        "description": "Filter to memories of this type: `\"semantic\"`, `\"episodic\"`, or `\"procedural\"`.",
+        "$ref": "#/$defs/MemoryType"
+      },
+      "include_superseded": {
+        "description": "When `true`, include memories that have been superseded by newer versions.\nDefault is `false` — superseded memories are hidden.",
+        "type": "boolean"
+      },
+      "entity": {
+        "description": "Filter to memories tagged with this entity name.",
+        "type": "string"
+      },
+      "entity_type": {
+        "description": "Filter to memories tagged with entities of this type.",
+        "type": "string"
+      },
+      "text_search": {
+        "description": "Filter to memories containing this text.",
+        "type": "string"
+      },
+      "has_embedding": {
+        "description": "Filter to memories with (`true`) or without (`false`) embeddings.",
+        "type": "boolean"
+      },
+      "limit": {
+        "description": "Maximum number of inventory cards to return.",
+        "type": "integer",
+        "format": "uint",
+        "minimum": 0,
+        "default": 20
+      },
+      "expand_scopes": {
+        "description": "Expand scope keys to include ancestor scopes.",
+        "type": "boolean",
+        "default": true
+      }
+    },
+    "$defs": {
+      "MemoryType": {
+        "description": "Classifies the kind of knowledge a memory captures.",
+        "oneOf": [
+          {
+            "description": "Facts, definitions, or general knowledge.",
+            "type": "string",
+            "const": "semantic"
+          },
+          {
+            "description": "Events that happened at a specific time.",
+            "type": "string",
+            "const": "episodic"
+          },
+          {
+            "description": "Step-by-step instructions or how-tos.",
+            "type": "string",
+            "const": "procedural"
+          }
+        ]
+      }
+    }
+  }
+}

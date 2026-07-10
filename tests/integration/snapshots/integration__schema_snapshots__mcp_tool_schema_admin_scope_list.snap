@@ -1,0 +1,14 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: tool
+---
+{
+  "name": "admin_scope_list",
+  "description": "Read-like admin: list persisted v2 scope definitions using read authorization from the server-resolved principal.",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "AdminScopeListParams",
+    "description": "Parameters for listing registered scopes.",
+    "type": "object"
+  }
+}

@@ -1,0 +1,52 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MatchDiagnostics",
+  "description": "Ranking diagnostics for a compact v2 card.",
+  "type": "object",
+  "properties": {
+    "retrieval_score": {
+      "description": "First-stage retrieval score.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "reranker_score": {
+      "description": "Reranker score when available.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "reranker_blend_weight": {
+      "description": "Reranker blend weight used when `score_basis` is `reranker_blend`.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "vector_distance": {
+      "description": "L2 vector distance when available.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "ranking_score": {
+      "description": "Internal ranking score combining relevance, importance, freshness, activity, and confidence.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    }
+  }
+}

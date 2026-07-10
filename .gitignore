@@ -1,0 +1,10 @@
+/target
+/.cargo
+/.rustup
+*.snap.new
+*:Zone.Identifier
+/recall.toml
+/.env
+*.db
+*.db-shm
+*.db-wal

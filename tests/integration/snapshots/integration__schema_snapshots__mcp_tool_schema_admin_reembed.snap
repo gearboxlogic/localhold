@@ -1,0 +1,32 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: tool
+---
+{
+  "name": "admin_reembed",
+  "description": "Write/admin: trigger re-embedding for one memory or a capped batch of unembedded memories using the server-resolved principal.",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "AdminReembedParams",
+    "description": "Parameters for v2 admin re-embedding.",
+    "type": "object",
+    "properties": {
+      "id": {
+        "description": "Specific memory ID to re-embed. When omitted, re-embeds all memories without embeddings.",
+        "$ref": "#/$defs/MemoryId"
+      },
+      "limit": {
+        "description": "Maximum number of memories to re-embed in bulk mode (when `id` is omitted). Defaults to a server-configured limit.",
+        "type": "integer",
+        "format": "uint",
+        "minimum": 0
+      }
+    },
+    "$defs": {
+      "MemoryId": {
+        "description": "A ULID-formatted unique memory identifier",
+        "type": "string"
+      }
+    }
+  }
+}

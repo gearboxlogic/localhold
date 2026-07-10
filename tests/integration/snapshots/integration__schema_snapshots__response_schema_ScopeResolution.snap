@@ -1,0 +1,71 @@
+---
+source: tests/integration/schema_snapshots.rs
+assertion_line: 28
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ScopeResolution",
+  "description": "Diagnostic details for agent-facing scope resolution.",
+  "type": "object",
+  "properties": {
+    "scope": {
+      "description": "Resolved scope key, or `inbox/unresolved`.",
+      "type": "string"
+    },
+    "unresolved_scope": {
+      "description": "Whether the scope still needs classification.",
+      "type": "boolean"
+    },
+    "resolved_by": {
+      "description": "Resolution mechanism.",
+      "$ref": "#/$defs/ScopeResolvedBy"
+    },
+    "matched_hint": {
+      "description": "Input hint or explicit value that matched, when applicable.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "matched_value": {
+      "description": "Registry alias or matcher value that matched, when applicable.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "scope",
+    "unresolved_scope",
+    "resolved_by"
+  ],
+  "$defs": {
+    "ScopeResolvedBy": {
+      "description": "Mechanism used to resolve a v2 scope.",
+      "oneOf": [
+        {
+          "description": "Explicit scope key or raw explicit scope value.",
+          "type": "string",
+          "const": "explicit"
+        },
+        {
+          "description": "Scope registry alias matched.",
+          "type": "string",
+          "const": "alias"
+        },
+        {
+          "description": "Scope registry matcher matched an explicit scope or context hint.",
+          "type": "string",
+          "const": "matcher"
+        },
+        {
+          "description": "No scope could be resolved.",
+          "type": "string",
+          "const": "unresolved"
+        }
+      ]
+    }
+  }
+}

@@ -50,6 +50,9 @@ Windows support is preview and is validated in GitHub Actions.
 - Add regression tests for bugs and contract tests for public surfaces.
 - Update maintained documentation and examples when behavior changes.
 - Run `just check`, or state exactly which checks could not be run.
+- Allow configured automated cloud reviews to complete and address actionable
+  findings before merge; green CI alone does not make a pull request
+  merge-ready.
 - Preserve compatibility unless the change is explicitly approved as breaking.
 
 See [AGENTS.md](AGENTS.md) for additional guidance used by automated coding

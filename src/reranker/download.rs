@@ -93,7 +93,13 @@ pub(crate) fn resolve_model_paths(config: &RerankerConfig) -> Result<ModelPaths,
     std::fs::create_dir_all(&model_dir).map_err(|e| RerankerError::Permanent(Box::new(e)))?;
 
     let lock = open_cache_lock(&model_dir)?;
-    lock.lock().map_err(|error| RerankerError::Transient(Box::new(error)))?;
+    lock.lock().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            RerankerError::Transient(Box::new(error))
+        } else {
+            RerankerError::Permanent(Box::new(error))
+        }
+    })?;
     remove_stale_partial_files(&model_dir)?;
 
     for (remote_path, local_name) in MODEL_FILES {
@@ -165,6 +171,7 @@ fn ensure_cached_file(url: &str, dest: &Path, expected_sha256: &str) -> Result<(
 
     if dest.exists() {
         info!("  {} cached but hash mismatch, re-downloading", dest.display());
+        std::fs::remove_file(dest).map_err(|error| RerankerError::Permanent(Box::new(error)))?;
     }
 
     download_file(url, dest, expected_sha256)
@@ -287,18 +294,15 @@ fn create_temporary_download(dest: &Path) -> Result<(PathBuf, File), RerankerErr
 fn publish_verified_file(tmp_path: &Path, dest: &Path, expected_sha256: &str) -> Result<(), RerankerError> {
     match std::fs::rename(tmp_path, dest) {
         Ok(()) => Ok(()),
-        Err(_error) if dest.exists() => {
-            if verify_file_sha256(dest, expected_sha256)? {
-                std::fs::remove_file(tmp_path).map_err(|remove_error| RerankerError::Permanent(Box::new(remove_error)))?;
-                return Ok(());
-            }
-            // Windows does not replace an existing destination with rename.
-            // The cache lock keeps cooperating readers out while the invalid
-            // destination is removed and the verified staging file is moved.
-            std::fs::remove_file(dest).map_err(|remove_error| RerankerError::Permanent(Box::new(remove_error)))?;
-            std::fs::rename(tmp_path, dest).map_err(|rename_error| RerankerError::Permanent(Box::new(rename_error)))
+        Err(_rename_error) if dest.exists() && matches!(verify_file_sha256(dest, expected_sha256), Ok(true)) => {
+            // A process that does not use this lock may have published the
+            // same verified artifact. Keep it and discard our staging file.
+            std::fs::remove_file(tmp_path).map_err(|remove_error| RerankerError::Permanent(Box::new(remove_error)))?;
+            Ok(())
         }
-        Err(error) => Err(RerankerError::Permanent(Box::new(error))),
+        Err(rename_error) => Err(RerankerError::Permanent(
+            format!("publishing verified reranker artifact {}: {rename_error}", dest.display()).into(),
+        )),
     }
 }
 
@@ -345,7 +349,7 @@ mod tests {
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use tempfile::TempDir;
@@ -362,7 +366,7 @@ mod tests {
         let mut children = std::iter::repeat_with(|| spawn_download_child(cache.path(), &server.base_url)).take(4).collect::<Vec<_>>();
 
         for child in &mut children {
-            let status = child.wait().unwrap();
+            let status = wait_for_child(child).unwrap();
             assert!(status.success(), "cache download child failed with {status}");
         }
 
@@ -376,7 +380,7 @@ mod tests {
         seed_invalid_cache(cache.path());
         let server = MockArtifactServer::start(true);
         let mut children = std::iter::repeat_with(|| spawn_download_child(cache.path(), &server.base_url)).take(2).collect::<Vec<_>>();
-        let statuses = children.iter_mut().map(|child| child.wait().unwrap()).collect::<Vec<_>>();
+        let statuses = children.iter_mut().map(|child| wait_for_child(child).unwrap()).collect::<Vec<_>>();
 
         assert_eq!(
             statuses.iter().filter(|status| status.success()).count(),
@@ -418,6 +422,21 @@ mod tests {
             .env("LOCALHOLD_TEST_RERANKER_BASE_URL", base_url)
             .spawn()
             .unwrap()
+    }
+
+    fn wait_for_child(child: &mut Child) -> std::io::Result<std::process::ExitStatus> {
+        let started = Instant::now();
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            if started.elapsed() >= Duration::from_secs(30) {
+                child.kill()?;
+                let _reaped_status = child.wait()?;
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "cache download child exceeded 30 seconds"));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn assert_verified_cache(cache_dir: &Path) {

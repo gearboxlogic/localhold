@@ -45,7 +45,10 @@ points to pre-provisioned files.
   session construction and initial health inference succeed; otherwise it
   warns and selects CPU.
 - `cpu` uses CPU even when CUDA support is compiled into the binary.
-- `cuda` requires CUDA provider selection and never falls back to CPU.
+- `cuda` requires a CUDA-backed session and never falls back to a CPU session.
+  ONNX Runtime may still place individual shape or control-flow nodes on CPU;
+  the selected provider describes the session's accelerator, not exclusive
+  placement of every graph node.
 
 `search.reranker.required = true` makes startup fail unless the selected
 provider passes initial inference. With the default `false`, LocalHold can

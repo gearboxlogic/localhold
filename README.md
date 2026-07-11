@@ -131,7 +131,8 @@ just build-release-reranker-cuda
 
 The CUDA-capable binary supports `auto`, `cpu`, and `cuda`. `auto` prefers CUDA
 after successful model inference and falls back visibly to CPU; `cpu` never
-registers CUDA; explicit `cuda` never falls back. Set `required = true` when
+registers CUDA; explicit `cuda` never falls back to a CPU session. ONNX Runtime
+may still place individual graph nodes on CPU. Set `required = true` when
 startup must fail unless reranking is active. CUDA requires a compatible NVIDIA
 driver and ONNX Runtime/CUDA libraries. It does not affect embedding placement;
 embedding compute happens at the selected OpenAI-compatible endpoint.

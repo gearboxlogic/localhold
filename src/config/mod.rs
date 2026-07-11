@@ -51,7 +51,7 @@ pub enum RerankerExecutionProvider {
     Auto,
     /// Run reranker inference on CPU, even in a CUDA-capable binary.
     Cpu,
-    /// Require the CUDA execution provider; never fall back to CPU.
+    /// Require a CUDA-backed session; never fall back to a CPU session.
     Cuda,
 }
 

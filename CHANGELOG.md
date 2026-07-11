@@ -11,8 +11,8 @@ requirements explicitly.
 - Added explicit reranker execution-provider policy with `auto`, `cpu`, and
   `cuda` modes, truthful compiled/selected/active provider reporting, and
   optional required-mode startup enforcement.
-- Made CUDA-capable builds fall back visibly to CPU only in `auto` mode; an
-  explicit `cuda` request never silently falls back.
+- Made CUDA-capable builds fall back visibly to a CPU session only in `auto`
+  mode; an explicit `cuda` request never silently falls back.
 
 ## [0.1.0-beta.3] - 2026-07-10
 

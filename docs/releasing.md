@@ -34,6 +34,15 @@ The tag must point to a commit contained in `main`. The release workflow then:
 5. creates `SHA256SUMS`; and
 6. publishes a GitHub prerelease when the version contains a prerelease suffix.
 
+After a successful release workflow, `Published Release Smoke` runs without a
+source checkout. It downloads the public assets on clean Linux and Windows
+runners, verifies their checksums, and exercises the extracted binaries. Rerun
+it for an existing release with:
+
+```sh
+gh workflow run release-smoke.yml -f tag=vVERSION
+```
+
 Do not move or reuse a published tag. If the workflow fails before publication,
 fix the problem through a reviewed pull request and create the next prerelease
 version. If publication succeeds only partially, preserve the failed workflow

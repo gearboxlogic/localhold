@@ -37,6 +37,23 @@ The optional reranker runs in the LocalHold process. Its model and tokenizer
 are downloaded into the configured cache on first use unless `model_path`
 points to pre-provisioned files.
 
+### Reranker execution providers
+
+`search.reranker.execution_provider` controls ONNX inference placement:
+
+- `auto` prefers CUDA in a CUDA-capable binary, but only keeps it selected when
+  session construction and initial health inference succeed; otherwise it
+  warns and selects CPU.
+- `cpu` uses CPU even when CUDA support is compiled into the binary.
+- `cuda` requires CUDA provider selection and never falls back to CPU.
+
+`search.reranker.required = true` makes startup fail unless the selected
+provider passes initial inference. With the default `false`, LocalHold can
+continue without active reranking and reports `selected=none` or `active=none`.
+Startup logs report the compiled, requested, selected, and active providers.
+`LOCALHOLD_RERANKER_EXECUTION_PROVIDER` and `LOCALHOLD_RERANKER_REQUIRED`
+override the corresponding TOML values.
+
 ## HTTP Deployment
 
 Bind to loopback unless a reverse proxy or private network boundary is in

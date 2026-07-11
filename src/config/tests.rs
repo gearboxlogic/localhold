@@ -61,6 +61,9 @@ fn default_config_has_sane_values() {
     assert_eq!(config.limits.max_top_tags_limit, 100);
     assert_eq!(config.limits.max_history_limit, 500);
     assert_eq!(config.limits.consolidation_neighbor_limit, 20);
+    assert!(!config.search.reranker.enabled);
+    assert_eq!(config.search.reranker.execution_provider, RerankerExecutionProvider::Auto);
+    assert!(!config.search.reranker.required);
 }
 
 #[test]
@@ -129,6 +132,23 @@ fn env_overrides_apply() {
     let mut config = Config::default();
     config.apply_env_from_map(&env);
     assert_eq!(config.embedding.openai_compatible().unwrap().model, "test-model");
+}
+
+#[test]
+fn reranker_provider_policy_loads_from_toml_and_env() {
+    let mut config: Config = toml::from_str("[search.reranker]\nenabled = true\nexecution_provider = \"cpu\"\nrequired = false\n").unwrap();
+    assert_eq!(config.search.reranker.execution_provider, RerankerExecutionProvider::Cpu);
+    assert!(!config.search.reranker.required);
+
+    config.apply_env_from_map(&env_with(&[("LOCALHOLD_RERANKER_EXECUTION_PROVIDER", "cuda"), ("LOCALHOLD_RERANKER_REQUIRED", "true")]));
+    assert_eq!(config.search.reranker.execution_provider, RerankerExecutionProvider::Cuda);
+    assert!(config.search.reranker.required);
+}
+
+#[test]
+fn reranker_provider_policy_rejects_unknown_value() {
+    let error = toml::from_str::<Config>("[search.reranker]\nenabled = true\nexecution_provider = \"tpu\"\n").unwrap_err();
+    assert!(error.to_string().contains("unknown variant `tpu`"));
 }
 
 #[test]
@@ -867,6 +887,19 @@ fn validate_search_config_zero_activity_half_life_rejected() {
 fn validate_search_config_valid() {
     let config = SearchConfig::default();
     validate_search_config(&config).unwrap();
+}
+
+#[test]
+fn validate_search_config_required_reranker_must_be_enabled() {
+    let config = SearchConfig {
+        reranker: RerankerConfig {
+            required: true,
+            ..RerankerConfig::default()
+        },
+        ..SearchConfig::default()
+    };
+    let err = validate_search_config(&config).unwrap_err();
+    assert!(err.to_string().contains("reranker.required = true requires reranker.enabled = true"));
 }
 
 #[test]

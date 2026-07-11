@@ -117,6 +117,7 @@ Enable the built-in CPU reranker with:
 ```toml
 [search.reranker]
 enabled = true
+execution_provider = "cpu"
 ```
 
 The pinned model and tokenizer are downloaded on first use. For offline
@@ -128,9 +129,12 @@ CUDA reranking is a preview build surface:
 just build-release-reranker-cuda
 ```
 
-It requires a compatible NVIDIA driver and ONNX Runtime/CUDA libraries. CUDA
-does not affect embedding placement; embedding compute happens at the selected
-OpenAI-compatible endpoint.
+The CUDA-capable binary supports `auto`, `cpu`, and `cuda`. `auto` prefers CUDA
+after successful model inference and falls back visibly to CPU; `cpu` never
+registers CUDA; explicit `cuda` never falls back. Set `required = true` when
+startup must fail unless reranking is active. CUDA requires a compatible NVIDIA
+driver and ONNX Runtime/CUDA libraries. It does not affect embedding placement;
+embedding compute happens at the selected OpenAI-compatible endpoint.
 
 ## MCP Client Setup
 

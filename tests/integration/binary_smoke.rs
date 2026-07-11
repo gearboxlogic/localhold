@@ -176,6 +176,80 @@ fn binary_starts_text_only_without_embedding_failure_warning() {
     let _cleanup = std::fs::remove_file(db_path);
 }
 
+#[cfg(not(feature = "reranker"))]
+#[test]
+fn required_reranker_fails_when_support_is_not_compiled() {
+    let db_path = unique_db_path("bin-reranker-required-uncompiled");
+    let root = db_path.with_extension("config");
+    let mut cmd = base_binary_command(&db_path);
+    let _config_dir = isolate_user_config_dir(&mut cmd, &root);
+    cmd.env("LOCALHOLD_RERANKER_ENABLED", "true");
+    cmd.env("LOCALHOLD_RERANKER_EXECUTION_PROVIDER", "cpu");
+    cmd.env("LOCALHOLD_RERANKER_REQUIRED", "true");
+
+    let output = cmd.output().unwrap();
+    assert!(!output.status.success(), "required reranker should reject a binary without reranker support");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("compiled without the `reranker` feature"), "unexpected startup error: {stderr}");
+
+    let _cleanup = std::fs::remove_dir_all(root);
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[cfg(all(feature = "reranker", not(feature = "reranker-cuda")))]
+#[test]
+fn explicit_optional_cuda_stays_running_without_cpu_fallback() {
+    let db_path = unique_db_path("bin-reranker-optional-cuda");
+    let root = db_path.with_extension("config");
+    let mut cmd = base_binary_command(&db_path);
+    let _config_dir = isolate_user_config_dir(&mut cmd, &root);
+    cmd.env("LOCALHOLD_RERANKER_ENABLED", "true");
+    cmd.env("LOCALHOLD_RERANKER_EXECUTION_PROVIDER", "cuda");
+    cmd.env("LOCALHOLD_RERANKER_REQUIRED", "false");
+    cmd.env("LOCALHOLD_LOG_LEVEL", "info");
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().unwrap();
+    assert_child_stays_running(&mut child, "optional CUDA reranker in CPU binary");
+    let _kill = child.kill();
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("CUDA was requested but this binary was compiled without"),
+        "unexpected fallback log: {stderr}"
+    );
+    assert!(stderr.contains("selected=\"none\""), "explicit CUDA must not silently select CPU: {stderr}");
+    assert!(stderr.contains("active=\"none\""), "explicit CUDA must not claim an active provider: {stderr}");
+
+    let _cleanup = std::fs::remove_dir_all(root);
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[cfg(all(feature = "reranker", not(feature = "reranker-cuda")))]
+#[test]
+fn explicit_required_cuda_fails_without_cuda_support() {
+    let db_path = unique_db_path("bin-reranker-required-cuda");
+    let root = db_path.with_extension("config");
+    let mut cmd = base_binary_command(&db_path);
+    let _config_dir = isolate_user_config_dir(&mut cmd, &root);
+    cmd.env("LOCALHOLD_RERANKER_ENABLED", "true");
+    cmd.env("LOCALHOLD_RERANKER_EXECUTION_PROVIDER", "cuda");
+    cmd.env("LOCALHOLD_RERANKER_REQUIRED", "true");
+
+    let output = cmd.output().unwrap();
+    assert!(!output.status.success(), "required CUDA reranker should reject a CPU-only binary");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("CUDA was requested but this binary was compiled without"),
+        "unexpected startup error: {stderr}"
+    );
+
+    let _cleanup = std::fs::remove_dir_all(root);
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
 #[test]
 #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
 fn binary_starts_with_postgres_backend() {

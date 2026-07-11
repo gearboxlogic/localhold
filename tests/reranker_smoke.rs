@@ -3,8 +3,8 @@
 #![cfg(feature = "reranker")]
 
 use localhold::{
-    config::RerankerConfig,
-    reranker::{RerankerProvider as _, onnx::OnnxReranker},
+    config::{RerankerConfig, RerankerExecutionProvider},
+    reranker::runtime::initialize_with_retry,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -12,15 +12,38 @@ use localhold::{
 async fn live_onnx_reranker_scores_documents() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut config = RerankerConfig::default();
     config.enabled = true;
-    let reranker = tokio::task::spawn_blocking(move || OnnxReranker::new(&config)).await??;
+    config.execution_provider = std::env::var("LOCALHOLD_TEST_RERANKER_EXECUTION_PROVIDER").unwrap_or_else(|_| "cpu".into()).parse()?;
+    let reranker = initialize_with_retry(&config).await?;
 
-    reranker.health_check().await?;
+    let expected_provider = std::env::var("LOCALHOLD_TEST_RERANKER_EXECUTION_PROVIDER")
+        .unwrap_or_else(|_| "cpu".into())
+        .parse::<RerankerExecutionProvider>()?;
+    let selected = reranker.selected_execution_provider().ok_or("reranker initialized without a selected execution provider")?;
+    let expected_selected = std::env::var("LOCALHOLD_TEST_RERANKER_EXPECTED_PROVIDER")
+        .ok()
+        .map(|value| value.parse::<RerankerExecutionProvider>())
+        .transpose()?;
+    let provider_matches = match expected_selected {
+        Some(expected) => selected == expected,
+        None => match expected_provider {
+            RerankerExecutionProvider::Auto => matches!(selected, RerankerExecutionProvider::Cpu | RerankerExecutionProvider::Cuda),
+            RerankerExecutionProvider::Cpu => selected == RerankerExecutionProvider::Cpu,
+            RerankerExecutionProvider::Cuda => selected == RerankerExecutionProvider::Cuda,
+            _ => return Err("unsupported reranker execution provider in smoke test".into()),
+        },
+    };
+    if !provider_matches {
+        return Err(format!("requested {expected_provider}, expected {expected_selected:?}, but selected {selected}").into());
+    }
+
+    let provider = reranker.into_provider();
+    provider.health_check().await?;
 
     let documents = [
         "Rust ownership and borrow checker rules for references",
         "Sourdough starter feeding schedule and bread hydration",
     ];
-    let scores = reranker.rerank("rust borrow checker ownership", &documents).await?;
+    let scores = provider.rerank("rust borrow checker ownership", &documents).await?;
 
     if scores.len() != documents.len() {
         return Err(format!("expected {} reranker scores, got {}", documents.len(), scores.len()).into());
@@ -32,6 +55,14 @@ async fn live_onnx_reranker_scores_documents() -> Result<(), Box<dyn std::error:
         if !(0.0_f64..=1.0_f64).contains(&score.score) {
             return Err(format!("reranker score should be normalized: {score:?}").into());
         }
+    }
+
+    let iterations = std::env::var("LOCALHOLD_TEST_RERANKER_ITERATIONS").map_or(Ok(1_usize), |value| value.parse::<usize>())?;
+    if iterations == 0 {
+        return Err("LOCALHOLD_TEST_RERANKER_ITERATIONS must be greater than zero".into());
+    }
+    for _ in 1..iterations {
+        let _scores = provider.rerank("rust borrow checker ownership", &documents).await?;
     }
 
     Ok(())

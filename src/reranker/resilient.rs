@@ -132,6 +132,14 @@ impl<P: RerankerProvider + 'static> RerankerProvider for ResilientReranker<P> {
             self.inner.health_check().await
         })
     }
+
+    fn selected_execution_provider(&self) -> Option<crate::config::RerankerExecutionProvider> {
+        self.inner.selected_execution_provider()
+    }
+
+    fn active_execution_provider(&self) -> Option<crate::config::RerankerExecutionProvider> {
+        if self.is_available() { self.inner.selected_execution_provider() } else { None }
+    }
 }
 
 /// Spawn a background task that periodically probes the inner provider's health.
@@ -232,6 +240,10 @@ mod tests {
         fn health_check(&self) -> BoxFuture<'_, Result<(), RerankerError>> {
             Box::pin(async move { self.health_check_sync() })
         }
+
+        fn selected_execution_provider(&self) -> Option<crate::config::RerankerExecutionProvider> {
+            Some(crate::config::RerankerExecutionProvider::Cpu)
+        }
     }
 
     #[tokio::test]
@@ -239,6 +251,8 @@ mod tests {
         let provider = MockReranker::new(true);
         let resilient = ResilientReranker::new(provider, ResilientRerankerConfig::default()).await;
         assert!(resilient.is_available(), "should be available when inner provider is healthy");
+        assert_eq!(resilient.selected_execution_provider(), Some(crate::config::RerankerExecutionProvider::Cpu));
+        assert_eq!(resilient.active_execution_provider(), Some(crate::config::RerankerExecutionProvider::Cpu));
     }
 
     #[tokio::test]
@@ -246,6 +260,8 @@ mod tests {
         let provider = MockReranker::new(false);
         let resilient = ResilientReranker::new(provider, ResilientRerankerConfig::default()).await;
         assert!(!resilient.is_available(), "should be unavailable when inner provider is unhealthy");
+        assert_eq!(resilient.selected_execution_provider(), Some(crate::config::RerankerExecutionProvider::Cpu));
+        assert_eq!(resilient.active_execution_provider(), None);
     }
 
     #[tokio::test]

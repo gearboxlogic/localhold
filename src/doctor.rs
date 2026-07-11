@@ -258,6 +258,7 @@ async fn storage_check(config: &Config) -> DiagnosticCheck {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "SQLite readiness is kept linear so each read-only compatibility gate is explicit")]
 fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
     if !path.exists() {
         return check(
@@ -284,7 +285,11 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
         })
         .unwrap_or(false);
     if !has_memories {
-        return check("storage", DiagnosticStatus::Failed, "SQLite file does not contain a LocalHold memories table");
+        return check(
+            "storage",
+            DiagnosticStatus::Degraded,
+            "SQLite file is readable but LocalHold schema bootstrap is pending; doctor did not create it",
+        );
     }
     let current_schema = connection
         .prepare("SELECT id, embedding_claimed_at, embedding_claim_token, confidence FROM memories LIMIT 0")
@@ -297,7 +302,13 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
         && table_readable(&connection, "memory_entities")
         && table_readable(&connection, "memory_embedding_map")
         && table_readable(&connection, "memory_embeddings")
-        && table_readable(&connection, "embedding_profile");
+        && table_readable(&connection, "embedding_profile")
+        && table_readable(&connection, "memory_fts")
+        && trigger_readable(&connection, "trg_memory_embedding_map_delete")
+        && trigger_readable(&connection, "trg_memory_clear_superseded_by")
+        && trigger_readable(&connection, "trg_memory_fts_insert")
+        && trigger_readable(&connection, "trg_memory_fts_update")
+        && trigger_readable(&connection, "trg_memory_fts_delete");
     if !current_schema {
         return check(
             "storage",
@@ -335,6 +346,14 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
 fn table_readable(connection: &Connection, table: &str) -> bool {
     connection
         .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)", [table], |row| {
+            row.get::<_, bool>(0)
+        })
+        .unwrap_or(false)
+}
+
+fn trigger_readable(connection: &Connection, trigger: &str) -> bool {
+    connection
+        .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?1)", [trigger], |row| {
             row.get::<_, bool>(0)
         })
         .unwrap_or(false)

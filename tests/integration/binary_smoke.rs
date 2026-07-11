@@ -149,6 +149,20 @@ fn doctor_json_reports_degraded_without_creating_missing_database_or_leaking_sec
 }
 
 #[test]
+fn doctor_degrades_for_empty_sqlite_file_without_bootstrapping_it() {
+    let db_path = unique_db_path("doctor-empty");
+    std::fs::File::create(&db_path).unwrap();
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "degraded");
+    assert_eq!(std::fs::metadata(&db_path).unwrap().len(), 0_u64, "doctor must not bootstrap the empty file");
+
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
 fn doctor_reports_healthy_for_current_sqlite_database() {
     let db_path = unique_db_path("doctor-healthy");
     let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
@@ -213,6 +227,32 @@ fn doctor_degrades_when_sqlite_schema_needs_entity_migration() {
     drop(store);
     let connection = rusqlite::Connection::open(&db_path).unwrap();
     connection.execute("DROP TABLE memory_entities", []).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "degraded");
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_degrades_when_sqlite_fts_objects_need_migration() {
+    let db_path = unique_db_path("doctor-fts-migration");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TRIGGER trg_memory_fts_insert;
+             DROP TRIGGER trg_memory_fts_update;
+             DROP TRIGGER trg_memory_fts_delete;
+             DROP TABLE memory_fts;",
+        )
+        .unwrap();
     drop(connection);
 
     let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();

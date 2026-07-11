@@ -220,10 +220,26 @@ where
     #[cfg(feature = "reranker")]
     let reranker_config = config.search.reranker.clone();
 
-    // Warn early if the config requests reranking but the binary lacks the feature.
+    // Enforce reranker requirements before the server starts when support was
+    // not compiled into this binary.
     #[cfg(not(feature = "reranker"))]
     if config.search.reranker.enabled {
-        warn!("reranker.enabled = true but compiled without `reranker` feature -- reranking disabled");
+        let requested = config.search.reranker.execution_provider;
+        let required = config.search.reranker.required;
+        if required {
+            return Err(localhold::reranker::RerankerError::ProviderUnavailable(format!(
+                "{requested} was requested with reranker.required = true, but this binary was compiled without the `reranker` feature"
+            ))
+            .into());
+        }
+        warn!(
+            compiled = "none",
+            %requested,
+            required,
+            selected = "none",
+            active = "none",
+            "reranker.enabled = true but compiled without `reranker` feature -- reranking disabled"
+        );
     }
 
     let server_principal = config.server.principal.clone();
@@ -241,10 +257,23 @@ where
     // Optionally attach a cross-encoder reranker (reranker feature)
     #[cfg(feature = "reranker")]
     let engine = if reranker_config.enabled {
-        match create_reranker_with_retry(&reranker_config).await {
-            Ok(reranker) => engine.with_reranker(reranker),
+        match localhold::reranker::runtime::initialize_with_retry(&reranker_config).await {
+            Ok(reranker) => engine.with_reranker(reranker.into_provider()),
+            Err(error) if reranker_config.required => return Err(error.into()),
             Err(e) => {
-                warn!("reranker initialization failed after retries, continuing without: {e}");
+                let compiled = localhold::reranker::policy::compiled_execution_providers()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                warn!(
+                    %compiled,
+                    requested = %reranker_config.execution_provider,
+                    required = reranker_config.required,
+                    selected = "none",
+                    active = "none",
+                    "reranker initialization failed after retries, continuing without: {e}"
+                );
                 engine
             }
         }
@@ -265,46 +294,6 @@ where
         Transport::Http => serve_http(server, &config.server).await,
         other => Err(format!("unsupported transport: {other}").into()),
     }
-}
-
-/// Construct an ONNX cross-encoder reranker wrapped in a resilient availability tracker.
-#[cfg(feature = "reranker")]
-async fn create_reranker(config: &localhold::config::RerankerConfig) -> Result<Arc<dyn localhold::reranker::RerankerProvider>, localhold::reranker::RerankerError> {
-    use localhold::reranker::{
-        RerankerError,
-        onnx::OnnxReranker,
-        resilient::{ResilientReranker, ResilientRerankerConfig},
-    };
-
-    let config = config.clone();
-    let onnx = tokio::task::spawn_blocking(move || OnnxReranker::new(&config))
-        .await
-        .map_err(|e| RerankerError::Transient(Box::new(e)))??;
-    let resilient = ResilientReranker::new(onnx, ResilientRerankerConfig::default()).await;
-    info!("reranker initialized (available: {})", resilient.is_available());
-    Ok(Arc::new(resilient))
-}
-
-/// Retry transient reranker init failures with exponential backoff.
-/// Permanent errors (bad model, incompatible graph) fail immediately.
-#[cfg(feature = "reranker")]
-async fn create_reranker_with_retry(config: &localhold::config::RerankerConfig) -> Result<Arc<dyn localhold::reranker::RerankerProvider>, localhold::reranker::RerankerError> {
-    use localhold::reranker::RerankerError;
-
-    const MAX_RETRIES: u32 = 3;
-    let mut delay = std::time::Duration::from_secs(2);
-    for attempt in 0..MAX_RETRIES {
-        match create_reranker(config).await {
-            Ok(r) => return Ok(r),
-            Err(RerankerError::Permanent(e)) => return Err(RerankerError::Permanent(e)),
-            Err(e) => {
-                warn!("reranker init attempt {}/{MAX_RETRIES} failed: {e}, retrying in {delay:?}", attempt.saturating_add(1));
-                tokio::time::sleep(delay).await;
-                delay = delay.saturating_mul(2);
-            }
-        }
-    }
-    create_reranker(config).await
 }
 
 /// Spawn a background task that re-embeds unembedded memories whenever the

@@ -34,6 +34,12 @@ use tokio::{
 const HTTP_AUTH_TOKEN: &str = "black-box-http-token";
 const HTTP_PRINCIPAL: &str = "black-box-http-client";
 
+fn assert_cpu_reranker_status(logs: &str) {
+    for expected in ["compiled=cpu", "requested=auto", "required=false", "selected=cpu", "active=cpu"] {
+        assert!(logs.contains(expected), "expected {expected:?} in reranker startup status, got:\n{logs}");
+    }
+}
+
 #[tokio::test]
 #[ignore = "black-box harness; run via just test-black-box"]
 async fn stdio_black_box_noop_core_workflow() {
@@ -240,6 +246,7 @@ async fn stdio_black_box_reranker_emits_scores() {
         logs.contains("reranker initialized (available: true)"),
         "expected reranker init log in harness logs, got:\n{logs}"
     );
+    assert_cpu_reranker_status(&logs);
 }
 
 #[tokio::test]
@@ -374,6 +381,7 @@ async fn http_black_box_reranker_emits_scores() {
         logs.contains("reranker initialized (available: true)"),
         "expected reranker init log in HTTP harness logs, got:\n{logs}"
     );
+    assert_cpu_reranker_status(&logs);
 }
 
 struct BlackBoxHarness {

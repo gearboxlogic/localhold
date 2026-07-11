@@ -10,10 +10,10 @@ use std::sync::Arc;
 use ort::execution_providers::CUDAExecutionProvider;
 use ort::{session::Session, value::Tensor};
 use parking_lot::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
-use super::{BoxFuture, RerankerError, RerankerProvider, RerankerScore, download};
-use crate::config::RerankerConfig;
+use super::{BoxFuture, RerankerError, RerankerProvider, RerankerScore, download, policy::execution_provider_candidates};
+use crate::config::{RerankerConfig, RerankerExecutionProvider};
 
 /// Cross-encoder reranker backed by an ONNX Runtime session.
 ///
@@ -27,6 +27,7 @@ pub struct OnnxReranker {
 struct OnnxRerankerInner {
     session: Mutex<Session>,
     tokenizer: tokenizers::Tokenizer,
+    execution_provider: RerankerExecutionProvider,
     /// Whether the ONNX graph declares a `token_type_ids` input.
     /// BERT-style models need it; RoBERTa/DistilBERT-style models do not.
     has_token_type_ids: bool,
@@ -50,19 +51,11 @@ impl OnnxReranker {
     /// Returns [`RerankerError::Permanent`] if the model files cannot be loaded
     /// or the ONNX session cannot be created.
     pub fn new(config: &RerankerConfig) -> Result<Self, RerankerError> {
+        let candidates = execution_provider_candidates(config.execution_provider)?;
         let paths = download::resolve_model_paths(config)?;
 
         info!("loading ONNX reranker model from {}", paths.onnx_path.display());
-
-        #[cfg(feature = "reranker-cuda")]
-        let session_builder = Session::builder()
-            .map_err(|e| RerankerError::Permanent(Box::new(e)))?
-            .with_execution_providers([CUDAExecutionProvider::default().build().error_on_failure()])
-            .map_err(|e| RerankerError::Permanent(e.to_string().into()))?;
-        #[cfg(not(feature = "reranker-cuda"))]
-        let session_builder = Session::builder().map_err(|e| RerankerError::Permanent(Box::new(e)))?;
-
-        let session = session_builder.commit_from_file(&paths.onnx_path).map_err(|e| RerankerError::Permanent(Box::new(e)))?;
+        let (session, execution_provider) = create_session_with_policy(&paths.onnx_path, config.execution_provider, candidates)?;
 
         let mut tokenizer = tokenizers::Tokenizer::from_file(&paths.tokenizer_path).map_err(RerankerError::Permanent)?;
 
@@ -95,9 +88,16 @@ impl OnnxReranker {
             inner: Arc::new(OnnxRerankerInner {
                 session: Mutex::new(session),
                 tokenizer,
+                execution_provider,
                 has_token_type_ids,
             }),
         })
+    }
+
+    /// Concrete execution provider selected for this ONNX session.
+    #[must_use]
+    pub fn execution_provider(&self) -> RerankerExecutionProvider {
+        self.inner.execution_provider
     }
 
     /// Run cross-encoder inference on (query, document) pairs.
@@ -247,6 +247,64 @@ impl RerankerProvider for OnnxReranker {
             Ok(())
         })
     }
+
+    fn selected_execution_provider(&self) -> Option<RerankerExecutionProvider> {
+        Some(self.execution_provider())
+    }
+}
+
+fn create_session_with_policy(
+    model_path: &std::path::Path,
+    requested: RerankerExecutionProvider,
+    candidates: &[RerankerExecutionProvider],
+) -> Result<(Session, RerankerExecutionProvider), RerankerError> {
+    let mut cuda_failure = None;
+    for &candidate in candidates {
+        match create_session(model_path, candidate) {
+            Ok(session) => {
+                if let Some(error) = cuda_failure {
+                    warn!(%error, selected = %candidate, "CUDA reranker initialization failed; auto policy fell back to CPU");
+                }
+                return Ok((session, candidate));
+            }
+            Err(error) if requested == RerankerExecutionProvider::Auto && candidate == RerankerExecutionProvider::Cuda => {
+                cuda_failure = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(cuda_failure.unwrap_or_else(|| RerankerError::ProviderUnavailable("no reranker execution-provider candidate was available".into())))
+}
+
+fn create_session(model_path: &std::path::Path, provider: RerankerExecutionProvider) -> Result<Session, RerankerError> {
+    let builder = Session::builder()
+        .and_then(ort::session::builder::SessionBuilder::with_no_environment_execution_providers)
+        .map_err(|error| RerankerError::Permanent(Box::new(error)))?;
+
+    let builder = match provider {
+        RerankerExecutionProvider::Cpu => builder,
+        RerankerExecutionProvider::Cuda => configure_cuda(builder)?,
+        RerankerExecutionProvider::Auto => {
+            return Err(RerankerError::Permanent("auto is a selection policy, not a concrete execution provider".into()));
+        }
+    };
+
+    builder.commit_from_file(model_path).map_err(|error| RerankerError::Permanent(Box::new(error)))
+}
+
+#[cfg(feature = "reranker-cuda")]
+fn configure_cuda(builder: ort::session::builder::SessionBuilder) -> Result<ort::session::builder::SessionBuilder, RerankerError> {
+    builder
+        .with_execution_providers([CUDAExecutionProvider::default().build().error_on_failure()])
+        .map_err(|error| RerankerError::ProviderUnavailable(error.to_string()))
+}
+
+#[cfg(not(feature = "reranker-cuda"))]
+fn configure_cuda(_builder: ort::session::builder::SessionBuilder) -> Result<ort::session::builder::SessionBuilder, RerankerError> {
+    Err(RerankerError::ProviderUnavailable(
+        "CUDA was selected but this binary was compiled without the `reranker-cuda` feature".into(),
+    ))
 }
 
 #[cfg(test)]

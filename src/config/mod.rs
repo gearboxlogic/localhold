@@ -41,6 +41,45 @@ pub const DEFAULT_HTTP_SESSION_IDLE_TIMEOUT_SECS: u64 = 900;
 /// Maximum candidate-pool size supported by all current search backends.
 pub const MAX_CANDIDATE_POOL_SIZE_CEILING: usize = 1000;
 
+/// Requested ONNX Runtime execution provider for reranking.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RerankerExecutionProvider {
+    /// Prefer CUDA when it is compiled and usable, otherwise use CPU.
+    #[default]
+    Auto,
+    /// Run reranker inference on CPU, even in a CUDA-capable binary.
+    Cpu,
+    /// Require the CUDA execution provider; never fall back to CPU.
+    Cuda,
+}
+
+impl fmt::Display for RerankerExecutionProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Auto => f.write_str("auto"),
+            Self::Cpu => f.write_str("cpu"),
+            Self::Cuda => f.write_str("cuda"),
+        }
+    }
+}
+
+impl FromStr for RerankerExecutionProvider {
+    type Err = ParseEnumError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "cpu" => Ok(Self::Cpu),
+            "cuda" => Ok(Self::Cuda),
+            other => Err(ParseEnumError(format!(
+                "unknown reranker execution provider {other:?}, expected \"auto\", \"cpu\", or \"cuda\""
+            ))),
+        }
+    }
+}
+
 /// Database backend for memory persistence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -322,6 +361,10 @@ impl Default for DuplicateSuppressionConfig {
 pub struct RerankerConfig {
     /// Enable cross-encoder reranking. Default `false` (opt-in).
     pub enabled: bool,
+    /// Execution-provider selection policy. Default [`RerankerExecutionProvider::Auto`].
+    pub execution_provider: RerankerExecutionProvider,
+    /// Fail startup unless the reranker initializes and passes health inference.
+    pub required: bool,
     /// `HuggingFace` model identifier for the cross-encoder.
     pub model: String,
     /// Immutable `HuggingFace` revision/commit to download from.
@@ -354,6 +397,8 @@ impl Default for RerankerConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            execution_provider: RerankerExecutionProvider::Auto,
+            required: false,
             model: DEFAULT_RERANKER_MODEL.into(),
             revision: String::new(),
             model_path: String::new(),
@@ -856,6 +901,8 @@ impl Config {
         apply_parsed_env(env, "LOCALHOLD_RELEVANCE_FLOOR_PENALTY", &mut self.search.relevance_floor_penalty);
         apply_parsed_env(env, "LOCALHOLD_SUPERSEDED_PENALTY", &mut self.search.superseded_penalty);
         apply_parsed_env(env, "LOCALHOLD_RERANKER_ENABLED", &mut self.search.reranker.enabled);
+        apply_parsed_env(env, "LOCALHOLD_RERANKER_EXECUTION_PROVIDER", &mut self.search.reranker.execution_provider);
+        apply_parsed_env(env, "LOCALHOLD_RERANKER_REQUIRED", &mut self.search.reranker.required);
         if let Some(v) = env.get("LOCALHOLD_RERANKER_MODEL") {
             self.search.reranker.model.clone_from(v);
         }
@@ -1119,6 +1166,9 @@ fn validate_search_config(config: &SearchConfig) -> Result<(), EngineError> {
     if !config.reranker.blend_weight.is_finite() || !(0.0_f64..=1.0_f64).contains(&config.reranker.blend_weight) {
         return Err(EngineError::config("reranker.blend_weight must be a finite number in [0, 1]"));
     }
+    if config.reranker.required && !config.reranker.enabled {
+        return Err(EngineError::config("reranker.required = true requires reranker.enabled = true"));
+    }
     // Validate auto-download requirements eagerly regardless of feature flag
     // so misconfigurations surface at startup, not at first search.
     if config.reranker.enabled && config.reranker.model_path.is_empty() {
@@ -1246,6 +1296,8 @@ fn collect_localhold_env_vars() -> HashMap<String, String> {
         "LOCALHOLD_RELEVANCE_FLOOR_PENALTY",
         "LOCALHOLD_SUPERSEDED_PENALTY",
         "LOCALHOLD_RERANKER_ENABLED",
+        "LOCALHOLD_RERANKER_EXECUTION_PROVIDER",
+        "LOCALHOLD_RERANKER_REQUIRED",
         "LOCALHOLD_RERANKER_MODEL",
         "LOCALHOLD_RERANKER_REVISION",
         "LOCALHOLD_RERANKER_MODEL_PATH",

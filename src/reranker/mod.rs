@@ -12,6 +12,13 @@ pub mod onnx;
 #[cfg(feature = "reranker")]
 pub mod resilient;
 
+/// Startup, health validation, and fallback for configured rerankers.
+#[cfg(feature = "reranker")]
+pub mod runtime;
+
+/// Execution-provider selection policy and compiled capabilities.
+pub mod policy;
+
 /// Model file download from `HuggingFace` (requires `reranker` feature).
 #[cfg(feature = "reranker")]
 mod download;
@@ -57,6 +64,10 @@ pub enum RerankerError {
     #[error("permanent reranker error: {0}")]
     Permanent(#[source] Box<dyn std::error::Error + Send + Sync>),
 
+    /// The requested execution provider is not compiled or usable.
+    #[error("reranker execution provider unavailable: {0}")]
+    ProviderUnavailable(String),
+
     /// The reranker is intentionally disabled (noop provider).
     #[error("reranker is disabled")]
     Unavailable,
@@ -78,4 +89,14 @@ pub trait RerankerProvider: Send + Sync {
 
     /// Verify that the reranker model is loaded and functional.
     fn health_check(&self) -> BoxFuture<'_, Result<(), RerankerError>>;
+
+    /// Concrete execution provider selected when the model session was built.
+    fn selected_execution_provider(&self) -> Option<crate::config::RerankerExecutionProvider> {
+        None
+    }
+
+    /// Execution provider currently available for inference.
+    fn active_execution_provider(&self) -> Option<crate::config::RerankerExecutionProvider> {
+        self.selected_execution_provider()
+    }
 }

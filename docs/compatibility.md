@@ -55,6 +55,11 @@ Current support levels are:
 | CUDA 12 reranker | Preview |
 | macOS and Linux ARM64 artifacts | Deferred |
 
+CUDA-capable builds also retain CPU support. The configured reranker policy
+distinguishes compiled providers from the provider selected for the model and
+the provider active after health inference; compatibility claims use the active
+provider rather than the build label.
+
 Preview surfaces receive CI or targeted validation but may require manual
 configuration and may change during `0.x`. Deferred surfaces are not release
 gates and should not be presented as supported.

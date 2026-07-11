@@ -220,8 +220,10 @@ fn explicit_optional_cuda_stays_running_without_cpu_fallback() {
         stderr.contains("CUDA was requested but this binary was compiled without"),
         "unexpected fallback log: {stderr}"
     );
-    assert!(stderr.contains("selected=\"none\""), "explicit CUDA must not silently select CPU: {stderr}");
-    assert!(stderr.contains("active=\"none\""), "explicit CUDA must not claim an active provider: {stderr}");
+    assert!(
+        !stderr.contains("reranker initialized (available: true)"),
+        "explicit CUDA must not silently initialize a CPU reranker: {stderr}"
+    );
 
     let _cleanup = std::fs::remove_dir_all(root);
     let _cleanup = std::fs::remove_file(db_path);

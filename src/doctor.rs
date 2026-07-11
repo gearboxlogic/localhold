@@ -2,15 +2,15 @@
 
 use std::{path::Path, time::Duration};
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension as _};
 use serde::Serialize;
 use sqlx_core::query_scalar::query_scalar;
-use sqlx_postgres::PgPoolOptions;
+use sqlx_postgres::{PgPool, PgPoolOptions};
 
 use crate::{
     config::{Config, DatabaseBackend, EmbeddingConfig, EmbeddingHealthCheck},
     embedding::{EmbeddingProvider as _, OpenAiEmbedding},
-    store::{PostgresStore, SqliteStore},
+    store::{EmbeddingProfile, PostgresStore, SqliteStore},
 };
 
 /// Machine-readable doctor report schema version.
@@ -252,12 +252,12 @@ fn filesystem_check(config: &Config) -> DiagnosticCheck {
 
 async fn storage_check(config: &Config) -> DiagnosticCheck {
     match config.database.backend {
-        DatabaseBackend::Sqlite => sqlite_check(config.database.sqlite_path()),
+        DatabaseBackend::Sqlite => sqlite_check(config, config.database.sqlite_path()),
         DatabaseBackend::Postgres => postgres_check(config).await,
     }
 }
 
-fn sqlite_check(path: &Path) -> DiagnosticCheck {
+fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
     if !path.exists() {
         return check(
             "storage",
@@ -291,20 +291,43 @@ fn sqlite_check(path: &Path) -> DiagnosticCheck {
         .is_ok()
         && table_readable(&connection, "memory_v2_metadata")
         && table_readable(&connection, "memory_tombstones")
-        && table_readable(&connection, "scope_registry");
-    if current_schema {
-        check(
-            "storage",
-            DiagnosticStatus::Healthy,
-            format!("SQLite is reachable, current, and passed quick_check at {}", path.display()),
-        )
-    } else {
-        check(
+        && table_readable(&connection, "scope_registry")
+        && table_readable(&connection, "memory_audit_log")
+        && table_readable(&connection, "memory_embedding_map")
+        && table_readable(&connection, "memory_embeddings")
+        && table_readable(&connection, "embedding_profile");
+    if !current_schema {
+        return check(
             "storage",
             DiagnosticStatus::Degraded,
             "SQLite is readable and internally consistent but requires a normal startup migration after backup",
-        )
+        );
     }
+    match crate::store::existing_embedding_dimensions(&connection) {
+        Ok(Some(dimensions)) if dimensions == config.embedding.dimensions() => {}
+        Ok(Some(_dimensions)) => {
+            return check(
+                "storage",
+                DiagnosticStatus::Failed,
+                "SQLite vector dimensions do not match the configured embedding dimensions",
+            );
+        }
+        Ok(None) | Err(_) => return check("storage", DiagnosticStatus::Failed, "SQLite vector dimensions could not be verified"),
+    }
+    if let Some(profile) = crate::embedding::factory::active_embedding_profile(&config.embedding)
+        && !sqlite_embedding_profile_compatible(&connection, &profile)
+    {
+        return check(
+            "storage",
+            DiagnosticStatus::Failed,
+            "SQLite stored embeddings are incompatible with the configured embedding profile",
+        );
+    }
+    check(
+        "storage",
+        DiagnosticStatus::Healthy,
+        format!("SQLite is reachable, current, and passed startup compatibility checks at {}", path.display()),
+    )
 }
 
 fn table_readable(connection: &Connection, table: &str) -> bool {
@@ -315,16 +338,38 @@ fn table_readable(connection: &Connection, table: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn sqlite_embedding_profile_compatible(connection: &Connection, expected: &EmbeddingProfile) -> bool {
+    let stored = connection
+        .query_row("SELECT provider, endpoint, model, dimensions FROM embedding_profile WHERE singleton = 1", [], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?))
+        })
+        .optional();
+    match stored {
+        Ok(Some((provider, endpoint, model, dimensions))) => {
+            provider == expected.provider && endpoint == expected.endpoint && model == expected.model && usize::try_from(dimensions).ok() == Some(expected.dimensions)
+        }
+        Ok(None) => connection
+            .query_row("SELECT COUNT(*) FROM memory_embedding_map", [], |row| row.get::<_, i64>(0))
+            .is_ok_and(|count| count == 0),
+        Err(_) => false,
+    }
+}
+
+#[expect(clippy::too_many_lines, reason = "PostgreSQL readiness is kept linear so each read-only compatibility gate is explicit")]
 async fn postgres_check(config: &Config) -> DiagnosticCheck {
     let connect = PgPoolOptions::new().max_connections(1).connect(&config.database.postgres.url);
     let Ok(Ok(pool)) = tokio::time::timeout(Duration::from_secs(10), connect).await else {
         return check("storage", DiagnosticStatus::Failed, "PostgreSQL is unreachable or rejected the configured connection");
     };
-    let has_memories: Result<bool, _> = query_scalar("SELECT to_regclass('memories') IS NOT NULL").fetch_one(&pool).await;
-    let has_migrations: Result<bool, _> = query_scalar("SELECT to_regclass('localhold_migrations') IS NOT NULL").fetch_one(&pool).await;
-    let schema_exists = match (has_memories, has_migrations) {
-        (Ok(has_memories), Ok(has_migrations)) => has_memories && has_migrations,
-        (Err(_error), _) | (_, Err(_error)) => {
+    let required_tables: Result<i64, _> = query_scalar(
+        "SELECT COUNT(*) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_v2_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name) WHERE to_regclass(required.name) IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await;
+    let schema_exists = match required_tables {
+        Ok(8_i64) => true,
+        Ok(_) => false,
+        Err(_error) => {
             pool.close().await;
             return check("storage", DiagnosticStatus::Failed, "PostgreSQL schema inspection failed");
         }
@@ -352,15 +397,39 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
     )
     .fetch_one(&pool)
     .await;
+    let vector_type: Result<Option<String>, _> = query_scalar(
+        "SELECT format_type(attribute.atttypid, attribute.atttypmod) FROM pg_attribute AS attribute WHERE attribute.attrelid = to_regclass('memory_embeddings') AND attribute.attname = 'embedding' AND NOT attribute.attisdropped",
+    )
+    .fetch_optional(&pool)
+    .await;
+    let profile_compatible = if let Some(profile) = crate::embedding::factory::active_embedding_profile(&config.embedding) {
+        postgres_embedding_profile_compatible(&pool, &profile).await
+    } else {
+        Ok(true)
+    };
     pool.close().await;
-    let (migration, current_columns) = match (migration, current_columns) {
-        (Ok(migration), Ok(current_columns)) => (migration, current_columns),
-        (Err(_error), _) | (_, Err(_error)) => {
+    let (migration, current_columns, vector_type, profile_compatible) = match (migration, current_columns, vector_type, profile_compatible) {
+        (Ok(migration), Ok(current_columns), Ok(vector_type), Ok(profile_compatible)) => (migration, current_columns, vector_type, profile_compatible),
+        (Err(_error), ..) | (_, Err(_error), ..) | (_, _, Err(_error), _) | (_, _, _, Err(_error)) => {
             return check("storage", DiagnosticStatus::Failed, "PostgreSQL schema compatibility queries failed");
         }
     };
     if migration.is_some_and(|version| version > PostgresStore::CURRENT_SCHEMA_VERSION) {
         return check("storage", DiagnosticStatus::Failed, "PostgreSQL schema is newer than this LocalHold binary supports");
+    }
+    if postgres_vector_dimensions(vector_type.as_deref()) != Some(config.embedding.dimensions()) {
+        return check(
+            "storage",
+            DiagnosticStatus::Failed,
+            "PostgreSQL vector dimensions do not match the configured embedding dimensions",
+        );
+    }
+    if !profile_compatible {
+        return check(
+            "storage",
+            DiagnosticStatus::Failed,
+            "PostgreSQL stored embeddings are incompatible with the configured embedding profile",
+        );
     }
     if migration == Some(PostgresStore::CURRENT_SCHEMA_VERSION) && current_columns == 3_i64 {
         check("storage", DiagnosticStatus::Healthy, "PostgreSQL is reachable and the LocalHold schema is current")
@@ -369,6 +438,26 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
     } else {
         check("storage", DiagnosticStatus::Failed, "PostgreSQL schema is not current and auto-migration is disabled")
     }
+}
+
+fn postgres_vector_dimensions(vector_type: Option<&str>) -> Option<usize> {
+    vector_type?.strip_prefix("vector(")?.strip_suffix(')')?.parse().ok()
+}
+
+async fn postgres_embedding_profile_compatible(pool: &PgPool, expected: &EmbeddingProfile) -> Result<bool, sqlx_core::error::Error> {
+    let dimensions = i64::try_from(expected.dimensions).unwrap_or(i64::MAX);
+    let matches: Option<bool> = query_scalar("SELECT provider = $1 AND endpoint = $2 AND model = $3 AND dimensions = $4 FROM embedding_profile WHERE singleton = 1")
+        .bind(&expected.provider)
+        .bind(&expected.endpoint)
+        .bind(&expected.model)
+        .bind(dimensions)
+        .fetch_optional(pool)
+        .await?;
+    if let Some(matches) = matches {
+        return Ok(matches);
+    }
+    let vector_count: i64 = query_scalar("SELECT COUNT(*) FROM memory_embeddings").fetch_one(pool).await?;
+    Ok(vector_count == 0)
 }
 
 async fn embedding_check(config: &Config) -> DiagnosticCheck {
@@ -413,6 +502,7 @@ async fn embedding_check(config: &Config) -> DiagnosticCheck {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "feature-gated reranker readiness and severity policy are intentionally kept together")]
 async fn reranker_check(config: &Config, options: DoctorOptions) -> DiagnosticCheck {
     #[cfg(not(feature = "reranker"))]
     let _options = options;
@@ -468,22 +558,28 @@ async fn reranker_check(config: &Config, options: DoctorOptions) -> DiagnosticCh
                     format!("{identity_summary}; compiled {compiled}; selected {selected}; active {active}; inference probe completed"),
                 )
             }
-            Err(_error) => check(
-                "reranker",
-                if reranker.required && options.allow_downloads {
+            Err(error) => {
+                let download_may_fix = !options.allow_downloads && reranker.model_path.is_empty() && matches!(error, crate::reranker::RerankerError::Unavailable);
+                let status = if reranker.required && !download_may_fix {
                     DiagnosticStatus::Failed
                 } else {
                     DiagnosticStatus::Degraded
-                },
-                format!(
-                    "{identity_summary}; inference probe unavailable{}",
-                    if options.allow_downloads {
-                        " after downloads were allowed"
-                    } else {
-                        "; rerun with --allow-downloads to permit first-use artifacts"
-                    }
-                ),
-            ),
+                };
+                check(
+                    "reranker",
+                    status,
+                    format!(
+                        "{identity_summary}; inference probe unavailable{}",
+                        if download_may_fix {
+                            "; rerun with --allow-downloads to permit first-use artifacts"
+                        } else if options.allow_downloads {
+                            " after downloads were allowed"
+                        } else {
+                            " with configured local artifacts"
+                        }
+                    ),
+                )
+            }
         }
     }
 }

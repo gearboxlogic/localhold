@@ -5,7 +5,7 @@ use std::{
 };
 
 use localhold::{
-    store::{MemoryWriter as _, SqliteStore},
+    store::{EmbeddingProfile, MemoryWriter as _, SqliteStore},
     types::{AccessPolicy, Memory, Provenance},
 };
 use serde_json::Value;
@@ -168,6 +168,71 @@ fn doctor_reports_healthy_for_current_sqlite_database() {
 }
 
 #[test]
+fn doctor_fails_when_sqlite_vector_dimensions_do_not_match_config() {
+    let db_path = unique_db_path("doctor-dimension-mismatch");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_EMBEDDING_DIMENSIONS", "384");
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_degrades_when_sqlite_schema_needs_audit_log_migration() {
+    let db_path = unique_db_path("doctor-audit-migration");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("DROP TABLE memory_audit_log", []).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "degraded");
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_for_incompatible_stored_embedding_profile_without_leaking_it() {
+    let db_path = unique_db_path("doctor-profile-mismatch");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(store.verify_embedding_profile(&EmbeddingProfile::openai_compatible(
+            "https://stored-secret.example/v1",
+            "stored-secret-model",
+            SqliteStore::DEFAULT_TEST_DIMENSIONS,
+        )))
+        .unwrap();
+    drop(store);
+
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_EMBEDDING_BASE_URL", "https://configured.example/v1");
+    command.env("LOCALHOLD_EMBEDDING_MODEL", "configured-model");
+    command.env("LOCALHOLD_EMBEDDING_HEALTH_CHECK", "disabled");
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("stored-secret"));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
 fn doctor_json_returns_failed_report_for_invalid_config_without_echoing_contents() {
     let db_path = unique_db_path("doctor-invalid-config");
     let mut cmd = base_binary_command(&db_path);
@@ -208,6 +273,27 @@ fn doctor_does_not_create_or_download_reranker_cache_without_opt_in() {
     assert!(!cache_path.exists(), "doctor must not create the reranker cache without --allow-downloads");
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("--allow-downloads"));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[cfg(feature = "reranker")]
+#[test]
+fn doctor_fails_for_required_missing_direct_reranker_model() {
+    let db_path = unique_db_path("doctor-reranker-required-direct");
+    let missing_model = db_path.with_extension("missing.onnx");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_RERANKER_ENABLED", "true");
+    command.env("LOCALHOLD_RERANKER_REQUIRED", "true");
+    command.env("LOCALHOLD_RERANKER_MODEL_PATH", &missing_model);
+
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+    assert!(!missing_model.exists());
 
     let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));

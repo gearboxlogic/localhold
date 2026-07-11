@@ -66,9 +66,7 @@ impl InitializedReranker {
 /// requested providers, and failed required-mode health inference.
 pub async fn initialize_with_retry(config: &RerankerConfig) -> Result<InitializedReranker, RerankerError> {
     const MAX_RETRIES: u32 = 3;
-    // commit installs the environment in ort's process-global singleton and
-    // returns whether this call performed the one-time initialization.
-    let _environment_inserted = ort::init().commit().map_err(|error| RerankerError::Permanent(Box::new(error)))?;
+    initialize_ort()?;
     let mut delay = std::time::Duration::from_secs(2);
     for attempt in 0..MAX_RETRIES {
         match initialize(config).await {
@@ -129,7 +127,15 @@ pub async fn initialize_for_diagnostics(config: &RerankerConfig, allow_downloads
     let paths = download::resolve_cached_model_paths(config)?;
     let mut local_config = config.clone();
     local_config.model_path = paths.onnx_path.to_string_lossy().into_owned();
+    initialize_ort()?;
     initialize(&local_config).await
+}
+
+fn initialize_ort() -> Result<(), RerankerError> {
+    // commit installs the environment in ort's process-global singleton and
+    // returns whether this call performed the one-time initialization.
+    let _environment_inserted = ort::init().commit().map_err(|error| RerankerError::Permanent(Box::new(error)))?;
+    Ok(())
 }
 
 async fn initialize(config: &RerankerConfig) -> Result<InitializedReranker, RerankerError> {

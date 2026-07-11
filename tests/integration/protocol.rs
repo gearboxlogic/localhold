@@ -2408,6 +2408,9 @@ async fn server_info_has_capabilities() {
     let client = setup_noop_server().await;
     #[expect(clippy::expect_used, reason = "test assertion: peer_info must exist after handshake")]
     let info = client.peer_info().expect("should have peer info after handshake");
+    assert_eq!(info.server_info.name, "localhold");
+    assert_eq!(info.server_info.title.as_deref(), Some("LocalHold"));
+    assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
     assert!(info.capabilities.tools.is_some(), "server should advertise tools capability");
     let instructions = info.instructions.as_deref().unwrap_or_default();
     assert!(instructions.contains("brief"), "server instructions should guide agents to the v2 core workflow");

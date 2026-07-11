@@ -8,6 +8,11 @@ requirements explicitly.
 
 ## [Unreleased]
 
+## [0.1.0-beta.3] - 2026-07-10
+
+- Corrected MCP initialize metadata to report LocalHold's name and package
+  version instead of the underlying SDK's identity.
+
 ## [0.1.0-beta.2] - 2026-07-10
 
 - Restored CPU reranker builds on the Ubuntu 22.04 release baseline by pinning
@@ -30,6 +35,7 @@ requirements explicitly.
 - Added reproducible Linux CPU and Windows preview release archives with
   extracted-artifact smoke tests, checksums, and automated GitHub prereleases.
 
-[Unreleased]: https://github.com/gearboxlogic/localhold/compare/v0.1.0-beta.2...HEAD
+[Unreleased]: https://github.com/gearboxlogic/localhold/compare/v0.1.0-beta.3...HEAD
+[0.1.0-beta.3]: https://github.com/gearboxlogic/localhold/compare/v0.1.0-beta.2...v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/gearboxlogic/localhold/compare/v0.1.0-beta.1...v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/gearboxlogic/localhold/tree/v0.1.0-beta.1

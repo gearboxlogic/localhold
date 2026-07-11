@@ -557,6 +557,44 @@ fn doctor_fails_for_same_name_wrong_sqlite_index() {
 }
 
 #[test]
+fn doctor_fails_when_missing_sqlite_index_name_is_occupied_by_table() {
+    let db_path = unique_db_path("doctor-index-name-conflict");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch("DROP INDEX idx_memories_has_embedding; CREATE TABLE idx_memories_has_embedding (dummy INTEGER);")
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_allows_repairable_missing_trigger_with_same_named_table() {
+    let db_path = unique_db_path("doctor-trigger-separate-namespace");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch("DROP TRIGGER trg_memory_fts_insert; CREATE TABLE trg_memory_fts_insert (dummy INTEGER);")
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
 fn doctor_fails_for_malformed_current_sqlite_table_shape() {
     let db_path = unique_db_path("doctor-malformed-table");
     let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
@@ -661,6 +699,35 @@ fn doctor_fails_for_incompatible_stored_embedding_profile_without_leaking_it() {
     assert_eq!(output.status.code(), Some(1_i32));
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(!stdout.contains("stored-secret"));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_for_incompatible_stored_profile_when_embedding_map_is_missing() {
+    let db_path = unique_db_path("doctor-profile-mismatch-missing-map");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(store.verify_embedding_profile(&EmbeddingProfile::openai_compatible(
+            "https://stored.example/v1",
+            "stored-model",
+            SqliteStore::DEFAULT_TEST_DIMENSIONS,
+        )))
+        .unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("DROP TABLE memory_embedding_map", []).unwrap();
+    drop(connection);
+
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_EMBEDDING_BASE_URL", "https://configured.example/v1");
+    command.env("LOCALHOLD_EMBEDDING_MODEL", "configured-model");
+    command.env("LOCALHOLD_EMBEDDING_HEALTH_CHECK", "disabled");
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
 
     let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
@@ -921,6 +988,31 @@ fn explicit_required_cuda_fails_without_cuda_support() {
     );
 
     let _cleanup = std::fs::remove_dir_all(root);
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[cfg(all(feature = "reranker", not(feature = "reranker-cuda")))]
+#[test]
+fn doctor_fails_required_cuda_before_cache_or_download_work() {
+    let db_path = unique_db_path("doctor-reranker-required-cuda");
+    let cache_path = db_path.with_extension("model-cache");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+
+    for arguments in [["doctor", "--json"].as_slice(), ["doctor", "--json", "--allow-downloads"].as_slice()] {
+        let mut command = base_binary_command(&db_path);
+        command.env("LOCALHOLD_RERANKER_ENABLED", "true");
+        command.env("LOCALHOLD_RERANKER_EXECUTION_PROVIDER", "cuda");
+        command.env("LOCALHOLD_RERANKER_REQUIRED", "true");
+        command.env("LOCALHOLD_RERANKER_CACHE_DIR", &cache_path);
+        let output = command.args(arguments).output().unwrap();
+        assert_eq!(output.status.code(), Some(1_i32));
+        assert!(!cache_path.exists(), "impossible execution provider must fail before cache or download work");
+        assert!(!String::from_utf8(output.stdout).unwrap().contains("rerun with --allow-downloads"));
+    }
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
     let _cleanup = std::fs::remove_file(db_path);
 }
 

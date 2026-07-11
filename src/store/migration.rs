@@ -753,6 +753,7 @@ fn validate_sqlite_managed_object_definitions(conn: &Connection, allow_missing: 
     for (name, expected) in INDEX_DEFINITIONS {
         let Some(sql) = normalized_sqlite_schema_sql(conn, "index", name)? else {
             if allow_missing {
+                reject_conflicting_sqlite_schema_object(conn, "index", name)?;
                 continue;
             }
             return Err(sqlite_source_schema_error(format!("required index {name} is missing")));
@@ -771,6 +772,20 @@ fn validate_sqlite_managed_object_definitions(conn: &Connection, allow_missing: 
         if sql != format!("create trigger {name} {expected}") {
             return Err(sqlite_source_schema_error(format!("required trigger {name} has an incompatible definition")));
         }
+    }
+    Ok(())
+}
+
+fn reject_conflicting_sqlite_schema_object(conn: &Connection, expected_type: &'static str, name: &'static str) -> Result<(), StoreError> {
+    let actual_type: Option<String> = conn
+        .query_row("SELECT type FROM sqlite_master WHERE name = ?1 AND type IN ('table', 'view', 'index')", [name], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    if let Some(actual_type) = actual_type {
+        return Err(sqlite_source_schema_error(format!(
+            "managed SQLite {expected_type} name {name} is occupied by a {actual_type}"
+        )));
     }
     Ok(())
 }
@@ -807,9 +822,11 @@ pub(crate) fn validate_present_sqlite_schema(conn: &Connection) -> Result<(), St
     ];
     for table in SQLITE_REQUIRED_TABLES {
         if sqlite_schema_sql(conn, "table", table.name)?.is_none() {
-            let conflicting_object: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1 AND type <> 'table')", [table.name], |row| {
-                row.get(0)
-            })?;
+            let conflicting_object: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1 AND type IN ('view', 'index'))",
+                [table.name],
+                |row| row.get(0),
+            )?;
             if conflicting_object {
                 return Err(sqlite_source_schema_error(format!("managed SQLite object {} exists but is not a table", table.name)));
             }
@@ -832,6 +849,9 @@ pub(crate) fn validate_present_sqlite_schema(conn: &Connection) -> Result<(), St
             if !columns.contains(*column) {
                 return Err(sqlite_source_schema_error(format!("table {} is missing required column {column}", table.name)));
             }
+        }
+        if table.name == "memories" {
+            validate_sqlite_embedding_revision_contract(conn)?;
         }
     }
     for key in SQLITE_REQUIRED_KEYS {
@@ -870,6 +890,32 @@ fn validate_sqlite_table(conn: &Connection, expectation: &SqliteTableExpectation
         if !columns.contains(*column) {
             return Err(sqlite_source_schema_error(format!("table {} is missing required column {column}", expectation.name)));
         }
+    }
+    if expectation.name == "memories" {
+        validate_sqlite_embedding_revision_contract(conn)?;
+    }
+    Ok(())
+}
+
+fn validate_sqlite_embedding_revision_contract(conn: &Connection) -> Result<(), StoreError> {
+    let mut stmt = conn.prepare("PRAGMA table_info(memories)")?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, bool>(3)?, row.get::<_, Option<String>>(4)?)))?;
+    let mut contract = None;
+    for row in rows {
+        let (name, not_null, default) = row?;
+        if name == "embedding_revision" {
+            contract = Some((not_null, default));
+            break;
+        }
+    }
+    let Some((not_null, default)) = contract else {
+        return Ok(());
+    };
+    let default_is_zero = default.as_deref().is_some_and(|value| value.trim().trim_matches(['(', ')']) == "0");
+    if !not_null || !default_is_zero {
+        return Err(sqlite_source_schema_error(
+            "memories.embedding_revision must be NOT NULL with DEFAULT 0 because startup does not repair an existing definition",
+        ));
     }
     Ok(())
 }
@@ -1544,6 +1590,7 @@ pub(crate) async fn validate_existing_postgres_schema(pool: &PgPool, embedding_d
     for expectation in POSTGRES_OPTIONAL_COLUMNS {
         validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type).await?;
     }
+    validate_postgres_embedding_revision_contract(pool).await?;
     for table in POSTGRES_USER_TABLES {
         validate_postgres_required_keys(pool, table).await?;
     }
@@ -1565,6 +1612,9 @@ pub(crate) async fn validate_present_postgres_schema(pool: &PgPool, embedding_di
         for expectation in POSTGRES_OPTIONAL_COLUMNS.iter().filter(|expectation| expectation.table == *table) {
             validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type).await?;
         }
+        if *table == "memories" {
+            validate_postgres_embedding_revision_contract(pool).await?;
+        }
         validate_postgres_required_keys(pool, table).await?;
     }
     if postgres_table_exists(pool, "memory_embeddings").await? {
@@ -1576,6 +1626,27 @@ pub(crate) async fn validate_present_postgres_schema(pool: &PgPool, embedding_di
 async fn validate_postgres_required_keys(pool: &PgPool, table: &'static str) -> Result<(), StoreError> {
     for expectation in POSTGRES_REQUIRED_KEYS.iter().filter(|expectation| expectation.table == table) {
         validate_postgres_unique_or_primary_key(pool, expectation.table, expectation.columns).await?;
+    }
+    Ok(())
+}
+
+async fn validate_postgres_embedding_revision_contract(pool: &PgPool) -> Result<(), StoreError> {
+    let not_null: bool = query_scalar("SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass('memories') AND attname = 'embedding_revision' AND NOT attisdropped")
+        .fetch_one(pool)
+        .await?;
+    let default: Option<String> = query_scalar(
+        "SELECT pg_get_expr(definition.adbin, definition.adrelid) FROM pg_attribute AS attribute LEFT JOIN pg_attrdef AS definition ON definition.adrelid = attribute.attrelid AND definition.adnum = attribute.attnum WHERE attribute.attrelid = to_regclass('memories') AND attribute.attname = 'embedding_revision' AND NOT attribute.attisdropped",
+    )
+    .fetch_one(pool)
+    .await?;
+    let default_is_zero = default.as_deref().is_some_and(|value| {
+        let normalized = value.trim().trim_matches(['(', ')']);
+        normalized.strip_suffix("::bigint").unwrap_or(normalized) == "0"
+    });
+    if !not_null || !default_is_zero {
+        return Err(StoreError::Conflict(
+            "PostgreSQL target column memories.embedding_revision must be NOT NULL with DEFAULT 0 because startup does not repair an existing definition".into(),
+        ));
     }
     Ok(())
 }
@@ -2235,6 +2306,24 @@ mod tests {
         audit_details: serde_json::Value,
         tombstone: MemoryTombstone,
         counts: MigrationTableCounts,
+    }
+
+    #[test]
+    fn sqlite_embedding_revision_contract_requires_not_null_default_zero() {
+        let connection = Connection::open_in_memory().unwrap();
+        let _created = connection.execute("CREATE TABLE memories (embedding_revision INTEGER)", []).unwrap();
+
+        let error = validate_sqlite_embedding_revision_contract(&connection).unwrap_err();
+
+        assert!(error.to_string().contains("embedding_revision"));
+    }
+
+    #[test]
+    fn sqlite_embedding_revision_contract_accepts_startup_definition() {
+        let connection = Connection::open_in_memory().unwrap();
+        let _created = connection.execute("CREATE TABLE memories (embedding_revision INTEGER NOT NULL DEFAULT 0)", []).unwrap();
+
+        validate_sqlite_embedding_revision_contract(&connection).unwrap();
     }
 
     #[test]

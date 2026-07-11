@@ -407,7 +407,7 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
         Err(_) => return check("storage", DiagnosticStatus::Failed, "SQLite vector dimensions could not be verified"),
     }
     if let Some(profile) = crate::embedding::factory::active_embedding_profile(&config.embedding) {
-        let profile_compatible = if table_readable(&connection, "embedding_profile") && table_readable(&connection, "memory_embedding_map") {
+        let profile_compatible = if table_readable(&connection, "embedding_profile") {
             sqlite_embedding_profile_compatible(&connection, &profile)
         } else if table_readable(&connection, "memory_embedding_map") {
             sqlite_vector_count(&connection).is_some_and(|count| count == 0)
@@ -529,6 +529,7 @@ fn sqlite_embedding_profile_compatible(connection: &Connection, expected: &Embed
         Ok(Some((provider, endpoint, model, dimensions))) => {
             provider == expected.provider && endpoint == expected.endpoint && model == expected.model && usize::try_from(dimensions).ok() == Some(expected.dimensions)
         }
+        Ok(None) if !table_readable(connection, "memory_embedding_map") => true,
         Ok(None) => sqlite_vector_count(connection).is_some_and(|count| count == 0),
         Err(_) => false,
     }
@@ -654,8 +655,9 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
         }
     }
     let required_tables: Result<i64, _> = query_scalar(
-        "SELECT COUNT(*) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_entities'), ('memory_v2_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name) WHERE to_regclass(required.name) IS NOT NULL",
+        "SELECT COUNT(*) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_entities'), ('memory_v2_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name) WHERE ($1 OR required.name <> 'localhold_migrations') AND to_regclass(required.name) IS NOT NULL",
     )
+    .bind(config.database.postgres.auto_migrate)
     .fetch_one(&pool)
     .await;
     let schema_table_count = match required_tables {
@@ -693,7 +695,8 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             "an existing PostgreSQL schema object is incompatible and cannot be repaired by a normal startup migration",
         );
     }
-    if schema_table_count > 0_i64 && schema_table_count < 9_i64 {
+    let required_table_count = if config.database.postgres.auto_migrate { 9_i64 } else { 8_i64 };
+    if schema_table_count > 0_i64 && schema_table_count < required_table_count {
         let present_indexes_compatible = postgres_indexes_compatible(&pool, true).await;
         let present_constraints_compatible: Result<bool, _> = query_scalar(
             "SELECT
@@ -976,13 +979,23 @@ async fn postgres_embedding_profile_compatible(pool: &PgPool, expected: &Embeddi
 }
 
 async fn postgres_embedding_profile_compatible_if_present(pool: &PgPool, expected: &EmbeddingProfile) -> Result<bool, sqlx_core::error::Error> {
+    let profile_exists: bool = query_scalar("SELECT to_regclass('embedding_profile') IS NOT NULL").fetch_one(pool).await?;
+    if profile_exists {
+        let dimensions = i64::try_from(expected.dimensions).unwrap_or(i64::MAX);
+        let matches: Option<bool> = query_scalar("SELECT provider = $1 AND endpoint = $2 AND model = $3 AND dimensions = $4 FROM embedding_profile WHERE singleton = 1")
+            .bind(&expected.provider)
+            .bind(&expected.endpoint)
+            .bind(&expected.model)
+            .bind(dimensions)
+            .fetch_optional(pool)
+            .await?;
+        if let Some(matches) = matches {
+            return Ok(matches);
+        }
+    }
     let embeddings_exist: bool = query_scalar("SELECT to_regclass('memory_embeddings') IS NOT NULL").fetch_one(pool).await?;
     if !embeddings_exist {
         return Ok(true);
-    }
-    let profile_exists: bool = query_scalar("SELECT to_regclass('embedding_profile') IS NOT NULL").fetch_one(pool).await?;
-    if profile_exists {
-        return postgres_embedding_profile_compatible(pool, expected).await;
     }
     let vector_count: i64 = query_scalar("SELECT COUNT(*) FROM memory_embeddings").fetch_one(pool).await?;
     Ok(vector_count == 0)

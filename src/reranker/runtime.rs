@@ -121,6 +121,7 @@ pub fn model_identity(config: &RerankerConfig) -> Result<RerankerModelIdentity, 
 ///
 /// Returns model, provider, or inference errors from normal initialization.
 pub async fn initialize_for_diagnostics(config: &RerankerConfig, allow_downloads: bool) -> Result<InitializedReranker, RerankerError> {
+    let _provider_candidates = crate::reranker::policy::execution_provider_candidates(config.execution_provider)?;
     if allow_downloads {
         return initialize_with_retry(config).await;
     }

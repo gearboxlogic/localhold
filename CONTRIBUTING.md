@@ -48,6 +48,22 @@ Windows support is preview and is validated in GitHub Actions.
 ## Pull Requests
 
 - Keep each change focused and explain user-visible behavior.
+- Treat the pull request body as the authoritative association with GitHub
+  issues. Use `Closes #N` only when merging the pull request fully satisfies
+  that issue's acceptance criteria; use `Refs #N` for partial work,
+  investigation, or prerequisites.
+- Prefer one primary issue per pull request. Reference multiple issues only
+  when the same inseparable change satisfies them. Link the focused child issue
+  rather than closing a roadmap parent through one child change.
+- Small bug fixes and documentation corrections may use `Not required` with a
+  short reason instead of creating a tracking issue. Branch names and commit
+  messages may include issue numbers, but they do not replace the pull request
+  body association.
+- After merge, add any acceptance evidence that is not visible from the pull
+  request to the issue. For work completed outside a pull request, such as a
+  release or operational rehearsal, comment with the workflow, artifact, and
+  validation links and close the issue manually only after every acceptance
+  criterion passes.
 - Add regression tests for bugs and contract tests for public surfaces.
 - Update maintained documentation and examples when behavior changes.
 - Run `just check`, or state exactly which checks could not be run.

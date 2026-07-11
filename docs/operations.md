@@ -37,6 +37,23 @@ The optional reranker runs in the LocalHold process. Its model and tokenizer
 are downloaded into the configured cache on first use unless `model_path`
 points to pre-provisioned files.
 
+Multiple LocalHold processes may share a reranker cache when they run as the
+same operating-system user or otherwise have compatible directory permissions.
+Downloads are coordinated per model and revision with a persistent
+`.download.lock` file. Artifacts are written to unique staging files, verified
+against their configured SHA-256 hashes, and only then moved into place. A
+crashed process releases its operating-system lock automatically; the next
+process removes abandoned staging files and resumes with a fresh download.
+
+All processes sharing one model-and-revision cache entry must use the same
+expected hashes. Do not share a writable cache between mutually untrusted
+users. The cache contains public model artifacts rather than memory content or
+credentials, but its owner must be able to create, replace, and remove files.
+Removing an unused model-revision directory is safe while no LocalHold process
+is using it; LocalHold downloads it again on demand. Each process still loads
+its own model session into memory—the shared cache avoids duplicate disk and
+network use, not per-process RAM or VRAM use.
+
 ### Reranker execution providers
 
 `search.reranker.execution_provider` controls ONNX inference placement:

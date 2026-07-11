@@ -266,6 +266,25 @@ fn doctor_degrades_when_sqlite_fts_objects_need_migration() {
 }
 
 #[test]
+fn doctor_degrades_when_sqlite_index_needs_migration() {
+    let db_path = unique_db_path("doctor-index-migration");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("DROP INDEX idx_memories_embedding_claim", []).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "degraded");
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
 fn doctor_fails_for_incompatible_stored_embedding_profile_without_leaking_it() {
     let db_path = unique_db_path("doctor-profile-mismatch");
     let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();

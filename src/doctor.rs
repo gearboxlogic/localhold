@@ -1,6 +1,9 @@
 //! Side-effect-conscious installation and runtime diagnostics.
 
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _};
 use serde::Serialize;
@@ -219,6 +222,13 @@ fn filesystem_check(config: &Config) -> DiagnosticCheck {
                         format!("SQLite parent directory is marked read-only at {}", parent.display()),
                     );
                 }
+                if let Some(sidecar) = unwritable_existing_sqlite_sidecar(path) {
+                    return check(
+                        "filesystem",
+                        DiagnosticStatus::Failed,
+                        format!("existing SQLite sidecar is not both readable and writable at {}", sidecar.display()),
+                    );
+                }
                 return match std::fs::OpenOptions::new().read(true).write(true).open(path) {
                     Ok(_file) => check(
                         "filesystem",
@@ -253,6 +263,19 @@ fn filesystem_check(config: &Config) -> DiagnosticCheck {
             )
         }
     }
+}
+
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    PathBuf::from(sidecar)
+}
+
+fn unwritable_existing_sqlite_sidecar(path: &Path) -> Option<PathBuf> {
+    ["-wal", "-shm"]
+        .into_iter()
+        .map(|suffix| sqlite_sidecar_path(path, suffix))
+        .find(|sidecar| sidecar.exists() && std::fs::OpenOptions::new().read(true).write(true).open(sidecar).is_err())
 }
 
 async fn storage_check(config: &Config) -> DiagnosticCheck {
@@ -322,7 +345,8 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
         && trigger_readable(&connection, "trg_memory_clear_superseded_by")
         && trigger_readable(&connection, "trg_memory_fts_insert")
         && trigger_readable(&connection, "trg_memory_fts_update")
-        && trigger_readable(&connection, "trg_memory_fts_delete");
+        && trigger_readable(&connection, "trg_memory_fts_delete")
+        && sqlite_indexes_current(&connection);
     if !current_schema {
         return check(
             "storage",
@@ -373,6 +397,35 @@ fn trigger_readable(connection: &Connection, trigger: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn sqlite_indexes_current(connection: &Connection) -> bool {
+    const REQUIRED_INDEXES: [&str; 17] = [
+        "idx_memories_created_at",
+        "idx_memories_source_agent",
+        "idx_memories_source_conversation",
+        "idx_memories_origin_conversation",
+        "idx_memories_effective_origin_conversation",
+        "idx_memories_access_type",
+        "idx_memories_expires_at",
+        "idx_memories_has_embedding",
+        "idx_memories_embedding_claim",
+        "idx_memories_memory_type",
+        "idx_memories_superseded_by",
+        "idx_memory_entities_entity",
+        "idx_memory_entities_entity_type",
+        "idx_audit_log_memory_id",
+        "idx_audit_log_timestamp",
+        "idx_memory_v2_metadata_scope_key",
+        "idx_memory_tombstones_deleted_at",
+    ];
+    REQUIRED_INDEXES.iter().all(|index| {
+        connection
+            .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)", [*index], |row| {
+                row.get::<_, bool>(0)
+            })
+            .unwrap_or(false)
+    })
+}
+
 fn sqlite_embedding_profile_compatible(connection: &Connection, expected: &EmbeddingProfile) -> bool {
     let stored = connection
         .query_row("SELECT provider, endpoint, model, dimensions FROM embedding_profile WHERE singleton = 1", [], |row| {
@@ -396,6 +449,20 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
     let Ok(Ok(pool)) = tokio::time::timeout(Duration::from_secs(10), connect).await else {
         return check("storage", DiagnosticStatus::Failed, "PostgreSQL is unreachable or rejected the configured connection");
     };
+    let vector_available: Result<bool, _> = query_scalar("SELECT EXISTS(SELECT 1 FROM pg_available_extensions WHERE name = 'vector')")
+        .fetch_one(&pool)
+        .await;
+    match vector_available {
+        Ok(true) => {}
+        Ok(false) => {
+            pool.close().await;
+            return check("storage", DiagnosticStatus::Failed, "PostgreSQL pgvector extension is not installed or available");
+        }
+        Err(_error) => {
+            pool.close().await;
+            return check("storage", DiagnosticStatus::Failed, "PostgreSQL extension availability could not be verified");
+        }
+    }
     let required_tables: Result<bool, _> = query_scalar(
         "SELECT COALESCE(bool_and(to_regclass(required.name) IS NOT NULL), FALSE) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_entities'), ('memory_v2_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name)",
     )

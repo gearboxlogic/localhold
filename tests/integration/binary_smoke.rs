@@ -399,6 +399,100 @@ fn doctor_fails_for_mixed_legacy_and_current_impression_columns() {
 }
 
 #[test]
+fn doctor_degrades_when_sqlite_embedding_map_fk_is_missing() {
+    let db_path = unique_db_path("doctor-missing-map-fk");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE memory_embedding_map;
+             CREATE TABLE memory_embedding_map (memory_id TEXT PRIMARY KEY, vec_rowid INTEGER NOT NULL UNIQUE);
+             CREATE TRIGGER trg_memory_embedding_map_delete AFTER DELETE ON memory_embedding_map BEGIN
+                 DELETE FROM memory_embeddings WHERE rowid = OLD.vec_rowid;
+             END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_when_sqlite_embedding_map_fk_lacks_cascade() {
+    let db_path = unique_db_path("doctor-map-fk-no-cascade");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE memory_embedding_map;
+             CREATE TABLE memory_embedding_map (
+                 memory_id TEXT PRIMARY KEY REFERENCES memories(id),
+                 vec_rowid INTEGER NOT NULL UNIQUE
+             );
+             CREATE TRIGGER trg_memory_embedding_map_delete AFTER DELETE ON memory_embedding_map BEGIN
+                 DELETE FROM memory_embeddings WHERE rowid = OLD.vec_rowid;
+             END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_when_sqlite_embedding_map_has_extra_fk() {
+    let db_path = unique_db_path("doctor-map-extra-fk");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE memory_embedding_map;
+             CREATE TABLE memory_embedding_map (
+                 memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+                 vec_rowid INTEGER NOT NULL UNIQUE REFERENCES memories(id)
+             );
+             CREATE TRIGGER trg_memory_embedding_map_delete AFTER DELETE ON memory_embedding_map BEGIN
+                 DELETE FROM memory_embeddings WHERE rowid = OLD.vec_rowid;
+             END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_when_sqlite_managed_table_name_is_a_view() {
+    let db_path = unique_db_path("doctor-conflicting-view");
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("CREATE VIEW memories AS SELECT 'conflict' AS id", []).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
 fn doctor_fails_for_same_name_broken_sqlite_trigger() {
     let db_path = unique_db_path("doctor-broken-trigger");
     let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();

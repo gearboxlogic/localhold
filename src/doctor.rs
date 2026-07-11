@@ -368,6 +368,13 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
     if !matches!(integrity.as_deref(), Ok("ok")) {
         return check("storage", DiagnosticStatus::Failed, "SQLite quick_check did not report a healthy database");
     }
+    if crate::store::migration::validate_present_sqlite_schema(&connection).is_err() {
+        return check(
+            "storage",
+            DiagnosticStatus::Failed,
+            "an existing SQLite schema object is incompatible and cannot be repaired by a normal startup migration",
+        );
+    }
     let has_memories = connection
         .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories')", [], |row| {
             row.get::<_, bool>(0)
@@ -415,13 +422,17 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
             );
         }
     }
-    if crate::store::migration::validate_present_sqlite_schema(&connection).is_err() {
-        return check(
-            "storage",
-            DiagnosticStatus::Failed,
-            "an existing SQLite schema object is incompatible and cannot be repaired by a normal startup migration",
-        );
-    }
+    let embedding_map_fk_current = match sqlite_embedding_map_fk_status(&connection) {
+        Ok(SqliteEmbeddingMapFkStatus::Current) => true,
+        Ok(SqliteEmbeddingMapFkStatus::Absent) => false,
+        Ok(SqliteEmbeddingMapFkStatus::Incompatible) | Err(_) => {
+            return check(
+                "storage",
+                DiagnosticStatus::Failed,
+                "SQLite embedding-map foreign key is incompatible with startup cascade requirements",
+            );
+        }
+    };
     let current_schema = connection
         .prepare("SELECT id, embedding_claimed_at, embedding_claim_token, confidence FROM memories LIMIT 0")
         .and_then(|mut statement| statement.query([]).map(|_rows| ()))
@@ -440,7 +451,8 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
         && trigger_readable(&connection, "trg_memory_fts_insert")
         && trigger_readable(&connection, "trg_memory_fts_update")
         && trigger_readable(&connection, "trg_memory_fts_delete")
-        && sqlite_indexes_current(&connection);
+        && sqlite_indexes_current(&connection)
+        && embedding_map_fk_current;
     if !current_schema {
         return check(
             "storage",
@@ -522,8 +534,86 @@ fn sqlite_embedding_profile_compatible(connection: &Connection, expected: &Embed
     }
 }
 
+async fn postgres_indexes_compatible(pool: &PgPool, allow_absent: bool) -> Result<bool, sqlx_core::error::Error> {
+    query_scalar(
+        "SELECT COALESCE(bool_and(
+            ($1 AND indexes.oid IS NULL) OR COALESCE(
+                indexes.relkind = 'i'
+                AND index_data.indrelid = to_regclass(required.table_name)
+                AND index_data.indisvalid
+                AND index_data.indisready
+                AND index_data.indnkeyatts = required.key_count
+                AND (required.expected_keys IS NULL OR (
+                    SELECT string_agg(regexp_replace(lower(pg_get_indexdef(indexes.oid, key_number, TRUE)), '[[:space:]]', '', 'g'), ',' ORDER BY key_number)
+                    FROM generate_series(1, required.key_count) AS key_number
+                ) = required.expected_keys)
+                AND position(required.definition_fragment IN lower(pg_get_indexdef(indexes.oid))) > 0
+                AND ((required.predicate IS NULL AND index_data.indpred IS NULL)
+                     OR regexp_replace(lower(pg_get_expr(index_data.indpred, index_data.indrelid, TRUE)), '[()[:space:]]', '', 'g') = required.predicate)
+            , FALSE)
+        ), FALSE)
+        FROM (VALUES
+            ('idx_memories_created_at', 'memories', 1, 'created_atdesc', 'created_at desc', NULL),
+            ('idx_memories_expires_at', 'memories', 1, 'expires_at', 'expires_at', 'expires_atisnotnull'),
+            ('idx_memories_has_embedding', 'memories', 1, 'has_embedding', 'has_embedding', NULL),
+            ('idx_memories_memory_type', 'memories', 1, 'memory_type', 'memory_type', NULL),
+            ('idx_memories_superseded_by', 'memories', 1, 'superseded_by', 'superseded_by', 'superseded_byisnotnull'),
+            ('idx_memories_tags_gin', 'memories', 1, 'tags', 'using gin (tags)', NULL),
+            ('idx_memories_source_agent', 'memories', 1, '(provenance->>''source_agent''::text)', 'source_agent', NULL),
+            ('idx_memories_source_conversation', 'memories', 1, '(provenance->>''source_conversation''::text)', 'source_conversation', NULL),
+            ('idx_memories_origin_conversation', 'memories', 1, '(provenance->>''origin_conversation''::text)', 'origin_conversation', NULL),
+            ('idx_memories_effective_origin_conversation', 'memories', 1, 'coalesce((provenance->>''origin_conversation''::text),(provenance->>''source_conversation''::text))', 'coalesce', NULL),
+            ('idx_memories_access_type', 'memories', 1, '(access_policy->>''type''::text)', 'access_policy', NULL),
+            ('idx_memories_content_fts', 'memories', 1, 'to_tsvector(''simple''::regconfig,content)', 'to_tsvector', NULL),
+            ('idx_memories_embedding_claim', 'memories', 4, 'has_embedding,embedding_claimed_at,created_at,id', 'embedding_claimed_at', 'has_embedding=false'),
+            ('idx_memory_entities_entity', 'memory_entities', 1, 'entity', '(entity)', NULL),
+            ('idx_memory_entities_entity_type', 'memory_entities', 1, 'entity_type', 'entity_type', NULL),
+            ('idx_audit_log_memory_id', 'memory_audit_log', 1, 'memory_id', 'memory_id', NULL),
+            ('idx_audit_log_timestamp', 'memory_audit_log', 1, '\"timestamp\"desc', '\"timestamp\" desc', NULL),
+            ('idx_memory_tombstones_deleted_at', 'memory_tombstones', 1, 'deleted_atdesc', 'deleted_at desc', NULL),
+            ('idx_memory_v2_metadata_scope_key', 'memory_v2_metadata', 1, 'scope_key', 'scope_key', NULL)
+        ) AS required(name, table_name, key_count, expected_keys, definition_fragment, predicate)
+        LEFT JOIN pg_class AS indexes ON indexes.oid = to_regclass(required.name)
+        LEFT JOIN pg_index AS index_data ON index_data.indexrelid = indexes.oid",
+    )
+    .bind(allow_absent)
+    .fetch_one(pool)
+    .await
+}
+
 fn sqlite_vector_count(connection: &Connection) -> Option<i64> {
     connection.query_row("SELECT COUNT(*) FROM memory_embedding_map", [], |row| row.get::<_, i64>(0)).ok()
+}
+
+enum SqliteEmbeddingMapFkStatus {
+    Current,
+    Absent,
+    Incompatible,
+}
+
+fn sqlite_embedding_map_fk_status(connection: &Connection) -> Result<SqliteEmbeddingMapFkStatus, rusqlite::Error> {
+    let mut statement = connection.prepare("PRAGMA foreign_key_list(memory_embedding_map)")?;
+    let mut rows = statement.query([])?;
+    let mut saw_foreign_key = false;
+    let mut canonical = false;
+    while let Some(row) = rows.next()? {
+        if saw_foreign_key {
+            return Ok(SqliteEmbeddingMapFkStatus::Incompatible);
+        }
+        saw_foreign_key = true;
+        let table: String = row.get(2)?;
+        let from_column: String = row.get(3)?;
+        if table == "memories" && from_column == "memory_id" {
+            let to_column: String = row.get(4)?;
+            let on_delete: String = row.get(6)?;
+            canonical = to_column == "id" && on_delete.eq_ignore_ascii_case("CASCADE");
+        }
+    }
+    Ok(match (saw_foreign_key, canonical) {
+        (false, _) => SqliteEmbeddingMapFkStatus::Absent,
+        (true, true) => SqliteEmbeddingMapFkStatus::Current,
+        (true, false) => SqliteEmbeddingMapFkStatus::Incompatible,
+    })
 }
 
 #[expect(clippy::too_many_lines, reason = "PostgreSQL readiness is kept linear so each read-only compatibility gate is explicit")]
@@ -604,7 +694,41 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
         );
     }
     if schema_table_count > 0_i64 && schema_table_count < 9_i64 {
+        let present_indexes_compatible = postgres_indexes_compatible(&pool, true).await;
+        let present_constraints_compatible: Result<bool, _> = query_scalar(
+            "SELECT
+                (to_regclass('memories') IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('memories') AND confrelid = to_regclass('memories') AND contype = 'f' AND convalidated AND confdeltype = 'n' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass('memories') AND attname = 'superseded_by')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass('memories') AND attname = 'id')]::smallint[]))
+                AND (to_regclass('memory_entities') IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('memory_entities') AND confrelid = to_regclass('memories') AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass('memory_entities') AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass('memories') AND attname = 'id')]::smallint[]))
+                AND (to_regclass('memory_embeddings') IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('memory_embeddings') AND confrelid = to_regclass('memories') AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass('memory_embeddings') AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass('memories') AND attname = 'id')]::smallint[]))
+                AND (to_regclass('memory_v2_metadata') IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('memory_v2_metadata') AND confrelid = to_regclass('memories') AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass('memory_v2_metadata') AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass('memories') AND attname = 'id')]::smallint[]))",
+        )
+        .fetch_one(&pool)
+        .await;
+        let can_repair: Result<bool, _> = if vector_installed {
+            query_scalar(
+                "SELECT has_schema_privilege(current_schema(), 'CREATE') AND (SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), TRUE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_v2_metadata', 'memory_tombstones', 'scope_registry'))",
+            )
+            .fetch_one(&pool)
+            .await
+        } else {
+            query_scalar(
+                "SELECT has_schema_privilege(current_schema(), 'CREATE') AND has_database_privilege(current_database(), 'CREATE') AND (SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), TRUE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_v2_metadata', 'memory_tombstones', 'scope_registry'))",
+            )
+            .fetch_one(&pool)
+            .await
+        };
         pool.close().await;
+        if config.database.postgres.auto_migrate
+            && matches!(present_indexes_compatible, Ok(true))
+            && matches!(present_constraints_compatible, Ok(true))
+            && matches!(can_repair, Ok(true))
+        {
+            return check(
+                "storage",
+                DiagnosticStatus::Degraded,
+                "PostgreSQL has a compatible partial managed schema that normal startup can complete",
+            );
+        }
         return check(
             "storage",
             DiagnosticStatus::Failed,
@@ -657,14 +781,12 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             "PostgreSQL schema shape, column types, or keys are incompatible with this LocalHold binary",
         );
     }
-    let startup_privileges: Result<bool, _> = if config.database.postgres.auto_migrate {
-        query_scalar("SELECT has_table_privilege('localhold_migrations', 'SELECT,INSERT')").fetch_one(&pool).await
-    } else {
-        query_scalar("SELECT has_table_privilege('localhold_migrations', 'SELECT')").fetch_one(&pool).await
-    };
-    if !matches!(startup_privileges, Ok(true)) {
-        pool.close().await;
-        return check("storage", DiagnosticStatus::Failed, "PostgreSQL migration metadata is not writable by the configured role");
+    if config.database.postgres.auto_migrate {
+        let startup_privileges: Result<bool, _> = query_scalar("SELECT has_table_privilege('localhold_migrations', 'SELECT,INSERT')").fetch_one(&pool).await;
+        if !matches!(startup_privileges, Ok(true)) {
+            pool.close().await;
+            return check("storage", DiagnosticStatus::Failed, "PostgreSQL migration metadata is not writable by the configured role");
+        }
     }
     let runtime_privileges: Result<bool, _> = query_scalar(
         "SELECT
@@ -701,7 +823,11 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             "PostgreSQL relational constraints do not match runtime cascade and audit requirements",
         );
     }
-    let migration: Result<Option<i64>, _> = query_scalar("SELECT MAX(version) FROM localhold_migrations").fetch_one(&pool).await;
+    let migration: Result<Option<i64>, _> = if config.database.postgres.auto_migrate {
+        query_scalar("SELECT MAX(version) FROM localhold_migrations").fetch_one(&pool).await
+    } else {
+        Ok(Some(PostgresStore::CURRENT_SCHEMA_VERSION))
+    };
     let audit_fk_exists: Result<bool, _> =
         query_scalar("SELECT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_audit_log'::regclass AND contype = 'f' AND confrelid = 'memories'::regclass)")
             .fetch_one(&pool)

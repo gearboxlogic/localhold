@@ -807,6 +807,12 @@ pub(crate) fn validate_present_sqlite_schema(conn: &Connection) -> Result<(), St
     ];
     for table in SQLITE_REQUIRED_TABLES {
         if sqlite_schema_sql(conn, "table", table.name)?.is_none() {
+            let conflicting_object: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1 AND type <> 'table')", [table.name], |row| {
+                row.get(0)
+            })?;
+            if conflicting_object {
+                return Err(sqlite_source_schema_error(format!("managed SQLite object {} exists but is not a table", table.name)));
+            }
             continue;
         }
         let sql = sqlite_schema_sql(conn, "table", table.name)?.unwrap_or_default().to_ascii_lowercase();
@@ -1554,11 +1560,7 @@ pub(crate) async fn validate_present_postgres_schema(pool: &PgPool, embedding_di
         }
         validate_postgres_table_kind(pool, table).await?;
         for expectation in POSTGRES_REQUIRED_COLUMNS.iter().filter(|expectation| expectation.table == *table) {
-            if expectation.table == "memories" && expectation.column == "confidence" {
-                validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type).await?;
-            } else {
-                validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type).await?;
-            }
+            validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type).await?;
         }
         for expectation in POSTGRES_OPTIONAL_COLUMNS.iter().filter(|expectation| expectation.table == *table) {
             validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type).await?;
@@ -3007,6 +3009,21 @@ mod tests {
         let err = migrate_sqlite_to_postgres(&options).await.unwrap_err();
 
         assert!(err.to_string().contains("scope_registry.description"));
+        drop_postgres_migration_schema().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; destructive cleanup requires LOCALHOLD_ALLOW_DESTRUCTIVE_PG_SMOKE=1"]
+    async fn present_postgres_schema_rejects_missing_non_migrated_confidence_column() {
+        reset_postgres_migration_database().await;
+        let pool = open_postgres_pool(&postgres_smoke_url()).await.unwrap();
+        let _dropped_table = query("DROP TABLE memory_audit_log").execute(&pool).await.unwrap();
+        let _dropped_column = query("ALTER TABLE memories DROP COLUMN confidence").execute(&pool).await.unwrap();
+
+        let err = validate_present_postgres_schema(&pool, TEST_EMBEDDING_DIMENSIONS).await.unwrap_err();
+
+        assert!(err.to_string().contains("memories.confidence"));
+        pool.close().await;
         drop_postgres_migration_schema().await;
     }
 

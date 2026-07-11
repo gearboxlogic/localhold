@@ -226,6 +226,7 @@ where
     if config.search.reranker.enabled {
         let requested = config.search.reranker.execution_provider;
         let required = config.search.reranker.required;
+        let inactive = "none";
         if required {
             return Err(localhold::reranker::RerankerError::ProviderUnavailable(format!(
                 "{requested} was requested with reranker.required = true, but this binary was compiled without the `reranker` feature"
@@ -236,8 +237,8 @@ where
             compiled = "none",
             %requested,
             required,
-            selected = "none",
-            active = "none",
+            selected = %inactive,
+            active = %inactive,
             "reranker.enabled = true but compiled without `reranker` feature -- reranking disabled"
         );
     }
@@ -261,6 +262,7 @@ where
             Ok(reranker) => engine.with_reranker(reranker.into_provider()),
             Err(error) if reranker_config.required => return Err(error.into()),
             Err(e) => {
+                let inactive = "none";
                 let compiled = localhold::reranker::policy::compiled_execution_providers()
                     .iter()
                     .map(ToString::to_string)
@@ -270,8 +272,8 @@ where
                     %compiled,
                     requested = %reranker_config.execution_provider,
                     required = reranker_config.required,
-                    selected = "none",
-                    active = "none",
+                    selected = %inactive,
+                    active = %inactive,
                     "reranker initialization failed after retries, continuing without: {e}"
                 );
                 engine

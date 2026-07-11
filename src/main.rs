@@ -30,6 +30,16 @@ async fn main() -> AppResult {
     if let Some(result) = try_run_info_cli() {
         return result;
     }
+    if let Some(result) = try_run_doctor_cli().await {
+        match result {
+            Ok(0_i32) => return Ok(()),
+            Ok(exit_code) => std::process::exit(exit_code),
+            Err(error) => {
+                write_stderr_line(error);
+                std::process::exit(1);
+            }
+        }
+    }
     if let Some(result) = try_run_migration_cli().await {
         if let Err(error) = result {
             write_migration_cli_error(&*error);
@@ -97,7 +107,46 @@ fn try_run_info_cli() -> Option<AppResult> {
 }
 
 const fn root_usage() -> &'static str {
-    "Usage: hold [COMMAND]\n\nRuns the LocalHold MCP server when no command is supplied.\n\nCommands:\n  embeddings reindex --yes   Clear and rebuild the configured vector space\n  migrate sqlite-to-postgres Migrate storage backends\n\nOptions:\n  -h, --help                 Print help\n  -V, --version              Print version"
+    "Usage: hold [COMMAND]\n\nRuns the LocalHold MCP server when no command is supplied.\n\nCommands:\n  doctor                     Diagnose installation and runtime readiness\n  embeddings reindex --yes   Clear and rebuild the configured vector space\n  migrate sqlite-to-postgres Migrate storage backends\n\nOptions:\n  -h, --help                 Print help\n  -V, --version              Print version"
+}
+
+async fn try_run_doctor_cli() -> Option<Result<i32, Box<dyn std::error::Error + Send + Sync>>> {
+    const USAGE: &str = "Usage: hold doctor [--json] [--allow-downloads]\n\nRuns side-effect-conscious readiness checks. By default, doctor does not create databases, migrate schemas, or download reranker artifacts.\n\nOptions:\n  --json             Emit the stable JSON report schema\n  --allow-downloads  Permit first-use reranker downloads for inference probing\n  -h, --help         Print help\n\nExit codes:\n  0  healthy\n  1  failed\n  2  degraded";
+
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if args.first().is_none_or(|argument| argument != "doctor") {
+        return None;
+    }
+    Some(
+        async {
+            if args[1..].iter().any(is_help_arg) {
+                write_stdout(USAGE)?;
+                write_stdout("\n")?;
+                return Ok(0);
+            }
+            let mut json = false;
+            let mut allow_downloads = false;
+            for argument in &args[1..] {
+                if argument == "--json" {
+                    json = true;
+                } else if argument == "--allow-downloads" {
+                    allow_downloads = true;
+                } else {
+                    return Err(EngineError::config(format!("unknown doctor argument: {}\n\n{USAGE}", argument.to_string_lossy())).into());
+                }
+            }
+            let mut options = localhold::doctor::DoctorOptions::default();
+            options.allow_downloads = allow_downloads;
+            let report = localhold::doctor::run(options).await;
+            if json {
+                write_stdout(&report.to_json()?)?;
+            } else {
+                write_stdout(&report.render_text())?;
+            }
+            Ok(report.exit_code)
+        }
+        .await,
+    )
 }
 
 async fn try_run_embeddings_cli() -> Option<AppResult> {

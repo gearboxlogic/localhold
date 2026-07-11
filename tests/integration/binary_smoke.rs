@@ -8,6 +8,7 @@ use localhold::{
     store::{MemoryWriter as _, SqliteStore},
     types::{AccessPolicy, Memory, Provenance},
 };
+use serde_json::Value;
 use sqlx_core::{query::query, query_scalar::query_scalar};
 use sqlx_postgres::PgPoolOptions;
 
@@ -125,6 +126,96 @@ fn binary_starts_in_stdio_mode() {
     let mut child = cmd.spawn().unwrap();
     assert_child_stays_running(&mut child, "stdio");
     terminate_child(&mut child);
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_json_reports_degraded_without_creating_missing_database_or_leaking_secrets() {
+    let db_path = unique_db_path("doctor-missing");
+    let mut cmd = base_binary_command(&db_path);
+    cmd.env("LOCALHOLD_HTTP_AUTH_TOKEN", "doctor-super-secret-token");
+    let output = cmd.args(["doctor", "--json"]).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(2_i32), "missing database should be degraded");
+    assert!(!db_path.exists(), "doctor must not create a missing database");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["schema_version"], 1_i32);
+    assert_eq!(report["status"], "degraded");
+    assert_eq!(report["exit_code"], 2_i32);
+    assert!(!stdout.contains("doctor-super-secret-token"), "doctor output must redact configured secrets");
+}
+
+#[test]
+fn doctor_reports_healthy_for_current_sqlite_database() {
+    let db_path = unique_db_path("doctor-healthy");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+
+    let output = base_binary_command(&db_path).arg("doctor").output().unwrap();
+    assert!(
+        output.status.success(),
+        "current SQLite database should be healthy: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("LocalHold doctor: healthy"));
+    assert!(stdout.contains("[healthy] storage:"));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_json_returns_failed_report_for_invalid_config_without_echoing_contents() {
+    let db_path = unique_db_path("doctor-invalid-config");
+    let root = db_path.with_extension("config");
+    let mut cmd = base_binary_command(&db_path);
+    let config_dir = isolate_user_config_dir(&mut cmd, &root).join("localhold");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("localhold.toml"), "api_key = 'must-not-appear'\ninvalid = [").unwrap();
+
+    let output = cmd.args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+    assert!(!stdout.contains("must-not-appear"));
+    assert!(!db_path.exists(), "failed configuration must not create storage");
+
+    let _cleanup = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn doctor_help_documents_side_effects_and_exit_codes() {
+    let output = Command::new(env!("CARGO_BIN_EXE_hold")).args(["doctor", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("does not create databases"));
+    assert!(stdout.contains("--allow-downloads"));
+    assert!(stdout.contains("2  degraded"));
+}
+
+#[cfg(feature = "reranker")]
+#[test]
+fn doctor_does_not_create_or_download_reranker_cache_without_opt_in() {
+    let db_path = unique_db_path("doctor-reranker-no-download");
+    let cache_path = db_path.with_extension("model-cache");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_RERANKER_ENABLED", "true");
+    command.env("LOCALHOLD_RERANKER_CACHE_DIR", &cache_path);
+
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+    assert!(!cache_path.exists(), "doctor must not create the reranker cache without --allow-downloads");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("--allow-downloads"));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
     let _cleanup = std::fs::remove_file(db_path);
 }
 

@@ -5,11 +5,23 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use super::{
-    RerankerError, RerankerProvider,
+    RerankerError, RerankerProvider, download,
     onnx::OnnxReranker,
     policy::compiled_execution_providers,
     resilient::{ResilientReranker, ResilientRerankerConfig},
 };
+
+/// Resolved reranker artifact identity suitable for diagnostics.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct RerankerModelIdentity {
+    /// Immutable model revision or the direct-file marker.
+    pub revision: String,
+    /// Expected model artifact SHA-256, or `not_configured` for direct files.
+    pub model_sha256: String,
+    /// Expected tokenizer artifact SHA-256, or `not_configured` for direct files.
+    pub tokenizer_sha256: String,
+}
 use crate::config::{RerankerConfig, RerankerExecutionProvider};
 
 /// Successfully initialized reranker provider.
@@ -70,6 +82,54 @@ pub async fn initialize_with_retry(config: &RerankerConfig) -> Result<Initialize
         }
     }
     initialize(config).await
+}
+
+/// Resolve the configured artifact identity without touching the model cache.
+///
+/// # Errors
+///
+/// Returns an error when an auto-downloaded model lacks immutable revision or
+/// hash pins.
+pub fn model_identity(config: &RerankerConfig) -> Result<RerankerModelIdentity, RerankerError> {
+    if !config.model_path.is_empty() {
+        return Ok(RerankerModelIdentity {
+            revision: if config.revision.is_empty() { "direct_file".into() } else { config.revision.clone() },
+            model_sha256: if config.model_sha256.is_empty() {
+                "not_configured".into()
+            } else {
+                config.model_sha256.clone()
+            },
+            tokenizer_sha256: if config.tokenizer_sha256.is_empty() {
+                "not_configured".into()
+            } else {
+                config.tokenizer_sha256.clone()
+            },
+        });
+    }
+    let pins = download::download_pins(config)?;
+    Ok(RerankerModelIdentity {
+        revision: pins.revision,
+        model_sha256: pins.model_sha256,
+        tokenizer_sha256: pins.tokenizer_sha256,
+    })
+}
+
+/// Initialize and run the normal inference health probe for diagnostics.
+///
+/// Without `allow_downloads`, only direct files or an already complete,
+/// hash-verified cache entry are used.
+///
+/// # Errors
+///
+/// Returns model, provider, or inference errors from normal initialization.
+pub async fn initialize_for_diagnostics(config: &RerankerConfig, allow_downloads: bool) -> Result<InitializedReranker, RerankerError> {
+    if allow_downloads {
+        return initialize_with_retry(config).await;
+    }
+    let paths = download::resolve_cached_model_paths(config)?;
+    let mut local_config = config.clone();
+    local_config.model_path = paths.onnx_path.to_string_lossy().into_owned();
+    initialize(&local_config).await
 }
 
 async fn initialize(config: &RerankerConfig) -> Result<InitializedReranker, RerankerError> {

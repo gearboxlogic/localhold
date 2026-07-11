@@ -56,10 +56,10 @@ pub(crate) struct ModelPaths {
 }
 
 #[derive(Debug, Clone)]
-struct DownloadPins {
-    revision: String,
-    model_sha256: String,
-    tokenizer_sha256: String,
+pub(crate) struct DownloadPins {
+    pub revision: String,
+    pub model_sha256: String,
+    pub tokenizer_sha256: String,
 }
 
 /// Resolve (and download if necessary) the ONNX model files.
@@ -161,6 +161,34 @@ fn resolve_download_pins(config: &RerankerConfig) -> Result<DownloadPins, Rerank
         model_sha256: config.model_sha256.clone(),
         tokenizer_sha256: config.tokenizer_sha256.clone(),
     })
+}
+
+pub(crate) fn download_pins(config: &RerankerConfig) -> Result<DownloadPins, RerankerError> {
+    resolve_download_pins(config)
+}
+
+pub(crate) fn resolve_cached_model_paths(config: &RerankerConfig) -> Result<ModelPaths, RerankerError> {
+    if !config.model_path.is_empty() {
+        let onnx_path = crate::config::expand_tilde(&config.model_path).map_err(|error| RerankerError::Permanent(error.to_string().into()))?;
+        let tokenizer_path = onnx_path.parent().unwrap_or_else(|| Path::new(".")).join("tokenizer.json");
+        if onnx_path.is_file() && tokenizer_path.is_file() {
+            return Ok(ModelPaths { onnx_path, tokenizer_path });
+        }
+        return Err(RerankerError::Unavailable);
+    }
+
+    let pins = resolve_download_pins(config)?;
+    let cache = crate::config::expand_tilde(&config.cache_dir).map_err(|error| RerankerError::Permanent(error.to_string().into()))?;
+    let model_dir = cache.join(format!("{}@{}", config.model.replace('/', "--"), pins.revision.replace('/', "--")));
+    let onnx_path = model_dir.join("model.onnx");
+    let tokenizer_path = model_dir.join("tokenizer.json");
+    if !onnx_path.is_file() || !tokenizer_path.is_file() {
+        return Err(RerankerError::Unavailable);
+    }
+    if !verify_file_sha256(&onnx_path, &pins.model_sha256)? || !verify_file_sha256(&tokenizer_path, &pins.tokenizer_sha256)? {
+        return Err(RerankerError::Permanent("cached reranker artifacts do not match their configured SHA-256 hashes".into()));
+    }
+    Ok(ModelPaths { onnx_path, tokenizer_path })
 }
 
 fn ensure_cached_file(url: &str, dest: &Path, expected_sha256: &str) -> Result<(), RerankerError> {

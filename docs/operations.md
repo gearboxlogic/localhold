@@ -4,6 +4,42 @@ This guide covers configuration, privacy boundaries, backup, and recovery for
 operators running LocalHold from a release archive or source. Managed service
 definitions are not available during the early beta.
 
+## Readiness diagnostics
+
+Run `hold doctor` before starting a new installation or when startup behavior
+is unclear. The command reports binary version and compiled capabilities,
+configuration source and validity, filesystem and storage readiness, embedding
+health according to the configured policy, and reranker model identity,
+provider selection, and real inference readiness.
+
+```sh
+hold doctor
+hold doctor --json
+```
+
+The default diagnostic is side-effect-conscious: it does not create a missing
+database, migrate an existing schema, write provider identity, or download
+reranker artifacts. It opens SQLite read-only and uses read-only PostgreSQL
+queries. When reranking is enabled, an already cached or directly configured
+model receives a real inference probe. To permit the normal pinned, verified
+first-use download for that probe, opt in explicitly:
+
+```sh
+hold doctor --allow-downloads
+```
+
+Exit code `0` means healthy, `2` means degraded or not yet initialized, and `1`
+means a required condition failed. The JSON form uses `schema_version: 1` and
+includes the same status and exit code. It does not serialize configuration,
+credentials, memory content, PostgreSQL URLs, or provider error bodies.
+
+Examples of degraded results include a missing SQLite database that normal
+startup would create, a schema that needs a normal startup migration, an
+unavailable optional embedding endpoint, or an enabled reranker whose model is
+not cached when downloads were not allowed. Corrupt storage, unreachable
+required storage, invalid configuration, and unavailable required reranking
+are failed results.
+
 ## Configuration
 
 The canonical configuration file is `localhold.toml` under the platform user

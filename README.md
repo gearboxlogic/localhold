@@ -202,6 +202,17 @@ backend = "postgres"
 url = "postgres://localhold:password@localhost:5432/localhold"
 ```
 
+Check installation and runtime readiness without creating or migrating storage
+or downloading models:
+
+```sh
+hold doctor
+hold doctor --json
+```
+
+See [Operations](docs/operations.md) for diagnostic exit codes and the explicit
+reranker download opt-in.
+
 To migrate an existing SQLite database into an empty PostgreSQL database:
 
 ```sh

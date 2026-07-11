@@ -4,6 +4,7 @@ pub(crate) mod background_tasks;
 pub mod clock;
 pub mod config;
 pub(crate) mod consolidation;
+pub mod doctor;
 pub mod embedding;
 pub mod engine;
 pub mod error;

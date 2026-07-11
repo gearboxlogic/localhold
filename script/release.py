@@ -26,6 +26,7 @@ PACKAGE_FILES = (
     "THIRD_PARTY_NOTICES.md",
     "localhold.example.toml",
 )
+TAG_TOKEN_CHARACTERS = "0-9A-Za-z.+-"
 
 
 class ReleaseError(RuntimeError):
@@ -101,6 +102,12 @@ def changelog_notes(version: str) -> str:
     return f"{notes}\n"
 
 
+def references_tag(text: str, tag: str) -> bool:
+    """Return whether text contains tag as a complete SemVer-like token."""
+    pattern = rf"(?<![{TAG_TOKEN_CHARACTERS}]){re.escape(tag)}(?![{TAG_TOKEN_CHARACTERS}])"
+    return re.search(pattern, text) is not None
+
+
 def validate(tag: str | None) -> None:
     """Validate metadata shared by local and GitHub release workflows."""
     resolved, version = resolve_tag(tag)
@@ -109,7 +116,7 @@ def validate(tag: str | None) -> None:
     installation = (REPO_ROOT / "docs" / "installation.md").read_text(
         encoding="utf-8"
     )
-    if resolved not in installation:
+    if not references_tag(installation, resolved):
         raise ReleaseError(
             f"docs/installation.md must reference the release tag {resolved}"
         )

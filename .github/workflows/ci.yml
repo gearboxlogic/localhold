@@ -52,6 +52,7 @@ jobs:
 
       - name: Validate release metadata and archive tooling
         run: |
+          python3 -m unittest discover -s script/tests
           python3 script/release.py validate
           tag="$(python3 script/release.py tag)"
           python3 script/package-release.py \

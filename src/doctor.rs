@@ -668,8 +668,9 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
         }
     }
     let required_tables: Result<i64, _> = query_scalar(
-        "SELECT COUNT(*) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_entities'), ('memory_v2_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name) WHERE ($1 OR required.name <> 'localhold_migrations') AND to_regclass(format('%I.%I', current_schema(), required.name)) IS NOT NULL",
+        "SELECT COUNT(*) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_entities'), ('memory_v2_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name) WHERE ($1 OR required.name <> 'localhold_migrations') AND to_regclass(CASE WHEN $2 THEN format('%I.%I', current_schema(), required.name) ELSE required.name END) IS NOT NULL",
     )
+    .bind(config.database.postgres.auto_migrate)
     .bind(config.database.postgres.auto_migrate)
     .fetch_one(&pool)
     .await;
@@ -681,7 +682,7 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
         }
     };
     if let Some(profile) = crate::embedding::factory::active_embedding_profile(&config.embedding) {
-        match postgres_embedding_profile_compatible_if_present(&pool, &profile).await {
+        match postgres_embedding_profile_compatible_if_present(&pool, &profile, config.database.postgres.auto_migrate).await {
             Ok(true) => {}
             Ok(false) => {
                 pool.close().await;
@@ -697,9 +698,14 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             }
         }
     }
-    if crate::store::migration::validate_present_postgres_schema(&pool, config.embedding.dimensions())
-        .await
-        .is_err()
+    if crate::store::migration::validate_present_postgres_schema(
+        &pool,
+        config.embedding.dimensions(),
+        config.database.postgres.auto_migrate,
+        config.database.postgres.auto_migrate,
+    )
+    .await
+    .is_err()
     {
         pool.close().await;
         return check(
@@ -786,9 +792,14 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             },
         );
     }
-    if crate::store::migration::validate_existing_postgres_schema(&pool, config.embedding.dimensions())
-        .await
-        .is_err()
+    if crate::store::migration::validate_existing_postgres_schema(
+        &pool,
+        config.embedding.dimensions(),
+        config.database.postgres.auto_migrate,
+        config.database.postgres.auto_migrate,
+    )
+    .await
+    .is_err()
     {
         pool.close().await;
         return check(
@@ -847,13 +858,28 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
     } else {
         Ok(Some(PostgresStore::CURRENT_SCHEMA_VERSION))
     };
+    let migration_rows_current: Result<bool, _> = if config.database.postgres.auto_migrate {
+        query_scalar("SELECT COUNT(*) = 2 FROM localhold_migrations WHERE (version = 1 AND name = 'bootstrap_schema') OR (version = 2 AND name = 'audit_log_without_memory_fk')")
+            .fetch_one(&pool)
+            .await
+    } else {
+        Ok(true)
+    };
+    let migration_identities_compatible: Result<bool, _> = if config.database.postgres.auto_migrate {
+        query_scalar("SELECT NOT EXISTS(SELECT 1 FROM localhold_migrations WHERE (version = 1 AND name <> 'bootstrap_schema') OR (version = 2 AND name <> 'audit_log_without_memory_fk') OR (name = 'bootstrap_schema' AND version <> 1) OR (name = 'audit_log_without_memory_fk' AND version <> 2))")
+            .fetch_one(&pool)
+            .await
+    } else {
+        Ok(true)
+    };
     let audit_fk_exists: Result<bool, _> =
         query_scalar("SELECT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_audit_log'::regclass AND contype = 'f' AND confrelid = 'memories'::regclass)")
             .fetch_one(&pool)
             .await;
     let current_columns: Result<i64, _> = query_scalar(
-        "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'memories' AND column_name IN ('embedding_claimed_at', 'embedding_claim_token', 'confidence')",
+        "SELECT COUNT(*) FROM pg_attribute WHERE attrelid = to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memories') ELSE 'memories' END) AND attname IN ('embedding_claimed_at', 'embedding_claim_token', 'confidence') AND NOT attisdropped",
     )
+    .bind(config.database.postgres.auto_migrate)
     .fetch_one(&pool)
     .await;
     let indexes_current: Result<bool, _> = query_scalar(
@@ -913,8 +939,20 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
         Ok(true)
     };
     pool.close().await;
-    let (migration, audit_fk_exists, current_columns, indexes_current, vector_type, profile_compatible, owns_managed_tables) = match (
+    let (
         migration,
+        migration_rows_current,
+        migration_identities_compatible,
+        audit_fk_exists,
+        current_columns,
+        indexes_current,
+        vector_type,
+        profile_compatible,
+        owns_managed_tables,
+    ) = match (
+        migration,
+        migration_rows_current,
+        migration_identities_compatible,
         audit_fk_exists,
         current_columns,
         indexes_current,
@@ -922,8 +960,20 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
         profile_compatible,
         owns_managed_tables,
     ) {
-        (Ok(migration), Ok(audit_fk_exists), Ok(current_columns), Ok(indexes_current), Ok(vector_type), Ok(profile_compatible), Ok(owns_managed_tables)) => (
+        (
+            Ok(migration),
+            Ok(migration_rows_current),
+            Ok(migration_identities_compatible),
+            Ok(audit_fk_exists),
+            Ok(current_columns),
+            Ok(indexes_current),
+            Ok(vector_type),
+            Ok(profile_compatible),
+            Ok(owns_managed_tables),
+        ) => (
             migration,
+            migration_rows_current,
+            migration_identities_compatible,
             audit_fk_exists,
             current_columns,
             indexes_current,
@@ -936,13 +986,22 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
         | (_, _, Err(_error), ..)
         | (_, _, _, Err(_error), ..)
         | (_, _, _, _, Err(_error), ..)
-        | (_, _, _, _, _, Err(_error), _)
-        | (_, _, _, _, _, _, Err(_error)) => {
+        | (_, _, _, _, _, Err(_error), ..)
+        | (_, _, _, _, _, _, Err(_error), ..)
+        | (_, _, _, _, _, _, _, Err(_error), _)
+        | (_, _, _, _, _, _, _, _, Err(_error)) => {
             return check("storage", DiagnosticStatus::Failed, "PostgreSQL schema compatibility queries failed");
         }
     };
     if migration.is_some_and(|version| version > PostgresStore::CURRENT_SCHEMA_VERSION) {
         return check("storage", DiagnosticStatus::Failed, "PostgreSQL schema is newer than this LocalHold binary supports");
+    }
+    if !migration_identities_compatible {
+        return check(
+            "storage",
+            DiagnosticStatus::Failed,
+            "PostgreSQL migration metadata conflicts with the expected migration identities",
+        );
     }
     if postgres_vector_dimensions(vector_type.as_deref()) != Some(config.embedding.dimensions()) {
         return check(
@@ -965,7 +1024,7 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             "PostgreSQL auto-migration is enabled but the configured role does not own every managed table",
         );
     }
-    if migration == Some(PostgresStore::CURRENT_SCHEMA_VERSION) && current_columns == 3_i64 && indexes_current && !audit_fk_exists {
+    if migration == Some(PostgresStore::CURRENT_SCHEMA_VERSION) && migration_rows_current && current_columns == 3_i64 && indexes_current && !audit_fk_exists {
         check("storage", DiagnosticStatus::Healthy, "PostgreSQL is reachable and the LocalHold schema is current")
     } else if config.database.postgres.auto_migrate {
         check("storage", DiagnosticStatus::Degraded, "PostgreSQL is reachable but a normal startup migration is required")
@@ -994,10 +1053,12 @@ async fn postgres_embedding_profile_compatible(pool: &PgPool, expected: &Embeddi
     Ok(vector_count == 0)
 }
 
-async fn postgres_embedding_profile_compatible_if_present(pool: &PgPool, expected: &EmbeddingProfile) -> Result<bool, sqlx_core::error::Error> {
-    let profile_exists: bool = query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'embedding_profile')) IS NOT NULL")
-        .fetch_one(pool)
-        .await?;
+async fn postgres_embedding_profile_compatible_if_present(pool: &PgPool, expected: &EmbeddingProfile, current_schema_only: bool) -> Result<bool, sqlx_core::error::Error> {
+    let profile_exists: bool =
+        query_scalar("SELECT to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'embedding_profile') ELSE 'embedding_profile' END) IS NOT NULL")
+            .bind(current_schema_only)
+            .fetch_one(pool)
+            .await?;
     if profile_exists {
         let dimensions = i64::try_from(expected.dimensions).unwrap_or(i64::MAX);
         let matches: Option<bool> = query_scalar("SELECT provider = $1 AND endpoint = $2 AND model = $3 AND dimensions = $4 FROM embedding_profile WHERE singleton = 1")
@@ -1011,9 +1072,11 @@ async fn postgres_embedding_profile_compatible_if_present(pool: &PgPool, expecte
             return Ok(matches);
         }
     }
-    let embeddings_exist: bool = query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'memory_embeddings')) IS NOT NULL")
-        .fetch_one(pool)
-        .await?;
+    let embeddings_exist: bool =
+        query_scalar("SELECT to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_embeddings') ELSE 'memory_embeddings' END) IS NOT NULL")
+            .bind(current_schema_only)
+            .fetch_one(pool)
+            .await?;
     if !embeddings_exist {
         return Ok(true);
     }

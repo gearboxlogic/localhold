@@ -548,7 +548,7 @@ pub async fn migrate_sqlite_to_postgres(options: &SqliteToPostgresOptions) -> Re
 
 async fn preflight_empty_postgres_target(options: &SqliteToPostgresOptions) -> Result<MigrationTableCounts, StoreError> {
     let target_pool = open_postgres_pool(&options.postgres_url).await?;
-    validate_existing_postgres_schema(&target_pool, options.embedding_dimensions).await?;
+    validate_existing_postgres_schema(&target_pool, options.embedding_dimensions, true, true).await?;
     check_existing_postgres_vector_dimensions(&target_pool, options.embedding_dimensions).await?;
     let target_before = postgres_counts_existing(&target_pool).await?;
     if !target_before.is_empty() {
@@ -834,6 +834,9 @@ pub(crate) fn validate_present_sqlite_schema(conn: &Connection) -> Result<(), St
                 )));
             }
         }
+        if table.name == "memory_fts" {
+            validate_sqlite_fts_external_content(&sql)?;
+        }
         let columns = sqlite_table_columns(conn, table.name)?;
         for column in table.columns {
             if table.name == "memories" && MIGRATABLE_MEMORY_COLUMNS.contains(column) {
@@ -897,6 +900,9 @@ fn validate_sqlite_table(conn: &Connection, expectation: &SqliteTableExpectation
             )));
         }
     }
+    if expectation.name == "memory_fts" {
+        validate_sqlite_fts_external_content(&sql)?;
+    }
 
     let columns = sqlite_table_columns(conn, expectation.name)?;
     for column in expectation.columns {
@@ -908,6 +914,79 @@ fn validate_sqlite_table(conn: &Connection, expectation: &SqliteTableExpectation
         validate_sqlite_embedding_revision_contract(conn)?;
     }
     Ok(())
+}
+
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::string_slice,
+    reason = "SQLite schema keywords and FTS delimiters are ASCII byte boundaries"
+)]
+fn validate_sqlite_fts_external_content(sql: &str) -> Result<(), StoreError> {
+    let lowercase = sql.to_ascii_lowercase();
+    let arguments_start = lowercase
+        .find("using fts5")
+        .and_then(|position| lowercase[position..].find('(').map(|offset| position + offset + 1))
+        .ok_or_else(|| sqlite_source_schema_error("memory_fts is not an FTS5 virtual table"))?;
+    let arguments_end = sql
+        .rfind(')')
+        .filter(|end| *end >= arguments_start)
+        .ok_or_else(|| sqlite_source_schema_error("memory_fts has malformed FTS5 arguments"))?;
+    let mut options = HashMap::new();
+    for argument in split_sqlite_fts_arguments(&sql[arguments_start..arguments_end]) {
+        let Some((key, value)) = argument.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = decode_sqlite_fts_option(value.trim()).to_ascii_lowercase();
+        let _previous = options.insert(key, value);
+    }
+    if options.get("content").is_some_and(|value| value == "memories") && options.get("content_rowid").is_some_and(|value| value == "rowid") {
+        Ok(())
+    } else {
+        Err(sqlite_source_schema_error("memory_fts must use memories(rowid) as its external-content source"))
+    }
+}
+
+#[expect(clippy::string_slice, reason = "FTS delimiters and SQL quote bytes are ASCII byte boundaries")]
+fn split_sqlite_fts_arguments(arguments: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut start = 0_usize;
+    let mut quote = None;
+    let bytes = arguments.as_bytes();
+    let mut index = 0_usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match quote {
+            Some(active_quote) if byte == active_quote => {
+                let doubled = bytes.get(index.saturating_add(1)) == Some(&active_quote);
+                quote = doubled.then_some(active_quote);
+                index = index.saturating_add(usize::from(doubled));
+            }
+            None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
+            None if byte == b',' => {
+                result.push(&arguments[start..index]);
+                start = index.saturating_add(1);
+            }
+            Some(_) | None => {}
+        }
+        index = index.saturating_add(1);
+    }
+    result.push(&arguments[start..]);
+    result
+}
+
+#[expect(clippy::string_slice, reason = "recognized SQL quote delimiters are single-byte ASCII")]
+fn decode_sqlite_fts_option(value: &str) -> String {
+    if value.len() >= 2 {
+        let first = value.as_bytes()[0];
+        if matches!(first, b'\'' | b'"') && value.as_bytes().last() == Some(&first) {
+            let inner = &value[1..value.len().saturating_sub(1)];
+            let doubled = String::from_utf8(vec![first, first]).unwrap_or_default();
+            let single = char::from(first).to_string();
+            return inner.replace(&doubled, &single);
+        }
+    }
+    value.to_owned()
 }
 
 fn validate_sqlite_embedding_revision_contract(conn: &Connection) -> Result<(), StoreError> {
@@ -1622,19 +1701,25 @@ async fn open_postgres_pool(url: &str) -> Result<PgPool, StoreError> {
     PgPoolOptions::new().max_connections(1).connect(url).await.map_err(StoreError::from)
 }
 
-pub(crate) async fn validate_existing_postgres_schema(pool: &PgPool, embedding_dimensions: usize) -> Result<(), StoreError> {
-    if postgres_table_exists(pool, POSTGRES_MIGRATIONS_TABLE).await? {
-        validate_postgres_table_kind(pool, POSTGRES_MIGRATIONS_TABLE).await?;
+pub(crate) async fn validate_existing_postgres_schema(
+    pool: &PgPool,
+    embedding_dimensions: usize,
+    current_schema_only: bool,
+    include_migration_metadata: bool,
+) -> Result<(), StoreError> {
+    if include_migration_metadata && postgres_table_exists(pool, POSTGRES_MIGRATIONS_TABLE, current_schema_only).await? {
+        validate_postgres_table_kind(pool, POSTGRES_MIGRATIONS_TABLE, current_schema_only).await?;
         for expectation in POSTGRES_REQUIRED_COLUMNS.iter().filter(|expectation| expectation.table == POSTGRES_MIGRATIONS_TABLE) {
-            validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type).await?;
+            validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
         }
-        validate_postgres_required_keys(pool, POSTGRES_MIGRATIONS_TABLE).await?;
+        validate_postgres_required_keys(pool, POSTGRES_MIGRATIONS_TABLE, current_schema_only).await?;
+        validate_postgres_default_contract(pool, POSTGRES_MIGRATIONS_TABLE, "applied_at", "now()", current_schema_only).await?;
     }
 
     let mut existing = HashSet::new();
     for table in POSTGRES_USER_TABLES {
-        if postgres_table_exists(pool, table).await? {
-            validate_postgres_table_kind(pool, table).await?;
+        if postgres_table_exists(pool, table, current_schema_only).await? {
+            validate_postgres_table_kind(pool, table, current_schema_only).await?;
             let _inserted = existing.insert(*table);
         }
     }
@@ -1651,60 +1736,75 @@ pub(crate) async fn validate_existing_postgres_schema(pool: &PgPool, embedding_d
     }
 
     for expectation in POSTGRES_REQUIRED_COLUMNS.iter().filter(|expectation| expectation.table != POSTGRES_MIGRATIONS_TABLE) {
-        validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type).await?;
+        validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
     }
     for expectation in POSTGRES_OPTIONAL_COLUMNS {
-        validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type).await?;
+        validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
     }
-    validate_postgres_embedding_revision_contract(pool).await?;
+    validate_postgres_embedding_revision_contract(pool, current_schema_only).await?;
+    validate_postgres_default_contract(pool, "memory_embeddings", "updated_at", "now()", current_schema_only).await?;
     for table in POSTGRES_USER_TABLES {
-        validate_postgres_required_keys(pool, table).await?;
+        validate_postgres_required_keys(pool, table, current_schema_only).await?;
     }
-    validate_postgres_column_type(pool, "memory_embeddings", "embedding", &format!("vector({embedding_dimensions})")).await?;
+    validate_postgres_column_type(pool, "memory_embeddings", "embedding", &format!("vector({embedding_dimensions})"), current_schema_only).await?;
     Ok(())
 }
 
 /// Validate every managed `PostgreSQL` table that is already present while
 /// allowing absent tables and known migration-added columns.
-pub(crate) async fn validate_present_postgres_schema(pool: &PgPool, embedding_dimensions: usize) -> Result<(), StoreError> {
-    for table in std::iter::once(&POSTGRES_MIGRATIONS_TABLE).chain(POSTGRES_USER_TABLES.iter()) {
-        if !postgres_table_exists(pool, table).await? {
+pub(crate) async fn validate_present_postgres_schema(
+    pool: &PgPool,
+    embedding_dimensions: usize,
+    current_schema_only: bool,
+    include_migration_metadata: bool,
+) -> Result<(), StoreError> {
+    for table in std::iter::once(&POSTGRES_MIGRATIONS_TABLE)
+        .filter(|_| include_migration_metadata)
+        .chain(POSTGRES_USER_TABLES.iter())
+    {
+        if !postgres_table_exists(pool, table, current_schema_only).await? {
             continue;
         }
-        validate_postgres_table_kind(pool, table).await?;
+        validate_postgres_table_kind(pool, table, current_schema_only).await?;
         for expectation in POSTGRES_REQUIRED_COLUMNS.iter().filter(|expectation| expectation.table == *table) {
-            validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type).await?;
+            validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
         }
         for expectation in POSTGRES_OPTIONAL_COLUMNS.iter().filter(|expectation| expectation.table == *table) {
-            validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type).await?;
+            validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
         }
         if *table == "memories" {
-            validate_postgres_embedding_revision_contract(pool).await?;
+            validate_postgres_embedding_revision_contract(pool, current_schema_only).await?;
+        } else if *table == "memory_embeddings" {
+            validate_postgres_default_contract(pool, "memory_embeddings", "updated_at", "now()", current_schema_only).await?;
+        } else if *table == POSTGRES_MIGRATIONS_TABLE {
+            validate_postgres_default_contract(pool, POSTGRES_MIGRATIONS_TABLE, "applied_at", "now()", current_schema_only).await?;
         }
-        validate_postgres_required_keys(pool, table).await?;
+        validate_postgres_required_keys(pool, table, current_schema_only).await?;
     }
-    if postgres_table_exists(pool, "memory_embeddings").await? {
-        validate_postgres_column_type(pool, "memory_embeddings", "embedding", &format!("vector({embedding_dimensions})")).await?;
+    if postgres_table_exists(pool, "memory_embeddings", current_schema_only).await? {
+        validate_postgres_column_type(pool, "memory_embeddings", "embedding", &format!("vector({embedding_dimensions})"), current_schema_only).await?;
     }
     Ok(())
 }
 
-async fn validate_postgres_required_keys(pool: &PgPool, table: &'static str) -> Result<(), StoreError> {
+async fn validate_postgres_required_keys(pool: &PgPool, table: &'static str, current_schema_only: bool) -> Result<(), StoreError> {
     for expectation in POSTGRES_REQUIRED_KEYS.iter().filter(|expectation| expectation.table == table) {
-        validate_postgres_unique_or_primary_key(pool, expectation.table, expectation.columns).await?;
+        validate_postgres_unique_or_primary_key(pool, expectation.table, expectation.columns, current_schema_only).await?;
     }
     Ok(())
 }
 
-async fn validate_postgres_embedding_revision_contract(pool: &PgPool) -> Result<(), StoreError> {
+async fn validate_postgres_embedding_revision_contract(pool: &PgPool, current_schema_only: bool) -> Result<(), StoreError> {
     let not_null: bool = query_scalar(
-        "SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'embedding_revision' AND NOT attisdropped",
+        "SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memories') ELSE 'memories' END) AND attname = 'embedding_revision' AND NOT attisdropped",
     )
+    .bind(current_schema_only)
     .fetch_one(pool)
     .await?;
     let default: Option<String> = query_scalar(
-        "SELECT pg_get_expr(definition.adbin, definition.adrelid) FROM pg_attribute AS attribute LEFT JOIN pg_attrdef AS definition ON definition.adrelid = attribute.attrelid AND definition.adnum = attribute.attnum WHERE attribute.attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attribute.attname = 'embedding_revision' AND NOT attribute.attisdropped",
+        "SELECT pg_get_expr(definition.adbin, definition.adrelid) FROM pg_attribute AS attribute LEFT JOIN pg_attrdef AS definition ON definition.adrelid = attribute.attrelid AND definition.adnum = attribute.attnum WHERE attribute.attrelid = to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memories') ELSE 'memories' END) AND attribute.attname = 'embedding_revision' AND NOT attribute.attisdropped",
     )
+    .bind(current_schema_only)
     .fetch_one(pool)
     .await?;
     let default_is_zero = default.as_deref().is_some_and(|value| {
@@ -1719,17 +1819,44 @@ async fn validate_postgres_embedding_revision_contract(pool: &PgPool) -> Result<
     Ok(())
 }
 
-async fn postgres_table_exists(pool: &PgPool, table: &'static str) -> Result<bool, StoreError> {
-    query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), $1)) IS NOT NULL")
+async fn validate_postgres_default_contract(
+    pool: &PgPool,
+    table: &'static str,
+    column: &'static str,
+    expected_default: &'static str,
+    current_schema_only: bool,
+) -> Result<(), StoreError> {
+    let contract: Option<bool> = query_scalar(
+        "SELECT attribute.attnotnull AND pg_get_expr(definition.adbin, definition.adrelid) = $3 FROM pg_attribute AS attribute LEFT JOIN pg_attrdef AS definition ON definition.adrelid = attribute.attrelid AND definition.adnum = attribute.attnum WHERE attribute.attrelid = to_regclass(CASE WHEN $4 THEN format('%I.%I', current_schema(), $1) ELSE $1 END) AND attribute.attname = $2 AND NOT attribute.attisdropped",
+    )
+    .bind(table)
+    .bind(column)
+    .bind(expected_default)
+    .bind(current_schema_only)
+    .fetch_optional(pool)
+    .await?;
+    if contract == Some(true) {
+        Ok(())
+    } else {
+        Err(StoreError::Conflict(format!(
+            "PostgreSQL target column {table}.{column} must be NOT NULL with DEFAULT {expected_default} because startup does not repair an existing definition"
+        )))
+    }
+}
+
+async fn postgres_table_exists(pool: &PgPool, table: &'static str, current_schema_only: bool) -> Result<bool, StoreError> {
+    query_scalar("SELECT to_regclass(CASE WHEN $2 THEN format('%I.%I', current_schema(), $1) ELSE $1 END) IS NOT NULL")
         .bind(table)
+        .bind(current_schema_only)
         .fetch_one(pool)
         .await
         .map_err(StoreError::from)
 }
 
-async fn validate_postgres_table_kind(pool: &PgPool, table: &'static str) -> Result<(), StoreError> {
-    let relkind: Option<String> = query_scalar("SELECT relkind::text FROM pg_class WHERE oid = to_regclass(format('%I.%I', current_schema(), $1))")
+async fn validate_postgres_table_kind(pool: &PgPool, table: &'static str, current_schema_only: bool) -> Result<(), StoreError> {
+    let relkind: Option<String> = query_scalar("SELECT relkind::text FROM pg_class WHERE oid = to_regclass(CASE WHEN $2 THEN format('%I.%I', current_schema(), $1) ELSE $1 END)")
         .bind(table)
+        .bind(current_schema_only)
         .fetch_optional(pool)
         .await?;
     match relkind.as_deref() {
@@ -1738,8 +1865,8 @@ async fn validate_postgres_table_kind(pool: &PgPool, table: &'static str) -> Res
     }
 }
 
-async fn validate_postgres_column_type(pool: &PgPool, table: &'static str, column: &'static str, expected_type: &str) -> Result<(), StoreError> {
-    let actual_type = postgres_column_type(pool, table, column).await?;
+async fn validate_postgres_column_type(pool: &PgPool, table: &'static str, column: &'static str, expected_type: &str, current_schema_only: bool) -> Result<(), StoreError> {
+    let actual_type = postgres_column_type(pool, table, column, current_schema_only).await?;
 
     match actual_type {
         Some(actual_type) if actual_type == expected_type => Ok(()),
@@ -1750,8 +1877,14 @@ async fn validate_postgres_column_type(pool: &PgPool, table: &'static str, colum
     }
 }
 
-async fn validate_optional_postgres_column_type(pool: &PgPool, table: &'static str, column: &'static str, expected_type: &str) -> Result<(), StoreError> {
-    let actual_type = postgres_column_type(pool, table, column).await?;
+async fn validate_optional_postgres_column_type(
+    pool: &PgPool,
+    table: &'static str,
+    column: &'static str,
+    expected_type: &str,
+    current_schema_only: bool,
+) -> Result<(), StoreError> {
+    let actual_type = postgres_column_type(pool, table, column, current_schema_only).await?;
 
     match actual_type {
         Some(actual_type) if actual_type == expected_type => Ok(()),
@@ -1762,24 +1895,25 @@ async fn validate_optional_postgres_column_type(pool: &PgPool, table: &'static s
     }
 }
 
-async fn postgres_column_type(pool: &PgPool, table: &'static str, column: &'static str) -> Result<Option<String>, StoreError> {
+async fn postgres_column_type(pool: &PgPool, table: &'static str, column: &'static str, current_schema_only: bool) -> Result<Option<String>, StoreError> {
     query_scalar(
         "
         SELECT format_type(attribute.atttypid, attribute.atttypmod)
         FROM pg_attribute AS attribute
-        WHERE attribute.attrelid = to_regclass(format('%I.%I', current_schema(), $1))
+        WHERE attribute.attrelid = to_regclass(CASE WHEN $3 THEN format('%I.%I', current_schema(), $1) ELSE $1 END)
           AND attribute.attname = $2
           AND NOT attribute.attisdropped
         ",
     )
     .bind(table)
     .bind(column)
+    .bind(current_schema_only)
     .fetch_optional(pool)
     .await
     .map_err(StoreError::from)
 }
 
-async fn validate_postgres_unique_or_primary_key(pool: &PgPool, table: &'static str, columns: &'static [&'static str]) -> Result<(), StoreError> {
+async fn validate_postgres_unique_or_primary_key(pool: &PgPool, table: &'static str, columns: &'static [&'static str], current_schema_only: bool) -> Result<(), StoreError> {
     let expected_columns = sorted_key_columns(columns);
     let has_key: bool = query_scalar(
         "
@@ -1797,7 +1931,7 @@ async fn validate_postgres_unique_or_primary_key(pool: &PgPool, table: &'static 
                  AND attribute.attnum = key.attnum
                 WHERE key.ordinal <= index_row.indnkeyatts
             ) AS key_columns
-            WHERE index_row.indrelid = to_regclass(format('%I.%I', current_schema(), $1))
+            WHERE index_row.indrelid = to_regclass(CASE WHEN $3 THEN format('%I.%I', current_schema(), $1) ELSE $1 END)
               AND index_row.indisunique
               AND index_row.indisvalid
               AND index_row.indisready
@@ -1810,6 +1944,7 @@ async fn validate_postgres_unique_or_primary_key(pool: &PgPool, table: &'static 
     )
     .bind(table)
     .bind(&expected_columns)
+    .bind(current_schema_only)
     .fetch_one(pool)
     .await?;
 
@@ -1847,7 +1982,7 @@ async fn postgres_counts_existing(pool: &PgPool) -> Result<MigrationTableCounts,
 }
 
 async fn postgres_count_existing(pool: &PgPool, table: &'static str) -> Result<u64, StoreError> {
-    let exists = postgres_table_exists(pool, table).await?;
+    let exists = postgres_table_exists(pool, table, true).await?;
     if !exists {
         return Ok(0);
     }
@@ -3177,7 +3312,7 @@ mod tests {
         let _dropped_table = query("DROP TABLE memory_audit_log").execute(&pool).await.unwrap();
         let _dropped_column = query("ALTER TABLE memories DROP COLUMN confidence").execute(&pool).await.unwrap();
 
-        let err = validate_present_postgres_schema(&pool, TEST_EMBEDDING_DIMENSIONS).await.unwrap_err();
+        let err = validate_present_postgres_schema(&pool, TEST_EMBEDDING_DIMENSIONS, true, true).await.unwrap_err();
 
         assert!(err.to_string().contains("memories.confidence"));
         pool.close().await;

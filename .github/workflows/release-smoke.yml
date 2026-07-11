@@ -1,0 +1,161 @@
+name: Published Release Smoke
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag to verify
+        required: true
+        type: string
+
+concurrency:
+  group: release-smoke-${{ github.event.workflow_run.head_branch || inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  RELEASE_TAG: ${{ github.event.workflow_run.head_branch || inputs.tag }}
+
+jobs:
+  linux:
+    name: Linux published archive
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download and verify release assets
+        run: |
+          mkdir release
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir release
+          cd release
+          sha256sum --check SHA256SUMS
+
+      - name: Smoke downloaded Linux binary
+        run: |
+          archive="release/localhold-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.zst"
+          mkdir extracted
+          tar --zstd -xf "$archive" -C extracted
+          binary="$PWD/extracted/localhold-${RELEASE_TAG}-x86_64-unknown-linux-gnu/bin/hold"
+          version="${RELEASE_TAG#v}"
+
+          test "$("$binary" --version)" = "hold $version"
+          "$binary" --help >/dev/null
+
+          request='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1"}}}'
+          printf '%s\n' "$request" |
+            XDG_CONFIG_HOME="$RUNNER_TEMP/mcp-config" \
+            LOCALHOLD_DB_PATH="$RUNNER_TEMP/mcp.db" \
+            LOCALHOLD_TRANSPORT=stdio \
+            LOCALHOLD_LOG_LEVEL=error \
+            "$binary" 2>"$RUNNER_TEMP/mcp-stderr.log" >"$RUNNER_TEMP/mcp-stdout.log"
+          jq -e --arg version "$version" '
+            select(.id == 1)
+            | .result.serverInfo
+            | .name == "localhold"
+              and .title == "LocalHold"
+              and .version == $version
+          ' "$RUNNER_TEMP/mcp-stdout.log" >/dev/null
+
+          set +e
+          XDG_CONFIG_HOME="$RUNNER_TEMP/text-config" \
+            LOCALHOLD_DB_PATH="$RUNNER_TEMP/text.db" \
+            LOCALHOLD_TRANSPORT=http \
+            LOCALHOLD_HTTP_HOST=127.0.0.1 \
+            LOCALHOLD_HTTP_PORT=0 \
+            LOCALHOLD_LOG_LEVEL=info \
+            timeout 3s "$binary" </dev/null >"$RUNNER_TEMP/text-stdout.log" 2>"$RUNNER_TEMP/text-stderr.log"
+          text_exit=$?
+          set -e
+          test "$text_exit" -eq 124
+          grep -Fq "noop embedding provider initialized" "$RUNNER_TEMP/text-stderr.log"
+          if grep -Fq "auto-reembed batch failed" "$RUNNER_TEMP/text-stderr.log"; then
+            exit 1
+          fi
+
+          XDG_CONFIG_HOME="$RUNNER_TEMP/reranker-config" \
+            LOCALHOLD_DB_PATH="$RUNNER_TEMP/reranker.db" \
+            LOCALHOLD_TRANSPORT=http \
+            LOCALHOLD_HTTP_HOST=127.0.0.1 \
+            LOCALHOLD_HTTP_PORT=0 \
+            LOCALHOLD_LOG_LEVEL=info \
+            LOCALHOLD_RERANKER_ENABLED=true \
+            LOCALHOLD_RERANKER_CACHE_DIR="$RUNNER_TEMP/models" \
+            "$binary" </dev/null >"$RUNNER_TEMP/reranker-stdout.log" 2>"$RUNNER_TEMP/reranker-stderr.log" &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+
+          ready=0
+          for _ in $(seq 1 180); do
+            if grep -Fq "reranker initialized (available: true)" "$RUNNER_TEMP/reranker-stderr.log"; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/reranker-stderr.log" >&2
+              wait "$pid"
+            fi
+            sleep 1
+          done
+          if test "$ready" -ne 1; then
+            cat "$RUNNER_TEMP/reranker-stderr.log" >&2
+            exit 1
+          fi
+          kill "$pid"
+          wait "$pid" 2>/dev/null || true
+          trap - EXIT
+
+  windows:
+    name: Windows published archive
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: windows-latest
+    steps:
+      - name: Download release assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release | Out-Null
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --dir release
+
+      - name: Verify checksums and smoke downloaded Windows binary
+        shell: pwsh
+        run: |
+          $verified = 0
+          foreach ($line in Get-Content release/SHA256SUMS) {
+            if ($line -notmatch '^([0-9a-f]{64})\s+\./(.+)$') {
+              throw "invalid checksum line: $line"
+            }
+            $expected = $Matches[1]
+            $path = Join-Path release $Matches[2]
+            $actual = (Get-FileHash -Algorithm SHA256 $path).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) {
+              throw "checksum mismatch for $path"
+            }
+            $verified++
+          }
+          if ($verified -ne 2) { throw "expected two release asset checksums, got $verified" }
+
+          $version = $env:RELEASE_TAG.Substring(1)
+          $archive = "release/localhold-$env:RELEASE_TAG-x86_64-pc-windows-msvc.zip"
+          Expand-Archive -Path $archive -DestinationPath extracted
+          $binary = "$PWD/extracted/localhold-$env:RELEASE_TAG-x86_64-pc-windows-msvc/bin/hold.exe"
+
+          $actualVersion = & $binary --version
+          if ($actualVersion -ne "hold $version") { throw "unexpected version: $actualVersion" }
+          & $binary --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "help command failed" }
+
+          $env:APPDATA = "$env:RUNNER_TEMP/mcp-config"
+          $env:LOCALHOLD_DB_PATH = "$env:RUNNER_TEMP/mcp.db"
+          $env:LOCALHOLD_TRANSPORT = "stdio"
+          $env:LOCALHOLD_LOG_LEVEL = "error"
+          $request = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1"}}}'
+          $responseLines = @($request | & $binary 2>"$env:RUNNER_TEMP/mcp-stderr.log")
+          $response = $responseLines | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object id -eq 1 | Select-Object -First 1
+          if ($null -eq $response) { throw "missing MCP initialize response" }
+          if ($response.result.serverInfo.name -ne "localhold") { throw "unexpected MCP server name" }
+          if ($response.result.serverInfo.title -ne "LocalHold") { throw "unexpected MCP server title" }
+          if ($response.result.serverInfo.version -ne $version) { throw "unexpected MCP server version" }

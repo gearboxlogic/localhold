@@ -5,13 +5,13 @@
 //! `tokio::task::spawn_blocking` during one-time startup initialization.
 
 use std::{
-    fs::File,
+    fs::{File, OpenOptions},
     io::{BufWriter, Read, Write as _},
     path::{Path, PathBuf},
 };
 
 use sha2::{Digest as _, Sha256};
-use tracing::info;
+use tracing::{info, warn};
 
 use super::RerankerError;
 use crate::config::{DEFAULT_RERANKER_REVISION, RerankerConfig, is_builtin_default_reranker_model};
@@ -28,6 +28,8 @@ const MAX_DOWNLOAD_BYTES: u64 = 500 * 1024 * 1024;
 const COPY_BUFFER_BYTES: usize = 16 * 1024;
 /// HTTP timeout for model downloads — generous to allow large files over slow connections.
 const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
+/// Persistent lock file used to serialize cache validation and publication.
+const CACHE_LOCK_FILE: &str = ".download.lock";
 
 fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -90,6 +92,16 @@ pub(crate) fn resolve_model_paths(config: &RerankerConfig) -> Result<ModelPaths,
     info!("resolving reranker model '{}' at revision {} in {}", config.model, pins.revision, model_dir.display());
     std::fs::create_dir_all(&model_dir).map_err(|e| RerankerError::Permanent(Box::new(e)))?;
 
+    let lock = open_cache_lock(&model_dir)?;
+    lock.lock().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            RerankerError::Transient(Box::new(error))
+        } else {
+            RerankerError::Permanent(Box::new(error))
+        }
+    })?;
+    remove_stale_partial_files(&model_dir)?;
+
     for (remote_path, local_name) in MODEL_FILES {
         let local_path = model_dir.join(local_name);
         let expected_sha256 = match *local_name {
@@ -97,7 +109,7 @@ pub(crate) fn resolve_model_paths(config: &RerankerConfig) -> Result<ModelPaths,
             "tokenizer.json" => pins.tokenizer_sha256.as_str(),
             other => return Err(RerankerError::Permanent(format!("unexpected reranker artifact '{other}'").into())),
         };
-        let url = format!("{HF_BASE_URL}/{}/resolve/{}/{remote_path}", config.model, pins.revision);
+        let url = format!("{}/{}/resolve/{}/{remote_path}", download_base_url(), config.model, pins.revision);
         ensure_cached_file(&url, &local_path, expected_sha256)?;
     }
 
@@ -159,7 +171,7 @@ fn ensure_cached_file(url: &str, dest: &Path, expected_sha256: &str) -> Result<(
 
     if dest.exists() {
         info!("  {} cached but hash mismatch, re-downloading", dest.display());
-        std::fs::remove_file(dest).map_err(|e| RerankerError::Permanent(Box::new(e)))?;
+        std::fs::remove_file(dest).map_err(|error| RerankerError::Permanent(Box::new(error)))?;
     }
 
     download_file(url, dest, expected_sha256)
@@ -208,9 +220,8 @@ fn download_file(url: &str, dest: &Path, expected_sha256: &str) -> Result<(), Re
         ));
     }
 
-    let tmp_path = temporary_download_path(dest);
+    let (tmp_path, tmp_file) = create_temporary_download(dest)?;
     let result = (|| -> Result<u64, RerankerError> {
-        let tmp_file = File::create(&tmp_path).map_err(|e| RerankerError::Permanent(Box::new(e)))?;
         let mut writer = BufWriter::new(tmp_file);
         let mut hasher = Sha256::new();
         let mut buffer = [0_u8; COPY_BUFFER_BYTES];
@@ -244,7 +255,7 @@ fn download_file(url: &str, dest: &Path, expected_sha256: &str) -> Result<(), Re
             ));
         }
 
-        std::fs::rename(&tmp_path, dest).map_err(|e| RerankerError::Permanent(Box::new(e)))?;
+        publish_verified_file(&tmp_path, dest, expected_sha256)?;
         Ok(total_bytes)
     })();
 
@@ -257,9 +268,266 @@ fn download_file(url: &str, dest: &Path, expected_sha256: &str) -> Result<(), Re
     Ok(())
 }
 
-fn temporary_download_path(dest: &Path) -> PathBuf {
+fn open_cache_lock(model_dir: &Path) -> Result<File, RerankerError> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(model_dir.join(CACHE_LOCK_FILE))
+        .map_err(|error| RerankerError::Permanent(Box::new(error)))
+}
+
+fn create_temporary_download(dest: &Path) -> Result<(PathBuf, File), RerankerError> {
     let file_name = dest.file_name().and_then(|name| name.to_str()).unwrap_or("download");
-    dest.with_file_name(format!(".{file_name}.partial"))
+    for _ in 0..16_u8 {
+        let path = dest.with_file_name(format!(".{file_name}.partial-{}-{:016x}", std::process::id(), fastrand::u64(..)));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(RerankerError::Permanent(Box::new(error))),
+        }
+    }
+    Err(RerankerError::Transient("could not allocate a unique reranker download staging file".into()))
+}
+
+fn publish_verified_file(tmp_path: &Path, dest: &Path, expected_sha256: &str) -> Result<(), RerankerError> {
+    match std::fs::rename(tmp_path, dest) {
+        Ok(()) => Ok(()),
+        Err(_rename_error) if dest.exists() && matches!(verify_file_sha256(dest, expected_sha256), Ok(true)) => {
+            // A process that does not use this lock may have published the
+            // same verified artifact. Keep it and discard our staging file.
+            std::fs::remove_file(tmp_path).map_err(|remove_error| RerankerError::Permanent(Box::new(remove_error)))?;
+            Ok(())
+        }
+        Err(rename_error) => Err(RerankerError::Permanent(
+            format!("publishing verified reranker artifact {}: {rename_error}", dest.display()).into(),
+        )),
+    }
+}
+
+fn remove_stale_partial_files(model_dir: &Path) -> Result<(), RerankerError> {
+    let entries = std::fs::read_dir(model_dir).map_err(|error| RerankerError::Permanent(Box::new(error)))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| RerankerError::Permanent(Box::new(error)))?;
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        let is_partial = file_name == ".model.onnx.partial"
+            || file_name == ".tokenizer.json.partial"
+            || file_name.starts_with(".model.onnx.partial-")
+            || file_name.starts_with(".tokenizer.json.partial-");
+        if is_partial
+            && let Err(error) = std::fs::remove_file(entry.path())
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!("could not remove stale reranker cache file {}: {error}", entry.path().display());
+        }
+    }
+    Ok(())
+}
+
+fn download_base_url() -> String {
+    #[cfg(test)]
+    if let Ok(base_url) = std::env::var("LOCALHOLD_TEST_RERANKER_BASE_URL") {
+        return base_url;
+    }
+    HF_BASE_URL.into()
 }
 
 // `expand_tilde` is in `crate::config::expand_tilde`.
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{Read as _, Write as _},
+        net::{TcpListener, TcpStream},
+        process::{Child, Command},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        thread,
+        time::{Duration, Instant},
+    };
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    const MODEL_BYTES: &[u8] = b"verified model artifact";
+    const TOKENIZER_BYTES: &[u8] = b"verified tokenizer artifact";
+
+    #[test]
+    fn concurrent_processes_converge_on_one_verified_cache_entry() {
+        let cache = TempDir::new().unwrap();
+        let server = MockArtifactServer::start(false);
+        let mut children = std::iter::repeat_with(|| spawn_download_child(cache.path(), &server.base_url)).take(4).collect::<Vec<_>>();
+
+        for child in &mut children {
+            let status = wait_for_child(child).unwrap();
+            assert!(status.success(), "cache download child failed with {status}");
+        }
+
+        assert_eq!(server.request_count(), 2, "only one process should download the two artifacts");
+        assert_verified_cache(cache.path());
+    }
+
+    #[test]
+    fn failed_downloader_releases_lock_and_another_process_recovers() {
+        let cache = TempDir::new().unwrap();
+        seed_invalid_cache(cache.path());
+        let server = MockArtifactServer::start(true);
+        let mut children = std::iter::repeat_with(|| spawn_download_child(cache.path(), &server.base_url)).take(2).collect::<Vec<_>>();
+        let statuses = children.iter_mut().map(|child| wait_for_child(child).unwrap()).collect::<Vec<_>>();
+
+        assert_eq!(
+            statuses.iter().filter(|status| status.success()).count(),
+            1,
+            "one process should recover after the injected failure"
+        );
+        assert_eq!(
+            statuses.iter().filter(|status| !status.success()).count(),
+            1,
+            "the injected HTTP failure should reach one process"
+        );
+        assert_eq!(server.request_count(), 3, "the recovery process should retry the model and download the tokenizer");
+        assert_verified_cache(cache.path());
+    }
+
+    #[test]
+    fn cache_download_child_process() {
+        let Ok(cache_dir) = std::env::var("LOCALHOLD_TEST_RERANKER_CACHE_CHILD") else {
+            return;
+        };
+        let config = RerankerConfig {
+            model: "test/model".into(),
+            revision: "revision".into(),
+            cache_dir,
+            model_sha256: sha256_bytes(MODEL_BYTES),
+            tokenizer_sha256: sha256_bytes(TOKENIZER_BYTES),
+            ..RerankerConfig::default()
+        };
+
+        let paths = resolve_model_paths(&config).unwrap();
+        assert_eq!(std::fs::read(paths.onnx_path).unwrap(), MODEL_BYTES);
+        assert_eq!(std::fs::read(paths.tokenizer_path).unwrap(), TOKENIZER_BYTES);
+    }
+
+    fn spawn_download_child(cache_dir: &Path, base_url: &str) -> Child {
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "reranker::download::tests::cache_download_child_process", "--nocapture"])
+            .env("LOCALHOLD_TEST_RERANKER_CACHE_CHILD", cache_dir)
+            .env("LOCALHOLD_TEST_RERANKER_BASE_URL", base_url)
+            .spawn()
+            .unwrap()
+    }
+
+    fn wait_for_child(child: &mut Child) -> std::io::Result<std::process::ExitStatus> {
+        let started = Instant::now();
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            if started.elapsed() >= Duration::from_secs(30) {
+                child.kill()?;
+                let _reaped_status = child.wait()?;
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "cache download child exceeded 30 seconds"));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn assert_verified_cache(cache_dir: &Path) {
+        let model_dir = cache_dir.join("test--model@revision");
+        assert_eq!(std::fs::read(model_dir.join("model.onnx")).unwrap(), MODEL_BYTES);
+        assert_eq!(std::fs::read(model_dir.join("tokenizer.json")).unwrap(), TOKENIZER_BYTES);
+        let partials = std::fs::read_dir(model_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".partial"))
+            .collect::<Vec<_>>();
+        assert!(partials.is_empty(), "staging files should be cleaned up: {partials:?}");
+    }
+
+    fn seed_invalid_cache(cache_dir: &Path) {
+        let model_dir = cache_dir.join("test--model@revision");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(model_dir.join("model.onnx"), b"invalid model").unwrap();
+        std::fs::write(model_dir.join("tokenizer.json"), b"invalid tokenizer").unwrap();
+        std::fs::write(model_dir.join(".model.onnx.partial"), b"interrupted legacy download").unwrap();
+        std::fs::write(model_dir.join(".tokenizer.json.partial-123-stale"), b"interrupted download").unwrap();
+    }
+
+    fn sha256_bytes(bytes: &[u8]) -> String {
+        hex_lower(Sha256::digest(bytes))
+    }
+
+    struct MockArtifactServer {
+        base_url: String,
+        request_count: Arc<AtomicUsize>,
+        stop: Arc<AtomicBool>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl MockArtifactServer {
+        fn start(fail_first: bool) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let request_count = Arc::new(AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread_request_count = Arc::clone(&request_count);
+            let thread_stop = Arc::clone(&stop);
+            let fail_next = AtomicBool::new(fail_first);
+            let thread = thread::spawn(move || run_mock_server(&listener, &thread_request_count, &thread_stop, &fail_next));
+            Self {
+                base_url: format!("http://{address}"),
+                request_count,
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        fn request_count(&self) -> usize {
+            self.request_count.load(Ordering::Acquire)
+        }
+    }
+
+    impl Drop for MockArtifactServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
+
+    fn run_mock_server(listener: &TcpListener, request_count: &AtomicUsize, stop: &AtomicBool, fail_next: &AtomicBool) {
+        while !stop.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((stream, _)) => serve_artifact(stream, request_count, fail_next),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(5)),
+                Err(_error) => return,
+            }
+        }
+    }
+
+    fn serve_artifact(mut stream: TcpStream, request_count: &AtomicUsize, fail_next: &AtomicBool) {
+        let mut request = [0_u8; 2048];
+        let read = stream.read(&mut request).unwrap();
+        let _previous_request_count = request_count.fetch_add(1, Ordering::AcqRel);
+        if fail_next.swap(false, Ordering::AcqRel) {
+            stream
+                .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            return;
+        }
+        let request = String::from_utf8_lossy(&request[..read]);
+        let body = if request.contains("tokenizer.json") { TOKENIZER_BYTES } else { MODEL_BYTES };
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+        stream.write_all(response.as_bytes()).unwrap();
+        stream.write_all(body).unwrap();
+    }
+}

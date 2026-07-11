@@ -147,6 +147,36 @@ fn binary_starts_in_http_mode() {
 }
 
 #[test]
+fn binary_starts_text_only_without_embedding_failure_warning() {
+    let db_path = unique_db_path("bin-text-only");
+    let root = db_path.with_extension("config");
+    let mut cmd = base_binary_command(&db_path);
+    let _config_dir = isolate_user_config_dir(&mut cmd, &root);
+    cmd.env("LOCALHOLD_TRANSPORT", "http");
+    cmd.env("LOCALHOLD_HTTP_HOST", "127.0.0.1");
+    cmd.env("LOCALHOLD_HTTP_PORT", "0");
+    cmd.env("LOCALHOLD_LOG_LEVEL", "info");
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().unwrap();
+    assert_child_stays_running(&mut child, "text-only HTTP");
+    let _kill = child.kill();
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(stderr.contains("noop embedding provider initialized"), "expected text-only provider startup log: {stderr}");
+    assert!(
+        !stderr.contains("auto-reembed batch failed"),
+        "text-only startup should not report embedding recovery failure: {stderr}"
+    );
+
+    let _cleanup = std::fs::remove_dir_all(root);
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
 #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
 fn binary_starts_with_postgres_backend() {
     let url = postgres_smoke_url();

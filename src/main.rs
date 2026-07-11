@@ -210,6 +210,8 @@ async fn run_with_store<S>(store: S, config: Config) -> AppResult
 where
     S: MemoryStore + Clone + std::fmt::Debug + 'static,
 {
+    let embedding_recovery_enabled = active_embedding_profile(&config.embedding).is_some();
+
     // Create embedding provider with recovery notification
     let recovery_notify = Arc::new(Notify::new());
     let embedding = create_embedding_provider(&config.embedding, &config.limits, Some(Arc::clone(&recovery_notify))).await;
@@ -250,8 +252,10 @@ where
         engine
     };
 
-    // Spawn auto-reembed watcher: when embeddings recover, re-embed memories that lack embeddings.
-    spawn_recovery_reembed(engine.clone(), recovery_notify);
+    // The noop provider is intentionally disabled and can never recover.
+    if embedding_recovery_enabled {
+        spawn_recovery_reembed(engine.clone(), recovery_notify);
+    }
 
     let server = LocalHoldServer::from_engine_with_auth_and_http(engine, server_principal, anonymous_policy, http_auth_token, http_principal_source);
     let server = if admin_tools_enabled { server.with_admin_tools() } else { server };

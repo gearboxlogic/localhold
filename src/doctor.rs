@@ -10,6 +10,7 @@ use sqlx_postgres::{PgPool, PgPoolOptions};
 use crate::{
     config::{Config, DatabaseBackend, EmbeddingConfig, EmbeddingHealthCheck},
     embedding::{EmbeddingProvider as _, OpenAiEmbedding},
+    error::EmbeddingError,
     store::{EmbeddingProfile, PostgresStore, SqliteStore},
 };
 
@@ -293,6 +294,7 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
         && table_readable(&connection, "memory_tombstones")
         && table_readable(&connection, "scope_registry")
         && table_readable(&connection, "memory_audit_log")
+        && table_readable(&connection, "memory_entities")
         && table_readable(&connection, "memory_embedding_map")
         && table_readable(&connection, "memory_embeddings")
         && table_readable(&connection, "embedding_profile");
@@ -362,12 +364,12 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
         return check("storage", DiagnosticStatus::Failed, "PostgreSQL is unreachable or rejected the configured connection");
     };
     let required_tables: Result<i64, _> = query_scalar(
-        "SELECT COUNT(*) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_v2_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name) WHERE to_regclass(required.name) IS NOT NULL",
+        "SELECT COUNT(*) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_entities'), ('memory_v2_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name) WHERE to_regclass(required.name) IS NOT NULL",
     )
     .fetch_one(&pool)
     .await;
     let schema_exists = match required_tables {
-        Ok(8_i64) => true,
+        Ok(9_i64) => true,
         Ok(_) => false,
         Err(_error) => {
             pool.close().await;
@@ -488,6 +490,14 @@ async fn embedding_check(config: &Config) -> DiagnosticCheck {
                     "embedding",
                     DiagnosticStatus::Healthy,
                     format!("model {} is healthy at {}", openai_compatible.model, openai_compatible.base_url),
+                ),
+                Err(EmbeddingError::RateLimited { .. }) => check(
+                    "embedding",
+                    DiagnosticStatus::Healthy,
+                    format!(
+                        "model {} at {} is reachable but currently rate limited; startup treats the provider as available",
+                        openai_compatible.model, openai_compatible.base_url
+                    ),
                 ),
                 Err(_error) => check(
                     "embedding",

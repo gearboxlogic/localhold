@@ -1,4 +1,6 @@
 use std::{
+    io::{Read as _, Write as _},
+    net::TcpListener,
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -205,6 +207,25 @@ fn doctor_degrades_when_sqlite_schema_needs_audit_log_migration() {
 }
 
 #[test]
+fn doctor_degrades_when_sqlite_schema_needs_entity_migration() {
+    let db_path = unique_db_path("doctor-entity-migration");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("DROP TABLE memory_entities", []).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "degraded");
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
 fn doctor_fails_for_incompatible_stored_embedding_profile_without_leaking_it() {
     let db_path = unique_db_path("doctor-profile-mismatch");
     let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
@@ -226,6 +247,36 @@ fn doctor_fails_for_incompatible_stored_embedding_profile_without_leaking_it() {
     assert_eq!(output.status.code(), Some(1_i32));
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(!stdout.contains("stored-secret"));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_treats_embedding_rate_limit_as_reachable_like_startup() {
+    let db_path = unique_db_path("doctor-embedding-rate-limit");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _peer) = listener.accept().unwrap();
+        let mut request = [0_u8; 2048];
+        let _bytes_read = stream.read(&mut request).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+    });
+
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_EMBEDDING_BASE_URL", format!("http://{address}/v1"));
+    command.env("LOCALHOLD_EMBEDDING_MODEL", "rate-limited-model");
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    server.join().unwrap();
+    assert!(output.status.success(), "rate-limited reachable provider should remain healthy");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "healthy");
 
     let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));

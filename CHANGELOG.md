@@ -8,6 +8,12 @@ requirements explicitly.
 
 ## [Unreleased]
 
+## [0.1.0-beta.2] - 2026-07-10
+
+- Restored CPU reranker builds on the Ubuntu 22.04 release baseline by pinning
+  the ONNX Runtime integration to a glibc-compatible release.
+- Added an Ubuntu 22.04 reranker-enabled source test to pull request CI.
+
 ## [0.1.0-beta.1] - 2026-07-10
 
 - Established the curated LocalHold public source tree.
@@ -24,5 +30,6 @@ requirements explicitly.
 - Added reproducible Linux CPU and Windows preview release archives with
   extracted-artifact smoke tests, checksums, and automated GitHub prereleases.
 
-[Unreleased]: https://github.com/gearboxlogic/localhold/compare/v0.1.0-beta.1...HEAD
-[0.1.0-beta.1]: https://github.com/gearboxlogic/localhold/releases/tag/v0.1.0-beta.1
+[Unreleased]: https://github.com/gearboxlogic/localhold/compare/v0.1.0-beta.2...HEAD
+[0.1.0-beta.2]: https://github.com/gearboxlogic/localhold/compare/v0.1.0-beta.1...v0.1.0-beta.2
+[0.1.0-beta.1]: https://github.com/gearboxlogic/localhold/tree/v0.1.0-beta.1

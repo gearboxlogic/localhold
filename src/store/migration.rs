@@ -822,14 +822,7 @@ pub(crate) fn validate_present_sqlite_schema(conn: &Connection) -> Result<(), St
     ];
     for table in SQLITE_REQUIRED_TABLES {
         if sqlite_schema_sql(conn, "table", table.name)?.is_none() {
-            let conflicting_object: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1 AND type IN ('view', 'index'))",
-                [table.name],
-                |row| row.get(0),
-            )?;
-            if conflicting_object {
-                return Err(sqlite_source_schema_error(format!("managed SQLite object {} exists but is not a table", table.name)));
-            }
+            validate_absent_sqlite_table_conflicts(conn, table.name)?;
             continue;
         }
         let sql = sqlite_schema_sql(conn, "table", table.name)?.unwrap_or_default().to_ascii_lowercase();
@@ -870,6 +863,26 @@ pub(crate) fn validate_present_sqlite_schema(conn: &Connection) -> Result<(), St
         }
     }
     validate_sqlite_managed_object_definitions(conn, true)?;
+    Ok(())
+}
+
+fn validate_absent_sqlite_table_conflicts(conn: &Connection, table: &'static str) -> Result<(), StoreError> {
+    if table == "memory_fts" {
+        let shadow_conflict: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('memory_fts_data', 'memory_fts_idx', 'memory_fts_docsize', 'memory_fts_config') AND type IN ('table', 'view', 'index'))",
+            [],
+            |row| row.get(0),
+        )?;
+        if shadow_conflict {
+            return Err(sqlite_source_schema_error("memory_fts is absent but a reserved FTS5 shadow-table name is occupied"));
+        }
+    }
+    let conflicting_object: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1 AND type IN ('view', 'index'))", [table], |row| {
+        row.get(0)
+    })?;
+    if conflicting_object {
+        return Err(sqlite_source_schema_error(format!("managed SQLite object {table} exists but is not a table")));
+    }
     Ok(())
 }
 
@@ -1023,6 +1036,59 @@ pub(crate) fn validate_embedding_map_integrity(conn: &Connection) -> Result<(), 
     if dangling_vector_count > 0 {
         return Err(StoreError::Conflict(format!(
             "SQLite source has {dangling_vector_count} embedding map row(s) whose vec_rowid does not exist in memory_embeddings"
+        )));
+    }
+    let unmapped_vector_count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM memory_embeddings AS embedding
+         LEFT JOIN memory_embedding_map AS map ON map.vec_rowid = embedding.rowid
+         WHERE map.vec_rowid IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if unmapped_vector_count > 0 {
+        return Err(StoreError::Conflict(format!(
+            "SQLite source has {unmapped_vector_count} vector row(s) without a matching embedding map entry"
+        )));
+    }
+    validate_embedding_flag_integrity(conn)
+}
+
+fn validate_embedding_flag_integrity(conn: &Connection) -> Result<(), StoreError> {
+    let invalid_flag_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memories WHERE has_embedding IS NULL OR typeof(has_embedding) <> 'integer' OR has_embedding NOT IN (0, 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid_flag_count > 0 {
+        return Err(StoreError::Conflict(format!(
+            "SQLite source has {invalid_flag_count} memory row(s) with a non-canonical has_embedding value"
+        )));
+    }
+    let missing_map_count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM memories AS memory
+         LEFT JOIN memory_embedding_map AS map ON map.memory_id = memory.id
+         WHERE memory.has_embedding = 1 AND map.memory_id IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if missing_map_count > 0 {
+        return Err(StoreError::Conflict(format!(
+            "SQLite source has {missing_map_count} memory row(s) with has_embedding=true but no embedding map entry"
+        )));
+    }
+    let unexpected_map_count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM memories AS memory
+         JOIN memory_embedding_map AS map ON map.memory_id = memory.id
+         WHERE memory.has_embedding = 0",
+        [],
+        |row| row.get(0),
+    )?;
+    if unexpected_map_count > 0 {
+        return Err(StoreError::Conflict(format!(
+            "SQLite source has {unexpected_map_count} memory row(s) with has_embedding=false but an embedding map entry exists"
         )));
     }
     Ok(())
@@ -1631,11 +1697,13 @@ async fn validate_postgres_required_keys(pool: &PgPool, table: &'static str) -> 
 }
 
 async fn validate_postgres_embedding_revision_contract(pool: &PgPool) -> Result<(), StoreError> {
-    let not_null: bool = query_scalar("SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass('memories') AND attname = 'embedding_revision' AND NOT attisdropped")
-        .fetch_one(pool)
-        .await?;
+    let not_null: bool = query_scalar(
+        "SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'embedding_revision' AND NOT attisdropped",
+    )
+    .fetch_one(pool)
+    .await?;
     let default: Option<String> = query_scalar(
-        "SELECT pg_get_expr(definition.adbin, definition.adrelid) FROM pg_attribute AS attribute LEFT JOIN pg_attrdef AS definition ON definition.adrelid = attribute.attrelid AND definition.adnum = attribute.attnum WHERE attribute.attrelid = to_regclass('memories') AND attribute.attname = 'embedding_revision' AND NOT attribute.attisdropped",
+        "SELECT pg_get_expr(definition.adbin, definition.adrelid) FROM pg_attribute AS attribute LEFT JOIN pg_attrdef AS definition ON definition.adrelid = attribute.attrelid AND definition.adnum = attribute.attnum WHERE attribute.attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attribute.attname = 'embedding_revision' AND NOT attribute.attisdropped",
     )
     .fetch_one(pool)
     .await?;
@@ -1652,7 +1720,7 @@ async fn validate_postgres_embedding_revision_contract(pool: &PgPool) -> Result<
 }
 
 async fn postgres_table_exists(pool: &PgPool, table: &'static str) -> Result<bool, StoreError> {
-    query_scalar("SELECT to_regclass($1) IS NOT NULL")
+    query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), $1)) IS NOT NULL")
         .bind(table)
         .fetch_one(pool)
         .await
@@ -1660,7 +1728,7 @@ async fn postgres_table_exists(pool: &PgPool, table: &'static str) -> Result<boo
 }
 
 async fn validate_postgres_table_kind(pool: &PgPool, table: &'static str) -> Result<(), StoreError> {
-    let relkind: Option<String> = query_scalar("SELECT relkind::text FROM pg_class WHERE oid = to_regclass($1)")
+    let relkind: Option<String> = query_scalar("SELECT relkind::text FROM pg_class WHERE oid = to_regclass(format('%I.%I', current_schema(), $1))")
         .bind(table)
         .fetch_optional(pool)
         .await?;
@@ -1699,7 +1767,7 @@ async fn postgres_column_type(pool: &PgPool, table: &'static str, column: &'stat
         "
         SELECT format_type(attribute.atttypid, attribute.atttypmod)
         FROM pg_attribute AS attribute
-        WHERE attribute.attrelid = to_regclass($1)
+        WHERE attribute.attrelid = to_regclass(format('%I.%I', current_schema(), $1))
           AND attribute.attname = $2
           AND NOT attribute.attisdropped
         ",
@@ -1729,7 +1797,7 @@ async fn validate_postgres_unique_or_primary_key(pool: &PgPool, table: &'static 
                  AND attribute.attnum = key.attnum
                 WHERE key.ordinal <= index_row.indnkeyatts
             ) AS key_columns
-            WHERE index_row.indrelid = to_regclass($1)
+            WHERE index_row.indrelid = to_regclass(format('%I.%I', current_schema(), $1))
               AND index_row.indisunique
               AND index_row.indisvalid
               AND index_row.indisready
@@ -1792,7 +1860,7 @@ async fn check_existing_postgres_vector_dimensions(pool: &PgPool, embedding_dime
         "
         SELECT format_type(attribute.atttypid, attribute.atttypmod)
         FROM pg_attribute AS attribute
-        WHERE attribute.attrelid = to_regclass('memory_embeddings')
+        WHERE attribute.attrelid = to_regclass(format('%I.%I', current_schema(), 'memory_embeddings'))
           AND attribute.attname = 'embedding'
           AND NOT attribute.attisdropped
         ",

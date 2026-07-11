@@ -659,6 +659,93 @@ fn doctor_degrades_when_sqlite_fts_objects_need_migration() {
 }
 
 #[test]
+fn doctor_fails_when_sqlite_fts_shadow_conflicts_block_recreation() {
+    let db_path = unique_db_path("doctor-fts-shadow-conflict");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TRIGGER trg_memory_fts_insert;
+             DROP TRIGGER trg_memory_fts_update;
+             DROP TRIGGER trg_memory_fts_delete;
+             DROP TABLE memory_fts;
+             CREATE TABLE memory_fts_data (id INTEGER);",
+        )
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_when_nonempty_embedding_map_has_no_vector_table() {
+    let db_path = unique_db_path("doctor-map-without-vectors");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    let memory = Memory::new_for_test("mapped vector".into(), vec![], Provenance::new_for_test(None, None, None), AccessPolicy::Public);
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(store.store(&memory, Some(&vec![0.1_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS])))
+        .unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("DROP TABLE memory_embeddings", []).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_when_sqlite_vector_has_no_embedding_map_entry() {
+    let db_path = unique_db_path("doctor-unmapped-vector");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    let embedding = vec![0.1_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS]
+        .into_iter()
+        .flat_map(f32::to_ne_bytes)
+        .collect::<Vec<_>>();
+    let _inserted = connection.execute("INSERT INTO memory_embeddings (embedding) VALUES (?1)", [embedding]).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_for_noncanonical_sqlite_embedding_flag() {
+    let db_path = unique_db_path("doctor-noncanonical-embedding-flag");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    let memory = Memory::new_for_test("bad embedding flag".into(), vec![], Provenance::new_for_test(None, None, None), AccessPolicy::Public);
+    let id = tokio::runtime::Runtime::new().unwrap().block_on(store.store(&memory, None)).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    let _updated = connection.execute("UPDATE memories SET has_embedding = 2 WHERE id = ?1", [id.to_string()]).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
 fn doctor_degrades_when_sqlite_index_needs_migration() {
     let db_path = unique_db_path("doctor-index-migration");
     let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();

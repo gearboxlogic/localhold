@@ -390,9 +390,18 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
     if crate::store::migration::validate_sqlite_foreign_key_integrity(&connection).is_err() {
         return check("storage", DiagnosticStatus::Failed, "SQLite foreign-key integrity check failed");
     }
-    let has_embedding_tables = table_readable(&connection, "memory_embedding_map") && table_readable(&connection, "memory_embeddings");
-    if has_embedding_tables && crate::store::migration::validate_embedding_map_integrity(&connection).is_err() {
-        return check("storage", DiagnosticStatus::Failed, "SQLite embedding-map integrity check failed");
+    let has_embedding_map = table_readable(&connection, "memory_embedding_map");
+    let has_embedding_vectors = table_readable(&connection, "memory_embeddings");
+    if has_embedding_map && has_embedding_vectors {
+        if crate::store::migration::validate_embedding_map_integrity(&connection).is_err() {
+            return check("storage", DiagnosticStatus::Failed, "SQLite embedding-map integrity check failed");
+        }
+    } else if has_embedding_map {
+        if sqlite_table_has_rows(&connection, "memory_embedding_map") != Some(false) {
+            return check("storage", DiagnosticStatus::Failed, "SQLite embedding map contains rows but its vector table is absent");
+        }
+    } else if has_embedding_vectors && sqlite_table_has_rows(&connection, "memory_embeddings") != Some(false) {
+        return check("storage", DiagnosticStatus::Failed, "SQLite vector table contains rows but its embedding map is absent");
     }
     match crate::store::existing_embedding_dimensions(&connection) {
         Ok(Some(dimensions)) if dimensions == config.embedding.dimensions() => {}
@@ -482,6 +491,10 @@ fn table_readable(connection: &Connection, table: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn sqlite_table_has_rows(connection: &Connection, table: &'static str) -> Option<bool> {
+    connection.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table})"), [], |row| row.get(0)).ok()
+}
+
 fn trigger_readable(connection: &Connection, trigger: &str) -> bool {
     connection
         .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?1)", [trigger], |row| {
@@ -540,7 +553,7 @@ async fn postgres_indexes_compatible(pool: &PgPool, allow_absent: bool) -> Resul
         "SELECT COALESCE(bool_and(
             ($1 AND indexes.oid IS NULL) OR COALESCE(
                 indexes.relkind = 'i'
-                AND index_data.indrelid = to_regclass(required.table_name)
+                AND index_data.indrelid = to_regclass(format('%I.%I', current_schema(), required.table_name))
                 AND index_data.indisvalid
                 AND index_data.indisready
                 AND index_data.indnkeyatts = required.key_count
@@ -574,7 +587,7 @@ async fn postgres_indexes_compatible(pool: &PgPool, allow_absent: bool) -> Resul
             ('idx_memory_tombstones_deleted_at', 'memory_tombstones', 1, 'deleted_atdesc', 'deleted_at desc', NULL),
             ('idx_memory_v2_metadata_scope_key', 'memory_v2_metadata', 1, 'scope_key', 'scope_key', NULL)
         ) AS required(name, table_name, key_count, expected_keys, definition_fragment, predicate)
-        LEFT JOIN pg_class AS indexes ON indexes.oid = to_regclass(required.name)
+        LEFT JOIN pg_class AS indexes ON indexes.oid = to_regclass(format('%I.%I', current_schema(), required.name))
         LEFT JOIN pg_index AS index_data ON index_data.indexrelid = indexes.oid",
     )
     .bind(allow_absent)
@@ -655,7 +668,7 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
         }
     }
     let required_tables: Result<i64, _> = query_scalar(
-        "SELECT COUNT(*) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_entities'), ('memory_v2_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name) WHERE ($1 OR required.name <> 'localhold_migrations') AND to_regclass(required.name) IS NOT NULL",
+        "SELECT COUNT(*) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_entities'), ('memory_v2_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name) WHERE ($1 OR required.name <> 'localhold_migrations') AND to_regclass(format('%I.%I', current_schema(), required.name)) IS NOT NULL",
     )
     .bind(config.database.postgres.auto_migrate)
     .fetch_one(&pool)
@@ -700,10 +713,10 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
         let present_indexes_compatible = postgres_indexes_compatible(&pool, true).await;
         let present_constraints_compatible: Result<bool, _> = query_scalar(
             "SELECT
-                (to_regclass('memories') IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('memories') AND confrelid = to_regclass('memories') AND contype = 'f' AND convalidated AND confdeltype = 'n' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass('memories') AND attname = 'superseded_by')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass('memories') AND attname = 'id')]::smallint[]))
-                AND (to_regclass('memory_entities') IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('memory_entities') AND confrelid = to_regclass('memories') AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass('memory_entities') AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass('memories') AND attname = 'id')]::smallint[]))
-                AND (to_regclass('memory_embeddings') IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('memory_embeddings') AND confrelid = to_regclass('memories') AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass('memory_embeddings') AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass('memories') AND attname = 'id')]::smallint[]))
-                AND (to_regclass('memory_v2_metadata') IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('memory_v2_metadata') AND confrelid = to_regclass('memories') AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass('memory_v2_metadata') AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass('memories') AND attname = 'id')]::smallint[]))",
+                (to_regclass(format('%I.%I', current_schema(), 'memories')) IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND confrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND contype = 'f' AND convalidated AND confdeltype = 'n' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'superseded_by')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'id')]::smallint[]))
+                AND (to_regclass(format('%I.%I', current_schema(), 'memory_entities')) IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(format('%I.%I', current_schema(), 'memory_entities')) AND confrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memory_entities')) AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'id')]::smallint[]))
+                AND (to_regclass(format('%I.%I', current_schema(), 'memory_embeddings')) IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(format('%I.%I', current_schema(), 'memory_embeddings')) AND confrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memory_embeddings')) AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'id')]::smallint[]))
+                AND (to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) AND confrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'id')]::smallint[]))",
         )
         .fetch_one(&pool)
         .await;
@@ -785,7 +798,10 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
         );
     }
     if config.database.postgres.auto_migrate {
-        let startup_privileges: Result<bool, _> = query_scalar("SELECT has_table_privilege('localhold_migrations', 'SELECT,INSERT')").fetch_one(&pool).await;
+        let startup_privileges: Result<bool, _> =
+            query_scalar("SELECT has_table_privilege('localhold_migrations', 'SELECT') AND has_table_privilege('localhold_migrations', 'INSERT')")
+                .fetch_one(&pool)
+                .await;
         if !matches!(startup_privileges, Ok(true)) {
             pool.close().await;
             return check("storage", DiagnosticStatus::Failed, "PostgreSQL migration metadata is not writable by the configured role");
@@ -793,14 +809,14 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
     }
     let runtime_privileges: Result<bool, _> = query_scalar(
         "SELECT
-            has_table_privilege('memories', 'SELECT,INSERT,UPDATE,DELETE')
-            AND has_table_privilege('memory_entities', 'SELECT,INSERT,DELETE')
-            AND has_table_privilege('memory_embeddings', 'SELECT,INSERT,UPDATE,DELETE')
-            AND has_table_privilege('memory_audit_log', 'SELECT,INSERT')
-            AND has_table_privilege('memory_tombstones', 'SELECT,INSERT,UPDATE')
-            AND has_table_privilege('scope_registry', 'SELECT,INSERT,UPDATE')
-            AND has_table_privilege('memory_v2_metadata', 'SELECT,INSERT,UPDATE,DELETE')
-            AND has_table_privilege('embedding_profile', 'SELECT,INSERT,UPDATE')
+            has_table_privilege('memories', 'SELECT') AND has_table_privilege('memories', 'INSERT') AND has_table_privilege('memories', 'UPDATE') AND has_table_privilege('memories', 'DELETE')
+            AND has_table_privilege('memory_entities', 'SELECT') AND has_table_privilege('memory_entities', 'INSERT') AND has_table_privilege('memory_entities', 'DELETE')
+            AND has_table_privilege('memory_embeddings', 'SELECT') AND has_table_privilege('memory_embeddings', 'INSERT') AND has_table_privilege('memory_embeddings', 'UPDATE') AND has_table_privilege('memory_embeddings', 'DELETE')
+            AND has_table_privilege('memory_audit_log', 'SELECT') AND has_table_privilege('memory_audit_log', 'INSERT')
+            AND has_table_privilege('memory_tombstones', 'SELECT') AND has_table_privilege('memory_tombstones', 'INSERT') AND has_table_privilege('memory_tombstones', 'UPDATE')
+            AND has_table_privilege('scope_registry', 'SELECT') AND has_table_privilege('scope_registry', 'INSERT') AND has_table_privilege('scope_registry', 'UPDATE')
+            AND has_table_privilege('memory_v2_metadata', 'SELECT') AND has_table_privilege('memory_v2_metadata', 'INSERT') AND has_table_privilege('memory_v2_metadata', 'UPDATE') AND has_table_privilege('memory_v2_metadata', 'DELETE')
+            AND has_table_privilege('embedding_profile', 'SELECT') AND has_table_privilege('embedding_profile', 'INSERT') AND has_table_privilege('embedding_profile', 'UPDATE')
             AND has_sequence_privilege(pg_get_serial_sequence('memory_audit_log', 'id'), 'USAGE')",
     )
     .fetch_one(&pool)
@@ -979,7 +995,9 @@ async fn postgres_embedding_profile_compatible(pool: &PgPool, expected: &Embeddi
 }
 
 async fn postgres_embedding_profile_compatible_if_present(pool: &PgPool, expected: &EmbeddingProfile) -> Result<bool, sqlx_core::error::Error> {
-    let profile_exists: bool = query_scalar("SELECT to_regclass('embedding_profile') IS NOT NULL").fetch_one(pool).await?;
+    let profile_exists: bool = query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'embedding_profile')) IS NOT NULL")
+        .fetch_one(pool)
+        .await?;
     if profile_exists {
         let dimensions = i64::try_from(expected.dimensions).unwrap_or(i64::MAX);
         let matches: Option<bool> = query_scalar("SELECT provider = $1 AND endpoint = $2 AND model = $3 AND dimensions = $4 FROM embedding_profile WHERE singleton = 1")
@@ -993,7 +1011,9 @@ async fn postgres_embedding_profile_compatible_if_present(pool: &PgPool, expecte
             return Ok(matches);
         }
     }
-    let embeddings_exist: bool = query_scalar("SELECT to_regclass('memory_embeddings') IS NOT NULL").fetch_one(pool).await?;
+    let embeddings_exist: bool = query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'memory_embeddings')) IS NOT NULL")
+        .fetch_one(pool)
+        .await?;
     if !embeddings_exist {
         return Ok(true);
     }

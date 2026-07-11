@@ -328,6 +328,29 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
             "SQLite file is readable but LocalHold schema bootstrap is pending; doctor did not create it",
         );
     }
+    match crate::store::existing_embedding_dimensions(&connection) {
+        Ok(Some(dimensions)) if dimensions == config.embedding.dimensions() => {}
+        Ok(Some(_dimensions)) => {
+            return check(
+                "storage",
+                DiagnosticStatus::Failed,
+                "SQLite vector dimensions do not match the configured embedding dimensions",
+            );
+        }
+        Ok(None) => {}
+        Err(_) => return check("storage", DiagnosticStatus::Failed, "SQLite vector dimensions could not be verified"),
+    }
+    if let Some(profile) = crate::embedding::factory::active_embedding_profile(&config.embedding)
+        && table_readable(&connection, "embedding_profile")
+        && table_readable(&connection, "memory_embedding_map")
+        && !sqlite_embedding_profile_compatible(&connection, &profile)
+    {
+        return check(
+            "storage",
+            DiagnosticStatus::Failed,
+            "SQLite stored embeddings are incompatible with the configured embedding profile",
+        );
+    }
     let current_schema = connection
         .prepare("SELECT id, embedding_claimed_at, embedding_claim_token, confidence FROM memories LIMIT 0")
         .and_then(|mut statement| statement.query([]).map(|_rows| ()))
@@ -354,24 +377,11 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
             "SQLite is readable and internally consistent but requires a normal startup migration after backup",
         );
     }
-    match crate::store::existing_embedding_dimensions(&connection) {
-        Ok(Some(dimensions)) if dimensions == config.embedding.dimensions() => {}
-        Ok(Some(_dimensions)) => {
-            return check(
-                "storage",
-                DiagnosticStatus::Failed,
-                "SQLite vector dimensions do not match the configured embedding dimensions",
-            );
-        }
-        Ok(None) | Err(_) => return check("storage", DiagnosticStatus::Failed, "SQLite vector dimensions could not be verified"),
-    }
-    if let Some(profile) = crate::embedding::factory::active_embedding_profile(&config.embedding)
-        && !sqlite_embedding_profile_compatible(&connection, &profile)
-    {
+    if crate::store::migration::validate_sqlite_source_schema(&connection, config.embedding.dimensions()).is_err() {
         return check(
             "storage",
             DiagnosticStatus::Failed,
-            "SQLite stored embeddings are incompatible with the configured embedding profile",
+            "SQLite schema shape, keys, or relational integrity is incompatible with this LocalHold binary",
         );
     }
     check(
@@ -490,6 +500,17 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             } else {
                 "PostgreSQL is reachable but the LocalHold schema is absent and auto-migration is disabled"
             },
+        );
+    }
+    if crate::store::migration::validate_existing_postgres_schema(&pool, config.embedding.dimensions())
+        .await
+        .is_err()
+    {
+        pool.close().await;
+        return check(
+            "storage",
+            DiagnosticStatus::Failed,
+            "PostgreSQL schema shape, column types, or keys are incompatible with this LocalHold binary",
         );
     }
     let migration: Result<Option<i64>, _> = query_scalar("SELECT MAX(version) FROM localhold_migrations").fetch_one(&pool).await;

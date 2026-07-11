@@ -682,7 +682,7 @@ fn export_sqlite_conn(conn: &Connection, embedding_dimensions: usize) -> Result<
     })
 }
 
-fn validate_sqlite_source_schema(conn: &Connection, embedding_dimensions: usize) -> Result<(), StoreError> {
+pub(crate) fn validate_sqlite_source_schema(conn: &Connection, embedding_dimensions: usize) -> Result<(), StoreError> {
     for table in SQLITE_REQUIRED_TABLES {
         validate_sqlite_table(conn, table)?;
     }
@@ -1358,7 +1358,7 @@ async fn open_postgres_pool(url: &str) -> Result<PgPool, StoreError> {
     PgPoolOptions::new().max_connections(1).connect(url).await.map_err(StoreError::from)
 }
 
-async fn validate_existing_postgres_schema(pool: &PgPool, embedding_dimensions: usize) -> Result<(), StoreError> {
+pub(crate) async fn validate_existing_postgres_schema(pool: &PgPool, embedding_dimensions: usize) -> Result<(), StoreError> {
     if postgres_table_exists(pool, POSTGRES_MIGRATIONS_TABLE).await? {
         validate_postgres_table_kind(pool, POSTGRES_MIGRATIONS_TABLE).await?;
         for expectation in POSTGRES_REQUIRED_COLUMNS.iter().filter(|expectation| expectation.table == POSTGRES_MIGRATIONS_TABLE) {

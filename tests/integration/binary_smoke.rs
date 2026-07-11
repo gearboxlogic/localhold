@@ -221,6 +221,44 @@ fn doctor_degrades_when_sqlite_schema_needs_audit_log_migration() {
 }
 
 #[test]
+fn doctor_fails_dimension_mismatch_even_when_sqlite_migration_is_pending() {
+    let db_path = unique_db_path("doctor-pending-migration-dimension-mismatch");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("DROP TABLE memory_audit_log", []).unwrap();
+    drop(connection);
+
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_EMBEDDING_DIMENSIONS", "384");
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_for_malformed_current_sqlite_table_shape() {
+    let db_path = unique_db_path("doctor-malformed-table");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("ALTER TABLE memory_audit_log DROP COLUMN details", []).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
 fn doctor_degrades_when_sqlite_schema_needs_entity_migration() {
     let db_path = unique_db_path("doctor-entity-migration");
     let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();

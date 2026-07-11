@@ -328,6 +328,13 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
             "SQLite file is readable but LocalHold schema bootstrap is pending; doctor did not create it",
         );
     }
+    if crate::store::migration::validate_sqlite_foreign_key_integrity(&connection).is_err() {
+        return check("storage", DiagnosticStatus::Failed, "SQLite foreign-key integrity check failed");
+    }
+    let has_embedding_tables = table_readable(&connection, "memory_embedding_map") && table_readable(&connection, "memory_embeddings");
+    if has_embedding_tables && crate::store::migration::validate_embedding_map_integrity(&connection).is_err() {
+        return check("storage", DiagnosticStatus::Failed, "SQLite embedding-map integrity check failed");
+    }
     match crate::store::existing_embedding_dimensions(&connection) {
         Ok(Some(dimensions)) if dimensions == config.embedding.dimensions() => {}
         Ok(Some(_dimensions)) => {
@@ -340,16 +347,21 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
         Ok(None) => {}
         Err(_) => return check("storage", DiagnosticStatus::Failed, "SQLite vector dimensions could not be verified"),
     }
-    if let Some(profile) = crate::embedding::factory::active_embedding_profile(&config.embedding)
-        && table_readable(&connection, "embedding_profile")
-        && table_readable(&connection, "memory_embedding_map")
-        && !sqlite_embedding_profile_compatible(&connection, &profile)
-    {
-        return check(
-            "storage",
-            DiagnosticStatus::Failed,
-            "SQLite stored embeddings are incompatible with the configured embedding profile",
-        );
+    if let Some(profile) = crate::embedding::factory::active_embedding_profile(&config.embedding) {
+        let profile_compatible = if table_readable(&connection, "embedding_profile") && table_readable(&connection, "memory_embedding_map") {
+            sqlite_embedding_profile_compatible(&connection, &profile)
+        } else if table_readable(&connection, "memory_embedding_map") {
+            sqlite_vector_count(&connection).is_some_and(|count| count == 0)
+        } else {
+            true
+        };
+        if !profile_compatible {
+            return check(
+                "storage",
+                DiagnosticStatus::Failed,
+                "SQLite stored embeddings are incompatible with the configured embedding profile",
+            );
+        }
     }
     let current_schema = connection
         .prepare("SELECT id, embedding_claimed_at, embedding_claim_token, confidence FROM memories LIMIT 0")
@@ -446,11 +458,13 @@ fn sqlite_embedding_profile_compatible(connection: &Connection, expected: &Embed
         Ok(Some((provider, endpoint, model, dimensions))) => {
             provider == expected.provider && endpoint == expected.endpoint && model == expected.model && usize::try_from(dimensions).ok() == Some(expected.dimensions)
         }
-        Ok(None) => connection
-            .query_row("SELECT COUNT(*) FROM memory_embedding_map", [], |row| row.get::<_, i64>(0))
-            .is_ok_and(|count| count == 0),
+        Ok(None) => sqlite_vector_count(connection).is_some_and(|count| count == 0),
         Err(_) => false,
     }
+}
+
+fn sqlite_vector_count(connection: &Connection) -> Option<i64> {
+    connection.query_row("SELECT COUNT(*) FROM memory_embedding_map", [], |row| row.get::<_, i64>(0)).ok()
 }
 
 #[expect(clippy::too_many_lines, reason = "PostgreSQL readiness is kept linear so each read-only compatibility gate is explicit")]
@@ -459,14 +473,20 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
     let Ok(Ok(pool)) = tokio::time::timeout(Duration::from_secs(10), connect).await else {
         return check("storage", DiagnosticStatus::Failed, "PostgreSQL is unreachable or rejected the configured connection");
     };
-    let vector_available: Result<bool, _> = query_scalar("SELECT EXISTS(SELECT 1 FROM pg_available_extensions WHERE name = 'vector')")
+    let vector_available: Result<bool, _> = query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector') OR (EXISTS(SELECT 1 FROM pg_available_extensions WHERE name = 'vector') AND EXISTS(SELECT 1 FROM pg_roles WHERE rolname = current_user AND rolsuper))",
+    )
         .fetch_one(&pool)
         .await;
     match vector_available {
         Ok(true) => {}
         Ok(false) => {
             pool.close().await;
-            return check("storage", DiagnosticStatus::Failed, "PostgreSQL pgvector extension is not installed or available");
+            return check(
+                "storage",
+                DiagnosticStatus::Failed,
+                "PostgreSQL pgvector extension is neither installed nor installable by the configured role",
+            );
         }
         Err(_error) => {
             pool.close().await;
@@ -485,6 +505,23 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             return check("storage", DiagnosticStatus::Failed, "PostgreSQL schema inspection failed");
         }
     };
+    if let Some(profile) = crate::embedding::factory::active_embedding_profile(&config.embedding) {
+        match postgres_embedding_profile_compatible_if_present(&pool, &profile).await {
+            Ok(true) => {}
+            Ok(false) => {
+                pool.close().await;
+                return check(
+                    "storage",
+                    DiagnosticStatus::Failed,
+                    "PostgreSQL stored embeddings are incompatible with the configured embedding profile",
+                );
+            }
+            Err(_error) => {
+                pool.close().await;
+                return check("storage", DiagnosticStatus::Failed, "PostgreSQL embedding-profile compatibility could not be verified");
+            }
+        }
+    }
     if !schema_exists {
         pool.close().await;
         let status = if config.database.postgres.auto_migrate {
@@ -577,6 +614,19 @@ async fn postgres_embedding_profile_compatible(pool: &PgPool, expected: &Embeddi
         .await?;
     if let Some(matches) = matches {
         return Ok(matches);
+    }
+    let vector_count: i64 = query_scalar("SELECT COUNT(*) FROM memory_embeddings").fetch_one(pool).await?;
+    Ok(vector_count == 0)
+}
+
+async fn postgres_embedding_profile_compatible_if_present(pool: &PgPool, expected: &EmbeddingProfile) -> Result<bool, sqlx_core::error::Error> {
+    let embeddings_exist: bool = query_scalar("SELECT to_regclass('memory_embeddings') IS NOT NULL").fetch_one(pool).await?;
+    if !embeddings_exist {
+        return Ok(true);
+    }
+    let profile_exists: bool = query_scalar("SELECT to_regclass('embedding_profile') IS NOT NULL").fetch_one(pool).await?;
+    if profile_exists {
+        return postgres_embedding_profile_compatible(pool, expected).await;
     }
     let vector_count: i64 = query_scalar("SELECT COUNT(*) FROM memory_embeddings").fetch_one(pool).await?;
     Ok(vector_count == 0)

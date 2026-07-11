@@ -773,7 +773,7 @@ fn quoted_sqlite_identifier(name: &'static str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-fn validate_sqlite_foreign_key_integrity(conn: &Connection) -> Result<(), StoreError> {
+pub(crate) fn validate_sqlite_foreign_key_integrity(conn: &Connection) -> Result<(), StoreError> {
     let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
     let mut rows = stmt.query([])?;
     let mut violation_count = 0_u64;
@@ -800,7 +800,7 @@ fn validate_sqlite_foreign_key_integrity(conn: &Connection) -> Result<(), StoreE
     Ok(())
 }
 
-fn validate_embedding_map_integrity(conn: &Connection) -> Result<(), StoreError> {
+pub(crate) fn validate_embedding_map_integrity(conn: &Connection) -> Result<(), StoreError> {
     let orphan_count: i64 = conn.query_row(
         "SELECT COUNT(*)
          FROM memory_embedding_map AS map

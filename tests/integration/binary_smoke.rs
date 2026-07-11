@@ -174,7 +174,7 @@ fn doctor_json_returns_failed_report_for_invalid_config_without_echoing_contents
     let mut cmd = base_binary_command(&db_path);
     let config_dir = isolate_user_config_dir(&mut cmd, &root).join("localhold");
     std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(config_dir.join("localhold.toml"), "api_key = 'must-not-appear'\ninvalid = [").unwrap();
+    std::fs::write(config_dir.join("localhold.toml"), "[server]\ntransport = \"websocket\"\n# must-not-appear\n").unwrap();
 
     let output = cmd.args(["doctor", "--json"]).output().unwrap();
     assert_eq!(output.status.code(), Some(1_i32));

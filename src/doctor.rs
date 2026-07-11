@@ -230,10 +230,18 @@ fn filesystem_check(config: &Config) -> DiagnosticCheck {
                     );
                 }
                 return match std::fs::OpenOptions::new().read(true).write(true).open(path) {
-                    Ok(_file) => check(
+                    Ok(_file) if sqlite_sidecars_exist(path) => check(
                         "filesystem",
                         DiagnosticStatus::Healthy,
-                        format!("SQLite data file is readable and writable at {}", path.display()),
+                        format!("SQLite data file and existing WAL sidecars are readable and writable at {}", path.display()),
+                    ),
+                    Ok(_file) => check(
+                        "filesystem",
+                        DiagnosticStatus::Degraded,
+                        format!(
+                            "SQLite data file is readable and writable at {}, but WAL sidecar creation was not tested by writing",
+                            path.display()
+                        ),
                     ),
                     Err(_error) => check(
                         "filesystem",
@@ -242,11 +250,18 @@ fn filesystem_check(config: &Config) -> DiagnosticCheck {
                     ),
                 };
             }
-            if !parent.is_dir() {
+            if !parent.exists() {
                 return check(
                     "filesystem",
                     DiagnosticStatus::Degraded,
                     format!("SQLite parent directory does not exist at {}; doctor did not create it", parent.display()),
+                );
+            }
+            if !parent.is_dir() {
+                return check(
+                    "filesystem",
+                    DiagnosticStatus::Failed,
+                    format!("SQLite parent path is not a directory at {}", parent.display()),
                 );
             }
             if parent.metadata().is_ok_and(|metadata| metadata.permissions().readonly()) {
@@ -276,6 +291,10 @@ fn unwritable_existing_sqlite_sidecar(path: &Path) -> Option<PathBuf> {
         .into_iter()
         .map(|suffix| sqlite_sidecar_path(path, suffix))
         .find(|sidecar| sidecar.exists() && std::fs::OpenOptions::new().read(true).write(true).open(sidecar).is_err())
+}
+
+fn sqlite_sidecars_exist(path: &Path) -> bool {
+    ["-wal", "-shm"].into_iter().map(|suffix| sqlite_sidecar_path(path, suffix)).all(|sidecar| sidecar.exists())
 }
 
 async fn storage_check(config: &Config) -> DiagnosticCheck {
@@ -473,11 +492,10 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
     let Ok(Ok(pool)) = tokio::time::timeout(Duration::from_secs(10), connect).await else {
         return check("storage", DiagnosticStatus::Failed, "PostgreSQL is unreachable or rejected the configured connection");
     };
-    let vector_available: Result<bool, _> = query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector') OR (EXISTS(SELECT 1 FROM pg_available_extensions WHERE name = 'vector') AND EXISTS(SELECT 1 FROM pg_roles WHERE rolname = current_user AND rolsuper))",
-    )
-        .fetch_one(&pool)
-        .await;
+    let vector_available: Result<bool, _> =
+        query_scalar("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector') OR EXISTS(SELECT 1 FROM pg_available_extensions WHERE name = 'vector')")
+            .fetch_one(&pool)
+            .await;
     match vector_available {
         Ok(true) => {}
         Ok(false) => {
@@ -485,7 +503,7 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             return check(
                 "storage",
                 DiagnosticStatus::Failed,
-                "PostgreSQL pgvector extension is neither installed nor installable by the configured role",
+                "PostgreSQL pgvector extension is neither installed nor available for startup to install",
             );
         }
         Err(_error) => {

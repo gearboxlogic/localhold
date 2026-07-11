@@ -166,7 +166,6 @@ fn doctor_degrades_for_empty_sqlite_file_without_bootstrapping_it() {
 fn doctor_reports_healthy_for_current_sqlite_database() {
     let db_path = unique_db_path("doctor-healthy");
     let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
-    drop(store);
 
     let output = base_binary_command(&db_path).arg("doctor").output().unwrap();
     assert!(
@@ -178,9 +177,48 @@ fn doctor_reports_healthy_for_current_sqlite_database() {
     assert!(stdout.contains("LocalHold doctor: healthy"));
     assert!(stdout.contains("[healthy] storage:"));
 
+    drop(store);
     let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
     let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_degrades_when_existing_sqlite_wal_sidecars_are_absent() {
+    let db_path = unique_db_path("doctor-missing-sidecars");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "degraded");
+    assert!(
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["name"] == "filesystem" && check["status"] == "degraded")
+    );
+
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_when_missing_sqlite_parent_is_a_file() {
+    let parent_path = unique_db_path("doctor-parent-file");
+    std::fs::File::create(&parent_path).unwrap();
+    let db_path = parent_path.join("localhold.db");
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+    assert!(!db_path.exists());
+
+    let _cleanup = std::fs::remove_file(parent_path);
 }
 
 #[test]
@@ -401,7 +439,6 @@ fn doctor_fails_for_incompatible_stored_embedding_profile_without_leaking_it() {
 fn doctor_treats_embedding_rate_limit_as_reachable_like_startup() {
     let db_path = unique_db_path("doctor-embedding-rate-limit");
     let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
-    drop(store);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
@@ -422,6 +459,7 @@ fn doctor_treats_embedding_rate_limit_as_reachable_like_startup() {
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["status"], "healthy");
 
+    drop(store);
     let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
     let _cleanup = std::fs::remove_file(db_path);

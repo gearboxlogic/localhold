@@ -5,11 +5,23 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use super::{
-    RerankerError, RerankerProvider,
+    RerankerError, RerankerProvider, download,
     onnx::OnnxReranker,
     policy::compiled_execution_providers,
     resilient::{ResilientReranker, ResilientRerankerConfig},
 };
+
+/// Resolved reranker artifact identity suitable for diagnostics.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct RerankerModelIdentity {
+    /// Immutable model revision or the direct-file marker.
+    pub revision: String,
+    /// Expected model artifact SHA-256, or `not_configured` for direct files.
+    pub model_sha256: String,
+    /// Expected tokenizer artifact SHA-256, or `not_configured` for direct files.
+    pub tokenizer_sha256: String,
+}
 use crate::config::{RerankerConfig, RerankerExecutionProvider};
 
 /// Successfully initialized reranker provider.
@@ -54,9 +66,7 @@ impl InitializedReranker {
 /// requested providers, and failed required-mode health inference.
 pub async fn initialize_with_retry(config: &RerankerConfig) -> Result<InitializedReranker, RerankerError> {
     const MAX_RETRIES: u32 = 3;
-    // commit installs the environment in ort's process-global singleton and
-    // returns whether this call performed the one-time initialization.
-    let _environment_inserted = ort::init().commit().map_err(|error| RerankerError::Permanent(Box::new(error)))?;
+    initialize_ort()?;
     let mut delay = std::time::Duration::from_secs(2);
     for attempt in 0..MAX_RETRIES {
         match initialize(config).await {
@@ -70,6 +80,63 @@ pub async fn initialize_with_retry(config: &RerankerConfig) -> Result<Initialize
         }
     }
     initialize(config).await
+}
+
+/// Resolve the configured artifact identity without touching the model cache.
+///
+/// # Errors
+///
+/// Returns an error when an auto-downloaded model lacks immutable revision or
+/// hash pins.
+pub fn model_identity(config: &RerankerConfig) -> Result<RerankerModelIdentity, RerankerError> {
+    if !config.model_path.is_empty() {
+        return Ok(RerankerModelIdentity {
+            revision: if config.revision.is_empty() { "direct_file".into() } else { config.revision.clone() },
+            model_sha256: if config.model_sha256.is_empty() {
+                "not_configured".into()
+            } else {
+                config.model_sha256.clone()
+            },
+            tokenizer_sha256: if config.tokenizer_sha256.is_empty() {
+                "not_configured".into()
+            } else {
+                config.tokenizer_sha256.clone()
+            },
+        });
+    }
+    let pins = download::download_pins(config)?;
+    Ok(RerankerModelIdentity {
+        revision: pins.revision,
+        model_sha256: pins.model_sha256,
+        tokenizer_sha256: pins.tokenizer_sha256,
+    })
+}
+
+/// Initialize and run the normal inference health probe for diagnostics.
+///
+/// Without `allow_downloads`, only direct files or an already complete,
+/// hash-verified cache entry are used.
+///
+/// # Errors
+///
+/// Returns model, provider, or inference errors from normal initialization.
+pub async fn initialize_for_diagnostics(config: &RerankerConfig, allow_downloads: bool) -> Result<InitializedReranker, RerankerError> {
+    let _provider_candidates = crate::reranker::policy::execution_provider_candidates(config.execution_provider)?;
+    if allow_downloads {
+        return initialize_with_retry(config).await;
+    }
+    let paths = download::resolve_cached_model_paths(config)?;
+    let mut local_config = config.clone();
+    local_config.model_path = paths.onnx_path.to_string_lossy().into_owned();
+    initialize_ort()?;
+    initialize(&local_config).await
+}
+
+fn initialize_ort() -> Result<(), RerankerError> {
+    // commit installs the environment in ort's process-global singleton and
+    // returns whether this call performed the one-time initialization.
+    let _environment_inserted = ort::init().commit().map_err(|error| RerankerError::Permanent(Box::new(error)))?;
+    Ok(())
 }
 
 async fn initialize(config: &RerankerConfig) -> Result<InitializedReranker, RerankerError> {

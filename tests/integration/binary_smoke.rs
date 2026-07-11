@@ -1,13 +1,16 @@
 use std::{
+    io::{Read as _, Write as _},
+    net::TcpListener,
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use localhold::{
-    store::{MemoryWriter as _, SqliteStore},
+    store::{EmbeddingProfile, MemoryWriter as _, SqliteStore},
     types::{AccessPolicy, Memory, Provenance},
 };
+use serde_json::Value;
 use sqlx_core::{query::query, query_scalar::query_scalar};
 use sqlx_postgres::PgPoolOptions;
 
@@ -125,6 +128,854 @@ fn binary_starts_in_stdio_mode() {
     let mut child = cmd.spawn().unwrap();
     assert_child_stays_running(&mut child, "stdio");
     terminate_child(&mut child);
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_json_reports_degraded_without_creating_missing_database_or_leaking_secrets() {
+    let db_path = unique_db_path("doctor-missing");
+    let mut cmd = base_binary_command(&db_path);
+    cmd.env("LOCALHOLD_HTTP_AUTH_TOKEN", "doctor-super-secret-token");
+    let output = cmd.args(["doctor", "--json"]).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(2_i32), "missing database should be degraded");
+    assert!(!db_path.exists(), "doctor must not create a missing database");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["schema_version"], 1_i32);
+    assert_eq!(report["status"], "degraded");
+    assert_eq!(report["exit_code"], 2_i32);
+    assert!(!stdout.contains("doctor-super-secret-token"), "doctor output must redact configured secrets");
+}
+
+#[test]
+fn doctor_degrades_for_empty_sqlite_file_without_bootstrapping_it() {
+    let db_path = unique_db_path("doctor-empty");
+    std::fs::File::create(&db_path).unwrap();
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "degraded");
+    assert_eq!(std::fs::metadata(&db_path).unwrap().len(), 0_u64, "doctor must not bootstrap the empty file");
+
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_reports_healthy_for_current_sqlite_database() {
+    let db_path = unique_db_path("doctor-healthy");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+
+    let output = base_binary_command(&db_path).arg("doctor").output().unwrap();
+    assert!(
+        output.status.success(),
+        "current SQLite database should be healthy: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("LocalHold doctor: healthy"));
+    assert!(stdout.contains("[healthy] storage:"));
+
+    drop(store);
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_degrades_when_existing_sqlite_wal_sidecars_are_absent() {
+    let db_path = unique_db_path("doctor-missing-sidecars");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "degraded");
+    assert!(
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["name"] == "filesystem" && check["status"] == "degraded")
+    );
+
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_does_not_recreate_missing_shm_for_existing_wal() {
+    let db_path = unique_db_path("doctor-wal-without-shm");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    let wal_path = db_path.with_extension("db-wal");
+    let shm_path = db_path.with_extension("db-shm");
+    assert!(wal_path.exists());
+    std::fs::remove_file(&shm_path).unwrap();
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+    assert!(!shm_path.exists(), "read-only doctor must not recreate SQLite shared-memory state");
+
+    drop(store);
+    let _cleanup = std::fs::remove_file(wal_path);
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_when_missing_sqlite_parent_is_a_file() {
+    let parent_path = unique_db_path("doctor-parent-file");
+    std::fs::File::create(&parent_path).unwrap();
+    let db_path = parent_path.join("localhold.db");
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+    assert!(!db_path.exists());
+
+    let _cleanup = std::fs::remove_file(parent_path);
+}
+
+#[test]
+fn doctor_fails_when_sqlite_vector_dimensions_do_not_match_config() {
+    let db_path = unique_db_path("doctor-dimension-mismatch");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_EMBEDDING_DIMENSIONS", "384");
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_degrades_when_sqlite_schema_needs_audit_log_migration() {
+    let db_path = unique_db_path("doctor-audit-migration");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("DROP TABLE memory_audit_log", []).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "degraded");
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_dimension_mismatch_even_when_sqlite_migration_is_pending() {
+    let db_path = unique_db_path("doctor-pending-migration-dimension-mismatch");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("DROP TABLE memory_audit_log", []).unwrap();
+    drop(connection);
+
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_EMBEDDING_DIMENSIONS", "384");
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_legacy_vectors_without_profile_even_when_migration_is_pending() {
+    let db_path = unique_db_path("doctor-pending-profile");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    let memory = Memory::new_for_test("legacy vector".into(), vec![], Provenance::new_for_test(None, None, None), AccessPolicy::Public);
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(store.store(&memory, Some(&vec![0.1_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS])))
+        .unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("DROP TABLE embedding_profile", []).unwrap();
+    drop(connection);
+
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_EMBEDDING_BASE_URL", "https://configured.example/v1");
+    command.env("LOCALHOLD_EMBEDDING_MODEL", "configured-model");
+    command.env("LOCALHOLD_EMBEDDING_HEALTH_CHECK", "disabled");
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_integrity_error_even_when_sqlite_migration_is_pending() {
+    let db_path = unique_db_path("doctor-pending-integrity");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.pragma_update(None, "foreign_keys", false).unwrap();
+    connection.execute("DROP TABLE memory_audit_log", []).unwrap();
+    connection
+        .execute("INSERT INTO memory_embedding_map (memory_id, vec_rowid) VALUES ('missing-memory', 999)", [])
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_malformed_core_schema_even_when_sqlite_migration_is_pending() {
+    let db_path = unique_db_path("doctor-pending-malformed-core");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("DROP TABLE memory_audit_log", []).unwrap();
+    connection.execute("ALTER TABLE memories DROP COLUMN tags", []).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_degrades_for_supported_legacy_sqlite_columns() {
+    let db_path = unique_db_path("doctor-supported-legacy-column");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("DROP INDEX idx_memories_memory_type", []).unwrap();
+    connection.execute("ALTER TABLE memories DROP COLUMN memory_type", []).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_for_mixed_legacy_and_current_impression_columns() {
+    let db_path = unique_db_path("doctor-mixed-impression-columns");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch("ALTER TABLE memories ADD COLUMN access_count INTEGER; ALTER TABLE memories ADD COLUMN last_accessed_at TEXT;")
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_degrades_when_sqlite_embedding_map_fk_is_missing() {
+    let db_path = unique_db_path("doctor-missing-map-fk");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE memory_embedding_map;
+             CREATE TABLE memory_embedding_map (memory_id TEXT PRIMARY KEY, vec_rowid INTEGER NOT NULL UNIQUE);
+             CREATE TRIGGER trg_memory_embedding_map_delete AFTER DELETE ON memory_embedding_map BEGIN
+                 DELETE FROM memory_embeddings WHERE rowid = OLD.vec_rowid;
+             END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_when_sqlite_embedding_map_fk_lacks_cascade() {
+    let db_path = unique_db_path("doctor-map-fk-no-cascade");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE memory_embedding_map;
+             CREATE TABLE memory_embedding_map (
+                 memory_id TEXT PRIMARY KEY REFERENCES memories(id),
+                 vec_rowid INTEGER NOT NULL UNIQUE
+             );
+             CREATE TRIGGER trg_memory_embedding_map_delete AFTER DELETE ON memory_embedding_map BEGIN
+                 DELETE FROM memory_embeddings WHERE rowid = OLD.vec_rowid;
+             END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_when_sqlite_embedding_map_has_extra_fk() {
+    let db_path = unique_db_path("doctor-map-extra-fk");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE memory_embedding_map;
+             CREATE TABLE memory_embedding_map (
+                 memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+                 vec_rowid INTEGER NOT NULL UNIQUE REFERENCES memories(id)
+             );
+             CREATE TRIGGER trg_memory_embedding_map_delete AFTER DELETE ON memory_embedding_map BEGIN
+                 DELETE FROM memory_embeddings WHERE rowid = OLD.vec_rowid;
+             END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_when_sqlite_managed_table_name_is_a_view() {
+    let db_path = unique_db_path("doctor-conflicting-view");
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("CREATE VIEW memories AS SELECT 'conflict' AS id", []).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_for_same_name_broken_sqlite_trigger() {
+    let db_path = unique_db_path("doctor-broken-trigger");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch("DROP TRIGGER trg_memory_fts_insert; CREATE TRIGGER trg_memory_fts_insert AFTER INSERT ON memories BEGIN SELECT 1; END;")
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_for_destructive_trigger_even_when_index_migration_is_pending() {
+    let db_path = unique_db_path("doctor-pending-index-broken-trigger");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch(
+            "DROP INDEX idx_memories_memory_type;
+             DROP TRIGGER trg_memory_fts_insert;
+             CREATE TRIGGER trg_memory_fts_insert AFTER INSERT ON memories BEGIN
+                 INSERT INTO memory_fts(rowid, content) VALUES (NEW.rowid, NEW.content);
+                 DELETE FROM memory_fts WHERE rowid <> NEW.rowid;
+             END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_for_same_name_wrong_sqlite_index() {
+    let db_path = unique_db_path("doctor-wrong-index");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch("DROP INDEX idx_memories_has_embedding; CREATE INDEX idx_memories_has_embedding ON memories(content);")
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_when_missing_sqlite_index_name_is_occupied_by_table() {
+    let db_path = unique_db_path("doctor-index-name-conflict");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch("DROP INDEX idx_memories_has_embedding; CREATE TABLE idx_memories_has_embedding (dummy INTEGER);")
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_allows_repairable_missing_trigger_with_same_named_table() {
+    let db_path = unique_db_path("doctor-trigger-separate-namespace");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch("DROP TRIGGER trg_memory_fts_insert; CREATE TABLE trg_memory_fts_insert (dummy INTEGER);")
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_for_malformed_current_sqlite_table_shape() {
+    let db_path = unique_db_path("doctor-malformed-table");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("ALTER TABLE memory_audit_log DROP COLUMN details", []).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_degrades_when_sqlite_schema_needs_entity_migration() {
+    let db_path = unique_db_path("doctor-entity-migration");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("DROP TABLE memory_entities", []).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "degraded");
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_degrades_when_sqlite_fts_objects_need_migration() {
+    let db_path = unique_db_path("doctor-fts-migration");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TRIGGER trg_memory_fts_insert;
+             DROP TRIGGER trg_memory_fts_update;
+             DROP TRIGGER trg_memory_fts_delete;
+             DROP TABLE memory_fts;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "degraded");
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_when_sqlite_fts_shadow_conflicts_block_recreation() {
+    let db_path = unique_db_path("doctor-fts-shadow-conflict");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TRIGGER trg_memory_fts_insert;
+             DROP TRIGGER trg_memory_fts_update;
+             DROP TRIGGER trg_memory_fts_delete;
+             DROP TABLE memory_fts;
+             CREATE TABLE memory_fts_data (id INTEGER);",
+        )
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_for_internal_content_sqlite_fts_table() {
+    let db_path = unique_db_path("doctor-internal-content-fts");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TRIGGER trg_memory_fts_insert;
+             DROP TRIGGER trg_memory_fts_update;
+             DROP TRIGGER trg_memory_fts_delete;
+             DROP TABLE memory_fts;
+             CREATE VIRTUAL TABLE memory_fts USING fts5(content);",
+        )
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_when_nonempty_embedding_map_has_no_vector_table() {
+    let db_path = unique_db_path("doctor-map-without-vectors");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    let memory = Memory::new_for_test("mapped vector".into(), vec![], Provenance::new_for_test(None, None, None), AccessPolicy::Public);
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(store.store(&memory, Some(&vec![0.1_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS])))
+        .unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("DROP TABLE memory_embeddings", []).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_when_sqlite_vector_has_no_embedding_map_entry() {
+    let db_path = unique_db_path("doctor-unmapped-vector");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    let embedding = vec![0.1_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS]
+        .into_iter()
+        .flat_map(f32::to_ne_bytes)
+        .collect::<Vec<_>>();
+    let _inserted = connection.execute("INSERT INTO memory_embeddings (embedding) VALUES (?1)", [embedding]).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_for_noncanonical_sqlite_embedding_flag() {
+    let db_path = unique_db_path("doctor-noncanonical-embedding-flag");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    let memory = Memory::new_for_test("bad embedding flag".into(), vec![], Provenance::new_for_test(None, None, None), AccessPolicy::Public);
+    let id = tokio::runtime::Runtime::new().unwrap().block_on(store.store(&memory, None)).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    let _updated = connection.execute("UPDATE memories SET has_embedding = 2 WHERE id = ?1", [id.to_string()]).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_degrades_when_sqlite_index_needs_migration() {
+    let db_path = unique_db_path("doctor-index-migration");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("DROP INDEX idx_memories_embedding_claim", []).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "degraded");
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_for_incompatible_stored_embedding_profile_without_leaking_it() {
+    let db_path = unique_db_path("doctor-profile-mismatch");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(store.verify_embedding_profile(&EmbeddingProfile::openai_compatible(
+            "https://stored-secret.example/v1",
+            "stored-secret-model",
+            SqliteStore::DEFAULT_TEST_DIMENSIONS,
+        )))
+        .unwrap();
+    drop(store);
+
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_EMBEDDING_BASE_URL", "https://configured.example/v1");
+    command.env("LOCALHOLD_EMBEDDING_MODEL", "configured-model");
+    command.env("LOCALHOLD_EMBEDDING_HEALTH_CHECK", "disabled");
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("stored-secret"));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_for_incompatible_stored_profile_when_embedding_map_is_missing() {
+    let db_path = unique_db_path("doctor-profile-mismatch-missing-map");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(store.verify_embedding_profile(&EmbeddingProfile::openai_compatible(
+            "https://stored.example/v1",
+            "stored-model",
+            SqliteStore::DEFAULT_TEST_DIMENSIONS,
+        )))
+        .unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("DROP TABLE memory_embedding_map", []).unwrap();
+    drop(connection);
+
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_EMBEDDING_BASE_URL", "https://configured.example/v1");
+    command.env("LOCALHOLD_EMBEDDING_MODEL", "configured-model");
+    command.env("LOCALHOLD_EMBEDDING_HEALTH_CHECK", "disabled");
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_treats_embedding_rate_limit_as_reachable_like_startup() {
+    let db_path = unique_db_path("doctor-embedding-rate-limit");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _peer) = listener.accept().unwrap();
+        let mut request = [0_u8; 2048];
+        let _bytes_read = stream.read(&mut request).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+    });
+
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_EMBEDDING_BASE_URL", format!("http://{address}/v1"));
+    command.env("LOCALHOLD_EMBEDDING_MODEL", "rate-limited-model");
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    server.join().unwrap();
+    assert!(output.status.success(), "rate-limited reachable provider should remain healthy");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "healthy");
+
+    drop(store);
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_json_returns_failed_report_for_invalid_config_without_echoing_contents() {
+    let db_path = unique_db_path("doctor-invalid-config");
+    let mut cmd = base_binary_command(&db_path);
+    cmd.env("LOCALHOLD_HTTP_AUTH_TOKEN", "must-not-appear\ninvalid-suffix");
+
+    let output = cmd.args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["checks"][0]["name"], "build");
+    assert_eq!(report["checks"][1]["name"], "configuration");
+    assert!(!stdout.contains("must-not-appear"));
+    assert!(!db_path.exists(), "failed configuration must not create storage");
+}
+
+#[test]
+fn doctor_redacts_configured_embedding_identity_from_all_output() {
+    let db_path = unique_db_path("doctor-redacted-identity");
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_EMBEDDING_BASE_URL", "https://embeddings.example/v1/credential-ABC123");
+    command.env("LOCALHOLD_EMBEDDING_MODEL", "model\n[failed] injected: credential-XYZ987");
+    command.env("LOCALHOLD_EMBEDDING_HEALTH_CHECK", "disabled");
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(!combined.contains("credential-ABC123"));
+    assert!(!combined.contains("credential-XYZ987"));
+    assert!(!combined.contains("[failed] injected"));
+}
+
+#[test]
+fn doctor_degrades_for_malformed_typed_env_without_echoing_value() {
+    let db_path = unique_db_path("doctor-invalid-typed-env");
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_DB_BACKEND", "postgresql-with-password-secret");
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["name"] == "configuration" && check["status"] == "degraded")
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("postgresql-with-password-secret"));
+}
+
+#[test]
+fn doctor_help_documents_side_effects_and_exit_codes() {
+    let output = Command::new(env!("CARGO_BIN_EXE_hold")).args(["doctor", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("does not create databases"));
+    assert!(stdout.contains("--allow-downloads"));
+    assert!(stdout.contains("2  degraded"));
+}
+
+#[cfg(feature = "reranker")]
+#[test]
+fn doctor_does_not_create_or_download_reranker_cache_without_opt_in() {
+    let db_path = unique_db_path("doctor-reranker-no-download");
+    let cache_path = db_path.with_extension("model-cache");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_RERANKER_ENABLED", "true");
+    command.env("LOCALHOLD_RERANKER_CACHE_DIR", &cache_path);
+
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+    assert!(!cache_path.exists(), "doctor must not create the reranker cache without --allow-downloads");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("--allow-downloads"));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[cfg(feature = "reranker")]
+#[test]
+fn doctor_fails_for_required_missing_direct_reranker_model() {
+    let db_path = unique_db_path("doctor-reranker-required-direct");
+    let missing_model = db_path.with_extension("missing.onnx");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_RERANKER_ENABLED", "true");
+    command.env("LOCALHOLD_RERANKER_REQUIRED", "true");
+    command.env("LOCALHOLD_RERANKER_MODEL_PATH", &missing_model);
+
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+    assert!(!missing_model.exists());
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
     let _cleanup = std::fs::remove_file(db_path);
 }
 
@@ -249,6 +1100,31 @@ fn explicit_required_cuda_fails_without_cuda_support() {
     );
 
     let _cleanup = std::fs::remove_dir_all(root);
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[cfg(all(feature = "reranker", not(feature = "reranker-cuda")))]
+#[test]
+fn doctor_fails_required_cuda_before_cache_or_download_work() {
+    let db_path = unique_db_path("doctor-reranker-required-cuda");
+    let cache_path = db_path.with_extension("model-cache");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+
+    for arguments in [["doctor", "--json"].as_slice(), ["doctor", "--json", "--allow-downloads"].as_slice()] {
+        let mut command = base_binary_command(&db_path);
+        command.env("LOCALHOLD_RERANKER_ENABLED", "true");
+        command.env("LOCALHOLD_RERANKER_EXECUTION_PROVIDER", "cuda");
+        command.env("LOCALHOLD_RERANKER_REQUIRED", "true");
+        command.env("LOCALHOLD_RERANKER_CACHE_DIR", &cache_path);
+        let output = command.args(arguments).output().unwrap();
+        assert_eq!(output.status.code(), Some(1_i32));
+        assert!(!cache_path.exists(), "impossible execution provider must fail before cache or download work");
+        assert!(!String::from_utf8(output.stdout).unwrap().contains("rerun with --allow-downloads"));
+    }
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
     let _cleanup = std::fs::remove_file(db_path);
 }
 

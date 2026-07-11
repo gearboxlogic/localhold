@@ -3,6 +3,7 @@
 mod embedding;
 
 use std::{
+    cell::Cell,
     collections::HashMap,
     fmt,
     io::Write as _,
@@ -233,6 +234,9 @@ pub struct Config {
     /// Search behavior (hybrid search, RRF fusion).
     pub search: SearchConfig,
 }
+
+/// A validated configuration and the optional file that supplied it.
+pub type ConfigWithSource = (Config, Option<PathBuf>);
 
 /// Configuration for hybrid search behavior and RRF fusion parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -686,9 +690,18 @@ impl Default for ServerConfig {
     }
 }
 
+thread_local! {
+    static ENV_PARSE_WARNING: Cell<bool> = const { Cell::new(false) };
+}
+
 #[expect(unused_must_use, reason = "best-effort stderr warning before tracing is ready")]
-fn warn_env_parse(var: &str, value: &str) {
-    writeln!(std::io::stderr(), "warning: ignoring unparseable {var}={value}");
+fn warn_env_parse(var: &str, _value: &str) {
+    ENV_PARSE_WARNING.set(true);
+    writeln!(std::io::stderr(), "warning: ignoring unparseable value for {var}");
+}
+
+pub(crate) fn take_env_parse_warning() -> bool {
+    ENV_PARSE_WARNING.replace(false)
 }
 
 /// Look up `var` in the env map and parse it into `target`. Logs a warning if the value is
@@ -771,10 +784,22 @@ impl Config {
     ///
     /// Returns `EngineError::Config` if a config file exists but cannot be read or parsed.
     pub fn load() -> Result<Self, EngineError> {
-        let candidates = user_config_candidates(dirs::config_dir().as_deref());
+        Self::load_with_source().map(|(config, _source)| config)
+    }
 
+    /// Load config and report the user config file that supplied it, if any.
+    ///
+    /// Environment overrides are applied after the file is loaded. The source
+    /// path is safe to report, but callers must not serialize the config itself
+    /// because it can contain credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Config` under the same conditions as [`Self::load`].
+    pub fn load_with_source() -> Result<ConfigWithSource, EngineError> {
+        let candidates = user_config_candidates(dirs::config_dir().as_deref());
         let env_map = collect_localhold_env_vars();
-        Self::load_from_sources(&candidates, &env_map)
+        Self::load_from_sources_with_source(&candidates, &env_map)
     }
 
     /// Load config from explicitly provided file search paths and environment map.
@@ -792,10 +817,16 @@ impl Config {
     /// Returns `EngineError::Config` if a config file exists but cannot be read or parsed,
     /// or if validation fails.
     pub fn load_from_sources(paths: &[PathBuf], env_map: &HashMap<String, String>) -> Result<Self, EngineError> {
+        Self::load_from_sources_with_source(paths, env_map).map(|(config, _source)| config)
+    }
+
+    fn load_from_sources_with_source(paths: &[PathBuf], env_map: &HashMap<String, String>) -> Result<ConfigWithSource, EngineError> {
         let mut config = None;
+        let mut source = None;
         for candidate in paths {
             if candidate.exists() {
                 config = Some(Self::load_from_file(candidate)?);
+                source = Some(candidate.clone());
                 break;
             }
         }
@@ -803,7 +834,7 @@ impl Config {
         config.apply_env_from_map(env_map);
         config.resolve_paths()?;
         config.validate(env_map)?;
-        Ok(config)
+        Ok((config, source))
     }
 
     fn load_from_file(path: &Path) -> Result<Self, EngineError> {

@@ -548,7 +548,7 @@ pub async fn migrate_sqlite_to_postgres(options: &SqliteToPostgresOptions) -> Re
 
 async fn preflight_empty_postgres_target(options: &SqliteToPostgresOptions) -> Result<MigrationTableCounts, StoreError> {
     let target_pool = open_postgres_pool(&options.postgres_url).await?;
-    validate_existing_postgres_schema(&target_pool, options.embedding_dimensions).await?;
+    validate_existing_postgres_schema(&target_pool, options.embedding_dimensions, true, true).await?;
     check_existing_postgres_vector_dimensions(&target_pool, options.embedding_dimensions).await?;
     let target_before = postgres_counts_existing(&target_pool).await?;
     if !target_before.is_empty() {
@@ -682,7 +682,7 @@ fn export_sqlite_conn(conn: &Connection, embedding_dimensions: usize) -> Result<
     })
 }
 
-fn validate_sqlite_source_schema(conn: &Connection, embedding_dimensions: usize) -> Result<(), StoreError> {
+pub(crate) fn validate_sqlite_source_schema(conn: &Connection, embedding_dimensions: usize) -> Result<(), StoreError> {
     for table in SQLITE_REQUIRED_TABLES {
         validate_sqlite_table(conn, table)?;
     }
@@ -695,9 +695,197 @@ fn validate_sqlite_source_schema(conn: &Connection, embedding_dimensions: usize)
     for trigger in SQLITE_REQUIRED_TRIGGERS {
         validate_sqlite_schema_object_exists(conn, "trigger", trigger)?;
     }
+    validate_sqlite_managed_object_definitions(conn, false)?;
     super::schema::check_dimension_mismatch(conn, embedding_dimensions)?;
     validate_sqlite_foreign_key_integrity(conn)?;
     validate_embedding_map_integrity(conn)?;
+    Ok(())
+}
+
+fn validate_sqlite_managed_object_definitions(conn: &Connection, allow_missing: bool) -> Result<(), StoreError> {
+    const INDEX_DEFINITIONS: &[(&str, &str)] = &[
+        ("idx_memories_created_at", "on memories(created_at desc)"),
+        ("idx_memories_source_agent", "on memories(json_extract(provenance, '$.source_agent'))"),
+        ("idx_memories_source_conversation", "on memories(json_extract(provenance, '$.source_conversation'))"),
+        ("idx_memories_origin_conversation", "on memories(json_extract(provenance, '$.origin_conversation'))"),
+        (
+            "idx_memories_effective_origin_conversation",
+            "on memories(coalesce(json_extract(provenance, '$.origin_conversation'), json_extract(provenance, '$.source_conversation')))",
+        ),
+        ("idx_memories_access_type", "on memories(json_extract(access_policy, '$.type'))"),
+        ("idx_memories_expires_at", "on memories(expires_at) where expires_at is not null"),
+        ("idx_memories_has_embedding", "on memories(has_embedding)"),
+        (
+            "idx_memories_embedding_claim",
+            "on memories(has_embedding, embedding_claimed_at, created_at, id) where has_embedding = 0",
+        ),
+        ("idx_memories_memory_type", "on memories(memory_type)"),
+        ("idx_memories_superseded_by", "on memories(superseded_by) where superseded_by is not null"),
+        ("idx_memory_entities_entity", "on memory_entities(entity)"),
+        ("idx_memory_entities_entity_type", "on memory_entities(entity_type)"),
+        ("idx_audit_log_memory_id", "on memory_audit_log(memory_id)"),
+        ("idx_audit_log_timestamp", "on memory_audit_log(timestamp desc)"),
+        ("idx_memory_v2_metadata_scope_key", "on memory_v2_metadata(scope_key)"),
+        ("idx_memory_tombstones_deleted_at", "on memory_tombstones(deleted_at desc)"),
+    ];
+    const TRIGGER_DEFINITIONS: &[(&str, &str)] = &[
+        (
+            "trg_memory_embedding_map_delete",
+            "after delete on memory_embedding_map begin delete from memory_embeddings where rowid = old.vec_rowid; end",
+        ),
+        (
+            "trg_memory_clear_superseded_by",
+            "after delete on memories begin update memories set superseded_by = null where superseded_by = old.id; end",
+        ),
+        (
+            "trg_memory_fts_insert",
+            "after insert on memories begin insert into memory_fts(rowid, content) values (new.rowid, new.content); end",
+        ),
+        (
+            "trg_memory_fts_update",
+            "after update of content on memories begin insert into memory_fts(memory_fts, rowid, content) values('delete', old.rowid, old.content); insert into memory_fts(rowid, content) values (new.rowid, new.content); end",
+        ),
+        (
+            "trg_memory_fts_delete",
+            "before delete on memories begin insert into memory_fts(memory_fts, rowid, content) values('delete', old.rowid, old.content); end",
+        ),
+    ];
+    for (name, expected) in INDEX_DEFINITIONS {
+        let Some(sql) = normalized_sqlite_schema_sql(conn, "index", name)? else {
+            if allow_missing {
+                reject_conflicting_sqlite_schema_object(conn, "index", name)?;
+                continue;
+            }
+            return Err(sqlite_source_schema_error(format!("required index {name} is missing")));
+        };
+        if sql != format!("create index {name} {expected}") {
+            return Err(sqlite_source_schema_error(format!("required index {name} has an incompatible definition")));
+        }
+    }
+    for (name, expected) in TRIGGER_DEFINITIONS {
+        let Some(sql) = normalized_sqlite_schema_sql(conn, "trigger", name)? else {
+            if allow_missing {
+                continue;
+            }
+            return Err(sqlite_source_schema_error(format!("required trigger {name} is missing")));
+        };
+        if sql != format!("create trigger {name} {expected}") {
+            return Err(sqlite_source_schema_error(format!("required trigger {name} has an incompatible definition")));
+        }
+    }
+    Ok(())
+}
+
+fn reject_conflicting_sqlite_schema_object(conn: &Connection, expected_type: &'static str, name: &'static str) -> Result<(), StoreError> {
+    let actual_type: Option<String> = conn
+        .query_row("SELECT type FROM sqlite_master WHERE name = ?1 AND type IN ('table', 'view', 'index')", [name], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    if let Some(actual_type) = actual_type {
+        return Err(sqlite_source_schema_error(format!(
+            "managed SQLite {expected_type} name {name} is occupied by a {actual_type}"
+        )));
+    }
+    Ok(())
+}
+
+fn normalized_sqlite_schema_sql(conn: &Connection, object_type: &'static str, name: &'static str) -> Result<Option<String>, StoreError> {
+    Ok(sqlite_schema_sql(conn, object_type, name)?.map(|sql| {
+        sql.to_ascii_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace("create index if not exists ", "create index ")
+            .replace("create trigger if not exists ", "create trigger ")
+            .trim_end_matches(';')
+            .to_owned()
+    }))
+}
+
+/// Validate every managed SQLite table that is already present without
+/// requiring tables or columns that a supported startup migration may add.
+pub(crate) fn validate_present_sqlite_schema(conn: &Connection) -> Result<(), StoreError> {
+    const MIGRATABLE_MEMORY_COLUMNS: &[&str] = &[
+        "embedding_revision",
+        "memory_type",
+        "importance",
+        "impression_count",
+        "last_impressed_at",
+        "superseded_by",
+        "activity_mass",
+        "last_used_at",
+        "updated_at",
+        "confidence",
+        "embedding_claimed_at",
+        "embedding_claim_token",
+    ];
+    for table in SQLITE_REQUIRED_TABLES {
+        if sqlite_schema_sql(conn, "table", table.name)?.is_none() {
+            validate_absent_sqlite_table_conflicts(conn, table.name)?;
+            continue;
+        }
+        let sql = sqlite_schema_sql(conn, "table", table.name)?.unwrap_or_default().to_ascii_lowercase();
+        for fragment in table.ddl_contains {
+            if !sql.contains(fragment) {
+                return Err(sqlite_source_schema_error(format!(
+                    "table {} has unexpected DDL; expected declaration containing {fragment:?}",
+                    table.name
+                )));
+            }
+        }
+        if table.name == "memory_fts" {
+            validate_sqlite_fts_external_content(&sql)?;
+        }
+        let columns = sqlite_table_columns(conn, table.name)?;
+        for column in table.columns {
+            if table.name == "memories" && MIGRATABLE_MEMORY_COLUMNS.contains(column) {
+                continue;
+            }
+            if !columns.contains(*column) {
+                return Err(sqlite_source_schema_error(format!("table {} is missing required column {column}", table.name)));
+            }
+        }
+        if table.name == "memories" {
+            validate_sqlite_embedding_revision_contract(conn)?;
+        }
+    }
+    for key in SQLITE_REQUIRED_KEYS {
+        if sqlite_schema_sql(conn, "table", key.table)?.is_some() {
+            validate_sqlite_primary_key(conn, key)?;
+        }
+    }
+    if sqlite_schema_sql(conn, "table", "memories")?.is_some() {
+        let columns = sqlite_table_columns(conn, "memories")?;
+        let old_pair = (columns.contains("access_count"), columns.contains("last_accessed_at"));
+        let current_pair = (columns.contains("impression_count"), columns.contains("last_impressed_at"));
+        if !matches!((old_pair, current_pair), ((false, false), (false, false) | (true, true)) | ((true, true), (false, false))) {
+            return Err(sqlite_source_schema_error(
+                "memories impression tracking columns are in a mixed state that startup cannot migrate",
+            ));
+        }
+    }
+    validate_sqlite_managed_object_definitions(conn, true)?;
+    Ok(())
+}
+
+fn validate_absent_sqlite_table_conflicts(conn: &Connection, table: &'static str) -> Result<(), StoreError> {
+    if table == "memory_fts" {
+        let shadow_conflict: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('memory_fts_data', 'memory_fts_idx', 'memory_fts_docsize', 'memory_fts_config') AND type IN ('table', 'view', 'index'))",
+            [],
+            |row| row.get(0),
+        )?;
+        if shadow_conflict {
+            return Err(sqlite_source_schema_error("memory_fts is absent but a reserved FTS5 shadow-table name is occupied"));
+        }
+    }
+    let conflicting_object: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1 AND type IN ('view', 'index'))", [table], |row| {
+        row.get(0)
+    })?;
+    if conflicting_object {
+        return Err(sqlite_source_schema_error(format!("managed SQLite object {table} exists but is not a table")));
+    }
     Ok(())
 }
 
@@ -712,12 +900,114 @@ fn validate_sqlite_table(conn: &Connection, expectation: &SqliteTableExpectation
             )));
         }
     }
+    if expectation.name == "memory_fts" {
+        validate_sqlite_fts_external_content(&sql)?;
+    }
 
     let columns = sqlite_table_columns(conn, expectation.name)?;
     for column in expectation.columns {
         if !columns.contains(*column) {
             return Err(sqlite_source_schema_error(format!("table {} is missing required column {column}", expectation.name)));
         }
+    }
+    if expectation.name == "memories" {
+        validate_sqlite_embedding_revision_contract(conn)?;
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::string_slice,
+    reason = "SQLite schema keywords and FTS delimiters are ASCII byte boundaries"
+)]
+fn validate_sqlite_fts_external_content(sql: &str) -> Result<(), StoreError> {
+    let lowercase = sql.to_ascii_lowercase();
+    let arguments_start = lowercase
+        .find("using fts5")
+        .and_then(|position| lowercase[position..].find('(').map(|offset| position + offset + 1))
+        .ok_or_else(|| sqlite_source_schema_error("memory_fts is not an FTS5 virtual table"))?;
+    let arguments_end = sql
+        .rfind(')')
+        .filter(|end| *end >= arguments_start)
+        .ok_or_else(|| sqlite_source_schema_error("memory_fts has malformed FTS5 arguments"))?;
+    let mut options = HashMap::new();
+    for argument in split_sqlite_fts_arguments(&sql[arguments_start..arguments_end]) {
+        let Some((key, value)) = argument.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = decode_sqlite_fts_option(value.trim()).to_ascii_lowercase();
+        let _previous = options.insert(key, value);
+    }
+    if options.get("content").is_some_and(|value| value == "memories") && options.get("content_rowid").is_some_and(|value| value == "rowid") {
+        Ok(())
+    } else {
+        Err(sqlite_source_schema_error("memory_fts must use memories(rowid) as its external-content source"))
+    }
+}
+
+#[expect(clippy::string_slice, reason = "FTS delimiters and SQL quote bytes are ASCII byte boundaries")]
+fn split_sqlite_fts_arguments(arguments: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut start = 0_usize;
+    let mut quote = None;
+    let bytes = arguments.as_bytes();
+    let mut index = 0_usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match quote {
+            Some(active_quote) if byte == active_quote => {
+                let doubled = bytes.get(index.saturating_add(1)) == Some(&active_quote);
+                quote = doubled.then_some(active_quote);
+                index = index.saturating_add(usize::from(doubled));
+            }
+            None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
+            None if byte == b',' => {
+                result.push(&arguments[start..index]);
+                start = index.saturating_add(1);
+            }
+            Some(_) | None => {}
+        }
+        index = index.saturating_add(1);
+    }
+    result.push(&arguments[start..]);
+    result
+}
+
+#[expect(clippy::string_slice, reason = "recognized SQL quote delimiters are single-byte ASCII")]
+fn decode_sqlite_fts_option(value: &str) -> String {
+    if value.len() >= 2 {
+        let first = value.as_bytes()[0];
+        if matches!(first, b'\'' | b'"') && value.as_bytes().last() == Some(&first) {
+            let inner = &value[1..value.len().saturating_sub(1)];
+            let doubled = String::from_utf8(vec![first, first]).unwrap_or_default();
+            let single = char::from(first).to_string();
+            return inner.replace(&doubled, &single);
+        }
+    }
+    value.to_owned()
+}
+
+fn validate_sqlite_embedding_revision_contract(conn: &Connection) -> Result<(), StoreError> {
+    let mut stmt = conn.prepare("PRAGMA table_info(memories)")?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, bool>(3)?, row.get::<_, Option<String>>(4)?)))?;
+    let mut contract = None;
+    for row in rows {
+        let (name, not_null, default) = row?;
+        if name == "embedding_revision" {
+            contract = Some((not_null, default));
+            break;
+        }
+    }
+    let Some((not_null, default)) = contract else {
+        return Ok(());
+    };
+    let default_is_zero = default.as_deref().is_some_and(|value| value.trim().trim_matches(['(', ')']) == "0");
+    if !not_null || !default_is_zero {
+        return Err(sqlite_source_schema_error(
+            "memories.embedding_revision must be NOT NULL with DEFAULT 0 because startup does not repair an existing definition",
+        ));
     }
     Ok(())
 }
@@ -773,7 +1063,7 @@ fn quoted_sqlite_identifier(name: &'static str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-fn validate_sqlite_foreign_key_integrity(conn: &Connection) -> Result<(), StoreError> {
+pub(crate) fn validate_sqlite_foreign_key_integrity(conn: &Connection) -> Result<(), StoreError> {
     let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
     let mut rows = stmt.query([])?;
     let mut violation_count = 0_u64;
@@ -800,7 +1090,7 @@ fn validate_sqlite_foreign_key_integrity(conn: &Connection) -> Result<(), StoreE
     Ok(())
 }
 
-fn validate_embedding_map_integrity(conn: &Connection) -> Result<(), StoreError> {
+pub(crate) fn validate_embedding_map_integrity(conn: &Connection) -> Result<(), StoreError> {
     let orphan_count: i64 = conn.query_row(
         "SELECT COUNT(*)
          FROM memory_embedding_map AS map
@@ -825,6 +1115,59 @@ fn validate_embedding_map_integrity(conn: &Connection) -> Result<(), StoreError>
     if dangling_vector_count > 0 {
         return Err(StoreError::Conflict(format!(
             "SQLite source has {dangling_vector_count} embedding map row(s) whose vec_rowid does not exist in memory_embeddings"
+        )));
+    }
+    let unmapped_vector_count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM memory_embeddings AS embedding
+         LEFT JOIN memory_embedding_map AS map ON map.vec_rowid = embedding.rowid
+         WHERE map.vec_rowid IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if unmapped_vector_count > 0 {
+        return Err(StoreError::Conflict(format!(
+            "SQLite source has {unmapped_vector_count} vector row(s) without a matching embedding map entry"
+        )));
+    }
+    validate_embedding_flag_integrity(conn)
+}
+
+fn validate_embedding_flag_integrity(conn: &Connection) -> Result<(), StoreError> {
+    let invalid_flag_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memories WHERE has_embedding IS NULL OR typeof(has_embedding) <> 'integer' OR has_embedding NOT IN (0, 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid_flag_count > 0 {
+        return Err(StoreError::Conflict(format!(
+            "SQLite source has {invalid_flag_count} memory row(s) with a non-canonical has_embedding value"
+        )));
+    }
+    let missing_map_count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM memories AS memory
+         LEFT JOIN memory_embedding_map AS map ON map.memory_id = memory.id
+         WHERE memory.has_embedding = 1 AND map.memory_id IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if missing_map_count > 0 {
+        return Err(StoreError::Conflict(format!(
+            "SQLite source has {missing_map_count} memory row(s) with has_embedding=true but no embedding map entry"
+        )));
+    }
+    let unexpected_map_count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM memories AS memory
+         JOIN memory_embedding_map AS map ON map.memory_id = memory.id
+         WHERE memory.has_embedding = 0",
+        [],
+        |row| row.get(0),
+    )?;
+    if unexpected_map_count > 0 {
+        return Err(StoreError::Conflict(format!(
+            "SQLite source has {unexpected_map_count} memory row(s) with has_embedding=false but an embedding map entry exists"
         )));
     }
     Ok(())
@@ -1358,19 +1701,25 @@ async fn open_postgres_pool(url: &str) -> Result<PgPool, StoreError> {
     PgPoolOptions::new().max_connections(1).connect(url).await.map_err(StoreError::from)
 }
 
-async fn validate_existing_postgres_schema(pool: &PgPool, embedding_dimensions: usize) -> Result<(), StoreError> {
-    if postgres_table_exists(pool, POSTGRES_MIGRATIONS_TABLE).await? {
-        validate_postgres_table_kind(pool, POSTGRES_MIGRATIONS_TABLE).await?;
+pub(crate) async fn validate_existing_postgres_schema(
+    pool: &PgPool,
+    embedding_dimensions: usize,
+    current_schema_only: bool,
+    include_migration_metadata: bool,
+) -> Result<(), StoreError> {
+    if include_migration_metadata && postgres_table_exists(pool, POSTGRES_MIGRATIONS_TABLE, current_schema_only).await? {
+        validate_postgres_table_kind(pool, POSTGRES_MIGRATIONS_TABLE, current_schema_only).await?;
         for expectation in POSTGRES_REQUIRED_COLUMNS.iter().filter(|expectation| expectation.table == POSTGRES_MIGRATIONS_TABLE) {
-            validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type).await?;
+            validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
         }
-        validate_postgres_required_keys(pool, POSTGRES_MIGRATIONS_TABLE).await?;
+        validate_postgres_required_keys(pool, POSTGRES_MIGRATIONS_TABLE, current_schema_only).await?;
+        validate_postgres_default_contract(pool, POSTGRES_MIGRATIONS_TABLE, "applied_at", "now()", current_schema_only).await?;
     }
 
     let mut existing = HashSet::new();
     for table in POSTGRES_USER_TABLES {
-        if postgres_table_exists(pool, table).await? {
-            validate_postgres_table_kind(pool, table).await?;
+        if postgres_table_exists(pool, table, current_schema_only).await? {
+            validate_postgres_table_kind(pool, table, current_schema_only).await?;
             let _inserted = existing.insert(*table);
         }
     }
@@ -1387,36 +1736,127 @@ async fn validate_existing_postgres_schema(pool: &PgPool, embedding_dimensions: 
     }
 
     for expectation in POSTGRES_REQUIRED_COLUMNS.iter().filter(|expectation| expectation.table != POSTGRES_MIGRATIONS_TABLE) {
-        validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type).await?;
+        validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
     }
     for expectation in POSTGRES_OPTIONAL_COLUMNS {
-        validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type).await?;
+        validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
     }
+    validate_postgres_embedding_revision_contract(pool, current_schema_only).await?;
+    validate_postgres_default_contract(pool, "memory_embeddings", "updated_at", "now()", current_schema_only).await?;
     for table in POSTGRES_USER_TABLES {
-        validate_postgres_required_keys(pool, table).await?;
+        validate_postgres_required_keys(pool, table, current_schema_only).await?;
     }
-    validate_postgres_column_type(pool, "memory_embeddings", "embedding", &format!("vector({embedding_dimensions})")).await?;
+    validate_postgres_column_type(pool, "memory_embeddings", "embedding", &format!("vector({embedding_dimensions})"), current_schema_only).await?;
     Ok(())
 }
 
-async fn validate_postgres_required_keys(pool: &PgPool, table: &'static str) -> Result<(), StoreError> {
+/// Validate every managed `PostgreSQL` table that is already present while
+/// allowing absent tables and known migration-added columns.
+pub(crate) async fn validate_present_postgres_schema(
+    pool: &PgPool,
+    embedding_dimensions: usize,
+    current_schema_only: bool,
+    include_migration_metadata: bool,
+) -> Result<(), StoreError> {
+    for table in std::iter::once(&POSTGRES_MIGRATIONS_TABLE)
+        .filter(|_| include_migration_metadata)
+        .chain(POSTGRES_USER_TABLES.iter())
+    {
+        if !postgres_table_exists(pool, table, current_schema_only).await? {
+            continue;
+        }
+        validate_postgres_table_kind(pool, table, current_schema_only).await?;
+        for expectation in POSTGRES_REQUIRED_COLUMNS.iter().filter(|expectation| expectation.table == *table) {
+            validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
+        }
+        for expectation in POSTGRES_OPTIONAL_COLUMNS.iter().filter(|expectation| expectation.table == *table) {
+            validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
+        }
+        if *table == "memories" {
+            validate_postgres_embedding_revision_contract(pool, current_schema_only).await?;
+        } else if *table == "memory_embeddings" {
+            validate_postgres_default_contract(pool, "memory_embeddings", "updated_at", "now()", current_schema_only).await?;
+        } else if *table == POSTGRES_MIGRATIONS_TABLE {
+            validate_postgres_default_contract(pool, POSTGRES_MIGRATIONS_TABLE, "applied_at", "now()", current_schema_only).await?;
+        }
+        validate_postgres_required_keys(pool, table, current_schema_only).await?;
+    }
+    if postgres_table_exists(pool, "memory_embeddings", current_schema_only).await? {
+        validate_postgres_column_type(pool, "memory_embeddings", "embedding", &format!("vector({embedding_dimensions})"), current_schema_only).await?;
+    }
+    Ok(())
+}
+
+async fn validate_postgres_required_keys(pool: &PgPool, table: &'static str, current_schema_only: bool) -> Result<(), StoreError> {
     for expectation in POSTGRES_REQUIRED_KEYS.iter().filter(|expectation| expectation.table == table) {
-        validate_postgres_unique_or_primary_key(pool, expectation.table, expectation.columns).await?;
+        validate_postgres_unique_or_primary_key(pool, expectation.table, expectation.columns, current_schema_only).await?;
     }
     Ok(())
 }
 
-async fn postgres_table_exists(pool: &PgPool, table: &'static str) -> Result<bool, StoreError> {
-    query_scalar("SELECT to_regclass($1) IS NOT NULL")
+async fn validate_postgres_embedding_revision_contract(pool: &PgPool, current_schema_only: bool) -> Result<(), StoreError> {
+    let not_null: bool = query_scalar(
+        "SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memories') ELSE 'memories' END) AND attname = 'embedding_revision' AND NOT attisdropped",
+    )
+    .bind(current_schema_only)
+    .fetch_one(pool)
+    .await?;
+    let default: Option<String> = query_scalar(
+        "SELECT pg_get_expr(definition.adbin, definition.adrelid) FROM pg_attribute AS attribute LEFT JOIN pg_attrdef AS definition ON definition.adrelid = attribute.attrelid AND definition.adnum = attribute.attnum WHERE attribute.attrelid = to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memories') ELSE 'memories' END) AND attribute.attname = 'embedding_revision' AND NOT attribute.attisdropped",
+    )
+    .bind(current_schema_only)
+    .fetch_one(pool)
+    .await?;
+    let default_is_zero = default.as_deref().is_some_and(|value| {
+        let normalized = value.trim().trim_matches(['(', ')']);
+        normalized.strip_suffix("::bigint").unwrap_or(normalized) == "0"
+    });
+    if !not_null || !default_is_zero {
+        return Err(StoreError::Conflict(
+            "PostgreSQL target column memories.embedding_revision must be NOT NULL with DEFAULT 0 because startup does not repair an existing definition".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_postgres_default_contract(
+    pool: &PgPool,
+    table: &'static str,
+    column: &'static str,
+    expected_default: &'static str,
+    current_schema_only: bool,
+) -> Result<(), StoreError> {
+    let contract: Option<bool> = query_scalar(
+        "SELECT attribute.attnotnull AND pg_get_expr(definition.adbin, definition.adrelid) = $3 FROM pg_attribute AS attribute LEFT JOIN pg_attrdef AS definition ON definition.adrelid = attribute.attrelid AND definition.adnum = attribute.attnum WHERE attribute.attrelid = to_regclass(CASE WHEN $4 THEN format('%I.%I', current_schema(), $1) ELSE $1 END) AND attribute.attname = $2 AND NOT attribute.attisdropped",
+    )
+    .bind(table)
+    .bind(column)
+    .bind(expected_default)
+    .bind(current_schema_only)
+    .fetch_optional(pool)
+    .await?;
+    if contract == Some(true) {
+        Ok(())
+    } else {
+        Err(StoreError::Conflict(format!(
+            "PostgreSQL target column {table}.{column} must be NOT NULL with DEFAULT {expected_default} because startup does not repair an existing definition"
+        )))
+    }
+}
+
+async fn postgres_table_exists(pool: &PgPool, table: &'static str, current_schema_only: bool) -> Result<bool, StoreError> {
+    query_scalar("SELECT to_regclass(CASE WHEN $2 THEN format('%I.%I', current_schema(), $1) ELSE $1 END) IS NOT NULL")
         .bind(table)
+        .bind(current_schema_only)
         .fetch_one(pool)
         .await
         .map_err(StoreError::from)
 }
 
-async fn validate_postgres_table_kind(pool: &PgPool, table: &'static str) -> Result<(), StoreError> {
-    let relkind: Option<String> = query_scalar("SELECT relkind::text FROM pg_class WHERE oid = to_regclass($1)")
+async fn validate_postgres_table_kind(pool: &PgPool, table: &'static str, current_schema_only: bool) -> Result<(), StoreError> {
+    let relkind: Option<String> = query_scalar("SELECT relkind::text FROM pg_class WHERE oid = to_regclass(CASE WHEN $2 THEN format('%I.%I', current_schema(), $1) ELSE $1 END)")
         .bind(table)
+        .bind(current_schema_only)
         .fetch_optional(pool)
         .await?;
     match relkind.as_deref() {
@@ -1425,8 +1865,8 @@ async fn validate_postgres_table_kind(pool: &PgPool, table: &'static str) -> Res
     }
 }
 
-async fn validate_postgres_column_type(pool: &PgPool, table: &'static str, column: &'static str, expected_type: &str) -> Result<(), StoreError> {
-    let actual_type = postgres_column_type(pool, table, column).await?;
+async fn validate_postgres_column_type(pool: &PgPool, table: &'static str, column: &'static str, expected_type: &str, current_schema_only: bool) -> Result<(), StoreError> {
+    let actual_type = postgres_column_type(pool, table, column, current_schema_only).await?;
 
     match actual_type {
         Some(actual_type) if actual_type == expected_type => Ok(()),
@@ -1437,8 +1877,14 @@ async fn validate_postgres_column_type(pool: &PgPool, table: &'static str, colum
     }
 }
 
-async fn validate_optional_postgres_column_type(pool: &PgPool, table: &'static str, column: &'static str, expected_type: &str) -> Result<(), StoreError> {
-    let actual_type = postgres_column_type(pool, table, column).await?;
+async fn validate_optional_postgres_column_type(
+    pool: &PgPool,
+    table: &'static str,
+    column: &'static str,
+    expected_type: &str,
+    current_schema_only: bool,
+) -> Result<(), StoreError> {
+    let actual_type = postgres_column_type(pool, table, column, current_schema_only).await?;
 
     match actual_type {
         Some(actual_type) if actual_type == expected_type => Ok(()),
@@ -1449,24 +1895,25 @@ async fn validate_optional_postgres_column_type(pool: &PgPool, table: &'static s
     }
 }
 
-async fn postgres_column_type(pool: &PgPool, table: &'static str, column: &'static str) -> Result<Option<String>, StoreError> {
+async fn postgres_column_type(pool: &PgPool, table: &'static str, column: &'static str, current_schema_only: bool) -> Result<Option<String>, StoreError> {
     query_scalar(
         "
         SELECT format_type(attribute.atttypid, attribute.atttypmod)
         FROM pg_attribute AS attribute
-        WHERE attribute.attrelid = to_regclass($1)
+        WHERE attribute.attrelid = to_regclass(CASE WHEN $3 THEN format('%I.%I', current_schema(), $1) ELSE $1 END)
           AND attribute.attname = $2
           AND NOT attribute.attisdropped
         ",
     )
     .bind(table)
     .bind(column)
+    .bind(current_schema_only)
     .fetch_optional(pool)
     .await
     .map_err(StoreError::from)
 }
 
-async fn validate_postgres_unique_or_primary_key(pool: &PgPool, table: &'static str, columns: &'static [&'static str]) -> Result<(), StoreError> {
+async fn validate_postgres_unique_or_primary_key(pool: &PgPool, table: &'static str, columns: &'static [&'static str], current_schema_only: bool) -> Result<(), StoreError> {
     let expected_columns = sorted_key_columns(columns);
     let has_key: bool = query_scalar(
         "
@@ -1484,7 +1931,7 @@ async fn validate_postgres_unique_or_primary_key(pool: &PgPool, table: &'static 
                  AND attribute.attnum = key.attnum
                 WHERE key.ordinal <= index_row.indnkeyatts
             ) AS key_columns
-            WHERE index_row.indrelid = to_regclass($1)
+            WHERE index_row.indrelid = to_regclass(CASE WHEN $3 THEN format('%I.%I', current_schema(), $1) ELSE $1 END)
               AND index_row.indisunique
               AND index_row.indisvalid
               AND index_row.indisready
@@ -1497,6 +1944,7 @@ async fn validate_postgres_unique_or_primary_key(pool: &PgPool, table: &'static 
     )
     .bind(table)
     .bind(&expected_columns)
+    .bind(current_schema_only)
     .fetch_one(pool)
     .await?;
 
@@ -1534,7 +1982,7 @@ async fn postgres_counts_existing(pool: &PgPool) -> Result<MigrationTableCounts,
 }
 
 async fn postgres_count_existing(pool: &PgPool, table: &'static str) -> Result<u64, StoreError> {
-    let exists = postgres_table_exists(pool, table).await?;
+    let exists = postgres_table_exists(pool, table, true).await?;
     if !exists {
         return Ok(0);
     }
@@ -1547,7 +1995,7 @@ async fn check_existing_postgres_vector_dimensions(pool: &PgPool, embedding_dime
         "
         SELECT format_type(attribute.atttypid, attribute.atttypmod)
         FROM pg_attribute AS attribute
-        WHERE attribute.attrelid = to_regclass('memory_embeddings')
+        WHERE attribute.attrelid = to_regclass(format('%I.%I', current_schema(), 'memory_embeddings'))
           AND attribute.attname = 'embedding'
           AND NOT attribute.attisdropped
         ",
@@ -2061,6 +2509,24 @@ mod tests {
         audit_details: serde_json::Value,
         tombstone: MemoryTombstone,
         counts: MigrationTableCounts,
+    }
+
+    #[test]
+    fn sqlite_embedding_revision_contract_requires_not_null_default_zero() {
+        let connection = Connection::open_in_memory().unwrap();
+        let _created = connection.execute("CREATE TABLE memories (embedding_revision INTEGER)", []).unwrap();
+
+        let error = validate_sqlite_embedding_revision_contract(&connection).unwrap_err();
+
+        assert!(error.to_string().contains("embedding_revision"));
+    }
+
+    #[test]
+    fn sqlite_embedding_revision_contract_accepts_startup_definition() {
+        let connection = Connection::open_in_memory().unwrap();
+        let _created = connection.execute("CREATE TABLE memories (embedding_revision INTEGER NOT NULL DEFAULT 0)", []).unwrap();
+
+        validate_sqlite_embedding_revision_contract(&connection).unwrap();
     }
 
     #[test]
@@ -2835,6 +3301,21 @@ mod tests {
         let err = migrate_sqlite_to_postgres(&options).await.unwrap_err();
 
         assert!(err.to_string().contains("scope_registry.description"));
+        drop_postgres_migration_schema().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; destructive cleanup requires LOCALHOLD_ALLOW_DESTRUCTIVE_PG_SMOKE=1"]
+    async fn present_postgres_schema_rejects_missing_non_migrated_confidence_column() {
+        reset_postgres_migration_database().await;
+        let pool = open_postgres_pool(&postgres_smoke_url()).await.unwrap();
+        let _dropped_table = query("DROP TABLE memory_audit_log").execute(&pool).await.unwrap();
+        let _dropped_column = query("ALTER TABLE memories DROP COLUMN confidence").execute(&pool).await.unwrap();
+
+        let err = validate_present_postgres_schema(&pool, TEST_EMBEDDING_DIMENSIONS, true, true).await.unwrap_err();
+
+        assert!(err.to_string().contains("memories.confidence"));
+        pool.close().await;
         drop_postgres_migration_schema().await;
     }
 

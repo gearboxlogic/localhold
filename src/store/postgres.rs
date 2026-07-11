@@ -189,6 +189,9 @@ pub struct PostgresStore {
 }
 
 impl PostgresStore {
+    /// Latest schema migration recorded by this binary.
+    pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+
     /// Open a `PostgreSQL` connection pool and optionally initialize schema.
     ///
     /// # Errors
@@ -3063,7 +3066,7 @@ async fn init_schema(pool: &PgPool, embedding_dimensions: usize) -> Result<(), S
     execute_dynamic_statement(pool, &memory_embeddings_ddl(embedding_dimensions)?).await?;
     check_vector_dimensions(pool, embedding_dimensions).await?;
     record_migration(pool, 1_i64, "bootstrap_schema").await?;
-    record_migration(pool, 2_i64, "audit_log_without_memory_fk").await?;
+    record_migration(pool, PostgresStore::CURRENT_SCHEMA_VERSION, "audit_log_without_memory_fk").await?;
     Ok(())
 }
 

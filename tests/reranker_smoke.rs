@@ -12,12 +12,10 @@ use localhold::{
 async fn live_onnx_reranker_scores_documents() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut config = RerankerConfig::default();
     config.enabled = true;
-    config.execution_provider = std::env::var("LOCALHOLD_TEST_RERANKER_EXECUTION_PROVIDER").unwrap_or_else(|_| "cpu".into()).parse()?;
+    let requested_provider = std::env::var("LOCALHOLD_TEST_RERANKER_EXECUTION_PROVIDER").unwrap_or_else(|_| "cpu".into()).parse()?;
+    config.execution_provider = requested_provider;
     let reranker = initialize_with_retry(&config).await?;
 
-    let expected_provider = std::env::var("LOCALHOLD_TEST_RERANKER_EXECUTION_PROVIDER")
-        .unwrap_or_else(|_| "cpu".into())
-        .parse::<RerankerExecutionProvider>()?;
     let selected = reranker.selected_execution_provider().ok_or("reranker initialized without a selected execution provider")?;
     let expected_selected = std::env::var("LOCALHOLD_TEST_RERANKER_EXPECTED_PROVIDER")
         .ok()
@@ -25,7 +23,7 @@ async fn live_onnx_reranker_scores_documents() -> Result<(), Box<dyn std::error:
         .transpose()?;
     let provider_matches = match expected_selected {
         Some(expected) => selected == expected,
-        None => match expected_provider {
+        None => match requested_provider {
             RerankerExecutionProvider::Auto => matches!(selected, RerankerExecutionProvider::Cpu | RerankerExecutionProvider::Cuda),
             RerankerExecutionProvider::Cpu => selected == RerankerExecutionProvider::Cpu,
             RerankerExecutionProvider::Cuda => selected == RerankerExecutionProvider::Cuda,
@@ -33,7 +31,7 @@ async fn live_onnx_reranker_scores_documents() -> Result<(), Box<dyn std::error:
         },
     };
     if !provider_matches {
-        return Err(format!("requested {expected_provider}, expected {expected_selected:?}, but selected {selected}").into());
+        return Err(format!("requested {requested_provider}, expected {expected_selected:?}, but selected {selected}").into());
     }
 
     let provider = reranker.into_provider();

@@ -23,7 +23,7 @@ use rmcp::{
         tool::{ToolCallContext, ToolRouter},
         wrapper::Parameters,
     },
-    model::{CallToolRequestParams, CallToolResult, ContentBlock, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool},
+    model::{CallToolRequestParams, CallToolResult, ContentBlock, Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool},
     service::RequestContext,
     tool, tool_router,
 };
@@ -2273,6 +2273,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> ServerHandler for Local
 
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
+        info.server_info = Implementation::new("localhold", env!("CARGO_PKG_VERSION")).with_title("LocalHold");
         let admin_instructions = if self.tool_router.get("admin_list").is_some() {
             " Privileged admin tools are enabled for migration, repair, statistics, re-embedding, consolidation, scope registry management, and audit history."
         } else {

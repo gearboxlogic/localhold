@@ -334,6 +334,8 @@ fn doctor_json_returns_failed_report_for_invalid_config_without_echoing_contents
     let stdout = String::from_utf8(output.stdout).unwrap();
     let report: Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(report["status"], "failed");
+    assert_eq!(report["checks"][0]["name"], "build");
+    assert_eq!(report["checks"][1]["name"], "configuration");
     assert!(!stdout.contains("must-not-appear"));
     assert!(!db_path.exists(), "failed configuration must not create storage");
 }

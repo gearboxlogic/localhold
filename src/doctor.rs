@@ -137,11 +137,15 @@ pub async fn run(options: DoctorOptions) -> DoctorReport {
     let (config, source) = match Config::load_with_source() {
         Ok(loaded) => loaded,
         Err(_error) => {
-            return finalize(build, None, None, vec![check(
-                "configuration",
-                DiagnosticStatus::Failed,
-                "configuration could not be loaded or validated; no secret-bearing parser context was emitted",
-            )]);
+            let checks = vec![
+                check("build", DiagnosticStatus::Healthy, build_summary(&build)),
+                check(
+                    "configuration",
+                    DiagnosticStatus::Failed,
+                    "configuration could not be loaded or validated; no secret-bearing parser context was emitted",
+                ),
+            ];
+            return finalize(build, None, None, checks);
         }
     };
 
@@ -253,7 +257,17 @@ fn filesystem_check(config: &Config) -> DiagnosticCheck {
 
 async fn storage_check(config: &Config) -> DiagnosticCheck {
     match config.database.backend {
-        DatabaseBackend::Sqlite => sqlite_check(config, config.database.sqlite_path()),
+        DatabaseBackend::Sqlite => {
+            let config = config.clone();
+            let path = config.database.sqlite_path().to_path_buf();
+            tokio::task::spawn_blocking(move || sqlite_check(&config, &path)).await.unwrap_or_else(|_join_error| {
+                check(
+                    "storage",
+                    DiagnosticStatus::Failed,
+                    "SQLite diagnostic worker terminated before completing compatibility checks",
+                )
+            })
+        }
         DatabaseBackend::Postgres => postgres_check(config).await,
     }
 }
@@ -382,14 +396,13 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
     let Ok(Ok(pool)) = tokio::time::timeout(Duration::from_secs(10), connect).await else {
         return check("storage", DiagnosticStatus::Failed, "PostgreSQL is unreachable or rejected the configured connection");
     };
-    let required_tables: Result<i64, _> = query_scalar(
-        "SELECT COUNT(*) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_entities'), ('memory_v2_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name) WHERE to_regclass(required.name) IS NOT NULL",
+    let required_tables: Result<bool, _> = query_scalar(
+        "SELECT COALESCE(bool_and(to_regclass(required.name) IS NOT NULL), FALSE) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_entities'), ('memory_v2_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name)",
     )
     .fetch_one(&pool)
     .await;
     let schema_exists = match required_tables {
-        Ok(9_i64) => true,
-        Ok(_) => false,
+        Ok(all_present) => all_present,
         Err(_error) => {
             pool.close().await;
             return check("storage", DiagnosticStatus::Failed, "PostgreSQL schema inspection failed");

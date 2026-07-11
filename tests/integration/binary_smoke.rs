@@ -170,11 +170,8 @@ fn doctor_reports_healthy_for_current_sqlite_database() {
 #[test]
 fn doctor_json_returns_failed_report_for_invalid_config_without_echoing_contents() {
     let db_path = unique_db_path("doctor-invalid-config");
-    let root = db_path.with_extension("config");
     let mut cmd = base_binary_command(&db_path);
-    let config_dir = isolate_user_config_dir(&mut cmd, &root).join("localhold");
-    std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(config_dir.join("localhold.toml"), "[server]\ntransport = \"websocket\"\n# must-not-appear\n").unwrap();
+    cmd.env("LOCALHOLD_HTTP_AUTH_TOKEN", "must-not-appear\ninvalid-suffix");
 
     let output = cmd.args(["doctor", "--json"]).output().unwrap();
     assert_eq!(output.status.code(), Some(1_i32));
@@ -183,8 +180,6 @@ fn doctor_json_returns_failed_report_for_invalid_config_without_echoing_contents
     assert_eq!(report["status"], "failed");
     assert!(!stdout.contains("must-not-appear"));
     assert!(!db_path.exists(), "failed configuration must not create storage");
-
-    let _cleanup = std::fs::remove_dir_all(root);
 }
 
 #[test]

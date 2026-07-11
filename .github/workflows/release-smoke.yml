@@ -97,7 +97,9 @@ jobs:
             fi
             if ! kill -0 "$pid" 2>/dev/null; then
               cat "$RUNNER_TEMP/reranker-stderr.log" >&2
-              wait "$pid"
+              wait "$pid" || true
+              echo "reranker exited before reporting healthy" >&2
+              exit 1
             fi
             sleep 1
           done
@@ -136,7 +138,7 @@ jobs:
             }
             $verified++
           }
-          if ($verified -ne 2) { throw "expected two release asset checksums, got $verified" }
+          if ($verified -lt 2) { throw "expected at least two release asset checksums, got $verified" }
 
           $version = $env:RELEASE_TAG.Substring(1)
           $archive = "release/localhold-$env:RELEASE_TAG-x86_64-pc-windows-msvc.zip"

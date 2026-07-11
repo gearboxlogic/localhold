@@ -31,8 +31,8 @@ single versioned root containing `bin/hold` (or `hold.exe`),
 notices.
 
 Linux archives are built on Ubuntu 22.04 and require glibc 2.35 or newer plus
-the normal C++ runtime library. Windows archives statically link the supported
-MSVC C runtime where the Rust and native dependencies permit it. Both archives
+the normal C++ runtime library. Windows archives require a supported Windows
+installation with the Microsoft Visual C++ Redistributable. Both archives
 include CPU reranker support, which remains disabled until configured.
 
 ## Build From Source

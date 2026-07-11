@@ -111,8 +111,6 @@ jobs:
         run: just test
 
       - name: Build and package Windows preview archive
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
         run: |
           cargo build --release --locked --features reranker --target x86_64-pc-windows-msvc
           python script/release.py validate

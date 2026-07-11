@@ -695,9 +695,155 @@ pub(crate) fn validate_sqlite_source_schema(conn: &Connection, embedding_dimensi
     for trigger in SQLITE_REQUIRED_TRIGGERS {
         validate_sqlite_schema_object_exists(conn, "trigger", trigger)?;
     }
+    validate_sqlite_managed_object_definitions(conn, false)?;
     super::schema::check_dimension_mismatch(conn, embedding_dimensions)?;
     validate_sqlite_foreign_key_integrity(conn)?;
     validate_embedding_map_integrity(conn)?;
+    Ok(())
+}
+
+fn validate_sqlite_managed_object_definitions(conn: &Connection, allow_missing: bool) -> Result<(), StoreError> {
+    const INDEX_DEFINITIONS: &[(&str, &str)] = &[
+        ("idx_memories_created_at", "on memories(created_at desc)"),
+        ("idx_memories_source_agent", "on memories(json_extract(provenance, '$.source_agent'))"),
+        ("idx_memories_source_conversation", "on memories(json_extract(provenance, '$.source_conversation'))"),
+        ("idx_memories_origin_conversation", "on memories(json_extract(provenance, '$.origin_conversation'))"),
+        (
+            "idx_memories_effective_origin_conversation",
+            "on memories(coalesce(json_extract(provenance, '$.origin_conversation'), json_extract(provenance, '$.source_conversation')))",
+        ),
+        ("idx_memories_access_type", "on memories(json_extract(access_policy, '$.type'))"),
+        ("idx_memories_expires_at", "on memories(expires_at) where expires_at is not null"),
+        ("idx_memories_has_embedding", "on memories(has_embedding)"),
+        (
+            "idx_memories_embedding_claim",
+            "on memories(has_embedding, embedding_claimed_at, created_at, id) where has_embedding = 0",
+        ),
+        ("idx_memories_memory_type", "on memories(memory_type)"),
+        ("idx_memories_superseded_by", "on memories(superseded_by) where superseded_by is not null"),
+        ("idx_memory_entities_entity", "on memory_entities(entity)"),
+        ("idx_memory_entities_entity_type", "on memory_entities(entity_type)"),
+        ("idx_audit_log_memory_id", "on memory_audit_log(memory_id)"),
+        ("idx_audit_log_timestamp", "on memory_audit_log(timestamp desc)"),
+        ("idx_memory_v2_metadata_scope_key", "on memory_v2_metadata(scope_key)"),
+        ("idx_memory_tombstones_deleted_at", "on memory_tombstones(deleted_at desc)"),
+    ];
+    const TRIGGER_DEFINITIONS: &[(&str, &str)] = &[
+        (
+            "trg_memory_embedding_map_delete",
+            "after delete on memory_embedding_map begin delete from memory_embeddings where rowid = old.vec_rowid; end",
+        ),
+        (
+            "trg_memory_clear_superseded_by",
+            "after delete on memories begin update memories set superseded_by = null where superseded_by = old.id; end",
+        ),
+        (
+            "trg_memory_fts_insert",
+            "after insert on memories begin insert into memory_fts(rowid, content) values (new.rowid, new.content); end",
+        ),
+        (
+            "trg_memory_fts_update",
+            "after update of content on memories begin insert into memory_fts(memory_fts, rowid, content) values('delete', old.rowid, old.content); insert into memory_fts(rowid, content) values (new.rowid, new.content); end",
+        ),
+        (
+            "trg_memory_fts_delete",
+            "before delete on memories begin insert into memory_fts(memory_fts, rowid, content) values('delete', old.rowid, old.content); end",
+        ),
+    ];
+    for (name, expected) in INDEX_DEFINITIONS {
+        let Some(sql) = normalized_sqlite_schema_sql(conn, "index", name)? else {
+            if allow_missing {
+                continue;
+            }
+            return Err(sqlite_source_schema_error(format!("required index {name} is missing")));
+        };
+        if sql != format!("create index {name} {expected}") {
+            return Err(sqlite_source_schema_error(format!("required index {name} has an incompatible definition")));
+        }
+    }
+    for (name, expected) in TRIGGER_DEFINITIONS {
+        let Some(sql) = normalized_sqlite_schema_sql(conn, "trigger", name)? else {
+            if allow_missing {
+                continue;
+            }
+            return Err(sqlite_source_schema_error(format!("required trigger {name} is missing")));
+        };
+        if sql != format!("create trigger {name} {expected}") {
+            return Err(sqlite_source_schema_error(format!("required trigger {name} has an incompatible definition")));
+        }
+    }
+    Ok(())
+}
+
+fn normalized_sqlite_schema_sql(conn: &Connection, object_type: &'static str, name: &'static str) -> Result<Option<String>, StoreError> {
+    Ok(sqlite_schema_sql(conn, object_type, name)?.map(|sql| {
+        sql.to_ascii_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace("create index if not exists ", "create index ")
+            .replace("create trigger if not exists ", "create trigger ")
+            .trim_end_matches(';')
+            .to_owned()
+    }))
+}
+
+/// Validate every managed SQLite table that is already present without
+/// requiring tables or columns that a supported startup migration may add.
+pub(crate) fn validate_present_sqlite_schema(conn: &Connection) -> Result<(), StoreError> {
+    const MIGRATABLE_MEMORY_COLUMNS: &[&str] = &[
+        "embedding_revision",
+        "memory_type",
+        "importance",
+        "impression_count",
+        "last_impressed_at",
+        "superseded_by",
+        "activity_mass",
+        "last_used_at",
+        "updated_at",
+        "confidence",
+        "embedding_claimed_at",
+        "embedding_claim_token",
+    ];
+    for table in SQLITE_REQUIRED_TABLES {
+        if sqlite_schema_sql(conn, "table", table.name)?.is_none() {
+            continue;
+        }
+        let sql = sqlite_schema_sql(conn, "table", table.name)?.unwrap_or_default().to_ascii_lowercase();
+        for fragment in table.ddl_contains {
+            if !sql.contains(fragment) {
+                return Err(sqlite_source_schema_error(format!(
+                    "table {} has unexpected DDL; expected declaration containing {fragment:?}",
+                    table.name
+                )));
+            }
+        }
+        let columns = sqlite_table_columns(conn, table.name)?;
+        for column in table.columns {
+            if table.name == "memories" && MIGRATABLE_MEMORY_COLUMNS.contains(column) {
+                continue;
+            }
+            if !columns.contains(*column) {
+                return Err(sqlite_source_schema_error(format!("table {} is missing required column {column}", table.name)));
+            }
+        }
+    }
+    for key in SQLITE_REQUIRED_KEYS {
+        if sqlite_schema_sql(conn, "table", key.table)?.is_some() {
+            validate_sqlite_primary_key(conn, key)?;
+        }
+    }
+    if sqlite_schema_sql(conn, "table", "memories")?.is_some() {
+        let columns = sqlite_table_columns(conn, "memories")?;
+        let old_pair = (columns.contains("access_count"), columns.contains("last_accessed_at"));
+        let current_pair = (columns.contains("impression_count"), columns.contains("last_impressed_at"));
+        if !matches!((old_pair, current_pair), ((false, false), (false, false) | (true, true)) | ((true, true), (false, false))) {
+            return Err(sqlite_source_schema_error(
+                "memories impression tracking columns are in a mixed state that startup cannot migrate",
+            ));
+        }
+    }
+    validate_sqlite_managed_object_definitions(conn, true)?;
     Ok(())
 }
 
@@ -1396,6 +1542,32 @@ pub(crate) async fn validate_existing_postgres_schema(pool: &PgPool, embedding_d
         validate_postgres_required_keys(pool, table).await?;
     }
     validate_postgres_column_type(pool, "memory_embeddings", "embedding", &format!("vector({embedding_dimensions})")).await?;
+    Ok(())
+}
+
+/// Validate every managed `PostgreSQL` table that is already present while
+/// allowing absent tables and known migration-added columns.
+pub(crate) async fn validate_present_postgres_schema(pool: &PgPool, embedding_dimensions: usize) -> Result<(), StoreError> {
+    for table in std::iter::once(&POSTGRES_MIGRATIONS_TABLE).chain(POSTGRES_USER_TABLES.iter()) {
+        if !postgres_table_exists(pool, table).await? {
+            continue;
+        }
+        validate_postgres_table_kind(pool, table).await?;
+        for expectation in POSTGRES_REQUIRED_COLUMNS.iter().filter(|expectation| expectation.table == *table) {
+            if expectation.table == "memories" && expectation.column == "confidence" {
+                validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type).await?;
+            } else {
+                validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type).await?;
+            }
+        }
+        for expectation in POSTGRES_OPTIONAL_COLUMNS.iter().filter(|expectation| expectation.table == *table) {
+            validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type).await?;
+        }
+        validate_postgres_required_keys(pool, table).await?;
+    }
+    if postgres_table_exists(pool, "memory_embeddings").await? {
+        validate_postgres_column_type(pool, "memory_embeddings", "embedding", &format!("vector({embedding_dimensions})")).await?;
+    }
     Ok(())
 }
 

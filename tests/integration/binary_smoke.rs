@@ -206,6 +206,25 @@ fn doctor_degrades_when_existing_sqlite_wal_sidecars_are_absent() {
     let _cleanup = std::fs::remove_file(db_path);
 }
 
+#[cfg(unix)]
+#[test]
+fn doctor_does_not_recreate_missing_shm_for_existing_wal() {
+    let db_path = unique_db_path("doctor-wal-without-shm");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    let wal_path = db_path.with_extension("db-wal");
+    let shm_path = db_path.with_extension("db-shm");
+    assert!(wal_path.exists());
+    std::fs::remove_file(&shm_path).unwrap();
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+    assert!(!shm_path.exists(), "read-only doctor must not recreate SQLite shared-memory state");
+
+    drop(store);
+    let _cleanup = std::fs::remove_file(wal_path);
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
 #[test]
 fn doctor_fails_when_missing_sqlite_parent_is_a_file() {
     let parent_path = unique_db_path("doctor-parent-file");
@@ -313,6 +332,125 @@ fn doctor_fails_integrity_error_even_when_sqlite_migration_is_pending() {
     connection.execute("DROP TABLE memory_audit_log", []).unwrap();
     connection
         .execute("INSERT INTO memory_embedding_map (memory_id, vec_rowid) VALUES ('missing-memory', 999)", [])
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_malformed_core_schema_even_when_sqlite_migration_is_pending() {
+    let db_path = unique_db_path("doctor-pending-malformed-core");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("DROP TABLE memory_audit_log", []).unwrap();
+    connection.execute("ALTER TABLE memories DROP COLUMN tags", []).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_degrades_for_supported_legacy_sqlite_columns() {
+    let db_path = unique_db_path("doctor-supported-legacy-column");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute("DROP INDEX idx_memories_memory_type", []).unwrap();
+    connection.execute("ALTER TABLE memories DROP COLUMN memory_type", []).unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_for_mixed_legacy_and_current_impression_columns() {
+    let db_path = unique_db_path("doctor-mixed-impression-columns");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch("ALTER TABLE memories ADD COLUMN access_count INTEGER; ALTER TABLE memories ADD COLUMN last_accessed_at TEXT;")
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_for_same_name_broken_sqlite_trigger() {
+    let db_path = unique_db_path("doctor-broken-trigger");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch("DROP TRIGGER trg_memory_fts_insert; CREATE TRIGGER trg_memory_fts_insert AFTER INSERT ON memories BEGIN SELECT 1; END;")
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_for_destructive_trigger_even_when_index_migration_is_pending() {
+    let db_path = unique_db_path("doctor-pending-index-broken-trigger");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch(
+            "DROP INDEX idx_memories_memory_type;
+             DROP TRIGGER trg_memory_fts_insert;
+             CREATE TRIGGER trg_memory_fts_insert AFTER INSERT ON memories BEGIN
+                 INSERT INTO memory_fts(rowid, content) VALUES (NEW.rowid, NEW.content);
+                 DELETE FROM memory_fts WHERE rowid <> NEW.rowid;
+             END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn doctor_fails_for_same_name_wrong_sqlite_index() {
+    let db_path = unique_db_path("doctor-wrong-index");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch("DROP INDEX idx_memories_has_embedding; CREATE INDEX idx_memories_has_embedding ON memories(content);")
         .unwrap();
     drop(connection);
 
@@ -480,6 +618,39 @@ fn doctor_json_returns_failed_report_for_invalid_config_without_echoing_contents
     assert_eq!(report["checks"][1]["name"], "configuration");
     assert!(!stdout.contains("must-not-appear"));
     assert!(!db_path.exists(), "failed configuration must not create storage");
+}
+
+#[test]
+fn doctor_redacts_configured_embedding_identity_from_all_output() {
+    let db_path = unique_db_path("doctor-redacted-identity");
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_EMBEDDING_BASE_URL", "https://embeddings.example/v1/credential-ABC123");
+    command.env("LOCALHOLD_EMBEDDING_MODEL", "model\n[failed] injected: credential-XYZ987");
+    command.env("LOCALHOLD_EMBEDDING_HEALTH_CHECK", "disabled");
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(!combined.contains("credential-ABC123"));
+    assert!(!combined.contains("credential-XYZ987"));
+    assert!(!combined.contains("[failed] injected"));
+}
+
+#[test]
+fn doctor_degrades_for_malformed_typed_env_without_echoing_value() {
+    let db_path = unique_db_path("doctor-invalid-typed-env");
+    let mut command = base_binary_command(&db_path);
+    command.env("LOCALHOLD_DB_BACKEND", "postgresql-with-password-secret");
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["name"] == "configuration" && check["status"] == "degraded")
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("postgresql-with-password-secret"));
 }
 
 #[test]

@@ -3,6 +3,7 @@
 mod embedding;
 
 use std::{
+    cell::Cell,
     collections::HashMap,
     fmt,
     io::Write as _,
@@ -689,9 +690,18 @@ impl Default for ServerConfig {
     }
 }
 
+thread_local! {
+    static ENV_PARSE_WARNING: Cell<bool> = const { Cell::new(false) };
+}
+
 #[expect(unused_must_use, reason = "best-effort stderr warning before tracing is ready")]
-fn warn_env_parse(var: &str, value: &str) {
-    writeln!(std::io::stderr(), "warning: ignoring unparseable {var}={value}");
+fn warn_env_parse(var: &str, _value: &str) {
+    ENV_PARSE_WARNING.set(true);
+    writeln!(std::io::stderr(), "warning: ignoring unparseable value for {var}");
+}
+
+pub(crate) fn take_env_parse_warning() -> bool {
+    ENV_PARSE_WARNING.replace(false)
 }
 
 /// Look up `var` in the env map and parse it into `target`. Logs a warning if the value is

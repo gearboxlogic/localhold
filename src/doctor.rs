@@ -127,19 +127,25 @@ impl DoctorReport {
         let mut output = format!("LocalHold doctor: {}\n", self.status);
         for check in &self.checks {
             use std::fmt::Write as _;
-            let _written = writeln!(output, "[{}] {}: {}", check.status, check.name, check.summary);
+            let _written = writeln!(output, "[{}] {}: {}", check.status, single_line(&check.name), single_line(&check.summary));
         }
         output
     }
+}
+
+fn single_line(value: &str) -> String {
+    value.chars().map(|character| if character.is_control() { '\u{fffd}' } else { character }).collect()
 }
 
 /// Run all diagnostics without creating a database or downloading model files
 /// unless `allow_downloads` is set.
 pub async fn run(options: DoctorOptions) -> DoctorReport {
     let build = build_info();
+    let _stale_parse_warning = crate::config::take_env_parse_warning();
     let (config, source) = match Config::load_with_source() {
         Ok(loaded) => loaded,
         Err(_error) => {
+            let _current_parse_warning = crate::config::take_env_parse_warning();
             let checks = vec![
                 check("build", DiagnosticStatus::Healthy, build_summary(&build)),
                 check(
@@ -153,7 +159,7 @@ pub async fn run(options: DoctorOptions) -> DoctorReport {
     };
 
     let mut checks = vec![check("build", DiagnosticStatus::Healthy, build_summary(&build))];
-    checks.push(config_check(source.as_deref()));
+    checks.push(config_check(source.as_deref(), crate::config::take_env_parse_warning()));
     checks.push(filesystem_check(&config));
     checks.push(storage_check(&config).await);
     checks.push(embedding_check(&config).await);
@@ -190,7 +196,14 @@ fn build_summary(build: &BuildInfo) -> String {
     )
 }
 
-fn config_check(source: Option<&Path>) -> DiagnosticCheck {
+fn config_check(source: Option<&Path>, ignored_invalid_override: bool) -> DiagnosticCheck {
+    if ignored_invalid_override {
+        return check(
+            "configuration",
+            DiagnosticStatus::Degraded,
+            "configuration loaded, but at least one malformed environment override was ignored",
+        );
+    }
     let Some(path) = source else {
         return check("configuration", DiagnosticStatus::Healthy, "defaults and LOCALHOLD_* environment overrides validated");
     };
@@ -297,11 +310,22 @@ fn sqlite_sidecars_exist(path: &Path) -> bool {
     ["-wal", "-shm"].into_iter().map(|suffix| sqlite_sidecar_path(path, suffix)).all(|sidecar| sidecar.exists())
 }
 
+fn sqlite_wal_state_requires_shm_creation(path: &Path) -> bool {
+    sqlite_sidecar_path(path, "-wal").exists() && !sqlite_sidecar_path(path, "-shm").exists()
+}
+
 async fn storage_check(config: &Config) -> DiagnosticCheck {
     match config.database.backend {
         DatabaseBackend::Sqlite => {
             let config = config.clone();
             let path = config.database.sqlite_path().to_path_buf();
+            if sqlite_wal_state_requires_shm_creation(&path) {
+                return check(
+                    "storage",
+                    DiagnosticStatus::Degraded,
+                    "SQLite WAL exists without shared-memory state; doctor did not open it because that could create a sidecar",
+                );
+            }
             tokio::task::spawn_blocking(move || sqlite_check(&config, &path)).await.unwrap_or_else(|_join_error| {
                 check(
                     "storage",
@@ -310,7 +334,9 @@ async fn storage_check(config: &Config) -> DiagnosticCheck {
                 )
             })
         }
-        DatabaseBackend::Postgres => postgres_check(config).await,
+        DatabaseBackend::Postgres => tokio::time::timeout(Duration::from_secs(20), postgres_check(config))
+            .await
+            .unwrap_or_else(|_elapsed| check("storage", DiagnosticStatus::Failed, "PostgreSQL readiness checks exceeded the 20 second deadline")),
     }
 }
 
@@ -321,6 +347,13 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
             "storage",
             DiagnosticStatus::Degraded,
             format!("SQLite database does not exist at {}; doctor did not create it", path.display()),
+        );
+    }
+    if sqlite_wal_state_requires_shm_creation(path) {
+        return check(
+            "storage",
+            DiagnosticStatus::Degraded,
+            "SQLite WAL exists without shared-memory state; doctor did not open it because that could create a sidecar",
         );
     }
     if SqliteStore::register_extension().is_err() {
@@ -381,6 +414,13 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
                 "SQLite stored embeddings are incompatible with the configured embedding profile",
             );
         }
+    }
+    if crate::store::migration::validate_present_sqlite_schema(&connection).is_err() {
+        return check(
+            "storage",
+            DiagnosticStatus::Failed,
+            "an existing SQLite schema object is incompatible and cannot be repaired by a normal startup migration",
+        );
     }
     let current_schema = connection
         .prepare("SELECT id, embedding_claimed_at, embedding_claim_token, confidence FROM memories LIMIT 0")
@@ -492,13 +532,29 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
     let Ok(Ok(pool)) = tokio::time::timeout(Duration::from_secs(10), connect).await else {
         return check("storage", DiagnosticStatus::Failed, "PostgreSQL is unreachable or rejected the configured connection");
     };
-    let vector_available: Result<bool, _> =
-        query_scalar("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector') OR EXISTS(SELECT 1 FROM pg_available_extensions WHERE name = 'vector')")
+    let vector_installed: Result<bool, _> = query_scalar("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector')").fetch_one(&pool).await;
+    let vector_installed = match vector_installed {
+        Ok(installed) => installed,
+        Err(_error) => {
+            pool.close().await;
+            return check("storage", DiagnosticStatus::Failed, "PostgreSQL extension installation state could not be verified");
+        }
+    };
+    if vector_installed {
+        let vector_visible: Result<bool, _> = query_scalar("SELECT to_regtype('vector') IS NOT NULL").fetch_one(&pool).await;
+        if !matches!(vector_visible, Ok(true)) {
+            pool.close().await;
+            return check(
+                "storage",
+                DiagnosticStatus::Failed,
+                "PostgreSQL pgvector is installed but its vector type is not visible on the configured search path",
+            );
+        }
+    } else {
+        let vector_available: Result<bool, _> = query_scalar("SELECT EXISTS(SELECT 1 FROM pg_available_extensions WHERE name = 'vector')")
             .fetch_one(&pool)
             .await;
-    match vector_available {
-        Ok(true) => {}
-        Ok(false) => {
+        if !matches!(vector_available, Ok(true)) {
             pool.close().await;
             return check(
                 "storage",
@@ -506,18 +562,14 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
                 "PostgreSQL pgvector extension is neither installed nor available for startup to install",
             );
         }
-        Err(_error) => {
-            pool.close().await;
-            return check("storage", DiagnosticStatus::Failed, "PostgreSQL extension availability could not be verified");
-        }
     }
-    let required_tables: Result<bool, _> = query_scalar(
-        "SELECT COALESCE(bool_and(to_regclass(required.name) IS NOT NULL), FALSE) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_entities'), ('memory_v2_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name)",
+    let required_tables: Result<i64, _> = query_scalar(
+        "SELECT COUNT(*) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_entities'), ('memory_v2_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name) WHERE to_regclass(required.name) IS NOT NULL",
     )
     .fetch_one(&pool)
     .await;
-    let schema_exists = match required_tables {
-        Ok(all_present) => all_present,
+    let schema_table_count = match required_tables {
+        Ok(count) => count,
         Err(_error) => {
             pool.close().await;
             return check("storage", DiagnosticStatus::Failed, "PostgreSQL schema inspection failed");
@@ -540,8 +592,41 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             }
         }
     }
-    if !schema_exists {
+    if crate::store::migration::validate_present_postgres_schema(&pool, config.embedding.dimensions())
+        .await
+        .is_err()
+    {
         pool.close().await;
+        return check(
+            "storage",
+            DiagnosticStatus::Failed,
+            "an existing PostgreSQL schema object is incompatible and cannot be repaired by a normal startup migration",
+        );
+    }
+    if schema_table_count > 0_i64 && schema_table_count < 9_i64 {
+        pool.close().await;
+        return check(
+            "storage",
+            DiagnosticStatus::Failed,
+            "PostgreSQL has a partial managed schema; restore it from backup or repair it explicitly before startup",
+        );
+    }
+    if schema_table_count == 0_i64 {
+        let can_create: Result<bool, _> = if vector_installed {
+            query_scalar("SELECT has_schema_privilege(current_schema(), 'CREATE')").fetch_one(&pool).await
+        } else {
+            query_scalar("SELECT has_schema_privilege(current_schema(), 'CREATE') AND has_database_privilege(current_database(), 'CREATE')")
+                .fetch_one(&pool)
+                .await
+        };
+        pool.close().await;
+        if config.database.postgres.auto_migrate && !matches!(can_create, Ok(true)) {
+            return check(
+                "storage",
+                DiagnosticStatus::Failed,
+                "PostgreSQL schema bootstrap is pending but the configured role lacks schema creation privilege",
+            );
+        }
         let status = if config.database.postgres.auto_migrate {
             DiagnosticStatus::Degraded
         } else {
@@ -551,7 +636,11 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             "storage",
             status,
             if config.database.postgres.auto_migrate {
-                "PostgreSQL is reachable; schema bootstrap is pending and doctor did not create it"
+                if vector_installed {
+                    "PostgreSQL is reachable; schema bootstrap is pending and doctor did not create it"
+                } else {
+                    "PostgreSQL is reachable; schema bootstrap and pgvector installation are pending, and extension install authority remains unverified"
+                }
             } else {
                 "PostgreSQL is reachable but the LocalHold schema is absent and auto-migration is disabled"
             },
@@ -568,9 +657,103 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             "PostgreSQL schema shape, column types, or keys are incompatible with this LocalHold binary",
         );
     }
+    let startup_privileges: Result<bool, _> = if config.database.postgres.auto_migrate {
+        query_scalar("SELECT has_table_privilege('localhold_migrations', 'SELECT,INSERT')").fetch_one(&pool).await
+    } else {
+        query_scalar("SELECT has_table_privilege('localhold_migrations', 'SELECT')").fetch_one(&pool).await
+    };
+    if !matches!(startup_privileges, Ok(true)) {
+        pool.close().await;
+        return check("storage", DiagnosticStatus::Failed, "PostgreSQL migration metadata is not writable by the configured role");
+    }
+    let runtime_privileges: Result<bool, _> = query_scalar(
+        "SELECT
+            has_table_privilege('memories', 'SELECT,INSERT,UPDATE,DELETE')
+            AND has_table_privilege('memory_entities', 'SELECT,INSERT,DELETE')
+            AND has_table_privilege('memory_embeddings', 'SELECT,INSERT,UPDATE,DELETE')
+            AND has_table_privilege('memory_audit_log', 'SELECT,INSERT')
+            AND has_table_privilege('memory_tombstones', 'SELECT,INSERT,UPDATE')
+            AND has_table_privilege('scope_registry', 'SELECT,INSERT,UPDATE')
+            AND has_table_privilege('memory_v2_metadata', 'SELECT,INSERT,UPDATE,DELETE')
+            AND has_table_privilege('embedding_profile', 'SELECT,INSERT,UPDATE')
+            AND has_sequence_privilege(pg_get_serial_sequence('memory_audit_log', 'id'), 'USAGE')",
+    )
+    .fetch_one(&pool)
+    .await;
+    if !matches!(runtime_privileges, Ok(true)) {
+        pool.close().await;
+        return check("storage", DiagnosticStatus::Failed, "PostgreSQL runtime table or sequence privileges are incomplete");
+    }
+    let constraints_current: Result<bool, _> = query_scalar(
+        "SELECT
+            EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memories'::regclass AND confrelid = 'memories'::regclass AND contype = 'f' AND convalidated AND confdeltype = 'n' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'superseded_by')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'id')]::smallint[])
+            AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_entities'::regclass AND confrelid = 'memories'::regclass AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memory_entities'::regclass AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'id')]::smallint[])
+            AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_embeddings'::regclass AND confrelid = 'memories'::regclass AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memory_embeddings'::regclass AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'id')]::smallint[])
+            AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_v2_metadata'::regclass AND confrelid = 'memories'::regclass AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memory_v2_metadata'::regclass AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'id')]::smallint[])",
+    )
+    .fetch_one(&pool)
+    .await;
+    if !matches!(constraints_current, Ok(true)) {
+        pool.close().await;
+        return check(
+            "storage",
+            DiagnosticStatus::Failed,
+            "PostgreSQL relational constraints do not match runtime cascade and audit requirements",
+        );
+    }
     let migration: Result<Option<i64>, _> = query_scalar("SELECT MAX(version) FROM localhold_migrations").fetch_one(&pool).await;
+    let audit_fk_exists: Result<bool, _> =
+        query_scalar("SELECT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_audit_log'::regclass AND contype = 'f' AND confrelid = 'memories'::regclass)")
+            .fetch_one(&pool)
+            .await;
     let current_columns: Result<i64, _> = query_scalar(
         "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'memories' AND column_name IN ('embedding_claimed_at', 'embedding_claim_token', 'confidence')",
+    )
+    .fetch_one(&pool)
+    .await;
+    let indexes_current: Result<bool, _> = query_scalar(
+        "SELECT COALESCE(bool_and(COALESCE(
+            indexes.relkind = 'i'
+            AND index_data.indrelid = to_regclass(required.table_name)
+            AND index_data.indisvalid
+            AND index_data.indisready
+            AND index_data.indnkeyatts = required.key_count
+            AND (required.expected_keys IS NULL OR (
+                SELECT string_agg(regexp_replace(lower(pg_get_indexdef(indexes.oid, key_number, TRUE)), '[[:space:]]', '', 'g'), ',' ORDER BY key_number)
+                FROM generate_series(1, required.key_count) AS key_number
+            ) = required.expected_keys)
+            AND position(required.definition_fragment IN lower(pg_get_indexdef(indexes.oid))) > 0
+            AND ((required.predicate IS NULL AND index_data.indpred IS NULL)
+                 OR regexp_replace(lower(pg_get_expr(index_data.indpred, index_data.indrelid, TRUE)), '[()[:space:]]', '', 'g') = required.predicate)
+        , FALSE)), FALSE)
+        FROM (VALUES
+            ('idx_memories_created_at', 'memories', 1, 'created_atdesc', 'created_at desc', NULL),
+            ('idx_memories_expires_at', 'memories', 1, 'expires_at', 'expires_at', 'expires_atisnotnull'),
+            ('idx_memories_has_embedding', 'memories', 1, 'has_embedding', 'has_embedding', NULL),
+            ('idx_memories_memory_type', 'memories', 1, 'memory_type', 'memory_type', NULL),
+            ('idx_memories_superseded_by', 'memories', 1, 'superseded_by', 'superseded_by', 'superseded_byisnotnull'),
+            ('idx_memories_tags_gin', 'memories', 1, 'tags', 'using gin (tags)', NULL),
+            ('idx_memories_source_agent', 'memories', 1, '(provenance->>''source_agent''::text)', 'source_agent', NULL),
+            ('idx_memories_source_conversation', 'memories', 1, '(provenance->>''source_conversation''::text)', 'source_conversation', NULL),
+            ('idx_memories_origin_conversation', 'memories', 1, '(provenance->>''origin_conversation''::text)', 'origin_conversation', NULL),
+            ('idx_memories_effective_origin_conversation', 'memories', 1, 'coalesce((provenance->>''origin_conversation''::text),(provenance->>''source_conversation''::text))', 'coalesce', NULL),
+            ('idx_memories_access_type', 'memories', 1, '(access_policy->>''type''::text)', 'access_policy', NULL),
+            ('idx_memories_content_fts', 'memories', 1, 'to_tsvector(''simple''::regconfig,content)', 'to_tsvector', NULL),
+            ('idx_memories_embedding_claim', 'memories', 4, 'has_embedding,embedding_claimed_at,created_at,id', 'embedding_claimed_at', 'has_embedding=false'),
+            ('idx_memory_entities_entity', 'memory_entities', 1, 'entity', '(entity)', NULL),
+            ('idx_memory_entities_entity_type', 'memory_entities', 1, 'entity_type', 'entity_type', NULL),
+            ('idx_audit_log_memory_id', 'memory_audit_log', 1, 'memory_id', 'memory_id', NULL),
+            ('idx_audit_log_timestamp', 'memory_audit_log', 1, '\"timestamp\"desc', '\"timestamp\" desc', NULL),
+            ('idx_memory_tombstones_deleted_at', 'memory_tombstones', 1, 'deleted_atdesc', 'deleted_at desc', NULL),
+            ('idx_memory_v2_metadata_scope_key', 'memory_v2_metadata', 1, 'scope_key', 'scope_key', NULL)
+        ) AS required(name, table_name, key_count, expected_keys, definition_fragment, predicate)
+        LEFT JOIN pg_class AS indexes ON indexes.oid = to_regclass(required.name)
+        LEFT JOIN pg_index AS index_data ON index_data.indexrelid = indexes.oid",
+    )
+    .fetch_one(&pool)
+    .await;
+    let owns_managed_tables: Result<bool, _> = query_scalar(
+        "SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), FALSE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_v2_metadata', 'memory_tombstones', 'scope_registry')",
     )
     .fetch_one(&pool)
     .await;
@@ -585,9 +768,31 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
         Ok(true)
     };
     pool.close().await;
-    let (migration, current_columns, vector_type, profile_compatible) = match (migration, current_columns, vector_type, profile_compatible) {
-        (Ok(migration), Ok(current_columns), Ok(vector_type), Ok(profile_compatible)) => (migration, current_columns, vector_type, profile_compatible),
-        (Err(_error), ..) | (_, Err(_error), ..) | (_, _, Err(_error), _) | (_, _, _, Err(_error)) => {
+    let (migration, audit_fk_exists, current_columns, indexes_current, vector_type, profile_compatible, owns_managed_tables) = match (
+        migration,
+        audit_fk_exists,
+        current_columns,
+        indexes_current,
+        vector_type,
+        profile_compatible,
+        owns_managed_tables,
+    ) {
+        (Ok(migration), Ok(audit_fk_exists), Ok(current_columns), Ok(indexes_current), Ok(vector_type), Ok(profile_compatible), Ok(owns_managed_tables)) => (
+            migration,
+            audit_fk_exists,
+            current_columns,
+            indexes_current,
+            vector_type,
+            profile_compatible,
+            owns_managed_tables,
+        ),
+        (Err(_error), ..)
+        | (_, Err(_error), ..)
+        | (_, _, Err(_error), ..)
+        | (_, _, _, Err(_error), ..)
+        | (_, _, _, _, Err(_error), ..)
+        | (_, _, _, _, _, Err(_error), _)
+        | (_, _, _, _, _, _, Err(_error)) => {
             return check("storage", DiagnosticStatus::Failed, "PostgreSQL schema compatibility queries failed");
         }
     };
@@ -608,7 +813,14 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             "PostgreSQL stored embeddings are incompatible with the configured embedding profile",
         );
     }
-    if migration == Some(PostgresStore::CURRENT_SCHEMA_VERSION) && current_columns == 3_i64 {
+    if config.database.postgres.auto_migrate && !owns_managed_tables {
+        return check(
+            "storage",
+            DiagnosticStatus::Failed,
+            "PostgreSQL auto-migration is enabled but the configured role does not own every managed table",
+        );
+    }
+    if migration == Some(PostgresStore::CURRENT_SCHEMA_VERSION) && current_columns == 3_i64 && indexes_current && !audit_fk_exists {
         check("storage", DiagnosticStatus::Healthy, "PostgreSQL is reachable and the LocalHold schema is current")
     } else if config.database.postgres.auto_migrate {
         check("storage", DiagnosticStatus::Degraded, "PostgreSQL is reachable but a normal startup migration is required")
@@ -662,10 +874,7 @@ async fn embedding_check(config: &Config) -> DiagnosticCheck {
                 return check(
                     "embedding",
                     DiagnosticStatus::Healthy,
-                    format!(
-                        "health probe is disabled by policy for model {} at {} with {dimensions} dimensions",
-                        openai_compatible.model, openai_compatible.base_url
-                    ),
+                    format!("health probe is disabled by policy for the configured OpenAI-compatible model with {dimensions} dimensions"),
                 );
             }
             let timeout = Duration::from_secs(config.limits.embedding_timeout_secs);
@@ -674,33 +883,22 @@ async fn embedding_check(config: &Config) -> DiagnosticCheck {
                 Err(_error) => return check("embedding", DiagnosticStatus::Degraded, "OpenAI-compatible provider could not be constructed"),
             };
             match provider.health_check().await {
-                Ok(()) => check(
-                    "embedding",
-                    DiagnosticStatus::Healthy,
-                    format!("model {} is healthy at {}", openai_compatible.model, openai_compatible.base_url),
-                ),
+                Ok(()) => check("embedding", DiagnosticStatus::Healthy, "the configured OpenAI-compatible model passed its health probe"),
                 Err(EmbeddingError::RateLimited { .. }) => check(
                     "embedding",
                     DiagnosticStatus::Healthy,
-                    format!(
-                        "model {} at {} is reachable but currently rate limited; startup treats the provider as available",
-                        openai_compatible.model, openai_compatible.base_url
-                    ),
+                    "the configured OpenAI-compatible provider is reachable but currently rate limited; startup treats it as available",
                 ),
                 Err(_error) => check(
                     "embedding",
                     DiagnosticStatus::Degraded,
-                    format!(
-                        "model {} did not pass its configured health probe at {}",
-                        openai_compatible.model, openai_compatible.base_url
-                    ),
+                    "the configured OpenAI-compatible model did not pass its health probe",
                 ),
             }
         }
     }
 }
 
-#[expect(clippy::too_many_lines, reason = "feature-gated reranker readiness and severity policy are intentionally kept together")]
 async fn reranker_check(config: &Config, options: DoctorOptions) -> DiagnosticCheck {
     #[cfg(not(feature = "reranker"))]
     let _options = options;
@@ -713,16 +911,11 @@ async fn reranker_check(config: &Config, options: DoctorOptions) -> DiagnosticCh
     if !reranker.enabled {
         #[cfg(feature = "reranker")]
         let identity = crate::reranker::runtime::model_identity(reranker).map_or_else(
-            |_error| format!("model {} has invalid revision or hash configuration", reranker.model),
-            |identity| {
-                format!(
-                    "model {} revision {} model_sha256 {} tokenizer_sha256 {}",
-                    reranker.model, identity.revision, identity.model_sha256, identity.tokenizer_sha256
-                )
-            },
+            |_error| "configured model has invalid revision or hash configuration".to_owned(),
+            |_identity| "configured model identity validated".to_owned(),
         );
         #[cfg(not(feature = "reranker"))]
-        let identity = format!("model {} identity unavailable in this build", reranker.model);
+        let identity = "configured model identity unavailable in this build";
         return check(
             "reranker",
             DiagnosticStatus::Healthy,
@@ -738,13 +931,8 @@ async fn reranker_check(config: &Config, options: DoctorOptions) -> DiagnosticCh
     {
         let identity = crate::reranker::runtime::model_identity(reranker);
         let identity_summary = identity.map_or_else(
-            |_error| format!("model {} has invalid revision or hash configuration", reranker.model),
-            |identity| {
-                format!(
-                    "model {} revision {} model_sha256 {} tokenizer_sha256 {}",
-                    reranker.model, identity.revision, identity.model_sha256, identity.tokenizer_sha256
-                )
-            },
+            |_error| "configured model has invalid revision or hash configuration".to_owned(),
+            |_identity| "configured model identity validated".to_owned(),
         );
         match crate::reranker::runtime::initialize_for_diagnostics(reranker, options.allow_downloads).await {
             Ok(initialized) => {
@@ -828,5 +1016,17 @@ mod tests {
         let json = report.to_json().unwrap();
         assert!(json.contains("\"schema_version\": 1"));
         assert!(!json.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn text_renderer_flattens_control_characters() {
+        let report = finalize(build_info(), None, None, vec![check(
+            "storage\n[failed] forged",
+            DiagnosticStatus::Healthy,
+            "path\r\n[failed] injected",
+        )]);
+        let rendered = report.render_text();
+        assert!(!rendered.contains("\n[failed]"));
+        assert!(!rendered.contains('\r'));
     }
 }

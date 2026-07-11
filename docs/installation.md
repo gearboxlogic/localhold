@@ -91,7 +91,7 @@ Clone a tagged release, review the tag and release notes, then install the CPU
 build for the current user:
 
 ```sh
-git clone --branch v0.1.0-beta.1 --depth 1 \
+git clone --branch v0.1.0-beta.2 --depth 1 \
   https://github.com/gearboxlogic/localhold.git
 cd localhold
 ./script/install.sh
@@ -131,8 +131,8 @@ Build and install the CUDA reranker variant with:
 ```
 
 This enables ONNX Runtime's CUDA execution provider for reranking. The current
-`ort 2.0.0-rc.12` integration targets the ONNX Runtime 1.24 ABI. Install a
-CUDA-enabled ONNX Runtime 1.24 build plus the CUDA and cuDNN versions required
+`ort 2.0.0-rc.10` integration targets the ONNX Runtime 1.22 ABI. Install a
+CUDA-enabled ONNX Runtime 1.22 build plus the CUDA and cuDNN versions required
 by that build, then set `ORT_DYLIB_PATH` to the absolute path of
 `libonnxruntime.so` when it is outside the dynamic loader's normal search path.
 Embedding placement is independent: embeddings are produced by the configured

@@ -55,12 +55,12 @@ impl OnnxReranker {
         info!("loading ONNX reranker model from {}", paths.onnx_path.display());
 
         #[cfg(feature = "reranker-cuda")]
-        let mut session_builder = Session::builder()
+        let session_builder = Session::builder()
             .map_err(|e| RerankerError::Permanent(Box::new(e)))?
             .with_execution_providers([CUDAExecutionProvider::default().build().error_on_failure()])
             .map_err(|e| RerankerError::Permanent(e.to_string().into()))?;
         #[cfg(not(feature = "reranker-cuda"))]
-        let mut session_builder = Session::builder().map_err(|e| RerankerError::Permanent(Box::new(e)))?;
+        let session_builder = Session::builder().map_err(|e| RerankerError::Permanent(Box::new(e)))?;
 
         let session = session_builder.commit_from_file(&paths.onnx_path).map_err(|e| RerankerError::Permanent(Box::new(e)))?;
 
@@ -81,7 +81,7 @@ impl OnnxReranker {
 
         // Detect which inputs the ONNX graph expects so we can skip
         // token_type_ids for models that don't declare it (e.g. RoBERTa).
-        let input_names: std::collections::HashSet<String> = session.inputs().iter().map(|o| o.name().to_owned()).collect();
+        let input_names: std::collections::HashSet<String> = session.inputs.iter().map(|o| o.name.clone()).collect();
         let has_token_type_ids = input_names.contains("token_type_ids");
 
         let trunc_len = tokenizer.get_truncation().map_or(0, |t| t.max_length);

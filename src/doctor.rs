@@ -681,6 +681,30 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             return check("storage", DiagnosticStatus::Failed, "PostgreSQL schema inspection failed");
         }
     };
+    let can_inspect_owned_audit_sequence: Result<bool, _> = query_scalar(
+        "SELECT COALESCE(bool_and(has_sequence_privilege(sequence.oid, 'SELECT')), TRUE)
+            FROM pg_attribute AS attribute
+            JOIN pg_attrdef AS definition ON definition.adrelid = attribute.attrelid AND definition.adnum = attribute.attnum
+            JOIN pg_depend AS default_dependency ON default_dependency.classid = 'pg_attrdef'::regclass AND default_dependency.objid = definition.oid AND default_dependency.refclassid = 'pg_class'::regclass
+            JOIN pg_class AS sequence ON sequence.oid = default_dependency.refobjid AND sequence.relkind = 'S'
+            JOIN pg_depend AS ownership ON ownership.classid = 'pg_class'::regclass AND ownership.objid = sequence.oid AND ownership.refclassid = 'pg_class'::regclass AND ownership.refobjid = attribute.attrelid AND ownership.refobjsubid = attribute.attnum AND ownership.deptype IN ('a', 'i')
+            WHERE attribute.attrelid = to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_audit_log') ELSE 'memory_audit_log' END)
+              AND attribute.attname = 'id'
+              AND NOT attribute.attisdropped",
+    )
+    .bind(config.database.postgres.auto_migrate)
+    .fetch_one(&pool)
+    .await;
+    let can_inspect_audit_rows: Result<bool, _> = query_scalar(
+        "SELECT COALESCE(has_table_privilege(to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_audit_log') ELSE 'memory_audit_log' END), 'SELECT'), TRUE)",
+    )
+    .bind(config.database.postgres.auto_migrate)
+    .fetch_one(&pool)
+    .await;
+    if !matches!(can_inspect_owned_audit_sequence, Ok(true)) || !matches!(can_inspect_audit_rows, Ok(true)) {
+        pool.close().await;
+        return check("storage", DiagnosticStatus::Failed, "PostgreSQL diagnostic schema inspection privileges are incomplete");
+    }
     if let Some(profile) = crate::embedding::factory::active_embedding_profile(&config.embedding) {
         match postgres_embedding_profile_compatible_if_present(&pool, &profile, config.database.postgres.auto_migrate).await {
             Ok(true) => {}
@@ -866,7 +890,7 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
         Ok(true)
     };
     let migration_identities_compatible: Result<bool, _> = if config.database.postgres.auto_migrate {
-        query_scalar("SELECT NOT EXISTS(SELECT 1 FROM localhold_migrations WHERE (version = 1 AND name <> 'bootstrap_schema') OR (version = 2 AND name <> 'audit_log_without_memory_fk') OR (name = 'bootstrap_schema' AND version <> 1) OR (name = 'audit_log_without_memory_fk' AND version <> 2))")
+        query_scalar("SELECT NOT EXISTS(SELECT 1 FROM localhold_migrations WHERE ((version = 1 AND name = 'bootstrap_schema') OR (version = 2 AND name = 'audit_log_without_memory_fk')) IS NOT TRUE)")
             .fetch_one(&pool)
             .await
     } else {

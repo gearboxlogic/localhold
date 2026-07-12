@@ -104,8 +104,45 @@ const POSTGRES_OPTIONAL_COLUMNS: &[PostgresColumnExpectation] = &[
     PostgresColumnExpectation::new("memories", "embedding_claimed_at", "timestamp with time zone"),
     PostgresColumnExpectation::new("memories", "embedding_claim_token", "text"),
 ];
+const POSTGRES_NULLABLE_COLUMNS: &[(&str, &str)] = &[
+    ("memories", "expires_at"),
+    ("memories", "last_impressed_at"),
+    ("memories", "superseded_by"),
+    ("memories", "last_used_at"),
+    ("memories", "embedding_claimed_at"),
+    ("memories", "embedding_claim_token"),
+    ("memory_audit_log", "caller_agent"),
+    ("memory_audit_log", "details"),
+    ("memory_tombstones", "deleted_by_principal"),
+    ("scope_registry", "description"),
+    ("scope_registry", "parent"),
+    ("memory_v2_metadata", "scope_key"),
+    ("memory_v2_metadata", "summary"),
+    ("memory_v2_metadata", "agent_label"),
+    ("memory_v2_metadata", "created_by_principal"),
+    ("memory_v2_metadata", "migrated_at"),
+];
+type PostgresDefaultExpectation = (&'static str, &'static str, &'static str);
+const POSTGRES_REQUIRED_DEFAULTS: &[PostgresDefaultExpectation] = &[
+    ("localhold_migrations", "applied_at", "now()"),
+    ("memories", "has_embedding", "false"),
+    ("memories", "embedding_revision", "0"),
+    ("memories", "memory_type", "'semantic'::text"),
+    ("memories", "importance", "0.5"),
+    ("memories", "impression_count", "0"),
+    ("memories", "activity_mass", "0.0"),
+    ("memories", "updated_at", "now()"),
+    ("memories", "confidence", "0.8"),
+    ("memory_embeddings", "updated_at", "now()"),
+    ("scope_registry", "aliases", "'[]'::jsonb"),
+    ("scope_registry", "matchers", "'[]'::jsonb"),
+    ("scope_registry", "related", "'[]'::jsonb"),
+    ("memory_v2_metadata", "quality_flags", "'[]'::jsonb"),
+    ("memory_v2_metadata", "schema_version", "2"),
+];
 const POSTGRES_REQUIRED_KEYS: &[PostgresKeyExpectation] = &[
     PostgresKeyExpectation::new("localhold_migrations", &["version"]),
+    PostgresKeyExpectation::new("localhold_migrations", &["name"]),
     PostgresKeyExpectation::new("memories", &["id"]),
     PostgresKeyExpectation::new("memory_entities", &["memory_id", "entity", "entity_type"]),
     PostgresKeyExpectation::new("memory_embeddings", &["memory_id"]),
@@ -161,7 +198,7 @@ const SQLITE_REQUIRED_TABLES: &[SqliteTableExpectation] = &[
     SqliteTableExpectation::new("memory_embedding_map", SQLITE_EMBEDDING_MAP_COLUMNS, &[]),
     SqliteTableExpectation::new("memory_embeddings", SQLITE_MEMORY_EMBEDDINGS_COLUMNS, &["using vec0", "float["]),
     SqliteTableExpectation::new("memory_entities", SQLITE_MEMORY_ENTITIES_COLUMNS, &[]),
-    SqliteTableExpectation::new("memory_fts", SQLITE_FTS_COLUMNS, &["using fts5"]),
+    SqliteTableExpectation::new("memory_fts", SQLITE_FTS_COLUMNS, &[]),
     SqliteTableExpectation::new("memory_audit_log", SQLITE_AUDIT_LOG_COLUMNS, &[]),
     SqliteTableExpectation::new("memory_tombstones", SQLITE_TOMBSTONE_COLUMNS, &[]),
     SqliteTableExpectation::new("scope_registry", SQLITE_SCOPE_REGISTRY_COLUMNS, &[]),
@@ -916,23 +953,16 @@ fn validate_sqlite_table(conn: &Connection, expectation: &SqliteTableExpectation
     Ok(())
 }
 
-#[expect(
-    clippy::arithmetic_side_effects,
-    clippy::string_slice,
-    reason = "SQLite schema keywords and FTS delimiters are ASCII byte boundaries"
-)]
+#[expect(clippy::string_slice, reason = "SQL lexer and closing-parenthesis indices are ASCII byte boundaries")]
 fn validate_sqlite_fts_external_content(sql: &str) -> Result<(), StoreError> {
-    let lowercase = sql.to_ascii_lowercase();
-    let arguments_start = lowercase
-        .find("using fts5")
-        .and_then(|position| lowercase[position..].find('(').map(|offset| position + offset + 1))
-        .ok_or_else(|| sqlite_source_schema_error("memory_fts is not an FTS5 virtual table"))?;
-    let arguments_end = sql
+    let executable_sql = sqlite_sql_without_comments(sql);
+    let arguments_start = sqlite_fts5_arguments_start(&executable_sql).ok_or_else(|| sqlite_source_schema_error("memory_fts is not an FTS5 virtual table"))?;
+    let arguments_end = executable_sql
         .rfind(')')
         .filter(|end| *end >= arguments_start)
         .ok_or_else(|| sqlite_source_schema_error("memory_fts has malformed FTS5 arguments"))?;
     let mut options = HashMap::new();
-    for argument in split_sqlite_fts_arguments(&sql[arguments_start..arguments_end]) {
+    for argument in split_sqlite_fts_arguments(&executable_sql[arguments_start..arguments_end]) {
         let Some((key, value)) = argument.split_once('=') else {
             continue;
         };
@@ -945,6 +975,115 @@ fn validate_sqlite_fts_external_content(sql: &str) -> Result<(), StoreError> {
     } else {
         Err(sqlite_source_schema_error("memory_fts must use memories(rowid) as its external-content source"))
     }
+}
+
+fn sqlite_sql_without_comments(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut executable = Vec::with_capacity(bytes.len());
+    let mut index = 0_usize;
+    while index < bytes.len() {
+        let end = match bytes[index] {
+            b'\'' | b'"' | b'`' => skip_sqlite_quoted(bytes, index, bytes[index]),
+            b'[' => skip_sqlite_quoted(bytes, index, b']'),
+            b'-' if bytes.get(index.saturating_add(1)) == Some(&b'-') => skip_sqlite_line_comment(bytes, index),
+            b'/' if bytes.get(index.saturating_add(1)) == Some(&b'*') => skip_sqlite_block_comment(bytes, index),
+            _ => {
+                executable.push(bytes[index]);
+                index = index.saturating_add(1);
+                continue;
+            }
+        };
+        if matches!(bytes[index], b'\'' | b'"' | b'`' | b'[') {
+            if let Some(quoted) = bytes.get(index..end) {
+                executable.extend_from_slice(quoted);
+            }
+        } else {
+            executable.push(b' ');
+        }
+        index = end;
+    }
+    String::from_utf8(executable).unwrap_or_default()
+}
+
+fn sqlite_fts5_arguments_start(sql: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut index = 0_usize;
+    let mut saw_using = false;
+    while index < bytes.len() {
+        if matches!(bytes[index], b'\'' | b'"' | b'`' | b'[') {
+            let terminator = if bytes[index] == b'[' { b']' } else { bytes[index] };
+            let end = skip_sqlite_quoted(bytes, index, terminator);
+            if saw_using && sql.get(index..end).is_some_and(|quoted| decode_sqlite_fts_option(quoted).eq_ignore_ascii_case("fts5")) {
+                return sqlite_open_parenthesis_after(bytes, end);
+            }
+            saw_using = false;
+            index = end;
+            continue;
+        }
+        match bytes[index] {
+            b'-' if bytes.get(index.saturating_add(1)) == Some(&b'-') => index = skip_sqlite_line_comment(bytes, index),
+            b'/' if bytes.get(index.saturating_add(1)) == Some(&b'*') => index = skip_sqlite_block_comment(bytes, index),
+            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
+                let start = index;
+                index = index.saturating_add(1);
+                while bytes.get(index).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_') {
+                    index = index.saturating_add(1);
+                }
+                let word = sql.get(start..index)?;
+                if saw_using && word.eq_ignore_ascii_case("fts5") {
+                    return sqlite_open_parenthesis_after(bytes, index);
+                }
+                saw_using = word.eq_ignore_ascii_case("using");
+            }
+            byte if byte.is_ascii_whitespace() => index = index.saturating_add(1),
+            _ => {
+                saw_using = false;
+                index = index.saturating_add(1);
+            }
+        }
+    }
+    None
+}
+
+fn sqlite_open_parenthesis_after(bytes: &[u8], mut index: usize) -> Option<usize> {
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index = index.saturating_add(1);
+    }
+    (bytes.get(index) == Some(&b'(')).then(|| index.saturating_add(1))
+}
+
+fn skip_sqlite_quoted(bytes: &[u8], start: usize, terminator: u8) -> usize {
+    let mut index = start.saturating_add(1);
+    while index < bytes.len() {
+        if bytes[index] == terminator {
+            if terminator != b']' && bytes.get(index.saturating_add(1)) == Some(&terminator) {
+                index = index.saturating_add(2);
+                continue;
+            }
+            return index.saturating_add(1);
+        }
+        index = index.saturating_add(1);
+    }
+    bytes.len()
+}
+
+fn skip_sqlite_line_comment(bytes: &[u8], start: usize) -> usize {
+    let mut index = start.saturating_add(2);
+    while bytes.get(index).is_some_and(|byte| !matches!(byte, b'\n' | b'\r')) {
+        index = index.saturating_add(1);
+    }
+    index
+}
+
+fn skip_sqlite_block_comment(bytes: &[u8], start: usize) -> usize {
+    let mut index = start.saturating_add(2);
+    while index < bytes.len() {
+        if bytes.get(index) == Some(&b'*') && bytes.get(index.saturating_add(1)) == Some(&b'/') {
+            return index.saturating_add(2);
+        }
+        index = index.saturating_add(1);
+    }
+    bytes.len()
 }
 
 #[expect(clippy::string_slice, reason = "FTS delimiters and SQL quote bytes are ASCII byte boundaries")]
@@ -962,7 +1101,8 @@ fn split_sqlite_fts_arguments(arguments: &str) -> Vec<&str> {
                 quote = doubled.then_some(active_quote);
                 index = index.saturating_add(usize::from(doubled));
             }
-            None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
+            None if matches!(byte, b'\'' | b'"' | b'`') => quote = Some(byte),
+            None if byte == b'[' => quote = Some(b']'),
             None if byte == b',' => {
                 result.push(&arguments[start..index]);
                 start = index.saturating_add(1);
@@ -979,10 +1119,11 @@ fn split_sqlite_fts_arguments(arguments: &str) -> Vec<&str> {
 fn decode_sqlite_fts_option(value: &str) -> String {
     if value.len() >= 2 {
         let first = value.as_bytes()[0];
-        if matches!(first, b'\'' | b'"') && value.as_bytes().last() == Some(&first) {
+        let terminator = if first == b'[' { b']' } else { first };
+        if matches!(first, b'\'' | b'"' | b'`' | b'[') && value.as_bytes().last() == Some(&terminator) {
             let inner = &value[1..value.len().saturating_sub(1)];
-            let doubled = String::from_utf8(vec![first, first]).unwrap_or_default();
-            let single = char::from(first).to_string();
+            let doubled = String::from_utf8(vec![terminator, terminator]).unwrap_or_default();
+            let single = char::from(terminator).to_string();
             return inner.replace(&doubled, &single);
         }
     }
@@ -1712,8 +1853,8 @@ pub(crate) async fn validate_existing_postgres_schema(
         for expectation in POSTGRES_REQUIRED_COLUMNS.iter().filter(|expectation| expectation.table == POSTGRES_MIGRATIONS_TABLE) {
             validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
         }
+        validate_postgres_table_contracts(pool, POSTGRES_MIGRATIONS_TABLE, current_schema_only).await?;
         validate_postgres_required_keys(pool, POSTGRES_MIGRATIONS_TABLE, current_schema_only).await?;
-        validate_postgres_default_contract(pool, POSTGRES_MIGRATIONS_TABLE, "applied_at", "now()", current_schema_only).await?;
     }
 
     let mut existing = HashSet::new();
@@ -1741,9 +1882,8 @@ pub(crate) async fn validate_existing_postgres_schema(
     for expectation in POSTGRES_OPTIONAL_COLUMNS {
         validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
     }
-    validate_postgres_embedding_revision_contract(pool, current_schema_only).await?;
-    validate_postgres_default_contract(pool, "memory_embeddings", "updated_at", "now()", current_schema_only).await?;
     for table in POSTGRES_USER_TABLES {
+        validate_postgres_table_contracts(pool, table, current_schema_only).await?;
         validate_postgres_required_keys(pool, table, current_schema_only).await?;
     }
     validate_postgres_column_type(pool, "memory_embeddings", "embedding", &format!("vector({embedding_dimensions})"), current_schema_only).await?;
@@ -1772,13 +1912,7 @@ pub(crate) async fn validate_present_postgres_schema(
         for expectation in POSTGRES_OPTIONAL_COLUMNS.iter().filter(|expectation| expectation.table == *table) {
             validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
         }
-        if *table == "memories" {
-            validate_postgres_embedding_revision_contract(pool, current_schema_only).await?;
-        } else if *table == "memory_embeddings" {
-            validate_postgres_default_contract(pool, "memory_embeddings", "updated_at", "now()", current_schema_only).await?;
-        } else if *table == POSTGRES_MIGRATIONS_TABLE {
-            validate_postgres_default_contract(pool, POSTGRES_MIGRATIONS_TABLE, "applied_at", "now()", current_schema_only).await?;
-        }
+        validate_postgres_table_contracts(pool, table, current_schema_only).await?;
         validate_postgres_required_keys(pool, table, current_schema_only).await?;
     }
     if postgres_table_exists(pool, "memory_embeddings", current_schema_only).await? {
@@ -1794,29 +1928,114 @@ async fn validate_postgres_required_keys(pool: &PgPool, table: &'static str, cur
     Ok(())
 }
 
-async fn validate_postgres_embedding_revision_contract(pool: &PgPool, current_schema_only: bool) -> Result<(), StoreError> {
-    let not_null: bool = query_scalar(
-        "SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memories') ELSE 'memories' END) AND attname = 'embedding_revision' AND NOT attisdropped",
-    )
-    .bind(current_schema_only)
-    .fetch_one(pool)
-    .await?;
-    let default: Option<String> = query_scalar(
-        "SELECT pg_get_expr(definition.adbin, definition.adrelid) FROM pg_attribute AS attribute LEFT JOIN pg_attrdef AS definition ON definition.adrelid = attribute.attrelid AND definition.adnum = attribute.attnum WHERE attribute.attrelid = to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memories') ELSE 'memories' END) AND attribute.attname = 'embedding_revision' AND NOT attribute.attisdropped",
-    )
-    .bind(current_schema_only)
-    .fetch_one(pool)
-    .await?;
-    let default_is_zero = default.as_deref().is_some_and(|value| {
-        let normalized = value.trim().trim_matches(['(', ')']);
-        normalized.strip_suffix("::bigint").unwrap_or(normalized) == "0"
-    });
-    if !not_null || !default_is_zero {
-        return Err(StoreError::Conflict(
-            "PostgreSQL target column memories.embedding_revision must be NOT NULL with DEFAULT 0 because startup does not repair an existing definition".into(),
-        ));
+async fn validate_postgres_table_contracts(pool: &PgPool, table: &'static str, current_schema_only: bool) -> Result<(), StoreError> {
+    for expectation in POSTGRES_REQUIRED_COLUMNS
+        .iter()
+        .chain(POSTGRES_OPTIONAL_COLUMNS.iter())
+        .filter(|expectation| expectation.table == table)
+    {
+        let actual = postgres_column_not_null(pool, table, expectation.column, current_schema_only).await?;
+        let Some(actual) = actual else {
+            continue;
+        };
+        let expected = !POSTGRES_NULLABLE_COLUMNS.contains(&(table, expectation.column));
+        if actual != expected {
+            return Err(StoreError::Conflict(format!(
+                "PostgreSQL target column {table}.{} has incompatible nullability; expected {}",
+                expectation.column,
+                if expected { "NOT NULL" } else { "nullable" }
+            )));
+        }
+    }
+    if table == "memory_embeddings" {
+        validate_postgres_not_null_column(pool, table, "embedding", current_schema_only).await?;
+    }
+    for (_, column, expected_default) in POSTGRES_REQUIRED_DEFAULTS.iter().filter(|(expected_table, ..)| *expected_table == table) {
+        validate_postgres_default_contract(pool, table, column, expected_default, current_schema_only).await?;
+    }
+    if table == "memory_audit_log" {
+        validate_postgres_serial_default(pool, table, "id", current_schema_only).await?;
     }
     Ok(())
+}
+
+async fn postgres_column_not_null(pool: &PgPool, table: &'static str, column: &'static str, current_schema_only: bool) -> Result<Option<bool>, StoreError> {
+    query_scalar(
+        "SELECT attribute.attnotnull FROM pg_attribute AS attribute WHERE attribute.attrelid = to_regclass(CASE WHEN $3 THEN format('%I.%I', current_schema(), $1) ELSE $1 END) AND attribute.attname = $2 AND NOT attribute.attisdropped",
+    )
+    .bind(table)
+    .bind(column)
+    .bind(current_schema_only)
+    .fetch_optional(pool)
+    .await
+    .map_err(StoreError::from)
+}
+
+async fn validate_postgres_not_null_column(pool: &PgPool, table: &'static str, column: &'static str, current_schema_only: bool) -> Result<(), StoreError> {
+    if postgres_column_not_null(pool, table, column, current_schema_only).await? == Some(true) {
+        Ok(())
+    } else {
+        Err(StoreError::Conflict(format!("PostgreSQL target column {table}.{column} must be NOT NULL")))
+    }
+}
+
+async fn validate_postgres_serial_default(pool: &PgPool, table: &'static str, column: &'static str, current_schema_only: bool) -> Result<(), StoreError> {
+    let sequence_name: Option<String> = query_scalar(
+        "SELECT format('%I.%I', sequence_namespace.nspname, sequence.relname)
+            FROM pg_attribute AS attribute
+            JOIN pg_attrdef AS definition ON definition.adrelid = attribute.attrelid AND definition.adnum = attribute.attnum
+            JOIN pg_depend AS default_dependency ON default_dependency.classid = 'pg_attrdef'::regclass AND default_dependency.objid = definition.oid AND default_dependency.refclassid = 'pg_class'::regclass
+            JOIN pg_class AS sequence ON sequence.oid = default_dependency.refobjid AND sequence.relkind = 'S'
+            JOIN pg_namespace AS sequence_namespace ON sequence_namespace.oid = sequence.relnamespace
+            JOIN pg_sequence AS sequence_config ON sequence_config.seqrelid = sequence.oid
+            JOIN pg_depend AS ownership ON ownership.classid = 'pg_class'::regclass AND ownership.objid = sequence.oid AND ownership.refclassid = 'pg_class'::regclass AND ownership.refobjid = attribute.attrelid AND ownership.refobjsubid = attribute.attnum AND ownership.deptype IN ('a', 'i')
+            WHERE attribute.attrelid = to_regclass(CASE WHEN $3 THEN format('%I.%I', current_schema(), $1) ELSE $1 END)
+              AND attribute.attname = $2
+              AND NOT attribute.attisdropped
+              AND pg_get_expr(definition.adbin, definition.adrelid) LIKE 'nextval(''%''::regclass)'
+              AND sequence_config.seqtypid = 'bigint'::regtype
+              AND sequence_config.seqstart = 1
+              AND sequence_config.seqincrement = 1
+              AND sequence_config.seqmax = 9223372036854775807
+              AND sequence_config.seqmin = 1
+              AND sequence_config.seqcache = 1
+              AND NOT sequence_config.seqcycle
+            LIMIT 1",
+    )
+    .bind(table)
+    .bind(column)
+    .bind(current_schema_only)
+    .fetch_optional(pool)
+    .await?;
+    let Some(sequence_name) = sequence_name else {
+        return Err(StoreError::Conflict(format!(
+            "PostgreSQL target column {table}.{column} must default from its owned sequence"
+        )));
+    };
+    let sequence_state = query(AssertSqlSafe(format!("SELECT last_value, is_called FROM {sequence_name}"))).fetch_one(pool).await?;
+    let last_value: i64 = sequence_state.try_get("last_value")?;
+    let is_called: bool = sequence_state.try_get("is_called")?;
+    let next_value = if is_called { last_value.checked_add(1) } else { Some(last_value) };
+    let qualified_table = postgres_qualified_relation_name(pool, table, current_schema_only).await?;
+    let max_id: Option<i64> = query_scalar(AssertSqlSafe(format!("SELECT MAX({column}) FROM {qualified_table}"))).fetch_one(pool).await?;
+    if next_value.is_some_and(|next| max_id.is_none_or(|maximum| next > maximum)) {
+        Ok(())
+    } else {
+        Err(StoreError::Conflict(format!(
+            "PostgreSQL target sequence for {table}.{column} will not generate an unused next value"
+        )))
+    }
+}
+
+async fn postgres_qualified_relation_name(pool: &PgPool, table: &'static str, current_schema_only: bool) -> Result<String, StoreError> {
+    query_scalar(
+        "SELECT format('%I.%I', namespace.nspname, relation.relname) FROM pg_class AS relation JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE relation.oid = to_regclass(CASE WHEN $2 THEN format('%I.%I', current_schema(), $1) ELSE $1 END)",
+    )
+    .bind(table)
+    .bind(current_schema_only)
+    .fetch_one(pool)
+    .await
+    .map_err(StoreError::from)
 }
 
 async fn validate_postgres_default_contract(
@@ -2509,6 +2728,34 @@ mod tests {
         audit_details: serde_json::Value,
         tombstone: MemoryTombstone,
         counts: MigrationTableCounts,
+    }
+
+    #[test]
+    fn sqlite_fts_contract_accepts_equivalent_spacing_and_quoted_options() {
+        validate_sqlite_fts_external_content(
+            "CREATE VIRTUAL TABLE memory_fts USING\n fts5(content, content = 'memories', content_rowid = \"rowid\", tokenize='unicode61 remove_diacritics 2')",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn sqlite_fts_contract_ignores_comment_decoys() {
+        let error = validate_sqlite_fts_external_content("CREATE VIRTUAL TABLE memory_fts USING fts5(content /*, content=memories, content_rowid=rowid, */)").unwrap_err();
+
+        assert!(error.to_string().contains("external-content"));
+    }
+
+    #[test]
+    fn sqlite_fts_contract_accepts_comment_between_module_and_arguments() {
+        validate_sqlite_fts_external_content("CREATE VIRTUAL TABLE memory_fts USING fts5/* gap */(content, content=memories, content_rowid=rowid)").unwrap();
+    }
+
+    #[test]
+    fn sqlite_fts_contract_rejects_wrong_module_with_comment_decoy() {
+        let error =
+            validate_sqlite_fts_external_content("CREATE VIRTUAL TABLE memory_fts USING fts4(content /* using fts5(content=memories, content_rowid=rowid, */)").unwrap_err();
+
+        assert!(error.to_string().contains("not an FTS5"));
     }
 
     #[test]
@@ -3321,6 +3568,66 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Docker or local PostgreSQL with pgvector; destructive cleanup requires LOCALHOLD_ALLOW_DESTRUCTIVE_PG_SMOKE=1"]
+    async fn present_postgres_schema_rejects_relaxed_required_nullability() {
+        reset_postgres_migration_database().await;
+        let pool = open_postgres_pool(&postgres_smoke_url()).await.unwrap();
+        let _altered = query("ALTER TABLE memories ALTER COLUMN content DROP NOT NULL").execute(&pool).await.unwrap();
+
+        let err = validate_present_postgres_schema(&pool, TEST_EMBEDDING_DIMENSIONS, true, true).await.unwrap_err();
+
+        assert!(err.to_string().contains("memories.content"));
+        pool.close().await;
+        drop_postgres_migration_schema().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; destructive cleanup requires LOCALHOLD_ALLOW_DESTRUCTIVE_PG_SMOKE=1"]
+    async fn present_postgres_schema_rejects_non_sequence_audit_id_default() {
+        reset_postgres_migration_database().await;
+        let pool = open_postgres_pool(&postgres_smoke_url()).await.unwrap();
+        let _altered = query("ALTER TABLE memory_audit_log ALTER COLUMN id SET DEFAULT 1").execute(&pool).await.unwrap();
+
+        let err = validate_present_postgres_schema(&pool, TEST_EMBEDDING_DIMENSIONS, true, true).await.unwrap_err();
+
+        assert!(err.to_string().contains("memory_audit_log.id"));
+        pool.close().await;
+        drop_postgres_migration_schema().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; destructive cleanup requires LOCALHOLD_ALLOW_DESTRUCTIVE_PG_SMOKE=1"]
+    async fn present_postgres_schema_rejects_cycling_audit_id_sequence() {
+        reset_postgres_migration_database().await;
+        let pool = open_postgres_pool(&postgres_smoke_url()).await.unwrap();
+        let _altered = query("ALTER SEQUENCE memory_audit_log_id_seq MAXVALUE 2 CYCLE").execute(&pool).await.unwrap();
+
+        let err = validate_present_postgres_schema(&pool, TEST_EMBEDDING_DIMENSIONS, true, true).await.unwrap_err();
+
+        assert!(err.to_string().contains("memory_audit_log.id"));
+        pool.close().await;
+        drop_postgres_migration_schema().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; destructive cleanup requires LOCALHOLD_ALLOW_DESTRUCTIVE_PG_SMOKE=1"]
+    async fn present_postgres_schema_rejects_audit_sequence_behind_existing_ids() {
+        reset_postgres_migration_database().await;
+        let pool = open_postgres_pool(&postgres_smoke_url()).await.unwrap();
+        let _inserted = query("INSERT INTO memory_audit_log (id, memory_id, action, timestamp) VALUES (1, 'seeded', 'remember', NOW())")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let _reset = query("SELECT setval('memory_audit_log_id_seq', 1, false)").execute(&pool).await.unwrap();
+
+        let err = validate_present_postgres_schema(&pool, TEST_EMBEDDING_DIMENSIONS, true, true).await.unwrap_err();
+
+        assert!(err.to_string().contains("unused next value"));
+        pool.close().await;
+        drop_postgres_migration_schema().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; destructive cleanup requires LOCALHOLD_ALLOW_DESTRUCTIVE_PG_SMOKE=1"]
     async fn sqlite_to_postgres_rejects_existing_schema_missing_managed_key_against_postgres() {
         let temp = tempfile::tempdir().unwrap();
         let source_path = temp.path().join("source.db");
@@ -3718,6 +4025,18 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    fn sqlite_fts_contract_accepts_bracket_and_backtick_option_values() {
+        validate_sqlite_fts_external_content("CREATE VIRTUAL TABLE memory_fts USING fts5(content, content=[memories], content_rowid=`rowid`)").unwrap();
+    }
+
+    #[test]
+    fn sqlite_fts_contract_ignores_options_inside_bracketed_identifier() {
+        let error = validate_sqlite_fts_external_content("CREATE VIRTUAL TABLE memory_fts USING fts5(content, [decoy, content=memories, content_rowid=rowid, x])").unwrap_err();
+
+        assert!(error.to_string().contains("external-content"));
+    }
+
     fn corrupt_sqlite_source<F>(path: &Path, mutate: F)
     where
         F: FnOnce(&Connection) -> rusqlite::Result<()>,
@@ -3747,6 +4066,13 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn sqlite_fts_contract_accepts_quoted_module_names() {
+        for module in ["\"fts5\"", "`fts5`", "[fts5]"] {
+            validate_sqlite_fts_external_content(&format!("CREATE VIRTUAL TABLE memory_fts USING {module}(content, content=memories, content_rowid=rowid)")).unwrap();
+        }
     }
 
     async fn drop_postgres_constraint(case: &MissingManagedKeyCase) {

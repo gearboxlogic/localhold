@@ -709,6 +709,31 @@ fn doctor_fails_for_internal_content_sqlite_fts_table() {
 }
 
 #[test]
+fn doctor_ignores_sqlite_fts_options_hidden_in_comments() {
+    let db_path = unique_db_path("doctor-comment-decoy-fts");
+    let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TRIGGER trg_memory_fts_insert;
+             DROP TRIGGER trg_memory_fts_update;
+             DROP TRIGGER trg_memory_fts_delete;
+             DROP TABLE memory_fts;
+             CREATE VIRTUAL TABLE memory_fts USING fts5(content /*, content=memories, content_rowid=rowid, */);",
+        )
+        .unwrap();
+    drop(connection);
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
 fn doctor_fails_when_nonempty_embedding_map_has_no_vector_table() {
     let db_path = unique_db_path("doctor-map-without-vectors");
     let store = SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();

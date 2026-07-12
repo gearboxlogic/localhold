@@ -828,7 +828,8 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             AND has_table_privilege('scope_registry', 'SELECT') AND has_table_privilege('scope_registry', 'INSERT') AND has_table_privilege('scope_registry', 'UPDATE')
             AND has_table_privilege('memory_v2_metadata', 'SELECT') AND has_table_privilege('memory_v2_metadata', 'INSERT') AND has_table_privilege('memory_v2_metadata', 'UPDATE') AND has_table_privilege('memory_v2_metadata', 'DELETE')
             AND has_table_privilege('embedding_profile', 'SELECT') AND has_table_privilege('embedding_profile', 'INSERT') AND has_table_privilege('embedding_profile', 'UPDATE')
-            AND has_sequence_privilege(pg_get_serial_sequence('memory_audit_log', 'id'), 'USAGE')",
+            AND has_sequence_privilege(pg_get_serial_sequence('memory_audit_log', 'id'), 'USAGE')
+            AND has_sequence_privilege(pg_get_serial_sequence('memory_audit_log', 'id'), 'SELECT')",
     )
     .fetch_one(&pool)
     .await;
@@ -866,7 +867,7 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
         Ok(true)
     };
     let migration_identities_compatible: Result<bool, _> = if config.database.postgres.auto_migrate {
-        query_scalar("SELECT NOT EXISTS(SELECT 1 FROM localhold_migrations WHERE (version = 1 AND name <> 'bootstrap_schema') OR (version = 2 AND name <> 'audit_log_without_memory_fk') OR (name = 'bootstrap_schema' AND version <> 1) OR (name = 'audit_log_without_memory_fk' AND version <> 2))")
+        query_scalar("SELECT NOT EXISTS(SELECT 1 FROM localhold_migrations WHERE ((version = 1 AND name = 'bootstrap_schema') OR (version = 2 AND name = 'audit_log_without_memory_fk')) IS NOT TRUE)")
             .fetch_one(&pool)
             .await
     } else {

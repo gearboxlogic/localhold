@@ -126,7 +126,6 @@ type PostgresDefaultExpectation = (&'static str, &'static str, &'static str);
 const POSTGRES_REQUIRED_DEFAULTS: &[PostgresDefaultExpectation] = &[
     ("localhold_migrations", "applied_at", "now()"),
     ("memories", "has_embedding", "false"),
-    ("memories", "embedding_revision", "0"),
     ("memories", "memory_type", "'semantic'::text"),
     ("memories", "importance", "0.5"),
     ("memories", "impression_count", "0"),
@@ -1021,8 +1020,6 @@ fn sqlite_fts5_arguments_start(sql: &str) -> Option<usize> {
             continue;
         }
         match bytes[index] {
-            b'-' if bytes.get(index.saturating_add(1)) == Some(&b'-') => index = skip_sqlite_line_comment(bytes, index),
-            b'/' if bytes.get(index.saturating_add(1)) == Some(&b'*') => index = skip_sqlite_block_comment(bytes, index),
             byte if byte.is_ascii_alphabetic() || byte == b'_' => {
                 let start = index;
                 index = index.saturating_add(1);
@@ -1097,7 +1094,7 @@ fn split_sqlite_fts_arguments(arguments: &str) -> Vec<&str> {
         let byte = bytes[index];
         match quote {
             Some(active_quote) if byte == active_quote => {
-                let doubled = bytes.get(index.saturating_add(1)) == Some(&active_quote);
+                let doubled = active_quote != b']' && bytes.get(index.saturating_add(1)) == Some(&active_quote);
                 quote = doubled.then_some(active_quote);
                 index = index.saturating_add(usize::from(doubled));
             }
@@ -1122,9 +1119,12 @@ fn decode_sqlite_fts_option(value: &str) -> String {
         let terminator = if first == b'[' { b']' } else { first };
         if matches!(first, b'\'' | b'"' | b'`' | b'[') && value.as_bytes().last() == Some(&terminator) {
             let inner = &value[1..value.len().saturating_sub(1)];
-            let doubled = String::from_utf8(vec![terminator, terminator]).unwrap_or_default();
-            let single = char::from(terminator).to_string();
-            return inner.replace(&doubled, &single);
+            if first != b'[' {
+                let doubled = String::from_utf8(vec![terminator, terminator]).unwrap_or_default();
+                let single = char::from(terminator).to_string();
+                return inner.replace(&doubled, &single);
+            }
+            return inner.to_owned();
         }
     }
     value.to_owned()
@@ -1953,6 +1953,9 @@ async fn validate_postgres_table_contracts(pool: &PgPool, table: &'static str, c
     for (_, column, expected_default) in POSTGRES_REQUIRED_DEFAULTS.iter().filter(|(expected_table, ..)| *expected_table == table) {
         validate_postgres_default_contract(pool, table, column, expected_default, current_schema_only).await?;
     }
+    if table == "memories" {
+        validate_postgres_embedding_revision_default(pool, current_schema_only).await?;
+    }
     if table == "memory_audit_log" {
         validate_postgres_serial_default(pool, table, "id", current_schema_only).await?;
     }
@@ -2060,6 +2063,26 @@ async fn validate_postgres_default_contract(
         Err(StoreError::Conflict(format!(
             "PostgreSQL target column {table}.{column} must be NOT NULL with DEFAULT {expected_default} because startup does not repair an existing definition"
         )))
+    }
+}
+
+async fn validate_postgres_embedding_revision_default(pool: &PgPool, current_schema_only: bool) -> Result<(), StoreError> {
+    let default: Option<String> = query_scalar(
+        "SELECT pg_get_expr(definition.adbin, definition.adrelid) FROM pg_attribute AS attribute LEFT JOIN pg_attrdef AS definition ON definition.adrelid = attribute.attrelid AND definition.adnum = attribute.attnum WHERE attribute.attrelid = to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memories') ELSE 'memories' END) AND attribute.attname = 'embedding_revision' AND NOT attribute.attisdropped",
+    )
+    .bind(current_schema_only)
+    .fetch_one(pool)
+    .await?;
+    let default_is_zero = default.as_deref().is_some_and(|value| {
+        let normalized = value.trim().trim_matches(['(', ')']);
+        normalized.strip_suffix("::bigint").unwrap_or(normalized) == "0"
+    });
+    if default_is_zero {
+        Ok(())
+    } else {
+        Err(StoreError::Conflict(
+            "PostgreSQL target column memories.embedding_revision must have DEFAULT 0 because startup does not repair an existing definition".into(),
+        ))
     }
 }
 
@@ -4028,6 +4051,13 @@ mod tests {
     #[test]
     fn sqlite_fts_contract_accepts_bracket_and_backtick_option_values() {
         validate_sqlite_fts_external_content("CREATE VIRTUAL TABLE memory_fts USING fts5(content, content=[memories], content_rowid=`rowid`)").unwrap();
+    }
+
+    #[test]
+    fn sqlite_fts_argument_splitter_closes_brackets_at_first_terminator() {
+        let arguments = split_sqlite_fts_arguments("[decoy]], content=memories, content_rowid=rowid");
+
+        assert_eq!(arguments, ["[decoy]]", " content=memories", " content_rowid=rowid"]);
     }
 
     #[test]

@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use super::{BoxFuture, RerankerError, RerankerProvider, RerankerScore};
+use crate::clock::{Clock, SystemClock};
 
 /// Configuration for the resilient reranker wrapper.
 #[derive(Debug, Clone)]
@@ -56,6 +57,11 @@ impl<P: RerankerProvider + 'static> ResilientReranker<P> {
     /// Runs an initial health check to set availability, then spawns a
     /// background probe task.
     pub async fn new(inner: P, config: ResilientRerankerConfig) -> Self {
+        Self::new_with_clock(inner, config, Arc::new(SystemClock::new())).await
+    }
+
+    /// Create a resilient wrapper driven by an injected clock.
+    pub async fn new_with_clock(inner: P, config: ResilientRerankerConfig, clock: Arc<dyn Clock>) -> Self {
         let inner = Arc::new(inner);
         let initially_available = inner.health_check().await.is_ok();
 
@@ -68,7 +74,7 @@ impl<P: RerankerProvider + 'static> ResilientReranker<P> {
         let available = Arc::new(AtomicBool::new(initially_available));
         let cancel = CancellationToken::new();
 
-        let probe_abort_handle = spawn_health_probe(Arc::clone(&inner), Arc::clone(&available), config.probe_interval, cancel.clone());
+        let probe_abort_handle = spawn_health_probe(Arc::clone(&inner), Arc::clone(&available), config.probe_interval, cancel.clone(), Arc::clone(&clock));
 
         Self {
             inner,
@@ -145,13 +151,19 @@ impl<P: RerankerProvider + 'static> RerankerProvider for ResilientReranker<P> {
 /// Spawn a background task that periodically probes the inner provider's health.
 /// When the provider is unavailable and a health check succeeds, it is marked
 /// available again. The task exits when the cancellation token is cancelled.
-fn spawn_health_probe<P: RerankerProvider + 'static>(inner: Arc<P>, available: Arc<AtomicBool>, interval: std::time::Duration, cancel: CancellationToken) -> AbortHandle {
+fn spawn_health_probe<P: RerankerProvider + 'static>(
+    inner: Arc<P>,
+    available: Arc<AtomicBool>,
+    interval: std::time::Duration,
+    cancel: CancellationToken,
+    clock: Arc<dyn Clock>,
+) -> AbortHandle {
     tokio::spawn(async move {
         loop {
             #[expect(clippy::integer_division_remainder_used, reason = "tokio::select! macro internally uses % for fairness")]
             {
                 tokio::select! {
-                    () = tokio::time::sleep(interval) => {}
+                    () = clock.sleep(interval) => {}
                     () = cancel.cancelled() => {
                         info!("resilient reranker: health probe task cancelled");
                         return;
@@ -190,7 +202,10 @@ mod tests {
     };
 
     use super::{BoxFuture, ResilientReranker, ResilientRerankerConfig};
-    use crate::reranker::{RerankerError, RerankerProvider, RerankerScore};
+    use crate::{
+        clock::MockClock,
+        reranker::{RerankerError, RerankerProvider, RerankerScore},
+    };
 
     /// Mock provider that can be toggled between healthy/unhealthy states
     /// and tracks call counts.
@@ -350,12 +365,15 @@ mod tests {
         let config = ResilientRerankerConfig {
             probe_interval: Duration::from_millis(20),
         };
-        let resilient = ResilientReranker::new(HealthProbeWrapper { inner: Arc::clone(&provider) }, config).await;
+        let clock = Arc::new(MockClock::new());
+        let resilient = ResilientReranker::new_with_clock(HealthProbeWrapper { inner: Arc::clone(&provider) }, config, Arc::<MockClock>::clone(&clock)).await;
         assert!(!resilient.is_available(), "should start unavailable");
 
-        // Make provider healthy, then wait for probe
+        // Make provider healthy, then advance directly to the probe deadline.
         provider.set_healthy(true);
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+        clock.advance(chrono::TimeDelta::milliseconds(20));
+        tokio::task::yield_now().await;
 
         assert!(resilient.is_available(), "should recover after health probe succeeds");
         let docs: &[&str] = &["doc1"];

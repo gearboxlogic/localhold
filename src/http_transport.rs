@@ -5,7 +5,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use axum::{
@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
 use crate::{
+    clock::{Clock, SystemClock},
     config::{ServerConfig, validate_server_config},
     error::EngineError,
     http_auth::bearer_matches,
@@ -54,6 +55,18 @@ pub fn build_router<S>(server: LocalHoldServer<S>, config: &ServerConfig, cancel
 where
     S: MemoryStore + Clone + std::fmt::Debug + 'static,
 {
+    build_router_with_clock(server, config, cancellation_token, Arc::new(SystemClock::new()))
+}
+
+/// Build the HTTP router with session expiry driven by an injected clock.
+///
+/// # Errors
+///
+/// Returns a configuration error if the configured endpoint path is invalid.
+pub fn build_router_with_clock<S>(server: LocalHoldServer<S>, config: &ServerConfig, cancellation_token: &CancellationToken, clock: Arc<dyn Clock>) -> Result<Router, EngineError>
+where
+    S: MemoryStore + Clone + std::fmt::Debug + 'static,
+{
     validate_server_config(config)?;
     let server = if config.admin_tools_enabled {
         server.with_admin_tools()
@@ -67,9 +80,10 @@ where
     http_config.cancellation_token = cancellation_token.child_token();
     http_config.allowed_hosts.clone_from(&config.http_allowed_hosts);
 
-    let sessions = Arc::new(CappedSessionManager::new(
+    let sessions = Arc::new(CappedSessionManager::new_with_clock(
         config.http_max_sessions,
         Duration::from_secs(config.http_session_idle_timeout_secs),
+        clock,
     ));
     sessions.spawn_reaper(cancellation_token.child_token());
     let service = StreamableHttpService::new(move || Ok(server.clone()), sessions, http_config);
@@ -89,16 +103,23 @@ struct CappedSessionManager {
     idle_timeout: Duration,
     activity: SessionActivityMap,
     create_lock: tokio::sync::Mutex<()>,
+    clock: Arc<dyn Clock>,
 }
 
 impl CappedSessionManager {
+    #[cfg(test)]
     fn new(max_sessions: usize, idle_timeout: Duration) -> Self {
+        Self::new_with_clock(max_sessions, idle_timeout, Arc::new(SystemClock::new()))
+    }
+
+    fn new_with_clock(max_sessions: usize, idle_timeout: Duration, clock: Arc<dyn Clock>) -> Self {
         Self {
             inner: LocalSessionManager::default(),
             max_sessions,
             idle_timeout,
             activity: Arc::new(Mutex::new(HashMap::new())),
             create_lock: tokio::sync::Mutex::new(()),
+            clock,
         }
     }
 
@@ -111,7 +132,7 @@ impl CappedSessionManager {
 
     fn touch(&self, id: &SessionId) {
         if let Some(activity) = self.activity.lock().get_mut(id) {
-            activity.last_seen = Instant::now();
+            activity.last_seen = self.clock.monotonic();
         }
     }
 
@@ -120,32 +141,36 @@ impl CappedSessionManager {
         S: Stream<Item = ServerSseMessage> + Send + Sync + 'static,
     {
         let mut sessions = self.activity.lock();
-        let activity = sessions.entry(Arc::clone(id)).or_insert_with(SessionActivity::now);
-        activity.last_seen = Instant::now();
+        let now = self.clock.monotonic();
+        let activity = sessions.entry(Arc::clone(id)).or_insert_with(|| SessionActivity::at(now));
+        activity.last_seen = now;
         activity.active_streams = activity.active_streams.saturating_add(1);
         drop(sessions);
         ActivityStream {
             inner: Box::pin(stream),
             id: Arc::clone(id),
             activity: Arc::clone(&self.activity),
+            clock: Arc::clone(&self.clock),
         }
     }
 
     async fn reap_stale(&self) {
+        let now = self.clock.monotonic();
         let stale = {
             let sessions = self.activity.lock();
             sessions
                 .iter()
-                .filter(|(_, activity)| activity.active_streams == 0 && activity.last_seen.elapsed() >= self.idle_timeout)
+                .filter(|(_, activity)| activity.active_streams == 0 && now.saturating_sub(activity.last_seen) >= self.idle_timeout)
                 .map(|(id, _)| Arc::clone(id))
                 .collect::<Vec<_>>()
         };
         for id in stale {
+            let now = self.clock.monotonic();
             let still_stale = self
                 .activity
                 .lock()
                 .get(&id)
-                .is_some_and(|activity| activity.active_streams == 0 && activity.last_seen.elapsed() >= self.idle_timeout);
+                .is_some_and(|activity| activity.active_streams == 0 && now.saturating_sub(activity.last_seen) >= self.idle_timeout);
             if !still_stale {
                 continue;
             }
@@ -159,12 +184,13 @@ impl CappedSessionManager {
     #[expect(clippy::integer_division_remainder_used, reason = "false positive from tokio::select macro expansion")]
     fn spawn_reaper(self: &Arc<Self>, cancellation_token: CancellationToken) {
         let manager = Arc::clone(self);
+        let clock = Arc::clone(&self.clock);
         let interval = self.idle_timeout.min(Duration::from_secs(30)).max(Duration::from_secs(1));
         let _reaper = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     () = cancellation_token.cancelled() => return,
-                    () = tokio::time::sleep(interval) => manager.reap_stale().await,
+                    () = clock.sleep(interval) => manager.reap_stale().await,
                 }
             }
         });
@@ -173,14 +199,14 @@ impl CappedSessionManager {
 
 #[derive(Debug)]
 struct SessionActivity {
-    last_seen: Instant,
+    last_seen: Duration,
     active_streams: usize,
 }
 
 impl SessionActivity {
-    fn now() -> Self {
+    const fn at(now: Duration) -> Self {
         Self {
-            last_seen: Instant::now(),
+            last_seen: now,
             active_streams: 0,
         }
     }
@@ -190,6 +216,7 @@ struct ActivityStream<S> {
     inner: Pin<Box<S>>,
     id: SessionId,
     activity: SessionActivityMap,
+    clock: Arc<dyn Clock>,
 }
 
 impl<S: Stream<Item = ServerSseMessage>> Stream for ActivityStream<S> {
@@ -201,7 +228,7 @@ impl<S: Stream<Item = ServerSseMessage>> Stream for ActivityStream<S> {
         if matches!(result, Poll::Ready(Some(_)))
             && let Some(activity) = this.activity.lock().get_mut(&this.id)
         {
-            activity.last_seen = Instant::now();
+            activity.last_seen = this.clock.monotonic();
         }
         result
     }
@@ -211,7 +238,7 @@ impl<S> Drop for ActivityStream<S> {
     fn drop(&mut self) {
         if let Some(activity) = self.activity.lock().get_mut(&self.id) {
             activity.active_streams = activity.active_streams.saturating_sub(1);
-            activity.last_seen = Instant::now();
+            activity.last_seen = self.clock.monotonic();
         }
     }
 }
@@ -232,7 +259,7 @@ impl SessionManager for CappedSessionManager {
         let _guard = self.create_lock.lock().await;
         self.ensure_capacity().await?;
         let (id, transport) = self.inner.create_session().await?;
-        let _previous = self.activity.lock().insert(Arc::clone(&id), SessionActivity::now());
+        let _previous = self.activity.lock().insert(Arc::clone(&id), SessionActivity::at(self.clock.monotonic()));
         Ok((id, transport))
     }
 
@@ -286,7 +313,7 @@ impl SessionManager for CappedSessionManager {
         self.ensure_capacity().await?;
         let outcome = self.inner.restore_session(Arc::clone(&id)).await?;
         if matches!(&outcome, RestoreOutcome::Restored(_)) {
-            let _previous = self.activity.lock().insert(id, SessionActivity::now());
+            let _previous = self.activity.lock().insert(id, SessionActivity::at(self.clock.monotonic()));
         }
         Ok(outcome)
     }
@@ -304,6 +331,7 @@ async fn require_bearer(State(expected): State<Arc<str>>, request: Request, next
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::MockClock;
 
     #[tokio::test]
     #[expect(clippy::expect_used, reason = "test assertion requires the capacity error")]
@@ -319,9 +347,10 @@ mod tests {
 
     #[tokio::test]
     async fn idle_session_is_reaped_and_releases_capacity() {
-        let manager = CappedSessionManager::new(1, Duration::from_millis(1));
+        let clock = Arc::new(MockClock::new());
+        let manager = CappedSessionManager::new_with_clock(1, Duration::from_millis(1), Arc::<MockClock>::clone(&clock));
         let (id, _transport) = manager.create_session().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        clock.advance(chrono::TimeDelta::milliseconds(1));
         manager.reap_stale().await;
         assert!(!manager.inner.has_session(&id).await.unwrap());
         let (_replacement_id, _transport) = manager.create_session().await.unwrap();

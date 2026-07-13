@@ -203,7 +203,13 @@ impl PostgresStore {
         Self::open_with_clock(config, embedding_dimensions, Arc::new(SystemClock::new())).await
     }
 
-    async fn open_with_clock(config: &PostgresDatabaseConfig, embedding_dimensions: usize, clock: Arc<dyn Clock>) -> Result<Self, StoreError> {
+    /// Open a `PostgreSQL` store with timestamps driven by an injected clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns a store error if connection, retired-schema validation, schema
+    /// initialization, or vector dimension validation fails.
+    pub async fn open_with_clock(config: &PostgresDatabaseConfig, embedding_dimensions: usize, clock: Arc<dyn Clock>) -> Result<Self, StoreError> {
         validate_bootstrap_inputs(config, embedding_dimensions)?;
         let pool = PgPoolOptions::new().max_connections(config.max_connections).connect(&config.url).await?;
         reject_retired_postgres_schema(&pool, true).await?;

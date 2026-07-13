@@ -7,6 +7,7 @@ use tracing::info;
 
 use super::{EmbeddingProvider, NoopEmbedding, OpenAiEmbedding, ResilientEmbedding, resilient::ResilientConfig};
 use crate::{
+    clock::{Clock, SystemClock},
     config::{EmbeddingConfig, LimitsConfig},
     store::EmbeddingProfile,
 };
@@ -26,10 +27,20 @@ pub fn active_embedding_profile(config: &EmbeddingConfig) -> Option<EmbeddingPro
 
 /// Build the configured provider, including outage detection and recovery.
 pub async fn create_embedding_provider(config: &EmbeddingConfig, limits: &LimitsConfig, recovery_notify: Option<Arc<Notify>>) -> Arc<dyn EmbeddingProvider> {
+    create_embedding_provider_with_clock(config, limits, recovery_notify, Arc::new(SystemClock::new())).await
+}
+
+/// Build the configured provider with all deadlines driven by `clock`.
+pub async fn create_embedding_provider_with_clock(
+    config: &EmbeddingConfig,
+    limits: &LimitsConfig,
+    recovery_notify: Option<Arc<Notify>>,
+    clock: Arc<dyn Clock>,
+) -> Arc<dyn EmbeddingProvider> {
     match config {
         EmbeddingConfig::OpenAiCompatible { dimensions, openai_compatible } => {
             let timeout = Duration::from_secs(limits.embedding_timeout_secs);
-            let provider = match OpenAiEmbedding::new(openai_compatible, *dimensions, timeout) {
+            let provider = match OpenAiEmbedding::new_with_clock(openai_compatible, *dimensions, timeout, Arc::clone(&clock)) {
                 Ok(provider) => provider,
                 Err(error) => {
                     tracing::error!(%error, "openai-compatible embedding provider could not be created; falling back to noop");
@@ -45,7 +56,7 @@ pub async fn create_embedding_provider(config: &EmbeddingConfig, limits: &Limits
             if let Some(notify) = recovery_notify {
                 resilient_config = resilient_config.with_recovery_notify(notify);
             }
-            let resilient = ResilientEmbedding::new(provider, resilient_config).await;
+            let resilient = ResilientEmbedding::new_with_clock(provider, resilient_config, clock).await;
             info!(
                 base_url = openai_compatible.base_url,
                 model = openai_compatible.model,

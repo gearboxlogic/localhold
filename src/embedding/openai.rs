@@ -1,4 +1,7 @@
-use std::time::{Duration, SystemTime};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use reqwest::{
     StatusCode,
@@ -8,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{BoxFuture, EmbeddingProvider};
 use crate::{
+    clock::{Clock, SystemClock},
     config::{EmbeddingHealthCheck, OpenAiAuthMode, OpenAiCompatibleConfig},
     error::EmbeddingError,
 };
@@ -22,6 +26,8 @@ pub struct OpenAiEmbedding {
     send_dimensions: bool,
     health_check: EmbeddingHealthCheck,
     dimensions: usize,
+    timeout: Duration,
+    clock: Arc<dyn Clock>,
 }
 
 impl std::fmt::Debug for OpenAiEmbedding {
@@ -109,13 +115,13 @@ fn classify_http_status(status: StatusCode, context: &str, body: &str, retry_aft
     }
 }
 
-fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
+fn parse_retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
     let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
     if let Ok(seconds) = value.parse::<u64>() {
         return Some(Duration::from_secs(seconds));
     }
     let retry_at = httpdate::parse_http_date(value).ok()?;
-    Some(retry_at.duration_since(SystemTime::now()).unwrap_or_default())
+    Some(retry_at.duration_since(now).unwrap_or_default())
 }
 
 async fn read_error_body(mut response: reqwest::Response) -> String {
@@ -183,8 +189,16 @@ impl OpenAiEmbedding {
     ///
     /// Returns a transient embedding error if the HTTP client cannot be built.
     pub fn new(config: &OpenAiCompatibleConfig, dimensions: usize, timeout: Duration) -> Result<Self, EmbeddingError> {
+        Self::new_with_clock(config, dimensions, timeout, Arc::new(SystemClock::new()))
+    }
+
+    /// Create a provider with request deadlines driven by an injected clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transient embedding error if the HTTP client cannot be built.
+    pub fn new_with_clock(config: &OpenAiCompatibleConfig, dimensions: usize, timeout: Duration, clock: Arc<dyn Clock>) -> Result<Self, EmbeddingError> {
         let client = reqwest::Client::builder()
-            .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(classify_reqwest_error)?;
@@ -197,6 +211,8 @@ impl OpenAiEmbedding {
             send_dimensions: config.send_dimensions,
             health_check: config.health_check,
             dimensions,
+            timeout,
+            clock,
         })
     }
 
@@ -232,7 +248,7 @@ impl OpenAiEmbedding {
 
         let status = response.status();
         if !status.is_success() {
-            let retry_after = parse_retry_after(response.headers());
+            let retry_after = parse_retry_after(response.headers(), self.clock.now().into());
             let body = read_error_body(response).await;
             return Err(classify_http_status(status, context, &body, retry_after));
         }
@@ -273,7 +289,7 @@ impl OpenAiEmbedding {
 
         let status = response.status();
         if !status.is_success() {
-            let retry_after = parse_retry_after(response.headers());
+            let retry_after = parse_retry_after(response.headers(), self.clock.now().into());
             let body = read_error_body(response).await;
             return Err(classify_http_status(status, "health check", &body, retry_after));
         }
@@ -292,15 +308,27 @@ impl OpenAiEmbedding {
 
 impl EmbeddingProvider for OpenAiEmbedding {
     fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, EmbeddingError>> {
-        Box::pin(self.embed_impl(text))
+        Box::pin(async move {
+            crate::clock::timeout(self.clock.as_ref(), self.timeout, self.embed_impl(text))
+                .await
+                .map_err(|_elapsed| EmbeddingError::Transient("embedding request timed out".into()))?
+        })
     }
 
     fn health_check(&self) -> BoxFuture<'_, Result<(), EmbeddingError>> {
-        Box::pin(self.health_check_impl())
+        Box::pin(async move {
+            crate::clock::timeout(self.clock.as_ref(), self.timeout, self.health_check_impl())
+                .await
+                .map_err(|_elapsed| EmbeddingError::Transient("embedding health check timed out".into()))?
+        })
     }
 
     fn embed_batch<'a>(&'a self, texts: &'a [&'a str]) -> BoxFuture<'a, Result<Vec<Vec<f32>>, EmbeddingError>> {
-        Box::pin(self.embed_batch_impl(texts))
+        Box::pin(async move {
+            crate::clock::timeout(self.clock.as_ref(), self.timeout, self.embed_batch_impl(texts))
+                .await
+                .map_err(|_elapsed| EmbeddingError::Transient("embedding batch request timed out".into()))?
+        })
     }
 }
 
@@ -327,6 +355,7 @@ mod tests {
 
     use super::OpenAiEmbedding;
     use crate::{
+        clock::MockClock,
         config::{EmbeddingHealthCheck, OpenAiAuthMode, OpenAiCompatibleConfig},
         embedding::EmbeddingProvider as _,
         error::EmbeddingError,
@@ -405,6 +434,10 @@ mod tests {
 
     async fn oversized_error_handler() -> (StatusCode, String) {
         (StatusCode::BAD_REQUEST, "x".repeat(5_000))
+    }
+
+    async fn hanging_embeddings_handler() -> (StatusCode, &'static str) {
+        std::future::pending().await
     }
 
     async fn batch_contract_handler(request: Request) -> (StatusCode, [(&'static str, &'static str); 1], String) {
@@ -512,6 +545,31 @@ mod tests {
         let (provider, server) = setup_provider(r#"{"data":[{"index":0,"embedding":[3.0,4.0,0.0]}]}"#, 3).await;
         let embedding = provider.embed("hello").await.unwrap();
         assert_eq!(embedding, vec![0.6, 0.8, 0.0]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn request_timeout_is_driven_by_injected_clock() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let _result = axum::serve(listener, Router::new().route("/v1/embeddings", post(hanging_embeddings_handler))).await;
+        });
+        let config = OpenAiCompatibleConfig {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            model: "test-model".into(),
+            ..OpenAiCompatibleConfig::default()
+        };
+        let clock = Arc::new(MockClock::new());
+        let provider = OpenAiEmbedding::new_with_clock(&config, 3, Duration::from_secs(30), Arc::<MockClock>::clone(&clock)).unwrap();
+        let request = provider.embed("hello");
+        tokio::pin!(request);
+        assert!(futures::poll!(request.as_mut()).is_pending());
+
+        clock.advance(chrono::TimeDelta::seconds(30));
+        let error = request.await.unwrap_err();
+        assert!(matches!(error, EmbeddingError::Transient(_)));
+        assert!(error.to_string().contains("timed out"));
         server.abort();
     }
 
@@ -651,12 +709,12 @@ mod tests {
     #[test]
     fn retry_after_accepts_http_dates() {
         let mut headers = reqwest::header::HeaderMap::new();
-        let retry_at = std::time::SystemTime::now() + Duration::from_secs(10);
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let retry_at = now + Duration::from_secs(10);
         let _previous = headers.insert(reqwest::header::RETRY_AFTER, httpdate::fmt_http_date(retry_at).parse().unwrap());
 
-        let delay = super::parse_retry_after(&headers).unwrap();
-        assert!(delay >= Duration::from_secs(8));
-        assert!(delay <= Duration::from_secs(10));
+        let delay = super::parse_retry_after(&headers, now).unwrap();
+        assert_eq!(delay, Duration::from_secs(10));
     }
 
     #[tokio::test]

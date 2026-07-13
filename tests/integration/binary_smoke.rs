@@ -1,8 +1,9 @@
 use std::{
-    io::{Read as _, Write as _},
+    io::{BufRead as _, BufReader, Read as _, Write as _},
     net::TcpListener,
     process::{Child, Command, Stdio},
-    thread,
+    sync::mpsc,
+    thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -21,8 +22,11 @@ fn unique_db_path(name: &str) -> std::path::PathBuf {
 
 fn base_binary_command(db_path: &std::path::Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_hold"));
+    let _isolated_config = isolate_user_config_dir(&mut cmd, &db_path.with_extension("base-config"));
+    cmd.env_remove("LOCALHOLD_DB_BACKEND");
+    cmd.env_remove("LOCALHOLD_POSTGRES_URL");
     cmd.env("LOCALHOLD_DB_PATH", db_path);
-    cmd.env("LOCALHOLD_LOG_LEVEL", "error");
+    cmd.env("LOCALHOLD_LOG_LEVEL", "info");
     cmd
 }
 
@@ -46,11 +50,35 @@ fn isolate_user_config_dir(command: &mut Command, root: &std::path::Path) -> std
     }
 }
 
-fn assert_child_stays_running(child: &mut Child, label: &str) {
-    // Startup should succeed and keep serving until explicitly terminated.
-    thread::sleep(Duration::from_millis(300));
-    let status = child.try_wait().unwrap();
-    assert!(status.is_none(), "{label} process exited early: {status:?}");
+#[expect(clippy::expect_used, clippy::panic, reason = "test helper reports subprocess startup failures with captured diagnostics")]
+fn wait_for_startup_log(child: &mut Child, label: &str, expected: &str) -> JoinHandle<String> {
+    let stderr = child.stderr.take().expect("startup-log test must pipe stderr");
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        let mut output = String::new();
+        for line in BufReader::new(stderr).lines() {
+            let line = line.expect("child stderr should remain valid UTF-8 text");
+            output.push_str(&line);
+            output.push('\n');
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+        output
+    });
+
+    loop {
+        match receiver.recv_timeout(Duration::from_secs(30)) {
+            Ok(line) if line.contains(expected) => return reader,
+            Ok(_line) => {}
+            Err(error) => {
+                let status = child.try_wait().unwrap();
+                terminate_child(child);
+                let stderr = reader.join().unwrap();
+                panic!("{label} did not emit startup readiness log {expected:?}: {error}; status={status:?}; stderr={stderr}");
+            }
+        }
+    }
 }
 
 fn terminate_child(child: &mut Child) {
@@ -121,13 +149,15 @@ fn binary_starts_in_stdio_mode() {
     let db_path = unique_db_path("bin-stdio");
     let mut cmd = base_binary_command(&db_path);
     cmd.env("LOCALHOLD_TRANSPORT", "stdio");
+    cmd.env("LOCALHOLD_LOG_LEVEL", "info");
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::null());
-    cmd.stderr(Stdio::null());
+    cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn().unwrap();
-    assert_child_stays_running(&mut child, "stdio");
+    let stderr = wait_for_startup_log(&mut child, "stdio", "noop embedding provider initialized");
     terminate_child(&mut child);
+    let _stderr = stderr.join().unwrap();
     let _cleanup = std::fs::remove_file(db_path);
 }
 
@@ -1012,13 +1042,15 @@ fn binary_starts_in_http_mode() {
     cmd.env("LOCALHOLD_HTTP_HOST", "127.0.0.1");
     cmd.env("LOCALHOLD_HTTP_PORT", "0");
     cmd.env("LOCALHOLD_HTTP_PATH", "/mcp");
+    cmd.env("LOCALHOLD_LOG_LEVEL", "info");
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
-    cmd.stderr(Stdio::null());
+    cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn().unwrap();
-    assert_child_stays_running(&mut child, "http");
+    let stderr = wait_for_startup_log(&mut child, "http", "localhold MCP server listening on");
     terminate_child(&mut child);
+    let _stderr = stderr.join().unwrap();
     let _cleanup = std::fs::remove_file(db_path);
 }
 
@@ -1037,10 +1069,9 @@ fn binary_starts_text_only_without_embedding_failure_warning() {
     cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn().unwrap();
-    assert_child_stays_running(&mut child, "text-only HTTP");
-    let _kill = child.kill();
-    let output = child.wait_with_output().unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
+    let stderr_reader = wait_for_startup_log(&mut child, "text-only HTTP", "localhold MCP server listening on");
+    terminate_child(&mut child);
+    let stderr = stderr_reader.join().unwrap();
 
     assert!(stderr.contains("noop embedding provider initialized"), "expected text-only provider startup log: {stderr}");
     assert!(
@@ -1166,11 +1197,12 @@ fn binary_starts_with_postgres_backend() {
     cmd.env("LOCALHOLD_LOG_LEVEL", "error");
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::null());
-    cmd.stderr(Stdio::null());
+    cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn().unwrap();
-    assert_child_stays_running(&mut child, "postgres stdio");
+    let stderr = wait_for_startup_log(&mut child, "postgres stdio", "noop embedding provider initialized");
     terminate_child(&mut child);
+    let _stderr = stderr.join().unwrap();
 }
 
 #[test]
@@ -1261,13 +1293,15 @@ fn binary_ignores_config_files_in_current_directory() {
     let _config_dir = isolate_user_config_dir(&mut cmd, &root);
     cmd.current_dir(&root);
     cmd.env("LOCALHOLD_TRANSPORT", "stdio");
+    cmd.env("LOCALHOLD_LOG_LEVEL", "info");
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::null());
-    cmd.stderr(Stdio::null());
+    cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn().unwrap();
-    assert_child_stays_running(&mut child, "stdio with untrusted CWD configs");
+    let stderr = wait_for_startup_log(&mut child, "stdio with untrusted CWD configs", "noop embedding provider initialized");
     terminate_child(&mut child);
+    let _stderr = stderr.join().unwrap();
     let _cleanup = std::fs::remove_dir_all(root);
     let _cleanup = std::fs::remove_file(db_path);
 }

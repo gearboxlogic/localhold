@@ -97,6 +97,20 @@ The ranking and search behavior in code should be treated as authoritative over 
 
 ## Operational Model
 
+### Time and scheduling
+
+LocalHold routes its own wall-clock reads, elapsed-time decisions, sleeps, and
+deadlines through the shared `Clock` abstraction. A production process creates
+one `SystemClock` and passes it to storage, embedding retries and health probes,
+the engine shutdown coordinator, reranker recovery, and HTTP session expiry.
+
+Tests can inject `MockClock`, register the work that is waiting, and advance
+logical time explicitly. Time-based behavior must not depend on fixed sleeps or
+direct `Utc::now`, `Instant::now`, or `tokio::time::sleep` calls outside the
+clock implementation. Subprocess and external-service tests may retain a real
+timeout as a failure bound, but readiness or an explicit event—not elapsed wall
+time—must drive their successful path.
+
 - memories are persisted before background embedding work starts
 - access control is enforced at read and write boundaries
 - authorization uses server-resolved principals rather than caller-provided labels

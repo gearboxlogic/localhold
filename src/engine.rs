@@ -253,7 +253,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
     /// Create a new engine with a custom clock (for testing).
     #[must_use]
     pub fn new_with_clock(store: S, embedding: Arc<dyn EmbeddingProvider>, limits: LimitsConfig, search_config: SearchConfig, clock: Arc<dyn Clock>) -> Self {
-        let background_tasks = BackgroundTasks::new();
+        let background_tasks = BackgroundTasks::new_with_clock(Arc::clone(&clock));
         let max_concurrent_embedding_requests = limits.max_concurrent_embedding_requests;
         let embedding_batch_size = limits.embedding_batch_size;
         let embedding: Arc<dyn EmbeddingProvider> = Arc::new(ConcurrencyLimitedEmbedding::new(embedding, max_concurrent_embedding_requests));
@@ -1382,6 +1382,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        clock::MockClock,
         config::LimitsConfig,
         embedding::{BoxFuture, EmbeddingProvider, NoopEmbedding},
         error::EmbeddingError,
@@ -1628,9 +1629,11 @@ mod tests {
         assert_eq!(engine.tracked_task_count(), 1);
 
         tx.send(()).unwrap();
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        let reaped = engine.reap_completed_tasks_for_test();
+        let mut reaped = engine.reap_completed_tasks_for_test();
+        while reaped == 0 {
+            tokio::task::yield_now().await;
+            reaped = engine.reap_completed_tasks_for_test();
+        }
         assert_eq!(reaped, 1);
         assert_eq!(engine.tracked_task_count(), 0);
     }
@@ -1640,18 +1643,29 @@ mod tests {
         let engine = make_engine();
         #[expect(clippy::panic, reason = "intentionally panicking task to test shutdown reaping")]
         engine.spawn_tracked_task(async { panic!("background panic for test") });
-        tokio::time::sleep(Duration::from_millis(10)).await;
         engine.shutdown().await;
         assert_eq!(engine.tracked_task_count(), 0);
     }
 
     #[tokio::test]
     async fn shutdown_timeout_drops_stuck_background_tasks() {
-        let engine = make_engine();
+        let clock = Arc::new(MockClock::new());
+        let store = SqliteStore::in_memory_with_clock(Arc::<MockClock>::clone(&clock)).unwrap();
+        let engine = LocalHoldEngine::new_with_clock(
+            store,
+            Arc::new(NoopEmbedding::new()),
+            LimitsConfig::default(),
+            SearchConfig::default(),
+            Arc::<MockClock>::clone(&clock),
+        );
         engine.spawn_tracked_task(async move {
             std::future::pending::<()>().await;
         });
-        engine.shutdown_for_test(Duration::from_millis(5)).await;
+        let shutdown = engine.shutdown_for_test(Duration::from_millis(5));
+        tokio::pin!(shutdown);
+        assert!(futures::poll!(shutdown.as_mut()).is_pending());
+        clock.advance(chrono::TimeDelta::milliseconds(5));
+        shutdown.await;
         assert_eq!(engine.tracked_task_count(), 0);
     }
 
@@ -1794,16 +1808,21 @@ mod tests {
     async fn reembed_health_check_does_not_block_shutdown_timeout() {
         let embedding = Arc::new(BlockingHealthCheckEmbedding::new());
         let embedding_waiter = Arc::clone(&embedding);
-        let engine = make_engine_with_embedding(embedding);
+        let clock = Arc::new(MockClock::new());
+        let store = SqliteStore::in_memory_with_clock(Arc::<MockClock>::clone(&clock)).unwrap();
+        let engine = LocalHoldEngine::new_with_clock(store, embedding, LimitsConfig::default(), SearchConfig::default(), Arc::<MockClock>::clone(&clock));
 
         let reembed_engine = engine.clone();
         let reembed = tokio::spawn(async move { reembed_engine.reembed(ReembedRequest::Bulk { limit: 1 }).await });
 
         embedding_waiter.wait_until_started().await;
 
-        let start = tokio::time::Instant::now();
-        engine.shutdown_for_test(Duration::from_millis(10)).await;
-        assert!(start.elapsed() < Duration::from_millis(200));
+        let shutdown = engine.shutdown_for_test(Duration::from_millis(10));
+        tokio::pin!(shutdown);
+        assert!(
+            futures::poll!(shutdown.as_mut()).is_ready(),
+            "health checks outside tracked embedding work must not hold shutdown open"
+        );
 
         reembed.abort();
         let aborted = reembed.await.unwrap_err();

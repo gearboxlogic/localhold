@@ -18,7 +18,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use super::{BoxFuture, EmbeddingProvider, retry::RetryPolicy};
-use crate::error::EmbeddingError;
+use crate::{
+    clock::{Clock, SystemClock},
+    error::EmbeddingError,
+};
 
 /// Configuration for the resilient embedding wrapper.
 #[derive(Debug, Clone)]
@@ -73,6 +76,7 @@ pub struct ResilientEmbedding<P> {
     probe_handle: JoinHandle<()>,
     cancel: CancellationToken,
     retry_policy: RetryPolicy,
+    clock: Arc<dyn Clock>,
 }
 
 impl<P: EmbeddingProvider + 'static> ResilientEmbedding<P> {
@@ -81,6 +85,11 @@ impl<P: EmbeddingProvider + 'static> ResilientEmbedding<P> {
     /// Runs an initial health check to set availability, then spawns a
     /// background probe task.
     pub async fn new(inner: P, config: ResilientConfig) -> Self {
+        Self::new_with_clock(inner, config, Arc::new(SystemClock::new())).await
+    }
+
+    /// Create a resilient wrapper driven by an injected clock.
+    pub async fn new_with_clock(inner: P, config: ResilientConfig, clock: Arc<dyn Clock>) -> Self {
         let inner = Arc::new(inner);
         let initial_health = inner.health_check().await;
         let initially_available = matches!(initial_health, Ok(()) | Err(EmbeddingError::RateLimited { .. }));
@@ -96,7 +105,14 @@ impl<P: EmbeddingProvider + 'static> ResilientEmbedding<P> {
 
         let retry_policy = RetryPolicy::new(config.max_retries, config.initial_backoff, config.max_backoff);
 
-        let probe_handle = spawn_health_probe(Arc::clone(&inner), Arc::clone(&available), config.probe_interval, cancel.clone(), config.recovery_notify);
+        let probe_handle = spawn_health_probe(
+            Arc::clone(&inner),
+            Arc::clone(&available),
+            config.probe_interval,
+            cancel.clone(),
+            config.recovery_notify,
+            Arc::clone(&clock),
+        );
 
         Self {
             inner,
@@ -104,6 +120,7 @@ impl<P: EmbeddingProvider + 'static> ResilientEmbedding<P> {
             probe_handle,
             cancel,
             retry_policy,
+            clock,
         }
     }
 
@@ -143,7 +160,7 @@ impl<P: EmbeddingProvider + 'static> ResilientEmbedding<P> {
                 return Err(self.handle_embed_error(error));
             };
             warn!(attempt = attempt.saturating_add(1), max_retries = self.retry_policy.max_retries(), ?delay, error = %error, "embedding request failed; retrying");
-            tokio::time::sleep(delay).await;
+            self.clock.sleep(delay).await;
             attempt = attempt.saturating_add(1);
         }
     }
@@ -200,19 +217,21 @@ impl<P: EmbeddingProvider + 'static> EmbeddingProvider for ResilientEmbedding<P>
 /// Spawn a background task that periodically probes the inner provider's health.
 /// When the provider is unavailable and a health check succeeds, it is marked
 /// available again. The task exits when the cancellation token is cancelled.
+#[expect(clippy::too_many_arguments, reason = "probe task owns provider state, cancellation, notification, interval, and clock")]
 fn spawn_health_probe<P: EmbeddingProvider + 'static>(
     inner: Arc<P>,
     available: Arc<AtomicBool>,
     interval: std::time::Duration,
     cancel: CancellationToken,
     recovery_notify: Option<Arc<Notify>>,
+    clock: Arc<dyn Clock>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             #[expect(clippy::integer_division_remainder_used, reason = "tokio::select! macro internally uses % for fairness")]
             {
                 tokio::select! {
-                    () = tokio::time::sleep(interval) => {}
+                    () = clock.sleep(interval) => {}
                     () = cancel.cancelled() => {
                         info!("resilient embedding: health probe task cancelled");
                         return;
@@ -254,8 +273,10 @@ mod tests {
         time::Duration,
     };
 
+    use futures::FutureExt as _;
+
     use super::{BoxFuture, ResilientConfig, ResilientEmbedding};
-    use crate::{embedding::EmbeddingProvider, error::EmbeddingError};
+    use crate::{clock::MockClock, embedding::EmbeddingProvider, error::EmbeddingError};
 
     /// Mock provider that can be toggled between healthy/unhealthy states
     /// and tracks call counts.
@@ -560,12 +581,15 @@ mod tests {
             recovery_notify: None,
             ..ResilientConfig::default()
         };
-        let resilient = ResilientEmbedding::new(HealthProbeWrapper { inner: Arc::clone(&provider) }, config).await;
+        let clock = Arc::new(MockClock::new());
+        let resilient = ResilientEmbedding::new_with_clock(HealthProbeWrapper { inner: Arc::clone(&provider) }, config, Arc::<MockClock>::clone(&clock)).await;
         assert!(!resilient.is_available(), "should start unavailable");
 
-        // Make provider healthy, then wait for probe
+        // Make provider healthy, then advance directly to the probe deadline.
         provider.set_healthy(true);
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+        clock.advance(chrono::TimeDelta::milliseconds(20));
+        tokio::task::yield_now().await;
 
         assert!(resilient.is_available(), "should recover after health probe succeeds");
         let result = resilient.embed("test").await;
@@ -648,15 +672,17 @@ mod tests {
             recovery_notify: Some(Arc::clone(&notify)),
             ..ResilientConfig::default()
         };
-        let resilient = ResilientEmbedding::new(HealthProbeWrapper { inner: Arc::clone(&provider) }, config).await;
+        let clock = Arc::new(MockClock::new());
+        let resilient = ResilientEmbedding::new_with_clock(HealthProbeWrapper { inner: Arc::clone(&provider) }, config, Arc::<MockClock>::clone(&clock)).await;
         assert!(!resilient.is_available(), "should start unavailable");
 
-        // Make provider healthy, then wait for the notify to fire
+        // Register before advancing so the transition cannot be missed.
+        let notified = notify.notified();
+        tokio::pin!(notified);
         provider.set_healthy(true);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), notify.notified()).await.is_ok(),
-            "recovery_notify should fire when provider recovers"
-        );
+        tokio::task::yield_now().await;
+        clock.advance(chrono::TimeDelta::milliseconds(20));
+        notified.await;
 
         assert!(resilient.is_available(), "should be available after recovery");
     }
@@ -670,10 +696,15 @@ mod tests {
             recovery_notify: Some(Arc::clone(&notify)),
             ..ResilientConfig::default()
         };
-        let _resilient = ResilientEmbedding::new(HealthProbeWrapper { inner: Arc::clone(&provider) }, config).await;
+        let clock = Arc::new(MockClock::new());
+        let _resilient = ResilientEmbedding::new_with_clock(HealthProbeWrapper { inner: Arc::clone(&provider) }, config, Arc::<MockClock>::clone(&clock)).await;
 
-        // The provider is already available — notify should NOT fire
-        let result = tokio::time::timeout(Duration::from_millis(100), notify.notified()).await;
-        assert!(result.is_err(), "recovery_notify should not fire when provider is already available");
+        tokio::task::yield_now().await;
+        clock.advance(chrono::TimeDelta::milliseconds(20));
+        tokio::task::yield_now().await;
+        assert!(
+            notify.notified().now_or_never().is_none(),
+            "recovery_notify should not fire when provider is already available"
+        );
     }
 }

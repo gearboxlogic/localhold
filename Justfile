@@ -66,9 +66,14 @@ audit:
 hygiene:
     ./script/check-publication-hygiene.sh
 
+# Prevent production timing logic from bypassing the injectable clock
+time-abstraction:
+    ./script/check-time-abstraction.sh
+
 # CI-style gate: fmt + clippy + deny + tests
 check:
     just hygiene
+    just time-abstraction
     just fmt-check
     just clippy
     just deny

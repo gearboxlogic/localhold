@@ -1191,13 +1191,15 @@ fn doctor_fails_required_cuda_before_cache_or_download_work() {
 #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
 fn binary_starts_with_postgres_backend() {
     let url = postgres_smoke_url();
+    let root = unique_db_path("bin-postgres").with_extension("config");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_hold"));
+    let _config_dir = isolate_user_config_dir(&mut cmd, &root);
     cmd.env("LOCALHOLD_DB_BACKEND", "postgres");
     cmd.env("LOCALHOLD_POSTGRES_URL", url);
     cmd.env("LOCALHOLD_POSTGRES_MAX_CONNECTIONS", "1");
     cmd.env("LOCALHOLD_EMBEDDING_DIMENSIONS", "3");
     cmd.env("LOCALHOLD_TRANSPORT", "stdio");
-    cmd.env("LOCALHOLD_LOG_LEVEL", "error");
+    cmd.env("LOCALHOLD_LOG_LEVEL", "info");
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::piped());
@@ -1206,6 +1208,7 @@ fn binary_starts_with_postgres_backend() {
     let stderr = wait_for_startup_log(&mut child, "postgres stdio", "noop embedding provider initialized");
     terminate_child(&mut child);
     let _stderr = stderr.join().unwrap();
+    let _cleanup = std::fs::remove_dir_all(root);
 }
 
 #[test]

@@ -6,7 +6,7 @@ failed=0
 
 while IFS= read -r file; do
     case "$file" in
-        src/clock.rs|src/types.rs|src/config/tests.rs) continue ;;
+        src/clock.rs|src/config/tests.rs) continue ;;
     esac
 
     production=$(awk '/^mod tests \{/{exit} {print}' "$file")

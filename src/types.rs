@@ -563,7 +563,7 @@ impl Memory {
     #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn new_for_test(content: String, tags: Vec<String>, provenance: Provenance, access_policy: AccessPolicy) -> Self {
-        let now = Utc::now();
+        let now = DateTime::<Utc>::UNIX_EPOCH;
         Self {
             id: MemoryId::new(),
             content,
@@ -1542,8 +1542,8 @@ mod tests {
                 ..Default::default()
             },
             access_policy: policy,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: DateTime::<Utc>::UNIX_EPOCH,
+            updated_at: DateTime::<Utc>::UNIX_EPOCH,
             expires_at: None,
             has_embedding: false,
             memory_type: MemoryType::default(),

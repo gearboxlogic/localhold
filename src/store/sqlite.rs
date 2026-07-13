@@ -1043,7 +1043,7 @@ mod tests {
         let report = store.migrate_metadata_audited(&[], false, &audit_draft(AuditAction::Update)).await.unwrap();
 
         assert_eq!(report.migrated, 1_u64);
-        assert!(store.get_metadata(&id).await.unwrap().is_some());
+        assert_eq!(store.get_metadata(&id).await.unwrap().unwrap().schema_version, 1_i64);
         let history = store.query_audit_log(&id, 10).await.unwrap();
         assert_eq!(history.len(), 1_usize);
         assert_eq!(history[0].action, AuditAction::Update);

@@ -11,8 +11,11 @@ paths = ['''(^|/)\.git/''', '''^\.cache/''', '''^\.cargo/''', '''^\.rustup/''', 
 id = "generic-api-key"
 
 [[rules.allowlists]]
-description = "V2 migration sentinel comparison is not a credential"
+description = "Current and retired metadata migration sentinel comparisons are not credentials"
 condition = "AND"
 regexTarget = "line"
-regexes = ['''^\s*let unresolved_scope = scope_key == V2_UNRESOLVED_SCOPE;\s*$''']
+regexes = [
+  '''^\s*let unresolved_scope = scope_key == V2_UNRESOLVED_SCOPE;\s*$''',
+  '''^\s*let unresolved_scope = scope_key == UNRESOLVED_SCOPE;\s*$''',
+]
 paths = ['''^src/store/(admin|postgres)\.rs$''']

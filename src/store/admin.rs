@@ -409,7 +409,7 @@ fn insert_metadata_migration_rows(conn: &mut Connection, prepared_rows: &[Prepar
             "INSERT INTO memory_metadata (
                 memory_id, scope_key, summary, agent_label, created_by_principal,
                 quality_flags, schema_version, migrated_at, updated_at
-             ) VALUES (?1, ?2, NULL, ?3, NULL, ?4, 2, ?5, ?5)
+             ) VALUES (?1, ?2, NULL, ?3, NULL, ?4, 1, ?5, ?5)
              ON CONFLICT(memory_id) DO NOTHING",
             params![row.id, row.scope_key, row.agent_label, quality_flags_json, now],
         )?;

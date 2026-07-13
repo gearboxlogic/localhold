@@ -275,6 +275,7 @@ impl PostgresStore {
     pub async fn reindex_embeddings(config: &PostgresDatabaseConfig, profile: &EmbeddingProfile) -> Result<(), StoreError> {
         validate_bootstrap_inputs(config, profile.dimensions)?;
         let pool = PgPoolOptions::new().max_connections(config.max_connections).connect(&config.url).await?;
+        reject_retired_postgres_schema(&pool, true).await?;
         execute_statement(&pool, CREATE_VECTOR_EXTENSION).await?;
         execute_statement(&pool, CREATE_MIGRATIONS_TABLE).await?;
         execute_statements(&pool, POSTGRES_SCHEMA_STATEMENTS).await?;
@@ -2736,7 +2737,7 @@ async fn insert_metadata_migration_rows(
             INSERT INTO memory_metadata (
                 memory_id, scope_key, summary, agent_label, created_by_principal,
                 quality_flags, schema_version, migrated_at, updated_at
-            ) VALUES ($1, $2, NULL, $3, NULL, $4, 2, $5, $5)
+            ) VALUES ($1, $2, NULL, $3, NULL, $4, 1, $5, $5)
             ON CONFLICT (memory_id) DO NOTHING
             ",
         )
@@ -3975,10 +3976,35 @@ mod tests {
         let registered_metadata = store.get_metadata_impl(&registered_id).await.unwrap().unwrap();
         assert_eq!(registered_metadata.scope_key.as_deref(), Some(scope_key.as_str()));
         assert_eq!(registered_metadata.quality_flags, vec!["missing_summary"]);
+        assert_eq!(registered_metadata.schema_version, 1_i64);
         let unresolved_metadata = store.get_metadata_impl(&unresolved_id).await.unwrap().unwrap();
         assert_eq!(unresolved_metadata.scope_key.as_deref(), Some(UNRESOLVED_SCOPE));
+        assert_eq!(unresolved_metadata.schema_version, 1_i64);
         assert!(unresolved_metadata.quality_flags.contains(&"missing_scope".to_owned()));
         assert!(unresolved_metadata.quality_flags.contains(&"possible_code_dump".to_owned()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn postgres_reindex_rejects_retired_iteration_metadata_table() {
+        let url = std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
+        let config = PostgresDatabaseConfig {
+            url,
+            max_connections: 1,
+            auto_migrate: true,
+        };
+        let store = PostgresStore::open(&config, 3_usize).await.unwrap();
+        reset_postgres_smoke_database(&store).await;
+        let _created = sqlx::query("CREATE TABLE memory_v2_metadata (memory_id TEXT PRIMARY KEY)")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let profile = EmbeddingProfile::openai_compatible("http://127.0.0.1:8000/v1", "test-model", 3_usize);
+
+        let error = PostgresStore::reindex_embeddings(&config, &profile).await.unwrap_err();
+
+        assert!(error.to_string().contains("unsupported prior-iteration table memory_v2_metadata"));
+        let _dropped = sqlx::query("DROP TABLE memory_v2_metadata").execute(store.pool()).await.unwrap();
     }
 
     #[tokio::test]

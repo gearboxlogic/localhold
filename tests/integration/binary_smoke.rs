@@ -15,6 +15,9 @@ use serde_json::Value;
 use sqlx_core::{query::query, query_scalar::query_scalar};
 use sqlx_postgres::PgPoolOptions;
 
+const STDIO_INITIALIZE: &str =
+    r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"localhold-binary-smoke","version":"1"}}}"#;
+
 fn unique_db_path(name: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     std::env::temp_dir().join(format!("localhold-{name}-{}-{nanos}.db", std::process::id()))
@@ -86,6 +89,13 @@ fn terminate_child(child: &mut Child) {
     let _status = child.wait();
 }
 
+#[expect(clippy::expect_used, reason = "test helper requires a piped stdin handle")]
+fn initialize_stdio_child(child: &mut Child) {
+    let stdin = child.stdin.as_mut().expect("stdio startup test must pipe stdin");
+    writeln!(stdin, "{STDIO_INITIALIZE}").unwrap();
+    stdin.flush().unwrap();
+}
+
 fn postgres_smoke_url() -> String {
     std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into())
 }
@@ -155,7 +165,8 @@ fn binary_starts_in_stdio_mode() {
     cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn().unwrap();
-    let stderr = wait_for_startup_log(&mut child, "stdio", "noop embedding provider initialized");
+    initialize_stdio_child(&mut child);
+    let stderr = wait_for_startup_log(&mut child, "stdio", "localhold MCP server running on stdio");
     terminate_child(&mut child);
     let _stderr = stderr.join().unwrap();
     let _cleanup = std::fs::remove_file(db_path);
@@ -1119,11 +1130,8 @@ fn explicit_optional_cuda_stays_running_without_cpu_fallback() {
     cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn().unwrap();
-    let stderr_reader = wait_for_startup_log(
-        &mut child,
-        "optional CUDA reranker in CPU binary",
-        "CUDA was requested but this binary was compiled without",
-    );
+    initialize_stdio_child(&mut child);
+    let stderr_reader = wait_for_startup_log(&mut child, "optional CUDA reranker in CPU binary", "localhold MCP server running on stdio");
     terminate_child(&mut child);
     let stderr = stderr_reader.join().unwrap();
     assert!(
@@ -1205,7 +1213,8 @@ fn binary_starts_with_postgres_backend() {
     cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn().unwrap();
-    let stderr = wait_for_startup_log(&mut child, "postgres stdio", "noop embedding provider initialized");
+    initialize_stdio_child(&mut child);
+    let stderr = wait_for_startup_log(&mut child, "postgres stdio", "localhold MCP server running on stdio");
     terminate_child(&mut child);
     let _stderr = stderr.join().unwrap();
     let _cleanup = std::fs::remove_dir_all(root);
@@ -1305,7 +1314,8 @@ fn binary_ignores_config_files_in_current_directory() {
     cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn().unwrap();
-    let stderr = wait_for_startup_log(&mut child, "stdio with untrusted CWD configs", "noop embedding provider initialized");
+    initialize_stdio_child(&mut child);
+    let stderr = wait_for_startup_log(&mut child, "stdio with untrusted CWD configs", "localhold MCP server running on stdio");
     terminate_child(&mut child);
     let _stderr = stderr.join().unwrap();
     let _cleanup = std::fs::remove_dir_all(root);

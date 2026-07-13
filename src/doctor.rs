@@ -567,7 +567,7 @@ async fn postgres_indexes_compatible(pool: &PgPool, allow_absent: bool) -> Resul
             , FALSE)
         ), FALSE)
         FROM (VALUES
-            ('idx_memories_created_at', 'memories', 1, 'created_atdesc', 'created_at desc', NULL),
+            ('idx_memories_created_at', 'memories', 1, 'created_at', 'created_at desc', NULL),
             ('idx_memories_expires_at', 'memories', 1, 'expires_at', 'expires_at', 'expires_atisnotnull'),
             ('idx_memories_has_embedding', 'memories', 1, 'has_embedding', 'has_embedding', NULL),
             ('idx_memories_memory_type', 'memories', 1, 'memory_type', 'memory_type', NULL),
@@ -576,15 +576,15 @@ async fn postgres_indexes_compatible(pool: &PgPool, allow_absent: bool) -> Resul
             ('idx_memories_source_agent', 'memories', 1, '(provenance->>''source_agent''::text)', 'source_agent', NULL),
             ('idx_memories_source_conversation', 'memories', 1, '(provenance->>''source_conversation''::text)', 'source_conversation', NULL),
             ('idx_memories_origin_conversation', 'memories', 1, '(provenance->>''origin_conversation''::text)', 'origin_conversation', NULL),
-            ('idx_memories_effective_origin_conversation', 'memories', 1, 'coalesce((provenance->>''origin_conversation''::text),(provenance->>''source_conversation''::text))', 'coalesce', NULL),
+            ('idx_memories_effective_origin_conversation', 'memories', 1, 'coalesce(provenance->>''origin_conversation''::text,provenance->>''source_conversation''::text)', 'coalesce', NULL),
             ('idx_memories_access_type', 'memories', 1, '(access_policy->>''type''::text)', 'access_policy', NULL),
             ('idx_memories_content_fts', 'memories', 1, 'to_tsvector(''simple''::regconfig,content)', 'to_tsvector', NULL),
             ('idx_memories_embedding_claim', 'memories', 4, 'has_embedding,embedding_claimed_at,created_at,id', 'embedding_claimed_at', 'has_embedding=false'),
             ('idx_memory_entities_entity', 'memory_entities', 1, 'entity', '(entity)', NULL),
             ('idx_memory_entities_entity_type', 'memory_entities', 1, 'entity_type', 'entity_type', NULL),
             ('idx_audit_log_memory_id', 'memory_audit_log', 1, 'memory_id', 'memory_id', NULL),
-            ('idx_audit_log_timestamp', 'memory_audit_log', 1, '\"timestamp\"desc', '\"timestamp\" desc', NULL),
-            ('idx_memory_tombstones_deleted_at', 'memory_tombstones', 1, 'deleted_atdesc', 'deleted_at desc', NULL),
+            ('idx_audit_log_timestamp', 'memory_audit_log', 1, '\"timestamp\"', '\"timestamp\" desc', NULL),
+            ('idx_memory_tombstones_deleted_at', 'memory_tombstones', 1, 'deleted_at', 'deleted_at desc', NULL),
             ('idx_memory_v2_metadata_scope_key', 'memory_v2_metadata', 1, 'scope_key', 'scope_key', NULL)
         ) AS required(name, table_name, key_count, expected_keys, definition_fragment, predicate)
         LEFT JOIN pg_class AS indexes ON indexes.oid = to_regclass(format('%I.%I', current_schema(), required.name))
@@ -922,7 +922,7 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
                  OR regexp_replace(lower(pg_get_expr(index_data.indpred, index_data.indrelid, TRUE)), '[()[:space:]]', '', 'g') = required.predicate)
         , FALSE)), FALSE)
         FROM (VALUES
-            ('idx_memories_created_at', 'memories', 1, 'created_atdesc', 'created_at desc', NULL),
+            ('idx_memories_created_at', 'memories', 1, 'created_at', 'created_at desc', NULL),
             ('idx_memories_expires_at', 'memories', 1, 'expires_at', 'expires_at', 'expires_atisnotnull'),
             ('idx_memories_has_embedding', 'memories', 1, 'has_embedding', 'has_embedding', NULL),
             ('idx_memories_memory_type', 'memories', 1, 'memory_type', 'memory_type', NULL),
@@ -931,15 +931,15 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             ('idx_memories_source_agent', 'memories', 1, '(provenance->>''source_agent''::text)', 'source_agent', NULL),
             ('idx_memories_source_conversation', 'memories', 1, '(provenance->>''source_conversation''::text)', 'source_conversation', NULL),
             ('idx_memories_origin_conversation', 'memories', 1, '(provenance->>''origin_conversation''::text)', 'origin_conversation', NULL),
-            ('idx_memories_effective_origin_conversation', 'memories', 1, 'coalesce((provenance->>''origin_conversation''::text),(provenance->>''source_conversation''::text))', 'coalesce', NULL),
+            ('idx_memories_effective_origin_conversation', 'memories', 1, 'coalesce(provenance->>''origin_conversation''::text,provenance->>''source_conversation''::text)', 'coalesce', NULL),
             ('idx_memories_access_type', 'memories', 1, '(access_policy->>''type''::text)', 'access_policy', NULL),
             ('idx_memories_content_fts', 'memories', 1, 'to_tsvector(''simple''::regconfig,content)', 'to_tsvector', NULL),
             ('idx_memories_embedding_claim', 'memories', 4, 'has_embedding,embedding_claimed_at,created_at,id', 'embedding_claimed_at', 'has_embedding=false'),
             ('idx_memory_entities_entity', 'memory_entities', 1, 'entity', '(entity)', NULL),
             ('idx_memory_entities_entity_type', 'memory_entities', 1, 'entity_type', 'entity_type', NULL),
             ('idx_audit_log_memory_id', 'memory_audit_log', 1, 'memory_id', 'memory_id', NULL),
-            ('idx_audit_log_timestamp', 'memory_audit_log', 1, '\"timestamp\"desc', '\"timestamp\" desc', NULL),
-            ('idx_memory_tombstones_deleted_at', 'memory_tombstones', 1, 'deleted_atdesc', 'deleted_at desc', NULL),
+            ('idx_audit_log_timestamp', 'memory_audit_log', 1, '\"timestamp\"', '\"timestamp\" desc', NULL),
+            ('idx_memory_tombstones_deleted_at', 'memory_tombstones', 1, 'deleted_at', 'deleted_at desc', NULL),
             ('idx_memory_v2_metadata_scope_key', 'memory_v2_metadata', 1, 'scope_key', 'scope_key', NULL)
         ) AS required(name, table_name, key_count, expected_keys, definition_fragment, predicate)
         LEFT JOIN pg_class AS indexes ON indexes.oid = to_regclass(required.name)

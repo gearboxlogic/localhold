@@ -3,7 +3,7 @@
 use rusqlite::{Connection, OptionalExtension as _, params};
 
 use super::{
-    ReembedClaim, SqliteStore, merge_v2_metadata_patch,
+    ReembedClaim, SqliteStore, merge_metadata_patch,
     query::{MEMORY_COLUMN_COUNT, MEMORY_COLUMNS, row_to_memory, usize_to_i64},
     sqlite_write_tx, update_audit_draft_for_locked_memory,
     vector::{SqliteVecIndex, VectorIndex},
@@ -11,8 +11,8 @@ use super::{
 use crate::{
     error::StoreError,
     types::{
-        AccessLevel, AccessPolicy, AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Entity, Memory, MemoryId, MemoryTombstone, MemoryUpdate, Provenance,
-        V2MemoryMetadata, V2MetadataPatch, WriteOutcome,
+        AccessLevel, AccessPolicy, AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Entity, Memory, MemoryId, MemoryMetadata, MemoryTombstone, MemoryUpdate,
+        MetadataPatch, Provenance, WriteOutcome,
     },
 };
 
@@ -342,7 +342,7 @@ fn supersedes_len_mismatch(expected: usize, actual: usize) -> StoreError {
     StoreError::Conflict(format!("supersedes length ({actual}) must match memories length ({expected})"))
 }
 
-fn validate_metadata_memory_id(memory_id: &MemoryId, metadata: &V2MemoryMetadata) -> Result<(), StoreError> {
+fn validate_metadata_memory_id(memory_id: &MemoryId, metadata: &MemoryMetadata) -> Result<(), StoreError> {
     if metadata.memory_id == *memory_id {
         return Ok(());
     }
@@ -352,11 +352,11 @@ fn validate_metadata_memory_id(memory_id: &MemoryId, metadata: &V2MemoryMetadata
     )))
 }
 
-pub(crate) fn upsert_v2_metadata_conn(conn: &Connection, metadata: &V2MemoryMetadata, now: &str) -> Result<(), StoreError> {
+pub(crate) fn upsert_metadata_conn(conn: &Connection, metadata: &MemoryMetadata, now: &str) -> Result<(), StoreError> {
     let quality_flags_json = serde_json::to_string(&metadata.quality_flags)?;
     #[expect(unused_results, reason = "UPSERT row count is not needed")]
     conn.execute(
-        "INSERT INTO memory_v2_metadata (
+        "INSERT INTO memory_metadata (
             memory_id, scope_key, summary, agent_label, created_by_principal,
             quality_flags, schema_version, updated_at
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -364,7 +364,7 @@ pub(crate) fn upsert_v2_metadata_conn(conn: &Connection, metadata: &V2MemoryMeta
             scope_key = excluded.scope_key,
             summary = excluded.summary,
             agent_label = excluded.agent_label,
-            created_by_principal = COALESCE(memory_v2_metadata.created_by_principal, excluded.created_by_principal),
+            created_by_principal = COALESCE(memory_metadata.created_by_principal, excluded.created_by_principal),
             quality_flags = excluded.quality_flags,
             schema_version = excluded.schema_version,
             updated_at = excluded.updated_at",
@@ -382,10 +382,10 @@ pub(crate) fn upsert_v2_metadata_conn(conn: &Connection, metadata: &V2MemoryMeta
     Ok(())
 }
 
-pub(crate) fn get_v2_metadata_conn(conn: &Connection, memory_id: &MemoryId) -> Result<Option<V2MemoryMetadata>, StoreError> {
+pub(crate) fn get_metadata_conn(conn: &Connection, memory_id: &MemoryId) -> Result<Option<MemoryMetadata>, StoreError> {
     conn.query_row(
         "SELECT memory_id, scope_key, summary, agent_label, created_by_principal, quality_flags, schema_version
-         FROM memory_v2_metadata
+         FROM memory_metadata
          WHERE memory_id = ?1",
         params![memory_id.to_string()],
         |row| {
@@ -395,7 +395,7 @@ pub(crate) fn get_v2_metadata_conn(conn: &Connection, memory_id: &MemoryId) -> R
                 .parse()
                 .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
             let quality_flags = serde_json::from_str(&quality_flags_json).map_err(|e| rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e)))?;
-            Ok(V2MemoryMetadata {
+            Ok(MemoryMetadata {
                 memory_id,
                 scope_key: row.get(1)?,
                 summary: row.get(2)?,
@@ -497,12 +497,12 @@ fn apply_authorized_delete(conn: &mut Connection, id_str: &str, principal: &str,
 }
 
 #[expect(clippy::too_many_arguments, reason = "atomic revise needs update, optional metadata, principal, timestamp, and audit draft")]
-fn apply_authorized_update_with_v2_metadata(
+fn apply_authorized_update_with_metadata(
     conn: &mut Connection,
     vector_index: &SqliteVecIndex,
     id: &MemoryId,
     update: &MemoryUpdate,
-    metadata_patch: Option<&V2MetadataPatch>,
+    metadata_patch: Option<&MetadataPatch>,
     principal: &str,
     now: &str,
     audit: Option<&AuditDraft>,
@@ -527,9 +527,9 @@ fn apply_authorized_update_with_v2_metadata(
     let outcome = apply_update_inner(&tx, vector_index, &id_str, update, now)?;
     if outcome.outcome == WriteOutcome::Applied {
         if let Some(patch) = metadata_patch {
-            let existing_metadata = get_v2_metadata_conn(&tx, id)?;
-            let metadata = merge_v2_metadata_patch(*id, patch, existing_metadata.as_ref(), existing.provenance.source_conversation.as_deref(), principal);
-            upsert_v2_metadata_conn(&tx, &metadata, now)?;
+            let existing_metadata = get_metadata_conn(&tx, id)?;
+            let metadata = merge_metadata_patch(*id, patch, existing_metadata.as_ref(), existing.provenance.source_conversation.as_deref(), principal);
+            upsert_metadata_conn(&tx, &metadata, now)?;
         }
         if let Some(audit) = audit {
             let audit = update_audit_draft_for_locked_memory(audit, update, &existing);
@@ -1156,23 +1156,23 @@ impl SqliteStore {
         .await
     }
 
-    pub(crate) async fn store_with_v2_metadata_impl(
+    pub(crate) async fn store_with_metadata_impl(
         &self,
         memory: &Memory,
         embedding: Option<&[f32]>,
         supersedes_id: Option<&MemoryId>,
-        metadata: &V2MemoryMetadata,
+        metadata: &MemoryMetadata,
     ) -> Result<MemoryId, StoreError> {
-        self.store_with_v2_metadata_audited_impl(memory, embedding, supersedes_id, metadata, None).await
+        self.store_with_metadata_audited_impl(memory, embedding, supersedes_id, metadata, None).await
     }
 
-    #[expect(clippy::too_many_arguments, reason = "audited v2 store needs memory, embedding, supersession, metadata, and audit draft")]
-    pub(crate) async fn store_with_v2_metadata_audited_impl(
+    #[expect(clippy::too_many_arguments, reason = "audited store needs memory, embedding, supersession, metadata, and audit draft")]
+    pub(crate) async fn store_with_metadata_audited_impl(
         &self,
         memory: &Memory,
         embedding: Option<&[f32]>,
         supersedes_id: Option<&MemoryId>,
-        metadata: &V2MemoryMetadata,
+        metadata: &MemoryMetadata,
         audit: Option<&AuditDraft>,
     ) -> Result<MemoryId, StoreError> {
         validate_metadata_memory_id(&memory.id, metadata)?;
@@ -1185,7 +1185,7 @@ impl SqliteStore {
         self.with_conn(move |conn| {
             let tx = sqlite_write_tx(conn)?;
             let id = insert_prepared_with_optional_supersession_and_audit(&tx, &vector_index, &prepared, supersedes_id.as_deref(), audit.as_ref())?;
-            upsert_v2_metadata_conn(&tx, &metadata, &metadata_now)?;
+            upsert_metadata_conn(&tx, &metadata, &metadata_now)?;
             tx.commit()?;
             Ok(id)
         })
@@ -1277,20 +1277,20 @@ impl SqliteStore {
             .await
     }
 
-    pub(crate) async fn store_batch_with_v2_metadata_impl(
+    pub(crate) async fn store_batch_with_metadata_impl(
         &self,
         memories: &[super::MemoryWithEmbedding],
         supersedes: &[Option<MemoryId>],
-        metadata: &[V2MemoryMetadata],
+        metadata: &[MemoryMetadata],
     ) -> Result<Vec<MemoryId>, StoreError> {
-        self.store_batch_with_v2_metadata_audited_impl(memories, supersedes, metadata, None).await
+        self.store_batch_with_metadata_audited_impl(memories, supersedes, metadata, None).await
     }
 
-    pub(crate) async fn store_batch_with_v2_metadata_audited_impl(
+    pub(crate) async fn store_batch_with_metadata_audited_impl(
         &self,
         memories: &[super::MemoryWithEmbedding],
         supersedes: &[Option<MemoryId>],
-        metadata: &[V2MemoryMetadata],
+        metadata: &[MemoryMetadata],
         audits: Option<&[AuditDraft]>,
     ) -> Result<Vec<MemoryId>, StoreError> {
         if metadata.len() != memories.len() {
@@ -1325,7 +1325,7 @@ impl SqliteStore {
                 let audit = audits.as_ref().and_then(|items| items.get(idx));
                 let id = insert_prepared_with_optional_supersession_and_audit(&tx, &vector_index, p, supersedes_id, audit)?;
                 let item_metadata = metadata.get(idx).ok_or_else(|| metadata_len_mismatch(prepared.len(), metadata.len()))?;
-                upsert_v2_metadata_conn(&tx, item_metadata, &metadata_now)?;
+                upsert_metadata_conn(&tx, item_metadata, &metadata_now)?;
                 ids.push(id);
             }
             tx.commit()?;
@@ -1379,11 +1379,11 @@ impl SqliteStore {
     }
 
     #[expect(clippy::too_many_arguments, reason = "audited revise needs id, update, metadata patch, principal, and audit draft")]
-    pub(crate) async fn update_authorized_with_v2_metadata_audited_impl(
+    pub(crate) async fn update_authorized_with_metadata_audited_impl(
         &self,
         id: &MemoryId,
         update: &MemoryUpdate,
-        metadata_patch: Option<&V2MetadataPatch>,
+        metadata_patch: Option<&MetadataPatch>,
         principal: &str,
         audit: Option<&AuditDraft>,
     ) -> Result<AuthorizedUpdateOutcome, StoreError> {
@@ -1394,7 +1394,7 @@ impl SqliteStore {
         let now = self.clock_now().to_rfc3339();
         let audit = audit.cloned();
         let vector_index = self.vector_index();
-        self.with_conn(move |conn| apply_authorized_update_with_v2_metadata(conn, &vector_index, &id_value, &update, metadata_patch.as_ref(), &caller, &now, audit.as_ref()))
+        self.with_conn(move |conn| apply_authorized_update_with_metadata(conn, &vector_index, &id_value, &update, metadata_patch.as_ref(), &caller, &now, audit.as_ref()))
             .await
     }
 

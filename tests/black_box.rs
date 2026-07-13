@@ -84,7 +84,7 @@ async fn http_black_box_noop_core_workflow() {
     let client = harness.http_client().await;
 
     let tools = client.list_all_tools().await.unwrap();
-    assert_eq!(tools.len(), 22, "expected all v2/admin tools exposed over HTTP");
+    assert_eq!(tools.len(), 22, "expected all /admin tools exposed over HTTP");
 
     let batch: RememberManyResponse = call_tool(
         &client,

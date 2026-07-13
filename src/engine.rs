@@ -24,9 +24,9 @@ use crate::{
     scoring::{apply_composite_scoring, seed_retrieval_scores},
     store::{MemoryStore, RecordUseOutcome},
     types::{
-        AccessPolicy, AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Confidence, Entity, Importance, Memory, MemoryFilter, MemoryId, MemoryStats, MemoryTombstone,
-        MemoryType, MemoryUpdate, Provenance, QueryContext, RedactableField, ScopeDefinition, SearchMode, SearchResult, V2MemoryMetadata, V2MetadataMigrationReport,
-        V2MetadataPatch, V2MigrationReport, WriteOutcome,
+        AccessPolicy, AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Confidence, Entity, Importance, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats,
+        MemoryTombstone, MemoryType, MemoryUpdate, MetadataMigrationOutcome, MetadataMigrationReport, MetadataPatch, Provenance, QueryContext, RedactableField, ScopeDefinition,
+        SearchMode, SearchResult, WriteOutcome,
     },
     validation::{
         normalize_entities, normalize_optional_non_empty, ttl_seconds_to_expiry, validate_batch_len, validate_content_length, validate_max_distance, validate_non_blank,
@@ -429,13 +429,13 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         Ok(id)
     }
 
-    /// Store a memory and required v2 metadata atomically, then spawn embedding work.
+    /// Store a memory and required metadata atomically, then spawn embedding work.
     ///
     /// # Errors
     ///
     /// Returns `EngineError::Store` if the persistence layer rejects the write
     /// or `EngineError::ShuttingDown` if embedding work cannot be admitted.
-    pub async fn store_memory_with_v2_metadata(&self, memory: Memory, supersedes: Option<&MemoryId>, metadata: &V2MemoryMetadata) -> Result<MemoryId, EngineError> {
+    pub async fn store_memory_with_metadata(&self, memory: Memory, supersedes: Option<&MemoryId>, metadata: &MemoryMetadata) -> Result<MemoryId, EngineError> {
         let principal = memory.provenance.source_agent.clone();
         let embed_admission = self.orchestrator.begin_embed_admission()?;
         let details = supersedes.map(|s| serde_json::json!({"supersedes": s.to_string()}));
@@ -801,27 +801,27 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         Ok(outcome)
     }
 
-    /// Update a memory and optional v2 metadata patch in one audited store
+    /// Update a memory and optional metadata patch in one audited store
     /// transaction, spawning a re-embed task when content changes.
     ///
     /// # Errors
     ///
     /// Returns `EngineError::Validation` on invalid content/tags/metadata,
     /// or `EngineError::Store` on persistence-layer failure.
-    pub async fn update_memory_with_v2_metadata(
+    pub async fn update_memory_with_metadata(
         &self,
         id: MemoryId,
         mut update: MemoryUpdate,
-        metadata_patch: Option<V2MetadataPatch>,
+        metadata_patch: Option<MetadataPatch>,
         principal: &str,
     ) -> Result<AuthorizedUpdateOutcome, EngineError> {
         let embed_admission = update.content.as_ref().map(|_| self.orchestrator.begin_embed_admission()).transpose()?;
         self.prepare_update(&mut update)?;
-        let details = metadata_patch.is_some().then(|| serde_json::json!({"v2_metadata": true}));
+        let details = metadata_patch.is_some().then(|| serde_json::json!({"metadata": true}));
         let audit = self.audit_draft(AuditAction::Update, Some(principal.to_owned()), details);
         let outcome = self
             .orchestrator
-            .update_with_v2_metadata_and_maybe_reembed(embed_admission.as_ref(), id, &update, metadata_patch.as_ref(), principal, &audit)
+            .update_with_metadata_and_maybe_reembed(embed_admission.as_ref(), id, &update, metadata_patch.as_ref(), principal, &audit)
             .await?;
 
         Ok(outcome)
@@ -906,7 +906,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         Ok(self.orchestrator.store().evict_expired().await?)
     }
 
-    /// Register or replace a v2 scope definition.
+    /// Register or replace a scope definition.
     ///
     /// # Errors
     ///
@@ -915,7 +915,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         Ok(self.orchestrator.store().register_scope(scope).await?)
     }
 
-    /// List registered v2 scope definitions.
+    /// List registered scope definitions.
     ///
     /// # Errors
     ///
@@ -924,42 +924,42 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         Ok(self.orchestrator.store().list_scopes().await?)
     }
 
-    /// Upsert non-destructive v2 metadata for an existing memory.
+    /// Upsert non-destructive metadata for an existing memory.
     ///
     /// # Errors
     ///
     /// Returns `EngineError::Store` on persistence-layer failure.
-    pub async fn upsert_v2_metadata(&self, metadata: V2MemoryMetadata, principal: &str) -> Result<(), EngineError> {
-        let audit = self.audit_draft(AuditAction::Update, Some(principal.to_owned()), Some(serde_json::json!({"v2_metadata": true})));
-        Ok(self.orchestrator.store().upsert_v2_metadata_audited(metadata, &audit).await?)
+    pub async fn upsert_metadata(&self, metadata: MemoryMetadata, principal: &str) -> Result<(), EngineError> {
+        let audit = self.audit_draft(AuditAction::Update, Some(principal.to_owned()), Some(serde_json::json!({"metadata": true})));
+        Ok(self.orchestrator.store().upsert_metadata_audited(metadata, &audit).await?)
     }
 
-    /// Fetch non-destructive v2 metadata for a memory.
+    /// Fetch non-destructive metadata for a memory.
     ///
     /// # Errors
     ///
     /// Returns `EngineError::Store` on persistence-layer failure.
-    pub async fn get_v2_metadata(&self, memory_id: &MemoryId) -> Result<Option<V2MemoryMetadata>, EngineError> {
-        Ok(self.orchestrator.store().get_v2_metadata(memory_id).await?)
+    pub async fn get_metadata(&self, memory_id: &MemoryId) -> Result<Option<MemoryMetadata>, EngineError> {
+        Ok(self.orchestrator.store().get_metadata(memory_id).await?)
     }
 
-    /// Return conservative v2 metadata migration/reporting counts.
+    /// Return conservative metadata migration/reporting counts.
     ///
     /// # Errors
     ///
     /// Returns `EngineError::Store` on persistence-layer failure.
-    pub async fn v2_migration_report(&self) -> Result<V2MigrationReport, EngineError> {
-        Ok(self.orchestrator.store().v2_migration_report().await?)
+    pub async fn metadata_migration_report(&self) -> Result<MetadataMigrationReport, EngineError> {
+        Ok(self.orchestrator.store().metadata_migration_report().await?)
     }
 
-    /// Add v2 metadata rows for existing memories without rewriting original content.
+    /// Add metadata rows for existing memories without rewriting original content.
     ///
     /// # Errors
     ///
     /// Returns `EngineError::Store` if the persistence layer rejects the migration pass.
-    pub async fn migrate_v2_metadata(&self, registered_scope_keys: &[String], dry_run: bool, principal: &str) -> Result<V2MetadataMigrationReport, EngineError> {
-        let audit = self.audit_draft(AuditAction::Update, Some(principal.to_owned()), Some(serde_json::json!({"v2_metadata_migration": true})));
-        Ok(self.orchestrator.store().migrate_v2_metadata_audited(registered_scope_keys, dry_run, &audit).await?)
+    pub async fn migrate_metadata(&self, registered_scope_keys: &[String], dry_run: bool, principal: &str) -> Result<MetadataMigrationOutcome, EngineError> {
+        let audit = self.audit_draft(AuditAction::Update, Some(principal.to_owned()), Some(serde_json::json!({"metadata_migration": true})));
+        Ok(self.orchestrator.store().migrate_metadata_audited(registered_scope_keys, dry_run, &audit).await?)
     }
 
     /// Return aggregate statistics about stored memories.
@@ -1009,18 +1009,18 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         Ok(ids)
     }
 
-    /// Store multiple memories and required v2 metadata atomically, spawning embed tasks for each.
+    /// Store multiple memories and required metadata atomically, spawning embed tasks for each.
     ///
     /// # Errors
     ///
     /// Returns `EngineError::Validation` if the batch inputs are inconsistent
     /// or oversized, `EngineError::Store` if the persistence layer rejects the
     /// write, or `EngineError::ShuttingDown` if embedding work cannot be admitted.
-    pub async fn batch_store_with_v2_metadata(
+    pub async fn batch_store_with_metadata(
         &self,
         memories: Vec<Memory>,
         supersedes_list: Vec<Option<MemoryId>>,
-        metadata: Vec<V2MemoryMetadata>,
+        metadata: Vec<MemoryMetadata>,
     ) -> Result<Vec<MemoryId>, EngineError> {
         if memories.len() != supersedes_list.len() {
             return Err(EngineError::Validation(ValidationError::new(

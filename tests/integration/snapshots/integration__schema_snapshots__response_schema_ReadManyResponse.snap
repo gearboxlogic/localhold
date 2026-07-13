@@ -1,12 +1,11 @@
 ---
 source: tests/integration/schema_snapshots.rs
-assertion_line: 94
 expression: schema
 ---
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ReadManyResponse",
-  "description": "Response from v2 `read_many`.",
+  "description": "Response from `read_many`.",
   "type": "object",
   "properties": {
     "operation": {
@@ -91,7 +90,7 @@ expression: schema
       ]
     },
     "OperationStatus": {
-      "description": "Standard operation status for v2 mutation and admin tools.",
+      "description": "Standard operation status for mutation and admin tools.",
       "oneOf": [
         {
           "description": "The operation changed persistent state.",
@@ -166,7 +165,7 @@ expression: schema
       ]
     },
     "QualityWarning": {
-      "description": "A quality or classification warning returned by v2 write tools.",
+      "description": "A quality or classification warning returned by write tools.",
       "type": "object",
       "properties": {
         "code": {
@@ -203,7 +202,7 @@ expression: schema
       ]
     },
     "QualityWarningSeverity": {
-      "description": "Severity for v2 quality warnings.",
+      "description": "Severity for quality warnings.",
       "oneOf": [
         {
           "description": "Informational hint; the operation is usually usable.",
@@ -251,7 +250,7 @@ expression: schema
       "type": "string"
     },
     "RecallCard": {
-      "description": "Compact v2 result card. Full content is available through `read`.",
+      "description": "Compact result card. Full content is available through `read`.",
       "type": "object",
       "properties": {
         "id": {
@@ -338,7 +337,7 @@ expression: schema
       "type": "string"
     },
     "MatchAssessment": {
-      "description": "Agent-facing match assessment for a compact v2 card.",
+      "description": "Agent-facing match assessment for a compact card.",
       "type": "object",
       "properties": {
         "quality": {
@@ -432,7 +431,7 @@ expression: schema
       ]
     },
     "MatchDiagnostics": {
-      "description": "Ranking diagnostics for a compact v2 card.",
+      "description": "Ranking diagnostics for a compact card.",
       "type": "object",
       "properties": {
         "retrieval_score": {
@@ -478,7 +477,7 @@ expression: schema
       }
     },
     "ReadManyItemResponse": {
-      "description": "Per-ID result from v2 `read_many`.",
+      "description": "Per-ID result from `read_many`.",
       "type": "object",
       "properties": {
         "id": {
@@ -501,14 +500,14 @@ expression: schema
           ]
         },
         "summary": {
-          "description": "V2 compact summary when present.",
+          "description": "compact summary when present.",
           "type": [
             "string",
             "null"
           ]
         },
         "scope": {
-          "description": "Resolved v2 scope key when present.",
+          "description": "Resolved scope key when present.",
           "type": [
             "string",
             "null"
@@ -522,14 +521,14 @@ expression: schema
           ]
         },
         "created_by_principal": {
-          "description": "Principal that created v2 metadata when known.",
+          "description": "Principal that created metadata when known.",
           "type": [
             "string",
             "null"
           ]
         },
         "quality_flags": {
-          "description": "Quality flags recorded with v2 metadata.",
+          "description": "Quality flags recorded with metadata.",
           "type": "array",
           "items": {
             "type": "string"
@@ -553,7 +552,7 @@ expression: schema
       ]
     },
     "ReadManyStatus": {
-      "description": "Per-item status from v2 `read_many`.",
+      "description": "Per-item status from `read_many`.",
       "oneOf": [
         {
           "description": "Memory was found and readable.",

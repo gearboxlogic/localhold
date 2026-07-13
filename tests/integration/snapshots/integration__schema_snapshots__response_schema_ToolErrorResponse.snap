@@ -1,12 +1,11 @@
 ---
 source: tests/integration/schema_snapshots.rs
-assertion_line: 16
 expression: schema
 ---
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ToolErrorResponse",
-  "description": "Response envelope returned as JSON text when a v2 tool sets `is_error=true`.",
+  "description": "Response envelope returned as JSON text when a tool sets `is_error=true`.",
   "type": "object",
   "properties": {
     "error": {
@@ -19,7 +18,7 @@ expression: schema
   ],
   "$defs": {
     "ToolError": {
-      "description": "Structured v2 application-level tool error.",
+      "description": "Structured application-level tool error.",
       "type": "object",
       "properties": {
         "code": {
@@ -56,7 +55,7 @@ expression: schema
       ]
     },
     "ToolErrorCode": {
-      "description": "Stable code for structured v2 application-level tool errors.",
+      "description": "Stable code for structured application-level tool errors.",
       "oneOf": [
         {
           "description": "Input was syntactically valid JSON but failed tool validation.",

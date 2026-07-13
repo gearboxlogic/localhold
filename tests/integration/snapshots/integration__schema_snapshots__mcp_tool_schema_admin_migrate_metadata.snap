@@ -3,8 +3,8 @@ source: tests/integration/schema_snapshots.rs
 expression: tool
 ---
 {
-  "name": "admin_v2_migrate_metadata",
-  "description": "Write/admin: add v2 metadata rows for existing memories using the server-resolved principal. dry_run=true previews; original memory content is never rewritten.",
+  "name": "admin_migrate_metadata",
+  "description": "Write/admin: add metadata rows for existing memories using the server-resolved principal. dry_run=true previews; original memory content is never rewritten.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {

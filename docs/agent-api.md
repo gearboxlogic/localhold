@@ -1,6 +1,6 @@
-# V2 Agent API
+# Agent API
 
-LocalHold v2 is the default agent-facing MCP surface. It keeps the first-use
+LocalHold is the default agent-facing MCP surface. It keeps the first-use
 workflow small while leaving maintenance and repair operations under explicit
 `admin_*` tools.
 
@@ -89,7 +89,7 @@ retrieval, reranker, vector-distance, and ranking diagnostics.
 
 ### `read`
 
-Returns one full memory by ID plus visible v2 metadata (`summary`, `scope`,
+Returns one full memory by ID plus visible metadata (`summary`, `scope`,
 `agent_label`, `created_by_principal`, `quality_flags`, and
 `unresolved_scope`). Redacted callers receive only fields allowed by the memory
 policy: hidden content suppresses summary, hidden provenance suppresses scope
@@ -106,7 +106,7 @@ Input:
 
 Returns full memories for multiple IDs in input order. Missing or unreadable IDs
 return per-item `status: "not_found"` instead of failing the whole batch. Found
-items use the same full-memory fields and v2 metadata as `read`.
+items use the same full-memory fields and metadata as `read`.
 
 Input:
 
@@ -322,9 +322,9 @@ longer make memories discoverable to unauthorized callers.
 | Surface | Before | After |
 |---------|--------|-------|
 | `recall` | Hidden content, embeddings, tags, scope, or entities could still influence matching or filters. | Hidden content is not searched by semantic, keyword, text, duplicate, reranker, or consolidation paths; hidden tags, scope/provenance, and entities do not satisfy filters. |
-| `read` | Redacted content could be hidden while server-added metadata or diagnostics could still reveal hidden context. | Redacted callers receive only policy-visible memory fields and visible v2 metadata. Hidden summary, scope, agent label, creator, quality flags, and diagnostics stay omitted. |
+| `read` | Redacted content could be hidden while server-added metadata or diagnostics could still reveal hidden context. | Redacted callers receive only policy-visible memory fields and visible metadata. Hidden summary, scope, agent label, creator, quality flags, and diagnostics stay omitted. |
 | `read_many` | Per-item reads had the same redacted metadata risks as `read`. | Each found item uses the same redacted view as `read`; unreadable items remain `not_found`. |
-| `admin_list` | Inventory views could reveal hidden v2 metadata or match hidden fields through filters. | Inventory rows and filters obey the caller's visible field set. |
+| `admin_list` | Inventory views could reveal hidden metadata or match hidden fields through filters. | Inventory rows and filters obey the caller's visible field set. |
 | `admin_history` | Deleted or redacted history could reveal principal/details to callers without full access. | Live-memory and tombstone authorization fail closed; redacted views omit principal and details. |
 
 To keep redacted memories content-searchable for unauthorized callers,
@@ -342,8 +342,8 @@ Admin tools are disabled by default. Setting
 - `admin_scope_register`
 - `admin_scope_list`
 - `admin_list`
-- `admin_v2_migration_report`
-- `admin_v2_migrate_metadata`
+- `admin_migration_report`
+- `admin_migrate_metadata`
 - `admin_count`
 - `admin_history`
 - `admin_reembed`
@@ -359,7 +359,7 @@ use the server-resolved principal. `admin_list` and
 policy. Migration reporting and repair tools require a write-capable principal
 because they expose whole-store maintenance state.
 
-Admin inventory filters use the same agent-facing vocabulary as core v2 tools:
+Admin inventory filters use the same agent-facing vocabulary as core tools:
 
 - `agent_label`: creator provenance label, useful for diagnostics but not
   authorization
@@ -385,9 +385,9 @@ deleted memories or manually purged tombstones return empty history.
 ## Legacy Metadata Migration
 
 Existing memories remain readable and recallable with preserved IDs and original
-content. V2 migration adds metadata rows rather than rewriting memory content.
+content. Metadata migration adds rows rather than rewriting memory content.
 
-Use `admin_v2_migration_report` first. It reports:
+Use `admin_migration_report` first. It reports:
 
 - migration candidates
 - unresolved legacy scope candidates
@@ -395,8 +395,8 @@ Use `admin_v2_migration_report` first. It reports:
 - duplicate candidates
 - oversized and code-derived candidates
 
-Then run `admin_v2_migrate_metadata` with `dry_run: true` to preview a
-non-destructive pass. A real pass inserts missing v2 metadata rows only.
+Then run `admin_migrate_metadata` with `dry_run: true` to preview a
+non-destructive pass. A real pass inserts missing metadata rows only.
 
 Legacy scopes are backfilled only when they exactly match a registered
 `scope_key`. Other legacy rows are classified as `inbox/unresolved`.

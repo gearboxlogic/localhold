@@ -76,7 +76,7 @@ fn drop_postgres_smoke_schema(url: &str) {
             DROP TABLE IF EXISTS
                 memory_audit_log,
                 memory_tombstones,
-                memory_v2_metadata,
+                memory_metadata,
                 memory_entities,
                 memory_embeddings,
                 memories,

@@ -65,7 +65,7 @@ async fn http_initialize_and_tool_call() {
         "handoff",
         "admin_list",
         "admin_scope_register",
-        "admin_v2_migrate_metadata",
+        "admin_migrate_metadata",
         "admin_count",
     ] {
         assert!(names.contains(expected), "HTTP tool list should include {expected}");
@@ -102,7 +102,7 @@ async fn http_multiple_sessions_share_data() {
 }
 
 #[tokio::test]
-async fn http_v2_fixed_bearer_principal_enables_write_without_launch_principal() {
+async fn http_fixed_bearer_principal_enables_write_without_launch_principal() {
     let (url, ct, server) = setup_http_noop_server_with_auth(None, AnonymousPolicy::PublicReadOnly, Some("secret-token")).await;
 
     let unauthenticated = raw_mcp_post(&url, RAW_INITIALIZE).send().await.unwrap();
@@ -137,14 +137,14 @@ async fn http_without_auth_does_not_inherit_launch_principal() {
 }
 
 #[tokio::test]
-async fn http_v2_migration_tools_require_local_admin_context() {
+async fn http_migration_tools_require_local_admin_context() {
     let (url, ct, server) = setup_http_noop_server_with_auth(Some("launch"), AnonymousPolicy::PublicReadOnly, Some("secret-token")).await;
     let client = connect_http_client_with_auth(&url, "secret-token", "alice").await;
 
-    let report_err = call_tool_error(&client, "admin_v2_migration_report", json!({})).await;
+    let report_err = call_tool_error(&client, "admin_migration_report", json!({})).await;
     assert!(report_err.contains("local server admin"), "expected local-admin denial, got: {report_err}");
 
-    let migrate_err = call_tool_error(&client, "admin_v2_migrate_metadata", json!({"dry_run": true})).await;
+    let migrate_err = call_tool_error(&client, "admin_migrate_metadata", json!({"dry_run": true})).await;
     assert!(migrate_err.contains("local server admin"), "expected local-admin denial, got: {migrate_err}");
 
     ct.cancel();
@@ -152,7 +152,7 @@ async fn http_v2_migration_tools_require_local_admin_context() {
 }
 
 #[tokio::test]
-async fn http_v2_forged_principal_header_cannot_override_fixed_identity() {
+async fn http_forged_principal_header_cannot_override_fixed_identity() {
     let (url, ct, server) = setup_http_noop_server_with_auth(Some("launch"), AnonymousPolicy::PublicReadOnly, Some("secret-token")).await;
 
     let client = connect_http_client_with_auth(&url, "secret-token", "alice").await;
@@ -168,7 +168,7 @@ async fn http_v2_forged_principal_header_cannot_override_fixed_identity() {
 }
 
 #[tokio::test]
-async fn http_v2_bad_bearer_does_not_fall_back_to_launch_principal() {
+async fn http_bad_bearer_does_not_fall_back_to_launch_principal() {
     let (url, ct, server) = setup_http_noop_server_with_auth(Some("launch"), AnonymousPolicy::PublicReadOnly, Some("secret-token")).await;
 
     for authorization in ["Bearer wrong-token", "Basic secret-token", "Bearer"] {

@@ -789,7 +789,7 @@ impl Provenance {
     }
 }
 
-/// A registered v2 scope definition used for write/read scope resolution.
+/// A registered scope definition used for write/read scope resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct ScopeDefinition {
@@ -814,13 +814,13 @@ pub struct ScopeDefinition {
     pub related: Vec<String>,
 }
 
-/// Non-destructive v2 metadata attached to an existing memory row.
+/// Non-destructive metadata attached to an existing memory row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
-pub struct V2MemoryMetadata {
+pub struct MemoryMetadata {
     /// Memory this metadata describes.
     pub memory_id: MemoryId,
-    /// Canonical v2 scope key resolved at write or migration time.
+    /// Canonical scope key resolved at write or migration time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_key: Option<String>,
     /// Caller-supplied compact summary. Original content remains unchanged.
@@ -839,13 +839,13 @@ pub struct V2MemoryMetadata {
     pub schema_version: i64,
 }
 
-/// Partial v2 metadata changes supplied by a revise request.
+/// Partial metadata changes supplied by a revise request.
 ///
 /// Stores merge this patch with the existing metadata row, if any, inside the
 /// same transaction as the memory mutation that authorized the write.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct V2MetadataPatch {
+pub struct MetadataPatch {
     /// Replacement canonical scope key.
     pub scope_key: Option<String>,
     /// Replacement compact summary.
@@ -854,7 +854,7 @@ pub struct V2MetadataPatch {
     pub agent_label: Option<String>,
 }
 
-impl V2MetadataPatch {
+impl MetadataPatch {
     /// Whether this patch has no changes to apply.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
@@ -862,18 +862,18 @@ impl V2MetadataPatch {
     }
 }
 
-/// Byte threshold used by v2 quality warnings and migration reporting.
-pub const V2_LARGE_CONTENT_WARNING_THRESHOLD_BYTES: usize = 4_000;
+/// Byte threshold used by quality warnings and migration reporting.
+pub const LARGE_CONTENT_WARNING_THRESHOLD_BYTES: usize = 4_000;
 
-/// Conservative report for the v2 metadata migration surface.
+/// Conservative report for the metadata migration surface.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
-pub struct V2MigrationReport {
+pub struct MetadataMigrationReport {
     /// Total memories in the store.
     pub total_memories: u64,
-    /// Memories that already have a v2 metadata row.
+    /// Memories that already have a metadata row.
     pub metadata_rows: u64,
-    /// Memories missing a v2 metadata row.
+    /// Memories missing a metadata row.
     pub missing_metadata: u64,
     /// Memories without a caller-supplied summary.
     pub missing_summary: u64,
@@ -881,19 +881,19 @@ pub struct V2MigrationReport {
     pub unresolved_scope: u64,
     /// Duplicate candidates based on identical original content.
     pub duplicate_candidates: u64,
-    /// Memories larger than the v2 large-content warning threshold.
+    /// Memories larger than the large-content warning threshold.
     pub oversized: u64,
     /// Memories that look like code dumps or code-derived content.
     pub code_derived: u64,
 }
 
-/// Outcome from a non-destructive v2 metadata migration pass.
+/// Outcome from a non-destructive metadata migration pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
-pub struct V2MetadataMigrationReport {
-    /// Existing memories missing a v2 metadata row before this pass.
+pub struct MetadataMigrationOutcome {
+    /// Existing memories missing a metadata row before this pass.
     pub candidate_count: u64,
-    /// Existing memories that already had v2 metadata and were skipped.
+    /// Existing memories that already had metadata and were skipped.
     pub skipped_existing: u64,
     /// Metadata rows inserted by this pass. Dry runs always report zero.
     pub migrated: u64,
@@ -901,7 +901,7 @@ pub struct V2MetadataMigrationReport {
     pub unresolved_scope: u64,
     /// Candidate memories still missing caller-supplied summaries.
     pub missing_summary: u64,
-    /// Candidate memories larger than the v2 large-content warning threshold.
+    /// Candidate memories larger than the large-content warning threshold.
     pub oversized: u64,
     /// Candidate memories that look like code dumps or code-derived content.
     pub code_derived: u64,
@@ -1047,8 +1047,7 @@ impl fmt::Display for AccessLevel {
 
 /// Minimal authorization envelope retained after a memory row is deleted.
 ///
-/// Tombstones intentionally exclude content, tags, entities, embeddings, and v2
-/// metadata. They exist only so deleted-memory history can be authorized without
+/// Tombstones intentionally exclude content, tags, entities, embeddings, and /// metadata. They exist only so deleted-memory history can be authorized without
 /// reconstructing the deleted memory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -1753,9 +1752,9 @@ mod tests {
 
     #[test]
     fn entity_new_accepts_printable_ascii_and_unicode() {
-        let e = Entity::new("Alice!", "person-type_v2").unwrap();
+        let e = Entity::new("Alice!", "person-type_current").unwrap();
         assert_eq!(e.name, "Alice!");
-        assert_eq!(e.entity_type.as_str(), "person-type_v2");
+        assert_eq!(e.entity_type.as_str(), "person-type_current");
     }
 
     // --- superseded_by: Option<MemoryId> serde ---

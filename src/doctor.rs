@@ -446,7 +446,7 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
         .prepare("SELECT id, embedding_claimed_at, embedding_claim_token, confidence FROM memories LIMIT 0")
         .and_then(|mut statement| statement.query([]).map(|_rows| ()))
         .is_ok()
-        && table_readable(&connection, "memory_v2_metadata")
+        && table_readable(&connection, "memory_metadata")
         && table_readable(&connection, "memory_tombstones")
         && table_readable(&connection, "scope_registry")
         && table_readable(&connection, "memory_audit_log")
@@ -520,7 +520,7 @@ fn sqlite_indexes_current(connection: &Connection) -> bool {
         "idx_memory_entities_entity_type",
         "idx_audit_log_memory_id",
         "idx_audit_log_timestamp",
-        "idx_memory_v2_metadata_scope_key",
+        "idx_memory_metadata_scope_key",
         "idx_memory_tombstones_deleted_at",
     ];
     REQUIRED_INDEXES.iter().all(|index| {
@@ -585,7 +585,7 @@ async fn postgres_indexes_compatible(pool: &PgPool, allow_absent: bool) -> Resul
             ('idx_audit_log_memory_id', 'memory_audit_log', 1, 'memory_id', 'memory_id', NULL),
             ('idx_audit_log_timestamp', 'memory_audit_log', 1, '\"timestamp\"', '\"timestamp\" desc', NULL),
             ('idx_memory_tombstones_deleted_at', 'memory_tombstones', 1, 'deleted_at', 'deleted_at desc', NULL),
-            ('idx_memory_v2_metadata_scope_key', 'memory_v2_metadata', 1, 'scope_key', 'scope_key', NULL)
+            ('idx_memory_metadata_scope_key', 'memory_metadata', 1, 'scope_key', 'scope_key', NULL)
         ) AS required(name, table_name, key_count, expected_keys, definition_fragment, predicate)
         LEFT JOIN pg_class AS indexes ON indexes.oid = to_regclass(format('%I.%I', current_schema(), required.name))
         LEFT JOIN pg_index AS index_data ON index_data.indexrelid = indexes.oid",
@@ -668,7 +668,7 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
         }
     }
     let required_tables: Result<i64, _> = query_scalar(
-        "SELECT COUNT(*) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_entities'), ('memory_v2_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name) WHERE ($1 OR required.name <> 'localhold_migrations') AND to_regclass(CASE WHEN $2 THEN format('%I.%I', current_schema(), required.name) ELSE required.name END) IS NOT NULL",
+        "SELECT COUNT(*) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_entities'), ('memory_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name) WHERE ($1 OR required.name <> 'localhold_migrations') AND to_regclass(CASE WHEN $2 THEN format('%I.%I', current_schema(), required.name) ELSE required.name END) IS NOT NULL",
     )
     .bind(config.database.postgres.auto_migrate)
     .bind(config.database.postgres.auto_migrate)
@@ -746,19 +746,19 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
                 (to_regclass(format('%I.%I', current_schema(), 'memories')) IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND confrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND contype = 'f' AND convalidated AND confdeltype = 'n' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'superseded_by')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'id')]::smallint[]))
                 AND (to_regclass(format('%I.%I', current_schema(), 'memory_entities')) IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(format('%I.%I', current_schema(), 'memory_entities')) AND confrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memory_entities')) AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'id')]::smallint[]))
                 AND (to_regclass(format('%I.%I', current_schema(), 'memory_embeddings')) IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(format('%I.%I', current_schema(), 'memory_embeddings')) AND confrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memory_embeddings')) AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'id')]::smallint[]))
-                AND (to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) AND confrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'id')]::smallint[]))",
+                AND (to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) AND confrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'id')]::smallint[]))",
         )
         .fetch_one(&pool)
         .await;
         let can_repair: Result<bool, _> = if vector_installed {
             query_scalar(
-                "SELECT has_schema_privilege(current_schema(), 'CREATE') AND (SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), TRUE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_v2_metadata', 'memory_tombstones', 'scope_registry'))",
+                "SELECT has_schema_privilege(current_schema(), 'CREATE') AND (SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), TRUE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_metadata', 'memory_tombstones', 'scope_registry'))",
             )
             .fetch_one(&pool)
             .await
         } else {
             query_scalar(
-                "SELECT has_schema_privilege(current_schema(), 'CREATE') AND has_database_privilege(current_database(), 'CREATE') AND (SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), TRUE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_v2_metadata', 'memory_tombstones', 'scope_registry'))",
+                "SELECT has_schema_privilege(current_schema(), 'CREATE') AND has_database_privilege(current_database(), 'CREATE') AND (SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), TRUE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_metadata', 'memory_tombstones', 'scope_registry'))",
             )
             .fetch_one(&pool)
             .await
@@ -850,7 +850,7 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             AND has_table_privilege('memory_audit_log', 'SELECT') AND has_table_privilege('memory_audit_log', 'INSERT')
             AND has_table_privilege('memory_tombstones', 'SELECT') AND has_table_privilege('memory_tombstones', 'INSERT') AND has_table_privilege('memory_tombstones', 'UPDATE')
             AND has_table_privilege('scope_registry', 'SELECT') AND has_table_privilege('scope_registry', 'INSERT') AND has_table_privilege('scope_registry', 'UPDATE')
-            AND has_table_privilege('memory_v2_metadata', 'SELECT') AND has_table_privilege('memory_v2_metadata', 'INSERT') AND has_table_privilege('memory_v2_metadata', 'UPDATE') AND has_table_privilege('memory_v2_metadata', 'DELETE')
+            AND has_table_privilege('memory_metadata', 'SELECT') AND has_table_privilege('memory_metadata', 'INSERT') AND has_table_privilege('memory_metadata', 'UPDATE') AND has_table_privilege('memory_metadata', 'DELETE')
             AND has_table_privilege('embedding_profile', 'SELECT') AND has_table_privilege('embedding_profile', 'INSERT') AND has_table_privilege('embedding_profile', 'UPDATE')
             AND has_sequence_privilege(pg_get_serial_sequence('memory_audit_log', 'id'), 'USAGE')",
     )
@@ -865,7 +865,7 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memories'::regclass AND confrelid = 'memories'::regclass AND contype = 'f' AND convalidated AND confdeltype = 'n' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'superseded_by')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'id')]::smallint[])
             AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_entities'::regclass AND confrelid = 'memories'::regclass AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memory_entities'::regclass AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'id')]::smallint[])
             AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_embeddings'::regclass AND confrelid = 'memories'::regclass AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memory_embeddings'::regclass AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'id')]::smallint[])
-            AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_v2_metadata'::regclass AND confrelid = 'memories'::regclass AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memory_v2_metadata'::regclass AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'id')]::smallint[])",
+            AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_metadata'::regclass AND confrelid = 'memories'::regclass AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memory_metadata'::regclass AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'id')]::smallint[])",
     )
     .fetch_one(&pool)
     .await;
@@ -940,7 +940,7 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             ('idx_audit_log_memory_id', 'memory_audit_log', 1, 'memory_id', 'memory_id', NULL),
             ('idx_audit_log_timestamp', 'memory_audit_log', 1, '\"timestamp\"', '\"timestamp\" desc', NULL),
             ('idx_memory_tombstones_deleted_at', 'memory_tombstones', 1, 'deleted_at', 'deleted_at desc', NULL),
-            ('idx_memory_v2_metadata_scope_key', 'memory_v2_metadata', 1, 'scope_key', 'scope_key', NULL)
+            ('idx_memory_metadata_scope_key', 'memory_metadata', 1, 'scope_key', 'scope_key', NULL)
         ) AS required(name, table_name, key_count, expected_keys, definition_fragment, predicate)
         LEFT JOIN pg_class AS indexes ON indexes.oid = to_regclass(required.name)
         LEFT JOIN pg_index AS index_data ON index_data.indexrelid = indexes.oid",
@@ -948,7 +948,7 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
     .fetch_one(&pool)
     .await;
     let owns_managed_tables: Result<bool, _> = query_scalar(
-        "SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), FALSE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_v2_metadata', 'memory_tombstones', 'scope_registry')",
+        "SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), FALSE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_metadata', 'memory_tombstones', 'scope_registry')",
     )
     .fetch_one(&pool)
     .await;

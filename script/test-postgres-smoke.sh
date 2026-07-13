@@ -58,7 +58,7 @@ main() {
   say "Resetting PostgreSQL schema before binary smoke tests"
   docker exec -e PGPASSWORD=localhold "$container" \
     psql -h 127.0.0.1 -U localhold -d localhold -v ON_ERROR_STOP=1 \
-    -c "DROP TABLE IF EXISTS memory_audit_log, memory_tombstones, memory_v2_metadata, memory_entities, memory_embeddings, memories, scope_registry, localhold_migrations CASCADE" >/dev/null
+    -c "DROP TABLE IF EXISTS memory_audit_log, memory_tombstones, memory_metadata, memory_v2_metadata, memory_entities, memory_embeddings, memories, scope_registry, localhold_migrations CASCADE" >/dev/null
 
   say "Running ignored PostgreSQL binary startup smoke test"
   LOCALHOLD_POSTGRES_URL="$url" cargo test -p localhold --test integration binary_smoke::binary_starts_with_postgres_backend --locked -- --ignored --test-threads=1

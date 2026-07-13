@@ -8,8 +8,8 @@ use std::sync::Arc;
 use axum::http::request::Parts;
 use params::{
     AdminBulkDeleteParams, AdminBulkUpdateParams, AdminCleanupExpiredParams, AdminConsolidateParams, AdminCountParams, AdminFilterFields, AdminHistoryParams, AdminListParams,
-    AdminListResponse, AdminReassignScopeParams, AdminReembedParams, AdminScopeListParams, AdminScopeListResponse, AdminScopeRegisterParams, AdminScopeRegisterResponse,
-    AdminV2MigrateMetadataParams, AdminV2MigrateMetadataResponse, AdminV2MigrationReportParams, AdminV2MigrationReportResponse, AgentCount, AuditEntryResponse, BriefParams,
+    AdminListResponse, AdminMigrateMetadataParams, AdminMigrateMetadataResponse, AdminMigrationReportParams, AdminMigrationReportResponse, AdminReassignScopeParams,
+    AdminReembedParams, AdminScopeListParams, AdminScopeListResponse, AdminScopeRegisterParams, AdminScopeRegisterResponse, AgentCount, AuditEntryResponse, BriefParams,
     BriefResponse, BulkDeleteResponse, BulkUpdateResponse, ConsolidateResponse, CountResponse, DeleteResponse, DuplicateCandidateCard, DuplicateGroupEntry, EvictExpiredResponse,
     ForgetParams, HandoffCandidate, HandoffParams, HandoffResponse, HandoffSuggestion, HistoryResponse, InventoryCard, MatchAction, MatchAssessment, MatchDiagnostics,
     MatchQuality, MatchScoreBasis, MemoryEntry, NextAction, OperationStatus, OperationSummary, QualityWarning, QualityWarningSeverity, ReadManyItemResponse, ReadManyParams,
@@ -36,18 +36,18 @@ use crate::{
     error::EngineError,
     store::{MemoryStore, RecordUseOutcome},
     types::{
-        AccessLevel, Memory, MemoryFilter, MemoryId, MemoryUpdate, QueryContext, RedactableField, ScopeDefinition, V2_LARGE_CONTENT_WARNING_THRESHOLD_BYTES, V2MemoryMetadata,
-        V2MetadataPatch, WriteOutcome,
+        AccessLevel, LARGE_CONTENT_WARNING_THRESHOLD_BYTES, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryUpdate, MetadataPatch, QueryContext, RedactableField,
+        ScopeDefinition, WriteOutcome,
     },
     validation::{normalize_non_empty, normalize_optional_non_empty, normalize_optional_string_array, validate_batch_len, validate_optional_non_empty},
 };
 
-const V2_UNRESOLVED_SCOPE: &str = "inbox/unresolved";
-const V2_REDACTED_SCOPE: &str = "[redacted]";
-const V2_SERVER_PRINCIPAL: &str = "stdio";
-const V2_HTTP_PRINCIPAL: &str = "http";
-const V2_ANONYMOUS_PRINCIPAL: &str = "anonymous";
-const V2_READ_EVENT_WEIGHT: f64 = 1.0;
+const UNRESOLVED_SCOPE: &str = "inbox/unresolved";
+const REDACTED_SCOPE: &str = "[redacted]";
+const SERVER_PRINCIPAL: &str = "stdio";
+const HTTP_PRINCIPAL: &str = "http";
+const ANONYMOUS_PRINCIPAL: &str = "anonymous";
+const READ_EVENT_WEIGHT: f64 = 1.0;
 
 const ADMIN_TOOLS: &[&str] = &[
     "admin_bulk_delete",
@@ -61,8 +61,8 @@ const ADMIN_TOOLS: &[&str] = &[
     "admin_reembed",
     "admin_scope_list",
     "admin_scope_register",
-    "admin_v2_migrate_metadata",
-    "admin_v2_migration_report",
+    "admin_migrate_metadata",
+    "admin_migration_report",
 ];
 
 const DEFAULT_DISCOVERY_TOOLS: &[&str] = &[
@@ -77,8 +77,8 @@ const DEFAULT_DISCOVERY_TOOLS: &[&str] = &[
     "admin_reembed",
     "admin_scope_list",
     "admin_scope_register",
-    "admin_v2_migrate_metadata",
-    "admin_v2_migration_report",
+    "admin_migrate_metadata",
+    "admin_migration_report",
     "brief",
     "forget",
     "handoff",
@@ -92,18 +92,18 @@ const DEFAULT_DISCOVERY_TOOLS: &[&str] = &[
 
 struct MemoryView {
     memory: Memory,
-    metadata: Option<V2MemoryMetadata>,
+    metadata: Option<MemoryMetadata>,
 }
 
 struct PreparedHandoff {
     suggestion: HandoffSuggestion,
     memory: Option<Memory>,
     supersedes: Option<MemoryId>,
-    metadata: Option<V2MemoryMetadata>,
+    metadata: Option<MemoryMetadata>,
 }
 
 impl MemoryView {
-    const fn new(memory: Memory, metadata: Option<V2MemoryMetadata>) -> Self {
+    const fn new(memory: Memory, metadata: Option<MemoryMetadata>) -> Self {
         Self { memory, metadata }
     }
 
@@ -141,17 +141,12 @@ impl MemoryView {
     }
 
     fn card_scope(&self) -> String {
-        self.scope().unwrap_or_else(|| {
-            if self.is_redacted() {
-                V2_REDACTED_SCOPE.to_owned()
-            } else {
-                V2_UNRESOLVED_SCOPE.to_owned()
-            }
-        })
+        self.scope()
+            .unwrap_or_else(|| if self.is_redacted() { REDACTED_SCOPE.to_owned() } else { UNRESOLVED_SCOPE.to_owned() })
     }
 
     fn unresolved_scope(&self) -> bool {
-        self.scope().as_deref() == Some(V2_UNRESOLVED_SCOPE)
+        self.scope().as_deref() == Some(UNRESOLVED_SCOPE)
     }
 
     fn agent_label(&self) -> Option<String> {
@@ -283,10 +278,10 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         Self {
             engine: LocalHoldEngine::new(store, embedding, limits, search_config),
             tool_router: Self::standard_tool_router(),
-            principal: Some(Arc::<str>::from(V2_SERVER_PRINCIPAL)),
+            principal: Some(Arc::<str>::from(SERVER_PRINCIPAL)),
             anonymous_policy: AnonymousPolicy::PublicReadOnly,
             http_auth_token: None,
-            http_principal_source: HttpPrincipalSource::fixed(V2_HTTP_PRINCIPAL),
+            http_principal_source: HttpPrincipalSource::fixed(HTTP_PRINCIPAL),
         }
     }
 
@@ -296,14 +291,14 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         Self {
             engine,
             tool_router: Self::standard_tool_router(),
-            principal: Some(Arc::<str>::from(V2_SERVER_PRINCIPAL)),
+            principal: Some(Arc::<str>::from(SERVER_PRINCIPAL)),
             anonymous_policy: AnonymousPolicy::PublicReadOnly,
             http_auth_token: None,
-            http_principal_source: HttpPrincipalSource::fixed(V2_HTTP_PRINCIPAL),
+            http_principal_source: HttpPrincipalSource::fixed(HTTP_PRINCIPAL),
         }
     }
 
-    /// Create a server from a pre-built engine with explicit v2 authorization settings.
+    /// Create a server from a pre-built engine with explicit authorization settings.
     #[must_use]
     pub fn from_engine_with_auth(engine: LocalHoldEngine<S>, principal: Option<String>, anonymous_policy: AnonymousPolicy) -> Self {
         Self {
@@ -312,11 +307,11 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             principal: principal.map(Arc::<str>::from),
             anonymous_policy,
             http_auth_token: None,
-            http_principal_source: HttpPrincipalSource::fixed(V2_HTTP_PRINCIPAL),
+            http_principal_source: HttpPrincipalSource::fixed(HTTP_PRINCIPAL),
         }
     }
 
-    /// Create a server from a pre-built engine with explicit v2 and HTTP authorization settings.
+    /// Create a server from a pre-built engine with explicit server and HTTP authorization settings.
     ///
     /// Use [`HttpPrincipalSource::TrustedProxyHeader`] only behind a trusted proxy.
     #[must_use]
@@ -343,10 +338,10 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         Self {
             engine: LocalHoldEngine::new_with_clock(store, embedding, limits, search_config, clock),
             tool_router: Self::standard_tool_router(),
-            principal: Some(Arc::<str>::from(V2_SERVER_PRINCIPAL)),
+            principal: Some(Arc::<str>::from(SERVER_PRINCIPAL)),
             anonymous_policy: AnonymousPolicy::PublicReadOnly,
             http_auth_token: None,
-            http_principal_source: HttpPrincipalSource::fixed(V2_HTTP_PRINCIPAL),
+            http_principal_source: HttpPrincipalSource::fixed(HTTP_PRINCIPAL),
         }
     }
 
@@ -392,7 +387,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
 
     fn write_principal_for(&self, principal: Option<&str>) -> Option<String> {
         principal.map(ToOwned::to_owned).or_else(|| match self.anonymous_policy {
-            AnonymousPolicy::PublicReadWrite => Some(V2_ANONYMOUS_PRINCIPAL.to_owned()),
+            AnonymousPolicy::PublicReadWrite => Some(ANONYMOUS_PRINCIPAL.to_owned()),
             AnonymousPolicy::PublicReadOnly | AnonymousPolicy::DenyAll => None,
         })
     }
@@ -438,23 +433,23 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
     }
 
     async fn memory_view(&self, memory: Memory) -> Result<MemoryView, EngineError> {
-        let metadata = self.engine.get_v2_metadata(&memory.id).await?;
+        let metadata = self.engine.get_metadata(&memory.id).await?;
         Ok(MemoryView::new(memory, metadata))
     }
 
     async fn recall_card(&self, result: crate::types::SearchResult, reranker_blend_weight: f64) -> Result<RecallCard, EngineError> {
-        let r#match = v2_match_assessment(&result, reranker_blend_weight);
+        let r#match = match_assessment(&result, reranker_blend_weight);
         let diagnostics = if result.memory.was_redacted {
             MatchDiagnostics::default()
         } else {
-            v2_match_diagnostics(&result, reranker_blend_weight)
+            match_diagnostics(&result, reranker_blend_weight)
         };
         let view = self.memory_view(result.memory).await?;
         Ok(recall_card_from_view(view, r#match, diagnostics))
     }
 
     async fn duplicate_card(&self, result: crate::types::SearchResult, reranker_blend_weight: f64) -> Result<DuplicateCandidateCard, EngineError> {
-        let r#match = v2_match_assessment(&result, reranker_blend_weight);
+        let r#match = match_assessment(&result, reranker_blend_weight);
         let view = self.memory_view(result.memory).await?;
         Ok(DuplicateCandidateCard {
             id: view.memory.id,
@@ -495,7 +490,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let explicit_scope = normalize_optional_non_empty("scope", explicit_scope).map_err(EngineError::from)?;
         if explicit_scope.is_none() && context_hints.is_empty() {
             return Ok(ScopeResolution {
-                scope: V2_UNRESOLVED_SCOPE.to_owned(),
+                scope: UNRESOLVED_SCOPE.to_owned(),
                 unresolved_scope: true,
                 resolved_by: ScopeResolvedBy::Unresolved,
                 matched_hint: None,
@@ -560,7 +555,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             });
         }
         Ok(ScopeResolution {
-            scope: V2_UNRESOLVED_SCOPE.to_owned(),
+            scope: UNRESOLVED_SCOPE.to_owned(),
             unresolved_scope: true,
             resolved_by: ScopeResolvedBy::Unresolved,
             matched_hint: context_hints.first().cloned(),
@@ -607,9 +602,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         })
     }
 
-    async fn v2_duplicate_candidates(&self, content: &str, scope: &str, principal: Option<&str>) -> Result<Vec<DuplicateCandidateCard>, EngineError> {
+    async fn duplicate_candidates(&self, content: &str, scope: &str, principal: Option<&str>) -> Result<Vec<DuplicateCandidateCard>, EngineError> {
         let mut filter = MemoryFilter::default();
-        if scope != V2_UNRESOLVED_SCOPE {
+        if scope != UNRESOLVED_SCOPE {
             filter.scopes_any = Some(vec![scope.to_owned()]);
         }
         let outcome = self
@@ -868,7 +863,7 @@ const fn finite_unit_score(value: f64) -> f64 {
 }
 
 #[expect(clippy::float_arithmetic, reason = "agent-facing relevance blend mirrors ranking relevance formula")]
-fn v2_match_score(result: &crate::types::SearchResult, reranker_blend_weight: f64) -> f64 {
+fn match_score(result: &crate::types::SearchResult, reranker_blend_weight: f64) -> f64 {
     if let Some(breakdown) = result.score_breakdown {
         return finite_unit_score(breakdown.query_relevance);
     }
@@ -879,7 +874,7 @@ fn v2_match_score(result: &crate::types::SearchResult, reranker_blend_weight: f6
     finite_unit_score(score)
 }
 
-const fn v2_match_score_basis(result: &crate::types::SearchResult) -> MatchScoreBasis {
+const fn match_score_basis(result: &crate::types::SearchResult) -> MatchScoreBasis {
     if result.reranker_score.is_some() {
         MatchScoreBasis::RerankerBlend
     } else if result.retrieval_score.is_some() {
@@ -889,7 +884,7 @@ const fn v2_match_score_basis(result: &crate::types::SearchResult) -> MatchScore
     }
 }
 
-fn v2_match_quality(score: f64) -> MatchQuality {
+fn match_quality(score: f64) -> MatchQuality {
     if score >= 0.50_f64 {
         MatchQuality::Strong
     } else if score >= 0.20_f64 {
@@ -899,7 +894,7 @@ fn v2_match_quality(score: f64) -> MatchQuality {
     }
 }
 
-const fn v2_match_action(quality: MatchQuality) -> MatchAction {
+const fn match_action(quality: MatchQuality) -> MatchAction {
     match quality {
         MatchQuality::Strong => MatchAction::Read,
         MatchQuality::Possible => MatchAction::Consider,
@@ -907,18 +902,18 @@ const fn v2_match_action(quality: MatchQuality) -> MatchAction {
     }
 }
 
-fn v2_match_assessment(result: &crate::types::SearchResult, reranker_blend_weight: f64) -> MatchAssessment {
-    let score = v2_match_score(result, reranker_blend_weight);
-    let quality = v2_match_quality(score);
+fn match_assessment(result: &crate::types::SearchResult, reranker_blend_weight: f64) -> MatchAssessment {
+    let score = match_score(result, reranker_blend_weight);
+    let quality = match_quality(score);
     MatchAssessment {
         quality,
-        action: v2_match_action(quality),
+        action: match_action(quality),
         score,
-        score_basis: v2_match_score_basis(result),
+        score_basis: match_score_basis(result),
     }
 }
 
-fn v2_match_diagnostics(result: &crate::types::SearchResult, reranker_blend_weight: f64) -> MatchDiagnostics {
+fn match_diagnostics(result: &crate::types::SearchResult, reranker_blend_weight: f64) -> MatchDiagnostics {
     MatchDiagnostics {
         retrieval_score: result.retrieval_score,
         reranker_score: result.reranker_score,
@@ -979,10 +974,7 @@ fn inventory_card_from_view(view: MemoryView, now: chrono::DateTime<chrono::Utc>
 fn write_quality_warnings(content: &str, summary: Option<&str>, unresolved_scope: bool, tags: &[String], entity_count: usize) -> Vec<QualityWarning> {
     let mut warnings = Vec::new();
     if unresolved_scope {
-        warnings.push(quality_warning(
-            "missing_scope",
-            format!("no scope was supplied; memory was placed in {V2_UNRESOLVED_SCOPE}"),
-        ));
+        warnings.push(quality_warning("missing_scope", format!("no scope was supplied; memory was placed in {UNRESOLVED_SCOPE}")));
     }
     if summary.is_none_or(|s| s.trim().is_empty()) {
         warnings.push(quality_warning("missing_summary", "no summary supplied; recall cards will use deterministic excerpts"));
@@ -993,7 +985,7 @@ fn write_quality_warnings(content: &str, summary: Option<&str>, unresolved_scope
     if entity_count == 0 {
         warnings.push(quality_warning("empty_entities", "no entities supplied"));
     }
-    if content.len() > V2_LARGE_CONTENT_WARNING_THRESHOLD_BYTES {
+    if content.len() > LARGE_CONTENT_WARNING_THRESHOLD_BYTES {
         warnings.push(quality_warning(
             "oversized_content",
             "content is large for an agent memory; consider storing a concise durable summary",
@@ -1073,7 +1065,7 @@ fn maybe_expand_scope_hierarchy(filter: &mut MemoryFilter, expand: bool) {
     }
 }
 
-/// Validated filter and context extracted from internal v2/admin filter fields.
+/// Validated filter and context extracted from internal admin filter fields.
 struct ValidatedFilter {
     filter: MemoryFilter,
     ctx: QueryContext,
@@ -1118,7 +1110,7 @@ fn validate_and_normalize_filter(fields: &params::CommonFilterFields) -> Result<
 
 fn reject_removed_admin_field(present: bool, removed: &str, replacement: &str) -> Result<(), EngineError> {
     if present {
-        return Err(crate::error::ValidationError::new(removed, format!("removed from v2 admin API; use {replacement}")).into());
+        return Err(crate::error::ValidationError::new(removed, format!("removed from admin API; use {replacement}")).into());
     }
     Ok(())
 }
@@ -1215,7 +1207,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             Err(err) => return Err(err.into()),
         };
         let mut warnings = write_quality_warnings(&memory.content, summary.as_deref(), unresolved_scope, &memory.tags, memory.entities.len());
-        let duplicate_candidates = self.v2_duplicate_candidates(&memory.content, &scope, Some(&principal)).await.unwrap_or_default();
+        let duplicate_candidates = self.duplicate_candidates(&memory.content, &scope, Some(&principal)).await.unwrap_or_default();
         if !duplicate_candidates.is_empty() {
             warnings.push(quality_warning(
                 "duplicate_candidate",
@@ -1223,16 +1215,16 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             ));
         }
         let quality_flags = warnings.iter().map(|warning| warning.code.clone()).collect();
-        let metadata = V2MemoryMetadata {
+        let metadata = MemoryMetadata {
             memory_id: memory.id,
             scope_key: Some(scope.clone()),
             summary,
             agent_label,
             created_by_principal: Some(principal),
             quality_flags,
-            schema_version: 2,
+            schema_version: 1,
         };
-        let id = self.engine.store_memory_with_v2_metadata(memory, supersedes.as_ref(), &metadata).await?;
+        let id = self.engine.store_memory_with_metadata(memory, supersedes.as_ref(), &metadata).await?;
         let next_action = next_action_for_warnings(&warnings);
         success_json(&RememberResponse {
             operation: operation_summary(OperationStatus::Applied, 1, warnings.clone(), next_action),
@@ -1329,7 +1321,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 Err(err) => return Err(err.into()),
             };
             let mut warnings = write_quality_warnings(&memory.content, summary.as_deref(), unresolved_scope, &memory.tags, memory.entities.len());
-            let duplicate_candidates = self.v2_duplicate_candidates(&memory.content, &scope, Some(&principal)).await.unwrap_or_default();
+            let duplicate_candidates = self.duplicate_candidates(&memory.content, &scope, Some(&principal)).await.unwrap_or_default();
             if !duplicate_candidates.is_empty() {
                 warnings.push(quality_warning(
                     "duplicate_candidate",
@@ -1337,14 +1329,14 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 ));
             }
             let quality_flags = warnings.iter().map(|warning| warning.code.clone()).collect();
-            let metadata_item = V2MemoryMetadata {
+            let metadata_item = MemoryMetadata {
                 memory_id: memory.id,
                 scope_key: Some(scope.clone()),
                 summary,
                 agent_label,
                 created_by_principal: Some(principal.clone()),
                 quality_flags,
-                schema_version: 2,
+                schema_version: 1,
             };
             prepared.push(memory);
             supersedes_list.push(supersedes);
@@ -1360,7 +1352,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             });
         }
 
-        let ids = self.engine.batch_store_with_v2_metadata(prepared, supersedes_list, metadata).await?;
+        let ids = self.engine.batch_store_with_metadata(prepared, supersedes_list, metadata).await?;
         for (id, response) in ids.iter().copied().zip(item_responses.iter_mut()) {
             response.id = id;
         }
@@ -1374,7 +1366,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
     }
 
     #[tool(
-        description = "Recall compact v2 memory cards and record lightweight search impressions. Scope may be a key, alias, matcher-containing value, or context_hints. Full content is omitted; call read/read_many for IDs."
+        description = "Recall compact memory cards and record lightweight search impressions. Scope may be a key, alias, matcher-containing value, or context_hints. Full content is omitted; call read/read_many for IDs."
     )]
     async fn recall(&self, context: RequestContext<RoleServer>, Parameters(params): Parameters<RecallParams>) -> Result<CallToolResult, rmcp::ErrorData> {
         let request_principal = self.principal_for_context(&context);
@@ -1457,7 +1449,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             ));
         };
         let use_outcome = if let Some(principal) = request_principal.as_deref() {
-            self.engine.record_memory_use(vec![id], principal, V2_READ_EVENT_WEIGHT).await.unwrap_or_default()
+            self.engine.record_memory_use(vec![id], principal, READ_EVENT_WEIGHT).await.unwrap_or_default()
         } else {
             RecordUseOutcome::default()
         };
@@ -1520,7 +1512,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let found_ids = found.iter().map(|(_index, id, _mem)| *id).collect::<Vec<_>>();
         let activity_recorded = if let Some(principal) = request_principal.as_deref() {
             self.engine
-                .record_memory_use(found_ids.clone(), principal, V2_READ_EVENT_WEIGHT)
+                .record_memory_use(found_ids.clone(), principal, READ_EVENT_WEIGHT)
                 .await
                 .unwrap_or_default()
                 .recorded
@@ -1563,7 +1555,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             None
         };
         let tags = normalize_optional_string_array("tags", params.tags).map_err(EngineError::from)?;
-        let metadata_patch = V2MetadataPatch {
+        let metadata_patch = MetadataPatch {
             scope_key: scope_update.clone(),
             summary,
             agent_label,
@@ -1578,7 +1570,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             source_conversation: scope_update.clone(),
             entities: normalize_optional_entity_inputs(params.entities).map_err(EngineError::from)?,
         };
-        let update_outcome = self.engine.update_memory_with_v2_metadata(id, update, metadata_patch, &principal).await?;
+        let update_outcome = self.engine.update_memory_with_metadata(id, update, metadata_patch, &principal).await?;
         match update_outcome.outcome {
             WriteOutcome::NotFound => Ok(tool_error(
                 ToolErrorCode::NotFound,
@@ -1796,10 +1788,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             let warning_entities_len = commit_payload.as_ref().map_or(raw_entities_len, |(memory, _)| memory.entities.len());
             let mut warnings = write_quality_warnings(warning_content, summary.as_deref(), unresolved_scope, warning_tags, warning_entities_len);
             let duplicate_principal = write_principal.as_deref().or(request_principal.as_deref());
-            let duplicate_candidates = self
-                .v2_duplicate_candidates(warning_content, &resolved_scope, duplicate_principal)
-                .await
-                .unwrap_or_default();
+            let duplicate_candidates = self.duplicate_candidates(warning_content, &resolved_scope, duplicate_principal).await.unwrap_or_default();
             if !duplicate_candidates.is_empty() {
                 warnings.push(quality_warning(
                     "duplicate_candidate",
@@ -1810,14 +1799,14 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             let next_action = next_action_for_warnings(&warnings);
             all_warnings.extend(warnings.clone());
             let (memory, supersedes, metadata) = if let Some((memory, supersedes)) = commit_payload {
-                let metadata = V2MemoryMetadata {
+                let metadata = MemoryMetadata {
                     memory_id: memory.id,
                     scope_key: Some(resolved_scope.clone()),
                     summary: metadata_summary,
                     agent_label: None,
                     created_by_principal: write_principal.clone(),
                     quality_flags,
-                    schema_version: 2,
+                    schema_version: 1,
                 };
                 (Some(memory), supersedes, Some(metadata))
             } else {
@@ -1855,7 +1844,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 }
             }
 
-            let ids = self.engine.batch_store_with_v2_metadata(memories, supersedes, metadata).await?;
+            let ids = self.engine.batch_store_with_metadata(memories, supersedes, metadata).await?;
             if ids.len() != suggestion_indexes.len() {
                 return Err(rmcp::ErrorData::internal_error("handoff batch store returned an unexpected ID count".to_owned(), None));
             }
@@ -1883,7 +1872,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
     }
 
     #[tool(
-        description = "Write/admin: register or replace a v2 scope definition using the server-resolved principal. Defines scope_key plus aliases and matcher substrings for context_hints."
+        description = "Write/admin: register or replace a scope definition using the server-resolved principal. Defines scope_key plus aliases and matcher substrings for context_hints."
     )]
     async fn admin_scope_register(&self, context: RequestContext<RoleServer>, Parameters(params): Parameters<AdminScopeRegisterParams>) -> Result<CallToolResult, rmcp::ErrorData> {
         let request_principal = self.principal_for_context(&context);
@@ -1914,7 +1903,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         success_json(&AdminScopeRegisterResponse { scope: ScopeEntry::from(scope) })
     }
 
-    #[tool(description = "Read-like admin: list persisted v2 scope definitions using read authorization from the server-resolved principal.")]
+    #[tool(description = "Read-like admin: list persisted scope definitions using read authorization from the server-resolved principal.")]
     async fn admin_scope_list(&self, context: RequestContext<RoleServer>, Parameters(_params): Parameters<AdminScopeListParams>) -> Result<CallToolResult, rmcp::ErrorData> {
         let request_principal = self.principal_for_context(&context);
         if !self.read_allowed_for(request_principal.as_deref()) {
@@ -1951,26 +1940,26 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         })
     }
 
-    #[tool(description = "Write/admin: report conservative v2 metadata migration counts using the server-resolved principal; does not rewrite original memory content.")]
-    async fn admin_v2_migration_report(
+    #[tool(description = "Write/admin: report conservative metadata migration counts using the server-resolved principal; does not rewrite original memory content.")]
+    async fn admin_migration_report(
         &self,
         context: RequestContext<RoleServer>,
-        Parameters(_params): Parameters<AdminV2MigrationReportParams>,
+        Parameters(_params): Parameters<AdminMigrationReportParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         if let Some(error) = self.local_admin_error_for_context(&context) {
             return Ok(error);
         }
-        let report = self.engine.v2_migration_report().await?;
-        success_json(&AdminV2MigrationReportResponse { report })
+        let report = self.engine.metadata_migration_report().await?;
+        success_json(&AdminMigrationReportResponse { report })
     }
 
     #[tool(
-        description = "Write/admin: add v2 metadata rows for existing memories using the server-resolved principal. dry_run=true previews; original memory content is never rewritten."
+        description = "Write/admin: add metadata rows for existing memories using the server-resolved principal. dry_run=true previews; original memory content is never rewritten."
     )]
-    async fn admin_v2_migrate_metadata(
+    async fn admin_migrate_metadata(
         &self,
         context: RequestContext<RoleServer>,
-        Parameters(params): Parameters<AdminV2MigrateMetadataParams>,
+        Parameters(params): Parameters<AdminMigrateMetadataParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         if let Some(error) = self.local_admin_error_for_context(&context) {
             return Ok(error);
@@ -1979,9 +1968,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             return Ok(Self::anonymous_write_denied());
         };
         let registered_scope_keys = self.engine.list_scopes().await?.into_iter().map(|scope| scope.scope_key).collect::<Vec<_>>();
-        let report = self.engine.migrate_v2_metadata(&registered_scope_keys, params.dry_run, &principal).await?;
+        let report = self.engine.migrate_metadata(&registered_scope_keys, params.dry_run, &principal).await?;
         let status = if params.dry_run { OperationStatus::Preview } else { OperationStatus::Applied };
-        success_json(&AdminV2MigrateMetadataResponse {
+        success_json(&AdminMigrateMetadataResponse {
             operation: operation_summary(status, report.migrated, Vec::new(), NextAction::None),
             dry_run: params.dry_run,
             report,
@@ -2285,7 +2274,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> ServerHandler for Local
              content and record activity, and remember to store durable new information. Use handoff to validate \
              candidate memories before persisting them. revise and forget modify existing memories \
              using the server-resolved principal.{admin_instructions} \
-             Legacy v1 memory_* names are not part of the public MCP tool surface."
+             Retired memory_* names are not part of the public MCP tool surface."
         ));
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info

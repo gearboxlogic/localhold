@@ -14,8 +14,8 @@ use localhold::{
     error::{EmbeddingError, StoreError},
     store::{MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter, ReassignScopeOutcome},
     types::{
-        AuditDraft, AuthorizedUpdateOutcome, Memory, MemoryFilter, MemoryId, MemoryStats, MemoryUpdate, QueryContext, ScopeDefinition, SearchResult, V2MemoryMetadata,
-        V2MetadataMigrationReport, V2MigrationReport, WriteOutcome,
+        AuditDraft, AuthorizedUpdateOutcome, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MemoryUpdate, MetadataMigrationOutcome, MetadataMigrationReport,
+        QueryContext, ScopeDefinition, SearchResult, WriteOutcome,
     },
 };
 use parking_lot::Mutex;
@@ -264,31 +264,25 @@ impl<S: MemoryWriter + Send + Sync> MemoryWriter for ChaosStore<S> {
         self.inner.store_with_supersession_audited(memory, embedding, supersedes_id, audit).await
     }
 
-    async fn store_with_v2_metadata(
-        &self,
-        memory: &Memory,
-        embedding: Option<&[f32]>,
-        supersedes_id: Option<&MemoryId>,
-        metadata: &V2MemoryMetadata,
-    ) -> Result<MemoryId, StoreError> {
+    async fn store_with_metadata(&self, memory: &Memory, embedding: Option<&[f32]>, supersedes_id: Option<&MemoryId>, metadata: &MemoryMetadata) -> Result<MemoryId, StoreError> {
         if let Some(err) = self.store_plan.should_fail() {
             return Err(err);
         }
-        self.inner.store_with_v2_metadata(memory, embedding, supersedes_id, metadata).await
+        self.inner.store_with_metadata(memory, embedding, supersedes_id, metadata).await
     }
 
-    async fn store_with_v2_metadata_audited(
+    async fn store_with_metadata_audited(
         &self,
         memory: &Memory,
         embedding: Option<&[f32]>,
         supersedes_id: Option<&MemoryId>,
-        metadata: &V2MemoryMetadata,
+        metadata: &MemoryMetadata,
         audit: &AuditDraft,
     ) -> Result<MemoryId, StoreError> {
         if let Some(err) = self.store_plan.should_fail() {
             return Err(err);
         }
-        self.inner.store_with_v2_metadata_audited(memory, embedding, supersedes_id, metadata, audit).await
+        self.inner.store_with_metadata_audited(memory, embedding, supersedes_id, metadata, audit).await
     }
 
     async fn store_batch(&self, memories: &[MemoryWithEmbedding]) -> Result<Vec<MemoryId>, StoreError> {
@@ -324,29 +318,24 @@ impl<S: MemoryWriter + Send + Sync> MemoryWriter for ChaosStore<S> {
         self.inner.store_batch_with_supersession_audited(memories, supersedes, audits).await
     }
 
-    async fn store_batch_with_v2_metadata(
-        &self,
-        memories: &[MemoryWithEmbedding],
-        supersedes: &[Option<MemoryId>],
-        metadata: &[V2MemoryMetadata],
-    ) -> Result<Vec<MemoryId>, StoreError> {
+    async fn store_batch_with_metadata(&self, memories: &[MemoryWithEmbedding], supersedes: &[Option<MemoryId>], metadata: &[MemoryMetadata]) -> Result<Vec<MemoryId>, StoreError> {
         if let Some(err) = self.batch_store_plan.should_fail() {
             return Err(err);
         }
-        self.inner.store_batch_with_v2_metadata(memories, supersedes, metadata).await
+        self.inner.store_batch_with_metadata(memories, supersedes, metadata).await
     }
 
-    async fn store_batch_with_v2_metadata_audited(
+    async fn store_batch_with_metadata_audited(
         &self,
         memories: &[MemoryWithEmbedding],
         supersedes: &[Option<MemoryId>],
-        metadata: &[V2MemoryMetadata],
+        metadata: &[MemoryMetadata],
         audits: &[AuditDraft],
     ) -> Result<Vec<MemoryId>, StoreError> {
         if let Some(err) = self.batch_store_plan.should_fail() {
             return Err(err);
         }
-        self.inner.store_batch_with_v2_metadata_audited(memories, supersedes, metadata, audits).await
+        self.inner.store_batch_with_metadata_audited(memories, supersedes, metadata, audits).await
     }
 
     async fn update(&self, id: &MemoryId, update: &MemoryUpdate) -> Result<bool, StoreError> {
@@ -380,15 +369,15 @@ impl<S: MemoryWriter + Send + Sync> MemoryWriter for ChaosStore<S> {
         self.inner.update_authorized_audited(id, update, principal, audit).await
     }
 
-    async fn update_authorized_with_v2_metadata_audited(
+    async fn update_authorized_with_metadata_audited(
         &self,
         id: &MemoryId,
         update: &MemoryUpdate,
-        metadata_patch: Option<&localhold::types::V2MetadataPatch>,
+        metadata_patch: Option<&localhold::types::MetadataPatch>,
         principal: &str,
         audit: &AuditDraft,
     ) -> Result<AuthorizedUpdateOutcome, StoreError> {
-        self.inner.update_authorized_with_v2_metadata_audited(id, update, metadata_patch, principal, audit).await
+        self.inner.update_authorized_with_metadata_audited(id, update, metadata_patch, principal, audit).await
     }
 
     async fn delete_authorized(&self, id: &MemoryId, principal: &str) -> Result<WriteOutcome, StoreError> {
@@ -501,28 +490,28 @@ impl<S: MemoryAdmin + Send + Sync> MemoryAdmin for ChaosStore<S> {
         self.inner.list_scopes().await
     }
 
-    async fn upsert_v2_metadata(&self, metadata: V2MemoryMetadata) -> Result<(), StoreError> {
-        self.inner.upsert_v2_metadata(metadata).await
+    async fn upsert_metadata(&self, metadata: MemoryMetadata) -> Result<(), StoreError> {
+        self.inner.upsert_metadata(metadata).await
     }
 
-    async fn upsert_v2_metadata_audited(&self, metadata: V2MemoryMetadata, audit: &AuditDraft) -> Result<(), StoreError> {
-        self.inner.upsert_v2_metadata_audited(metadata, audit).await
+    async fn upsert_metadata_audited(&self, metadata: MemoryMetadata, audit: &AuditDraft) -> Result<(), StoreError> {
+        self.inner.upsert_metadata_audited(metadata, audit).await
     }
 
-    async fn get_v2_metadata(&self, memory_id: &MemoryId) -> Result<Option<V2MemoryMetadata>, StoreError> {
-        self.inner.get_v2_metadata(memory_id).await
+    async fn get_metadata(&self, memory_id: &MemoryId) -> Result<Option<MemoryMetadata>, StoreError> {
+        self.inner.get_metadata(memory_id).await
     }
 
-    async fn v2_migration_report(&self) -> Result<V2MigrationReport, StoreError> {
-        self.inner.v2_migration_report().await
+    async fn metadata_migration_report(&self) -> Result<MetadataMigrationReport, StoreError> {
+        self.inner.metadata_migration_report().await
     }
 
-    async fn migrate_v2_metadata(&self, registered_scope_keys: &[String], dry_run: bool) -> Result<V2MetadataMigrationReport, StoreError> {
-        self.inner.migrate_v2_metadata(registered_scope_keys, dry_run).await
+    async fn migrate_metadata(&self, registered_scope_keys: &[String], dry_run: bool) -> Result<MetadataMigrationOutcome, StoreError> {
+        self.inner.migrate_metadata(registered_scope_keys, dry_run).await
     }
 
-    async fn migrate_v2_metadata_audited(&self, registered_scope_keys: &[String], dry_run: bool, audit: &AuditDraft) -> Result<V2MetadataMigrationReport, StoreError> {
-        self.inner.migrate_v2_metadata_audited(registered_scope_keys, dry_run, audit).await
+    async fn migrate_metadata_audited(&self, registered_scope_keys: &[String], dry_run: bool, audit: &AuditDraft) -> Result<MetadataMigrationOutcome, StoreError> {
+        self.inner.migrate_metadata_audited(registered_scope_keys, dry_run, audit).await
     }
 }
 

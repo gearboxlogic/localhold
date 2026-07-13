@@ -82,7 +82,7 @@ async fn optional_agent_facing_fields_populated() {
     assert_eq!(read.summary.as_deref(), Some("fully populated summary"));
     assert_eq!(read.agent_label.as_deref(), Some("agent-1"));
     assert_eq!(read.scope.as_deref(), Some("conv-123"));
-    assert!(read.memory.expires_at.is_none(), "v2 core writes do not expose TTL");
+    assert!(read.memory.expires_at.is_none(), "core writes do not expose TTL");
 }
 
 #[tokio::test]
@@ -251,7 +251,7 @@ async fn admin_list_scope_expansion_matches_ancestor_scopes() {
         }),
     )
     .await;
-    assert_eq!(empty.count, 3, "empty scopes is treated like an omitted optional filter in v2");
+    assert_eq!(empty.count, 3, "empty scopes is treated like an omitted optional filter in ");
 }
 
 #[tokio::test]

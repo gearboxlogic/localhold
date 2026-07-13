@@ -230,7 +230,7 @@ async fn admin_count_scope_filter_and_breakdown() {
     .await;
     assert_eq!(filtered.total, 1);
     assert_eq!(filtered.scope_count, 1, "scope_count should describe the filtered subset");
-    assert_eq!(filtered.superseded_count, 0, "new v2 writes should not be superseded");
+    assert_eq!(filtered.superseded_count, 0, "new writes should not be superseded");
 }
 
 #[tokio::test]
@@ -260,8 +260,8 @@ async fn admin_count_reports_storage_scope_and_memory_type_breakdowns() {
     assert!(count.storage_bytes.is_some_and(|bytes| bytes > 0), "storage_bytes should be positive");
     assert!(count.oldest_memory.is_some(), "oldest_memory should be populated");
     assert!(count.newest_memory.is_some(), "newest_memory should be populated");
-    assert_eq!(count.scope_count, 2, "scope_count should count distinct v2 scopes");
-    assert_eq!(count.superseded_count, 0, "new v2 writes should not be superseded");
+    assert_eq!(count.scope_count, 2, "scope_count should count distinct scopes");
+    assert_eq!(count.superseded_count, 0, "new writes should not be superseded");
 
     let semantic = count.by_memory_type.iter().find(|entry| entry.memory_type == MemoryType::Semantic);
     assert_eq!(semantic.map(|entry| entry.count), Some(2));
@@ -324,5 +324,5 @@ async fn admin_count_expired_memories_reports_global_expired_count() {
 
     let stats: CountResponse = call_tool(&client, "admin_count", json!({})).await;
     assert_eq!(stats.total, 2);
-    assert_eq!(stats.expired, 0, "v2 core writes do not expose TTL");
+    assert_eq!(stats.expired, 0, "core writes do not expose TTL");
 }

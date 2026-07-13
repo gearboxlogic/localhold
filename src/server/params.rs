@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::types::{AccessPolicy, Entity, Memory, MemoryId, MemoryType, ScopeDefinition, SearchMode, V2MetadataMigrationReport, V2MigrationReport};
+use crate::types::{AccessPolicy, Entity, Memory, MemoryId, MemoryType, MetadataMigrationOutcome, MetadataMigrationReport, ScopeDefinition, SearchMode};
 
 // -- Default‐value functions for serde(default = "...") --
 
@@ -125,7 +125,7 @@ impl JsonSchema for EntityInput {
     }
 }
 
-/// One request entity accepted by v2 write/update tools.
+/// One request entity accepted by write/update tools.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(untagged)]
 #[non_exhaustive]
@@ -166,7 +166,7 @@ pub enum AccessPolicyShorthand {
     Public,
 }
 
-/// One request access policy accepted by v2 write/update tools.
+/// One request access policy accepted by write/update tools.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(untagged)]
 #[non_exhaustive]
@@ -186,7 +186,7 @@ impl From<AccessPolicyInput> for AccessPolicy {
     }
 }
 
-/// Internal memory-store fields assembled from v2 tool inputs before engine validation.
+/// Internal memory-store fields assembled from tool inputs before engine validation.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
@@ -232,7 +232,7 @@ pub(crate) struct MemoryInput {
     pub entities: Vec<EntityInputItem>,
 }
 
-/// Parameters for the v2 `remember` tool.
+/// Parameters for the `remember` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
@@ -271,7 +271,7 @@ pub struct RememberParams {
     pub access_policy: Option<AccessPolicyInput>,
 }
 
-/// Parameters for the v2 `recall` tool.
+/// Parameters for the `recall` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
@@ -307,7 +307,7 @@ pub struct RecallParams {
     pub query_context: Option<String>,
 }
 
-/// One item accepted by the v2 `remember_many` tool.
+/// One item accepted by the `remember_many` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(untagged)]
 #[non_exhaustive]
@@ -339,7 +339,7 @@ impl From<RememberManyItem> for RememberParams {
     }
 }
 
-/// Parameters for the v2 `remember_many` tool.
+/// Parameters for the `remember_many` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct RememberManyParams {
@@ -347,7 +347,7 @@ pub struct RememberManyParams {
     pub memories: Vec<RememberManyItem>,
 }
 
-/// Parameters for the v2 `read` tool.
+/// Parameters for the `read` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
@@ -356,7 +356,7 @@ pub struct ReadParams {
     pub id: MemoryId,
 }
 
-/// Parameters for the v2 `read_many` tool.
+/// Parameters for the `read_many` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
@@ -365,7 +365,7 @@ pub struct ReadManyParams {
     pub ids: Vec<MemoryId>,
 }
 
-/// Parameters for the v2 `revise` tool.
+/// Parameters for the `revise` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
@@ -375,7 +375,7 @@ pub struct ReviseParams {
     /// Replacement content. When set, embeddings are regenerated in the background.
     #[serde(default)]
     pub content: Option<String>,
-    /// Replacement compact summary for v2 cards.
+    /// Replacement compact summary for cards.
     #[serde(default)]
     pub summary: Option<String>,
     /// Replacement human-readable agent label. This does not grant access.
@@ -404,7 +404,7 @@ pub struct ReviseParams {
     pub entities: Option<Vec<EntityInputItem>>,
 }
 
-/// Parameters for the v2 `forget` tool.
+/// Parameters for the `forget` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct ForgetParams {
@@ -412,7 +412,7 @@ pub struct ForgetParams {
     pub id: MemoryId,
 }
 
-/// Parameters for the v2 `brief` tool.
+/// Parameters for the `brief` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
@@ -458,7 +458,7 @@ pub struct HandoffCandidate {
     pub memory_type: Option<MemoryType>,
 }
 
-/// One candidate item accepted by the v2 `handoff` tool.
+/// One candidate item accepted by the `handoff` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(untagged)]
 #[non_exhaustive]
@@ -486,7 +486,7 @@ impl From<HandoffCandidateItem> for HandoffCandidate {
     }
 }
 
-/// Parameters for the v2 `handoff` tool.
+/// Parameters for the `handoff` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct HandoffParams {
@@ -529,22 +529,22 @@ pub struct AdminScopeRegisterParams {
 #[expect(clippy::empty_structs_with_brackets, reason = "MCP params schema must remain an empty JSON object")]
 pub struct AdminScopeListParams {}
 
-/// Parameters for reporting v2 metadata migration state.
+/// Parameters for reporting metadata migration state.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[non_exhaustive]
 #[expect(clippy::empty_structs_with_brackets, reason = "MCP params schema must remain an empty JSON object")]
-pub struct AdminV2MigrationReportParams {}
+pub struct AdminMigrationReportParams {}
 
-/// Parameters for applying non-destructive v2 metadata migration.
+/// Parameters for applying non-destructive metadata migration.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[non_exhaustive]
-pub struct AdminV2MigrateMetadataParams {
+pub struct AdminMigrateMetadataParams {
     /// When true, report what would be migrated without inserting metadata rows.
     #[serde(default)]
     pub dry_run: bool,
 }
 
-/// Shared filter fields for v2 admin tools. Authorization identity is resolved by the server.
+/// Shared filter fields for admin tools. Authorization identity is resolved by the server.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
@@ -596,7 +596,7 @@ pub struct AdminFilterFields {
     pub(crate) deprecated_scope_keys_any: Option<serde_json::Value>,
 }
 
-/// Parameters for the v2 admin scope reassignment tool.
+/// Parameters for the admin scope reassignment tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
@@ -618,13 +618,13 @@ pub struct AdminReassignScopeParams {
     pub(crate) deprecated_origin_conversation: Option<serde_json::Value>,
 }
 
-/// Parameters for v2 admin expired-memory cleanup.
+/// Parameters for admin expired-memory cleanup.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[non_exhaustive]
 #[expect(clippy::empty_structs_with_brackets, reason = "MCP params schema must remain an empty JSON object")]
 pub struct AdminCleanupExpiredParams {}
 
-/// Parameters for v2 admin aggregate memory counts.
+/// Parameters for admin aggregate memory counts.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
@@ -642,7 +642,7 @@ pub struct AdminCountParams {
     pub expand_scopes: Option<bool>,
 }
 
-/// Parameters for v2 admin bulk deletion.
+/// Parameters for admin bulk deletion.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
@@ -660,7 +660,7 @@ pub struct AdminBulkDeleteParams {
     pub expand_scopes: Option<bool>,
 }
 
-/// Parameters for v2 admin bulk metadata updates.
+/// Parameters for admin bulk metadata updates.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
@@ -687,7 +687,7 @@ pub struct AdminBulkUpdateParams {
     pub expand_scopes: Option<bool>,
 }
 
-/// Parameters for v2 admin duplicate consolidation.
+/// Parameters for admin duplicate consolidation.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
@@ -718,7 +718,7 @@ pub struct AdminConsolidateParams {
     pub dry_run: bool,
 }
 
-/// Parameters for v2 admin audit history reads.
+/// Parameters for admin audit history reads.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
@@ -730,7 +730,7 @@ pub struct AdminHistoryParams {
     pub limit: usize,
 }
 
-/// Parameters for v2 admin re-embedding.
+/// Parameters for admin re-embedding.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
@@ -743,7 +743,7 @@ pub struct AdminReembedParams {
     pub limit: Option<usize>,
 }
 
-/// Parameters for the v2 admin inventory listing tool.
+/// Parameters for the admin inventory listing tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
@@ -765,7 +765,7 @@ pub struct AdminListParams {
     pub expand_scopes: Option<bool>,
 }
 
-/// Internal filter fields assembled from v2/admin tool inputs before engine validation.
+/// Internal filter fields assembled from /admin tool inputs before engine validation.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
@@ -805,7 +805,7 @@ pub(crate) struct CommonFilterFields {
 
 // -- Response types for JSON serialization --
 
-/// Stable code for structured v2 application-level tool errors.
+/// Stable code for structured application-level tool errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -828,7 +828,7 @@ pub enum ToolErrorCode {
     Internal,
 }
 
-/// Structured v2 application-level tool error.
+/// Structured application-level tool error.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct ToolError {
@@ -846,7 +846,7 @@ pub struct ToolError {
     pub retryable: bool,
 }
 
-/// Response envelope returned as JSON text when a v2 tool sets `is_error=true`.
+/// Response envelope returned as JSON text when a tool sets `is_error=true`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct ToolErrorResponse {
@@ -854,7 +854,7 @@ pub struct ToolErrorResponse {
     pub error: ToolError,
 }
 
-/// Severity for v2 quality warnings.
+/// Severity for quality warnings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -867,7 +867,7 @@ pub enum QualityWarningSeverity {
     ActionRequired,
 }
 
-/// A quality or classification warning returned by v2 write tools.
+/// A quality or classification warning returned by write tools.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct QualityWarning {
@@ -885,7 +885,7 @@ pub struct QualityWarning {
     pub suggested_fix: Option<String>,
 }
 
-/// Standard operation status for v2 mutation and admin tools.
+/// Standard operation status for mutation and admin tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -972,7 +972,7 @@ pub struct DuplicateCandidateCard {
     pub r#match: MatchAssessment,
 }
 
-/// Response from v2 `remember`.
+/// Response from `remember`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct RememberResponse {
@@ -992,7 +992,7 @@ pub struct RememberResponse {
     pub warnings: Vec<QualityWarning>,
 }
 
-/// Per-item result from v2 `remember_many`.
+/// Per-item result from `remember_many`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct RememberManyItemResponse {
@@ -1010,7 +1010,7 @@ pub struct RememberManyItemResponse {
     pub warnings: Vec<QualityWarning>,
 }
 
-/// Response from v2 `remember_many`.
+/// Response from `remember_many`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct RememberManyResponse {
@@ -1061,7 +1061,7 @@ pub enum MatchScoreBasis {
     Unavailable,
 }
 
-/// Agent-facing match assessment for a compact v2 card.
+/// Agent-facing match assessment for a compact card.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct MatchAssessment {
@@ -1075,7 +1075,7 @@ pub struct MatchAssessment {
     pub score_basis: MatchScoreBasis,
 }
 
-/// Ranking diagnostics for a compact v2 card.
+/// Ranking diagnostics for a compact card.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct MatchDiagnostics {
@@ -1096,7 +1096,7 @@ pub struct MatchDiagnostics {
     pub ranking_score: Option<f64>,
 }
 
-/// Mechanism used to resolve a v2 scope.
+/// Mechanism used to resolve a scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -1129,7 +1129,7 @@ pub struct ScopeResolution {
     pub matched_value: Option<String>,
 }
 
-/// Compact v2 result card. Full content is available through `read`.
+/// Compact result card. Full content is available through `read`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct RecallCard {
@@ -1157,7 +1157,7 @@ pub struct RecallCard {
     pub diagnostics: MatchDiagnostics,
 }
 
-/// Response from v2 `recall`.
+/// Response from `recall`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct RecallResponse {
@@ -1176,7 +1176,7 @@ pub struct RecallResponse {
     pub results: Vec<RecallCard>,
 }
 
-/// Response from v2 `read`.
+/// Response from `read`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct ReadResponse {
@@ -1184,19 +1184,19 @@ pub struct ReadResponse {
     pub operation: OperationSummary,
     /// Full memory content and metadata.
     pub memory: MemoryEntry,
-    /// V2 compact summary when present.
+    /// compact summary when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
-    /// Resolved v2 scope key when present.
+    /// Resolved scope key when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     /// Agent provenance label when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_label: Option<String>,
-    /// Principal that created v2 metadata when known.
+    /// Principal that created metadata when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_by_principal: Option<String>,
-    /// Quality flags recorded with v2 metadata.
+    /// Quality flags recorded with metadata.
     pub quality_flags: Vec<String>,
     /// Whether this memory is still unresolved.
     pub unresolved_scope: bool,
@@ -1204,7 +1204,7 @@ pub struct ReadResponse {
     pub activity_recorded: bool,
 }
 
-/// Per-item status from v2 `read_many`.
+/// Per-item status from `read_many`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -1215,7 +1215,7 @@ pub enum ReadManyStatus {
     NotFound,
 }
 
-/// Per-ID result from v2 `read_many`.
+/// Per-ID result from `read_many`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct ReadManyItemResponse {
@@ -1226,19 +1226,19 @@ pub struct ReadManyItemResponse {
     /// Full memory content and metadata when found.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryEntry>,
-    /// V2 compact summary when present.
+    /// compact summary when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
-    /// Resolved v2 scope key when present.
+    /// Resolved scope key when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     /// Agent provenance label when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_label: Option<String>,
-    /// Principal that created v2 metadata when known.
+    /// Principal that created metadata when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_by_principal: Option<String>,
-    /// Quality flags recorded with v2 metadata.
+    /// Quality flags recorded with metadata.
     pub quality_flags: Vec<String>,
     /// Whether this memory is still unresolved.
     pub unresolved_scope: bool,
@@ -1246,7 +1246,7 @@ pub struct ReadManyItemResponse {
     pub activity_recorded: bool,
 }
 
-/// Response from v2 `read_many`.
+/// Response from `read_many`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct ReadManyResponse {
@@ -1301,7 +1301,7 @@ pub struct RecommendedAction {
     pub arguments: Option<serde_json::Value>,
 }
 
-/// Response from v2 `brief`.
+/// Response from `brief`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct BriefResponse {
@@ -1349,7 +1349,7 @@ pub struct HandoffSuggestion {
     pub next_action: NextAction,
 }
 
-/// Response from v2 `handoff`.
+/// Response from `handoff`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct HandoffResponse {
@@ -1399,24 +1399,24 @@ pub struct AdminScopeListResponse {
     pub scopes: Vec<ScopeEntry>,
 }
 
-/// Response from admin v2 migration report.
+/// Response from admin migration report.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
-pub struct AdminV2MigrationReportResponse {
+pub struct AdminMigrationReportResponse {
     /// Conservative migration/reporting counts.
-    pub report: V2MigrationReport,
+    pub report: MetadataMigrationReport,
 }
 
-/// Response from admin v2 metadata migration.
+/// Response from admin metadata migration.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
-pub struct AdminV2MigrateMetadataResponse {
+pub struct AdminMigrateMetadataResponse {
     /// Action-oriented operation summary.
     pub operation: OperationSummary,
     /// Whether this pass was a dry run.
     pub dry_run: bool,
     /// Non-destructive migration pass outcome.
-    pub report: V2MetadataMigrationReport,
+    pub report: MetadataMigrationOutcome,
 }
 
 /// Compact inventory card for admin listing without query relevance.
@@ -1452,11 +1452,11 @@ pub struct InventoryCard {
     pub expired: bool,
     /// Whether this memory has been superseded.
     pub superseded: bool,
-    /// V2 quality flags.
+    /// quality flags.
     pub quality_flags: Vec<String>,
 }
 
-/// Response from v2 `admin_list`.
+/// Response from `admin_list`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct AdminListResponse {
@@ -1543,7 +1543,7 @@ impl std::ops::DerefMut for MemoryEntry {
     }
 }
 
-/// Response from v2 `revise` and compatible admin update operations.
+/// Response from `revise` and compatible admin update operations.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct UpdateResponse {
@@ -1556,7 +1556,7 @@ pub struct UpdateResponse {
     pub scope_resolution: Option<ScopeResolution>,
 }
 
-/// Response from v2 `forget` and compatible admin delete operations.
+/// Response from `forget` and compatible admin delete operations.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct DeleteResponse {
@@ -1566,7 +1566,7 @@ pub struct DeleteResponse {
     pub deleted: bool,
 }
 
-/// Response from v2 `admin_cleanup_expired`.
+/// Response from `admin_cleanup_expired`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct EvictExpiredResponse {
@@ -1576,7 +1576,7 @@ pub struct EvictExpiredResponse {
     pub deleted: u64,
 }
 
-/// Response from v2 `admin_reassign_scope`.
+/// Response from `admin_reassign_scope`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct ReassignScopeResponse {
@@ -1588,7 +1588,7 @@ pub struct ReassignScopeResponse {
 
 // -- New feature params --
 
-/// Response from v2 `admin_count`.
+/// Response from `admin_count`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct CountResponse {
@@ -1651,7 +1651,7 @@ pub struct MemoryTypeCount {
     pub count: u64,
 }
 
-/// Response from v2 `admin_reembed`.
+/// Response from `admin_reembed`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct ReembedResponse {
@@ -1663,7 +1663,7 @@ pub struct ReembedResponse {
 
 // -- Bulk operation types --
 
-/// Response from v2 `admin_bulk_delete`.
+/// Response from `admin_bulk_delete`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct BulkDeleteResponse {
@@ -1678,7 +1678,7 @@ pub struct BulkDeleteResponse {
     pub capped: bool,
 }
 
-/// Response from v2 `admin_bulk_update`.
+/// Response from `admin_bulk_update`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct BulkUpdateResponse {
@@ -1742,7 +1742,7 @@ const fn default_history_limit() -> usize {
     50
 }
 
-/// Response from v2 `admin_consolidate`.
+/// Response from `admin_consolidate`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct ConsolidateResponse {
@@ -1768,7 +1768,7 @@ pub struct DuplicateGroupEntry {
     pub member_count: usize,
 }
 
-/// Response from v2 `admin_history`.
+/// Response from `admin_history`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct HistoryResponse {

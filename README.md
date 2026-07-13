@@ -233,7 +233,7 @@ migration operations use explicit `admin_*` tools. Those privileged routes are
 removed from discovery and dispatch by default; operators must set
 `server.admin_tools_enabled = true` for a dedicated maintenance instance.
 
-See [docs/agent-api-v2.md](docs/agent-api-v2.md) for tool semantics and
+See [docs/agent-api.md](docs/agent-api.md) for tool semantics and
 [docs/architecture.md](docs/architecture.md) for the current system design.
 Operators should also read [Operations](docs/operations.md) and the
 [Compatibility Policy](docs/compatibility.md).

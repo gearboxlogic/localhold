@@ -186,7 +186,7 @@ pub enum AnonymousPolicy {
     /// Anonymous callers may read public memories but may not write.
     #[default]
     PublicReadOnly,
-    /// Anonymous callers may not read or write through the v2 facade.
+    /// Anonymous callers may not read or write through the agent API.
     DenyAll,
     /// Anonymous callers may read public memories and create public memories
     /// under the fixed anonymous principal.
@@ -514,14 +514,14 @@ pub struct ServerConfig {
 #[serde(default)]
 #[non_exhaustive]
 pub struct LimitsConfig {
-    /// Maximum number of results for v2 `recall`.
+    /// Maximum number of results for `recall`.
     /// Default: 200 (balances result quality with response size; higher values
     /// increase latency from distance re-ranking).
     pub max_search_limit: usize,
     /// Maximum first-stage candidates fetched before reranking and composite scoring.
     /// Default: 1,000 (matches current vector backend safety ceiling).
     pub max_candidate_pool_size: usize,
-    /// Maximum number of results for v2 `admin_list`.
+    /// Maximum number of results for `admin_list`.
     /// Default: 500 (higher than search because listing skips vector distance
     /// computation and returns lightweight metadata).
     pub max_list_limit: usize,

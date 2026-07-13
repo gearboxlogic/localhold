@@ -26,7 +26,7 @@ MCP client
 
 `src/server/mod.rs` maps MCP calls to engine operations. `src/server/params.rs` is the authoritative wire surface for request and response shapes.
 
-The registered MCP surface is the v2 agent API: `brief`, `recall`, `read`,
+The registered MCP surface is the agent API: `brief`, `recall`, `read`,
 `remember`, `remember_many`, `handoff`, `revise`, `forget`, and explicit
 `admin_*` maintenance tools. Legacy `memory_*` tools are not registered as MCP
 tools. Privileged admin routes are removed from the router by default and
@@ -78,7 +78,7 @@ The main persisted objects are:
 - `memory_fts` for SQLite FTS5 keyword search; PostgreSQL uses a `to_tsvector('simple', content)` index
 - `memory_audit_log` for append-only write history
 - `scope_registry` for tool-managed scope definitions, aliases, and matchers
-- `memory_v2_metadata` for non-destructive v2 card metadata, scope keys,
+- `memory_metadata` for non-destructive card metadata, scope keys,
   quality flags, migration markers, and principal provenance
 
 See `src/types.rs` for the domain model, `src/store/schema.rs` for the SQLite schema, and `src/store/postgres.rs` for the PostgreSQL schema bootstrap.
@@ -99,7 +99,7 @@ The ranking and search behavior in code should be treated as authoritative over 
 
 - memories are persisted before background embedding work starts
 - access control is enforced at read and write boundaries
-- v2 authorization uses server-resolved principals rather than caller-provided labels
+- authorization uses server-resolved principals rather than caller-provided labels
 - stdio uses one trusted principal per server instance; shared multi-agent
   deployments need distinct trusted principals, typically via separate stdio
   instances or explicit trusted-proxy HTTP mode behind an authenticating proxy
@@ -108,7 +108,7 @@ The ranking and search behavior in code should be treated as authoritative over 
 - scope is retrieval/write context and is resolved from explicit scope values,
   registered aliases, or context matchers
 - mutating memory writes commit audit rows transactionally with the associated
-  mutation, required v2 metadata, and tombstone or supersession state; search
+  mutation, required metadata, and tombstone or supersession state; search
   impressions and other analytics remain best-effort operational metadata
 - deletes retain minimal authorization tombstones so post-delete history can be
   authorized without retaining recallable memory content; missing tombstones
@@ -132,4 +132,4 @@ The ranking and search behavior in code should be treated as authoritative over 
 ## Related Docs
 
 - Example configuration: [../localhold.example.toml](../localhold.example.toml)
-- V2 agent API: [agent-api-v2.md](agent-api-v2.md)
+- Agent API: [agent-api.md](agent-api.md)

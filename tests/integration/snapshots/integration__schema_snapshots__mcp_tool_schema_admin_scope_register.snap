@@ -4,7 +4,7 @@ expression: tool
 ---
 {
   "name": "admin_scope_register",
-  "description": "Write/admin: register or replace a v2 scope definition using the server-resolved principal. Defines scope_key plus aliases and matcher substrings for context_hints.",
+  "description": "Write/admin: register or replace a scope definition using the server-resolved principal. Defines scope_key plus aliases and matcher substrings for context_hints.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "required": [

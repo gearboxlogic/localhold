@@ -15,7 +15,8 @@ use sqlx_postgres::{PgPool, PgPoolOptions, PgRow, Postgres};
 
 use super::{
     BulkAuthOutcome, EmbeddingMap, EmbeddingNeighbor, EmbeddingProfile, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter, ReassignScopeOutcome, RecordUseOutcome,
-    ReembedClaim, merge_v2_metadata_patch,
+    ReembedClaim, merge_metadata_patch,
+    migration::reject_retired_postgres_schema,
     query::{
         DEFAULT_LIST_LIMIT, MAX_SCAN_ROWS, MAX_VEC_CANDIDATES, OVERFETCH_FACTOR, apply_access_policy_for_filter, escape_like, normalize_filter, sort_by_distance, usize_to_i64,
     },
@@ -28,14 +29,14 @@ use crate::{
     error::{ParseEnumError, StoreError},
     scoring::decay_mass,
     types::{
-        AccessLevel, AccessPolicy, AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Entity, Memory, MemoryFilter, MemoryId, MemoryStats, MemoryTombstone, MemoryType,
-        MemoryUpdate, Provenance, QueryContext, ScopeDefinition, SearchResult, V2_LARGE_CONTENT_WARNING_THRESHOLD_BYTES, V2MemoryMetadata, V2MetadataMigrationReport,
-        V2MetadataPatch, V2MigrationReport, WriteOutcome,
+        AccessLevel, AccessPolicy, AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Entity, LARGE_CONTENT_WARNING_THRESHOLD_BYTES, Memory, MemoryFilter, MemoryId,
+        MemoryMetadata, MemoryStats, MemoryTombstone, MemoryType, MemoryUpdate, MetadataMigrationOutcome, MetadataMigrationReport, MetadataPatch, Provenance, QueryContext,
+        ScopeDefinition, SearchResult, WriteOutcome,
     },
 };
 
 const CREATE_VECTOR_EXTENSION: &str = "CREATE EXTENSION IF NOT EXISTS vector";
-const V2_UNRESOLVED_SCOPE: &str = "inbox/unresolved";
+const UNRESOLVED_SCOPE: &str = "inbox/unresolved";
 const POSTGRES_COUNT_PAGE_SIZE: usize = 500;
 const EMBEDDING_CLAIM_LEASE_SECS: i64 = 300;
 const EMBEDDING_PROFILE_ADVISORY_LOCK: i64 = 5_499_250_768_369_920_844;
@@ -130,19 +131,19 @@ const POSTGRES_SCHEMA_STATEMENTS: &[&str] = &[
     )
     ",
     "
-    CREATE TABLE IF NOT EXISTS memory_v2_metadata (
+    CREATE TABLE IF NOT EXISTS memory_metadata (
         memory_id            TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
         scope_key            TEXT,
         summary              TEXT,
         agent_label          TEXT,
         created_by_principal TEXT,
         quality_flags        JSONB NOT NULL DEFAULT '[]'::jsonb,
-        schema_version       BIGINT NOT NULL DEFAULT 2,
+        schema_version       BIGINT NOT NULL DEFAULT 1,
         migrated_at          TIMESTAMPTZ,
         updated_at           TIMESTAMPTZ NOT NULL
     )
     ",
-    "CREATE INDEX IF NOT EXISTS idx_memory_v2_metadata_scope_key ON memory_v2_metadata(scope_key)",
+    "CREATE INDEX IF NOT EXISTS idx_memory_metadata_scope_key ON memory_metadata(scope_key)",
     "
     CREATE TABLE IF NOT EXISTS embedding_profile (
         singleton  SMALLINT PRIMARY KEY CHECK (singleton = 1),
@@ -205,6 +206,7 @@ impl PostgresStore {
     async fn open_with_clock(config: &PostgresDatabaseConfig, embedding_dimensions: usize, clock: Arc<dyn Clock>) -> Result<Self, StoreError> {
         validate_bootstrap_inputs(config, embedding_dimensions)?;
         let pool = PgPoolOptions::new().max_connections(config.max_connections).connect(&config.url).await?;
+        reject_retired_postgres_schema(&pool, true).await?;
         if config.auto_migrate {
             init_schema(&pool, embedding_dimensions).await?;
         }
@@ -335,23 +337,23 @@ impl PostgresStore {
         Ok(memory.id)
     }
 
-    pub(crate) async fn store_with_v2_metadata_impl(
+    pub(crate) async fn store_with_metadata_impl(
         &self,
         memory: &Memory,
         embedding: Option<&[f32]>,
         supersedes_id: Option<&MemoryId>,
-        metadata: &V2MemoryMetadata,
+        metadata: &MemoryMetadata,
     ) -> Result<MemoryId, StoreError> {
-        self.store_with_v2_metadata_audited_impl(memory, embedding, supersedes_id, metadata, None).await
+        self.store_with_metadata_audited_impl(memory, embedding, supersedes_id, metadata, None).await
     }
 
-    #[expect(clippy::too_many_arguments, reason = "audited v2 store needs memory, embedding, supersession, metadata, and audit draft")]
-    pub(crate) async fn store_with_v2_metadata_audited_impl(
+    #[expect(clippy::too_many_arguments, reason = "audited store needs memory, embedding, supersession, metadata, and audit draft")]
+    pub(crate) async fn store_with_metadata_audited_impl(
         &self,
         memory: &Memory,
         embedding: Option<&[f32]>,
         supersedes_id: Option<&MemoryId>,
-        metadata: &V2MemoryMetadata,
+        metadata: &MemoryMetadata,
         audit: Option<&AuditDraft>,
     ) -> Result<MemoryId, StoreError> {
         validate_metadata_memory_id(&memory.id, metadata)?;
@@ -367,7 +369,7 @@ impl PostgresStore {
         if let Some(supersedes_id) = supersedes_id {
             let _marked = mark_superseded_tx(&mut tx, supersedes_id, &memory.id).await?;
         }
-        upsert_v2_metadata_tx(&mut tx, metadata, self.clock_now()).await?;
+        upsert_metadata_tx(&mut tx, metadata, self.clock_now()).await?;
         if let Some(audit) = audit {
             insert_audit_draft_tx(&mut tx, &memory.id, audit).await?;
         }
@@ -441,20 +443,20 @@ impl PostgresStore {
         Ok(ids)
     }
 
-    pub(crate) async fn store_batch_with_v2_metadata_impl(
+    pub(crate) async fn store_batch_with_metadata_impl(
         &self,
         memories: &[MemoryWithEmbedding],
         supersedes: &[Option<MemoryId>],
-        metadata: &[V2MemoryMetadata],
+        metadata: &[MemoryMetadata],
     ) -> Result<Vec<MemoryId>, StoreError> {
-        self.store_batch_with_v2_metadata_audited_impl(memories, supersedes, metadata, None).await
+        self.store_batch_with_metadata_audited_impl(memories, supersedes, metadata, None).await
     }
 
-    pub(crate) async fn store_batch_with_v2_metadata_audited_impl(
+    pub(crate) async fn store_batch_with_metadata_audited_impl(
         &self,
         memories: &[MemoryWithEmbedding],
         supersedes: &[Option<MemoryId>],
-        metadata: &[V2MemoryMetadata],
+        metadata: &[MemoryMetadata],
         audits: Option<&[AuditDraft]>,
     ) -> Result<Vec<MemoryId>, StoreError> {
         if metadata.len() != memories.len() {
@@ -485,7 +487,7 @@ impl PostgresStore {
                 insert_memory_with_embedding(&mut tx, &memory_with_embedding.memory, memory_with_embedding.embedding.as_deref()).await?;
             }
             let item_metadata = metadata.get(idx).ok_or_else(|| metadata_len_mismatch(memories.len(), metadata.len()))?;
-            upsert_v2_metadata_tx(&mut tx, item_metadata, now).await?;
+            upsert_metadata_tx(&mut tx, item_metadata, now).await?;
             if let Some(audits) = audits {
                 let audit = audits.get(idx).ok_or_else(|| audit_len_mismatch(memories.len(), audits.len()))?;
                 insert_audit_draft_tx(&mut tx, &memory_with_embedding.memory.id, audit).await?;
@@ -1183,11 +1185,11 @@ impl PostgresStore {
     }
 
     #[expect(clippy::too_many_arguments, reason = "audited revise needs id, update, metadata patch, principal, and audit draft")]
-    pub(crate) async fn update_authorized_with_v2_metadata_audited_impl(
+    pub(crate) async fn update_authorized_with_metadata_audited_impl(
         &self,
         id: &MemoryId,
         update: &MemoryUpdate,
-        metadata_patch: Option<&V2MetadataPatch>,
+        metadata_patch: Option<&MetadataPatch>,
         principal: &str,
         audit: Option<&AuditDraft>,
     ) -> Result<AuthorizedUpdateOutcome, StoreError> {
@@ -1210,9 +1212,9 @@ impl PostgresStore {
         let outcome = apply_update_tx(&mut tx, id, update, self.clock_now()).await?;
         if outcome.outcome == WriteOutcome::Applied {
             if let Some(patch) = metadata_patch {
-                let existing_metadata = get_v2_metadata_tx(&mut tx, id).await?;
-                let metadata = merge_v2_metadata_patch(*id, patch, existing_metadata.as_ref(), existing.provenance.source_conversation.as_deref(), principal);
-                upsert_v2_metadata_tx(&mut tx, &metadata, self.clock_now()).await?;
+                let existing_metadata = get_metadata_tx(&mut tx, id).await?;
+                let metadata = merge_metadata_patch(*id, patch, existing_metadata.as_ref(), existing.provenance.source_conversation.as_deref(), principal);
+                upsert_metadata_tx(&mut tx, &metadata, self.clock_now()).await?;
             }
             if let Some(audit) = audit {
                 let audit = update_audit_draft_for_locked_memory(audit, update, &existing);
@@ -1445,7 +1447,7 @@ impl PostgresStore {
             .await?;
             let _metadata = sqlx::query(
                 "
-                UPDATE memory_v2_metadata
+                UPDATE memory_metadata
                 SET scope_key = $1, updated_at = $2
                 WHERE memory_id = $3
                 ",
@@ -1583,23 +1585,23 @@ impl PostgresStore {
             .collect()
     }
 
-    pub(crate) async fn upsert_v2_metadata_impl(&self, metadata: V2MemoryMetadata) -> Result<(), StoreError> {
-        self.upsert_v2_metadata_audited_impl(metadata, None).await
+    pub(crate) async fn upsert_metadata_impl(&self, metadata: MemoryMetadata) -> Result<(), StoreError> {
+        self.upsert_metadata_audited_impl(metadata, None).await
     }
 
-    pub(crate) async fn upsert_v2_metadata_audited_impl(&self, metadata: V2MemoryMetadata, audit: Option<&AuditDraft>) -> Result<(), StoreError> {
+    pub(crate) async fn upsert_metadata_audited_impl(&self, metadata: MemoryMetadata, audit: Option<&AuditDraft>) -> Result<(), StoreError> {
         let mut tx = self.pool().begin().await?;
-        upsert_v2_metadata_tx(&mut tx, &metadata, self.clock_now()).await?;
+        upsert_metadata_tx(&mut tx, &metadata, self.clock_now()).await?;
         insert_optional_audit_draft_tx(&mut tx, &metadata.memory_id, audit).await?;
         tx.commit().await?;
         Ok(())
     }
 
-    pub(crate) async fn get_v2_metadata_impl(&self, memory_id: &MemoryId) -> Result<Option<V2MemoryMetadata>, StoreError> {
+    pub(crate) async fn get_metadata_impl(&self, memory_id: &MemoryId) -> Result<Option<MemoryMetadata>, StoreError> {
         let row = sqlx::query(
             "
             SELECT memory_id, scope_key, summary, agent_label, created_by_principal, quality_flags, schema_version
-            FROM memory_v2_metadata
+            FROM memory_metadata
             WHERE memory_id = $1
             ",
         )
@@ -1607,19 +1609,19 @@ impl PostgresStore {
         .fetch_optional(self.pool())
         .await?;
 
-        row.as_ref().map(row_to_v2_metadata).transpose()
+        row.as_ref().map(row_to_metadata).transpose()
     }
 
-    pub(crate) async fn v2_migration_report_impl(&self) -> Result<V2MigrationReport, StoreError> {
+    pub(crate) async fn metadata_migration_report_impl(&self) -> Result<MetadataMigrationReport, StoreError> {
         let total_memories = count_query(self.pool(), "SELECT COUNT(*) FROM memories").await?;
-        let metadata_rows = count_query(self.pool(), "SELECT COUNT(*) FROM memory_v2_metadata").await?;
+        let metadata_rows = count_query(self.pool(), "SELECT COUNT(*) FROM memory_metadata").await?;
         let missing_metadata = total_memories.saturating_sub(metadata_rows);
         let missing_summary = count_query(
             self.pool(),
             "
             SELECT COUNT(*)
             FROM memories AS m
-            LEFT JOIN memory_v2_metadata AS meta ON meta.memory_id = m.id
+            LEFT JOIN memory_metadata AS meta ON meta.memory_id = m.id
             WHERE meta.summary IS NULL OR trim(meta.summary) = ''
             ",
         )
@@ -1629,7 +1631,7 @@ impl PostgresStore {
             "
             SELECT COUNT(*)
             FROM memories AS m
-            LEFT JOIN memory_v2_metadata AS meta ON meta.memory_id = m.id
+            LEFT JOIN memory_metadata AS meta ON meta.memory_id = m.id
             WHERE COALESCE(meta.scope_key, m.provenance->>'source_conversation') IS NULL
                OR COALESCE(meta.scope_key, m.provenance->>'source_conversation') = 'inbox/unresolved'
             ",
@@ -1648,7 +1650,7 @@ impl PostgresStore {
             ",
         )
         .await?;
-        let oversized_threshold = i64::try_from(V2_LARGE_CONTENT_WARNING_THRESHOLD_BYTES).map_err(|e| StoreError::Serialization(Box::new(e)))?;
+        let oversized_threshold = i64::try_from(LARGE_CONTENT_WARNING_THRESHOLD_BYTES).map_err(|e| StoreError::Serialization(Box::new(e)))?;
         let oversized_raw = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM memories WHERE octet_length(content) > $1")
             .bind(oversized_threshold)
             .fetch_one(self.pool())
@@ -1668,7 +1670,7 @@ impl PostgresStore {
         )
         .await?;
 
-        Ok(V2MigrationReport {
+        Ok(MetadataMigrationReport {
             total_memories,
             metadata_rows,
             missing_metadata,
@@ -1680,32 +1682,32 @@ impl PostgresStore {
         })
     }
 
-    pub(crate) async fn migrate_v2_metadata_impl(&self, registered_scope_keys: &[String], dry_run: bool) -> Result<V2MetadataMigrationReport, StoreError> {
-        self.migrate_v2_metadata_audited_impl(registered_scope_keys, dry_run, None).await
+    pub(crate) async fn migrate_metadata_impl(&self, registered_scope_keys: &[String], dry_run: bool) -> Result<MetadataMigrationOutcome, StoreError> {
+        self.migrate_metadata_audited_impl(registered_scope_keys, dry_run, None).await
     }
 
-    pub(crate) async fn migrate_v2_metadata_audited_impl(
+    pub(crate) async fn migrate_metadata_audited_impl(
         &self,
         registered_scope_keys: &[String],
         dry_run: bool,
         audit: Option<&AuditDraft>,
-    ) -> Result<V2MetadataMigrationReport, StoreError> {
+    ) -> Result<MetadataMigrationOutcome, StoreError> {
         let registered_scope_keys = registered_scope_keys.iter().cloned().collect::<HashSet<_>>();
-        let skipped_existing = count_query(self.pool(), "SELECT COUNT(*) FROM memory_v2_metadata").await?;
-        let candidates = load_v2_migration_candidates(self.pool()).await?;
+        let skipped_existing = count_query(self.pool(), "SELECT COUNT(*) FROM memory_metadata").await?;
+        let candidates = load_metadata_migration_candidates(self.pool()).await?;
         let candidate_count = u64::try_from(candidates.len()).map_err(|e| StoreError::Serialization(Box::new(e)))?;
         let prepared_rows = candidates
             .into_iter()
-            .map(|candidate| prepare_v2_migration_metadata(candidate, &registered_scope_keys))
+            .map(|candidate| prepare_metadata_migration_metadata(candidate, &registered_scope_keys))
             .collect::<Vec<_>>();
-        let mut report = v2_metadata_migration_report(candidate_count, skipped_existing, &prepared_rows);
+        let mut report = metadata_migration_outcome(candidate_count, skipped_existing, &prepared_rows);
 
         if dry_run {
             return Ok(report);
         }
 
         let mut tx = self.pool().begin().await?;
-        report.migrated = insert_v2_metadata_migration_rows(&mut tx, &prepared_rows, self.clock_now(), audit).await?;
+        report.migrated = insert_metadata_migration_rows(&mut tx, &prepared_rows, self.clock_now(), audit).await?;
         tx.commit().await?;
         Ok(report)
     }
@@ -1793,25 +1795,19 @@ impl MemoryWriter for PostgresStore {
         self.store_with_supersession_audited_impl(memory, embedding, supersedes_id, Some(audit)).await
     }
 
-    async fn store_with_v2_metadata(
-        &self,
-        memory: &Memory,
-        embedding: Option<&[f32]>,
-        supersedes_id: Option<&MemoryId>,
-        metadata: &V2MemoryMetadata,
-    ) -> Result<MemoryId, StoreError> {
-        self.store_with_v2_metadata_impl(memory, embedding, supersedes_id, metadata).await
+    async fn store_with_metadata(&self, memory: &Memory, embedding: Option<&[f32]>, supersedes_id: Option<&MemoryId>, metadata: &MemoryMetadata) -> Result<MemoryId, StoreError> {
+        self.store_with_metadata_impl(memory, embedding, supersedes_id, metadata).await
     }
 
-    async fn store_with_v2_metadata_audited(
+    async fn store_with_metadata_audited(
         &self,
         memory: &Memory,
         embedding: Option<&[f32]>,
         supersedes_id: Option<&MemoryId>,
-        metadata: &V2MemoryMetadata,
+        metadata: &MemoryMetadata,
         audit: &AuditDraft,
     ) -> Result<MemoryId, StoreError> {
-        self.store_with_v2_metadata_audited_impl(memory, embedding, supersedes_id, metadata, Some(audit)).await
+        self.store_with_metadata_audited_impl(memory, embedding, supersedes_id, metadata, Some(audit)).await
     }
 
     async fn store_batch(&self, memories: &[MemoryWithEmbedding]) -> Result<Vec<MemoryId>, StoreError> {
@@ -1835,23 +1831,18 @@ impl MemoryWriter for PostgresStore {
         self.store_batch_with_supersession_audited_impl(memories, supersedes, Some(audits)).await
     }
 
-    async fn store_batch_with_v2_metadata(
-        &self,
-        memories: &[MemoryWithEmbedding],
-        supersedes: &[Option<MemoryId>],
-        metadata: &[V2MemoryMetadata],
-    ) -> Result<Vec<MemoryId>, StoreError> {
-        self.store_batch_with_v2_metadata_impl(memories, supersedes, metadata).await
+    async fn store_batch_with_metadata(&self, memories: &[MemoryWithEmbedding], supersedes: &[Option<MemoryId>], metadata: &[MemoryMetadata]) -> Result<Vec<MemoryId>, StoreError> {
+        self.store_batch_with_metadata_impl(memories, supersedes, metadata).await
     }
 
-    async fn store_batch_with_v2_metadata_audited(
+    async fn store_batch_with_metadata_audited(
         &self,
         memories: &[MemoryWithEmbedding],
         supersedes: &[Option<MemoryId>],
-        metadata: &[V2MemoryMetadata],
+        metadata: &[MemoryMetadata],
         audits: &[AuditDraft],
     ) -> Result<Vec<MemoryId>, StoreError> {
-        self.store_batch_with_v2_metadata_audited_impl(memories, supersedes, metadata, Some(audits)).await
+        self.store_batch_with_metadata_audited_impl(memories, supersedes, metadata, Some(audits)).await
     }
 
     async fn update(&self, id: &MemoryId, update: &MemoryUpdate) -> Result<bool, StoreError> {
@@ -1882,16 +1873,15 @@ impl MemoryWriter for PostgresStore {
         self.update_authorized_audited_impl(id, update, principal, Some(audit)).await
     }
 
-    async fn update_authorized_with_v2_metadata_audited(
+    async fn update_authorized_with_metadata_audited(
         &self,
         id: &MemoryId,
         update: &MemoryUpdate,
-        metadata_patch: Option<&V2MetadataPatch>,
+        metadata_patch: Option<&MetadataPatch>,
         principal: &str,
         audit: &AuditDraft,
     ) -> Result<AuthorizedUpdateOutcome, StoreError> {
-        self.update_authorized_with_v2_metadata_audited_impl(id, update, metadata_patch, principal, Some(audit))
-            .await
+        self.update_authorized_with_metadata_audited_impl(id, update, metadata_patch, principal, Some(audit)).await
     }
 
     async fn delete_authorized(&self, id: &MemoryId, principal: &str) -> Result<WriteOutcome, StoreError> {
@@ -1998,28 +1988,28 @@ impl MemoryAdmin for PostgresStore {
         self.list_scopes_impl().await
     }
 
-    async fn upsert_v2_metadata(&self, metadata: V2MemoryMetadata) -> Result<(), StoreError> {
-        self.upsert_v2_metadata_impl(metadata).await
+    async fn upsert_metadata(&self, metadata: MemoryMetadata) -> Result<(), StoreError> {
+        self.upsert_metadata_impl(metadata).await
     }
 
-    async fn upsert_v2_metadata_audited(&self, metadata: V2MemoryMetadata, audit: &AuditDraft) -> Result<(), StoreError> {
-        self.upsert_v2_metadata_audited_impl(metadata, Some(audit)).await
+    async fn upsert_metadata_audited(&self, metadata: MemoryMetadata, audit: &AuditDraft) -> Result<(), StoreError> {
+        self.upsert_metadata_audited_impl(metadata, Some(audit)).await
     }
 
-    async fn get_v2_metadata(&self, memory_id: &MemoryId) -> Result<Option<V2MemoryMetadata>, StoreError> {
-        self.get_v2_metadata_impl(memory_id).await
+    async fn get_metadata(&self, memory_id: &MemoryId) -> Result<Option<MemoryMetadata>, StoreError> {
+        self.get_metadata_impl(memory_id).await
     }
 
-    async fn v2_migration_report(&self) -> Result<V2MigrationReport, StoreError> {
-        self.v2_migration_report_impl().await
+    async fn metadata_migration_report(&self) -> Result<MetadataMigrationReport, StoreError> {
+        self.metadata_migration_report_impl().await
     }
 
-    async fn migrate_v2_metadata(&self, registered_scope_keys: &[String], dry_run: bool) -> Result<V2MetadataMigrationReport, StoreError> {
-        self.migrate_v2_metadata_impl(registered_scope_keys, dry_run).await
+    async fn migrate_metadata(&self, registered_scope_keys: &[String], dry_run: bool) -> Result<MetadataMigrationOutcome, StoreError> {
+        self.migrate_metadata_impl(registered_scope_keys, dry_run).await
     }
 
-    async fn migrate_v2_metadata_audited(&self, registered_scope_keys: &[String], dry_run: bool, audit: &AuditDraft) -> Result<V2MetadataMigrationReport, StoreError> {
-        self.migrate_v2_metadata_audited_impl(registered_scope_keys, dry_run, Some(audit)).await
+    async fn migrate_metadata_audited(&self, registered_scope_keys: &[String], dry_run: bool, audit: &AuditDraft) -> Result<MetadataMigrationOutcome, StoreError> {
+        self.migrate_metadata_audited_impl(registered_scope_keys, dry_run, Some(audit)).await
     }
 }
 
@@ -2053,7 +2043,7 @@ fn supersedes_len_mismatch(expected: usize, actual: usize) -> StoreError {
     StoreError::Conflict(format!("supersedes length ({actual}) must match memories length ({expected})"))
 }
 
-fn validate_metadata_memory_id(memory_id: &MemoryId, metadata: &V2MemoryMetadata) -> Result<(), StoreError> {
+fn validate_metadata_memory_id(memory_id: &MemoryId, metadata: &MemoryMetadata) -> Result<(), StoreError> {
     if metadata.memory_id == *memory_id {
         return Ok(());
     }
@@ -2063,10 +2053,10 @@ fn validate_metadata_memory_id(memory_id: &MemoryId, metadata: &V2MemoryMetadata
     )))
 }
 
-async fn upsert_v2_metadata_tx(tx: &mut Transaction<'_, Postgres>, metadata: &V2MemoryMetadata, now: DateTime<Utc>) -> Result<(), StoreError> {
+async fn upsert_metadata_tx(tx: &mut Transaction<'_, Postgres>, metadata: &MemoryMetadata, now: DateTime<Utc>) -> Result<(), StoreError> {
     let _result = sqlx::query(
         "
-        INSERT INTO memory_v2_metadata (
+        INSERT INTO memory_metadata (
             memory_id, scope_key, summary, agent_label, created_by_principal,
             quality_flags, schema_version, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -2074,7 +2064,7 @@ async fn upsert_v2_metadata_tx(tx: &mut Transaction<'_, Postgres>, metadata: &V2
             scope_key = excluded.scope_key,
             summary = excluded.summary,
             agent_label = excluded.agent_label,
-            created_by_principal = COALESCE(memory_v2_metadata.created_by_principal, excluded.created_by_principal),
+            created_by_principal = COALESCE(memory_metadata.created_by_principal, excluded.created_by_principal),
             quality_flags = excluded.quality_flags,
             schema_version = excluded.schema_version,
             updated_at = excluded.updated_at
@@ -2093,11 +2083,11 @@ async fn upsert_v2_metadata_tx(tx: &mut Transaction<'_, Postgres>, metadata: &V2
     Ok(())
 }
 
-async fn get_v2_metadata_tx(tx: &mut Transaction<'_, Postgres>, memory_id: &MemoryId) -> Result<Option<V2MemoryMetadata>, StoreError> {
+async fn get_metadata_tx(tx: &mut Transaction<'_, Postgres>, memory_id: &MemoryId) -> Result<Option<MemoryMetadata>, StoreError> {
     let row = sqlx::query(
         "
         SELECT memory_id, scope_key, summary, agent_label, created_by_principal, quality_flags, schema_version
-        FROM memory_v2_metadata
+        FROM memory_metadata
         WHERE memory_id = $1
         ",
     )
@@ -2105,7 +2095,7 @@ async fn get_v2_metadata_tx(tx: &mut Transaction<'_, Postgres>, memory_id: &Memo
     .fetch_optional(&mut **tx)
     .await?;
 
-    row.as_ref().map(row_to_v2_metadata).transpose()
+    row.as_ref().map(row_to_metadata).transpose()
 }
 
 async fn insert_memory_row(tx: &mut Transaction<'_, Postgres>, memory: &Memory, embedding: Option<&[f32]>) -> Result<(), StoreError> {
@@ -2585,10 +2575,10 @@ fn push_postgres_condition_separator(builder: &mut QueryBuilder<Postgres>, has_c
     }
 }
 
-fn row_to_v2_metadata(row: &PgRow) -> Result<V2MemoryMetadata, StoreError> {
+fn row_to_metadata(row: &PgRow) -> Result<MemoryMetadata, StoreError> {
     let id_str: String = row.try_get("memory_id")?;
     let quality_flags: Json<Vec<String>> = row.try_get("quality_flags")?;
-    Ok(V2MemoryMetadata {
+    Ok(MemoryMetadata {
         memory_id: parse_memory_id(&id_str, "memory_id")?,
         scope_key: row.try_get("scope_key")?,
         summary: row.try_get("summary")?,
@@ -2667,7 +2657,7 @@ struct PreparedMigrationMetadata {
     code_derived: bool,
 }
 
-async fn load_v2_migration_candidates(pool: &PgPool) -> Result<Vec<MigrationCandidate>, StoreError> {
+async fn load_metadata_migration_candidates(pool: &PgPool) -> Result<Vec<MigrationCandidate>, StoreError> {
     let rows = sqlx::query(
         "
         SELECT
@@ -2676,7 +2666,7 @@ async fn load_v2_migration_candidates(pool: &PgPool) -> Result<Vec<MigrationCand
             m.provenance->>'source_agent' AS source_agent,
             m.provenance->>'source_conversation' AS source_conversation
         FROM memories AS m
-        LEFT JOIN memory_v2_metadata AS meta ON meta.memory_id = m.id
+        LEFT JOIN memory_metadata AS meta ON meta.memory_id = m.id
         WHERE meta.memory_id IS NULL
         ORDER BY m.created_at, m.id
         ",
@@ -2696,14 +2686,14 @@ async fn load_v2_migration_candidates(pool: &PgPool) -> Result<Vec<MigrationCand
         .collect()
 }
 
-fn prepare_v2_migration_metadata(candidate: MigrationCandidate, registered_scope_keys: &HashSet<String>) -> PreparedMigrationMetadata {
+fn prepare_metadata_migration_metadata(candidate: MigrationCandidate, registered_scope_keys: &HashSet<String>) -> PreparedMigrationMetadata {
     let scope_key = candidate
         .source_conversation
         .as_deref()
         .filter(|scope| registered_scope_keys.contains(*scope))
-        .map_or_else(|| V2_UNRESOLVED_SCOPE.to_owned(), ToOwned::to_owned);
-    let unresolved_scope = scope_key == V2_UNRESOLVED_SCOPE;
-    let oversized = candidate.content.len() > V2_LARGE_CONTENT_WARNING_THRESHOLD_BYTES;
+        .map_or_else(|| UNRESOLVED_SCOPE.to_owned(), ToOwned::to_owned);
+    let unresolved_scope = scope_key == UNRESOLVED_SCOPE;
+    let oversized = candidate.content.len() > LARGE_CONTENT_WARNING_THRESHOLD_BYTES;
     let code_derived = looks_code_derived(&candidate.content);
 
     PreparedMigrationMetadata {
@@ -2717,8 +2707,8 @@ fn prepare_v2_migration_metadata(candidate: MigrationCandidate, registered_scope
     }
 }
 
-fn v2_metadata_migration_report(candidate_count: u64, skipped_existing: u64, prepared_rows: &[PreparedMigrationMetadata]) -> V2MetadataMigrationReport {
-    V2MetadataMigrationReport {
+fn metadata_migration_outcome(candidate_count: u64, skipped_existing: u64, prepared_rows: &[PreparedMigrationMetadata]) -> MetadataMigrationOutcome {
+    MetadataMigrationOutcome {
         candidate_count,
         skipped_existing,
         migrated: 0,
@@ -2733,7 +2723,7 @@ fn count_prepared_rows(prepared_rows: &[PreparedMigrationMetadata], predicate: i
     prepared_rows.iter().filter(|row| predicate(row)).count().try_into().unwrap_or(u64::MAX)
 }
 
-async fn insert_v2_metadata_migration_rows(
+async fn insert_metadata_migration_rows(
     tx: &mut Transaction<'_, Postgres>,
     prepared_rows: &[PreparedMigrationMetadata],
     now: DateTime<Utc>,
@@ -2743,7 +2733,7 @@ async fn insert_v2_metadata_migration_rows(
     for row in prepared_rows {
         let result = sqlx::query(
             "
-            INSERT INTO memory_v2_metadata (
+            INSERT INTO memory_metadata (
                 memory_id, scope_key, summary, agent_label, created_by_principal,
                 quality_flags, schema_version, migrated_at, updated_at
             ) VALUES ($1, $2, NULL, $3, NULL, $4, 2, $5, $5)
@@ -3921,36 +3911,36 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
-    async fn v2_metadata_and_migration_against_postgres() {
+    async fn metadata_and_migration_against_postgres() {
         let store = open_postgres_smoke_store().await;
         reset_postgres_smoke_database(&store).await;
-        let memory = test_memory_with_content("postgres v2 metadata memory");
+        let memory = test_memory_with_content("postgres metadata memory");
         let id = store.store_impl(&memory, None).await.unwrap();
         let scope_key = format!("postgres-migration/{}", MemoryId::new());
 
-        let metadata = V2MemoryMetadata {
+        let metadata = MemoryMetadata {
             memory_id: id,
             scope_key: Some(scope_key.clone()),
             summary: Some("metadata summary".into()),
             agent_label: Some("postgres-agent-label".into()),
             created_by_principal: Some("creator".into()),
             quality_flags: vec!["manual".into()],
-            schema_version: 2,
+            schema_version: 1,
         };
-        store.upsert_v2_metadata_impl(metadata.clone()).await.unwrap();
-        assert_eq!(store.get_v2_metadata_impl(&id).await.unwrap(), Some(metadata.clone()));
+        store.upsert_metadata_impl(metadata.clone()).await.unwrap();
+        assert_eq!(store.get_metadata_impl(&id).await.unwrap(), Some(metadata.clone()));
 
-        let rejected_memory = test_memory_with_content("postgres mismatched v2 metadata memory");
-        let wrong_metadata = V2MemoryMetadata {
+        let rejected_memory = test_memory_with_content("postgres mismatched metadata memory");
+        let wrong_metadata = MemoryMetadata {
             memory_id: id,
             scope_key: Some(scope_key.clone()),
             summary: Some("wrong target".into()),
             agent_label: Some("postgres-agent-label".into()),
             created_by_principal: Some("creator".into()),
             quality_flags: vec!["manual".into()],
-            schema_version: 2,
+            schema_version: 1,
         };
-        let err = store.store_with_v2_metadata_impl(&rejected_memory, None, None, &wrong_metadata).await.unwrap_err();
+        let err = store.store_with_metadata_impl(&rejected_memory, None, None, &wrong_metadata).await.unwrap_err();
         assert!(err.to_string().contains("metadata memory_id"));
         let rejected_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM memories WHERE id = $1)")
             .bind(rejected_memory.id.to_string())
@@ -3958,7 +3948,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!rejected_exists);
-        assert_eq!(store.get_v2_metadata_impl(&id).await.unwrap(), Some(metadata));
+        assert_eq!(store.get_metadata_impl(&id).await.unwrap(), Some(metadata));
 
         let mut registered_memory = test_memory_with_content("postgres registered migration memory");
         registered_memory.provenance.source_conversation = Some(scope_key.clone());
@@ -3967,33 +3957,33 @@ mod tests {
         unresolved_memory.provenance.source_conversation = None;
         let unresolved_id = store.store_impl(&unresolved_memory, None).await.unwrap();
 
-        let report = store.v2_migration_report_impl().await.unwrap();
+        let report = store.metadata_migration_report_impl().await.unwrap();
         assert_eq!(report.total_memories, 3_u64);
         assert_eq!(report.metadata_rows, 1_u64);
         assert_eq!(report.missing_metadata, 2_u64);
         assert_eq!(report.unresolved_scope, 1_u64);
 
-        let dry_run = store.migrate_v2_metadata_impl(std::slice::from_ref(&scope_key), true).await.unwrap();
+        let dry_run = store.migrate_metadata_impl(std::slice::from_ref(&scope_key), true).await.unwrap();
         assert_eq!(dry_run.candidate_count, 2_u64);
         assert_eq!(dry_run.skipped_existing, 1_u64);
         assert_eq!(dry_run.migrated, 0_u64);
         assert_eq!(dry_run.unresolved_scope, 1_u64);
         assert_eq!(dry_run.code_derived, 1_u64);
 
-        let applied = store.migrate_v2_metadata_impl(std::slice::from_ref(&scope_key), false).await.unwrap();
+        let applied = store.migrate_metadata_impl(std::slice::from_ref(&scope_key), false).await.unwrap();
         assert_eq!(applied.migrated, 2_u64);
-        let registered_metadata = store.get_v2_metadata_impl(&registered_id).await.unwrap().unwrap();
+        let registered_metadata = store.get_metadata_impl(&registered_id).await.unwrap().unwrap();
         assert_eq!(registered_metadata.scope_key.as_deref(), Some(scope_key.as_str()));
         assert_eq!(registered_metadata.quality_flags, vec!["missing_summary"]);
-        let unresolved_metadata = store.get_v2_metadata_impl(&unresolved_id).await.unwrap().unwrap();
-        assert_eq!(unresolved_metadata.scope_key.as_deref(), Some(V2_UNRESOLVED_SCOPE));
+        let unresolved_metadata = store.get_metadata_impl(&unresolved_id).await.unwrap().unwrap();
+        assert_eq!(unresolved_metadata.scope_key.as_deref(), Some(UNRESOLVED_SCOPE));
         assert!(unresolved_metadata.quality_flags.contains(&"missing_scope".to_owned()));
         assert!(unresolved_metadata.quality_flags.contains(&"possible_code_dump".to_owned()));
     }
 
     #[tokio::test]
     #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
-    async fn postgres_store_batch_with_v2_metadata_rejects_supersedes_length_mismatch() {
+    async fn postgres_store_batch_with_metadata_rejects_supersedes_length_mismatch() {
         let store = open_postgres_smoke_store().await;
         reset_postgres_smoke_database(&store).await;
         let first = test_memory_with_content("postgres batch supersedes mismatch one");
@@ -4009,27 +3999,27 @@ mod tests {
             },
         ];
         let metadata = vec![
-            V2MemoryMetadata {
+            MemoryMetadata {
                 memory_id: first.id,
                 scope_key: Some("postgres-batch-mismatch".into()),
                 summary: Some("batch first".into()),
                 agent_label: Some("postgres-agent-label".into()),
                 created_by_principal: Some("creator".into()),
                 quality_flags: vec!["manual".into()],
-                schema_version: 2,
+                schema_version: 1,
             },
-            V2MemoryMetadata {
+            MemoryMetadata {
                 memory_id: second.id,
                 scope_key: Some("postgres-batch-mismatch".into()),
                 summary: Some("batch second".into()),
                 agent_label: Some("postgres-agent-label".into()),
                 created_by_principal: Some("creator".into()),
                 quality_flags: vec!["manual".into()],
-                schema_version: 2,
+                schema_version: 1,
             },
         ];
 
-        let err = store.store_batch_with_v2_metadata_impl(&memories, &[None], &metadata).await.unwrap_err();
+        let err = store.store_batch_with_metadata_impl(&memories, &[None], &metadata).await.unwrap_err();
 
         assert!(err.to_string().contains("supersedes length"));
     }
@@ -4140,7 +4130,7 @@ mod tests {
             TRUNCATE TABLE
                 memory_audit_log,
                 memory_tombstones,
-                memory_v2_metadata,
+                memory_metadata,
                 memory_entities,
                 memory_embeddings,
                 memories,

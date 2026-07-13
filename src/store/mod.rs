@@ -23,8 +23,8 @@ pub(crate) use sqlite::sqlite_write_tx;
 use crate::{
     error::StoreError,
     types::{
-        AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Memory, MemoryFilter, MemoryId, MemoryStats, MemoryTombstone, MemoryUpdate, QueryContext, ScopeDefinition,
-        SearchResult, V2MemoryMetadata, V2MetadataMigrationReport, V2MetadataPatch, V2MigrationReport, WriteOutcome,
+        AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MemoryTombstone, MemoryUpdate,
+        MetadataMigrationOutcome, MetadataMigrationReport, MetadataPatch, QueryContext, ScopeDefinition, SearchResult, WriteOutcome,
     },
 };
 
@@ -243,26 +243,26 @@ pub trait MemoryWriter: Send + Sync {
         audit: &AuditDraft,
     ) -> impl Future<Output = Result<MemoryId, StoreError>> + Send;
 
-    /// Store a memory and required v2 metadata in one transaction.
+    /// Store a memory and required metadata in one transaction.
     /// When `supersedes_id` is provided, the older memory is marked superseded
     /// in the same transaction.
-    fn store_with_v2_metadata(
+    fn store_with_metadata(
         &self,
         memory: &Memory,
         embedding: Option<&[f32]>,
         supersedes_id: Option<&MemoryId>,
-        metadata: &V2MemoryMetadata,
+        metadata: &MemoryMetadata,
     ) -> impl Future<Output = Result<MemoryId, StoreError>> + Send;
 
-    /// Store a memory, required v2 metadata, optional supersession state, and
+    /// Store a memory, required metadata, optional supersession state, and
     /// audit row in one transaction.
-    #[expect(clippy::too_many_arguments, reason = "audited v2 store needs memory, embedding, supersession, metadata, and audit draft")]
-    fn store_with_v2_metadata_audited(
+    #[expect(clippy::too_many_arguments, reason = "audited store needs memory, embedding, supersession, metadata, and audit draft")]
+    fn store_with_metadata_audited(
         &self,
         memory: &Memory,
         embedding: Option<&[f32]>,
         supersedes_id: Option<&MemoryId>,
-        metadata: &V2MemoryMetadata,
+        metadata: &MemoryMetadata,
         audit: &AuditDraft,
     ) -> impl Future<Output = Result<MemoryId, StoreError>> + Send;
 
@@ -288,23 +288,23 @@ pub trait MemoryWriter: Send + Sync {
         audits: &[AuditDraft],
     ) -> impl Future<Output = Result<Vec<MemoryId>, StoreError>> + Send;
 
-    /// Store multiple memories and their required v2 metadata in one transaction.
+    /// Store multiple memories and their required metadata in one transaction.
     /// Each memory may optionally supersede an older memory.
     /// `supersedes` and `metadata` must have the same length as `memories`.
-    fn store_batch_with_v2_metadata(
+    fn store_batch_with_metadata(
         &self,
         memories: &[MemoryWithEmbedding],
         supersedes: &[Option<MemoryId>],
-        metadata: &[V2MemoryMetadata],
+        metadata: &[MemoryMetadata],
     ) -> impl Future<Output = Result<Vec<MemoryId>, StoreError>> + Send;
 
-    /// Store multiple memories, required v2 metadata, optional supersession
+    /// Store multiple memories, required metadata, optional supersession
     /// state, and matching audit rows in one transaction.
-    fn store_batch_with_v2_metadata_audited(
+    fn store_batch_with_metadata_audited(
         &self,
         memories: &[MemoryWithEmbedding],
         supersedes: &[Option<MemoryId>],
-        metadata: &[V2MemoryMetadata],
+        metadata: &[MemoryMetadata],
         audits: &[AuditDraft],
     ) -> impl Future<Output = Result<Vec<MemoryId>, StoreError>> + Send;
 
@@ -346,14 +346,14 @@ pub trait MemoryWriter: Send + Sync {
         audit: &AuditDraft,
     ) -> impl Future<Output = Result<AuthorizedUpdateOutcome, StoreError>> + Send;
 
-    /// Authorization-aware update, optional v2 metadata patch, and audit row in
+    /// Authorization-aware update, optional metadata patch, and audit row in
     /// one transaction.
     #[expect(clippy::too_many_arguments, reason = "audited revise needs id, update, metadata patch, principal, and audit draft")]
-    fn update_authorized_with_v2_metadata_audited(
+    fn update_authorized_with_metadata_audited(
         &self,
         id: &MemoryId,
         update: &MemoryUpdate,
-        metadata_patch: Option<&V2MetadataPatch>,
+        metadata_patch: Option<&MetadataPatch>,
         principal: &str,
         audit: &AuditDraft,
     ) -> impl Future<Output = Result<AuthorizedUpdateOutcome, StoreError>> + Send;
@@ -485,28 +485,28 @@ pub trait MemoryAdmin: Send + Sync {
     /// List all registered scope definitions ordered by key.
     fn list_scopes(&self) -> impl Future<Output = Result<Vec<ScopeDefinition>, StoreError>> + Send;
 
-    /// Upsert non-destructive v2 metadata for a memory.
-    fn upsert_v2_metadata(&self, metadata: V2MemoryMetadata) -> impl Future<Output = Result<(), StoreError>> + Send;
+    /// Upsert non-destructive metadata for a memory.
+    fn upsert_metadata(&self, metadata: MemoryMetadata) -> impl Future<Output = Result<(), StoreError>> + Send;
 
-    /// Upsert non-destructive v2 metadata and audit the memory in one transaction.
-    fn upsert_v2_metadata_audited(&self, metadata: V2MemoryMetadata, audit: &AuditDraft) -> impl Future<Output = Result<(), StoreError>> + Send;
+    /// Upsert non-destructive metadata and audit the memory in one transaction.
+    fn upsert_metadata_audited(&self, metadata: MemoryMetadata, audit: &AuditDraft) -> impl Future<Output = Result<(), StoreError>> + Send;
 
-    /// Fetch non-destructive v2 metadata for a memory.
-    fn get_v2_metadata(&self, memory_id: &MemoryId) -> impl Future<Output = Result<Option<V2MemoryMetadata>, StoreError>> + Send;
+    /// Fetch non-destructive metadata for a memory.
+    fn get_metadata(&self, memory_id: &MemoryId) -> impl Future<Output = Result<Option<MemoryMetadata>, StoreError>> + Send;
 
-    /// Return conservative migration/reporting counts for v2 metadata.
-    fn v2_migration_report(&self) -> impl Future<Output = Result<V2MigrationReport, StoreError>> + Send;
+    /// Return conservative migration/reporting counts for metadata.
+    fn metadata_migration_report(&self) -> impl Future<Output = Result<MetadataMigrationReport, StoreError>> + Send;
 
-    /// Add v2 metadata rows for existing memories without rewriting original content.
-    fn migrate_v2_metadata(&self, registered_scope_keys: &[String], dry_run: bool) -> impl Future<Output = Result<V2MetadataMigrationReport, StoreError>> + Send;
+    /// Add metadata rows for existing memories without rewriting original content.
+    fn migrate_metadata(&self, registered_scope_keys: &[String], dry_run: bool) -> impl Future<Output = Result<MetadataMigrationOutcome, StoreError>> + Send;
 
-    /// Add v2 metadata rows and audit each inserted row in one transaction.
-    fn migrate_v2_metadata_audited(
+    /// Add metadata rows and audit each inserted row in one transaction.
+    fn migrate_metadata_audited(
         &self,
         registered_scope_keys: &[String],
         dry_run: bool,
         audit: &AuditDraft,
-    ) -> impl Future<Output = Result<V2MetadataMigrationReport, StoreError>> + Send;
+    ) -> impl Future<Output = Result<MetadataMigrationOutcome, StoreError>> + Send;
 }
 
 /// Combined trait for full memory store access: read, write, and admin.
@@ -516,14 +516,8 @@ pub trait MemoryStore: MemoryReader + MemoryWriter + MemoryAdmin {}
 
 impl<T: MemoryReader + MemoryWriter + MemoryAdmin> MemoryStore for T {}
 
-pub(crate) fn merge_v2_metadata_patch(
-    memory_id: MemoryId,
-    patch: &V2MetadataPatch,
-    existing: Option<&V2MemoryMetadata>,
-    fallback_scope: Option<&str>,
-    principal: &str,
-) -> V2MemoryMetadata {
-    V2MemoryMetadata {
+pub(crate) fn merge_metadata_patch(memory_id: MemoryId, patch: &MetadataPatch, existing: Option<&MemoryMetadata>, fallback_scope: Option<&str>, principal: &str) -> MemoryMetadata {
+    MemoryMetadata {
         memory_id,
         scope_key: patch
             .scope_key
@@ -534,7 +528,7 @@ pub(crate) fn merge_v2_metadata_patch(
         agent_label: patch.agent_label.clone().or_else(|| existing.and_then(|metadata| metadata.agent_label.clone())),
         created_by_principal: existing.and_then(|metadata| metadata.created_by_principal.clone()).or_else(|| Some(principal.to_owned())),
         quality_flags: existing.map_or_else(Vec::new, |metadata| metadata.quality_flags.clone()),
-        schema_version: 2,
+        schema_version: 1,
     }
 }
 

@@ -7,8 +7,8 @@ use super::{MemoryStore, MemoryWithEmbedding};
 use crate::{
     error::StoreError,
     types::{
-        AccessPolicy, AuditAction, AuditDraft, Confidence, Entity, Importance, Memory, MemoryFilter, MemoryId, MemoryType, MemoryUpdate, Provenance, QueryContext, RedactableField,
-        ScopeDefinition, SearchResult, V2MemoryMetadata, V2MetadataPatch, WriteOutcome,
+        AccessPolicy, AuditAction, AuditDraft, Confidence, Entity, Importance, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryType, MemoryUpdate, MetadataPatch, Provenance,
+        QueryContext, RedactableField, ScopeDefinition, SearchResult, WriteOutcome,
     },
 };
 
@@ -26,7 +26,7 @@ struct MemorySpec {
     created_at: DateTime<Utc>,
 }
 
-/// Exercise the backend-neutral store contract for remediated v2 behavior.
+/// Exercise the backend-neutral store contract for remediated behavior.
 #[expect(clippy::too_many_lines, reason = "single shared fixture intentionally exercises the full backend-neutral MemoryStore contract")]
 pub(crate) async fn assert_memory_store_contract<S>(store: &S, embedding_dimensions: usize)
 where
@@ -248,29 +248,29 @@ where
         .unwrap();
     assert_eq!(batch_ids, vec![batch_a.id, batch_b.id]);
 
-    let v2_memory = memory(MemorySpec {
-        content: format!("v2 metadata {case}"),
-        tags: vec![case_tag.clone(), "v2".into()],
+    let metadata_memory = memory(MemorySpec {
+        content: format!("metadata {case}"),
+        tags: vec![case_tag.clone(), "metadata".into()],
         source_agent: OWNER,
         scope: scope.clone(),
         origin: origin.clone(),
         access_policy: AccessPolicy::Public,
         created_at: time_after(base, 9),
     });
-    let v2_metadata = V2MemoryMetadata {
-        memory_id: v2_memory.id,
+    let metadata = MemoryMetadata {
+        memory_id: metadata_memory.id,
         scope_key: Some(scope.clone()),
         summary: Some("contract summary".into()),
         agent_label: Some("contract-agent-label".into()),
         created_by_principal: Some(OWNER.into()),
         quality_flags: vec!["contract_flag".into()],
-        schema_version: 2,
+        schema_version: 1,
     };
-    let v2_id = store
-        .store_with_v2_metadata(&v2_memory, Some(&embedding(embedding_dimensions, 8.0_f32)), None, &v2_metadata)
+    let id = store
+        .store_with_metadata(&metadata_memory, Some(&embedding(embedding_dimensions, 8.0_f32)), None, &metadata)
         .await
         .unwrap();
-    assert_eq!(store.get_v2_metadata(&v2_id).await.unwrap(), Some(v2_metadata));
+    assert_eq!(store.get_metadata(&id).await.unwrap(), Some(metadata));
 
     let unembedded = memory(MemorySpec {
         content: format!("needs reembed {case}"),
@@ -374,7 +374,7 @@ where
     assert_eq!(content_details.get("old_content_hash"), Some(&json!(super::crud::content_hash(&original_audited_content))));
     assert_eq!(content_details.get("case"), Some(&json!(case_tag)));
 
-    let metadata_patch = V2MetadataPatch {
+    let metadata_patch = MetadataPatch {
         scope_key: Some(format!("contract/revised/{case}")),
         summary: Some(format!("revised summary {case}")),
         agent_label: Some("conformance-agent".into()),
@@ -383,7 +383,7 @@ where
         action: AuditAction::Update,
         caller_agent: Some(OWNER.into()),
         timestamp: time_after(base, 15),
-        details: Some(json!({ "v2_metadata": true, "old_content_hash": "stale" })),
+        details: Some(json!({ "metadata": true, "old_content_hash": "stale" })),
     };
     let metadata_update = MemoryUpdate {
         content: Some(format!("audited transactional metadata update {case}")),
@@ -391,17 +391,17 @@ where
         ..MemoryUpdate::default()
     };
     let metadata_outcome = store
-        .update_authorized_with_v2_metadata_audited(&audited_id, &metadata_update, Some(&metadata_patch), OWNER, &metadata_audit)
+        .update_authorized_with_metadata_audited(&audited_id, &metadata_update, Some(&metadata_patch), OWNER, &metadata_audit)
         .await
         .unwrap();
     assert_eq!(metadata_outcome.outcome, WriteOutcome::Applied);
-    let revised_metadata = store.get_v2_metadata(&audited_id).await.unwrap().unwrap();
+    let revised_metadata = store.get_metadata(&audited_id).await.unwrap().unwrap();
     assert_eq!(revised_metadata.scope_key, metadata_patch.scope_key);
     assert_eq!(revised_metadata.summary, metadata_patch.summary);
     let metadata_history = store.query_audit_log(&audited_id, 10).await.unwrap();
     let metadata_audit_entry = metadata_history.iter().find(|entry| entry.timestamp == metadata_audit.timestamp).unwrap();
     let metadata_details = metadata_audit_entry.details.as_ref().and_then(serde_json::Value::as_object).unwrap();
-    assert_eq!(metadata_details.get("v2_metadata"), Some(&json!(true)));
+    assert_eq!(metadata_details.get("metadata"), Some(&json!(true)));
     assert_eq!(
         metadata_details.get("old_content_hash"),
         Some(&json!(super::crud::content_hash(&content_after_audit_update)))

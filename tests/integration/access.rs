@@ -10,7 +10,7 @@ use localhold::{
         params::{AdminListResponse, HistoryResponse, ReadManyResponse, ReadResponse, RecallResponse},
     },
     store::{MemoryAdmin as _, MemoryWriter as _, SqliteStore},
-    types::{AccessPolicy, AuditAction, Memory, MemoryId, Provenance, RedactableField, V2MemoryMetadata},
+    types::{AccessPolicy, AuditAction, Memory, MemoryId, MemoryMetadata, Provenance, RedactableField},
 };
 use rmcp::{ServiceExt as _, service::RunningService};
 use serde_json::json;
@@ -133,17 +133,17 @@ async fn setup_seeded_server(principal: Option<&str>, seeds: Vec<Seed>) -> (Runn
         let memory = Memory::new_for_test(seed.content.to_owned(), seed.tags.into_iter().map(ToOwned::to_owned).collect(), provenance, seed.policy);
         let id = store.store(&memory, None).await.unwrap();
         if let Some(metadata) = seed.metadata {
-            let metadata = serde_json::from_value::<V2MemoryMetadata>(json!({
+            let metadata = serde_json::from_value::<MemoryMetadata>(json!({
                 "memory_id": id,
                 "scope_key": metadata.scope,
                 "summary": metadata.summary,
                 "agent_label": metadata.agent_label,
                 "created_by_principal": metadata.created_by,
                 "quality_flags": metadata.quality_flags,
-                "schema_version": 2_i32,
+                "schema_version": 1_i32,
             }))
             .unwrap();
-            store.upsert_v2_metadata(metadata).await.unwrap();
+            store.upsert_metadata(metadata).await.unwrap();
         }
         ids.push(id);
     }
@@ -256,7 +256,7 @@ async fn redacted_visible_fields_hide_tags_and_provenance_for_non_owner() {
 }
 
 #[tokio::test]
-async fn redacted_v2_metadata_does_not_restore_hidden_read_fields() {
+async fn redacted_metadata_does_not_restore_hidden_read_fields() {
     let metadata = SeedMetadata::new()
         .summary("hidden summary")
         .scope("secret/scope")

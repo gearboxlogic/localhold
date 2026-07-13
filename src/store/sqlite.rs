@@ -16,6 +16,7 @@ use sqlite_vec::sqlite3_vec_init;
 
 use super::{
     EmbeddingProfile, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter,
+    migration::reject_retired_sqlite_schema,
     vector::{SqliteVecIndex, VectorIndex as _},
 };
 use crate::{
@@ -23,13 +24,13 @@ use crate::{
     error::StoreError,
     store::schema::{
         MAIN_DDL, TRIGGER_DDL, existing_embedding_dimensions, migrate_create_audit_log, migrate_create_fts_index, migrate_create_memory_entities, migrate_create_memory_tombstones,
-        migrate_create_scope_registry, migrate_create_v2_metadata, migrate_memories_add_activity_tracking, migrate_memories_add_confidence, migrate_memories_add_embedding_claims,
+        migrate_create_metadata, migrate_create_scope_registry, migrate_memories_add_activity_tracking, migrate_memories_add_confidence, migrate_memories_add_embedding_claims,
         migrate_memories_add_embedding_revision, migrate_memories_add_importance, migrate_memories_add_memory_type, migrate_memories_add_superseded_by,
         migrate_memories_add_updated_at, migrate_memories_align_impression_tracking, migrate_memories_backfill_origin_conversation, migrate_memory_embedding_map_fk,
     },
     types::{
-        AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Memory, MemoryFilter, MemoryId, MemoryStats, MemoryTombstone, MemoryUpdate, QueryContext, ScopeDefinition,
-        SearchResult, V2MemoryMetadata, V2MetadataMigrationReport, V2MigrationReport, WriteOutcome,
+        AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MemoryTombstone, MemoryUpdate,
+        MetadataMigrationOutcome, MetadataMigrationReport, QueryContext, ScopeDefinition, SearchResult, WriteOutcome,
     },
 };
 
@@ -185,6 +186,7 @@ impl SqliteStore {
 
     fn init_schema(&self) -> Result<(), StoreError> {
         let conn = self.inner.conn.lock();
+        reject_retired_sqlite_schema(&conn)?;
 
         // First pass: create tables and indexes for fresh databases. For legacy
         // databases some indexes may reference migration-added columns and fail
@@ -225,9 +227,9 @@ impl SqliteStore {
         migrate_memories_add_activity_tracking(&conn).map_err(|e| migration_failed("add_activity_tracking", e))?;
         migrate_memories_add_updated_at(&conn).map_err(|e| migration_failed("add_updated_at", e))?;
         migrate_memories_add_confidence(&conn).map_err(|e| migration_failed("add_confidence", e))?;
-        // V2 migrations
+        // migrations
         migrate_create_scope_registry(&conn).map_err(|e| migration_failed("create_scope_registry", e))?;
-        migrate_create_v2_metadata(&conn).map_err(|e| migration_failed("create_v2_metadata", e))?;
+        migrate_create_metadata(&conn).map_err(|e| migration_failed("create_metadata", e))?;
         migrate_create_memory_tombstones(&conn).map_err(|e| migration_failed("create_memory_tombstones", e))?;
 
         drop(conn);
@@ -486,25 +488,19 @@ impl MemoryWriter for SqliteStore {
         self.store_with_supersession_audited_impl(memory, embedding, supersedes_id, Some(audit)).await
     }
 
-    async fn store_with_v2_metadata(
-        &self,
-        memory: &Memory,
-        embedding: Option<&[f32]>,
-        supersedes_id: Option<&MemoryId>,
-        metadata: &V2MemoryMetadata,
-    ) -> Result<MemoryId, StoreError> {
-        self.store_with_v2_metadata_impl(memory, embedding, supersedes_id, metadata).await
+    async fn store_with_metadata(&self, memory: &Memory, embedding: Option<&[f32]>, supersedes_id: Option<&MemoryId>, metadata: &MemoryMetadata) -> Result<MemoryId, StoreError> {
+        self.store_with_metadata_impl(memory, embedding, supersedes_id, metadata).await
     }
 
-    async fn store_with_v2_metadata_audited(
+    async fn store_with_metadata_audited(
         &self,
         memory: &Memory,
         embedding: Option<&[f32]>,
         supersedes_id: Option<&MemoryId>,
-        metadata: &V2MemoryMetadata,
+        metadata: &MemoryMetadata,
         audit: &AuditDraft,
     ) -> Result<MemoryId, StoreError> {
-        self.store_with_v2_metadata_audited_impl(memory, embedding, supersedes_id, metadata, Some(audit)).await
+        self.store_with_metadata_audited_impl(memory, embedding, supersedes_id, metadata, Some(audit)).await
     }
 
     async fn store_batch(&self, memories: &[MemoryWithEmbedding]) -> Result<Vec<MemoryId>, StoreError> {
@@ -528,23 +524,18 @@ impl MemoryWriter for SqliteStore {
         self.store_batch_with_supersession_audited_impl(memories, supersedes, Some(audits)).await
     }
 
-    async fn store_batch_with_v2_metadata(
-        &self,
-        memories: &[MemoryWithEmbedding],
-        supersedes: &[Option<MemoryId>],
-        metadata: &[V2MemoryMetadata],
-    ) -> Result<Vec<MemoryId>, StoreError> {
-        self.store_batch_with_v2_metadata_impl(memories, supersedes, metadata).await
+    async fn store_batch_with_metadata(&self, memories: &[MemoryWithEmbedding], supersedes: &[Option<MemoryId>], metadata: &[MemoryMetadata]) -> Result<Vec<MemoryId>, StoreError> {
+        self.store_batch_with_metadata_impl(memories, supersedes, metadata).await
     }
 
-    async fn store_batch_with_v2_metadata_audited(
+    async fn store_batch_with_metadata_audited(
         &self,
         memories: &[MemoryWithEmbedding],
         supersedes: &[Option<MemoryId>],
-        metadata: &[V2MemoryMetadata],
+        metadata: &[MemoryMetadata],
         audits: &[AuditDraft],
     ) -> Result<Vec<MemoryId>, StoreError> {
-        self.store_batch_with_v2_metadata_audited_impl(memories, supersedes, metadata, Some(audits)).await
+        self.store_batch_with_metadata_audited_impl(memories, supersedes, metadata, Some(audits)).await
     }
 
     async fn update(&self, id: &MemoryId, update: &MemoryUpdate) -> Result<bool, StoreError> {
@@ -575,16 +566,15 @@ impl MemoryWriter for SqliteStore {
         self.update_authorized_audited_impl(id, update, principal, Some(audit)).await
     }
 
-    async fn update_authorized_with_v2_metadata_audited(
+    async fn update_authorized_with_metadata_audited(
         &self,
         id: &MemoryId,
         update: &MemoryUpdate,
-        metadata_patch: Option<&crate::types::V2MetadataPatch>,
+        metadata_patch: Option<&crate::types::MetadataPatch>,
         principal: &str,
         audit: &AuditDraft,
     ) -> Result<AuthorizedUpdateOutcome, StoreError> {
-        self.update_authorized_with_v2_metadata_audited_impl(id, update, metadata_patch, principal, Some(audit))
-            .await
+        self.update_authorized_with_metadata_audited_impl(id, update, metadata_patch, principal, Some(audit)).await
     }
 
     async fn delete_authorized(&self, id: &MemoryId, principal: &str) -> Result<WriteOutcome, StoreError> {
@@ -685,28 +675,28 @@ impl MemoryAdmin for SqliteStore {
         self.list_scopes_impl().await
     }
 
-    async fn upsert_v2_metadata(&self, metadata: V2MemoryMetadata) -> Result<(), StoreError> {
-        self.upsert_v2_metadata_impl(metadata).await
+    async fn upsert_metadata(&self, metadata: MemoryMetadata) -> Result<(), StoreError> {
+        self.upsert_metadata_impl(metadata).await
     }
 
-    async fn upsert_v2_metadata_audited(&self, metadata: V2MemoryMetadata, audit: &AuditDraft) -> Result<(), StoreError> {
-        self.upsert_v2_metadata_audited_impl(metadata, Some(audit)).await
+    async fn upsert_metadata_audited(&self, metadata: MemoryMetadata, audit: &AuditDraft) -> Result<(), StoreError> {
+        self.upsert_metadata_audited_impl(metadata, Some(audit)).await
     }
 
-    async fn get_v2_metadata(&self, memory_id: &MemoryId) -> Result<Option<V2MemoryMetadata>, StoreError> {
-        self.get_v2_metadata_impl(memory_id).await
+    async fn get_metadata(&self, memory_id: &MemoryId) -> Result<Option<MemoryMetadata>, StoreError> {
+        self.get_metadata_impl(memory_id).await
     }
 
-    async fn v2_migration_report(&self) -> Result<V2MigrationReport, StoreError> {
-        self.v2_migration_report_impl().await
+    async fn metadata_migration_report(&self) -> Result<MetadataMigrationReport, StoreError> {
+        self.metadata_migration_report_impl().await
     }
 
-    async fn migrate_v2_metadata(&self, registered_scope_keys: &[String], dry_run: bool) -> Result<V2MetadataMigrationReport, StoreError> {
-        self.migrate_v2_metadata_impl(registered_scope_keys, dry_run).await
+    async fn migrate_metadata(&self, registered_scope_keys: &[String], dry_run: bool) -> Result<MetadataMigrationOutcome, StoreError> {
+        self.migrate_metadata_impl(registered_scope_keys, dry_run).await
     }
 
-    async fn migrate_v2_metadata_audited(&self, registered_scope_keys: &[String], dry_run: bool, audit: &AuditDraft) -> Result<V2MetadataMigrationReport, StoreError> {
-        self.migrate_v2_metadata_audited_impl(registered_scope_keys, dry_run, Some(audit)).await
+    async fn migrate_metadata_audited(&self, registered_scope_keys: &[String], dry_run: bool, audit: &AuditDraft) -> Result<MetadataMigrationOutcome, StoreError> {
+        self.migrate_metadata_audited_impl(registered_scope_keys, dry_run, Some(audit)).await
     }
 }
 
@@ -829,15 +819,15 @@ mod tests {
         assert!(reopened.fetch_embeddings_for_ids(&[memory_id]).await.unwrap().is_empty());
     }
 
-    fn make_v2_metadata(memory_id: MemoryId) -> V2MemoryMetadata {
-        V2MemoryMetadata {
+    fn make_metadata(memory_id: MemoryId) -> MemoryMetadata {
+        MemoryMetadata {
             memory_id,
             scope_key: Some("test-scope".into()),
             summary: Some("test summary".into()),
             agent_label: Some("test-agent".into()),
             created_by_principal: Some("test-principal".into()),
             quality_flags: vec!["test_flag".into()],
-            schema_version: 2,
+            schema_version: 1,
         }
     }
 
@@ -955,16 +945,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn store_with_v2_metadata_persists_memory_and_metadata() {
+    async fn store_with_metadata_persists_memory_and_metadata() {
         let store = SqliteStore::in_memory().unwrap();
         let mem = make_memory("metadata memory", &[], base_time());
-        let metadata = make_v2_metadata(mem.id);
+        let metadata = make_metadata(mem.id);
 
-        let id = store.store_with_v2_metadata(&mem, None, None, &metadata).await.unwrap();
+        let id = store.store_with_metadata(&mem, None, None, &metadata).await.unwrap();
 
         assert_eq!(id, mem.id);
         assert!(store.get(&id, None).await.unwrap().is_some());
-        assert_eq!(store.get_v2_metadata(&id).await.unwrap(), Some(metadata));
+        assert_eq!(store.get_metadata(&id).await.unwrap(), Some(metadata));
     }
 
     #[tokio::test]
@@ -980,18 +970,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn store_with_v2_metadata_audited_rolls_back_when_metadata_insert_fails() {
+    async fn store_with_metadata_audited_rolls_back_when_metadata_insert_fails() {
         let store = SqliteStore::in_memory().unwrap();
         let mem = make_memory("metadata rollback audited memory", &[], base_time());
-        let metadata = make_v2_metadata(mem.id);
-        drop_table(&store, "memory_v2_metadata").await;
+        let metadata = make_metadata(mem.id);
+        drop_table(&store, "memory_metadata").await;
 
         let err = store
-            .store_with_v2_metadata_audited(&mem, None, None, &metadata, &audit_draft(AuditAction::Store))
+            .store_with_metadata_audited(&mem, None, None, &metadata, &audit_draft(AuditAction::Store))
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("memory_v2_metadata"));
+        assert!(err.to_string().contains("memory_metadata"));
         assert!(store.get(&mem.id, None).await.unwrap().is_none());
         assert!(store.query_audit_log(&mem.id, 10).await.unwrap().is_empty());
     }
@@ -1019,46 +1009,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_authorized_with_v2_metadata_audited_rolls_back_update_when_metadata_insert_fails() {
+    async fn update_authorized_with_metadata_audited_rolls_back_update_when_metadata_insert_fails() {
         let store = SqliteStore::in_memory().unwrap();
         let mem = make_memory("before metadata rollback", &[], base_time());
         let id = store.store(&mem, None).await.unwrap();
-        drop_table(&store, "memory_v2_metadata").await;
+        drop_table(&store, "memory_metadata").await;
 
         let update = MemoryUpdate {
             content: Some("after metadata rollback".into()),
             ..MemoryUpdate::default()
         };
-        let patch = crate::types::V2MetadataPatch {
+        let patch = crate::types::MetadataPatch {
             summary: Some("rollback summary".into()),
             ..Default::default()
         };
         let err = store
-            .update_authorized_with_v2_metadata_audited(&id, &update, Some(&patch), "test-agent", &audit_draft(AuditAction::Update))
+            .update_authorized_with_metadata_audited(&id, &update, Some(&patch), "test-agent", &audit_draft(AuditAction::Update))
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("memory_v2_metadata"));
+        assert!(err.to_string().contains("memory_metadata"));
         let after = store.get(&id, Some("test-agent")).await.unwrap().unwrap();
         assert_eq!(after.content, "before metadata rollback");
         assert!(store.query_audit_log(&id, 10).await.unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn migrate_v2_metadata_audited_records_only_inserted_rows() {
+    async fn migrate_metadata_audited_records_only_inserted_rows() {
         let store = SqliteStore::in_memory().unwrap();
         let mem = make_memory("metadata migration audited", &[], base_time());
         let id = store.store(&mem, None).await.unwrap();
 
-        let report = store.migrate_v2_metadata_audited(&[], false, &audit_draft(AuditAction::Update)).await.unwrap();
+        let report = store.migrate_metadata_audited(&[], false, &audit_draft(AuditAction::Update)).await.unwrap();
 
         assert_eq!(report.migrated, 1_u64);
-        assert!(store.get_v2_metadata(&id).await.unwrap().is_some());
+        assert!(store.get_metadata(&id).await.unwrap().is_some());
         let history = store.query_audit_log(&id, 10).await.unwrap();
         assert_eq!(history.len(), 1_usize);
         assert_eq!(history[0].action, AuditAction::Update);
 
-        let second_report = store.migrate_v2_metadata_audited(&[], false, &audit_draft(AuditAction::Update)).await.unwrap();
+        let second_report = store.migrate_metadata_audited(&[], false, &audit_draft(AuditAction::Update)).await.unwrap();
         assert_eq!(second_report.migrated, 0_u64);
         assert_eq!(store.query_audit_log(&id, 10).await.unwrap().len(), 1_usize);
     }
@@ -1104,36 +1094,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn store_with_v2_metadata_rolls_back_memory_when_metadata_insert_fails() {
+    async fn store_with_metadata_rolls_back_memory_when_metadata_insert_fails() {
         let store = SqliteStore::in_memory().unwrap();
         let mem = make_memory("rollback memory", &[], base_time());
-        let bad_metadata = make_v2_metadata(MemoryId::new());
+        let bad_metadata = make_metadata(MemoryId::new());
 
-        let _err = store.store_with_v2_metadata(&mem, None, None, &bad_metadata).await.unwrap_err();
+        let _err = store.store_with_metadata(&mem, None, None, &bad_metadata).await.unwrap_err();
 
         assert!(store.get(&mem.id, None).await.unwrap().is_none());
     }
 
     #[tokio::test]
-    async fn store_with_v2_metadata_rejects_existing_wrong_metadata_id() {
+    async fn store_with_metadata_rejects_existing_wrong_metadata_id() {
         let store = SqliteStore::in_memory().unwrap();
         let existing = make_memory("existing metadata owner", &[], base_time());
-        let existing_metadata = make_v2_metadata(existing.id);
-        let _existing_id = store.store_with_v2_metadata(&existing, None, None, &existing_metadata).await.unwrap();
+        let existing_metadata = make_metadata(existing.id);
+        let _existing_id = store.store_with_metadata(&existing, None, None, &existing_metadata).await.unwrap();
 
         let new_memory = make_memory("new memory with mismatched metadata", &[], base_time());
-        let mut wrong_metadata = make_v2_metadata(existing.id);
+        let mut wrong_metadata = make_metadata(existing.id);
         wrong_metadata.summary = Some("wrong target".into());
 
-        let err = store.store_with_v2_metadata(&new_memory, None, None, &wrong_metadata).await.unwrap_err();
+        let err = store.store_with_metadata(&new_memory, None, None, &wrong_metadata).await.unwrap_err();
 
         assert!(err.to_string().contains("metadata memory_id"));
         assert!(store.get(&new_memory.id, None).await.unwrap().is_none());
-        assert_eq!(store.get_v2_metadata(&existing.id).await.unwrap(), Some(existing_metadata));
+        assert_eq!(store.get_metadata(&existing.id).await.unwrap(), Some(existing_metadata));
     }
 
     #[tokio::test]
-    async fn store_batch_with_v2_metadata_rolls_back_all_memories_when_metadata_insert_fails() {
+    async fn store_batch_with_metadata_rolls_back_all_memories_when_metadata_insert_fails() {
         let store = SqliteStore::in_memory().unwrap();
         let first = make_memory("batch rollback one", &[], base_time());
         let second = make_memory("batch rollback two", &[], base_time());
@@ -1147,16 +1137,16 @@ mod tests {
                 embedding: None,
             },
         ];
-        let metadata = vec![make_v2_metadata(first.id), make_v2_metadata(MemoryId::new())];
+        let metadata = vec![make_metadata(first.id), make_metadata(MemoryId::new())];
 
-        let _err = store.store_batch_with_v2_metadata(&memories, &[None, None], &metadata).await.unwrap_err();
+        let _err = store.store_batch_with_metadata(&memories, &[None, None], &metadata).await.unwrap_err();
 
         assert!(store.get(&first.id, None).await.unwrap().is_none());
         assert!(store.get(&second.id, None).await.unwrap().is_none());
     }
 
     #[tokio::test]
-    async fn store_batch_with_v2_metadata_rejects_supersedes_length_mismatch() {
+    async fn store_batch_with_metadata_rejects_supersedes_length_mismatch() {
         let store = SqliteStore::in_memory().unwrap();
         let first = make_memory("batch supersedes mismatch one", &[], base_time());
         let second = make_memory("batch supersedes mismatch two", &[], base_time());
@@ -1170,9 +1160,9 @@ mod tests {
                 embedding: None,
             },
         ];
-        let metadata = vec![make_v2_metadata(first.id), make_v2_metadata(second.id)];
+        let metadata = vec![make_metadata(first.id), make_metadata(second.id)];
 
-        let err = store.store_batch_with_v2_metadata(&memories, &[None], &metadata).await.unwrap_err();
+        let err = store.store_batch_with_metadata(&memories, &[None], &metadata).await.unwrap_err();
 
         assert!(err.to_string().contains("supersedes length"));
         assert!(store.get(&first.id, None).await.unwrap().is_none());
@@ -1180,11 +1170,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn store_batch_with_v2_metadata_rejects_existing_wrong_metadata_id() {
+    async fn store_batch_with_metadata_rejects_existing_wrong_metadata_id() {
         let store = SqliteStore::in_memory().unwrap();
         let existing = make_memory("existing batch metadata owner", &[], base_time());
-        let existing_metadata = make_v2_metadata(existing.id);
-        let _existing_id = store.store_with_v2_metadata(&existing, None, None, &existing_metadata).await.unwrap();
+        let existing_metadata = make_metadata(existing.id);
+        let _existing_id = store.store_with_metadata(&existing, None, None, &existing_metadata).await.unwrap();
 
         let first = make_memory("batch wrong id one", &[], base_time());
         let second = make_memory("batch wrong id two", &[], base_time());
@@ -1198,16 +1188,16 @@ mod tests {
                 embedding: None,
             },
         ];
-        let mut wrong_metadata = make_v2_metadata(existing.id);
+        let mut wrong_metadata = make_metadata(existing.id);
         wrong_metadata.summary = Some("wrong batch target".into());
-        let metadata = vec![make_v2_metadata(first.id), wrong_metadata];
+        let metadata = vec![make_metadata(first.id), wrong_metadata];
 
-        let err = store.store_batch_with_v2_metadata(&memories, &[None, None], &metadata).await.unwrap_err();
+        let err = store.store_batch_with_metadata(&memories, &[None, None], &metadata).await.unwrap_err();
 
         assert!(err.to_string().contains("metadata memory_id"));
         assert!(store.get(&first.id, None).await.unwrap().is_none());
         assert!(store.get(&second.id, None).await.unwrap().is_none());
-        assert_eq!(store.get_v2_metadata(&existing.id).await.unwrap(), Some(existing_metadata));
+        assert_eq!(store.get_metadata(&existing.id).await.unwrap(), Some(existing_metadata));
     }
 
     #[tokio::test]

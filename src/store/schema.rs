@@ -406,7 +406,7 @@ pub(crate) const AUDIT_LOG_DDL: &str = "
         ON memory_audit_log(timestamp DESC);
 ";
 
-/// DDL for the v2 scope registry.
+/// DDL for the scope registry.
 pub(crate) const SCOPE_REGISTRY_DDL: &str = "
     CREATE TABLE IF NOT EXISTS scope_registry (
         scope_key    TEXT PRIMARY KEY,
@@ -420,22 +420,22 @@ pub(crate) const SCOPE_REGISTRY_DDL: &str = "
     );
 ";
 
-/// DDL for non-destructive v2 metadata attached to existing memories.
-pub(crate) const V2_METADATA_DDL: &str = "
-    CREATE TABLE IF NOT EXISTS memory_v2_metadata (
+/// DDL for non-destructive metadata attached to existing memories.
+pub(crate) const METADATA_DDL: &str = "
+    CREATE TABLE IF NOT EXISTS memory_metadata (
         memory_id            TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
         scope_key            TEXT,
         summary              TEXT,
         agent_label          TEXT,
         created_by_principal TEXT,
         quality_flags        TEXT NOT NULL DEFAULT '[]',
-        schema_version       INTEGER NOT NULL DEFAULT 2,
+        schema_version       INTEGER NOT NULL DEFAULT 1,
         migrated_at          TEXT,
         updated_at           TEXT NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_memory_v2_metadata_scope_key
-        ON memory_v2_metadata(scope_key);
+    CREATE INDEX IF NOT EXISTS idx_memory_metadata_scope_key
+        ON memory_metadata(scope_key);
 ";
 
 /// DDL for deleted-memory authorization tombstones.
@@ -452,15 +452,15 @@ pub(crate) const TOMBSTONE_DDL: &str = "
         ON memory_tombstones(deleted_at DESC);
 ";
 
-/// Create the v2 scope registry table for fresh and existing databases.
+/// Create the scope registry table for fresh and existing databases.
 pub(crate) fn migrate_create_scope_registry(conn: &Connection) -> Result<(), StoreError> {
     conn.execute_batch(SCOPE_REGISTRY_DDL)?;
     Ok(())
 }
 
-/// Create the v2 metadata table for fresh and existing databases.
-pub(crate) fn migrate_create_v2_metadata(conn: &Connection) -> Result<(), StoreError> {
-    conn.execute_batch(V2_METADATA_DDL)?;
+/// Create the metadata table for fresh and existing databases.
+pub(crate) fn migrate_create_metadata(conn: &Connection) -> Result<(), StoreError> {
+    conn.execute_batch(METADATA_DDL)?;
     Ok(())
 }
 

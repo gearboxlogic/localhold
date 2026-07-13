@@ -1047,7 +1047,8 @@ impl fmt::Display for AccessLevel {
 
 /// Minimal authorization envelope retained after a memory row is deleted.
 ///
-/// Tombstones intentionally exclude content, tags, entities, embeddings, and /// metadata. They exist only so deleted-memory history can be authorized without
+/// Tombstones intentionally exclude content, tags, entities, embeddings, and
+/// metadata. They exist only so deleted-memory history can be authorized without
 /// reconstructing the deleted memory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]

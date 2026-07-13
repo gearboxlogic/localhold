@@ -1119,10 +1119,13 @@ fn explicit_optional_cuda_stays_running_without_cpu_fallback() {
     cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn().unwrap();
-    assert_child_stays_running(&mut child, "optional CUDA reranker in CPU binary");
-    let _kill = child.kill();
-    let output = child.wait_with_output().unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
+    let stderr_reader = wait_for_startup_log(
+        &mut child,
+        "optional CUDA reranker in CPU binary",
+        "CUDA was requested but this binary was compiled without",
+    );
+    terminate_child(&mut child);
+    let stderr = stderr_reader.join().unwrap();
     assert!(
         stderr.contains("CUDA was requested but this binary was compiled without"),
         "unexpected fallback log: {stderr}"

@@ -48,7 +48,7 @@ pub(crate) fn arb_access_policy() -> BoxedStrategy<Value> {
     .boxed()
 }
 
-/// Generate a `serde_json::Value` representing valid v2 `remember` parameters.
+/// Generate a `serde_json::Value` representing valid `remember` parameters.
 pub(crate) fn arb_remember_input() -> BoxedStrategy<Value> {
     let content = arb_nonempty_string(1000);
     let tags = prop::collection::vec(arb_nonempty_string(50), 0_usize..=5_usize);
@@ -88,7 +88,7 @@ pub(crate) fn arb_remember_input() -> BoxedStrategy<Value> {
         .boxed()
 }
 
-/// Generate a `serde_json::Value` for v2 recall/admin-list filter fields.
+/// Generate a `serde_json::Value` for recall/admin-list filter fields.
 #[expect(dead_code, reason = "strategy available for future property tests")]
 pub(crate) fn arb_memory_filter() -> BoxedStrategy<Value> {
     let tags = prop::option::of(prop::collection::vec(arb_nonempty_string(50), 1_usize..=3_usize));

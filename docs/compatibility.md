@@ -29,11 +29,20 @@ a release explicitly documents a rollback procedure.
 Back up the active store before upgrades, storage migrations, bulk maintenance,
 or embedding-provider changes. See [Operations](operations.md).
 
+Pre-release development databases containing the retired
+`memory_v2_metadata` table are not compatible with the current schema. LocalHold
+stops with an actionable error instead of importing or ignoring that data. Back
+up and reset those databases before starting the current release.
+
 ## Protocol Compatibility
 
 MCP protocol versions are negotiated during initialization. Supported clients
 must use a protocol version accepted by the bundled Rust MCP SDK. Tool schema
 snapshots are checked in and reviewed as public API changes.
+
+The retired `admin_v2_migration_report` and `admin_v2_migrate_metadata` tool
+names are not registered as aliases. Current maintenance clients must use
+`admin_migration_report` and `admin_migrate_metadata`.
 
 Security fixes may intentionally tighten authentication, authorization,
 redaction, or destructive-operation behavior in a minor or patch release. Such

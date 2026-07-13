@@ -82,9 +82,9 @@ fn search_result_for_match_score(retrieval_score: Option<f64>, reranker_score: O
 }
 
 #[test]
-fn v2_match_assessment_prefers_final_query_relevance() {
+fn match_assessment_prefers_final_query_relevance() {
     let result = search_result_for_match_score(Some(0.95_f64), Some(0.01_f64), Some(0.292_f64));
-    let assessment = v2_match_assessment(&result, 0.7_f64);
+    let assessment = match_assessment(&result, 0.7_f64);
 
     assert_eq!(assessment.score_basis, MatchScoreBasis::RerankerBlend);
     assert_eq!(assessment.quality, MatchQuality::Possible);
@@ -93,9 +93,9 @@ fn v2_match_assessment_prefers_final_query_relevance() {
 }
 
 #[test]
-fn v2_match_assessment_falls_back_to_retrieval_score() {
+fn match_assessment_falls_back_to_retrieval_score() {
     let result = search_result_for_match_score(Some(0.75_f64), None, None);
-    let assessment = v2_match_assessment(&result, 0.7_f64);
+    let assessment = match_assessment(&result, 0.7_f64);
 
     assert_eq!(assessment.score_basis, MatchScoreBasis::Retrieval);
     assert_eq!(assessment.quality, MatchQuality::Strong);

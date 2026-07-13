@@ -4,7 +4,7 @@ expression: tool
 ---
 {
   "name": "recall",
-  "description": "Recall compact v2 memory cards and record lightweight search impressions. Scope may be a key, alias, matcher-containing value, or context_hints. Full content is omitted; call read/read_many for IDs.",
+  "description": "Recall compact memory cards and record lightweight search impressions. Scope may be a key, alias, matcher-containing value, or context_hints. Full content is omitted; call read/read_many for IDs.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$defs": {

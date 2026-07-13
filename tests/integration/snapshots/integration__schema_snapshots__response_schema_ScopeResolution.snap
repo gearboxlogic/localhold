@@ -1,6 +1,5 @@
 ---
 source: tests/integration/schema_snapshots.rs
-assertion_line: 28
 expression: schema
 ---
 {
@@ -43,7 +42,7 @@ expression: schema
   ],
   "$defs": {
     "ScopeResolvedBy": {
-      "description": "Mechanism used to resolve a v2 scope.",
+      "description": "Mechanism used to resolve a scope.",
       "oneOf": [
         {
           "description": "Explicit scope key or raw explicit scope value.",

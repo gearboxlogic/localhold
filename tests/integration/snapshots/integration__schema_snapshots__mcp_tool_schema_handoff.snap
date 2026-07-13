@@ -9,7 +9,7 @@ expression: tool
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$defs": {
       "HandoffCandidateItem": {
-        "description": "One candidate item accepted by the v2 `handoff` tool.",
+        "description": "One candidate item accepted by the `handoff` tool.",
         "anyOf": [
           {
             "description": "String shorthand for candidate memory content.",
@@ -70,7 +70,7 @@ expression: tool
         ]
       },
       "EntityInputItem": {
-        "description": "One request entity accepted by v2 write/update tools.",
+        "description": "One request entity accepted by write/update tools.",
         "anyOf": [
           {
             "description": "String shorthand for an entity name; the entity type defaults to `unknown`.",

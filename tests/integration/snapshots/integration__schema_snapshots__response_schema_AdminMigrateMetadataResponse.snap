@@ -1,12 +1,11 @@
 ---
 source: tests/integration/schema_snapshots.rs
-assertion_line: 172
 expression: schema
 ---
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "AdminV2MigrateMetadataResponse",
-  "description": "Response from admin v2 metadata migration.",
+  "title": "AdminMigrateMetadataResponse",
+  "description": "Response from admin metadata migration.",
   "type": "object",
   "properties": {
     "operation": {
@@ -19,7 +18,7 @@ expression: schema
     },
     "report": {
       "description": "Non-destructive migration pass outcome.",
-      "$ref": "#/$defs/V2MetadataMigrationReport"
+      "$ref": "#/$defs/MetadataMigrationOutcome"
     }
   },
   "required": [
@@ -93,7 +92,7 @@ expression: schema
       ]
     },
     "OperationStatus": {
-      "description": "Standard operation status for v2 mutation and admin tools.",
+      "description": "Standard operation status for mutation and admin tools.",
       "oneOf": [
         {
           "description": "The operation changed persistent state.",
@@ -168,7 +167,7 @@ expression: schema
       ]
     },
     "QualityWarning": {
-      "description": "A quality or classification warning returned by v2 write tools.",
+      "description": "A quality or classification warning returned by write tools.",
       "type": "object",
       "properties": {
         "code": {
@@ -205,7 +204,7 @@ expression: schema
       ]
     },
     "QualityWarningSeverity": {
-      "description": "Severity for v2 quality warnings.",
+      "description": "Severity for quality warnings.",
       "oneOf": [
         {
           "description": "Informational hint; the operation is usually usable.",
@@ -253,7 +252,7 @@ expression: schema
       "type": "string"
     },
     "RecallCard": {
-      "description": "Compact v2 result card. Full content is available through `read`.",
+      "description": "Compact result card. Full content is available through `read`.",
       "type": "object",
       "properties": {
         "id": {
@@ -340,7 +339,7 @@ expression: schema
       "type": "string"
     },
     "MatchAssessment": {
-      "description": "Agent-facing match assessment for a compact v2 card.",
+      "description": "Agent-facing match assessment for a compact card.",
       "type": "object",
       "properties": {
         "quality": {
@@ -434,7 +433,7 @@ expression: schema
       ]
     },
     "MatchDiagnostics": {
-      "description": "Ranking diagnostics for a compact v2 card.",
+      "description": "Ranking diagnostics for a compact card.",
       "type": "object",
       "properties": {
         "retrieval_score": {
@@ -479,18 +478,18 @@ expression: schema
         }
       }
     },
-    "V2MetadataMigrationReport": {
-      "description": "Outcome from a non-destructive v2 metadata migration pass.",
+    "MetadataMigrationOutcome": {
+      "description": "Outcome from a non-destructive metadata migration pass.",
       "type": "object",
       "properties": {
         "candidate_count": {
-          "description": "Existing memories missing a v2 metadata row before this pass.",
+          "description": "Existing memories missing a metadata row before this pass.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
         "skipped_existing": {
-          "description": "Existing memories that already had v2 metadata and were skipped.",
+          "description": "Existing memories that already had metadata and were skipped.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
@@ -514,7 +513,7 @@ expression: schema
           "minimum": 0
         },
         "oversized": {
-          "description": "Candidate memories larger than the v2 large-content warning threshold.",
+          "description": "Candidate memories larger than the large-content warning threshold.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0

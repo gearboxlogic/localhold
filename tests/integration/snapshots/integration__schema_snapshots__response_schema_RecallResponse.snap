@@ -1,12 +1,11 @@
 ---
 source: tests/integration/schema_snapshots.rs
-assertion_line: 82
 expression: schema
 ---
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "RecallResponse",
-  "description": "Response from v2 `recall`.",
+  "description": "Response from `recall`.",
   "type": "object",
   "properties": {
     "search_mode": {
@@ -127,7 +126,7 @@ expression: schema
       ]
     },
     "ScopeResolvedBy": {
-      "description": "Mechanism used to resolve a v2 scope.",
+      "description": "Mechanism used to resolve a scope.",
       "oneOf": [
         {
           "description": "Explicit scope key or raw explicit scope value.",
@@ -152,7 +151,7 @@ expression: schema
       ]
     },
     "QualityWarning": {
-      "description": "A quality or classification warning returned by v2 write tools.",
+      "description": "A quality or classification warning returned by write tools.",
       "type": "object",
       "properties": {
         "code": {
@@ -189,7 +188,7 @@ expression: schema
       ]
     },
     "QualityWarningSeverity": {
-      "description": "Severity for v2 quality warnings.",
+      "description": "Severity for quality warnings.",
       "oneOf": [
         {
           "description": "Informational hint; the operation is usually usable.",
@@ -209,7 +208,7 @@ expression: schema
       ]
     },
     "RecallCard": {
-      "description": "Compact v2 result card. Full content is available through `read`.",
+      "description": "Compact result card. Full content is available through `read`.",
       "type": "object",
       "properties": {
         "id": {
@@ -300,7 +299,7 @@ expression: schema
       "type": "string"
     },
     "MatchAssessment": {
-      "description": "Agent-facing match assessment for a compact v2 card.",
+      "description": "Agent-facing match assessment for a compact card.",
       "type": "object",
       "properties": {
         "quality": {
@@ -394,7 +393,7 @@ expression: schema
       ]
     },
     "MatchDiagnostics": {
-      "description": "Ranking diagnostics for a compact v2 card.",
+      "description": "Ranking diagnostics for a compact card.",
       "type": "object",
       "properties": {
         "retrieval_score": {

@@ -13,7 +13,7 @@ expression: tool
         "type": "string"
       },
       "AccessPolicyInput": {
-        "description": "One request access policy accepted by v2 write/update tools.",
+        "description": "One request access policy accepted by write/update tools.",
         "anyOf": [
           {
             "description": "String shorthand; currently only `\"public\"` is accepted.",
@@ -100,7 +100,7 @@ expression: tool
         "type": "string"
       },
       "EntityInputItem": {
-        "description": "One request entity accepted by v2 write/update tools.",
+        "description": "One request entity accepted by write/update tools.",
         "anyOf": [
           {
             "description": "String shorthand for an entity name; the entity type defaults to `unknown`.",
@@ -145,7 +145,7 @@ expression: tool
         "type": "string"
       },
       "summary": {
-        "description": "Replacement compact summary for v2 cards.",
+        "description": "Replacement compact summary for cards.",
         "type": "string"
       },
       "agent_label": {

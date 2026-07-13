@@ -1,8 +1,9 @@
 use std::{
-    io::{Read as _, Write as _},
+    io::{BufRead as _, BufReader, Read as _, Write as _},
     net::TcpListener,
     process::{Child, Command, Stdio},
-    thread,
+    sync::mpsc,
+    thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -14,6 +15,9 @@ use serde_json::Value;
 use sqlx_core::{query::query, query_scalar::query_scalar};
 use sqlx_postgres::PgPoolOptions;
 
+const STDIO_INITIALIZE: &str =
+    r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"localhold-binary-smoke","version":"1"}}}"#;
+
 fn unique_db_path(name: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     std::env::temp_dir().join(format!("localhold-{name}-{}-{nanos}.db", std::process::id()))
@@ -21,8 +25,11 @@ fn unique_db_path(name: &str) -> std::path::PathBuf {
 
 fn base_binary_command(db_path: &std::path::Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_hold"));
+    let _isolated_config = isolate_user_config_dir(&mut cmd, &db_path.with_extension("base-config"));
+    cmd.env_remove("LOCALHOLD_DB_BACKEND");
+    cmd.env_remove("LOCALHOLD_POSTGRES_URL");
     cmd.env("LOCALHOLD_DB_PATH", db_path);
-    cmd.env("LOCALHOLD_LOG_LEVEL", "error");
+    cmd.env("LOCALHOLD_LOG_LEVEL", "info");
     cmd
 }
 
@@ -46,16 +53,47 @@ fn isolate_user_config_dir(command: &mut Command, root: &std::path::Path) -> std
     }
 }
 
-fn assert_child_stays_running(child: &mut Child, label: &str) {
-    // Startup should succeed and keep serving until explicitly terminated.
-    thread::sleep(Duration::from_millis(300));
-    let status = child.try_wait().unwrap();
-    assert!(status.is_none(), "{label} process exited early: {status:?}");
+#[expect(clippy::expect_used, clippy::panic, reason = "test helper reports subprocess startup failures with captured diagnostics")]
+fn wait_for_startup_log(child: &mut Child, label: &str, expected: &str) -> JoinHandle<String> {
+    let stderr = child.stderr.take().expect("startup-log test must pipe stderr");
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        let mut output = String::new();
+        for line in BufReader::new(stderr).lines() {
+            let line = line.expect("child stderr should remain valid UTF-8 text");
+            output.push_str(&line);
+            output.push('\n');
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+        output
+    });
+
+    loop {
+        match receiver.recv_timeout(Duration::from_secs(30)) {
+            Ok(line) if line.contains(expected) => return reader,
+            Ok(_line) => {}
+            Err(error) => {
+                let status = child.try_wait().unwrap();
+                terminate_child(child);
+                let stderr = reader.join().unwrap();
+                panic!("{label} did not emit startup readiness log {expected:?}: {error}; status={status:?}; stderr={stderr}");
+            }
+        }
+    }
 }
 
 fn terminate_child(child: &mut Child) {
     let _kill = child.kill();
     let _status = child.wait();
+}
+
+#[expect(clippy::expect_used, reason = "test helper requires a piped stdin handle")]
+fn initialize_stdio_child(child: &mut Child) {
+    let stdin = child.stdin.as_mut().expect("stdio startup test must pipe stdin");
+    writeln!(stdin, "{STDIO_INITIALIZE}").unwrap();
+    stdin.flush().unwrap();
 }
 
 fn postgres_smoke_url() -> String {
@@ -76,7 +114,7 @@ fn drop_postgres_smoke_schema(url: &str) {
             DROP TABLE IF EXISTS
                 memory_audit_log,
                 memory_tombstones,
-                memory_v2_metadata,
+                memory_metadata,
                 memory_entities,
                 memory_embeddings,
                 memories,
@@ -121,13 +159,16 @@ fn binary_starts_in_stdio_mode() {
     let db_path = unique_db_path("bin-stdio");
     let mut cmd = base_binary_command(&db_path);
     cmd.env("LOCALHOLD_TRANSPORT", "stdio");
+    cmd.env("LOCALHOLD_LOG_LEVEL", "info");
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::null());
-    cmd.stderr(Stdio::null());
+    cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn().unwrap();
-    assert_child_stays_running(&mut child, "stdio");
+    initialize_stdio_child(&mut child);
+    let stderr = wait_for_startup_log(&mut child, "stdio", "localhold MCP server running on stdio");
     terminate_child(&mut child);
+    let _stderr = stderr.join().unwrap();
     let _cleanup = std::fs::remove_file(db_path);
 }
 
@@ -1012,13 +1053,15 @@ fn binary_starts_in_http_mode() {
     cmd.env("LOCALHOLD_HTTP_HOST", "127.0.0.1");
     cmd.env("LOCALHOLD_HTTP_PORT", "0");
     cmd.env("LOCALHOLD_HTTP_PATH", "/mcp");
+    cmd.env("LOCALHOLD_LOG_LEVEL", "info");
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
-    cmd.stderr(Stdio::null());
+    cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn().unwrap();
-    assert_child_stays_running(&mut child, "http");
+    let stderr = wait_for_startup_log(&mut child, "http", "localhold MCP server listening on");
     terminate_child(&mut child);
+    let _stderr = stderr.join().unwrap();
     let _cleanup = std::fs::remove_file(db_path);
 }
 
@@ -1037,10 +1080,9 @@ fn binary_starts_text_only_without_embedding_failure_warning() {
     cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn().unwrap();
-    assert_child_stays_running(&mut child, "text-only HTTP");
-    let _kill = child.kill();
-    let output = child.wait_with_output().unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
+    let stderr_reader = wait_for_startup_log(&mut child, "text-only HTTP", "localhold MCP server listening on");
+    terminate_child(&mut child);
+    let stderr = stderr_reader.join().unwrap();
 
     assert!(stderr.contains("noop embedding provider initialized"), "expected text-only provider startup log: {stderr}");
     assert!(
@@ -1088,10 +1130,10 @@ fn explicit_optional_cuda_stays_running_without_cpu_fallback() {
     cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn().unwrap();
-    assert_child_stays_running(&mut child, "optional CUDA reranker in CPU binary");
-    let _kill = child.kill();
-    let output = child.wait_with_output().unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
+    initialize_stdio_child(&mut child);
+    let stderr_reader = wait_for_startup_log(&mut child, "optional CUDA reranker in CPU binary", "localhold MCP server running on stdio");
+    terminate_child(&mut child);
+    let stderr = stderr_reader.join().unwrap();
     assert!(
         stderr.contains("CUDA was requested but this binary was compiled without"),
         "unexpected fallback log: {stderr}"
@@ -1157,20 +1199,25 @@ fn doctor_fails_required_cuda_before_cache_or_download_work() {
 #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
 fn binary_starts_with_postgres_backend() {
     let url = postgres_smoke_url();
+    let root = unique_db_path("bin-postgres").with_extension("config");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_hold"));
+    let _config_dir = isolate_user_config_dir(&mut cmd, &root);
     cmd.env("LOCALHOLD_DB_BACKEND", "postgres");
     cmd.env("LOCALHOLD_POSTGRES_URL", url);
     cmd.env("LOCALHOLD_POSTGRES_MAX_CONNECTIONS", "1");
     cmd.env("LOCALHOLD_EMBEDDING_DIMENSIONS", "3");
     cmd.env("LOCALHOLD_TRANSPORT", "stdio");
-    cmd.env("LOCALHOLD_LOG_LEVEL", "error");
+    cmd.env("LOCALHOLD_LOG_LEVEL", "info");
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::null());
-    cmd.stderr(Stdio::null());
+    cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn().unwrap();
-    assert_child_stays_running(&mut child, "postgres stdio");
+    initialize_stdio_child(&mut child);
+    let stderr = wait_for_startup_log(&mut child, "postgres stdio", "localhold MCP server running on stdio");
     terminate_child(&mut child);
+    let _stderr = stderr.join().unwrap();
+    let _cleanup = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -1261,13 +1308,16 @@ fn binary_ignores_config_files_in_current_directory() {
     let _config_dir = isolate_user_config_dir(&mut cmd, &root);
     cmd.current_dir(&root);
     cmd.env("LOCALHOLD_TRANSPORT", "stdio");
+    cmd.env("LOCALHOLD_LOG_LEVEL", "info");
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::null());
-    cmd.stderr(Stdio::null());
+    cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn().unwrap();
-    assert_child_stays_running(&mut child, "stdio with untrusted CWD configs");
+    initialize_stdio_child(&mut child);
+    let stderr = wait_for_startup_log(&mut child, "stdio with untrusted CWD configs", "localhold MCP server running on stdio");
     terminate_child(&mut child);
+    let _stderr = stderr.join().unwrap();
     let _cleanup = std::fs::remove_dir_all(root);
     let _cleanup = std::fs::remove_file(db_path);
 }

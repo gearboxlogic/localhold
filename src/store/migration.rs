@@ -21,13 +21,14 @@ use super::{
 use crate::{
     config::PostgresDatabaseConfig,
     error::{ParseEnumError, StoreError},
-    types::{AccessPolicy, AuditAction, AuditEntry, Entity, Memory, MemoryId, MemoryTombstone, Provenance, ScopeDefinition, V2MemoryMetadata},
+    types::{AccessPolicy, AuditAction, AuditEntry, Entity, Memory, MemoryId, MemoryMetadata, MemoryTombstone, Provenance, ScopeDefinition},
 };
 
 const DEFAULT_BATCH_SIZE: usize = 500;
 const DEFAULT_POSTGRES_URL_ENV: &str = "LOCALHOLD_POSTGRES_URL";
 const SQLITE_EMBEDDING_FETCH_CHUNK_SIZE: usize = 500;
 const POSTGRES_MIGRATIONS_TABLE: &str = "localhold_migrations";
+const RETIRED_METADATA_TABLE: &str = "memory_v2_metadata";
 const POSTGRES_LOCK_TIMEOUT: &str = "5s";
 const POSTGRES_USER_TABLES: &[&str] = &[
     "memories",
@@ -36,7 +37,7 @@ const POSTGRES_USER_TABLES: &[&str] = &[
     "memory_audit_log",
     "memory_tombstones",
     "scope_registry",
-    "memory_v2_metadata",
+    "memory_metadata",
     "embedding_profile",
 ];
 const POSTGRES_REQUIRED_COLUMNS: &[PostgresColumnExpectation] = &[
@@ -85,15 +86,15 @@ const POSTGRES_REQUIRED_COLUMNS: &[PostgresColumnExpectation] = &[
     PostgresColumnExpectation::new("scope_registry", "parent", "text"),
     PostgresColumnExpectation::new("scope_registry", "related", "jsonb"),
     PostgresColumnExpectation::new("scope_registry", "updated_at", "timestamp with time zone"),
-    PostgresColumnExpectation::new("memory_v2_metadata", "memory_id", "text"),
-    PostgresColumnExpectation::new("memory_v2_metadata", "scope_key", "text"),
-    PostgresColumnExpectation::new("memory_v2_metadata", "summary", "text"),
-    PostgresColumnExpectation::new("memory_v2_metadata", "agent_label", "text"),
-    PostgresColumnExpectation::new("memory_v2_metadata", "created_by_principal", "text"),
-    PostgresColumnExpectation::new("memory_v2_metadata", "quality_flags", "jsonb"),
-    PostgresColumnExpectation::new("memory_v2_metadata", "schema_version", "bigint"),
-    PostgresColumnExpectation::new("memory_v2_metadata", "migrated_at", "timestamp with time zone"),
-    PostgresColumnExpectation::new("memory_v2_metadata", "updated_at", "timestamp with time zone"),
+    PostgresColumnExpectation::new("memory_metadata", "memory_id", "text"),
+    PostgresColumnExpectation::new("memory_metadata", "scope_key", "text"),
+    PostgresColumnExpectation::new("memory_metadata", "summary", "text"),
+    PostgresColumnExpectation::new("memory_metadata", "agent_label", "text"),
+    PostgresColumnExpectation::new("memory_metadata", "created_by_principal", "text"),
+    PostgresColumnExpectation::new("memory_metadata", "quality_flags", "jsonb"),
+    PostgresColumnExpectation::new("memory_metadata", "schema_version", "bigint"),
+    PostgresColumnExpectation::new("memory_metadata", "migrated_at", "timestamp with time zone"),
+    PostgresColumnExpectation::new("memory_metadata", "updated_at", "timestamp with time zone"),
     PostgresColumnExpectation::new("embedding_profile", "singleton", "smallint"),
     PostgresColumnExpectation::new("embedding_profile", "provider", "text"),
     PostgresColumnExpectation::new("embedding_profile", "endpoint", "text"),
@@ -116,11 +117,11 @@ const POSTGRES_NULLABLE_COLUMNS: &[(&str, &str)] = &[
     ("memory_tombstones", "deleted_by_principal"),
     ("scope_registry", "description"),
     ("scope_registry", "parent"),
-    ("memory_v2_metadata", "scope_key"),
-    ("memory_v2_metadata", "summary"),
-    ("memory_v2_metadata", "agent_label"),
-    ("memory_v2_metadata", "created_by_principal"),
-    ("memory_v2_metadata", "migrated_at"),
+    ("memory_metadata", "scope_key"),
+    ("memory_metadata", "summary"),
+    ("memory_metadata", "agent_label"),
+    ("memory_metadata", "created_by_principal"),
+    ("memory_metadata", "migrated_at"),
 ];
 type PostgresDefaultExpectation = (&'static str, &'static str, &'static str);
 const POSTGRES_REQUIRED_DEFAULTS: &[PostgresDefaultExpectation] = &[
@@ -136,8 +137,8 @@ const POSTGRES_REQUIRED_DEFAULTS: &[PostgresDefaultExpectation] = &[
     ("scope_registry", "aliases", "'[]'::jsonb"),
     ("scope_registry", "matchers", "'[]'::jsonb"),
     ("scope_registry", "related", "'[]'::jsonb"),
-    ("memory_v2_metadata", "quality_flags", "'[]'::jsonb"),
-    ("memory_v2_metadata", "schema_version", "2"),
+    ("memory_metadata", "quality_flags", "'[]'::jsonb"),
+    ("memory_metadata", "schema_version", "1"),
 ];
 const POSTGRES_REQUIRED_KEYS: &[PostgresKeyExpectation] = &[
     PostgresKeyExpectation::new("localhold_migrations", &["version"]),
@@ -148,7 +149,7 @@ const POSTGRES_REQUIRED_KEYS: &[PostgresKeyExpectation] = &[
     PostgresKeyExpectation::new("memory_audit_log", &["id"]),
     PostgresKeyExpectation::new("memory_tombstones", &["memory_id"]),
     PostgresKeyExpectation::new("scope_registry", &["scope_key"]),
-    PostgresKeyExpectation::new("memory_v2_metadata", &["memory_id"]),
+    PostgresKeyExpectation::new("memory_metadata", &["memory_id"]),
     PostgresKeyExpectation::new("embedding_profile", &["singleton"]),
 ];
 const SQLITE_MEMORIES_COLUMNS: &[&str] = &[
@@ -179,7 +180,7 @@ const SQLITE_MEMORY_ENTITIES_COLUMNS: &[&str] = &["memory_id", "entity", "entity
 const SQLITE_AUDIT_LOG_COLUMNS: &[&str] = &["id", "memory_id", "action", "caller_agent", "timestamp", "details"];
 const SQLITE_TOMBSTONE_COLUMNS: &[&str] = &["memory_id", "provenance", "access_policy", "deleted_at", "deleted_by_principal"];
 const SQLITE_SCOPE_REGISTRY_COLUMNS: &[&str] = &["scope_key", "display_name", "description", "aliases", "matchers", "parent", "related", "updated_at"];
-const SQLITE_V2_METADATA_COLUMNS: &[&str] = &[
+const SQLITE_METADATA_COLUMNS: &[&str] = &[
     "memory_id",
     "scope_key",
     "summary",
@@ -201,7 +202,7 @@ const SQLITE_REQUIRED_TABLES: &[SqliteTableExpectation] = &[
     SqliteTableExpectation::new("memory_audit_log", SQLITE_AUDIT_LOG_COLUMNS, &[]),
     SqliteTableExpectation::new("memory_tombstones", SQLITE_TOMBSTONE_COLUMNS, &[]),
     SqliteTableExpectation::new("scope_registry", SQLITE_SCOPE_REGISTRY_COLUMNS, &[]),
-    SqliteTableExpectation::new("memory_v2_metadata", SQLITE_V2_METADATA_COLUMNS, &[]),
+    SqliteTableExpectation::new("memory_metadata", SQLITE_METADATA_COLUMNS, &[]),
     SqliteTableExpectation::new("embedding_profile", SQLITE_EMBEDDING_PROFILE_COLUMNS, &[]),
 ];
 const SQLITE_REQUIRED_KEYS: &[SqliteKeyExpectation] = &[
@@ -211,7 +212,7 @@ const SQLITE_REQUIRED_KEYS: &[SqliteKeyExpectation] = &[
     SqliteKeyExpectation::new("memory_audit_log", &["id"]),
     SqliteKeyExpectation::new("memory_tombstones", &["memory_id"]),
     SqliteKeyExpectation::new("scope_registry", &["scope_key"]),
-    SqliteKeyExpectation::new("memory_v2_metadata", &["memory_id"]),
+    SqliteKeyExpectation::new("memory_metadata", &["memory_id"]),
     SqliteKeyExpectation::new("embedding_profile", &["singleton"]),
 ];
 const SQLITE_REQUIRED_INDEXES: &[&str] = &[
@@ -231,7 +232,7 @@ const SQLITE_REQUIRED_INDEXES: &[&str] = &[
     "idx_audit_log_memory_id",
     "idx_audit_log_timestamp",
     "idx_memory_tombstones_deleted_at",
-    "idx_memory_v2_metadata_scope_key",
+    "idx_memory_metadata_scope_key",
 ];
 const SQLITE_REQUIRED_TRIGGERS: &[&str] = &[
     "trg_memory_embedding_map_delete",
@@ -454,8 +455,8 @@ pub struct MigrationTableCounts {
     pub tombstones: u64,
     /// Scope registry rows.
     pub scopes: u64,
-    /// v2 metadata rows.
-    pub v2_metadata: u64,
+    /// metadata rows.
+    pub metadata: u64,
     /// Embedding vector-space profile rows (zero or one).
     pub embedding_profiles: u64,
 }
@@ -468,7 +469,7 @@ impl MigrationTableCounts {
             && self.audit_entries == 0
             && self.tombstones == 0
             && self.scopes == 0
-            && self.v2_metadata == 0
+            && self.metadata == 0
             && self.embedding_profiles == 0
     }
 }
@@ -517,7 +518,7 @@ fn append_counts(output: &mut String, counts: MigrationTableCounts) {
     let _write_failed = writeln!(output, "  audit_entries: {}", counts.audit_entries).is_err();
     let _write_failed = writeln!(output, "  tombstones: {}", counts.tombstones).is_err();
     let _write_failed = writeln!(output, "  scopes: {}", counts.scopes).is_err();
-    let _write_failed = writeln!(output, "  v2_metadata: {}", counts.v2_metadata).is_err();
+    let _write_failed = writeln!(output, "  metadata: {}", counts.metadata).is_err();
     let _write_failed = writeln!(output, "  embedding_profiles: {}", counts.embedding_profiles).is_err();
 }
 
@@ -600,7 +601,7 @@ struct MigrationSnapshot {
     audit_entries: Vec<MigrationAuditEntry>,
     tombstones: Vec<MigrationTombstone>,
     scopes: Vec<MigrationScope>,
-    v2_metadata: Vec<MigrationV2Metadata>,
+    metadata: Vec<MigrationMetadata>,
     embedding_profile: Option<EmbeddingProfile>,
     counts: MigrationTableCounts,
 }
@@ -631,8 +632,8 @@ struct MigrationScope {
 }
 
 #[derive(Clone, Debug)]
-struct MigrationV2Metadata {
-    metadata: V2MemoryMetadata,
+struct MigrationMetadata {
+    metadata: MemoryMetadata,
     migrated_at: Option<DateTime<Utc>>,
     updated_at: DateTime<Utc>,
 }
@@ -703,7 +704,7 @@ fn export_sqlite_conn(conn: &Connection, embedding_dimensions: usize) -> Result<
     let audit_entries = export_audit_entries(conn)?;
     let tombstones = export_tombstones(conn)?;
     let scopes = export_scopes(conn)?;
-    let v2_metadata = export_v2_metadata(conn)?;
+    let metadata = export_metadata(conn)?;
     let counts = sqlite_counts(conn)?;
 
     Ok(MigrationSnapshot {
@@ -712,13 +713,14 @@ fn export_sqlite_conn(conn: &Connection, embedding_dimensions: usize) -> Result<
         audit_entries,
         tombstones,
         scopes,
-        v2_metadata,
+        metadata,
         embedding_profile: export_sqlite_embedding_profile(conn)?,
         counts,
     })
 }
 
 pub(crate) fn validate_sqlite_source_schema(conn: &Connection, embedding_dimensions: usize) -> Result<(), StoreError> {
+    reject_retired_sqlite_schema(conn)?;
     for table in SQLITE_REQUIRED_TABLES {
         validate_sqlite_table(conn, table)?;
     }
@@ -761,7 +763,7 @@ fn validate_sqlite_managed_object_definitions(conn: &Connection, allow_missing: 
         ("idx_memory_entities_entity_type", "on memory_entities(entity_type)"),
         ("idx_audit_log_memory_id", "on memory_audit_log(memory_id)"),
         ("idx_audit_log_timestamp", "on memory_audit_log(timestamp desc)"),
-        ("idx_memory_v2_metadata_scope_key", "on memory_v2_metadata(scope_key)"),
+        ("idx_memory_metadata_scope_key", "on memory_metadata(scope_key)"),
         ("idx_memory_tombstones_deleted_at", "on memory_tombstones(deleted_at desc)"),
     ];
     const TRIGGER_DEFINITIONS: &[(&str, &str)] = &[
@@ -856,6 +858,7 @@ pub(crate) fn validate_present_sqlite_schema(conn: &Connection) -> Result<(), St
         "embedding_claimed_at",
         "embedding_claim_token",
     ];
+    reject_retired_sqlite_schema(conn)?;
     for table in SQLITE_REQUIRED_TABLES {
         if sqlite_schema_sql(conn, "table", table.name)?.is_none() {
             validate_absent_sqlite_table_conflicts(conn, table.name)?;
@@ -1455,10 +1458,10 @@ fn export_scopes(conn: &Connection) -> Result<Vec<MigrationScope>, StoreError> {
     rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
 }
 
-fn export_v2_metadata(conn: &Connection) -> Result<Vec<MigrationV2Metadata>, StoreError> {
+fn export_metadata(conn: &Connection) -> Result<Vec<MigrationMetadata>, StoreError> {
     let mut stmt = conn.prepare(
         "SELECT memory_id, scope_key, summary, agent_label, created_by_principal, quality_flags, schema_version, migrated_at, updated_at
-         FROM memory_v2_metadata
+         FROM memory_metadata
          ORDER BY memory_id",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -1466,8 +1469,8 @@ fn export_v2_metadata(conn: &Connection) -> Result<Vec<MigrationV2Metadata>, Sto
         let quality_flags_json: String = row.get(5)?;
         let migrated_at_str: Option<String> = row.get(7)?;
         let updated_at_str: String = row.get(8)?;
-        Ok(MigrationV2Metadata {
-            metadata: V2MemoryMetadata {
+        Ok(MigrationMetadata {
+            metadata: MemoryMetadata {
                 memory_id: parse_memory_id_sql(&memory_id_str, 0)?,
                 scope_key: row.get(1)?,
                 summary: row.get(2)?,
@@ -1532,7 +1535,7 @@ async fn export_postgres_tx(tx: &mut Transaction<'_, Postgres>, embedding_dimens
         audit_entries: export_postgres_audit_entries_tx(tx).await?,
         tombstones: export_postgres_tombstones_tx(tx).await?,
         scopes: export_postgres_scopes_tx(tx).await?,
-        v2_metadata: export_postgres_v2_metadata_tx(tx).await?,
+        metadata: export_postgres_metadata_tx(tx).await?,
         embedding_profile: export_postgres_embedding_profile_tx(tx).await?,
         counts: postgres_counts_tx(tx).await?,
     })
@@ -1638,15 +1641,15 @@ async fn export_postgres_scopes_tx(tx: &mut Transaction<'_, Postgres>) -> Result
     rows.iter().map(postgres_row_to_scope).collect()
 }
 
-async fn export_postgres_v2_metadata_tx(tx: &mut Transaction<'_, Postgres>) -> Result<Vec<MigrationV2Metadata>, StoreError> {
+async fn export_postgres_metadata_tx(tx: &mut Transaction<'_, Postgres>) -> Result<Vec<MigrationMetadata>, StoreError> {
     let rows = query(
         "SELECT memory_id, scope_key, summary, agent_label, created_by_principal, quality_flags, schema_version, migrated_at, updated_at
-         FROM memory_v2_metadata
+         FROM memory_metadata
          ORDER BY memory_id ASC",
     )
     .fetch_all(&mut **tx)
     .await?;
-    rows.iter().map(postgres_row_to_v2_metadata).collect()
+    rows.iter().map(postgres_row_to_metadata).collect()
 }
 
 async fn export_postgres_embedding_profile_tx(tx: &mut Transaction<'_, Postgres>) -> Result<Option<EmbeddingProfile>, StoreError> {
@@ -1745,12 +1748,12 @@ fn postgres_row_to_scope(row: &PgRow) -> Result<MigrationScope, StoreError> {
     })
 }
 
-fn postgres_row_to_v2_metadata(row: &PgRow) -> Result<MigrationV2Metadata, StoreError> {
+fn postgres_row_to_metadata(row: &PgRow) -> Result<MigrationMetadata, StoreError> {
     let memory_id: String = row.try_get("memory_id")?;
     let quality_flags: Json<Vec<String>> = row.try_get("quality_flags")?;
-    Ok(MigrationV2Metadata {
-        metadata: V2MemoryMetadata {
-            memory_id: parse_memory_id_store(&memory_id, "memory_v2_metadata.memory_id")?,
+    Ok(MigrationMetadata {
+        metadata: MemoryMetadata {
+            memory_id: parse_memory_id_store(&memory_id, "memory_metadata.memory_id")?,
             scope_key: row.try_get("scope_key")?,
             summary: row.try_get("summary")?,
             agent_label: row.try_get("agent_label")?,
@@ -1802,7 +1805,7 @@ fn sqlite_counts(conn: &Connection) -> Result<MigrationTableCounts, StoreError> 
         audit_entries: sqlite_count(conn, "memory_audit_log")?,
         tombstones: sqlite_count(conn, "memory_tombstones")?,
         scopes: sqlite_count(conn, "scope_registry")?,
-        v2_metadata: sqlite_count(conn, "memory_v2_metadata")?,
+        metadata: sqlite_count(conn, "memory_metadata")?,
         embedding_profiles: sqlite_count(conn, "embedding_profile")?,
     })
 }
@@ -1848,6 +1851,7 @@ pub(crate) async fn validate_existing_postgres_schema(
     current_schema_only: bool,
     include_migration_metadata: bool,
 ) -> Result<(), StoreError> {
+    reject_retired_postgres_schema(pool, current_schema_only).await?;
     if include_migration_metadata && postgres_table_exists(pool, POSTGRES_MIGRATIONS_TABLE, current_schema_only).await? {
         validate_postgres_table_kind(pool, POSTGRES_MIGRATIONS_TABLE, current_schema_only).await?;
         for expectation in POSTGRES_REQUIRED_COLUMNS.iter().filter(|expectation| expectation.table == POSTGRES_MIGRATIONS_TABLE) {
@@ -1898,6 +1902,7 @@ pub(crate) async fn validate_present_postgres_schema(
     current_schema_only: bool,
     include_migration_metadata: bool,
 ) -> Result<(), StoreError> {
+    reject_retired_postgres_schema(pool, current_schema_only).await?;
     for table in std::iter::once(&POSTGRES_MIGRATIONS_TABLE)
         .filter(|_| include_migration_metadata)
         .chain(POSTGRES_USER_TABLES.iter())
@@ -1917,6 +1922,24 @@ pub(crate) async fn validate_present_postgres_schema(
     }
     if postgres_table_exists(pool, "memory_embeddings", current_schema_only).await? {
         validate_postgres_column_type(pool, "memory_embeddings", "embedding", &format!("vector({embedding_dimensions})"), current_schema_only).await?;
+    }
+    Ok(())
+}
+
+pub(crate) fn reject_retired_sqlite_schema(conn: &Connection) -> Result<(), StoreError> {
+    if sqlite_schema_sql(conn, "table", RETIRED_METADATA_TABLE)?.is_some() {
+        return Err(StoreError::Conflict(format!(
+            "SQLite contains unsupported prior-iteration table {RETIRED_METADATA_TABLE}; back up and reset the database before using this LocalHold version"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) async fn reject_retired_postgres_schema(pool: &PgPool, current_schema_only: bool) -> Result<(), StoreError> {
+    if postgres_table_exists(pool, RETIRED_METADATA_TABLE, current_schema_only).await? {
+        return Err(StoreError::Conflict(format!(
+            "PostgreSQL contains unsupported prior-iteration table {RETIRED_METADATA_TABLE}; back up and reset the database before using this LocalHold version"
+        )));
     }
     Ok(())
 }
@@ -2218,7 +2241,7 @@ async fn postgres_counts_existing(pool: &PgPool) -> Result<MigrationTableCounts,
         audit_entries: postgres_count_existing(pool, "memory_audit_log").await?,
         tombstones: postgres_count_existing(pool, "memory_tombstones").await?,
         scopes: postgres_count_existing(pool, "scope_registry").await?,
-        v2_metadata: postgres_count_existing(pool, "memory_v2_metadata").await?,
+        metadata: postgres_count_existing(pool, "memory_metadata").await?,
         embedding_profiles: postgres_count_existing(pool, "embedding_profile").await?,
     })
 }
@@ -2274,7 +2297,7 @@ async fn postgres_counts_tx(tx: &mut Transaction<'_, Postgres>) -> Result<Migrat
         audit_entries: postgres_count_tx(tx, "memory_audit_log").await?,
         tombstones: postgres_count_tx(tx, "memory_tombstones").await?,
         scopes: postgres_count_tx(tx, "scope_registry").await?,
-        v2_metadata: postgres_count_tx(tx, "memory_v2_metadata").await?,
+        metadata: postgres_count_tx(tx, "memory_metadata").await?,
         embedding_profiles: postgres_count_tx(tx, "embedding_profile").await?,
     })
 }
@@ -2290,7 +2313,7 @@ async fn lock_postgres_user_tables(tx: &mut Transaction<'_, Postgres>) -> Result
             memory_audit_log,
             memory_tombstones,
             scope_registry,
-            memory_v2_metadata,
+            memory_metadata,
             embedding_profile
         IN ACCESS EXCLUSIVE MODE
         ",
@@ -2328,8 +2351,8 @@ async fn import_postgres(tx: &mut Transaction<'_, Postgres>, source: &MigrationS
     for scope in &source.scopes {
         insert_postgres_scope(tx, scope).await?;
     }
-    for metadata in &source.v2_metadata {
-        insert_postgres_v2_metadata(tx, metadata).await?;
+    for metadata in &source.metadata {
+        insert_postgres_metadata(tx, metadata).await?;
     }
     for audit in &source.audit_entries {
         insert_postgres_audit_entry(tx, audit).await?;
@@ -2449,11 +2472,11 @@ async fn insert_postgres_scope(tx: &mut Transaction<'_, Postgres>, scope: &Migra
     Ok(())
 }
 
-async fn insert_postgres_v2_metadata(tx: &mut Transaction<'_, Postgres>, metadata: &MigrationV2Metadata) -> Result<(), StoreError> {
+async fn insert_postgres_metadata(tx: &mut Transaction<'_, Postgres>, metadata: &MigrationMetadata) -> Result<(), StoreError> {
     let row = &metadata.metadata;
     let _result = query(
         "
-        INSERT INTO memory_v2_metadata (
+        INSERT INTO memory_metadata (
             memory_id, scope_key, summary, agent_label, created_by_principal,
             quality_flags, schema_version, migrated_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -2578,7 +2601,7 @@ struct ComparableSnapshot {
     audit_entries: Vec<ComparableAuditEntry>,
     tombstones: Vec<ComparableTombstone>,
     scopes: Vec<ComparableScope>,
-    v2_metadata: Vec<ComparableV2Metadata>,
+    metadata: Vec<ComparableMetadata>,
     embedding_profile: Option<EmbeddingProfile>,
 }
 
@@ -2611,8 +2634,8 @@ struct ComparableScope {
 }
 
 #[derive(serde::Serialize)]
-struct ComparableV2Metadata {
-    metadata: V2MemoryMetadata,
+struct ComparableMetadata {
+    metadata: MemoryMetadata,
     migrated_at_micros: Option<i64>,
     updated_at_micros: i64,
 }
@@ -2637,8 +2660,8 @@ fn comparable_snapshot(snapshot: &MigrationSnapshot) -> Result<serde_json::Value
     let mut scopes = snapshot.scopes.iter().cloned().map(comparable_scope).collect::<Vec<_>>();
     scopes.sort_by_key(|item| item.definition.scope_key.clone());
 
-    let mut v2_metadata = snapshot.v2_metadata.iter().cloned().map(comparable_v2_metadata).collect::<Vec<_>>();
-    v2_metadata.sort_by_key(|item| item.metadata.memory_id.to_string());
+    let mut metadata = snapshot.metadata.iter().cloned().map(comparable_metadata).collect::<Vec<_>>();
+    metadata.sort_by_key(|item| item.metadata.memory_id.to_string());
 
     let comparable = ComparableSnapshot {
         memories,
@@ -2646,7 +2669,7 @@ fn comparable_snapshot(snapshot: &MigrationSnapshot) -> Result<serde_json::Value
         audit_entries,
         tombstones,
         scopes,
-        v2_metadata,
+        metadata,
         embedding_profile: snapshot.embedding_profile.clone(),
     };
     serde_json::to_value(comparable).map_err(StoreError::from)
@@ -2688,8 +2711,8 @@ fn comparable_scope(item: MigrationScope) -> ComparableScope {
     }
 }
 
-fn comparable_v2_metadata(item: MigrationV2Metadata) -> ComparableV2Metadata {
-    ComparableV2Metadata {
+fn comparable_metadata(item: MigrationMetadata) -> ComparableMetadata {
+    ComparableMetadata {
         metadata: item.metadata,
         migrated_at_micros: item.migrated_at.map(timestamp_micros),
         updated_at_micros: timestamp_micros(item.updated_at),
@@ -2745,12 +2768,22 @@ mod tests {
         entity: Entity,
         scope: ScopeDefinition,
         scope_updated_at: DateTime<Utc>,
-        metadata: V2MemoryMetadata,
+        metadata: MemoryMetadata,
         metadata_migrated_at: DateTime<Utc>,
         metadata_updated_at: DateTime<Utc>,
         audit_details: serde_json::Value,
         tombstone: MemoryTombstone,
         counts: MigrationTableCounts,
+    }
+
+    #[test]
+    fn sqlite_rejects_retired_iteration_metadata_table() {
+        let connection = Connection::open_in_memory().unwrap();
+        let _created = connection.execute("CREATE TABLE memory_v2_metadata (memory_id TEXT PRIMARY KEY)", []).unwrap();
+
+        let error = reject_retired_sqlite_schema(&connection).unwrap_err();
+
+        assert!(error.to_string().contains("unsupported prior-iteration table memory_v2_metadata"));
     }
 
     #[test]
@@ -3033,10 +3066,10 @@ mod tests {
         assert_eq!(snapshot.scopes.len(), 1_usize);
         assert_eq!(snapshot.scopes[0].definition, fixture.scope);
         assert_eq!(snapshot.scopes[0].updated_at, fixture.scope_updated_at);
-        assert_eq!(snapshot.v2_metadata.len(), 1_usize);
-        assert_eq!(snapshot.v2_metadata[0].metadata, fixture.metadata);
-        assert_eq!(snapshot.v2_metadata[0].migrated_at, Some(fixture.metadata_migrated_at));
-        assert_eq!(snapshot.v2_metadata[0].updated_at, fixture.metadata_updated_at);
+        assert_eq!(snapshot.metadata.len(), 1_usize);
+        assert_eq!(snapshot.metadata[0].metadata, fixture.metadata);
+        assert_eq!(snapshot.metadata[0].migrated_at, Some(fixture.metadata_migrated_at));
+        assert_eq!(snapshot.metadata[0].updated_at, fixture.metadata_updated_at);
         assert_eq!(snapshot.audit_entries.len(), 2_usize);
         assert_eq!(snapshot.audit_entries[0].memory_id, fixture.old_id);
         assert_eq!(snapshot.audit_entries[0].entry.action, AuditAction::Store);
@@ -3150,14 +3183,14 @@ mod tests {
         let source_path = temp.path().join("source.db");
         let _fixture = seed_sqlite_source(&source_path).await;
         corrupt_sqlite_source(&source_path, |conn| {
-            conn.execute_batch("DROP TABLE memory_v2_metadata")?;
+            conn.execute_batch("DROP TABLE memory_metadata")?;
             Ok(())
         });
         let options = sqlite_options(&source_path, true, false);
 
         let err = export_sqlite(&options).await.unwrap_err();
 
-        assert!(err.to_string().contains("memory_v2_metadata"), "expected missing table error, got: {err}");
+        assert!(err.to_string().contains("memory_metadata"), "expected missing table error, got: {err}");
         assert!(err.to_string().contains("open the source database once"), "expected repair guidance, got: {err}");
     }
 
@@ -3239,10 +3272,10 @@ mod tests {
             ])?;
             assert_eq!(inserted, 1_usize, "expected to insert one orphan entity row");
             let inserted = conn.execute(
-                "INSERT INTO memory_v2_metadata (memory_id, quality_flags, schema_version, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO memory_metadata (memory_id, quality_flags, schema_version, updated_at) VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![missing_id.to_string(), "[]", 2_i64, fixed_time(10_u32).to_rfc3339()],
             )?;
-            assert_eq!(inserted, 1_usize, "expected to insert one orphan v2 metadata row");
+            assert_eq!(inserted, 1_usize, "expected to insert one orphan metadata row");
             Ok(())
         });
 
@@ -3321,7 +3354,7 @@ mod tests {
         assert_eq!(old.superseded_by, Some(fixture.new_id));
         assert_eq!(old.entities, vec![fixture.entity.clone()]);
 
-        let metadata = target.get_v2_metadata(&fixture.old_id).await.unwrap();
+        let metadata = target.get_metadata(&fixture.old_id).await.unwrap();
         assert_eq!(metadata, Some(fixture.metadata.clone()));
 
         let audit_entries = target.query_audit_log(&fixture.old_id, 10_usize).await.unwrap();
@@ -3358,7 +3391,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(scope_updated_at, fixture.scope_updated_at);
-        let metadata_timestamps: MetadataTimestamps = sqlx_core::query_as::query_as("SELECT migrated_at, updated_at FROM memory_v2_metadata WHERE memory_id = $1")
+        let metadata_timestamps: MetadataTimestamps = sqlx_core::query_as::query_as("SELECT migrated_at, updated_at FROM memory_metadata WHERE memory_id = $1")
             .bind(fixture.old_id.to_string())
             .fetch_one(target.pool())
             .await
@@ -3591,6 +3624,20 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Docker or local PostgreSQL with pgvector; destructive cleanup requires LOCALHOLD_ALLOW_DESTRUCTIVE_PG_SMOKE=1"]
+    async fn present_postgres_schema_rejects_retired_iteration_metadata_table() {
+        reset_postgres_migration_database().await;
+        let pool = open_postgres_pool(&postgres_smoke_url()).await.unwrap();
+        let _created = query("CREATE TABLE memory_v2_metadata (memory_id TEXT PRIMARY KEY)").execute(&pool).await.unwrap();
+
+        let error = validate_present_postgres_schema(&pool, TEST_EMBEDDING_DIMENSIONS, true, true).await.unwrap_err();
+
+        assert!(error.to_string().contains("unsupported prior-iteration table memory_v2_metadata"));
+        pool.close().await;
+        drop_postgres_migration_schema().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; destructive cleanup requires LOCALHOLD_ALLOW_DESTRUCTIVE_PG_SMOKE=1"]
     async fn present_postgres_schema_rejects_relaxed_required_nullability() {
         reset_postgres_migration_database().await;
         let pool = open_postgres_pool(&postgres_smoke_url()).await.unwrap();
@@ -3693,9 +3740,9 @@ mod tests {
                 cascade: false,
             },
             MissingManagedKeyCase {
-                table: "memory_v2_metadata",
-                constraint: "memory_v2_metadata_pkey",
-                expected_error: "memory_v2_metadata.memory_id",
+                table: "memory_metadata",
+                constraint: "memory_metadata_pkey",
+                expected_error: "memory_metadata.memory_id",
                 cascade: false,
             },
         ];
@@ -3761,7 +3808,7 @@ mod tests {
                 ..MigrationTableCounts::default()
             },
             MigrationTableCounts {
-                v2_metadata: 1,
+                metadata: 1,
                 ..MigrationTableCounts::default()
             },
         ];
@@ -3803,7 +3850,7 @@ mod tests {
             audit_entries: Vec::new(),
             tombstones: Vec::new(),
             scopes: Vec::new(),
-            v2_metadata: Vec::new(),
+            metadata: Vec::new(),
             embedding_profile: None,
             counts: MigrationTableCounts::default(),
         }
@@ -3849,16 +3896,16 @@ mod tests {
         };
         store.register_scope(scope.clone()).await.unwrap();
 
-        let metadata = V2MemoryMetadata {
+        let metadata = MemoryMetadata {
             memory_id: old_id,
             scope_key: Some(scope.scope_key.clone()),
             summary: Some("copied summary".into()),
             agent_label: Some("migration-agent".into()),
             created_by_principal: Some("migration-principal".into()),
             quality_flags: vec!["seeded".into()],
-            schema_version: 2_i64,
+            schema_version: 1_i64,
         };
-        store.upsert_v2_metadata(metadata.clone()).await.unwrap();
+        store.upsert_metadata(metadata.clone()).await.unwrap();
 
         let old_id_for_update = old_id.to_string();
         let new_id_for_update = new_id.to_string();
@@ -3881,12 +3928,12 @@ mod tests {
                     scope_key_for_update
                 ])?;
                 assert_eq!(updated, 1_usize, "expected to update scope timestamp");
-                let updated = conn.execute("UPDATE memory_v2_metadata SET migrated_at = ?1, updated_at = ?2 WHERE memory_id = ?3", rusqlite::params![
+                let updated = conn.execute("UPDATE memory_metadata SET migrated_at = ?1, updated_at = ?2 WHERE memory_id = ?3", rusqlite::params![
                     metadata_migrated_at.to_rfc3339(),
                     metadata_updated_at.to_rfc3339(),
                     metadata_id_for_update
                 ])?;
-                assert_eq!(updated, 1_usize, "expected to update v2 metadata timestamps");
+                assert_eq!(updated, 1_usize, "expected to update metadata timestamps");
                 Ok(())
             })
             .await
@@ -3961,7 +4008,7 @@ mod tests {
                 audit_entries: 2_u64,
                 tombstones: 1_u64,
                 scopes: 1_u64,
-                v2_metadata: 1_u64,
+                metadata: 1_u64,
                 embedding_profiles: 1_u64,
             },
         }
@@ -4035,7 +4082,7 @@ mod tests {
             TRUNCATE TABLE
                 memory_audit_log,
                 memory_tombstones,
-                memory_v2_metadata,
+                memory_metadata,
                 memory_entities,
                 memory_embeddings,
                 memories,
@@ -4084,7 +4131,7 @@ mod tests {
             DROP TABLE IF EXISTS
                 memory_audit_log,
                 memory_tombstones,
-                memory_v2_metadata,
+                memory_metadata,
                 memory_entities,
                 memory_embeddings,
                 memories,

@@ -185,9 +185,9 @@ fn response_schema_reembed_response() {
 }
 
 #[test]
-fn response_schema_admin_v2_migrate_metadata_response() {
-    let schema = schemars::schema_for!(params::AdminV2MigrateMetadataResponse);
-    insta::assert_json_snapshot!("response_schema_AdminV2MigrateMetadataResponse", schema);
+fn response_schema_admin_migrate_metadata_response() {
+    let schema = schemars::schema_for!(params::AdminMigrateMetadataResponse);
+    insta::assert_json_snapshot!("response_schema_AdminMigrateMetadataResponse", schema);
 }
 
 // ---------------------------------------------------------------------------

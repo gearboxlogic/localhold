@@ -1,12 +1,11 @@
 ---
 source: tests/integration/schema_snapshots.rs
-assertion_line: 22
 expression: schema
 ---
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "QualityWarning",
-  "description": "A quality or classification warning returned by v2 write tools.",
+  "description": "A quality or classification warning returned by write tools.",
   "type": "object",
   "properties": {
     "code": {
@@ -43,7 +42,7 @@ expression: schema
   ],
   "$defs": {
     "QualityWarningSeverity": {
-      "description": "Severity for v2 quality warnings.",
+      "description": "Severity for quality warnings.",
       "oneOf": [
         {
           "description": "Informational hint; the operation is usually usable.",

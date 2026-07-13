@@ -9,7 +9,7 @@ expression: tool
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$defs": {
       "EntityInputItem": {
-        "description": "One request entity accepted by v2 write/update tools.",
+        "description": "One request entity accepted by write/update tools.",
         "anyOf": [
           {
             "description": "String shorthand for an entity name; the entity type defaults to `unknown`.",
@@ -60,7 +60,7 @@ expression: tool
         ]
       },
       "AccessPolicyInput": {
-        "description": "One request access policy accepted by v2 write/update tools.",
+        "description": "One request access policy accepted by write/update tools.",
         "anyOf": [
           {
             "description": "String shorthand; currently only `\"public\"` is accepted.",

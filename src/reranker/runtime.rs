@@ -22,7 +22,10 @@ pub struct RerankerModelIdentity {
     /// Expected tokenizer artifact SHA-256, or `not_configured` for direct files.
     pub tokenizer_sha256: String,
 }
-use crate::config::{RerankerConfig, RerankerExecutionProvider};
+use crate::{
+    clock::{Clock, SystemClock},
+    config::{RerankerConfig, RerankerExecutionProvider},
+};
 
 /// Successfully initialized reranker provider.
 pub struct InitializedReranker {
@@ -65,21 +68,31 @@ impl InitializedReranker {
 /// Returns immediately for permanent model errors, unavailable explicitly
 /// requested providers, and failed required-mode health inference.
 pub async fn initialize_with_retry(config: &RerankerConfig) -> Result<InitializedReranker, RerankerError> {
+    initialize_with_retry_and_clock(config, Arc::new(SystemClock::new())).await
+}
+
+/// Initialize a reranker with retries driven by an injected clock.
+///
+/// # Errors
+///
+/// Returns model, provider, or inference errors using the same policy as
+/// [`initialize_with_retry`].
+pub async fn initialize_with_retry_and_clock(config: &RerankerConfig, clock: Arc<dyn Clock>) -> Result<InitializedReranker, RerankerError> {
     const MAX_RETRIES: u32 = 3;
     initialize_ort()?;
     let mut delay = std::time::Duration::from_secs(2);
     for attempt in 0..MAX_RETRIES {
-        match initialize(config).await {
+        match initialize(config, Arc::clone(&clock)).await {
             Ok(initialized) => return Ok(initialized),
             Err(error @ (RerankerError::Permanent(_) | RerankerError::ProviderUnavailable(_))) => return Err(error),
             Err(error) => {
                 warn!("reranker init attempt {}/{MAX_RETRIES} failed: {error}, retrying in {delay:?}", attempt.saturating_add(1));
-                tokio::time::sleep(delay).await;
+                clock.sleep(delay).await;
                 delay = delay.saturating_mul(2);
             }
         }
     }
-    initialize(config).await
+    initialize(config, clock).await
 }
 
 /// Resolve the configured artifact identity without touching the model cache.
@@ -121,15 +134,25 @@ pub fn model_identity(config: &RerankerConfig) -> Result<RerankerModelIdentity, 
 ///
 /// Returns model, provider, or inference errors from normal initialization.
 pub async fn initialize_for_diagnostics(config: &RerankerConfig, allow_downloads: bool) -> Result<InitializedReranker, RerankerError> {
+    initialize_for_diagnostics_with_clock(config, allow_downloads, Arc::new(SystemClock::new())).await
+}
+
+/// Initialize diagnostic inference with retries and probes driven by `clock`.
+///
+/// # Errors
+///
+/// Returns model, provider, download, or inference errors from normal
+/// initialization.
+pub async fn initialize_for_diagnostics_with_clock(config: &RerankerConfig, allow_downloads: bool, clock: Arc<dyn Clock>) -> Result<InitializedReranker, RerankerError> {
     let _provider_candidates = crate::reranker::policy::execution_provider_candidates(config.execution_provider)?;
     if allow_downloads {
-        return initialize_with_retry(config).await;
+        return initialize_with_retry_and_clock(config, clock).await;
     }
     let paths = download::resolve_cached_model_paths(config)?;
     let mut local_config = config.clone();
     local_config.model_path = paths.onnx_path.to_string_lossy().into_owned();
     initialize_ort()?;
-    initialize(&local_config).await
+    initialize(&local_config, clock).await
 }
 
 fn initialize_ort() -> Result<(), RerankerError> {
@@ -139,8 +162,8 @@ fn initialize_ort() -> Result<(), RerankerError> {
     Ok(())
 }
 
-async fn initialize(config: &RerankerConfig) -> Result<InitializedReranker, RerankerError> {
-    let mut initialized = load_provider(config).await?;
+async fn initialize(config: &RerankerConfig, clock: Arc<dyn Clock>) -> Result<InitializedReranker, RerankerError> {
+    let mut initialized = load_provider(config, Arc::clone(&clock)).await?;
 
     if config.execution_provider == RerankerExecutionProvider::Auto
         && initialized.selected_execution_provider() == Some(RerankerExecutionProvider::Cuda)
@@ -149,7 +172,7 @@ async fn initialize(config: &RerankerConfig) -> Result<InitializedReranker, Rera
         warn!("CUDA reranker failed initial health inference; auto policy falling back to CPU");
         let mut cpu_config = config.clone();
         cpu_config.execution_provider = RerankerExecutionProvider::Cpu;
-        initialized = load_provider(&cpu_config).await?;
+        initialized = load_provider(&cpu_config, clock).await?;
     }
 
     let selected = initialized.selected_execution_provider();
@@ -175,10 +198,10 @@ async fn initialize(config: &RerankerConfig) -> Result<InitializedReranker, Rera
     Ok(InitializedReranker { provider: Arc::new(initialized) })
 }
 
-async fn load_provider(config: &RerankerConfig) -> Result<ResilientReranker<OnnxReranker>, RerankerError> {
+async fn load_provider(config: &RerankerConfig, clock: Arc<dyn Clock>) -> Result<ResilientReranker<OnnxReranker>, RerankerError> {
     let config = config.clone();
     let onnx = tokio::task::spawn_blocking(move || OnnxReranker::new(&config))
         .await
         .map_err(|error| RerankerError::Transient(Box::new(error)))??;
-    Ok(ResilientReranker::new(onnx, ResilientRerankerConfig::default()).await)
+    Ok(ResilientReranker::new_with_clock(onnx, ResilientRerankerConfig::default(), clock).await)
 }

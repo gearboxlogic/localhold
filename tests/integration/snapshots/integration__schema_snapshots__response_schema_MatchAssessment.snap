@@ -5,7 +5,7 @@ expression: schema
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "MatchAssessment",
-  "description": "Agent-facing match assessment for a compact v2 card.",
+  "description": "Agent-facing match assessment for a compact card.",
   "type": "object",
   "properties": {
     "quality": {

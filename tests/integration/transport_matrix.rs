@@ -1,4 +1,4 @@
-//! Transport-agnostic v2 tests that run against both stdio and HTTP.
+//! Transport-agnostic tests that run against both stdio and HTTP.
 //!
 //! Each [`transport_test!`] invocation generates two `#[tokio::test]`
 //! functions: `stdio_<name>` and `http_<name>`.
@@ -16,7 +16,7 @@ use serde_json::json;
 
 use super::helpers::{assert_invalid_params_contains, await_embeddings, call_tool, call_tool_error, transport_test};
 
-transport_test!(noop, v2_core_lifecycle, |h| async move {
+transport_test!(noop, core_lifecycle, |h| async move {
     let client = h.client();
 
     let remembered: RememberResponse = call_tool(
@@ -68,7 +68,7 @@ transport_test!(noop, v2_core_lifecycle, |h| async move {
     h.shutdown().await;
 });
 
-transport_test!(noop, v2_remember_many_and_admin_count, |h| async move {
+transport_test!(noop, remember_many_and_admin_count, |h| async move {
     let client = h.client();
 
     let remembered: RememberManyResponse = call_tool(
@@ -97,7 +97,7 @@ transport_test!(noop, v2_remember_many_and_admin_count, |h| async move {
     h.shutdown().await;
 });
 
-transport_test!(noop, v2_scope_registry_context_hints, |h| async move {
+transport_test!(noop, scope_registry_context_hints, |h| async move {
     let client = h.client();
 
     let _registered: serde_json::Value = call_tool(
@@ -140,7 +140,7 @@ transport_test!(noop, v2_scope_registry_context_hints, |h| async move {
     h.shutdown().await;
 });
 
-transport_test!(noop, v2_admin_reassign_scope_updates_read_metadata, |h| async move {
+transport_test!(noop, admin_reassign_scope_updates_read_metadata, |h| async move {
     let client = h.client();
 
     let remembered: RememberResponse = call_tool(client, "remember", json!({"content": "move this scope", "scope": "matrix/source"})).await;
@@ -158,7 +158,7 @@ transport_test!(noop, v2_admin_reassign_scope_updates_read_metadata, |h| async m
     h.shutdown().await;
 });
 
-transport_test!(noop, v2_validation_errors_are_transport_consistent, |h| async move {
+transport_test!(noop, validation_errors_are_transport_consistent, |h| async move {
     let client = h.client();
 
     assert_invalid_params_contains(client, "remember", json!({}), "content").await;
@@ -175,7 +175,7 @@ transport_test!(noop, v2_validation_errors_are_transport_consistent, |h| async m
     h.shutdown().await;
 });
 
-transport_test!(noop, v2_remember_many_validation_is_all_or_nothing, |h| async move {
+transport_test!(noop, remember_many_validation_is_all_or_nothing, |h| async move {
     let client = h.client();
 
     assert_invalid_params_contains(
@@ -197,7 +197,7 @@ transport_test!(noop, v2_remember_many_validation_is_all_or_nothing, |h| async m
     h.shutdown().await;
 });
 
-transport_test!(embedding, v2_recall_uses_embeddings_when_available, |h| async move {
+transport_test!(embedding, recall_uses_embeddings_when_available, |h| async move {
     let client = h.client();
 
     let rust: RememberResponse = call_tool(client, "remember", json!({"content": "Rust programming language systems", "scope": "matrix/embedding"})).await;
@@ -226,7 +226,7 @@ transport_test!(embedding, v2_recall_uses_embeddings_when_available, |h| async m
     h.shutdown().await;
 });
 
-transport_test!(embedding, v2_revise_content_triggers_reembedding, |h| async move {
+transport_test!(embedding, revise_content_triggers_reembedding, |h| async move {
     let client = h.client();
 
     let remembered: RememberResponse = call_tool(client, "remember", json!({"content": "original embedding matrix", "scope": "matrix/reembed"})).await;

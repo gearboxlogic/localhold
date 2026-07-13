@@ -304,7 +304,7 @@ pub(crate) async fn setup_server_with_limits(embedding: Arc<dyn EmbeddingProvide
     (client, server_ref)
 }
 
-/// Spawn an MCP server with explicit v2 authorization settings.
+/// Spawn an MCP server with explicit authorization settings.
 /// Returns `(client, server_ref)`.
 pub(crate) async fn setup_server_with_auth(
     embedding: Arc<dyn EmbeddingProvider>,
@@ -362,7 +362,7 @@ pub(crate) async fn setup_noop_server_with_limits(limits: LimitsConfig) -> (Runn
     setup_server_with_limits(Arc::new(NoopEmbedding::new()), limits).await
 }
 
-/// Spawn an MCP server with `NoopEmbedding` and explicit v2 authorization settings.
+/// Spawn an MCP server with `NoopEmbedding` and explicit authorization settings.
 pub(crate) async fn setup_noop_server_with_auth(principal: Option<&str>, anonymous_policy: AnonymousPolicy) -> RunningService<rmcp::RoleClient, ()> {
     let (client, _server) = setup_server_with_auth(Arc::new(NoopEmbedding::new()), principal, anonymous_policy).await;
     client
@@ -536,7 +536,7 @@ pub(crate) async fn spawn_http_noop_server_with_allowed_hosts(http_allowed_hosts
     spawn_http_server_inner(server, localhold::config::DEFAULT_HTTP_MAX_BODY_BYTES, None, Some(http_allowed_hosts)).await
 }
 
-/// Spawn an HTTP MCP server with explicit v2 authorization settings.
+/// Spawn an HTTP MCP server with explicit authorization settings.
 /// Returns `(url, cancellation_token, server_ref)`.
 pub(crate) async fn spawn_http_server_with_auth(
     embedding: Arc<dyn EmbeddingProvider>,
@@ -656,7 +656,7 @@ pub(crate) async fn setup_http_noop_server() -> (String, CancellationToken, Loca
     spawn_http_server_with(Arc::new(NoopEmbedding::new())).await
 }
 
-/// Spawn an HTTP MCP server with `NoopEmbedding` and explicit v2 auth settings.
+/// Spawn an HTTP MCP server with `NoopEmbedding` and explicit auth settings.
 pub(crate) async fn setup_http_noop_server_with_auth(
     principal: Option<&str>,
     anonymous_policy: AnonymousPolicy,

@@ -14,7 +14,7 @@ use localhold::{
     server::{
         LocalHoldServer,
         params::{
-            AdminListResponse, AdminV2MigrateMetadataResponse, AdminV2MigrationReportResponse, BriefResponse, BulkDeleteResponse, BulkUpdateResponse, ConsolidateResponse,
+            AdminListResponse, AdminMigrateMetadataResponse, AdminMigrationReportResponse, BriefResponse, BulkDeleteResponse, BulkUpdateResponse, ConsolidateResponse,
             CountResponse, HandoffResponse, HistoryResponse, MatchAction, MatchQuality, OperationStatus, QualityWarning, QualityWarningSeverity, ReadManyResponse, ReadManyStatus,
             ReadResponse, ReassignScopeResponse, RecallResponse, RecommendedActionPriority, RecommendedActionTool, RememberManyResponse, RememberResponse, ScopeResolvedBy,
             ToolErrorCode, ToolErrorResponse, UpdateResponse,
@@ -112,12 +112,12 @@ async fn tool_list_returns_expected_tools() {
         "admin_count",
         "admin_history",
         "admin_list",
+        "admin_migrate_metadata",
+        "admin_migration_report",
         "admin_reassign_scope",
         "admin_reembed",
         "admin_scope_list",
         "admin_scope_register",
-        "admin_v2_migrate_metadata",
-        "admin_v2_migration_report",
         "brief",
         "forget",
         "handoff",
@@ -129,7 +129,7 @@ async fn tool_list_returns_expected_tools() {
         "revise"
     ]);
     assert_eq!(names.len(), 22_usize, "expected 22 default-discovery tools");
-    assert!(!names.contains(&"memory_store"), "legacy v1 tools should remain hidden from default discovery");
+    assert!(!names.contains(&"memory_store"), "retired tools should remain hidden from default discovery");
 }
 
 #[tokio::test]
@@ -138,6 +138,16 @@ async fn legacy_memory_tools_are_not_directly_callable() {
     let result = client.call_tool(call_tool_params("memory_store", json!({}))).await;
 
     assert!(result.is_err(), "legacy memory_store should not be registered as an MCP tool");
+}
+
+#[tokio::test]
+async fn retired_iteration_migration_tools_are_not_directly_callable() {
+    let client = setup_noop_server().await;
+
+    for name in ["admin_v2_migration_report", "admin_v2_migrate_metadata"] {
+        let result = client.call_tool(call_tool_params(name, json!({}))).await;
+        assert!(result.is_err(), "retired tool {name} should not be registered");
+    }
 }
 
 #[tokio::test]
@@ -176,12 +186,12 @@ async fn tool_schemas_have_required_fields() {
     assert!(find_required("admin_reembed").is_empty());
     assert_eq!(find_required("admin_scope_register"), BTreeSet::from(["display_name".to_owned(), "scope_key".to_owned()]));
     assert!(find_required("admin_scope_list").is_empty());
-    assert!(find_required("admin_v2_migrate_metadata").is_empty());
-    assert!(find_required("admin_v2_migration_report").is_empty());
+    assert!(find_required("admin_migrate_metadata").is_empty());
+    assert!(find_required("admin_migration_report").is_empty());
 }
 
 #[tokio::test]
-async fn tool_schemas_expose_v2_properties() {
+async fn tool_schemas_expose_properties() {
     let client = setup_noop_server().await;
     let tools = client.list_all_tools().await.unwrap();
 
@@ -337,8 +347,8 @@ async fn admin_tool_metadata_describes_authorization_and_preview_behavior() {
         "admin_reembed",
         "admin_scope_list",
         "admin_scope_register",
-        "admin_v2_migrate_metadata",
-        "admin_v2_migration_report",
+        "admin_migrate_metadata",
+        "admin_migration_report",
     ] {
         assert!(description(name).contains("server-resolved principal"), "{name} should mention server-resolved principal");
     }
@@ -347,7 +357,7 @@ async fn admin_tool_metadata_describes_authorization_and_preview_behavior() {
     assert!(description("admin_bulk_delete").contains("destructively delete"));
     assert!(description("admin_consolidate").contains("dry_run=true previews"));
     assert!(description("admin_consolidate").contains("dry_run=false merges"));
-    assert!(description("admin_v2_migrate_metadata").contains("dry_run=true previews"));
+    assert!(description("admin_migrate_metadata").contains("dry_run=true previews"));
 }
 
 #[tokio::test]
@@ -373,7 +383,7 @@ async fn store_roundtrip_through_protocol() {
 }
 
 #[tokio::test]
-async fn v2_read_nonexistent_memory_returns_not_found() {
+async fn read_nonexistent_memory_returns_not_found() {
     let client = setup_noop_server().await;
     let fake_id = "01J0000000000000000000000A";
 
@@ -386,7 +396,7 @@ async fn v2_read_nonexistent_memory_returns_not_found() {
 }
 
 #[tokio::test]
-async fn v2_remember_invalid_content_returns_structured_tool_error() {
+async fn remember_invalid_content_returns_structured_tool_error() {
     let client = setup_noop_server().await;
 
     let err = call_tool_error(&client, "remember", json!({"content": "   "})).await;
@@ -399,7 +409,7 @@ async fn v2_remember_invalid_content_returns_structured_tool_error() {
 }
 
 #[tokio::test]
-async fn v2_recall_empty_store_returns_no_results() {
+async fn recall_empty_store_returns_no_results() {
     let client = setup_noop_server().await;
 
     let recalled: RecallResponse = call_tool(&client, "recall", json!({"query": "nonexistent content"})).await;
@@ -409,7 +419,7 @@ async fn v2_recall_empty_store_returns_no_results() {
 }
 
 #[tokio::test]
-async fn v2_entities_roundtrip_filter_update_and_delete() {
+async fn entities_roundtrip_filter_update_and_delete() {
     let client = setup_noop_server().await;
 
     let target: RememberResponse = call_tool(
@@ -485,7 +495,7 @@ async fn v2_entities_roundtrip_filter_update_and_delete() {
 }
 
 #[tokio::test]
-async fn v2_entity_string_shorthand_roundtrips_across_write_tools() {
+async fn entity_string_shorthand_roundtrips_across_write_tools() {
     let client = setup_noop_server().await;
 
     let remembered: RememberResponse = call_tool(
@@ -556,7 +566,7 @@ async fn v2_entity_string_shorthand_roundtrips_across_write_tools() {
 }
 
 #[tokio::test]
-async fn v2_access_policy_public_shorthand_roundtrips_across_write_tools() {
+async fn access_policy_public_shorthand_roundtrips_across_write_tools() {
     let (client, server) = setup_server_with_auth(Arc::new(NoopEmbedding::new()), Some("owner"), AnonymousPolicy::PublicReadOnly).await;
 
     let remembered: RememberResponse = call_tool(
@@ -641,7 +651,7 @@ async fn v2_access_policy_public_shorthand_roundtrips_across_write_tools() {
 }
 
 #[tokio::test]
-async fn v2_admin_bulk_update_and_delete_filter_workflow() {
+async fn admin_bulk_update_and_delete_filter_workflow() {
     let client = setup_noop_server().await;
 
     let keep: RememberResponse = call_tool(&client, "remember", json!({"content": "keep me", "tags": ["keep"]})).await;
@@ -692,7 +702,7 @@ async fn v2_admin_bulk_update_and_delete_filter_workflow() {
 }
 
 #[tokio::test]
-async fn v2_admin_tools_reject_removed_wire_names() {
+async fn admin_tools_reject_removed_wire_names() {
     let client = setup_noop_server().await;
 
     for (tool, args, expected) in [
@@ -712,7 +722,7 @@ async fn v2_admin_tools_reject_removed_wire_names() {
 }
 
 #[tokio::test]
-async fn v2_admin_history_reports_audit_entries_without_memory_content() {
+async fn admin_history_reports_audit_entries_without_memory_content() {
     let (client, server) = setup_server_with(Arc::new(NoopEmbedding::new())).await;
 
     let lifecycle: RememberResponse = call_tool(
@@ -780,7 +790,7 @@ async fn v2_admin_history_reports_audit_entries_without_memory_content() {
 }
 
 #[tokio::test]
-async fn v2_admin_history_hides_current_memory_not_visible_to_principal() {
+async fn admin_history_hides_current_memory_not_visible_to_principal() {
     let store = SqliteStore::in_memory().unwrap();
     let memory = Memory::new_for_test(
         "restricted audit history content".to_owned(),
@@ -810,7 +820,7 @@ async fn v2_admin_history_hides_current_memory_not_visible_to_principal() {
 }
 
 #[tokio::test]
-async fn v2_admin_consolidate_previews_and_validates_thresholds() {
+async fn admin_consolidate_previews_and_validates_thresholds() {
     let client = setup_noop_server().await;
 
     let preview: ConsolidateResponse = call_tool(
@@ -838,14 +848,14 @@ async fn v2_admin_consolidate_previews_and_validates_thresholds() {
 }
 
 #[tokio::test]
-async fn v2_remember_recall_read_roundtrip_uses_compact_cards() {
+async fn remember_recall_read_roundtrip_uses_compact_cards() {
     let client = setup_noop_server().await;
 
     let remembered: RememberResponse = call_tool(
         &client,
         "remember",
         json!({
-            "content": "v2 durable project decision: compact recall cards omit full content",
+            "content": "durable project decision: compact recall cards omit full content",
             "summary": "Compact cards omit full content",
             "scope": "gearboxlogic/localhold",
             "agent_label": "Protocol Test Agent",
@@ -879,12 +889,12 @@ async fn v2_remember_recall_read_roundtrip_uses_compact_cards() {
 
     let read: ReadResponse = call_tool(&client, "read", json!({"id": remembered.id})).await;
     assert_eq!(read.memory.id, remembered.id);
-    assert_eq!(read.memory.content, "v2 durable project decision: compact recall cards omit full content");
+    assert_eq!(read.memory.content, "durable project decision: compact recall cards omit full content");
     assert!(read.activity_recorded, "read should record activity automatically");
 }
 
 #[tokio::test]
-async fn v2_read_many_preserves_order_and_returns_not_found_items() {
+async fn read_many_preserves_order_and_returns_not_found_items() {
     let client = setup_noop_server().await;
     let first: RememberResponse = call_tool(&client, "remember", json!({"content": "read_many first", "scope": "read-many"})).await;
     let second: RememberResponse = call_tool(&client, "remember", json!({"content": "read_many second", "scope": "read-many"})).await;
@@ -908,7 +918,7 @@ async fn v2_read_many_preserves_order_and_returns_not_found_items() {
 }
 
 #[tokio::test]
-async fn v2_read_many_validates_batch_size() {
+async fn read_many_validates_batch_size() {
     let client = setup_noop_server().await;
 
     let empty_err = call_tool_error(&client, "read_many", json!({"ids": []})).await;
@@ -924,7 +934,7 @@ async fn v2_read_many_validates_batch_size() {
 }
 
 #[tokio::test]
-async fn v2_remember_many_returns_per_item_results_and_operation_summary() {
+async fn remember_many_returns_per_item_results_and_operation_summary() {
     let client = setup_noop_server().await;
 
     let remembered: RememberManyResponse = call_tool(
@@ -967,7 +977,7 @@ async fn v2_remember_many_returns_per_item_results_and_operation_summary() {
 }
 
 #[tokio::test]
-async fn v2_remember_many_accepts_string_shorthand_items() {
+async fn remember_many_accepts_string_shorthand_items() {
     let client = setup_noop_server().await;
 
     let remembered: RememberManyResponse = call_tool(
@@ -993,7 +1003,7 @@ async fn v2_remember_many_accepts_string_shorthand_items() {
 }
 
 #[tokio::test]
-async fn v2_admin_list_returns_compact_inventory_cards() {
+async fn admin_list_returns_compact_inventory_cards() {
     let client = setup_noop_server().await;
 
     let remembered: RememberResponse = call_tool(
@@ -1026,7 +1036,7 @@ async fn v2_admin_list_returns_compact_inventory_cards() {
 }
 
 #[tokio::test]
-async fn v2_recall_records_search_impressions() {
+async fn recall_records_search_impressions() {
     let clock = Arc::new(MockClock::new());
     let (client, server) = setup_noop_server_with_clock(Arc::clone(&clock)).await;
 
@@ -1034,7 +1044,7 @@ async fn v2_recall_records_search_impressions() {
         &client,
         "remember",
         json!({
-            "content": "v2 recall impression activity candidate",
+            "content": "recall impression activity candidate",
             "summary": "Recall impression candidate",
             "scope": "gearboxlogic/localhold",
             "tags": ["wip"]
@@ -1050,7 +1060,7 @@ async fn v2_recall_records_search_impressions() {
         &client,
         "recall",
         json!({
-            "query": "v2 recall impression activity candidate",
+            "query": "recall impression activity candidate",
             "scope": "gearboxlogic/localhold"
         }),
     )
@@ -1066,7 +1076,7 @@ async fn v2_recall_records_search_impressions() {
 }
 
 #[tokio::test]
-async fn v2_recall_suppresses_weak_matches_unless_requested() {
+async fn recall_suppresses_weak_matches_unless_requested() {
     let (client, server) = setup_embedding_server().await;
 
     for content in [
@@ -1122,9 +1132,9 @@ async fn v2_recall_suppresses_weak_matches_unless_requested() {
 }
 
 #[tokio::test]
-async fn v2_remember_warns_when_duplicate_candidates_exist() {
+async fn remember_warns_when_duplicate_candidates_exist() {
     let client = setup_noop_server().await;
-    let content = "v2 duplicate warning should surface similar existing memories";
+    let content = "duplicate warning should surface similar existing memories";
 
     let _first: RememberResponse = call_tool(
         &client,
@@ -1159,7 +1169,7 @@ async fn v2_remember_warns_when_duplicate_candidates_exist() {
 }
 
 #[tokio::test]
-async fn v2_remember_quality_warnings_are_advisory() {
+async fn remember_quality_warnings_are_advisory() {
     let client = setup_noop_server().await;
     let content = format!("{}\n```rust\nfn derived_from_code() {{}}\n```", "oversized agent memory candidate ".repeat(160));
 
@@ -1191,14 +1201,14 @@ async fn v2_remember_quality_warnings_are_advisory() {
 }
 
 #[tokio::test]
-async fn v2_revise_updates_card_metadata() {
+async fn revise_updates_card_metadata() {
     let client = setup_noop_server().await;
 
     let remembered: RememberResponse = call_tool(
         &client,
         "remember",
         json!({
-            "content": "v2 revise metadata keeps cards current",
+            "content": "revise metadata keeps cards current",
             "summary": "Old revise summary",
             "agent_label": "Old Agent",
             "scope": "gearboxlogic/localhold",
@@ -1223,7 +1233,7 @@ async fn v2_revise_updates_card_metadata() {
         &client,
         "recall",
         json!({
-            "query": "v2 revise metadata keeps cards current",
+            "query": "revise metadata keeps cards current",
             "scope": "gearboxlogic/localhold"
         }),
     )
@@ -1236,7 +1246,7 @@ async fn v2_revise_updates_card_metadata() {
 }
 
 #[tokio::test]
-async fn v2_revise_classifies_unresolved_memory_from_context_hints() {
+async fn revise_classifies_unresolved_memory_from_context_hints() {
     let client = setup_noop_server().await;
 
     let _registered: serde_json::Value = call_tool(
@@ -1293,14 +1303,14 @@ async fn v2_revise_classifies_unresolved_memory_from_context_hints() {
 }
 
 #[tokio::test]
-async fn v2_missing_scope_lands_in_unresolved_inbox() {
+async fn missing_scope_lands_in_unresolved_inbox() {
     let client = setup_noop_server().await;
 
     let remembered: RememberResponse = call_tool(
         &client,
         "remember",
         json!({
-            "content": "v2 unresolved memory should be classified later"
+            "content": "unresolved memory should be classified later"
         }),
     )
     .await;
@@ -1312,7 +1322,7 @@ async fn v2_missing_scope_lands_in_unresolved_inbox() {
 }
 
 #[tokio::test]
-async fn v2_scope_registry_resolves_aliases_and_matchers() {
+async fn scope_registry_resolves_aliases_and_matchers() {
     let client = setup_noop_server().await;
 
     let _registered: serde_json::Value = call_tool(
@@ -1383,14 +1393,14 @@ async fn v2_scope_registry_resolves_aliases_and_matchers() {
 }
 
 #[tokio::test]
-async fn v2_admin_reassign_scope_updates_card_metadata_scope() {
+async fn admin_reassign_scope_updates_card_metadata_scope() {
     let client = setup_noop_server().await;
 
     let remembered: RememberResponse = call_tool(
         &client,
         "remember",
         json!({
-            "content": "admin reassign scope updates v2 card metadata",
+            "content": "admin reassign scope updates card metadata",
             "summary": "Reassigned card metadata",
             "scope": "old/project",
             "tags": ["decision"]
@@ -1413,7 +1423,7 @@ async fn v2_admin_reassign_scope_updates_card_metadata_scope() {
         &client,
         "recall",
         json!({
-            "query": "admin reassign scope updates v2 card metadata",
+            "query": "admin reassign scope updates card metadata",
             "scope": "new/project"
         }),
     )
@@ -1425,10 +1435,10 @@ async fn v2_admin_reassign_scope_updates_card_metadata_scope() {
 }
 
 #[tokio::test]
-async fn v2_admin_reassign_scope_respects_origin_filter_and_records_history() {
+async fn admin_reassign_scope_respects_origin_filter_and_records_history() {
     let (client, server) = setup_server_with_auth(Arc::new(NoopEmbedding::new()), Some("bot"), AnonymousPolicy::PublicReadOnly).await;
-    let moved_id = seed_reassign_memory(&server, "v2 reassign origin moved", "bot", "project-1", "conv-a").await;
-    let retained_id = seed_reassign_memory(&server, "v2 reassign origin retained", "bot", "project-1", "conv-b").await;
+    let moved_id = seed_reassign_memory(&server, "reassign origin moved", "bot", "project-1", "conv-a").await;
+    let retained_id = seed_reassign_memory(&server, "reassign origin retained", "bot", "project-1", "conv-b").await;
 
     let reassigned: ReassignScopeResponse = call_tool(
         &client,
@@ -1467,10 +1477,10 @@ async fn v2_admin_reassign_scope_respects_origin_filter_and_records_history() {
 }
 
 #[tokio::test]
-async fn v2_admin_reassign_scope_skips_unauthorized_matches() {
+async fn admin_reassign_scope_skips_unauthorized_matches() {
     let (client, server) = setup_server_with_auth(Arc::new(NoopEmbedding::new()), Some("owner"), AnonymousPolicy::PublicReadOnly).await;
-    let owned_id = seed_reassign_memory(&server, "v2 reassign owned", "owner", "project-1", "conv-a").await;
-    let denied_id = seed_reassign_memory(&server, "v2 reassign denied", "other", "project-1", "conv-b").await;
+    let owned_id = seed_reassign_memory(&server, "reassign owned", "owner", "project-1", "conv-a").await;
+    let denied_id = seed_reassign_memory(&server, "reassign denied", "other", "project-1", "conv-b").await;
 
     let reassigned: ReassignScopeResponse = call_tool(
         &client,
@@ -1491,7 +1501,7 @@ async fn v2_admin_reassign_scope_skips_unauthorized_matches() {
 }
 
 #[tokio::test]
-async fn v2_forget_denied_returns_structured_tool_error() {
+async fn forget_denied_returns_structured_tool_error() {
     let (client, server) = setup_server_with_auth(Arc::new(NoopEmbedding::new()), Some("owner"), AnonymousPolicy::PublicReadOnly).await;
     let denied_id = seed_reassign_memory(&server, "forget denied structured error", "other", "project-1", "conv-a").await;
 
@@ -1505,9 +1515,9 @@ async fn v2_forget_denied_returns_structured_tool_error() {
 }
 
 #[tokio::test]
-async fn v2_admin_reassign_scope_validates_and_trims_inputs() {
+async fn admin_reassign_scope_validates_and_trims_inputs() {
     let (client, server) = setup_server_with_auth(Arc::new(NoopEmbedding::new()), Some("bot"), AnonymousPolicy::PublicReadOnly).await;
-    let seeded_id = seed_reassign_memory(&server, "v2 reassign trimmed", "bot", "project-1", "conv-a").await;
+    let seeded_id = seed_reassign_memory(&server, "reassign trimmed", "bot", "project-1", "conv-a").await;
 
     assert_invalid_params_contains(
         &client,
@@ -1547,7 +1557,7 @@ async fn v2_admin_reassign_scope_validates_and_trims_inputs() {
 }
 
 #[tokio::test]
-async fn v2_brief_resolves_scope_from_context_hints() {
+async fn brief_resolves_scope_from_context_hints() {
     let client = setup_noop_server().await;
 
     let _registered: serde_json::Value = call_tool(
@@ -1601,7 +1611,7 @@ async fn v2_brief_resolves_scope_from_context_hints() {
 }
 
 #[tokio::test]
-async fn v2_brief_recommends_read_for_one_suggested_read() {
+async fn brief_recommends_read_for_one_suggested_read() {
     let client = setup_noop_server().await;
     let remembered: RememberResponse = call_tool(
         &client,
@@ -1624,7 +1634,7 @@ async fn v2_brief_recommends_read_for_one_suggested_read() {
 }
 
 #[tokio::test]
-async fn v2_brief_recommends_read_many_for_ordered_suggested_reads() {
+async fn brief_recommends_read_many_for_ordered_suggested_reads() {
     let client = setup_noop_server().await;
     let _first: RememberResponse = call_tool(
         &client,
@@ -1656,7 +1666,7 @@ async fn v2_brief_recommends_read_many_for_ordered_suggested_reads() {
 }
 
 #[tokio::test]
-async fn v2_brief_recommends_scope_registration_without_partial_arguments() {
+async fn brief_recommends_scope_registration_without_partial_arguments() {
     let client = setup_noop_server().await;
     let _remembered: RememberResponse = call_tool(
         &client,
@@ -1687,7 +1697,7 @@ async fn v2_brief_recommends_scope_registration_without_partial_arguments() {
 }
 
 #[tokio::test]
-async fn v2_brief_recommends_remember_for_empty_brief() {
+async fn brief_recommends_remember_for_empty_brief() {
     let client = setup_noop_server().await;
 
     let brief: BriefResponse = call_tool(&client, "brief", json!({"query": "brief empty no visible memories"})).await;
@@ -1701,7 +1711,7 @@ async fn v2_brief_recommends_remember_for_empty_brief() {
 }
 
 #[tokio::test]
-async fn v2_brief_recommends_include_weak_recall_for_stale_only_query() {
+async fn brief_recommends_include_weak_recall_for_stale_only_query() {
     let (client, server) = setup_low_rerank_server().await;
     let _first: RememberResponse = call_tool(
         &client,
@@ -1741,7 +1751,7 @@ async fn v2_brief_recommends_include_weak_recall_for_stale_only_query() {
 }
 
 #[tokio::test]
-async fn v2_recall_resolves_scope_from_context_hints() {
+async fn recall_resolves_scope_from_context_hints() {
     let client = setup_noop_server().await;
 
     let _registered: serde_json::Value = call_tool(
@@ -1809,7 +1819,7 @@ async fn v2_recall_resolves_scope_from_context_hints() {
 }
 
 #[tokio::test]
-async fn v2_recall_warns_when_context_hints_do_not_resolve_scope() {
+async fn recall_warns_when_context_hints_do_not_resolve_scope() {
     let client = setup_noop_server().await;
 
     let remembered: RememberResponse = call_tool(
@@ -1847,7 +1857,7 @@ async fn v2_recall_warns_when_context_hints_do_not_resolve_scope() {
 }
 
 #[tokio::test]
-async fn v2_brief_warns_when_context_hints_do_not_resolve_scope() {
+async fn brief_warns_when_context_hints_do_not_resolve_scope() {
     let client = setup_noop_server().await;
 
     let remembered: RememberResponse = call_tool(
@@ -1879,9 +1889,9 @@ async fn v2_brief_warns_when_context_hints_do_not_resolve_scope() {
 }
 
 #[tokio::test]
-async fn v2_anonymous_public_read_only_allows_public_recall_and_blocks_writes() {
+async fn anonymous_public_read_only_allows_public_recall_and_blocks_writes() {
     let (client, ids) = setup_noop_server_with_auth_and_legacy_memories(
-        vec![LegacySeed::new("anonymous public read-only can see public v2 recall cards").tags(&["auth"])],
+        vec![LegacySeed::new("anonymous public read-only can see public recall cards").tags(&["auth"])],
         None,
         AnonymousPolicy::PublicReadOnly,
     )
@@ -1901,7 +1911,7 @@ async fn v2_anonymous_public_read_only_allows_public_recall_and_blocks_writes() 
     assert_eq!(recalled.results[0].id, stored_id);
 
     let read: ReadResponse = call_tool(&client, "read", json!({"id": stored_id})).await;
-    assert_eq!(read.memory.content, "anonymous public read-only can see public v2 recall cards");
+    assert_eq!(read.memory.content, "anonymous public read-only can see public recall cards");
     assert!(!read.activity_recorded, "anonymous reads do not create owner activity");
 
     let read_many: ReadManyResponse = call_tool(&client, "read_many", json!({"ids": [stored_id]})).await;
@@ -1922,15 +1932,15 @@ async fn v2_anonymous_public_read_only_allows_public_recall_and_blocks_writes() 
     assert_eq!(structured.error.code, ToolErrorCode::AnonymousWriteDenied);
     assert!(!structured.error.retryable);
 
-    let err = call_tool_error(&client, "admin_v2_migration_report", json!({})).await;
+    let err = call_tool_error(&client, "admin_migration_report", json!({})).await;
     assert!(err.contains("anonymous writes are disabled"));
 
-    let migrate_err = call_tool_error(&client, "admin_v2_migrate_metadata", json!({"dry_run": true})).await;
+    let migrate_err = call_tool_error(&client, "admin_migrate_metadata", json!({"dry_run": true})).await;
     assert!(migrate_err.contains("anonymous writes are disabled"));
 }
 
 #[tokio::test]
-async fn v2_anonymous_deny_all_blocks_reads() {
+async fn anonymous_deny_all_blocks_reads() {
     let client = setup_noop_server_with_auth(None, AnonymousPolicy::DenyAll).await;
 
     let recall_err = call_tool_error(
@@ -1948,9 +1958,9 @@ async fn v2_anonymous_deny_all_blocks_reads() {
 }
 
 #[tokio::test]
-async fn v2_migration_report_counts_legacy_rows_missing_metadata() {
+async fn metadata_migration_report_counts_legacy_rows_missing_metadata() {
     let (client, _ids) = setup_noop_server_with_legacy_memories(vec![
-        LegacySeed::new("legacy row without v2 metadata"),
+        LegacySeed::new("legacy row without metadata"),
         LegacySeed::new(format!(
             "{}\n```rust\nfn migration_report_code_candidate() {{}}\n```",
             "oversized migration report candidate ".repeat(130)
@@ -1959,18 +1969,18 @@ async fn v2_migration_report_counts_legacy_rows_missing_metadata() {
         LegacySeed::new("legacy duplicate migration report candidate"),
     ])
     .await;
-    let _v2: RememberResponse = call_tool(
+    let _current: RememberResponse = call_tool(
         &client,
         "remember",
         json!({
-            "content": "v2 row with metadata summary",
-            "summary": "v2 metadata summary",
+            "content": "row with metadata summary",
+            "summary": "metadata summary",
             "scope": "gearboxlogic/localhold"
         }),
     )
     .await;
 
-    let report: AdminV2MigrationReportResponse = call_tool(&client, "admin_v2_migration_report", json!({})).await;
+    let report: AdminMigrationReportResponse = call_tool(&client, "admin_migration_report", json!({})).await;
     assert_eq!(report.report.total_memories, 5);
     assert_eq!(report.report.metadata_rows, 1);
     assert_eq!(report.report.missing_metadata, 4);
@@ -1982,13 +1992,13 @@ async fn v2_migration_report_counts_legacy_rows_missing_metadata() {
 }
 
 #[tokio::test]
-async fn v2_metadata_migration_backfills_legacy_rows_non_destructively() {
+async fn metadata_migration_backfills_legacy_rows_non_destructively() {
     let (client, legacy_ids) = setup_noop_server_with_legacy_memories(vec![
-        LegacySeed::new("legacy scoped durable fact for v2 metadata migration")
+        LegacySeed::new("legacy scoped durable fact for metadata migration")
             .tags(&["migration-scoped"])
             .source_agent("legacy-agent")
             .source_conversation("gearboxlogic/localhold"),
-        LegacySeed::new("legacy unregistered scope durable fact for v2 metadata migration")
+        LegacySeed::new("legacy unregistered scope durable fact for metadata migration")
             .tags(&["migration-unresolved"])
             .source_agent("legacy-agent")
             .source_conversation("old/unregistered"),
@@ -1999,20 +2009,20 @@ async fn v2_metadata_migration_backfills_legacy_rows_non_destructively() {
 
     register_localhold_scope(&client).await;
 
-    let dry_run: AdminV2MigrateMetadataResponse = call_tool(&client, "admin_v2_migrate_metadata", json!({"dry_run": true})).await;
+    let dry_run: AdminMigrateMetadataResponse = call_tool(&client, "admin_migrate_metadata", json!({"dry_run": true})).await;
     assert!(dry_run.dry_run);
     assert_eq!(dry_run.report.candidate_count, 2);
     assert_eq!(dry_run.report.migrated, 0);
     assert_eq!(dry_run.report.unresolved_scope, 1);
     assert_eq!(dry_run.report.missing_summary, 2);
 
-    let applied: AdminV2MigrateMetadataResponse = call_tool(&client, "admin_v2_migrate_metadata", json!({})).await;
+    let applied: AdminMigrateMetadataResponse = call_tool(&client, "admin_migrate_metadata", json!({})).await;
     assert!(!applied.dry_run);
     assert_eq!(applied.report.candidate_count, 2);
     assert_eq!(applied.report.migrated, 2);
     assert_eq!(applied.report.unresolved_scope, 1);
 
-    let after: AdminV2MigrationReportResponse = call_tool(&client, "admin_v2_migration_report", json!({})).await;
+    let after: AdminMigrationReportResponse = call_tool(&client, "admin_migration_report", json!({})).await;
     assert_eq!(after.report.metadata_rows, 2);
     assert_eq!(after.report.missing_metadata, 0);
     assert_eq!(after.report.missing_summary, 2);
@@ -2047,11 +2057,11 @@ async fn v2_metadata_migration_backfills_legacy_rows_non_destructively() {
     assert_eq!(unresolved_recall.results[0].scope, "inbox/unresolved");
 
     let read: ReadResponse = call_tool(&client, "read", json!({"id": scoped_id})).await;
-    assert_eq!(read.memory.content, "legacy scoped durable fact for v2 metadata migration");
+    assert_eq!(read.memory.content, "legacy scoped durable fact for metadata migration");
 }
 
 #[tokio::test]
-async fn v2_metadata_migration_is_idempotent_and_preserves_existing_metadata() {
+async fn metadata_migration_is_idempotent_and_preserves_existing_metadata() {
     let (client, legacy_ids) = setup_noop_server_with_legacy_memories(vec![
         LegacySeed::new("legacy idempotent migration row keeps original content")
             .tags(&["migration-idempotent"])
@@ -2063,29 +2073,29 @@ async fn v2_metadata_migration_is_idempotent_and_preserves_existing_metadata() {
 
     register_localhold_scope(&client).await;
 
-    let existing_v2: RememberResponse = call_tool(
+    let existing: RememberResponse = call_tool(
         &client,
         "remember",
         json!({
-            "content": "existing v2 metadata should survive migration",
-            "summary": "Existing v2 summary",
+            "content": "existing metadata should survive migration",
+            "summary": "Existing summary",
             "scope": "gearboxlogic/localhold",
-            "agent_label": "Existing V2 Agent",
+            "agent_label": "Existing Agent",
             "tags": ["migration-existing"]
         }),
     )
     .await;
-    let first: AdminV2MigrateMetadataResponse = call_tool(&client, "admin_v2_migrate_metadata", json!({})).await;
+    let first: AdminMigrateMetadataResponse = call_tool(&client, "admin_migrate_metadata", json!({})).await;
     assert_eq!(first.report.candidate_count, 1);
     assert_eq!(first.report.skipped_existing, 1);
     assert_eq!(first.report.migrated, 1);
 
-    let second: AdminV2MigrateMetadataResponse = call_tool(&client, "admin_v2_migrate_metadata", json!({})).await;
+    let second: AdminMigrateMetadataResponse = call_tool(&client, "admin_migrate_metadata", json!({})).await;
     assert_eq!(second.report.candidate_count, 0);
     assert_eq!(second.report.skipped_existing, 2);
     assert_eq!(second.report.migrated, 0);
 
-    let report: AdminV2MigrationReportResponse = call_tool(&client, "admin_v2_migration_report", json!({})).await;
+    let report: AdminMigrationReportResponse = call_tool(&client, "admin_migration_report", json!({})).await;
     assert_eq!(report.report.metadata_rows, 2);
     assert_eq!(report.report.missing_metadata, 0);
     assert_eq!(report.report.missing_summary, 1);
@@ -2094,15 +2104,15 @@ async fn v2_metadata_migration_is_idempotent_and_preserves_existing_metadata() {
         &client,
         "recall",
         json!({
-            "query": "existing v2 metadata should survive migration",
+            "query": "existing metadata should survive migration",
             "tags": ["migration-existing"],
             "scope": "gearboxlogic/localhold"
         }),
     )
     .await;
-    assert_eq!(existing_recall.results[0].id, existing_v2.id);
-    assert_eq!(existing_recall.results[0].summary_or_excerpt, "Existing v2 summary");
-    assert_eq!(existing_recall.results[0].agent_label.as_deref(), Some("Existing V2 Agent"));
+    assert_eq!(existing_recall.results[0].id, existing.id);
+    assert_eq!(existing_recall.results[0].summary_or_excerpt, "Existing summary");
+    assert_eq!(existing_recall.results[0].agent_label.as_deref(), Some("Existing Agent"));
 
     let legacy_recall: RecallResponse = call_tool(
         &client,
@@ -2122,7 +2132,7 @@ async fn v2_metadata_migration_is_idempotent_and_preserves_existing_metadata() {
 }
 
 #[tokio::test]
-async fn v2_handoff_previews_without_commit() {
+async fn handoff_previews_without_commit() {
     let client = setup_noop_server().await;
 
     let handoff: HandoffResponse = call_tool(
@@ -2146,7 +2156,7 @@ async fn v2_handoff_previews_without_commit() {
 }
 
 #[tokio::test]
-async fn v2_handoff_rejects_oversized_batch_before_candidate_work() {
+async fn handoff_rejects_oversized_batch_before_candidate_work() {
     let mut limits = LimitsConfig::default();
     limits.max_batch_size = 1;
     let (client, _server) = setup_noop_server_with_limits(limits).await;
@@ -2174,7 +2184,7 @@ async fn v2_handoff_rejects_oversized_batch_before_candidate_work() {
 }
 
 #[tokio::test]
-async fn v2_handoff_commit_validates_all_candidates_before_writing() {
+async fn handoff_commit_validates_all_candidates_before_writing() {
     let client = setup_noop_server().await;
 
     assert_invalid_params_contains(
@@ -2196,7 +2206,7 @@ async fn v2_handoff_commit_validates_all_candidates_before_writing() {
 }
 
 #[tokio::test]
-async fn v2_handoff_commit_batch_store_failure_does_not_write_candidates() {
+async fn handoff_commit_batch_store_failure_does_not_write_candidates() {
     let inner = SqliteStore::in_memory().unwrap();
     let store = chaos_store_fail_batch_and_store_call(inner, 2_usize);
     let engine = LocalHoldEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
@@ -2226,7 +2236,7 @@ async fn v2_handoff_commit_batch_store_failure_does_not_write_candidates() {
 }
 
 #[tokio::test]
-async fn v2_handoff_commit_uses_one_batch_store_call() {
+async fn handoff_commit_uses_one_batch_store_call() {
     let inner = SqliteStore::in_memory().unwrap();
     let store = chaos_store_fail_on_store_call(inner, 2_usize);
     let engine = LocalHoldEngine::new(store, Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
@@ -2258,7 +2268,7 @@ async fn v2_handoff_commit_uses_one_batch_store_call() {
 }
 
 #[tokio::test]
-async fn v2_handoff_rejects_empty_batch() {
+async fn handoff_rejects_empty_batch() {
     let client = setup_noop_server().await;
 
     let err = call_tool_error(&client, "handoff", json!({"candidates": []})).await;
@@ -2269,7 +2279,7 @@ async fn v2_handoff_rejects_empty_batch() {
 }
 
 #[tokio::test]
-async fn v2_handoff_accepts_string_shorthand_candidates() {
+async fn handoff_accepts_string_shorthand_candidates() {
     let client = setup_noop_server().await;
 
     let handoff: HandoffResponse = call_tool(
@@ -2293,7 +2303,7 @@ async fn v2_handoff_accepts_string_shorthand_candidates() {
 }
 
 #[tokio::test]
-async fn v2_handoff_warns_when_duplicate_candidates_exist() {
+async fn handoff_warns_when_duplicate_candidates_exist() {
     let client = setup_noop_server().await;
     let content = "handoff duplicate warning should surface similar existing memories";
 
@@ -2330,7 +2340,7 @@ async fn v2_handoff_warns_when_duplicate_candidates_exist() {
 }
 
 #[tokio::test]
-async fn v2_handoff_quality_warnings_are_advisory() {
+async fn handoff_quality_warnings_are_advisory() {
     let client = setup_noop_server().await;
     let content = format!("{}\n```rust\nfn handoff_code_dump_candidate() {{}}\n```", "oversized handoff candidate ".repeat(170));
 
@@ -2365,7 +2375,7 @@ async fn v2_handoff_quality_warnings_are_advisory() {
 }
 
 #[tokio::test]
-async fn v2_handoff_resolves_scope_from_context_hints_without_commit() {
+async fn handoff_resolves_scope_from_context_hints_without_commit() {
     let client = setup_noop_server().await;
 
     let _registered: serde_json::Value = call_tool(
@@ -2413,9 +2423,9 @@ async fn server_info_has_capabilities() {
     assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
     assert!(info.capabilities.tools.is_some(), "server should advertise tools capability");
     let instructions = info.instructions.as_deref().unwrap_or_default();
-    assert!(instructions.contains("brief"), "server instructions should guide agents to the v2 core workflow");
+    assert!(instructions.contains("brief"), "server instructions should guide agents to the core workflow");
     assert!(
-        instructions.contains("Legacy v1 memory_* names are not part of the public MCP tool surface"),
+        instructions.contains("Retired memory_* names are not part of the public MCP tool surface"),
         "server instructions should not imply legacy tools are available"
     );
 }

@@ -9,7 +9,7 @@ expression: tool
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$defs": {
       "RememberManyItem": {
-        "description": "One item accepted by the v2 `remember_many` tool.",
+        "description": "One item accepted by the `remember_many` tool.",
         "anyOf": [
           {
             "description": "String shorthand for a durable memory's content.",
@@ -22,7 +22,7 @@ expression: tool
         ]
       },
       "RememberParams": {
-        "description": "Parameters for the v2 `remember` tool.",
+        "description": "Parameters for the `remember` tool.",
         "type": "object",
         "properties": {
           "content": {
@@ -88,7 +88,7 @@ expression: tool
         ]
       },
       "EntityInputItem": {
-        "description": "One request entity accepted by v2 write/update tools.",
+        "description": "One request entity accepted by write/update tools.",
         "anyOf": [
           {
             "description": "String shorthand for an entity name; the entity type defaults to `unknown`.",
@@ -139,7 +139,7 @@ expression: tool
         ]
       },
       "AccessPolicyInput": {
-        "description": "One request access policy accepted by v2 write/update tools.",
+        "description": "One request access policy accepted by write/update tools.",
         "anyOf": [
           {
             "description": "String shorthand; currently only `\"public\"` is accepted.",

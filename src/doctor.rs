@@ -140,6 +140,21 @@ fn single_line(value: &str) -> String {
 /// Run all diagnostics without creating a database or downloading model files
 /// unless `allow_downloads` is set.
 pub async fn run(options: DoctorOptions) -> DoctorReport {
+    Box::pin(run_with_clock(options, std::sync::Arc::new(crate::clock::SystemClock::new()))).await
+}
+
+/// Run diagnostics with timeouts driven by an injected clock.
+#[cfg(any(test, feature = "testing"))]
+pub async fn run_with_clock(options: DoctorOptions, clock: std::sync::Arc<dyn crate::clock::Clock>) -> DoctorReport {
+    Box::pin(run_with_clock_inner(options, clock)).await
+}
+
+#[cfg(not(any(test, feature = "testing")))]
+async fn run_with_clock(options: DoctorOptions, clock: std::sync::Arc<dyn crate::clock::Clock>) -> DoctorReport {
+    Box::pin(run_with_clock_inner(options, clock)).await
+}
+
+async fn run_with_clock_inner(options: DoctorOptions, clock: std::sync::Arc<dyn crate::clock::Clock>) -> DoctorReport {
     let build = build_info();
     let _stale_parse_warning = crate::config::take_env_parse_warning();
     let (config, source) = match Config::load_with_source() {
@@ -161,9 +176,9 @@ pub async fn run(options: DoctorOptions) -> DoctorReport {
     let mut checks = vec![check("build", DiagnosticStatus::Healthy, build_summary(&build))];
     checks.push(config_check(source.as_deref(), crate::config::take_env_parse_warning()));
     checks.push(filesystem_check(&config));
-    checks.push(storage_check(&config).await);
-    checks.push(embedding_check(&config).await);
-    checks.push(reranker_check(&config, options).await);
+    checks.push(Box::pin(storage_check(&config, clock.as_ref())).await);
+    checks.push(embedding_check(&config, std::sync::Arc::clone(&clock)).await);
+    checks.push(reranker_check(&config, options, clock).await);
     let data_path = match config.database.backend {
         DatabaseBackend::Sqlite => Some(config.database.sqlite_path().display().to_string()),
         DatabaseBackend::Postgres => None,
@@ -314,7 +329,7 @@ fn sqlite_wal_state_requires_shm_creation(path: &Path) -> bool {
     sqlite_sidecar_path(path, "-wal").exists() && !sqlite_sidecar_path(path, "-shm").exists()
 }
 
-async fn storage_check(config: &Config) -> DiagnosticCheck {
+async fn storage_check(config: &Config, clock: &dyn crate::clock::Clock) -> DiagnosticCheck {
     match config.database.backend {
         DatabaseBackend::Sqlite => {
             let config = config.clone();
@@ -334,7 +349,7 @@ async fn storage_check(config: &Config) -> DiagnosticCheck {
                 )
             })
         }
-        DatabaseBackend::Postgres => tokio::time::timeout(Duration::from_secs(20), postgres_check(config))
+        DatabaseBackend::Postgres => Box::pin(crate::clock::timeout(clock, Duration::from_secs(20), postgres_check(config, clock)))
             .await
             .unwrap_or_else(|_elapsed| check("storage", DiagnosticStatus::Failed, "PostgreSQL readiness checks exceeded the 20 second deadline")),
     }
@@ -446,7 +461,7 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
         .prepare("SELECT id, embedding_claimed_at, embedding_claim_token, confidence FROM memories LIMIT 0")
         .and_then(|mut statement| statement.query([]).map(|_rows| ()))
         .is_ok()
-        && table_readable(&connection, "memory_v2_metadata")
+        && table_readable(&connection, "memory_metadata")
         && table_readable(&connection, "memory_tombstones")
         && table_readable(&connection, "scope_registry")
         && table_readable(&connection, "memory_audit_log")
@@ -520,7 +535,7 @@ fn sqlite_indexes_current(connection: &Connection) -> bool {
         "idx_memory_entities_entity_type",
         "idx_audit_log_memory_id",
         "idx_audit_log_timestamp",
-        "idx_memory_v2_metadata_scope_key",
+        "idx_memory_metadata_scope_key",
         "idx_memory_tombstones_deleted_at",
     ];
     REQUIRED_INDEXES.iter().all(|index| {
@@ -585,7 +600,7 @@ async fn postgres_indexes_compatible(pool: &PgPool, allow_absent: bool) -> Resul
             ('idx_audit_log_memory_id', 'memory_audit_log', 1, 'memory_id', 'memory_id', NULL),
             ('idx_audit_log_timestamp', 'memory_audit_log', 1, '\"timestamp\"', '\"timestamp\" desc', NULL),
             ('idx_memory_tombstones_deleted_at', 'memory_tombstones', 1, 'deleted_at', 'deleted_at desc', NULL),
-            ('idx_memory_v2_metadata_scope_key', 'memory_v2_metadata', 1, 'scope_key', 'scope_key', NULL)
+            ('idx_memory_metadata_scope_key', 'memory_metadata', 1, 'scope_key', 'scope_key', NULL)
         ) AS required(name, table_name, key_count, expected_keys, definition_fragment, predicate)
         LEFT JOIN pg_class AS indexes ON indexes.oid = to_regclass(format('%I.%I', current_schema(), required.name))
         LEFT JOIN pg_index AS index_data ON index_data.indexrelid = indexes.oid",
@@ -631,9 +646,9 @@ fn sqlite_embedding_map_fk_status(connection: &Connection) -> Result<SqliteEmbed
 }
 
 #[expect(clippy::too_many_lines, reason = "PostgreSQL readiness is kept linear so each read-only compatibility gate is explicit")]
-async fn postgres_check(config: &Config) -> DiagnosticCheck {
+async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> DiagnosticCheck {
     let connect = PgPoolOptions::new().max_connections(1).connect(&config.database.postgres.url);
-    let Ok(Ok(pool)) = tokio::time::timeout(Duration::from_secs(10), connect).await else {
+    let Ok(Ok(pool)) = crate::clock::timeout(clock, Duration::from_secs(10), connect).await else {
         return check("storage", DiagnosticStatus::Failed, "PostgreSQL is unreachable or rejected the configured connection");
     };
     let vector_installed: Result<bool, _> = query_scalar("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector')").fetch_one(&pool).await;
@@ -668,7 +683,7 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
         }
     }
     let required_tables: Result<i64, _> = query_scalar(
-        "SELECT COUNT(*) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_entities'), ('memory_v2_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name) WHERE ($1 OR required.name <> 'localhold_migrations') AND to_regclass(CASE WHEN $2 THEN format('%I.%I', current_schema(), required.name) ELSE required.name END) IS NOT NULL",
+        "SELECT COUNT(*) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_entities'), ('memory_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name) WHERE ($1 OR required.name <> 'localhold_migrations') AND to_regclass(CASE WHEN $2 THEN format('%I.%I', current_schema(), required.name) ELSE required.name END) IS NOT NULL",
     )
     .bind(config.database.postgres.auto_migrate)
     .bind(config.database.postgres.auto_migrate)
@@ -746,19 +761,19 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
                 (to_regclass(format('%I.%I', current_schema(), 'memories')) IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND confrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND contype = 'f' AND convalidated AND confdeltype = 'n' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'superseded_by')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'id')]::smallint[]))
                 AND (to_regclass(format('%I.%I', current_schema(), 'memory_entities')) IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(format('%I.%I', current_schema(), 'memory_entities')) AND confrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memory_entities')) AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'id')]::smallint[]))
                 AND (to_regclass(format('%I.%I', current_schema(), 'memory_embeddings')) IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(format('%I.%I', current_schema(), 'memory_embeddings')) AND confrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memory_embeddings')) AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'id')]::smallint[]))
-                AND (to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) AND confrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'id')]::smallint[]))",
+                AND (to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NULL OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) AND confrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), 'memories')) AND attname = 'id')]::smallint[]))",
         )
         .fetch_one(&pool)
         .await;
         let can_repair: Result<bool, _> = if vector_installed {
             query_scalar(
-                "SELECT has_schema_privilege(current_schema(), 'CREATE') AND (SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), TRUE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_v2_metadata', 'memory_tombstones', 'scope_registry'))",
+                "SELECT has_schema_privilege(current_schema(), 'CREATE') AND (SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), TRUE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_metadata', 'memory_tombstones', 'scope_registry'))",
             )
             .fetch_one(&pool)
             .await
         } else {
             query_scalar(
-                "SELECT has_schema_privilege(current_schema(), 'CREATE') AND has_database_privilege(current_database(), 'CREATE') AND (SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), TRUE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_v2_metadata', 'memory_tombstones', 'scope_registry'))",
+                "SELECT has_schema_privilege(current_schema(), 'CREATE') AND has_database_privilege(current_database(), 'CREATE') AND (SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), TRUE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_metadata', 'memory_tombstones', 'scope_registry'))",
             )
             .fetch_one(&pool)
             .await
@@ -850,7 +865,7 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             AND has_table_privilege('memory_audit_log', 'SELECT') AND has_table_privilege('memory_audit_log', 'INSERT')
             AND has_table_privilege('memory_tombstones', 'SELECT') AND has_table_privilege('memory_tombstones', 'INSERT') AND has_table_privilege('memory_tombstones', 'UPDATE')
             AND has_table_privilege('scope_registry', 'SELECT') AND has_table_privilege('scope_registry', 'INSERT') AND has_table_privilege('scope_registry', 'UPDATE')
-            AND has_table_privilege('memory_v2_metadata', 'SELECT') AND has_table_privilege('memory_v2_metadata', 'INSERT') AND has_table_privilege('memory_v2_metadata', 'UPDATE') AND has_table_privilege('memory_v2_metadata', 'DELETE')
+            AND has_table_privilege('memory_metadata', 'SELECT') AND has_table_privilege('memory_metadata', 'INSERT') AND has_table_privilege('memory_metadata', 'UPDATE') AND has_table_privilege('memory_metadata', 'DELETE')
             AND has_table_privilege('embedding_profile', 'SELECT') AND has_table_privilege('embedding_profile', 'INSERT') AND has_table_privilege('embedding_profile', 'UPDATE')
             AND has_sequence_privilege(pg_get_serial_sequence('memory_audit_log', 'id'), 'USAGE')",
     )
@@ -865,7 +880,7 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memories'::regclass AND confrelid = 'memories'::regclass AND contype = 'f' AND convalidated AND confdeltype = 'n' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'superseded_by')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'id')]::smallint[])
             AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_entities'::regclass AND confrelid = 'memories'::regclass AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memory_entities'::regclass AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'id')]::smallint[])
             AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_embeddings'::regclass AND confrelid = 'memories'::regclass AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memory_embeddings'::regclass AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'id')]::smallint[])
-            AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_v2_metadata'::regclass AND confrelid = 'memories'::regclass AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memory_v2_metadata'::regclass AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'id')]::smallint[])",
+            AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_metadata'::regclass AND confrelid = 'memories'::regclass AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memory_metadata'::regclass AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'id')]::smallint[])",
     )
     .fetch_one(&pool)
     .await;
@@ -940,7 +955,7 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
             ('idx_audit_log_memory_id', 'memory_audit_log', 1, 'memory_id', 'memory_id', NULL),
             ('idx_audit_log_timestamp', 'memory_audit_log', 1, '\"timestamp\"', '\"timestamp\" desc', NULL),
             ('idx_memory_tombstones_deleted_at', 'memory_tombstones', 1, 'deleted_at', 'deleted_at desc', NULL),
-            ('idx_memory_v2_metadata_scope_key', 'memory_v2_metadata', 1, 'scope_key', 'scope_key', NULL)
+            ('idx_memory_metadata_scope_key', 'memory_metadata', 1, 'scope_key', 'scope_key', NULL)
         ) AS required(name, table_name, key_count, expected_keys, definition_fragment, predicate)
         LEFT JOIN pg_class AS indexes ON indexes.oid = to_regclass(required.name)
         LEFT JOIN pg_index AS index_data ON index_data.indexrelid = indexes.oid",
@@ -948,7 +963,7 @@ async fn postgres_check(config: &Config) -> DiagnosticCheck {
     .fetch_one(&pool)
     .await;
     let owns_managed_tables: Result<bool, _> = query_scalar(
-        "SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), FALSE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_v2_metadata', 'memory_tombstones', 'scope_registry')",
+        "SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), FALSE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_metadata', 'memory_tombstones', 'scope_registry')",
     )
     .fetch_one(&pool)
     .await;
@@ -1108,7 +1123,7 @@ async fn postgres_embedding_profile_compatible_if_present(pool: &PgPool, expecte
     Ok(vector_count == 0)
 }
 
-async fn embedding_check(config: &Config) -> DiagnosticCheck {
+async fn embedding_check(config: &Config, clock: std::sync::Arc<dyn crate::clock::Clock>) -> DiagnosticCheck {
     match &config.embedding {
         EmbeddingConfig::Noop { dimensions } => check(
             "embedding",
@@ -1124,7 +1139,7 @@ async fn embedding_check(config: &Config) -> DiagnosticCheck {
                 );
             }
             let timeout = Duration::from_secs(config.limits.embedding_timeout_secs);
-            let provider = match OpenAiEmbedding::new(openai_compatible, *dimensions, timeout) {
+            let provider = match OpenAiEmbedding::new_with_clock(openai_compatible, *dimensions, timeout, clock) {
                 Ok(provider) => provider,
                 Err(_error) => return check("embedding", DiagnosticStatus::Degraded, "OpenAI-compatible provider could not be constructed"),
             };
@@ -1145,9 +1160,11 @@ async fn embedding_check(config: &Config) -> DiagnosticCheck {
     }
 }
 
-async fn reranker_check(config: &Config, options: DoctorOptions) -> DiagnosticCheck {
+async fn reranker_check(config: &Config, options: DoctorOptions, clock: std::sync::Arc<dyn crate::clock::Clock>) -> DiagnosticCheck {
     #[cfg(not(feature = "reranker"))]
     let _options = options;
+    #[cfg(not(feature = "reranker"))]
+    let _clock = clock;
     let reranker = &config.search.reranker;
     let compiled = crate::reranker::policy::compiled_execution_providers()
         .iter()
@@ -1180,7 +1197,7 @@ async fn reranker_check(config: &Config, options: DoctorOptions) -> DiagnosticCh
             |_error| "configured model has invalid revision or hash configuration".to_owned(),
             |_identity| "configured model identity validated".to_owned(),
         );
-        match crate::reranker::runtime::initialize_for_diagnostics(reranker, options.allow_downloads).await {
+        match crate::reranker::runtime::initialize_for_diagnostics_with_clock(reranker, options.allow_downloads, clock).await {
             Ok(initialized) => {
                 let selected = initialized.selected_execution_provider().map_or_else(|| "none".into(), |provider| provider.to_string());
                 let active = initialized.active_execution_provider().map_or_else(|| "none".into(), |provider| provider.to_string());

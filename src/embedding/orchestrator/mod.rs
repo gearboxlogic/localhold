@@ -17,7 +17,7 @@ use crate::{
     embedding::{EmbeddingProvider, batch::BatchEmbeddingExecutor},
     error::{EngineError, StoreError, ValidationError},
     store::{MemoryStore, MemoryWithEmbedding},
-    types::{AuditDraft, AuthorizedUpdateOutcome, Memory, MemoryId, MemoryUpdate, V2MemoryMetadata, V2MetadataPatch, WriteOutcome},
+    types::{AuditDraft, AuthorizedUpdateOutcome, Memory, MemoryId, MemoryMetadata, MemoryUpdate, MetadataPatch, WriteOutcome},
 };
 
 type EmbedKey = (MemoryId, i64);
@@ -126,21 +126,18 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
         Ok(id)
     }
 
-    /// Store a memory and required v2 metadata atomically, then spawn a background embedding task.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "audited v2 write needs admission, memory, supersession metadata, v2 metadata, and audit draft"
-    )]
+    /// Store a memory and required metadata atomically, then spawn a background embedding task.
+    #[expect(clippy::too_many_arguments, reason = "audited write needs admission, memory, supersession metadata, metadata, and audit draft")]
     pub(crate) async fn store_and_embed_with_metadata(
         &self,
         admission: &EmbedAdmission,
         memory: Memory,
         supersedes: Option<&MemoryId>,
-        metadata: &V2MemoryMetadata,
+        metadata: &MemoryMetadata,
         audit: &AuditDraft,
     ) -> Result<MemoryId, EngineError> {
         let content = memory.content.clone();
-        let id = self.store.store_with_v2_metadata_audited(&memory, None, supersedes, metadata, audit).await?;
+        let id = self.store.store_with_metadata_audited(&memory, None, supersedes, metadata, audit).await?;
         let _queued = self.spawn_embed_task_or_run_inline(admission, id, content, 0).await;
         Ok(id)
     }
@@ -206,17 +203,14 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
         Ok(ids)
     }
 
-    /// Store multiple memories and required v2 metadata atomically, then spawn embed tasks.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "batch v2 write needs admission, memories, supersession metadata, v2 metadata, and caller cap"
-    )]
+    /// Store multiple memories and required metadata atomically, then spawn embed tasks.
+    #[expect(clippy::too_many_arguments, reason = "batch write needs admission, memories, supersession metadata, metadata, and caller cap")]
     pub(crate) async fn batch_store_and_embed_with_metadata(
         &self,
         admission: &EmbedAdmission,
         memories: Vec<Memory>,
         supersedes_list: &[Option<MemoryId>],
-        metadata: &[V2MemoryMetadata],
+        metadata: &[MemoryMetadata],
         audits: &[AuditDraft],
         max_batch_size: usize,
     ) -> Result<Vec<MemoryId>, EngineError> {
@@ -236,10 +230,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
             })
             .collect();
 
-        let ids = self
-            .store
-            .store_batch_with_v2_metadata_audited(&memories_for_store, supersedes_list, metadata, audits)
-            .await?;
+        let ids = self.store.store_batch_with_metadata_audited(&memories_for_store, supersedes_list, metadata, audits).await?;
 
         let work = ids
             .iter()
@@ -278,23 +269,23 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
         Ok(outcome)
     }
 
-    /// Update a memory plus optional v2 metadata in one store transaction,
+    /// Update a memory plus optional metadata in one store transaction,
     /// then spawn a re-embed task when content changes.
     #[expect(
         clippy::too_many_arguments,
         reason = "audited revise needs embed admission, id, update, metadata patch, principal, and audit draft"
     )]
-    pub(crate) async fn update_with_v2_metadata_and_maybe_reembed(
+    pub(crate) async fn update_with_metadata_and_maybe_reembed(
         &self,
         embed_admission: Option<&EmbedAdmission>,
         id: MemoryId,
         update: &MemoryUpdate,
-        metadata_patch: Option<&V2MetadataPatch>,
+        metadata_patch: Option<&MetadataPatch>,
         principal: &str,
         audit: &AuditDraft,
     ) -> Result<AuthorizedUpdateOutcome, EngineError> {
         let new_content = update.content.clone();
-        let outcome = self.store.update_authorized_with_v2_metadata_audited(&id, update, metadata_patch, principal, audit).await?;
+        let outcome = self.store.update_authorized_with_metadata_audited(&id, update, metadata_patch, principal, audit).await?;
         maybe_reembed_after_update(self, embed_admission, id, new_content, &outcome).await;
         Ok(outcome)
     }

@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 
 use super::{
     ReassignScopeOutcome, SqliteStore,
-    crud::{SQLITE_MAX_CHUNK, fetch_memory_by_id, get_v2_metadata_conn, insert_audit_draft, insert_tombstone, upsert_v2_metadata_conn},
+    crud::{SQLITE_MAX_CHUNK, fetch_memory_by_id, get_metadata_conn, insert_audit_draft, insert_tombstone, upsert_metadata_conn},
     query::{DEFAULT_LIST_LIMIT, OVERFETCH_FACTOR, ScanConfig, count_with_access_filter, normalize_filter},
     sqlite_write_tx,
     vector::{VectorIndex as _, validate_embedding_vector},
@@ -14,12 +14,12 @@ use super::{
 use crate::{
     error::StoreError,
     types::{
-        AuditDraft, Memory, MemoryFilter, MemoryId, MemoryStats, QueryContext, ScopeDefinition, V2_LARGE_CONTENT_WARNING_THRESHOLD_BYTES, V2MemoryMetadata,
-        V2MetadataMigrationReport, V2MigrationReport,
+        AuditDraft, LARGE_CONTENT_WARNING_THRESHOLD_BYTES, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MetadataMigrationOutcome, MetadataMigrationReport,
+        QueryContext, ScopeDefinition,
     },
 };
 
-const V2_UNRESOLVED_SCOPE: &str = "inbox/unresolved";
+const UNRESOLVED_SCOPE: &str = "inbox/unresolved";
 
 fn sqlite_count(row: &rusqlite::Row<'_>) -> rusqlite::Result<u64> {
     let count: i64 = row.get(0)?;
@@ -197,16 +197,16 @@ impl SqliteStore {
         .await
     }
 
-    pub(crate) async fn upsert_v2_metadata_impl(&self, metadata: V2MemoryMetadata) -> Result<(), StoreError> {
-        self.upsert_v2_metadata_audited_impl(metadata, None).await
+    pub(crate) async fn upsert_metadata_impl(&self, metadata: MemoryMetadata) -> Result<(), StoreError> {
+        self.upsert_metadata_audited_impl(metadata, None).await
     }
 
-    pub(crate) async fn upsert_v2_metadata_audited_impl(&self, metadata: V2MemoryMetadata, audit: Option<&AuditDraft>) -> Result<(), StoreError> {
+    pub(crate) async fn upsert_metadata_audited_impl(&self, metadata: MemoryMetadata, audit: Option<&AuditDraft>) -> Result<(), StoreError> {
         let now = self.clock_now().to_rfc3339();
         let audit = audit.cloned();
         self.with_conn(move |conn| {
             let tx = sqlite_write_tx(conn)?;
-            upsert_v2_metadata_conn(&tx, &metadata, &now)?;
+            upsert_metadata_conn(&tx, &metadata, &now)?;
             insert_optional_metadata_audit(&tx, &metadata.memory_id, audit.as_ref())?;
             tx.commit()?;
             Ok(())
@@ -214,21 +214,21 @@ impl SqliteStore {
         .await
     }
 
-    pub(crate) async fn get_v2_metadata_impl(&self, memory_id: &MemoryId) -> Result<Option<V2MemoryMetadata>, StoreError> {
+    pub(crate) async fn get_metadata_impl(&self, memory_id: &MemoryId) -> Result<Option<MemoryMetadata>, StoreError> {
         let memory_id_value = *memory_id;
-        self.with_conn(move |conn| get_v2_metadata_conn(conn, &memory_id_value)).await
+        self.with_conn(move |conn| get_metadata_conn(conn, &memory_id_value)).await
     }
 
-    pub(crate) async fn v2_migration_report_impl(&self) -> Result<V2MigrationReport, StoreError> {
-        let oversized_threshold = i64::try_from(V2_LARGE_CONTENT_WARNING_THRESHOLD_BYTES).map_err(|e| StoreError::Serialization(Box::new(e)))?;
+    pub(crate) async fn metadata_migration_report_impl(&self) -> Result<MetadataMigrationReport, StoreError> {
+        let oversized_threshold = i64::try_from(LARGE_CONTENT_WARNING_THRESHOLD_BYTES).map_err(|e| StoreError::Serialization(Box::new(e)))?;
         self.with_conn(move |conn| {
             let total_memories = conn.query_row("SELECT COUNT(*) FROM memories", [], sqlite_count)?;
-            let metadata_rows = conn.query_row("SELECT COUNT(*) FROM memory_v2_metadata", [], sqlite_count)?;
+            let metadata_rows = conn.query_row("SELECT COUNT(*) FROM memory_metadata", [], sqlite_count)?;
             let missing_metadata = total_memories.saturating_sub(metadata_rows);
             let missing_summary: u64 = conn.query_row(
                 "SELECT COUNT(*)
                  FROM memories AS m
-                 LEFT JOIN memory_v2_metadata AS meta ON meta.memory_id = m.id
+                 LEFT JOIN memory_metadata AS meta ON meta.memory_id = m.id
                  WHERE meta.summary IS NULL OR trim(meta.summary) = ''",
                 [],
                 sqlite_count,
@@ -236,7 +236,7 @@ impl SqliteStore {
             let unresolved_scope: u64 = conn.query_row(
                 "SELECT COUNT(*)
                  FROM memories AS m
-                 LEFT JOIN memory_v2_metadata AS meta ON meta.memory_id = m.id
+                 LEFT JOIN memory_metadata AS meta ON meta.memory_id = m.id
                  WHERE COALESCE(meta.scope_key, json_extract(m.provenance, '$.source_conversation')) IS NULL
                     OR COALESCE(meta.scope_key, json_extract(m.provenance, '$.source_conversation')) = 'inbox/unresolved'",
                 [],
@@ -269,7 +269,7 @@ impl SqliteStore {
                 [],
                 sqlite_count,
             )?;
-            Ok(V2MigrationReport {
+            Ok(MetadataMigrationReport {
                 total_memories,
                 metadata_rows,
                 missing_metadata,
@@ -283,33 +283,33 @@ impl SqliteStore {
         .await
     }
 
-    pub(crate) async fn migrate_v2_metadata_impl(&self, registered_scope_keys: &[String], dry_run: bool) -> Result<V2MetadataMigrationReport, StoreError> {
-        self.migrate_v2_metadata_audited_impl(registered_scope_keys, dry_run, None).await
+    pub(crate) async fn migrate_metadata_impl(&self, registered_scope_keys: &[String], dry_run: bool) -> Result<MetadataMigrationOutcome, StoreError> {
+        self.migrate_metadata_audited_impl(registered_scope_keys, dry_run, None).await
     }
 
-    pub(crate) async fn migrate_v2_metadata_audited_impl(
+    pub(crate) async fn migrate_metadata_audited_impl(
         &self,
         registered_scope_keys: &[String],
         dry_run: bool,
         audit: Option<&AuditDraft>,
-    ) -> Result<V2MetadataMigrationReport, StoreError> {
+    ) -> Result<MetadataMigrationOutcome, StoreError> {
         let registered_scope_keys = registered_scope_keys.iter().cloned().collect::<HashSet<_>>();
         let now = self.clock_now().to_rfc3339();
         let audit = audit.cloned();
         self.with_conn(move |conn| {
-            let skipped_existing = conn.query_row("SELECT COUNT(*) FROM memory_v2_metadata", [], sqlite_count)?;
-            let candidates = load_v2_migration_candidates(conn)?;
+            let skipped_existing = conn.query_row("SELECT COUNT(*) FROM memory_metadata", [], sqlite_count)?;
+            let candidates = load_metadata_migration_candidates(conn)?;
             let candidate_count = u64::try_from(candidates.len()).map_err(|e| StoreError::Serialization(Box::new(e)))?;
             let prepared_rows = candidates
                 .into_iter()
-                .map(|candidate| prepare_v2_migration_metadata(candidate, &registered_scope_keys))
+                .map(|candidate| prepare_metadata_migration_metadata(candidate, &registered_scope_keys))
                 .collect::<Vec<_>>();
-            let mut report = v2_metadata_migration_report(candidate_count, skipped_existing, &prepared_rows);
+            let mut report = metadata_migration_outcome(candidate_count, skipped_existing, &prepared_rows);
 
             if dry_run {
                 return Ok(report);
             }
-            report.migrated = insert_v2_metadata_migration_rows(conn, &prepared_rows, &now, audit.as_ref())?;
+            report.migrated = insert_metadata_migration_rows(conn, &prepared_rows, &now, audit.as_ref())?;
             Ok(report)
         })
         .await
@@ -333,7 +333,7 @@ struct PreparedMigrationMetadata {
     code_derived: bool,
 }
 
-fn load_v2_migration_candidates(conn: &Connection) -> Result<Vec<MigrationCandidate>, StoreError> {
+fn load_metadata_migration_candidates(conn: &Connection) -> Result<Vec<MigrationCandidate>, StoreError> {
     let mut stmt = conn.prepare(
         "SELECT
             m.id,
@@ -341,7 +341,7 @@ fn load_v2_migration_candidates(conn: &Connection) -> Result<Vec<MigrationCandid
             json_extract(m.provenance, '$.source_agent') AS source_agent,
             json_extract(m.provenance, '$.source_conversation') AS source_conversation
          FROM memories AS m
-         LEFT JOIN memory_v2_metadata AS meta ON meta.memory_id = m.id
+         LEFT JOIN memory_metadata AS meta ON meta.memory_id = m.id
          WHERE meta.memory_id IS NULL
          ORDER BY m.created_at, m.id",
     )?;
@@ -356,14 +356,14 @@ fn load_v2_migration_candidates(conn: &Connection) -> Result<Vec<MigrationCandid
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-fn prepare_v2_migration_metadata(candidate: MigrationCandidate, registered_scope_keys: &HashSet<String>) -> PreparedMigrationMetadata {
+fn prepare_metadata_migration_metadata(candidate: MigrationCandidate, registered_scope_keys: &HashSet<String>) -> PreparedMigrationMetadata {
     let scope_key = candidate
         .source_conversation
         .as_deref()
         .filter(|scope| registered_scope_keys.contains(*scope))
-        .map_or_else(|| V2_UNRESOLVED_SCOPE.to_owned(), ToOwned::to_owned);
-    let unresolved_scope = scope_key == V2_UNRESOLVED_SCOPE;
-    let oversized = candidate.content.len() > V2_LARGE_CONTENT_WARNING_THRESHOLD_BYTES;
+        .map_or_else(|| UNRESOLVED_SCOPE.to_owned(), ToOwned::to_owned);
+    let unresolved_scope = scope_key == UNRESOLVED_SCOPE;
+    let oversized = candidate.content.len() > LARGE_CONTENT_WARNING_THRESHOLD_BYTES;
     let code_derived = looks_code_derived(&candidate.content);
 
     PreparedMigrationMetadata {
@@ -377,8 +377,8 @@ fn prepare_v2_migration_metadata(candidate: MigrationCandidate, registered_scope
     }
 }
 
-fn v2_metadata_migration_report(candidate_count: u64, skipped_existing: u64, prepared_rows: &[PreparedMigrationMetadata]) -> V2MetadataMigrationReport {
-    V2MetadataMigrationReport {
+fn metadata_migration_outcome(candidate_count: u64, skipped_existing: u64, prepared_rows: &[PreparedMigrationMetadata]) -> MetadataMigrationOutcome {
+    MetadataMigrationOutcome {
         candidate_count,
         skipped_existing,
         migrated: 0,
@@ -400,16 +400,16 @@ fn insert_optional_metadata_audit(conn: &Connection, memory_id: &MemoryId, audit
     Ok(())
 }
 
-fn insert_v2_metadata_migration_rows(conn: &mut Connection, prepared_rows: &[PreparedMigrationMetadata], now: &str, audit: Option<&AuditDraft>) -> Result<u64, StoreError> {
+fn insert_metadata_migration_rows(conn: &mut Connection, prepared_rows: &[PreparedMigrationMetadata], now: &str, audit: Option<&AuditDraft>) -> Result<u64, StoreError> {
     let tx = sqlite_write_tx(conn)?;
     let mut migrated = 0_u64;
     for row in prepared_rows {
         let quality_flags_json = serde_json::to_string(&row.quality_flags)?;
         let inserted = tx.execute(
-            "INSERT INTO memory_v2_metadata (
+            "INSERT INTO memory_metadata (
                 memory_id, scope_key, summary, agent_label, created_by_principal,
                 quality_flags, schema_version, migrated_at, updated_at
-             ) VALUES (?1, ?2, NULL, ?3, NULL, ?4, 2, ?5, ?5)
+             ) VALUES (?1, ?2, NULL, ?3, NULL, ?4, 1, ?5, ?5)
              ON CONFLICT(memory_id) DO NOTHING",
             params![row.id, row.scope_key, row.agent_label, quality_flags_json, now],
         )?;
@@ -543,7 +543,7 @@ fn apply_reassign_scope(conn: &mut Connection, params: ReassignScopeApply<'_>) -
 
         let metadata_placeholders: Vec<String> = (3..=chunk.len().saturating_add(2)).map(|i| format!("?{i}")).collect();
         let metadata_sql = format!(
-            "UPDATE memory_v2_metadata \
+            "UPDATE memory_metadata \
              SET scope_key = ?1, updated_at = ?2 \
              WHERE memory_id IN ({})",
             metadata_placeholders.join(", ")
@@ -554,7 +554,7 @@ fn apply_reassign_scope(conn: &mut Connection, params: ReassignScopeApply<'_>) -
         for id in &id_strings {
             metadata_params.push(id);
         }
-        #[expect(unused_results, reason = "not every reassigned memory has v2 metadata yet")]
+        #[expect(unused_results, reason = "not every reassigned memory has metadata yet")]
         tx.execute(&metadata_sql, metadata_params.as_slice())?;
         if let Some(audit) = params.audit {
             for id in chunk {

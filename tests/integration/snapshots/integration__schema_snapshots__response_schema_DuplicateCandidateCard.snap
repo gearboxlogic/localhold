@@ -32,7 +32,7 @@ expression: schema
       "type": "string"
     },
     "MatchAssessment": {
-      "description": "Agent-facing match assessment for a compact v2 card.",
+      "description": "Agent-facing match assessment for a compact card.",
       "type": "object",
       "properties": {
         "quality": {

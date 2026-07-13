@@ -12,7 +12,12 @@ use parking_lot::Mutex;
 use tokio::{sync::Notify, task::JoinSet};
 use tracing::warn;
 
-use crate::error::EngineError;
+#[cfg(test)]
+use crate::clock::SystemClock;
+use crate::{
+    clock::{Clock, Sleep},
+    error::EngineError,
+};
 
 /// Categorizes tracked background work for diagnostics.
 #[derive(Debug, Clone, Copy)]
@@ -37,6 +42,7 @@ impl std::fmt::Display for BackgroundTaskKind {
 /// Coordinates tracked background work across the engine and orchestrator.
 #[derive(Debug)]
 pub(crate) struct BackgroundTasks {
+    clock: Arc<dyn Clock>,
     tasks: Mutex<JoinSet<()>>,
     shutting_down: AtomicBool,
     admitted_spawns_closed: AtomicBool,
@@ -53,8 +59,15 @@ pub(crate) struct EmbedAdmission {
 
 impl BackgroundTasks {
     /// Create a new shared background task coordinator.
+    #[cfg(test)]
     pub(crate) fn new() -> Arc<Self> {
+        Self::new_with_clock(Arc::new(SystemClock::new()))
+    }
+
+    /// Create a coordinator driven by an injected clock.
+    pub(crate) fn new_with_clock(clock: Arc<dyn Clock>) -> Arc<Self> {
         Arc::new(Self {
+            clock,
             tasks: Mutex::new(JoinSet::new()),
             shutting_down: AtomicBool::new(false),
             admitted_spawns_closed: AtomicBool::new(false),
@@ -126,8 +139,7 @@ impl BackgroundTasks {
     {
         let mut cleanup = Some(cleanup);
         self.shutting_down.store(true, Ordering::Release);
-        let deadline = tokio::time::sleep(timeout);
-        tokio::pin!(deadline);
+        let mut deadline = self.clock.sleep(timeout);
         let admissions_drained = self.wait_for_embed_admissions_until(&mut deadline).await;
         if !admissions_drained {
             self.admitted_spawns_closed.store(true, Ordering::Release);
@@ -154,7 +166,7 @@ impl BackgroundTasks {
                         break;
                     }
                 }
-                () = &mut deadline => {
+                () = deadline.as_mut() => {
                     warn!("shutdown timed out with {} remaining tasks, dropping them", tasks.len());
                     if let Some(cleanup) = cleanup.take() {
                         cleanup().await;
@@ -170,7 +182,7 @@ impl BackgroundTasks {
 
     /// Wait until all in-flight embed admissions have been dropped.
     #[expect(clippy::integer_division_remainder_used, reason = "false positive from tokio::select! macro expansion")]
-    async fn wait_for_embed_admissions_until(&self, deadline: &mut core::pin::Pin<&mut tokio::time::Sleep>) -> bool {
+    async fn wait_for_embed_admissions_until(&self, deadline: &mut Sleep) -> bool {
         let notified = self.embed_admissions_notify.notified();
         tokio::pin!(notified);
 
@@ -271,6 +283,7 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use super::*;
+    use crate::clock::MockClock;
 
     #[tokio::test]
     async fn admitted_embed_task_is_drained_during_shutdown() {
@@ -289,7 +302,9 @@ mod tests {
             shutdown_tasks.shutdown(Duration::from_secs(1)).await;
         });
 
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        while !background_tasks.is_shutting_down() {
+            tokio::task::yield_now().await;
+        }
         tx.send(()).unwrap();
         drop(admission);
 
@@ -316,12 +331,15 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_timeout_includes_waiting_for_embed_admissions() {
-        let background_tasks = BackgroundTasks::new();
+        let clock = Arc::new(MockClock::new());
+        let background_tasks = BackgroundTasks::new_with_clock(Arc::<MockClock>::clone(&clock));
         let admission = background_tasks.begin_embed_admission().unwrap();
 
-        let start = tokio::time::Instant::now();
-        background_tasks.shutdown(Duration::from_millis(10)).await;
-        assert!(start.elapsed() < Duration::from_millis(200));
+        let shutdown = background_tasks.shutdown(Duration::from_millis(10));
+        tokio::pin!(shutdown);
+        assert!(futures::poll!(shutdown.as_mut()).is_pending());
+        clock.advance(chrono::TimeDelta::milliseconds(10));
+        shutdown.await;
 
         let spawned = admission.spawn(BackgroundTaskKind::Test, async {});
         assert!(!spawned, "timed-out admitted spawns should be surfaced to callers");

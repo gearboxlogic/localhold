@@ -8,11 +8,12 @@ use std::{
 };
 
 use localhold::{
+    clock::{Clock, SystemClock},
     config::{Config, DatabaseBackend, HttpPrincipalMode, ServerConfig, Transport},
-    embedding::factory::{active_embedding_profile, create_embedding_provider},
+    embedding::factory::{active_embedding_profile, create_embedding_provider_with_clock},
     engine::{LocalHoldEngine, ReembedOutcome, ReembedRequest},
     error::EngineError,
-    http_transport::build_router,
+    http_transport::build_router_with_clock,
     server::{HttpPrincipalSource, LocalHoldServer},
     store::{
         MemoryStore, PostgresStore, SqliteStore,
@@ -69,6 +70,7 @@ async fn main() -> AppResult {
 
     info!("localhold starting up");
     let embedding_profile = active_embedding_profile(&config.embedding);
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
 
     match config.database.backend {
         DatabaseBackend::Sqlite => {
@@ -78,20 +80,20 @@ async fn main() -> AppResult {
             {
                 std::fs::create_dir_all(parent)?;
             }
-            let store = SqliteStore::open(&db_path, config.embedding.dimensions())?;
+            let store = SqliteStore::open_with_clock(&db_path, config.embedding.dimensions(), Arc::clone(&clock))?;
             if let Some(profile) = &embedding_profile {
                 store.verify_embedding_profile(profile).await?;
             }
             info!("sqlite database opened at {}", db_path.display());
-            run_with_store(store, config).await
+            run_with_store(store, config, clock).await
         }
         DatabaseBackend::Postgres => {
-            let store = PostgresStore::open(&config.database.postgres, config.embedding.dimensions()).await?;
+            let store = PostgresStore::open_with_clock(&config.database.postgres, config.embedding.dimensions(), Arc::clone(&clock)).await?;
             if let Some(profile) = &embedding_profile {
                 store.verify_embedding_profile(profile).await?;
             }
             info!("postgres database opened");
-            run_with_store(store, config).await
+            run_with_store(store, config, clock).await
         }
         other => return Err(EngineError::config(format!("unsupported database backend: {other}")).into()),
     }
@@ -255,7 +257,7 @@ fn write_stderr_line(message: impl std::fmt::Display) {
     let _write_failed = writeln!(stderr, "{message}").is_err();
 }
 
-async fn run_with_store<S>(store: S, config: Config) -> AppResult
+async fn run_with_store<S>(store: S, config: Config, clock: Arc<dyn Clock>) -> AppResult
 where
     S: MemoryStore + Clone + std::fmt::Debug + 'static,
 {
@@ -263,7 +265,7 @@ where
 
     // Create embedding provider with recovery notification
     let recovery_notify = Arc::new(Notify::new());
-    let embedding = create_embedding_provider(&config.embedding, &config.limits, Some(Arc::clone(&recovery_notify))).await;
+    let embedding = create_embedding_provider_with_clock(&config.embedding, &config.limits, Some(Arc::clone(&recovery_notify)), Arc::clone(&clock)).await;
 
     // Clone reranker config before search config is consumed by LocalHoldEngine::new
     #[cfg(feature = "reranker")]
@@ -302,12 +304,12 @@ where
         _ => return Err("unsupported HTTP principal mode".into()),
     };
 
-    let engine = LocalHoldEngine::new(store, embedding, config.limits, config.search);
+    let engine = LocalHoldEngine::new_with_clock(store, embedding, config.limits, config.search, Arc::clone(&clock));
 
     // Optionally attach a cross-encoder reranker (reranker feature)
     #[cfg(feature = "reranker")]
     let engine = if reranker_config.enabled {
-        match localhold::reranker::runtime::initialize_with_retry(&reranker_config).await {
+        match localhold::reranker::runtime::initialize_with_retry_and_clock(&reranker_config, Arc::clone(&clock)).await {
             Ok(reranker) => engine.with_reranker(reranker.into_provider()),
             Err(error) if reranker_config.required => return Err(error.into()),
             Err(e) => {
@@ -342,7 +344,7 @@ where
 
     match config.server.transport {
         Transport::Stdio => Box::pin(serve_stdio(server)).await,
-        Transport::Http => serve_http(server, &config.server).await,
+        Transport::Http => serve_http(server, &config.server, clock).await,
         other => Err(format!("unsupported transport: {other}").into()),
     }
 }
@@ -439,7 +441,7 @@ where
     serve_result
 }
 
-async fn serve_http<S>(server: LocalHoldServer<S>, config: &ServerConfig) -> AppResult
+async fn serve_http<S>(server: LocalHoldServer<S>, config: &ServerConfig, clock: Arc<dyn Clock>) -> AppResult
 where
     S: MemoryStore + Clone + std::fmt::Debug + 'static,
 {
@@ -451,7 +453,7 @@ where
     }
     let server_for_shutdown = server.clone();
     let path = config.path.clone();
-    let router = build_router(server, config, &ct)?;
+    let router = build_router_with_clock(server, config, &ct, clock)?;
 
     let bind_addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;

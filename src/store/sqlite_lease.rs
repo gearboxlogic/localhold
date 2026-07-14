@@ -106,9 +106,11 @@ mod tests {
     fn lock_path_cannot_collide_with_sqlite_sidecars() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("localhold.db");
-        assert_eq!(lock_path(&database).unwrap(), directory.path().join("localhold.db.localhold.lock"));
-        assert_ne!(lock_path(&database).unwrap(), directory.path().join("localhold.db-wal"));
-        assert_ne!(lock_path(&database).unwrap(), directory.path().join("localhold.db-shm"));
+        let canonical_directory = directory.path().canonicalize().unwrap();
+        let path = lock_path(&database).unwrap();
+        assert_eq!(path, canonical_directory.join("localhold.db.localhold.lock"));
+        assert_ne!(path, canonical_directory.join("localhold.db-wal"));
+        assert_ne!(path, canonical_directory.join("localhold.db-shm"));
     }
 
     #[cfg(unix)]

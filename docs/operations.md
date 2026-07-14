@@ -56,6 +56,29 @@ Start from [the example configuration](../localhold.example.toml). Restrict
 config-file permissions because embedding API keys, HTTP bearer tokens, and
 PostgreSQL credentials may be present.
 
+The binary provides side-effect-conscious configuration commands:
+
+```sh
+hold config paths
+hold config init
+hold config validate
+```
+
+`config paths` reports the canonical path, the active file, and every searched
+path without loading configuration. `config init` creates a minimal starter at
+the canonical path and refuses to replace any existing path; edit or replace
+an existing file explicitly. On Unix, the new file is created with mode
+`0600`. `config validate` checks the effective file plus `LOCALHOLD_*`
+overrides, but does not open storage, contact embedding or reranking providers,
+download models, or start a transport. Validation exits `0` when valid and `1`
+when invalid or unreadable; `config init` also exits `1` when creation is
+refused or fails. Parser details are suppressed on validation failure because
+TOML diagnostics can contain secret-bearing source lines.
+
+All three commands accept `--json`. Their output includes `schema_version: 1`;
+automation should reject unknown schema versions before consuming other
+fields.
+
 ## External Compute
 
 The default `noop` embedding provider performs text-only retrieval and sends no

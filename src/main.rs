@@ -25,11 +25,22 @@ use tokio::sync::Notify;
 use tracing::{info, warn};
 
 type AppResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+type CliExitResult = Result<i32, Box<dyn std::error::Error + Send + Sync>>;
 
 #[tokio::main]
 async fn main() -> AppResult {
     if let Some(result) = try_run_info_cli() {
         return result;
+    }
+    if let Some(result) = try_run_config_cli() {
+        match result {
+            Ok(0_i32) => return Ok(()),
+            Ok(exit_code) => std::process::exit(exit_code),
+            Err(error) => {
+                write_stderr_line(error);
+                std::process::exit(1);
+            }
+        }
     }
     if let Some(result) = try_run_doctor_cli().await {
         match result {
@@ -112,7 +123,64 @@ fn try_run_info_cli() -> Option<AppResult> {
 }
 
 const fn root_usage() -> &'static str {
-    "Usage: hold [COMMAND]\n\nRuns the LocalHold MCP server when no command is supplied.\n\nCommands:\n  doctor                     Diagnose installation and runtime readiness\n  embeddings status          Inspect embedding identity and rebuild progress\n  embeddings reindex --yes   Clear and rebuild the configured vector space\n  migrate sqlite-to-postgres Migrate storage backends\n\nOptions:\n  -h, --help                 Print help\n  -V, --version              Print version"
+    "Usage: hold [COMMAND]\n\nRuns the LocalHold MCP server when no command is supplied.\n\nCommands:\n  config init                Create a no-clobber starter configuration\n  config paths               Show configuration search and active paths\n  config validate            Validate effective configuration without startup\n  doctor                     Diagnose installation and runtime readiness\n  embeddings status          Inspect embedding identity and rebuild progress\n  embeddings reindex --yes   Clear and rebuild the configured vector space\n  migrate sqlite-to-postgres Migrate storage backends\n\nOptions:\n  -h, --help                 Print help\n  -V, --version              Print version"
+}
+
+fn try_run_config_cli() -> Option<CliExitResult> {
+    const USAGE: &str = "Usage: hold config <COMMAND>\n\nInspect, validate, or initialize user configuration without starting the MCP server.\n\nCommands:\n  init [--json]      Create a minimal starter at the canonical path; never overwrite\n  paths [--json]     Show canonical, active, and searched configuration paths\n  validate [--json]  Validate the effective file and LOCALHOLD_* environment\n\nOptions:\n  -h, --help         Print help\n\nExit codes:\n  0  command succeeded or configuration is valid\n  1  init failed/refused or configuration is invalid/unreadable";
+
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if args.first().is_none_or(|argument| argument != "config") {
+        return None;
+    }
+    Some((|| {
+        if args[1..].iter().any(is_help_arg) {
+            write_stdout(USAGE)?;
+            write_stdout("\n")?;
+            return Ok(0_i32);
+        }
+        let Some(command) = args.get(1).and_then(|argument| argument.to_str()) else {
+            write_stderr_line(USAGE);
+            return Err(EngineError::config("missing or non-UTF-8 config command").into());
+        };
+        if args.len() > 3 || args.get(2).is_some_and(|argument| argument != "--json") {
+            return Err(EngineError::config(format!("unexpected config {command} argument\n\n{USAGE}")).into());
+        }
+        let json = args.get(2).is_some();
+        match command {
+            "paths" => {
+                let report = localhold::config::operator::ConfigPathsReport::discover();
+                if json {
+                    write_stdout(&report.to_json()?)?;
+                } else {
+                    write_stdout(&report.render_text())?;
+                }
+                Ok(0_i32)
+            }
+            "validate" => {
+                let report = localhold::config::operator::ConfigValidationReport::validate();
+                if json {
+                    write_stdout(&report.to_json()?)?;
+                } else {
+                    write_stdout(&report.render_text())?;
+                }
+                Ok(report.exit_code)
+            }
+            "init" => {
+                let report = localhold::config::operator::init();
+                if json {
+                    write_stdout(&report.to_json()?)?;
+                } else {
+                    write_stdout(&report.render_text())?;
+                }
+                Ok(report.exit_code)
+            }
+            _ => {
+                write_stderr_line(USAGE);
+                Err(EngineError::config(format!("unknown config command: {command}")).into())
+            }
+        }
+    })())
 }
 
 async fn try_run_doctor_cli() -> Option<Result<i32, Box<dyn std::error::Error + Send + Sync>>> {

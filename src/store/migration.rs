@@ -720,6 +720,16 @@ fn export_sqlite_conn(conn: &Connection, embedding_dimensions: usize) -> Result<
 }
 
 pub(crate) fn validate_sqlite_source_schema(conn: &Connection, embedding_dimensions: usize) -> Result<(), StoreError> {
+    let schema_version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if schema_version > super::schema::SQLITE_SCHEMA_VERSION {
+        return Err(sqlite_newer_source_schema_error(schema_version));
+    }
+    if schema_version != super::schema::SQLITE_SCHEMA_VERSION {
+        return Err(sqlite_source_schema_error(format!(
+            "schema version is {schema_version}, expected {}",
+            super::schema::SQLITE_SCHEMA_VERSION
+        )));
+    }
     reject_retired_sqlite_schema(conn)?;
     for table in SQLITE_REQUIRED_TABLES {
         validate_sqlite_table(conn, table)?;
@@ -858,6 +868,10 @@ pub(crate) fn validate_present_sqlite_schema(conn: &Connection) -> Result<(), St
         "embedding_claimed_at",
         "embedding_claim_token",
     ];
+    let schema_version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if schema_version > super::schema::SQLITE_SCHEMA_VERSION {
+        return Err(sqlite_newer_source_schema_error(schema_version));
+    }
     reject_retired_sqlite_schema(conn)?;
     for table in SQLITE_REQUIRED_TABLES {
         if sqlite_schema_sql(conn, "table", table.name)?.is_none() {
@@ -1319,7 +1333,14 @@ fn validate_embedding_flag_integrity(conn: &Connection) -> Result<(), StoreError
 
 fn sqlite_source_schema_error(message: impl std::fmt::Display) -> StoreError {
     StoreError::Conflict(format!(
-        "SQLite source schema is not current: {message}; open the source database once with this localhold build to repair schema before migration"
+        "SQLite source schema is not current: {message}; open the source database once with this localhold build to apply supported schema repairs before retrying"
+    ))
+}
+
+fn sqlite_newer_source_schema_error(schema_version: u32) -> StoreError {
+    StoreError::Conflict(format!(
+        "SQLite source schema version {schema_version} is newer than this binary supports ({}); use a matching or newer localhold build",
+        super::schema::SQLITE_SCHEMA_VERSION
     ))
 }
 

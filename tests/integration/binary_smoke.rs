@@ -180,6 +180,98 @@ fn config_paths_reports_canonical_policy_without_starting_server() {
     assert!(!root.exists(), "config paths must not create the user configuration directory");
 }
 
+#[tokio::test]
+async fn backup_restore_cli_round_trips_and_emits_stable_json() {
+    let database = unique_db_path("backup-restore-cli");
+    let backup_path = database.with_extension("backup.db");
+    let store = SqliteStore::open(&database, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+    let memory = Memory::new_for_test(
+        "before restore".into(),
+        Vec::new(),
+        Provenance::new_for_test(Some("cli-test".into()), None, None),
+        AccessPolicy::Public,
+    );
+    let memory_id = store.store(&memory, None).await.unwrap();
+
+    let backup_output = base_binary_command(&database).arg("backup").arg(&backup_path).arg("--json").output().unwrap();
+    assert!(backup_output.status.success(), "backup failed: {backup_output:?}");
+    let backup_report: Value = serde_json::from_slice(&backup_output.stdout).unwrap();
+    assert_eq!(backup_report["schema_version"], 1_i32);
+    assert_eq!(backup_report["operation"], "backup");
+    assert_eq!(backup_report["status"], "ok");
+    assert_eq!(backup_report["database_schema_version"], 1_i32);
+    assert_eq!(backup_report["memories"], 1_i32);
+    assert!(backup_path.exists());
+    drop(store);
+
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    let _updated = connection
+        .execute("UPDATE memories SET content = 'after backup' WHERE id = ?1", [memory_id.to_string()])
+        .unwrap();
+    drop(connection);
+
+    let dry_run_output = base_binary_command(&database)
+        .arg("restore")
+        .arg(&backup_path)
+        .args(["--dry-run", "--json"])
+        .output()
+        .unwrap();
+    assert!(dry_run_output.status.success(), "restore dry-run failed: {dry_run_output:?}");
+    let dry_run_report: Value = serde_json::from_slice(&dry_run_output.stdout).unwrap();
+    assert_eq!(dry_run_report["status"], "validated");
+    assert_eq!(dry_run_report["database_replaced"], false);
+    let current: String = rusqlite::Connection::open(&database)
+        .unwrap()
+        .query_row("SELECT content FROM memories WHERE id = ?1", [memory_id.to_string()], |row| row.get(0))
+        .unwrap();
+    assert_eq!(current, "after backup");
+
+    let restore_output = base_binary_command(&database).arg("restore").arg(&backup_path).args(["--yes", "--json"]).output().unwrap();
+    assert!(restore_output.status.success(), "restore failed: {restore_output:?}");
+    let restore_report: Value = serde_json::from_slice(&restore_output.stdout).unwrap();
+    assert_eq!(restore_report["status"], "ok");
+    assert_eq!(restore_report["database_replaced"], true);
+    assert!(std::path::Path::new(restore_report["recovery_path"].as_str().unwrap()).exists());
+    let restored: String = rusqlite::Connection::open(&database)
+        .unwrap()
+        .query_row("SELECT content FROM memories WHERE id = ?1", [memory_id.to_string()], |row| row.get(0))
+        .unwrap();
+    assert_eq!(restored, "before restore");
+}
+
+#[test]
+fn restore_cli_reports_missing_confirmation_as_stable_json() {
+    let database = unique_db_path("restore-confirmation");
+    let backup_path = database.with_extension("backup.db");
+    let output = base_binary_command(&database).arg("restore").arg(&backup_path).arg("--json").output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1_i32);
+    assert_eq!(report["status"], "refused");
+    assert!(report["message"].as_str().unwrap().contains("--yes"));
+    assert!(output.stderr.is_empty());
+    assert!(!database.exists());
+}
+
+#[test]
+fn backup_cli_reports_unsupported_postgres_backend_as_stable_json() {
+    let database = unique_db_path("backup-postgres-backend");
+    let backup_path = database.with_extension("backup.db");
+    let mut command = base_binary_command(&database);
+    command.env("LOCALHOLD_DB_BACKEND", "postgres");
+    command.env("LOCALHOLD_POSTGRES_URL", "postgres://localhold:secret@127.0.0.1/localhold");
+    let output = command.arg("backup").arg(&backup_path).arg("--json").output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1_i32);
+    assert_eq!(report["operation"], "backup");
+    assert_eq!(report["status"], "failed");
+    assert!(report["message"].as_str().unwrap().contains("PostgreSQL-native"));
+    assert!(output.stderr.is_empty());
+    assert!(!database.exists());
+    assert!(!backup_path.exists());
+}
+
 #[test]
 fn config_init_creates_valid_config_and_refuses_to_clobber() {
     let root = unique_db_path("config-init").with_extension("root");

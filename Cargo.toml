@@ -22,7 +22,7 @@ tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 
 # SQLite + vector search
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["backup", "bundled"] }
 sqlite-vec = "0.1"
 zerocopy = { version = "0.8", features = ["derive"] }
 

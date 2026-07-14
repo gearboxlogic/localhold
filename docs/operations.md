@@ -251,22 +251,66 @@ those routes; do not expose that instance to ordinary agent clients.
 
 The default database is `~/.local/share/localhold/localhold.db`. SQLite uses WAL
 mode, so copying only the main database while LocalHold is running is not a
-valid backup.
+valid backup. Use the supported online command instead:
 
-For a filesystem backup:
+```sh
+hold backup ./localhold-2026-07-14.db
+hold backup ./localhold-2026-07-14.db --json
+```
 
-1. Stop every LocalHold process using the database.
-2. Confirm no process has the database open.
-3. Copy `localhold.db` and any adjacent `localhold.db-wal` and
-   `localhold.db-shm` files
-   as one set.
-4. Preserve file ownership and permissions.
-5. Restart LocalHold and verify a representative `read` and `recall` workflow.
+`hold backup` may run while LocalHold is serving requests. It uses SQLite's
+online backup transaction to include committed WAL data, validates
+`integrity_check`, the complete managed schema, foreign keys, vector mappings,
+the on-disk schema version, and the stored embedding profile, then publishes a
+self-contained file without overwriting an existing path. New Unix backup files
+use mode `0600`; Windows files inherit the destination directory's ACL. The
+destination directory must already exist.
 
-To restore, stop LocalHold, move the current database set aside, place the
-backup set at the configured path, and start with the same embedding dimensions
-used by the backup. Keep the previous files until the restored store has been
-verified.
+Always validate a restore first:
+
+```sh
+hold restore ./localhold-2026-07-14.db --dry-run
+hold restore ./localhold-2026-07-14.db --dry-run --json
+```
+
+The dry run copies the candidate into a private staging database, validates it
+against the current configuration, and verifies that the configured database
+can be exclusively coordinated. It does not replace data. If the configured
+database directory does not exist yet, restore creates it before acquiring the
+lease, matching normal server startup. Stop every LocalHold server using the
+SQLite path before the dry run and restore. Current LocalHold binaries hold
+shared OS leases for their connection lifetime, so restore refuses while any
+of them remains open. Stop non-LocalHold SQLite clients too; they do not
+participate in the lease protocol.
+
+After reviewing the dry run, restore explicitly:
+
+```sh
+hold restore ./localhold-2026-07-14.db --yes
+hold restore ./localhold-2026-07-14.db --yes --json
+```
+
+Before replacement, LocalHold creates a uniquely named
+`localhold.db.pre-restore-*.bak` recovery snapshot. The snapshot deliberately
+preserves the current database even when invalid schema or embedding metadata
+is the reason for restoring, so it is a rollback and forensic artifact rather
+than a second validated backup. The incoming backup must still pass every
+validation check. If the current file is not SQLite-readable, LocalHold instead
+retains it and any `-wal`, `-shm`, or `-journal` sidecars byte-for-byte under
+the reported recovery name before replacing it. Recovery names include the
+UTC timestamp, process ID, and a process-local sequence to avoid concurrent
+restore collisions. Replacement uses SQLite's transactional backup API;
+interruption, lock failure, or insufficient disk rolls the destination back
+instead of leaving a partial database. Existing database permissions are
+retained. Keep the reported recovery snapshot and any matching sidecars until
+representative `read`, `recall`, access-control, and embedding checks pass,
+then remove them according to the operator's retention policy.
+
+Both commands emit stable JSON with `schema_version: 1` when `--json` is used.
+Reports include the validated database schema version, embedding profile,
+memory and embedding counts, byte size, replacement state, and recovery path.
+These commands intentionally reject `database.backend = "postgres"`; use the
+PostgreSQL-native workflow below for that backend.
 
 ## PostgreSQL Backup And Restore
 

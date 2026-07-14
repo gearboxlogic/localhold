@@ -229,9 +229,16 @@ async fn run_models_command(command: &str, json: bool, confirmed: bool) -> CliEx
         write_models_report(&report, json)?;
         return Ok(report.exit_code);
     }
-    let config = Config::load().map_err(|_error| EngineError::config("effective configuration is invalid; run `hold config validate` for details"))?;
-    let reranker = config.search.reranker;
     let fetch = command == "fetch";
+    let config = match localhold::config::operator::load_effective_strict() {
+        Ok(config) => config,
+        Err(_error) => {
+            let report = localhold::reranker::operator::ModelsReport::invalid_configuration(command, fetch);
+            write_models_report(&report, json)?;
+            return Ok(report.exit_code);
+        }
+    };
+    let reranker = config.search.reranker;
     let report = tokio::task::spawn_blocking(move || {
         if fetch {
             localhold::reranker::operator::fetch(&reranker)

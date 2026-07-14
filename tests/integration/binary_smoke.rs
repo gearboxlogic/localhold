@@ -282,6 +282,42 @@ fn models_fetch_requires_confirmation_and_verify_is_offline() {
 
 #[cfg(feature = "reranker")]
 #[test]
+fn models_json_reports_invalid_configuration_and_malformed_overrides() {
+    let invalid_root = unique_db_path("models-invalid-config").with_extension("root");
+    let (mut invalid, _config_dir) = config_binary_command(&invalid_root);
+    invalid.env("LOCALHOLD_RERANKER_ENABLED", "true");
+    invalid.env("LOCALHOLD_RERANKER_MODEL", "custom/model");
+    let invalid_output = invalid.args(["models", "verify", "--json"]).output().unwrap();
+    assert_eq!(invalid_output.status.code(), Some(1_i32));
+    let invalid_report: Value = serde_json::from_slice(&invalid_output.stdout).unwrap();
+    assert_eq!(invalid_report["schema_version"], 1_i32);
+    assert_eq!(invalid_report["command"], "verify");
+    assert_eq!(invalid_report["status"], "error");
+    assert_eq!(invalid_report["network_allowed"], false);
+    assert_eq!(invalid_report["model"], "not_loaded");
+
+    let malformed_root = unique_db_path("models-malformed-env").with_extension("root");
+    let cache = malformed_root.join("cache");
+    let model_dir = cache.join("test--model@revision");
+    std::fs::create_dir_all(&model_dir).unwrap();
+    std::fs::write(model_dir.join("model.onnx"), b"model artifact").unwrap();
+    std::fs::write(model_dir.join("tokenizer.json"), b"tokenizer artifact").unwrap();
+    let mut malformed = models_binary_command(&malformed_root, &cache);
+    malformed.env("LOCALHOLD_RERANKER_PRECISION", "f16");
+    let malformed_output = malformed.args(["models", "verify", "--json"]).output().unwrap();
+    assert_eq!(malformed_output.status.code(), Some(1_i32));
+    let malformed_report: Value = serde_json::from_slice(&malformed_output.stdout).unwrap();
+    assert_eq!(malformed_report["command"], "verify");
+    assert_eq!(malformed_report["status"], "error");
+    assert_eq!(malformed_report["model"], "not_loaded");
+    assert_ne!(malformed_report["status"], "verified");
+
+    let _cleanup = std::fs::remove_dir_all(invalid_root);
+    let _cleanup = std::fs::remove_dir_all(malformed_root);
+}
+
+#[cfg(feature = "reranker")]
+#[test]
 #[expect(clippy::panic, reason = "loopback fixture failures should include the unexpected request or socket error")]
 fn models_fetch_downloads_only_when_explicit_and_reverifies_offline() {
     let root = unique_db_path("models-fetch").with_extension("root");

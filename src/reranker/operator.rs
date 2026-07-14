@@ -88,6 +88,27 @@ impl ModelsReport {
         }
     }
 
+    /// Return a structured, secret-free failure when effective configuration
+    /// cannot be loaded strictly enough to select model artifacts.
+    #[must_use]
+    pub fn invalid_configuration(command: &str, network_allowed: bool) -> Self {
+        Self {
+            schema_version: MODELS_REPORT_SCHEMA_VERSION,
+            command: command.into(),
+            model: "not_loaded".into(),
+            revision: "not_loaded".into(),
+            artifact: "not_loaded".into(),
+            precision: "not_loaded".into(),
+            source: "not_loaded".into(),
+            network_allowed,
+            artifacts_changed: false,
+            status: "error".into(),
+            artifacts: Vec::new(),
+            summary: "effective configuration is invalid; run hold config validate for details".into(),
+            exit_code: 1,
+        }
+    }
+
     /// Serialize the stable report schema as one JSON line.
     ///
     /// # Errors

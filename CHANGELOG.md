@@ -8,6 +8,9 @@ requirements explicitly.
 
 ## [Unreleased]
 
+- Added `hold embeddings status [--json]` with provider health, secret-free
+  configured/stored profile identity, SQLite and PostgreSQL vector coverage,
+  consistency diagnostics, stable states, and automation-friendly exit codes.
 - Added explicit reranker execution-provider policy with `auto`, `cpu`, and
   `cuda` modes, truthful compiled/selected/active provider reporting, and
   optional required-mode startup enforcement.

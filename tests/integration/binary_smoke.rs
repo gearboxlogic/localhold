@@ -8,12 +8,15 @@ use std::{
 };
 
 use localhold::{
-    store::{EmbeddingProfile, MemoryWriter as _, SqliteStore},
+    config::PostgresDatabaseConfig,
+    store::{EmbeddingProfile, MemoryWriter as _, PostgresStore, SqliteStore},
     types::{AccessPolicy, Memory, Provenance},
 };
+use rusqlite::params;
 use serde_json::Value;
 use sqlx_core::{query::query, query_scalar::query_scalar};
 use sqlx_postgres::PgPoolOptions;
+use zerocopy::IntoBytes as _;
 
 const STDIO_INITIALIZE: &str =
     r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"localhold-binary-smoke","version":"1"}}}"#;
@@ -117,6 +120,7 @@ fn drop_postgres_smoke_schema(url: &str) {
                 memory_metadata,
                 memory_entities,
                 memory_embeddings,
+                embedding_profile,
                 memories,
                 scope_registry,
                 localhold_migrations
@@ -141,6 +145,55 @@ fn seed_sqlite_migration_source(path: &std::path::Path) {
         let embedding = [0.1_f32, 0.2_f32, 0.3_f32];
         let _id = store.store(&memory, Some(&embedding)).await.unwrap();
     });
+}
+
+fn seed_embedding_status_database(path: &std::path::Path, model: &str, embedded: usize, pending: usize) {
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let store = SqliteStore::open(path, 3_usize).unwrap();
+        let profile = EmbeddingProfile::openai_compatible("http://127.0.0.1:8000/v1", model, 3_usize);
+        store.verify_embedding_profile(&profile).await.unwrap();
+        for index in 0..embedded.saturating_add(pending) {
+            let memory = Memory::new_for_test(format!("embedding status memory {index}"), Vec::new(), Provenance::default(), AccessPolicy::Public);
+            let embedding = (index < embedded).then_some([0.1_f32, 0.2_f32, 0.3_f32]);
+            let _id = store.store(&memory, embedding.as_ref().map(<[_; 3]>::as_slice)).await.unwrap();
+        }
+    });
+}
+
+fn create_canceling_embedding_corruption(path: &std::path::Path) {
+    let connection = rusqlite::Connection::open(path).unwrap();
+    let mapped_rowid: i64 = connection.query_row("SELECT vec_rowid FROM memory_embedding_map LIMIT 1", [], |row| row.get(0)).unwrap();
+    let _deleted = connection.execute("DELETE FROM memory_embeddings WHERE rowid = ?1", params![mapped_rowid]).unwrap();
+    let orphan = [0.7_f32, 0.8_f32, 0.9_f32];
+    let _inserted = connection
+        .execute("INSERT INTO memory_embeddings (embedding) VALUES (?1)", params![orphan.as_bytes()])
+        .unwrap();
+}
+
+fn seed_postgres_embedding_status_database(url: &str, model: &str) {
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let mut config = PostgresDatabaseConfig::default();
+        config.url = url.into();
+        config.max_connections = 1;
+        let store = PostgresStore::open(&config, 3_usize).await.unwrap();
+        let profile = EmbeddingProfile::openai_compatible("http://127.0.0.1:8000/v1", model, 3_usize);
+        store.verify_embedding_profile(&profile).await.unwrap();
+        for index in 0..2_usize {
+            let memory = Memory::new_for_test(format!("postgres embedding status memory {index}"), Vec::new(), Provenance::default(), AccessPolicy::Public);
+            let embedding = (index == 0).then_some([0.1_f32, 0.2_f32, 0.3_f32]);
+            let _id = store.store(&memory, embedding.as_ref().map(<[_; 3]>::as_slice)).await.unwrap();
+        }
+    });
+}
+
+fn embedding_status_command(db_path: &std::path::Path, model: &str) -> Command {
+    let mut command = base_binary_command(db_path);
+    command.env("LOCALHOLD_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1");
+    command.env("LOCALHOLD_EMBEDDING_MODEL", model);
+    command.env("LOCALHOLD_EMBEDDING_DIMENSIONS", "3");
+    command.env("LOCALHOLD_EMBEDDING_HEALTH_CHECK", "disabled");
+    command.env("LOCALHOLD_EMBEDDING_API_KEY", "embedding-status-secret");
+    command
 }
 
 fn migrated_memory_count(url: &str) -> i64 {
@@ -170,6 +223,143 @@ fn binary_starts_in_stdio_mode() {
     terminate_child(&mut child);
     let _stderr = stderr.join().unwrap();
     let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn embeddings_status_json_reports_rebuild_progress_and_secret_free_profiles() {
+    let db_path = unique_db_path("embeddings-status-rebuilding");
+    seed_embedding_status_database(&db_path, "embed-current", 1, 2);
+
+    let output = embedding_status_command(&db_path, "embed-current")
+        .args(["embeddings", "status", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2_i32), "pending vectors should report degraded rebuild status: {output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["schema_version"], 1_i32);
+    assert_eq!(report["status"], "degraded");
+    assert_eq!(report["state"], "rebuilding");
+    assert_eq!(report["provider_health"], "check_disabled");
+    assert_eq!(report["configured_profile"]["model"], "embed-current");
+    assert_eq!(report["stored_profile"]["model"], "embed-current");
+    assert_eq!(report["counts"]["total_memories"], 3_i32);
+    assert_eq!(report["counts"]["embedded_memories"], 1_i32);
+    assert_eq!(report["counts"]["pending_memories"], 2_i32);
+    assert_eq!(report["counts"]["vector_rows"], 1_i32);
+    assert!(!stdout.contains("embedding-status-secret"), "status JSON must not contain API keys");
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn embeddings_status_requires_reindex_for_profile_mismatch() {
+    let db_path = unique_db_path("embeddings-status-mismatch");
+    seed_embedding_status_database(&db_path, "embed-old", 1, 0);
+
+    let output = embedding_status_command(&db_path, "embed-new").args(["embeddings", "status", "--json"]).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1_i32), "profile mismatch must fail: {output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["state"], "reindex_required");
+    assert_eq!(report["configured_profile"]["model"], "embed-new");
+    assert_eq!(report["stored_profile"]["model"], "embed-old");
+    assert!(report["summary"].as_str().unwrap().contains("hold embeddings reindex --yes"));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn embeddings_status_detects_missing_and_orphan_vectors_even_when_counts_cancel() {
+    let db_path = unique_db_path("embeddings-status-canceling-corruption");
+    seed_embedding_status_database(&db_path, "embed-current", 1, 0);
+    create_canceling_embedding_corruption(&db_path);
+
+    let output = embedding_status_command(&db_path, "embed-current")
+        .args(["embeddings", "status", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(1_i32),
+        "relational corruption must fail even when aggregate row counts match: {output:?}"
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["state"], "inconsistent");
+    assert_eq!(report["counts"]["embedded_memories"], 1_i32);
+    assert_eq!(report["counts"]["mapped_memories"], 1_i32);
+    assert_eq!(report["counts"]["vector_rows"], 1_i32);
+    assert_eq!(report["counts"]["missing_vectors"], 1_i32);
+    assert_eq!(report["counts"]["unexpected_vectors"], 1_i32);
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn embeddings_status_does_not_initialize_a_missing_database() {
+    let db_path = unique_db_path("embeddings-status-missing");
+
+    let output = embedding_status_command(&db_path, "embed-current")
+        .args(["embeddings", "status", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["state"], "not_initialized");
+    assert!(!db_path.exists(), "status must not create a missing SQLite database");
+}
+
+#[test]
+fn embeddings_status_help_documents_json_and_exit_codes_without_loading_config() {
+    let output = Command::new(env!("CARGO_BIN_EXE_hold")).args(["embeddings", "status", "--help"]).output().unwrap();
+
+    assert!(output.status.success(), "help command failed: {output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("status [--json]"));
+    assert!(stdout.contains("Exit codes for status"));
+    assert!(String::from_utf8(output.stderr).unwrap().is_empty());
+}
+
+#[test]
+#[ignore = "requires Docker or local PostgreSQL with pgvector; destructive cleanup requires LOCALHOLD_ALLOW_DESTRUCTIVE_PG_SMOKE=1"]
+fn embeddings_status_reports_postgres_profile_and_progress() {
+    let url = postgres_smoke_url();
+    drop_postgres_smoke_schema(&url);
+    seed_postgres_embedding_status_database(&url, "embed-postgres");
+    let root = unique_db_path("embeddings-status-postgres").with_extension("config");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hold"));
+    let _config_dir = isolate_user_config_dir(&mut command, &root);
+    command.env("LOCALHOLD_DB_BACKEND", "postgres");
+    command.env("LOCALHOLD_POSTGRES_URL", &url);
+    command.env("LOCALHOLD_POSTGRES_MAX_CONNECTIONS", "1");
+    command.env("LOCALHOLD_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1");
+    command.env("LOCALHOLD_EMBEDDING_MODEL", "embed-postgres");
+    command.env("LOCALHOLD_EMBEDDING_DIMENSIONS", "3");
+    command.env("LOCALHOLD_EMBEDDING_HEALTH_CHECK", "disabled");
+
+    let output = command.args(["embeddings", "status", "--json"]).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(2_i32), "one pending PostgreSQL memory should report rebuilding: {output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["backend"], "postgres");
+    assert_eq!(report["state"], "rebuilding");
+    assert_eq!(report["stored_profile"]["model"], "embed-postgres");
+    assert_eq!(report["counts"]["embedded_memories"], 1_i32);
+    assert_eq!(report["counts"]["pending_memories"], 1_i32);
+    assert_eq!(report["counts"]["vector_rows"], 1_i32);
+
+    drop_postgres_smoke_schema(&url);
+    let _cleanup = std::fs::remove_dir_all(root);
 }
 
 #[test]

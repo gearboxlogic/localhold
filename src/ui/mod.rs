@@ -155,10 +155,16 @@ where
     };
 
     let terminal = ratatui::try_init()?;
-    let result = {
-        let _restore = TerminalRestoreGuard;
-        event_loop(terminal, engine.clone(), principal, startup_notice, mutation_factory).await
-    };
+    let restore = TerminalRestoreGuard;
+    let (data_tx, data_rx) = mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    spawn_input_reader(event_tx);
+    let mut app = app::App::new_with_mutation_factory(engine.clone(), theme::Theme::detect(), principal, data_tx, mutation_factory);
+    app.notice = startup_notice;
+    app.bootstrap().await;
+    let result = event_loop(terminal, &mut app, data_rx, event_rx).await;
+    drop(restore);
+    app.shutdown_mutation_engine().await;
     engine.shutdown().await;
     result
 }
@@ -194,22 +200,15 @@ impl Drop for TerminalRestoreGuard {
 #[expect(clippy::integer_division_remainder_used, reason = "false positive from tokio::select! macro expansion")]
 async fn event_loop<S>(
     mut terminal: ratatui::DefaultTerminal,
-    engine: LocalHoldEngine<S>,
-    principal: Option<String>,
-    startup_notice: Option<String>,
-    mutation_factory: app::MutationEngineFactory<S>,
+    app: &mut app::App<S>,
+    mut data_rx: mpsc::UnboundedReceiver<app::DataMsg>,
+    mut event_rx: mpsc::UnboundedReceiver<Event>,
 ) -> Result<i32, UiError>
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
-    let (data_tx, mut data_rx) = mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-    spawn_input_reader(event_tx);
-    let mut app = app::App::new_with_mutation_factory(engine, theme::Theme::detect(), principal, data_tx, mutation_factory);
-    app.notice = startup_notice;
-    app.bootstrap().await;
     while !app.quit {
-        let _completed_frame = terminal.draw(|frame| view::draw(frame, &app))?;
+        let _completed_frame = terminal.draw(|frame| view::draw(frame, app))?;
         tokio::select! {
             maybe_event = event_rx.recv() => match maybe_event {
                 Some(event) => app.on_event(event).await,
@@ -221,7 +220,6 @@ where
             },
         }
     }
-    app.shutdown_mutation_engine().await;
     Ok(0_i32)
 }
 

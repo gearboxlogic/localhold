@@ -188,18 +188,24 @@ impl PreparedMemoryRow {
 ///
 /// Returns `true` if the row was updated, `false` if the referenced
 /// memory was not found at all.
-pub(crate) fn mark_superseded(conn: &Connection, old_id_str: &str, new_id_str: &str) -> Result<bool, StoreError> {
-    let affected = conn.execute("UPDATE memories SET superseded_by = ?1 WHERE id = ?2 AND superseded_by IS NULL", params![
-        new_id_str, old_id_str
+pub(crate) fn mark_superseded(conn: &Connection, old_id_str: &str, new_id_str: &str, now: chrono::DateTime<chrono::Utc>) -> Result<bool, StoreError> {
+    let Some(existing) = fetch_memory_by_id(conn, old_id_str)? else {
+        return Ok(false);
+    };
+    if existing.superseded_by.is_some() {
+        return Err(StoreError::Conflict(format!("memory {old_id_str} is already superseded")));
+    }
+
+    let revision_at = next_memory_revision(now, existing.updated_at).to_rfc3339();
+    let affected = conn.execute("UPDATE memories SET superseded_by = ?1, updated_at = ?2 WHERE id = ?3 AND superseded_by IS NULL", params![
+        new_id_str,
+        revision_at,
+        old_id_str
     ])?;
     if affected == 0 {
-        // Distinguish "not found" from "already superseded".
-        let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1)", params![old_id_str], |row| row.get(0))?;
-        if exists {
-            return Err(StoreError::Conflict(format!("memory {old_id_str} is already superseded")));
-        }
+        return Err(StoreError::Conflict(format!("memory {old_id_str} changed while superseding")));
     }
-    Ok(affected > 0)
+    Ok(true)
 }
 
 /// Insert entity rows for a memory within an active transaction or connection.
@@ -274,12 +280,17 @@ pub(crate) fn hydrate_entities_batch(conn: &Connection, memory_ids: &[MemoryId])
     Ok(map)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "atomic batch store needs rows, supersession, audit, vector index, and one revision timestamp"
+)]
 fn batch_store_with_supersession_and_audit(
     conn: &mut Connection,
     vector_index: &SqliteVecIndex,
     prepared: &[PreparedMemoryRow],
     supersedes: &[Option<String>],
     audits: Option<&[AuditDraft]>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<MemoryId>, StoreError> {
     if let Some(audits) = audits
         && audits.len() != prepared.len()
@@ -297,7 +308,7 @@ fn batch_store_with_supersession_and_audit(
         if let Some(sid) = supersedes_id {
             let new_id_str = id.to_string();
             #[expect(unused_results, reason = "UPDATE checked via validate_superseded_exists above")]
-            mark_superseded(&tx, sid, &new_id_str)?;
+            mark_superseded(&tx, sid, &new_id_str, now)?;
         }
         if let Some(audits) = audits {
             let audit = audits.get(i).ok_or_else(|| audit_len_mismatch(prepared.len(), audits.len()))?;
@@ -309,12 +320,14 @@ fn batch_store_with_supersession_and_audit(
     Ok(ids)
 }
 
+#[expect(clippy::too_many_arguments, reason = "atomic store needs row, supersession, audit, vector index, and one revision timestamp")]
 fn insert_prepared_with_optional_supersession_and_audit(
     conn: &Connection,
     vector_index: &SqliteVecIndex,
     prepared: &PreparedMemoryRow,
     supersedes_id: Option<&str>,
     audit: Option<&AuditDraft>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<MemoryId, StoreError> {
     if let Some(sid) = supersedes_id {
         validate_superseded_exists(conn, sid)?;
@@ -323,7 +336,7 @@ fn insert_prepared_with_optional_supersession_and_audit(
     if let Some(sid) = supersedes_id {
         let new_id_str = id.to_string();
         #[expect(unused_results, reason = "UPDATE checked via validate_superseded_exists above")]
-        mark_superseded(conn, sid, &new_id_str)?;
+        mark_superseded(conn, sid, &new_id_str, now)?;
     }
     if let Some(audit) = audit {
         insert_audit_draft(conn, &id, audit)?;
@@ -1277,6 +1290,7 @@ impl SqliteStore {
         let prepared = PreparedMemoryRow::from_memory(memory, embedding)?;
         let supersedes_id = supersedes_id.to_string();
         let audit = audit.cloned();
+        let now = self.clock_now();
         let vector_index = self.vector_index();
         self.with_conn(move |conn| {
             let tx = sqlite_write_tx(conn)?;
@@ -1284,7 +1298,7 @@ impl SqliteStore {
             let id = prepared.insert(&tx, &vector_index)?;
             let new_id_str = id.to_string();
             #[expect(unused_results, reason = "UPDATE row count checked via validate_superseded_exists above")]
-            mark_superseded(&tx, &supersedes_id, &new_id_str)?;
+            mark_superseded(&tx, &supersedes_id, &new_id_str, now)?;
             if let Some(audit) = audit.as_ref() {
                 insert_audit_draft(&tx, &id, audit)?;
             }
@@ -1317,12 +1331,13 @@ impl SqliteStore {
         let prepared = PreparedMemoryRow::from_memory(memory, embedding)?;
         let supersedes_id = supersedes_id.map(ToString::to_string);
         let metadata = metadata.clone();
-        let metadata_now = self.clock_now().to_rfc3339();
+        let now = self.clock_now();
+        let metadata_now = now.to_rfc3339();
         let audit = audit.cloned();
         let vector_index = self.vector_index();
         self.with_conn(move |conn| {
             let tx = sqlite_write_tx(conn)?;
-            let id = insert_prepared_with_optional_supersession_and_audit(&tx, &vector_index, &prepared, supersedes_id.as_deref(), audit.as_ref())?;
+            let id = insert_prepared_with_optional_supersession_and_audit(&tx, &vector_index, &prepared, supersedes_id.as_deref(), audit.as_ref(), now)?;
             upsert_metadata_conn(&tx, &metadata, &metadata_now)?;
             tx.commit()?;
             Ok(id)
@@ -1409,9 +1424,10 @@ impl SqliteStore {
         // Convert MemoryId to String for SQL layer
         let supersedes_strs: Vec<Option<String>> = supersedes.iter().map(|s| s.map(|id| id.to_string())).collect();
         let audits = audits.map(<[AuditDraft]>::to_vec);
+        let now = self.clock_now();
 
         let vector_index = self.vector_index();
-        self.with_conn(move |conn| batch_store_with_supersession_and_audit(conn, &vector_index, &prepared, &supersedes_strs, audits.as_deref()))
+        self.with_conn(move |conn| batch_store_with_supersession_and_audit(conn, &vector_index, &prepared, &supersedes_strs, audits.as_deref(), now))
             .await
     }
 
@@ -1451,7 +1467,8 @@ impl SqliteStore {
             .collect::<Result<Vec<_>, _>>()?;
         let supersedes_strs: Vec<Option<String>> = supersedes.iter().map(|s| s.map(|id| id.to_string())).collect();
         let metadata = metadata.to_vec();
-        let metadata_now = self.clock_now().to_rfc3339();
+        let now = self.clock_now();
+        let metadata_now = now.to_rfc3339();
         let audits = audits.map(<[AuditDraft]>::to_vec);
 
         let vector_index = self.vector_index();
@@ -1461,7 +1478,7 @@ impl SqliteStore {
             for (idx, p) in prepared.iter().enumerate() {
                 let supersedes_id = supersedes_strs.get(idx).and_then(|s| s.as_deref());
                 let audit = audits.as_ref().and_then(|items| items.get(idx));
-                let id = insert_prepared_with_optional_supersession_and_audit(&tx, &vector_index, p, supersedes_id, audit)?;
+                let id = insert_prepared_with_optional_supersession_and_audit(&tx, &vector_index, p, supersedes_id, audit, now)?;
                 let item_metadata = metadata.get(idx).ok_or_else(|| metadata_len_mismatch(prepared.len(), metadata.len()))?;
                 upsert_metadata_conn(&tx, item_metadata, &metadata_now)?;
                 ids.push(id);
@@ -1801,9 +1818,10 @@ impl SqliteStore {
     pub(crate) async fn mark_superseded_by_impl(&self, id: &MemoryId, superseded_by: &MemoryId) -> Result<bool, StoreError> {
         let id_str = id.to_string();
         let sup_by = superseded_by.to_string();
+        let now = self.clock_now();
         self.with_conn(move |conn| {
             let tx = sqlite_write_tx(conn)?;
-            let marked = mark_superseded(&tx, &id_str, &sup_by)?;
+            let marked = mark_superseded(&tx, &id_str, &sup_by, now)?;
             tx.commit()?;
             Ok(marked)
         })
@@ -1825,6 +1843,7 @@ impl SqliteStore {
         let sup_by = superseded_by.to_string();
         let caller = principal.to_owned();
         let audit = audit.cloned();
+        let now = self.clock_now();
         self.with_conn(move |conn| {
             let tx = sqlite_write_tx(conn)?;
             let Some(existing) = fetch_memory_by_id(&tx, &id_str)? else {
@@ -1833,7 +1852,7 @@ impl SqliteStore {
             if !existing.has_write_access(&caller) {
                 return Ok(WriteOutcome::Denied);
             }
-            let marked = mark_superseded(&tx, &id_str, &sup_by)?;
+            let marked = mark_superseded(&tx, &id_str, &sup_by, now)?;
             if marked && let Some(audit) = audit.as_ref() {
                 insert_audit_draft(&tx, &existing.id, audit)?;
             }

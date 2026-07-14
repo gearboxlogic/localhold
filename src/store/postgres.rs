@@ -396,10 +396,11 @@ impl PostgresStore {
             validate_embedding_dimensions(embedding, self.embedding_dimensions())?;
         }
 
+        let now = self.clock_now();
         let mut tx = self.pool().begin().await?;
         validate_superseded_exists(&mut tx, supersedes_id).await?;
         insert_memory_with_embedding(&mut tx, memory, embedding).await?;
-        let _marked = mark_superseded_tx(&mut tx, supersedes_id, &memory.id).await?;
+        let _marked = mark_superseded_tx(&mut tx, supersedes_id, &memory.id, now).await?;
         if let Some(audit) = audit {
             insert_audit_draft_tx(&mut tx, &memory.id, audit).await?;
         }
@@ -431,15 +432,16 @@ impl PostgresStore {
             validate_embedding_dimensions(embedding, self.embedding_dimensions())?;
         }
 
+        let now = self.clock_now();
         let mut tx = self.pool().begin().await?;
         if let Some(supersedes_id) = supersedes_id {
             validate_superseded_exists(&mut tx, supersedes_id).await?;
         }
         insert_memory_with_embedding(&mut tx, memory, embedding).await?;
         if let Some(supersedes_id) = supersedes_id {
-            let _marked = mark_superseded_tx(&mut tx, supersedes_id, &memory.id).await?;
+            let _marked = mark_superseded_tx(&mut tx, supersedes_id, &memory.id, now).await?;
         }
-        upsert_metadata_tx(&mut tx, metadata, self.clock_now()).await?;
+        upsert_metadata_tx(&mut tx, metadata, now).await?;
         if let Some(audit) = audit {
             insert_audit_draft_tx(&mut tx, &memory.id, audit).await?;
         }
@@ -493,13 +495,14 @@ impl PostgresStore {
         }
         validate_batch_embedding_dimensions(memories, self.embedding_dimensions())?;
 
+        let now = self.clock_now();
         let mut tx = self.pool().begin().await?;
         let mut ids = Vec::with_capacity(memories.len());
         for (idx, memory_with_embedding) in memories.iter().enumerate() {
             if let Some(supersedes_id) = supersedes.get(idx).and_then(|id| *id) {
                 validate_superseded_exists(&mut tx, &supersedes_id).await?;
                 insert_memory_with_embedding(&mut tx, &memory_with_embedding.memory, memory_with_embedding.embedding.as_deref()).await?;
-                let _marked = mark_superseded_tx(&mut tx, &supersedes_id, &memory_with_embedding.memory.id).await?;
+                let _marked = mark_superseded_tx(&mut tx, &supersedes_id, &memory_with_embedding.memory.id, now).await?;
             } else {
                 insert_memory_with_embedding(&mut tx, &memory_with_embedding.memory, memory_with_embedding.embedding.as_deref()).await?;
             }
@@ -552,7 +555,7 @@ impl PostgresStore {
             if let Some(supersedes_id) = supersedes.get(idx).and_then(|id| *id) {
                 validate_superseded_exists(&mut tx, &supersedes_id).await?;
                 insert_memory_with_embedding(&mut tx, &memory_with_embedding.memory, memory_with_embedding.embedding.as_deref()).await?;
-                let _marked = mark_superseded_tx(&mut tx, &supersedes_id, &memory_with_embedding.memory.id).await?;
+                let _marked = mark_superseded_tx(&mut tx, &supersedes_id, &memory_with_embedding.memory.id, now).await?;
             } else {
                 insert_memory_with_embedding(&mut tx, &memory_with_embedding.memory, memory_with_embedding.embedding.as_deref()).await?;
             }
@@ -1505,8 +1508,9 @@ impl PostgresStore {
     }
 
     pub(crate) async fn mark_superseded_by_impl(&self, id: &MemoryId, superseded_by: &MemoryId) -> Result<bool, StoreError> {
+        let now = self.clock_now();
         let mut tx = self.pool().begin().await?;
-        let marked = mark_superseded_tx(&mut tx, id, superseded_by).await?;
+        let marked = mark_superseded_tx(&mut tx, id, superseded_by, now).await?;
         tx.commit().await?;
         Ok(marked)
     }
@@ -1522,6 +1526,7 @@ impl PostgresStore {
         principal: &str,
         audit: Option<&AuditDraft>,
     ) -> Result<WriteOutcome, StoreError> {
+        let now = self.clock_now();
         let mut tx = self.pool().begin().await?;
         let Some(existing) = fetch_memory_by_id_for_update_tx(&mut tx, id).await? else {
             tx.commit().await?;
@@ -1532,7 +1537,7 @@ impl PostgresStore {
             return Ok(WriteOutcome::Denied);
         }
 
-        let marked = mark_superseded_tx(&mut tx, id, superseded_by).await?;
+        let marked = mark_superseded_tx(&mut tx, id, superseded_by, now).await?;
         if marked && let Some(audit) = audit {
             insert_audit_draft_tx(&mut tx, id, audit).await?;
         }
@@ -2423,16 +2428,25 @@ async fn validate_superseded_exists(tx: &mut Transaction<'_, Postgres>, supersed
     Ok(())
 }
 
-async fn mark_superseded_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, superseded_by: &MemoryId) -> Result<bool, StoreError> {
-    let result = sqlx::query("UPDATE memories SET superseded_by = $1 WHERE id = $2 AND superseded_by IS NULL")
+async fn mark_superseded_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, superseded_by: &MemoryId, now: DateTime<Utc>) -> Result<bool, StoreError> {
+    let Some(existing) = fetch_memory_by_id_for_update_tx(tx, id).await? else {
+        return Ok(false);
+    };
+    if existing.superseded_by.is_some() {
+        return Err(StoreError::Conflict(format!("memory {id} is already superseded")));
+    }
+
+    let revision_at = next_memory_revision(now, existing.updated_at);
+    let result = sqlx::query("UPDATE memories SET superseded_by = $1, updated_at = $2 WHERE id = $3 AND superseded_by IS NULL")
         .bind(superseded_by.to_string())
+        .bind(revision_at)
         .bind(id.to_string())
         .execute(&mut **tx)
         .await?;
-    if result.rows_affected() == 0 && memory_exists_tx(tx, id).await? {
-        return Err(StoreError::Conflict(format!("memory {id} is already superseded")));
+    if result.rows_affected() == 0 {
+        return Err(StoreError::Conflict(format!("memory {id} changed while superseding")));
     }
-    Ok(result.rows_affected() > 0)
+    Ok(true)
 }
 
 async fn delete_memory_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId) -> Result<bool, StoreError> {

@@ -160,6 +160,7 @@ where
         created_at: time_after(base, 3),
     });
     let old_id = store.store(&old, Some(&embedding(embedding_dimensions, 6.0_f32))).await.unwrap();
+    let opened_old = store.get(&old_id, Some(OWNER)).await.unwrap().unwrap();
     let new = memory(MemorySpec {
         content: format!("superseded new {case}"),
         tags: vec![case_tag.clone(), "supersession".into()],
@@ -170,6 +171,31 @@ where
         created_at: time_after(base, 4),
     });
     let new_id = store.store_with_supersession(&new, Some(&embedding(embedding_dimensions, 6.1_f32)), &old_id).await.unwrap();
+    let superseded = store.get(&old_id, Some(OWNER)).await.unwrap().unwrap();
+    assert!(superseded.updated_at > opened_old.updated_at, "supersession must advance the optimistic revision");
+    let supersession_audit = AuditDraft {
+        action: AuditAction::Update,
+        caller_agent: Some(OWNER.into()),
+        timestamp: time_after(base, 4),
+        details: Some(json!({"stale_after_supersession": true})),
+    };
+    let stale_after_supersession = store
+        .update_authorized_if_unmodified_with_metadata_audited(
+            &old_id,
+            opened_old.updated_at,
+            &MemoryUpdate {
+                importance: Some(Importance::new(0.6_f64)),
+                ..MemoryUpdate::default()
+            },
+            None,
+            None,
+            OWNER,
+            &supersession_audit,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(stale_after_supersession, StoreError::Conflict(_)));
+
     let supersession_filter = MemoryFilter {
         tags: Some(vec![case_tag.clone(), "supersession".into()]),
         ..MemoryFilter::default()
@@ -188,7 +214,7 @@ where
         .await
         .unwrap());
     assert!(all_supersession_ids.contains(&old_id));
-    assert_eq!(store.get(&old_id, Some(OWNER)).await.unwrap().unwrap().superseded_by, Some(new_id));
+    assert_eq!(superseded.superseded_by, Some(new_id));
 
     let neighbor = memory(MemorySpec {
         content: format!("near vector neighbor {case}"),

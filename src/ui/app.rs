@@ -116,6 +116,13 @@ pub(crate) enum DataMsg {
         /// Mutation generation; stale responses are dropped.
         generation: u64,
     },
+    /// A mutation found that the selected memory no longer exists.
+    Missing {
+        /// Missing memory ID.
+        id: MemoryId,
+        /// Mutation generation; stale responses are dropped.
+        generation: u64,
+    },
     /// A memory was deleted.
     Deleted {
         /// Deleted memory ID.
@@ -464,6 +471,15 @@ where
                 self.mode = Mode::Browse;
                 self.status = Status::NotHeld(format!("memory revised, but refresh failed: {message}"));
             }
+            DataMsg::Missing { id, generation } if generation == self.operation_generation => {
+                self.pending = false;
+                self.rows.retain(|row| row.memory.id != id);
+                self.row_selected = self.row_selected.min(self.rows.len().saturating_sub(1_usize));
+                self.detail = None;
+                self.edit = None;
+                self.mode = Mode::Browse;
+                self.status = Status::NotHeld("memory no longer exists".into());
+            }
             DataMsg::Deleted { id, generation } if generation == self.operation_generation => {
                 self.pending = false;
                 self.rows.retain(|row| row.memory.id != id);
@@ -485,6 +501,7 @@ where
             | DataMsg::Updated { .. }
             | DataMsg::UpdatedInvisible { .. }
             | DataMsg::UpdatedUnrefreshed { .. }
+            | DataMsg::Missing { .. }
             | DataMsg::Deleted { .. }
             | DataMsg::MutationFailed { .. } => {}
         }
@@ -776,14 +793,13 @@ where
                     .update_memory_if_unmodified_with_metadata(id, expected_updated_at, parsed.update, parsed.metadata_patch, &principal)
                     .await
                 {
-                    Ok(outcome) if outcome.outcome == WriteOutcome::Applied => refresh_updated_detail(engine, id, &principal, generation).await,
-                    Ok(outcome) => DataMsg::MutationFailed {
-                        message: match outcome.outcome {
-                            WriteOutcome::NotFound => "memory no longer exists".into(),
-                            WriteOutcome::Denied => "this principal cannot modify the selected memory".into(),
-                            WriteOutcome::Applied => "unexpected update outcome".into(),
+                    Ok(outcome) => match outcome.outcome {
+                        WriteOutcome::Applied => refresh_updated_detail(engine, id, &principal, generation).await,
+                        WriteOutcome::NotFound => DataMsg::Missing { id, generation },
+                        WriteOutcome::Denied => DataMsg::MutationFailed {
+                            message: "this principal cannot modify the selected memory".into(),
+                            generation,
                         },
-                        generation,
                     },
                     Err(error) => DataMsg::MutationFailed {
                         message: error.to_string(),
@@ -820,10 +836,7 @@ where
             let msg = match mutation_engine.get().await {
                 Ok(engine) => match engine.delete_memory_if_unmodified(&id, expected_updated_at, &principal).await {
                     Ok(WriteOutcome::Applied) => DataMsg::Deleted { id, generation },
-                    Ok(WriteOutcome::NotFound) => DataMsg::MutationFailed {
-                        message: "memory no longer exists".into(),
-                        generation,
-                    },
+                    Ok(WriteOutcome::NotFound) => DataMsg::Missing { id, generation },
                     Ok(WriteOutcome::Denied) => DataMsg::MutationFailed {
                         message: "this principal cannot delete the selected memory".into(),
                         generation,
@@ -1179,6 +1192,28 @@ mod tests {
         assert!(app.loading, "a successful filtered edit should re-run the active search");
         app.on_data(rx.recv().await.unwrap());
         assert!(!app.rows.iter().any(|row| row.memory.id == id));
+    }
+
+    #[tokio::test]
+    async fn save_not_found_removes_stale_editor_state() {
+        let (mut app, mut rx) = app_with_memories(&["deleted elsewhere"]).await;
+        app.principal = Some("operator".into());
+        app.bootstrap().await;
+        app.on_data(rx.recv().await.unwrap());
+        let id = app.rows[0].memory.id;
+        app.on_event(press(KeyCode::Enter)).await;
+        app.on_event(press(KeyCode::Char('e'))).await;
+        app.edit.as_mut().unwrap().content.value = "stale edit".into();
+        assert!(app.engine.store().delete(&id).await.unwrap());
+
+        app.on_event(press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
+        app.on_data(rx.recv().await.unwrap());
+
+        assert_eq!(app.mode, Mode::Browse);
+        assert!(app.edit.is_none());
+        assert!(app.detail.is_none());
+        assert!(!app.rows.iter().any(|row| row.memory.id == id));
+        assert!(matches!(&app.status, Status::NotHeld(message) if message == "memory no longer exists"));
     }
 
     #[tokio::test]

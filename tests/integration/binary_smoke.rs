@@ -64,6 +64,7 @@ fn config_binary_command(root: &std::path::Path) -> (Command, std::path::PathBuf
         }
     }
     let config_dir = isolate_user_config_dir(&mut command, root);
+    command.env("LOCALHOLD_TEST_CONFIG_DIR", &config_dir);
     (command, config_dir)
 }
 

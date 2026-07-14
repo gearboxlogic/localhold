@@ -4,7 +4,7 @@ use std::{fs::OpenOptions, io::Write as _, path::Path};
 
 use serde::Serialize;
 
-use super::{Config, user_config_candidates};
+use super::{Config, user_config_candidates, user_config_dir};
 use crate::error::EngineError;
 
 /// Machine-readable configuration report schema version.
@@ -47,7 +47,8 @@ impl ConfigPathsReport {
     /// Discover configuration paths for the current platform user.
     #[must_use]
     pub fn discover() -> Self {
-        Self::for_config_dir(dirs::config_dir().as_deref())
+        let config_dir = user_config_dir();
+        Self::for_config_dir(config_dir.as_deref())
     }
 
     fn for_config_dir(config_dir: Option<&Path>) -> Self {
@@ -224,7 +225,8 @@ impl ConfigInitReport {
 /// so `--json` callers always receive the documented schema.
 #[must_use]
 pub fn init() -> ConfigInitReport {
-    let candidates = user_config_candidates(dirs::config_dir().as_deref());
+    let config_dir = user_config_dir();
+    let candidates = user_config_candidates(config_dir.as_deref());
     let Some(path) = candidates.into_iter().next() else {
         return ConfigInitReport::failed(None, "platform user configuration directory is unavailable");
     };
@@ -263,8 +265,14 @@ fn init_at(path: &Path) -> Result<ConfigInitReport, EngineError> {
     })?;
     if let Err(error) = file.write_all(STARTER_CONFIG.as_bytes()).and_then(|()| file.sync_all()) {
         drop(file);
-        let _cleanup = std::fs::remove_file(path);
-        return Err(EngineError::config(format!("writing {}: {error}", path.display())));
+        return match std::fs::remove_file(path) {
+            Ok(()) => Err(EngineError::config(format!("writing {}: {error}", path.display()))),
+            Err(cleanup_error) => Err(EngineError::config(format!(
+                "writing {}: {error}; cleanup also failed and a partial file may remain at {}: {cleanup_error}",
+                path.display(),
+                path.display()
+            ))),
+        };
     }
 
     Ok(ConfigInitReport {

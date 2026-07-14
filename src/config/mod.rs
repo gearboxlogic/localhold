@@ -736,6 +736,12 @@ fn warn_env_parse(var: &str, _value: &str) {
     writeln!(std::io::stderr(), "warning: ignoring unparseable value for {var}");
 }
 
+/// Consume the malformed-environment flag for the current thread.
+///
+/// A caller that needs to associate warnings with one config load owns the
+/// drain: call this immediately before loading, then exactly once afterward.
+/// Config loading must not consume the flag internally or it can hide a
+/// malformed override from that caller.
 pub(crate) fn take_env_parse_warning() -> bool {
     ENV_PARSE_WARNING.replace(false)
 }
@@ -833,7 +839,8 @@ impl Config {
     ///
     /// Returns `EngineError::Config` under the same conditions as [`Self::load`].
     pub fn load_with_source() -> Result<ConfigWithSource, EngineError> {
-        let candidates = user_config_candidates(dirs::config_dir().as_deref());
+        let config_dir = user_config_dir();
+        let candidates = user_config_candidates(config_dir.as_deref());
         let env_map = collect_localhold_env_vars();
         Self::load_from_sources_with_source(&candidates, &env_map)
     }
@@ -1051,6 +1058,14 @@ impl Config {
 
 pub(super) fn user_config_candidates(config_dir: Option<&Path>) -> Vec<PathBuf> {
     config_dir.map_or_else(Vec::new, |dir| vec![dir.join("localhold/localhold.toml")])
+}
+
+pub(super) fn user_config_dir() -> Option<PathBuf> {
+    #[cfg(any(test, feature = "testing"))]
+    if let Some(path) = std::env::var_os("LOCALHOLD_TEST_CONFIG_DIR") {
+        return Some(path.into());
+    }
+    dirs::config_dir()
 }
 
 pub(crate) fn validate_server_config(config: &ServerConfig) -> Result<(), EngineError> {

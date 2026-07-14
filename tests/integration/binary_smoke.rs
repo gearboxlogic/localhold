@@ -170,6 +170,13 @@ fn create_canceling_embedding_corruption(path: &std::path::Path) {
         .unwrap();
 }
 
+fn replace_vector_table_with_malformed_table(path: &std::path::Path) {
+    let connection = rusqlite::Connection::open(path).unwrap();
+    connection
+        .execute_batch("DROP TABLE memory_embeddings; CREATE TABLE memory_embeddings (embedding BLOB NOT NULL);")
+        .unwrap();
+}
+
 fn seed_postgres_embedding_status_database(url: &str, model: &str) {
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         let mut config = PostgresDatabaseConfig::default();
@@ -186,6 +193,13 @@ fn seed_postgres_embedding_status_database(url: &str, model: &str) {
     });
 }
 
+fn drop_postgres_embedding_tables(url: &str) {
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let pool = PgPoolOptions::new().max_connections(1).connect(url).await.unwrap();
+        let _dropped = query("DROP TABLE embedding_profile, memory_embeddings").execute(&pool).await.unwrap();
+    });
+}
+
 fn embedding_status_command(db_path: &std::path::Path, model: &str) -> Command {
     let mut command = base_binary_command(db_path);
     command.env("LOCALHOLD_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1");
@@ -193,6 +207,37 @@ fn embedding_status_command(db_path: &std::path::Path, model: &str) -> Command {
     command.env("LOCALHOLD_EMBEDDING_DIMENSIONS", "3");
     command.env("LOCALHOLD_EMBEDDING_HEALTH_CHECK", "disabled");
     command.env("LOCALHOLD_EMBEDDING_API_KEY", "embedding-status-secret");
+    command
+}
+
+fn noop_embedding_status_command(db_path: &std::path::Path, dimensions: &str) -> Command {
+    let mut command = base_binary_command(db_path);
+    for key in [
+        "LOCALHOLD_EMBEDDING_BASE_URL",
+        "LOCALHOLD_EMBEDDING_MODEL",
+        "LOCALHOLD_EMBEDDING_API_KEY",
+        "LOCALHOLD_EMBEDDING_AUTH_MODE",
+        "LOCALHOLD_EMBEDDING_SEND_DIMENSIONS",
+        "LOCALHOLD_EMBEDDING_HEALTH_CHECK",
+        "LOCALHOLD_EMBEDDING_ALLOW_INSECURE_HTTP",
+    ] {
+        command.env_remove(key);
+    }
+    command.env("LOCALHOLD_EMBEDDING_DIMENSIONS", dimensions);
+    command
+}
+
+fn postgres_embedding_status_command(url: &str, root: &std::path::Path, auto_migrate: bool) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hold"));
+    let _config_dir = isolate_user_config_dir(&mut command, root);
+    command.env("LOCALHOLD_DB_BACKEND", "postgres");
+    command.env("LOCALHOLD_POSTGRES_URL", url);
+    command.env("LOCALHOLD_POSTGRES_MAX_CONNECTIONS", "1");
+    command.env("LOCALHOLD_POSTGRES_AUTO_MIGRATE", auto_migrate.to_string());
+    command.env("LOCALHOLD_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1");
+    command.env("LOCALHOLD_EMBEDDING_MODEL", "embed-postgres");
+    command.env("LOCALHOLD_EMBEDDING_DIMENSIONS", "3");
+    command.env("LOCALHOLD_EMBEDDING_HEALTH_CHECK", "disabled");
     command
 }
 
@@ -309,6 +354,46 @@ fn embeddings_status_detects_missing_and_orphan_vectors_even_when_counts_cancel(
 }
 
 #[test]
+fn embeddings_status_rejects_an_unparseable_empty_vector_table() {
+    let db_path = unique_db_path("embeddings-status-malformed-vector-table");
+    seed_embedding_status_database(&db_path, "embed-current", 0, 1);
+    replace_vector_table_with_malformed_table(&db_path);
+
+    let output = embedding_status_command(&db_path, "embed-current")
+        .args(["embeddings", "status", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["state"], "reindex_required");
+    assert_eq!(report["stored_dimensions"], Value::Null);
+    assert!(report["summary"].as_str().unwrap().contains("dimensions could not be read"));
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn embeddings_status_checks_vector_dimensions_before_declaring_noop_disabled() {
+    let db_path = unique_db_path("embeddings-status-noop-dimension-mismatch");
+    seed_embedding_status_database(&db_path, "embed-current", 0, 0);
+
+    let output = noop_embedding_status_command(&db_path, "4").args(["embeddings", "status", "--json"]).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["provider_health"], "disabled");
+    assert_eq!(report["state"], "reindex_required");
+    assert_eq!(report["stored_dimensions"], 3_i32);
+
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[test]
 fn embeddings_status_does_not_initialize_a_missing_database() {
     let db_path = unique_db_path("embeddings-status-missing");
 
@@ -341,17 +426,10 @@ fn embeddings_status_reports_postgres_profile_and_progress() {
     drop_postgres_smoke_schema(&url);
     seed_postgres_embedding_status_database(&url, "embed-postgres");
     let root = unique_db_path("embeddings-status-postgres").with_extension("config");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_hold"));
-    let _config_dir = isolate_user_config_dir(&mut command, &root);
-    command.env("LOCALHOLD_DB_BACKEND", "postgres");
-    command.env("LOCALHOLD_POSTGRES_URL", &url);
-    command.env("LOCALHOLD_POSTGRES_MAX_CONNECTIONS", "1");
-    command.env("LOCALHOLD_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1");
-    command.env("LOCALHOLD_EMBEDDING_MODEL", "embed-postgres");
-    command.env("LOCALHOLD_EMBEDDING_DIMENSIONS", "3");
-    command.env("LOCALHOLD_EMBEDDING_HEALTH_CHECK", "disabled");
-
-    let output = command.args(["embeddings", "status", "--json"]).output().unwrap();
+    let output = postgres_embedding_status_command(&url, &root, true)
+        .args(["embeddings", "status", "--json"])
+        .output()
+        .unwrap();
 
     assert_eq!(output.status.code(), Some(2_i32), "one pending PostgreSQL memory should report rebuilding: {output:?}");
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -361,6 +439,15 @@ fn embeddings_status_reports_postgres_profile_and_progress() {
     assert_eq!(report["counts"]["embedded_memories"], 1_i32);
     assert_eq!(report["counts"]["pending_memories"], 1_i32);
     assert_eq!(report["counts"]["vector_rows"], 1_i32);
+
+    drop_postgres_embedding_tables(&url);
+    let no_migration_output = postgres_embedding_status_command(&url, &root, false)
+        .args(["embeddings", "status", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(no_migration_output.status.code(), Some(1_i32));
+    let no_migration_report: Value = serde_json::from_slice(&no_migration_output.stdout).unwrap();
+    assert_eq!(no_migration_report["state"], "unavailable");
 
     drop_postgres_smoke_schema(&url);
     let _cleanup = std::fs::remove_dir_all(root);

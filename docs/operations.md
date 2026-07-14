@@ -252,14 +252,16 @@ treat status output as operational metadata rather than public telemetry.
 
 States have the following meaning:
 
-- `disabled`: the noop provider is selected;
+- `disabled`: the noop provider is selected and any existing vector table has
+  compatible dimensions;
 - `not_initialized`: the database schema does not exist yet;
 - `ready`: empty vector storage can be stamped by normal startup;
 - `rebuilding`: the stored profile matches and memories still need vectors;
 - `complete`: every memory has a current vector;
 - `reindex_required`: configured identity or dimensions differ from storage;
 - `inconsistent`: flags, mappings, and vector rows disagree; and
-- `unavailable`: storage could not be inspected safely.
+- `unavailable`: storage could not be inspected safely, including missing
+  PostgreSQL embedding tables when automatic migration is disabled.
 
 Exit code `0` means healthy or intentionally disabled, `2` means initialization,
 rebuild work, or provider recovery remains, and `1` means storage is

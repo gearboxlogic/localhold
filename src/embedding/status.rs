@@ -226,6 +226,7 @@ impl EmbeddingStatusReport {
 
 #[derive(Debug)]
 struct StorageSnapshot {
+    vector_table_present: bool,
     stored_profile: Option<EmbeddingProfile>,
     stored_dimensions: Option<usize>,
     counts: EmbeddingCounts,
@@ -279,7 +280,7 @@ fn build_report(config: &Config, provider_health: EmbeddingProviderHealth, obser
             "database embedding status could not be inspected safely".to_owned(),
         ),
         StorageObservation::Ready(snapshot) => {
-            let (status, state, summary) = classify_snapshot(configured_profile.as_ref(), &snapshot);
+            let (status, state, summary) = classify_snapshot(configured_profile.as_ref(), config.embedding.dimensions(), &snapshot);
             (status, state, snapshot.stored_profile, snapshot.stored_dimensions, snapshot.counts, summary)
         }
     };
@@ -304,14 +305,7 @@ fn build_report(config: &Config, provider_health: EmbeddingProviderHealth, obser
     }
 }
 
-fn classify_snapshot(configured: Option<&EmbeddingProfile>, snapshot: &StorageSnapshot) -> (EmbeddingStatusLevel, EmbeddingState, String) {
-    let Some(configured) = configured else {
-        return (
-            EmbeddingStatusLevel::Healthy,
-            EmbeddingState::Disabled,
-            "noop embedding provider is selected; stored vectors are not used for retrieval".into(),
-        );
-    };
+fn classify_snapshot(configured: Option<&EmbeddingProfile>, configured_dimensions: usize, snapshot: &StorageSnapshot) -> (EmbeddingStatusLevel, EmbeddingState, String) {
     if !snapshot.counts.is_consistent() {
         return (
             EmbeddingStatusLevel::Failed,
@@ -319,10 +313,28 @@ fn classify_snapshot(configured: Option<&EmbeddingProfile>, snapshot: &StorageSn
             "embedding flags, mappings, or vector rows are inconsistent; run hold doctor before attempting recovery".into(),
         );
     }
-    if !profiles_compatible(configured, snapshot.stored_profile.as_ref(), snapshot.counts.vector_rows)
-        || snapshot.stored_dimensions.is_some_and(|dimensions| dimensions != configured.dimensions)
-        || (snapshot.counts.vector_rows > 0 && snapshot.stored_dimensions.is_none())
-    {
+    if snapshot.vector_table_present && snapshot.stored_dimensions.is_none() {
+        return (
+            EmbeddingStatusLevel::Failed,
+            EmbeddingState::ReindexRequired,
+            "physical vector-table dimensions could not be read; back up the database and run `hold embeddings reindex --yes`".into(),
+        );
+    }
+    if snapshot.stored_dimensions.is_some_and(|dimensions| dimensions != configured_dimensions) {
+        return (
+            EmbeddingStatusLevel::Failed,
+            EmbeddingState::ReindexRequired,
+            "physical vector-table dimensions differ from the configured embedding dimensions; back up the database and run `hold embeddings reindex --yes`".into(),
+        );
+    }
+    let Some(configured) = configured else {
+        return (
+            EmbeddingStatusLevel::Healthy,
+            EmbeddingState::Disabled,
+            "noop embedding provider is selected; stored vectors are not used for retrieval".into(),
+        );
+    };
+    if !profiles_compatible(configured, snapshot.stored_profile.as_ref(), snapshot.counts.vector_rows) {
         return (
             EmbeddingStatusLevel::Failed,
             EmbeddingState::ReindexRequired,
@@ -428,6 +440,7 @@ fn inspect_sqlite_storage_blocking(path: &Path) -> StatusResult<StorageObservati
     let stored_profile = if profile_exists { read_sqlite_profile(&connection)? } else { None };
     let stored_dimensions = crate::store::existing_embedding_dimensions(&connection)?;
     Ok(StorageObservation::Ready(StorageSnapshot {
+        vector_table_present: vectors_exist,
         stored_profile,
         stored_dimensions,
         counts: EmbeddingCounts {
@@ -500,7 +513,7 @@ async fn inspect_postgres_storage(config: &Config, clock: &dyn Clock) -> Storage
     let observation = if remaining.is_zero() {
         StorageObservation::Unavailable
     } else {
-        crate::clock::timeout(clock, remaining, inspect_postgres_pool(&pool))
+        crate::clock::timeout(clock, remaining, inspect_postgres_pool(&pool, config.database.postgres.auto_migrate))
             .await
             .unwrap_or(Ok(StorageObservation::Unavailable))
             .unwrap_or(StorageObservation::Unavailable)
@@ -509,7 +522,7 @@ async fn inspect_postgres_storage(config: &Config, clock: &dyn Clock) -> Storage
     observation
 }
 
-async fn inspect_postgres_pool(pool: &PgPool) -> StatusResult<StorageObservation> {
+async fn inspect_postgres_pool(pool: &PgPool, auto_migrate: bool) -> StatusResult<StorageObservation> {
     let memories_exist: bool = query_scalar("SELECT to_regclass('memories') IS NOT NULL").fetch_one(pool).await?;
     if !memories_exist {
         return Ok(StorageObservation::NotInitialized);
@@ -525,6 +538,9 @@ async fn inspect_postgres_pool(pool: &PgPool) -> StatusResult<StorageObservation
     .await?;
     let vector_table_exists: bool = query_scalar("SELECT to_regclass('memory_embeddings') IS NOT NULL").fetch_one(pool).await?;
     let profile_table_exists: bool = query_scalar("SELECT to_regclass('embedding_profile') IS NOT NULL").fetch_one(pool).await?;
+    if !auto_migrate && (!vector_table_exists || !profile_table_exists) {
+        return Ok(StorageObservation::Unavailable);
+    }
     let (vector_rows, missing, unexpected) = if vector_table_exists {
         (
             query_scalar::<_, i64>("SELECT COUNT(*) FROM memory_embeddings").fetch_one(pool).await?,
@@ -545,6 +561,7 @@ async fn inspect_postgres_pool(pool: &PgPool) -> StatusResult<StorageObservation
     let stored_profile = if profile_table_exists { read_postgres_profile(pool).await? } else { None };
     let stored_dimensions = if vector_table_exists { read_postgres_dimensions(pool).await? } else { None };
     Ok(StorageObservation::Ready(StorageSnapshot {
+        vector_table_present: vector_table_exists,
         stored_profile,
         stored_dimensions,
         counts: EmbeddingCounts {
@@ -668,6 +685,7 @@ mod tests {
 
     fn snapshot(stored_profile: Option<EmbeddingProfile>, embedded: u64, pending: u64) -> StorageSnapshot {
         StorageSnapshot {
+            vector_table_present: true,
             stored_profile,
             stored_dimensions: Some(3),
             counts: EmbeddingCounts {
@@ -684,14 +702,17 @@ mod tests {
     #[test]
     fn classification_distinguishes_ready_rebuilding_complete_and_reindex() {
         let configured = profile("current");
-        assert_eq!(classify_snapshot(Some(&configured), &snapshot(None, 0, 1)).1, EmbeddingState::Ready);
+        assert_eq!(classify_snapshot(Some(&configured), 3, &snapshot(None, 0, 1)).1, EmbeddingState::Ready);
         assert_eq!(
-            classify_snapshot(Some(&configured), &snapshot(Some(configured.clone()), 1, 1)).1,
+            classify_snapshot(Some(&configured), 3, &snapshot(Some(configured.clone()), 1, 1)).1,
             EmbeddingState::Rebuilding
         );
-        assert_eq!(classify_snapshot(Some(&configured), &snapshot(Some(configured.clone()), 2, 0)).1, EmbeddingState::Complete);
         assert_eq!(
-            classify_snapshot(Some(&configured), &snapshot(Some(profile("old")), 2, 0)).1,
+            classify_snapshot(Some(&configured), 3, &snapshot(Some(configured.clone()), 2, 0)).1,
+            EmbeddingState::Complete
+        );
+        assert_eq!(
+            classify_snapshot(Some(&configured), 3, &snapshot(Some(profile("old")), 2, 0)).1,
             EmbeddingState::ReindexRequired
         );
     }
@@ -701,7 +722,17 @@ mod tests {
         let configured = profile("current");
         let mut snapshot = snapshot(Some(configured.clone()), 1, 0);
         snapshot.counts.vector_rows = 0;
-        assert_eq!(classify_snapshot(Some(&configured), &snapshot).1, EmbeddingState::Inconsistent);
+        assert_eq!(classify_snapshot(Some(&configured), 3, &snapshot).1, EmbeddingState::Inconsistent);
+    }
+
+    #[test]
+    fn physical_vector_dimensions_are_checked_before_noop_is_declared_healthy() {
+        let mut malformed = snapshot(None, 0, 0);
+        malformed.stored_dimensions = None;
+        assert_eq!(classify_snapshot(None, 3, &malformed).1, EmbeddingState::ReindexRequired);
+
+        let mismatched = snapshot(None, 0, 0);
+        assert_eq!(classify_snapshot(None, 4, &mismatched).1, EmbeddingState::ReindexRequired);
     }
 
     #[test]

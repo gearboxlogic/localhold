@@ -42,19 +42,41 @@ pub(crate) enum ExclusiveLeaseError {
 }
 
 fn lock_path(database_path: &Path) -> Result<PathBuf, std::io::Error> {
-    let identity = if database_path.exists() {
-        database_path.canonicalize()?
-    } else {
-        let parent = database_path.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-        parent.canonicalize()?.join(
-            database_path
-                .file_name()
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "database path must name a file"))?,
-        )
-    };
+    let identity = database_identity(database_path)?;
     let mut path = OsString::from(identity.as_os_str());
     path.push(".localhold.lock");
     Ok(PathBuf::from(path))
+}
+
+fn database_identity(database_path: &Path) -> Result<PathBuf, std::io::Error> {
+    let mut candidate = database_path.to_path_buf();
+    for _depth in 0_u8..40_u8 {
+        match candidate.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = std::fs::read_link(&candidate)?;
+                candidate = if target.is_absolute() {
+                    target
+                } else {
+                    candidate
+                        .parent()
+                        .filter(|path| !path.as_os_str().is_empty())
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(target)
+                };
+            }
+            Ok(_) => return candidate.canonicalize(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let parent = candidate.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+                return Ok(parent.canonicalize()?.join(
+                    candidate
+                        .file_name()
+                        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "database path must name a file"))?,
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "database path contains too many symbolic links"))
 }
 
 fn open_lock_file(database_path: &Path) -> Result<File, StoreError> {
@@ -125,5 +147,20 @@ mod tests {
         symlink(&database, &alias).unwrap();
         let _shared = SqliteDatabaseLease::shared(&database).unwrap();
         assert!(matches!(SqliteDatabaseLease::try_exclusive(&alias), Err(ExclusiveLeaseError::InUse)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_keeps_the_same_lock_identity_after_target_creation() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("localhold.db");
+        let alias = directory.path().join("alias.db");
+        symlink(&database, &alias).unwrap();
+        let _shared = SqliteDatabaseLease::shared(&alias).unwrap();
+        let _database_file = File::create(&database).unwrap();
+
+        assert!(matches!(SqliteDatabaseLease::try_exclusive(&database), Err(ExclusiveLeaseError::InUse)));
     }
 }

@@ -275,11 +275,13 @@ hold restore ./localhold-2026-07-14.db --dry-run --json
 
 The dry run copies the candidate into a private staging database, validates it
 against the current configuration, and verifies that the configured database
-can be exclusively coordinated. It does not replace data. Stop every LocalHold
-server using the SQLite path before the dry run and restore. Current LocalHold
-binaries hold shared OS leases for their connection lifetime, so restore
-refuses while any of them remains open. Stop non-LocalHold SQLite clients too;
-they do not participate in the lease protocol.
+can be exclusively coordinated. It does not replace data. If the configured
+database directory does not exist yet, restore creates it before acquiring the
+lease, matching normal server startup. Stop every LocalHold server using the
+SQLite path before the dry run and restore. Current LocalHold binaries hold
+shared OS leases for their connection lifetime, so restore refuses while any
+of them remains open. Stop non-LocalHold SQLite clients too; they do not
+participate in the lease protocol.
 
 After reviewing the dry run, restore explicitly:
 
@@ -293,12 +295,16 @@ Before replacement, LocalHold creates a uniquely named
 preserves the current database even when invalid schema or embedding metadata
 is the reason for restoring, so it is a rollback and forensic artifact rather
 than a second validated backup. The incoming backup must still pass every
-validation check. Replacement uses SQLite's transactional backup API:
-interruption, lock failure, or insufficient disk rolls the destination
-transaction back instead of leaving a partial database. Existing database
-permissions are retained. Keep the reported recovery snapshot until
+validation check. If the current file is not SQLite-readable, LocalHold instead
+retains it and any `-wal`, `-shm`, or `-journal` sidecars byte-for-byte under
+the reported recovery name before replacing it. Recovery names include the
+UTC timestamp, process ID, and a process-local sequence to avoid concurrent
+restore collisions. Replacement uses SQLite's transactional backup API;
+interruption, lock failure, or insufficient disk rolls the destination back
+instead of leaving a partial database. Existing database permissions are
+retained. Keep the reported recovery snapshot and any matching sidecars until
 representative `read`, `recall`, access-control, and embedding checks pass,
-then remove it according to the operator's retention policy.
+then remove them according to the operator's retention policy.
 
 Both commands emit stable JSON with `schema_version: 1` when `--json` is used.
 Reports include the validated database schema version, embedding profile,

@@ -195,6 +195,24 @@ struct Inspection {
 }
 
 #[derive(Debug)]
+struct RecoverySnapshot {
+    path: PathBuf,
+    kind: RecoveryKind,
+}
+
+#[derive(Debug)]
+enum RecoveryKind {
+    Sqlite,
+    Raw(RawRecovery),
+}
+
+#[derive(Debug)]
+struct RawRecovery {
+    target_path: PathBuf,
+    permissions: std::fs::Permissions,
+}
+
+#[derive(Debug)]
 struct MaintenanceFailure {
     status: &'static str,
     message: String,
@@ -302,6 +320,7 @@ fn restore_sync(options: &RestoreOptions) -> Result<MaintenanceReport, Maintenan
     reason = "restore keeps validation, coordination, recovery creation, transactional replacement, and rollback in one auditable control flow"
 )]
 fn restore_sync_with_replace_policy(options: &RestoreOptions, replace_policy: CopyPolicy) -> Result<MaintenanceReport, MaintenanceFailure> {
+    ensure_restore_parent(&options.database_path)?;
     ensure_distinct_paths(&options.backup_path, &options.database_path)?;
     let staged = temporary_path(&options.database_path, "restore-stage");
     let result = (|| {
@@ -335,41 +354,34 @@ fn restore_sync_with_replace_policy(options: &RestoreOptions, replace_policy: Co
         }
 
         let target_existed = options.database_path.exists();
-        let recovery_path = if target_existed {
+        let recovery_snapshot = if target_existed {
             let recovery = recovery_path(&options.database_path, options.clock.as_ref());
-            let recovery_temporary = temporary_path(&recovery, "recovery");
-            let recovery_result = (|| {
-                snapshot_path(&options.database_path, &recovery_temporary, options.clock.as_ref(), CopyPolicy::default())?;
-                // Preserve the current database exactly as SQLite can read it, even when
-                // its schema or embedding metadata is the reason restore is necessary.
-                // The candidate backup was validated above; the recovery snapshot is a
-                // rollback/quarantine artifact and must not gate disaster recovery.
-                publish_no_clobber(&recovery_temporary, &recovery)
-            })();
-            remove_if_exists(&recovery_temporary);
-            recovery_result?;
-            Some(recovery)
+            Some(create_recovery_snapshot(&options.database_path, recovery, options.clock.as_ref())?)
         } else {
             None
         };
 
+        let recovery_path = recovery_snapshot.as_ref().map(|snapshot| &snapshot.path);
+
         if !target_existed {
             create_secure_empty_file(&options.database_path)?;
         }
-        let replace_result = replace_from_snapshot(&staged, &options.database_path, options.clock.as_ref(), replace_policy);
+        let replace_result = match recovery_snapshot.as_ref() {
+            Some(RecoverySnapshot {
+                path,
+                kind: RecoveryKind::Raw(raw),
+            }) => replace_over_raw_target(&staged, path, raw, options.clock.as_ref(), replace_policy),
+            Some(RecoverySnapshot { kind: RecoveryKind::Sqlite, .. }) | None => replace_from_snapshot(&staged, &options.database_path, options.clock.as_ref(), replace_policy),
+        };
         if let Err(failure) = replace_result {
             if !target_existed {
                 remove_sqlite_files(&options.database_path);
             }
-            return Err(if let Some(recovery) = &recovery_path {
-                failure.with_recovery(recovery)
-            } else {
-                failure
-            });
+            return Err(if let Some(recovery) = recovery_path { failure.with_recovery(recovery) } else { failure });
         }
 
         if let Err(validation_failure) = inspect_path(&options.database_path, options.embedding_dimensions, options.expected_profile.as_ref()) {
-            if let Some(recovery) = &recovery_path {
+            if let Some(recovery) = &recovery_snapshot {
                 rollback_invalid_restore(options, recovery, &validation_failure)?;
             } else {
                 remove_sqlite_files(&options.database_path);
@@ -378,11 +390,7 @@ fn restore_sync_with_replace_policy(options: &RestoreOptions, replace_policy: Co
                 "restored database failed post-write validation and the previous database was recovered: {}",
                 validation_failure.message
             ));
-            return Err(if let Some(recovery) = &recovery_path {
-                failure.with_recovery(recovery)
-            } else {
-                failure
-            });
+            return Err(if let Some(recovery) = recovery_path { failure.with_recovery(recovery) } else { failure });
         }
 
         Ok(success_report(
@@ -392,7 +400,7 @@ fn restore_sync_with_replace_policy(options: &RestoreOptions, replace_policy: Co
                 destination: &options.database_path,
                 dry_run: false,
                 database_replaced: true,
-                recovery_path: recovery_path.as_deref(),
+                recovery_path: recovery_path.map(PathBuf::as_path),
                 message: "validated backup restored transactionally; the pre-restore snapshot was retained".into(),
             },
             inspection,
@@ -402,15 +410,57 @@ fn restore_sync_with_replace_policy(options: &RestoreOptions, replace_policy: Co
     result
 }
 
-fn rollback_invalid_restore(options: &RestoreOptions, recovery: &Path, validation_failure: &MaintenanceFailure) -> Result<(), MaintenanceFailure> {
-    replace_from_snapshot(recovery, &options.database_path, options.clock.as_ref(), CopyPolicy::default()).map_err(|rollback_failure| {
+fn rollback_invalid_restore(options: &RestoreOptions, recovery: &RecoverySnapshot, validation_failure: &MaintenanceFailure) -> Result<(), MaintenanceFailure> {
+    let rollback_result = match &recovery.kind {
+        RecoveryKind::Sqlite => replace_from_snapshot(&recovery.path, &options.database_path, options.clock.as_ref(), CopyPolicy::default()),
+        RecoveryKind::Raw(raw) => restore_raw_bundle(&recovery.path, &raw.target_path, &raw.permissions),
+    };
+    rollback_result.map_err(|rollback_failure| {
         MaintenanceFailure::failed(format!(
             "restored database failed post-write validation ({}) and automatic rollback also failed ({}); recovery snapshot remains at {}",
             validation_failure.message,
             rollback_failure.message,
-            recovery.display()
+            recovery.path.display()
         ))
-        .with_recovery(recovery)
+        .with_recovery(&recovery.path)
+    })
+}
+
+fn create_recovery_snapshot(database_path: &Path, recovery_path: PathBuf, clock: &dyn Clock) -> Result<RecoverySnapshot, MaintenanceFailure> {
+    let recovery_temporary = temporary_path(&recovery_path, "recovery");
+    let sqlite_result = snapshot_path(database_path, &recovery_temporary, clock, CopyPolicy::default()).and_then(|()| publish_no_clobber(&recovery_temporary, &recovery_path));
+    remove_if_exists(&recovery_temporary);
+    let sqlite_failure = match sqlite_result {
+        Ok(()) => {
+            return Ok(RecoverySnapshot {
+                path: recovery_path,
+                kind: RecoveryKind::Sqlite,
+            });
+        }
+        Err(failure) => failure,
+    };
+    let target_path = database_path
+        .canonicalize()
+        .map_err(|error| MaintenanceFailure::failed(format!("cannot resolve unreadable current database {}: {error}", database_path.display())))?;
+    let permissions = target_path
+        .metadata()
+        .map_err(|error| MaintenanceFailure::failed(format!("cannot inspect unreadable current database {}: {error}", target_path.display())))?
+        .permissions();
+    copy_raw_sqlite_bundle(&target_path, &recovery_path).map_err(|raw_failure| {
+        MaintenanceFailure::failed(format!(
+            "cannot preserve current database before restore: SQLite snapshot failed ({}); byte-for-byte recovery copy also failed ({})",
+            sqlite_failure.message, raw_failure.message
+        ))
+    })?;
+    tracing::warn!(
+        database = %target_path.display(),
+        recovery = %recovery_path.display(),
+        sqlite_error = %sqlite_failure.message,
+        "current database is not SQLite-readable; retained a byte-for-byte recovery bundle"
+    );
+    Ok(RecoverySnapshot {
+        path: recovery_path,
+        kind: RecoveryKind::Raw(RawRecovery { target_path, permissions }),
     })
 }
 
@@ -445,6 +495,114 @@ fn replace_from_snapshot(source_path: &Path, destination_path: &Path, clock: &dy
     #[cfg(unix)]
     sync_parent(destination_path)?;
     Ok(())
+}
+
+fn replace_over_raw_target(staged: &Path, recovery: &Path, raw: &RawRecovery, clock: &dyn Clock, policy: CopyPolicy) -> Result<(), MaintenanceFailure> {
+    let target = &raw.target_path;
+    let permissions = &raw.permissions;
+    let replace_result = (|| {
+        remove_sqlite_bundle_checked(target)?;
+        create_secure_empty_file(target)?;
+        std::fs::set_permissions(target, permissions.clone())
+            .map_err(|error| MaintenanceFailure::failed(format!("cannot preserve permissions on {}: {error}", target.display())))?;
+        replace_from_snapshot(staged, target, clock, policy)
+    })();
+    if let Err(replace_failure) = replace_result {
+        return match restore_raw_bundle(recovery, target, permissions) {
+            Ok(()) => Err(replace_failure),
+            Err(rollback_failure) => Err(MaintenanceFailure::failed(format!(
+                "restore failed ({}) and byte-for-byte rollback also failed ({}); recovery bundle remains at {}",
+                replace_failure.message,
+                rollback_failure.message,
+                recovery.display()
+            ))
+            .with_recovery(recovery)),
+        };
+    }
+    Ok(())
+}
+
+fn restore_raw_bundle(recovery: &Path, target: &Path, permissions: &std::fs::Permissions) -> Result<(), MaintenanceFailure> {
+    remove_sqlite_bundle_checked(target)?;
+    copy_raw_sqlite_bundle(recovery, target)?;
+    std::fs::set_permissions(target, permissions.clone()).map_err(|error| MaintenanceFailure::failed(format!("cannot restore permissions on {}: {error}", target.display())))?;
+    sync_file(target)?;
+    Ok(())
+}
+
+fn copy_raw_sqlite_bundle(source: &Path, destination: &Path) -> Result<(), MaintenanceFailure> {
+    let result = (|| {
+        copy_raw_file(source, destination)?;
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let source_sidecar = sqlite_sidecar(source, suffix);
+            match source_sidecar.symlink_metadata() {
+                Ok(metadata) if metadata.is_file() => copy_raw_file(&source_sidecar, &sqlite_sidecar(destination, suffix))?,
+                Ok(_) => {
+                    return Err(MaintenanceFailure::failed(format!("SQLite sidecar {} is not a regular file", source_sidecar.display())));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(MaintenanceFailure::failed(format!("cannot inspect SQLite sidecar {}: {error}", source_sidecar.display())));
+                }
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        remove_sqlite_files(destination);
+    }
+    result
+}
+
+fn copy_raw_file(source: &Path, destination: &Path) -> Result<(), MaintenanceFailure> {
+    let metadata = source
+        .metadata()
+        .map_err(|error| MaintenanceFailure::failed(format!("cannot inspect {}: {error}", source.display())))?;
+    if !metadata.is_file() {
+        return Err(MaintenanceFailure::failed(format!("{} is not a regular file", source.display())));
+    }
+    create_secure_empty_file(destination)?;
+    let result = (|| {
+        let mut source_file = OpenOptions::new()
+            .read(true)
+            .open(source)
+            .map_err(|error| MaintenanceFailure::failed(format!("cannot read {}: {error}", source.display())))?;
+        let mut destination_file = OpenOptions::new()
+            .write(true)
+            .open(destination)
+            .map_err(|error| MaintenanceFailure::failed(format!("cannot write {}: {error}", destination.display())))?;
+        let _bytes = std::io::copy(&mut source_file, &mut destination_file)
+            .map_err(|error| MaintenanceFailure::failed(format!("cannot copy {} to {}: {error}", source.display(), destination.display())))?;
+        destination_file
+            .sync_all()
+            .map_err(|error| MaintenanceFailure::failed(format!("cannot durably sync {}: {error}", destination.display())))?;
+        #[cfg(unix)]
+        sync_parent(destination)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        remove_if_exists(destination);
+    }
+    result
+}
+
+fn remove_sqlite_bundle_checked(database: &Path) -> Result<(), MaintenanceFailure> {
+    for path in std::iter::once(database.to_path_buf()).chain(["-wal", "-shm", "-journal"].into_iter().map(|suffix| sqlite_sidecar(database, suffix))) {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(MaintenanceFailure::failed(format!("cannot remove {} before restore: {error}", path.display()))),
+        }
+    }
+    #[cfg(unix)]
+    sync_parent(database)?;
+    Ok(())
+}
+
+fn sqlite_sidecar(database: &Path, suffix: &str) -> PathBuf {
+    let mut path = OsString::from(database.as_os_str());
+    path.push(suffix);
+    PathBuf::from(path)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -572,6 +730,11 @@ fn ensure_distinct_paths(first: &Path, second: &Path) -> Result<(), MaintenanceF
     Ok(())
 }
 
+fn ensure_restore_parent(destination: &Path) -> Result<(), MaintenanceFailure> {
+    let parent = destination.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|error| MaintenanceFailure::failed(format!("cannot create restore destination directory {}: {error}", parent.display())))
+}
+
 fn ensure_new_destination(destination: &Path) -> Result<(), MaintenanceFailure> {
     match destination.symlink_metadata() {
         Ok(_) => Err(MaintenanceFailure {
@@ -659,7 +822,7 @@ fn recovery_path(database: &Path, clock: &dyn Clock) -> PathBuf {
     let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let timestamp = clock.now().format("%Y%m%dT%H%M%SZ");
     let mut path = OsString::from(database.as_os_str());
-    path.push(format!(".pre-restore-{timestamp}-{sequence}.bak"));
+    path.push(format!(".pre-restore-{timestamp}-{}-{sequence}.bak", std::process::id()));
     PathBuf::from(path)
 }
 
@@ -760,8 +923,11 @@ mod tests {
     #[test]
     fn recovery_names_use_the_injected_clock() {
         let clock = MockClock::pinned(Utc.with_ymd_and_hms(2031, 2, 3, 4, 5, 6).unwrap());
-        let path = recovery_path(Path::new("memory.db"), &clock);
-        assert!(path.to_string_lossy().contains("20310203T040506Z"));
+        let first = recovery_path(Path::new("memory.db"), &clock);
+        let second = recovery_path(Path::new("memory.db"), &clock);
+        assert!(first.to_string_lossy().contains("20310203T040506Z"));
+        assert!(first.to_string_lossy().contains(&format!("-{}-", std::process::id())));
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -1065,6 +1231,75 @@ mod tests {
         assert!(memory_contents(&recovery).iter().any(|content| content.contains("target")));
         let recovery_failure = inspect_path_using_stored_dimensions(&recovery).unwrap_err();
         assert!(recovery_failure.message.contains("no recorded embedding profile"));
+    }
+
+    #[tokio::test]
+    async fn restore_creates_a_missing_destination_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.db");
+        let backup_path = directory.path().join("snapshot.db");
+        let target = directory.path().join("fresh/data/localhold.db");
+        let expected = profile("model-a");
+        let source_store = seed_database(&source, "source", &expected).await;
+        assert_eq!(backup(BackupOptions::new(source, backup_path.clone())).await.status, "ok");
+        drop(source_store);
+
+        let restored = restore(RestoreOptions::new(target.clone(), backup_path, DIMENSIONS, Some(expected)).confirmed(true)).await;
+
+        assert_eq!(restored.status, "ok");
+        assert!(target.exists());
+        assert!(memory_contents(&target).iter().any(|content| content.contains("source")));
+    }
+
+    #[tokio::test]
+    async fn restore_replaces_unreadable_current_database_and_retains_raw_bundle() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.db");
+        let backup_path = directory.path().join("snapshot.db");
+        let target = directory.path().join("target.db");
+        let expected = profile("model-a");
+        let source_store = seed_database(&source, "source", &expected).await;
+        assert_eq!(backup(BackupOptions::new(source, backup_path.clone())).await.status, "ok");
+        drop(source_store);
+        std::fs::write(&target, b"not a SQLite database").unwrap();
+        std::fs::write(sqlite_sidecar(&target, "-wal"), b"forensic WAL bytes").unwrap();
+
+        let restored = restore(RestoreOptions::new(target.clone(), backup_path, DIMENSIONS, Some(expected)).confirmed(true)).await;
+
+        assert_eq!(restored.status, "ok");
+        assert!(memory_contents(&target).iter().any(|content| content.contains("source")));
+        let recovery = restored.recovery_path.as_ref().map(PathBuf::from).unwrap();
+        assert_eq!(std::fs::read(&recovery).unwrap(), b"not a SQLite database");
+        assert_eq!(std::fs::read(sqlite_sidecar(&recovery, "-wal")).unwrap(), b"forensic WAL bytes");
+    }
+
+    #[tokio::test]
+    async fn interrupted_restore_rolls_back_an_unreadable_current_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.db");
+        let backup_path = directory.path().join("snapshot.db");
+        let target = directory.path().join("target.db");
+        let expected = profile("model-a");
+        let source_store = seed_database(&source, "source", &expected).await;
+        add_large_fixture_rows(&source_store, "01J40000000000000000", 600_usize, "raw".repeat(2048)).await;
+        assert_eq!(backup(BackupOptions::new(source, backup_path.clone())).await.status, "ok");
+        drop(source_store);
+        std::fs::write(&target, b"not a SQLite database").unwrap();
+        let options = RestoreOptions::new(target.clone(), backup_path, DIMENSIONS, Some(expected)).confirmed(true);
+
+        let failure = tokio::task::spawn_blocking(move || {
+            restore_sync_with_replace_policy(&options, CopyPolicy {
+                abort_after_steps_for_test: Some(1),
+                ..CopyPolicy::default()
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+
+        assert!(failure.message.contains("interrupted"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"not a SQLite database");
+        assert!(failure.recovery_path.is_some_and(|path| path.exists()));
     }
 
     #[tokio::test]

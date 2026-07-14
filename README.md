@@ -256,9 +256,10 @@ Backup never overwrites an existing destination. Restore validates schema,
 integrity, and embedding identity before replacement, refuses while another
 LocalHold process holds the database open, and retains a pre-restore recovery
 snapshot. The recovery snapshot preserves the current database even when its
-invalid schema or embedding metadata is the reason for restoring; only the
-incoming backup must pass validation. Add `--json` to any command for stable
-automation output.
+invalid schema, embedding metadata, or unreadable SQLite contents are the
+reason for restoring; unreadable databases and their sidecars are retained as
+a byte-for-byte recovery bundle. Only the incoming backup must pass
+validation. Add `--json` to any command for stable automation output.
 
 PostgreSQL is opt-in:
 

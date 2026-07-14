@@ -56,6 +56,142 @@ fn isolate_user_config_dir(command: &mut Command, root: &std::path::Path) -> std
     }
 }
 
+fn config_binary_command(root: &std::path::Path) -> (Command, std::path::PathBuf) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hold"));
+    for (key, _value) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("LOCALHOLD_") {
+            command.env_remove(key);
+        }
+    }
+    let config_dir = isolate_user_config_dir(&mut command, root);
+    (command, config_dir)
+}
+
+#[test]
+fn config_paths_reports_canonical_policy_without_starting_server() {
+    let root = unique_db_path("config-paths").with_extension("root");
+    let (mut command, config_dir) = config_binary_command(&root);
+
+    let output = command.args(["config", "paths", "--json"]).output().unwrap();
+
+    assert!(output.status.success(), "config paths failed: {output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1_i32);
+    assert_eq!(report["canonical_path"], config_dir.join("localhold/localhold.toml").to_string_lossy().as_ref());
+    assert!(report["active_path"].is_null());
+    assert_eq!(report["searched_paths"].as_array().unwrap().len(), 1_usize);
+    assert!(String::from_utf8(output.stderr).unwrap().is_empty());
+    assert!(!root.exists(), "config paths must not create the user configuration directory");
+}
+
+#[test]
+fn config_init_creates_valid_config_and_refuses_to_clobber() {
+    let root = unique_db_path("config-init").with_extension("root");
+    let (mut init_command, config_dir) = config_binary_command(&root);
+    let config_path = config_dir.join("localhold/localhold.toml");
+
+    let output = init_command.args(["config", "init", "--json"]).output().unwrap();
+
+    assert!(output.status.success(), "config init failed: {output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1_i32);
+    assert_eq!(report["created"], true);
+    assert_eq!(report["config_path"], config_path.to_string_lossy().as_ref());
+    let original = std::fs::read_to_string(&config_path).unwrap();
+    let _parsed: localhold::config::Config = toml::from_str(&original).unwrap();
+
+    let (mut second_command, _config_dir) = config_binary_command(&root);
+    let second = second_command.args(["config", "init"]).output().unwrap();
+    assert!(!second.status.success());
+    assert!(String::from_utf8(second.stdout).unwrap().contains("refusing to overwrite"));
+    assert!(String::from_utf8(second.stderr).unwrap().is_empty());
+    assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
+
+    let (mut json_command, _config_dir) = config_binary_command(&root);
+    let json_failure = json_command.args(["config", "init", "--json"]).output().unwrap();
+    assert_eq!(json_failure.status.code(), Some(1_i32));
+    let failure_report: Value = serde_json::from_slice(&json_failure.stdout).unwrap();
+    assert_eq!(failure_report["created"], false);
+    assert_eq!(failure_report["exit_code"], 1_i32);
+    assert!(failure_report["summary"].as_str().unwrap().contains("refusing to overwrite"));
+    assert!(String::from_utf8(json_failure.stderr).unwrap().is_empty());
+    let _cleanup = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn config_validate_accepts_effective_starter_without_opening_database() {
+    let root = unique_db_path("config-validate-valid").with_extension("root");
+    let db_path = root.join("must-not-exist.db");
+    let (mut init_command, _config_dir) = config_binary_command(&root);
+    let init = init_command.args(["config", "init"]).output().unwrap();
+    assert!(init.status.success());
+
+    let (mut validate_command, _config_dir) = config_binary_command(&root);
+    validate_command.env("LOCALHOLD_DB_PATH", &db_path);
+    let output = validate_command.args(["config", "validate", "--json"]).output().unwrap();
+
+    assert!(output.status.success(), "config validate failed: {output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["valid"], true);
+    assert_eq!(report["exit_code"], 0_i32);
+    assert!(!db_path.exists(), "config validate must not initialize storage");
+    let _cleanup = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn config_validate_rejects_invalid_file_without_leaking_parser_context() {
+    let root = unique_db_path("config-validate-invalid").with_extension("root");
+    let (mut command, config_dir) = config_binary_command(&root);
+    let config_path = config_dir.join("localhold/localhold.toml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(&config_path, "[server]\nhttp_auth_token = \"parser-secret-ABC123\n").unwrap();
+
+    let output = command.args(["config", "validate", "--json"]).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["valid"], false);
+    assert_eq!(report["exit_code"], 1_i32);
+    assert!(report["summary"].as_str().unwrap().contains("parser context was suppressed"));
+    let combined = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(!combined.contains("parser-secret-ABC123"));
+    let _cleanup = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn config_validate_rejects_malformed_environment_override_without_echoing_value() {
+    let root = unique_db_path("config-validate-env").with_extension("root");
+    let (mut command, _config_dir) = config_binary_command(&root);
+    command.env("LOCALHOLD_HTTP_PORT", "environment-secret-XYZ987");
+
+    let output = command.args(["config", "validate", "--json"]).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["valid"], false);
+    assert!(report["summary"].as_str().unwrap().contains("environment override is malformed"));
+    let combined = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(!combined.contains("environment-secret-XYZ987"));
+    let _cleanup = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn config_help_and_unknown_commands_never_fall_through_to_server_startup() {
+    let help = Command::new(env!("CARGO_BIN_EXE_hold")).args(["config", "--help"]).output().unwrap();
+    assert!(help.status.success());
+    let stdout = String::from_utf8(help.stdout).unwrap();
+    assert!(stdout.contains("init [--json]"));
+    assert!(stdout.contains("Exit codes:"));
+
+    let root = unique_db_path("config-unknown").with_extension("root");
+    let db_path = root.join("must-not-exist.db");
+    let (mut command, _config_dir) = config_binary_command(&root);
+    command.env("LOCALHOLD_DB_PATH", &db_path);
+    let unknown = command.args(["config", "unknown"]).output().unwrap();
+    assert!(!unknown.status.success());
+    assert!(!db_path.exists(), "unknown config commands must not start or initialize the server");
+}
+
 #[expect(clippy::expect_used, clippy::panic, reason = "test helper reports subprocess startup failures with captured diagnostics")]
 fn wait_for_startup_log(child: &mut Child, label: &str, expected: &str) -> JoinHandle<String> {
     let stderr = child.stderr.take().expect("startup-log test must pipe stderr");

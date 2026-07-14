@@ -83,6 +83,13 @@ implicitly from the current working directory. Runtime overrides use
 [localhold.example.toml](localhold.example.toml) for the complete configuration
 surface.
 
+Use `hold config paths` to show the canonical and active paths, `hold config
+init` to create a minimal starter without replacing an existing file, and
+`hold config validate` to validate the effective file and environment settings
+without opening storage, contacting model providers, or starting the server.
+Add `--json` to any of these commands for the versioned machine-readable
+report.
+
 The default provider is `noop`, which keeps search local and text-only. To use
 semantic search, configure an OpenAI-compatible `/v1` endpoint:
 

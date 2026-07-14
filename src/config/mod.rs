@@ -1,6 +1,7 @@
 //! Configuration loading from TOML files and environment variable overrides.
 
 mod embedding;
+pub mod operator;
 
 use std::{
     cell::Cell,
@@ -1048,7 +1049,7 @@ impl Config {
     }
 }
 
-fn user_config_candidates(config_dir: Option<&Path>) -> Vec<PathBuf> {
+pub(super) fn user_config_candidates(config_dir: Option<&Path>) -> Vec<PathBuf> {
     config_dir.map_or_else(Vec::new, |dir| vec![dir.join("localhold/localhold.toml")])
 }
 

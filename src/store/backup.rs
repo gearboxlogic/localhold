@@ -2,7 +2,6 @@
 
 use std::{
     ffi::OsString,
-    fmt::Write as _,
     fs::{File, OpenOptions},
     path::{Path, PathBuf},
     sync::{
@@ -177,7 +176,9 @@ impl MaintenanceReport {
     pub fn render_text(&self) -> String {
         let mut output = format!("{} {}: {}\n", self.operation, self.status, self.message);
         if let Some(recovery_path) = &self.recovery_path {
-            let _write_failed = writeln!(output, "Recovery snapshot: {recovery_path}").is_err();
+            output.push_str("Recovery snapshot: ");
+            output.push_str(recovery_path);
+            output.push('\n');
         }
         output
     }

@@ -169,9 +169,6 @@ async fn try_run_backup_restore_cli() -> Option<CliExitResult> {
                 }
             }
             let path = path.ok_or_else(|| EngineError::config(format!("{command} requires a path\n\n{USAGE}")))?;
-            if command == "backup" && (dry_run || confirmed) {
-                return Err(EngineError::config(format!("backup does not accept restore confirmation options\n\n{USAGE}")).into());
-            }
             if command == "restore" && dry_run && confirmed {
                 return Err(EngineError::config(format!("restore accepts only one of --dry-run or --yes\n\n{USAGE}")).into());
             }

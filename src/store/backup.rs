@@ -1,8 +1,10 @@
 //! Supported WAL-safe SQLite backup and restore operations.
 
+#[cfg(unix)]
+use std::fs::File;
 use std::{
     ffi::OsString,
-    fs::{File, OpenOptions},
+    fs::OpenOptions,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -627,7 +629,10 @@ fn publish_no_clobber_with_cleanup(temporary: &Path, destination: &Path, remove_
 }
 
 fn sync_file(path: &Path) -> Result<(), MaintenanceFailure> {
-    File::open(path)
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
         .and_then(|file| file.sync_all())
         .map_err(|error| MaintenanceFailure::failed(format!("cannot durably sync {}: {error}", path.display())))
 }

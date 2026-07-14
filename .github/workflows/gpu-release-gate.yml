@@ -1,0 +1,139 @@
+name: Protected Real-GPU Release Gate
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: gpu-release-gate-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  LOCALHOLD_LOG_LEVEL: error
+  LOCALHOLD_RERANKER_ENABLED: "true"
+  LOCALHOLD_RERANKER_REQUIRED: "true"
+  LOCALHOLD_RERANKER_EXECUTION_PROVIDER: cuda
+  LOCALHOLD_RERANKER_CACHE_DIR: ${{ vars.LOCALHOLD_GPU_RERANKER_CACHE_DIR }}
+  ORT_DYLIB_PATH: ${{ vars.LOCALHOLD_GPU_ORT_DYLIB_PATH }}
+  LD_LIBRARY_PATH: ${{ vars.LOCALHOLD_GPU_LD_LIBRARY_PATH }}
+
+jobs:
+  gate:
+    name: CUDA parity and performance
+    if: github.ref_protected && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: [self-hosted, linux, x64, localhold-gpu-release]
+    environment: cuda-release
+    timeout-minutes: 45
+    env:
+      XDG_CONFIG_HOME: /tmp/localhold-gpu-config-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Require protected release-runner configuration
+        shell: bash
+        run: |
+          test "$GITHUB_REF_PROTECTED" = true
+          test -n "$ORT_DYLIB_PATH"
+          test -n "$LD_LIBRARY_PATH"
+          test -n "$LOCALHOLD_RERANKER_CACHE_DIR"
+          command -v nvidia-smi >/dev/null
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require exact protected main or tag commit
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            git fetch origin main:refs/remotes/origin/main
+            test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
+          else
+            test "$(git rev-list -n 1 "$GITHUB_REF")" = "$GITHUB_SHA"
+          fi
+
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          version: 2026.7.5
+
+      - name: Build and stage packaged CUDA binary
+        shell: bash
+        run: ./script/install.sh --profile cuda --prefix "$RUNNER_TEMP/localhold-gpu"
+
+      - name: Verify managed artifacts offline
+        shell: bash
+        run: |
+          LOCALHOLD_RERANKER_PRECISION=fp32 "$RUNNER_TEMP/localhold-gpu/bin/hold" models verify --json >/dev/null
+          LOCALHOLD_RERANKER_PRECISION=fp16 "$RUNNER_TEMP/localhold-gpu/bin/hold" models verify --json >/dev/null
+
+      - name: Run FP32 and FP16 real-GPU gates
+        shell: bash
+        run: |
+          mkdir -p gate-evidence
+          status=0
+          LOCALHOLD_RERANKER_PRECISION=fp32 \
+            "$RUNNER_TEMP/localhold-gpu/bin/hold" reranker gate \
+              --iterations 10 \
+              --warmup 3 \
+              --min-overlap 1.0 \
+              --max-score-delta 0.001 \
+              --max-p95-ms 1000 \
+              --min-throughput 50 \
+              --max-rss-mib 3072 \
+              --max-vram-mib 2048 \
+              --json >gate-evidence/fp32.json || status=1
+          LOCALHOLD_RERANKER_PRECISION=fp16 \
+            "$RUNNER_TEMP/localhold-gpu/bin/hold" reranker gate \
+              --iterations 10 \
+              --warmup 3 \
+              --min-overlap 0.9 \
+              --max-score-delta 0.03 \
+              --max-p95-ms 1000 \
+              --min-throughput 50 \
+              --max-rss-mib 3072 \
+              --max-vram-mib 2048 \
+              --json >gate-evidence/fp16.json || status=1
+          jq -e '.status == "passed" and .policies.explicit_required_cuda and .policies.auto_selected_cuda' gate-evidence/fp32.json >/dev/null || status=1
+          jq -e '.status == "passed" and .policies.explicit_required_cuda and .policies.auto_selected_cuda' gate-evidence/fp16.json >/dev/null || status=1
+          exit "$status"
+
+      - name: Prove unavailable CUDA fails required mode
+        shell: bash
+        run: |
+          set +e
+          CUDA_VISIBLE_DEVICES='' \
+            LOCALHOLD_RERANKER_PRECISION=fp32 \
+            "$RUNNER_TEMP/localhold-gpu/bin/hold" reranker gate \
+              --iterations 1 --warmup 0 --json \
+              >"$RUNNER_TEMP/no-cuda.json" 2>"$RUNNER_TEMP/no-cuda.stderr"
+          status=$?
+          set -e
+          test "$status" -eq 1
+          jq -e '.status == "failed" and (.failures | any(contains("required CUDA")))' "$RUNNER_TEMP/no-cuda.json" >/dev/null
+          ! grep -Fq "panicked" "$RUNNER_TEMP/no-cuda.stderr"
+
+      - name: Prove incompatible runtime is structured
+        shell: bash
+        run: |
+          set +e
+          ORT_DYLIB_PATH="$RUNNER_TEMP/missing-libonnxruntime.so" \
+            LOCALHOLD_RERANKER_PRECISION=fp32 \
+            "$RUNNER_TEMP/localhold-gpu/bin/hold" doctor --json \
+              >"$RUNNER_TEMP/incompatible-runtime.json" 2>"$RUNNER_TEMP/incompatible-runtime.stderr"
+          status=$?
+          set -e
+          test "$status" -eq 1
+          jq -e '.checks[] | select(.name == "reranker") | .status == "failed"' "$RUNNER_TEMP/incompatible-runtime.json" >/dev/null
+          ! grep -Fq "panicked" "$RUNNER_TEMP/incompatible-runtime.stderr"
+
+      - name: Upload sanitized gate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gpu-release-gate-${{ github.sha }}
+          path: gate-evidence/*.json
+          if-no-files-found: error
+          retention-days: 90

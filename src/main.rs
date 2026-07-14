@@ -38,6 +38,9 @@ async fn main() -> AppResult {
     if let Some(result) = try_run_models_cli().await {
         return finish_cli(result);
     }
+    if let Some(result) = try_run_reranker_cli().await {
+        return finish_cli(result);
+    }
     if let Some(result) = try_run_doctor_cli().await {
         return finish_cli(result);
     }
@@ -117,7 +120,7 @@ fn try_run_info_cli() -> Option<AppResult> {
 }
 
 const fn root_usage() -> &'static str {
-    "Usage: hold [COMMAND]\n\nRuns the LocalHold MCP server when no command is supplied.\n\nCommands:\n  config init                Create a no-clobber starter configuration\n  config paths               Show configuration search and active paths\n  config validate            Validate effective configuration without startup\n  doctor                     Diagnose installation and runtime readiness\n  embeddings status          Inspect embedding identity and rebuild progress\n  embeddings reindex --yes   Clear and rebuild the configured vector space\n  models verify              Verify reranker artifacts offline by SHA-256\n  models fetch --yes         Explicitly fetch and verify reranker artifacts\n  migrate sqlite-to-postgres Migrate storage backends\n\nOptions:\n  -h, --help                 Print help\n  -V, --version              Print version"
+    "Usage: hold [COMMAND]\n\nRuns the LocalHold MCP server when no command is supplied.\n\nCommands:\n  config init                Create a no-clobber starter configuration\n  config paths               Show configuration search and active paths\n  config validate            Validate effective configuration without startup\n  doctor                     Diagnose installation and runtime readiness\n  embeddings status          Inspect embedding identity and rebuild progress\n  embeddings reindex --yes   Clear and rebuild the configured vector space\n  models verify              Verify reranker artifacts offline by SHA-256\n  models fetch --yes         Explicitly fetch and verify reranker artifacts\n  reranker gate              Run the real-GPU parity and performance release gate\n  migrate sqlite-to-postgres Migrate storage backends\n\nOptions:\n  -h, --help                 Print help\n  -V, --version              Print version"
 }
 
 fn try_run_config_cli() -> Option<CliExitResult> {
@@ -215,6 +218,91 @@ async fn try_run_models_cli() -> Option<CliExitResult> {
         }
         .await,
     )
+}
+
+async fn try_run_reranker_cli() -> Option<CliExitResult> {
+    const USAGE: &str = "Usage: hold reranker gate [OPTIONS]\n\nRuns offline CPU/CUDA parity, policy, concurrency, latency, throughput, RSS, and VRAM checks against already verified model artifacts. Output is always JSON for release evidence.\n\nOptions:\n  --iterations N              Measured requests per client (default: 10)\n  --warmup N                  Warmup requests per provider (default: 3)\n  --top-k N                   Ranking membership boundary (default: 10)\n  --min-overlap FRACTION      Minimum CPU/CUDA top-k overlap (default: 0.9)\n  --max-score-delta DELTA     Maximum absolute score delta (default: 0.03)\n  --max-p95-ms N              Maximum CUDA p95 at every concurrency (default: 1000)\n  --min-throughput N          Minimum CUDA document pairs/second (default: 50)\n  --max-rss-mib N             Maximum process high-water RSS (default: 3072)\n  --max-vram-mib N            Maximum process VRAM (default: 2048)\n  --json                      Accepted for scripting symmetry; JSON is always emitted\n  -h, --help                  Print help\n\nExit codes:\n  0  every policy, parity, performance, and resource threshold passed\n  1  initialization, inference, measurement, or a threshold failed";
+
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if args.first().is_none_or(|argument| argument != "reranker") {
+        return None;
+    }
+    Some(
+        async {
+            if args[1..].iter().any(is_help_arg) {
+                write_stdout(USAGE)?;
+                write_stdout("\n")?;
+                return Ok(0_i32);
+            }
+            if args.get(1).is_none_or(|argument| argument != "gate") {
+                write_stderr_line(USAGE);
+                return Err(EngineError::config("missing or unknown reranker command").into());
+            }
+            run_reranker_gate_cli(&args[2..]).await
+        }
+        .await,
+    )
+}
+
+#[cfg(not(feature = "reranker-cuda"))]
+async fn run_reranker_gate_cli(_args: &[OsString]) -> CliExitResult {
+    Err(EngineError::config("reranker gate requires a LocalHold binary built with reranker-cuda support").into())
+}
+
+#[cfg(feature = "reranker-cuda")]
+async fn run_reranker_gate_cli(args: &[OsString]) -> CliExitResult {
+    use localhold::reranker::gate::GateOptions;
+
+    let mut options = GateOptions::default();
+    let mut index = 0_usize;
+    while index < args.len() {
+        let argument = args[index].to_string_lossy();
+        if argument == "--json" {
+            index = index.saturating_add(1);
+            continue;
+        }
+        let value = args
+            .get(index.saturating_add(1))
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| EngineError::config(format!("{argument} requires a UTF-8 value")))?;
+        match argument.as_ref() {
+            "--iterations" => options.iterations_per_client = parse_gate_value(value, "iterations")?,
+            "--warmup" => options.warmup_iterations = parse_gate_value(value, "warmup")?,
+            "--top-k" => options.parity_top_k = parse_gate_value(value, "top-k")?,
+            "--min-overlap" => options.minimum_top_k_overlap = parse_gate_value(value, "minimum overlap")?,
+            "--max-score-delta" => options.maximum_score_delta = parse_gate_value(value, "maximum score delta")?,
+            "--max-p95-ms" => {
+                let millis = parse_gate_value(value, "maximum p95 milliseconds")?;
+                options.maximum_cuda_p95 = std::time::Duration::from_millis(millis);
+            }
+            "--min-throughput" => options.minimum_cuda_pairs_per_second = parse_gate_value(value, "minimum throughput")?,
+            "--max-rss-mib" => options.maximum_rss_bytes = gate_mib_to_bytes(parse_gate_value(value, "maximum RSS MiB")?)?,
+            "--max-vram-mib" => options.maximum_vram_bytes = gate_mib_to_bytes(parse_gate_value(value, "maximum VRAM MiB")?)?,
+            _ => return Err(EngineError::config(format!("unknown reranker gate argument: {argument}")).into()),
+        }
+        index = index.saturating_add(2);
+    }
+
+    let config = Config::load()?;
+    let report = localhold::reranker::gate::run(&config.search.reranker, &options).await;
+    write_stdout(&report.to_json()?)?;
+    Ok(report.exit_code)
+}
+
+#[cfg(feature = "reranker-cuda")]
+fn parse_gate_value<T>(value: &str, label: &str) -> Result<T, EngineError>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    value.parse::<T>().map_err(|error| EngineError::config(format!("invalid {label} {value:?}: {error}")))
+}
+
+#[cfg(feature = "reranker-cuda")]
+fn gate_mib_to_bytes(mib: u64) -> Result<u64, EngineError> {
+    mib.checked_mul(1024_u64)
+        .and_then(|value| value.checked_mul(1024_u64))
+        .ok_or_else(|| EngineError::config("resource threshold is too large"))
 }
 
 #[cfg(not(feature = "reranker"))]
@@ -661,6 +749,8 @@ mod tests {
     };
 
     use super::{drain_unembedded, run_with_shutdown};
+    #[cfg(feature = "reranker-cuda")]
+    use super::{gate_mib_to_bytes, parse_gate_value};
 
     struct FixedEmbedding;
 
@@ -700,6 +790,15 @@ mod tests {
 
         assert_eq!(result.unwrap_err(), "boom");
         assert!(shutdown_called.load(Ordering::SeqCst));
+    }
+
+    #[cfg(feature = "reranker-cuda")]
+    #[test]
+    fn reranker_gate_cli_parses_and_bounds_resource_thresholds() {
+        assert_eq!(parse_gate_value::<usize>("10", "iterations").unwrap(), 10_usize);
+        let _error = parse_gate_value::<usize>("not-a-number", "iterations").unwrap_err();
+        assert_eq!(gate_mib_to_bytes(2048_u64).unwrap(), 2_147_483_648_u64);
+        let _error = gate_mib_to_bytes(u64::MAX).unwrap_err();
     }
 
     #[tokio::test]

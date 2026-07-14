@@ -199,6 +199,13 @@ architectures, and ranking metrics before quantifying the impact reliably.
 Operators choosing FP16 should evaluate recall and ranking quality on their own
 golden queries and preserve FP32 as the rollback profile.
 
+Before publishing or deploying a CUDA artifact broadly, run the
+[real-GPU reranker release gate](gpu-release-gate.md). It proves selected and
+active provider use with real inference, compares FP32 CPU and CUDA ordering,
+and records the one/four/eight-client latency, throughput, RSS, and VRAM
+thresholds. The optional FP16 run uses the same FP32 CPU baseline and emits a
+separate report so its speed/resource gains never erase its ranking tradeoff.
+
 The managed artifacts come from
 `cross-encoder/ms-marco-MiniLM-L6-v2` revision
 `c5ee24cb16019beea0893ab7796b1df96625c6b8`, transformed with ONNX Runtime

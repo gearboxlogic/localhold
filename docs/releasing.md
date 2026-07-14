@@ -51,3 +51,10 @@ logs and remove the incomplete GitHub release before retrying the same tag job.
 CUDA reranking remains source-build-only until LocalHold defines and validates a
 portable ONNX Runtime, CUDA, cuDNN, driver, and dynamic-loader compatibility
 matrix.
+
+CUDA publication also requires a successful protected-runner execution of the
+[real-GPU reranker release gate](gpu-release-gate.md) for the exact protected
+tag commit. Compilation on GitHub-hosted CPU runners is not release evidence.
+Keep the FP32 and FP16 gate JSON artifacts with the release run; a missing GPU,
+unavailable RSS/VRAM metric, provider fallback, parity violation, or resource
+threshold violation blocks publication.

@@ -16,6 +16,10 @@ pub mod resilient;
 #[cfg(feature = "reranker")]
 pub mod runtime;
 
+/// Real-hardware parity and performance release gate.
+#[cfg(feature = "reranker-cuda")]
+pub mod gate;
+
 /// Offline model verification and explicit download operations.
 #[cfg(feature = "reranker")]
 pub mod operator;

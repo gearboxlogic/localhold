@@ -823,6 +823,34 @@ fn doctor_reports_healthy_for_current_sqlite_database() {
     let _cleanup = std::fs::remove_file(db_path);
 }
 
+#[cfg(feature = "reranker-cuda")]
+#[test]
+fn doctor_reports_missing_cuda_runtime_without_panicking() {
+    let root = unique_db_path("doctor-missing-ort").with_extension("root");
+    let model_path = root.join("model.onnx");
+    let tokenizer_path = root.join("tokenizer.json");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(&model_path, b"model fixture").unwrap();
+    std::fs::write(tokenizer_path, b"tokenizer fixture").unwrap();
+    let (mut command, _config_dir) = config_binary_command(&root);
+    command.env("LOCALHOLD_RERANKER_ENABLED", "true");
+    command.env("LOCALHOLD_RERANKER_REQUIRED", "true");
+    command.env("LOCALHOLD_RERANKER_EXECUTION_PROVIDER", "cuda");
+    command.env("LOCALHOLD_RERANKER_MODEL_PATH", &model_path);
+    command.env("ORT_DYLIB_PATH", root.join("missing-libonnxruntime.so"));
+
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let reranker = report["checks"].as_array().unwrap().iter().find(|check| check["name"] == "reranker").unwrap();
+    assert_eq!(reranker["status"], "failed");
+    assert!(reranker["summary"].as_str().unwrap().contains("ORT_DYLIB_PATH"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
+
+    let _cleanup = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn doctor_degrades_when_existing_sqlite_wal_sidecars_are_absent() {
     let db_path = unique_db_path("doctor-missing-sidecars");

@@ -538,6 +538,7 @@ async fn inspect_postgres_storage(config: &Config, clock: &dyn Clock) -> Storage
 
 async fn inspect_postgres_pool(pool: &PgPool, auto_migrate: bool) -> StatusResult<StorageObservation> {
     let mut transaction = pool.begin().await?;
+    let _transaction_mode = query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY").execute(&mut *transaction).await?;
     let memories_exist: bool = query_scalar("SELECT to_regclass('memories') IS NOT NULL").fetch_one(&mut *transaction).await?;
     if !memories_exist {
         return Ok(StorageObservation::NotInitialized);

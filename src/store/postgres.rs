@@ -61,6 +61,7 @@ const POSTGRES_SCHEMA_STATEMENTS: &[&str] = &[
         expires_at         TIMESTAMPTZ,
         has_embedding      BOOLEAN NOT NULL DEFAULT FALSE,
         embedding_revision BIGINT NOT NULL DEFAULT 0,
+        record_revision    BIGINT NOT NULL DEFAULT 0,
         memory_type        TEXT NOT NULL DEFAULT 'semantic',
         importance         DOUBLE PRECISION NOT NULL DEFAULT 0.5,
         impression_count   BIGINT NOT NULL DEFAULT 0,
@@ -172,7 +173,8 @@ const MEMORY_COLUMNS: &str = "
     activity_mass,
     last_used_at,
     updated_at,
-    confidence
+    confidence,
+    record_revision
 ";
 
 #[derive(Debug)]
@@ -191,7 +193,7 @@ pub struct PostgresStore {
 
 impl PostgresStore {
     /// Latest schema migration recorded by this binary.
-    pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+    pub const CURRENT_SCHEMA_VERSION: i64 = 3;
 
     /// Open a `PostgreSQL` connection pool and optionally initialize schema.
     ///
@@ -349,6 +351,8 @@ impl PostgresStore {
         execute_statement(&pool, CREATE_MIGRATIONS_TABLE).await?;
         execute_statements(&pool, POSTGRES_SCHEMA_STATEMENTS).await?;
         migrate_embedding_claim_columns(&pool).await?;
+        migrate_record_revision_column(&pool).await?;
+        record_migration(&pool, Self::CURRENT_SCHEMA_VERSION, "record_revision").await?;
 
         let mut tx = pool.begin().await?;
         lock_embedding_profile(&mut tx).await?;
@@ -396,10 +400,11 @@ impl PostgresStore {
             validate_embedding_dimensions(embedding, self.embedding_dimensions())?;
         }
 
+        let now = self.clock_now();
         let mut tx = self.pool().begin().await?;
         validate_superseded_exists(&mut tx, supersedes_id).await?;
         insert_memory_with_embedding(&mut tx, memory, embedding).await?;
-        let _marked = mark_superseded_tx(&mut tx, supersedes_id, &memory.id).await?;
+        mark_required_superseded_tx(&mut tx, supersedes_id, &memory.id, now).await?;
         if let Some(audit) = audit {
             insert_audit_draft_tx(&mut tx, &memory.id, audit).await?;
         }
@@ -431,15 +436,16 @@ impl PostgresStore {
             validate_embedding_dimensions(embedding, self.embedding_dimensions())?;
         }
 
+        let now = self.clock_now();
         let mut tx = self.pool().begin().await?;
         if let Some(supersedes_id) = supersedes_id {
             validate_superseded_exists(&mut tx, supersedes_id).await?;
         }
         insert_memory_with_embedding(&mut tx, memory, embedding).await?;
         if let Some(supersedes_id) = supersedes_id {
-            let _marked = mark_superseded_tx(&mut tx, supersedes_id, &memory.id).await?;
+            mark_required_superseded_tx(&mut tx, supersedes_id, &memory.id, now).await?;
         }
-        upsert_metadata_tx(&mut tx, metadata, self.clock_now()).await?;
+        upsert_metadata_tx(&mut tx, metadata, now).await?;
         if let Some(audit) = audit {
             insert_audit_draft_tx(&mut tx, &memory.id, audit).await?;
         }
@@ -493,13 +499,14 @@ impl PostgresStore {
         }
         validate_batch_embedding_dimensions(memories, self.embedding_dimensions())?;
 
+        let now = self.clock_now();
         let mut tx = self.pool().begin().await?;
         let mut ids = Vec::with_capacity(memories.len());
         for (idx, memory_with_embedding) in memories.iter().enumerate() {
             if let Some(supersedes_id) = supersedes.get(idx).and_then(|id| *id) {
                 validate_superseded_exists(&mut tx, &supersedes_id).await?;
                 insert_memory_with_embedding(&mut tx, &memory_with_embedding.memory, memory_with_embedding.embedding.as_deref()).await?;
-                let _marked = mark_superseded_tx(&mut tx, &supersedes_id, &memory_with_embedding.memory.id).await?;
+                mark_required_superseded_tx(&mut tx, &supersedes_id, &memory_with_embedding.memory.id, now).await?;
             } else {
                 insert_memory_with_embedding(&mut tx, &memory_with_embedding.memory, memory_with_embedding.embedding.as_deref()).await?;
             }
@@ -552,7 +559,7 @@ impl PostgresStore {
             if let Some(supersedes_id) = supersedes.get(idx).and_then(|id| *id) {
                 validate_superseded_exists(&mut tx, &supersedes_id).await?;
                 insert_memory_with_embedding(&mut tx, &memory_with_embedding.memory, memory_with_embedding.embedding.as_deref()).await?;
-                let _marked = mark_superseded_tx(&mut tx, &supersedes_id, &memory_with_embedding.memory.id).await?;
+                mark_required_superseded_tx(&mut tx, &supersedes_id, &memory_with_embedding.memory.id, now).await?;
             } else {
                 insert_memory_with_embedding(&mut tx, &memory_with_embedding.memory, memory_with_embedding.embedding.as_deref()).await?;
             }
@@ -1279,18 +1286,97 @@ impl PostgresStore {
             });
         }
 
-        let outcome = apply_update_tx(&mut tx, id, update, self.clock_now()).await?;
+        let now = self.clock_now();
+        let outcome = apply_update_tx(&mut tx, id, update, now).await?;
+        let metadata_only = metadata_patch.is_some() && !has_column_updates(update) && update.entities.is_none();
         if outcome.outcome == WriteOutcome::Applied {
             if let Some(patch) = metadata_patch {
                 let existing_metadata = get_metadata_tx(&mut tx, id).await?;
                 let metadata = merge_metadata_patch(*id, patch, existing_metadata.as_ref(), existing.provenance.source_conversation.as_deref(), principal);
-                upsert_metadata_tx(&mut tx, &metadata, self.clock_now()).await?;
+                upsert_metadata_tx(&mut tx, &metadata, now).await?;
+            }
+            if metadata_only {
+                increment_record_revision_tx(&mut tx, id, "saving").await?;
             }
             if let Some(audit) = audit {
                 let audit = update_audit_draft_for_locked_memory(audit, update, &existing);
                 insert_audit_draft_tx(&mut tx, &existing.id, &audit).await?;
             }
         }
+        tx.commit().await?;
+        Ok(outcome)
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "atomic TUI revise needs revision, fields, metadata, embedding, principal, and audit")]
+    pub(crate) async fn update_authorized_if_unmodified_with_metadata_audited_impl(
+        &self,
+        id: &MemoryId,
+        expected_revision: i64,
+        update: &MemoryUpdate,
+        metadata_patch: Option<&MetadataPatch>,
+        embedding: Option<&[f32]>,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<AuthorizedUpdateOutcome, StoreError> {
+        if embedding.is_some() && update.content.is_none() {
+            return Err(StoreError::Conflict("a replacement embedding requires replacement content".into()));
+        }
+        if let Some(embedding) = embedding {
+            validate_embedding_dimensions(embedding, self.embedding_dimensions())?;
+        }
+
+        let mut tx = self.pool().begin().await?;
+        let Some(existing) = fetch_memory_by_id_for_update_tx(&mut tx, id).await? else {
+            tx.commit().await?;
+            return Ok(AuthorizedUpdateOutcome {
+                outcome: WriteOutcome::NotFound,
+                reembed_revision: None,
+            });
+        };
+        if !existing.has_write_access(principal) {
+            tx.commit().await?;
+            return Ok(AuthorizedUpdateOutcome {
+                outcome: WriteOutcome::Denied,
+                reembed_revision: None,
+            });
+        }
+        if existing.record_revision != expected_revision {
+            return Err(StoreError::Conflict(format!("memory {id} changed after it was opened")));
+        }
+
+        let now = self.clock_now();
+        let mut outcome = apply_update_tx(&mut tx, id, update, now).await?;
+        if let Some(embedding) = embedding {
+            let active_profile = self.inner.active_embedding_profile.read().clone();
+            if let Some(profile) = active_profile {
+                ensure_embedding_profile_matches_tx(&mut tx, &profile).await?;
+            }
+            insert_embedding(&mut tx, id, embedding).await?;
+            let result = sqlx::query(
+                "UPDATE memories
+                 SET has_embedding = TRUE,
+                     embedding_claimed_at = NULL,
+                     embedding_claim_token = NULL
+                 WHERE id = $1",
+            )
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+            if result.rows_affected() == 0 {
+                return Err(StoreError::Conflict(format!("memory {id} changed while saving")));
+            }
+            outcome.reembed_revision = None;
+        }
+        if let Some(patch) = metadata_patch {
+            let existing_metadata = get_metadata_tx(&mut tx, id).await?;
+            let metadata = merge_metadata_patch(*id, patch, existing_metadata.as_ref(), existing.provenance.source_conversation.as_deref(), principal);
+            upsert_metadata_tx(&mut tx, &metadata, now).await?;
+        }
+        if metadata_patch.is_some() && !has_column_updates(update) && update.entities.is_none() {
+            increment_record_revision_tx(&mut tx, id, "saving").await?;
+        }
+        let audit = update_audit_draft_for_locked_memory(audit, update, &existing);
+        insert_audit_draft_tx(&mut tx, id, &audit).await?;
         tx.commit().await?;
         Ok(outcome)
     }
@@ -1315,6 +1401,36 @@ impl PostgresStore {
         if let Some(audit) = audit {
             insert_audit_draft_tx(&mut tx, id, audit).await?;
         }
+        tx.commit().await?;
+        Ok(WriteOutcome::Applied)
+    }
+
+    pub(crate) async fn delete_authorized_if_unmodified_audited_impl(
+        &self,
+        id: &MemoryId,
+        expected_revision: i64,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<WriteOutcome, StoreError> {
+        let mut tx = self.pool().begin().await?;
+        let Some(existing) = fetch_memory_by_id_for_update_tx(&mut tx, id).await? else {
+            tx.commit().await?;
+            return Ok(WriteOutcome::NotFound);
+        };
+        if !existing.has_write_access(principal) {
+            tx.commit().await?;
+            return Ok(WriteOutcome::Denied);
+        }
+        if existing.record_revision != expected_revision {
+            return Err(StoreError::Conflict(format!("memory {id} changed after it was opened")));
+        }
+
+        insert_tombstone_tx(&mut tx, &existing, self.clock_now(), Some(principal)).await?;
+        let deleted = delete_memory_tx(&mut tx, id).await?;
+        if !deleted {
+            return Err(StoreError::Conflict(format!("memory {id} changed while deleting")));
+        }
+        insert_audit_draft_tx(&mut tx, id, audit).await?;
         tx.commit().await?;
         Ok(WriteOutcome::Applied)
     }
@@ -1394,8 +1510,9 @@ impl PostgresStore {
     }
 
     pub(crate) async fn mark_superseded_by_impl(&self, id: &MemoryId, superseded_by: &MemoryId) -> Result<bool, StoreError> {
+        let now = self.clock_now();
         let mut tx = self.pool().begin().await?;
-        let marked = mark_superseded_tx(&mut tx, id, superseded_by).await?;
+        let marked = mark_superseded_tx(&mut tx, id, superseded_by, now).await?;
         tx.commit().await?;
         Ok(marked)
     }
@@ -1411,6 +1528,7 @@ impl PostgresStore {
         principal: &str,
         audit: Option<&AuditDraft>,
     ) -> Result<WriteOutcome, StoreError> {
+        let now = self.clock_now();
         let mut tx = self.pool().begin().await?;
         let Some(existing) = fetch_memory_by_id_for_update_tx(&mut tx, id).await? else {
             tx.commit().await?;
@@ -1421,7 +1539,7 @@ impl PostgresStore {
             return Ok(WriteOutcome::Denied);
         }
 
-        let marked = mark_superseded_tx(&mut tx, id, superseded_by).await?;
+        let marked = mark_superseded_tx(&mut tx, id, superseded_by, now).await?;
         if marked && let Some(audit) = audit {
             insert_audit_draft_tx(&mut tx, id, audit).await?;
         }
@@ -1492,6 +1610,7 @@ impl PostgresStore {
                 continue;
             }
 
+            let metadata_updated_at = self.clock_now();
             let _result = sqlx::query(
                 "
                 UPDATE memories
@@ -1506,12 +1625,11 @@ impl PostgresStore {
                         to_jsonb($1::text),
                         true
                     ),
-                    updated_at = $2
-                WHERE id = $3
+                    record_revision = record_revision + 1
+                WHERE id = $2
                 ",
             )
             .bind(to_scope)
-            .bind(self.clock_now())
             .bind(id.to_string())
             .execute(&mut *tx)
             .await?;
@@ -1523,7 +1641,7 @@ impl PostgresStore {
                 ",
             )
             .bind(to_scope)
-            .bind(self.clock_now())
+            .bind(metadata_updated_at)
             .bind(id.to_string())
             .execute(&mut *tx)
             .await?;
@@ -1661,8 +1779,13 @@ impl PostgresStore {
 
     pub(crate) async fn upsert_metadata_audited_impl(&self, metadata: MemoryMetadata, audit: Option<&AuditDraft>) -> Result<(), StoreError> {
         let mut tx = self.pool().begin().await?;
+        let id = metadata.memory_id;
+        let _existing = fetch_memory_by_id_for_update_tx(&mut tx, &id)
+            .await?
+            .ok_or_else(|| StoreError::NotFound(format!("memory not found: {id}")))?;
         upsert_metadata_tx(&mut tx, &metadata, self.clock_now()).await?;
-        insert_optional_audit_draft_tx(&mut tx, &metadata.memory_id, audit).await?;
+        increment_record_revision_tx(&mut tx, &id, "updating metadata").await?;
+        insert_optional_audit_draft_tx(&mut tx, &id, audit).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1954,12 +2077,30 @@ impl MemoryWriter for PostgresStore {
         self.update_authorized_with_metadata_audited_impl(id, update, metadata_patch, principal, Some(audit)).await
     }
 
+    async fn update_authorized_if_unmodified_with_metadata_audited(
+        &self,
+        id: &MemoryId,
+        expected_revision: i64,
+        update: &MemoryUpdate,
+        metadata_patch: Option<&MetadataPatch>,
+        embedding: Option<&[f32]>,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<AuthorizedUpdateOutcome, StoreError> {
+        self.update_authorized_if_unmodified_with_metadata_audited_impl(id, expected_revision, update, metadata_patch, embedding, principal, audit)
+            .await
+    }
+
     async fn delete_authorized(&self, id: &MemoryId, principal: &str) -> Result<WriteOutcome, StoreError> {
         self.delete_authorized_impl(id, principal).await
     }
 
     async fn delete_authorized_audited(&self, id: &MemoryId, principal: &str, audit: &AuditDraft) -> Result<WriteOutcome, StoreError> {
         self.delete_authorized_audited_impl(id, principal, Some(audit)).await
+    }
+
+    async fn delete_authorized_if_unmodified_audited(&self, id: &MemoryId, expected_revision: i64, principal: &str, audit: &AuditDraft) -> Result<WriteOutcome, StoreError> {
+        self.delete_authorized_if_unmodified_audited_impl(id, expected_revision, principal, audit).await
     }
 
     async fn bulk_delete_ids(&self, ids: Vec<MemoryId>, principal: &str) -> Result<BulkAuthOutcome, StoreError> {
@@ -2177,11 +2318,11 @@ async fn insert_memory_row(tx: &mut Transaction<'_, Postgres>, memory: &Memory, 
         INSERT INTO memories (
             id, content, tags, provenance, access_policy, created_at, expires_at,
             has_embedding, memory_type, importance, impression_count, last_impressed_at,
-            superseded_by, activity_mass, last_used_at, updated_at, confidence
+            superseded_by, activity_mass, last_used_at, updated_at, confidence, record_revision
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7,
             $8, $9, $10, $11, $12,
-            $13, $14, $15, $16, $17
+            $13, $14, $15, $16, $17, $18
         )
         ",
     )
@@ -2202,6 +2343,7 @@ async fn insert_memory_row(tx: &mut Transaction<'_, Postgres>, memory: &Memory, 
     .bind(memory.last_used_at)
     .bind(memory.updated_at)
     .bind(memory.confidence.value())
+    .bind(memory.record_revision)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -2276,25 +2418,48 @@ async fn memory_exists_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId) -> 
 }
 
 async fn validate_superseded_exists(tx: &mut Transaction<'_, Postgres>, supersedes_id: &MemoryId) -> Result<(), StoreError> {
-    if !memory_exists_tx(tx, supersedes_id).await? {
+    let locked_id: Option<String> = sqlx::query_scalar("SELECT id FROM memories WHERE id = $1 FOR UPDATE")
+        .bind(supersedes_id.to_string())
+        .fetch_optional(&mut **tx)
+        .await?;
+    if locked_id.is_none() {
         return Err(StoreError::NotFound(format!("superseded memory not found: {supersedes_id}")));
     }
     Ok(())
 }
 
-async fn mark_superseded_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, superseded_by: &MemoryId) -> Result<bool, StoreError> {
-    let result = sqlx::query("UPDATE memories SET superseded_by = $1 WHERE id = $2 AND superseded_by IS NULL")
+async fn mark_required_superseded_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, superseded_by: &MemoryId, now: DateTime<Utc>) -> Result<(), StoreError> {
+    if mark_superseded_tx(tx, id, superseded_by, now).await? {
+        Ok(())
+    } else {
+        Err(StoreError::NotFound(format!("superseded memory not found: {id}")))
+    }
+}
+
+async fn mark_superseded_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, superseded_by: &MemoryId, _now: DateTime<Utc>) -> Result<bool, StoreError> {
+    let Some(existing) = fetch_memory_by_id_for_update_tx(tx, id).await? else {
+        return Ok(false);
+    };
+    if existing.superseded_by.is_some() {
+        return Err(StoreError::Conflict(format!("memory {id} is already superseded")));
+    }
+
+    let result = sqlx::query("UPDATE memories SET superseded_by = $1, record_revision = record_revision + 1 WHERE id = $2 AND superseded_by IS NULL")
         .bind(superseded_by.to_string())
         .bind(id.to_string())
         .execute(&mut **tx)
         .await?;
-    if result.rows_affected() == 0 && memory_exists_tx(tx, id).await? {
-        return Err(StoreError::Conflict(format!("memory {id} is already superseded")));
+    if result.rows_affected() == 0 {
+        return Err(StoreError::Conflict(format!("memory {id} changed while superseding")));
     }
-    Ok(result.rows_affected() > 0)
+    Ok(true)
 }
 
 async fn delete_memory_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId) -> Result<bool, StoreError> {
+    let _cleared = sqlx::query("UPDATE memories SET superseded_by = NULL, record_revision = record_revision + 1 WHERE superseded_by = $1")
+        .bind(id.to_string())
+        .execute(&mut **tx)
+        .await?;
     let result = sqlx::query("DELETE FROM memories WHERE id = $1").bind(id.to_string()).execute(&mut **tx).await?;
     Ok(result.rows_affected() > 0)
 }
@@ -2353,6 +2518,17 @@ async fn delete_embedding_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId) 
     Ok(())
 }
 
+async fn increment_record_revision_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, action: &str) -> Result<(), StoreError> {
+    let result = sqlx::query("UPDATE memories SET record_revision = record_revision + 1 WHERE id = $1")
+        .bind(id.to_string())
+        .execute(&mut **tx)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(StoreError::Conflict(format!("memory {id} changed while {action}")));
+    }
+    Ok(())
+}
+
 async fn replace_entities_tx(tx: &mut Transaction<'_, Postgres>, memory_id: &MemoryId, entities: &[Entity]) -> Result<(), StoreError> {
     let _result = sqlx::query("DELETE FROM memory_entities WHERE memory_id = $1")
         .bind(memory_id.to_string())
@@ -2361,15 +2537,36 @@ async fn replace_entities_tx(tx: &mut Transaction<'_, Postgres>, memory_id: &Mem
     insert_entities(tx, memory_id, entities).await
 }
 
+fn next_memory_revision(now: DateTime<Utc>, previous: DateTime<Utc>) -> DateTime<Utc> {
+    previous.checked_add_signed(chrono::Duration::microseconds(1_i64)).map_or(now, |minimum| now.max(minimum))
+}
+
+#[expect(clippy::too_many_lines, reason = "the dynamic update builder keeps all memory fields and revision handling together")]
 async fn apply_update_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, update: &MemoryUpdate, now: DateTime<Utc>) -> Result<AuthorizedUpdateOutcome, StoreError> {
     let content_changed = update.content.is_some();
+    let has_record_updates = has_column_updates(update) || update.entities.is_some();
     let mut reembed_revision = None;
 
-    if has_column_updates(update) {
+    if has_record_updates {
+        let previous: Option<DateTime<Utc>> = sqlx::query_scalar("SELECT updated_at FROM memories WHERE id = $1 FOR UPDATE")
+            .bind(id.to_string())
+            .fetch_optional(&mut **tx)
+            .await?;
+        let Some(previous) = previous else {
+            return Ok(AuthorizedUpdateOutcome {
+                outcome: WriteOutcome::NotFound,
+                reembed_revision: None,
+            });
+        };
+        let revision_at = next_memory_revision(now, previous);
         let mut builder = QueryBuilder::<Postgres>::new("UPDATE memories SET ");
         let mut has_assignments = false;
+        push_assignment_separator(&mut builder, &mut has_assignments);
+        let _ = builder.push("record_revision = record_revision + 1");
 
         if let Some(content) = &update.content {
+            push_assignment_separator(&mut builder, &mut has_assignments);
+            let _ = builder.push("updated_at = ").push_bind(revision_at);
             push_assignment_separator(&mut builder, &mut has_assignments);
             let _ = builder.push("content = ").push_bind(content.clone());
             push_assignment_separator(&mut builder, &mut has_assignments);
@@ -2380,8 +2577,6 @@ async fn apply_update_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, upda
             let _ = builder.push("embedding_claimed_at = NULL");
             push_assignment_separator(&mut builder, &mut has_assignments);
             let _ = builder.push("embedding_claim_token = NULL");
-            push_assignment_separator(&mut builder, &mut has_assignments);
-            let _ = builder.push("updated_at = ").push_bind(now);
         }
         if let Some(tags) = &update.tags {
             push_assignment_separator(&mut builder, &mut has_assignments);
@@ -2394,6 +2589,10 @@ async fn apply_update_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, upda
         if let Some(importance) = update.importance {
             push_assignment_separator(&mut builder, &mut has_assignments);
             let _ = builder.push("importance = ").push_bind(importance.value());
+        }
+        if let Some(expires_at) = update.expires_at {
+            push_assignment_separator(&mut builder, &mut has_assignments);
+            let _ = builder.push("expires_at = ").push_bind(expires_at);
         }
         if let Some(confidence) = update.confidence {
             push_assignment_separator(&mut builder, &mut has_assignments);
@@ -2442,6 +2641,7 @@ const fn has_column_updates(update: &MemoryUpdate) -> bool {
         || update.access_policy.is_some()
         || update.importance.is_some()
         || update.confidence.is_some()
+        || update.expires_at.is_some()
         || update.source_conversation.is_some()
 }
 
@@ -2819,6 +3019,7 @@ async fn insert_metadata_migration_rows(
         .await?;
         if result.rows_affected() > 0 {
             let memory_id = row.id.parse().map_err(|e| StoreError::Serialization(format!("invalid memory id: {e}").into()))?;
+            increment_record_revision_tx(tx, &memory_id, "migrating metadata").await?;
             insert_optional_audit_draft_tx(tx, &memory_id, audit).await?;
         }
         migrated = migrated.saturating_add(result.rows_affected());
@@ -2974,6 +3175,7 @@ fn row_to_memory(row: &PgRow) -> Result<Memory, StoreError> {
         memory_type: memory_type_str.parse().map_err(|e: ParseEnumError| StoreError::Serialization(Box::new(e)))?,
         importance: crate::types::Importance::new(row.try_get("importance")?),
         confidence: crate::types::Confidence::new(row.try_get("confidence")?),
+        record_revision: row.try_get("record_revision")?,
         impression_count: u64::try_from(impression_count).map_err(|e| StoreError::Serialization(Box::new(e)))?,
         last_impressed_at: row.try_get("last_impressed_at")?,
         superseded_by: superseded_by_str.as_deref().map(|value| parse_memory_id(value, "superseded_by")).transpose()?,
@@ -3122,12 +3324,18 @@ async fn init_schema(pool: &PgPool, embedding_dimensions: usize) -> Result<(), S
     check_vector_dimensions(pool, embedding_dimensions).await?;
     execute_statements(pool, POSTGRES_SCHEMA_STATEMENTS).await?;
     migrate_embedding_claim_columns(pool).await?;
+    migrate_record_revision_column(pool).await?;
     migrate_audit_log_remove_memory_fk(pool).await?;
     execute_dynamic_statement(pool, &memory_embeddings_ddl(embedding_dimensions)?).await?;
     check_vector_dimensions(pool, embedding_dimensions).await?;
     record_migration(pool, 1_i64, "bootstrap_schema").await?;
-    record_migration(pool, PostgresStore::CURRENT_SCHEMA_VERSION, "audit_log_without_memory_fk").await?;
+    record_migration(pool, 2_i64, "audit_log_without_memory_fk").await?;
+    record_migration(pool, PostgresStore::CURRENT_SCHEMA_VERSION, "record_revision").await?;
     Ok(())
+}
+
+async fn migrate_record_revision_column(pool: &PgPool) -> Result<(), StoreError> {
+    execute_statement(pool, "ALTER TABLE memories ADD COLUMN IF NOT EXISTS record_revision BIGINT NOT NULL DEFAULT 0").await
 }
 
 async fn migrate_embedding_claim_columns(pool: &PgPool) -> Result<(), StoreError> {
@@ -3341,9 +3549,10 @@ async fn validate_current_migration_metadata(pool: &PgPool) -> Result<(), StoreE
     }
     let current: bool = sqlx::query_scalar(
         "SELECT
-            COUNT(*) = 2
+            COUNT(*) = 3
             AND COUNT(*) FILTER (WHERE version = 1 AND name = 'bootstrap_schema') = 1
             AND COUNT(*) FILTER (WHERE version = 2 AND name = 'audit_log_without_memory_fk') = 1
+            AND COUNT(*) FILTER (WHERE version = 3 AND name = 'record_revision') = 1
          FROM localhold_migrations",
     )
     .fetch_one(pool)
@@ -3746,7 +3955,7 @@ mod tests {
         let store = open_postgres_smoke_store().await;
         reset_postgres_smoke_database(&store).await;
 
-        crate::store::conformance::assert_memory_store_contract(&store, 3_usize).await;
+        Box::pin(crate::store::conformance::assert_memory_store_contract(&store, 3_usize)).await;
     }
 
     #[tokio::test]
@@ -4015,6 +4224,43 @@ mod tests {
         assert_eq!(supersession_ids, vec![batch_new.id, batch_plain.id]);
         let batch_superseded = fetch_memory_by_id(store.pool(), &batch_old.id).await.unwrap().unwrap();
         assert_eq!(batch_superseded.superseded_by, Some(batch_new.id));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn supersession_validation_waits_for_concurrent_delete_against_postgres() {
+        let url = std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
+        let config = PostgresDatabaseConfig {
+            url,
+            max_connections: 2,
+            auto_migrate: true,
+        };
+        let store = PostgresStore::open(&config, 3_usize).await.unwrap();
+        let old_memory = test_memory_with_content("postgres supersession delete race");
+        let old_id = store.store_impl(&old_memory, None).await.unwrap();
+
+        let mut deleting = store.pool().begin().await.unwrap();
+        let deleted = sqlx::query("DELETE FROM memories WHERE id = $1")
+            .bind(old_id.to_string())
+            .execute(&mut *deleting)
+            .await
+            .unwrap();
+        assert_eq!(deleted.rows_affected(), 1_u64);
+
+        let validating_store = store.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let validation = tokio::spawn(async move {
+            let mut tx = validating_store.pool().begin().await.unwrap();
+            started_tx.send(()).unwrap();
+            validate_superseded_exists(&mut tx, &old_id).await
+        });
+        started_rx.await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50_u64)).await;
+        assert!(!validation.is_finished(), "supersession validation must wait for the deleting row lock");
+
+        deleting.commit().await.unwrap();
+        let error = validation.await.unwrap().unwrap_err();
+        assert!(matches!(error, StoreError::NotFound(_)));
     }
 
     #[tokio::test]
@@ -4396,6 +4642,7 @@ mod tests {
             },
             created_at: now,
             updated_at: now,
+            record_revision: 0_i64,
             expires_at: None,
             has_embedding: false,
             memory_type: MemoryType::Semantic,

@@ -57,6 +57,7 @@ define_memory_columns![
     "last_used_at",      // 14
     "updated_at",        // 15
     "confidence",        // 16
+    "record_revision",   // 17
 ];
 
 /// Overfetch multiplier for SQL LIMIT — accounts for rows filtered in Rust by access policy.
@@ -184,6 +185,7 @@ pub(crate) fn row_to_memory(row: &rusqlite::Row<'_>) -> Result<Memory, StoreErro
     let last_used_at_str: Option<String> = row.get(14)?;
     let updated_at_str: Option<String> = row.get(15)?;
     let confidence_val: f64 = row.get(16)?;
+    let record_revision: i64 = row.get(17)?;
 
     let id: MemoryId = id_str.parse().map_err(|e| StoreError::Serialization(format!("invalid memory id: {e}").into()))?;
     let superseded_by: Option<MemoryId> = superseded_by_str
@@ -246,6 +248,7 @@ pub(crate) fn row_to_memory(row: &rusqlite::Row<'_>) -> Result<Memory, StoreErro
         memory_type,
         importance,
         confidence: crate::types::Confidence::new(confidence_val),
+        record_revision,
         impression_count,
         last_impressed_at,
         superseded_by,
@@ -891,6 +894,7 @@ mod tests {
             access_policy: AccessPolicy::Public,
             created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
             updated_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
+            record_revision: 0_i64,
             expires_at: None,
             has_embedding: true,
             memory_type: MemoryType::Semantic,

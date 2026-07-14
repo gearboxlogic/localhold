@@ -202,12 +202,19 @@ impl SqliteStore {
     }
 
     pub(crate) async fn upsert_metadata_audited_impl(&self, metadata: MemoryMetadata, audit: Option<&AuditDraft>) -> Result<(), StoreError> {
-        let now = self.clock_now().to_rfc3339();
+        let now = self.clock_now();
         let audit = audit.cloned();
         self.with_conn(move |conn| {
             let tx = sqlite_write_tx(conn)?;
-            upsert_metadata_conn(&tx, &metadata, &now)?;
-            insert_optional_metadata_audit(&tx, &metadata.memory_id, audit.as_ref())?;
+            let id = metadata.memory_id;
+            let id_str = id.to_string();
+            let _existing = fetch_memory_by_id(&tx, &id_str)?.ok_or_else(|| StoreError::NotFound(format!("memory not found: {id}")))?;
+            upsert_metadata_conn(&tx, &metadata, &now.to_rfc3339())?;
+            let affected = tx.execute("UPDATE memories SET record_revision = record_revision + 1 WHERE id = ?1", params![id_str])?;
+            if affected == 0 {
+                return Err(StoreError::Conflict(format!("memory {id} changed while updating metadata")));
+            }
+            insert_optional_metadata_audit(&tx, &id, audit.as_ref())?;
             tx.commit()?;
             Ok(())
         })
@@ -415,6 +422,10 @@ fn insert_metadata_migration_rows(conn: &mut Connection, prepared_rows: &[Prepar
         )?;
         if inserted > 0 {
             let memory_id = row.id.parse().map_err(|e| StoreError::Serialization(format!("invalid memory id: {e}").into()))?;
+            let revised = tx.execute("UPDATE memories SET record_revision = record_revision + 1 WHERE id = ?1", params![row.id])?;
+            if revised == 0 {
+                return Err(StoreError::Conflict(format!("memory {memory_id} changed while migrating metadata")));
+            }
             insert_optional_metadata_audit(&tx, &memory_id, audit)?;
         }
         migrated = migrated.saturating_add(u64::try_from(inserted).map_err(|e| StoreError::Serialization(Box::new(e)))?);
@@ -540,6 +551,13 @@ fn apply_reassign_scope(conn: &mut Connection, params: ReassignScopeApply<'_>) -
             memory_params.push(id);
         }
         updated = updated.saturating_add(tx.execute(&sql, memory_params.as_slice())?);
+        for id in chunk {
+            let id_str = id.to_string();
+            let affected = tx.execute("UPDATE memories SET record_revision = record_revision + 1 WHERE id = ?1", params![id_str])?;
+            if affected == 0 {
+                return Err(StoreError::Conflict(format!("memory {id} changed while reassigning scope")));
+            }
+        }
 
         let metadata_placeholders: Vec<String> = (3..=chunk.len().saturating_add(2)).map(|i| format!("?{i}")).collect();
         let metadata_sql = format!(
@@ -611,6 +629,7 @@ mod tests {
             access_policy: AccessPolicy::Public,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            record_revision: 0_i64,
             expires_at: None,
             has_embedding: false,
             memory_type: MemoryType::default(),

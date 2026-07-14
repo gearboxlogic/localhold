@@ -53,6 +53,7 @@ const POSTGRES_REQUIRED_COLUMNS: &[PostgresColumnExpectation] = &[
     PostgresColumnExpectation::new("memories", "expires_at", "timestamp with time zone"),
     PostgresColumnExpectation::new("memories", "has_embedding", "boolean"),
     PostgresColumnExpectation::new("memories", "embedding_revision", "bigint"),
+    PostgresColumnExpectation::new("memories", "record_revision", "bigint"),
     PostgresColumnExpectation::new("memories", "memory_type", "text"),
     PostgresColumnExpectation::new("memories", "importance", "double precision"),
     PostgresColumnExpectation::new("memories", "impression_count", "bigint"),
@@ -127,6 +128,7 @@ type PostgresDefaultExpectation = (&'static str, &'static str, &'static str);
 const POSTGRES_REQUIRED_DEFAULTS: &[PostgresDefaultExpectation] = &[
     ("localhold_migrations", "applied_at", "now()"),
     ("memories", "has_embedding", "false"),
+    ("memories", "record_revision", "0"),
     ("memories", "memory_type", "'semantic'::text"),
     ("memories", "importance", "0.5"),
     ("memories", "impression_count", "0"),
@@ -162,6 +164,7 @@ const SQLITE_MEMORIES_COLUMNS: &[&str] = &[
     "expires_at",
     "has_embedding",
     "embedding_revision",
+    "record_revision",
     "memory_type",
     "importance",
     "impression_count",
@@ -241,6 +244,14 @@ const SQLITE_REQUIRED_TRIGGERS: &[&str] = &[
     "trg_memory_fts_update",
     "trg_memory_fts_delete",
 ];
+pub(crate) const SQLITE_V1_SCHEMA_VERSION: u32 = 1;
+const _: () = assert!(
+    super::schema::SQLITE_SCHEMA_VERSION == SQLITE_V1_SCHEMA_VERSION + 1,
+    "the v1 restore upgrade contract must be revised when SQLite schema version changes"
+);
+const SQLITE_CURRENT_CLEAR_SUPERSEDED_TRIGGER: &str =
+    "after delete on memories begin update memories set superseded_by = null, record_revision = record_revision + 1 where superseded_by = old.id; end";
+const SQLITE_V1_CLEAR_SUPERSEDED_TRIGGER: &str = "after delete on memories begin update memories set superseded_by = null where superseded_by = old.id; end";
 
 struct PostgresColumnExpectation {
     table: &'static str,
@@ -743,14 +754,43 @@ pub(crate) fn validate_sqlite_source_schema(conn: &Connection, embedding_dimensi
     for trigger in SQLITE_REQUIRED_TRIGGERS {
         validate_sqlite_schema_object_exists(conn, "trigger", trigger)?;
     }
-    validate_sqlite_managed_object_definitions(conn, false)?;
+    validate_sqlite_managed_object_definitions(conn, false, SQLITE_CURRENT_CLEAR_SUPERSEDED_TRIGGER)?;
     super::schema::check_dimension_mismatch(conn, embedding_dimensions)?;
     validate_sqlite_foreign_key_integrity(conn)?;
     validate_embedding_map_integrity(conn)?;
     Ok(())
 }
 
-fn validate_sqlite_managed_object_definitions(conn: &Connection, allow_missing: bool) -> Result<(), StoreError> {
+/// Validate the immediately previous SQLite contract before upgrading a private restore stage.
+pub(crate) fn validate_sqlite_v1_source_schema_for_upgrade(conn: &Connection, embedding_dimensions: usize) -> Result<(), StoreError> {
+    let schema_version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if schema_version != SQLITE_V1_SCHEMA_VERSION {
+        return Err(sqlite_source_schema_error(format!(
+            "schema version is {schema_version}, expected supported upgrade source {SQLITE_V1_SCHEMA_VERSION}"
+        )));
+    }
+    reject_retired_sqlite_schema(conn)?;
+    for table in SQLITE_REQUIRED_TABLES {
+        let allowed_missing = if table.name == "memories" { &["record_revision"][..] } else { &[] };
+        validate_sqlite_table_allowing_missing(conn, table, allowed_missing)?;
+    }
+    for key in SQLITE_REQUIRED_KEYS {
+        validate_sqlite_primary_key(conn, key)?;
+    }
+    for index in SQLITE_REQUIRED_INDEXES {
+        validate_sqlite_schema_object_exists(conn, "index", index)?;
+    }
+    for trigger in SQLITE_REQUIRED_TRIGGERS {
+        validate_sqlite_schema_object_exists(conn, "trigger", trigger)?;
+    }
+    validate_sqlite_managed_object_definitions(conn, false, SQLITE_V1_CLEAR_SUPERSEDED_TRIGGER)?;
+    super::schema::check_dimension_mismatch(conn, embedding_dimensions)?;
+    validate_sqlite_foreign_key_integrity(conn)?;
+    validate_embedding_map_integrity(conn)?;
+    Ok(())
+}
+
+fn validate_sqlite_managed_object_definitions(conn: &Connection, allow_missing: bool, clear_superseded_definition: &'static str) -> Result<(), StoreError> {
     const INDEX_DEFINITIONS: &[(&str, &str)] = &[
         ("idx_memories_created_at", "on memories(created_at desc)"),
         ("idx_memories_source_agent", "on memories(json_extract(provenance, '$.source_agent'))"),
@@ -776,15 +816,12 @@ fn validate_sqlite_managed_object_definitions(conn: &Connection, allow_missing: 
         ("idx_memory_metadata_scope_key", "on memory_metadata(scope_key)"),
         ("idx_memory_tombstones_deleted_at", "on memory_tombstones(deleted_at desc)"),
     ];
-    const TRIGGER_DEFINITIONS: &[(&str, &str)] = &[
+    let trigger_definitions = [
         (
             "trg_memory_embedding_map_delete",
             "after delete on memory_embedding_map begin delete from memory_embeddings where rowid = old.vec_rowid; end",
         ),
-        (
-            "trg_memory_clear_superseded_by",
-            "after delete on memories begin update memories set superseded_by = null where superseded_by = old.id; end",
-        ),
+        ("trg_memory_clear_superseded_by", clear_superseded_definition),
         (
             "trg_memory_fts_insert",
             "after insert on memories begin insert into memory_fts(rowid, content) values (new.rowid, new.content); end",
@@ -810,7 +847,7 @@ fn validate_sqlite_managed_object_definitions(conn: &Connection, allow_missing: 
             return Err(sqlite_source_schema_error(format!("required index {name} has an incompatible definition")));
         }
     }
-    for (name, expected) in TRIGGER_DEFINITIONS {
+    for (name, expected) in trigger_definitions {
         let Some(sql) = normalized_sqlite_schema_sql(conn, "trigger", name)? else {
             if allow_missing {
                 continue;
@@ -856,6 +893,7 @@ fn normalized_sqlite_schema_sql(conn: &Connection, object_type: &'static str, na
 pub(crate) fn validate_present_sqlite_schema(conn: &Connection) -> Result<(), StoreError> {
     const MIGRATABLE_MEMORY_COLUMNS: &[&str] = &[
         "embedding_revision",
+        "record_revision",
         "memory_type",
         "importance",
         "impression_count",
@@ -918,7 +956,7 @@ pub(crate) fn validate_present_sqlite_schema(conn: &Connection) -> Result<(), St
             ));
         }
     }
-    validate_sqlite_managed_object_definitions(conn, true)?;
+    validate_sqlite_managed_object_definitions(conn, true, SQLITE_CURRENT_CLEAR_SUPERSEDED_TRIGGER)?;
     Ok(())
 }
 
@@ -943,6 +981,10 @@ fn validate_absent_sqlite_table_conflicts(conn: &Connection, table: &'static str
 }
 
 fn validate_sqlite_table(conn: &Connection, expectation: &SqliteTableExpectation) -> Result<(), StoreError> {
+    validate_sqlite_table_allowing_missing(conn, expectation, &[])
+}
+
+fn validate_sqlite_table_allowing_missing(conn: &Connection, expectation: &SqliteTableExpectation, allowed_missing_columns: &[&str]) -> Result<(), StoreError> {
     let sql = sqlite_schema_sql(conn, "table", expectation.name)?.ok_or_else(|| sqlite_source_schema_error(format!("required table {} is missing", expectation.name)))?;
     let normalized_sql = sql.to_ascii_lowercase();
     for fragment in expectation.ddl_contains {
@@ -959,6 +1001,9 @@ fn validate_sqlite_table(conn: &Connection, expectation: &SqliteTableExpectation
 
     let columns = sqlite_table_columns(conn, expectation.name)?;
     for column in expectation.columns {
+        if allowed_missing_columns.contains(column) {
+            continue;
+        }
         if !columns.contains(*column) {
             return Err(sqlite_source_schema_error(format!("table {} is missing required column {column}", expectation.name)));
         }
@@ -1705,6 +1750,7 @@ fn postgres_row_to_memory(row: &PgRow) -> Result<Memory, StoreError> {
         access_policy: access_policy.0,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+        record_revision: row.try_get("record_revision")?,
         expires_at: row.try_get("expires_at")?,
         has_embedding: row.try_get("has_embedding")?,
         memory_type: memory_type.parse().map_err(|e: ParseEnumError| StoreError::Serialization(Box::new(e)))?,
@@ -2396,11 +2442,11 @@ async fn insert_postgres_memory(tx: &mut Transaction<'_, Postgres>, item: &Migra
         INSERT INTO memories (
             id, content, tags, provenance, access_policy, created_at, expires_at,
             has_embedding, embedding_revision, memory_type, importance, impression_count,
-            last_impressed_at, superseded_by, activity_mass, last_used_at, updated_at, confidence
+            last_impressed_at, superseded_by, activity_mass, last_used_at, updated_at, confidence, record_revision
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7,
             $8, $9, $10, $11, $12,
-            $13, NULL, $14, $15, $16, $17
+            $13, NULL, $14, $15, $16, $17, $18
         )
         ",
     )
@@ -2421,6 +2467,7 @@ async fn insert_postgres_memory(tx: &mut Transaction<'_, Postgres>, item: &Migra
     .bind(memory.last_used_at)
     .bind(memory.updated_at)
     .bind(memory.confidence.value())
+    .bind(memory.record_revision)
     .execute(&mut **tx)
     .await?;
 
@@ -2630,6 +2677,7 @@ struct ComparableSnapshot {
 struct ComparableMemory {
     memory: Memory,
     embedding_revision: i64,
+    record_revision: i64,
     embedding: Option<Vec<f32>>,
 }
 
@@ -2702,9 +2750,11 @@ fn comparable_memory(mut item: MigrationMemory) -> ComparableMemory {
     item.memory.expires_at = item.memory.expires_at.map(truncate_to_micros);
     item.memory.last_impressed_at = item.memory.last_impressed_at.map(truncate_to_micros);
     item.memory.last_used_at = item.memory.last_used_at.map(truncate_to_micros);
+    let record_revision = item.memory.record_revision;
     ComparableMemory {
         memory: item.memory,
         embedding_revision: item.embedding_revision,
+        record_revision,
         embedding: item.embedding,
     }
 }
@@ -3864,6 +3914,25 @@ mod tests {
         assert_eq!(comparable_snapshot(&source).unwrap(), comparable_snapshot(&target).unwrap());
     }
 
+    #[test]
+    fn comparable_snapshot_includes_record_revision() {
+        let source_memory = test_memory("revision source", 0_u32);
+        let mut target_memory = source_memory.clone();
+        target_memory.record_revision = source_memory.record_revision + 1_i64;
+        let source = migration_snapshot_with_memories(vec![MigrationMemory {
+            memory: source_memory,
+            embedding_revision: 0_i64,
+            embedding: None,
+        }]);
+        let target = migration_snapshot_with_memories(vec![MigrationMemory {
+            memory: target_memory,
+            embedding_revision: 0_i64,
+            embedding: None,
+        }]);
+
+        assert_ne!(comparable_snapshot(&source).unwrap(), comparable_snapshot(&target).unwrap());
+    }
+
     fn migration_snapshot_with_memories(memories: Vec<MigrationMemory>) -> MigrationSnapshot {
         MigrationSnapshot {
             memories,
@@ -4052,6 +4121,7 @@ mod tests {
             },
             created_at: now,
             updated_at: now,
+            record_revision: 0_i64,
             expires_at: None,
             has_embedding: false,
             memory_type: MemoryType::Semantic,

@@ -360,11 +360,38 @@ pub trait MemoryWriter: Send + Sync {
         audit: &AuditDraft,
     ) -> impl Future<Output = Result<AuthorizedUpdateOutcome, StoreError>> + Send;
 
+    /// Authorization-aware, optimistic-concurrency update with optional
+    /// metadata and replacement embedding in one transaction. Replacement
+    /// content without a vector is committed as needing re-embedding. Obtain
+    /// `expected_revision` from [`Memory::optimistic_revision`].
+    #[expect(clippy::too_many_arguments, reason = "atomic TUI revise needs revision, fields, metadata, embedding, principal, and audit")]
+    fn update_authorized_if_unmodified_with_metadata_audited(
+        &self,
+        id: &MemoryId,
+        expected_revision: i64,
+        update: &MemoryUpdate,
+        metadata_patch: Option<&MetadataPatch>,
+        embedding: Option<&[f32]>,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> impl Future<Output = Result<AuthorizedUpdateOutcome, StoreError>> + Send;
+
     /// Authorization-aware delete. Checks write access before removing the memory.
     fn delete_authorized(&self, id: &MemoryId, principal: &str) -> impl Future<Output = Result<WriteOutcome, StoreError>> + Send;
 
     /// Authorization-aware delete plus tombstone and audit row in one transaction.
     fn delete_authorized_audited(&self, id: &MemoryId, principal: &str, audit: &AuditDraft) -> impl Future<Output = Result<WriteOutcome, StoreError>> + Send;
+
+    /// Authorization-aware delete that refuses to remove a memory whose
+    /// record revision changed after it was loaded. Obtain `expected_revision`
+    /// from [`Memory::optimistic_revision`].
+    fn delete_authorized_if_unmodified_audited(
+        &self,
+        id: &MemoryId,
+        expected_revision: i64,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> impl Future<Output = Result<WriteOutcome, StoreError>> + Send;
 
     /// Delete multiple memories by ID in a single transaction, checking write
     /// access per-ID inside the transaction to avoid TOCTOU races.
@@ -513,6 +540,8 @@ pub trait MemoryAdmin: Send + Sync {
 
 /// Combined trait for full memory store access: read, write, and admin.
 ///
+/// Implementations must populate and advance [`Memory::record_revision`] for
+/// every user-visible record mutation so optimistic writes remain sound.
 /// Automatically implemented for any type that implements all three sub-traits.
 pub trait MemoryStore: MemoryReader + MemoryWriter + MemoryAdmin {}
 
@@ -526,8 +555,16 @@ pub(crate) fn merge_metadata_patch(memory_id: MemoryId, patch: &MetadataPatch, e
             .clone()
             .or_else(|| existing.and_then(|metadata| metadata.scope_key.clone()))
             .or_else(|| fallback_scope.map(ToOwned::to_owned)),
-        summary: patch.summary.clone().or_else(|| existing.and_then(|metadata| metadata.summary.clone())),
-        agent_label: patch.agent_label.clone().or_else(|| existing.and_then(|metadata| metadata.agent_label.clone())),
+        summary: if patch.clear_summary {
+            None
+        } else {
+            patch.summary.clone().or_else(|| existing.and_then(|metadata| metadata.summary.clone()))
+        },
+        agent_label: if patch.clear_agent_label {
+            None
+        } else {
+            patch.agent_label.clone().or_else(|| existing.and_then(|metadata| metadata.agent_label.clone()))
+        },
         created_by_principal: existing.and_then(|metadata| metadata.created_by_principal.clone()).or_else(|| Some(principal.to_owned())),
         quality_flags: existing.map_or_else(Vec::new, |metadata| metadata.quality_flags.clone()),
         schema_version: 1,

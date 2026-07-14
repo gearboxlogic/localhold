@@ -3,10 +3,11 @@
 use rusqlite::{Connection, OptionalExtension as _, params};
 
 use super::{
-    ReembedClaim, SqliteStore, merge_metadata_patch,
+    EmbeddingProfile, ReembedClaim, SqliteStore, merge_metadata_patch,
     query::{MEMORY_COLUMN_COUNT, MEMORY_COLUMNS, row_to_memory, usize_to_i64},
+    sqlite::ensure_embedding_profile_matches,
     sqlite_write_tx, update_audit_draft_for_locked_memory,
-    vector::{SqliteVecIndex, VectorIndex},
+    vector::{SqliteVecIndex, VectorIndex, validate_embedding_vector},
 };
 use crate::{
     error::StoreError,
@@ -38,11 +39,11 @@ macro_rules! concat_placeholders {
 ///
 /// When adding columns to [`super::query::COLUMNS`], append the next number here
 /// too. The static assertion below will fail at compile time if they diverge.
-const INSERT_PLACEHOLDERS: &str = numbered_placeholders![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
+const INSERT_PLACEHOLDERS: &str = numbered_placeholders![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18];
 
 /// Compile-time check: placeholder count must equal column count.
 const _: () = assert!(
-    MEMORY_COLUMN_COUNT == 17,
+    MEMORY_COLUMN_COUNT == 18,
     "INSERT_PLACEHOLDERS is out of sync with COLUMNS -- update the numbered_placeholders! invocation"
 );
 
@@ -70,6 +71,7 @@ pub(crate) struct PreparedMemoryRow {
     last_used_at: Option<String>,
     updated_at: String,
     confidence: f64,
+    record_revision: i64,
     entities: Vec<Entity>,
 }
 
@@ -97,6 +99,7 @@ impl PreparedMemoryRow {
             last_used_at: memory.last_used_at.map(|t| t.to_rfc3339()),
             updated_at: memory.updated_at.to_rfc3339(),
             confidence: memory.confidence.value(),
+            record_revision: memory.record_revision,
             entities: memory.entities.clone(),
         })
     }
@@ -124,6 +127,7 @@ impl PreparedMemoryRow {
         let last_used_at = memory.last_used_at.map(|t| t.to_rfc3339());
         let updated_at = memory.updated_at.to_rfc3339();
         let confidence = memory.confidence.value();
+        let record_revision = memory.record_revision;
         Ok(Self {
             id,
             id_str,
@@ -144,6 +148,7 @@ impl PreparedMemoryRow {
             last_used_at,
             updated_at,
             confidence,
+            record_revision,
             entities: memory.entities,
         })
     }
@@ -168,6 +173,7 @@ impl PreparedMemoryRow {
             self.last_used_at,
             self.updated_at,
             self.confidence,
+            self.record_revision,
         ])?;
         if let Some(emb) = &self.embedding {
             vector_index.upsert(conn, &self.id_str, emb)?;
@@ -187,18 +193,22 @@ impl PreparedMemoryRow {
 ///
 /// Returns `true` if the row was updated, `false` if the referenced
 /// memory was not found at all.
-pub(crate) fn mark_superseded(conn: &Connection, old_id_str: &str, new_id_str: &str) -> Result<bool, StoreError> {
-    let affected = conn.execute("UPDATE memories SET superseded_by = ?1 WHERE id = ?2 AND superseded_by IS NULL", params![
-        new_id_str, old_id_str
-    ])?;
-    if affected == 0 {
-        // Distinguish "not found" from "already superseded".
-        let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1)", params![old_id_str], |row| row.get(0))?;
-        if exists {
-            return Err(StoreError::Conflict(format!("memory {old_id_str} is already superseded")));
-        }
+pub(crate) fn mark_superseded(conn: &Connection, old_id_str: &str, new_id_str: &str, _now: chrono::DateTime<chrono::Utc>) -> Result<bool, StoreError> {
+    let Some(existing) = fetch_memory_by_id(conn, old_id_str)? else {
+        return Ok(false);
+    };
+    if existing.superseded_by.is_some() {
+        return Err(StoreError::Conflict(format!("memory {old_id_str} is already superseded")));
     }
-    Ok(affected > 0)
+
+    let affected = conn.execute(
+        "UPDATE memories SET superseded_by = ?1, record_revision = record_revision + 1 WHERE id = ?2 AND superseded_by IS NULL",
+        params![new_id_str, old_id_str],
+    )?;
+    if affected == 0 {
+        return Err(StoreError::Conflict(format!("memory {old_id_str} changed while superseding")));
+    }
+    Ok(true)
 }
 
 /// Insert entity rows for a memory within an active transaction or connection.
@@ -273,12 +283,17 @@ pub(crate) fn hydrate_entities_batch(conn: &Connection, memory_ids: &[MemoryId])
     Ok(map)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "atomic batch store needs rows, supersession, audit, vector index, and one revision timestamp"
+)]
 fn batch_store_with_supersession_and_audit(
     conn: &mut Connection,
     vector_index: &SqliteVecIndex,
     prepared: &[PreparedMemoryRow],
     supersedes: &[Option<String>],
     audits: Option<&[AuditDraft]>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<MemoryId>, StoreError> {
     if let Some(audits) = audits
         && audits.len() != prepared.len()
@@ -296,7 +311,7 @@ fn batch_store_with_supersession_and_audit(
         if let Some(sid) = supersedes_id {
             let new_id_str = id.to_string();
             #[expect(unused_results, reason = "UPDATE checked via validate_superseded_exists above")]
-            mark_superseded(&tx, sid, &new_id_str)?;
+            mark_superseded(&tx, sid, &new_id_str, now)?;
         }
         if let Some(audits) = audits {
             let audit = audits.get(i).ok_or_else(|| audit_len_mismatch(prepared.len(), audits.len()))?;
@@ -308,12 +323,14 @@ fn batch_store_with_supersession_and_audit(
     Ok(ids)
 }
 
+#[expect(clippy::too_many_arguments, reason = "atomic store needs row, supersession, audit, vector index, and one revision timestamp")]
 fn insert_prepared_with_optional_supersession_and_audit(
     conn: &Connection,
     vector_index: &SqliteVecIndex,
     prepared: &PreparedMemoryRow,
     supersedes_id: Option<&str>,
     audit: Option<&AuditDraft>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<MemoryId, StoreError> {
     if let Some(sid) = supersedes_id {
         validate_superseded_exists(conn, sid)?;
@@ -322,7 +339,7 @@ fn insert_prepared_with_optional_supersession_and_audit(
     if let Some(sid) = supersedes_id {
         let new_id_str = id.to_string();
         #[expect(unused_results, reason = "UPDATE checked via validate_superseded_exists above")]
-        mark_superseded(conn, sid, &new_id_str)?;
+        mark_superseded(conn, sid, &new_id_str, now)?;
     }
     if let Some(audit) = audit {
         insert_audit_draft(conn, &id, audit)?;
@@ -504,7 +521,7 @@ fn apply_authorized_update_with_metadata(
     update: &MemoryUpdate,
     metadata_patch: Option<&MetadataPatch>,
     principal: &str,
-    now: &str,
+    now: chrono::DateTime<chrono::Utc>,
     audit: Option<&AuditDraft>,
 ) -> Result<AuthorizedUpdateOutcome, StoreError> {
     let tx = sqlite_write_tx(conn)?;
@@ -524,12 +541,18 @@ fn apply_authorized_update_with_metadata(
         });
     }
 
-    let outcome = apply_update_inner(&tx, vector_index, &id_str, update, now)?;
+    let revision_at = next_memory_revision(now, existing.updated_at);
+    let revision_at_text = revision_at.to_rfc3339();
+    let outcome = apply_update_inner(&tx, vector_index, &id_str, update, &revision_at_text)?;
+    let metadata_only = metadata_patch.is_some() && !has_column_updates(update) && update.entities.is_none();
     if outcome.outcome == WriteOutcome::Applied {
         if let Some(patch) = metadata_patch {
             let existing_metadata = get_metadata_conn(&tx, id)?;
             let metadata = merge_metadata_patch(*id, patch, existing_metadata.as_ref(), existing.provenance.source_conversation.as_deref(), principal);
-            upsert_metadata_conn(&tx, &metadata, now)?;
+            upsert_metadata_conn(&tx, &metadata, &revision_at_text)?;
+        }
+        if metadata_only {
+            increment_record_revision_conn(&tx, &id_str, "saving")?;
         }
         if let Some(audit) = audit {
             let audit = update_audit_draft_for_locked_memory(audit, update, &existing);
@@ -538,6 +561,120 @@ fn apply_authorized_update_with_metadata(
     }
     tx.commit()?;
     Ok(outcome)
+}
+
+#[expect(clippy::too_many_arguments, reason = "atomic TUI revise needs revision, fields, metadata, embedding, principal, and audit")]
+fn apply_authorized_update_if_unmodified_with_metadata(
+    conn: &mut Connection,
+    vector_index: &SqliteVecIndex,
+    id: &MemoryId,
+    expected_revision: i64,
+    update: &MemoryUpdate,
+    metadata_patch: Option<&MetadataPatch>,
+    embedding: Option<&[f32]>,
+    expected_embedding_profile: Option<&EmbeddingProfile>,
+    principal: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    audit: &AuditDraft,
+) -> Result<AuthorizedUpdateOutcome, StoreError> {
+    if embedding.is_some() && update.content.is_none() {
+        return Err(StoreError::Conflict("a replacement embedding requires replacement content".into()));
+    }
+    if let Some(embedding) = embedding {
+        validate_embedding_vector(embedding, vector_index.dimensions())?;
+    }
+
+    let tx = sqlite_write_tx(conn)?;
+    let id_str = id.to_string();
+    let Some(existing) = fetch_memory_by_id(&tx, &id_str)? else {
+        tx.commit()?;
+        return Ok(AuthorizedUpdateOutcome {
+            outcome: WriteOutcome::NotFound,
+            reembed_revision: None,
+        });
+    };
+    if !existing.has_write_access(principal) {
+        tx.commit()?;
+        return Ok(AuthorizedUpdateOutcome {
+            outcome: WriteOutcome::Denied,
+            reembed_revision: None,
+        });
+    }
+    if existing.record_revision != expected_revision {
+        return Err(StoreError::Conflict(format!("memory {id} changed after it was opened")));
+    }
+
+    let revision_at = next_memory_revision(now, existing.updated_at);
+    let revision_at_text = revision_at.to_rfc3339();
+    let mut outcome = apply_update_inner(&tx, vector_index, &id_str, update, &revision_at_text)?;
+    if let Some(embedding) = embedding {
+        if let Some(profile) = expected_embedding_profile {
+            ensure_embedding_profile_matches(&tx, profile)?;
+        }
+        vector_index.upsert(&tx, &id_str, embedding)?;
+        let affected = tx.execute("UPDATE memories SET has_embedding = 1 WHERE id = ?1", params![id_str])?;
+        if affected == 0 {
+            return Err(StoreError::Conflict(format!("memory {id} changed while saving")));
+        }
+        outcome.reembed_revision = None;
+    }
+    if let Some(patch) = metadata_patch {
+        let existing_metadata = get_metadata_conn(&tx, id)?;
+        let metadata = merge_metadata_patch(*id, patch, existing_metadata.as_ref(), existing.provenance.source_conversation.as_deref(), principal);
+        upsert_metadata_conn(&tx, &metadata, &revision_at_text)?;
+    }
+    if metadata_patch.is_some() && !has_column_updates(update) && update.entities.is_none() {
+        increment_record_revision_conn(&tx, &id_str, "saving")?;
+    }
+    let audit = update_audit_draft_for_locked_memory(audit, update, &existing);
+    insert_audit_draft(&tx, id, &audit)?;
+    tx.commit()?;
+    Ok(outcome)
+}
+
+fn increment_record_revision_conn(conn: &Connection, id_str: &str, action: &str) -> Result<(), StoreError> {
+    let affected = conn.execute("UPDATE memories SET record_revision = record_revision + 1 WHERE id = ?1", params![id_str])?;
+    if affected == 0 {
+        return Err(StoreError::Conflict(format!("memory {id_str} changed while {action}")));
+    }
+    Ok(())
+}
+
+pub(crate) fn next_memory_revision(now: chrono::DateTime<chrono::Utc>, previous: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    previous.checked_add_signed(chrono::Duration::microseconds(1_i64)).map_or(now, |minimum| now.max(minimum))
+}
+
+#[expect(clippy::too_many_arguments, reason = "atomic delete needs connection, identity, revision, principal, timestamp, and audit")]
+fn apply_authorized_delete_if_unmodified(
+    conn: &mut Connection,
+    id: &MemoryId,
+    expected_revision: i64,
+    principal: &str,
+    deleted_at: &str,
+    audit: &AuditDraft,
+) -> Result<WriteOutcome, StoreError> {
+    let tx = sqlite_write_tx(conn)?;
+    let id_str = id.to_string();
+    let Some(existing) = fetch_memory_by_id(&tx, &id_str)? else {
+        tx.commit()?;
+        return Ok(WriteOutcome::NotFound);
+    };
+    if !existing.has_write_access(principal) {
+        tx.commit()?;
+        return Ok(WriteOutcome::Denied);
+    }
+    if existing.record_revision != expected_revision {
+        return Err(StoreError::Conflict(format!("memory {id} changed after it was opened")));
+    }
+
+    insert_tombstone(&tx, &existing, deleted_at, Some(principal))?;
+    let affected = tx.execute("DELETE FROM memories WHERE id = ?1", params![id_str])?;
+    if affected == 0 {
+        return Err(StoreError::Conflict(format!("memory {id} changed while deleting")));
+    }
+    insert_audit_draft(&tx, id, audit)?;
+    tx.commit()?;
+    Ok(WriteOutcome::Applied)
 }
 
 /// Maximum number of IDs per `IN (…)` clause in bulk operations, staying
@@ -597,7 +734,7 @@ pub(crate) fn bulk_update_ids(
     ids: &[MemoryId],
     update: &MemoryUpdate,
     principal: &str,
-    now: &str,
+    now: chrono::DateTime<chrono::Utc>,
     audit: Option<&AuditDraft>,
 ) -> Result<super::BulkAuthOutcome, StoreError> {
     if ids.is_empty() {
@@ -619,7 +756,8 @@ pub(crate) fn bulk_update_ids(
                 denied = denied.saturating_add(1);
                 continue;
             }
-            let outcome = apply_update_inner(&tx, vector_index, id_str, update, now)?;
+            let revision_at = next_memory_revision(now, mem.updated_at).to_rfc3339();
+            let outcome = apply_update_inner(&tx, vector_index, id_str, update, &revision_at)?;
             if outcome.outcome == WriteOutcome::Applied {
                 insert_optional_audit_draft(&tx, &id, audit)?;
                 applied_ids.push(id);
@@ -631,7 +769,13 @@ pub(crate) fn bulk_update_ids(
 }
 
 /// Apply a partial update to a memory, returning the outcome and optional reembed revision.
-pub(crate) fn apply_update(conn: &mut Connection, vector_index: &SqliteVecIndex, id_str: &str, update: &MemoryUpdate, now: &str) -> Result<AuthorizedUpdateOutcome, StoreError> {
+pub(crate) fn apply_update(
+    conn: &mut Connection,
+    vector_index: &SqliteVecIndex,
+    id_str: &str,
+    update: &MemoryUpdate,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<AuthorizedUpdateOutcome, StoreError> {
     // Entity-only update with no columns: no transaction needed, just an existence check.
     let entities_update = update.entities.clone();
     if !has_column_updates(update) && entities_update.is_none() {
@@ -643,7 +787,15 @@ pub(crate) fn apply_update(conn: &mut Connection, vector_index: &SqliteVecIndex,
     }
 
     let tx = sqlite_write_tx(conn)?;
-    let outcome = apply_update_inner(&tx, vector_index, id_str, update, now)?;
+    let Some(existing) = fetch_memory_by_id(&tx, id_str)? else {
+        tx.commit()?;
+        return Ok(AuthorizedUpdateOutcome {
+            outcome: WriteOutcome::NotFound,
+            reembed_revision: None,
+        });
+    };
+    let revision_at = next_memory_revision(now, existing.updated_at).to_rfc3339();
+    let outcome = apply_update_inner(&tx, vector_index, id_str, update, &revision_at)?;
     tx.commit()?;
     Ok(outcome)
 }
@@ -654,6 +806,7 @@ const fn has_column_updates(update: &MemoryUpdate) -> bool {
         || update.tags.is_some()
         || update.access_policy.is_some()
         || update.importance.is_some()
+        || update.expires_at.is_some()
         || update.confidence.is_some()
         || update.source_conversation.is_some()
 }
@@ -734,8 +887,6 @@ fn build_set_clause(update: &MemoryUpdate, now: &str) -> Result<SetClauseBuilder
         builder.push_literal("embedding_revision = embedding_revision + 1");
         builder.push_literal("embedding_claimed_at = NULL");
         builder.push_literal("embedding_claim_token = NULL");
-        // Track when content was last modified for freshness scoring.
-        builder.push("updated_at", Box::new(now.to_owned()));
     }
     if let Some(tags) = &update.tags {
         builder.push("tags", Box::new(serde_json::to_string(tags)?));
@@ -746,6 +897,9 @@ fn build_set_clause(update: &MemoryUpdate, now: &str) -> Result<SetClauseBuilder
     if let Some(importance) = update.importance {
         builder.push("importance", Box::new(importance.value()));
     }
+    if let Some(expires_at) = update.expires_at {
+        builder.push("expires_at", Box::new(expires_at.map(|value| value.to_rfc3339())));
+    }
     if let Some(confidence) = update.confidence {
         builder.push("confidence", Box::new(confidence.value()));
     }
@@ -754,6 +908,12 @@ fn build_set_clause(update: &MemoryUpdate, now: &str) -> Result<SetClauseBuilder
             format!("provenance = json_set(provenance, '$.source_conversation', ?{})", builder.next_index()),
             Box::new(source_conversation.clone()),
         );
+    }
+    if update.content.is_some() {
+        builder.push("updated_at", Box::new(now.to_owned()));
+    }
+    if has_column_updates(update) {
+        builder.push_literal("record_revision = record_revision + 1");
     }
 
     Ok(builder)
@@ -769,9 +929,12 @@ fn apply_update_inner(conn: &Connection, vector_index: &SqliteVecIndex, id_str: 
     let entities_update = update.entities.clone();
 
     if builder.is_empty() {
-        // Entity-only update: verify existence before replacing.
-        let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1)", params![id_str], |row| row.get(0))?;
-        if !exists {
+        let affected = if entities_update.is_some() {
+            conn.execute("UPDATE memories SET record_revision = record_revision + 1 WHERE id = ?1", params![id_str])?
+        } else {
+            usize::from(conn.query_row("SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1)", params![id_str], |row| row.get::<_, bool>(0))?)
+        };
+        if affected == 0 {
             return Ok(AuthorizedUpdateOutcome {
                 outcome: WriteOutcome::NotFound,
                 reembed_revision: None,
@@ -1139,6 +1302,7 @@ impl SqliteStore {
         let prepared = PreparedMemoryRow::from_memory(memory, embedding)?;
         let supersedes_id = supersedes_id.to_string();
         let audit = audit.cloned();
+        let now = self.clock_now();
         let vector_index = self.vector_index();
         self.with_conn(move |conn| {
             let tx = sqlite_write_tx(conn)?;
@@ -1146,7 +1310,7 @@ impl SqliteStore {
             let id = prepared.insert(&tx, &vector_index)?;
             let new_id_str = id.to_string();
             #[expect(unused_results, reason = "UPDATE row count checked via validate_superseded_exists above")]
-            mark_superseded(&tx, &supersedes_id, &new_id_str)?;
+            mark_superseded(&tx, &supersedes_id, &new_id_str, now)?;
             if let Some(audit) = audit.as_ref() {
                 insert_audit_draft(&tx, &id, audit)?;
             }
@@ -1179,12 +1343,13 @@ impl SqliteStore {
         let prepared = PreparedMemoryRow::from_memory(memory, embedding)?;
         let supersedes_id = supersedes_id.map(ToString::to_string);
         let metadata = metadata.clone();
-        let metadata_now = self.clock_now().to_rfc3339();
+        let now = self.clock_now();
+        let metadata_now = now.to_rfc3339();
         let audit = audit.cloned();
         let vector_index = self.vector_index();
         self.with_conn(move |conn| {
             let tx = sqlite_write_tx(conn)?;
-            let id = insert_prepared_with_optional_supersession_and_audit(&tx, &vector_index, &prepared, supersedes_id.as_deref(), audit.as_ref())?;
+            let id = insert_prepared_with_optional_supersession_and_audit(&tx, &vector_index, &prepared, supersedes_id.as_deref(), audit.as_ref(), now)?;
             upsert_metadata_conn(&tx, &metadata, &metadata_now)?;
             tx.commit()?;
             Ok(id)
@@ -1202,9 +1367,9 @@ impl SqliteStore {
     pub(crate) async fn update_impl(&self, id: &MemoryId, update: &MemoryUpdate) -> Result<bool, StoreError> {
         let id_str = id.to_string();
         let update = update.clone();
-        let now = self.clock_now().to_rfc3339();
+        let now = self.clock_now();
         let vector_index = self.vector_index();
-        self.with_conn(move |conn| apply_update(conn, &vector_index, &id_str, &update, &now).map(|outcome| outcome.outcome == WriteOutcome::Applied))
+        self.with_conn(move |conn| apply_update(conn, &vector_index, &id_str, &update, now).map(|outcome| outcome.outcome == WriteOutcome::Applied))
             .await
     }
 
@@ -1271,9 +1436,10 @@ impl SqliteStore {
         // Convert MemoryId to String for SQL layer
         let supersedes_strs: Vec<Option<String>> = supersedes.iter().map(|s| s.map(|id| id.to_string())).collect();
         let audits = audits.map(<[AuditDraft]>::to_vec);
+        let now = self.clock_now();
 
         let vector_index = self.vector_index();
-        self.with_conn(move |conn| batch_store_with_supersession_and_audit(conn, &vector_index, &prepared, &supersedes_strs, audits.as_deref()))
+        self.with_conn(move |conn| batch_store_with_supersession_and_audit(conn, &vector_index, &prepared, &supersedes_strs, audits.as_deref(), now))
             .await
     }
 
@@ -1313,7 +1479,8 @@ impl SqliteStore {
             .collect::<Result<Vec<_>, _>>()?;
         let supersedes_strs: Vec<Option<String>> = supersedes.iter().map(|s| s.map(|id| id.to_string())).collect();
         let metadata = metadata.to_vec();
-        let metadata_now = self.clock_now().to_rfc3339();
+        let now = self.clock_now();
+        let metadata_now = now.to_rfc3339();
         let audits = audits.map(<[AuditDraft]>::to_vec);
 
         let vector_index = self.vector_index();
@@ -1323,7 +1490,7 @@ impl SqliteStore {
             for (idx, p) in prepared.iter().enumerate() {
                 let supersedes_id = supersedes_strs.get(idx).and_then(|s| s.as_deref());
                 let audit = audits.as_ref().and_then(|items| items.get(idx));
-                let id = insert_prepared_with_optional_supersession_and_audit(&tx, &vector_index, p, supersedes_id, audit)?;
+                let id = insert_prepared_with_optional_supersession_and_audit(&tx, &vector_index, p, supersedes_id, audit, now)?;
                 let item_metadata = metadata.get(idx).ok_or_else(|| metadata_len_mismatch(prepared.len(), metadata.len()))?;
                 upsert_metadata_conn(&tx, item_metadata, &metadata_now)?;
                 ids.push(id);
@@ -1348,7 +1515,7 @@ impl SqliteStore {
         let id_str = id.to_string();
         let update = update.clone();
         let caller = principal.to_owned();
-        let now = self.clock_now().to_rfc3339();
+        let now = self.clock_now();
         let audit = audit.cloned();
         let vector_index = self.vector_index();
         self.with_conn(move |conn| {
@@ -1365,7 +1532,8 @@ impl SqliteStore {
                     reembed_revision: None,
                 });
             }
-            let outcome = apply_update_inner(&tx, &vector_index, &id_str, &update, &now)?;
+            let revision_at = next_memory_revision(now, existing.updated_at).to_rfc3339();
+            let outcome = apply_update_inner(&tx, &vector_index, &id_str, &update, &revision_at)?;
             if outcome.outcome == WriteOutcome::Applied
                 && let Some(audit) = audit.as_ref()
             {
@@ -1391,11 +1559,49 @@ impl SqliteStore {
         let update = update.clone();
         let metadata_patch = metadata_patch.cloned();
         let caller = principal.to_owned();
-        let now = self.clock_now().to_rfc3339();
+        let now = self.clock_now();
         let audit = audit.cloned();
         let vector_index = self.vector_index();
-        self.with_conn(move |conn| apply_authorized_update_with_metadata(conn, &vector_index, &id_value, &update, metadata_patch.as_ref(), &caller, &now, audit.as_ref()))
+        self.with_conn(move |conn| apply_authorized_update_with_metadata(conn, &vector_index, &id_value, &update, metadata_patch.as_ref(), &caller, now, audit.as_ref()))
             .await
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "atomic TUI revise needs revision, fields, metadata, embedding, principal, and audit")]
+    pub(crate) async fn update_authorized_if_unmodified_with_metadata_audited_impl(
+        &self,
+        id: &MemoryId,
+        expected_revision: i64,
+        update: &MemoryUpdate,
+        metadata_patch: Option<&MetadataPatch>,
+        embedding: Option<&[f32]>,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<AuthorizedUpdateOutcome, StoreError> {
+        let id_value = *id;
+        let update = update.clone();
+        let metadata_patch = metadata_patch.cloned();
+        let embedding = embedding.map(<[f32]>::to_vec);
+        let caller = principal.to_owned();
+        let now = self.clock_now();
+        let audit = audit.clone();
+        let vector_index = self.vector_index();
+        let expected_embedding_profile = self.active_embedding_profile();
+        self.with_conn(move |conn| {
+            apply_authorized_update_if_unmodified_with_metadata(
+                conn,
+                &vector_index,
+                &id_value,
+                expected_revision,
+                &update,
+                metadata_patch.as_ref(),
+                embedding.as_deref(),
+                expected_embedding_profile.as_ref(),
+                &caller,
+                now,
+                &audit,
+            )
+        })
+        .await
     }
 
     pub(crate) async fn delete_authorized_impl(&self, id: &MemoryId, principal: &str) -> Result<WriteOutcome, StoreError> {
@@ -1408,6 +1614,21 @@ impl SqliteStore {
         let deleted_at = self.clock_now().to_rfc3339();
         let audit = audit.cloned();
         self.with_conn(move |conn| apply_authorized_delete(conn, &id_str, &caller, &deleted_at, audit.as_ref()))
+            .await
+    }
+
+    pub(crate) async fn delete_authorized_if_unmodified_audited_impl(
+        &self,
+        id: &MemoryId,
+        expected_revision: i64,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<WriteOutcome, StoreError> {
+        let id_value = *id;
+        let caller = principal.to_owned();
+        let deleted_at = self.clock_now().to_rfc3339();
+        let audit = audit.clone();
+        self.with_conn(move |conn| apply_authorized_delete_if_unmodified(conn, &id_value, expected_revision, &caller, &deleted_at, &audit))
             .await
     }
 
@@ -1442,10 +1663,9 @@ impl SqliteStore {
         audit: Option<&AuditDraft>,
     ) -> Result<super::BulkAuthOutcome, StoreError> {
         let caller = principal.to_owned();
-        let now_str = now.to_rfc3339();
         let audit = audit.cloned();
         let vector_index = self.vector_index();
-        self.with_conn(move |conn| bulk_update_ids(conn, &vector_index, &ids, &update, &caller, &now_str, audit.as_ref()))
+        self.with_conn(move |conn| bulk_update_ids(conn, &vector_index, &ids, &update, &caller, now, audit.as_ref()))
             .await
     }
 
@@ -1610,9 +1830,10 @@ impl SqliteStore {
     pub(crate) async fn mark_superseded_by_impl(&self, id: &MemoryId, superseded_by: &MemoryId) -> Result<bool, StoreError> {
         let id_str = id.to_string();
         let sup_by = superseded_by.to_string();
+        let now = self.clock_now();
         self.with_conn(move |conn| {
             let tx = sqlite_write_tx(conn)?;
-            let marked = mark_superseded(&tx, &id_str, &sup_by)?;
+            let marked = mark_superseded(&tx, &id_str, &sup_by, now)?;
             tx.commit()?;
             Ok(marked)
         })
@@ -1634,6 +1855,7 @@ impl SqliteStore {
         let sup_by = superseded_by.to_string();
         let caller = principal.to_owned();
         let audit = audit.cloned();
+        let now = self.clock_now();
         self.with_conn(move |conn| {
             let tx = sqlite_write_tx(conn)?;
             let Some(existing) = fetch_memory_by_id(&tx, &id_str)? else {
@@ -1642,7 +1864,7 @@ impl SqliteStore {
             if !existing.has_write_access(&caller) {
                 return Ok(WriteOutcome::Denied);
             }
-            let marked = mark_superseded(&tx, &id_str, &sup_by)?;
+            let marked = mark_superseded(&tx, &id_str, &sup_by, now)?;
             if marked && let Some(audit) = audit.as_ref() {
                 insert_audit_draft(&tx, &existing.id, audit)?;
             }
@@ -1737,6 +1959,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn optimistic_delete_rolls_back_tombstone_when_delete_is_ignored() {
+        use crate::{
+            store::{MemoryReader as _, MemoryWriter as _, SqliteStore},
+            types::{AccessPolicy, AuditAction, AuditDraft, Memory, Provenance},
+        };
+
+        let store = SqliteStore::in_memory().unwrap();
+        let memory = Memory::new_for_test(
+            "protected from delete".into(),
+            Vec::new(),
+            Provenance {
+                source_agent: Some("owner".into()),
+                ..Provenance::default()
+            },
+            AccessPolicy::Public,
+        );
+        let id = store.store(&memory, None).await.unwrap();
+        let loaded = store.get(&id, Some("owner")).await.unwrap().unwrap();
+        store
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER ignore_memory_delete
+                     BEFORE DELETE ON memories
+                     BEGIN
+                         SELECT RAISE(IGNORE);
+                     END;",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let audit = AuditDraft {
+            action: AuditAction::Delete,
+            caller_agent: Some("owner".into()),
+            timestamp: chrono::Utc::now(),
+            details: None,
+        };
+
+        let error = store
+            .delete_authorized_if_unmodified_audited(&id, loaded.record_revision, "owner", &audit)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, StoreError::Conflict(_)));
+        assert!(store.get(&id, Some("owner")).await.unwrap().is_some());
+        assert!(store.get_tombstone(&id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn optimistic_embedding_write_rejects_profile_drift() {
+        use crate::{
+            store::{EmbeddingProfile, MemoryReader as _, MemoryWriter as _, SqliteStore},
+            types::{AccessPolicy, AuditAction, AuditDraft, Memory, MemoryUpdate, Provenance},
+        };
+
+        let store = SqliteStore::in_memory().unwrap();
+        let profile = EmbeddingProfile::openai_compatible("http://127.0.0.1:8000/v1", "model-a", SqliteStore::DEFAULT_TEST_DIMENSIONS);
+        store.verify_embedding_profile(&profile).await.unwrap();
+        let memory = Memory::new_for_test(
+            "profile guarded".into(),
+            Vec::new(),
+            Provenance {
+                source_agent: Some("owner".into()),
+                ..Provenance::default()
+            },
+            AccessPolicy::Public,
+        );
+        let original_embedding = vec![0.25_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS];
+        let id = store.store(&memory, Some(&original_embedding)).await.unwrap();
+        let loaded = store.get(&id, Some("owner")).await.unwrap().unwrap();
+        store
+            .with_conn(|conn| {
+                let affected = conn.execute("UPDATE embedding_profile SET model = 'model-b' WHERE singleton = 1", [])?;
+                assert_eq!(affected, 1_usize);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let audit = AuditDraft {
+            action: AuditAction::Update,
+            caller_agent: Some("owner".into()),
+            timestamp: chrono::Utc::now(),
+            details: None,
+        };
+        let replacement_embedding = vec![0.75_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS];
+
+        let error = store
+            .update_authorized_if_unmodified_with_metadata_audited(
+                &id,
+                loaded.record_revision,
+                &MemoryUpdate {
+                    content: Some("must roll back".into()),
+                    ..MemoryUpdate::default()
+                },
+                None,
+                Some(&replacement_embedding),
+                "owner",
+                &audit,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, StoreError::Conflict(_)));
+        assert_eq!(store.get(&id, Some("owner")).await.unwrap().unwrap().content, "profile guarded");
+        assert_eq!(store.fetch_embeddings_for_ids(&[id]).await.unwrap().get(&id), Some(&original_embedding));
+    }
+
+    #[tokio::test]
     async fn mark_superseded_nonexistent_memory_returns_false() {
         use crate::{
             store::{MemoryWriter as _, SqliteStore},
@@ -1771,6 +2101,7 @@ mod tests {
             access_policy: AccessPolicy::Restricted { allowed: vec!["owner".into()] },
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            record_revision: 0_i64,
             expires_at: None,
             has_embedding: false,
             memory_type: MemoryType::default(),
@@ -1792,6 +2123,7 @@ mod tests {
             access_policy: AccessPolicy::Public,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            record_revision: 0_i64,
             expires_at: None,
             has_embedding: false,
             memory_type: MemoryType::default(),

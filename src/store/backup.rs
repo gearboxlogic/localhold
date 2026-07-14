@@ -18,7 +18,7 @@ use serde::Serialize;
 
 use super::{
     EmbeddingProfile, SqliteStore, existing_embedding_dimensions,
-    migration::validate_sqlite_source_schema,
+    migration::{SQLITE_V1_SCHEMA_VERSION, validate_sqlite_source_schema, validate_sqlite_v1_source_schema_for_upgrade},
     schema::SQLITE_SCHEMA_VERSION,
     sqlite::read_embedding_profile,
     sqlite_lease::{ExclusiveLeaseError, SqliteDatabaseLease},
@@ -325,6 +325,7 @@ fn restore_sync_with_replace_policy(options: &RestoreOptions, replace_policy: Co
     let staged = temporary_path(&options.database_path, "restore-stage");
     let result = (|| {
         snapshot_path(&options.backup_path, &staged, options.clock.as_ref(), CopyPolicy::default())?;
+        prepare_restore_stage(&staged, options.embedding_dimensions)?;
         let inspection = inspect_path(&staged, options.embedding_dimensions, options.expected_profile.as_ref())?;
         let _lease = match SqliteDatabaseLease::try_exclusive(&options.database_path) {
             Ok(lease) => lease,
@@ -406,7 +407,7 @@ fn restore_sync_with_replace_policy(options: &RestoreOptions, replace_policy: Co
             inspection,
         ))
     })();
-    remove_if_exists(&staged);
+    remove_sqlite_files(&staged);
     result
 }
 
@@ -640,6 +641,26 @@ fn copy_database(source: &Connection, destination: &mut Connection, clock: &dyn 
             _ => return Err(MaintenanceFailure::failed("SQLite returned an unsupported online-backup result")),
         }
     }
+}
+
+fn prepare_restore_stage(path: &Path, embedding_dimensions: usize) -> Result<(), MaintenanceFailure> {
+    SqliteStore::register_extension().map_err(|error| store_failure(&error))?;
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sqlite_failure("open staged backup for schema inspection"))?;
+    let schema_version: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(sqlite_failure("read staged backup schema version"))?;
+    if schema_version == SQLITE_SCHEMA_VERSION {
+        return Ok(());
+    }
+    if schema_version != SQLITE_V1_SCHEMA_VERSION {
+        return validate_sqlite_source_schema(&connection, embedding_dimensions).map_err(|error| MaintenanceFailure::invalid(error.to_string()));
+    }
+    validate_sqlite_v1_source_schema_for_upgrade(&connection, embedding_dimensions).map_err(|error| MaintenanceFailure::invalid(error.to_string()))?;
+    drop(connection);
+
+    SqliteStore::migrate_restore_stage(path, embedding_dimensions).map_err(|error| store_failure(&error))?;
+    sync_file(path)?;
+    Ok(())
 }
 
 fn inspect_path(path: &Path, embedding_dimensions: usize, expected_profile: Option<&EmbeddingProfile>) -> Result<Inspection, MaintenanceFailure> {
@@ -1154,6 +1175,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restore_upgrades_a_valid_v1_backup_on_the_private_stage() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.db");
+        let backup_path = directory.path().join("snapshot-v1.db");
+        let target = directory.path().join("target.db");
+        let expected = profile("model-a");
+        let source_store = seed_database(&source, "source", &expected).await;
+        assert_eq!(backup(BackupOptions::new(source, backup_path.clone())).await.status, "ok");
+        drop(source_store);
+        let target_store = seed_database(&target, "target", &expected).await;
+        drop(target_store);
+
+        let connection = Connection::open(&backup_path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER trg_memory_clear_superseded_by;
+             ALTER TABLE memories DROP COLUMN record_revision;
+             CREATE TRIGGER trg_memory_clear_superseded_by
+             AFTER DELETE ON memories
+             BEGIN
+                 UPDATE memories SET superseded_by = NULL WHERE superseded_by = OLD.id;
+             END;",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", SQLITE_V1_SCHEMA_VERSION).unwrap();
+        drop(connection);
+
+        let dry_run = restore(RestoreOptions::new(target.clone(), backup_path.clone(), DIMENSIONS, Some(expected.clone())).dry_run(true)).await;
+        assert_eq!(dry_run.status, "validated");
+        assert_eq!(dry_run.database_schema_version, Some(SQLITE_SCHEMA_VERSION));
+        let untouched_backup = Connection::open_with_flags(&backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let backup_version: u32 = untouched_backup.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(backup_version, SQLITE_V1_SCHEMA_VERSION, "restore must migrate only its private stage");
+        drop(untouched_backup);
+
+        let restored = restore(RestoreOptions::new(target.clone(), backup_path, DIMENSIONS, Some(expected)).confirmed(true)).await;
+        assert_eq!(restored.status, "ok");
+        assert!(memory_contents(&target).iter().any(|content| content.contains("source")));
+        let restored_connection = Connection::open_with_flags(&target, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let restored_version: u32 = restored_connection.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(restored_version, SQLITE_SCHEMA_VERSION);
+        let revision_column: bool = restored_connection
+            .query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('memories') WHERE name = 'record_revision')", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(revision_column);
+        let trigger_sql: String = restored_connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_memory_clear_superseded_by'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(trigger_sql.contains("record_revision = record_revision + 1"));
+    }
+
+    #[tokio::test]
     async fn restore_rejects_corruption_schema_and_embedding_profile_before_replacement() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source.db");
@@ -1442,7 +1521,7 @@ mod tests {
         };
         let json: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
         assert_eq!(json["schema_version"], 1_i32);
-        assert_eq!(json["database_schema_version"], 1_i32);
+        assert_eq!(json["database_schema_version"], SQLITE_SCHEMA_VERSION);
         assert_eq!(json["operation"], "backup");
         assert_eq!(json["embedding_profile"]["model"], "model-a");
         assert!(json.get("exit_code").is_none());

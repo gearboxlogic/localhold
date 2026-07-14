@@ -236,6 +236,7 @@ mod tests {
                 access_policy: AccessPolicy::Public,
                 created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
                 updated_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
+                record_revision: 0_i64,
                 expires_at: None,
                 has_embedding: embedding.is_some(),
                 memory_type: MemoryType::default(),

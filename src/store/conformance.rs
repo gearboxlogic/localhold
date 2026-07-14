@@ -160,6 +160,7 @@ where
         created_at: time_after(base, 3),
     });
     let old_id = store.store(&old, Some(&embedding(embedding_dimensions, 6.0_f32))).await.unwrap();
+    let opened_old = store.get(&old_id, Some(OWNER)).await.unwrap().unwrap();
     let new = memory(MemorySpec {
         content: format!("superseded new {case}"),
         tags: vec![case_tag.clone(), "supersession".into()],
@@ -170,6 +171,32 @@ where
         created_at: time_after(base, 4),
     });
     let new_id = store.store_with_supersession(&new, Some(&embedding(embedding_dimensions, 6.1_f32)), &old_id).await.unwrap();
+    let superseded = store.get(&old_id, Some(OWNER)).await.unwrap().unwrap();
+    assert!(superseded.record_revision > opened_old.record_revision, "supersession must advance the optimistic revision");
+    assert_eq!(superseded.updated_at, opened_old.updated_at, "supersession must preserve content freshness");
+    let supersession_audit = AuditDraft {
+        action: AuditAction::Update,
+        caller_agent: Some(OWNER.into()),
+        timestamp: time_after(base, 4),
+        details: Some(json!({"stale_after_supersession": true})),
+    };
+    let stale_after_supersession = store
+        .update_authorized_if_unmodified_with_metadata_audited(
+            &old_id,
+            opened_old.record_revision,
+            &MemoryUpdate {
+                importance: Some(Importance::new(0.6_f64)),
+                ..MemoryUpdate::default()
+            },
+            None,
+            None,
+            OWNER,
+            &supersession_audit,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(stale_after_supersession, StoreError::Conflict(_)));
+
     let supersession_filter = MemoryFilter {
         tags: Some(vec![case_tag.clone(), "supersession".into()]),
         ..MemoryFilter::default()
@@ -188,7 +215,7 @@ where
         .await
         .unwrap());
     assert!(all_supersession_ids.contains(&old_id));
-    assert_eq!(store.get(&old_id, Some(OWNER)).await.unwrap().unwrap().superseded_by, Some(new_id));
+    assert_eq!(superseded.superseded_by, Some(new_id));
 
     let neighbor = memory(MemorySpec {
         content: format!("near vector neighbor {case}"),
@@ -377,7 +404,9 @@ where
     let metadata_patch = MetadataPatch {
         scope_key: Some(format!("contract/revised/{case}")),
         summary: Some(format!("revised summary {case}")),
+        clear_summary: false,
         agent_label: Some("conformance-agent".into()),
+        clear_agent_label: false,
     };
     let metadata_audit = AuditDraft {
         action: AuditAction::Update,
@@ -407,6 +436,249 @@ where
         Some(&json!(super::crud::content_hash(&content_after_audit_update)))
     );
 
+    let interactive = memory(MemorySpec {
+        content: format!("interactive original {case}"),
+        tags: vec![case_tag.clone(), "interactive".into()],
+        source_agent: OWNER,
+        scope: scope.clone(),
+        origin: origin.clone(),
+        access_policy: AccessPolicy::Public,
+        created_at: time_after(base, 16),
+    });
+    let interactive_id = store.store(&interactive, Some(&embedding(embedding_dimensions, 20.0_f32))).await.unwrap();
+    let interactive_metadata = MemoryMetadata {
+        memory_id: interactive_id,
+        scope_key: Some(scope.clone()),
+        summary: Some("interactive summary".into()),
+        agent_label: Some("interactive agent".into()),
+        created_by_principal: Some(OWNER.into()),
+        quality_flags: Vec::new(),
+        schema_version: 1,
+    };
+    store.upsert_metadata(interactive_metadata.clone()).await.unwrap();
+    let opened_before_external_update = store.get(&interactive_id, Some(OWNER)).await.unwrap().unwrap();
+    let concurrency_audit = AuditDraft {
+        action: AuditAction::Update,
+        caller_agent: Some(OWNER.into()),
+        timestamp: time_after(base, 16),
+        details: Some(json!({"concurrency": true})),
+    };
+
+    let ordinary_outcome = store
+        .update_authorized(
+            &interactive_id,
+            &MemoryUpdate {
+                tags: Some(vec![case_tag.clone(), "external-tag-revision".into()]),
+                ..MemoryUpdate::default()
+            },
+            OWNER,
+        )
+        .await
+        .unwrap();
+    assert_eq!(ordinary_outcome.outcome, WriteOutcome::Applied);
+    let after_ordinary_update = store.get(&interactive_id, Some(OWNER)).await.unwrap().unwrap();
+    assert!(
+        after_ordinary_update.record_revision > opened_before_external_update.record_revision,
+        "ordinary non-content updates must advance the optimistic revision"
+    );
+    assert_eq!(
+        after_ordinary_update.updated_at, opened_before_external_update.updated_at,
+        "ordinary non-content updates must preserve content freshness"
+    );
+    let stale_after_ordinary_update = store
+        .update_authorized_if_unmodified_with_metadata_audited(
+            &interactive_id,
+            opened_before_external_update.record_revision,
+            &MemoryUpdate {
+                importance: Some(Importance::new(0.6_f64)),
+                ..MemoryUpdate::default()
+            },
+            None,
+            None,
+            OWNER,
+            &concurrency_audit,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(stale_after_ordinary_update, StoreError::Conflict(_)));
+
+    let mut concurrent_metadata = interactive_metadata;
+    concurrent_metadata.summary = Some("external metadata revision".into());
+    store.upsert_metadata(concurrent_metadata).await.unwrap();
+    let loaded = store.get(&interactive_id, Some(OWNER)).await.unwrap().unwrap();
+    assert!(
+        loaded.record_revision > after_ordinary_update.record_revision,
+        "standalone metadata upserts must advance the optimistic revision"
+    );
+    assert_eq!(
+        loaded.updated_at, after_ordinary_update.updated_at,
+        "standalone metadata upserts must preserve content freshness"
+    );
+    let stale_after_metadata_update = store
+        .update_authorized_if_unmodified_with_metadata_audited(
+            &interactive_id,
+            after_ordinary_update.record_revision,
+            &MemoryUpdate {
+                importance: Some(Importance::new(0.7_f64)),
+                ..MemoryUpdate::default()
+            },
+            None,
+            None,
+            OWNER,
+            &concurrency_audit,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(stale_after_metadata_update, StoreError::Conflict(_)));
+
+    let replacement_content = format!("interactive revised {case}");
+    let replacement_expiry = Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).single().unwrap();
+    let replacement_update = MemoryUpdate {
+        content: Some(replacement_content.clone()),
+        tags: Some(vec![case_tag.clone(), "revised-interactive".into()]),
+        expires_at: Some(Some(replacement_expiry)),
+        importance: Some(Importance::new(0.9_f64)),
+        ..MemoryUpdate::default()
+    };
+    let replacement_metadata = MetadataPatch {
+        scope_key: None,
+        summary: None,
+        clear_summary: true,
+        agent_label: Some("revised agent".into()),
+        clear_agent_label: false,
+    };
+    let replacement_audit = AuditDraft {
+        action: AuditAction::Update,
+        caller_agent: Some(OWNER.into()),
+        timestamp: time_after(base, 17),
+        details: Some(json!({"interactive": true})),
+    };
+    let wrong_dimension_error = store
+        .update_authorized_if_unmodified_with_metadata_audited(
+            &interactive_id,
+            loaded.record_revision,
+            &MemoryUpdate {
+                content: Some("wrong-dimensional revision".into()),
+                ..MemoryUpdate::default()
+            },
+            None,
+            Some(&vec![0.0_f32; embedding_dimensions.saturating_add(1_usize)]),
+            OWNER,
+            &replacement_audit,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(wrong_dimension_error, StoreError::Conflict(_)));
+    assert_eq!(store.get(&interactive_id, Some(OWNER)).await.unwrap().unwrap().content, interactive.content);
+
+    let replacement_embedding = embedding(embedding_dimensions, 21.0_f32);
+    let interactive_outcome = store
+        .update_authorized_if_unmodified_with_metadata_audited(
+            &interactive_id,
+            loaded.record_revision,
+            &replacement_update,
+            Some(&replacement_metadata),
+            Some(&replacement_embedding),
+            OWNER,
+            &replacement_audit,
+        )
+        .await
+        .unwrap();
+    assert_eq!(interactive_outcome.outcome, WriteOutcome::Applied);
+    assert!(interactive_outcome.reembed_revision.is_none());
+    let revised = store.get(&interactive_id, Some(OWNER)).await.unwrap().unwrap();
+    assert_eq!(revised.content, replacement_content);
+    assert_eq!(revised.expires_at, Some(replacement_expiry));
+    assert!(revised.has_embedding);
+    assert_eq!(
+        store.fetch_embeddings_for_ids(&[interactive_id]).await.unwrap().get(&interactive_id),
+        Some(&replacement_embedding)
+    );
+    let revised_metadata = store.get_metadata(&interactive_id).await.unwrap().unwrap();
+    assert!(revised_metadata.summary.is_none());
+    assert_eq!(revised_metadata.agent_label.as_deref(), Some("revised agent"));
+
+    let metadata_only_outcome = store
+        .update_authorized_if_unmodified_with_metadata_audited(
+            &interactive_id,
+            revised.record_revision,
+            &MemoryUpdate::default(),
+            Some(&MetadataPatch {
+                scope_key: None,
+                summary: Some("metadata revision".into()),
+                clear_summary: false,
+                agent_label: None,
+                clear_agent_label: false,
+            }),
+            None,
+            OWNER,
+            &replacement_audit,
+        )
+        .await
+        .unwrap();
+    assert_eq!(metadata_only_outcome.outcome, WriteOutcome::Applied);
+    let metadata_revised = store.get(&interactive_id, Some(OWNER)).await.unwrap().unwrap();
+    assert!(
+        metadata_revised.record_revision > revised.record_revision,
+        "metadata-only interactive edits must advance the optimistic revision"
+    );
+    assert_eq!(
+        metadata_revised.updated_at, revised.updated_at,
+        "metadata-only interactive edits must preserve content freshness"
+    );
+    let stale_metadata_error = store
+        .update_authorized_if_unmodified_with_metadata_audited(
+            &interactive_id,
+            revised.record_revision,
+            &MemoryUpdate {
+                importance: Some(Importance::new(0.4_f64)),
+                ..MemoryUpdate::default()
+            },
+            None,
+            None,
+            OWNER,
+            &replacement_audit,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(stale_metadata_error, StoreError::Conflict(_)));
+
+    let stale_error = store
+        .update_authorized_if_unmodified_with_metadata_audited(
+            &interactive_id,
+            loaded.record_revision,
+            &MemoryUpdate {
+                content: Some("stale overwrite".into()),
+                ..MemoryUpdate::default()
+            },
+            None,
+            Some(&embedding(embedding_dimensions, 22.0_f32)),
+            OWNER,
+            &replacement_audit,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(stale_error, StoreError::Conflict(_)));
+    assert_eq!(store.get(&interactive_id, Some(OWNER)).await.unwrap().unwrap().content, replacement_content);
+
+    let delete_audit = AuditDraft {
+        action: AuditAction::Delete,
+        caller_agent: Some(OWNER.into()),
+        timestamp: time_after(base, 18),
+        details: Some(json!({"interactive": true})),
+    };
+    let stale_delete = store
+        .delete_authorized_if_unmodified_audited(&interactive_id, loaded.record_revision, OWNER, &delete_audit)
+        .await
+        .unwrap_err();
+    assert!(matches!(stale_delete, StoreError::Conflict(_)));
+    let delete_outcome = store
+        .delete_authorized_if_unmodified_audited(&interactive_id, metadata_revised.record_revision, OWNER, &delete_audit)
+        .await
+        .unwrap();
+    assert_eq!(delete_outcome, WriteOutcome::Applied);
+    assert!(store.get(&interactive_id, Some(OWNER)).await.unwrap().is_none());
+
     let from_scope = format!("contract/from/{case}");
     let to_scope = format!("contract/to/{case}");
     let movable = memory(MemorySpec {
@@ -419,12 +691,16 @@ where
         created_at: time_after(base, 13),
     });
     let movable_id = store.store(&movable, Some(&embedding(embedding_dimensions, 10.0_f32))).await.unwrap();
+    let opened_movable = store.get(&movable_id, Some(OWNER)).await.unwrap().unwrap();
     let reassigned = store.reassign_scope(&from_scope, &to_scope, None, OWNER).await.unwrap();
     assert_eq!(reassigned.applied_ids, vec![movable_id]);
-    assert_eq!(
-        store.get(&movable_id, Some(OWNER)).await.unwrap().unwrap().provenance.source_conversation.as_deref(),
-        Some(to_scope.as_str())
+    let moved = store.get(&movable_id, Some(OWNER)).await.unwrap().unwrap();
+    assert_eq!(moved.provenance.source_conversation.as_deref(), Some(to_scope.as_str()));
+    assert!(
+        moved.record_revision > opened_movable.record_revision,
+        "scope reassignment must advance the optimistic revision"
     );
+    assert_eq!(moved.updated_at, opened_movable.updated_at, "scope reassignment must preserve content freshness");
 
     let delete_me = memory(MemorySpec {
         content: format!("delete me {case}"),
@@ -519,6 +795,7 @@ fn memory(spec: MemorySpec) -> Memory {
         access_policy: spec.access_policy,
         created_at: spec.created_at,
         updated_at: spec.created_at,
+        record_revision: 0_i64,
         expires_at: None,
         has_embedding: false,
         memory_type: MemoryType::Semantic,

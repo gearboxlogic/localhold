@@ -83,6 +83,7 @@ mod tests {
             access_policy: AccessPolicy::Public,
             created_at: now,
             updated_at: now,
+            record_revision: 0_i64,
             expires_at: None,
             has_embedding: false,
             memory_type: MemoryType::default(),

@@ -392,6 +392,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
             access_policy,
             created_at: now,
             updated_at: now,
+            record_revision: 0_i64,
             expires_at,
             has_embedding: false,
             memory_type: input.memory_type.unwrap_or_default(),
@@ -840,6 +841,42 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         Ok(outcome)
     }
 
+    /// Revise a memory loaded at `expected_revision`, obtained from
+    /// [`Memory::optimistic_revision`].
+    ///
+    /// Fields, metadata, and audit commit only after authorization and
+    /// concurrency checks pass. Replacement content is then queued for
+    /// background embedding, so rejected drafts are never sent to a provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, authorization/store, or concurrency errors without
+    /// partially applying the persisted revision.
+    #[expect(clippy::too_many_arguments, reason = "interactive revise needs identity, revision, fields, metadata, and principal")]
+    pub async fn update_memory_if_unmodified_with_metadata(
+        &self,
+        id: MemoryId,
+        expected_revision: i64,
+        mut update: MemoryUpdate,
+        metadata_patch: Option<MetadataPatch>,
+        principal: &str,
+    ) -> Result<AuthorizedUpdateOutcome, EngineError> {
+        let new_content = update.content.clone();
+        let embed_admission = new_content.as_ref().map(|_| self.orchestrator.begin_embed_admission()).transpose()?;
+        self.prepare_update(&mut update)?;
+        let details = metadata_patch.is_some().then(|| serde_json::json!({"metadata": true, "interactive": true}));
+        let audit = self.audit_draft(AuditAction::Update, Some(principal.to_owned()), details);
+        let outcome = self
+            .orchestrator
+            .store()
+            .update_authorized_if_unmodified_with_metadata_audited(&id, expected_revision, &update, metadata_patch.as_ref(), None, principal, &audit)
+            .await?;
+        if let (Some(content), Some(revision), Some(admission)) = (new_content, outcome.reembed_revision, embed_admission.as_ref()) {
+            let _queued = self.orchestrator.spawn_embed_task_or_run_inline(admission, id, content, revision).await;
+        }
+        Ok(outcome)
+    }
+
     /// Validate content, tags, and entities fields of an update payload.
     fn validate_update_fields(&self, update: &MemoryUpdate) -> Result<(), EngineError> {
         if let Some(content) = &update.content {
@@ -884,6 +921,21 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         let audit = self.audit_draft(AuditAction::Delete, Some(principal.to_owned()), None);
         let outcome = self.orchestrator.store().delete_authorized_audited(id, principal, &audit).await?;
         Ok(outcome)
+    }
+
+    /// Delete a memory only if its loaded record revision is still current.
+    /// Obtain `expected_revision` from [`Memory::optimistic_revision`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Store` on persistence or concurrency failure.
+    pub async fn delete_memory_if_unmodified(&self, id: &MemoryId, expected_revision: i64, principal: &str) -> Result<WriteOutcome, EngineError> {
+        let audit = self.audit_draft(AuditAction::Delete, Some(principal.to_owned()), Some(serde_json::json!({"interactive": true})));
+        Ok(self
+            .orchestrator
+            .store()
+            .delete_authorized_if_unmodified_audited(id, expected_revision, principal, &audit)
+            .await?)
     }
 
     /// Reassign conversation scope for matching memories the caller may write.

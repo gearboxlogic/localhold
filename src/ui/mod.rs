@@ -1,11 +1,12 @@
-//! Interactive terminal UI (`hold ui`) for browsing and searching the hold.
+//! Interactive terminal UI (`hold ui`) for browsing and managing the hold.
 //!
-//! The UI opens the configured store directly (SQLite in WAL mode supports
-//! concurrent readers alongside a running server; `PostgreSQL` is shared by
-//! nature), so it works whether or not a `LocalHold` process is serving MCP.
-//! It is read-only: browsing records no activity and writes nothing.
+//! The UI opens the configured store directly. SQLite WAL mode and `PostgreSQL`
+//! both support concurrent access alongside a running server. Browsing remains
+//! side-effect-free; explicit edit and delete commands use normal audited
+//! authorization paths.
 
 mod app;
+mod editor;
 mod theme;
 mod view;
 
@@ -30,7 +31,7 @@ type UiError = Box<dyn std::error::Error + Send + Sync>;
 #[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct UiOptions {
-    /// Principal used for read visibility; defaults to `server.principal`.
+    /// Principal used for visibility and writes; defaults to `server.principal`.
     pub principal: Option<String>,
 }
 
@@ -49,6 +50,7 @@ impl UiOptions {
 /// Returns an error when config loading, store opening, or terminal setup fails.
 pub async fn run(options: UiOptions) -> Result<i32, UiError> {
     let config = Config::load()?;
+    let principal = resolve_principal(&config, options)?;
     let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
     match config.database.backend {
         DatabaseBackend::Sqlite => {
@@ -57,23 +59,63 @@ pub async fn run(options: UiOptions) -> Result<i32, UiError> {
             if let Some(profile) = active_embedding_profile(&config.embedding) {
                 store.check_embedding_profile(&profile).await?;
             }
-            run_with_store(store, config, clock, options).await
+            let writer_config = config.clone();
+            let writer_clock = Arc::clone(&clock);
+            let mutation_factory: app::MutationEngineFactory<SqliteStore> = Arc::new(move || {
+                let config = writer_config.clone();
+                let clock = Arc::clone(&writer_clock);
+                Box::pin(open_sqlite_mutation_engine(config, clock))
+            });
+            run_with_store(store, config, clock, principal, mutation_factory).await
         }
         DatabaseBackend::Postgres => {
             let store = PostgresStore::open_read_only_with_clock(&config.database.postgres, config.embedding.dimensions(), Arc::clone(&clock)).await?;
             if let Some(profile) = active_embedding_profile(&config.embedding) {
                 store.check_embedding_profile(&profile).await?;
             }
-            run_with_store(store, config, clock, options).await
+            let writer_config = config.clone();
+            let writer_clock = Arc::clone(&clock);
+            let mutation_factory: app::MutationEngineFactory<PostgresStore> = Arc::new(move || {
+                let config = writer_config.clone();
+                let clock = Arc::clone(&writer_clock);
+                Box::pin(open_postgres_mutation_engine(config, clock))
+            });
+            run_with_store(store, config, clock, principal, mutation_factory).await
         }
     }
 }
 
-async fn run_with_store<S>(store: S, config: Config, clock: Arc<dyn Clock>, options: UiOptions) -> Result<i32, UiError>
+async fn open_sqlite_mutation_engine(config: Config, clock: Arc<dyn Clock>) -> Result<LocalHoldEngine<SqliteStore>, String> {
+    let store = SqliteStore::open_with_clock(config.database.sqlite_path(), config.embedding.dimensions(), Arc::clone(&clock))
+        .map_err(|error| format!("write store unavailable: {error}"))?;
+    if let Some(profile) = active_embedding_profile(&config.embedding) {
+        store
+            .verify_embedding_profile(&profile)
+            .await
+            .map_err(|error| format!("write store unavailable: {error}"))?;
+    }
+    let embedding = create_deferred_embedding_provider_with_clock(&config.embedding, &config.limits, Arc::clone(&clock));
+    Ok(LocalHoldEngine::new_with_clock(store, embedding, config.limits, config.search, clock))
+}
+
+async fn open_postgres_mutation_engine(config: Config, clock: Arc<dyn Clock>) -> Result<LocalHoldEngine<PostgresStore>, String> {
+    let store = PostgresStore::open_with_clock(&config.database.postgres, config.embedding.dimensions(), Arc::clone(&clock))
+        .await
+        .map_err(|error| format!("write store unavailable: {error}"))?;
+    if let Some(profile) = active_embedding_profile(&config.embedding) {
+        store
+            .verify_embedding_profile(&profile)
+            .await
+            .map_err(|error| format!("write store unavailable: {error}"))?;
+    }
+    let embedding = create_deferred_embedding_provider_with_clock(&config.embedding, &config.limits, Arc::clone(&clock));
+    Ok(LocalHoldEngine::new_with_clock(store, embedding, config.limits, config.search, clock))
+}
+
+async fn run_with_store<S>(store: S, config: Config, clock: Arc<dyn Clock>, principal: Option<String>, mutation_factory: app::MutationEngineFactory<S>) -> Result<i32, UiError>
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
-    let principal = resolve_principal(&config, options)?;
     let mut startup_notice = None;
 
     #[cfg(feature = "reranker")]
@@ -113,10 +155,16 @@ where
     };
 
     let terminal = ratatui::try_init()?;
-    let result = {
-        let _restore = TerminalRestoreGuard;
-        event_loop(terminal, engine.clone(), principal, startup_notice).await
-    };
+    let restore = TerminalRestoreGuard;
+    let (data_tx, data_rx) = mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    spawn_input_reader(event_tx);
+    let mut app = app::App::new_with_mutation_factory(engine.clone(), theme::Theme::detect(), principal, data_tx, mutation_factory);
+    app.notice = startup_notice;
+    app.bootstrap().await;
+    let result = event_loop(terminal, &mut app, data_rx, event_rx).await;
+    drop(restore);
+    app.shutdown_mutation_engine().await;
     engine.shutdown().await;
     result
 }
@@ -150,18 +198,17 @@ impl Drop for TerminalRestoreGuard {
 }
 
 #[expect(clippy::integer_division_remainder_used, reason = "false positive from tokio::select! macro expansion")]
-async fn event_loop<S>(mut terminal: ratatui::DefaultTerminal, engine: LocalHoldEngine<S>, principal: Option<String>, startup_notice: Option<String>) -> Result<i32, UiError>
+async fn event_loop<S>(
+    mut terminal: ratatui::DefaultTerminal,
+    app: &mut app::App<S>,
+    mut data_rx: mpsc::UnboundedReceiver<app::DataMsg>,
+    mut event_rx: mpsc::UnboundedReceiver<Event>,
+) -> Result<i32, UiError>
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
-    let (data_tx, mut data_rx) = mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-    spawn_input_reader(event_tx);
-    let mut app = app::App::new(engine, theme::Theme::detect(), principal, data_tx);
-    app.notice = startup_notice;
-    app.bootstrap().await;
     while !app.quit {
-        let _completed_frame = terminal.draw(|frame| view::draw(frame, &app))?;
+        let _completed_frame = terminal.draw(|frame| view::draw(frame, app))?;
         tokio::select! {
             maybe_event = event_rx.recv() => match maybe_event {
                 Some(event) => app.on_event(event).await,

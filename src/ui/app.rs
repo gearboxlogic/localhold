@@ -272,13 +272,7 @@ where
     pub(crate) fn on_data(&mut self, msg: DataMsg) {
         match msg {
             DataMsg::Rows { rows, mode, generation } if generation == self.generation => {
-                self.rows = rows
-                    .into_iter()
-                    .map(|row| Row {
-                        memory: row.memory.sanitize_for_wire(),
-                        score: row.score,
-                    })
-                    .collect();
+                self.rows = rows.into_iter().map(sanitize_row_for_view).collect();
                 self.executed_mode = mode;
                 self.loading = false;
                 self.row_selected = self.row_selected.min(self.rows.len().saturating_sub(1_usize));
@@ -464,6 +458,12 @@ where
     }
 }
 
+fn sanitize_row_for_view(row: Row) -> Row {
+    let memory = row.memory.sanitize_for_wire();
+    let score = row.score.filter(|_| !memory.was_redacted);
+    Row { memory, score }
+}
+
 fn redact_audit(audit: &mut [AuditEntry]) {
     for entry in audit {
         entry.caller_agent = None;
@@ -564,6 +564,23 @@ mod tests {
             generation: 0_u64,
         });
         assert!(matches!(app.status, Status::Note(_)), "zero matches must not be reported as held");
+    }
+
+    #[tokio::test]
+    async fn redacted_rows_hide_composite_scores() {
+        let (mut app, _rx) = app_with_memories(&[]).await;
+        let mut memory = Memory::new_for_test("[redacted]".into(), Vec::new(), Provenance::default(), AccessPolicy::Public);
+        memory.was_redacted = true;
+
+        app.on_data(DataMsg::Rows {
+            rows: vec![Row { memory, score: Some(98.0_f64) }],
+            mode: Some(crate::types::SearchMode::Text),
+            generation: 0_u64,
+        });
+
+        assert_eq!(app.rows.len(), 1_usize);
+        assert!(app.rows[0].memory.was_redacted);
+        assert!(app.rows[0].score.is_none(), "redacted ranking diagnostics must not reach the view");
     }
 
     #[tokio::test]

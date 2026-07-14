@@ -92,11 +92,18 @@ where
 
     #[cfg(feature = "reranker")]
     let engine = if reranker_config.enabled {
-        match crate::reranker::runtime::initialize_with_retry_and_clock(&reranker_config, clock).await {
+        match crate::reranker::runtime::initialize_cached_with_clock(&reranker_config, clock).await {
             Ok(reranker) => engine.with_reranker(reranker.into_provider()),
+            Err(crate::reranker::RerankerError::Unavailable) if reranker_config.required => {
+                return Err(EngineError::config("required TUI reranker artifacts are not cached; run `hold models fetch --yes` before starting `hold ui`").into());
+            }
+            Err(crate::reranker::RerankerError::Unavailable) => {
+                tracing::warn!("optional TUI reranker artifacts are not cached; run `hold models fetch --yes` to enable reranking");
+                engine
+            }
             Err(error) if reranker_config.required => return Err(error.into()),
             Err(error) => {
-                tracing::warn!(%error, "optional TUI reranker initialization failed; search will continue without reranking");
+                tracing::warn!(%error, "optional cached TUI reranker initialization failed; search will continue without reranking");
                 engine
             }
         }

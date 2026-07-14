@@ -436,7 +436,9 @@ fn replace_from_snapshot(source_path: &Path, destination_path: &Path, clock: &dy
     copy_database(&source, &mut destination, clock, &tokio::runtime::Handle::current(), policy)?;
     drop(destination);
     sync_file(destination_path)?;
-    sync_parent(destination_path)
+    #[cfg(unix)]
+    sync_parent(destination_path)?;
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -603,7 +605,9 @@ fn publish_no_clobber(temporary: &Path, destination: &Path) -> Result<(), Mainte
         }
     })?;
     std::fs::remove_file(temporary).map_err(|error| MaintenanceFailure::failed(format!("backup was published but temporary cleanup failed: {error}")))?;
-    sync_parent(destination)
+    #[cfg(unix)]
+    sync_parent(destination)?;
+    Ok(())
 }
 
 fn sync_file(path: &Path) -> Result<(), MaintenanceFailure> {
@@ -618,11 +622,6 @@ fn sync_parent(path: &Path) -> Result<(), MaintenanceFailure> {
     File::open(parent)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| MaintenanceFailure::failed(format!("cannot durably sync directory {}: {error}", parent.display())))
-}
-
-#[cfg(not(unix))]
-fn sync_parent(_path: &Path) -> Result<(), MaintenanceFailure> {
-    Ok(())
 }
 
 fn temporary_path(base: &Path, label: &str) -> PathBuf {

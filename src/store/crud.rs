@@ -505,7 +505,7 @@ fn apply_authorized_update_with_metadata(
     update: &MemoryUpdate,
     metadata_patch: Option<&MetadataPatch>,
     principal: &str,
-    now: &str,
+    now: chrono::DateTime<chrono::Utc>,
     audit: Option<&AuditDraft>,
 ) -> Result<AuthorizedUpdateOutcome, StoreError> {
     let tx = sqlite_write_tx(conn)?;
@@ -525,12 +525,18 @@ fn apply_authorized_update_with_metadata(
         });
     }
 
-    let outcome = apply_update_inner(&tx, vector_index, &id_str, update, now)?;
+    let revision_at = next_memory_revision(now, existing.updated_at);
+    let revision_at_text = revision_at.to_rfc3339();
+    let outcome = apply_update_inner(&tx, vector_index, &id_str, update, &revision_at_text)?;
     if outcome.outcome == WriteOutcome::Applied {
         if let Some(patch) = metadata_patch {
             let existing_metadata = get_metadata_conn(&tx, id)?;
             let metadata = merge_metadata_patch(*id, patch, existing_metadata.as_ref(), existing.provenance.source_conversation.as_deref(), principal);
-            upsert_metadata_conn(&tx, &metadata, now)?;
+            upsert_metadata_conn(&tx, &metadata, &revision_at_text)?;
+            let affected = tx.execute("UPDATE memories SET updated_at = ?1 WHERE id = ?2", params![revision_at_text, id_str])?;
+            if affected == 0 {
+                return Err(StoreError::Conflict(format!("memory {id} changed while saving")));
+            }
         }
         if let Some(audit) = audit {
             let audit = update_audit_draft_for_locked_memory(audit, update, &existing);
@@ -582,7 +588,7 @@ fn apply_authorized_update_if_unmodified_with_metadata(
         return Err(StoreError::Conflict(format!("memory {id} changed after it was opened")));
     }
 
-    let revision_at = next_interactive_revision(now, existing.updated_at);
+    let revision_at = next_memory_revision(now, existing.updated_at);
     let revision_at_text = revision_at.to_rfc3339();
     let mut outcome = apply_update_inner(&tx, vector_index, &id_str, update, &revision_at_text)?;
     if let Some(embedding) = embedding {
@@ -611,7 +617,7 @@ fn apply_authorized_update_if_unmodified_with_metadata(
     Ok(outcome)
 }
 
-fn next_interactive_revision(now: chrono::DateTime<chrono::Utc>, previous: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+pub(crate) fn next_memory_revision(now: chrono::DateTime<chrono::Utc>, previous: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
     previous.checked_add_signed(chrono::Duration::microseconds(1_i64)).map_or(now, |minimum| now.max(minimum))
 }
 
@@ -705,7 +711,7 @@ pub(crate) fn bulk_update_ids(
     ids: &[MemoryId],
     update: &MemoryUpdate,
     principal: &str,
-    now: &str,
+    now: chrono::DateTime<chrono::Utc>,
     audit: Option<&AuditDraft>,
 ) -> Result<super::BulkAuthOutcome, StoreError> {
     if ids.is_empty() {
@@ -727,7 +733,8 @@ pub(crate) fn bulk_update_ids(
                 denied = denied.saturating_add(1);
                 continue;
             }
-            let outcome = apply_update_inner(&tx, vector_index, id_str, update, now)?;
+            let revision_at = next_memory_revision(now, mem.updated_at).to_rfc3339();
+            let outcome = apply_update_inner(&tx, vector_index, id_str, update, &revision_at)?;
             if outcome.outcome == WriteOutcome::Applied {
                 insert_optional_audit_draft(&tx, &id, audit)?;
                 applied_ids.push(id);
@@ -739,7 +746,13 @@ pub(crate) fn bulk_update_ids(
 }
 
 /// Apply a partial update to a memory, returning the outcome and optional reembed revision.
-pub(crate) fn apply_update(conn: &mut Connection, vector_index: &SqliteVecIndex, id_str: &str, update: &MemoryUpdate, now: &str) -> Result<AuthorizedUpdateOutcome, StoreError> {
+pub(crate) fn apply_update(
+    conn: &mut Connection,
+    vector_index: &SqliteVecIndex,
+    id_str: &str,
+    update: &MemoryUpdate,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<AuthorizedUpdateOutcome, StoreError> {
     // Entity-only update with no columns: no transaction needed, just an existence check.
     let entities_update = update.entities.clone();
     if !has_column_updates(update) && entities_update.is_none() {
@@ -751,7 +764,15 @@ pub(crate) fn apply_update(conn: &mut Connection, vector_index: &SqliteVecIndex,
     }
 
     let tx = sqlite_write_tx(conn)?;
-    let outcome = apply_update_inner(&tx, vector_index, id_str, update, now)?;
+    let Some(existing) = fetch_memory_by_id(&tx, id_str)? else {
+        tx.commit()?;
+        return Ok(AuthorizedUpdateOutcome {
+            outcome: WriteOutcome::NotFound,
+            reembed_revision: None,
+        });
+    };
+    let revision_at = next_memory_revision(now, existing.updated_at).to_rfc3339();
+    let outcome = apply_update_inner(&tx, vector_index, id_str, update, &revision_at)?;
     tx.commit()?;
     Ok(outcome)
 }
@@ -843,8 +864,6 @@ fn build_set_clause(update: &MemoryUpdate, now: &str) -> Result<SetClauseBuilder
         builder.push_literal("embedding_revision = embedding_revision + 1");
         builder.push_literal("embedding_claimed_at = NULL");
         builder.push_literal("embedding_claim_token = NULL");
-        // Track when content was last modified for freshness scoring.
-        builder.push("updated_at", Box::new(now.to_owned()));
     }
     if let Some(tags) = &update.tags {
         builder.push("tags", Box::new(serde_json::to_string(tags)?));
@@ -867,6 +886,10 @@ fn build_set_clause(update: &MemoryUpdate, now: &str) -> Result<SetClauseBuilder
             Box::new(source_conversation.clone()),
         );
     }
+    if has_column_updates(update) {
+        // Every record mutation advances the optimistic-concurrency token.
+        builder.push("updated_at", Box::new(now.to_owned()));
+    }
 
     Ok(builder)
 }
@@ -881,9 +904,12 @@ fn apply_update_inner(conn: &Connection, vector_index: &SqliteVecIndex, id_str: 
     let entities_update = update.entities.clone();
 
     if builder.is_empty() {
-        // Entity-only update: verify existence before replacing.
-        let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1)", params![id_str], |row| row.get(0))?;
-        if !exists {
+        let affected = if entities_update.is_some() {
+            conn.execute("UPDATE memories SET updated_at = ?1 WHERE id = ?2", params![now, id_str])?
+        } else {
+            usize::from(conn.query_row("SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1)", params![id_str], |row| row.get::<_, bool>(0))?)
+        };
+        if affected == 0 {
             return Ok(AuthorizedUpdateOutcome {
                 outcome: WriteOutcome::NotFound,
                 reembed_revision: None,
@@ -1314,9 +1340,9 @@ impl SqliteStore {
     pub(crate) async fn update_impl(&self, id: &MemoryId, update: &MemoryUpdate) -> Result<bool, StoreError> {
         let id_str = id.to_string();
         let update = update.clone();
-        let now = self.clock_now().to_rfc3339();
+        let now = self.clock_now();
         let vector_index = self.vector_index();
-        self.with_conn(move |conn| apply_update(conn, &vector_index, &id_str, &update, &now).map(|outcome| outcome.outcome == WriteOutcome::Applied))
+        self.with_conn(move |conn| apply_update(conn, &vector_index, &id_str, &update, now).map(|outcome| outcome.outcome == WriteOutcome::Applied))
             .await
     }
 
@@ -1460,7 +1486,7 @@ impl SqliteStore {
         let id_str = id.to_string();
         let update = update.clone();
         let caller = principal.to_owned();
-        let now = self.clock_now().to_rfc3339();
+        let now = self.clock_now();
         let audit = audit.cloned();
         let vector_index = self.vector_index();
         self.with_conn(move |conn| {
@@ -1477,7 +1503,8 @@ impl SqliteStore {
                     reembed_revision: None,
                 });
             }
-            let outcome = apply_update_inner(&tx, &vector_index, &id_str, &update, &now)?;
+            let revision_at = next_memory_revision(now, existing.updated_at).to_rfc3339();
+            let outcome = apply_update_inner(&tx, &vector_index, &id_str, &update, &revision_at)?;
             if outcome.outcome == WriteOutcome::Applied
                 && let Some(audit) = audit.as_ref()
             {
@@ -1503,10 +1530,10 @@ impl SqliteStore {
         let update = update.clone();
         let metadata_patch = metadata_patch.cloned();
         let caller = principal.to_owned();
-        let now = self.clock_now().to_rfc3339();
+        let now = self.clock_now();
         let audit = audit.cloned();
         let vector_index = self.vector_index();
-        self.with_conn(move |conn| apply_authorized_update_with_metadata(conn, &vector_index, &id_value, &update, metadata_patch.as_ref(), &caller, &now, audit.as_ref()))
+        self.with_conn(move |conn| apply_authorized_update_with_metadata(conn, &vector_index, &id_value, &update, metadata_patch.as_ref(), &caller, now, audit.as_ref()))
             .await
     }
 
@@ -1607,10 +1634,9 @@ impl SqliteStore {
         audit: Option<&AuditDraft>,
     ) -> Result<super::BulkAuthOutcome, StoreError> {
         let caller = principal.to_owned();
-        let now_str = now.to_rfc3339();
         let audit = audit.cloned();
         let vector_index = self.vector_index();
-        self.with_conn(move |conn| bulk_update_ids(conn, &vector_index, &ids, &update, &caller, &now_str, audit.as_ref()))
+        self.with_conn(move |conn| bulk_update_ids(conn, &vector_index, &ids, &update, &caller, now, audit.as_ref()))
             .await
     }
 

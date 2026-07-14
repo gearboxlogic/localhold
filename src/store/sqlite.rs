@@ -1084,7 +1084,7 @@ mod tests {
     #[tokio::test]
     async fn sqlite_store_satisfies_memory_store_conformance() {
         let store = SqliteStore::in_memory().unwrap();
-        crate::store::conformance::assert_memory_store_contract(&store, SqliteStore::DEFAULT_TEST_DIMENSIONS).await;
+        Box::pin(crate::store::conformance::assert_memory_store_contract(&store, SqliteStore::DEFAULT_TEST_DIMENSIONS)).await;
     }
 
     #[tokio::test]

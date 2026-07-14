@@ -199,7 +199,9 @@ importance, expiry, and card metadata; `d` deletes after confirmation.
 `Ctrl+S` saves an edit, and `Esc` cancels. Browsing remains side-effect-free,
 while mutations use the normal audited authorization path and require
 `--principal` or `server.principal`. SQLite WAL and PostgreSQL allow the UI
-to run alongside a serving LocalHold process.
+to run alongside a serving LocalHold process. Tags are edited as a JSON string
+array (for example `["decision","client,west"]`) so punctuation inside a tag
+is preserved exactly.
 
 ## MCP Client Setup
 

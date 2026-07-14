@@ -21,7 +21,7 @@ impl EditField {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Content => "CONTENT",
-            Self::Tags => "TAGS",
+            Self::Tags => "TAGS JSON",
             Self::Importance => "IMPORTANCE",
             Self::Expiry => "EXPIRY",
             Self::Metadata => "METADATA JSON",
@@ -162,7 +162,7 @@ impl EditDraft {
     pub(crate) fn new(memory: &Memory, metadata: Option<&MemoryMetadata>) -> Self {
         let values = DraftValues {
             content: memory.content.clone(),
-            tags: memory.tags.join(", "),
+            tags: serde_json::to_string(&memory.tags).unwrap_or_else(|_| "[]".into()),
             importance: format!("{:.2}", memory.importance.value()),
             expiry: memory.expires_at.map_or_else(String::new, |value| value.to_rfc3339()),
             metadata: editable_metadata_json(metadata),
@@ -177,6 +177,16 @@ impl EditDraft {
             metadata: TextInput::new(values.metadata.clone()),
             original: values,
             original_metadata: metadata.cloned(),
+        }
+    }
+
+    pub(crate) const fn active(&self) -> &TextInput {
+        match self.field {
+            EditField::Content => &self.content,
+            EditField::Tags => &self.tags,
+            EditField::Importance => &self.importance,
+            EditField::Expiry => &self.expiry,
+            EditField::Metadata => &self.metadata,
         }
     }
 
@@ -203,7 +213,7 @@ impl EditDraft {
     }
 
     #[expect(clippy::string_slice, reason = "input cursors are maintained at UTF-8 character boundaries")]
-    fn cursor_document_line(&self) -> usize {
+    pub(crate) fn cursor_document_line(&self) -> usize {
         let fields = [
             (EditField::Content, &self.content),
             (EditField::Tags, &self.tags),
@@ -228,7 +238,11 @@ impl EditDraft {
 
     pub(crate) fn parse(&self) -> Result<ParsedEdit, DraftError> {
         let content = (self.content.value != self.original.content).then(|| self.content.value.clone());
-        let tags = (self.tags.value != self.original.tags).then(|| self.tags.value.split(',').map(str::trim).filter(|tag| !tag.is_empty()).map(ToOwned::to_owned).collect());
+        let tags = if self.tags.value == self.original.tags {
+            None
+        } else {
+            Some(serde_json::from_str::<Vec<String>>(&self.tags.value).map_err(|_error| DraftError::new(EditField::Tags, "tags must be a JSON array of strings"))?)
+        };
 
         let importance = if self.importance.value == self.original.importance {
             None
@@ -410,7 +424,7 @@ mod tests {
             schema_version: 1,
         };
         let mut draft = EditDraft::new(&memory, Some(&metadata));
-        draft.tags.value = "alpha, beta".into();
+        draft.tags.value = r#"["alpha","beta"]"#.into();
         draft.expiry.value = "2026-08-01T12:00:00Z".into();
         draft.metadata.value = r#"{"summary": null, "agent_label": "new"}"#.into();
 
@@ -420,6 +434,31 @@ mod tests {
         let patch = parsed.metadata_patch.unwrap();
         assert!(patch.clear_summary);
         assert_eq!(patch.agent_label.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn tags_json_preserves_commas_inside_tags() {
+        let mut memory = memory();
+        memory.tags = vec!["client,west".into()];
+        let mut draft = EditDraft::new(&memory, None);
+        assert_eq!(draft.tags.value, r#"["client,west"]"#);
+
+        draft.tags.value = r#"["client,west","urgent"]"#.into();
+        let parsed = draft.parse().unwrap();
+
+        assert_eq!(parsed.update.tags.unwrap(), vec!["client,west", "urgent"]);
+    }
+
+    #[test]
+    fn tags_reject_ambiguous_non_json_input() {
+        let memory = memory();
+        let mut draft = EditDraft::new(&memory, None);
+        draft.tags.value = "alpha, beta".into();
+
+        let error = draft.parse().unwrap_err();
+
+        assert_eq!(error.field, EditField::Tags);
+        assert!(error.message.contains("JSON array"));
     }
 
     #[test]

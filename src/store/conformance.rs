@@ -428,8 +428,74 @@ where
         quality_flags: Vec::new(),
         schema_version: 1,
     };
-    store.upsert_metadata(interactive_metadata).await.unwrap();
+    store.upsert_metadata(interactive_metadata.clone()).await.unwrap();
+    let opened_before_external_update = store.get(&interactive_id, Some(OWNER)).await.unwrap().unwrap();
+    let concurrency_audit = AuditDraft {
+        action: AuditAction::Update,
+        caller_agent: Some(OWNER.into()),
+        timestamp: time_after(base, 16),
+        details: Some(json!({"concurrency": true})),
+    };
+
+    let ordinary_outcome = store
+        .update_authorized(
+            &interactive_id,
+            &MemoryUpdate {
+                tags: Some(vec![case_tag.clone(), "external-tag-revision".into()]),
+                ..MemoryUpdate::default()
+            },
+            OWNER,
+        )
+        .await
+        .unwrap();
+    assert_eq!(ordinary_outcome.outcome, WriteOutcome::Applied);
+    let after_ordinary_update = store.get(&interactive_id, Some(OWNER)).await.unwrap().unwrap();
+    assert!(
+        after_ordinary_update.updated_at > opened_before_external_update.updated_at,
+        "ordinary non-content updates must advance the optimistic revision"
+    );
+    let stale_after_ordinary_update = store
+        .update_authorized_if_unmodified_with_metadata_audited(
+            &interactive_id,
+            opened_before_external_update.updated_at,
+            &MemoryUpdate {
+                importance: Some(Importance::new(0.6_f64)),
+                ..MemoryUpdate::default()
+            },
+            None,
+            None,
+            OWNER,
+            &concurrency_audit,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(stale_after_ordinary_update, StoreError::Conflict(_)));
+
+    let mut concurrent_metadata = interactive_metadata;
+    concurrent_metadata.summary = Some("external metadata revision".into());
+    store.upsert_metadata(concurrent_metadata).await.unwrap();
     let loaded = store.get(&interactive_id, Some(OWNER)).await.unwrap().unwrap();
+    assert!(
+        loaded.updated_at > after_ordinary_update.updated_at,
+        "standalone metadata upserts must advance the optimistic revision"
+    );
+    let stale_after_metadata_update = store
+        .update_authorized_if_unmodified_with_metadata_audited(
+            &interactive_id,
+            after_ordinary_update.updated_at,
+            &MemoryUpdate {
+                importance: Some(Importance::new(0.7_f64)),
+                ..MemoryUpdate::default()
+            },
+            None,
+            None,
+            OWNER,
+            &concurrency_audit,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(stale_after_metadata_update, StoreError::Conflict(_)));
+
     let replacement_content = format!("interactive revised {case}");
     let replacement_expiry = Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).single().unwrap();
     let replacement_update = MemoryUpdate {

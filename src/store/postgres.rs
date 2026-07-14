@@ -1279,12 +1279,14 @@ impl PostgresStore {
             });
         }
 
-        let outcome = apply_update_tx(&mut tx, id, update, self.clock_now()).await?;
+        let revision_at = next_memory_revision(self.clock_now(), existing.updated_at);
+        let outcome = apply_update_tx(&mut tx, id, update, revision_at).await?;
         if outcome.outcome == WriteOutcome::Applied {
             if let Some(patch) = metadata_patch {
                 let existing_metadata = get_metadata_tx(&mut tx, id).await?;
                 let metadata = merge_metadata_patch(*id, patch, existing_metadata.as_ref(), existing.provenance.source_conversation.as_deref(), principal);
-                upsert_metadata_tx(&mut tx, &metadata, self.clock_now()).await?;
+                upsert_metadata_tx(&mut tx, &metadata, revision_at).await?;
+                set_memory_revision_tx(&mut tx, id, revision_at, "saving").await?;
             }
             if let Some(audit) = audit {
                 let audit = update_audit_draft_for_locked_memory(audit, update, &existing);
@@ -1332,7 +1334,7 @@ impl PostgresStore {
             return Err(StoreError::Conflict(format!("memory {id} changed after it was opened")));
         }
 
-        let revision_at = next_interactive_revision(self.clock_now(), existing.updated_at);
+        let revision_at = next_memory_revision(self.clock_now(), existing.updated_at);
         let mut outcome = apply_update_tx(&mut tx, id, update, revision_at).await?;
         if let Some(embedding) = embedding {
             let active_profile = self.inner.active_embedding_profile.read().clone();
@@ -1770,8 +1772,14 @@ impl PostgresStore {
 
     pub(crate) async fn upsert_metadata_audited_impl(&self, metadata: MemoryMetadata, audit: Option<&AuditDraft>) -> Result<(), StoreError> {
         let mut tx = self.pool().begin().await?;
-        upsert_metadata_tx(&mut tx, &metadata, self.clock_now()).await?;
-        insert_optional_audit_draft_tx(&mut tx, &metadata.memory_id, audit).await?;
+        let id = metadata.memory_id;
+        let existing = fetch_memory_by_id_for_update_tx(&mut tx, &id)
+            .await?
+            .ok_or_else(|| StoreError::NotFound(format!("memory not found: {id}")))?;
+        let revision_at = next_memory_revision(self.clock_now(), existing.updated_at);
+        upsert_metadata_tx(&mut tx, &metadata, revision_at).await?;
+        set_memory_revision_tx(&mut tx, &id, revision_at, "updating metadata").await?;
+        insert_optional_audit_draft_tx(&mut tx, &id, audit).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -2486,6 +2494,18 @@ async fn delete_embedding_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId) 
     Ok(())
 }
 
+async fn set_memory_revision_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, revision_at: DateTime<Utc>, action: &str) -> Result<(), StoreError> {
+    let result = sqlx::query("UPDATE memories SET updated_at = $1 WHERE id = $2")
+        .bind(revision_at)
+        .bind(id.to_string())
+        .execute(&mut **tx)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(StoreError::Conflict(format!("memory {id} changed while {action}")));
+    }
+    Ok(())
+}
+
 async fn replace_entities_tx(tx: &mut Transaction<'_, Postgres>, memory_id: &MemoryId, entities: &[Entity]) -> Result<(), StoreError> {
     let _result = sqlx::query("DELETE FROM memory_entities WHERE memory_id = $1")
         .bind(memory_id.to_string())
@@ -2494,17 +2514,32 @@ async fn replace_entities_tx(tx: &mut Transaction<'_, Postgres>, memory_id: &Mem
     insert_entities(tx, memory_id, entities).await
 }
 
-fn next_interactive_revision(now: DateTime<Utc>, previous: DateTime<Utc>) -> DateTime<Utc> {
+fn next_memory_revision(now: DateTime<Utc>, previous: DateTime<Utc>) -> DateTime<Utc> {
     previous.checked_add_signed(chrono::Duration::microseconds(1_i64)).map_or(now, |minimum| now.max(minimum))
 }
 
+#[expect(clippy::too_many_lines, reason = "the dynamic update builder keeps all memory fields and revision handling together")]
 async fn apply_update_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, update: &MemoryUpdate, now: DateTime<Utc>) -> Result<AuthorizedUpdateOutcome, StoreError> {
     let content_changed = update.content.is_some();
+    let has_record_updates = has_column_updates(update) || update.entities.is_some();
     let mut reembed_revision = None;
 
-    if has_column_updates(update) {
+    if has_record_updates {
+        let previous: Option<DateTime<Utc>> = sqlx::query_scalar("SELECT updated_at FROM memories WHERE id = $1 FOR UPDATE")
+            .bind(id.to_string())
+            .fetch_optional(&mut **tx)
+            .await?;
+        let Some(previous) = previous else {
+            return Ok(AuthorizedUpdateOutcome {
+                outcome: WriteOutcome::NotFound,
+                reembed_revision: None,
+            });
+        };
+        let revision_at = next_memory_revision(now, previous);
         let mut builder = QueryBuilder::<Postgres>::new("UPDATE memories SET ");
         let mut has_assignments = false;
+        push_assignment_separator(&mut builder, &mut has_assignments);
+        let _ = builder.push("updated_at = ").push_bind(revision_at);
 
         if let Some(content) = &update.content {
             push_assignment_separator(&mut builder, &mut has_assignments);
@@ -2517,8 +2552,6 @@ async fn apply_update_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, upda
             let _ = builder.push("embedding_claimed_at = NULL");
             push_assignment_separator(&mut builder, &mut has_assignments);
             let _ = builder.push("embedding_claim_token = NULL");
-            push_assignment_separator(&mut builder, &mut has_assignments);
-            let _ = builder.push("updated_at = ").push_bind(now);
         }
         if let Some(tags) = &update.tags {
             push_assignment_separator(&mut builder, &mut has_assignments);
@@ -3888,7 +3921,7 @@ mod tests {
         let store = open_postgres_smoke_store().await;
         reset_postgres_smoke_database(&store).await;
 
-        crate::store::conformance::assert_memory_store_contract(&store, 3_usize).await;
+        Box::pin(crate::store::conformance::assert_memory_store_contract(&store, 3_usize)).await;
     }
 
     #[tokio::test]

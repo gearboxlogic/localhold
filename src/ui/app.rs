@@ -107,6 +107,15 @@ pub(crate) enum DataMsg {
         /// Mutation generation; stale responses are dropped.
         generation: u64,
     },
+    /// An edit committed but its updated memory could not be refreshed.
+    UpdatedUnrefreshed {
+        /// Updated memory ID.
+        id: MemoryId,
+        /// Human-readable refresh failure.
+        message: String,
+        /// Mutation generation; stale responses are dropped.
+        generation: u64,
+    },
     /// A memory was deleted.
     Deleted {
         /// Deleted memory ID.
@@ -389,6 +398,7 @@ where
     }
 
     /// Fold a completed data or mutation task into the state.
+    #[expect(clippy::too_many_lines, reason = "the reducer keeps all generation-checked data transitions together")]
     pub(crate) fn on_data(&mut self, msg: DataMsg) {
         match msg {
             DataMsg::Rows { rows, mode, generation } if generation == self.generation => {
@@ -410,6 +420,7 @@ where
                 generation,
             } if generation == self.operation_generation => {
                 self.pending = false;
+                let refresh_results = !self.query.is_empty();
                 let memory = (*memory).sanitize_for_wire();
                 let metadata = if memory.was_redacted { None } else { metadata };
                 if memory.was_redacted {
@@ -431,6 +442,9 @@ where
                     || Status::Held("memory revised".into()),
                     |warning| Status::NotHeld(format!("memory revised, but {warning}")),
                 );
+                if refresh_results {
+                    self.refresh();
+                }
             }
             DataMsg::UpdatedInvisible { id, generation } if generation == self.operation_generation => {
                 self.pending = false;
@@ -440,6 +454,15 @@ where
                 self.edit = None;
                 self.mode = Mode::Browse;
                 self.status = Status::Held("memory revised and is no longer visible".into());
+            }
+            DataMsg::UpdatedUnrefreshed { id, message, generation } if generation == self.operation_generation => {
+                self.pending = false;
+                self.rows.retain(|row| row.memory.id != id);
+                self.row_selected = self.row_selected.min(self.rows.len().saturating_sub(1_usize));
+                self.detail = None;
+                self.edit = None;
+                self.mode = Mode::Browse;
+                self.status = Status::NotHeld(format!("memory revised, but refresh failed: {message}"));
             }
             DataMsg::Deleted { id, generation } if generation == self.operation_generation => {
                 self.pending = false;
@@ -461,6 +484,7 @@ where
             | DataMsg::Failed { .. }
             | DataMsg::Updated { .. }
             | DataMsg::UpdatedInvisible { .. }
+            | DataMsg::UpdatedUnrefreshed { .. }
             | DataMsg::Deleted { .. }
             | DataMsg::MutationFailed { .. } => {}
         }
@@ -737,6 +761,8 @@ where
 
         self.operation_generation = self.operation_generation.saturating_add(1_u64);
         let generation = self.operation_generation;
+        self.generation = self.generation.saturating_add(1_u64);
+        self.loading = false;
         self.pending = true;
         self.status = Status::Note("holding revision\u{2026}".into());
         let mutation_engine = self.mutation_engine.clone();
@@ -781,6 +807,8 @@ where
         let Some(detail) = self.detail.as_ref() else { return };
         self.operation_generation = self.operation_generation.saturating_add(1_u64);
         let generation = self.operation_generation;
+        self.generation = self.generation.saturating_add(1_u64);
+        self.loading = false;
         self.pending = true;
         self.status = Status::Note("forgetting memory\u{2026}".into());
         let mutation_engine = self.mutation_engine.clone();
@@ -882,8 +910,9 @@ where
             }
         }
         Ok(None) => DataMsg::UpdatedInvisible { id, generation },
-        Err(error) => DataMsg::MutationFailed {
-            message: format!("saved, but refresh failed: {error}"),
+        Err(error) => DataMsg::UpdatedUnrefreshed {
+            id,
+            message: error.to_string(),
             generation,
         },
     }
@@ -1055,6 +1084,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn committed_save_with_primary_refresh_failure_closes_dirty_editor() {
+        let (mut app, mut rx) = app_with_memories(&["revised"]).await;
+        app.principal = Some("operator".into());
+        app.bootstrap().await;
+        app.on_data(rx.recv().await.unwrap());
+        let id = app.rows[0].memory.id;
+        app.on_event(press(KeyCode::Enter)).await;
+        app.on_event(press(KeyCode::Char('e'))).await;
+        app.edit.as_mut().unwrap().content.value = "committed".into();
+        app.pending = true;
+
+        app.on_data(DataMsg::UpdatedUnrefreshed {
+            id,
+            message: "test fault".into(),
+            generation: app.operation_generation,
+        });
+
+        assert!(!app.pending);
+        assert_eq!(app.mode, Mode::Browse);
+        assert!(app.edit.is_none());
+        assert!(app.detail.is_none());
+        assert!(!app.rows.iter().any(|row| row.memory.id == id));
+        assert!(matches!(&app.status, Status::NotHeld(message) if message.contains("memory revised, but refresh failed")));
+    }
+
+    #[tokio::test]
     async fn redacted_rows_hide_composite_scores() {
         let (mut app, _rx) = app_with_memories(&[]).await;
         let mut memory = Memory::new_for_test("[redacted]".into(), Vec::new(), Provenance::default(), AccessPolicy::Public);
@@ -1100,6 +1155,62 @@ mod tests {
         assert_eq!(detail.memory.confidence, crate::types::Confidence::DEFAULT);
         assert!(detail.memory.superseded_by.is_none());
         assert_eq!(detail.memory.id, id);
+    }
+
+    #[tokio::test]
+    async fn filtered_results_refresh_after_an_edit_stops_matching() {
+        let (mut app, mut rx) = app_with_memories(&["needle original", "unrelated"]).await;
+        app.principal = Some("operator".into());
+        app.bootstrap().await;
+        app.on_data(rx.recv().await.unwrap());
+        app.query = "needle".into();
+        app.requested_mode = Some(crate::types::SearchMode::Keyword);
+        app.refresh();
+        app.on_data(rx.recv().await.unwrap());
+        assert_eq!(app.rows.len(), 1_usize);
+        let id = app.rows[0].memory.id;
+
+        app.on_event(press(KeyCode::Enter)).await;
+        app.on_event(press(KeyCode::Char('e'))).await;
+        app.edit.as_mut().unwrap().content.value = "no longer matches".into();
+        app.on_event(press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
+        app.on_data(rx.recv().await.unwrap());
+
+        assert!(app.loading, "a successful filtered edit should re-run the active search");
+        app.on_data(rx.recv().await.unwrap());
+        assert!(!app.rows.iter().any(|row| row.memory.id == id));
+    }
+
+    #[tokio::test]
+    async fn pre_mutation_rows_cannot_resurrect_a_deleted_memory() {
+        let (mut app, mut rx) = app_with_memories(&["stale row"]).await;
+        app.principal = Some("operator".into());
+        app.bootstrap().await;
+        app.on_data(rx.recv().await.unwrap());
+        let stale_rows = vec![Row {
+            memory: app.rows[0].memory.clone(),
+            score: app.rows[0].score,
+        }];
+        let id = stale_rows[0].memory.id;
+        app.on_event(press(KeyCode::Enter)).await;
+        app.refresh();
+        let stale_generation = app.generation;
+
+        app.on_event(press(KeyCode::Char('d'))).await;
+        app.on_event(press(KeyCode::Char('y'))).await;
+        assert!(app.generation > stale_generation, "starting a mutation must invalidate in-flight reads");
+        app.on_data(DataMsg::Deleted {
+            id,
+            generation: app.operation_generation,
+        });
+        app.on_data(DataMsg::Rows {
+            rows: stale_rows,
+            mode: None,
+            generation: stale_generation,
+        });
+
+        assert!(!app.rows.iter().any(|row| row.memory.id == id));
+        assert_eq!(app.mode, Mode::Browse);
     }
 
     #[tokio::test]
@@ -1153,7 +1264,7 @@ mod tests {
         app.on_event(press(KeyCode::Char('e'))).await;
         let edit = app.edit.as_mut().unwrap();
         edit.content.value = "revised memory".into();
-        edit.tags.value = "alpha, beta".into();
+        edit.tags.value = r#"["alpha","beta"]"#.into();
         edit.importance.value = "0.90".into();
         edit.expiry.value = "2026-08-01T12:00:00Z".into();
         edit.metadata.value = r#"{"summary":"revised summary","agent_label":"operator"}"#.into();
@@ -1198,7 +1309,7 @@ mod tests {
         assert_eq!(opens.load(Ordering::SeqCst), 0_usize, "browsing and opening detail must stay read-only");
 
         app.on_event(press(KeyCode::Char('e'))).await;
-        app.edit.as_mut().unwrap().tags.value = "revised".into();
+        app.edit.as_mut().unwrap().tags.value = r#"["revised"]"#.into();
         app.on_event(press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
         app.on_data(rx.recv().await.unwrap());
 
@@ -1374,6 +1485,17 @@ mod tests {
         let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
         let rendered: String = terminal.backend().buffer().content().iter().map(ratatui::buffer::Cell::symbol).collect();
         assert!(rendered.contains("EDIT MEMORY"));
+
+        let long_line = "wrapped-content-".repeat(40_usize);
+        let edit = app.edit.as_mut().unwrap();
+        edit.content.value = long_line;
+        edit.content.cursor = edit.content.value.len();
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        let rendered: String = terminal.backend().buffer().content().iter().map(ratatui::buffer::Cell::symbol).collect();
+        assert!(
+            rendered.contains(char::from_u32(0x2588_u32).unwrap()),
+            "the edit cursor must remain visible after a long line wraps"
+        );
 
         app.mode = Mode::ConfirmDelete;
         let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();

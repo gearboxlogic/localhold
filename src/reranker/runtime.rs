@@ -220,6 +220,7 @@ fn preload_dynamic_ort_library() -> Result<std::path::PathBuf, RerankerError> {
     let configured = std::env::var_os("ORT_DYLIB_PATH").filter(|value| !value.is_empty());
     let executable = std::env::current_exe().ok();
     let resolved = resolve_dynamic_ort_library(configured.as_deref(), executable.as_deref());
+    #[cfg(target_os = "linux")]
     if let Some(directory) = &resolved.bundled_library_dir {
         preload_bundled_cuda_dependencies(directory)?;
     }
@@ -323,11 +324,6 @@ fn find_unique_bundled_library(directory: &std::path::Path, prefix: &str) -> Res
             directory.display()
         ))),
     }
-}
-
-#[cfg(all(feature = "reranker-cuda", not(target_os = "linux")))]
-fn preload_bundled_cuda_dependencies(_directory: &std::path::Path) -> Result<(), RerankerError> {
-    Ok(())
 }
 
 #[cfg(feature = "reranker-cuda")]

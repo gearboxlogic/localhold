@@ -11,13 +11,13 @@ use std::{
 };
 
 use parking_lot::{Mutex, RwLock};
-use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, ffi::sqlite3_auto_extension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension as _, Transaction, TransactionBehavior, ffi::sqlite3_auto_extension};
 use sqlite_vec::sqlite3_vec_init;
 
 use super::{
     EmbeddingProfile, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter,
-    migration::reject_retired_sqlite_schema,
-    sqlite_lease::SqliteDatabaseLease,
+    migration::{reject_retired_sqlite_schema, validate_sqlite_source_schema},
+    sqlite_lease::{SqliteDatabaseLease, database_identity},
     vector::{SqliteVecIndex, VectorIndex as _},
 };
 use crate::{
@@ -117,6 +117,41 @@ impl SqliteStore {
         };
         store.init_schema()?;
         Ok(store)
+    }
+
+    /// Open an existing, current-schema SQLite store without creating files or
+    /// running migrations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database is missing, needs migration, has
+    /// incompatible embedding dimensions, or cannot be opened read-only.
+    pub fn open_read_only_with_clock(path: &Path, embedding_dimensions: usize, clock: Arc<dyn Clock>) -> Result<Self, StoreError> {
+        Self::register_extension()?;
+        if !path.exists() {
+            return Err(StoreError::Conflict(format!("SQLite database does not exist: {}", path.display())));
+        }
+        let database_lease = SqliteDatabaseLease::shared_existing(path)?;
+        if sqlite_wal_requires_shm_creation(path)? {
+            return Err(StoreError::Conflict(
+                "SQLite WAL exists without its shared-memory sidecar; refusing a read-only open that could create files".into(),
+            ));
+        }
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+        conn.pragma_update(None, "query_only", true)?;
+        conn.pragma_update(None, "foreign_keys", true)?;
+        validate_sqlite_source_schema(&conn, embedding_dimensions)?;
+        Ok(Self {
+            inner: Arc::new(SqliteInner {
+                conn: Mutex::new(conn),
+                clock,
+                vector_index: SqliteVecIndex::new(embedding_dimensions),
+                fts_available: AtomicBool::new(true),
+                active_embedding_profile: RwLock::new(None),
+                _database_lease: Some(database_lease),
+            }),
+        })
     }
 
     /// Create an in-memory store (for testing).
@@ -313,6 +348,17 @@ impl SqliteStore {
         result
     }
 
+    /// Check vector-space identity without stamping a missing profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when stored vectors have unknown identity or the
+    /// configured profile differs from the stored profile.
+    pub async fn check_embedding_profile(&self, profile: &EmbeddingProfile) -> Result<(), StoreError> {
+        let profile = profile.clone();
+        self.with_conn(move |conn| check_embedding_profile_conn(conn, &profile)).await
+    }
+
     /// Clear all vectors and stamp the configured vector-space identity.
     ///
     /// Memory content and metadata are preserved. The normal startup recovery
@@ -351,6 +397,15 @@ impl SqliteStore {
     }
 }
 
+fn sqlite_wal_requires_shm_creation(path: &Path) -> Result<bool, StoreError> {
+    let database = database_identity(path).map_err(|error| StoreError::Database(Box::new(error)))?;
+    let mut wal = database.as_os_str().to_os_string();
+    wal.push("-wal");
+    let mut shm = database.as_os_str().to_os_string();
+    shm.push("-shm");
+    Ok(Path::new(&wal).exists() && !Path::new(&shm).exists())
+}
+
 pub(crate) fn verify_embedding_profile_conn(conn: &mut Connection, profile: &EmbeddingProfile) -> Result<(), StoreError> {
     let tx = sqlite_write_tx(conn)?;
     let existing = read_embedding_profile(&tx)?;
@@ -370,6 +425,24 @@ pub(crate) fn verify_embedding_profile_conn(conn: &mut Connection, profile: &Emb
         ));
     }
     insert_embedding_profile(&tx, profile)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn check_embedding_profile_conn(conn: &Connection, profile: &EmbeddingProfile) -> Result<(), StoreError> {
+    let tx = conn.unchecked_transaction()?;
+    match read_embedding_profile(&tx)? {
+        Some(existing) if existing != *profile => return Err(profile_mismatch(&existing, profile)),
+        None => {
+            let vector_count: i64 = tx.query_row("SELECT COUNT(*) FROM memory_embedding_map", [], |row| row.get(0))?;
+            if vector_count > 0 {
+                return Err(StoreError::Conflict(
+                    "existing embeddings have no recorded provider/model identity; run `hold embeddings reindex --yes` before searching with an active embedding provider".into(),
+                ));
+            }
+        }
+        Some(_) => {}
+    }
     tx.commit()?;
     Ok(())
 }
@@ -787,6 +860,97 @@ mod tests {
         drop(connection);
         let error = SqliteStore::open(&future_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap_err();
         assert!(error.to_string().contains("newer than this binary supports"));
+    }
+
+    #[test]
+    fn read_only_open_neither_creates_nor_migrates_databases() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.db");
+        let error = SqliteStore::open_read_only_with_clock(&missing, SqliteStore::DEFAULT_TEST_DIMENSIONS, Arc::new(MockClock::new())).unwrap_err();
+        assert!(error.to_string().contains("does not exist"));
+        assert!(!missing.exists(), "read-only open must not create a missing database");
+
+        let outdated = directory.path().join("outdated.db");
+        drop(Connection::open(&outdated).unwrap());
+        drop(SqliteDatabaseLease::shared(&outdated).unwrap());
+        let error = SqliteStore::open_read_only_with_clock(&outdated, SqliteStore::DEFAULT_TEST_DIMENSIONS, Arc::new(MockClock::new())).unwrap_err();
+        assert!(error.to_string().contains("schema version"));
+        let connection = Connection::open(&outdated).unwrap();
+        let memories_exist: bool = connection
+            .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories')", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(!memories_exist, "read-only open must not bootstrap an outdated database");
+    }
+
+    #[test]
+    fn read_only_open_requires_but_never_creates_a_lease_sidecar() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("current.db");
+        drop(SqliteStore::open(&path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap());
+        let mut lease_path = database_identity(&path).unwrap().into_os_string();
+        lease_path.push(".localhold.lock");
+        let lease_path = std::path::PathBuf::from(lease_path);
+        std::fs::remove_file(&lease_path).unwrap();
+
+        let error = SqliteStore::open_read_only_with_clock(&path, SqliteStore::DEFAULT_TEST_DIMENSIONS, Arc::new(MockClock::new())).unwrap_err();
+
+        assert!(error.to_string().contains("requires an existing LocalHold lease sidecar"), "{error}");
+        assert!(!lease_path.exists(), "read-only store open must not recreate a missing lease sidecar");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_open_checks_wal_sidecars_beside_a_symlink_target() {
+        use std::{fs::File, os::unix::fs::symlink};
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("current.db");
+        drop(SqliteStore::open(&target, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap());
+        let alias = directory.path().join("alias.db");
+        symlink(&target, &alias).unwrap();
+        let target_wal = directory.path().join("current.db-wal");
+        let target_shm = directory.path().join("current.db-shm");
+        let _wal = File::create(&target_wal).unwrap();
+        assert!(!target_shm.exists());
+
+        let error = SqliteStore::open_read_only_with_clock(&alias, SqliteStore::DEFAULT_TEST_DIMENSIONS, Arc::new(MockClock::new())).unwrap_err();
+
+        assert!(error.to_string().contains("WAL exists without its shared-memory sidecar"), "{error}");
+        assert!(!target_shm.exists(), "the rejected read-only open must not create a target-side SHM file");
+    }
+
+    #[tokio::test]
+    async fn read_only_store_reads_but_rejects_writes_and_profile_stamping() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("current.db");
+        let writable = SqliteStore::open(&path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+        let memory = make_memory("read-only", &[], base_time());
+        let id = writable.store(&memory, None).await.unwrap();
+        drop(writable);
+
+        let read_only = SqliteStore::open_read_only_with_clock(&path, SqliteStore::DEFAULT_TEST_DIMENSIONS, Arc::new(MockClock::new())).unwrap();
+        assert!(
+            matches!(SqliteDatabaseLease::try_exclusive(&path), Err(crate::store::sqlite_lease::ExclusiveLeaseError::InUse)),
+            "the read-only store must prevent replacement while its connection is live"
+        );
+        assert!(read_only.get(&id, None).await.unwrap().is_some());
+        read_only
+            .check_embedding_profile(&embedding_profile("model-a", SqliteStore::DEFAULT_TEST_DIMENSIONS))
+            .await
+            .unwrap();
+        let error = read_only.store(&make_memory("write attempt", &[], base_time()), None).await.unwrap_err();
+        assert!(error.to_string().contains("readonly") || error.to_string().contains("read-only"));
+        drop(read_only);
+        assert!(
+            SqliteDatabaseLease::try_exclusive(&path).is_ok(),
+            "dropping the read-only store must release its database lease"
+        );
+
+        let connection = Connection::open(&path).unwrap();
+        let profile_count: i64 = connection.query_row("SELECT COUNT(*) FROM embedding_profile", [], |row| row.get(0)).unwrap();
+        assert_eq!(profile_count, 0_i64, "profile checks must not stamp the database");
     }
 
     #[tokio::test]

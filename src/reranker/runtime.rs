@@ -154,11 +154,27 @@ pub async fn initialize_for_diagnostics(config: &RerankerConfig, allow_downloads
 /// Returns model, provider, download, or inference errors from normal
 /// initialization.
 pub async fn initialize_for_diagnostics_with_clock(config: &RerankerConfig, allow_downloads: bool, clock: Arc<dyn Clock>) -> Result<InitializedReranker, RerankerError> {
-    validate_precision_policy(config)?;
-    let _provider_candidates = crate::reranker::policy::execution_provider_candidates(config.execution_provider)?;
     if allow_downloads {
+        validate_precision_policy(config)?;
+        let _provider_candidates = crate::reranker::policy::execution_provider_candidates(config.execution_provider)?;
         return initialize_with_retry_and_clock(config, clock).await;
     }
+    initialize_cached_with_clock(config, clock).await
+}
+
+/// Initialize a reranker only from existing local artifacts.
+///
+/// Managed artifacts must already form a complete, hash-verified cache entry.
+/// This path never creates cache directories or lock files and never accesses
+/// the network.
+///
+/// # Errors
+///
+/// Returns [`RerankerError::Unavailable`] when artifacts are absent, or the
+/// normal model/provider errors when existing artifacts cannot be loaded.
+pub async fn initialize_cached_with_clock(config: &RerankerConfig, clock: Arc<dyn Clock>) -> Result<InitializedReranker, RerankerError> {
+    validate_precision_policy(config)?;
+    let _provider_candidates = crate::reranker::policy::execution_provider_candidates(config.execution_provider)?;
     let paths = download::resolve_cached_model_paths(config)?;
     let mut local_config = config.clone();
     local_config.model_path = paths.onnx_path.to_string_lossy().into_owned();
@@ -402,6 +418,26 @@ async fn load_provider(config: &RerankerConfig, clock: Arc<dyn Clock>) -> Result
         .await
         .map_err(|error| RerankerError::Transient(Box::new(error)))??;
     Ok(ResilientReranker::new_with_clock(onnx, ResilientRerankerConfig::default(), clock).await)
+}
+
+#[cfg(test)]
+mod offline_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cached_initialization_does_not_create_a_missing_cache() {
+        let root = tempfile::TempDir::new().unwrap();
+        let cache = root.path().join("must-not-be-created");
+        let config = RerankerConfig {
+            cache_dir: cache.to_string_lossy().into_owned(),
+            ..RerankerConfig::default()
+        };
+
+        let error = initialize_cached_with_clock(&config, Arc::new(SystemClock::new())).await.unwrap_err();
+
+        assert!(matches!(error, RerankerError::Unavailable), "{error}");
+        assert!(!cache.exists(), "cached-only initialization must not create cache paths");
+    }
 }
 
 #[cfg(all(test, feature = "reranker-cuda"))]

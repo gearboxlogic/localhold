@@ -189,6 +189,16 @@ as a latency/VRAM optimization, validate ranking quality on your own corpus,
 and see [Operations](docs/operations.md#reranker-model-precision) for the
 current evidence and limitations.
 
+## Browse The Hold
+
+`hold ui` opens an interactive terminal browser over the configured store:
+scopes on the left, memories on the right, `/` to search (with `m` cycling
+keyword, text, semantic, and hybrid modes), and `enter` to inspect a memory
+with its audit trail. The UI is read-only and opens the store alongside any
+running LocalHold process — SQLite uses WAL for concurrent readers, and
+PostgreSQL is shared by nature. `--principal` overrides the read-visibility
+principal, which defaults to `server.principal`.
+
 ## MCP Client Setup
 
 Build the binary, then configure an MCP client to launch `hold` over stdio:

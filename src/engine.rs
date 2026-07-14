@@ -458,7 +458,18 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
     ///
     /// Returns `EngineError::Validation` if the query is blank or `max_distance` is invalid,
     /// or `EngineError::Store` if the underlying search query fails.
-    pub(crate) async fn search_memories(&self, mut request: SearchRequest) -> Result<SearchOutcome, EngineError> {
+    pub(crate) async fn search_memories(&self, request: SearchRequest) -> Result<SearchOutcome, EngineError> {
+        self.search_memories_inner(request, true).await
+    }
+
+    /// Search without recording analytics impressions.
+    ///
+    /// This is reserved for read-only inspection surfaces such as the TUI.
+    pub(crate) async fn search_memories_read_only(&self, request: SearchRequest) -> Result<SearchOutcome, EngineError> {
+        self.search_memories_inner(request, false).await
+    }
+
+    async fn search_memories_inner(&self, mut request: SearchRequest, record_impressions: bool) -> Result<SearchOutcome, EngineError> {
         validate_non_blank("query", &request.query)?;
         validate_max_distance(request.max_distance)?;
         request.limit = request.limit.min(self.limits.max_search_limit);
@@ -541,12 +552,14 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         // Fire-and-forget impression tracking — do not block the search response.
         // Impressions update impression_count + last_impressed_at for analytics only;
         // they do NOT feed into ranking signals (activity tracking is separate).
-        self.record_search_impression(
-            outcome.results.iter().map(|r| r.memory.id).collect(),
-            BackgroundTaskKind::AccessTracking,
-            "failed to record search impression",
-        )
-        .await;
+        if record_impressions {
+            self.record_search_impression(
+                outcome.results.iter().map(|r| r.memory.id).collect(),
+                BackgroundTaskKind::AccessTracking,
+                "failed to record search impression",
+            )
+            .await;
+        }
 
         Ok(outcome)
     }

@@ -5,12 +5,62 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::Notify;
 use tracing::info;
 
-use super::{EmbeddingProvider, NoopEmbedding, OpenAiEmbedding, ResilientEmbedding, resilient::ResilientConfig};
+use super::{BoxFuture, EmbeddingProvider, NoopEmbedding, OpenAiEmbedding, ResilientEmbedding, resilient::ResilientConfig};
 use crate::{
     clock::{Clock, SystemClock},
     config::{EmbeddingConfig, LimitsConfig},
+    error::EmbeddingError,
     store::EmbeddingProfile,
 };
+
+struct DeferredEmbedding {
+    config: EmbeddingConfig,
+    limits: LimitsConfig,
+    clock: Arc<dyn Clock>,
+    inner: tokio::sync::OnceCell<Arc<dyn EmbeddingProvider>>,
+}
+
+impl DeferredEmbedding {
+    fn new(config: EmbeddingConfig, limits: LimitsConfig, clock: Arc<dyn Clock>) -> Self {
+        Self {
+            config,
+            limits,
+            clock,
+            inner: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    async fn provider(&self) -> Arc<dyn EmbeddingProvider> {
+        Arc::clone(
+            self.inner
+                .get_or_init(|| create_embedding_provider_with_clock(&self.config, &self.limits, None, Arc::clone(&self.clock)))
+                .await,
+        )
+    }
+}
+
+impl EmbeddingProvider for DeferredEmbedding {
+    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, EmbeddingError>> {
+        Box::pin(async move {
+            let provider = self.provider().await;
+            provider.embed(text).await
+        })
+    }
+
+    fn health_check(&self) -> BoxFuture<'_, Result<(), EmbeddingError>> {
+        Box::pin(async move {
+            let provider = self.provider().await;
+            provider.health_check().await
+        })
+    }
+
+    fn embed_batch<'a>(&'a self, texts: &'a [&'a str]) -> BoxFuture<'a, Result<Vec<Vec<f32>>, EmbeddingError>> {
+        Box::pin(async move {
+            let provider = self.provider().await;
+            provider.embed_batch(texts).await
+        })
+    }
+}
 
 /// Return the persisted vector-space identity for the active provider.
 #[must_use]
@@ -73,10 +123,28 @@ pub async fn create_embedding_provider_with_clock(
     }
 }
 
+/// Build a provider that performs no endpoint health check until embeddings
+/// are first requested.
+///
+/// This is intended for read-only/browser flows where listing and keyword
+/// search do not need an embedding endpoint.
+#[must_use]
+pub fn create_deferred_embedding_provider_with_clock(config: &EmbeddingConfig, limits: &LimitsConfig, clock: Arc<dyn Clock>) -> Arc<dyn EmbeddingProvider> {
+    match config {
+        EmbeddingConfig::Noop { .. } => Arc::new(NoopEmbedding::new()),
+        EmbeddingConfig::OpenAiCompatible { .. } => Arc::new(DeferredEmbedding::new(config.clone(), limits.clone(), clock)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::active_embedding_profile;
-    use crate::config::{EmbeddingConfig, OpenAiCompatibleConfig};
+    use std::sync::Arc;
+
+    use super::{DeferredEmbedding, active_embedding_profile};
+    use crate::{
+        clock::SystemClock,
+        config::{EmbeddingConfig, LimitsConfig, OpenAiCompatibleConfig},
+    };
 
     #[test]
     fn profile_is_present_only_for_vector_provider() {
@@ -93,5 +161,23 @@ mod tests {
         assert_eq!(profile.as_ref().map(|profile| profile.model.as_str()), Some("embed-v1"));
 
         assert!(active_embedding_profile(&EmbeddingConfig::Noop { dimensions: 384 }).is_none());
+    }
+
+    #[test]
+    fn deferred_provider_construction_does_not_initialize_its_endpoint() {
+        let provider = DeferredEmbedding::new(
+            EmbeddingConfig::OpenAiCompatible {
+                dimensions: 384,
+                openai_compatible: OpenAiCompatibleConfig {
+                    base_url: "https://embeddings.invalid/v1".into(),
+                    model: "embed-v1".into(),
+                    ..OpenAiCompatibleConfig::default()
+                },
+            },
+            LimitsConfig::default(),
+            Arc::new(SystemClock::new()),
+        );
+
+        assert!(provider.inner.get().is_none(), "provider construction must not start endpoint initialization");
     }
 }

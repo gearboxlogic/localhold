@@ -73,6 +73,29 @@ pub(crate) struct DownloadPins {
     pub tokenizer_url: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArtifactStatus {
+    Verified,
+    Missing,
+    HashMismatch,
+    Unverifiable,
+}
+
+#[derive(Debug)]
+pub(crate) struct ModelInspection {
+    pub paths: ModelPaths,
+    pub model_sha256: String,
+    pub tokenizer_sha256: String,
+    pub model_status: ArtifactStatus,
+    pub tokenizer_status: ArtifactStatus,
+}
+
+impl ModelInspection {
+    pub(super) const fn is_verified(&self) -> bool {
+        matches!(self.model_status, ArtifactStatus::Verified) && matches!(self.tokenizer_status, ArtifactStatus::Verified)
+    }
+}
+
 /// Resolve (and download if necessary) the ONNX model files.
 ///
 /// If `model_path` is non-empty, it is used as the direct path to the ONNX
@@ -222,6 +245,9 @@ pub(crate) fn download_pins(config: &RerankerConfig) -> Result<DownloadPins, Rer
 }
 
 pub(crate) fn resolve_cached_model_paths(config: &RerankerConfig) -> Result<ModelPaths, RerankerError> {
+    // Direct files are an explicit operator-managed override. Runtime
+    // diagnostics preserve the existing presence-only behavior; the
+    // `models verify` command applies the stricter hash-pin policy.
     if !config.model_path.is_empty() {
         let onnx_path = crate::config::expand_tilde(&config.model_path).map_err(|error| RerankerError::Permanent(error.to_string().into()))?;
         let tokenizer_path = onnx_path.parent().unwrap_or_else(|| Path::new(".")).join("tokenizer.json");
@@ -230,19 +256,57 @@ pub(crate) fn resolve_cached_model_paths(config: &RerankerConfig) -> Result<Mode
         }
         return Err(RerankerError::Unavailable);
     }
-
-    let pins = resolve_download_pins(config)?;
-    let cache = crate::config::expand_tilde(&config.cache_dir).map_err(|error| RerankerError::Permanent(error.to_string().into()))?;
-    let model_dir = cache.join(format!("{}@{}", config.model.replace('/', "--"), pins.cache_revision.replace('/', "--")));
-    let onnx_path = model_dir.join("model.onnx");
-    let tokenizer_path = model_dir.join("tokenizer.json");
-    if !onnx_path.is_file() || !tokenizer_path.is_file() {
+    let inspection = inspect_model_paths(config)?;
+    if matches!(inspection.model_status, ArtifactStatus::Missing) || matches!(inspection.tokenizer_status, ArtifactStatus::Missing) {
         return Err(RerankerError::Unavailable);
     }
-    if !verify_file_sha256(&onnx_path, &pins.model_sha256)? || !verify_file_sha256(&tokenizer_path, &pins.tokenizer_sha256)? {
+    if !inspection.is_verified() {
         return Err(RerankerError::Permanent("cached reranker artifacts do not match their configured SHA-256 hashes".into()));
     }
-    Ok(ModelPaths { onnx_path, tokenizer_path })
+    Ok(inspection.paths)
+}
+
+pub(crate) fn inspect_model_paths(config: &RerankerConfig) -> Result<ModelInspection, RerankerError> {
+    let (paths, model_sha256, tokenizer_sha256) = if config.model_path.is_empty() {
+        let pins = resolve_download_pins(config)?;
+        let cache = crate::config::expand_tilde(&config.cache_dir).map_err(|error| RerankerError::Permanent(error.to_string().into()))?;
+        let model_dir = cache.join(format!("{}@{}", config.model.replace('/', "--"), pins.cache_revision.replace('/', "--")));
+        (
+            ModelPaths {
+                onnx_path: model_dir.join("model.onnx"),
+                tokenizer_path: model_dir.join("tokenizer.json"),
+            },
+            pins.model_sha256,
+            pins.tokenizer_sha256,
+        )
+    } else {
+        let onnx_path = crate::config::expand_tilde(&config.model_path).map_err(|error| RerankerError::Permanent(error.to_string().into()))?;
+        let tokenizer_path = onnx_path.parent().unwrap_or_else(|| Path::new(".")).join("tokenizer.json");
+        (ModelPaths { onnx_path, tokenizer_path }, config.model_sha256.clone(), config.tokenizer_sha256.clone())
+    };
+    let model_status = inspect_artifact(&paths.onnx_path, &model_sha256)?;
+    let tokenizer_status = inspect_artifact(&paths.tokenizer_path, &tokenizer_sha256)?;
+    Ok(ModelInspection {
+        paths,
+        model_sha256,
+        tokenizer_sha256,
+        model_status,
+        tokenizer_status,
+    })
+}
+
+fn inspect_artifact(path: &Path, expected_sha256: &str) -> Result<ArtifactStatus, RerankerError> {
+    if !path.is_file() {
+        return Ok(ArtifactStatus::Missing);
+    }
+    if expected_sha256.is_empty() {
+        return Ok(ArtifactStatus::Unverifiable);
+    }
+    if verify_file_sha256(path, expected_sha256)? {
+        Ok(ArtifactStatus::Verified)
+    } else {
+        Ok(ArtifactStatus::HashMismatch)
+    }
 }
 
 fn ensure_cached_file(url: &str, dest: &Path, expected_sha256: &str) -> Result<(), RerankerError> {
@@ -411,7 +475,7 @@ fn remove_stale_partial_files(model_dir: &Path) -> Result<(), RerankerError> {
 }
 
 fn download_base_url() -> String {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     if let Ok(base_url) = std::env::var("LOCALHOLD_TEST_RERANKER_BASE_URL") {
         return base_url;
     }
@@ -419,7 +483,7 @@ fn download_base_url() -> String {
 }
 
 fn builtin_artifact_base_url() -> String {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     if let Ok(base_url) = std::env::var("LOCALHOLD_TEST_RERANKER_BASE_URL") {
         return base_url;
     }

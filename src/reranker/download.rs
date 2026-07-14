@@ -500,7 +500,7 @@ fn builtin_artifact_base_url() -> String {
 #[cfg(test)]
 mod tests {
     use std::{
-        io::{Read as _, Write as _},
+        io::{Read, Write as _},
         net::{TcpListener, TcpStream},
         process::{Child, Command},
         sync::{
@@ -739,8 +739,7 @@ mod tests {
     }
 
     fn serve_artifact(mut stream: TcpStream, request_count: &AtomicUsize, fail_next: &AtomicBool) {
-        let mut request = [0_u8; 2048];
-        let read = stream.read(&mut request).unwrap();
+        let request = read_http_request_headers(&mut stream).unwrap();
         let _previous_request_count = request_count.fetch_add(1, Ordering::AcqRel);
         if fail_next.swap(false, Ordering::AcqRel) {
             stream
@@ -748,10 +747,30 @@ mod tests {
                 .unwrap();
             return;
         }
-        let request = String::from_utf8_lossy(&request[..read]);
+        let request = String::from_utf8_lossy(&request);
         let body = if request.contains("tokenizer.json") { TOKENIZER_BYTES } else { MODEL_BYTES };
         let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
         stream.write_all(response.as_bytes()).unwrap();
         stream.write_all(body).unwrap();
+    }
+
+    fn read_http_request_headers(stream: &mut impl Read) -> std::io::Result<Vec<u8>> {
+        const MAX_HEADER_BYTES: usize = 16 * 1024;
+        let mut request = Vec::with_capacity(1024);
+        let mut chunk = [0_u8; 1024];
+        while request.len() < MAX_HEADER_BYTES {
+            let read = stream.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                return Ok(request);
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "model mock server received incomplete or oversized HTTP headers",
+        ))
     }
 }

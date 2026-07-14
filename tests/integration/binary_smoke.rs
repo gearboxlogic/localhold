@@ -1,5 +1,5 @@
 use std::{
-    io::{BufRead as _, BufReader, Read as _, Write as _},
+    io::{BufRead as _, BufReader, Read, Write as _},
     net::TcpListener,
     process::{Child, Command, Stdio},
     sync::mpsc,
@@ -91,6 +91,27 @@ fn sha256_hex(bytes: &[u8]) -> String {
         output.push(char::from(HEX[usize::from(byte & 0x0f_u8)]));
     }
     output
+}
+
+#[cfg(feature = "reranker")]
+fn read_http_request_headers(stream: &mut impl Read) -> std::io::Result<Vec<u8>> {
+    const MAX_HEADER_BYTES: usize = 16 * 1024;
+    let mut request = Vec::with_capacity(1024);
+    let mut chunk = [0_u8; 1024];
+    while request.len() < MAX_HEADER_BYTES {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&chunk[..read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(request);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "model mock server received incomplete or oversized HTTP headers",
+    ))
 }
 
 #[test]
@@ -280,9 +301,8 @@ fn models_fetch_downloads_only_when_explicit_and_reverifies_offline() {
                 }
                 Err(error) => panic!("model mock server accept failed: {error}"),
             };
-            let mut request = [0_u8; 4096];
-            let read = stream.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..read]);
+            let request = read_http_request_headers(&mut stream).unwrap();
+            let request = String::from_utf8_lossy(&request);
             let body: &[u8] = if request.contains("/onnx/model.onnx") {
                 b"model artifact"
             } else if request.contains("/tokenizer.json") {

@@ -53,7 +53,7 @@ where
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
-    let mode = app.requested_mode.map_or_else(|| "auto".to_owned(), |mode| mode.to_string());
+    let mode = app.requested_mode.map_or_else(|| "default".to_owned(), |mode| mode.to_string());
     let right = Line::from(vec![Span::styled("mode ", app.theme.label()), Span::styled(mode, app.theme.ident()), Span::raw(" ")]);
     frame.render_widget(Paragraph::new(right).alignment(Alignment::Right), area);
 }

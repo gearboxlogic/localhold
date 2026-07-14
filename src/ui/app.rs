@@ -455,7 +455,8 @@ where
             Some(SearchMode::Keyword) => Some(SearchMode::Text),
             Some(SearchMode::Text) => Some(SearchMode::Semantic),
             Some(SearchMode::Semantic) => Some(SearchMode::Hybrid),
-            Some(SearchMode::Hybrid | SearchMode::Auto) => None,
+            Some(SearchMode::Hybrid) => Some(SearchMode::Auto),
+            Some(SearchMode::Auto) => None,
         };
         if !self.query.is_empty() {
             self.refresh();
@@ -615,6 +616,24 @@ mod tests {
         let (mut app, _rx) = app_with_memories(&[]).await;
         app.on_event(press(KeyCode::Char('q'))).await;
         assert!(app.quit, "q should request quit");
+    }
+
+    #[tokio::test]
+    async fn mode_cycle_includes_explicit_auto_before_config_default() {
+        let (mut app, _rx) = app_with_memories(&[]).await;
+        let expected = [
+            Some(crate::types::SearchMode::Keyword),
+            Some(crate::types::SearchMode::Text),
+            Some(crate::types::SearchMode::Semantic),
+            Some(crate::types::SearchMode::Hybrid),
+            Some(crate::types::SearchMode::Auto),
+            None,
+        ];
+
+        for mode in expected {
+            app.cycle_mode();
+            assert_eq!(app.requested_mode, mode);
+        }
     }
 
     #[tokio::test]

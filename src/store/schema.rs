@@ -8,7 +8,7 @@ use crate::error::StoreError;
 ///
 /// This project reset its pre-1.0 schema lineage. Databases carrying a newer
 /// value are never opened or restored by an older binary.
-pub(crate) const SQLITE_SCHEMA_VERSION: u32 = 1;
+pub(crate) const SQLITE_SCHEMA_VERSION: u32 = 2;
 
 /// Core DDL for the memories table and its indexes.
 pub(crate) const MAIN_DDL: &str = "
@@ -22,6 +22,7 @@ pub(crate) const MAIN_DDL: &str = "
         expires_at    TEXT,
         has_embedding INTEGER NOT NULL DEFAULT 0,
         embedding_revision INTEGER NOT NULL DEFAULT 0,
+        record_revision INTEGER NOT NULL DEFAULT 0,
         memory_type   TEXT NOT NULL DEFAULT 'semantic',
         importance    REAL NOT NULL DEFAULT 0.5,
         impression_count INTEGER NOT NULL DEFAULT 0,
@@ -107,7 +108,9 @@ pub(crate) const TRIGGER_DDL: &str = "
     CREATE TRIGGER IF NOT EXISTS trg_memory_clear_superseded_by
     AFTER DELETE ON memories
     BEGIN
-        UPDATE memories SET superseded_by = NULL WHERE superseded_by = OLD.id;
+        UPDATE memories
+        SET superseded_by = NULL, record_revision = record_revision + 1
+        WHERE superseded_by = OLD.id;
     END;
 ";
 
@@ -187,6 +190,16 @@ pub(crate) fn migrate_memories_add_embedding_revision(conn: &Connection) -> Resu
     }
     #[expect(unused_results, reason = "ALTER TABLE DDL — row count is meaningless")]
     conn.execute("ALTER TABLE memories ADD COLUMN embedding_revision INTEGER NOT NULL DEFAULT 0", [])?;
+    Ok(())
+}
+
+/// Add the user-visible record revision used for optimistic concurrency.
+pub(crate) fn migrate_memories_add_record_revision(conn: &Connection) -> Result<(), StoreError> {
+    if has_column(conn, "record_revision")? {
+        return Ok(());
+    }
+    #[expect(unused_results, reason = "ALTER TABLE DDL — row count is meaningless")]
+    conn.execute("ALTER TABLE memories ADD COLUMN record_revision INTEGER NOT NULL DEFAULT 0", [])?;
     Ok(())
 }
 

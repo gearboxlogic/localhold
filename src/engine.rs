@@ -392,6 +392,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
             access_policy,
             created_at: now,
             updated_at: now,
+            record_revision: 0_i64,
             expires_at,
             has_embedding: false,
             memory_type: input.memory_type.unwrap_or_default(),
@@ -840,7 +841,8 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         Ok(outcome)
     }
 
-    /// Revise a memory loaded at `expected_updated_at`.
+    /// Revise a memory loaded at `expected_revision`, obtained from
+    /// [`Memory::optimistic_revision`].
     ///
     /// Fields, metadata, and audit commit only after authorization and
     /// concurrency checks pass. Replacement content is then queued for
@@ -854,7 +856,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
     pub async fn update_memory_if_unmodified_with_metadata(
         &self,
         id: MemoryId,
-        expected_updated_at: chrono::DateTime<chrono::Utc>,
+        expected_revision: i64,
         mut update: MemoryUpdate,
         metadata_patch: Option<MetadataPatch>,
         principal: &str,
@@ -867,7 +869,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         let outcome = self
             .orchestrator
             .store()
-            .update_authorized_if_unmodified_with_metadata_audited(&id, expected_updated_at, &update, metadata_patch.as_ref(), None, principal, &audit)
+            .update_authorized_if_unmodified_with_metadata_audited(&id, expected_revision, &update, metadata_patch.as_ref(), None, principal, &audit)
             .await?;
         if let (Some(content), Some(revision), Some(admission)) = (new_content, outcome.reembed_revision, embed_admission.as_ref()) {
             let _queued = self.orchestrator.spawn_embed_task_or_run_inline(admission, id, content, revision).await;
@@ -921,17 +923,18 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         Ok(outcome)
     }
 
-    /// Delete a memory only if its loaded content revision is still current.
+    /// Delete a memory only if its loaded record revision is still current.
+    /// Obtain `expected_revision` from [`Memory::optimistic_revision`].
     ///
     /// # Errors
     ///
     /// Returns `EngineError::Store` on persistence or concurrency failure.
-    pub async fn delete_memory_if_unmodified(&self, id: &MemoryId, expected_updated_at: chrono::DateTime<chrono::Utc>, principal: &str) -> Result<WriteOutcome, EngineError> {
+    pub async fn delete_memory_if_unmodified(&self, id: &MemoryId, expected_revision: i64, principal: &str) -> Result<WriteOutcome, EngineError> {
         let audit = self.audit_draft(AuditAction::Delete, Some(principal.to_owned()), Some(serde_json::json!({"interactive": true})));
         Ok(self
             .orchestrator
             .store()
-            .delete_authorized_if_unmodified_audited(id, expected_updated_at, principal, &audit)
+            .delete_authorized_if_unmodified_audited(id, expected_revision, principal, &audit)
             .await?)
     }
 

@@ -793,12 +793,12 @@ where
         let mutation_engine = self.mutation_engine.clone();
         let tx = self.data_tx.clone();
         let id = detail.memory.id;
-        let expected_updated_at = detail.memory.updated_at;
+        let expected_revision = detail.memory.record_revision;
         #[expect(unused_results, reason = "JoinHandle intentionally dropped — the result arrives via the data channel")]
         tokio::spawn(async move {
             let msg = match mutation_engine.get().await {
                 Ok(engine) => match engine
-                    .update_memory_if_unmodified_with_metadata(id, expected_updated_at, parsed.update, parsed.metadata_patch, &principal)
+                    .update_memory_if_unmodified_with_metadata(id, expected_revision, parsed.update, parsed.metadata_patch, &principal)
                     .await
                 {
                     Ok(outcome) => match outcome.outcome {
@@ -838,11 +838,11 @@ where
         let mutation_engine = self.mutation_engine.clone();
         let tx = self.data_tx.clone();
         let id = detail.memory.id;
-        let expected_updated_at = detail.memory.updated_at;
+        let expected_revision = detail.memory.record_revision;
         #[expect(unused_results, reason = "JoinHandle intentionally dropped — the result arrives via the data channel")]
         tokio::spawn(async move {
             let msg = match mutation_engine.get().await {
-                Ok(engine) => match engine.delete_memory_if_unmodified(&id, expected_updated_at, &principal).await {
+                Ok(engine) => match engine.delete_memory_if_unmodified(&id, expected_revision, &principal).await {
                     Ok(WriteOutcome::Applied) => DataMsg::Deleted { id, generation },
                     Ok(WriteOutcome::NotFound) => DataMsg::Missing { id, generation },
                     Ok(WriteOutcome::Denied) => DataMsg::MutationFailed {

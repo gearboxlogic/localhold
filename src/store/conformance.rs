@@ -172,12 +172,8 @@ where
     });
     let new_id = store.store_with_supersession(&new, Some(&embedding(embedding_dimensions, 6.1_f32)), &old_id).await.unwrap();
     let superseded = store.get(&old_id, Some(OWNER)).await.unwrap().unwrap();
-    assert!(superseded.updated_at > opened_old.updated_at, "supersession must advance the optimistic revision");
-    assert_eq!(
-        superseded.updated_at.signed_duration_since(opened_old.updated_at),
-        Duration::microseconds(1_i64),
-        "supersession must not make unchanged content appear freshly updated"
-    );
+    assert!(superseded.record_revision > opened_old.record_revision, "supersession must advance the optimistic revision");
+    assert_eq!(superseded.updated_at, opened_old.updated_at, "supersession must preserve content freshness");
     let supersession_audit = AuditDraft {
         action: AuditAction::Update,
         caller_agent: Some(OWNER.into()),
@@ -187,7 +183,7 @@ where
     let stale_after_supersession = store
         .update_authorized_if_unmodified_with_metadata_audited(
             &old_id,
-            opened_old.updated_at,
+            opened_old.record_revision,
             &MemoryUpdate {
                 importance: Some(Importance::new(0.6_f64)),
                 ..MemoryUpdate::default()
@@ -482,18 +478,17 @@ where
     assert_eq!(ordinary_outcome.outcome, WriteOutcome::Applied);
     let after_ordinary_update = store.get(&interactive_id, Some(OWNER)).await.unwrap().unwrap();
     assert!(
-        after_ordinary_update.updated_at > opened_before_external_update.updated_at,
+        after_ordinary_update.record_revision > opened_before_external_update.record_revision,
         "ordinary non-content updates must advance the optimistic revision"
     );
     assert_eq!(
-        after_ordinary_update.updated_at.signed_duration_since(opened_before_external_update.updated_at),
-        Duration::microseconds(1_i64),
-        "ordinary non-content updates must not reset content freshness"
+        after_ordinary_update.updated_at, opened_before_external_update.updated_at,
+        "ordinary non-content updates must preserve content freshness"
     );
     let stale_after_ordinary_update = store
         .update_authorized_if_unmodified_with_metadata_audited(
             &interactive_id,
-            opened_before_external_update.updated_at,
+            opened_before_external_update.record_revision,
             &MemoryUpdate {
                 importance: Some(Importance::new(0.6_f64)),
                 ..MemoryUpdate::default()
@@ -512,18 +507,17 @@ where
     store.upsert_metadata(concurrent_metadata).await.unwrap();
     let loaded = store.get(&interactive_id, Some(OWNER)).await.unwrap().unwrap();
     assert!(
-        loaded.updated_at > after_ordinary_update.updated_at,
+        loaded.record_revision > after_ordinary_update.record_revision,
         "standalone metadata upserts must advance the optimistic revision"
     );
     assert_eq!(
-        loaded.updated_at.signed_duration_since(after_ordinary_update.updated_at),
-        Duration::microseconds(1_i64),
-        "standalone metadata upserts must not reset content freshness"
+        loaded.updated_at, after_ordinary_update.updated_at,
+        "standalone metadata upserts must preserve content freshness"
     );
     let stale_after_metadata_update = store
         .update_authorized_if_unmodified_with_metadata_audited(
             &interactive_id,
-            after_ordinary_update.updated_at,
+            after_ordinary_update.record_revision,
             &MemoryUpdate {
                 importance: Some(Importance::new(0.7_f64)),
                 ..MemoryUpdate::default()
@@ -562,7 +556,7 @@ where
     let wrong_dimension_error = store
         .update_authorized_if_unmodified_with_metadata_audited(
             &interactive_id,
-            loaded.updated_at,
+            loaded.record_revision,
             &MemoryUpdate {
                 content: Some("wrong-dimensional revision".into()),
                 ..MemoryUpdate::default()
@@ -581,7 +575,7 @@ where
     let interactive_outcome = store
         .update_authorized_if_unmodified_with_metadata_audited(
             &interactive_id,
-            loaded.updated_at,
+            loaded.record_revision,
             &replacement_update,
             Some(&replacement_metadata),
             Some(&replacement_embedding),
@@ -607,7 +601,7 @@ where
     let metadata_only_outcome = store
         .update_authorized_if_unmodified_with_metadata_audited(
             &interactive_id,
-            revised.updated_at,
+            revised.record_revision,
             &MemoryUpdate::default(),
             Some(&MetadataPatch {
                 scope_key: None,
@@ -625,13 +619,17 @@ where
     assert_eq!(metadata_only_outcome.outcome, WriteOutcome::Applied);
     let metadata_revised = store.get(&interactive_id, Some(OWNER)).await.unwrap().unwrap();
     assert!(
-        metadata_revised.updated_at > revised.updated_at,
+        metadata_revised.record_revision > revised.record_revision,
         "metadata-only interactive edits must advance the optimistic revision"
+    );
+    assert_eq!(
+        metadata_revised.updated_at, revised.updated_at,
+        "metadata-only interactive edits must preserve content freshness"
     );
     let stale_metadata_error = store
         .update_authorized_if_unmodified_with_metadata_audited(
             &interactive_id,
-            revised.updated_at,
+            revised.record_revision,
             &MemoryUpdate {
                 importance: Some(Importance::new(0.4_f64)),
                 ..MemoryUpdate::default()
@@ -648,7 +646,7 @@ where
     let stale_error = store
         .update_authorized_if_unmodified_with_metadata_audited(
             &interactive_id,
-            loaded.updated_at,
+            loaded.record_revision,
             &MemoryUpdate {
                 content: Some("stale overwrite".into()),
                 ..MemoryUpdate::default()
@@ -670,12 +668,12 @@ where
         details: Some(json!({"interactive": true})),
     };
     let stale_delete = store
-        .delete_authorized_if_unmodified_audited(&interactive_id, loaded.updated_at, OWNER, &delete_audit)
+        .delete_authorized_if_unmodified_audited(&interactive_id, loaded.record_revision, OWNER, &delete_audit)
         .await
         .unwrap_err();
     assert!(matches!(stale_delete, StoreError::Conflict(_)));
     let delete_outcome = store
-        .delete_authorized_if_unmodified_audited(&interactive_id, metadata_revised.updated_at, OWNER, &delete_audit)
+        .delete_authorized_if_unmodified_audited(&interactive_id, metadata_revised.record_revision, OWNER, &delete_audit)
         .await
         .unwrap();
     assert_eq!(delete_outcome, WriteOutcome::Applied);
@@ -693,12 +691,16 @@ where
         created_at: time_after(base, 13),
     });
     let movable_id = store.store(&movable, Some(&embedding(embedding_dimensions, 10.0_f32))).await.unwrap();
+    let opened_movable = store.get(&movable_id, Some(OWNER)).await.unwrap().unwrap();
     let reassigned = store.reassign_scope(&from_scope, &to_scope, None, OWNER).await.unwrap();
     assert_eq!(reassigned.applied_ids, vec![movable_id]);
-    assert_eq!(
-        store.get(&movable_id, Some(OWNER)).await.unwrap().unwrap().provenance.source_conversation.as_deref(),
-        Some(to_scope.as_str())
+    let moved = store.get(&movable_id, Some(OWNER)).await.unwrap().unwrap();
+    assert_eq!(moved.provenance.source_conversation.as_deref(), Some(to_scope.as_str()));
+    assert!(
+        moved.record_revision > opened_movable.record_revision,
+        "scope reassignment must advance the optimistic revision"
     );
+    assert_eq!(moved.updated_at, opened_movable.updated_at, "scope reassignment must preserve content freshness");
 
     let delete_me = memory(MemorySpec {
         content: format!("delete me {case}"),
@@ -793,6 +795,7 @@ fn memory(spec: MemorySpec) -> Memory {
         access_policy: spec.access_policy,
         created_at: spec.created_at,
         updated_at: spec.created_at,
+        record_revision: 0_i64,
         expires_at: None,
         has_embedding: false,
         memory_type: MemoryType::Semantic,

@@ -222,7 +222,7 @@ async fn backup_restore_cli_round_trips_and_emits_stable_json() {
     assert_eq!(backup_report["schema_version"], 1_i32);
     assert_eq!(backup_report["operation"], "backup");
     assert_eq!(backup_report["status"], "ok");
-    assert_eq!(backup_report["database_schema_version"], 1_i32);
+    assert_eq!(backup_report["database_schema_version"], 2_i32);
     assert_eq!(backup_report["memories"], 1_i32);
     assert!(backup_path.exists());
     drop(store);

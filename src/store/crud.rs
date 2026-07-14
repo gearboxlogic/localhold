@@ -39,11 +39,11 @@ macro_rules! concat_placeholders {
 ///
 /// When adding columns to [`super::query::COLUMNS`], append the next number here
 /// too. The static assertion below will fail at compile time if they diverge.
-const INSERT_PLACEHOLDERS: &str = numbered_placeholders![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
+const INSERT_PLACEHOLDERS: &str = numbered_placeholders![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18];
 
 /// Compile-time check: placeholder count must equal column count.
 const _: () = assert!(
-    MEMORY_COLUMN_COUNT == 17,
+    MEMORY_COLUMN_COUNT == 18,
     "INSERT_PLACEHOLDERS is out of sync with COLUMNS -- update the numbered_placeholders! invocation"
 );
 
@@ -71,6 +71,7 @@ pub(crate) struct PreparedMemoryRow {
     last_used_at: Option<String>,
     updated_at: String,
     confidence: f64,
+    record_revision: i64,
     entities: Vec<Entity>,
 }
 
@@ -98,6 +99,7 @@ impl PreparedMemoryRow {
             last_used_at: memory.last_used_at.map(|t| t.to_rfc3339()),
             updated_at: memory.updated_at.to_rfc3339(),
             confidence: memory.confidence.value(),
+            record_revision: memory.record_revision,
             entities: memory.entities.clone(),
         })
     }
@@ -125,6 +127,7 @@ impl PreparedMemoryRow {
         let last_used_at = memory.last_used_at.map(|t| t.to_rfc3339());
         let updated_at = memory.updated_at.to_rfc3339();
         let confidence = memory.confidence.value();
+        let record_revision = memory.record_revision;
         Ok(Self {
             id,
             id_str,
@@ -145,6 +148,7 @@ impl PreparedMemoryRow {
             last_used_at,
             updated_at,
             confidence,
+            record_revision,
             entities: memory.entities,
         })
     }
@@ -169,6 +173,7 @@ impl PreparedMemoryRow {
             self.last_used_at,
             self.updated_at,
             self.confidence,
+            self.record_revision,
         ])?;
         if let Some(emb) = &self.embedding {
             vector_index.upsert(conn, &self.id_str, emb)?;
@@ -188,7 +193,7 @@ impl PreparedMemoryRow {
 ///
 /// Returns `true` if the row was updated, `false` if the referenced
 /// memory was not found at all.
-pub(crate) fn mark_superseded(conn: &Connection, old_id_str: &str, new_id_str: &str, now: chrono::DateTime<chrono::Utc>) -> Result<bool, StoreError> {
+pub(crate) fn mark_superseded(conn: &Connection, old_id_str: &str, new_id_str: &str, _now: chrono::DateTime<chrono::Utc>) -> Result<bool, StoreError> {
     let Some(existing) = fetch_memory_by_id(conn, old_id_str)? else {
         return Ok(false);
     };
@@ -196,12 +201,10 @@ pub(crate) fn mark_superseded(conn: &Connection, old_id_str: &str, new_id_str: &
         return Err(StoreError::Conflict(format!("memory {old_id_str} is already superseded")));
     }
 
-    let revision_at = next_update_revision(now, existing.updated_at, false).to_rfc3339();
-    let affected = conn.execute("UPDATE memories SET superseded_by = ?1, updated_at = ?2 WHERE id = ?3 AND superseded_by IS NULL", params![
-        new_id_str,
-        revision_at,
-        old_id_str
-    ])?;
+    let affected = conn.execute(
+        "UPDATE memories SET superseded_by = ?1, record_revision = record_revision + 1 WHERE id = ?2 AND superseded_by IS NULL",
+        params![new_id_str, old_id_str],
+    )?;
     if affected == 0 {
         return Err(StoreError::Conflict(format!("memory {old_id_str} changed while superseding")));
     }
@@ -538,18 +541,18 @@ fn apply_authorized_update_with_metadata(
         });
     }
 
-    let revision_at = next_update_revision(now, existing.updated_at, update.content.is_some());
+    let revision_at = next_memory_revision(now, existing.updated_at);
     let revision_at_text = revision_at.to_rfc3339();
     let outcome = apply_update_inner(&tx, vector_index, &id_str, update, &revision_at_text)?;
+    let metadata_only = metadata_patch.is_some() && !has_column_updates(update) && update.entities.is_none();
     if outcome.outcome == WriteOutcome::Applied {
         if let Some(patch) = metadata_patch {
             let existing_metadata = get_metadata_conn(&tx, id)?;
             let metadata = merge_metadata_patch(*id, patch, existing_metadata.as_ref(), existing.provenance.source_conversation.as_deref(), principal);
             upsert_metadata_conn(&tx, &metadata, &revision_at_text)?;
-            let affected = tx.execute("UPDATE memories SET updated_at = ?1 WHERE id = ?2", params![revision_at_text, id_str])?;
-            if affected == 0 {
-                return Err(StoreError::Conflict(format!("memory {id} changed while saving")));
-            }
+        }
+        if metadata_only {
+            increment_record_revision_conn(&tx, &id_str, "saving")?;
         }
         if let Some(audit) = audit {
             let audit = update_audit_draft_for_locked_memory(audit, update, &existing);
@@ -565,7 +568,7 @@ fn apply_authorized_update_if_unmodified_with_metadata(
     conn: &mut Connection,
     vector_index: &SqliteVecIndex,
     id: &MemoryId,
-    expected_updated_at: chrono::DateTime<chrono::Utc>,
+    expected_revision: i64,
     update: &MemoryUpdate,
     metadata_patch: Option<&MetadataPatch>,
     embedding: Option<&[f32]>,
@@ -597,11 +600,11 @@ fn apply_authorized_update_if_unmodified_with_metadata(
             reembed_revision: None,
         });
     }
-    if existing.updated_at != expected_updated_at {
+    if existing.record_revision != expected_revision {
         return Err(StoreError::Conflict(format!("memory {id} changed after it was opened")));
     }
 
-    let revision_at = next_update_revision(now, existing.updated_at, update.content.is_some());
+    let revision_at = next_memory_revision(now, existing.updated_at);
     let revision_at_text = revision_at.to_rfc3339();
     let mut outcome = apply_update_inner(&tx, vector_index, &id_str, update, &revision_at_text)?;
     if let Some(embedding) = embedding {
@@ -620,9 +623,8 @@ fn apply_authorized_update_if_unmodified_with_metadata(
         let metadata = merge_metadata_patch(*id, patch, existing_metadata.as_ref(), existing.provenance.source_conversation.as_deref(), principal);
         upsert_metadata_conn(&tx, &metadata, &revision_at_text)?;
     }
-    let affected = tx.execute("UPDATE memories SET updated_at = ?1 WHERE id = ?2", params![revision_at_text, id_str])?;
-    if affected == 0 {
-        return Err(StoreError::Conflict(format!("memory {id} changed while saving")));
+    if metadata_patch.is_some() && !has_column_updates(update) && update.entities.is_none() {
+        increment_record_revision_conn(&tx, &id_str, "saving")?;
     }
     let audit = update_audit_draft_for_locked_memory(audit, update, &existing);
     insert_audit_draft(&tx, id, &audit)?;
@@ -630,27 +632,23 @@ fn apply_authorized_update_if_unmodified_with_metadata(
     Ok(outcome)
 }
 
+fn increment_record_revision_conn(conn: &Connection, id_str: &str, action: &str) -> Result<(), StoreError> {
+    let affected = conn.execute("UPDATE memories SET record_revision = record_revision + 1 WHERE id = ?1", params![id_str])?;
+    if affected == 0 {
+        return Err(StoreError::Conflict(format!("memory {id_str} changed while {action}")));
+    }
+    Ok(())
+}
+
 pub(crate) fn next_memory_revision(now: chrono::DateTime<chrono::Utc>, previous: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
     previous.checked_add_signed(chrono::Duration::microseconds(1_i64)).map_or(now, |minimum| now.max(minimum))
-}
-
-pub(crate) fn next_record_revision(previous: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
-    previous.checked_add_signed(chrono::Duration::microseconds(1_i64)).unwrap_or(previous)
-}
-
-fn next_update_revision(now: chrono::DateTime<chrono::Utc>, previous: chrono::DateTime<chrono::Utc>, content_changed: bool) -> chrono::DateTime<chrono::Utc> {
-    if content_changed {
-        next_memory_revision(now, previous)
-    } else {
-        next_record_revision(previous)
-    }
 }
 
 #[expect(clippy::too_many_arguments, reason = "atomic delete needs connection, identity, revision, principal, timestamp, and audit")]
 fn apply_authorized_delete_if_unmodified(
     conn: &mut Connection,
     id: &MemoryId,
-    expected_updated_at: chrono::DateTime<chrono::Utc>,
+    expected_revision: i64,
     principal: &str,
     deleted_at: &str,
     audit: &AuditDraft,
@@ -665,7 +663,7 @@ fn apply_authorized_delete_if_unmodified(
         tx.commit()?;
         return Ok(WriteOutcome::Denied);
     }
-    if existing.updated_at != expected_updated_at {
+    if existing.record_revision != expected_revision {
         return Err(StoreError::Conflict(format!("memory {id} changed after it was opened")));
     }
 
@@ -758,7 +756,7 @@ pub(crate) fn bulk_update_ids(
                 denied = denied.saturating_add(1);
                 continue;
             }
-            let revision_at = next_update_revision(now, mem.updated_at, update.content.is_some()).to_rfc3339();
+            let revision_at = next_memory_revision(now, mem.updated_at).to_rfc3339();
             let outcome = apply_update_inner(&tx, vector_index, id_str, update, &revision_at)?;
             if outcome.outcome == WriteOutcome::Applied {
                 insert_optional_audit_draft(&tx, &id, audit)?;
@@ -796,7 +794,7 @@ pub(crate) fn apply_update(
             reembed_revision: None,
         });
     };
-    let revision_at = next_update_revision(now, existing.updated_at, update.content.is_some()).to_rfc3339();
+    let revision_at = next_memory_revision(now, existing.updated_at).to_rfc3339();
     let outcome = apply_update_inner(&tx, vector_index, id_str, update, &revision_at)?;
     tx.commit()?;
     Ok(outcome)
@@ -911,9 +909,11 @@ fn build_set_clause(update: &MemoryUpdate, now: &str) -> Result<SetClauseBuilder
             Box::new(source_conversation.clone()),
         );
     }
-    if has_column_updates(update) {
-        // Every record mutation advances the optimistic-concurrency token.
+    if update.content.is_some() {
         builder.push("updated_at", Box::new(now.to_owned()));
+    }
+    if has_column_updates(update) {
+        builder.push_literal("record_revision = record_revision + 1");
     }
 
     Ok(builder)
@@ -930,7 +930,7 @@ fn apply_update_inner(conn: &Connection, vector_index: &SqliteVecIndex, id_str: 
 
     if builder.is_empty() {
         let affected = if entities_update.is_some() {
-            conn.execute("UPDATE memories SET updated_at = ?1 WHERE id = ?2", params![now, id_str])?
+            conn.execute("UPDATE memories SET record_revision = record_revision + 1 WHERE id = ?1", params![id_str])?
         } else {
             usize::from(conn.query_row("SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1)", params![id_str], |row| row.get::<_, bool>(0))?)
         };
@@ -1532,7 +1532,7 @@ impl SqliteStore {
                     reembed_revision: None,
                 });
             }
-            let revision_at = next_update_revision(now, existing.updated_at, update.content.is_some()).to_rfc3339();
+            let revision_at = next_memory_revision(now, existing.updated_at).to_rfc3339();
             let outcome = apply_update_inner(&tx, &vector_index, &id_str, &update, &revision_at)?;
             if outcome.outcome == WriteOutcome::Applied
                 && let Some(audit) = audit.as_ref()
@@ -1570,7 +1570,7 @@ impl SqliteStore {
     pub(crate) async fn update_authorized_if_unmodified_with_metadata_audited_impl(
         &self,
         id: &MemoryId,
-        expected_updated_at: chrono::DateTime<chrono::Utc>,
+        expected_revision: i64,
         update: &MemoryUpdate,
         metadata_patch: Option<&MetadataPatch>,
         embedding: Option<&[f32]>,
@@ -1591,7 +1591,7 @@ impl SqliteStore {
                 conn,
                 &vector_index,
                 &id_value,
-                expected_updated_at,
+                expected_revision,
                 &update,
                 metadata_patch.as_ref(),
                 embedding.as_deref(),
@@ -1620,7 +1620,7 @@ impl SqliteStore {
     pub(crate) async fn delete_authorized_if_unmodified_audited_impl(
         &self,
         id: &MemoryId,
-        expected_updated_at: chrono::DateTime<chrono::Utc>,
+        expected_revision: i64,
         principal: &str,
         audit: &AuditDraft,
     ) -> Result<WriteOutcome, StoreError> {
@@ -1628,7 +1628,7 @@ impl SqliteStore {
         let caller = principal.to_owned();
         let deleted_at = self.clock_now().to_rfc3339();
         let audit = audit.clone();
-        self.with_conn(move |conn| apply_authorized_delete_if_unmodified(conn, &id_value, expected_updated_at, &caller, &deleted_at, &audit))
+        self.with_conn(move |conn| apply_authorized_delete_if_unmodified(conn, &id_value, expected_revision, &caller, &deleted_at, &audit))
             .await
     }
 
@@ -1997,7 +1997,10 @@ mod tests {
             details: None,
         };
 
-        let error = store.delete_authorized_if_unmodified_audited(&id, loaded.updated_at, "owner", &audit).await.unwrap_err();
+        let error = store
+            .delete_authorized_if_unmodified_audited(&id, loaded.record_revision, "owner", &audit)
+            .await
+            .unwrap_err();
 
         assert!(matches!(error, StoreError::Conflict(_)));
         assert!(store.get(&id, Some("owner")).await.unwrap().is_some());
@@ -2045,7 +2048,7 @@ mod tests {
         let error = store
             .update_authorized_if_unmodified_with_metadata_audited(
                 &id,
-                loaded.updated_at,
+                loaded.record_revision,
                 &MemoryUpdate {
                     content: Some("must roll back".into()),
                     ..MemoryUpdate::default()
@@ -2098,6 +2101,7 @@ mod tests {
             access_policy: AccessPolicy::Restricted { allowed: vec!["owner".into()] },
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            record_revision: 0_i64,
             expires_at: None,
             has_embedding: false,
             memory_type: MemoryType::default(),
@@ -2119,6 +2123,7 @@ mod tests {
             access_policy: AccessPolicy::Public,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            record_revision: 0_i64,
             expires_at: None,
             has_embedding: false,
             memory_type: MemoryType::default(),

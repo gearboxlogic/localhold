@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 
 use super::{
     ReassignScopeOutcome, SqliteStore,
-    crud::{SQLITE_MAX_CHUNK, fetch_memory_by_id, get_metadata_conn, insert_audit_draft, insert_tombstone, next_record_revision, upsert_metadata_conn},
+    crud::{SQLITE_MAX_CHUNK, fetch_memory_by_id, get_metadata_conn, insert_audit_draft, insert_tombstone, upsert_metadata_conn},
     query::{DEFAULT_LIST_LIMIT, OVERFETCH_FACTOR, ScanConfig, count_with_access_filter, normalize_filter},
     sqlite_write_tx,
     vector::{VectorIndex as _, validate_embedding_vector},
@@ -202,15 +202,15 @@ impl SqliteStore {
     }
 
     pub(crate) async fn upsert_metadata_audited_impl(&self, metadata: MemoryMetadata, audit: Option<&AuditDraft>) -> Result<(), StoreError> {
+        let now = self.clock_now();
         let audit = audit.cloned();
         self.with_conn(move |conn| {
             let tx = sqlite_write_tx(conn)?;
             let id = metadata.memory_id;
             let id_str = id.to_string();
-            let existing = fetch_memory_by_id(&tx, &id_str)?.ok_or_else(|| StoreError::NotFound(format!("memory not found: {id}")))?;
-            let revision_at = next_record_revision(existing.updated_at).to_rfc3339();
-            upsert_metadata_conn(&tx, &metadata, &revision_at)?;
-            let affected = tx.execute("UPDATE memories SET updated_at = ?1 WHERE id = ?2", params![revision_at, id_str])?;
+            let _existing = fetch_memory_by_id(&tx, &id_str)?.ok_or_else(|| StoreError::NotFound(format!("memory not found: {id}")))?;
+            upsert_metadata_conn(&tx, &metadata, &now.to_rfc3339())?;
+            let affected = tx.execute("UPDATE memories SET record_revision = record_revision + 1 WHERE id = ?1", params![id_str])?;
             if affected == 0 {
                 return Err(StoreError::Conflict(format!("memory {id} changed while updating metadata")));
             }
@@ -422,6 +422,10 @@ fn insert_metadata_migration_rows(conn: &mut Connection, prepared_rows: &[Prepar
         )?;
         if inserted > 0 {
             let memory_id = row.id.parse().map_err(|e| StoreError::Serialization(format!("invalid memory id: {e}").into()))?;
+            let revised = tx.execute("UPDATE memories SET record_revision = record_revision + 1 WHERE id = ?1", params![row.id])?;
+            if revised == 0 {
+                return Err(StoreError::Conflict(format!("memory {memory_id} changed while migrating metadata")));
+            }
             insert_optional_metadata_audit(&tx, &memory_id, audit)?;
         }
         migrated = migrated.saturating_add(u64::try_from(inserted).map_err(|e| StoreError::Serialization(Box::new(e)))?);
@@ -549,11 +553,7 @@ fn apply_reassign_scope(conn: &mut Connection, params: ReassignScopeApply<'_>) -
         updated = updated.saturating_add(tx.execute(&sql, memory_params.as_slice())?);
         for id in chunk {
             let id_str = id.to_string();
-            let Some(memory) = fetch_memory_by_id(&tx, &id_str)? else {
-                continue;
-            };
-            let revision_at = next_record_revision(memory.updated_at).to_rfc3339();
-            let affected = tx.execute("UPDATE memories SET updated_at = ?1 WHERE id = ?2", params![revision_at, id_str])?;
+            let affected = tx.execute("UPDATE memories SET record_revision = record_revision + 1 WHERE id = ?1", params![id_str])?;
             if affected == 0 {
                 return Err(StoreError::Conflict(format!("memory {id} changed while reassigning scope")));
             }
@@ -629,6 +629,7 @@ mod tests {
             access_policy: AccessPolicy::Public,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            record_revision: 0_i64,
             expires_at: None,
             has_embedding: false,
             memory_type: MemoryType::default(),

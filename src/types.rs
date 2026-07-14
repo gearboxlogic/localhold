@@ -511,6 +511,12 @@ pub struct Memory {
     /// Defaults to `created_at` for new memories; updated automatically
     /// when `content` changes via `revise` or internal update paths.
     pub updated_at: DateTime<Utc>,
+    /// Opaque optimistic-concurrency token for user-visible record changes.
+    /// Kept separate from `updated_at` so metadata-only edits do not affect
+    /// content freshness. It is available to native store implementations but
+    /// omitted from serialized wire responses.
+    #[serde(skip)]
+    pub record_revision: i64,
     /// When this memory expires (if ever).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
@@ -572,6 +578,7 @@ impl Memory {
             access_policy,
             created_at: now,
             updated_at: now,
+            record_revision: 0_i64,
             expires_at: None,
             has_embedding: false,
             memory_type: MemoryType::default(),
@@ -667,6 +674,15 @@ impl Memory {
         }
     }
 
+    /// Return the optimistic-concurrency token for a full-access record.
+    ///
+    /// Redacted views do not expose the token because changes to hidden fields
+    /// could otherwise be inferred from it.
+    #[must_use]
+    pub const fn optimistic_revision(&self) -> Option<i64> {
+        if self.was_redacted { None } else { Some(self.record_revision) }
+    }
+
     /// Apply field-level redaction based on this memory's access policy.
     ///
     /// Always-visible fields: `id`, `access_policy`, `created_at`, `has_embedding`, `importance`.
@@ -715,6 +731,7 @@ impl Memory {
             importance,
             confidence,
             updated_at,
+            record_revision: 0_i64,
             superseded_by,
             activity_mass,
             last_used_at,
@@ -1518,6 +1535,7 @@ mod tests {
             access_policy: AccessPolicy::Public,
             created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
             updated_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
+            record_revision: 0_i64,
             expires_at: None,
             has_embedding: false,
             memory_type: MemoryType::default(),
@@ -1550,6 +1568,7 @@ mod tests {
             access_policy: policy,
             created_at: DateTime::<Utc>::UNIX_EPOCH,
             updated_at: DateTime::<Utc>::UNIX_EPOCH,
+            record_revision: 0_i64,
             expires_at: None,
             has_embedding: false,
             memory_type: MemoryType::default(),
@@ -1665,6 +1684,8 @@ mod tests {
         let custom_last_used = Utc.with_ymd_and_hms(2030, 1, 3, 0, 0, 0).unwrap();
         let superseder = MemoryId::new();
         mem.updated_at = custom_updated;
+        mem.record_revision = 42_i64;
+        assert_eq!(mem.optimistic_revision(), Some(42_i64));
         mem.confidence = Confidence::new(0.2_f64);
         mem.impression_count = 99;
         mem.last_impressed_at = Some(Utc.with_ymd_and_hms(2030, 1, 2, 0, 0, 0).unwrap());
@@ -1685,7 +1706,9 @@ mod tests {
         );
         assert_eq!(redacted.last_used_at, Some(custom_last_used), "last_used_at must be preserved for activity decay");
 
-        // Analytics-only fields are zeroed (not used by ranking).
+        // Internal and analytics-only fields are zeroed.
+        assert_eq!(redacted.record_revision, 0_i64);
+        assert_eq!(redacted.optimistic_revision(), None);
         assert_eq!(redacted.impression_count, 0);
         assert!(redacted.last_impressed_at.is_none());
     }

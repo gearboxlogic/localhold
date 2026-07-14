@@ -362,12 +362,13 @@ pub trait MemoryWriter: Send + Sync {
 
     /// Authorization-aware, optimistic-concurrency update with optional
     /// metadata and replacement embedding in one transaction. Replacement
-    /// content without a vector is committed as needing re-embedding.
+    /// content without a vector is committed as needing re-embedding. Obtain
+    /// `expected_revision` from [`Memory::optimistic_revision`].
     #[expect(clippy::too_many_arguments, reason = "atomic TUI revise needs revision, fields, metadata, embedding, principal, and audit")]
     fn update_authorized_if_unmodified_with_metadata_audited(
         &self,
         id: &MemoryId,
-        expected_updated_at: chrono::DateTime<chrono::Utc>,
+        expected_revision: i64,
         update: &MemoryUpdate,
         metadata_patch: Option<&MetadataPatch>,
         embedding: Option<&[f32]>,
@@ -382,11 +383,12 @@ pub trait MemoryWriter: Send + Sync {
     fn delete_authorized_audited(&self, id: &MemoryId, principal: &str, audit: &AuditDraft) -> impl Future<Output = Result<WriteOutcome, StoreError>> + Send;
 
     /// Authorization-aware delete that refuses to remove a memory whose
-    /// content revision changed after it was loaded.
+    /// record revision changed after it was loaded. Obtain `expected_revision`
+    /// from [`Memory::optimistic_revision`].
     fn delete_authorized_if_unmodified_audited(
         &self,
         id: &MemoryId,
-        expected_updated_at: chrono::DateTime<chrono::Utc>,
+        expected_revision: i64,
         principal: &str,
         audit: &AuditDraft,
     ) -> impl Future<Output = Result<WriteOutcome, StoreError>> + Send;
@@ -538,6 +540,8 @@ pub trait MemoryAdmin: Send + Sync {
 
 /// Combined trait for full memory store access: read, write, and admin.
 ///
+/// Implementations must populate and advance [`Memory::record_revision`] for
+/// every user-visible record mutation so optimistic writes remain sound.
 /// Automatically implemented for any type that implements all three sub-traits.
 pub trait MemoryStore: MemoryReader + MemoryWriter + MemoryAdmin {}
 

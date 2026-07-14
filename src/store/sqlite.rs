@@ -26,8 +26,9 @@ use crate::{
     store::schema::{
         MAIN_DDL, TRIGGER_DDL, existing_embedding_dimensions, migrate_create_audit_log, migrate_create_fts_index, migrate_create_memory_entities, migrate_create_memory_tombstones,
         migrate_create_metadata, migrate_create_scope_registry, migrate_memories_add_activity_tracking, migrate_memories_add_confidence, migrate_memories_add_embedding_claims,
-        migrate_memories_add_embedding_revision, migrate_memories_add_importance, migrate_memories_add_memory_type, migrate_memories_add_superseded_by,
-        migrate_memories_add_updated_at, migrate_memories_align_impression_tracking, migrate_memories_backfill_origin_conversation, migrate_memory_embedding_map_fk,
+        migrate_memories_add_embedding_revision, migrate_memories_add_importance, migrate_memories_add_memory_type, migrate_memories_add_record_revision,
+        migrate_memories_add_superseded_by, migrate_memories_add_updated_at, migrate_memories_align_impression_tracking, migrate_memories_backfill_origin_conversation,
+        migrate_memory_embedding_map_fk,
     },
     types::{
         AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MemoryTombstone, MemoryUpdate,
@@ -117,6 +118,28 @@ impl SqliteStore {
         };
         store.init_schema()?;
         Ok(store)
+    }
+
+    /// Upgrade a private restore staging database through the normal schema migrations.
+    ///
+    /// The caller must validate the source contract before invoking this helper.
+    pub(crate) fn migrate_restore_stage(path: &Path, embedding_dimensions: usize) -> Result<(), StoreError> {
+        Self::register_extension()?;
+        let conn = Connection::open(path)?;
+        conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+        conn.pragma_update(None, "journal_mode", "DELETE")?;
+        conn.pragma_update(None, "foreign_keys", true)?;
+        let store = Self {
+            inner: Arc::new(SqliteInner {
+                conn: Mutex::new(conn),
+                clock: Arc::new(SystemClock::new()),
+                vector_index: SqliteVecIndex::new(embedding_dimensions),
+                fts_available: AtomicBool::new(false),
+                active_embedding_profile: RwLock::new(None),
+                _database_lease: None,
+            }),
+        };
+        store.init_schema()
     }
 
     /// Open an existing, current-schema SQLite store without creating files or
@@ -249,6 +272,7 @@ impl SqliteStore {
         };
         self.inner.vector_index.init_schema(&conn)?;
         migrate_memories_add_embedding_revision(&conn).map_err(|e| migration_failed("add_embedding_revision", e))?;
+        migrate_memories_add_record_revision(&conn).map_err(|e| migration_failed("add_record_revision", e))?;
         migrate_memories_add_embedding_claims(&conn).map_err(|e| migration_failed("add_embedding_claims", e))?;
         migrate_memories_backfill_origin_conversation(&conn).map_err(|e| migration_failed("backfill_origin_conversation", e))?;
         migrate_memory_embedding_map_fk(&conn).map_err(|e| migration_failed("memory_embedding_map_fk", e))?;
@@ -266,6 +290,8 @@ impl SqliteStore {
         if first_pass_failed {
             conn.execute_batch(MAIN_DDL).map_err(|e| migration_failed("main_ddl_retry", e))?;
         }
+        conn.execute_batch("DROP TRIGGER IF EXISTS trg_memory_clear_superseded_by")
+            .map_err(|e| migration_failed("refresh_superseded_trigger", e))?;
         conn.execute_batch(TRIGGER_DDL).map_err(|e| migration_failed("trigger_ddl", e))?;
 
         let fts_available = migrate_create_fts_index(&conn).map_err(|e| migration_failed("create_fts_index", e))?;
@@ -668,14 +694,14 @@ impl MemoryWriter for SqliteStore {
     async fn update_authorized_if_unmodified_with_metadata_audited(
         &self,
         id: &MemoryId,
-        expected_updated_at: chrono::DateTime<chrono::Utc>,
+        expected_revision: i64,
         update: &MemoryUpdate,
         metadata_patch: Option<&crate::types::MetadataPatch>,
         embedding: Option<&[f32]>,
         principal: &str,
         audit: &AuditDraft,
     ) -> Result<AuthorizedUpdateOutcome, StoreError> {
-        self.update_authorized_if_unmodified_with_metadata_audited_impl(id, expected_updated_at, update, metadata_patch, embedding, principal, audit)
+        self.update_authorized_if_unmodified_with_metadata_audited_impl(id, expected_revision, update, metadata_patch, embedding, principal, audit)
             .await
     }
 
@@ -687,14 +713,8 @@ impl MemoryWriter for SqliteStore {
         self.delete_authorized_audited_impl(id, principal, Some(audit)).await
     }
 
-    async fn delete_authorized_if_unmodified_audited(
-        &self,
-        id: &MemoryId,
-        expected_updated_at: chrono::DateTime<chrono::Utc>,
-        principal: &str,
-        audit: &AuditDraft,
-    ) -> Result<WriteOutcome, StoreError> {
-        self.delete_authorized_if_unmodified_audited_impl(id, expected_updated_at, principal, audit).await
+    async fn delete_authorized_if_unmodified_audited(&self, id: &MemoryId, expected_revision: i64, principal: &str, audit: &AuditDraft) -> Result<WriteOutcome, StoreError> {
+        self.delete_authorized_if_unmodified_audited_impl(id, expected_revision, principal, audit).await
     }
 
     async fn bulk_delete_ids(&self, ids: Vec<MemoryId>, principal: &str) -> Result<super::BulkAuthOutcome, StoreError> {
@@ -822,8 +842,8 @@ mod tests {
     use crate::{
         clock::MockClock,
         store::schema::{
-            migrate_memories_add_embedding_revision, migrate_memories_add_importance, migrate_memories_add_memory_type, migrate_memories_add_superseded_by,
-            migrate_memories_align_impression_tracking, migrate_memories_backfill_origin_conversation, migrate_memory_embedding_map_fk,
+            migrate_memories_add_embedding_revision, migrate_memories_add_importance, migrate_memories_add_memory_type, migrate_memories_add_record_revision,
+            migrate_memories_add_superseded_by, migrate_memories_align_impression_tracking, migrate_memories_backfill_origin_conversation, migrate_memory_embedding_map_fk,
         },
         types::{AccessPolicy, Entity, Provenance, RedactableField, ScopeDefinition},
     };
@@ -846,6 +866,7 @@ mod tests {
             access_policy: AccessPolicy::Public,
             created_at: now,
             updated_at: now,
+            record_revision: 0_i64,
             expires_at: None,
             has_embedding: false,
             memory_type: crate::types::MemoryType::default(),
@@ -2225,6 +2246,26 @@ mod tests {
             .query_row("SELECT embedding_revision FROM memories WHERE id = '01H00000000000000000000000'", [], |row| row.get(0))
             .unwrap();
         assert_eq!(revision, 0);
+    }
+
+    #[test]
+    fn migrate_adds_record_revision_to_legacy_memories_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE memories (id TEXT PRIMARY KEY)", []).unwrap();
+        conn.execute("INSERT INTO memories (id) VALUES ('01H00000000000000000000000')", []).unwrap();
+
+        migrate_memories_add_record_revision(&conn).unwrap();
+
+        let definition: (i64, Option<String>) = conn
+            .query_row(
+                r#"SELECT "notnull", dflt_value FROM pragma_table_info('memories') WHERE name = 'record_revision'"#,
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(definition, (1_i64, Some("0".into())));
+        let revision: i64 = conn.query_row("SELECT record_revision FROM memories", [], |row| row.get(0)).unwrap();
+        assert_eq!(revision, 0_i64);
     }
 
     #[test]

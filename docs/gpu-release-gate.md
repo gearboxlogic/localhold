@@ -1,0 +1,130 @@
+# Real-GPU Reranker Release Gate
+
+CUDA artifacts must not be published from compilation evidence alone. The
+release gate runs the packaged `hold` binary on a protected Linux NVIDIA runner
+and records real inference, ranking parity, performance, and resource evidence.
+
+## Runner isolation
+
+The GPU workflow is intentionally unavailable to pull requests. Run it only
+from a protected `main` ref or protected release tag, on a runner carrying all
+of these labels:
+
+```text
+self-hosted, linux, x64, localhold-gpu-release
+```
+
+Attach the job to a protected `cuda-release` environment. Restrict environment
+approval and workflow dispatch to release maintainers, use an ephemeral runner
+when possible, and never register a general-purpose repository runner with the
+`localhold-gpu-release` label. The runner account needs read access only to a
+pinned ONNX Runtime/CUDA installation and a pre-populated, hash-verified model
+cache. It must not expose database credentials, agent configuration, signing
+keys, or unrelated services.
+
+The workflow uploads only sanitized gate JSON. Reports contain provider, precision,
+aggregate timing, throughput, RSS, VRAM, parity, thresholds, and failure text;
+they omit hostnames, GPU UUIDs, usernames, credentials, configuration paths,
+and model-cache paths. Negative-case evidence retains only the stable case,
+status, exit code, failure category, and reranker check status; raw doctor
+summaries and stderr remain ephemeral because they can contain configured paths.
+
+## Preparing artifacts
+
+Both managed artifacts must be fetched and verified before the offline gate:
+
+```sh
+LOCALHOLD_RERANKER_PRECISION=fp32 hold models fetch --yes --json
+LOCALHOLD_RERANKER_PRECISION=fp16 hold models fetch --yes --json
+```
+
+Fetch is a separate, audited preparation step. The release workflow uses
+`models verify` and fails when either artifact is absent or has the wrong
+SHA-256; the benchmark never downloads or repairs artifacts.
+
+Build and stage the exact protected commit:
+
+```sh
+./script/install.sh --profile cuda --prefix "$RUNNER_TEMP/localhold-gpu"
+```
+
+`ORT_DYLIB_PATH` and the platform loader path must select the supported ONNX
+Runtime 1.22 CUDA build and one consistent CUDA 12/cuDNN family.
+
+## Methodology
+
+`hold reranker gate` performs these checks in one machine-readable operation:
+
+1. Loads the fused FP32 artifact with explicit required CPU, performs health
+   inference, and scores a fixed six-query, sixteen-document corpus.
+2. Measures CPU request p50, p95, and document-pair throughput with one, four,
+   and eight concurrent clients after warmup.
+3. Loads the configured CUDA precision with explicit required CUDA, proves both
+   selected and active providers are CUDA, scores the same corpus, and measures
+   the same concurrency matrix.
+4. Compares top-k membership and per-pair scores against the FP32 CPU baseline.
+5. Records process high-water RSS from `/proc/self/status` and process VRAM from
+   `nvidia-smi` outside timed regions.
+6. Creates an `auto` session and requires real health inference to keep CUDA
+   selected and active.
+
+The session mutex deliberately remains part of the measurement: the reported
+numbers describe the packaged LocalHold behavior seen by concurrent callers,
+not an isolated ONNX kernel microbenchmark. Tokenization, queueing, inference,
+and result extraction are included. Model loading, warmup, resource sampling,
+and `nvidia-smi` execution are excluded from request latency.
+
+All elapsed-time measurement uses LocalHold's injectable monotonic clock. Unit
+tests therefore control time without wall-clock sleeps; release runs use the
+system implementation.
+
+## Thresholds
+
+The command has conservative portable defaults and exposes every release
+threshold as a CLI option:
+
+| Threshold | Default | Release use |
+| --- | ---: | --- |
+| Minimum top-10 overlap | 0.90 | FP32 should normally require 1.00; FP16 may use 0.90 while quality work continues. |
+| Maximum absolute score delta | 0.03 | Use 0.001 for FP32 and 0.03 for FP16. |
+| Maximum CUDA p95 | 1000 ms | Enforced independently at 1, 4, and 8 clients. Tighten per protected runner baseline. |
+| Minimum CUDA throughput | 50 pairs/s | Enforced independently at 1, 4, and 8 clients. Tighten per protected runner baseline. |
+| Maximum peak RSS | 3072 MiB | Covers the complete gate process, including model sessions. |
+| Maximum process VRAM | 2048 MiB | Requires an actual `nvidia-smi` process measurement. |
+
+Example FP32 release invocation:
+
+```sh
+LOCALHOLD_RERANKER_PRECISION=fp32 hold reranker gate \
+  --iterations 10 \
+  --warmup 3 \
+  --min-overlap 1.0 \
+  --max-score-delta 0.001 \
+  --max-p95-ms 1000 \
+  --min-throughput 50 \
+  --max-rss-mib 3072 \
+  --max-vram-mib 2048 \
+  --json
+```
+
+Run FP16 separately with `LOCALHOLD_RERANKER_PRECISION=fp16`, a 0.90 minimum
+overlap, and a 0.03 maximum score delta. FP16 evidence is a performance and
+parity guard, not proof of ranking-quality equivalence. Preserve the FP32
+report as its baseline and keep FP32 as the rollback artifact.
+
+Any unavailable metric is a gate failure. A threshold should change only in a
+reviewed commit with benchmark evidence and an explanation of the regression
+or intentional workload change; do not raise thresholds inside a release run.
+
+## Negative cases
+
+The protected workflow also verifies that:
+
+- hiding all CUDA devices makes the explicit required-CUDA gate fail;
+- an incompatible or missing ONNX Runtime path produces structured doctor JSON
+  without panic text on stderr;
+- model verification remains offline and rejects missing or modified files.
+
+Preserve the successful workflow run and uploaded JSON artifacts with the
+release record. CUDA publication must depend on that successful run for the
+exact tag commit.

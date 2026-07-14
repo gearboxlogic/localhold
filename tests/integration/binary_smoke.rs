@@ -93,6 +93,55 @@ fn sha256_hex(bytes: &[u8]) -> String {
     output
 }
 
+#[test]
+fn reranker_gate_help_is_offline_and_documents_thresholds() {
+    let output = Command::new(env!("CARGO_BIN_EXE_hold")).args(["reranker", "gate", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("CPU/CUDA parity"));
+    assert!(stdout.contains("--max-vram-mib"));
+    assert!(stdout.contains("one, four, and eight concurrent clients") || stdout.contains("concurrency"));
+}
+
+#[cfg(not(feature = "reranker-cuda"))]
+#[test]
+fn reranker_gate_requires_cuda_build_without_starting_server() {
+    let root = unique_db_path("reranker-gate-no-cuda").with_extension("root");
+    let (mut command, _config_dir) = config_binary_command(&root);
+    let output = command.args(["reranker", "gate", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("built with reranker-cuda"));
+    assert!(!root.exists(), "unsupported gate must not initialize configuration or storage");
+}
+
+#[cfg(feature = "reranker-cuda")]
+#[test]
+fn reranker_gate_invalid_threshold_is_structured_without_hardware_access() {
+    let root = unique_db_path("reranker-gate-invalid-threshold").with_extension("root");
+    let (mut command, _config_dir) = config_binary_command(&root);
+    let output = command.args(["reranker", "gate", "--iterations", "0", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1_u32);
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["failures"][0], "iterations per client must be greater than zero");
+    assert!(String::from_utf8(output.stderr).unwrap().is_empty());
+    assert!(!root.exists(), "invalid gate options must not initialize storage or model artifacts");
+}
+
+#[cfg(feature = "reranker-cuda")]
+#[test]
+fn reranker_gate_rejects_malformed_environment_override() {
+    let root = unique_db_path("reranker-gate-malformed-env").with_extension("root");
+    let (mut command, _config_dir) = config_binary_command(&root);
+    command.env("LOCALHOLD_RERANKER_PRECISION", "f16");
+    let output = command.args(["reranker", "gate", "--iterations", "0", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8(output.stderr).unwrap().contains("LOCALHOLD_* environment override is malformed"));
+    assert!(!root.exists(), "malformed gate configuration must not initialize storage or model artifacts");
+}
+
 #[cfg(feature = "reranker")]
 fn read_http_request_headers(stream: &mut impl Read) -> std::io::Result<Vec<u8>> {
     const MAX_HEADER_BYTES: usize = 16 * 1024;

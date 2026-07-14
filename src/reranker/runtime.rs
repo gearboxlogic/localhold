@@ -206,12 +206,11 @@ fn commit_ort_environment_without_panic_output(dynamic_ort_path: Option<&std::pa
         }
     }));
     #[cfg(feature = "reranker-cuda")]
-    let initialized =
-        std::panic::catch_unwind(|| dynamic_ort_path.map_or_else(|| Ok(ort::init().commit()), |path| ort::init_from(path).map(ort::environment::EnvironmentBuilder::commit)));
+    let initialized = std::panic::catch_unwind(|| dynamic_ort_path.map_or_else(|| ort::init().commit(), |path| ort::init_from(path.to_string_lossy()).commit()));
     #[cfg(not(feature = "reranker-cuda"))]
     let _ = dynamic_ort_path;
     #[cfg(not(feature = "reranker-cuda"))]
-    let initialized = std::panic::catch_unwind(|| Ok(ort::init().commit()));
+    let initialized = std::panic::catch_unwind(|| ort::init().commit());
     std::panic::set_hook(Box::new(move |panic_info| previous_hook(panic_info)));
     initialized
 }
@@ -276,7 +275,7 @@ fn preload_bundled_cuda_dependencies(directory: &std::path::Path) -> Result<(), 
     // inherits an unrelated system CUDA or cuDNN installation. ORT's helper
     // owns the provider dependency order; the two JIT support libraries and
     // cuDNN CNN module are runtime-loaded transitive dependencies outside the
-    // helper's list in ort 2.0.0-rc.11.
+    // helper's list in the pinned ort bindings.
     for library in ["libnvJitLink.so.12", "libnvrtc-builtins.so.12.8"] {
         preload_bundled_library(directory, library)?;
     }

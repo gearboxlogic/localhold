@@ -157,10 +157,16 @@ Build and install the CUDA reranker variant with:
 
 This compiles ONNX Runtime's CUDA execution provider alongside CPU support. The
 runtime `execution_provider` policy selects which provider is used; building
-the CUDA profile alone does not claim that CUDA is active. The current `ort
-2.0.0-rc.11` integration targets the ONNX Runtime 1.23 ABI. Install a
+the CUDA profile alone does not claim that CUDA is active. The pinned `ort
+2.0.0-rc.10` bindings request ONNX Runtime's stable v22 C API. The CUDA profile
+loads ONNX Runtime 1.23, which retains that earlier API table; this keeps the
+standard CPU build compatible with the Ubuntu 22.04/glibc 2.35 release floor
+without weakening the CUDA runtime pin. LocalHold suppresses the binding's
+conservative newer-version warning after that API table is obtained; loader,
+provider, and ONNX Runtime session diagnostics remain visible. Install a
 CUDA-enabled ONNX Runtime 1.23 build plus the CUDA and cuDNN versions required
-by that build, then set `ORT_DYLIB_PATH` to the absolute path of
+by that build, then set
+`ORT_DYLIB_PATH` to the absolute path of
 `libonnxruntime.so` when it is outside the dynamic loader's normal search path.
 `hold doctor` reports this as a failed reranker check with loader guidance when
 the library is not discoverable; it must not terminate with an ONNX loader panic.

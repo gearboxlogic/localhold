@@ -22,7 +22,12 @@ use localhold::{
 };
 use rmcp::ServiceExt as _;
 use tokio::sync::Notify;
-use tracing::{info, warn};
+use tracing::{Event, Subscriber, info, warn};
+use tracing_subscriber::{
+    Layer as _,
+    layer::{Context as LayerContext, Filter as LayerFilter, SubscriberExt as _},
+    util::SubscriberInitExt as _,
+};
 
 type AppResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 type CliExitResult = Result<i32, Box<dyn std::error::Error + Send + Sync>>;
@@ -65,7 +70,11 @@ async fn main() -> AppResult {
 
     // Init tracing to stderr (stdout is reserved for MCP stdio transport)
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| parse_log_level(&config.server.log_level));
-    tracing_subscriber::fmt().with_writer(std::io::stderr).with_env_filter(env_filter).init();
+    let formatting = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(env_filter)
+        .with_filter(ExpectedOrtVersionWarningFilter);
+    tracing_subscriber::registry().with(formatting).init();
 
     info!("localhold starting up");
     let embedding_profile = active_embedding_profile(&config.embedding);
@@ -659,6 +668,49 @@ fn parse_log_level(level: &str) -> tracing_subscriber::EnvFilter {
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ExpectedOrtVersionWarningFilter;
+
+impl<S: Subscriber> LayerFilter<S> for ExpectedOrtVersionWarningFilter {
+    fn enabled(&self, _metadata: &tracing::Metadata<'_>, _context: &LayerContext<'_, S>) -> bool {
+        true
+    }
+
+    fn event_enabled(&self, event: &Event<'_>, _context: &LayerContext<'_, S>) -> bool {
+        let metadata = event.metadata();
+        if metadata.target() != "ort" || *metadata.level() != tracing::Level::WARN {
+            return true;
+        }
+
+        let mut visitor = EventMessageVisitor::default();
+        event.record(&mut visitor);
+        should_emit_runtime_log(metadata.target(), *metadata.level(), visitor.message.as_deref())
+    }
+}
+
+#[derive(Default)]
+struct EventMessageVisitor {
+    message: Option<String>,
+}
+
+impl tracing::field::Visit for EventMessageVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = Some(format!("{value:?}"));
+        }
+    }
+}
+
+fn should_emit_runtime_log(target: &str, level: tracing::Level, message: Option<&str>) -> bool {
+    // ort rc.10 conservatively warns whenever GetVersionString is newer than
+    // its compile-time minor version, even after the requested v22 C API was
+    // returned successfully. CUDA deliberately uses that stable API from ORT
+    // 1.23. Keep actual runtime diagnostics from `ort::logging` and all errors.
+    !(target == "ort"
+        && level == tracing::Level::WARN
+        && message.is_some_and(|message| message.contains("may have compatibility issues with the ONNX Runtime binary") && message.contains("expected GetVersionString")))
+}
+
 async fn run_with_shutdown<T, E, Run, ShutdownFn, ShutdownFut>(run: Run, shutdown: ShutdownFn) -> Result<T, E>
 where
     Run: IntoFuture<Output = Result<T, E>>,
@@ -748,11 +800,20 @@ mod tests {
         types::{AccessPolicy, Memory, Provenance},
     };
 
-    use super::{drain_unembedded, run_with_shutdown};
+    use super::{drain_unembedded, run_with_shutdown, should_emit_runtime_log};
     #[cfg(feature = "reranker-cuda")]
     use super::{gate_mib_to_bytes, parse_gate_value};
 
     struct FixedEmbedding;
+
+    #[test]
+    fn runtime_log_filter_only_suppresses_conservative_ort_version_warning_target() {
+        let compatibility_warning = "ort may have compatibility issues with the ONNX Runtime binary; expected GetVersionString";
+        assert!(!should_emit_runtime_log("ort", tracing::Level::WARN, Some(compatibility_warning)));
+        assert!(should_emit_runtime_log("ort", tracing::Level::WARN, Some("a different warning")));
+        assert!(should_emit_runtime_log("ort", tracing::Level::ERROR, Some(compatibility_warning)));
+        assert!(should_emit_runtime_log("ort::logging", tracing::Level::WARN, Some(compatibility_warning)));
+    }
 
     impl EmbeddingProvider for FixedEmbedding {
         fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, EmbeddingError>> {

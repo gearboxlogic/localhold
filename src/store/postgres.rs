@@ -16,7 +16,7 @@ use sqlx_postgres::{PgPool, PgPoolOptions, PgRow, Postgres};
 use super::{
     BulkAuthOutcome, EmbeddingMap, EmbeddingNeighbor, EmbeddingProfile, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter, ReassignScopeOutcome, RecordUseOutcome,
     ReembedClaim, merge_metadata_patch,
-    migration::reject_retired_postgres_schema,
+    migration::{reject_retired_postgres_schema, validate_existing_postgres_schema},
     query::{
         DEFAULT_LIST_LIMIT, MAX_SCAN_ROWS, MAX_VEC_CANDIDATES, OVERFETCH_FACTOR, apply_access_policy_for_filter, escape_like, normalize_filter, sort_by_distance, usize_to_i64,
     },
@@ -226,6 +226,42 @@ impl PostgresStore {
         })
     }
 
+    /// Open an existing, current-schema `PostgreSQL` store with read-only
+    /// sessions and without running migrations.
+    ///
+    /// # Errors
+    ///
+    /// Returns a store error if the database is uninitialized, needs migration,
+    /// has incompatible embedding dimensions, or cannot be opened read-only.
+    pub async fn open_read_only_with_clock(config: &PostgresDatabaseConfig, embedding_dimensions: usize, clock: Arc<dyn Clock>) -> Result<Self, StoreError> {
+        validate_bootstrap_inputs(config, embedding_dimensions)?;
+        let pool = PgPoolOptions::new()
+            .max_connections(config.max_connections)
+            .after_connect(|connection, _metadata| {
+                Box::pin(async move {
+                    let _read_only = sqlx::query("SET default_transaction_read_only = on").execute(connection).await?;
+                    Ok(())
+                })
+            })
+            .connect(&config.url)
+            .await?;
+        let initialized: bool = sqlx::query_scalar("SELECT to_regclass('memories') IS NOT NULL").fetch_one(&pool).await?;
+        if !initialized {
+            return Err(StoreError::Conflict(
+                "PostgreSQL database is not initialized; start LocalHold once to create the current schema".into(),
+            ));
+        }
+        validate_existing_postgres_schema(&pool, embedding_dimensions, true, true).await?;
+        Ok(Self {
+            inner: Arc::new(PostgresInner {
+                pool,
+                embedding_dimensions,
+                clock,
+                active_embedding_profile: parking_lot::RwLock::new(None),
+            }),
+        })
+    }
+
     /// Configured embedding dimensions for this store.
     #[must_use]
     pub fn embedding_dimensions(&self) -> usize {
@@ -266,6 +302,30 @@ impl PostgresStore {
         }
         tx.commit().await?;
         *self.inner.active_embedding_profile.write() = Some(profile.clone());
+        Ok(())
+    }
+
+    /// Check vector-space identity without stamping a missing profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when stored vectors have unknown identity or the
+    /// configured profile differs from the stored profile.
+    pub async fn check_embedding_profile(&self, profile: &EmbeddingProfile) -> Result<(), StoreError> {
+        let mut tx = self.pool().begin().await?;
+        if let Some(existing) = read_embedding_profile_tx(&mut tx).await? {
+            if existing != *profile {
+                return Err(profile_mismatch(&existing, profile));
+            }
+        } else {
+            let vector_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_embeddings").fetch_one(&mut *tx).await?;
+            if vector_count > 0 {
+                return Err(StoreError::Conflict(
+                    "existing embeddings have no recorded provider/model identity; run `hold embeddings reindex --yes` before searching with an active embedding provider".into(),
+                ));
+            }
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -3377,6 +3437,27 @@ mod tests {
             .await
             .unwrap();
         assert!(has_tombstone_table, "bootstrap should create the tombstone table");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn read_only_open_validates_schema_and_rejects_writes_against_postgres() {
+        let url = std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
+        let config = PostgresDatabaseConfig {
+            url,
+            max_connections: 1,
+            auto_migrate: true,
+        };
+        drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+
+        let store = PostgresStore::open_read_only_with_clock(&config, 3_usize, Arc::new(SystemClock::new())).await.unwrap();
+        let setting: String = sqlx::query_scalar("SHOW default_transaction_read_only").fetch_one(store.pool()).await.unwrap();
+        assert_eq!(setting, "on");
+        let error = sqlx::query("INSERT INTO scope_registry (scope_key, display_name, updated_at) VALUES ('tui-read-only-test', 'TUI', NOW())")
+            .execute(store.pool())
+            .await
+            .unwrap_err();
+        assert_eq!(error.as_database_error().and_then(sqlx_core::error::DatabaseError::code).as_deref(), Some("25006"));
     }
 
     #[tokio::test]

@@ -246,7 +246,7 @@ where
         };
         #[expect(unused_results, reason = "JoinHandle intentionally dropped — the result arrives via the data channel")]
         tokio::spawn(async move {
-            let msg = match engine.search_memories(request).await {
+            let msg = match engine.search_memories_read_only(request).await {
                 Ok(outcome) => {
                     let mode = Some(outcome.search_mode);
                     let rows = outcome
@@ -295,6 +295,9 @@ where
             return Status::Held(format!("{count} memories"));
         }
         let mode = self.executed_mode.map_or_else(String::new, |mode| format!(" ({mode})"));
+        if count == 0_usize {
+            return Status::Note(format!("nothing found{mode}"));
+        }
         Status::Held(format!("{count} results{mode}"))
     }
 
@@ -387,15 +390,18 @@ where
     async fn open_detail(&mut self) {
         let Some(row) = self.rows.get(self.row_selected) else { return };
         let id = row.memory.id;
-        let audit = match self.engine.query_audit_log(&id, 20_usize).await {
-            Ok(entries) => entries,
-            Err(error) => {
-                self.status = Status::NotHeld(format!("history unavailable: {error}"));
-                Vec::new()
-            }
-        };
         match self.engine.get_memory(&id, self.principal.as_deref()).await {
             Ok(Some(memory)) => {
+                let mut audit = match self.engine.query_audit_log(&id, 20_usize).await {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        self.status = Status::NotHeld(format!("history unavailable: {error}"));
+                        Vec::new()
+                    }
+                };
+                if memory.was_redacted {
+                    redact_audit(&mut audit);
+                }
                 self.detail = Some(Detail { memory, audit, scroll: 0_u16 });
                 self.mode = Mode::Detail;
             }
@@ -450,6 +456,13 @@ where
     }
 }
 
+fn redact_audit(audit: &mut [AuditEntry]) {
+    for entry in audit {
+        entry.caller_agent = None;
+        entry.details = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -461,14 +474,14 @@ mod tests {
     };
     use tokio::sync::mpsc;
 
-    use super::{App, DataMsg, Mode, Status};
+    use super::{App, DataMsg, Mode, Row, Status};
     use crate::{
         config::{LimitsConfig, SearchConfig},
         embedding::{BoxFuture, EmbeddingProvider},
         engine::LocalHoldEngine,
         error::EmbeddingError,
-        store::{MemoryWriter as _, SqliteStore},
-        types::{AccessPolicy, Memory, Provenance},
+        store::{MemoryReader as _, MemoryWriter as _, SqliteStore},
+        types::{AccessPolicy, Memory, Provenance, RedactableField},
         ui::{theme::Theme, view},
     };
 
@@ -527,6 +540,47 @@ mod tests {
             app.rows.iter().any(|row| row.memory.content.contains("bastion")),
             "keyword search should surface the matching memory"
         );
+        let id = app.rows.iter().find(|row| row.memory.content.contains("bastion")).unwrap().memory.id;
+        let stored = app.engine.store().get(&id, None).await.unwrap().unwrap();
+        assert_eq!(stored.impression_count, 0_u64, "TUI search must not write analytics impressions");
+        assert!(stored.last_impressed_at.is_none(), "TUI search must not write impression timestamps");
+    }
+
+    #[tokio::test]
+    async fn empty_search_result_is_a_neutral_note() {
+        let (mut app, _rx) = app_with_memories(&[]).await;
+        app.query = "missing".into();
+        app.on_data(DataMsg::Rows {
+            rows: Vec::new(),
+            mode: Some(crate::types::SearchMode::Text),
+            generation: 0_u64,
+        });
+        assert!(matches!(app.status, Status::Note(_)), "zero matches must not be reported as held");
+    }
+
+    #[tokio::test]
+    async fn redacted_detail_hides_audit_principals() {
+        let store = SqliteStore::in_memory().unwrap();
+        let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
+        let mut memory = Memory::new_for_test("visible content".into(), Vec::new(), Provenance::default(), AccessPolicy::Public);
+        memory.provenance.source_agent = Some("owner".into());
+        memory.access_policy = AccessPolicy::Redacted {
+            visible_fields: vec![RedactableField::Content],
+        };
+        let id = engine.store_memory(memory.clone(), None).await.unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(engine, Theme::detect(), Some("outsider".into()), tx);
+        app.rows.push(Row { memory, score: None });
+
+        app.open_detail().await;
+
+        assert!(app.detail.is_some(), "redacted memory should remain visible");
+        let detail = app.detail.as_ref().unwrap();
+        assert!(detail.memory.was_redacted);
+        assert!(!detail.audit.is_empty(), "the store audit should be present before sanitization");
+        assert!(detail.audit.iter().all(|entry| entry.caller_agent.is_none()));
+        assert!(detail.audit.iter().all(|entry| entry.details.is_none()));
+        assert_eq!(detail.memory.id, id);
     }
 
     #[tokio::test]

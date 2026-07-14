@@ -900,9 +900,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+    use std::{
+        ffi::OsString,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
     };
 
     use localhold::{
@@ -914,7 +917,7 @@ mod tests {
         types::{AccessPolicy, Memory, Provenance},
     };
 
-    use super::{drain_unembedded, run_with_shutdown, should_emit_runtime_log};
+    use super::{drain_unembedded, parse_ui_principal, run_with_shutdown, should_emit_runtime_log};
     #[cfg(feature = "reranker-cuda")]
     use super::{gate_mib_to_bytes, parse_gate_value};
 
@@ -927,6 +930,12 @@ mod tests {
         assert!(should_emit_runtime_log("ort", tracing::Level::WARN, Some("a different warning")));
         assert!(should_emit_runtime_log("ort", tracing::Level::ERROR, Some(compatibility_warning)));
         assert!(should_emit_runtime_log("ort::logging", tracing::Level::WARN, Some(compatibility_warning)));
+    }
+
+    #[test]
+    fn ui_principal_flag_requires_a_value() {
+        let error = parse_ui_principal(&[OsString::from("--principal")], "usage").unwrap_err();
+        assert!(error.to_string().contains("--principal requires a value"));
     }
 
     impl EmbeddingProvider for FixedEmbedding {

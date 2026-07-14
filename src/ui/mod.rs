@@ -16,9 +16,10 @@ use tokio::sync::mpsc;
 
 use crate::{
     clock::{Clock, SystemClock},
-    config::{Config, DatabaseBackend},
-    embedding::factory::create_embedding_provider_with_clock,
+    config::{AnonymousPolicy, Config, DatabaseBackend},
+    embedding::factory::{active_embedding_profile, create_embedding_provider_with_clock},
     engine::LocalHoldEngine,
+    error::EngineError,
     store::{MemoryStore, PostgresStore, SqliteStore},
 };
 
@@ -52,11 +53,17 @@ pub async fn run(options: UiOptions) -> Result<i32, UiError> {
     match config.database.backend {
         DatabaseBackend::Sqlite => {
             let db_path = config.database.sqlite_path().to_path_buf();
-            let store = SqliteStore::open_with_clock(&db_path, config.embedding.dimensions(), Arc::clone(&clock))?;
+            let store = SqliteStore::open_read_only_with_clock(&db_path, config.embedding.dimensions(), Arc::clone(&clock))?;
+            if let Some(profile) = active_embedding_profile(&config.embedding) {
+                store.check_embedding_profile(&profile).await?;
+            }
             run_with_store(store, config, clock, options).await
         }
         DatabaseBackend::Postgres => {
-            let store = PostgresStore::open_with_clock(&config.database.postgres, config.embedding.dimensions(), Arc::clone(&clock)).await?;
+            let store = PostgresStore::open_read_only_with_clock(&config.database.postgres, config.embedding.dimensions(), Arc::clone(&clock)).await?;
+            if let Some(profile) = active_embedding_profile(&config.embedding) {
+                store.check_embedding_profile(&profile).await?;
+            }
             run_with_store(store, config, clock, options).await
         }
     }
@@ -66,14 +73,69 @@ async fn run_with_store<S>(store: S, config: Config, clock: Arc<dyn Clock>, opti
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
-    let principal = options.principal.or_else(|| config.server.principal.clone());
+    let principal = resolve_principal(&config, options)?;
+
+    #[cfg(feature = "reranker")]
+    let reranker_config = config.search.reranker.clone();
+
+    #[cfg(not(feature = "reranker"))]
+    if config.search.reranker.enabled {
+        let requested = config.search.reranker.execution_provider;
+        if config.search.reranker.required {
+            return Err(localhold_reranker_unavailable(requested).into());
+        }
+        tracing::warn!(%requested, "reranker requested but this binary was compiled without reranker support; TUI search will not rerank");
+    }
+
     let embedding = create_embedding_provider_with_clock(&config.embedding, &config.limits, None, Arc::clone(&clock)).await;
-    let engine = LocalHoldEngine::new_with_clock(store, embedding, config.limits, config.search, clock);
+    let engine = LocalHoldEngine::new_with_clock(store, embedding, config.limits, config.search, Arc::clone(&clock));
+
+    #[cfg(feature = "reranker")]
+    let engine = if reranker_config.enabled {
+        match crate::reranker::runtime::initialize_with_retry_and_clock(&reranker_config, clock).await {
+            Ok(reranker) => engine.with_reranker(reranker.into_provider()),
+            Err(error) if reranker_config.required => return Err(error.into()),
+            Err(error) => {
+                tracing::warn!(%error, "optional TUI reranker initialization failed; search will continue without reranking");
+                engine
+            }
+        }
+    } else {
+        engine
+    };
+
     let terminal = ratatui::try_init()?;
-    let result = event_loop(terminal, engine.clone(), principal).await;
-    ratatui::restore();
+    let result = {
+        let _restore = TerminalRestoreGuard;
+        event_loop(terminal, engine.clone(), principal).await
+    };
     engine.shutdown().await;
     result
+}
+
+fn resolve_principal(config: &Config, options: UiOptions) -> Result<Option<String>, EngineError> {
+    let principal = options.principal.or_else(|| config.server.principal.clone());
+    if principal.is_none() && config.server.anonymous_policy == AnonymousPolicy::DenyAll {
+        return Err(EngineError::config(
+            "hold ui requires --principal or server.principal when server.anonymous_policy = deny_all",
+        ));
+    }
+    Ok(principal)
+}
+
+#[cfg(not(feature = "reranker"))]
+fn localhold_reranker_unavailable(requested: crate::config::RerankerExecutionProvider) -> crate::reranker::RerankerError {
+    crate::reranker::RerankerError::ProviderUnavailable(format!(
+        "{requested} was requested with reranker.required = true, but this binary was compiled without the `reranker` feature"
+    ))
+}
+
+struct TerminalRestoreGuard;
+
+impl Drop for TerminalRestoreGuard {
+    fn drop(&mut self) {
+        ratatui::restore();
+    }
 }
 
 #[expect(clippy::integer_division_remainder_used, reason = "false positive from tokio::select! macro expansion")]
@@ -113,4 +175,20 @@ fn spawn_input_reader(tx: mpsc::UnboundedSender<Event>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deny_all_requires_a_ui_principal() {
+        let mut config = Config::default();
+        config.server.principal = None;
+        config.server.anonymous_policy = AnonymousPolicy::DenyAll;
+
+        let error = resolve_principal(&config, UiOptions::default()).unwrap_err();
+        assert!(error.to_string().contains("requires --principal"));
+        assert_eq!(resolve_principal(&config, UiOptions::new(Some("operator".into()))).unwrap().as_deref(), Some("operator"));
+    }
 }

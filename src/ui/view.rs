@@ -138,7 +138,9 @@ where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
     let width = usize::from(area.width);
-    let pattern: String = BATTLEMENT_UNIT.repeat(width).chars().take(width).collect();
+    let unit_width = BATTLEMENT_UNIT.chars().count();
+    let repetitions = width.div_ceil(unit_width);
+    let pattern: String = BATTLEMENT_UNIT.repeat(repetitions).chars().take(width).collect();
     frame.render_widget(Paragraph::new(Span::styled(pattern, app.theme.accent().dim())), area);
 }
 

@@ -17,7 +17,7 @@ use sqlite_vec::sqlite3_vec_init;
 use super::{
     EmbeddingProfile, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter,
     migration::{reject_retired_sqlite_schema, validate_sqlite_source_schema},
-    sqlite_lease::SqliteDatabaseLease,
+    sqlite_lease::{SqliteDatabaseLease, database_identity},
     vector::{SqliteVecIndex, VectorIndex as _},
 };
 use crate::{
@@ -132,7 +132,7 @@ impl SqliteStore {
             return Err(StoreError::Conflict(format!("SQLite database does not exist: {}", path.display())));
         }
         let database_lease = SqliteDatabaseLease::shared(path)?;
-        if sqlite_wal_requires_shm_creation(path) {
+        if sqlite_wal_requires_shm_creation(path)? {
             return Err(StoreError::Conflict(
                 "SQLite WAL exists without its shared-memory sidecar; refusing a read-only open that could create files".into(),
             ));
@@ -397,12 +397,13 @@ impl SqliteStore {
     }
 }
 
-fn sqlite_wal_requires_shm_creation(path: &Path) -> bool {
-    let mut wal = path.as_os_str().to_os_string();
+fn sqlite_wal_requires_shm_creation(path: &Path) -> Result<bool, StoreError> {
+    let database = database_identity(path).map_err(|error| StoreError::Database(Box::new(error)))?;
+    let mut wal = database.as_os_str().to_os_string();
     wal.push("-wal");
-    let mut shm = path.as_os_str().to_os_string();
+    let mut shm = database.as_os_str().to_os_string();
     shm.push("-shm");
-    Path::new(&wal).exists() && !Path::new(&shm).exists()
+    Ok(Path::new(&wal).exists() && !Path::new(&shm).exists())
 }
 
 pub(crate) fn verify_embedding_profile_conn(conn: &mut Connection, profile: &EmbeddingProfile) -> Result<(), StoreError> {
@@ -880,6 +881,27 @@ mod tests {
             })
             .unwrap();
         assert!(!memories_exist, "read-only open must not bootstrap an outdated database");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_open_checks_wal_sidecars_beside_a_symlink_target() {
+        use std::{fs::File, os::unix::fs::symlink};
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("current.db");
+        drop(SqliteStore::open(&target, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap());
+        let alias = directory.path().join("alias.db");
+        symlink(&target, &alias).unwrap();
+        let target_wal = directory.path().join("current.db-wal");
+        let target_shm = directory.path().join("current.db-shm");
+        let _wal = File::create(&target_wal).unwrap();
+        assert!(!target_shm.exists());
+
+        let error = SqliteStore::open_read_only_with_clock(&alias, SqliteStore::DEFAULT_TEST_DIMENSIONS, Arc::new(MockClock::new())).unwrap_err();
+
+        assert!(error.to_string().contains("WAL exists without its shared-memory sidecar"), "{error}");
+        assert!(!target_shm.exists(), "the rejected read-only open must not create a target-side SHM file");
     }
 
     #[tokio::test]

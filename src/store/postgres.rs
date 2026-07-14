@@ -245,7 +245,9 @@ impl PostgresStore {
             })
             .connect(&config.url)
             .await?;
-        let initialized: bool = sqlx::query_scalar("SELECT to_regclass('memories') IS NOT NULL").fetch_one(&pool).await?;
+        let initialized: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'memories')) IS NOT NULL")
+            .fetch_one(&pool)
+            .await?;
         if !initialized {
             return Err(StoreError::Conflict(
                 "PostgreSQL database is not initialized; start LocalHold once to create the current schema".into(),
@@ -3458,6 +3460,35 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.as_database_error().and_then(sqlx_core::error::DatabaseError::code).as_deref(), Some("25006"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn read_only_open_rejects_an_empty_current_schema_before_public() {
+        let url = std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
+        let config = PostgresDatabaseConfig {
+            url: url.clone(),
+            max_connections: 1,
+            auto_migrate: true,
+        };
+        drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+
+        let schema = format!("localhold_ui_empty_{}", MemoryId::new().to_string().to_lowercase());
+        let admin = PgPoolOptions::new().max_connections(1).connect(&url).await.unwrap();
+        let _created = sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}"))).execute(&admin).await.unwrap();
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let scoped_config = PostgresDatabaseConfig {
+            url: format!("{url}{separator}options=-csearch_path%3D{schema}%2Cpublic"),
+            max_connections: 1,
+            auto_migrate: false,
+        };
+
+        let error = PostgresStore::open_read_only_with_clock(&scoped_config, 3_usize, Arc::new(SystemClock::new()))
+            .await
+            .unwrap_err();
+
+        let _dropped = sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema}"))).execute(&admin).await.unwrap();
+        assert!(error.to_string().contains("not initialized"), "{error}");
     }
 
     #[tokio::test]

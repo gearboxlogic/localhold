@@ -48,7 +48,7 @@ fn lock_path(database_path: &Path) -> Result<PathBuf, std::io::Error> {
     Ok(PathBuf::from(path))
 }
 
-fn database_identity(database_path: &Path) -> Result<PathBuf, std::io::Error> {
+pub(crate) fn database_identity(database_path: &Path) -> Result<PathBuf, std::io::Error> {
     let mut candidate = database_path.to_path_buf();
     for _depth in 0_u8..40_u8 {
         match candidate.symlink_metadata() {

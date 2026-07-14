@@ -114,7 +114,10 @@ where
 }
 
 fn resolve_principal(config: &Config, options: UiOptions) -> Result<Option<String>, EngineError> {
-    let principal = options.principal.or_else(|| config.server.principal.clone());
+    let principal = options.principal.or_else(|| config.server.principal.clone()).and_then(|principal| {
+        let principal = principal.trim();
+        (!principal.is_empty()).then(|| principal.to_owned())
+    });
     if principal.is_none() && config.server.anonymous_policy == AnonymousPolicy::DenyAll {
         return Err(EngineError::config(
             "hold ui requires --principal or server.principal when server.anonymous_policy = deny_all",
@@ -189,6 +192,11 @@ mod tests {
 
         let error = resolve_principal(&config, UiOptions::default()).unwrap_err();
         assert!(error.to_string().contains("requires --principal"));
-        assert_eq!(resolve_principal(&config, UiOptions::new(Some("operator".into()))).unwrap().as_deref(), Some("operator"));
+        let error = resolve_principal(&config, UiOptions::new(Some(" \t ".into()))).unwrap_err();
+        assert!(error.to_string().contains("requires --principal"));
+        assert_eq!(
+            resolve_principal(&config, UiOptions::new(Some("  operator  ".into()))).unwrap().as_deref(),
+            Some("operator")
+        );
     }
 }

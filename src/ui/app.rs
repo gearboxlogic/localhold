@@ -272,7 +272,13 @@ where
     pub(crate) fn on_data(&mut self, msg: DataMsg) {
         match msg {
             DataMsg::Rows { rows, mode, generation } if generation == self.generation => {
-                self.rows = rows;
+                self.rows = rows
+                    .into_iter()
+                    .map(|row| Row {
+                        memory: row.memory.sanitize_for_wire(),
+                        score: row.score,
+                    })
+                    .collect();
                 self.executed_mode = mode;
                 self.loading = false;
                 self.row_selected = self.row_selected.min(self.rows.len().saturating_sub(1_usize));
@@ -392,6 +398,7 @@ where
         let id = row.memory.id;
         match self.engine.get_memory(&id, self.principal.as_deref()).await {
             Ok(Some(memory)) => {
+                let memory = memory.sanitize_for_wire();
                 let mut audit = match self.engine.query_audit_log(&id, 20_usize).await {
                     Ok(entries) => entries,
                     Err(error) => {
@@ -564,6 +571,9 @@ mod tests {
         let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
         let mut memory = Memory::new_for_test("visible content".into(), Vec::new(), Provenance::default(), AccessPolicy::Public);
         memory.provenance.source_agent = Some("owner".into());
+        memory.updated_at += chrono::Duration::days(7_i64);
+        memory.confidence = crate::types::Confidence::new(0.2_f64);
+        memory.superseded_by = Some(crate::types::MemoryId::new());
         memory.access_policy = AccessPolicy::Redacted {
             visible_fields: vec![RedactableField::Content],
         };
@@ -580,6 +590,9 @@ mod tests {
         assert!(!detail.audit.is_empty(), "the store audit should be present before sanitization");
         assert!(detail.audit.iter().all(|entry| entry.caller_agent.is_none()));
         assert!(detail.audit.iter().all(|entry| entry.details.is_none()));
+        assert_eq!(detail.memory.updated_at, detail.memory.created_at);
+        assert_eq!(detail.memory.confidence, crate::types::Confidence::DEFAULT);
+        assert!(detail.memory.superseded_by.is_none());
         assert_eq!(detail.memory.id, id);
     }
 

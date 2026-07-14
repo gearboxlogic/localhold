@@ -131,6 +131,7 @@ impl SqliteStore {
         if !path.exists() {
             return Err(StoreError::Conflict(format!("SQLite database does not exist: {}", path.display())));
         }
+        let database_lease = SqliteDatabaseLease::shared(path)?;
         if sqlite_wal_requires_shm_creation(path) {
             return Err(StoreError::Conflict(
                 "SQLite WAL exists without its shared-memory sidecar; refusing a read-only open that could create files".into(),
@@ -148,7 +149,7 @@ impl SqliteStore {
                 vector_index: SqliteVecIndex::new(embedding_dimensions),
                 fts_available: AtomicBool::new(true),
                 active_embedding_profile: RwLock::new(None),
-                _database_lease: None,
+                _database_lease: Some(database_lease),
             }),
         })
     }
@@ -891,6 +892,10 @@ mod tests {
         drop(writable);
 
         let read_only = SqliteStore::open_read_only_with_clock(&path, SqliteStore::DEFAULT_TEST_DIMENSIONS, Arc::new(MockClock::new())).unwrap();
+        assert!(
+            matches!(SqliteDatabaseLease::try_exclusive(&path), Err(crate::store::sqlite_lease::ExclusiveLeaseError::InUse)),
+            "the read-only store must prevent replacement while its connection is live"
+        );
         assert!(read_only.get(&id, None).await.unwrap().is_some());
         read_only
             .check_embedding_profile(&embedding_profile("model-a", SqliteStore::DEFAULT_TEST_DIMENSIONS))
@@ -899,6 +904,10 @@ mod tests {
         let error = read_only.store(&make_memory("write attempt", &[], base_time()), None).await.unwrap_err();
         assert!(error.to_string().contains("readonly") || error.to_string().contains("read-only"));
         drop(read_only);
+        assert!(
+            SqliteDatabaseLease::try_exclusive(&path).is_ok(),
+            "dropping the read-only store must release its database lease"
+        );
 
         let connection = Connection::open(&path).unwrap();
         let profile_count: i64 = connection.query_row("SELECT COUNT(*) FROM embedding_profile", [], |row| row.get(0)).unwrap();

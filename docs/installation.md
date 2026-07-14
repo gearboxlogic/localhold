@@ -133,8 +133,8 @@ Build and install the CUDA reranker variant with:
 This compiles ONNX Runtime's CUDA execution provider alongside CPU support. The
 runtime `execution_provider` policy selects which provider is used; building
 the CUDA profile alone does not claim that CUDA is active. The current `ort
-2.0.0-rc.10` integration targets the ONNX Runtime 1.22 ABI. Install a
-CUDA-enabled ONNX Runtime 1.22 build plus the CUDA and cuDNN versions required
+2.0.0-rc.12` integration targets the ONNX Runtime 1.24 ABI. Install a
+CUDA-enabled ONNX Runtime 1.24 build plus the CUDA and cuDNN versions required
 by that build, then set `ORT_DYLIB_PATH` to the absolute path of
 `libonnxruntime.so` when it is outside the dynamic loader's normal search path.
 Embedding placement is independent: embeddings are produced by the configured

@@ -1,10 +1,10 @@
 //! Application state and update logic for `hold ui`.
 
-use std::fmt;
+use std::{fmt, future::Future, pin::Pin, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{OnceCell, mpsc::UnboundedSender};
 
 use crate::{
     engine::{LocalHoldEngine, SearchRequest},
@@ -123,14 +123,61 @@ pub(crate) enum DataMsg {
     },
 }
 
+pub(crate) type MutationEngineFuture<S> = Pin<Box<dyn Future<Output = Result<LocalHoldEngine<S>, String>> + Send>>;
+pub(crate) type MutationEngineFactory<S> = Arc<dyn Fn() -> MutationEngineFuture<S> + Send + Sync>;
+
+#[derive(Clone)]
+pub(crate) struct LazyMutationEngine<S>
+where
+    S: MemoryStore + Clone + fmt::Debug + 'static,
+{
+    engine: Arc<OnceCell<LocalHoldEngine<S>>>,
+    factory: MutationEngineFactory<S>,
+}
+
+impl<S> fmt::Debug for LazyMutationEngine<S>
+where
+    S: MemoryStore + Clone + fmt::Debug + 'static,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LazyMutationEngine")
+            .field("initialized", &self.engine.initialized())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<S> LazyMutationEngine<S>
+where
+    S: MemoryStore + Clone + fmt::Debug + 'static,
+{
+    pub(crate) fn new(factory: MutationEngineFactory<S>) -> Self {
+        Self {
+            engine: Arc::new(OnceCell::new()),
+            factory,
+        }
+    }
+
+    async fn get(&self) -> Result<&LocalHoldEngine<S>, String> {
+        self.engine.get_or_try_init(|| (self.factory)()).await
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        if let Some(engine) = self.engine.get() {
+            engine.shutdown().await;
+        }
+    }
+}
+
 /// TUI application state. Rendering reads it; `on_event`/`on_data` mutate it.
 #[derive(Debug)]
 pub(crate) struct App<S>
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
-    /// Engine connected to the configured backend.
+    /// Read-only engine connected to the configured backend.
     pub engine: LocalHoldEngine<S>,
+    /// Writable engine acquired and cached on the first explicit mutation.
+    pub mutation_engine: LazyMutationEngine<S>,
     /// Sender that spawned data tasks report back through.
     pub data_tx: UnboundedSender<DataMsg>,
     /// Read-visibility principal.
@@ -181,11 +228,29 @@ impl<S> App<S>
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
-    /// Build the initial state around a connected engine.
+    /// Build state around one engine for focused state-machine tests.
+    #[cfg(test)]
     pub(crate) fn new(engine: LocalHoldEngine<S>, theme: Theme, principal: Option<String>, data_tx: UnboundedSender<DataMsg>) -> Self {
+        let mutation_engine = engine.clone();
+        let factory: MutationEngineFactory<S> = Arc::new(move || {
+            let engine = mutation_engine.clone();
+            Box::pin(async move { Ok(engine) })
+        });
+        Self::new_with_mutation_factory(engine, theme, principal, data_tx, factory)
+    }
+
+    /// Build state with a writable engine that is opened only on first mutation.
+    pub(crate) fn new_with_mutation_factory(
+        engine: LocalHoldEngine<S>,
+        theme: Theme,
+        principal: Option<String>,
+        data_tx: UnboundedSender<DataMsg>,
+        mutation_factory: MutationEngineFactory<S>,
+    ) -> Self {
         let now = engine.now();
         Self {
             engine,
+            mutation_engine: LazyMutationEngine::new(mutation_factory),
             data_tx,
             principal,
             generation: 0_u64,
@@ -209,6 +274,11 @@ where
             loading: true,
             quit: false,
         }
+    }
+
+    /// Drain background work owned by the lazily opened mutation engine.
+    pub(crate) async fn shutdown_mutation_engine(&self) {
+        self.mutation_engine.shutdown().await;
     }
 
     /// Load scopes, then kick off the first bounded listing.
@@ -648,29 +718,32 @@ where
         let generation = self.operation_generation;
         self.pending = true;
         self.status = Status::Note("holding revision\u{2026}".into());
-        let engine = self.engine.clone();
+        let mutation_engine = self.mutation_engine.clone();
         let tx = self.data_tx.clone();
         let id = detail.memory.id;
         let expected_updated_at = detail.memory.updated_at;
         #[expect(unused_results, reason = "JoinHandle intentionally dropped — the result arrives via the data channel")]
         tokio::spawn(async move {
-            let msg = match engine
-                .update_memory_if_unmodified_with_metadata(id, expected_updated_at, parsed.update, parsed.metadata_patch, &principal)
-                .await
-            {
-                Ok(outcome) if outcome.outcome == WriteOutcome::Applied => refresh_updated_detail(&engine, id, &principal, generation).await,
-                Ok(outcome) => DataMsg::MutationFailed {
-                    message: match outcome.outcome {
-                        WriteOutcome::NotFound => "memory no longer exists".into(),
-                        WriteOutcome::Denied => "this principal cannot modify the selected memory".into(),
-                        WriteOutcome::Applied => "unexpected update outcome".into(),
+            let msg = match mutation_engine.get().await {
+                Ok(engine) => match engine
+                    .update_memory_if_unmodified_with_metadata(id, expected_updated_at, parsed.update, parsed.metadata_patch, &principal)
+                    .await
+                {
+                    Ok(outcome) if outcome.outcome == WriteOutcome::Applied => refresh_updated_detail(engine, id, &principal, generation).await,
+                    Ok(outcome) => DataMsg::MutationFailed {
+                        message: match outcome.outcome {
+                            WriteOutcome::NotFound => "memory no longer exists".into(),
+                            WriteOutcome::Denied => "this principal cannot modify the selected memory".into(),
+                            WriteOutcome::Applied => "unexpected update outcome".into(),
+                        },
+                        generation,
                     },
-                    generation,
+                    Err(error) => DataMsg::MutationFailed {
+                        message: error.to_string(),
+                        generation,
+                    },
                 },
-                Err(error) => DataMsg::MutationFailed {
-                    message: error.to_string(),
-                    generation,
-                },
+                Err(message) => DataMsg::MutationFailed { message, generation },
             };
             drop(tx.send(msg));
         });
@@ -689,26 +762,29 @@ where
         let generation = self.operation_generation;
         self.pending = true;
         self.status = Status::Note("forgetting memory\u{2026}".into());
-        let engine = self.engine.clone();
+        let mutation_engine = self.mutation_engine.clone();
         let tx = self.data_tx.clone();
         let id = detail.memory.id;
         let expected_updated_at = detail.memory.updated_at;
         #[expect(unused_results, reason = "JoinHandle intentionally dropped — the result arrives via the data channel")]
         tokio::spawn(async move {
-            let msg = match engine.delete_memory_if_unmodified(&id, expected_updated_at, &principal).await {
-                Ok(WriteOutcome::Applied) => DataMsg::Deleted { id, generation },
-                Ok(WriteOutcome::NotFound) => DataMsg::MutationFailed {
-                    message: "memory no longer exists".into(),
-                    generation,
+            let msg = match mutation_engine.get().await {
+                Ok(engine) => match engine.delete_memory_if_unmodified(&id, expected_updated_at, &principal).await {
+                    Ok(WriteOutcome::Applied) => DataMsg::Deleted { id, generation },
+                    Ok(WriteOutcome::NotFound) => DataMsg::MutationFailed {
+                        message: "memory no longer exists".into(),
+                        generation,
+                    },
+                    Ok(WriteOutcome::Denied) => DataMsg::MutationFailed {
+                        message: "this principal cannot delete the selected memory".into(),
+                        generation,
+                    },
+                    Err(error) => DataMsg::MutationFailed {
+                        message: error.to_string(),
+                        generation,
+                    },
                 },
-                Ok(WriteOutcome::Denied) => DataMsg::MutationFailed {
-                    message: "this principal cannot delete the selected memory".into(),
-                    generation,
-                },
-                Err(error) => DataMsg::MutationFailed {
-                    message: error.to_string(),
-                    generation,
-                },
+                Err(message) => DataMsg::MutationFailed { message, generation },
             };
             drop(tx.send(msg));
         });
@@ -822,7 +898,7 @@ mod tests {
     };
     use tokio::sync::mpsc;
 
-    use super::{App, DataMsg, Mode, Row, Status};
+    use super::{App, DataMsg, Mode, MutationEngineFactory, Row, Status};
     use crate::{
         config::{LimitsConfig, SearchConfig},
         embedding::{BoxFuture, EmbeddingProvider},
@@ -1082,7 +1158,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embedding_failure_preserves_original_memory_and_draft() {
+    async fn browsing_does_not_initialize_the_mutation_engine() {
+        let store = SqliteStore::in_memory().unwrap();
+        let memory = Memory::new_for_test("lazy writer".into(), Vec::new(), Provenance::default(), AccessPolicy::Public);
+        let _id = store.store(&memory, None).await.unwrap();
+        let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
+        let writer_engine = engine.clone();
+        let opens = Arc::new(AtomicUsize::new(0_usize));
+        let factory_opens = Arc::clone(&opens);
+        let factory: MutationEngineFactory<SqliteStore> = Arc::new(move || {
+            let engine = writer_engine.clone();
+            let _previous = factory_opens.fetch_add(1_usize, Ordering::SeqCst);
+            Box::pin(std::future::ready(Ok(engine)))
+        });
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new_with_mutation_factory(engine, Theme::detect(), Some("operator".into()), tx, factory);
+
+        app.bootstrap().await;
+        app.on_data(rx.recv().await.unwrap());
+        app.on_event(press(KeyCode::Enter)).await;
+        assert_eq!(opens.load(Ordering::SeqCst), 0_usize, "browsing and opening detail must stay read-only");
+
+        app.on_event(press(KeyCode::Char('e'))).await;
+        app.edit.as_mut().unwrap().tags.value = "revised".into();
+        app.on_event(press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
+        app.on_data(rx.recv().await.unwrap());
+
+        assert_eq!(opens.load(Ordering::SeqCst), 1_usize, "the first explicit save should acquire one writable engine");
+    }
+
+    #[tokio::test]
+    async fn embedding_failure_saves_content_without_a_stale_vector() {
         let store = SqliteStore::in_memory().unwrap();
         let memory = Memory::new_for_test("original".into(), Vec::new(), Provenance::default(), AccessPolicy::Public);
         let id = store.store(&memory, None).await.unwrap();
@@ -1097,12 +1203,13 @@ mod tests {
         app.on_event(press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
         app.on_data(rx.recv().await.unwrap());
 
-        assert_eq!(app.mode, Mode::Edit);
-        assert!(app.edit.as_ref().unwrap().dirty());
-        assert!(matches!(app.status, Status::NotHeld(_)));
+        assert_eq!(app.mode, Mode::Detail);
+        assert!(app.edit.is_none());
+        assert!(matches!(app.status, Status::Held(_)));
         let stored = app.engine.store().get(&id, Some("operator")).await.unwrap().unwrap();
-        assert_eq!(stored.content, "original");
+        assert_eq!(stored.content, "rejected revision");
         assert!(!stored.has_embedding);
+        assert!(!app.engine.store().fetch_embeddings_for_ids(&[id]).await.unwrap().contains_key(&id));
     }
 
     #[tokio::test]

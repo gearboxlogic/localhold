@@ -497,6 +497,47 @@ where
     assert!(revised_metadata.summary.is_none());
     assert_eq!(revised_metadata.agent_label.as_deref(), Some("revised agent"));
 
+    let metadata_only_outcome = store
+        .update_authorized_if_unmodified_with_metadata_audited(
+            &interactive_id,
+            revised.updated_at,
+            &MemoryUpdate::default(),
+            Some(&MetadataPatch {
+                scope_key: None,
+                summary: Some("metadata revision".into()),
+                clear_summary: false,
+                agent_label: None,
+                clear_agent_label: false,
+            }),
+            None,
+            OWNER,
+            &replacement_audit,
+        )
+        .await
+        .unwrap();
+    assert_eq!(metadata_only_outcome.outcome, WriteOutcome::Applied);
+    let metadata_revised = store.get(&interactive_id, Some(OWNER)).await.unwrap().unwrap();
+    assert!(
+        metadata_revised.updated_at > revised.updated_at,
+        "metadata-only interactive edits must advance the optimistic revision"
+    );
+    let stale_metadata_error = store
+        .update_authorized_if_unmodified_with_metadata_audited(
+            &interactive_id,
+            revised.updated_at,
+            &MemoryUpdate {
+                importance: Some(Importance::new(0.4_f64)),
+                ..MemoryUpdate::default()
+            },
+            None,
+            None,
+            OWNER,
+            &replacement_audit,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(stale_metadata_error, StoreError::Conflict(_)));
+
     let stale_error = store
         .update_authorized_if_unmodified_with_metadata_audited(
             &interactive_id,
@@ -527,7 +568,7 @@ where
         .unwrap_err();
     assert!(matches!(stale_delete, StoreError::Conflict(_)));
     let delete_outcome = store
-        .delete_authorized_if_unmodified_audited(&interactive_id, revised.updated_at, OWNER, &delete_audit)
+        .delete_authorized_if_unmodified_audited(&interactive_id, metadata_revised.updated_at, OWNER, &delete_audit)
         .await
         .unwrap();
     assert_eq!(delete_outcome, WriteOutcome::Applied);

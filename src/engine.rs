@@ -840,16 +840,17 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         Ok(outcome)
     }
 
-    /// Atomically revise a memory loaded at `expected_updated_at`.
+    /// Revise a memory loaded at `expected_updated_at`.
     ///
-    /// Replacement content is embedded before the store transaction begins;
-    /// the transaction then commits fields, metadata, vector, and audit
-    /// together. A provider or revision conflict leaves the original intact.
+    /// When replacement content can be embedded immediately, fields, metadata,
+    /// vector, and audit commit together. If embeddings are disabled or
+    /// temporarily unavailable, the content still commits with its stale vector
+    /// removed and normal background re-embedding is attempted.
     ///
     /// # Errors
     ///
-    /// Returns validation, embedding, authorization/store, or concurrency
-    /// errors without partially applying the revision.
+    /// Returns validation, authorization/store, or concurrency errors without
+    /// partially applying the persisted revision.
     #[expect(clippy::too_many_arguments, reason = "interactive revise needs identity, revision, fields, metadata, and principal")]
     pub async fn update_memory_if_unmodified_with_metadata(
         &self,
@@ -859,18 +860,32 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         metadata_patch: Option<MetadataPatch>,
         principal: &str,
     ) -> Result<AuthorizedUpdateOutcome, EngineError> {
+        let new_content = update.content.clone();
+        let embed_admission = new_content.as_ref().map(|_| self.orchestrator.begin_embed_admission()).transpose()?;
         self.prepare_update(&mut update)?;
         let embedding = match update.content.as_deref() {
-            Some(content) => Some(self.orchestrator.embedding().embed(content).await?),
+            Some(content) => match self.orchestrator.embedding().embed(content).await {
+                Ok(embedding) => Some(embedding),
+                Err(error) => {
+                    warn!(memory_id = %id, error = %error, "interactive embedding unavailable; saving stale-vector revision");
+                    None
+                }
+            },
             None => None,
         };
         let details = metadata_patch.is_some().then(|| serde_json::json!({"metadata": true, "interactive": true}));
         let audit = self.audit_draft(AuditAction::Update, Some(principal.to_owned()), details);
-        Ok(self
+        let outcome = self
             .orchestrator
             .store()
             .update_authorized_if_unmodified_with_metadata_audited(&id, expected_updated_at, &update, metadata_patch.as_ref(), embedding.as_deref(), principal, &audit)
-            .await?)
+            .await?;
+        if embedding.is_none()
+            && let (Some(content), Some(revision), Some(admission)) = (new_content, outcome.reembed_revision, embed_admission.as_ref())
+        {
+            let _queued = self.orchestrator.spawn_embed_task_or_run_inline(admission, id, content, revision).await;
+        }
+        Ok(outcome)
     }
 
     /// Validate content, tags, and entities fields of an update payload.

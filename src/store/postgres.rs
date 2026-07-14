@@ -1306,8 +1306,8 @@ impl PostgresStore {
         principal: &str,
         audit: &AuditDraft,
     ) -> Result<AuthorizedUpdateOutcome, StoreError> {
-        if update.content.is_some() != embedding.is_some() {
-            return Err(StoreError::Conflict("replacement content and embedding must be supplied together".into()));
+        if embedding.is_some() && update.content.is_none() {
+            return Err(StoreError::Conflict("a replacement embedding requires replacement content".into()));
         }
         if let Some(embedding) = embedding {
             validate_embedding_dimensions(embedding, self.embedding_dimensions())?;
@@ -1332,7 +1332,8 @@ impl PostgresStore {
             return Err(StoreError::Conflict(format!("memory {id} changed after it was opened")));
         }
 
-        let mut outcome = apply_update_tx(&mut tx, id, update, self.clock_now()).await?;
+        let revision_at = next_interactive_revision(self.clock_now(), existing.updated_at);
+        let mut outcome = apply_update_tx(&mut tx, id, update, revision_at).await?;
         if let Some(embedding) = embedding {
             let active_profile = self.inner.active_embedding_profile.read().clone();
             if let Some(profile) = active_profile {
@@ -1357,7 +1358,15 @@ impl PostgresStore {
         if let Some(patch) = metadata_patch {
             let existing_metadata = get_metadata_tx(&mut tx, id).await?;
             let metadata = merge_metadata_patch(*id, patch, existing_metadata.as_ref(), existing.provenance.source_conversation.as_deref(), principal);
-            upsert_metadata_tx(&mut tx, &metadata, self.clock_now()).await?;
+            upsert_metadata_tx(&mut tx, &metadata, revision_at).await?;
+        }
+        let result = sqlx::query("UPDATE memories SET updated_at = $1 WHERE id = $2")
+            .bind(revision_at)
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::Conflict(format!("memory {id} changed while saving")));
         }
         let audit = update_audit_draft_for_locked_memory(audit, update, &existing);
         insert_audit_draft_tx(&mut tx, id, &audit).await?;
@@ -2483,6 +2492,10 @@ async fn replace_entities_tx(tx: &mut Transaction<'_, Postgres>, memory_id: &Mem
         .execute(&mut **tx)
         .await?;
     insert_entities(tx, memory_id, entities).await
+}
+
+fn next_interactive_revision(now: DateTime<Utc>, previous: DateTime<Utc>) -> DateTime<Utc> {
+    previous.checked_add_signed(chrono::Duration::microseconds(1_i64)).map_or(now, |minimum| now.max(minimum))
 }
 
 async fn apply_update_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, update: &MemoryUpdate, now: DateTime<Utc>) -> Result<AuthorizedUpdateOutcome, StoreError> {

@@ -361,7 +361,8 @@ pub trait MemoryWriter: Send + Sync {
     ) -> impl Future<Output = Result<AuthorizedUpdateOutcome, StoreError>> + Send;
 
     /// Authorization-aware, optimistic-concurrency update with optional
-    /// metadata and a precomputed replacement embedding in one transaction.
+    /// metadata and replacement embedding in one transaction. Replacement
+    /// content without a vector is committed as needing re-embedding.
     #[expect(clippy::too_many_arguments, reason = "atomic TUI revise needs revision, fields, metadata, embedding, principal, and audit")]
     fn update_authorized_if_unmodified_with_metadata_audited(
         &self,

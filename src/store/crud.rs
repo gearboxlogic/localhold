@@ -3,8 +3,9 @@
 use rusqlite::{Connection, OptionalExtension as _, params};
 
 use super::{
-    ReembedClaim, SqliteStore, merge_metadata_patch,
+    EmbeddingProfile, ReembedClaim, SqliteStore, merge_metadata_patch,
     query::{MEMORY_COLUMN_COUNT, MEMORY_COLUMNS, row_to_memory, usize_to_i64},
+    sqlite::ensure_embedding_profile_matches,
     sqlite_write_tx, update_audit_draft_for_locked_memory,
     vector::{SqliteVecIndex, VectorIndex, validate_embedding_vector},
 };
@@ -549,12 +550,13 @@ fn apply_authorized_update_if_unmodified_with_metadata(
     update: &MemoryUpdate,
     metadata_patch: Option<&MetadataPatch>,
     embedding: Option<&[f32]>,
+    expected_embedding_profile: Option<&EmbeddingProfile>,
     principal: &str,
-    now: &str,
+    now: chrono::DateTime<chrono::Utc>,
     audit: &AuditDraft,
 ) -> Result<AuthorizedUpdateOutcome, StoreError> {
-    if update.content.is_some() != embedding.is_some() {
-        return Err(StoreError::Conflict("replacement content and embedding must be supplied together".into()));
+    if embedding.is_some() && update.content.is_none() {
+        return Err(StoreError::Conflict("a replacement embedding requires replacement content".into()));
     }
     if let Some(embedding) = embedding {
         validate_embedding_vector(embedding, vector_index.dimensions())?;
@@ -580,8 +582,13 @@ fn apply_authorized_update_if_unmodified_with_metadata(
         return Err(StoreError::Conflict(format!("memory {id} changed after it was opened")));
     }
 
-    let mut outcome = apply_update_inner(&tx, vector_index, &id_str, update, now)?;
+    let revision_at = next_interactive_revision(now, existing.updated_at);
+    let revision_at_text = revision_at.to_rfc3339();
+    let mut outcome = apply_update_inner(&tx, vector_index, &id_str, update, &revision_at_text)?;
     if let Some(embedding) = embedding {
+        if let Some(profile) = expected_embedding_profile {
+            ensure_embedding_profile_matches(&tx, profile)?;
+        }
         vector_index.upsert(&tx, &id_str, embedding)?;
         let affected = tx.execute("UPDATE memories SET has_embedding = 1 WHERE id = ?1", params![id_str])?;
         if affected == 0 {
@@ -592,12 +599,20 @@ fn apply_authorized_update_if_unmodified_with_metadata(
     if let Some(patch) = metadata_patch {
         let existing_metadata = get_metadata_conn(&tx, id)?;
         let metadata = merge_metadata_patch(*id, patch, existing_metadata.as_ref(), existing.provenance.source_conversation.as_deref(), principal);
-        upsert_metadata_conn(&tx, &metadata, now)?;
+        upsert_metadata_conn(&tx, &metadata, &revision_at_text)?;
+    }
+    let affected = tx.execute("UPDATE memories SET updated_at = ?1 WHERE id = ?2", params![revision_at_text, id_str])?;
+    if affected == 0 {
+        return Err(StoreError::Conflict(format!("memory {id} changed while saving")));
     }
     let audit = update_audit_draft_for_locked_memory(audit, update, &existing);
     insert_audit_draft(&tx, id, &audit)?;
     tx.commit()?;
     Ok(outcome)
+}
+
+fn next_interactive_revision(now: chrono::DateTime<chrono::Utc>, previous: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    previous.checked_add_signed(chrono::Duration::microseconds(1_i64)).map_or(now, |minimum| now.max(minimum))
 }
 
 #[expect(clippy::too_many_arguments, reason = "atomic delete needs connection, identity, revision, principal, timestamp, and audit")]
@@ -1511,9 +1526,10 @@ impl SqliteStore {
         let metadata_patch = metadata_patch.cloned();
         let embedding = embedding.map(<[f32]>::to_vec);
         let caller = principal.to_owned();
-        let now = self.clock_now().to_rfc3339();
+        let now = self.clock_now();
         let audit = audit.clone();
         let vector_index = self.vector_index();
+        let expected_embedding_profile = self.active_embedding_profile();
         self.with_conn(move |conn| {
             apply_authorized_update_if_unmodified_with_metadata(
                 conn,
@@ -1523,8 +1539,9 @@ impl SqliteStore {
                 &update,
                 metadata_patch.as_ref(),
                 embedding.as_deref(),
+                expected_embedding_profile.as_ref(),
                 &caller,
-                &now,
+                now,
                 &audit,
             )
         })
@@ -1928,6 +1945,65 @@ mod tests {
         assert!(matches!(error, StoreError::Conflict(_)));
         assert!(store.get(&id, Some("owner")).await.unwrap().is_some());
         assert!(store.get_tombstone(&id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn optimistic_embedding_write_rejects_profile_drift() {
+        use crate::{
+            store::{EmbeddingProfile, MemoryReader as _, MemoryWriter as _, SqliteStore},
+            types::{AccessPolicy, AuditAction, AuditDraft, Memory, MemoryUpdate, Provenance},
+        };
+
+        let store = SqliteStore::in_memory().unwrap();
+        let profile = EmbeddingProfile::openai_compatible("http://127.0.0.1:8000/v1", "model-a", SqliteStore::DEFAULT_TEST_DIMENSIONS);
+        store.verify_embedding_profile(&profile).await.unwrap();
+        let memory = Memory::new_for_test(
+            "profile guarded".into(),
+            Vec::new(),
+            Provenance {
+                source_agent: Some("owner".into()),
+                ..Provenance::default()
+            },
+            AccessPolicy::Public,
+        );
+        let original_embedding = vec![0.25_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS];
+        let id = store.store(&memory, Some(&original_embedding)).await.unwrap();
+        let loaded = store.get(&id, Some("owner")).await.unwrap().unwrap();
+        store
+            .with_conn(|conn| {
+                let affected = conn.execute("UPDATE embedding_profile SET model = 'model-b' WHERE singleton = 1", [])?;
+                assert_eq!(affected, 1_usize);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let audit = AuditDraft {
+            action: AuditAction::Update,
+            caller_agent: Some("owner".into()),
+            timestamp: chrono::Utc::now(),
+            details: None,
+        };
+        let replacement_embedding = vec![0.75_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS];
+
+        let error = store
+            .update_authorized_if_unmodified_with_metadata_audited(
+                &id,
+                loaded.updated_at,
+                &MemoryUpdate {
+                    content: Some("must roll back".into()),
+                    ..MemoryUpdate::default()
+                },
+                None,
+                Some(&replacement_embedding),
+                "owner",
+                &audit,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, StoreError::Conflict(_)));
+        assert_eq!(store.get(&id, Some("owner")).await.unwrap().unwrap().content, "profile guarded");
+        assert_eq!(store.fetch_embeddings_for_ids(&[id]).await.unwrap().get(&id), Some(&original_embedding));
     }
 
     #[tokio::test]

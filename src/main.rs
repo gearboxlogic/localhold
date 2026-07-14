@@ -33,24 +33,13 @@ async fn main() -> AppResult {
         return result;
     }
     if let Some(result) = try_run_config_cli() {
-        match result {
-            Ok(0_i32) => return Ok(()),
-            Ok(exit_code) => std::process::exit(exit_code),
-            Err(error) => {
-                write_stderr_line(error);
-                std::process::exit(1);
-            }
-        }
+        return finish_cli(result);
+    }
+    if let Some(result) = try_run_models_cli().await {
+        return finish_cli(result);
     }
     if let Some(result) = try_run_doctor_cli().await {
-        match result {
-            Ok(0_i32) => return Ok(()),
-            Ok(exit_code) => std::process::exit(exit_code),
-            Err(error) => {
-                write_stderr_line(error);
-                std::process::exit(1);
-            }
-        }
+        return finish_cli(result);
     }
     if let Some(result) = try_run_migration_cli().await {
         if let Err(error) = result {
@@ -61,14 +50,7 @@ async fn main() -> AppResult {
     }
 
     if let Some(result) = try_run_embeddings_cli().await {
-        match result {
-            Ok(0_i32) => return Ok(()),
-            Ok(exit_code) => std::process::exit(exit_code),
-            Err(error) => {
-                write_stderr_line(error);
-                std::process::exit(1);
-            }
-        }
+        return finish_cli(result);
     }
     if let Some(argument) = std::env::args_os().nth(1) {
         write_stderr_line(root_usage());
@@ -113,6 +95,18 @@ async fn main() -> AppResult {
     }
 }
 
+#[expect(clippy::exit, reason = "operator subcommands define nonzero process exit codes as part of their CLI contract")]
+fn finish_cli(result: CliExitResult) -> AppResult {
+    match result {
+        Ok(0_i32) => Ok(()),
+        Ok(exit_code) => std::process::exit(exit_code),
+        Err(error) => {
+            write_stderr_line(error);
+            std::process::exit(1);
+        }
+    }
+}
+
 fn try_run_info_cli() -> Option<AppResult> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match args.as_slice() {
@@ -123,7 +117,7 @@ fn try_run_info_cli() -> Option<AppResult> {
 }
 
 const fn root_usage() -> &'static str {
-    "Usage: hold [COMMAND]\n\nRuns the LocalHold MCP server when no command is supplied.\n\nCommands:\n  config init                Create a no-clobber starter configuration\n  config paths               Show configuration search and active paths\n  config validate            Validate effective configuration without startup\n  doctor                     Diagnose installation and runtime readiness\n  embeddings status          Inspect embedding identity and rebuild progress\n  embeddings reindex --yes   Clear and rebuild the configured vector space\n  migrate sqlite-to-postgres Migrate storage backends\n\nOptions:\n  -h, --help                 Print help\n  -V, --version              Print version"
+    "Usage: hold [COMMAND]\n\nRuns the LocalHold MCP server when no command is supplied.\n\nCommands:\n  config init                Create a no-clobber starter configuration\n  config paths               Show configuration search and active paths\n  config validate            Validate effective configuration without startup\n  doctor                     Diagnose installation and runtime readiness\n  embeddings status          Inspect embedding identity and rebuild progress\n  embeddings reindex --yes   Clear and rebuild the configured vector space\n  models verify              Verify reranker artifacts offline by SHA-256\n  models fetch --yes         Explicitly fetch and verify reranker artifacts\n  migrate sqlite-to-postgres Migrate storage backends\n\nOptions:\n  -h, --help                 Print help\n  -V, --version              Print version"
 }
 
 fn try_run_config_cli() -> Option<CliExitResult> {
@@ -181,6 +175,86 @@ fn try_run_config_cli() -> Option<CliExitResult> {
             }
         }
     })())
+}
+
+async fn try_run_models_cli() -> Option<CliExitResult> {
+    const USAGE: &str = "Usage: hold models <COMMAND>\n\nVerify or explicitly fetch configured reranker artifacts without starting the MCP server.\n\nCommands:\n  verify [--json]       Offline SHA-256 verification; never downloads or creates paths\n  fetch --yes [--json]  Fetch/repair managed artifacts and verify both SHA-256 pins\n\nOptions:\n  --json                Emit the stable JSON report schema\n  --yes                 Explicitly permit the network-capable fetch operation\n  -h, --help            Print help\n\nExit codes:\n  0  both model artifacts are present and hash-verified\n  1  refused, missing, unpinned, invalid, or download failed";
+
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if args.first().is_none_or(|argument| argument != "models") {
+        return None;
+    }
+    Some(
+        async {
+            if args[1..].iter().any(is_help_arg) {
+                write_stdout(USAGE)?;
+                write_stdout("\n")?;
+                return Ok(0_i32);
+            }
+            let Some(command) = args.get(1).and_then(|argument| argument.to_str()) else {
+                write_stderr_line(USAGE);
+                return Err(EngineError::config("missing or non-UTF-8 models command").into());
+            };
+            let mut json = false;
+            let mut confirmed = false;
+            for argument in &args[2..] {
+                if argument == "--json" {
+                    json = true;
+                } else if argument == "--yes" && command == "fetch" {
+                    confirmed = true;
+                } else {
+                    return Err(EngineError::config(format!("unexpected models {command} argument: {}\n\n{USAGE}", argument.to_string_lossy())).into());
+                }
+            }
+            if !matches!(command, "verify" | "fetch") {
+                write_stderr_line(USAGE);
+                return Err(EngineError::config(format!("unknown models command: {command}")).into());
+            }
+
+            run_models_command(command, json, confirmed).await
+        }
+        .await,
+    )
+}
+
+#[cfg(not(feature = "reranker"))]
+async fn run_models_command(_command: &str, _json: bool, _confirmed: bool) -> CliExitResult {
+    Err(EngineError::config("models commands require a LocalHold binary built with reranker support").into())
+}
+
+#[cfg(feature = "reranker")]
+async fn run_models_command(command: &str, json: bool, confirmed: bool) -> CliExitResult {
+    if command == "fetch" && !confirmed {
+        let report = localhold::reranker::operator::ModelsReport::confirmation_refused();
+        write_models_report(&report, json)?;
+        return Ok(report.exit_code);
+    }
+    let fetch = command == "fetch";
+    let config = match localhold::config::operator::load_effective_strict() {
+        Ok(config) => config,
+        Err(_error) => {
+            let report = localhold::reranker::operator::ModelsReport::invalid_configuration(command, fetch);
+            write_models_report(&report, json)?;
+            return Ok(report.exit_code);
+        }
+    };
+    let reranker = config.search.reranker;
+    let report = tokio::task::spawn_blocking(move || {
+        if fetch {
+            localhold::reranker::operator::fetch(&reranker)
+        } else {
+            localhold::reranker::operator::verify(&reranker)
+        }
+    })
+    .await
+    .map_err(|error| EngineError::config(format!("model operation worker failed: {error}")))?;
+    write_models_report(&report, json)?;
+    Ok(report.exit_code)
+}
+
+#[cfg(feature = "reranker")]
+fn write_models_report(report: &localhold::reranker::operator::ModelsReport, json: bool) -> AppResult {
+    if json { write_stdout(&report.to_json()?) } else { write_stdout(&report.render_text()) }
 }
 
 async fn try_run_doctor_cli() -> Option<Result<i32, Box<dyn std::error::Error + Send + Sync>>> {

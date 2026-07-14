@@ -15,6 +15,25 @@ pub const EXIT_VALID: i32 = 0;
 /// Exit code used when configuration is invalid or cannot be loaded.
 pub const EXIT_INVALID: i32 = 1;
 
+/// Load the effective configuration while rejecting malformed environment overrides.
+///
+/// Unlike the normal server startup loader, this operator-facing loader does not
+/// permit an invalid `LOCALHOLD_*` value to fall back to the configured default.
+///
+/// # Errors
+///
+/// Returns a configuration error when the file cannot be loaded or validated,
+/// or when any recognized environment override is malformed.
+pub fn load_effective_strict() -> Result<Config, EngineError> {
+    let _stale_parse_warning = super::take_env_parse_warning();
+    let loaded = Config::load();
+    let malformed_override = super::take_env_parse_warning();
+    if malformed_override {
+        return Err(EngineError::config("at least one LOCALHOLD_* environment override is malformed; its value was ignored"));
+    }
+    loaded
+}
+
 const STARTER_CONFIG: &str = r#"# LocalHold configuration
 # Complete reference: https://github.com/gearboxlogic/localhold/blob/main/localhold.example.toml
 # Omitted settings use safe defaults and can be overridden with LOCALHOLD_* variables.

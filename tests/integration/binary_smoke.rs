@@ -1,5 +1,5 @@
 use std::{
-    io::{BufRead as _, BufReader, Read as _, Write as _},
+    io::{BufRead as _, BufReader, Read, Write as _},
     net::TcpListener,
     process::{Child, Command, Stdio},
     sync::mpsc,
@@ -14,6 +14,8 @@ use localhold::{
 };
 use rusqlite::params;
 use serde_json::Value;
+#[cfg(feature = "reranker")]
+use sha2::{Digest as _, Sha256};
 use sqlx_core::{query::query, query_scalar::query_scalar};
 use sqlx_postgres::PgPoolOptions;
 use zerocopy::IntoBytes as _;
@@ -66,6 +68,50 @@ fn config_binary_command(root: &std::path::Path) -> (Command, std::path::PathBuf
     let config_dir = isolate_user_config_dir(&mut command, root);
     command.env("LOCALHOLD_TEST_CONFIG_DIR", &config_dir);
     (command, config_dir)
+}
+
+#[cfg(feature = "reranker")]
+fn models_binary_command(root: &std::path::Path, cache_dir: &std::path::Path) -> Command {
+    let (mut command, _config_dir) = config_binary_command(root);
+    command.env("LOCALHOLD_RERANKER_MODEL", "test/model");
+    command.env("LOCALHOLD_RERANKER_REVISION", "revision");
+    command.env("LOCALHOLD_RERANKER_CACHE_DIR", cache_dir);
+    command.env("LOCALHOLD_RERANKER_MODEL_SHA256", sha256_hex(b"model artifact"));
+    command.env("LOCALHOLD_RERANKER_TOKENIZER_SHA256", sha256_hex(b"tokenizer artifact"));
+    command
+}
+
+#[cfg(feature = "reranker")]
+fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len().saturating_mul(2));
+    for byte in digest {
+        output.push(char::from(HEX[usize::from(byte >> 4_u8)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f_u8)]));
+    }
+    output
+}
+
+#[cfg(feature = "reranker")]
+fn read_http_request_headers(stream: &mut impl Read) -> std::io::Result<Vec<u8>> {
+    const MAX_HEADER_BYTES: usize = 16 * 1024;
+    let mut request = Vec::with_capacity(1024);
+    let mut chunk = [0_u8; 1024];
+    while request.len() < MAX_HEADER_BYTES {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&chunk[..read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(request);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "model mock server received incomplete or oversized HTTP headers",
+    ))
 }
 
 #[test]
@@ -191,6 +237,141 @@ fn config_help_and_unknown_commands_never_fall_through_to_server_startup() {
     let unknown = command.args(["config", "unknown"]).output().unwrap();
     assert!(!unknown.status.success());
     assert!(!db_path.exists(), "unknown config commands must not start or initialize the server");
+}
+
+#[test]
+fn models_help_and_unknown_commands_never_fall_through_to_server_startup() {
+    let help = Command::new(env!("CARGO_BIN_EXE_hold")).args(["models", "--help"]).output().unwrap();
+    assert!(help.status.success());
+    let stdout = String::from_utf8(help.stdout).unwrap();
+    assert!(stdout.contains("verify [--json]"));
+    assert!(stdout.contains("fetch --yes [--json]"));
+
+    let root = unique_db_path("models-unknown").with_extension("root");
+    let db_path = root.join("must-not-exist.db");
+    let (mut command, _config_dir) = config_binary_command(&root);
+    command.env("LOCALHOLD_DB_PATH", &db_path);
+    let unknown = command.args(["models", "unknown"]).output().unwrap();
+    assert!(!unknown.status.success());
+    assert!(!db_path.exists(), "unknown models commands must not start or initialize the server");
+}
+
+#[cfg(feature = "reranker")]
+#[test]
+fn models_fetch_requires_confirmation_and_verify_is_offline() {
+    let root = unique_db_path("models-refusal").with_extension("root");
+    let cache = root.join("cache");
+
+    let mut verify = models_binary_command(&root, &cache);
+    let missing = verify.args(["models", "verify", "--json"]).output().unwrap();
+    assert_eq!(missing.status.code(), Some(1_i32));
+    let report: Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1_i32);
+    assert_eq!(report["status"], "missing");
+    assert_eq!(report["network_allowed"], false);
+    assert!(!cache.exists(), "offline verification must not create the model cache");
+
+    let mut fetch = models_binary_command(&root, &cache);
+    let refused = fetch.args(["models", "fetch", "--json"]).output().unwrap();
+    assert_eq!(refused.status.code(), Some(1_i32));
+    let refusal: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(refusal["status"], "refused");
+    assert_eq!(refusal["network_allowed"], false);
+    assert!(!cache.exists(), "refused fetch must not create the model cache");
+}
+
+#[cfg(feature = "reranker")]
+#[test]
+fn models_json_reports_invalid_configuration_and_malformed_overrides() {
+    let invalid_root = unique_db_path("models-invalid-config").with_extension("root");
+    let (mut invalid, _config_dir) = config_binary_command(&invalid_root);
+    invalid.env("LOCALHOLD_RERANKER_ENABLED", "true");
+    invalid.env("LOCALHOLD_RERANKER_MODEL", "custom/model");
+    let invalid_output = invalid.args(["models", "verify", "--json"]).output().unwrap();
+    assert_eq!(invalid_output.status.code(), Some(1_i32));
+    let invalid_report: Value = serde_json::from_slice(&invalid_output.stdout).unwrap();
+    assert_eq!(invalid_report["schema_version"], 1_i32);
+    assert_eq!(invalid_report["command"], "verify");
+    assert_eq!(invalid_report["status"], "error");
+    assert_eq!(invalid_report["network_allowed"], false);
+    assert_eq!(invalid_report["model"], "not_loaded");
+
+    let malformed_root = unique_db_path("models-malformed-env").with_extension("root");
+    let cache = malformed_root.join("cache");
+    let model_dir = cache.join("test--model@revision");
+    std::fs::create_dir_all(&model_dir).unwrap();
+    std::fs::write(model_dir.join("model.onnx"), b"model artifact").unwrap();
+    std::fs::write(model_dir.join("tokenizer.json"), b"tokenizer artifact").unwrap();
+    let mut malformed = models_binary_command(&malformed_root, &cache);
+    malformed.env("LOCALHOLD_RERANKER_PRECISION", "f16");
+    let malformed_output = malformed.args(["models", "verify", "--json"]).output().unwrap();
+    assert_eq!(malformed_output.status.code(), Some(1_i32));
+    let malformed_report: Value = serde_json::from_slice(&malformed_output.stdout).unwrap();
+    assert_eq!(malformed_report["command"], "verify");
+    assert_eq!(malformed_report["status"], "error");
+    assert_eq!(malformed_report["model"], "not_loaded");
+    assert_ne!(malformed_report["status"], "verified");
+
+    let _cleanup = std::fs::remove_dir_all(invalid_root);
+    let _cleanup = std::fs::remove_dir_all(malformed_root);
+}
+
+#[cfg(feature = "reranker")]
+#[test]
+#[expect(clippy::panic, reason = "loopback fixture failures should include the unexpected request or socket error")]
+fn models_fetch_downloads_only_when_explicit_and_reverifies_offline() {
+    let root = unique_db_path("models-fetch").with_extension("root");
+    let cache = root.join("cache");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let mut served = 0_u8;
+        while served < 2 && started.elapsed() < Duration::from_secs(10) {
+            let (mut stream, _peer) = match listener.accept() {
+                Ok(accepted) => accepted,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(error) => panic!("model mock server accept failed: {error}"),
+            };
+            let request = read_http_request_headers(&mut stream).unwrap();
+            let request = String::from_utf8_lossy(&request);
+            let body: &[u8] = if request.contains("/onnx/model.onnx") {
+                b"model artifact"
+            } else if request.contains("/tokenizer.json") {
+                b"tokenizer artifact"
+            } else {
+                panic!("unexpected model download request: {request}");
+            };
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+            served += 1;
+        }
+        served
+    });
+
+    let mut fetch = models_binary_command(&root, &cache);
+    fetch.env("LOCALHOLD_TEST_RERANKER_BASE_URL", format!("http://{address}"));
+    let output = fetch.args(["models", "fetch", "--yes", "--json"]).output().unwrap();
+    let request_count = server.join().unwrap();
+    assert!(output.status.success(), "models fetch failed: {output:?}");
+    assert_eq!(request_count, 2, "fetch should request exactly the model and tokenizer artifacts");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "verified");
+    assert_eq!(report["network_allowed"], true);
+    assert_eq!(report["artifacts_changed"], true);
+
+    let mut verify = models_binary_command(&root, &cache);
+    let offline = verify.args(["models", "verify", "--json"]).output().unwrap();
+    assert!(offline.status.success(), "offline verification failed: {offline:?}");
+    let report: Value = serde_json::from_slice(&offline.stdout).unwrap();
+    assert_eq!(report["status"], "verified");
+    assert_eq!(report["network_allowed"], false);
+    let _cleanup = std::fs::remove_dir_all(root);
 }
 
 #[expect(clippy::expect_used, clippy::panic, reason = "test helper reports subprocess startup failures with captured diagnostics")]

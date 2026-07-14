@@ -73,6 +73,29 @@ pub(crate) struct DownloadPins {
     pub tokenizer_url: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArtifactStatus {
+    Verified,
+    Missing,
+    HashMismatch,
+    Unverifiable,
+}
+
+#[derive(Debug)]
+pub(crate) struct ModelInspection {
+    pub paths: ModelPaths,
+    pub model_sha256: String,
+    pub tokenizer_sha256: String,
+    pub model_status: ArtifactStatus,
+    pub tokenizer_status: ArtifactStatus,
+}
+
+impl ModelInspection {
+    pub(super) const fn is_verified(&self) -> bool {
+        matches!(self.model_status, ArtifactStatus::Verified) && matches!(self.tokenizer_status, ArtifactStatus::Verified)
+    }
+}
+
 /// Resolve (and download if necessary) the ONNX model files.
 ///
 /// If `model_path` is non-empty, it is used as the direct path to the ONNX
@@ -245,6 +268,49 @@ pub(crate) fn resolve_cached_model_paths(config: &RerankerConfig) -> Result<Mode
     Ok(ModelPaths { onnx_path, tokenizer_path })
 }
 
+pub(crate) fn inspect_model_paths(config: &RerankerConfig) -> Result<ModelInspection, RerankerError> {
+    let (paths, model_sha256, tokenizer_sha256) = if config.model_path.is_empty() {
+        let pins = resolve_download_pins(config)?;
+        let cache = crate::config::expand_tilde(&config.cache_dir).map_err(|error| RerankerError::Permanent(error.to_string().into()))?;
+        let model_dir = cache.join(format!("{}@{}", config.model.replace('/', "--"), pins.cache_revision.replace('/', "--")));
+        (
+            ModelPaths {
+                onnx_path: model_dir.join("model.onnx"),
+                tokenizer_path: model_dir.join("tokenizer.json"),
+            },
+            pins.model_sha256,
+            pins.tokenizer_sha256,
+        )
+    } else {
+        let onnx_path = crate::config::expand_tilde(&config.model_path).map_err(|error| RerankerError::Permanent(error.to_string().into()))?;
+        let tokenizer_path = onnx_path.parent().unwrap_or_else(|| Path::new(".")).join("tokenizer.json");
+        (ModelPaths { onnx_path, tokenizer_path }, config.model_sha256.clone(), config.tokenizer_sha256.clone())
+    };
+    let model_status = inspect_artifact(&paths.onnx_path, &model_sha256)?;
+    let tokenizer_status = inspect_artifact(&paths.tokenizer_path, &tokenizer_sha256)?;
+    Ok(ModelInspection {
+        paths,
+        model_sha256,
+        tokenizer_sha256,
+        model_status,
+        tokenizer_status,
+    })
+}
+
+fn inspect_artifact(path: &Path, expected_sha256: &str) -> Result<ArtifactStatus, RerankerError> {
+    if !path.is_file() {
+        return Ok(ArtifactStatus::Missing);
+    }
+    if expected_sha256.is_empty() {
+        return Ok(ArtifactStatus::Unverifiable);
+    }
+    if verify_file_sha256(path, expected_sha256)? {
+        Ok(ArtifactStatus::Verified)
+    } else {
+        Ok(ArtifactStatus::HashMismatch)
+    }
+}
+
 fn ensure_cached_file(url: &str, dest: &Path, expected_sha256: &str) -> Result<(), RerankerError> {
     if dest.exists() && verify_file_sha256(dest, expected_sha256)? {
         info!("  {} already cached and verified", dest.display());
@@ -411,7 +477,9 @@ fn remove_stale_partial_files(model_dir: &Path) -> Result<(), RerankerError> {
 }
 
 fn download_base_url() -> String {
-    #[cfg(test)]
+    // The `testing` feature is reserved for Cargo integration-test binaries;
+    // every production and release build must omit it.
+    #[cfg(any(test, feature = "testing"))]
     if let Ok(base_url) = std::env::var("LOCALHOLD_TEST_RERANKER_BASE_URL") {
         return base_url;
     }
@@ -419,7 +487,8 @@ fn download_base_url() -> String {
 }
 
 fn builtin_artifact_base_url() -> String {
-    #[cfg(test)]
+    // See `download_base_url`: release builds must never enable `testing`.
+    #[cfg(any(test, feature = "testing"))]
     if let Ok(base_url) = std::env::var("LOCALHOLD_TEST_RERANKER_BASE_URL") {
         return base_url;
     }
@@ -431,7 +500,7 @@ fn builtin_artifact_base_url() -> String {
 #[cfg(test)]
 mod tests {
     use std::{
-        io::{Read as _, Write as _},
+        io::{Read, Write as _},
         net::{TcpListener, TcpStream},
         process::{Child, Command},
         sync::{
@@ -670,8 +739,7 @@ mod tests {
     }
 
     fn serve_artifact(mut stream: TcpStream, request_count: &AtomicUsize, fail_next: &AtomicBool) {
-        let mut request = [0_u8; 2048];
-        let read = stream.read(&mut request).unwrap();
+        let request = read_http_request_headers(&mut stream).unwrap();
         let _previous_request_count = request_count.fetch_add(1, Ordering::AcqRel);
         if fail_next.swap(false, Ordering::AcqRel) {
             stream
@@ -679,10 +747,30 @@ mod tests {
                 .unwrap();
             return;
         }
-        let request = String::from_utf8_lossy(&request[..read]);
+        let request = String::from_utf8_lossy(&request);
         let body = if request.contains("tokenizer.json") { TOKENIZER_BYTES } else { MODEL_BYTES };
         let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
         stream.write_all(response.as_bytes()).unwrap();
         stream.write_all(body).unwrap();
+    }
+
+    fn read_http_request_headers(stream: &mut impl Read) -> std::io::Result<Vec<u8>> {
+        const MAX_HEADER_BYTES: usize = 16 * 1024;
+        let mut request = Vec::with_capacity(1024);
+        let mut chunk = [0_u8; 1024];
+        while request.len() < MAX_HEADER_BYTES {
+            let read = stream.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                return Ok(request);
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "model mock server received incomplete or oversized HTTP headers",
+        ))
     }
 }

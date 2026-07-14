@@ -16,6 +16,10 @@ pub mod resilient;
 #[cfg(feature = "reranker")]
 pub mod runtime;
 
+/// Offline model verification and explicit download operations.
+#[cfg(feature = "reranker")]
+pub mod operator;
+
 /// Execution-provider selection policy and compiled capabilities.
 pub mod policy;
 

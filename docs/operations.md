@@ -114,6 +114,44 @@ is using it; LocalHold downloads it again on demand. Each process still loads
 its own model session into memory—the shared cache avoids duplicate disk and
 network use, not per-process RAM or VRAM use.
 
+### Reranker model artifacts
+
+Use the model operator commands to separate network access from offline
+integrity checks:
+
+```sh
+hold models fetch --yes
+hold models verify
+hold models verify --json
+```
+
+`models verify` is strictly offline. It does not create the cache directory,
+repair files, initialize ONNX Runtime, open storage, or start a transport. It
+resolves the configured paths and hashes both `model.onnx` and
+`tokenizer.json`. Exit code `0` means both files match their configured
+SHA-256 values. Exit code `1` covers missing files, unpinned direct files, hash
+mismatches, unreadable files, or invalid artifact configuration.
+
+`models fetch` is the explicit network-capable operation and refuses to run
+without `--yes`. It uses the same per-cache lock, bounded downloads, unique
+staging files, SHA-256 checks, and atomic publication as first-use startup,
+then re-verifies both published files. An already verified cache is left
+unchanged. `model_path` is operator-managed and is never downloaded or
+replaced; under a direct-file configuration, `models fetch --yes` only verifies
+the supplied files.
+
+Both commands accept `--json`. Reports use `schema_version: 1`, identify
+whether network access was allowed, list the resolved artifact paths and
+expected hashes, and include `status` plus `exit_code`. Automation should
+reject unknown schema versions. Status values are `verified`, `missing`,
+`hash_mismatch`, `unverifiable`, `refused`, and `error`.
+
+For direct files, set both `search.reranker.model_sha256` and
+`search.reranker.tokenizer_sha256`; otherwise offline verification reports
+`unverifiable` even when both files exist. Normal startup retains its explicit
+operator-managed direct-file behavior, so adding verification pins can be
+rolled out independently.
+
 ### Reranker execution providers
 
 `search.reranker.execution_provider` controls ONNX inference placement:

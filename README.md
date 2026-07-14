@@ -145,6 +145,21 @@ is also the default for CUDA and `auto`, so a CUDA failure can safely fall back
 to CPU. For offline deployments, set `model_path` and provide the model files
 in advance.
 
+Operators can fetch the configured managed artifacts explicitly, or verify a
+cache without starting the server:
+
+```sh
+hold models fetch --yes
+hold models verify
+hold models verify --json
+```
+
+`models verify` is offline, creates no paths, and hashes both the ONNX model
+and tokenizer. Direct-file deployments must configure `model_sha256` and
+`tokenizer_sha256` for this command to report `verified`. See
+[Operations](docs/operations.md#reranker-model-artifacts) for exit codes and
+the versioned JSON contract.
+
 CUDA reranking is a preview build surface:
 
 ```sh

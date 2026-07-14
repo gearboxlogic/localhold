@@ -118,10 +118,13 @@ Enable the built-in CPU reranker with:
 [search.reranker]
 enabled = true
 execution_provider = "cpu"
+precision = "fp32"
 ```
 
-The pinned model and tokenizer are downloaded on first use. For offline
-deployments, set `model_path` and provide the model files in advance.
+The pinned, fused FP32 model and tokenizer are downloaded on first use. FP32
+is also the default for CUDA and `auto`, so a CUDA failure can safely fall back
+to CPU. For offline deployments, set `model_path` and provide the model files
+in advance.
 
 CUDA reranking is a preview build surface:
 
@@ -136,6 +139,20 @@ may still place individual graph nodes on CPU. Set `required = true` when
 startup must fail unless reranking is active. CUDA requires a compatible NVIDIA
 driver and ONNX Runtime/CUDA libraries. It does not affect embedding placement;
 embedding compute happens at the selected OpenAI-compatible endpoint.
+
+CUDA users may opt into the smaller, faster fused FP16 artifact:
+
+```toml
+[search.reranker]
+enabled = true
+execution_provider = "cuda"
+precision = "fp16"
+```
+
+FP16 is CUDA-only and can change the order of closely scored results. Treat it
+as a latency/VRAM optimization, validate ranking quality on your own corpus,
+and see [Operations](docs/operations.md#reranker-model-precision) for the
+current evidence and limitations.
 
 ## MCP Client Setup
 

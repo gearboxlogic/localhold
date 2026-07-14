@@ -56,6 +56,39 @@ pub enum RerankerExecutionProvider {
     Cuda,
 }
 
+/// Numeric precision of the reranker model artifact.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RerankerPrecision {
+    /// Fused FP32 model. Portable across CPU and CUDA execution providers.
+    #[default]
+    Fp32,
+    /// Fused FP16 model. Supported only with an explicitly required CUDA provider.
+    Fp16,
+}
+
+impl fmt::Display for RerankerPrecision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fp32 => f.write_str("fp32"),
+            Self::Fp16 => f.write_str("fp16"),
+        }
+    }
+}
+
+impl FromStr for RerankerPrecision {
+    type Err = ParseEnumError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "fp32" => Ok(Self::Fp32),
+            "fp16" => Ok(Self::Fp16),
+            other => Err(ParseEnumError(format!("unknown reranker precision {other:?}, expected \"fp32\" or \"fp16\""))),
+        }
+    }
+}
+
 impl fmt::Display for RerankerExecutionProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -367,12 +400,13 @@ pub struct RerankerConfig {
     pub enabled: bool,
     /// Execution-provider selection policy. Default [`RerankerExecutionProvider::Auto`].
     pub execution_provider: RerankerExecutionProvider,
+    /// Model artifact precision. FP32 is the portable default; FP16 requires explicit CUDA.
+    pub precision: RerankerPrecision,
     /// Fail startup unless the reranker initializes and passes health inference.
     pub required: bool,
-    /// `HuggingFace` model identifier for the cross-encoder.
+    /// Model identifier for the cross-encoder and for custom `HuggingFace` downloads.
     pub model: String,
-    /// Immutable `HuggingFace` revision/commit to download from.
-    /// Required for custom auto-downloaded models.
+    /// Immutable source revision/commit. Required for custom auto-downloaded models.
     pub revision: String,
     /// Override: local filesystem path to a pre-exported ONNX model file.
     /// When non-empty, takes precedence over downloading from `model`.
@@ -402,6 +436,7 @@ impl Default for RerankerConfig {
         Self {
             enabled: false,
             execution_provider: RerankerExecutionProvider::Auto,
+            precision: RerankerPrecision::Fp32,
             required: false,
             model: DEFAULT_RERANKER_MODEL.into(),
             revision: String::new(),
@@ -933,6 +968,7 @@ impl Config {
         apply_parsed_env(env, "LOCALHOLD_SUPERSEDED_PENALTY", &mut self.search.superseded_penalty);
         apply_parsed_env(env, "LOCALHOLD_RERANKER_ENABLED", &mut self.search.reranker.enabled);
         apply_parsed_env(env, "LOCALHOLD_RERANKER_EXECUTION_PROVIDER", &mut self.search.reranker.execution_provider);
+        apply_parsed_env(env, "LOCALHOLD_RERANKER_PRECISION", &mut self.search.reranker.precision);
         apply_parsed_env(env, "LOCALHOLD_RERANKER_REQUIRED", &mut self.search.reranker.required);
         if let Some(v) = env.get("LOCALHOLD_RERANKER_MODEL") {
             self.search.reranker.model.clone_from(v);
@@ -1191,39 +1227,7 @@ fn validate_search_config(config: &SearchConfig) -> Result<(), EngineError> {
     validate_positive_finite(config.freshness_half_life_semantic_days, "freshness_half_life_semantic_days")?;
     validate_positive_finite(config.freshness_half_life_episodic_days, "freshness_half_life_episodic_days")?;
     validate_positive_finite(config.freshness_half_life_procedural_days, "freshness_half_life_procedural_days")?;
-    if config.reranker.pool_size == 0 {
-        return Err(EngineError::config("reranker.pool_size must be greater than zero"));
-    }
-    if !config.reranker.blend_weight.is_finite() || !(0.0_f64..=1.0_f64).contains(&config.reranker.blend_weight) {
-        return Err(EngineError::config("reranker.blend_weight must be a finite number in [0, 1]"));
-    }
-    if config.reranker.required && !config.reranker.enabled {
-        return Err(EngineError::config("reranker.required = true requires reranker.enabled = true"));
-    }
-    // Validate auto-download requirements eagerly regardless of feature flag
-    // so misconfigurations surface at startup, not at first search.
-    if config.reranker.enabled && config.reranker.model_path.is_empty() {
-        if is_builtin_default_reranker_model(&config.reranker.model) {
-            // Overriding the revision on the builtin model requires explicit
-            // hashes — the pinned defaults only match the pinned revision.
-            let custom_revision = !config.reranker.revision.is_empty() && config.reranker.revision != DEFAULT_RERANKER_REVISION;
-            if custom_revision && (config.reranker.model_sha256.is_empty() || config.reranker.tokenizer_sha256.is_empty()) {
-                return Err(EngineError::config(
-                    "overriding reranker.revision on the builtin model requires explicit model_sha256 and tokenizer_sha256",
-                ));
-            }
-        } else {
-            if config.reranker.revision.is_empty() {
-                return Err(EngineError::config("reranker.revision must be set for custom auto-downloaded models"));
-            }
-            if config.reranker.model_sha256.is_empty() {
-                return Err(EngineError::config("reranker.model_sha256 must be set for custom auto-downloaded models"));
-            }
-            if config.reranker.tokenizer_sha256.is_empty() {
-                return Err(EngineError::config("reranker.tokenizer_sha256 must be set for custom auto-downloaded models"));
-            }
-        }
-    }
+    validate_reranker_config(&config.reranker)?;
     // Prevent subnormal values that would make the decay lambda infinite,
     // producing NaN in exp calculations when hours == 0.
     if config.activity_half_life_hours < 0.001_f64 {
@@ -1238,6 +1242,59 @@ fn validate_search_config(config: &SearchConfig) -> Result<(), EngineError> {
         return Err(EngineError::config(format!(
             "composite scoring weights (relevance + importance + freshness + activity + confidence) must sum to 100.0, got {weight_sum:.1}"
         )));
+    }
+    Ok(())
+}
+
+fn validate_reranker_config(config: &RerankerConfig) -> Result<(), EngineError> {
+    if config.pool_size == 0 {
+        return Err(EngineError::config("reranker.pool_size must be greater than zero"));
+    }
+    if !config.blend_weight.is_finite() || !(0.0_f64..=1.0_f64).contains(&config.blend_weight) {
+        return Err(EngineError::config("reranker.blend_weight must be a finite number in [0, 1]"));
+    }
+    if config.required && !config.enabled {
+        return Err(EngineError::config("reranker.required = true requires reranker.enabled = true"));
+    }
+    if config.precision == RerankerPrecision::Fp16 && config.execution_provider != RerankerExecutionProvider::Cuda {
+        return Err(EngineError::config(
+            "reranker.precision = \"fp16\" requires reranker.execution_provider = \"cuda\"; auto fallback and CPU execution are not supported",
+        ));
+    }
+    if config.precision == RerankerPrecision::Fp16
+        && config.model_path.is_empty()
+        && (!is_builtin_default_reranker_model(&config.model)
+            || (!config.revision.is_empty() && config.revision != DEFAULT_RERANKER_REVISION)
+            || !config.model_sha256.is_empty()
+            || !config.tokenizer_sha256.is_empty())
+    {
+        return Err(EngineError::config(
+            "the managed fp16 reranker artifact requires the builtin model and pins; use model_path for a custom FP16 artifact",
+        ));
+    }
+    // Validate auto-download requirements eagerly regardless of feature flag
+    // so misconfigurations surface at startup, not at first search.
+    if config.enabled && config.model_path.is_empty() {
+        if is_builtin_default_reranker_model(&config.model) {
+            // Overriding the revision on the builtin model requires explicit
+            // hashes — the pinned defaults only match the pinned revision.
+            let custom_revision = !config.revision.is_empty() && config.revision != DEFAULT_RERANKER_REVISION;
+            if custom_revision && (config.model_sha256.is_empty() || config.tokenizer_sha256.is_empty()) {
+                return Err(EngineError::config(
+                    "overriding reranker.revision on the builtin model requires explicit model_sha256 and tokenizer_sha256",
+                ));
+            }
+        } else {
+            if config.revision.is_empty() {
+                return Err(EngineError::config("reranker.revision must be set for custom auto-downloaded models"));
+            }
+            if config.model_sha256.is_empty() {
+                return Err(EngineError::config("reranker.model_sha256 must be set for custom auto-downloaded models"));
+            }
+            if config.tokenizer_sha256.is_empty() {
+                return Err(EngineError::config("reranker.tokenizer_sha256 must be set for custom auto-downloaded models"));
+            }
+        }
     }
     Ok(())
 }
@@ -1328,6 +1385,7 @@ fn collect_localhold_env_vars() -> HashMap<String, String> {
         "LOCALHOLD_SUPERSEDED_PENALTY",
         "LOCALHOLD_RERANKER_ENABLED",
         "LOCALHOLD_RERANKER_EXECUTION_PROVIDER",
+        "LOCALHOLD_RERANKER_PRECISION",
         "LOCALHOLD_RERANKER_REQUIRED",
         "LOCALHOLD_RERANKER_MODEL",
         "LOCALHOLD_RERANKER_REVISION",

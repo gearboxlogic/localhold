@@ -12,7 +12,10 @@ use ort::{session::Session, value::Tensor};
 use parking_lot::Mutex;
 use tracing::{info, warn};
 
-use super::{BoxFuture, RerankerError, RerankerProvider, RerankerScore, download, policy::execution_provider_candidates};
+use super::{
+    BoxFuture, RerankerError, RerankerProvider, RerankerScore, download,
+    policy::{execution_provider_candidates, validate_precision_policy},
+};
 use crate::config::{RerankerConfig, RerankerExecutionProvider};
 
 /// Cross-encoder reranker backed by an ONNX Runtime session.
@@ -51,6 +54,7 @@ impl OnnxReranker {
     /// Returns [`RerankerError::Permanent`] if the model files cannot be loaded
     /// or the ONNX session cannot be created.
     pub fn new(config: &RerankerConfig) -> Result<Self, RerankerError> {
+        validate_precision_policy(config)?;
         let candidates = execution_provider_candidates(config.execution_provider)?;
         let paths = download::resolve_model_paths(config)?;
 
@@ -309,7 +313,21 @@ fn configure_cuda(_builder: ort::session::builder::SessionBuilder) -> Result<ort
 
 #[cfg(test)]
 mod tests {
-    use super::sigmoid;
+    use super::{OnnxReranker, sigmoid};
+    use crate::config::{RerankerConfig, RerankerExecutionProvider, RerankerPrecision};
+
+    #[test]
+    fn direct_constructor_rejects_fp16_without_explicit_cuda_before_loading() {
+        for execution_provider in [RerankerExecutionProvider::Auto, RerankerExecutionProvider::Cpu] {
+            let config = RerankerConfig {
+                precision: RerankerPrecision::Fp16,
+                execution_provider,
+                ..RerankerConfig::default()
+            };
+            let error = OnnxReranker::new(&config).unwrap_err();
+            assert!(error.to_string().contains("fp16 requires execution provider cuda"));
+        }
+    }
 
     #[test]
     fn sigmoid_zero_is_half() {

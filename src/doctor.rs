@@ -1175,7 +1175,7 @@ async fn reranker_check(config: &Config, options: DoctorOptions, clock: std::syn
         #[cfg(feature = "reranker")]
         let identity = crate::reranker::runtime::model_identity(reranker).map_or_else(
             |_error| "configured model has invalid revision or hash configuration".to_owned(),
-            |_identity| "configured model identity validated".to_owned(),
+            |identity| format!("configured {} {} model identity validated", identity.artifact, identity.precision),
         );
         #[cfg(not(feature = "reranker"))]
         let identity = "configured model identity unavailable in this build";
@@ -1195,7 +1195,7 @@ async fn reranker_check(config: &Config, options: DoctorOptions, clock: std::syn
         let identity = crate::reranker::runtime::model_identity(reranker);
         let identity_summary = identity.map_or_else(
             |_error| "configured model has invalid revision or hash configuration".to_owned(),
-            |_identity| "configured model identity validated".to_owned(),
+            |identity| format!("configured {} {} model identity validated", identity.artifact, identity.precision),
         );
         match crate::reranker::runtime::initialize_for_diagnostics_with_clock(reranker, options.allow_downloads, clock).await {
             Ok(initialized) => {

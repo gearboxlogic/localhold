@@ -7,7 +7,7 @@ use tracing::{info, warn};
 use super::{
     RerankerError, RerankerProvider, download,
     onnx::OnnxReranker,
-    policy::compiled_execution_providers,
+    policy::{compiled_execution_providers, validate_precision_policy},
     resilient::{ResilientReranker, ResilientRerankerConfig},
 };
 
@@ -17,6 +17,10 @@ use super::{
 pub struct RerankerModelIdentity {
     /// Immutable model revision or the direct-file marker.
     pub revision: String,
+    /// Managed artifact profile or direct/custom marker.
+    pub artifact: String,
+    /// Configured numeric precision.
+    pub precision: RerankerPrecision,
     /// Expected model artifact SHA-256, or `not_configured` for direct files.
     pub model_sha256: String,
     /// Expected tokenizer artifact SHA-256, or `not_configured` for direct files.
@@ -24,7 +28,7 @@ pub struct RerankerModelIdentity {
 }
 use crate::{
     clock::{Clock, SystemClock},
-    config::{RerankerConfig, RerankerExecutionProvider},
+    config::{RerankerConfig, RerankerExecutionProvider, RerankerPrecision},
 };
 
 /// Successfully initialized reranker provider.
@@ -79,6 +83,7 @@ pub async fn initialize_with_retry(config: &RerankerConfig) -> Result<Initialize
 /// [`initialize_with_retry`].
 pub async fn initialize_with_retry_and_clock(config: &RerankerConfig, clock: Arc<dyn Clock>) -> Result<InitializedReranker, RerankerError> {
     const MAX_RETRIES: u32 = 3;
+    validate_precision_policy(config)?;
     initialize_ort()?;
     let mut delay = std::time::Duration::from_secs(2);
     for attempt in 0..MAX_RETRIES {
@@ -102,9 +107,12 @@ pub async fn initialize_with_retry_and_clock(config: &RerankerConfig, clock: Arc
 /// Returns an error when an auto-downloaded model lacks immutable revision or
 /// hash pins.
 pub fn model_identity(config: &RerankerConfig) -> Result<RerankerModelIdentity, RerankerError> {
+    validate_precision_policy(config)?;
     if !config.model_path.is_empty() {
         return Ok(RerankerModelIdentity {
             revision: if config.revision.is_empty() { "direct_file".into() } else { config.revision.clone() },
+            artifact: "direct_file".into(),
+            precision: config.precision,
             model_sha256: if config.model_sha256.is_empty() {
                 "not_configured".into()
             } else {
@@ -120,6 +128,8 @@ pub fn model_identity(config: &RerankerConfig) -> Result<RerankerModelIdentity, 
     let pins = download::download_pins(config)?;
     Ok(RerankerModelIdentity {
         revision: pins.revision,
+        artifact: pins.artifact,
+        precision: config.precision,
         model_sha256: pins.model_sha256,
         tokenizer_sha256: pins.tokenizer_sha256,
     })
@@ -144,6 +154,7 @@ pub async fn initialize_for_diagnostics(config: &RerankerConfig, allow_downloads
 /// Returns model, provider, download, or inference errors from normal
 /// initialization.
 pub async fn initialize_for_diagnostics_with_clock(config: &RerankerConfig, allow_downloads: bool, clock: Arc<dyn Clock>) -> Result<InitializedReranker, RerankerError> {
+    validate_precision_policy(config)?;
     let _provider_candidates = crate::reranker::policy::execution_provider_candidates(config.execution_provider)?;
     if allow_downloads {
         return initialize_with_retry_and_clock(config, clock).await;
@@ -188,6 +199,7 @@ async fn initialize(config: &RerankerConfig, clock: Arc<dyn Clock>) -> Result<In
     info!(
         %compiled,
         requested = %config.execution_provider,
+        precision = %config.precision,
         required = config.required,
         selected = %selected.map_or_else(|| "none".into(), |provider| provider.to_string()),
         active = %active.map_or_else(|| "none".into(), |provider| provider.to_string()),

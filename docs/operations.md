@@ -71,7 +71,8 @@ Provider-specific request and authentication settings are documented in
 
 The optional reranker runs in the LocalHold process. Its model and tokenizer
 are downloaded into the configured cache on first use unless `model_path`
-points to pre-provisioned files.
+points to pre-provisioned files. The built-in model uses LocalHold-produced,
+checksum-pinned fused artifacts derived from the immutable upstream revision.
 
 Multiple LocalHold processes may share a reranker cache when they run as the
 same operating-system user or otherwise have compatible directory permissions.
@@ -107,8 +108,45 @@ network use, not per-process RAM or VRAM use.
 provider passes initial inference. With the default `false`, LocalHold can
 continue without active reranking and reports `selected=none` or `active=none`.
 Startup logs report the compiled, requested, selected, and active providers.
-`LOCALHOLD_RERANKER_EXECUTION_PROVIDER` and `LOCALHOLD_RERANKER_REQUIRED`
-override the corresponding TOML values.
+`LOCALHOLD_RERANKER_EXECUTION_PROVIDER`, `LOCALHOLD_RERANKER_PRECISION`, and
+`LOCALHOLD_RERANKER_REQUIRED` override the corresponding TOML values.
+
+### Reranker model precision
+
+`search.reranker.precision = "fp32"` is the default. This artifact is fused to
+reduce ONNX graph overhead while retaining FP32 weights and computation. It is
+the portable choice for CPU, CUDA, and `auto`; CUDA can fall back to CPU without
+changing artifacts. Existing custom model and hash overrides retain their
+previous upstream-download behavior.
+
+`search.reranker.precision = "fp16"` selects a fused half-precision artifact
+whose file and weight storage are approximately half the FP32 size; total VRAM
+savings vary with runtime buffers and workload. It is supported only when
+`execution_provider = "cuda"` is explicit. LocalHold rejects FP16
+with `auto` because a CUDA failure would otherwise send the FP16 graph to CPU,
+where the tested runtime was substantially slower than FP32. Custom FP16 files
+may be supplied with `model_path`, but the explicit-CUDA requirement remains.
+
+FP16 can make CUDA reranking faster, especially as the candidate count or
+sequence length grows. The tradeoff is reduced numerical precision: documents
+with nearly equal logits can change order or cross a result-set boundary. In a
+small local comparison against the upstream FP32 graph, top-five membership was
+unchanged, while two of ten queries changed one member of the top ten. That is
+an indicative engineering check, not a ranking-quality benchmark. More testing
+is needed across representative corpora, query types, candidate counts, CUDA
+architectures, and ranking metrics before quantifying the impact reliably.
+Operators choosing FP16 should evaluate recall and ranking quality on their own
+golden queries and preserve FP32 as the rollback profile.
+
+The managed artifacts come from
+`cross-encoder/ms-marco-MiniLM-L6-v2` revision
+`c5ee24cb16019beea0893ab7796b1df96625c6b8`, transformed with ONNX Runtime
+1.22's BERT optimizer (`opt_level=0`, 12 attention heads, hidden size 384). The
+FP16 artifact adds the optimizer's float16 conversion. LocalHold keeps FP32 and
+FP16 in separate cache directories and verifies both the model and tokenizer
+SHA-256 before publishing either cache entry. The
+[artifact release](https://github.com/gearboxlogic/localhold/releases/tag/reranker-minilm-l6-v1)
+includes checksums, transformation provenance, and license notices.
 
 ## HTTP Deployment
 

@@ -13,6 +13,10 @@ requirements explicitly.
   optional required-mode startup enforcement.
 - Made CUDA-capable builds fall back visibly to a CPU session only in `auto`
   mode; an explicit `cuda` request never silently falls back.
+- Replaced the built-in reranker's raw ONNX graph with a checksum-pinned fused
+  FP32 artifact, and added an opt-in fused FP16 profile for explicit CUDA use.
+  FP16 is rejected with CPU or `auto` fallback because it trades some ranking
+  precision for lower weight storage and faster CUDA reranking.
 
 ## [0.1.0-beta.3] - 2026-07-10
 

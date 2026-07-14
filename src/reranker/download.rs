@@ -245,9 +245,6 @@ pub(crate) fn download_pins(config: &RerankerConfig) -> Result<DownloadPins, Rer
 }
 
 pub(crate) fn resolve_cached_model_paths(config: &RerankerConfig) -> Result<ModelPaths, RerankerError> {
-    // Direct files are an explicit operator-managed override. Runtime
-    // diagnostics preserve the existing presence-only behavior; the
-    // `models verify` command applies the stricter hash-pin policy.
     if !config.model_path.is_empty() {
         let onnx_path = crate::config::expand_tilde(&config.model_path).map_err(|error| RerankerError::Permanent(error.to_string().into()))?;
         let tokenizer_path = onnx_path.parent().unwrap_or_else(|| Path::new(".")).join("tokenizer.json");
@@ -256,14 +253,19 @@ pub(crate) fn resolve_cached_model_paths(config: &RerankerConfig) -> Result<Mode
         }
         return Err(RerankerError::Unavailable);
     }
-    let inspection = inspect_model_paths(config)?;
-    if matches!(inspection.model_status, ArtifactStatus::Missing) || matches!(inspection.tokenizer_status, ArtifactStatus::Missing) {
+
+    let pins = resolve_download_pins(config)?;
+    let cache = crate::config::expand_tilde(&config.cache_dir).map_err(|error| RerankerError::Permanent(error.to_string().into()))?;
+    let model_dir = cache.join(format!("{}@{}", config.model.replace('/', "--"), pins.cache_revision.replace('/', "--")));
+    let onnx_path = model_dir.join("model.onnx");
+    let tokenizer_path = model_dir.join("tokenizer.json");
+    if !onnx_path.is_file() || !tokenizer_path.is_file() {
         return Err(RerankerError::Unavailable);
     }
-    if !inspection.is_verified() {
+    if !verify_file_sha256(&onnx_path, &pins.model_sha256)? || !verify_file_sha256(&tokenizer_path, &pins.tokenizer_sha256)? {
         return Err(RerankerError::Permanent("cached reranker artifacts do not match their configured SHA-256 hashes".into()));
     }
-    Ok(inspection.paths)
+    Ok(ModelPaths { onnx_path, tokenizer_path })
 }
 
 pub(crate) fn inspect_model_paths(config: &RerankerConfig) -> Result<ModelInspection, RerankerError> {

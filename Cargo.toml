@@ -66,6 +66,8 @@ sqlx-core = { version = "0.9", default-features = false, features = ["_rt-tokio"
 sqlx-postgres = { version = "0.9", default-features = false, features = ["chrono", "json"] }
 
 [features]
+# Integration-test-only runtime hooks. Production and release builds must
+# never enable this feature.
 testing = []
 reranker = ["dep:ort", "dep:tokenizers", "dep:sha2"]
 reranker-cuda = ["reranker", "ort/cuda", "ort/load-dynamic"]

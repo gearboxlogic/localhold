@@ -14,6 +14,13 @@ use crate::config::RerankerConfig;
 /// Stable schema version for `hold models` JSON output.
 pub const MODELS_REPORT_SCHEMA_VERSION: u32 = 1;
 
+#[derive(Debug, Clone, Copy)]
+struct ReportOptions<'a> {
+    command: &'a str,
+    network_allowed: bool,
+    artifacts_changed: bool,
+}
+
 /// Verification state for one model artifact.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
@@ -127,7 +134,23 @@ impl ModelsReport {
 /// Inspect configured reranker artifacts without creating paths or using the network.
 #[must_use]
 pub fn verify(config: &RerankerConfig) -> ModelsReport {
-    build_report("verify", config, false, false, inspect(config))
+    let identity = match model_identity(config) {
+        Ok(identity) => identity,
+        Err(error) => return report_from_error("verify", config, false, None, &error),
+    };
+    match download::inspect_model_paths(config) {
+        Ok(inspection) => report_from_inspection(
+            ReportOptions {
+                command: "verify",
+                network_allowed: false,
+                artifacts_changed: false,
+            },
+            config,
+            &identity,
+            &inspection,
+        ),
+        Err(error) => report_from_error("verify", config, false, Some(&identity), &error),
+    }
 }
 
 /// Fetch missing or invalid managed artifacts, then verify both SHA-256 pins.
@@ -135,58 +158,71 @@ pub fn verify(config: &RerankerConfig) -> ModelsReport {
 /// Direct-file configurations are never downloaded; they are verified in place.
 #[must_use]
 pub fn fetch(config: &RerankerConfig) -> ModelsReport {
-    let before = match inspect(config) {
+    let identity = match model_identity(config) {
+        Ok(identity) => identity,
+        Err(error) => return report_from_error("fetch", config, true, None, &error),
+    };
+    let before = match download::inspect_model_paths(config) {
         Ok(before) => before,
-        Err(error) => return build_report("fetch", config, true, false, Err(error)),
+        Err(error) => return report_from_error("fetch", config, true, Some(&identity), &error),
     };
     if !config.model_path.is_empty() {
-        return build_report("fetch", config, true, false, Ok(before));
+        return report_from_inspection(
+            ReportOptions {
+                command: "fetch",
+                network_allowed: true,
+                artifacts_changed: false,
+            },
+            config,
+            &identity,
+            &before,
+        );
     }
     let artifacts_changed = !before.is_verified();
     match download::resolve_model_paths(config) {
-        Ok(_paths) => build_report("fetch", config, true, artifacts_changed, inspect(config)),
-        Err(error) => build_report("fetch", config, true, false, Err(error)),
+        Ok(_paths) => match download::inspect_model_paths(config) {
+            Ok(inspection) => report_from_inspection(
+                ReportOptions {
+                    command: "fetch",
+                    network_allowed: true,
+                    artifacts_changed,
+                },
+                config,
+                &identity,
+                &inspection,
+            ),
+            Err(error) => report_from_error("fetch", config, true, Some(&identity), &error),
+        },
+        Err(error) => report_from_error("fetch", config, true, Some(&identity), &error),
     }
 }
 
-fn inspect(config: &RerankerConfig) -> Result<ModelInspection, RerankerError> {
-    let _identity = model_identity(config)?;
-    download::inspect_model_paths(config)
-}
-
-fn build_report(command: &str, config: &RerankerConfig, network_allowed: bool, artifacts_changed: bool, result: Result<ModelInspection, RerankerError>) -> ModelsReport {
-    match result {
-        Ok(inspection) => report_from_inspection(command, config, network_allowed, artifacts_changed, &inspection),
-        Err(error) => report_from_error(command, config, network_allowed, &error),
-    }
-}
-
-fn report_from_inspection(command: &str, config: &RerankerConfig, network_allowed: bool, artifacts_changed: bool, inspection: &ModelInspection) -> ModelsReport {
-    let (revision, artifact, precision) = identity_fields(config, model_identity(config));
+fn report_from_inspection(options: ReportOptions<'_>, config: &RerankerConfig, identity: &RerankerModelIdentity, inspection: &ModelInspection) -> ModelsReport {
+    let (revision, artifact, precision) = identity_fields(config, Some(identity));
     let aggregate = aggregate_status(inspection.model_status, inspection.tokenizer_status);
     let exit_code = i32::from(aggregate != "verified");
     ModelsReport {
         schema_version: MODELS_REPORT_SCHEMA_VERSION,
-        command: command.into(),
+        command: options.command.into(),
         model: config.model.clone(),
         revision,
         artifact,
         precision,
         source: if config.model_path.is_empty() { "managed_cache".into() } else { "direct_file".into() },
-        network_allowed,
-        artifacts_changed: artifacts_changed && aggregate == "verified",
+        network_allowed: options.network_allowed,
+        artifacts_changed: options.artifacts_changed && aggregate == "verified",
         status: aggregate.into(),
         artifacts: vec![
             artifact_report("model", &inspection.paths.onnx_path, &inspection.model_sha256, inspection.model_status),
             artifact_report("tokenizer", &inspection.paths.tokenizer_path, &inspection.tokenizer_sha256, inspection.tokenizer_status),
         ],
-        summary: summary_for(aggregate, config.model_path.is_empty(), command),
+        summary: summary_for(aggregate, config.model_path.is_empty(), options.command),
         exit_code,
     }
 }
 
-fn report_from_error(command: &str, config: &RerankerConfig, network_allowed: bool, error: &RerankerError) -> ModelsReport {
-    let (revision, artifact, precision) = identity_fields(config, model_identity(config));
+fn report_from_error(command: &str, config: &RerankerConfig, network_allowed: bool, identity: Option<&RerankerModelIdentity>, error: &RerankerError) -> ModelsReport {
+    let (revision, artifact, precision) = identity_fields(config, identity);
     ModelsReport {
         schema_version: MODELS_REPORT_SCHEMA_VERSION,
         command: command.into(),
@@ -204,15 +240,17 @@ fn report_from_error(command: &str, config: &RerankerConfig, network_allowed: bo
     }
 }
 
-fn identity_fields(config: &RerankerConfig, identity: Result<RerankerModelIdentity, RerankerError>) -> (String, String, String) {
-    match identity {
-        Ok(identity) => (identity.revision, identity.artifact, identity.precision.to_string()),
-        Err(_error) => (
-            if config.revision.is_empty() { "not_resolved".into() } else { config.revision.clone() },
-            if config.model_path.is_empty() { "not_resolved".into() } else { "direct_file".into() },
-            config.precision.to_string(),
-        ),
-    }
+fn identity_fields(config: &RerankerConfig, identity: Option<&RerankerModelIdentity>) -> (String, String, String) {
+    identity.map_or_else(
+        || {
+            (
+                if config.revision.is_empty() { "not_resolved".into() } else { config.revision.clone() },
+                if config.model_path.is_empty() { "not_resolved".into() } else { "direct_file".into() },
+                config.precision.to_string(),
+            )
+        },
+        |identity| (identity.revision.clone(), identity.artifact.clone(), identity.precision.to_string()),
+    )
 }
 
 fn artifact_report(name: &str, path: &std::path::Path, expected_sha256: &str, status: ArtifactStatus) -> ModelArtifactReport {
@@ -225,10 +263,10 @@ fn artifact_report(name: &str, path: &std::path::Path, expected_sha256: &str, st
 }
 
 const fn aggregate_status(model: ArtifactStatus, tokenizer: ArtifactStatus) -> &'static str {
-    if matches!(model, ArtifactStatus::HashMismatch) || matches!(tokenizer, ArtifactStatus::HashMismatch) {
-        "hash_mismatch"
-    } else if matches!(model, ArtifactStatus::Missing) || matches!(tokenizer, ArtifactStatus::Missing) {
+    if matches!(model, ArtifactStatus::Missing) || matches!(tokenizer, ArtifactStatus::Missing) {
         "missing"
+    } else if matches!(model, ArtifactStatus::HashMismatch) || matches!(tokenizer, ArtifactStatus::HashMismatch) {
+        "hash_mismatch"
     } else if matches!(model, ArtifactStatus::Unverifiable) || matches!(tokenizer, ArtifactStatus::Unverifiable) {
         "unverifiable"
     } else {
@@ -309,6 +347,12 @@ mod tests {
         assert_eq!(report.status, "missing");
         assert!(!report.network_allowed);
         assert!(!cache.exists());
+    }
+
+    #[test]
+    fn aggregate_status_prioritizes_missing_artifacts_over_hash_mismatches() {
+        assert_eq!(aggregate_status(ArtifactStatus::HashMismatch, ArtifactStatus::Missing), "missing");
+        assert_eq!(aggregate_status(ArtifactStatus::Missing, ArtifactStatus::HashMismatch), "missing");
     }
 
     fn hex(bytes: impl AsRef<[u8]>) -> String {

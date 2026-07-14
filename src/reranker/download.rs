@@ -477,6 +477,8 @@ fn remove_stale_partial_files(model_dir: &Path) -> Result<(), RerankerError> {
 }
 
 fn download_base_url() -> String {
+    // The `testing` feature is reserved for Cargo integration-test binaries;
+    // every production and release build must omit it.
     #[cfg(any(test, feature = "testing"))]
     if let Ok(base_url) = std::env::var("LOCALHOLD_TEST_RERANKER_BASE_URL") {
         return base_url;
@@ -485,6 +487,7 @@ fn download_base_url() -> String {
 }
 
 fn builtin_artifact_base_url() -> String {
+    // See `download_base_url`: release builds must never enable `testing`.
     #[cfg(any(test, feature = "testing"))]
     if let Ok(base_url) = std::env::var("LOCALHOLD_TEST_RERANKER_BASE_URL") {
         return base_url;

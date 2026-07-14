@@ -212,6 +212,13 @@ impl EmbeddingStatusReport {
             self.counts.mapped_memories,
             self.counts.vector_rows
         );
+        if self.counts.missing_vectors > 0 || self.counts.unexpected_vectors > 0 {
+            let _written = writeln!(
+                output,
+                "Inconsistencies: missing {}, unexpected {}",
+                self.counts.missing_vectors, self.counts.unexpected_vectors
+            );
+        }
         let _written = writeln!(output, "Summary: {}", single_line(&self.summary));
         output
     }
@@ -370,10 +377,7 @@ pub(crate) async fn probe_provider(config: &Config, clock: Arc<dyn Clock>) -> Em
 async fn inspect_storage(config: &Config, clock: &dyn Clock) -> StorageObservation {
     match config.database.backend {
         DatabaseBackend::Sqlite => inspect_sqlite_storage(config.database.sqlite_path()).await,
-        DatabaseBackend::Postgres => crate::clock::timeout(clock, Duration::from_secs(20), inspect_postgres_storage(config))
-            .await
-            .unwrap_or(Ok(StorageObservation::Unavailable))
-            .unwrap_or(StorageObservation::Unavailable),
+        DatabaseBackend::Postgres => inspect_postgres_storage(config, clock).await,
     }
 }
 
@@ -483,9 +487,30 @@ fn inspect_sqlite_consistency(connection: &Connection, map_exists: bool, vectors
     Ok((missing, unexpected))
 }
 
-async fn inspect_postgres_storage(config: &Config) -> StatusResult<StorageObservation> {
-    let pool = PgPoolOptions::new().max_connections(1).connect(&config.database.postgres.url).await?;
-    let memories_exist: bool = query_scalar("SELECT to_regclass('memories') IS NOT NULL").fetch_one(&pool).await?;
+async fn inspect_postgres_storage(config: &Config, clock: &dyn Clock) -> StorageObservation {
+    const TIMEOUT: Duration = Duration::from_secs(20);
+
+    let started_at = clock.monotonic();
+    let connect = PgPoolOptions::new().max_connections(1).connect(&config.database.postgres.url);
+    let Ok(Ok(pool)) = crate::clock::timeout(clock, TIMEOUT, connect).await else {
+        return StorageObservation::Unavailable;
+    };
+    let elapsed = clock.monotonic().saturating_sub(started_at);
+    let remaining = TIMEOUT.saturating_sub(elapsed);
+    let observation = if remaining.is_zero() {
+        StorageObservation::Unavailable
+    } else {
+        crate::clock::timeout(clock, remaining, inspect_postgres_pool(&pool))
+            .await
+            .unwrap_or(Ok(StorageObservation::Unavailable))
+            .unwrap_or(StorageObservation::Unavailable)
+    };
+    pool.close().await;
+    observation
+}
+
+async fn inspect_postgres_pool(pool: &PgPool) -> StatusResult<StorageObservation> {
+    let memories_exist: bool = query_scalar("SELECT to_regclass('memories') IS NOT NULL").fetch_one(pool).await?;
     if !memories_exist {
         return Ok(StorageObservation::NotInitialized);
     }
@@ -496,29 +521,29 @@ async fn inspect_postgres_storage(config: &Config) -> StatusResult<StorageObserv
                 COUNT(*) FILTER (WHERE NOT has_embedding AND embedding_claim_token IS NOT NULL) AS claimed
          FROM memories",
     )
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await?;
-    let vector_table_exists: bool = query_scalar("SELECT to_regclass('memory_embeddings') IS NOT NULL").fetch_one(&pool).await?;
-    let profile_table_exists: bool = query_scalar("SELECT to_regclass('embedding_profile') IS NOT NULL").fetch_one(&pool).await?;
+    let vector_table_exists: bool = query_scalar("SELECT to_regclass('memory_embeddings') IS NOT NULL").fetch_one(pool).await?;
+    let profile_table_exists: bool = query_scalar("SELECT to_regclass('embedding_profile') IS NOT NULL").fetch_one(pool).await?;
     let (vector_rows, missing, unexpected) = if vector_table_exists {
         (
-            query_scalar::<_, i64>("SELECT COUNT(*) FROM memory_embeddings").fetch_one(&pool).await?,
+            query_scalar::<_, i64>("SELECT COUNT(*) FROM memory_embeddings").fetch_one(pool).await?,
             query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM memories AS memory LEFT JOIN memory_embeddings AS embedding ON embedding.memory_id = memory.id WHERE memory.has_embedding AND embedding.memory_id IS NULL",
             )
-            .fetch_one(&pool)
+            .fetch_one(pool)
             .await?,
             query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM memory_embeddings AS embedding LEFT JOIN memories AS memory ON memory.id = embedding.memory_id WHERE memory.id IS NULL OR NOT memory.has_embedding",
             )
-            .fetch_one(&pool)
+            .fetch_one(pool)
             .await?,
         )
     } else {
         (0, row.try_get::<i64, _>("embedded")?, 0)
     };
-    let stored_profile = if profile_table_exists { read_postgres_profile(&pool).await? } else { None };
-    let stored_dimensions = if vector_table_exists { read_postgres_dimensions(&pool).await? } else { None };
+    let stored_profile = if profile_table_exists { read_postgres_profile(pool).await? } else { None };
+    let stored_dimensions = if vector_table_exists { read_postgres_dimensions(pool).await? } else { None };
     Ok(StorageObservation::Ready(StorageSnapshot {
         stored_profile,
         stored_dimensions,

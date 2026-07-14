@@ -299,6 +299,10 @@ fn embeddings_status_detects_missing_and_orphan_vectors_even_when_counts_cancel(
     assert_eq!(report["counts"]["missing_vectors"], 1_i32);
     assert_eq!(report["counts"]["unexpected_vectors"], 1_i32);
 
+    let text_output = embedding_status_command(&db_path, "embed-current").args(["embeddings", "status"]).output().unwrap();
+    assert_eq!(text_output.status.code(), Some(1_i32));
+    assert!(String::from_utf8(text_output.stdout).unwrap().contains("Inconsistencies: missing 1, unexpected 1"));
+
     let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
     let _cleanup = std::fs::remove_file(db_path);

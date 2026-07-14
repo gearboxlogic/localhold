@@ -79,7 +79,7 @@ pub async fn initialize_with_retry(config: &RerankerConfig) -> Result<Initialize
 /// [`initialize_with_retry`].
 pub async fn initialize_with_retry_and_clock(config: &RerankerConfig, clock: Arc<dyn Clock>) -> Result<InitializedReranker, RerankerError> {
     const MAX_RETRIES: u32 = 3;
-    initialize_ort();
+    initialize_ort()?;
     let mut delay = std::time::Duration::from_secs(2);
     for attempt in 0..MAX_RETRIES {
         match initialize(config, Arc::clone(&clock)).await {
@@ -151,14 +151,15 @@ pub async fn initialize_for_diagnostics_with_clock(config: &RerankerConfig, allo
     let paths = download::resolve_cached_model_paths(config)?;
     let mut local_config = config.clone();
     local_config.model_path = paths.onnx_path.to_string_lossy().into_owned();
-    initialize_ort();
+    initialize_ort()?;
     initialize(&local_config, clock).await
 }
 
-fn initialize_ort() {
+fn initialize_ort() -> Result<(), RerankerError> {
     // commit installs the environment in ort's process-global singleton and
     // returns whether this call performed the one-time initialization.
-    let _environment_inserted = ort::init().commit();
+    let _environment_inserted = ort::init().commit().map_err(|error| RerankerError::Permanent(Box::new(error)))?;
+    Ok(())
 }
 
 async fn initialize(config: &RerankerConfig, clock: Arc<dyn Clock>) -> Result<InitializedReranker, RerankerError> {

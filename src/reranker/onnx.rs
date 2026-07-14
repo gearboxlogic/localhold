@@ -74,7 +74,7 @@ impl OnnxReranker {
 
         // Detect which inputs the ONNX graph expects so we can skip
         // token_type_ids for models that don't declare it (e.g. RoBERTa).
-        let input_names: std::collections::HashSet<String> = session.inputs().iter().map(|o| o.name().to_owned()).collect();
+        let input_names: std::collections::HashSet<String> = session.inputs.iter().map(|o| o.name.clone()).collect();
         let has_token_type_ids = input_names.contains("token_type_ids");
 
         let trunc_len = tokenizer.get_truncation().map_or(0, |t| t.max_length);
@@ -278,12 +278,11 @@ fn create_session_with_policy(
 }
 
 fn create_session(model_path: &std::path::Path, provider: RerankerExecutionProvider) -> Result<Session, RerankerError> {
-    let builder = Session::builder().map_err(|error| RerankerError::Permanent(Box::new(error)))?;
-    let builder = builder
-        .with_no_environment_execution_providers()
-        .map_err(|error| RerankerError::Permanent(error.to_string().into()))?;
+    let builder = Session::builder()
+        .and_then(ort::session::builder::SessionBuilder::with_no_environment_execution_providers)
+        .map_err(|error| RerankerError::Permanent(Box::new(error)))?;
 
-    let mut builder = match provider {
+    let builder = match provider {
         RerankerExecutionProvider::Cpu => builder,
         RerankerExecutionProvider::Cuda => configure_cuda(builder)?,
         RerankerExecutionProvider::Auto => {

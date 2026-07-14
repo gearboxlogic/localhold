@@ -13,9 +13,6 @@ requirements explicitly.
   optional required-mode startup enforcement.
 - Made CUDA-capable builds fall back visibly to a CPU session only in `auto`
   mode; an explicit `cuda` request never silently falls back.
-- Updated the ONNX Runtime integration to `ort 2.0.0-rc.12` and the 1.24 ABI
-  so CUDA deployments can use a version-matched runtime without compatibility
-  warnings.
 
 ## [0.1.0-beta.3] - 2026-07-10
 

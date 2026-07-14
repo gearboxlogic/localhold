@@ -14,7 +14,7 @@ Those artifacts are fetched from the upstream model repository at runtime and
 are not part of this source repository.
 
 The standard CPU build statically incorporates Microsoft ONNX Runtime through
-`ort 2.0.0-rc.12`. ONNX Runtime is licensed under the MIT License:
+`ort 2.0.0-rc.10`. ONNX Runtime is licensed under the MIT License:
 
 > Copyright (c) Microsoft Corporation. All rights reserved.
 >

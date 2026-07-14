@@ -136,6 +136,7 @@ superseded_penalty = 0.05      # Multiplier for superseded memories when include
 # Release builds ship with reranker support compiled in; runtime enablement is opt-in.
 enabled = false
 execution_provider = "auto"   # auto prefers usable CUDA when compiled, then CPU
+precision = "fp32"             # fused fp32 default; fp16 requires explicit cuda
 required = false              # true fails startup unless initial inference succeeds
 pool_size = 50                 # Deprecated compatibility shim; prefer search.rerank_top_m
 
@@ -150,7 +151,8 @@ blend_weight = 0.7
 cache_dir = "~/.cache/localhold/models"
 
 # Env: LOCALHOLD_RERANKER_ENABLED, LOCALHOLD_RERANKER_EXECUTION_PROVIDER,
-#      LOCALHOLD_RERANKER_REQUIRED, LOCALHOLD_RERANKER_MODEL, LOCALHOLD_RERANKER_REVISION,
+#      LOCALHOLD_RERANKER_PRECISION, LOCALHOLD_RERANKER_REQUIRED,
+#      LOCALHOLD_RERANKER_MODEL, LOCALHOLD_RERANKER_REVISION,
 #      LOCALHOLD_RERANKER_MODEL_PATH, LOCALHOLD_RERANKER_MODEL_SHA256,
 #      LOCALHOLD_RERANKER_TOKENIZER_SHA256, LOCALHOLD_RERANKER_BLEND_WEIGHT,
 #      LOCALHOLD_RERANKER_CACHE_DIR, LOCALHOLD_RERANKER_POOL_SIZE

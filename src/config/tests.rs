@@ -63,6 +63,7 @@ fn default_config_has_sane_values() {
     assert_eq!(config.limits.consolidation_neighbor_limit, 20);
     assert!(!config.search.reranker.enabled);
     assert_eq!(config.search.reranker.execution_provider, RerankerExecutionProvider::Auto);
+    assert_eq!(config.search.reranker.precision, RerankerPrecision::Fp32);
     assert!(!config.search.reranker.required);
 }
 
@@ -136,12 +137,18 @@ fn env_overrides_apply() {
 
 #[test]
 fn reranker_provider_policy_loads_from_toml_and_env() {
-    let mut config: Config = toml::from_str("[search.reranker]\nenabled = true\nexecution_provider = \"cpu\"\nrequired = false\n").unwrap();
+    let mut config: Config = toml::from_str("[search.reranker]\nenabled = true\nexecution_provider = \"cpu\"\nprecision = \"fp32\"\nrequired = false\n").unwrap();
     assert_eq!(config.search.reranker.execution_provider, RerankerExecutionProvider::Cpu);
+    assert_eq!(config.search.reranker.precision, RerankerPrecision::Fp32);
     assert!(!config.search.reranker.required);
 
-    config.apply_env_from_map(&env_with(&[("LOCALHOLD_RERANKER_EXECUTION_PROVIDER", "cuda"), ("LOCALHOLD_RERANKER_REQUIRED", "true")]));
+    config.apply_env_from_map(&env_with(&[
+        ("LOCALHOLD_RERANKER_EXECUTION_PROVIDER", "cuda"),
+        ("LOCALHOLD_RERANKER_PRECISION", "fp16"),
+        ("LOCALHOLD_RERANKER_REQUIRED", "true"),
+    ]));
     assert_eq!(config.search.reranker.execution_provider, RerankerExecutionProvider::Cuda);
+    assert_eq!(config.search.reranker.precision, RerankerPrecision::Fp16);
     assert!(config.search.reranker.required);
 }
 
@@ -149,6 +156,12 @@ fn reranker_provider_policy_loads_from_toml_and_env() {
 fn reranker_provider_policy_rejects_unknown_value() {
     let error = toml::from_str::<Config>("[search.reranker]\nenabled = true\nexecution_provider = \"tpu\"\n").unwrap_err();
     assert!(error.to_string().contains("unknown variant `tpu`"));
+}
+
+#[test]
+fn reranker_precision_rejects_unknown_value() {
+    let error = toml::from_str::<Config>("[search.reranker]\nprecision = \"bf16\"\n").unwrap_err();
+    assert!(error.to_string().contains("unknown variant `bf16`"));
 }
 
 #[test]
@@ -913,6 +926,50 @@ fn validate_search_config_builtin_default_reranker_allows_embedded_pins() {
         ..SearchConfig::default()
     };
     validate_search_config(&config).unwrap();
+}
+
+#[test]
+fn validate_search_config_fp16_requires_explicit_cuda() {
+    for execution_provider in [RerankerExecutionProvider::Auto, RerankerExecutionProvider::Cpu] {
+        let config = SearchConfig {
+            reranker: RerankerConfig {
+                enabled: true,
+                execution_provider,
+                precision: RerankerPrecision::Fp16,
+                ..RerankerConfig::default()
+            },
+            ..SearchConfig::default()
+        };
+        let err = validate_search_config(&config).unwrap_err();
+        assert!(err.to_string().contains("requires reranker.execution_provider = \"cuda\""));
+    }
+
+    let config = SearchConfig {
+        reranker: RerankerConfig {
+            enabled: true,
+            execution_provider: RerankerExecutionProvider::Cuda,
+            precision: RerankerPrecision::Fp16,
+            ..RerankerConfig::default()
+        },
+        ..SearchConfig::default()
+    };
+    validate_search_config(&config).unwrap();
+}
+
+#[test]
+fn validate_search_config_managed_fp16_rejects_custom_download_pins() {
+    let config = SearchConfig {
+        reranker: RerankerConfig {
+            enabled: true,
+            execution_provider: RerankerExecutionProvider::Cuda,
+            precision: RerankerPrecision::Fp16,
+            model_sha256: "custom".into(),
+            ..RerankerConfig::default()
+        },
+        ..SearchConfig::default()
+    };
+    let err = validate_search_config(&config).unwrap_err();
+    assert!(err.to_string().contains("managed fp16 reranker artifact"));
 }
 
 #[test]

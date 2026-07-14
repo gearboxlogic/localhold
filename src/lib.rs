@@ -17,4 +17,5 @@ pub(crate) mod scoring;
 pub mod server;
 pub mod store;
 pub mod types;
+pub mod ui;
 pub(crate) mod validation;

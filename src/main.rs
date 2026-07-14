@@ -64,6 +64,9 @@ async fn main() -> AppResult {
     if let Some(result) = try_run_embeddings_cli().await {
         return finish_cli(result);
     }
+    if let Some(result) = try_run_ui_cli().await {
+        return finish_cli(result);
+    }
     if let Some(argument) = std::env::args_os().nth(1) {
         write_stderr_line(root_usage());
         return Err(EngineError::config(format!("unknown argument: {}", argument.to_string_lossy())).into());
@@ -133,7 +136,33 @@ fn try_run_info_cli() -> Option<AppResult> {
 }
 
 const fn root_usage() -> &'static str {
-    "Usage: hold [COMMAND]\n\nRuns the LocalHold MCP server when no command is supplied.\n\nCommands:\n  backup PATH                Create a validated online SQLite backup\n  restore PATH --dry-run     Validate an SQLite restore without replacing data\n  restore PATH --yes         Restore SQLite and retain a recovery snapshot\n  config init                Create a no-clobber starter configuration\n  config paths               Show configuration search and active paths\n  config validate            Validate effective configuration without startup\n  doctor                     Diagnose installation and runtime readiness\n  embeddings status          Inspect embedding identity and rebuild progress\n  embeddings reindex --yes   Clear and rebuild the configured vector space\n  models verify              Verify reranker artifacts offline by SHA-256\n  models fetch --yes         Explicitly fetch and verify reranker artifacts\n  reranker gate              Run the real-GPU parity and performance release gate\n  migrate sqlite-to-postgres Migrate storage backends\n\nOptions:\n  -h, --help                 Print help\n  -V, --version              Print version"
+    "Usage: hold [COMMAND]\n\nRuns the LocalHold MCP server when no command is supplied.\n\nCommands:\n  backup PATH                Create a validated online SQLite backup\n  restore PATH --dry-run     Validate an SQLite restore without replacing data\n  restore PATH --yes         Restore SQLite and retain a recovery snapshot\n  config init                Create a no-clobber starter configuration\n  config paths               Show configuration search and active paths\n  config validate            Validate effective configuration without startup\n  doctor                     Diagnose installation and runtime readiness\n  embeddings status          Inspect embedding identity and rebuild progress\n  embeddings reindex --yes   Clear and rebuild the configured vector space\n  models verify              Verify reranker artifacts offline by SHA-256\n  models fetch --yes         Explicitly fetch and verify reranker artifacts\n  reranker gate              Run the real-GPU parity and performance release gate\n  migrate sqlite-to-postgres Migrate storage backends\n  ui                         Browse and search the hold interactively\n\nOptions:\n  -h, --help                 Print help\n  -V, --version              Print version"
+}
+
+async fn try_run_ui_cli() -> Option<CliExitResult> {
+    const USAGE: &str = "Usage: hold ui [--principal <NAME>]\n\nBrowse and search the hold interactively. Opens the configured store\nread-only alongside any running LocalHold process (SQLite uses WAL for\nconcurrent readers; PostgreSQL is shared by nature).\n\nOptions:\n  --principal <NAME>  Read visibility principal (defaults to server.principal)\n  -h, --help          Print help";
+
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if args.first().is_none_or(|argument| argument != "ui") {
+        return None;
+    }
+    if args[1..].iter().any(is_help_arg) {
+        return Some(write_stdout(USAGE).and_then(|()| write_stdout("\n")).map(|()| 0_i32));
+    }
+    let principal = match parse_ui_principal(&args[1..], USAGE) {
+        Ok(principal) => principal,
+        Err(error) => return Some(Err(error.into())),
+    };
+    Some(localhold::ui::run(localhold::ui::UiOptions::new(principal)).await)
+}
+
+fn parse_ui_principal(args: &[OsString], usage: &str) -> Result<Option<String>, EngineError> {
+    match args {
+        [] => Ok(None),
+        [flag, value] if flag == "--principal" => Ok(Some(value.to_string_lossy().into_owned())),
+        [flag] if flag == "--principal" => Err(EngineError::config(format!("--principal requires a value\n\n{usage}"))),
+        [argument, ..] => Err(EngineError::config(format!("unknown ui argument: {}\n\n{usage}", argument.to_string_lossy()))),
+    }
 }
 
 async fn try_run_backup_restore_cli() -> Option<CliExitResult> {

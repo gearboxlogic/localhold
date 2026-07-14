@@ -78,7 +78,7 @@ impl OnnxReranker {
 
         // Detect which inputs the ONNX graph expects so we can skip
         // token_type_ids for models that don't declare it (e.g. RoBERTa).
-        let input_names: std::collections::HashSet<String> = session.inputs.iter().map(|o| o.name.clone()).collect();
+        let input_names: std::collections::HashSet<String> = session.inputs().iter().map(|o| o.name().to_owned()).collect();
         let has_token_type_ids = input_names.contains("token_type_ids");
 
         let trunc_len = tokenizer.get_truncation().map_or(0, |t| t.max_length);

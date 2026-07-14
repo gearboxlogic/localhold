@@ -1,7 +1,18 @@
 name: Protected Real-GPU Release Gate
 
 on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Validated tag whose CUDA archive is being built
+        required: true
+        type: string
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to package; defaults to the current package version
+        required: false
+        type: string
 
 concurrency:
   group: gpu-release-gate-${{ github.ref }}
@@ -17,12 +28,92 @@ env:
   LOCALHOLD_RERANKER_REQUIRED: "true"
   LOCALHOLD_RERANKER_EXECUTION_PROVIDER: cuda
   LOCALHOLD_RERANKER_CACHE_DIR: ${{ vars.LOCALHOLD_GPU_RERANKER_CACHE_DIR }}
-  ORT_DYLIB_PATH: ${{ vars.LOCALHOLD_GPU_ORT_DYLIB_PATH }}
-  LD_LIBRARY_PATH: ${{ vars.LOCALHOLD_GPU_LD_LIBRARY_PATH }}
 
 jobs:
+  build:
+    name: Build portable CUDA archive
+    if: github.ref_protected && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: ubuntu-22.04
+    outputs:
+      release_tag: ${{ steps.release.outputs.tag }}
+    env:
+      XDG_CACHE_HOME: ${{ github.workspace }}/.cache
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          version: 2026.7.5
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        env:
+          REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          tag="$REQUESTED_RELEASE_TAG"
+          if test -z "$tag"; then
+            tag="$(python3 script/release.py tag)"
+          fi
+          python3 script/release.py validate "$tag"
+          printf 'tag=%s\n' "$tag" >>"$GITHUB_OUTPUT"
+
+      - name: Build on the documented glibc baseline
+        shell: bash
+        run: |
+          cargo build --release --locked --features reranker-cuda --target x86_64-unknown-linux-gnu
+          binary=target/x86_64-unknown-linux-gnu/release/hold
+          required_glibc="$(readelf --version-info "$binary" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -n1)"
+          test -n "$required_glibc"
+          test "$(printf '%s\n' GLIBC_2.35 "$required_glibc" | sort -V | tail -n1)" = GLIBC_2.35
+          cp "$binary" "$RUNNER_TEMP/hold-cuda"
+          cargo clean
+
+      - name: Restore pinned CUDA source cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/localhold-cuda-source-cache
+          key: localhold-cuda12-${{ hashFiles('release/cuda-linux-x86_64.json') }}
+
+      - name: Materialize and validate pinned CUDA runtime
+        shell: bash
+        run: |
+          available_kib="$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 {print $4}')"
+          test "$available_kib" -ge 10485760
+          python3 script/prepare-cuda-runtime.py \
+            --cache-dir "$RUNNER_TEMP/localhold-cuda-source-cache" \
+            --output-dir "$RUNNER_TEMP/localhold-cuda-runtime"
+          python3 script/validate-cuda-runtime.py "$RUNNER_TEMP/localhold-cuda-runtime"
+
+      - name: Package portable CUDA archive
+        shell: bash
+        run: |
+          mkdir "$RUNNER_TEMP/localhold-cuda-package-temp"
+          export TMPDIR="$RUNNER_TEMP/localhold-cuda-package-temp"
+          python3 script/package-release.py \
+            --tag "${{ steps.release.outputs.tag }}" \
+            --target x86_64-unknown-linux-gnu-cuda12 \
+            --binary "$RUNNER_TEMP/hold-cuda" \
+            --cuda-runtime-dir "$RUNNER_TEMP/localhold-cuda-runtime" \
+            --format tar.zst \
+            --output-dir dist
+          tar --zstd -tf dist/*.tar.zst >/dev/null
+
+      - name: Upload exact CUDA release archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-linux-x86_64-cuda12
+          path: dist/*.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
   gate:
     name: CUDA parity and performance
+    needs: build
     if: github.ref_protected && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
     runs-on: [self-hosted, linux, x64, localhold-gpu-release]
     environment: cuda-release
@@ -34,10 +125,14 @@ jobs:
         shell: bash
         run: |
           test "$GITHUB_REF_PROTECTED" = true
-          test -n "$ORT_DYLIB_PATH"
-          test -n "$LD_LIBRARY_PATH"
           test -n "$LOCALHOLD_RERANKER_CACHE_DIR"
           command -v nvidia-smi >/dev/null
+          command -v readelf >/dev/null
+          command -v zstd >/dev/null
+          driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1)"
+          test "$(printf '%s\n' 570.26 "$driver" | sort -V | head -n1)" = 570.26
+          available_kib="$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 {print $4}')"
+          test "$available_kib" -ge 8388608
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -49,20 +144,72 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           [[ "$GITHUB_REF" == refs/heads/main || "$GITHUB_REF" == refs/tags/* ]]
+          mkdir -p gate-evidence
 
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - name: Download exact portable CUDA archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          version: 2026.7.5
+          name: release-linux-x86_64-cuda12
+          path: dist
 
-      - name: Build and stage packaged CUDA binary
+      - name: Extract and validate portable CUDA archive
         shell: bash
-        run: ./script/install.sh --profile cuda --prefix "$RUNNER_TEMP/localhold-gpu"
+        run: |
+          mkdir "$RUNNER_TEMP/localhold-cuda-extracted"
+          tar --zstd -xf dist/*.tar.zst -C "$RUNNER_TEMP/localhold-cuda-extracted"
+          tag="${{ needs.build.outputs.release_tag }}"
+          root="$RUNNER_TEMP/localhold-cuda-extracted/localhold-${tag}-x86_64-unknown-linux-gnu-cuda12"
+          python3 script/validate-cuda-runtime.py "$root"
+          test "$("$root/bin/hold" --version)" = "hold ${tag#v}"
+          required_glibc="$(readelf --version-info "$root/bin/hold" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -n1)"
+          test "$(printf '%s\n' GLIBC_2.35 "$required_glibc" | sort -V | tail -n1)" = GLIBC_2.35
+          printf 'CUDA_RELEASE_ROOT=%s\n' "$root" >>"$GITHUB_ENV"
+
+      - name: Prove clean-host private runtime loading
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/clean-home" "$RUNNER_TEMP/clean-config"
+          env -i \
+            PATH=/usr/bin:/bin \
+            HOME="$RUNNER_TEMP/clean-home" \
+            XDG_CONFIG_HOME="$RUNNER_TEMP/clean-config" \
+            LOCALHOLD_DB_PATH="$RUNNER_TEMP/clean.db" \
+            LOCALHOLD_TRANSPORT=http \
+            LOCALHOLD_HTTP_HOST=127.0.0.1 \
+            LOCALHOLD_HTTP_PORT=0 \
+            LOCALHOLD_LOG_LEVEL=info \
+            LOCALHOLD_RERANKER_ENABLED=true \
+            LOCALHOLD_RERANKER_REQUIRED=true \
+            LOCALHOLD_RERANKER_EXECUTION_PROVIDER=cuda \
+            LOCALHOLD_RERANKER_CACHE_DIR="$LOCALHOLD_RERANKER_CACHE_DIR" \
+            "$CUDA_RELEASE_ROOT/bin/hold" \
+              >"$RUNNER_TEMP/clean-stdout.log" 2>"$RUNNER_TEMP/clean-stderr.log" &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          ready=0
+          for _ in $(seq 1 180); do
+            if grep -Fq "reranker initialized (available: true)" "$RUNNER_TEMP/clean-stderr.log"; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/clean-stderr.log" >&2
+              wait "$pid" || true
+              exit 1
+            fi
+            sleep 1
+          done
+          test "$ready" -eq 1
+          python3 script/validate-cuda-runtime.py "$CUDA_RELEASE_ROOT" --pid "$pid"
+          kill "$pid"
+          wait "$pid" 2>/dev/null || true
+          trap - EXIT
 
       - name: Verify managed artifacts offline
         shell: bash
         run: |
-          LOCALHOLD_RERANKER_PRECISION=fp32 "$RUNNER_TEMP/localhold-gpu/bin/hold" models verify --json >/dev/null
-          LOCALHOLD_RERANKER_PRECISION=fp16 "$RUNNER_TEMP/localhold-gpu/bin/hold" models verify --json >/dev/null
+          LOCALHOLD_RERANKER_PRECISION=fp32 "$CUDA_RELEASE_ROOT/bin/hold" models verify --json >/dev/null
+          LOCALHOLD_RERANKER_PRECISION=fp16 "$CUDA_RELEASE_ROOT/bin/hold" models verify --json >/dev/null
 
       - name: Run FP32 and FP16 real-GPU gates
         shell: bash
@@ -70,7 +217,7 @@ jobs:
           mkdir -p gate-evidence
           status=0
           LOCALHOLD_RERANKER_PRECISION=fp32 \
-            "$RUNNER_TEMP/localhold-gpu/bin/hold" reranker gate \
+            "$CUDA_RELEASE_ROOT/bin/hold" reranker gate \
               --iterations 10 \
               --warmup 3 \
               --min-overlap 1.0 \
@@ -81,7 +228,7 @@ jobs:
               --max-vram-mib 2048 \
               --json >gate-evidence/fp32.json || status=1
           LOCALHOLD_RERANKER_PRECISION=fp16 \
-            "$RUNNER_TEMP/localhold-gpu/bin/hold" reranker gate \
+            "$CUDA_RELEASE_ROOT/bin/hold" reranker gate \
               --iterations 10 \
               --warmup 3 \
               --min-overlap 0.9 \
@@ -101,7 +248,7 @@ jobs:
           set +e
           CUDA_VISIBLE_DEVICES='' \
             LOCALHOLD_RERANKER_PRECISION=fp32 \
-            "$RUNNER_TEMP/localhold-gpu/bin/hold" reranker gate \
+            "$CUDA_RELEASE_ROOT/bin/hold" reranker gate \
               --iterations 1 --warmup 0 --json \
               >"$RUNNER_TEMP/no-cuda.json" 2>"$RUNNER_TEMP/no-cuda.stderr"
           status=$?
@@ -110,7 +257,9 @@ jobs:
             "$RUNNER_TEMP/no-cuda.json" >gate-evidence/no-cuda.json
           test "$status" -eq 1
           jq -e '.status == "failed" and (.failures | any(contains("required CUDA")))' "$RUNNER_TEMP/no-cuda.json" >/dev/null
-          ! grep -Fq "panicked" "$RUNNER_TEMP/no-cuda.stderr"
+          if grep -Fq "panicked" "$RUNNER_TEMP/no-cuda.stderr"; then
+            exit 1
+          fi
 
       - name: Prove incompatible runtime is structured
         shell: bash
@@ -118,7 +267,7 @@ jobs:
           set +e
           ORT_DYLIB_PATH="$RUNNER_TEMP/missing-libonnxruntime.so" \
             LOCALHOLD_RERANKER_PRECISION=fp32 \
-            "$RUNNER_TEMP/localhold-gpu/bin/hold" doctor --json \
+            "$CUDA_RELEASE_ROOT/bin/hold" doctor --json \
               >"$RUNNER_TEMP/incompatible-runtime.json" 2>"$RUNNER_TEMP/incompatible-runtime.stderr"
           status=$?
           set -e
@@ -126,7 +275,33 @@ jobs:
             "$RUNNER_TEMP/incompatible-runtime.json" >gate-evidence/incompatible-runtime.json
           test "$status" -eq 1
           jq -e '.checks[] | select(.name == "reranker") | .status == "failed"' "$RUNNER_TEMP/incompatible-runtime.json" >/dev/null
-          ! grep -Fq "panicked" "$RUNNER_TEMP/incompatible-runtime.stderr"
+          if grep -Fq "panicked" "$RUNNER_TEMP/incompatible-runtime.stderr"; then
+            exit 1
+          fi
+
+      - name: Prove a missing bundled dependency is structured
+        shell: bash
+        run: |
+          dependency="$CUDA_RELEASE_ROOT/lib/libcudart.so.12"
+          moved="$RUNNER_TEMP/libcudart.so.12"
+          mv "$dependency" "$moved"
+          trap 'mv "$moved" "$dependency"' EXIT
+          set +e
+          LOCALHOLD_RERANKER_PRECISION=fp32 \
+            "$CUDA_RELEASE_ROOT/bin/hold" doctor --json \
+              >"$RUNNER_TEMP/missing-dependency.json" 2>"$RUNNER_TEMP/missing-dependency.stderr"
+          status=$?
+          set -e
+          jq '{schema_version, case: "missing_bundled_dependency", status, exit_code, reranker: (.checks[] | select(.name == "reranker") | {name, status})}' \
+            "$RUNNER_TEMP/missing-dependency.json" >gate-evidence/missing-dependency.json
+          test "$status" -eq 1
+          jq -e '.checks[] | select(.name == "reranker") | .status == "failed"' "$RUNNER_TEMP/missing-dependency.json" >/dev/null
+          grep -Fq "bundled CUDA 12 runtime" "$RUNNER_TEMP/missing-dependency.json"
+          if grep -Fq "panicked" "$RUNNER_TEMP/missing-dependency.stderr"; then
+            exit 1
+          fi
+          mv "$moved" "$dependency"
+          trap - EXIT
 
       - name: Upload sanitized gate evidence
         if: always()

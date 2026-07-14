@@ -36,13 +36,9 @@ wildcards = "allow"
 highlight = "all"
 skip = [
   { crate = "base64@0.13.1", reason = "Transitive via tokenizers/spm_precompiled; rest of the tree uses base64 0.22" },
-  { crate = "block-buffer@0.10.4", reason = "Transitive via the ort rc.10 build dependency retained for Ubuntu 22.04 compatibility; the application graph uses block-buffer 0.12" },
-  { crate = "cpufeatures@0.2.17", reason = "Transitive via the ort rc.10 build dependency retained for Ubuntu 22.04 compatibility; the application graph uses cpufeatures 0.3" },
-  { crate = "crypto-common@0.1.7", reason = "Transitive via the ort rc.10 build dependency retained for Ubuntu 22.04 compatibility; the application graph uses crypto-common 0.2" },
   { crate = "darling@0.20.11", reason = "Transitive via tokenizers/derive_builder; rmcp uses darling 0.23" },
   { crate = "darling_core@0.20.11", reason = "Transitive via tokenizers/derive_builder; rmcp uses darling_core 0.23" },
   { crate = "darling_macro@0.20.11", reason = "Transitive via tokenizers/derive_builder; rmcp uses darling_macro 0.23" },
-  { crate = "digest@0.10.7", reason = "Transitive via the ort rc.10 build dependency retained for Ubuntu 22.04 compatibility; the application graph uses digest 0.11" },
   { crate = "getrandom@0.2.17", reason = "Target-specific transitive via dirs-sys/redox_users; newer rand users pull getrandom 0.3+" },
   { crate = "getrandom@0.3.4", reason = "Transitive via tokenizers/proptest/ulid; rmcp/rand/tempfile use getrandom 0.4" },
   { crate = "hashlink@0.11.0", reason = "Transitive via sqlx-core 0.9; rusqlite 0.40 uses hashlink 0.12" },
@@ -50,8 +46,6 @@ skip = [
   { crate = "r-efi@5.3.0", reason = "Transitive via getrandom 0.3; getrandom 0.4 pulls r-efi 6" },
   { crate = "rand@0.9.4", reason = "Transitive via proptest/tokenizers/ulid; direct/rmcp uses rand 0.10" },
   { crate = "rand_core@0.9.5", reason = "Transitive via proptest/tokenizers/ulid/rand 0.9; direct/rmcp uses rand_core 0.10" },
-  { crate = "sha2@0.10.9", reason = "Transitive via the ort rc.10 build dependency retained for Ubuntu 22.04 compatibility; the application graph uses sha2 0.11" },
-  { crate = "smallvec@2.0.0-alpha.10", reason = "Transitive via ort rc.10 retained for Ubuntu 22.04 compatibility; the application graph uses stable smallvec 1" },
   { crate = "wit-bindgen@0.51.0", reason = "Transitive via getrandom 0.4 wasip3 support; wasip2 pulls wit-bindgen 0.57" },
 ]
 

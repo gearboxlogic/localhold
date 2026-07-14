@@ -593,6 +593,14 @@ fn create_secure_empty_file(path: &Path) -> Result<(), MaintenanceFailure> {
 }
 
 fn publish_no_clobber(temporary: &Path, destination: &Path) -> Result<(), MaintenanceFailure> {
+    publish_no_clobber_with_cleanup(temporary, destination, remove_private_staging)
+}
+
+fn remove_private_staging(path: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(path)
+}
+
+fn publish_no_clobber_with_cleanup(temporary: &Path, destination: &Path, remove_temporary: impl FnOnce(&Path) -> std::io::Result<()>) -> Result<(), MaintenanceFailure> {
     std::fs::hard_link(temporary, destination).map_err(|error| {
         if error.kind() == std::io::ErrorKind::AlreadyExists {
             MaintenanceFailure {
@@ -604,9 +612,16 @@ fn publish_no_clobber(temporary: &Path, destination: &Path) -> Result<(), Mainte
             MaintenanceFailure::failed(format!("cannot publish {}: {error}", destination.display()))
         }
     })?;
-    std::fs::remove_file(temporary).map_err(|error| MaintenanceFailure::failed(format!("backup was published but temporary cleanup failed: {error}")))?;
     #[cfg(unix)]
     sync_parent(destination)?;
+    if let Err(error) = remove_temporary(temporary) {
+        tracing::warn!(
+            temporary = %temporary.display(),
+            destination = %destination.display(),
+            %error,
+            "backup was published successfully but private staging cleanup must be retried"
+        );
+    }
     Ok(())
 }
 
@@ -738,6 +753,22 @@ mod tests {
         let clock = MockClock::pinned(Utc.with_ymd_and_hms(2031, 2, 3, 4, 5, 6).unwrap());
         let path = recovery_path(Path::new("memory.db"), &clock);
         assert!(path.to_string_lossy().contains("20310203T040506Z"));
+    }
+
+    #[test]
+    fn published_backup_succeeds_when_private_staging_cleanup_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let temporary = directory.path().join("private-stage.db");
+        let destination = directory.path().join("backup.db");
+        std::fs::write(&temporary, b"validated backup").unwrap();
+
+        publish_no_clobber_with_cleanup(&temporary, &destination, |_| {
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "injected cleanup failure"))
+        })
+        .unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"validated backup");
+        assert!(temporary.exists(), "the caller retains the private staging path for a cleanup retry");
     }
 
     async fn seed_database(path: &Path, label: &str, profile: &EmbeddingProfile) -> SqliteStore {
@@ -955,6 +986,7 @@ mod tests {
         let target = directory.path().join("target.db");
         let corrupt = directory.path().join("corrupt.db");
         let wrong_schema = directory.path().join("wrong-schema.db");
+        let unversioned_schema = directory.path().join("unversioned-schema.db");
         let expected = profile("model-a");
         let source_store = seed_database(&source, "source", &expected).await;
         assert_eq!(backup(BackupOptions::new(source, backup_path.clone())).await.status, "ok");
@@ -975,6 +1007,18 @@ mod tests {
         let schema_report = restore(RestoreOptions::new(target.clone(), wrong_schema, DIMENSIONS, Some(expected.clone())).dry_run(true)).await;
         assert_eq!(schema_report.status, "invalid");
         assert!(schema_report.message.contains("schema version"));
+        assert!(schema_report.message.contains("matching or newer localhold build"));
+        assert!(!schema_report.message.contains("schema repairs"));
+        assert_eq!(memory_contents(&target), original);
+
+        let _bytes_copied = std::fs::copy(&backup_path, &unversioned_schema).unwrap();
+        let schema_connection = Connection::open(&unversioned_schema).unwrap();
+        schema_connection.pragma_update(None, "user_version", 0_u32).unwrap();
+        drop(schema_connection);
+        let schema_report = restore(RestoreOptions::new(target.clone(), unversioned_schema, DIMENSIONS, Some(expected.clone())).dry_run(true)).await;
+        assert_eq!(schema_report.status, "invalid");
+        assert!(schema_report.message.contains("schema repairs"));
+        assert!(!schema_report.message.contains("matching or newer localhold build"));
         assert_eq!(memory_contents(&target), original);
 
         let profile_report = restore(RestoreOptions::new(target.clone(), backup_path, DIMENSIONS, Some(profile("model-b"))).dry_run(true)).await;

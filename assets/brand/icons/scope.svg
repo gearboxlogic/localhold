@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="scope">
+  <!-- A walled yard: what's inside belongs to it. -->
+  <path fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="square" d="
+    M12 52 V20 L20 20 V26 L28 26 V20 L36 20 V26 L44 26 V20 L52 20 V52 Z"/>
+  <circle fill="var(--lh-or, #C89B3C)" cx="32" cy="40" r="4"/>
+</svg>

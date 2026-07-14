@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 866 1000" role="img" aria-label="LocalHold hex sticker">
+  <!-- Standard pointy-top hex sticker proportions (2" die-cut compatible, w = 0.866h).
+       A hexagon is a fort trace; the Plan of the Hold sits inside its own walls. -->
+  <polygon points="433,0 866,250 866,750 433,1000 0,750 0,250" fill="#10161E"/>
+  <polygon points="433,38 833,269 833,731 433,962 33,731 33,269"
+           fill="none" stroke="#C89B3C" stroke-width="6"/>
+
+  <!-- The Plan of the Hold -->
+  <g transform="translate(433 430) scale(8.8) translate(-32 -32)">
+    <path fill="none" stroke="#3D639C" stroke-width="2.4" d="
+      M32 10 L40 18 L46 18 L46 24 L54 32 L46 40 L46 46 L40 46 L32 54
+      L24 46 L18 46 L18 40 L10 32 L18 24 L18 18 L24 18 Z"/>
+    <circle fill="#C89B3C" cx="32" cy="32" r="3.2"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="433" y="790" text-anchor="middle"
+        font-family="Iowan Old Style, Palatino Linotype, Palatino, Book Antiqua, Georgia, serif"
+        font-size="98" font-weight="600" letter-spacing="1" fill="#F2F4F6">local<tspan fill="#C89B3C">hold</tspan></text>
+</svg>

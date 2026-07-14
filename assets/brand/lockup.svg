@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 72" role="img" aria-label="LocalHold">
+  <!-- Horizontal lockup: the Keep plus wordmark. Ink follows currentColor; "hold" is always or (gold). -->
+  <g transform="translate(0 4)">
+    <path fill="currentColor" fill-rule="evenodd" d="
+      M14 56 L14 50 L18 50 L18 10 L25 10 L25 16 L28.5 16 L28.5 10 L35.5 10 L35.5 16
+      L39 16 L39 10 L46 10 L46 50 L50 50 L50 56 Z
+      M27 56 L27 42 A5 5 0 0 1 37 42 L37 56 Z"/>
+  </g>
+  <text x="72" y="52" font-family="Iowan Old Style, Palatino Linotype, Palatino, Book Antiqua, Georgia, serif"
+        font-size="44" font-weight="600" letter-spacing="0.5" fill="currentColor">local<tspan fill="var(--lh-or, #C89B3C)">hold</tspan></text>
+</svg>

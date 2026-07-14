@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="doctor">
+  <!-- Inspection: run the colors up, see what answers. -->
+  <path stroke="currentColor" stroke-width="4" stroke-linecap="square" d="M22 10 V54" fill="none"/>
+  <path fill="var(--lh-or, #C89B3C)" d="M22 12 L46 18.5 L22 25 Z"/>
+  <path stroke="currentColor" stroke-width="4" stroke-linecap="square" d="M13 54 H31" fill="none"/>
+</svg>

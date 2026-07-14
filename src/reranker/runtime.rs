@@ -7,7 +7,7 @@ use tracing::{info, warn};
 use super::{
     RerankerError, RerankerProvider, download,
     onnx::OnnxReranker,
-    policy::compiled_execution_providers,
+    policy::{compiled_execution_providers, validate_precision_policy},
     resilient::{ResilientReranker, ResilientRerankerConfig},
 };
 
@@ -216,37 +216,4 @@ async fn load_provider(config: &RerankerConfig, clock: Arc<dyn Clock>) -> Result
         .await
         .map_err(|error| RerankerError::Transient(Box::new(error)))??;
     Ok(ResilientReranker::new_with_clock(onnx, ResilientRerankerConfig::default(), clock).await)
-}
-
-fn validate_precision_policy(config: &RerankerConfig) -> Result<(), RerankerError> {
-    if config.precision == RerankerPrecision::Fp16 && config.execution_provider != RerankerExecutionProvider::Cuda {
-        return Err(RerankerError::Permanent(
-            "reranker precision fp16 requires execution provider cuda; auto fallback and CPU execution are not supported".into(),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fp16_policy_requires_explicit_cuda() {
-        for execution_provider in [RerankerExecutionProvider::Auto, RerankerExecutionProvider::Cpu] {
-            let config = RerankerConfig {
-                precision: RerankerPrecision::Fp16,
-                execution_provider,
-                ..RerankerConfig::default()
-            };
-            assert!(validate_precision_policy(&config).is_err());
-        }
-
-        let config = RerankerConfig {
-            precision: RerankerPrecision::Fp16,
-            execution_provider: RerankerExecutionProvider::Cuda,
-            ..RerankerConfig::default()
-        };
-        validate_precision_policy(&config).unwrap();
-    }
 }

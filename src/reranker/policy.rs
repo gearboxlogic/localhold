@@ -3,6 +3,8 @@
 #[cfg(any(feature = "reranker", test))]
 use super::RerankerError;
 use crate::config::RerankerExecutionProvider;
+#[cfg(any(feature = "reranker", test))]
+use crate::config::{RerankerConfig, RerankerPrecision};
 
 const NONE: &[RerankerExecutionProvider] = &[];
 const CPU: &[RerankerExecutionProvider] = &[RerankerExecutionProvider::Cpu];
@@ -41,10 +43,25 @@ pub(crate) fn execution_provider_candidates(requested: RerankerExecutionProvider
     }
 }
 
+/// Reject precision/provider combinations that cannot execute safely.
+#[cfg(any(feature = "reranker", test))]
+pub(crate) fn validate_precision_policy(config: &RerankerConfig) -> Result<(), RerankerError> {
+    if config.precision == RerankerPrecision::Fp16 && config.execution_provider != RerankerExecutionProvider::Cuda {
+        return Err(RerankerError::Permanent(
+            "reranker precision fp16 requires execution provider cuda; auto fallback and CPU execution are not supported".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{compiled_execution_providers, execution_provider_candidates};
-    use crate::config::RerankerExecutionProvider::{Auto, Cpu, Cuda};
+    use super::{compiled_execution_providers, execution_provider_candidates, validate_precision_policy};
+    use crate::config::{
+        RerankerConfig,
+        RerankerExecutionProvider::{Auto, Cpu, Cuda},
+        RerankerPrecision,
+    };
 
     #[test]
     fn compiled_provider_report_matches_features() {
@@ -85,5 +102,24 @@ mod tests {
         } else {
             let _error = execution_provider_candidates(Auto).unwrap_err();
         }
+    }
+
+    #[test]
+    fn fp16_policy_requires_explicit_cuda() {
+        for execution_provider in [Auto, Cpu] {
+            let config = RerankerConfig {
+                precision: RerankerPrecision::Fp16,
+                execution_provider,
+                ..RerankerConfig::default()
+            };
+            assert!(validate_precision_policy(&config).is_err());
+        }
+
+        let config = RerankerConfig {
+            precision: RerankerPrecision::Fp16,
+            execution_provider: Cuda,
+            ..RerankerConfig::default()
+        };
+        validate_precision_policy(&config).unwrap();
     }
 }

@@ -27,14 +27,14 @@ does not start or manage model servers.
 
 ## Install A Release
 
-GitHub prereleases provide a Linux x86_64 CPU archive and a Windows x86_64
-preview archive. Each archive contains `hold`, the example configuration,
-current documentation, and license notices. Verify the downloaded archive with
-the accompanying `SHA256SUMS` file before extracting it. See
-[Installation](docs/installation.md) for the archive layout and commands.
-
-CUDA reranking remains a source-build preview and is not included in the
-binary archives.
+GitHub prereleases provide Linux x86_64 CPU and CUDA 12 archives plus a Windows
+x86_64 preview archive. Each archive contains `hold`, the example
+configuration, current documentation, and license notices. The CUDA archive
+also carries its checksum-pinned ONNX Runtime/CUDA/cuDNN user-space runtime and
+does not require Python or a CUDA toolkit installation. Verify downloads with
+the accompanying `SHA256SUMS` file before extracting them. See
+[Installation](docs/installation.md) for the archive layout, compatibility
+matrix, and commands.
 
 ## Build From Source
 
@@ -72,7 +72,8 @@ hold
 
 The standard install includes CPU reranker support, but reranking remains
 disabled until configured. See [Installation](docs/installation.md) for custom
-prefixes, macOS and Windows prerequisites, and the CUDA preview profile.
+prefixes, macOS and Windows prerequisites, the CUDA release archive, and custom
+CUDA source builds.
 
 ## Configuration
 
@@ -160,7 +161,7 @@ and tokenizer. Direct-file deployments must configure `model_sha256` and
 [Operations](docs/operations.md#reranker-model-artifacts) for exit codes and
 the versioned JSON contract.
 
-CUDA reranking is a preview build surface:
+Build against a custom CUDA runtime from source with:
 
 ```sh
 just build-release-reranker-cuda
@@ -170,9 +171,11 @@ The CUDA-capable binary supports `auto`, `cpu`, and `cuda`. `auto` prefers CUDA
 after successful model inference and falls back visibly to CPU; `cpu` never
 registers CUDA; explicit `cuda` never falls back to a CPU session. ONNX Runtime
 may still place individual graph nodes on CPU. Set `required = true` when
-startup must fail unless reranking is active. CUDA requires a compatible NVIDIA
-driver and ONNX Runtime/CUDA libraries. It does not affect embedding placement;
-embedding compute happens at the selected OpenAI-compatible endpoint.
+startup must fail unless reranking is active. The CUDA release archive requires
+only its documented NVIDIA driver and standard host-library floor; custom
+source builds must provide compatible ONNX Runtime/CUDA libraries. CUDA does
+not affect embedding placement; embedding compute happens at the selected
+OpenAI-compatible endpoint.
 
 CUDA users may opt into the smaller, faster fused FP16 artifact:
 

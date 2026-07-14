@@ -52,7 +52,9 @@ fastrand = "2"
 httpdate = "1"
 parking_lot = "0.12"
 
-# Cross-encoder reranker (optional)
+# Cross-encoder reranker (optional). rc.10 keeps the statically linked CPU
+# artifact compatible with the Ubuntu 22.04/glibc 2.35 release floor. CUDA
+# loads pinned ONNX Runtime 1.23 through its backward-compatible v22 C API.
 ort = { version = "=2.0.0-rc.10", optional = true }
 tokenizers = { version = "0.23", optional = true, default-features = false, features = ["onig"] }
 sha2 = { version = "0.11", optional = true }

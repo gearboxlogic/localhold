@@ -1,8 +1,9 @@
 # Installation
 
 LocalHold is not published to crates.io. GitHub prereleases provide CPU binary
-archives for Linux x86_64 and Windows x86_64. Building a locked checkout remains
-available for other prefixes and the CUDA preview profile.
+archives for Linux x86_64 and Windows x86_64 plus a self-contained CUDA 12
+reranker archive for Linux x86_64. Building a locked checkout remains available
+for other prefixes and custom CUDA installations.
 
 ## Release Archives
 
@@ -11,6 +12,7 @@ Download the archive for the release and its `SHA256SUMS` file from
 archives use these names:
 
 - `localhold-vVERSION-x86_64-unknown-linux-gnu.tar.zst`
+- `localhold-vVERSION-x86_64-unknown-linux-gnu-cuda12.tar.zst`
 - `localhold-vVERSION-x86_64-pc-windows-msvc.zip` (preview)
 
 Verify and extract the Linux archive:
@@ -34,6 +36,28 @@ Linux archives are built on Ubuntu 22.04 and require glibc 2.35 or newer plus
 the normal C++ runtime library. Windows archives require a supported Windows
 installation with the Microsoft Visual C++ Redistributable. Both archives
 include CPU reranker support, which remains disabled until configured.
+
+The `cuda12` archive additionally contains ONNX Runtime 1.23.2, CUDA 12.8
+user-space libraries, and cuDNN 9.8 in its private `lib/` directory. It requires
+Linux x86_64, glibc 2.35 or newer, `libstdc++`, `libz`, a compatible NVIDIA GPU,
+and NVIDIA Linux driver 570.26 or newer. CUDA 12.8 adds the SM100, SM101, and
+SM120 Blackwell architectures while retaining CUDA 12 compatibility for older
+supported NVIDIA GPUs. The archive does not require Python, vLLM, a
+CUDA toolkit installation, cuDNN installation, or `LD_LIBRARY_PATH`. The NVIDIA
+kernel/driver library remains host-owned and is deliberately not bundled.
+
+After verifying `SHA256SUMS`, inspect the resolved native manifest if desired:
+
+```sh
+tar --zstd -xf localhold-vVERSION-x86_64-unknown-linux-gnu-cuda12.tar.zst
+root=localhold-vVERSION-x86_64-unknown-linux-gnu-cuda12
+cat "$root/manifest/cuda-runtime.json"
+"$root/bin/hold" doctor --json
+```
+
+The manifest records every upstream input checksum, extracted library checksum,
+compatibility floor, system-owned dependency, and provider policy. Component
+license and notice files are under `licenses/` and `notices/`.
 
 ## Build From Source
 
@@ -79,9 +103,10 @@ The following are not required for the standard CPU installation:
 - An OpenAI-compatible embedding endpoint is required only for semantic or
   hybrid vector search. The default `noop` provider supports local text search
   without a model server.
-- The NVIDIA driver, CUDA, cuDNN, and CUDA-enabled ONNX Runtime are required
-  only for the CUDA reranker profile described below. The CPU reranker does not
-  require them.
+- The NVIDIA driver is required only for CUDA reranking. A source-built CUDA
+  profile also needs compatible CUDA, cuDNN, and CUDA-enabled ONNX Runtime
+  libraries; the `cuda12` release archive already carries those user-space
+  libraries.
 - Docker and PostgreSQL client tools are used only by the PostgreSQL smoke-test
   workflow; they are not application dependencies.
 - Python 3 is used only by maintainers and CI to create release archives; it is
@@ -122,7 +147,7 @@ The POSIX `script/install.sh` installer is not currently supported on Windows.
 Windows compilation and native tests run in CI, but packaging and installer
 integration remain preview work.
 
-### CUDA Reranker Preview
+### Custom CUDA Source Build
 
 Build and install the CUDA reranker variant with:
 
@@ -132,10 +157,16 @@ Build and install the CUDA reranker variant with:
 
 This compiles ONNX Runtime's CUDA execution provider alongside CPU support. The
 runtime `execution_provider` policy selects which provider is used; building
-the CUDA profile alone does not claim that CUDA is active. The current `ort
-2.0.0-rc.10` integration targets the ONNX Runtime 1.22 ABI. Install a
-CUDA-enabled ONNX Runtime 1.22 build plus the CUDA and cuDNN versions required
-by that build, then set `ORT_DYLIB_PATH` to the absolute path of
+the CUDA profile alone does not claim that CUDA is active. The pinned `ort
+2.0.0-rc.10` bindings request ONNX Runtime's stable v22 C API. The CUDA profile
+loads ONNX Runtime 1.23, which retains that earlier API table; this keeps the
+standard CPU build compatible with the Ubuntu 22.04/glibc 2.35 release floor
+without weakening the CUDA runtime pin. LocalHold suppresses the binding's
+conservative newer-version warning after that API table is obtained; loader,
+provider, and ONNX Runtime session diagnostics remain visible. Install a
+CUDA-enabled ONNX Runtime 1.23 build plus the CUDA and cuDNN versions required
+by that build, then set
+`ORT_DYLIB_PATH` to the absolute path of
 `libonnxruntime.so` when it is outside the dynamic loader's normal search path.
 `hold doctor` reports this as a failed reranker check with loader guidance when
 the library is not discoverable; it must not terminate with an ONNX loader panic.

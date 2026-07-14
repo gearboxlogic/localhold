@@ -15,6 +15,7 @@ import tarfile
 import tempfile
 import zipfile
 from pathlib import Path
+from typing import BinaryIO
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -33,7 +34,7 @@ class PackageError(RuntimeError):
     """Actionable archive construction error."""
 
 
-def validate_inputs(tag: str, target: str, binary: Path) -> None:
+def validate_inputs(tag: str, target: str, binary: Path, cuda_runtime_dir: Path | None) -> None:
     """Validate metadata and package-specific arguments before staging."""
     subprocess.run(
         [sys.executable, str(REPO_ROOT / "script" / "release.py"), "validate", tag],
@@ -44,6 +45,17 @@ def validate_inputs(tag: str, target: str, binary: Path) -> None:
         raise PackageError(f"invalid release target name: {target}")
     if not binary.is_file():
         raise PackageError(f"release binary does not exist: {binary}")
+    cuda_target = target == "x86_64-unknown-linux-gnu-cuda12"
+    if cuda_target != (cuda_runtime_dir is not None):
+        raise PackageError(
+            "the x86_64-unknown-linux-gnu-cuda12 target and --cuda-runtime-dir must be used together"
+        )
+    if cuda_runtime_dir is not None:
+        subprocess.run(
+            [sys.executable, str(REPO_ROOT / "script" / "validate-cuda-runtime.py"), str(cuda_runtime_dir)],
+            cwd=REPO_ROOT,
+            check=True,
+        )
 
 
 def source_date_epoch() -> int:
@@ -65,7 +77,7 @@ def source_date_epoch() -> int:
     return int(result.stdout.strip())
 
 
-def stage_package(stage_root: Path, binary: Path) -> None:
+def stage_package(stage_root: Path, binary: Path, cuda_runtime_dir: Path | None = None) -> None:
     """Create the platform-neutral release archive layout."""
     bin_dir = stage_root / "bin"
     bin_dir.mkdir(parents=True)
@@ -77,6 +89,9 @@ def stage_package(stage_root: Path, binary: Path) -> None:
     for relative in PACKAGE_FILES:
         shutil.copy2(REPO_ROOT / relative, stage_root / relative)
     shutil.copytree(REPO_ROOT / "docs", stage_root / "docs")
+    if cuda_runtime_dir is not None:
+        for directory in ("lib", "licenses", "notices", "manifest"):
+            shutil.copytree(cuda_runtime_dir / directory, stage_root / directory)
 
 
 def archive_paths(stage_root: Path) -> list[Path]:
@@ -84,9 +99,9 @@ def archive_paths(stage_root: Path) -> list[Path]:
     return [stage_root, *sorted(stage_root.rglob("*"), key=lambda path: path.as_posix())]
 
 
-def write_tar(stage_root: Path, destination: Path, epoch: int) -> None:
-    """Write a deterministic uncompressed POSIX tar archive."""
-    with tarfile.open(destination, mode="w", format=tarfile.PAX_FORMAT) as archive:
+def write_tar(stage_root: Path, output: BinaryIO, epoch: int) -> None:
+    """Stream a deterministic POSIX tar archive to a binary output."""
+    with tarfile.open(fileobj=output, mode="w|", format=tarfile.PAX_FORMAT) as archive:
         for path in archive_paths(stage_root):
             arcname = path.relative_to(stage_root.parent).as_posix()
             info = archive.gettarinfo(str(path), arcname)
@@ -103,23 +118,38 @@ def write_tar(stage_root: Path, destination: Path, epoch: int) -> None:
 
 
 def write_tar_zst(stage_root: Path, destination: Path, epoch: int) -> None:
-    """Compress a deterministic tar archive with reproducible high-ratio zstd."""
-    uncompressed = stage_root.parent / f"{stage_root.name}.tar"
-    write_tar(stage_root, uncompressed, epoch)
-    subprocess.run(
-        [
-            "zstd",
-            "-19",
-            "--threads=1",
-            "--no-progress",
-            "--quiet",
-            "--force",
-            str(uncompressed),
-            "-o",
-            str(destination),
-        ],
-        check=True,
+    """Stream a deterministic tar archive through reproducible high-ratio zstd."""
+    command = [
+        "zstd",
+        "-19",
+        "--threads=1",
+        "--no-progress",
+        "--quiet",
+        "--force",
+        "-o",
+        str(destination),
+    ]
+    compressor = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
     )
+    assert compressor.stdin is not None
+    try:
+        write_tar(stage_root, compressor.stdin, epoch)
+        compressor.stdin.close()
+        return_code = compressor.wait()
+    except BaseException:
+        try:
+            compressor.stdin.close()
+        except OSError:
+            pass
+        compressor.terminate()
+        compressor.wait()
+        destination.unlink(missing_ok=True)
+        raise
+    if return_code != 0:
+        destination.unlink(missing_ok=True)
+        raise subprocess.CalledProcessError(return_code, command)
 
 
 def write_zip(stage_root: Path, destination: Path, epoch: int) -> None:
@@ -151,7 +181,7 @@ def write_zip(stage_root: Path, destination: Path, epoch: int) -> None:
 
 def package(args: argparse.Namespace) -> Path:
     """Build the selected release archive."""
-    validate_inputs(args.tag, args.target, args.binary)
+    validate_inputs(args.tag, args.target, args.binary, args.cuda_runtime_dir)
     extension = "tar.zst" if args.archive_format == "tar.zst" else "zip"
     stem = f"localhold-{args.tag}-{args.target}"
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -161,7 +191,11 @@ def package(args: argparse.Namespace) -> Path:
     with tempfile.TemporaryDirectory(prefix="localhold-release-") as temporary:
         stage_root = Path(temporary) / stem
         stage_root.mkdir()
-        stage_package(stage_root, args.binary.resolve())
+        stage_package(
+            stage_root,
+            args.binary.resolve(),
+            args.cuda_runtime_dir.resolve() if args.cuda_runtime_dir is not None else None,
+        )
         if args.archive_format == "tar.zst":
             write_tar_zst(stage_root, destination, epoch)
         else:
@@ -177,6 +211,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--tag", required=True, help="validated release tag")
     result.add_argument("--target", required=True, help="Rust target triple")
     result.add_argument("--binary", required=True, type=Path, help="compiled hold binary")
+    result.add_argument(
+        "--cuda-runtime-dir",
+        type=Path,
+        help="validated CUDA runtime tree for the Linux x86_64 CUDA 12 target",
+    )
     result.add_argument(
         "--format", required=True, choices=("tar.zst", "zip"), dest="archive_format"
     )

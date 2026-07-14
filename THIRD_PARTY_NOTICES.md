@@ -36,8 +36,13 @@ The standard CPU build statically incorporates Microsoft ONNX Runtime through
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
 
-CUDA, cuDNN, NVIDIA drivers, CUDA-profile ONNX Runtime shared libraries, embedding models,
-and external model servers are not bundled in this source repository. Users
-and distributors are responsible for the terms that apply to the components
-they select. Binary distributions must ship a notice inventory matching the
-components actually bundled in that artifact.
+CUDA, cuDNN, NVIDIA drivers, CUDA-profile ONNX Runtime shared libraries,
+embedding models, and external model servers are not bundled in this source
+repository. The Linux x86_64 CUDA 12 release archive does redistribute the
+manifested ONNX Runtime, CUDA 12.8, and cuDNN 9.8 user-space libraries. That
+archive includes the upstream ONNX Runtime license and third-party notices plus
+the license supplied with every NVIDIA component under `licenses/` and
+`notices/`. The NVIDIA kernel/driver library is never bundled. Users and other
+distributors remain responsible for reviewing the terms that apply to their
+distribution and use. Every binary distribution must ship a notice inventory
+matching the components actually bundled in that artifact.

@@ -851,6 +851,57 @@ fn doctor_reports_missing_cuda_runtime_without_panicking() {
     let _cleanup = std::fs::remove_dir_all(root);
 }
 
+#[cfg(feature = "reranker-cuda")]
+#[test]
+fn doctor_reports_incompatible_cuda_runtime_without_panicking() {
+    let root = unique_db_path("doctor-incompatible-ort").with_extension("root");
+    let model_path = root.join("model.onnx");
+    let tokenizer_path = root.join("tokenizer.json");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(&model_path, b"model fixture").unwrap();
+    std::fs::write(tokenizer_path, b"tokenizer fixture").unwrap();
+    let (mut command, _config_dir) = config_binary_command(&root);
+    command.env("LOCALHOLD_RERANKER_ENABLED", "true");
+    command.env("LOCALHOLD_RERANKER_REQUIRED", "true");
+    command.env("LOCALHOLD_RERANKER_EXECUTION_PROVIDER", "cuda");
+    command.env("LOCALHOLD_RERANKER_MODEL_PATH", &model_path);
+    command.env("ORT_DYLIB_PATH", loadable_non_ort_library());
+
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let reranker = report["checks"].as_array().unwrap().iter().find(|check| check["name"] == "reranker").unwrap();
+    assert_eq!(reranker["status"], "failed");
+    assert!(reranker["summary"].as_str().unwrap().contains("compatible ONNX Runtime"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
+
+    let _cleanup = std::fs::remove_dir_all(root);
+}
+
+#[cfg(all(feature = "reranker-cuda", target_os = "windows"))]
+const fn loadable_non_ort_library() -> &'static str {
+    "kernel32.dll"
+}
+
+#[cfg(all(feature = "reranker-cuda", any(target_os = "linux", target_os = "android")))]
+const fn loadable_non_ort_library() -> &'static str {
+    "libc.so.6"
+}
+
+#[cfg(all(feature = "reranker-cuda", any(target_os = "macos", target_os = "ios")))]
+const fn loadable_non_ort_library() -> &'static str {
+    "libSystem.B.dylib"
+}
+
+#[cfg(all(
+    feature = "reranker-cuda",
+    not(any(target_os = "windows", target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios"))
+))]
+const fn loadable_non_ort_library() -> &'static str {
+    "libc.so"
+}
+
 #[test]
 fn doctor_degrades_when_existing_sqlite_wal_sidecars_are_absent() {
     let db_path = unique_db_path("doctor-missing-sidecars");

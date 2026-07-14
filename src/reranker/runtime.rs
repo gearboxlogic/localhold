@@ -1,6 +1,6 @@
 //! Reranker startup, health validation, fallback, and retry policy.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tracing::{info, warn};
 
@@ -171,9 +171,31 @@ fn initialize_ort() -> Result<(), RerankerError> {
     preload_dynamic_ort_library()?;
     // commit installs the environment in ort's process-global singleton and
     // returns whether this call performed the one-time initialization.
-    let initialized = std::panic::catch_unwind(|| ort::init().commit()).map_err(|_panic| RerankerError::ProviderUnavailable(onnx_runtime_panic_guidance().into()))?;
+    let initialized = commit_ort_environment_without_panic_output().map_err(|_panic| RerankerError::ProviderUnavailable(onnx_runtime_panic_guidance().into()))?;
     let _environment_inserted = initialized.map_err(|error| RerankerError::Permanent(Box::new(error)))?;
     Ok(())
+}
+
+type PanicHook = dyn for<'a> Fn(&std::panic::PanicHookInfo<'a>) + Send + Sync + 'static;
+
+fn commit_ort_environment_without_panic_output() -> std::thread::Result<ort::Result<bool>> {
+    static PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
+
+    // Panic hooks are process-global. Serialize our temporary replacement and
+    // suppress output only for this thread; concurrent panics still reach the
+    // hook that was installed before ORT initialization.
+    let _hook_guard = PANIC_HOOK_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let initializing_thread = std::thread::current().id();
+    let previous_hook: Arc<PanicHook> = Arc::from(std::panic::take_hook());
+    let delegated_hook = Arc::clone(&previous_hook);
+    std::panic::set_hook(Box::new(move |panic_info| {
+        if std::thread::current().id() != initializing_thread {
+            delegated_hook(panic_info);
+        }
+    }));
+    let initialized = std::panic::catch_unwind(|| ort::init().commit());
+    std::panic::set_hook(Box::new(move |panic_info| previous_hook(panic_info)));
+    initialized
 }
 
 #[cfg(feature = "reranker-cuda")]

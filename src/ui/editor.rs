@@ -335,18 +335,35 @@ fn parse_metadata_patch(value: &str, existing: Option<&MemoryMetadata>) -> Resul
         return Err(DraftError::new(EditField::Metadata, format!("unknown metadata field: {key}")));
     }
 
-    let summary = optional_json_string(object.get("summary"), "summary")?;
-    let agent_label = optional_json_string(object.get("agent_label"), "agent_label")?;
-    let old_summary = existing.and_then(|item| item.summary.clone());
-    let old_agent_label = existing.and_then(|item| item.agent_label.clone());
+    let old_summary = existing.and_then(|item| item.summary.as_deref());
+    let old_agent_label = existing.and_then(|item| item.agent_label.as_deref());
+    let summary = metadata_field_patch(object.get("summary"), "summary", old_summary)?;
+    let agent_label = metadata_field_patch(object.get("agent_label"), "agent_label", old_agent_label)?;
 
     Ok(MetadataPatch {
         scope_key: None,
-        summary: (summary != old_summary).then(|| summary.clone()).flatten(),
-        clear_summary: summary.is_none() && old_summary.is_some(),
-        agent_label: (agent_label != old_agent_label).then(|| agent_label.clone()).flatten(),
-        clear_agent_label: agent_label.is_none() && old_agent_label.is_some(),
+        summary: summary.replacement,
+        clear_summary: summary.clear,
+        agent_label: agent_label.replacement,
+        clear_agent_label: agent_label.clear,
     })
+}
+
+struct MetadataFieldPatch {
+    replacement: Option<String>,
+    clear: bool,
+}
+
+fn metadata_field_patch(value: Option<&Value>, field: &str, existing: Option<&str>) -> Result<MetadataFieldPatch, DraftError> {
+    let Some(value) = value else {
+        return Ok(MetadataFieldPatch { replacement: None, clear: false });
+    };
+    let replacement = optional_json_string(Some(value), field)?;
+    if replacement.as_deref() == existing {
+        return Ok(MetadataFieldPatch { replacement: None, clear: false });
+    }
+    let clear = replacement.is_none() && existing.is_some();
+    Ok(MetadataFieldPatch { replacement, clear })
 }
 
 fn optional_json_string(value: Option<&Value>, field: &str) -> Result<Option<String>, DraftError> {
@@ -403,6 +420,46 @@ mod tests {
         let patch = parsed.metadata_patch.unwrap();
         assert!(patch.clear_summary);
         assert_eq!(patch.agent_label.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn omitted_metadata_keys_preserve_existing_values() {
+        let memory = memory();
+        let metadata = MemoryMetadata {
+            memory_id: memory.id,
+            scope_key: Some("scope".into()),
+            summary: Some("old".into()),
+            agent_label: Some("agent".into()),
+            created_by_principal: Some("owner".into()),
+            quality_flags: Vec::new(),
+            schema_version: 1,
+        };
+        let patch = parse_metadata_patch(r#"{"summary":"new"}"#, Some(&metadata)).unwrap();
+
+        assert_eq!(patch.summary.as_deref(), Some("new"));
+        assert!(!patch.clear_summary);
+        assert!(patch.agent_label.is_none());
+        assert!(!patch.clear_agent_label);
+    }
+
+    #[test]
+    fn explicit_metadata_null_clears_only_that_field() {
+        let memory = memory();
+        let metadata = MemoryMetadata {
+            memory_id: memory.id,
+            scope_key: Some("scope".into()),
+            summary: Some("old".into()),
+            agent_label: Some("agent".into()),
+            created_by_principal: Some("owner".into()),
+            quality_flags: Vec::new(),
+            schema_version: 1,
+        };
+        let patch = parse_metadata_patch(r#"{"agent_label":null}"#, Some(&metadata)).unwrap();
+
+        assert!(patch.summary.is_none());
+        assert!(!patch.clear_summary);
+        assert!(patch.agent_label.is_none());
+        assert!(patch.clear_agent_label);
     }
 
     #[test]

@@ -100,6 +100,13 @@ pub(crate) enum DataMsg {
         /// Mutation generation; stale responses are dropped.
         generation: u64,
     },
+    /// An edit committed but the memory is no longer visible afterward.
+    UpdatedInvisible {
+        /// Updated memory ID.
+        id: MemoryId,
+        /// Mutation generation; stale responses are dropped.
+        generation: u64,
+    },
     /// A memory was deleted.
     Deleted {
         /// Deleted memory ID.
@@ -425,6 +432,15 @@ where
                     |warning| Status::NotHeld(format!("memory revised, but {warning}")),
                 );
             }
+            DataMsg::UpdatedInvisible { id, generation } if generation == self.operation_generation => {
+                self.pending = false;
+                self.rows.retain(|row| row.memory.id != id);
+                self.row_selected = self.row_selected.min(self.rows.len().saturating_sub(1_usize));
+                self.detail = None;
+                self.edit = None;
+                self.mode = Mode::Browse;
+                self.status = Status::Held("memory revised and is no longer visible".into());
+            }
             DataMsg::Deleted { id, generation } if generation == self.operation_generation => {
                 self.pending = false;
                 self.rows.retain(|row| row.memory.id != id);
@@ -441,7 +457,12 @@ where
                     self.mode = Mode::Detail;
                 }
             }
-            DataMsg::Rows { .. } | DataMsg::Failed { .. } | DataMsg::Updated { .. } | DataMsg::Deleted { .. } | DataMsg::MutationFailed { .. } => {}
+            DataMsg::Rows { .. }
+            | DataMsg::Failed { .. }
+            | DataMsg::Updated { .. }
+            | DataMsg::UpdatedInvisible { .. }
+            | DataMsg::Deleted { .. }
+            | DataMsg::MutationFailed { .. } => {}
         }
     }
 
@@ -860,10 +881,7 @@ where
                 generation,
             }
         }
-        Ok(None) => DataMsg::MutationFailed {
-            message: "memory became unavailable after saving".into(),
-            generation,
-        },
+        Ok(None) => DataMsg::UpdatedInvisible { id, generation },
         Err(error) => DataMsg::MutationFailed {
             message: format!("saved, but refresh failed: {error}"),
             generation,
@@ -1210,6 +1228,28 @@ mod tests {
         assert_eq!(stored.content, "rejected revision");
         assert!(!stored.has_embedding);
         assert!(!app.engine.store().fetch_embeddings_for_ids(&[id]).await.unwrap().contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn immediately_expired_save_closes_editor_as_committed() {
+        let (mut app, mut rx) = app_with_memories(&["expires now"]).await;
+        app.principal = Some("operator".into());
+        app.bootstrap().await;
+        app.on_data(rx.recv().await.unwrap());
+        let id = app.rows[0].memory.id;
+        app.on_event(press(KeyCode::Enter)).await;
+        app.on_event(press(KeyCode::Char('e'))).await;
+        app.edit.as_mut().unwrap().expiry.value = "2000-01-01T00:00:00Z".into();
+
+        app.on_event(press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
+        app.on_data(rx.recv().await.unwrap());
+
+        assert_eq!(app.mode, Mode::Browse);
+        assert!(!app.pending);
+        assert!(app.edit.is_none());
+        assert!(app.detail.is_none());
+        assert!(!app.rows.iter().any(|row| row.memory.id == id));
+        assert!(matches!(&app.status, Status::Held(message) if message.contains("revised")));
     }
 
     #[tokio::test]

@@ -167,10 +167,98 @@ pub async fn initialize_for_diagnostics_with_clock(config: &RerankerConfig, allo
 }
 
 fn initialize_ort() -> Result<(), RerankerError> {
+    #[cfg(feature = "reranker-cuda")]
+    ensure_dynamic_ort_library_available()?;
     // commit installs the environment in ort's process-global singleton and
     // returns whether this call performed the one-time initialization.
-    let _environment_inserted = ort::init().commit().map_err(|error| RerankerError::Permanent(Box::new(error)))?;
+    let initialized = std::panic::catch_unwind(|| ort::init().commit()).map_err(|_panic| {
+        RerankerError::ProviderUnavailable("ONNX Runtime could not load its dynamic library or one of its dependencies; verify ORT_DYLIB_PATH and the platform loader path".into())
+    })?;
+    let _environment_inserted = initialized.map_err(|error| RerankerError::Permanent(Box::new(error)))?;
     Ok(())
+}
+
+#[cfg(feature = "reranker-cuda")]
+fn ensure_dynamic_ort_library_available() -> Result<(), RerankerError> {
+    let configured = std::env::var_os("ORT_DYLIB_PATH").filter(|value| !value.is_empty());
+    let loader_paths = std::env::var_os(dynamic_loader_path_variable());
+    let executable = std::env::current_exe().ok();
+    if find_dynamic_ort_library(configured.as_deref(), loader_paths.as_deref(), executable.as_deref()).is_some() {
+        return Ok(());
+    }
+    let guidance = if configured.is_some() {
+        "ORT_DYLIB_PATH does not identify a readable ONNX Runtime library; set it to the absolute library path"
+    } else {
+        "the ONNX Runtime dynamic library is not discoverable; set ORT_DYLIB_PATH to its absolute path"
+    };
+    Err(RerankerError::ProviderUnavailable(guidance.into()))
+}
+
+#[cfg(feature = "reranker-cuda")]
+fn find_dynamic_ort_library(configured: Option<&std::ffi::OsStr>, loader_paths: Option<&std::ffi::OsStr>, executable: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    let library = configured.map_or_else(|| std::path::PathBuf::from(dynamic_ort_library_name()), std::path::PathBuf::from);
+    let mut candidates = Vec::new();
+    if library.is_absolute() {
+        candidates.push(library);
+    } else {
+        if let Some(parent) = executable.and_then(std::path::Path::parent) {
+            candidates.push(parent.join(&library));
+        }
+        candidates.push(library.clone());
+        if let Some(paths) = loader_paths {
+            candidates.extend(std::env::split_paths(paths).map(|path| path.join(&library)));
+        }
+        candidates.extend(dynamic_ort_common_directories().iter().map(|path| std::path::Path::new(path).join(&library)));
+    }
+    candidates.into_iter().find(|candidate| candidate.is_file())
+}
+
+#[cfg(all(feature = "reranker-cuda", target_os = "windows"))]
+const fn dynamic_ort_library_name() -> &'static str {
+    "onnxruntime.dll"
+}
+
+#[cfg(all(feature = "reranker-cuda", any(target_os = "linux", target_os = "android")))]
+const fn dynamic_ort_library_name() -> &'static str {
+    "libonnxruntime.so"
+}
+
+#[cfg(all(feature = "reranker-cuda", any(target_os = "macos", target_os = "ios")))]
+const fn dynamic_ort_library_name() -> &'static str {
+    "libonnxruntime.dylib"
+}
+
+#[cfg(all(
+    feature = "reranker-cuda",
+    not(any(target_os = "windows", target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios"))
+))]
+const fn dynamic_ort_library_name() -> &'static str {
+    "libonnxruntime.so"
+}
+
+#[cfg(all(feature = "reranker-cuda", target_os = "windows"))]
+const fn dynamic_loader_path_variable() -> &'static str {
+    "PATH"
+}
+
+#[cfg(all(feature = "reranker-cuda", any(target_os = "macos", target_os = "ios")))]
+const fn dynamic_loader_path_variable() -> &'static str {
+    "DYLD_LIBRARY_PATH"
+}
+
+#[cfg(all(feature = "reranker-cuda", not(any(target_os = "windows", target_os = "macos", target_os = "ios"))))]
+const fn dynamic_loader_path_variable() -> &'static str {
+    "LD_LIBRARY_PATH"
+}
+
+#[cfg(all(feature = "reranker-cuda", target_os = "linux"))]
+const fn dynamic_ort_common_directories() -> &'static [&'static str] {
+    &["/lib64", "/usr/lib64", "/lib", "/usr/lib"]
+}
+
+#[cfg(all(feature = "reranker-cuda", not(target_os = "linux")))]
+const fn dynamic_ort_common_directories() -> &'static [&'static str] {
+    &[]
 }
 
 async fn initialize(config: &RerankerConfig, clock: Arc<dyn Clock>) -> Result<InitializedReranker, RerankerError> {
@@ -216,4 +304,33 @@ async fn load_provider(config: &RerankerConfig, clock: Arc<dyn Clock>) -> Result
         .await
         .map_err(|error| RerankerError::Transient(Box::new(error)))??;
     Ok(ResilientReranker::new_with_clock(onnx, ResilientRerankerConfig::default(), clock).await)
+}
+
+#[cfg(all(test, feature = "reranker-cuda"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_ort_preflight_resolves_configured_and_loader_paths_without_loading() {
+        let root = tempfile::TempDir::new().unwrap();
+        let executable = root.path().join("bin/hold");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        let configured = root.path().join("configured/libonnxruntime-test.so");
+        std::fs::create_dir_all(configured.parent().unwrap()).unwrap();
+        std::fs::write(&configured, b"fixture").unwrap();
+        assert_eq!(find_dynamic_ort_library(Some(configured.as_os_str()), None, Some(&executable)), Some(configured));
+
+        let loader_dir = root.path().join("loader");
+        std::fs::create_dir_all(&loader_dir).unwrap();
+        let loader_library = loader_dir.join(dynamic_ort_library_name());
+        std::fs::write(&loader_library, b"fixture").unwrap();
+        let loader_paths = std::env::join_paths([&loader_dir]).unwrap();
+        assert_eq!(find_dynamic_ort_library(None, Some(&loader_paths), Some(&executable)), Some(loader_library));
+    }
+
+    #[test]
+    fn dynamic_ort_preflight_rejects_missing_configured_absolute_path() {
+        let missing = std::path::Path::new("/localhold-test/missing/libonnxruntime.so");
+        assert!(find_dynamic_ort_library(Some(missing.as_os_str()), None, None).is_none());
+    }
 }

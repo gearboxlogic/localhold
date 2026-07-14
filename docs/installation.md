@@ -137,6 +137,8 @@ the CUDA profile alone does not claim that CUDA is active. The current `ort
 CUDA-enabled ONNX Runtime 1.22 build plus the CUDA and cuDNN versions required
 by that build, then set `ORT_DYLIB_PATH` to the absolute path of
 `libonnxruntime.so` when it is outside the dynamic loader's normal search path.
+`hold doctor` reports this as a failed reranker check with loader guidance when
+the library is not discoverable; it must not terminate with an ONNX loader panic.
 
 The fused FP32 reranker artifact is the runtime default. The optional fused
 FP16 artifact requires `execution_provider = "cuda"`; it cannot use `auto`

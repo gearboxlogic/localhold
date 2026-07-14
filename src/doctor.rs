@@ -1201,6 +1201,7 @@ async fn reranker_check(config: &Config, options: DoctorOptions, clock: std::syn
             }
             Err(error) => {
                 let download_may_fix = !options.allow_downloads && reranker.model_path.is_empty() && matches!(error, crate::reranker::RerankerError::Unavailable);
+                let provider_guidance = reranker_provider_guidance(&error);
                 let status = if reranker.required && !download_may_fix {
                     DiagnosticStatus::Failed
                 } else {
@@ -1210,18 +1211,28 @@ async fn reranker_check(config: &Config, options: DoctorOptions, clock: std::syn
                     "reranker",
                     status,
                     format!(
-                        "{identity_summary}; inference probe unavailable{}",
+                        "{identity_summary}; inference probe unavailable{}{}",
                         if download_may_fix {
                             "; rerun with --allow-downloads to permit first-use artifacts"
                         } else if options.allow_downloads {
                             " after downloads were allowed"
                         } else {
                             " with configured local artifacts"
-                        }
+                        },
+                        provider_guidance,
                     ),
                 )
             }
         }
+    }
+}
+
+#[cfg(feature = "reranker")]
+fn reranker_provider_guidance(error: &crate::reranker::RerankerError) -> String {
+    if let crate::reranker::RerankerError::ProviderUnavailable(reason) = error {
+        format!("; {reason}")
+    } else {
+        String::new()
     }
 }
 

@@ -1,6 +1,6 @@
 //! Reranker startup, health validation, fallback, and retry policy.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tracing::{info, warn};
 
@@ -167,10 +167,94 @@ pub async fn initialize_for_diagnostics_with_clock(config: &RerankerConfig, allo
 }
 
 fn initialize_ort() -> Result<(), RerankerError> {
+    #[cfg(feature = "reranker-cuda")]
+    preload_dynamic_ort_library()?;
     // commit installs the environment in ort's process-global singleton and
     // returns whether this call performed the one-time initialization.
-    let _environment_inserted = ort::init().commit().map_err(|error| RerankerError::Permanent(Box::new(error)))?;
+    let initialized = commit_ort_environment_without_panic_output().map_err(|_panic| RerankerError::ProviderUnavailable(onnx_runtime_panic_guidance().into()))?;
+    let _environment_inserted = initialized.map_err(|error| RerankerError::Permanent(Box::new(error)))?;
     Ok(())
+}
+
+type PanicHook = dyn for<'a> Fn(&std::panic::PanicHookInfo<'a>) + Send + Sync + 'static;
+
+fn commit_ort_environment_without_panic_output() -> std::thread::Result<ort::Result<bool>> {
+    static PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
+
+    // Panic hooks are process-global. Serialize our temporary replacement and
+    // suppress output only for this thread; concurrent panics still reach the
+    // hook that was installed before ORT initialization.
+    let _hook_guard = PANIC_HOOK_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let initializing_thread = std::thread::current().id();
+    let previous_hook: Arc<PanicHook> = Arc::from(std::panic::take_hook());
+    let delegated_hook = Arc::clone(&previous_hook);
+    std::panic::set_hook(Box::new(move |panic_info| {
+        if std::thread::current().id() != initializing_thread {
+            delegated_hook(panic_info);
+        }
+    }));
+    let initialized = std::panic::catch_unwind(|| ort::init().commit());
+    std::panic::set_hook(Box::new(move |panic_info| previous_hook(panic_info)));
+    initialized
+}
+
+#[cfg(feature = "reranker-cuda")]
+fn preload_dynamic_ort_library() -> Result<(), RerankerError> {
+    let configured = std::env::var_os("ORT_DYLIB_PATH").filter(|value| !value.is_empty());
+    let executable = std::env::current_exe().ok();
+    let path = resolve_dynamic_ort_library_path(configured.as_deref(), executable.as_deref());
+    ort::util::preload_dylib(&path).map_err(|error| {
+        RerankerError::ProviderUnavailable(format!(
+            "ONNX Runtime could not load `{}` or one of its dependencies: {error}; set ORT_DYLIB_PATH to the absolute library path or configure the platform loader",
+            path.display()
+        ))
+    })
+}
+
+#[cfg(feature = "reranker-cuda")]
+fn resolve_dynamic_ort_library_path(configured: Option<&std::ffi::OsStr>, executable: Option<&std::path::Path>) -> std::path::PathBuf {
+    let path = configured.map_or_else(|| std::path::PathBuf::from(dynamic_ort_library_name()), std::path::PathBuf::from);
+    if path.is_absolute() {
+        return path;
+    }
+    executable
+        .and_then(std::path::Path::parent)
+        .map(|parent| parent.join(&path))
+        .filter(|relative| relative.exists())
+        .unwrap_or(path)
+}
+
+#[cfg(feature = "reranker-cuda")]
+const fn onnx_runtime_panic_guidance() -> &'static str {
+    "ONNX Runtime initialization failed unexpectedly after loading its dynamic library; verify that ORT_DYLIB_PATH selects a compatible ONNX Runtime build"
+}
+
+#[cfg(not(feature = "reranker-cuda"))]
+const fn onnx_runtime_panic_guidance() -> &'static str {
+    "ONNX Runtime initialization failed unexpectedly"
+}
+
+#[cfg(all(feature = "reranker-cuda", target_os = "windows"))]
+const fn dynamic_ort_library_name() -> &'static str {
+    "onnxruntime.dll"
+}
+
+#[cfg(all(feature = "reranker-cuda", any(target_os = "linux", target_os = "android")))]
+const fn dynamic_ort_library_name() -> &'static str {
+    "libonnxruntime.so"
+}
+
+#[cfg(all(feature = "reranker-cuda", any(target_os = "macos", target_os = "ios")))]
+const fn dynamic_ort_library_name() -> &'static str {
+    "libonnxruntime.dylib"
+}
+
+#[cfg(all(
+    feature = "reranker-cuda",
+    not(any(target_os = "windows", target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios"))
+))]
+const fn dynamic_ort_library_name() -> &'static str {
+    "libonnxruntime.so"
 }
 
 async fn initialize(config: &RerankerConfig, clock: Arc<dyn Clock>) -> Result<InitializedReranker, RerankerError> {
@@ -216,4 +300,26 @@ async fn load_provider(config: &RerankerConfig, clock: Arc<dyn Clock>) -> Result
         .await
         .map_err(|error| RerankerError::Transient(Box::new(error)))??;
     Ok(ResilientReranker::new_with_clock(onnx, ResilientRerankerConfig::default(), clock).await)
+}
+
+#[cfg(all(test, feature = "reranker-cuda"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_ort_path_resolves_configured_path() {
+        let root = tempfile::TempDir::new().unwrap();
+        let configured = root.path().join("configured/libonnxruntime-test.so");
+        assert_eq!(resolve_dynamic_ort_library_path(Some(configured.as_os_str()), None), configured);
+    }
+
+    #[test]
+    fn dynamic_ort_path_prefers_library_beside_executable() {
+        let root = tempfile::TempDir::new().unwrap();
+        let executable = root.path().join("bin/hold");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        let library = executable.parent().unwrap().join(dynamic_ort_library_name());
+        std::fs::write(&library, b"fixture").unwrap();
+        assert_eq!(resolve_dynamic_ort_library_path(None, Some(&executable)), library);
+    }
 }

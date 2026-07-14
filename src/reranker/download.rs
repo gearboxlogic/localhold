@@ -89,7 +89,10 @@ pub(crate) fn resolve_model_paths(config: &RerankerConfig) -> Result<ModelPaths,
     }
 
     let pins = resolve_download_pins(config)?;
+    resolve_downloaded_model_paths(config, &pins)
+}
 
+fn resolve_downloaded_model_paths(config: &RerankerConfig, pins: &DownloadPins) -> Result<ModelPaths, RerankerError> {
     // Expand ~ in cache_dir
     let expanded_cache = crate::config::expand_tilde(&config.cache_dir).map_err(|e| RerankerError::Permanent(e.to_string().into()))?;
     let model_name = config.model.replace('/', "--");
@@ -480,6 +483,35 @@ mod tests {
         assert!(pins.model_url.contains("huggingface.co"));
         assert!(pins.model_url.ends_with("/onnx/model.onnx"));
         assert_eq!(pins.cache_revision, DEFAULT_RERANKER_REVISION);
+    }
+
+    #[test]
+    fn builtin_artifact_download_uses_managed_url_cache_and_hash_verification() {
+        let cache = TempDir::new().unwrap();
+        let server = MockArtifactServer::start(false);
+        for (precision, model_file) in [(RerankerPrecision::Fp32, BUILTIN_FP32_FILE), (RerankerPrecision::Fp16, BUILTIN_FP16_FILE)] {
+            let config = RerankerConfig {
+                cache_dir: cache.path().to_string_lossy().into_owned(),
+                precision,
+                ..RerankerConfig::default()
+            };
+            let mut pins = resolve_download_pins(&config).unwrap();
+            assert!(pins.model_url.starts_with(BUILTIN_ARTIFACT_RELEASE));
+            assert!(pins.model_url.ends_with(model_file));
+            assert!(pins.tokenizer_url.ends_with(BUILTIN_TOKENIZER_FILE));
+
+            pins.model_url = format!("{}/{model_file}", server.base_url);
+            pins.tokenizer_url = format!("{}/{}", server.base_url, BUILTIN_TOKENIZER_FILE);
+            pins.model_sha256 = sha256_bytes(MODEL_BYTES);
+            pins.tokenizer_sha256 = sha256_bytes(TOKENIZER_BYTES);
+
+            let paths = resolve_downloaded_model_paths(&config, &pins).unwrap();
+            assert_eq!(std::fs::read(&paths.onnx_path).unwrap(), MODEL_BYTES);
+            assert_eq!(std::fs::read(&paths.tokenizer_path).unwrap(), TOKENIZER_BYTES);
+            let expected_cache = format!("{}@{}--{BUILTIN_ARTIFACT_VERSION}-{precision}", config.model.replace('/', "--"), DEFAULT_RERANKER_REVISION);
+            assert_eq!(paths.onnx_path.parent().unwrap(), cache.path().join(expected_cache));
+        }
+        assert_eq!(server.request_count(), 4);
     }
 
     #[test]

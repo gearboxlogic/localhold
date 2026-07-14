@@ -9,7 +9,7 @@ use std::{
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _};
 use serde::Serialize;
 use sqlx_core::{query::query, query_scalar::query_scalar, row::Row as _};
-use sqlx_postgres::{PgPool, PgPoolOptions};
+use sqlx_postgres::{PgConnection, PgPool, PgPoolOptions};
 
 use super::{EmbeddingProvider as _, OpenAiEmbedding, factory::active_embedding_profile};
 use crate::{
@@ -194,15 +194,16 @@ impl EmbeddingStatusReport {
 
     /// Render a concise human-readable report.
     #[must_use]
+    #[expect(clippy::expect_used, reason = "formatting into a String cannot fail")]
     pub fn render_text(&self) -> String {
         use std::fmt::Write as _;
 
         let mut output = format!("LocalHold embeddings: {} ({})\n", self.status, self.state);
-        let _written = writeln!(output, "Backend: {}", single_line(&self.backend));
-        let _written = writeln!(output, "Provider health: {}", self.provider_health);
-        let _written = writeln!(output, "Configured profile: {}", render_profile(self.configured_profile.as_ref()));
-        let _written = writeln!(output, "Stored profile: {}", render_profile(self.stored_profile.as_ref()));
-        let _written = writeln!(
+        writeln!(output, "Backend: {}", single_line(&self.backend)).expect("writing to a String is infallible");
+        writeln!(output, "Provider health: {}", self.provider_health).expect("writing to a String is infallible");
+        writeln!(output, "Configured profile: {}", render_profile(self.configured_profile.as_ref())).expect("writing to a String is infallible");
+        writeln!(output, "Stored profile: {}", render_profile(self.stored_profile.as_ref())).expect("writing to a String is infallible");
+        writeln!(
             output,
             "Memories: total {}, embedded {}, pending {}, claimed {}, mapped {}, vectors {}",
             self.counts.total_memories,
@@ -211,15 +212,17 @@ impl EmbeddingStatusReport {
             self.counts.claimed_memories,
             self.counts.mapped_memories,
             self.counts.vector_rows
-        );
+        )
+        .expect("writing to a String is infallible");
         if self.counts.missing_vectors > 0 || self.counts.unexpected_vectors > 0 {
-            let _written = writeln!(
+            writeln!(
                 output,
                 "Inconsistencies: missing {}, unexpected {}",
                 self.counts.missing_vectors, self.counts.unexpected_vectors
-            );
+            )
+            .expect("writing to a String is infallible");
         }
-        let _written = writeln!(output, "Summary: {}", single_line(&self.summary));
+        writeln!(output, "Summary: {}", single_line(&self.summary)).expect("writing to a String is infallible");
         output
     }
 }
@@ -263,6 +266,14 @@ fn build_report(config: &Config, provider_health: EmbeddingProviderHealth, obser
     let configured_profile = active_embedding_profile(&config.embedding);
     let backend = backend_name(config.database.backend).to_owned();
     let (mut status, state, stored_profile, stored_dimensions, counts, mut summary) = match observation {
+        StorageObservation::NotInitialized if configured_profile.is_none() => (
+            EmbeddingStatusLevel::Healthy,
+            EmbeddingState::Disabled,
+            None,
+            None,
+            EmbeddingCounts::default(),
+            "noop embedding provider is selected; no embedding storage is required".to_owned(),
+        ),
         StorageObservation::NotInitialized => (
             EmbeddingStatusLevel::Degraded,
             EmbeddingState::NotInitialized,
@@ -411,10 +422,11 @@ fn inspect_sqlite_storage_blocking(path: &Path) -> StatusResult<StorageObservati
     SqliteStore::register_extension()?;
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let connection = Connection::open_with_flags(path, flags)?;
-    if !sqlite_table_exists(&connection, "memories")? {
+    let transaction = connection.unchecked_transaction()?;
+    if !sqlite_table_exists(&transaction, "memories")? {
         return Ok(StorageObservation::NotInitialized);
     }
-    let (total, embedded, pending, claimed): (i64, i64, i64, i64) = connection.query_row(
+    let (total, embedded, pending, claimed): (i64, i64, i64, i64) = transaction.query_row(
         "SELECT COUNT(*),
                 COALESCE(SUM(CASE WHEN has_embedding = 1 THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN has_embedding = 0 THEN 1 ELSE 0 END), 0),
@@ -423,23 +435,23 @@ fn inspect_sqlite_storage_blocking(path: &Path) -> StatusResult<StorageObservati
         [],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
-    let map_exists = sqlite_table_exists(&connection, "memory_embedding_map")?;
-    let vectors_exist = sqlite_table_exists(&connection, "memory_embeddings")?;
-    let profile_exists = sqlite_table_exists(&connection, "embedding_profile")?;
+    let map_exists = sqlite_table_exists(&transaction, "memory_embedding_map")?;
+    let vectors_exist = sqlite_table_exists(&transaction, "memory_embeddings")?;
+    let profile_exists = sqlite_table_exists(&transaction, "embedding_profile")?;
     let mapped = if map_exists {
-        connection.query_row("SELECT COUNT(*) FROM memory_embedding_map", [], |row| row.get::<_, i64>(0))?
+        transaction.query_row("SELECT COUNT(*) FROM memory_embedding_map", [], |row| row.get::<_, i64>(0))?
     } else {
         0
     };
     let vector_rows = if vectors_exist {
-        connection.query_row("SELECT COUNT(*) FROM memory_embeddings", [], |row| row.get::<_, i64>(0))?
+        transaction.query_row("SELECT COUNT(*) FROM memory_embeddings", [], |row| row.get::<_, i64>(0))?
     } else {
         0
     };
-    let (missing, unexpected) = inspect_sqlite_consistency(&connection, map_exists, vectors_exist, embedded, vector_rows)?;
-    let stored_profile = if profile_exists { read_sqlite_profile(&connection)? } else { None };
-    let stored_dimensions = crate::store::existing_embedding_dimensions(&connection)?;
-    Ok(StorageObservation::Ready(StorageSnapshot {
+    let (missing, unexpected) = inspect_sqlite_consistency(&transaction, map_exists, vectors_exist, embedded, vector_rows)?;
+    let stored_profile = if profile_exists { read_sqlite_profile(&transaction)? } else { None };
+    let stored_dimensions = crate::store::existing_embedding_dimensions(&transaction)?;
+    let observation = StorageObservation::Ready(StorageSnapshot {
         vector_table_present: vectors_exist,
         stored_profile,
         stored_dimensions,
@@ -453,7 +465,9 @@ fn inspect_sqlite_storage_blocking(path: &Path) -> StatusResult<StorageObservati
             missing_vectors: count_to_u64(missing)?,
             unexpected_vectors: count_to_u64(unexpected)?,
         },
-    }))
+    });
+    transaction.commit()?;
+    Ok(observation)
 }
 
 fn inspect_sqlite_consistency(connection: &Connection, map_exists: bool, vectors_exist: bool, embedded: i64, vector_rows: i64) -> Result<(i64, i64), rusqlite::Error> {
@@ -523,7 +537,9 @@ async fn inspect_postgres_storage(config: &Config, clock: &dyn Clock) -> Storage
 }
 
 async fn inspect_postgres_pool(pool: &PgPool, auto_migrate: bool) -> StatusResult<StorageObservation> {
-    let memories_exist: bool = query_scalar("SELECT to_regclass('memories') IS NOT NULL").fetch_one(pool).await?;
+    let mut transaction = pool.begin().await?;
+    let _transaction_mode = query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY").execute(&mut *transaction).await?;
+    let memories_exist: bool = query_scalar("SELECT to_regclass('memories') IS NOT NULL").fetch_one(&mut *transaction).await?;
     if !memories_exist {
         return Ok(StorageObservation::NotInitialized);
     }
@@ -534,33 +550,35 @@ async fn inspect_postgres_pool(pool: &PgPool, auto_migrate: bool) -> StatusResul
                 COUNT(*) FILTER (WHERE NOT has_embedding AND embedding_claim_token IS NOT NULL) AS claimed
          FROM memories",
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await?;
-    let vector_table_exists: bool = query_scalar("SELECT to_regclass('memory_embeddings') IS NOT NULL").fetch_one(pool).await?;
-    let profile_table_exists: bool = query_scalar("SELECT to_regclass('embedding_profile') IS NOT NULL").fetch_one(pool).await?;
-    if !auto_migrate && (!vector_table_exists || !profile_table_exists) {
+    let vector_table_exists: bool = query_scalar("SELECT to_regclass('memory_embeddings') IS NOT NULL").fetch_one(&mut *transaction).await?;
+    let profile_table_exists: bool = query_scalar("SELECT to_regclass('embedding_profile') IS NOT NULL").fetch_one(&mut *transaction).await?;
+    if !vector_table_exists || (!auto_migrate && !profile_table_exists) {
         return Ok(StorageObservation::Unavailable);
     }
     let (vector_rows, missing, unexpected) = if vector_table_exists {
         (
-            query_scalar::<_, i64>("SELECT COUNT(*) FROM memory_embeddings").fetch_one(pool).await?,
+            query_scalar::<_, i64>("SELECT COUNT(*) FROM memory_embeddings")
+                .fetch_one(&mut *transaction)
+                .await?,
             query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM memories AS memory LEFT JOIN memory_embeddings AS embedding ON embedding.memory_id = memory.id WHERE memory.has_embedding AND embedding.memory_id IS NULL",
             )
-            .fetch_one(pool)
+            .fetch_one(&mut *transaction)
             .await?,
             query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM memory_embeddings AS embedding LEFT JOIN memories AS memory ON memory.id = embedding.memory_id WHERE memory.id IS NULL OR NOT memory.has_embedding",
             )
-            .fetch_one(pool)
+            .fetch_one(&mut *transaction)
             .await?,
         )
     } else {
         (0, row.try_get::<i64, _>("embedded")?, 0)
     };
-    let stored_profile = if profile_table_exists { read_postgres_profile(pool).await? } else { None };
-    let stored_dimensions = if vector_table_exists { read_postgres_dimensions(pool).await? } else { None };
-    Ok(StorageObservation::Ready(StorageSnapshot {
+    let stored_profile = if profile_table_exists { read_postgres_profile(&mut transaction).await? } else { None };
+    let stored_dimensions = read_postgres_dimensions(&mut transaction).await?;
+    let observation = StorageObservation::Ready(StorageSnapshot {
         vector_table_present: vector_table_exists,
         stored_profile,
         stored_dimensions,
@@ -574,7 +592,9 @@ async fn inspect_postgres_pool(pool: &PgPool, auto_migrate: bool) -> StatusResul
             missing_vectors: count_to_u64(missing)?,
             unexpected_vectors: count_to_u64(unexpected)?,
         },
-    }))
+    });
+    transaction.commit().await?;
+    Ok(observation)
 }
 
 fn sqlite_table_exists(connection: &Connection, table: &str) -> Result<bool, rusqlite::Error> {
@@ -599,9 +619,9 @@ fn read_sqlite_profile(connection: &Connection) -> StatusResult<Option<Embedding
         .transpose()
 }
 
-async fn read_postgres_profile(pool: &PgPool) -> StatusResult<Option<EmbeddingProfile>> {
+async fn read_postgres_profile(connection: &mut PgConnection) -> StatusResult<Option<EmbeddingProfile>> {
     let row = query("SELECT provider, endpoint, model, dimensions FROM embedding_profile WHERE singleton = 1")
-        .fetch_optional(pool)
+        .fetch_optional(connection)
         .await?;
     row.map(|row| {
         Ok(EmbeddingProfile {
@@ -614,11 +634,11 @@ async fn read_postgres_profile(pool: &PgPool) -> StatusResult<Option<EmbeddingPr
     .transpose()
 }
 
-async fn read_postgres_dimensions(pool: &PgPool) -> StatusResult<Option<usize>> {
+async fn read_postgres_dimensions(connection: &mut PgConnection) -> StatusResult<Option<usize>> {
     let vector_type: Option<String> = query_scalar(
         "SELECT format_type(attribute.atttypid, attribute.atttypmod) FROM pg_attribute AS attribute WHERE attribute.attrelid = to_regclass('memory_embeddings') AND attribute.attname = 'embedding' AND NOT attribute.attisdropped",
     )
-    .fetch_optional(pool)
+    .fetch_optional(connection)
     .await?;
     Ok(vector_type.as_deref().and_then(postgres_vector_dimensions))
 }
@@ -735,22 +755,24 @@ mod tests {
         assert_eq!(classify_snapshot(None, 4, &mismatched).1, EmbeddingState::ReindexRequired);
     }
 
-    #[test]
-    fn report_json_never_contains_an_api_key_field() {
-        let report = EmbeddingStatusReport {
-            schema_version: REPORT_SCHEMA_VERSION,
-            status: EmbeddingStatusLevel::Healthy,
-            exit_code: EXIT_HEALTHY,
-            backend: "sqlite".into(),
-            state: EmbeddingState::Complete,
-            provider_health: EmbeddingProviderHealth::Healthy,
-            configured_profile: Some(profile("current")),
-            stored_profile: Some(profile("current")),
-            stored_dimensions: Some(3),
-            counts: EmbeddingCounts::default(),
-            summary: "ready".into(),
+    #[tokio::test]
+    async fn inspected_report_json_never_contains_api_key_material() {
+        const SECRET: &str = "status-test-secret";
+        let mut config = Config::default();
+        config.database.sqlite.path = std::env::temp_dir().join(format!("localhold-status-secret-test-{}.db", std::process::id()));
+        config.embedding = EmbeddingConfig::OpenAiCompatible {
+            dimensions: 3,
+            openai_compatible: crate::config::OpenAiCompatibleConfig {
+                api_key: Some(SECRET.into()),
+                health_check: EmbeddingHealthCheck::Disabled,
+                ..crate::config::OpenAiCompatibleConfig::default()
+            },
         };
+
+        let report = inspect_with_clock(&config, Arc::new(SystemClock::new())).await;
         let json = report.to_json().unwrap();
         assert!(!json.contains("api_key"));
+        assert!(!json.contains(SECRET));
+        assert!(!config.database.sqlite.path.exists());
     }
 }

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="transport">
+  <!-- Two holds, one road: the memory travels between them. -->
+  <path fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="square" d="M8 54 V42 A8 8 0 0 1 24 42 V54"/>
+  <path fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="square" d="M40 54 V42 A8 8 0 0 1 56 42 V54"/>
+  <path fill="none" stroke="currentColor" stroke-width="3" d="M16 32 C16 16 48 16 48 32"/>
+  <circle fill="var(--lh-or, #C89B3C)" cx="32" cy="20" r="4"/>
+</svg>

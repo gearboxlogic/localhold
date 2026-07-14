@@ -28,6 +28,29 @@ fn unique_db_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("localhold-{name}-{}-{nanos}.db", std::process::id()))
 }
 
+struct TemporarySqliteDb {
+    path: std::path::PathBuf,
+}
+
+impl TemporarySqliteDb {
+    fn new(name: &str) -> Self {
+        Self { path: unique_db_path(name) }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TemporarySqliteDb {
+    fn drop(&mut self) {
+        for suffix in ["db-shm", "db-wal"] {
+            let _cleanup = std::fs::remove_file(self.path.with_extension(suffix));
+        }
+        let _cleanup = std::fs::remove_file(&self.path);
+    }
+}
+
 fn base_binary_command(db_path: &std::path::Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_hold"));
     let _isolated_config = isolate_user_config_dir(&mut cmd, &db_path.with_extension("base-config"));
@@ -731,10 +754,11 @@ fn binary_starts_in_stdio_mode() {
 
 #[test]
 fn embeddings_status_json_reports_rebuild_progress_and_secret_free_profiles() {
-    let db_path = unique_db_path("embeddings-status-rebuilding");
-    seed_embedding_status_database(&db_path, "embed-current", 1, 2);
+    let database = TemporarySqliteDb::new("embeddings-status-rebuilding");
+    let db_path = database.path();
+    seed_embedding_status_database(db_path, "embed-current", 1, 2);
 
-    let output = embedding_status_command(&db_path, "embed-current")
+    let output = embedding_status_command(db_path, "embed-current")
         .args(["embeddings", "status", "--json"])
         .output()
         .unwrap();
@@ -753,18 +777,15 @@ fn embeddings_status_json_reports_rebuild_progress_and_secret_free_profiles() {
     assert_eq!(report["counts"]["pending_memories"], 2_i32);
     assert_eq!(report["counts"]["vector_rows"], 1_i32);
     assert!(!stdout.contains("embedding-status-secret"), "status JSON must not contain API keys");
-
-    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
-    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
-    let _cleanup = std::fs::remove_file(db_path);
 }
 
 #[test]
 fn embeddings_status_requires_reindex_for_profile_mismatch() {
-    let db_path = unique_db_path("embeddings-status-mismatch");
-    seed_embedding_status_database(&db_path, "embed-old", 1, 0);
+    let database = TemporarySqliteDb::new("embeddings-status-mismatch");
+    let db_path = database.path();
+    seed_embedding_status_database(db_path, "embed-old", 1, 0);
 
-    let output = embedding_status_command(&db_path, "embed-new").args(["embeddings", "status", "--json"]).output().unwrap();
+    let output = embedding_status_command(db_path, "embed-new").args(["embeddings", "status", "--json"]).output().unwrap();
 
     assert_eq!(output.status.code(), Some(1_i32), "profile mismatch must fail: {output:?}");
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -773,19 +794,16 @@ fn embeddings_status_requires_reindex_for_profile_mismatch() {
     assert_eq!(report["configured_profile"]["model"], "embed-new");
     assert_eq!(report["stored_profile"]["model"], "embed-old");
     assert!(report["summary"].as_str().unwrap().contains("hold embeddings reindex --yes"));
-
-    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
-    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
-    let _cleanup = std::fs::remove_file(db_path);
 }
 
 #[test]
 fn embeddings_status_detects_missing_and_orphan_vectors_even_when_counts_cancel() {
-    let db_path = unique_db_path("embeddings-status-canceling-corruption");
-    seed_embedding_status_database(&db_path, "embed-current", 1, 0);
-    create_canceling_embedding_corruption(&db_path);
+    let database = TemporarySqliteDb::new("embeddings-status-canceling-corruption");
+    let db_path = database.path();
+    seed_embedding_status_database(db_path, "embed-current", 1, 0);
+    create_canceling_embedding_corruption(db_path);
 
-    let output = embedding_status_command(&db_path, "embed-current")
+    let output = embedding_status_command(db_path, "embed-current")
         .args(["embeddings", "status", "--json"])
         .output()
         .unwrap();
@@ -803,22 +821,19 @@ fn embeddings_status_detects_missing_and_orphan_vectors_even_when_counts_cancel(
     assert_eq!(report["counts"]["missing_vectors"], 1_i32);
     assert_eq!(report["counts"]["unexpected_vectors"], 1_i32);
 
-    let text_output = embedding_status_command(&db_path, "embed-current").args(["embeddings", "status"]).output().unwrap();
+    let text_output = embedding_status_command(db_path, "embed-current").args(["embeddings", "status"]).output().unwrap();
     assert_eq!(text_output.status.code(), Some(1_i32));
     assert!(String::from_utf8(text_output.stdout).unwrap().contains("Inconsistencies: missing 1, unexpected 1"));
-
-    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
-    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
-    let _cleanup = std::fs::remove_file(db_path);
 }
 
 #[test]
 fn embeddings_status_rejects_an_unparseable_empty_vector_table() {
-    let db_path = unique_db_path("embeddings-status-malformed-vector-table");
-    seed_embedding_status_database(&db_path, "embed-current", 0, 1);
-    replace_vector_table_with_malformed_table(&db_path);
+    let database = TemporarySqliteDb::new("embeddings-status-malformed-vector-table");
+    let db_path = database.path();
+    seed_embedding_status_database(db_path, "embed-current", 0, 1);
+    replace_vector_table_with_malformed_table(db_path);
 
-    let output = embedding_status_command(&db_path, "embed-current")
+    let output = embedding_status_command(db_path, "embed-current")
         .args(["embeddings", "status", "--json"])
         .output()
         .unwrap();
@@ -828,35 +843,29 @@ fn embeddings_status_rejects_an_unparseable_empty_vector_table() {
     assert_eq!(report["state"], "reindex_required");
     assert_eq!(report["stored_dimensions"], Value::Null);
     assert!(report["summary"].as_str().unwrap().contains("dimensions could not be read"));
-
-    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
-    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
-    let _cleanup = std::fs::remove_file(db_path);
 }
 
 #[test]
 fn embeddings_status_checks_vector_dimensions_before_declaring_noop_disabled() {
-    let db_path = unique_db_path("embeddings-status-noop-dimension-mismatch");
-    seed_embedding_status_database(&db_path, "embed-current", 0, 0);
+    let database = TemporarySqliteDb::new("embeddings-status-noop-dimension-mismatch");
+    let db_path = database.path();
+    seed_embedding_status_database(db_path, "embed-current", 0, 0);
 
-    let output = noop_embedding_status_command(&db_path, "4").args(["embeddings", "status", "--json"]).output().unwrap();
+    let output = noop_embedding_status_command(db_path, "4").args(["embeddings", "status", "--json"]).output().unwrap();
 
     assert_eq!(output.status.code(), Some(1_i32));
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["provider_health"], "disabled");
     assert_eq!(report["state"], "reindex_required");
     assert_eq!(report["stored_dimensions"], 3_i32);
-
-    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
-    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
-    let _cleanup = std::fs::remove_file(db_path);
 }
 
 #[test]
 fn embeddings_status_does_not_initialize_a_missing_database() {
-    let db_path = unique_db_path("embeddings-status-missing");
+    let database = TemporarySqliteDb::new("embeddings-status-missing");
+    let db_path = database.path();
 
-    let output = embedding_status_command(&db_path, "embed-current")
+    let output = embedding_status_command(db_path, "embed-current")
         .args(["embeddings", "status", "--json"])
         .output()
         .unwrap();
@@ -865,6 +874,21 @@ fn embeddings_status_does_not_initialize_a_missing_database() {
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["state"], "not_initialized");
     assert!(!db_path.exists(), "status must not create a missing SQLite database");
+}
+
+#[test]
+fn embeddings_status_reports_disabled_for_noop_without_a_database() {
+    let database = TemporarySqliteDb::new("embeddings-status-noop-missing");
+    let db_path = database.path();
+
+    let output = noop_embedding_status_command(db_path, "384").args(["embeddings", "status", "--json"]).output().unwrap();
+
+    assert!(output.status.success(), "noop embeddings should be healthy without storage: {output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "healthy");
+    assert_eq!(report["state"], "disabled");
+    assert_eq!(report["provider_health"], "disabled");
+    assert!(!db_path.exists(), "status must not create a database for noop embeddings");
 }
 
 #[test]
@@ -900,6 +924,14 @@ fn embeddings_status_reports_postgres_profile_and_progress() {
     assert_eq!(report["counts"]["vector_rows"], 1_i32);
 
     drop_postgres_embedding_tables(&url);
+    let missing_vector_output = postgres_embedding_status_command(&url, &root, true)
+        .args(["embeddings", "status", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(missing_vector_output.status.code(), Some(1_i32));
+    let missing_vector_report: Value = serde_json::from_slice(&missing_vector_output.stdout).unwrap();
+    assert_eq!(missing_vector_report["state"], "unavailable");
+
     let no_migration_output = postgres_embedding_status_command(&url, &root, false)
         .args(["embeddings", "status", "--json"])
         .output()

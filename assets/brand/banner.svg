@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 320" role="img" aria-label="LocalHold — searchable context that stays yours">
+  <defs>
+    <pattern id="crenel" width="64" height="8" patternUnits="userSpaceOnUse">
+      <path d="M0 8 L0 3 L32 3 L32 8 Z" fill="#C89B3C"/>
+      <rect y="6" width="64" height="2" fill="#C89B3C"/>
+    </pattern>
+    <clipPath id="frame"><rect width="1280" height="320"/></clipPath>
+  </defs>
+  <g clip-path="url(#frame)">
+    <rect width="1280" height="320" fill="#10161E"/>
+
+    <!-- The Plan of the Hold, drawn large off the right edge -->
+    <g transform="translate(1010 160) scale(9.5) translate(-32 -32)">
+      <path fill="none" stroke="#27436B" stroke-width="0.9" d="
+        M32 10 L40 18 L46 18 L46 24 L54 32 L46 40 L46 46 L40 46 L32 54
+        L24 46 L18 46 L18 40 L10 32 L18 24 L18 18 L24 18 Z"/>
+      <circle fill="#C89B3C" cx="32" cy="32" r="1.8"/>
+    </g>
+
+    <!-- The Keep -->
+    <g transform="translate(70 96) scale(2)">
+      <path fill="#F2F4F6" fill-rule="evenodd" d="
+        M14 56 L14 50 L18 50 L18 10 L25 10 L25 16 L28.5 16 L28.5 10 L35.5 10 L35.5 16
+        L39 16 L39 10 L46 10 L46 50 L50 50 L50 56 Z
+        M27 56 L27 42 A5 5 0 0 1 37 42 L37 56 Z"/>
+    </g>
+
+    <!-- Wordmark and brand line -->
+    <text x="204" y="186" font-family="Iowan Old Style, Palatino Linotype, Palatino, Book Antiqua, Georgia, serif"
+          font-size="88" font-weight="600" letter-spacing="1" fill="#F2F4F6">local<tspan fill="#C89B3C">hold</tspan></text>
+    <text x="208" y="232" font-family="-apple-system, Segoe UI, system-ui, sans-serif"
+          font-size="25" fill="#93A2B3">Searchable context that stays yours.</text>
+
+    <!-- Battlement rule -->
+    <rect x="0" y="312" width="1280" height="8" fill="url(#crenel)"/>
+  </g>
+</svg>

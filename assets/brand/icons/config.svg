@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="config">
+  <!-- The keystone: the one stone that sets how everything else holds. -->
+  <path fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="square" d="M10 50 A22 22 0 0 1 24 29.5"/>
+  <path fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="square" d="M40 29.5 A22 22 0 0 1 54 50"/>
+  <path fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="miter" d="M26 12 L38 12 L42 32 L22 32 Z"/>
+</svg>

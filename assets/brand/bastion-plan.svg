@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="localhold bastion plan mark">
+  <!-- Concept C — The Plan of the Hold: a star fort in plan view, your context held at the center. -->
+  <path fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="miter" d="
+    M32 10 L40 18 L46 18 L46 24 L54 32 L46 40 L46 46 L40 46 L32 54
+    L24 46 L18 46 L18 40 L10 32 L18 24 L18 18 L24 18 Z"/>
+  <circle fill="var(--lh-accent, #C89B3C)" cx="32" cy="32" r="4"/>
+</svg>

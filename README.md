@@ -1,9 +1,7 @@
-# LocalHold
+<img src="assets/brand/banner.svg" alt="LocalHold — searchable context that stays yours" width="100%">
 
 [![CI](https://github.com/gearboxlogic/localhold/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/gearboxlogic/localhold/actions/workflows/ci.yml)
 [![Dependency freshness](https://github.com/gearboxlogic/localhold/actions/workflows/outdated.yml/badge.svg?branch=main)](https://github.com/gearboxlogic/localhold/actions/workflows/outdated.yml)
-
-**Searchable context that stays yours.**
 
 LocalHold is local context infrastructure for AI agents. It runs as a standalone
 [Model Context Protocol](https://modelcontextprotocol.io/) server and keeps

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="forget">
+  <!-- Released: the enclosure stays, the memory is gone. No gold. -->
+  <rect x="15" y="15" width="34" height="34" rx="2" fill="none" stroke="currentColor"
+        stroke-width="4" stroke-dasharray="7 7"/>
+</svg>

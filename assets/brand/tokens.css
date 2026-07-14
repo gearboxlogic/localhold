@@ -1,0 +1,107 @@
+/* ============================================================
+   LocalHold design tokens
+   Palette is named after heraldic tinctures — see BRAND.md.
+   Usage: import this file, style everything through the
+   semantic tokens (--lh-bg, --lh-ink, …), never the raw
+   tinctures, so both themes come for free.
+   ============================================================ */
+
+:root {
+  /* --- tinctures (raw palette; theme-invariant) --- */
+  --lh-sable:  #1C2733; /* iron ink */
+  --lh-azure:  #1F3A5F; /* the field */
+  --lh-or:     #C89B3C; /* the accent — one per composition */
+  --lh-argent: #F2F4F6; /* stone white */
+  --lh-night:  #10161E; /* dark ground */
+  --lh-gules:  #A4433B; /* semantic: error / destructive */
+  --lh-vert:   #3E7A54; /* semantic: success */
+
+  /* --- semantic (light theme) --- */
+  --lh-bg:      var(--lh-argent);
+  --lh-surface: #FFFFFF;
+  --lh-ink:     var(--lh-sable);
+  --lh-muted:   #5B6B7C;
+  --lh-line:    #D8DEE5;
+  --lh-accent:  var(--lh-or);
+  --lh-link:    var(--lh-azure);
+  --lh-error:   var(--lh-gules);
+  --lh-success: var(--lh-vert);
+
+  /* --- type --- */
+  --lh-font-display: "Iowan Old Style", "Palatino Linotype", Palatino,
+                     "Book Antiqua", Georgia, serif;
+  --lh-font-body: -apple-system, "Segoe UI", system-ui, sans-serif;
+  --lh-font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo,
+                  Consolas, monospace;
+  --lh-text-xs: 0.72rem;  /* uppercase labels; pair with 0.12em tracking */
+  --lh-text-sm: 0.875rem;
+  --lh-text-md: 1rem;
+  --lh-text-lg: 1.35rem;  /* section headings */
+  --lh-text-xl: 2.4rem;   /* page titles */
+
+  /* --- shape: cut stone, never pills --- */
+  --lh-radius-sm: 2px;
+  --lh-radius:    4px;
+  --lh-radius-lg: 8px;
+
+  /* --- spacing scale --- */
+  --lh-space-1: 0.25rem;
+  --lh-space-2: 0.5rem;
+  --lh-space-3: 1rem;
+  --lh-space-4: 1.75rem;
+  --lh-space-5: 3rem;
+
+  /* --- the battlement rule (signature divider) --- */
+  --lh-crenel: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='6'%3E%3Cpath d='M0 6 L0 2 L16 2 L16 6 Z' fill='%23C89B3C'/%3E%3Crect y='5' width='32' height='1' fill='%23C89B3C'/%3E%3C/svg%3E");
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --lh-bg:      var(--lh-night);
+    --lh-surface: #131B25;
+    --lh-ink:     #E8ECF1;
+    --lh-muted:   #93A2B3;
+    --lh-line:    #26303C;
+    --lh-link:    #7FA3D4;
+    --lh-error:   #C86A61;
+    --lh-success: #6BA383;
+  }
+}
+:root[data-theme="dark"] {
+  --lh-bg:      var(--lh-night);
+  --lh-surface: #131B25;
+  --lh-ink:     #E8ECF1;
+  --lh-muted:   #93A2B3;
+  --lh-line:    #26303C;
+  --lh-link:    #7FA3D4;
+  --lh-error:   #C86A61;
+  --lh-success: #6BA383;
+}
+:root[data-theme="light"] {
+  --lh-bg:      var(--lh-argent);
+  --lh-surface: #FFFFFF;
+  --lh-ink:     var(--lh-sable);
+  --lh-muted:   #5B6B7C;
+  --lh-line:    #D8DEE5;
+  --lh-link:    var(--lh-azure);
+  --lh-error:   var(--lh-gules);
+  --lh-success: var(--lh-vert);
+}
+
+/* --- primitives --- */
+
+/* Battlement rule: the section divider. Use sparingly — one per major break. */
+.lh-rule {
+  border: 0;
+  height: 6px;
+  background: var(--lh-crenel) repeat-x bottom left;
+  opacity: 0.9;
+}
+
+/* Uppercase label (blazon style) */
+.lh-label {
+  font: 600 var(--lh-text-xs) / 1 var(--lh-font-mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--lh-muted);
+}

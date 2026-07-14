@@ -93,11 +93,13 @@ jobs:
 
       - name: Package portable CUDA archive
         shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           mkdir "$RUNNER_TEMP/localhold-cuda-package-temp"
           export TMPDIR="$RUNNER_TEMP/localhold-cuda-package-temp"
           python3 script/package-release.py \
-            --tag "${{ steps.release.outputs.tag }}" \
+            --tag "$RELEASE_TAG" \
             --target x86_64-unknown-linux-gnu-cuda12 \
             --binary "$RUNNER_TEMP/hold-cuda" \
             --cuda-runtime-dir "$RUNNER_TEMP/localhold-cuda-runtime" \
@@ -163,10 +165,12 @@ jobs:
 
       - name: Extract and validate portable CUDA archive
         shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
         run: |
           mkdir "$RUNNER_TEMP/localhold-cuda-extracted"
           tar --zstd -xf dist/*.tar.zst -C "$RUNNER_TEMP/localhold-cuda-extracted"
-          tag="${{ needs.build.outputs.release_tag }}"
+          tag="$RELEASE_TAG"
           root="$RUNNER_TEMP/localhold-cuda-extracted/localhold-${tag}-x86_64-unknown-linux-gnu-cuda12"
           python3 script/validate-cuda-runtime.py "$root"
           test "$("$root/bin/hold" --version)" = "hold ${tag#v}"

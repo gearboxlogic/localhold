@@ -205,8 +205,13 @@ fn commit_ort_environment_without_panic_output(dynamic_ort_path: Option<&std::pa
             delegated_hook(panic_info);
         }
     }));
+    #[cfg(feature = "reranker-cuda")]
     let initialized =
         std::panic::catch_unwind(|| dynamic_ort_path.map_or_else(|| Ok(ort::init().commit()), |path| ort::init_from(path).map(ort::environment::EnvironmentBuilder::commit)));
+    #[cfg(not(feature = "reranker-cuda"))]
+    let _ = dynamic_ort_path;
+    #[cfg(not(feature = "reranker-cuda"))]
+    let initialized = std::panic::catch_unwind(|| Ok(ort::init().commit()));
     std::panic::set_hook(Box::new(move |panic_info| previous_hook(panic_info)));
     initialized
 }

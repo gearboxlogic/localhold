@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use crate::{
     clock::{Clock, SystemClock},
     config::{AnonymousPolicy, Config, DatabaseBackend},
-    embedding::factory::{active_embedding_profile, create_embedding_provider_with_clock},
+    embedding::factory::{active_embedding_profile, create_deferred_embedding_provider_with_clock},
     engine::LocalHoldEngine,
     error::EngineError,
     store::{MemoryStore, PostgresStore, SqliteStore},
@@ -74,6 +74,7 @@ where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
     let principal = resolve_principal(&config, options)?;
+    let mut startup_notice = None;
 
     #[cfg(feature = "reranker")]
     let reranker_config = config.search.reranker.clone();
@@ -84,10 +85,10 @@ where
         if config.search.reranker.required {
             return Err(localhold_reranker_unavailable(requested).into());
         }
-        tracing::warn!(%requested, "reranker requested but this binary was compiled without reranker support; TUI search will not rerank");
+        startup_notice = Some(format!("reranker off: {requested} support is not compiled into this binary"));
     }
 
-    let embedding = create_embedding_provider_with_clock(&config.embedding, &config.limits, None, Arc::clone(&clock)).await;
+    let embedding = create_deferred_embedding_provider_with_clock(&config.embedding, &config.limits, Arc::clone(&clock));
     let engine = LocalHoldEngine::new_with_clock(store, embedding, config.limits, config.search, Arc::clone(&clock));
 
     #[cfg(feature = "reranker")]
@@ -98,12 +99,12 @@ where
                 return Err(EngineError::config("required TUI reranker artifacts are not cached; run `hold models fetch --yes` before starting `hold ui`").into());
             }
             Err(crate::reranker::RerankerError::Unavailable) => {
-                tracing::warn!("optional TUI reranker artifacts are not cached; run `hold models fetch --yes` to enable reranking");
+                startup_notice = Some("reranker off: artifacts are not cached; run `hold models fetch --yes` to enable it".into());
                 engine
             }
             Err(error) if reranker_config.required => return Err(error.into()),
             Err(error) => {
-                tracing::warn!(%error, "optional cached TUI reranker initialization failed; search will continue without reranking");
+                startup_notice = Some(format!("reranker off: {error}"));
                 engine
             }
         }
@@ -114,7 +115,7 @@ where
     let terminal = ratatui::try_init()?;
     let result = {
         let _restore = TerminalRestoreGuard;
-        event_loop(terminal, engine.clone(), principal).await
+        event_loop(terminal, engine.clone(), principal, startup_notice).await
     };
     engine.shutdown().await;
     result
@@ -149,7 +150,7 @@ impl Drop for TerminalRestoreGuard {
 }
 
 #[expect(clippy::integer_division_remainder_used, reason = "false positive from tokio::select! macro expansion")]
-async fn event_loop<S>(mut terminal: ratatui::DefaultTerminal, engine: LocalHoldEngine<S>, principal: Option<String>) -> Result<i32, UiError>
+async fn event_loop<S>(mut terminal: ratatui::DefaultTerminal, engine: LocalHoldEngine<S>, principal: Option<String>, startup_notice: Option<String>) -> Result<i32, UiError>
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
@@ -157,6 +158,7 @@ where
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     spawn_input_reader(event_tx);
     let mut app = app::App::new(engine, theme::Theme::detect(), principal, data_tx);
+    app.notice = startup_notice;
     app.bootstrap().await;
     while !app.quit {
         let _completed_frame = terminal.draw(|frame| view::draw(frame, &app))?;

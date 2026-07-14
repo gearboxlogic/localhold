@@ -156,11 +156,14 @@ where
             Span::styled(escape_terminal_text(text), app.theme.label()),
         ]),
     };
-    let line = if app.loading {
+    let mut line = if app.loading {
         Line::from(vec![Span::styled(" \u{2026} recalling", app.theme.label())])
     } else {
         verb
     };
+    if let Some(notice) = &app.notice {
+        line.push_span(Span::styled(format!("  ! {}", escape_terminal_text(notice)), app.theme.not_held()));
+    }
     frame.render_widget(Paragraph::new(line), area);
     let hints = Line::from(Span::styled("/ search  m mode  tab pane  enter open  q quit ", app.theme.label()));
     frame.render_widget(Paragraph::new(hints).alignment(Alignment::Right), area);

@@ -9,7 +9,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::{
     engine::{LocalHoldEngine, SearchRequest},
     store::MemoryStore,
-    types::{AuditEntry, Memory, MemoryFilter, MemoryStats, QueryContext, ScopeDefinition, SearchMode},
+    types::{AuditEntry, Memory, MemoryFilter, QueryContext, ScopeDefinition, SearchMode},
     ui::theme::Theme,
 };
 
@@ -123,8 +123,8 @@ where
     pub executed_mode: Option<SearchMode>,
     /// Detail overlay, when open.
     pub detail: Option<Detail>,
-    /// Aggregate stats for the status line.
-    pub stats: Option<MemoryStats>,
+    /// Persistent operator notice displayed beside transient status.
+    pub notice: Option<String>,
     /// Status line content.
     pub status: Status,
     /// True while a data task is in flight.
@@ -157,22 +157,18 @@ where
             requested_mode: None,
             executed_mode: None,
             detail: None,
-            stats: None,
+            notice: None,
             status: Status::Note("recalling the hold\u{2026}".into()),
             loading: true,
             quit: false,
         }
     }
 
-    /// Load scopes and stats, then kick off the first listing.
+    /// Load scopes, then kick off the first bounded listing.
     pub(crate) async fn bootstrap(&mut self) {
         match self.engine.list_scopes().await {
             Ok(scopes) => self.scopes = scopes,
             Err(error) => self.status = Status::NotHeld(format!("scopes unavailable: {error}")),
-        }
-        match self.engine.count_memories(MemoryFilter::default(), self.ctx(), 0_usize).await {
-            Ok(stats) => self.stats = Some(stats),
-            Err(error) => self.status = Status::NotHeld(format!("stats unavailable: {error}")),
         }
         self.refresh();
     }
@@ -658,6 +654,7 @@ mod tests {
         let (mut app, mut rx) = app_with_memories(&["the keep stands"]).await;
         app.bootstrap().await;
         app.on_data(rx.recv().await.unwrap());
+        app.notice = Some("reranker off: artifacts are not cached".into());
         let mut terminal = Terminal::new(TestBackend::new(100_u16, 24_u16)).unwrap();
         let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
         let rendered: String = terminal.backend().buffer().content().iter().map(ratatui::buffer::Cell::symbol).collect();
@@ -666,5 +663,6 @@ mod tests {
         assert!(rendered.contains("MEMORIES"), "memory pane should be titled");
         assert!(rendered.contains('\u{2580}'), "the battlement rule should be drawn");
         assert!(rendered.contains("held"), "the status line should speak the brand verb");
+        assert!(rendered.contains("reranker off"), "persistent startup notices should be visible in the TUI");
     }
 }

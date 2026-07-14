@@ -196,7 +196,7 @@ pub(crate) fn mark_superseded(conn: &Connection, old_id_str: &str, new_id_str: &
         return Err(StoreError::Conflict(format!("memory {old_id_str} is already superseded")));
     }
 
-    let revision_at = next_memory_revision(now, existing.updated_at).to_rfc3339();
+    let revision_at = next_update_revision(now, existing.updated_at, false).to_rfc3339();
     let affected = conn.execute("UPDATE memories SET superseded_by = ?1, updated_at = ?2 WHERE id = ?3 AND superseded_by IS NULL", params![
         new_id_str,
         revision_at,
@@ -538,7 +538,7 @@ fn apply_authorized_update_with_metadata(
         });
     }
 
-    let revision_at = next_memory_revision(now, existing.updated_at);
+    let revision_at = next_update_revision(now, existing.updated_at, update.content.is_some());
     let revision_at_text = revision_at.to_rfc3339();
     let outcome = apply_update_inner(&tx, vector_index, &id_str, update, &revision_at_text)?;
     if outcome.outcome == WriteOutcome::Applied {
@@ -601,7 +601,7 @@ fn apply_authorized_update_if_unmodified_with_metadata(
         return Err(StoreError::Conflict(format!("memory {id} changed after it was opened")));
     }
 
-    let revision_at = next_memory_revision(now, existing.updated_at);
+    let revision_at = next_update_revision(now, existing.updated_at, update.content.is_some());
     let revision_at_text = revision_at.to_rfc3339();
     let mut outcome = apply_update_inner(&tx, vector_index, &id_str, update, &revision_at_text)?;
     if let Some(embedding) = embedding {
@@ -632,6 +632,18 @@ fn apply_authorized_update_if_unmodified_with_metadata(
 
 pub(crate) fn next_memory_revision(now: chrono::DateTime<chrono::Utc>, previous: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
     previous.checked_add_signed(chrono::Duration::microseconds(1_i64)).map_or(now, |minimum| now.max(minimum))
+}
+
+pub(crate) fn next_record_revision(previous: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    previous.checked_add_signed(chrono::Duration::microseconds(1_i64)).unwrap_or(previous)
+}
+
+fn next_update_revision(now: chrono::DateTime<chrono::Utc>, previous: chrono::DateTime<chrono::Utc>, content_changed: bool) -> chrono::DateTime<chrono::Utc> {
+    if content_changed {
+        next_memory_revision(now, previous)
+    } else {
+        next_record_revision(previous)
+    }
 }
 
 #[expect(clippy::too_many_arguments, reason = "atomic delete needs connection, identity, revision, principal, timestamp, and audit")]
@@ -746,7 +758,7 @@ pub(crate) fn bulk_update_ids(
                 denied = denied.saturating_add(1);
                 continue;
             }
-            let revision_at = next_memory_revision(now, mem.updated_at).to_rfc3339();
+            let revision_at = next_update_revision(now, mem.updated_at, update.content.is_some()).to_rfc3339();
             let outcome = apply_update_inner(&tx, vector_index, id_str, update, &revision_at)?;
             if outcome.outcome == WriteOutcome::Applied {
                 insert_optional_audit_draft(&tx, &id, audit)?;
@@ -784,7 +796,7 @@ pub(crate) fn apply_update(
             reembed_revision: None,
         });
     };
-    let revision_at = next_memory_revision(now, existing.updated_at).to_rfc3339();
+    let revision_at = next_update_revision(now, existing.updated_at, update.content.is_some()).to_rfc3339();
     let outcome = apply_update_inner(&tx, vector_index, id_str, update, &revision_at)?;
     tx.commit()?;
     Ok(outcome)
@@ -1520,7 +1532,7 @@ impl SqliteStore {
                     reembed_revision: None,
                 });
             }
-            let revision_at = next_memory_revision(now, existing.updated_at).to_rfc3339();
+            let revision_at = next_update_revision(now, existing.updated_at, update.content.is_some()).to_rfc3339();
             let outcome = apply_update_inner(&tx, &vector_index, &id_str, &update, &revision_at)?;
             if outcome.outcome == WriteOutcome::Applied
                 && let Some(audit) = audit.as_ref()

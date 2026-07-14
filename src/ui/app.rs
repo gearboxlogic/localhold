@@ -522,13 +522,21 @@ where
         Status::Held(format!("{count} results{mode}"))
     }
 
+    fn request_quit(&mut self) {
+        if self.pending {
+            self.status = Status::Note("waiting for the pending memory change to finish".into());
+        } else {
+            self.quit = true;
+        }
+    }
+
     /// Route a terminal event.
     pub(crate) async fn on_event(&mut self, event: Event) {
         if let Event::Key(key) = event
             && key.kind == KeyEventKind::Press
         {
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                self.quit = true;
+                self.request_quit();
                 return;
             }
             match self.mode {
@@ -545,7 +553,7 @@ where
     #[expect(clippy::wildcard_enum_match_arm, reason = "KeyCode is non-exhaustive upstream; unmapped keys are intentionally ignored")]
     async fn key_browse(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('q') => self.request_quit(),
             KeyCode::Tab => self.focus = if self.focus == Focus::Scopes { Focus::Memories } else { Focus::Scopes },
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(true),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(false),
@@ -965,7 +973,7 @@ mod tests {
         engine::LocalHoldEngine,
         error::EmbeddingError,
         store::{MemoryReader as _, MemoryWriter as _, SqliteStore},
-        types::{AccessPolicy, Memory, Provenance, RedactableField},
+        types::{AccessPolicy, Memory, MemoryUpdate, Provenance, RedactableField, WriteOutcome},
         ui::{theme::Theme, view},
     };
 
@@ -1270,6 +1278,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ctrl_c_waits_for_pending_mutation() {
+        let (mut app, _rx) = app_with_memories(&[]).await;
+        app.pending = true;
+
+        app.on_event(press_with(KeyCode::Char('c'), KeyModifiers::CONTROL)).await;
+
+        assert!(!app.quit);
+        assert!(matches!(&app.status, Status::Note(message) if message.contains("pending memory change")));
+
+        app.pending = false;
+        app.on_event(press_with(KeyCode::Char('c'), KeyModifiers::CONTROL)).await;
+        assert!(app.quit);
+    }
+
+    #[tokio::test]
     async fn mode_cycle_includes_explicit_auto_before_config_default() {
         let (mut app, _rx) = app_with_memories(&[]).await;
         let expected = [
@@ -1288,7 +1311,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detail_edit_saves_fields_metadata_and_embedding_atomically() {
+    async fn detail_edit_saves_fields_metadata_and_queues_embedding_after_commit() {
         let (mut app, mut rx) = app_with_memories(&["original memory"]).await;
         app.principal = Some("operator".into());
         app.bootstrap().await;
@@ -1309,6 +1332,7 @@ mod tests {
         app.on_data(rx.recv().await.unwrap());
         assert_eq!(app.mode, Mode::Detail);
         assert!(!app.pending);
+        app.shutdown_mutation_engine().await;
         let stored = app.engine.store().get(&id, Some("operator")).await.unwrap().unwrap();
         assert_eq!(stored.content, "revised memory");
         assert_eq!(stored.tags, vec!["alpha", "beta"]);
@@ -1455,12 +1479,12 @@ mod tests {
         let id = app.rows[0].memory.id;
         app.on_event(press(KeyCode::Enter)).await;
 
-        let external = crate::types::MemoryUpdate {
+        let external = MemoryUpdate {
             content: Some("external revision".into()),
-            ..crate::types::MemoryUpdate::default()
+            ..MemoryUpdate::default()
         };
         let outcome = app.engine.update_memory(id, external, "operator").await.unwrap();
-        assert_eq!(outcome.outcome, crate::types::WriteOutcome::Applied);
+        assert_eq!(outcome.outcome, WriteOutcome::Applied);
 
         app.on_event(press(KeyCode::Char('e'))).await;
         app.edit.as_mut().unwrap().content.value = "stale local revision".into();
@@ -1472,6 +1496,41 @@ mod tests {
         assert!(matches!(app.status, Status::NotHeld(_)));
         let stored = app.engine.store().get(&id, Some("operator")).await.unwrap().unwrap();
         assert_eq!(stored.content, "external revision");
+    }
+
+    #[tokio::test]
+    async fn stale_content_is_not_sent_to_embedding_provider() {
+        let store = SqliteStore::in_memory().unwrap();
+        let memory = Memory::new_for_test("original".into(), Vec::new(), Provenance::default(), AccessPolicy::Public);
+        let id = store.store(&memory, None).await.unwrap();
+        let calls = Arc::new(AtomicUsize::new(0_usize));
+        let engine = LocalHoldEngine::new(
+            store,
+            Arc::new(CountingEmbedding { calls: Arc::clone(&calls) }),
+            LimitsConfig::default(),
+            SearchConfig::default(),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new(engine, Theme::detect(), Some("operator".into()), tx);
+        app.bootstrap().await;
+        app.on_data(rx.recv().await.unwrap());
+        app.on_event(press(KeyCode::Enter)).await;
+
+        let external = MemoryUpdate {
+            tags: Some(vec!["external".into()]),
+            ..MemoryUpdate::default()
+        };
+        let outcome = app.engine.store().update_authorized(&id, &external, "operator").await.unwrap();
+        assert_eq!(outcome.outcome, WriteOutcome::Applied);
+
+        app.on_event(press(KeyCode::Char('e'))).await;
+        app.edit.as_mut().unwrap().content.value = "sensitive stale draft".into();
+        app.on_event(press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
+        app.on_data(rx.recv().await.unwrap());
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0_usize);
+        assert_eq!(app.mode, Mode::Edit);
+        assert!(app.edit.as_ref().unwrap().dirty());
     }
 
     #[tokio::test]

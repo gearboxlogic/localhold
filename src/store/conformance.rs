@@ -173,6 +173,11 @@ where
     let new_id = store.store_with_supersession(&new, Some(&embedding(embedding_dimensions, 6.1_f32)), &old_id).await.unwrap();
     let superseded = store.get(&old_id, Some(OWNER)).await.unwrap().unwrap();
     assert!(superseded.updated_at > opened_old.updated_at, "supersession must advance the optimistic revision");
+    assert_eq!(
+        superseded.updated_at.signed_duration_since(opened_old.updated_at),
+        Duration::microseconds(1_i64),
+        "supersession must not make unchanged content appear freshly updated"
+    );
     let supersession_audit = AuditDraft {
         action: AuditAction::Update,
         caller_agent: Some(OWNER.into()),
@@ -480,6 +485,11 @@ where
         after_ordinary_update.updated_at > opened_before_external_update.updated_at,
         "ordinary non-content updates must advance the optimistic revision"
     );
+    assert_eq!(
+        after_ordinary_update.updated_at.signed_duration_since(opened_before_external_update.updated_at),
+        Duration::microseconds(1_i64),
+        "ordinary non-content updates must not reset content freshness"
+    );
     let stale_after_ordinary_update = store
         .update_authorized_if_unmodified_with_metadata_audited(
             &interactive_id,
@@ -504,6 +514,11 @@ where
     assert!(
         loaded.updated_at > after_ordinary_update.updated_at,
         "standalone metadata upserts must advance the optimistic revision"
+    );
+    assert_eq!(
+        loaded.updated_at.signed_duration_since(after_ordinary_update.updated_at),
+        Duration::microseconds(1_i64),
+        "standalone metadata upserts must not reset content freshness"
     );
     let stale_after_metadata_update = store
         .update_authorized_if_unmodified_with_metadata_audited(

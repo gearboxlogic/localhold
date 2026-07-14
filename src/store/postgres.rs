@@ -1282,7 +1282,7 @@ impl PostgresStore {
             });
         }
 
-        let revision_at = next_memory_revision(self.clock_now(), existing.updated_at);
+        let revision_at = next_update_revision(self.clock_now(), existing.updated_at, update.content.is_some());
         let outcome = apply_update_tx(&mut tx, id, update, revision_at).await?;
         if outcome.outcome == WriteOutcome::Applied {
             if let Some(patch) = metadata_patch {
@@ -1337,7 +1337,7 @@ impl PostgresStore {
             return Err(StoreError::Conflict(format!("memory {id} changed after it was opened")));
         }
 
-        let revision_at = next_memory_revision(self.clock_now(), existing.updated_at);
+        let revision_at = next_update_revision(self.clock_now(), existing.updated_at, update.content.is_some());
         let mut outcome = apply_update_tx(&mut tx, id, update, revision_at).await?;
         if let Some(embedding) = embedding {
             let active_profile = self.inner.active_embedding_profile.read().clone();
@@ -1608,6 +1608,7 @@ impl PostgresStore {
                 continue;
             }
 
+            let revision_at = next_record_revision(memory.updated_at);
             let _result = sqlx::query(
                 "
                 UPDATE memories
@@ -1627,7 +1628,7 @@ impl PostgresStore {
                 ",
             )
             .bind(to_scope)
-            .bind(self.clock_now())
+            .bind(revision_at)
             .bind(id.to_string())
             .execute(&mut *tx)
             .await?;
@@ -1639,7 +1640,7 @@ impl PostgresStore {
                 ",
             )
             .bind(to_scope)
-            .bind(self.clock_now())
+            .bind(revision_at)
             .bind(id.to_string())
             .execute(&mut *tx)
             .await?;
@@ -1781,7 +1782,7 @@ impl PostgresStore {
         let existing = fetch_memory_by_id_for_update_tx(&mut tx, &id)
             .await?
             .ok_or_else(|| StoreError::NotFound(format!("memory not found: {id}")))?;
-        let revision_at = next_memory_revision(self.clock_now(), existing.updated_at);
+        let revision_at = next_record_revision(existing.updated_at);
         upsert_metadata_tx(&mut tx, &metadata, revision_at).await?;
         set_memory_revision_tx(&mut tx, &id, revision_at, "updating metadata").await?;
         insert_optional_audit_draft_tx(&mut tx, &id, audit).await?;
@@ -2448,7 +2449,7 @@ async fn mark_superseded_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, s
         return Err(StoreError::Conflict(format!("memory {id} is already superseded")));
     }
 
-    let revision_at = next_memory_revision(now, existing.updated_at);
+    let revision_at = next_update_revision(now, existing.updated_at, false);
     let result = sqlx::query("UPDATE memories SET superseded_by = $1, updated_at = $2 WHERE id = $3 AND superseded_by IS NULL")
         .bind(superseded_by.to_string())
         .bind(revision_at)
@@ -2544,6 +2545,18 @@ fn next_memory_revision(now: DateTime<Utc>, previous: DateTime<Utc>) -> DateTime
     previous.checked_add_signed(chrono::Duration::microseconds(1_i64)).map_or(now, |minimum| now.max(minimum))
 }
 
+fn next_record_revision(previous: DateTime<Utc>) -> DateTime<Utc> {
+    previous.checked_add_signed(chrono::Duration::microseconds(1_i64)).unwrap_or(previous)
+}
+
+fn next_update_revision(now: DateTime<Utc>, previous: DateTime<Utc>, content_changed: bool) -> DateTime<Utc> {
+    if content_changed {
+        next_memory_revision(now, previous)
+    } else {
+        next_record_revision(previous)
+    }
+}
+
 #[expect(clippy::too_many_lines, reason = "the dynamic update builder keeps all memory fields and revision handling together")]
 async fn apply_update_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, update: &MemoryUpdate, now: DateTime<Utc>) -> Result<AuthorizedUpdateOutcome, StoreError> {
     let content_changed = update.content.is_some();
@@ -2561,7 +2574,7 @@ async fn apply_update_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, upda
                 reembed_revision: None,
             });
         };
-        let revision_at = next_memory_revision(now, previous);
+        let revision_at = next_update_revision(now, previous, content_changed);
         let mut builder = QueryBuilder::<Postgres>::new("UPDATE memories SET ");
         let mut has_assignments = false;
         push_assignment_separator(&mut builder, &mut has_assignments);

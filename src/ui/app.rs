@@ -95,6 +95,8 @@ pub(crate) enum DataMsg {
         metadata: Option<MemoryMetadata>,
         /// Refreshed audit trail.
         audit: Vec<AuditEntry>,
+        /// Warning when the mutation committed but a detail refresh failed.
+        refresh_warning: Option<String>,
         /// Mutation generation; stale responses are dropped.
         generation: u64,
     },
@@ -327,6 +329,7 @@ where
                 memory,
                 metadata,
                 mut audit,
+                refresh_warning,
                 generation,
             } if generation == self.operation_generation => {
                 self.pending = false;
@@ -347,7 +350,10 @@ where
                 });
                 self.edit = None;
                 self.mode = Mode::Detail;
-                self.status = Status::Held("memory revised".into());
+                self.status = refresh_warning.map_or_else(
+                    || Status::Held("memory revised".into()),
+                    |warning| Status::NotHeld(format!("memory revised, but {warning}")),
+                );
             }
             DataMsg::Deleted { id, generation } if generation == self.operation_generation => {
                 self.pending = false;
@@ -652,26 +658,7 @@ where
                 .update_memory_if_unmodified_with_metadata(id, expected_updated_at, parsed.update, parsed.metadata_patch, &principal)
                 .await
             {
-                Ok(outcome) if outcome.outcome == WriteOutcome::Applied => match engine.get_memory(&id, Some(&principal)).await {
-                    Ok(Some(memory)) => {
-                        let metadata = engine.get_metadata(&id).await.unwrap_or(None);
-                        let audit = engine.query_audit_log(&id, 20_usize).await.unwrap_or_default();
-                        DataMsg::Updated {
-                            memory: Box::new(memory),
-                            metadata,
-                            audit,
-                            generation,
-                        }
-                    }
-                    Ok(None) => DataMsg::MutationFailed {
-                        message: "memory became unavailable after saving".into(),
-                        generation,
-                    },
-                    Err(error) => DataMsg::MutationFailed {
-                        message: format!("saved, but refresh failed: {error}"),
-                        generation,
-                    },
-                },
+                Ok(outcome) if outcome.outcome == WriteOutcome::Applied => refresh_updated_detail(&engine, id, &principal, generation).await,
                 Ok(outcome) => DataMsg::MutationFailed {
                     message: match outcome.outcome {
                         WriteOutcome::NotFound => "memory no longer exists".into(),
@@ -771,6 +758,40 @@ where
         if !self.query.is_empty() {
             self.refresh();
         }
+    }
+}
+
+async fn refresh_updated_detail<S>(engine: &LocalHoldEngine<S>, id: MemoryId, principal: &str, generation: u64) -> DataMsg
+where
+    S: MemoryStore + Clone + fmt::Debug + 'static,
+{
+    match engine.get_memory(&id, Some(principal)).await {
+        Ok(Some(memory)) => {
+            let (metadata, metadata_warning) = match engine.get_metadata(&id).await {
+                Ok(metadata) => (metadata, None),
+                Err(error) => (None, Some(format!("metadata refresh failed: {error}"))),
+            };
+            let (audit, audit_warning) = match engine.query_audit_log(&id, 20_usize).await {
+                Ok(audit) => (audit, None),
+                Err(error) => (Vec::new(), Some(format!("history refresh failed: {error}"))),
+            };
+            let refresh_warning = [metadata_warning, audit_warning].into_iter().flatten().collect::<Vec<_>>().join("; ");
+            DataMsg::Updated {
+                memory: Box::new(memory),
+                metadata,
+                audit,
+                refresh_warning: (!refresh_warning.is_empty()).then_some(refresh_warning),
+                generation,
+            }
+        }
+        Ok(None) => DataMsg::MutationFailed {
+            message: "memory became unavailable after saving".into(),
+            generation,
+        },
+        Err(error) => DataMsg::MutationFailed {
+            message: format!("saved, but refresh failed: {error}"),
+            generation,
+        },
     }
 }
 
@@ -914,6 +935,29 @@ mod tests {
             generation: 0_u64,
         });
         assert!(matches!(app.status, Status::Note(_)), "zero matches must not be reported as held");
+    }
+
+    #[tokio::test]
+    async fn post_save_refresh_warning_is_visible() {
+        let (mut app, mut rx) = app_with_memories(&["revised"]).await;
+        app.bootstrap().await;
+        app.on_data(rx.recv().await.unwrap());
+        let memory = app.rows[0].memory.clone();
+        app.pending = true;
+
+        app.on_data(DataMsg::Updated {
+            memory: Box::new(memory),
+            metadata: None,
+            audit: Vec::new(),
+            refresh_warning: Some("metadata refresh failed: test fault".into()),
+            generation: app.operation_generation,
+        });
+
+        assert!(!app.pending);
+        assert!(
+            matches!(&app.status, Status::NotHeld(message) if message.contains("memory revised, but metadata refresh failed")),
+            "a refresh failure should be visible"
+        );
     }
 
     #[tokio::test]

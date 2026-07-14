@@ -452,6 +452,24 @@ where
         timestamp: time_after(base, 17),
         details: Some(json!({"interactive": true})),
     };
+    let wrong_dimension_error = store
+        .update_authorized_if_unmodified_with_metadata_audited(
+            &interactive_id,
+            loaded.updated_at,
+            &MemoryUpdate {
+                content: Some("wrong-dimensional revision".into()),
+                ..MemoryUpdate::default()
+            },
+            None,
+            Some(&vec![0.0_f32; embedding_dimensions.saturating_add(1_usize)]),
+            OWNER,
+            &replacement_audit,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(wrong_dimension_error, StoreError::Conflict(_)));
+    assert_eq!(store.get(&interactive_id, Some(OWNER)).await.unwrap().unwrap().content, interactive.content);
+
     let replacement_embedding = embedding(embedding_dimensions, 21.0_f32);
     let interactive_outcome = store
         .update_authorized_if_unmodified_with_metadata_audited(

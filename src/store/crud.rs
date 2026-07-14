@@ -6,7 +6,7 @@ use super::{
     ReembedClaim, SqliteStore, merge_metadata_patch,
     query::{MEMORY_COLUMN_COUNT, MEMORY_COLUMNS, row_to_memory, usize_to_i64},
     sqlite_write_tx, update_audit_draft_for_locked_memory,
-    vector::{SqliteVecIndex, VectorIndex},
+    vector::{SqliteVecIndex, VectorIndex, validate_embedding_vector},
 };
 use crate::{
     error::StoreError,
@@ -556,6 +556,9 @@ fn apply_authorized_update_if_unmodified_with_metadata(
     if update.content.is_some() != embedding.is_some() {
         return Err(StoreError::Conflict("replacement content and embedding must be supplied together".into()));
     }
+    if let Some(embedding) = embedding {
+        validate_embedding_vector(embedding, vector_index.dimensions())?;
+    }
 
     let tx = sqlite_write_tx(conn)?;
     let id_str = id.to_string();
@@ -622,11 +625,12 @@ fn apply_authorized_delete_if_unmodified(
 
     insert_tombstone(&tx, &existing, deleted_at, Some(principal))?;
     let affected = tx.execute("DELETE FROM memories WHERE id = ?1", params![id_str])?;
-    if affected > 0 {
-        insert_audit_draft(&tx, id, audit)?;
+    if affected == 0 {
+        return Err(StoreError::Conflict(format!("memory {id} changed while deleting")));
     }
+    insert_audit_draft(&tx, id, audit)?;
     tx.commit()?;
-    Ok(if affected > 0 { WriteOutcome::Applied } else { WriteOutcome::NotFound })
+    Ok(WriteOutcome::Applied)
 }
 
 /// Maximum number of IDs per `IN (…)` clause in bulk operations, staying
@@ -1878,6 +1882,52 @@ mod tests {
         assert!(matches!(err, StoreError::Conflict(_)), "double supersession should return Conflict, got: {err:?}");
         let msg = err.to_string();
         assert!(msg.contains("already superseded"), "error message should mention 'already superseded': {msg}");
+    }
+
+    #[tokio::test]
+    async fn optimistic_delete_rolls_back_tombstone_when_delete_is_ignored() {
+        use crate::{
+            store::{MemoryReader as _, MemoryWriter as _, SqliteStore},
+            types::{AccessPolicy, AuditAction, AuditDraft, Memory, Provenance},
+        };
+
+        let store = SqliteStore::in_memory().unwrap();
+        let memory = Memory::new_for_test(
+            "protected from delete".into(),
+            Vec::new(),
+            Provenance {
+                source_agent: Some("owner".into()),
+                ..Provenance::default()
+            },
+            AccessPolicy::Public,
+        );
+        let id = store.store(&memory, None).await.unwrap();
+        let loaded = store.get(&id, Some("owner")).await.unwrap().unwrap();
+        store
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER ignore_memory_delete
+                     BEFORE DELETE ON memories
+                     BEGIN
+                         SELECT RAISE(IGNORE);
+                     END;",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let audit = AuditDraft {
+            action: AuditAction::Delete,
+            caller_agent: Some("owner".into()),
+            timestamp: chrono::Utc::now(),
+            details: None,
+        };
+
+        let error = store.delete_authorized_if_unmodified_audited(&id, loaded.updated_at, "owner", &audit).await.unwrap_err();
+
+        assert!(matches!(error, StoreError::Conflict(_)));
+        assert!(store.get(&id, Some("owner")).await.unwrap().is_some());
+        assert!(store.get_tombstone(&id).await.unwrap().is_none());
     }
 
     #[tokio::test]

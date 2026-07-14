@@ -288,13 +288,17 @@ hold restore ./localhold-2026-07-14.db --yes
 hold restore ./localhold-2026-07-14.db --yes --json
 ```
 
-Before replacement, LocalHold creates and validates a uniquely named
-`localhold.db.pre-restore-*.bak` recovery snapshot. Replacement uses SQLite's
-transactional backup API: interruption, lock failure, or insufficient disk
-rolls the destination transaction back instead of leaving a partial database.
-Existing database permissions are retained. Keep the reported recovery
-snapshot until representative `read`, `recall`, access-control, and embedding
-checks pass, then remove it according to the operator's retention policy.
+Before replacement, LocalHold creates a uniquely named
+`localhold.db.pre-restore-*.bak` recovery snapshot. The snapshot deliberately
+preserves the current database even when invalid schema or embedding metadata
+is the reason for restoring, so it is a rollback and forensic artifact rather
+than a second validated backup. The incoming backup must still pass every
+validation check. Replacement uses SQLite's transactional backup API:
+interruption, lock failure, or insufficient disk rolls the destination
+transaction back instead of leaving a partial database. Existing database
+permissions are retained. Keep the reported recovery snapshot until
+representative `read`, `recall`, access-control, and embedding checks pass,
+then remove it according to the operator's retention policy.
 
 Both commands emit stable JSON with `schema_version: 1` when `--json` is used.
 Reports include the validated database schema version, embedding profile,

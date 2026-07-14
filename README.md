@@ -255,7 +255,10 @@ hold restore ./localhold-backup.db --yes
 Backup never overwrites an existing destination. Restore validates schema,
 integrity, and embedding identity before replacement, refuses while another
 LocalHold process holds the database open, and retains a pre-restore recovery
-snapshot. Add `--json` to any command for stable automation output.
+snapshot. The recovery snapshot preserves the current database even when its
+invalid schema or embedding metadata is the reason for restoring; only the
+incoming backup must pass validation. Add `--json` to any command for stable
+automation output.
 
 PostgreSQL is opt-in:
 

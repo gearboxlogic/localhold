@@ -340,7 +340,10 @@ fn restore_sync_with_replace_policy(options: &RestoreOptions, replace_policy: Co
             let recovery_temporary = temporary_path(&recovery, "recovery");
             let recovery_result = (|| {
                 snapshot_path(&options.database_path, &recovery_temporary, options.clock.as_ref(), CopyPolicy::default())?;
-                let _validated = inspect_path_using_stored_dimensions(&recovery_temporary)?;
+                // Preserve the current database exactly as SQLite can read it, even when
+                // its schema or embedding metadata is the reason restore is necessary.
+                // The candidate backup was validated above; the recovery snapshot is a
+                // rollback/quarantine artifact and must not gate disaster recovery.
                 publish_no_clobber(&recovery_temporary, &recovery)
             })();
             remove_if_exists(&recovery_temporary);
@@ -1031,6 +1034,37 @@ mod tests {
         assert_eq!(profile_report.status, "invalid");
         assert!(profile_report.message.contains("embedding profile mismatch"));
         assert_eq!(memory_contents(&target), original);
+    }
+
+    #[tokio::test]
+    async fn restore_replaces_invalid_current_database_and_retains_it_for_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.db");
+        let backup_path = directory.path().join("snapshot.db");
+        let target = directory.path().join("target.db");
+        let expected = profile("model-a");
+        let source_store = seed_database(&source, "source", &expected).await;
+        assert_eq!(backup(BackupOptions::new(source, backup_path.clone())).await.status, "ok");
+        drop(source_store);
+        let target_store = seed_database(&target, "target", &expected).await;
+        drop(target_store);
+
+        let connection = Connection::open(&target).unwrap();
+        let deleted = connection.execute("DELETE FROM embedding_profile", []).unwrap();
+        assert_eq!(deleted, 1_usize);
+        drop(connection);
+        let current_failure = inspect_path_using_stored_dimensions(&target).unwrap_err();
+        assert!(current_failure.message.contains("no recorded embedding profile"));
+
+        let restored = restore(RestoreOptions::new(target.clone(), backup_path, DIMENSIONS, Some(expected)).confirmed(true)).await;
+
+        assert_eq!(restored.status, "ok");
+        assert!(memory_contents(&target).iter().any(|content| content.contains("source")));
+        let recovery = restored.recovery_path.as_ref().map(PathBuf::from).unwrap();
+        assert!(recovery.exists());
+        assert!(memory_contents(&recovery).iter().any(|content| content.contains("target")));
+        let recovery_failure = inspect_path_using_stored_dimensions(&recovery).unwrap_err();
+        assert!(recovery_failure.message.contains("no recorded embedding profile"));
     }
 
     #[tokio::test]

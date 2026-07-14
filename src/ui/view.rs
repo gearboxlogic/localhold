@@ -46,7 +46,7 @@ where
     if app.query.is_empty() && app.mode != Mode::Search {
         spans.push(Span::styled("press / to search the hold", app.theme.label()));
     } else {
-        spans.push(Span::raw(app.query.clone()));
+        spans.push(Span::raw(escape_terminal_text(&app.query)));
     }
     if app.mode == Mode::Search {
         spans.push(Span::styled("\u{2588}", app.theme.accent()));
@@ -68,7 +68,7 @@ where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
     let mut items = vec![Line::from("(all scopes)")];
-    items.extend(app.scopes.iter().map(|scope| Line::from(scope.display_name.clone())));
+    items.extend(app.scopes.iter().map(|scope| Line::from(escape_terminal_text(&scope.display_name))));
     let list = List::new(items)
         .block(pane_block(" SCOPES ", app.focus == Focus::Scopes, app.theme.ident(), app.theme.label()))
         .highlight_style(app.theme.accent().bold())
@@ -121,14 +121,14 @@ where
     "now".to_owned()
 }
 
-fn content_line<'a, S>(app: &App<S>, memory: &'a Memory) -> Line<'a>
+fn content_line<S>(app: &App<S>, memory: &Memory) -> Line<'static>
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
     let preview = memory.content.lines().next().unwrap_or_default();
-    let mut spans = vec![Span::raw(preview)];
+    let mut spans = vec![Span::raw(escape_terminal_text(preview))];
     for tag in &memory.tags {
-        spans.push(Span::styled(format!(" #{tag}"), app.theme.ident()));
+        spans.push(Span::styled(format!(" #{}", escape_terminal_text(tag)), app.theme.ident()));
     }
     Line::from(spans)
 }
@@ -149,9 +149,12 @@ where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
     let verb = match &app.status {
-        Status::Held(text) => Line::from(vec![Span::styled(" \u{2713} held  ", app.theme.held()), Span::raw(text.clone())]),
-        Status::NotHeld(text) => Line::from(vec![Span::styled(" \u{2717} not held  ", app.theme.not_held()), Span::raw(text.clone())]),
-        Status::Note(text) => Line::from(vec![Span::styled(" \u{b7} ", app.theme.label()), Span::styled(text.clone(), app.theme.label())]),
+        Status::Held(text) => Line::from(vec![Span::styled(" \u{2713} held  ", app.theme.held()), Span::raw(escape_terminal_text(text))]),
+        Status::NotHeld(text) => Line::from(vec![Span::styled(" \u{2717} not held  ", app.theme.not_held()), Span::raw(escape_terminal_text(text))]),
+        Status::Note(text) => Line::from(vec![
+            Span::styled(" \u{b7} ", app.theme.label()),
+            Span::styled(escape_terminal_text(text), app.theme.label()),
+        ]),
     };
     let line = if app.loading {
         Line::from(vec![Span::styled(" \u{2026} recalling", app.theme.label())])
@@ -173,7 +176,7 @@ where
     let block = Block::bordered().border_style(app.theme.accent()).title(Span::styled(" MEMORY ", app.theme.label()));
     let mut lines = meta_lines(app, &detail.memory);
     lines.push(Line::default());
-    lines.extend(detail.memory.content.lines().map(|line| Line::from(line.to_owned())));
+    lines.extend(detail.memory.content.lines().map(|line| Line::from(escape_terminal_text(line))));
     lines.push(Line::default());
     lines.push(Line::from(Span::styled("AUDIT", app.theme.label())));
     lines.extend(audit_lines(app, &detail.audit));
@@ -181,13 +184,13 @@ where
     frame.render_widget(paragraph, popup);
 }
 
-fn meta_lines<'a, S>(app: &App<S>, memory: &'a Memory) -> Vec<Line<'a>>
+fn meta_lines<S>(app: &App<S>, memory: &Memory) -> Vec<Line<'static>>
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
     let mut tags = Line::default();
     for tag in &memory.tags {
-        tags.push_span(Span::styled(format!("#{tag} "), app.theme.ident()));
+        tags.push_span(Span::styled(format!("#{} ", escape_terminal_text(tag)), app.theme.ident()));
     }
     let importance = memory.importance.value();
     let confidence = memory.confidence.value();
@@ -200,9 +203,12 @@ where
         ]),
         Line::from(vec![
             Span::styled("agent      ", app.theme.label()),
-            Span::raw(memory.provenance.source_agent.clone().unwrap_or_else(|| "\u{2014}".to_owned())),
+            Span::raw(memory.provenance.source_agent.as_deref().map_or_else(|| "\u{2014}".to_owned(), escape_terminal_text)),
             Span::styled("   scope ", app.theme.label()),
-            Span::styled(memory.provenance.source_conversation.clone().unwrap_or_else(|| "\u{2014}".to_owned()), app.theme.ident()),
+            Span::styled(
+                memory.provenance.source_conversation.as_deref().map_or_else(|| "\u{2014}".to_owned(), escape_terminal_text),
+                app.theme.ident(),
+            ),
         ]),
         Line::from(vec![
             Span::styled("updated    ", app.theme.label()),
@@ -213,7 +219,7 @@ where
     ]
 }
 
-fn audit_lines<'a, S>(app: &App<S>, audit: &'a [AuditEntry]) -> Vec<Line<'a>>
+fn audit_lines<S>(app: &App<S>, audit: &[AuditEntry]) -> Vec<Line<'static>>
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
@@ -226,8 +232,37 @@ where
             Line::from(vec![
                 Span::styled(entry.timestamp.format("%Y-%m-%d %H:%M  ").to_string(), app.theme.label()),
                 Span::raw(entry.action.to_string()),
-                Span::styled(format!("  {}", entry.caller_agent.clone().unwrap_or_else(|| "\u{2014}".to_owned())), app.theme.ident()),
+                Span::styled(
+                    format!("  {}", entry.caller_agent.as_deref().map_or_else(|| "\u{2014}".to_owned(), escape_terminal_text)),
+                    app.theme.ident(),
+                ),
             ])
         })
         .collect()
+}
+
+fn escape_terminal_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_control() {
+            escaped.extend(character.escape_default());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_terminal_text;
+
+    #[test]
+    fn terminal_control_characters_are_visibly_escaped() {
+        let escaped = escape_terminal_text("safe\u{1b}]52;c;payload\u{7}\tend");
+        assert!(!escaped.chars().any(char::is_control));
+        assert!(escaped.starts_with("safe\\"));
+        assert!(escaped.contains("]52;c;payload"));
+        assert!(escaped.ends_with("\\tend"));
+    }
 }

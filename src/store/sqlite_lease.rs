@@ -25,6 +25,12 @@ impl SqliteDatabaseLease {
         Ok(Self { _file: file })
     }
 
+    pub(crate) fn shared_existing(database_path: &Path) -> Result<Self, StoreError> {
+        let file = open_existing_lock_file(database_path)?;
+        file.lock_shared().map_err(database_lock_error)?;
+        Ok(Self { _file: file })
+    }
+
     pub(crate) fn try_exclusive(database_path: &Path) -> Result<Self, ExclusiveLeaseError> {
         let file = open_lock_file(database_path).map_err(ExclusiveLeaseError::Store)?;
         match file.try_lock() {
@@ -101,6 +107,17 @@ fn open_lock_file(database_path: &Path) -> Result<File, StoreError> {
     Ok(file)
 }
 
+fn open_existing_lock_file(database_path: &Path) -> Result<File, StoreError> {
+    let path = lock_path(database_path).map_err(database_lock_error)?;
+    OpenOptions::new().read(true).open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            StoreError::Conflict("read-only SQLite access requires an existing LocalHold lease sidecar; start LocalHold once with write access before using hold ui".into())
+        } else {
+            database_lock_error(error)
+        }
+    })
+}
+
 fn database_lock_error(error: std::io::Error) -> StoreError {
     StoreError::Database(Box::new(error))
 }
@@ -122,6 +139,23 @@ mod tests {
         drop(second);
         let exclusive = SqliteDatabaseLease::try_exclusive(&database).unwrap();
         drop(exclusive);
+    }
+
+    #[test]
+    fn shared_existing_never_creates_a_lock_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("memories.db");
+        let _database = File::create(&database).unwrap();
+        let lease_path = lock_path(&database).unwrap();
+
+        let error = SqliteDatabaseLease::shared_existing(&database).unwrap_err();
+        assert!(error.to_string().contains("requires an existing LocalHold lease sidecar"));
+        assert!(!lease_path.exists(), "read-only lease acquisition must not create its sidecar");
+
+        drop(SqliteDatabaseLease::shared(&database).unwrap());
+        let existing = SqliteDatabaseLease::shared_existing(&database).unwrap();
+        assert!(matches!(SqliteDatabaseLease::try_exclusive(&database), Err(ExclusiveLeaseError::InUse)));
+        drop(existing);
     }
 
     #[test]

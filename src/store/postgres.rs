@@ -254,6 +254,7 @@ impl PostgresStore {
             ));
         }
         validate_existing_postgres_schema(&pool, embedding_dimensions, true, true).await?;
+        validate_current_migration_metadata(&pool).await?;
         Ok(Self {
             inner: Arc::new(PostgresInner {
                 pool,
@@ -3329,6 +3330,32 @@ async fn record_migration(pool: &PgPool, version: i64, name: &'static str) -> Re
     Ok(())
 }
 
+async fn validate_current_migration_metadata(pool: &PgPool) -> Result<(), StoreError> {
+    let table_exists: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'localhold_migrations')) IS NOT NULL")
+        .fetch_one(pool)
+        .await?;
+    if !table_exists {
+        return Err(StoreError::Conflict(
+            "PostgreSQL schema migration metadata is not current; start LocalHold once to apply migrations".into(),
+        ));
+    }
+    let current: bool = sqlx::query_scalar(
+        "SELECT
+            COUNT(*) = 2
+            AND COUNT(*) FILTER (WHERE version = 1 AND name = 'bootstrap_schema') = 1
+            AND COUNT(*) FILTER (WHERE version = 2 AND name = 'audit_log_without_memory_fk') = 1
+         FROM localhold_migrations",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !current {
+        return Err(StoreError::Conflict(
+            "PostgreSQL schema migration metadata is not current; start LocalHold once to apply migrations".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone as _;
@@ -3489,6 +3516,32 @@ mod tests {
 
         let _dropped = sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema}"))).execute(&admin).await.unwrap();
         assert!(error.to_string().contains("not initialized"), "{error}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn read_only_open_rejects_stale_migration_metadata() {
+        let url = std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
+        let schema = format!("localhold_ui_stale_{}", MemoryId::new().to_string().to_lowercase());
+        let admin = PgPoolOptions::new().max_connections(1).connect(&url).await.unwrap();
+        let _created = sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}"))).execute(&admin).await.unwrap();
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let scoped_config = PostgresDatabaseConfig {
+            url: format!("{url}{separator}options=-csearch_path%3D{schema}%2Cpublic"),
+            max_connections: 1,
+            auto_migrate: true,
+        };
+        drop(PostgresStore::open(&scoped_config, 3_usize).await.unwrap());
+        let scoped_admin = PgPoolOptions::new().max_connections(1).connect(&scoped_config.url).await.unwrap();
+        let _deleted = sqlx::query("DELETE FROM localhold_migrations WHERE version = 2").execute(&scoped_admin).await.unwrap();
+
+        let error = PostgresStore::open_read_only_with_clock(&scoped_config, 3_usize, Arc::new(SystemClock::new()))
+            .await
+            .unwrap_err();
+
+        scoped_admin.close().await;
+        let _dropped = sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE"))).execute(&admin).await.unwrap();
+        assert!(error.to_string().contains("migration metadata is not current"), "{error}");
     }
 
     #[tokio::test]

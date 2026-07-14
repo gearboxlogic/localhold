@@ -131,7 +131,7 @@ impl SqliteStore {
         if !path.exists() {
             return Err(StoreError::Conflict(format!("SQLite database does not exist: {}", path.display())));
         }
-        let database_lease = SqliteDatabaseLease::shared(path)?;
+        let database_lease = SqliteDatabaseLease::shared_existing(path)?;
         if sqlite_wal_requires_shm_creation(path)? {
             return Err(StoreError::Conflict(
                 "SQLite WAL exists without its shared-memory sidecar; refusing a read-only open that could create files".into(),
@@ -872,6 +872,7 @@ mod tests {
 
         let outdated = directory.path().join("outdated.db");
         drop(Connection::open(&outdated).unwrap());
+        drop(SqliteDatabaseLease::shared(&outdated).unwrap());
         let error = SqliteStore::open_read_only_with_clock(&outdated, SqliteStore::DEFAULT_TEST_DIMENSIONS, Arc::new(MockClock::new())).unwrap_err();
         assert!(error.to_string().contains("schema version"));
         let connection = Connection::open(&outdated).unwrap();
@@ -881,6 +882,22 @@ mod tests {
             })
             .unwrap();
         assert!(!memories_exist, "read-only open must not bootstrap an outdated database");
+    }
+
+    #[test]
+    fn read_only_open_requires_but_never_creates_a_lease_sidecar() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("current.db");
+        drop(SqliteStore::open(&path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap());
+        let mut lease_path = database_identity(&path).unwrap().into_os_string();
+        lease_path.push(".localhold.lock");
+        let lease_path = std::path::PathBuf::from(lease_path);
+        std::fs::remove_file(&lease_path).unwrap();
+
+        let error = SqliteStore::open_read_only_with_clock(&path, SqliteStore::DEFAULT_TEST_DIMENSIONS, Arc::new(MockClock::new())).unwrap_err();
+
+        assert!(error.to_string().contains("requires an existing LocalHold lease sidecar"), "{error}");
+        assert!(!lease_path.exists(), "read-only store open must not recreate a missing lease sidecar");
     }
 
     #[cfg(unix)]

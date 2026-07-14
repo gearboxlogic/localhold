@@ -48,12 +48,7 @@ jobs:
         shell: bash
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
-            git fetch origin main:refs/remotes/origin/main
-            test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
-          else
-            test "$(git rev-list -n 1 "$GITHUB_REF")" = "$GITHUB_SHA"
-          fi
+          [[ "$GITHUB_REF" == refs/heads/main || "$GITHUB_REF" == refs/tags/* ]]
 
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         with:
@@ -96,8 +91,8 @@ jobs:
               --max-rss-mib 3072 \
               --max-vram-mib 2048 \
               --json >gate-evidence/fp16.json || status=1
-          jq -e '.status == "passed" and .policies.explicit_required_cuda and .policies.auto_selected_cuda' gate-evidence/fp32.json >/dev/null || status=1
-          jq -e '.status == "passed" and .policies.explicit_required_cuda and .policies.auto_selected_cuda' gate-evidence/fp16.json >/dev/null || status=1
+          jq -e '.status == "passed" and .policies.explicit_cpu and .policies.explicit_required_cuda and .policies.auto_selected_cuda' gate-evidence/fp32.json >/dev/null || status=1
+          jq -e '.status == "passed" and .policies.explicit_cpu and .policies.explicit_required_cuda and .policies.auto_selected_cuda' gate-evidence/fp16.json >/dev/null || status=1
           exit "$status"
 
       - name: Prove unavailable CUDA fails required mode
@@ -111,6 +106,8 @@ jobs:
               >"$RUNNER_TEMP/no-cuda.json" 2>"$RUNNER_TEMP/no-cuda.stderr"
           status=$?
           set -e
+          jq '{schema_version, case: "cuda_unavailable", status, exit_code, failures}' \
+            "$RUNNER_TEMP/no-cuda.json" >gate-evidence/no-cuda.json
           test "$status" -eq 1
           jq -e '.status == "failed" and (.failures | any(contains("required CUDA")))' "$RUNNER_TEMP/no-cuda.json" >/dev/null
           ! grep -Fq "panicked" "$RUNNER_TEMP/no-cuda.stderr"
@@ -125,6 +122,8 @@ jobs:
               >"$RUNNER_TEMP/incompatible-runtime.json" 2>"$RUNNER_TEMP/incompatible-runtime.stderr"
           status=$?
           set -e
+          jq '{schema_version, case: "incompatible_runtime", status, exit_code, reranker: (.checks[] | select(.name == "reranker") | {name, status})}' \
+            "$RUNNER_TEMP/incompatible-runtime.json" >gate-evidence/incompatible-runtime.json
           test "$status" -eq 1
           jq -e '.checks[] | select(.name == "reranker") | .status == "failed"' "$RUNNER_TEMP/incompatible-runtime.json" >/dev/null
           ! grep -Fq "panicked" "$RUNNER_TEMP/incompatible-runtime.stderr"

@@ -22,10 +22,12 @@ pinned ONNX Runtime/CUDA installation and a pre-populated, hash-verified model
 cache. It must not expose database credentials, agent configuration, signing
 keys, or unrelated services.
 
-The workflow uploads only the gate JSON. Reports contain provider, precision,
+The workflow uploads only sanitized gate JSON. Reports contain provider, precision,
 aggregate timing, throughput, RSS, VRAM, parity, thresholds, and failure text;
 they omit hostnames, GPU UUIDs, usernames, credentials, configuration paths,
-and model-cache paths.
+and model-cache paths. Negative-case evidence retains only the stable case,
+status, exit code, failure category, and reranker check status; raw doctor
+summaries and stderr remain ephemeral because they can contain configured paths.
 
 ## Preparing artifacts
 

@@ -73,10 +73,12 @@ pub struct ResourceSnapshot {
 #[non_exhaustive]
 pub struct SystemResourceSampler;
 
-impl SystemResourceSampler {
-    /// Sample RSS and process VRAM without printing machine identifiers.
-    #[must_use]
-    pub fn sample(self) -> ResourceSnapshot {
+trait ResourceSampler: Send + Sync {
+    fn sample(&self) -> ResourceSnapshot;
+}
+
+impl ResourceSampler for SystemResourceSampler {
+    fn sample(&self) -> ResourceSnapshot {
         let (rss_bytes, peak_rss_bytes) = linux_rss_bytes();
         ResourceSnapshot {
             rss_bytes,
@@ -262,11 +264,11 @@ const CASES: &[QueryCase] = &[
 
 /// Run the real-GPU gate using production time and resource sampling.
 pub async fn run(config: &RerankerConfig, options: &GateOptions) -> GateReport {
-    run_with(config, options, Arc::new(SystemClock::new()), SystemResourceSampler).await
+    run_with(config, options, Arc::new(SystemClock::new()), &SystemResourceSampler).await
 }
 
 #[expect(clippy::too_many_lines, reason = "linear gate orchestration keeps partial evidence and phase-specific failures explicit")]
-async fn run_with(config: &RerankerConfig, options: &GateOptions, clock: Arc<dyn Clock>, sampler: SystemResourceSampler) -> GateReport {
+async fn run_with(config: &RerankerConfig, options: &GateOptions, clock: Arc<dyn Clock>, sampler: &dyn ResourceSampler) -> GateReport {
     let thresholds = GateThresholdReport {
         minimum_top_k_overlap: options.minimum_top_k_overlap,
         maximum_score_delta: options.maximum_score_delta,
@@ -384,6 +386,8 @@ async fn run_with(config: &RerankerConfig, options: &GateOptions, clock: Arc<dyn
 
     let mut auto_config = cuda_config;
     auto_config.execution_provider = RerankerExecutionProvider::Auto;
+    // FP16 intentionally forbids auto fallback, so prove auto-provider CUDA
+    // selection with the portable FP32 artifact instead.
     if auto_config.precision == RerankerPrecision::Fp16 {
         auto_config.precision = RerankerPrecision::Fp32;
     }
@@ -443,7 +447,7 @@ async fn measure_provider(
     provider: &Arc<dyn RerankerProvider>,
     options: &GateOptions,
     clock: Arc<dyn Clock>,
-    sampler: SystemResourceSampler,
+    sampler: &dyn ResourceSampler,
 ) -> Result<Vec<ConcurrencyMeasurement>, String> {
     for index in 0..options.warmup_iterations {
         let case = CASES[index % CASES.len()];
@@ -643,6 +647,10 @@ fn nvidia_process_vram_bytes() -> Option<u64> {
     }
     let pid = std::process::id();
     let stdout = String::from_utf8(output.stdout).ok()?;
+    parse_nvidia_process_vram_bytes(&stdout, pid)
+}
+
+fn parse_nvidia_process_vram_bytes(stdout: &str, pid: u32) -> Option<u64> {
     let mut found = false;
     let mut mib = 0_u64;
     for line in stdout.lines() {
@@ -653,7 +661,11 @@ fn nvidia_process_vram_bytes() -> Option<u64> {
             continue;
         }
         found = true;
-        mib = mib.checked_add(raw_mib.trim().parse::<u64>().ok()?)?;
+        // A partial multi-GPU total could under-report VRAM and incorrectly
+        // pass the release threshold, so any malformed matching row fails the
+        // measurement closed.
+        let parsed_mib = raw_mib.trim().parse::<u64>().ok()?;
+        mib = mib.checked_add(parsed_mib)?;
     }
     if !found {
         return None;
@@ -664,6 +676,52 @@ fn nvidia_process_vram_bytes() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn report_with_cuda_resources(resources: ResourceSnapshot) -> GateReport {
+        GateReport {
+            schema_version: SCHEMA_VERSION,
+            status: "failed",
+            exit_code: 1,
+            cuda_precision: RerankerPrecision::Fp32,
+            thresholds: GateThresholdReport {
+                minimum_top_k_overlap: 0.9_f64,
+                maximum_score_delta: 0.03_f64,
+                maximum_cuda_p95_ms: 1_000.0_f64,
+                minimum_cuda_pairs_per_second: 50.0_f64,
+                maximum_rss_bytes: 1,
+                maximum_vram_bytes: 1,
+            },
+            cpu: None,
+            cuda: Some(ProviderEvidence {
+                requested: RerankerExecutionProvider::Cuda,
+                selected: Some(RerankerExecutionProvider::Cuda),
+                active: Some(RerankerExecutionProvider::Cuda),
+                precision: RerankerPrecision::Fp32,
+                loaded_resources: resources,
+                concurrency: vec![ConcurrencyMeasurement {
+                    clients: 1,
+                    requests: 1,
+                    document_pairs: DOCUMENTS.len(),
+                    p50_ms: 1.0_f64,
+                    p95_ms: 1.0_f64,
+                    pairs_per_second: 100.0_f64,
+                    resources,
+                }],
+            }),
+            parity: Some(ParityEvidence {
+                query_count: CASES.len(),
+                top_k: 10,
+                minimum_observed_overlap: 1.0_f64,
+                maximum_observed_score_delta: 0.0_f64,
+            }),
+            policies: PolicyEvidence {
+                explicit_cpu: true,
+                explicit_required_cuda: true,
+                auto_selected_cuda: true,
+            },
+            failures: Vec::new(),
+        }
+    }
 
     #[test]
     fn percentile_uses_nearest_rank() {
@@ -686,6 +744,37 @@ mod tests {
         let status = "Name:\thold\nVmHWM:\t2048 kB\nVmRSS:\t1024 kB\n";
         assert_eq!(proc_status_kib(status, "VmRSS:"), Some(1_048_576_u64));
         assert_eq!(proc_status_kib(status, "VmHWM:"), Some(2_097_152_u64));
+    }
+
+    #[test]
+    fn nvidia_vram_parser_sums_matching_gpus_and_fails_closed() {
+        let complete = "42, 100\n7, 999\n42, 200\n";
+        assert_eq!(parse_nvidia_process_vram_bytes(complete, 42), Some(300_u64 * 1024 * 1024));
+
+        let partial = "42, 100\n42, N/A\n";
+        assert_eq!(parse_nvidia_process_vram_bytes(partial, 42), None);
+    }
+
+    #[test]
+    fn resource_thresholds_fail_for_unavailable_and_excessive_samples() {
+        let options = GateOptions {
+            maximum_rss_bytes: 10,
+            maximum_vram_bytes: 20,
+            ..GateOptions::default()
+        };
+        let mut excessive = report_with_cuda_resources(ResourceSnapshot {
+            rss_bytes: Some(1),
+            peak_rss_bytes: Some(11),
+            vram_bytes: Some(21),
+        });
+        evaluate_thresholds(&mut excessive, &options);
+        assert!(excessive.failures.iter().any(|failure| failure.starts_with("peak RSS")));
+        assert!(excessive.failures.iter().any(|failure| failure.starts_with("process VRAM")));
+
+        let mut unavailable = report_with_cuda_resources(ResourceSnapshot::default());
+        evaluate_thresholds(&mut unavailable, &options);
+        assert!(unavailable.failures.iter().any(|failure| failure == "peak RSS measurement is unavailable"));
+        assert!(unavailable.failures.iter().any(|failure| failure == "process VRAM measurement is unavailable"));
     }
 
     #[test]

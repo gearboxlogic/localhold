@@ -137,6 +137,13 @@ the CUDA profile alone does not claim that CUDA is active. The current `ort
 CUDA-enabled ONNX Runtime 1.22 build plus the CUDA and cuDNN versions required
 by that build, then set `ORT_DYLIB_PATH` to the absolute path of
 `libonnxruntime.so` when it is outside the dynamic loader's normal search path.
+Keep every CUDA dependency for the reranker in one toolkit family. In
+particular, do not place CUDA 13 directories ahead of a CUDA 12 runtime in
+`LD_LIBRARY_PATH`: libraries with stable sonames such as `libcurand.so.10` can
+otherwise resolve from the wrong toolkit even when the remaining dependencies
+resolve from CUDA 12. Before starting LocalHold, run `ldd` on
+`libonnxruntime_providers_cuda.so` and confirm that every CUDA and cuDNN library
+is found in the intended runtime family.
 Embedding placement is independent: embeddings are produced by the configured
 OpenAI-compatible endpoint.
 

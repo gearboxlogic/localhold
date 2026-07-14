@@ -276,8 +276,8 @@ fn preload_bundled_cuda_dependencies(directory: &std::path::Path) -> Result<(), 
     // owns the provider dependency order; the two JIT support libraries and
     // cuDNN CNN module are runtime-loaded transitive dependencies outside the
     // helper's list in the pinned ort bindings.
-    for library in ["libnvJitLink.so.12", "libnvrtc-builtins.so.12.8"] {
-        preload_bundled_library(directory, library)?;
+    for prefix in ["libnvJitLink.so.", "libnvrtc-builtins.so."] {
+        preload_unique_bundled_library(directory, prefix)?;
     }
     ort::execution_providers::cuda::preload_dylibs(Some(directory), Some(directory)).map_err(|error| {
         RerankerError::ProviderUnavailable(format!(
@@ -285,18 +285,44 @@ fn preload_bundled_cuda_dependencies(directory: &std::path::Path) -> Result<(), 
             directory.display()
         ))
     })?;
-    preload_bundled_library(directory, "libcudnn_cnn.so.9")
+    preload_unique_bundled_library(directory, "libcudnn_cnn.so.")
 }
 
 #[cfg(all(feature = "reranker-cuda", target_os = "linux"))]
-fn preload_bundled_library(directory: &std::path::Path, library: &str) -> Result<(), RerankerError> {
-    let path = directory.join(library);
+fn preload_unique_bundled_library(directory: &std::path::Path, prefix: &str) -> Result<(), RerankerError> {
+    let path = find_unique_bundled_library(directory, prefix)?;
     ort::util::preload_dylib(&path).map_err(|error| {
         RerankerError::ProviderUnavailable(format!(
             "bundled CUDA dependency `{}` could not be loaded: {error}; verify the release manifest and NVIDIA driver compatibility",
             path.display()
         ))
     })
+}
+
+#[cfg(all(feature = "reranker-cuda", target_os = "linux"))]
+fn find_unique_bundled_library(directory: &std::path::Path, prefix: &str) -> Result<std::path::PathBuf, RerankerError> {
+    let mut candidates = Vec::new();
+    let entries =
+        std::fs::read_dir(directory).map_err(|error| RerankerError::ProviderUnavailable(format!("could not inspect bundled CUDA runtime `{}`: {error}", directory.display())))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| RerankerError::ProviderUnavailable(format!("could not inspect bundled CUDA runtime `{}`: {error}", directory.display())))?;
+        let path = entry.path();
+        if path.is_file() && entry.file_name().to_str().is_some_and(|name| name.starts_with(prefix)) {
+            candidates.push(path);
+        }
+    }
+    candidates.sort();
+    match candidates.as_slice() {
+        [path] => Ok(path.clone()),
+        [] => Err(RerankerError::ProviderUnavailable(format!(
+            "bundled CUDA runtime `{}` has no library matching `{prefix}*`; verify the release manifest",
+            directory.display()
+        ))),
+        _ => Err(RerankerError::ProviderUnavailable(format!(
+            "bundled CUDA runtime `{}` has multiple libraries matching `{prefix}*`; verify the release manifest",
+            directory.display()
+        ))),
+    }
 }
 
 #[cfg(all(feature = "reranker-cuda", not(target_os = "linux")))]
@@ -435,5 +461,24 @@ mod tests {
             path: configured.into(),
             bundled_library_dir: None
         });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bundled_library_discovery_accepts_new_pinned_patch_name() {
+        let root = tempfile::TempDir::new().unwrap();
+        let expected = root.path().join("libnvrtc-builtins.so.12.9");
+        std::fs::write(&expected, b"fixture").unwrap();
+        assert_eq!(find_unique_bundled_library(root.path(), "libnvrtc-builtins.so.").unwrap(), expected);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bundled_library_discovery_rejects_ambiguous_versions() {
+        let root = tempfile::TempDir::new().unwrap();
+        std::fs::write(root.path().join("libcudnn_cnn.so.9"), b"fixture").unwrap();
+        std::fs::write(root.path().join("libcudnn_cnn.so.10"), b"fixture").unwrap();
+        let error = find_unique_bundled_library(root.path(), "libcudnn_cnn.so.").unwrap_err();
+        assert!(error.to_string().contains("multiple libraries"));
     }
 }

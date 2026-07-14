@@ -7,11 +7,13 @@ import importlib.util
 import json
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 from types import ModuleType
+from unittest import mock
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -69,6 +71,39 @@ class PrepareCudaRuntimeTests(unittest.TestCase):
             path.write_text(json.dumps(spec), encoding="utf-8")
             with self.assertRaisesRegex(PREPARE.CudaRuntimeError, "normalized relative path"):
                 PREPARE.load_spec(path)
+
+    def test_archive_member_closes_zip_when_declared_member_is_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "fixture.whl"
+            with zipfile.ZipFile(archive, "w") as wheel:
+                wheel.mkdir("directory/")
+            container = zipfile.ZipFile(archive)
+            with mock.patch.object(PREPARE.zipfile, "ZipFile", return_value=container):
+                with self.assertRaisesRegex(PREPARE.CudaRuntimeError, "not a regular file"):
+                    PREPARE.archive_member(archive, "zip", "directory/")
+            self.assertIsNone(container.fp)
+
+    def test_archive_member_closes_tar_when_declared_member_is_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "fixture.tar.gz"
+            with tarfile.open(archive, "w:gz") as tar:
+                info = tarfile.TarInfo("directory")
+                info.type = tarfile.DIRTYPE
+                tar.addfile(info)
+            container = tarfile.open(archive, "r:gz")
+            with mock.patch.object(PREPARE.tarfile, "open", return_value=container):
+                with self.assertRaisesRegex(PREPARE.CudaRuntimeError, "not a regular file"):
+                    PREPARE.archive_member(archive, "tar.gz", "directory")
+            self.assertTrue(container.fileobj.closed)
+
+    def test_closing_reader_always_closes_container(self) -> None:
+        reader = mock.Mock()
+        reader.close.side_effect = OSError("reader close failed")
+        container = mock.Mock()
+        closing_reader = PREPARE._ClosingReader(reader, container)
+        with self.assertRaisesRegex(OSError, "reader close failed"):
+            closing_reader.__exit__()
+        container.close.assert_called_once_with()
 
     @staticmethod
     def spec(digest: str) -> dict[str, object]:

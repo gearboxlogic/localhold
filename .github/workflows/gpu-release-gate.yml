@@ -32,7 +32,10 @@ env:
 jobs:
   build:
     name: Build portable CUDA archive
-    if: github.ref_protected && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref_protected &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))) ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-22.04
     outputs:
       release_tag: ${{ steps.release.outputs.tag }}
@@ -114,7 +117,10 @@ jobs:
   gate:
     name: CUDA parity and performance
     needs: build
-    if: github.ref_protected && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref_protected &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))) ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
     runs-on: [self-hosted, linux, x64, localhold-gpu-release]
     environment: cuda-release
     timeout-minutes: 45
@@ -124,7 +130,10 @@ jobs:
       - name: Require protected release-runner configuration
         shell: bash
         run: |
-          test "$GITHUB_REF_PROTECTED" = true
+          if test "$GITHUB_EVENT_NAME" = workflow_dispatch; then
+            test "$GITHUB_REF_PROTECTED" = true
+          fi
+          [[ "$GITHUB_REF" == refs/heads/main || "$GITHUB_REF" == refs/tags/* ]]
           test -n "$LOCALHOLD_RERANKER_CACHE_DIR"
           command -v nvidia-smi >/dev/null
           command -v readelf >/dev/null
@@ -164,6 +173,13 @@ jobs:
           required_glibc="$(readelf --version-info "$root/bin/hold" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -n1)"
           test "$(printf '%s\n' GLIBC_2.35 "$required_glibc" | sort -V | tail -n1)" = GLIBC_2.35
           printf 'CUDA_RELEASE_ROOT=%s\n' "$root" >>"$GITHUB_ENV"
+
+      - name: Verify managed artifacts offline
+        shell: bash
+        run: |
+          unset ORT_DYLIB_PATH LD_LIBRARY_PATH LD_PRELOAD
+          LOCALHOLD_RERANKER_PRECISION=fp32 "$CUDA_RELEASE_ROOT/bin/hold" models verify --json >/dev/null
+          LOCALHOLD_RERANKER_PRECISION=fp16 "$CUDA_RELEASE_ROOT/bin/hold" models verify --json >/dev/null
 
       - name: Prove clean-host private runtime loading
         shell: bash
@@ -205,15 +221,10 @@ jobs:
           wait "$pid" 2>/dev/null || true
           trap - EXIT
 
-      - name: Verify managed artifacts offline
-        shell: bash
-        run: |
-          LOCALHOLD_RERANKER_PRECISION=fp32 "$CUDA_RELEASE_ROOT/bin/hold" models verify --json >/dev/null
-          LOCALHOLD_RERANKER_PRECISION=fp16 "$CUDA_RELEASE_ROOT/bin/hold" models verify --json >/dev/null
-
       - name: Run FP32 and FP16 real-GPU gates
         shell: bash
         run: |
+          unset ORT_DYLIB_PATH LD_LIBRARY_PATH LD_PRELOAD
           mkdir -p gate-evidence
           status=0
           LOCALHOLD_RERANKER_PRECISION=fp32 \
@@ -245,6 +256,7 @@ jobs:
       - name: Prove unavailable CUDA fails required mode
         shell: bash
         run: |
+          unset ORT_DYLIB_PATH LD_LIBRARY_PATH LD_PRELOAD
           set +e
           CUDA_VISIBLE_DEVICES='' \
             LOCALHOLD_RERANKER_PRECISION=fp32 \
@@ -282,6 +294,7 @@ jobs:
       - name: Prove a missing bundled dependency is structured
         shell: bash
         run: |
+          unset ORT_DYLIB_PATH LD_LIBRARY_PATH LD_PRELOAD
           dependency="$CUDA_RELEASE_ROOT/lib/libcudart.so.12"
           moved="$RUNNER_TEMP/libcudart.so.12"
           mv "$dependency" "$moved"
@@ -295,8 +308,8 @@ jobs:
           jq '{schema_version, case: "missing_bundled_dependency", status, exit_code, reranker: (.checks[] | select(.name == "reranker") | {name, status})}' \
             "$RUNNER_TEMP/missing-dependency.json" >gate-evidence/missing-dependency.json
           test "$status" -eq 1
-          jq -e '.checks[] | select(.name == "reranker") | .status == "failed"' "$RUNNER_TEMP/missing-dependency.json" >/dev/null
-          grep -Fq "bundled CUDA 12 runtime" "$RUNNER_TEMP/missing-dependency.json"
+          jq -e '.checks[] | select(.name == "reranker") | .status == "failed" and (.message | contains("bundled CUDA 12 runtime"))' \
+            "$RUNNER_TEMP/missing-dependency.json" >/dev/null
           if grep -Fq "panicked" "$RUNNER_TEMP/missing-dependency.stderr"; then
             exit 1
           fi

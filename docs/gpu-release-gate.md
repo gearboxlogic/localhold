@@ -7,8 +7,9 @@ and records real inference, ranking parity, performance, and resource evidence.
 ## Runner isolation
 
 The GPU workflow is intentionally unavailable to pull requests. Run it only
-from a protected `main` ref or protected release tag, on a runner carrying all
-of these labels:
+by manual dispatch from a protected `main` or tag ref, or as the CUDA job of
+the release workflow for an annotated tag whose commit was validated as part
+of `main`. The runner must carry all of these labels:
 
 ```text
 self-hosted, linux, x64, localhold-gpu-release
@@ -45,11 +46,11 @@ Fetch is a separate, audited preparation step. The release workflow uses
 `models verify` and fails when either artifact is absent or has the wrong
 SHA-256; the benchmark never downloads or repairs artifacts.
 
-The reusable workflow first builds the exact protected commit on an Ubuntu
-22.04 GitHub-hosted runner. That pins the published binary to the documented
-glibc 2.35 floor; the workflow inspects its ELF version requirements and fails
-if it references a newer glibc. It then materializes, validates, and packages
-the pinned runtime:
+The reusable workflow first builds the exact trusted release commit on an
+Ubuntu 22.04 GitHub-hosted runner. That pins the published binary to the
+documented glibc 2.35 floor; the workflow inspects its ELF version requirements
+and fails if it references a newer glibc. It then materializes, validates, and
+packages the pinned runtime:
 
 ```sh
 python3 script/prepare-cuda-runtime.py \

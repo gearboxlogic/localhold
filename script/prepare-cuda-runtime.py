@@ -132,6 +132,7 @@ def archive_member(archive: Path, archive_type: str, member: str) -> BinaryIO:
     """Open one declared regular file from a tarball or ZIP archive."""
     if archive_type == "tar.gz":
         container = tarfile.open(archive, "r:gz")
+        handed_off = False
         try:
             info = container.getmember(member)
             if not info.isfile():
@@ -139,20 +140,29 @@ def archive_member(archive: Path, archive_type: str, member: str) -> BinaryIO:
             extracted = container.extractfile(info)
             if extracted is None:
                 raise CudaRuntimeError(f"could not read declared source member: {member}")
-            return _ClosingReader(extracted, container)
+            reader = _ClosingReader(extracted, container)
+            handed_off = True
+            return reader
         except (KeyError, tarfile.TarError) as error:
-            container.close()
             raise CudaRuntimeError(f"missing declared source member {member} in {archive.name}") from error
+        finally:
+            if not handed_off:
+                container.close()
 
     container = zipfile.ZipFile(archive)
+    handed_off = False
     try:
         info = container.getinfo(member)
         if info.is_dir():
             raise CudaRuntimeError(f"declared source member is not a regular file: {member}")
-        return _ClosingReader(container.open(info), container)
+        reader = _ClosingReader(container.open(info), container)
+        handed_off = True
+        return reader
     except (KeyError, zipfile.BadZipFile) as error:
-        container.close()
         raise CudaRuntimeError(f"missing declared source member {member} in {archive.name}") from error
+    finally:
+        if not handed_off:
+            container.close()
 
 
 class _ClosingReader:
@@ -166,9 +176,11 @@ class _ClosingReader:
         return self.reader
 
     def __exit__(self, *args: object) -> None:
-        self.reader.close()
-        close = getattr(self.container, "close")
-        close()
+        try:
+            self.reader.close()
+        finally:
+            close = getattr(self.container, "close")
+            close()
 
 
 def materialize(spec: dict[str, object], cache_dir: Path, output_dir: Path, offline: bool) -> Path:

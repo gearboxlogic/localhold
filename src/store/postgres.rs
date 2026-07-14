@@ -400,7 +400,7 @@ impl PostgresStore {
         let mut tx = self.pool().begin().await?;
         validate_superseded_exists(&mut tx, supersedes_id).await?;
         insert_memory_with_embedding(&mut tx, memory, embedding).await?;
-        let _marked = mark_superseded_tx(&mut tx, supersedes_id, &memory.id, now).await?;
+        mark_required_superseded_tx(&mut tx, supersedes_id, &memory.id, now).await?;
         if let Some(audit) = audit {
             insert_audit_draft_tx(&mut tx, &memory.id, audit).await?;
         }
@@ -439,7 +439,7 @@ impl PostgresStore {
         }
         insert_memory_with_embedding(&mut tx, memory, embedding).await?;
         if let Some(supersedes_id) = supersedes_id {
-            let _marked = mark_superseded_tx(&mut tx, supersedes_id, &memory.id, now).await?;
+            mark_required_superseded_tx(&mut tx, supersedes_id, &memory.id, now).await?;
         }
         upsert_metadata_tx(&mut tx, metadata, now).await?;
         if let Some(audit) = audit {
@@ -502,7 +502,7 @@ impl PostgresStore {
             if let Some(supersedes_id) = supersedes.get(idx).and_then(|id| *id) {
                 validate_superseded_exists(&mut tx, &supersedes_id).await?;
                 insert_memory_with_embedding(&mut tx, &memory_with_embedding.memory, memory_with_embedding.embedding.as_deref()).await?;
-                let _marked = mark_superseded_tx(&mut tx, &supersedes_id, &memory_with_embedding.memory.id, now).await?;
+                mark_required_superseded_tx(&mut tx, &supersedes_id, &memory_with_embedding.memory.id, now).await?;
             } else {
                 insert_memory_with_embedding(&mut tx, &memory_with_embedding.memory, memory_with_embedding.embedding.as_deref()).await?;
             }
@@ -555,7 +555,7 @@ impl PostgresStore {
             if let Some(supersedes_id) = supersedes.get(idx).and_then(|id| *id) {
                 validate_superseded_exists(&mut tx, &supersedes_id).await?;
                 insert_memory_with_embedding(&mut tx, &memory_with_embedding.memory, memory_with_embedding.embedding.as_deref()).await?;
-                let _marked = mark_superseded_tx(&mut tx, &supersedes_id, &memory_with_embedding.memory.id, now).await?;
+                mark_required_superseded_tx(&mut tx, &supersedes_id, &memory_with_embedding.memory.id, now).await?;
             } else {
                 insert_memory_with_embedding(&mut tx, &memory_with_embedding.memory, memory_with_embedding.embedding.as_deref()).await?;
             }
@@ -2422,10 +2422,22 @@ async fn memory_exists_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId) -> 
 }
 
 async fn validate_superseded_exists(tx: &mut Transaction<'_, Postgres>, supersedes_id: &MemoryId) -> Result<(), StoreError> {
-    if !memory_exists_tx(tx, supersedes_id).await? {
+    let locked_id: Option<String> = sqlx::query_scalar("SELECT id FROM memories WHERE id = $1 FOR UPDATE")
+        .bind(supersedes_id.to_string())
+        .fetch_optional(&mut **tx)
+        .await?;
+    if locked_id.is_none() {
         return Err(StoreError::NotFound(format!("superseded memory not found: {supersedes_id}")));
     }
     Ok(())
+}
+
+async fn mark_required_superseded_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, superseded_by: &MemoryId, now: DateTime<Utc>) -> Result<(), StoreError> {
+    if mark_superseded_tx(tx, id, superseded_by, now).await? {
+        Ok(())
+    } else {
+        Err(StoreError::NotFound(format!("superseded memory not found: {id}")))
+    }
 }
 
 async fn mark_superseded_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, superseded_by: &MemoryId, now: DateTime<Utc>) -> Result<bool, StoreError> {
@@ -4204,6 +4216,43 @@ mod tests {
         assert_eq!(supersession_ids, vec![batch_new.id, batch_plain.id]);
         let batch_superseded = fetch_memory_by_id(store.pool(), &batch_old.id).await.unwrap().unwrap();
         assert_eq!(batch_superseded.superseded_by, Some(batch_new.id));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn supersession_validation_waits_for_concurrent_delete_against_postgres() {
+        let url = std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
+        let config = PostgresDatabaseConfig {
+            url,
+            max_connections: 2,
+            auto_migrate: true,
+        };
+        let store = PostgresStore::open(&config, 3_usize).await.unwrap();
+        let old_memory = test_memory_with_content("postgres supersession delete race");
+        let old_id = store.store_impl(&old_memory, None).await.unwrap();
+
+        let mut deleting = store.pool().begin().await.unwrap();
+        let deleted = sqlx::query("DELETE FROM memories WHERE id = $1")
+            .bind(old_id.to_string())
+            .execute(&mut *deleting)
+            .await
+            .unwrap();
+        assert_eq!(deleted.rows_affected(), 1_u64);
+
+        let validating_store = store.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let validation = tokio::spawn(async move {
+            let mut tx = validating_store.pool().begin().await.unwrap();
+            started_tx.send(()).unwrap();
+            validate_superseded_exists(&mut tx, &old_id).await
+        });
+        started_rx.await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50_u64)).await;
+        assert!(!validation.is_finished(), "supersession validation must wait for the deleting row lock");
+
+        deleting.commit().await.unwrap();
+        let error = validation.await.unwrap().unwrap_err();
+        assert!(matches!(error, StoreError::NotFound(_)));
     }
 
     #[tokio::test]

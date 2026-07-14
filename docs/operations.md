@@ -223,6 +223,50 @@ controls.
 
 ## Recovery Checks
 
+### Embedding status
+
+Use the embedding-specific status command to compare the configured vector
+space with the identity and progress stored in SQLite or PostgreSQL:
+
+```sh
+hold embeddings status
+hold embeddings status --json
+```
+
+The command does not create or migrate a database, stamp a profile, clear
+vectors, or start the MCP server. It uses read-only storage queries. For an
+OpenAI-compatible provider it also performs the configured health probe;
+`health_check = "disabled"` reports `check_disabled` without network access.
+
+The stable JSON document has `schema_version: 1` and reports:
+
+- the secret-free configured and stored provider, endpoint, model, and
+  dimensions;
+- provider health and physical vector-table dimensions;
+- total, embedded, pending, claimed, mapped, and vector-row counts; and
+- missing or unexpected vectors when flags and stored rows disagree.
+
+API keys, PostgreSQL credentials, memory content, and provider error bodies are
+never included. Because endpoint and model identity are deliberately visible,
+treat status output as operational metadata rather than public telemetry.
+
+States have the following meaning:
+
+- `disabled`: the noop provider is selected and any existing vector table has
+  compatible dimensions;
+- `not_initialized`: the database schema does not exist yet;
+- `ready`: empty vector storage can be stamped by normal startup;
+- `rebuilding`: the stored profile matches and memories still need vectors;
+- `complete`: every memory has a current vector;
+- `reindex_required`: configured identity or dimensions differ from storage;
+- `inconsistent`: flags, mappings, and vector rows disagree; and
+- `unavailable`: storage could not be inspected safely, including missing
+  PostgreSQL embedding tables when automatic migration is disabled.
+
+Exit code `0` means healthy or intentionally disabled, `2` means initialization,
+rebuild work, or provider recovery remains, and `1` means storage is
+unavailable, inconsistent, or requires explicit reindexing.
+
 ## Changing Embedding Providers
 
 LocalHold records the active OpenAI-compatible endpoint, model, and dimensions

@@ -110,6 +110,18 @@ vectors and refuses to mix a different vector space. To change any of them,
 preserve a backup and run `hold embeddings reindex --yes`; memory content and
 metadata are retained while vectors are rebuilt after the next start.
 
+Inspect the configured and stored profiles, provider health, and rebuild
+progress without starting the MCP server:
+
+```sh
+hold embeddings status
+hold embeddings status --json
+```
+
+The report includes vector coverage and claim counts but never API keys or
+memory content. See [Operations](docs/operations.md#embedding-status) for its
+states and exit codes.
+
 ### Reranking
 
 Enable the built-in CPU reranker with:

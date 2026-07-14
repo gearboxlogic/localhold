@@ -3617,7 +3617,7 @@ mod tests {
 
         let err = validate_present_postgres_schema(&pool, TEST_EMBEDDING_DIMENSIONS, true, true).await.unwrap_err();
 
-        assert!(err.to_string().contains("memories.confidence"));
+        assert!(err.to_string().contains("table memories is missing required column confidence"), "{err}");
         pool.close().await;
         drop_postgres_migration_schema().await;
     }
@@ -3645,7 +3645,7 @@ mod tests {
 
         let err = validate_present_postgres_schema(&pool, TEST_EMBEDDING_DIMENSIONS, true, true).await.unwrap_err();
 
-        assert!(err.to_string().contains("memories.content"));
+        assert!(err.to_string().contains("memories.content"), "{err}");
         pool.close().await;
         drop_postgres_migration_schema().await;
     }
@@ -3659,7 +3659,7 @@ mod tests {
 
         let err = validate_present_postgres_schema(&pool, TEST_EMBEDDING_DIMENSIONS, true, true).await.unwrap_err();
 
-        assert!(err.to_string().contains("memory_audit_log.id"));
+        assert!(err.to_string().contains("memory_audit_log.id"), "{err}");
         pool.close().await;
         drop_postgres_migration_schema().await;
     }
@@ -4085,6 +4085,7 @@ mod tests {
                 memory_metadata,
                 memory_entities,
                 memory_embeddings,
+                embedding_profile,
                 memories,
                 scope_registry
             RESTART IDENTITY CASCADE
@@ -4132,8 +4133,10 @@ mod tests {
                 memory_audit_log,
                 memory_tombstones,
                 memory_metadata,
+                memory_v2_metadata,
                 memory_entities,
                 memory_embeddings,
+                embedding_profile,
                 memories,
                 scope_registry,
                 localhold_migrations

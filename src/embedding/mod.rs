@@ -16,6 +16,8 @@ pub(crate) mod orchestrator;
 pub mod resilient;
 /// Retry-delay policy shared by resilient providers.
 pub(crate) mod retry;
+/// Operator-facing embedding profile, provider, and rebuild status.
+pub mod status;
 
 use std::{future::Future, pin::Pin};
 

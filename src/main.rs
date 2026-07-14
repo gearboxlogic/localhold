@@ -50,11 +50,14 @@ async fn main() -> AppResult {
     }
 
     if let Some(result) = try_run_embeddings_cli().await {
-        if let Err(error) = result {
-            write_stderr_line(error);
-            std::process::exit(1);
+        match result {
+            Ok(0_i32) => return Ok(()),
+            Ok(exit_code) => std::process::exit(exit_code),
+            Err(error) => {
+                write_stderr_line(error);
+                std::process::exit(1);
+            }
         }
-        return Ok(());
     }
     if let Some(argument) = std::env::args_os().nth(1) {
         write_stderr_line(root_usage());
@@ -109,7 +112,7 @@ fn try_run_info_cli() -> Option<AppResult> {
 }
 
 const fn root_usage() -> &'static str {
-    "Usage: hold [COMMAND]\n\nRuns the LocalHold MCP server when no command is supplied.\n\nCommands:\n  doctor                     Diagnose installation and runtime readiness\n  embeddings reindex --yes   Clear and rebuild the configured vector space\n  migrate sqlite-to-postgres Migrate storage backends\n\nOptions:\n  -h, --help                 Print help\n  -V, --version              Print version"
+    "Usage: hold [COMMAND]\n\nRuns the LocalHold MCP server when no command is supplied.\n\nCommands:\n  doctor                     Diagnose installation and runtime readiness\n  embeddings status          Inspect embedding identity and rebuild progress\n  embeddings reindex --yes   Clear and rebuild the configured vector space\n  migrate sqlite-to-postgres Migrate storage backends\n\nOptions:\n  -h, --help                 Print help\n  -V, --version              Print version"
 }
 
 async fn try_run_doctor_cli() -> Option<Result<i32, Box<dyn std::error::Error + Send + Sync>>> {
@@ -151,7 +154,7 @@ async fn try_run_doctor_cli() -> Option<Result<i32, Box<dyn std::error::Error + 
     )
 }
 
-async fn try_run_embeddings_cli() -> Option<AppResult> {
+async fn try_run_embeddings_cli() -> Option<Result<i32, Box<dyn std::error::Error + Send + Sync>>> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     if args.first().is_none_or(|arg| arg != "embeddings") {
         return None;
@@ -159,41 +162,59 @@ async fn try_run_embeddings_cli() -> Option<AppResult> {
     Some(run_embeddings_cli(&args[1..]).await)
 }
 
-async fn run_embeddings_cli(args: &[OsString]) -> AppResult {
-    const USAGE: &str = "Usage: hold embeddings reindex --yes\n\nClears stored vectors while preserving memories, then records the embedding provider, endpoint, model, and dimensions from localhold.toml.";
+async fn run_embeddings_cli(args: &[OsString]) -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
+    const USAGE: &str = "Usage: hold embeddings <COMMAND>\n\nInspect or rebuild the configured vector space without starting the MCP server.\n\nCommands:\n  status [--json]  Show provider health, profile compatibility, and rebuild progress\n  reindex --yes    Clear stored vectors and record the configured profile\n\nOptions:\n  -h, --help       Print help\n\nExit codes for status:\n  0  healthy or intentionally disabled\n  1  unavailable, inconsistent, or reindex required\n  2  initialization, rebuild work, or provider recovery remains";
     if args.iter().any(is_help_arg) {
         write_stdout(USAGE)?;
         write_stdout("\n")?;
-        return Ok(());
+        return Ok(0);
     }
-    if args.first().is_none_or(|arg| arg != "reindex") {
-        write_stderr_line(USAGE);
-        return Err(EngineError::config("missing or unknown embeddings command").into());
-    }
-    if !args[1..].iter().any(|arg| arg == "--yes") {
-        return Err(EngineError::config("reindex is destructive to stored vectors; rerun with `--yes` to confirm").into());
-    }
-    if args.len() != 2 {
-        return Err(EngineError::config("unexpected embeddings reindex argument").into());
-    }
-
-    let config = Config::load()?;
-    let profile = active_embedding_profile(&config.embedding).ok_or_else(|| EngineError::config("embeddings reindex requires an active OpenAI-compatible embedding provider"))?;
-    match config.database.backend {
-        DatabaseBackend::Sqlite => {
-            let path = config.database.sqlite_path();
-            if let Some(parent) = path.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                std::fs::create_dir_all(parent)?;
+    match args.first().and_then(|argument| argument.to_str()) {
+        Some("status") => {
+            if args.len() > 2 || args.get(1).is_some_and(|argument| argument != "--json") {
+                return Err(EngineError::config("unexpected embeddings status argument").into());
             }
-            SqliteStore::reindex_embeddings(path, &profile).await?;
+            let config = Config::load()?;
+            let report = localhold::embedding::status::inspect(&config).await;
+            if args.get(1).is_some() {
+                write_stdout(&report.to_json()?)?;
+            } else {
+                write_stdout(&report.render_text())?;
+            }
+            Ok(report.exit_code)
         }
-        DatabaseBackend::Postgres => PostgresStore::reindex_embeddings(&config.database.postgres, &profile).await?,
-        other => return Err(EngineError::config(format!("unsupported database backend: {other}")).into()),
+        Some("reindex") => {
+            if !args[1..].iter().any(|arg| arg == "--yes") {
+                return Err(EngineError::config("reindex is destructive to stored vectors; rerun with `--yes` to confirm").into());
+            }
+            if args.len() != 2 {
+                return Err(EngineError::config("unexpected embeddings reindex argument").into());
+            }
+
+            let config = Config::load()?;
+            let profile =
+                active_embedding_profile(&config.embedding).ok_or_else(|| EngineError::config("embeddings reindex requires an active OpenAI-compatible embedding provider"))?;
+            match config.database.backend {
+                DatabaseBackend::Sqlite => {
+                    let path = config.database.sqlite_path();
+                    if let Some(parent) = path.parent()
+                        && !parent.as_os_str().is_empty()
+                    {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    SqliteStore::reindex_embeddings(path, &profile).await?;
+                }
+                DatabaseBackend::Postgres => PostgresStore::reindex_embeddings(&config.database.postgres, &profile).await?,
+                other => return Err(EngineError::config(format!("unsupported database backend: {other}")).into()),
+            }
+            write_stdout("Embedding vectors cleared. Start LocalHold to rebuild them with the configured provider.\n")?;
+            Ok(0_i32)
+        }
+        _ => {
+            write_stderr_line(USAGE);
+            Err(EngineError::config("missing or unknown embeddings command").into())
+        }
     }
-    write_stdout("Embedding vectors cleared. Start LocalHold to rebuild them with the configured provider.\n")?;
-    Ok(())
 }
 
 async fn try_run_migration_cli() -> Option<AppResult> {

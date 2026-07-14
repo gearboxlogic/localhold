@@ -11,9 +11,8 @@ use sqlx_core::query_scalar::query_scalar;
 use sqlx_postgres::{PgPool, PgPoolOptions};
 
 use crate::{
-    config::{Config, DatabaseBackend, EmbeddingConfig, EmbeddingHealthCheck},
-    embedding::{EmbeddingProvider as _, OpenAiEmbedding},
-    error::EmbeddingError,
+    config::{Config, DatabaseBackend, EmbeddingConfig},
+    embedding::status::EmbeddingProviderHealth,
     store::{EmbeddingProfile, PostgresStore, SqliteStore},
 };
 
@@ -1124,39 +1123,32 @@ async fn postgres_embedding_profile_compatible_if_present(pool: &PgPool, expecte
 }
 
 async fn embedding_check(config: &Config, clock: std::sync::Arc<dyn crate::clock::Clock>) -> DiagnosticCheck {
-    match &config.embedding {
-        EmbeddingConfig::Noop { dimensions } => check(
+    let provider_health = crate::embedding::status::probe_provider(config, clock).await;
+    match (&config.embedding, provider_health) {
+        (EmbeddingConfig::Noop { dimensions }, EmbeddingProviderHealth::Disabled) => check(
             "embedding",
             DiagnosticStatus::Healthy,
             format!("text-only noop provider is selected with {dimensions} schema dimensions"),
         ),
-        EmbeddingConfig::OpenAiCompatible { dimensions, openai_compatible } => {
-            if openai_compatible.health_check == EmbeddingHealthCheck::Disabled {
-                return check(
-                    "embedding",
-                    DiagnosticStatus::Healthy,
-                    format!("health probe is disabled by policy for the configured OpenAI-compatible model with {dimensions} dimensions"),
-                );
-            }
-            let timeout = Duration::from_secs(config.limits.embedding_timeout_secs);
-            let provider = match OpenAiEmbedding::new_with_clock(openai_compatible, *dimensions, timeout, clock) {
-                Ok(provider) => provider,
-                Err(_error) => return check("embedding", DiagnosticStatus::Degraded, "OpenAI-compatible provider could not be constructed"),
-            };
-            match provider.health_check().await {
-                Ok(()) => check("embedding", DiagnosticStatus::Healthy, "the configured OpenAI-compatible model passed its health probe"),
-                Err(EmbeddingError::RateLimited { .. }) => check(
-                    "embedding",
-                    DiagnosticStatus::Healthy,
-                    "the configured OpenAI-compatible provider is reachable but currently rate limited; startup treats it as available",
-                ),
-                Err(_error) => check(
-                    "embedding",
-                    DiagnosticStatus::Degraded,
-                    "the configured OpenAI-compatible model did not pass its health probe",
-                ),
-            }
+        (EmbeddingConfig::OpenAiCompatible { dimensions, .. }, EmbeddingProviderHealth::CheckDisabled) => check(
+            "embedding",
+            DiagnosticStatus::Healthy,
+            format!("health probe is disabled by policy for the configured OpenAI-compatible model with {dimensions} dimensions"),
+        ),
+        (EmbeddingConfig::OpenAiCompatible { .. }, EmbeddingProviderHealth::Healthy) => {
+            check("embedding", DiagnosticStatus::Healthy, "the configured OpenAI-compatible model passed its health probe")
         }
+        (EmbeddingConfig::OpenAiCompatible { .. }, EmbeddingProviderHealth::RateLimited) => check(
+            "embedding",
+            DiagnosticStatus::Healthy,
+            "the configured OpenAI-compatible provider is reachable but currently rate limited; startup treats it as available",
+        ),
+        (EmbeddingConfig::OpenAiCompatible { .. }, EmbeddingProviderHealth::Unavailable) => check(
+            "embedding",
+            DiagnosticStatus::Degraded,
+            "the configured OpenAI-compatible model did not pass its health probe",
+        ),
+        _ => check("embedding", DiagnosticStatus::Failed, "embedding provider status did not match the configured provider"),
     }
 }
 

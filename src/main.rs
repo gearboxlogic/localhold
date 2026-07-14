@@ -4,6 +4,7 @@ use std::{
     ffi::OsString,
     future::{Future, IntoFuture},
     io::Write as _,
+    path::PathBuf,
     sync::Arc,
 };
 
@@ -47,6 +48,9 @@ async fn main() -> AppResult {
         return finish_cli(result);
     }
     if let Some(result) = try_run_doctor_cli().await {
+        return finish_cli(result);
+    }
+    if let Some(result) = try_run_backup_restore_cli().await {
         return finish_cli(result);
     }
     if let Some(result) = try_run_migration_cli().await {
@@ -129,7 +133,91 @@ fn try_run_info_cli() -> Option<AppResult> {
 }
 
 const fn root_usage() -> &'static str {
-    "Usage: hold [COMMAND]\n\nRuns the LocalHold MCP server when no command is supplied.\n\nCommands:\n  config init                Create a no-clobber starter configuration\n  config paths               Show configuration search and active paths\n  config validate            Validate effective configuration without startup\n  doctor                     Diagnose installation and runtime readiness\n  embeddings status          Inspect embedding identity and rebuild progress\n  embeddings reindex --yes   Clear and rebuild the configured vector space\n  models verify              Verify reranker artifacts offline by SHA-256\n  models fetch --yes         Explicitly fetch and verify reranker artifacts\n  reranker gate              Run the real-GPU parity and performance release gate\n  migrate sqlite-to-postgres Migrate storage backends\n\nOptions:\n  -h, --help                 Print help\n  -V, --version              Print version"
+    "Usage: hold [COMMAND]\n\nRuns the LocalHold MCP server when no command is supplied.\n\nCommands:\n  backup PATH                Create a validated online SQLite backup\n  restore PATH --dry-run     Validate an SQLite restore without replacing data\n  restore PATH --yes         Restore SQLite and retain a recovery snapshot\n  config init                Create a no-clobber starter configuration\n  config paths               Show configuration search and active paths\n  config validate            Validate effective configuration without startup\n  doctor                     Diagnose installation and runtime readiness\n  embeddings status          Inspect embedding identity and rebuild progress\n  embeddings reindex --yes   Clear and rebuild the configured vector space\n  models verify              Verify reranker artifacts offline by SHA-256\n  models fetch --yes         Explicitly fetch and verify reranker artifacts\n  reranker gate              Run the real-GPU parity and performance release gate\n  migrate sqlite-to-postgres Migrate storage backends\n\nOptions:\n  -h, --help                 Print help\n  -V, --version              Print version"
+}
+
+async fn try_run_backup_restore_cli() -> Option<CliExitResult> {
+    const USAGE: &str = "Usage:\n  hold backup PATH [--json]\n  hold restore PATH (--dry-run | --yes) [--json]\n\nCreates a WAL-consistent SQLite backup or validates/restores one transactionally. Restore refuses to run while any LocalHold process has the configured database open. A successful restore retains a validated pre-restore recovery snapshot.\n\nOptions:\n  --dry-run  Validate schema, integrity, embedding profile, and server coordination\n  --yes      Explicitly confirm database replacement\n  --json     Emit the stable JSON report schema\n  -h, --help Print help\n\nExit codes:\n  0  backup created, restore validated, or restore completed\n  1  refused, blocked, invalid, or failed";
+
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let command = args.first().and_then(|argument| argument.to_str())?;
+    if !matches!(command, "backup" | "restore") {
+        return None;
+    }
+    Some(
+        async {
+            if args[1..].iter().any(is_help_arg) {
+                write_stdout(USAGE)?;
+                write_stdout("\n")?;
+                return Ok(0_i32);
+            }
+            let mut json = false;
+            let mut dry_run = false;
+            let mut confirmed = false;
+            let mut path = None;
+            for argument in &args[1..] {
+                if argument == "--json" {
+                    json = true;
+                } else if command == "restore" && argument == "--dry-run" {
+                    dry_run = true;
+                } else if command == "restore" && argument == "--yes" {
+                    confirmed = true;
+                } else if argument.to_string_lossy().starts_with('-') {
+                    return Err(EngineError::config(format!("unknown {command} option: {}\n\n{USAGE}", argument.to_string_lossy())).into());
+                } else if path.replace(PathBuf::from(argument)).is_some() {
+                    return Err(EngineError::config(format!("{command} accepts exactly one path\n\n{USAGE}")).into());
+                }
+            }
+            let path = path.ok_or_else(|| EngineError::config(format!("{command} requires a path\n\n{USAGE}")))?;
+            if command == "backup" && (dry_run || confirmed) {
+                return Err(EngineError::config(format!("backup does not accept restore confirmation options\n\n{USAGE}")).into());
+            }
+            if command == "restore" && dry_run && confirmed {
+                return Err(EngineError::config(format!("restore accepts only one of --dry-run or --yes\n\n{USAGE}")).into());
+            }
+
+            let operation = if command == "backup" { "backup" } else { "restore" };
+            let config = match Config::load() {
+                Ok(config) => config,
+                Err(error) => {
+                    let report = localhold::store::backup::MaintenanceReport::configuration_failure(operation, &path, error.to_string());
+                    return write_maintenance_cli_report(&report, json);
+                }
+            };
+            if config.database.backend != DatabaseBackend::Sqlite {
+                let report = localhold::store::backup::MaintenanceReport::configuration_failure(
+                    operation,
+                    &path,
+                    format!("{command} is supported only when database.backend = \"sqlite\"; PostgreSQL backups use PostgreSQL-native tooling"),
+                );
+                return write_maintenance_cli_report(&report, json);
+            }
+            let database_path = config.database.sqlite_path().to_path_buf();
+            let dimensions = config.embedding.dimensions();
+            let profile = active_embedding_profile(&config.embedding);
+            let report = if command == "backup" {
+                localhold::store::backup::backup(localhold::store::backup::BackupOptions::new(database_path, path)).await
+            } else {
+                localhold::store::backup::restore(
+                    localhold::store::backup::RestoreOptions::new(database_path, path, dimensions, profile)
+                        .dry_run(dry_run)
+                        .confirmed(confirmed),
+                )
+                .await
+            };
+            write_maintenance_cli_report(&report, json)
+        }
+        .await,
+    )
+}
+
+fn write_maintenance_cli_report(report: &localhold::store::backup::MaintenanceReport, json: bool) -> CliExitResult {
+    if json {
+        write_stdout(&report.to_json()?)?;
+    } else {
+        write_stdout(&report.render_text())?;
+    }
+    Ok(report.exit_code)
 }
 
 fn try_run_config_cli() -> Option<CliExitResult> {

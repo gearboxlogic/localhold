@@ -4,6 +4,12 @@ use rusqlite::{Connection, OptionalExtension as _};
 
 use crate::error::StoreError;
 
+/// Current on-disk SQLite schema contract.
+///
+/// This project reset its pre-1.0 schema lineage. Databases carrying a newer
+/// value are never opened or restored by an older binary.
+pub(crate) const SQLITE_SCHEMA_VERSION: u32 = 1;
+
 /// Core DDL for the memories table and its indexes.
 pub(crate) const MAIN_DDL: &str = "
     CREATE TABLE IF NOT EXISTS memories (

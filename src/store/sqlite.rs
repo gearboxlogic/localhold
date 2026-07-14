@@ -17,6 +17,7 @@ use sqlite_vec::sqlite3_vec_init;
 use super::{
     EmbeddingProfile, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter,
     migration::reject_retired_sqlite_schema,
+    sqlite_lease::SqliteDatabaseLease,
     vector::{SqliteVecIndex, VectorIndex as _},
 };
 use crate::{
@@ -47,6 +48,9 @@ struct SqliteInner {
     /// Whether FTS5 is available in this SQLite build. Set once during schema init.
     fts_available: AtomicBool,
     active_embedding_profile: RwLock<Option<EmbeddingProfile>>,
+    /// Shared process-lifetime lease that prevents an online restore from
+    /// replacing this database while the connection is open.
+    _database_lease: Option<SqliteDatabaseLease>,
 }
 
 pub(crate) const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -93,6 +97,7 @@ impl SqliteStore {
     /// Returns `StoreError` if the database cannot be opened or schema initialization fails.
     pub fn open_with_clock(path: &Path, embedding_dimensions: usize, clock: Arc<dyn Clock>) -> Result<Self, StoreError> {
         Self::register_extension()?;
+        let database_lease = SqliteDatabaseLease::shared(path)?;
         let conn = Connection::open(path)?;
         conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
         // WAL mode allows concurrent reads during writes (important for HTTP transport
@@ -107,6 +112,7 @@ impl SqliteStore {
                 vector_index: SqliteVecIndex::new(embedding_dimensions),
                 fts_available: AtomicBool::new(false),
                 active_embedding_profile: RwLock::new(None),
+                _database_lease: Some(database_lease),
             }),
         };
         store.init_schema()?;
@@ -141,6 +147,7 @@ impl SqliteStore {
                 vector_index: SqliteVecIndex::new(Self::DEFAULT_TEST_DIMENSIONS),
                 fts_available: AtomicBool::new(false),
                 active_embedding_profile: RwLock::new(None),
+                _database_lease: None,
             }),
         };
         store.init_schema()?;
@@ -186,6 +193,13 @@ impl SqliteStore {
 
     fn init_schema(&self) -> Result<(), StoreError> {
         let conn = self.inner.conn.lock();
+        let schema_version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if schema_version > crate::store::schema::SQLITE_SCHEMA_VERSION {
+            return Err(StoreError::Conflict(format!(
+                "SQLite schema version {schema_version} is newer than this binary supports ({})",
+                crate::store::schema::SQLITE_SCHEMA_VERSION
+            )));
+        }
         reject_retired_sqlite_schema(&conn)?;
 
         // First pass: create tables and indexes for fresh databases. For legacy
@@ -231,6 +245,7 @@ impl SqliteStore {
         migrate_create_scope_registry(&conn).map_err(|e| migration_failed("create_scope_registry", e))?;
         migrate_create_metadata(&conn).map_err(|e| migration_failed("create_metadata", e))?;
         migrate_create_memory_tombstones(&conn).map_err(|e| migration_failed("create_memory_tombstones", e))?;
+        conn.pragma_update(None, "user_version", crate::store::schema::SQLITE_SCHEMA_VERSION)?;
 
         drop(conn);
         Ok(())
@@ -368,7 +383,7 @@ pub(crate) fn ensure_embedding_profile_matches(conn: &Connection, expected: &Emb
     Ok(())
 }
 
-fn read_embedding_profile(conn: &Connection) -> Result<Option<EmbeddingProfile>, StoreError> {
+pub(crate) fn read_embedding_profile(conn: &Connection) -> Result<Option<EmbeddingProfile>, StoreError> {
     conn.query_row("SELECT provider, endpoint, model, dimensions FROM embedding_profile WHERE singleton = 1", [], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?))
     })
@@ -751,6 +766,27 @@ mod tests {
 
     fn embedding_profile(model: &str, dimensions: usize) -> EmbeddingProfile {
         EmbeddingProfile::openai_compatible("http://127.0.0.1:8000/v1", model, dimensions)
+    }
+
+    #[test]
+    fn open_stamps_schema_version_and_rejects_newer_databases() {
+        let directory = tempfile::tempdir().unwrap();
+        let current_path = directory.path().join("current.db");
+        let current = SqliteStore::open(&current_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap();
+        drop(current);
+        let connection = Connection::open(&current_path).unwrap();
+        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(version, crate::store::schema::SQLITE_SCHEMA_VERSION);
+        drop(connection);
+
+        let future_path = directory.path().join("future.db");
+        let connection = Connection::open(&future_path).unwrap();
+        connection
+            .pragma_update(None, "user_version", crate::store::schema::SQLITE_SCHEMA_VERSION.saturating_add(1))
+            .unwrap();
+        drop(connection);
+        let error = SqliteStore::open(&future_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap_err();
+        assert!(error.to_string().contains("newer than this binary supports"));
     }
 
     #[tokio::test]

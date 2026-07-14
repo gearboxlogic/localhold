@@ -242,9 +242,20 @@ LocalHold.
 ## Storage
 
 SQLite is the default backend and stores data under
-`~/.local/share/localhold/localhold.db`. Back up the database and its WAL files as
-a consistent set while the service is stopped or by using SQLite's backup
-facilities.
+`~/.local/share/localhold/localhold.db`. Create a WAL-consistent online backup,
+validate a restore, and then apply it explicitly with:
+
+```sh
+hold backup ./localhold-backup.db
+hold restore ./localhold-backup.db --dry-run
+# Stop every LocalHold process using the database, then:
+hold restore ./localhold-backup.db --yes
+```
+
+Backup never overwrites an existing destination. Restore validates schema,
+integrity, and embedding identity before replacement, refuses while another
+LocalHold process holds the database open, and retains a pre-restore recovery
+snapshot. Add `--json` to any command for stable automation output.
 
 PostgreSQL is opt-in:
 

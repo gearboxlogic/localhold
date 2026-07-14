@@ -1,6 +1,7 @@
 //! Memory persistence layer — trait definition and SQLite-backed implementation.
 
 mod admin;
+pub mod backup;
 #[cfg(test)]
 pub(crate) mod conformance;
 pub(crate) mod crud;
@@ -10,6 +11,7 @@ mod query;
 mod schema;
 mod search;
 mod sqlite;
+mod sqlite_lease;
 pub(crate) mod vector;
 
 use std::{collections::HashMap, future::Future};

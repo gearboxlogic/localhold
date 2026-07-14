@@ -15,7 +15,10 @@ use ratatui::{
 use crate::{
     store::MemoryStore,
     types::{AuditEntry, Memory},
-    ui::app::{App, Detail, Focus, Mode, Status},
+    ui::{
+        app::{App, Detail, Focus, Mode, Status},
+        editor::{EditDraft, EditField, TextInput},
+    },
 };
 
 /// One battlement unit: eight merlons, four gaps.
@@ -34,7 +37,18 @@ where
     draw_rule(frame, app, rule);
     draw_status(frame, app, status);
     if let Some(detail) = &app.detail {
-        draw_detail(frame, app, detail, main);
+        if matches!(app.mode, Mode::Edit | Mode::ConfirmDiscard) {
+            if let Some(edit) = &app.edit {
+                draw_edit(frame, app, detail, edit, main);
+            }
+        } else {
+            draw_detail(frame, app, detail, main);
+        }
+    }
+    if app.mode == Mode::ConfirmDelete {
+        draw_confirmation(frame, app, main, "Forget this memory permanently?  y yes  n no");
+    } else if app.mode == Mode::ConfirmDiscard {
+        draw_confirmation(frame, app, main, "Discard unsaved changes?  y yes  n no");
     }
 }
 
@@ -165,7 +179,13 @@ where
         line.push_span(Span::styled(format!("  ! {}", escape_terminal_text(notice)), app.theme.not_held()));
     }
     frame.render_widget(Paragraph::new(line), area);
-    let hints = Line::from(Span::styled("/ search  m mode  tab pane  enter open  q quit ", app.theme.label()));
+    let hint = match app.mode {
+        Mode::Browse | Mode::Search => "/ search  m mode  tab pane  enter open  q quit ",
+        Mode::Detail => "e edit  d delete  j/k scroll  esc close ",
+        Mode::Edit => "tab field  arrows edit  ctrl+s save  esc cancel ",
+        Mode::ConfirmDelete | Mode::ConfirmDiscard => "y confirm  n cancel ",
+    };
+    let hints = Line::from(Span::styled(hint, app.theme.label()));
     frame.render_widget(Paragraph::new(hints).alignment(Alignment::Right), area);
 }
 
@@ -173,11 +193,20 @@ fn draw_detail<S>(frame: &mut Frame<'_>, app: &App<S>, detail: &Detail, main: Re
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
-    let [_, mid, _] = Layout::horizontal([Constraint::Percentage(8), Constraint::Percentage(84), Constraint::Percentage(8)]).areas(main);
-    let [_, popup, _] = Layout::vertical([Constraint::Percentage(6), Constraint::Percentage(88), Constraint::Percentage(6)]).areas(mid);
+    let popup = main;
     frame.render_widget(Clear, popup);
     let block = Block::bordered().border_style(app.theme.accent()).title(Span::styled(" MEMORY ", app.theme.label()));
     let mut lines = meta_lines(app, &detail.memory);
+    if let Some(metadata) = &detail.metadata {
+        lines.push(Line::from(vec![
+            Span::styled("summary    ", app.theme.label()),
+            Span::raw(metadata.summary.as_deref().map_or_else(|| "\u{2014}".to_owned(), escape_terminal_text)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("label      ", app.theme.label()),
+            Span::raw(metadata.agent_label.as_deref().map_or_else(|| "\u{2014}".to_owned(), escape_terminal_text)),
+        ]));
+    }
     lines.push(Line::default());
     lines.extend(detail.memory.content.lines().map(|line| Line::from(escape_terminal_text(line))));
     lines.push(Line::default());
@@ -218,8 +247,78 @@ where
             Span::raw(memory.updated_at.format("%Y-%m-%d %H:%M").to_string()),
             Span::styled(format!("   embedded {}", if memory.has_embedding { "yes" } else { "no" }), app.theme.label()),
         ]),
+        Line::from(vec![
+            Span::styled("expires    ", app.theme.label()),
+            Span::raw(memory.expires_at.map_or_else(|| "\u{2014}".to_owned(), |value| value.to_rfc3339())),
+        ]),
         tags,
     ]
+}
+
+fn draw_edit<S>(frame: &mut Frame<'_>, app: &App<S>, detail: &Detail, edit: &EditDraft, area: Rect)
+where
+    S: MemoryStore + Clone + fmt::Debug + 'static,
+{
+    frame.render_widget(Clear, area);
+    let title = if app.pending { " EDIT MEMORY \u{b7} SAVING " } else { " EDIT MEMORY " };
+    let block = Block::bordered().border_style(app.theme.accent()).title(Span::styled(title, app.theme.label()));
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("id         ", app.theme.label()),
+            Span::styled(detail.memory.id.to_string(), app.theme.ident()),
+        ]),
+        Line::from(vec![
+            Span::styled("scope      ", app.theme.label()),
+            Span::raw(
+                detail
+                    .memory
+                    .provenance
+                    .source_conversation
+                    .as_deref()
+                    .map_or_else(|| "\u{2014}".to_owned(), escape_terminal_text),
+            ),
+            Span::styled("  (read-only)", app.theme.label()),
+        ]),
+        Line::default(),
+    ];
+    append_edit_field(&mut lines, app, edit, EditField::Content, &edit.content);
+    append_edit_field(&mut lines, app, edit, EditField::Tags, &edit.tags);
+    append_edit_field(&mut lines, app, edit, EditField::Importance, &edit.importance);
+    append_edit_field(&mut lines, app, edit, EditField::Expiry, &edit.expiry);
+    append_edit_field(&mut lines, app, edit, EditField::Metadata, &edit.metadata);
+    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false }).scroll((edit.scroll, 0_u16));
+    frame.render_widget(paragraph, area);
+}
+
+fn append_edit_field<S>(lines: &mut Vec<Line<'static>>, app: &App<S>, edit: &EditDraft, field: EditField, input: &TextInput)
+where
+    S: MemoryStore + Clone + fmt::Debug + 'static,
+{
+    let active = edit.field == field;
+    let marker = if active { "\u{258c} " } else { "  " };
+    let label_style = if active { app.theme.accent().bold() } else { app.theme.label() };
+    lines.push(Line::from(vec![Span::styled(marker, label_style), Span::styled(field.label(), label_style)]));
+    let mut value = input.value.clone();
+    if active && !app.pending {
+        value.insert(input.cursor, '\u{2588}');
+    }
+    if value.is_empty() {
+        lines.push(Line::from(Span::styled("  \u{2014}", app.theme.label())));
+    } else {
+        lines.extend(value.lines().map(|line| Line::from(format!("  {}", escape_terminal_text(line)))));
+    }
+    lines.push(Line::default());
+}
+
+fn draw_confirmation<S>(frame: &mut Frame<'_>, app: &App<S>, area: Rect, message: &str)
+where
+    S: MemoryStore + Clone + fmt::Debug + 'static,
+{
+    let [_, middle, _] = Layout::vertical([Constraint::Percentage(40), Constraint::Length(5), Constraint::Percentage(40)]).areas(area);
+    let [_, popup, _] = Layout::horizontal([Constraint::Percentage(20), Constraint::Percentage(60), Constraint::Percentage(20)]).areas(middle);
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered().border_style(app.theme.not_held()).title(Span::styled(" CONFIRM ", app.theme.label()));
+    frame.render_widget(Paragraph::new(escape_terminal_text(message)).block(block).alignment(Alignment::Center), popup);
 }
 
 fn audit_lines<S>(app: &App<S>, audit: &[AuditEntry]) -> Vec<Line<'static>>

@@ -1295,6 +1295,76 @@ impl PostgresStore {
         Ok(outcome)
     }
 
+    #[expect(clippy::too_many_arguments, reason = "atomic TUI revise needs revision, fields, metadata, embedding, principal, and audit")]
+    pub(crate) async fn update_authorized_if_unmodified_with_metadata_audited_impl(
+        &self,
+        id: &MemoryId,
+        expected_updated_at: DateTime<Utc>,
+        update: &MemoryUpdate,
+        metadata_patch: Option<&MetadataPatch>,
+        embedding: Option<&[f32]>,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<AuthorizedUpdateOutcome, StoreError> {
+        if update.content.is_some() != embedding.is_some() {
+            return Err(StoreError::Conflict("replacement content and embedding must be supplied together".into()));
+        }
+        if let Some(embedding) = embedding {
+            validate_embedding_dimensions(embedding, self.embedding_dimensions())?;
+        }
+
+        let mut tx = self.pool().begin().await?;
+        let Some(existing) = fetch_memory_by_id_for_update_tx(&mut tx, id).await? else {
+            tx.commit().await?;
+            return Ok(AuthorizedUpdateOutcome {
+                outcome: WriteOutcome::NotFound,
+                reembed_revision: None,
+            });
+        };
+        if !existing.has_write_access(principal) {
+            tx.commit().await?;
+            return Ok(AuthorizedUpdateOutcome {
+                outcome: WriteOutcome::Denied,
+                reembed_revision: None,
+            });
+        }
+        if existing.updated_at != expected_updated_at {
+            return Err(StoreError::Conflict(format!("memory {id} changed after it was opened")));
+        }
+
+        let mut outcome = apply_update_tx(&mut tx, id, update, self.clock_now()).await?;
+        if let Some(embedding) = embedding {
+            let active_profile = self.inner.active_embedding_profile.read().clone();
+            if let Some(profile) = active_profile {
+                ensure_embedding_profile_matches_tx(&mut tx, &profile).await?;
+            }
+            insert_embedding(&mut tx, id, embedding).await?;
+            let result = sqlx::query(
+                "UPDATE memories
+                 SET has_embedding = TRUE,
+                     embedding_claimed_at = NULL,
+                     embedding_claim_token = NULL
+                 WHERE id = $1",
+            )
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+            if result.rows_affected() == 0 {
+                return Err(StoreError::Conflict(format!("memory {id} changed while saving")));
+            }
+            outcome.reembed_revision = None;
+        }
+        if let Some(patch) = metadata_patch {
+            let existing_metadata = get_metadata_tx(&mut tx, id).await?;
+            let metadata = merge_metadata_patch(*id, patch, existing_metadata.as_ref(), existing.provenance.source_conversation.as_deref(), principal);
+            upsert_metadata_tx(&mut tx, &metadata, self.clock_now()).await?;
+        }
+        let audit = update_audit_draft_for_locked_memory(audit, update, &existing);
+        insert_audit_draft_tx(&mut tx, id, &audit).await?;
+        tx.commit().await?;
+        Ok(outcome)
+    }
+
     pub(crate) async fn delete_authorized_impl(&self, id: &MemoryId, principal: &str) -> Result<WriteOutcome, StoreError> {
         self.delete_authorized_audited_impl(id, principal, None).await
     }
@@ -1315,6 +1385,36 @@ impl PostgresStore {
         if let Some(audit) = audit {
             insert_audit_draft_tx(&mut tx, id, audit).await?;
         }
+        tx.commit().await?;
+        Ok(WriteOutcome::Applied)
+    }
+
+    pub(crate) async fn delete_authorized_if_unmodified_audited_impl(
+        &self,
+        id: &MemoryId,
+        expected_updated_at: DateTime<Utc>,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<WriteOutcome, StoreError> {
+        let mut tx = self.pool().begin().await?;
+        let Some(existing) = fetch_memory_by_id_for_update_tx(&mut tx, id).await? else {
+            tx.commit().await?;
+            return Ok(WriteOutcome::NotFound);
+        };
+        if !existing.has_write_access(principal) {
+            tx.commit().await?;
+            return Ok(WriteOutcome::Denied);
+        }
+        if existing.updated_at != expected_updated_at {
+            return Err(StoreError::Conflict(format!("memory {id} changed after it was opened")));
+        }
+
+        insert_tombstone_tx(&mut tx, &existing, self.clock_now(), Some(principal)).await?;
+        let deleted = delete_memory_tx(&mut tx, id).await?;
+        if !deleted {
+            return Err(StoreError::Conflict(format!("memory {id} changed while deleting")));
+        }
+        insert_audit_draft_tx(&mut tx, id, audit).await?;
         tx.commit().await?;
         Ok(WriteOutcome::Applied)
     }
@@ -1954,12 +2054,36 @@ impl MemoryWriter for PostgresStore {
         self.update_authorized_with_metadata_audited_impl(id, update, metadata_patch, principal, Some(audit)).await
     }
 
+    async fn update_authorized_if_unmodified_with_metadata_audited(
+        &self,
+        id: &MemoryId,
+        expected_updated_at: DateTime<Utc>,
+        update: &MemoryUpdate,
+        metadata_patch: Option<&MetadataPatch>,
+        embedding: Option<&[f32]>,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<AuthorizedUpdateOutcome, StoreError> {
+        self.update_authorized_if_unmodified_with_metadata_audited_impl(id, expected_updated_at, update, metadata_patch, embedding, principal, audit)
+            .await
+    }
+
     async fn delete_authorized(&self, id: &MemoryId, principal: &str) -> Result<WriteOutcome, StoreError> {
         self.delete_authorized_impl(id, principal).await
     }
 
     async fn delete_authorized_audited(&self, id: &MemoryId, principal: &str, audit: &AuditDraft) -> Result<WriteOutcome, StoreError> {
         self.delete_authorized_audited_impl(id, principal, Some(audit)).await
+    }
+
+    async fn delete_authorized_if_unmodified_audited(
+        &self,
+        id: &MemoryId,
+        expected_updated_at: DateTime<Utc>,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<WriteOutcome, StoreError> {
+        self.delete_authorized_if_unmodified_audited_impl(id, expected_updated_at, principal, audit).await
     }
 
     async fn bulk_delete_ids(&self, ids: Vec<MemoryId>, principal: &str) -> Result<BulkAuthOutcome, StoreError> {
@@ -2395,6 +2519,10 @@ async fn apply_update_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, upda
             push_assignment_separator(&mut builder, &mut has_assignments);
             let _ = builder.push("importance = ").push_bind(importance.value());
         }
+        if let Some(expires_at) = update.expires_at {
+            push_assignment_separator(&mut builder, &mut has_assignments);
+            let _ = builder.push("expires_at = ").push_bind(expires_at);
+        }
         if let Some(confidence) = update.confidence {
             push_assignment_separator(&mut builder, &mut has_assignments);
             let _ = builder.push("confidence = ").push_bind(confidence.value());
@@ -2442,6 +2570,7 @@ const fn has_column_updates(update: &MemoryUpdate) -> bool {
         || update.access_policy.is_some()
         || update.importance.is_some()
         || update.confidence.is_some()
+        || update.expires_at.is_some()
         || update.source_conversation.is_some()
 }
 

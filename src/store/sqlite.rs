@@ -665,12 +665,36 @@ impl MemoryWriter for SqliteStore {
         self.update_authorized_with_metadata_audited_impl(id, update, metadata_patch, principal, Some(audit)).await
     }
 
+    async fn update_authorized_if_unmodified_with_metadata_audited(
+        &self,
+        id: &MemoryId,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+        update: &MemoryUpdate,
+        metadata_patch: Option<&crate::types::MetadataPatch>,
+        embedding: Option<&[f32]>,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<AuthorizedUpdateOutcome, StoreError> {
+        self.update_authorized_if_unmodified_with_metadata_audited_impl(id, expected_updated_at, update, metadata_patch, embedding, principal, audit)
+            .await
+    }
+
     async fn delete_authorized(&self, id: &MemoryId, principal: &str) -> Result<WriteOutcome, StoreError> {
         self.delete_authorized_impl(id, principal).await
     }
 
     async fn delete_authorized_audited(&self, id: &MemoryId, principal: &str, audit: &AuditDraft) -> Result<WriteOutcome, StoreError> {
         self.delete_authorized_audited_impl(id, principal, Some(audit)).await
+    }
+
+    async fn delete_authorized_if_unmodified_audited(
+        &self,
+        id: &MemoryId,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<WriteOutcome, StoreError> {
+        self.delete_authorized_if_unmodified_audited_impl(id, expected_updated_at, principal, audit).await
     }
 
     async fn bulk_delete_ids(&self, ids: Vec<MemoryId>, principal: &str) -> Result<super::BulkAuthOutcome, StoreError> {

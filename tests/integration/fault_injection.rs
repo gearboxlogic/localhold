@@ -380,6 +380,24 @@ impl<S: MemoryWriter + Send + Sync> MemoryWriter for ChaosStore<S> {
         self.inner.update_authorized_with_metadata_audited(id, update, metadata_patch, principal, audit).await
     }
 
+    async fn update_authorized_if_unmodified_with_metadata_audited(
+        &self,
+        id: &MemoryId,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+        update: &MemoryUpdate,
+        metadata_patch: Option<&localhold::types::MetadataPatch>,
+        embedding: Option<&[f32]>,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<AuthorizedUpdateOutcome, StoreError> {
+        if let Some(err) = self.store_plan.should_fail() {
+            return Err(err);
+        }
+        self.inner
+            .update_authorized_if_unmodified_with_metadata_audited(id, expected_updated_at, update, metadata_patch, embedding, principal, audit)
+            .await
+    }
+
     async fn delete_authorized(&self, id: &MemoryId, principal: &str) -> Result<WriteOutcome, StoreError> {
         if let Some(err) = self.delete_plan.should_fail() {
             return Err(err);
@@ -392,6 +410,19 @@ impl<S: MemoryWriter + Send + Sync> MemoryWriter for ChaosStore<S> {
             return Err(err);
         }
         self.inner.delete_authorized_audited(id, principal, audit).await
+    }
+
+    async fn delete_authorized_if_unmodified_audited(
+        &self,
+        id: &MemoryId,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<WriteOutcome, StoreError> {
+        if let Some(err) = self.delete_plan.should_fail() {
+            return Err(err);
+        }
+        self.inner.delete_authorized_if_unmodified_audited(id, expected_updated_at, principal, audit).await
     }
 
     async fn bulk_delete_ids(&self, ids: Vec<MemoryId>, principal: &str) -> Result<localhold::store::BulkAuthOutcome, StoreError> {

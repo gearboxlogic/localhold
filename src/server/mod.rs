@@ -1558,7 +1558,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let metadata_patch = MetadataPatch {
             scope_key: scope_update.clone(),
             summary,
+            clear_summary: false,
             agent_label,
+            clear_agent_label: false,
         };
         let metadata_patch = (!metadata_patch.is_empty()).then_some(metadata_patch);
         let update = MemoryUpdate {
@@ -1566,6 +1568,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             tags,
             access_policy: normalize_optional_access_policy(params.access_policy),
             importance: params.importance.map(crate::types::Importance::new),
+            expires_at: None,
             confidence: params.confidence.map(crate::types::Confidence::new),
             source_conversation: scope_update.clone(),
             entities: normalize_optional_entity_inputs(params.entities).map_err(EngineError::from)?,

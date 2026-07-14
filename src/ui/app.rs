@@ -9,8 +9,11 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::{
     engine::{LocalHoldEngine, SearchRequest},
     store::MemoryStore,
-    types::{AuditEntry, Memory, MemoryFilter, QueryContext, ScopeDefinition, SearchMode},
-    ui::theme::Theme,
+    types::{AuditEntry, Memory, MemoryFilter, MemoryId, MemoryMetadata, QueryContext, ScopeDefinition, SearchMode, WriteOutcome},
+    ui::{
+        editor::{EditDraft, ParsedEdit},
+        theme::Theme,
+    },
 };
 
 /// Which pane owns keyboard focus.
@@ -29,8 +32,14 @@ pub(crate) enum Mode {
     Browse,
     /// The search input owns keystrokes.
     Search,
-    /// The detail overlay is open.
+    /// The detail view is open.
     Detail,
+    /// The in-app editor owns keystrokes.
+    Edit,
+    /// Destructive deletion is awaiting confirmation.
+    ConfirmDelete,
+    /// A dirty edit is awaiting discard confirmation.
+    ConfirmDiscard,
 }
 
 /// Status line verb + message, in the CLI voice from `assets/brand/cli.md`.
@@ -58,6 +67,8 @@ pub(crate) struct Row {
 pub(crate) struct Detail {
     /// The memory being inspected.
     pub memory: Memory,
+    /// Visible card metadata, when present.
+    pub metadata: Option<MemoryMetadata>,
     /// Its audit trail, newest first.
     pub audit: Vec<AuditEntry>,
     /// Vertical scroll offset for long content.
@@ -74,6 +85,31 @@ pub(crate) enum DataMsg {
         /// The search mode the engine actually used; `None` for plain listing.
         mode: Option<SearchMode>,
         /// Generation stamp; stale responses are dropped.
+        generation: u64,
+    },
+    /// An edit completed and the refreshed detail is available.
+    Updated {
+        /// Updated memory.
+        memory: Box<Memory>,
+        /// Updated metadata, when present.
+        metadata: Option<MemoryMetadata>,
+        /// Refreshed audit trail.
+        audit: Vec<AuditEntry>,
+        /// Mutation generation; stale responses are dropped.
+        generation: u64,
+    },
+    /// A memory was deleted.
+    Deleted {
+        /// Deleted memory ID.
+        id: MemoryId,
+        /// Mutation generation; stale responses are dropped.
+        generation: u64,
+    },
+    /// A mutation task failed.
+    MutationFailed {
+        /// Human-readable failure.
+        message: String,
+        /// Mutation generation; stale responses are dropped.
         generation: u64,
     },
     /// A data task failed.
@@ -121,8 +157,14 @@ where
     pub requested_mode: Option<SearchMode>,
     /// Mode the engine reported for the visible results.
     pub executed_mode: Option<SearchMode>,
-    /// Detail overlay, when open.
+    /// Detail view, when open.
     pub detail: Option<Detail>,
+    /// Edit draft, while editing or confirming discard.
+    pub edit: Option<EditDraft>,
+    /// Stamp for in-flight mutations; stale responses are dropped.
+    pub operation_generation: u64,
+    /// True while an edit or delete is in flight.
+    pub pending: bool,
     /// Persistent operator notice displayed beside transient status.
     pub notice: Option<String>,
     /// Status line content.
@@ -157,6 +199,9 @@ where
             requested_mode: None,
             executed_mode: None,
             detail: None,
+            edit: None,
+            operation_generation: 0_u64,
+            pending: false,
             notice: None,
             status: Status::Note("recalling the hold\u{2026}".into()),
             loading: true,
@@ -264,7 +309,7 @@ where
         });
     }
 
-    /// Fold a completed data task into the state.
+    /// Fold a completed data or mutation task into the state.
     pub(crate) fn on_data(&mut self, msg: DataMsg) {
         match msg {
             DataMsg::Rows { rows, mode, generation } if generation == self.generation => {
@@ -278,7 +323,49 @@ where
                 self.loading = false;
                 self.status = Status::NotHeld(message);
             }
-            DataMsg::Rows { .. } | DataMsg::Failed { .. } => {}
+            DataMsg::Updated {
+                memory,
+                metadata,
+                mut audit,
+                generation,
+            } if generation == self.operation_generation => {
+                self.pending = false;
+                let memory = (*memory).sanitize_for_wire();
+                let metadata = if memory.was_redacted { None } else { metadata };
+                if memory.was_redacted {
+                    redact_audit(&mut audit);
+                }
+                if let Some(row) = self.rows.iter_mut().find(|row| row.memory.id == memory.id) {
+                    row.memory = memory.clone();
+                    row.score = None;
+                }
+                self.detail = Some(Detail {
+                    memory,
+                    metadata,
+                    audit,
+                    scroll: 0_u16,
+                });
+                self.edit = None;
+                self.mode = Mode::Detail;
+                self.status = Status::Held("memory revised".into());
+            }
+            DataMsg::Deleted { id, generation } if generation == self.operation_generation => {
+                self.pending = false;
+                self.rows.retain(|row| row.memory.id != id);
+                self.row_selected = self.row_selected.min(self.rows.len().saturating_sub(1_usize));
+                self.detail = None;
+                self.edit = None;
+                self.mode = Mode::Browse;
+                self.status = Status::Held("memory forgotten".into());
+            }
+            DataMsg::MutationFailed { message, generation } if generation == self.operation_generation => {
+                self.pending = false;
+                self.status = Status::NotHeld(message);
+                if self.mode == Mode::ConfirmDelete {
+                    self.mode = Mode::Detail;
+                }
+            }
+            DataMsg::Rows { .. } | DataMsg::Failed { .. } | DataMsg::Updated { .. } | DataMsg::Deleted { .. } | DataMsg::MutationFailed { .. } => {}
         }
     }
 
@@ -310,6 +397,9 @@ where
                 Mode::Browse => self.key_browse(key).await,
                 Mode::Search => self.key_search(key),
                 Mode::Detail => self.key_detail(key),
+                Mode::Edit => self.key_edit(key),
+                Mode::ConfirmDelete => self.key_confirm_delete(key),
+                Mode::ConfirmDiscard => self.key_confirm_discard(key),
             }
         }
     }
@@ -362,6 +452,8 @@ where
                 self.detail = None;
                 self.mode = Mode::Browse;
             }
+            KeyCode::Char('e') => self.begin_edit(),
+            KeyCode::Char('d') => self.begin_delete(),
             KeyCode::Char('j') | KeyCode::Down => {
                 if let Some(detail) = self.detail.as_mut() {
                     detail.scroll = detail.scroll.saturating_add(1_u16);
@@ -372,6 +464,69 @@ where
                     detail.scroll = detail.scroll.saturating_sub(1_u16);
                 }
             }
+            _other => {}
+        }
+    }
+
+    #[expect(clippy::wildcard_enum_match_arm, reason = "KeyCode is non-exhaustive upstream; unmapped keys are intentionally ignored")]
+    fn key_edit(&mut self, key: KeyEvent) {
+        if self.pending {
+            return;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+            self.spawn_save();
+            return;
+        }
+        let Some(edit) = self.edit.as_mut() else {
+            self.mode = Mode::Detail;
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = if edit.dirty() { Mode::ConfirmDiscard } else { Mode::Detail };
+                if self.mode == Mode::Detail {
+                    self.edit = None;
+                }
+            }
+            KeyCode::Enter if edit.field.multiline() => edit.active_mut().insert('\n'),
+            KeyCode::Backspace => edit.active_mut().backspace(),
+            KeyCode::Delete => edit.active_mut().delete(),
+            KeyCode::Left => edit.active_mut().left(),
+            KeyCode::Right => edit.active_mut().right(),
+            KeyCode::Home => edit.active_mut().home(),
+            KeyCode::End => edit.active_mut().end(),
+            KeyCode::Up if edit.field.multiline() => edit.active_mut().up(),
+            KeyCode::Down if edit.field.multiline() => edit.active_mut().down(),
+            KeyCode::BackTab | KeyCode::Up => edit.field = edit.field.next(true),
+            KeyCode::Tab | KeyCode::Enter | KeyCode::Down => edit.field = edit.field.next(false),
+            KeyCode::Char(ch) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => edit.active_mut().insert(ch),
+            _other => {}
+        }
+        if let Some(edit) = self.edit.as_mut() {
+            edit.ensure_cursor_visible();
+        }
+    }
+
+    #[expect(clippy::wildcard_enum_match_arm, reason = "KeyCode is non-exhaustive upstream; unmapped keys are intentionally ignored")]
+    fn key_confirm_delete(&mut self, key: KeyEvent) {
+        if self.pending {
+            return;
+        }
+        match key.code {
+            KeyCode::Char('y') => self.spawn_delete(),
+            KeyCode::Char('n') | KeyCode::Esc => self.mode = Mode::Detail,
+            _other => {}
+        }
+    }
+
+    #[expect(clippy::wildcard_enum_match_arm, reason = "KeyCode is non-exhaustive upstream; unmapped keys are intentionally ignored")]
+    fn key_confirm_discard(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('y') => {
+                self.edit = None;
+                self.mode = Mode::Detail;
+            }
+            KeyCode::Char('n') | KeyCode::Esc => self.mode = Mode::Edit,
             _other => {}
         }
     }
@@ -399,12 +554,177 @@ where
                 if memory.was_redacted {
                     redact_audit(&mut audit);
                 }
-                self.detail = Some(Detail { memory, audit, scroll: 0_u16 });
+                let metadata = if memory.was_redacted { None } else { self.load_detail_metadata(&id).await };
+                self.detail = Some(Detail {
+                    memory,
+                    metadata,
+                    audit,
+                    scroll: 0_u16,
+                });
                 self.mode = Mode::Detail;
             }
             Ok(None) => self.status = Status::NotHeld("memory is no longer visible to this principal".into()),
             Err(error) => self.status = Status::NotHeld(format!("read failed: {error}")),
         }
+    }
+
+    async fn load_detail_metadata(&mut self, id: &MemoryId) -> Option<MemoryMetadata> {
+        match self.engine.get_metadata(id).await {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                self.status = Status::NotHeld(format!("metadata unavailable: {error}"));
+                None
+            }
+        }
+    }
+
+    fn begin_edit(&mut self) {
+        if self.pending {
+            return;
+        }
+        let Some(principal) = self.principal.as_deref() else {
+            self.status = Status::NotHeld("editing requires --principal or server.principal".into());
+            return;
+        };
+        let Some(detail) = self.detail.as_ref() else { return };
+        if detail.memory.was_redacted || !detail.memory.has_write_access(principal) {
+            self.status = Status::NotHeld("this principal cannot modify the selected memory".into());
+            return;
+        }
+        self.edit = Some(EditDraft::new(&detail.memory, detail.metadata.as_ref()));
+        self.mode = Mode::Edit;
+        self.status = Status::Note("editing memory".into());
+    }
+
+    fn begin_delete(&mut self) {
+        if self.pending {
+            return;
+        }
+        let Some(principal) = self.principal.as_deref() else {
+            self.status = Status::NotHeld("deletion requires --principal or server.principal".into());
+            return;
+        };
+        let Some(detail) = self.detail.as_ref() else { return };
+        if detail.memory.was_redacted || !detail.memory.has_write_access(principal) {
+            self.status = Status::NotHeld("this principal cannot delete the selected memory".into());
+            return;
+        }
+        self.mode = Mode::ConfirmDelete;
+    }
+
+    fn spawn_save(&mut self) {
+        if self.pending {
+            return;
+        }
+        let Some(principal) = self.principal.clone() else {
+            self.status = Status::NotHeld("editing requires --principal or server.principal".into());
+            return;
+        };
+        let Some(detail) = self.detail.as_ref() else { return };
+        let Some(edit) = self.edit.as_mut() else { return };
+        let ParsedEdit { update, metadata_patch } = match edit.parse() {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                edit.field = error.field;
+                self.status = Status::NotHeld(error.message);
+                return;
+            }
+        };
+        let parsed = ParsedEdit { update, metadata_patch };
+        if parsed.is_empty() {
+            self.edit = None;
+            self.mode = Mode::Detail;
+            self.status = Status::Note("no changes to hold".into());
+            return;
+        }
+
+        self.operation_generation = self.operation_generation.saturating_add(1_u64);
+        let generation = self.operation_generation;
+        self.pending = true;
+        self.status = Status::Note("holding revision\u{2026}".into());
+        let engine = self.engine.clone();
+        let tx = self.data_tx.clone();
+        let id = detail.memory.id;
+        let expected_updated_at = detail.memory.updated_at;
+        #[expect(unused_results, reason = "JoinHandle intentionally dropped — the result arrives via the data channel")]
+        tokio::spawn(async move {
+            let msg = match engine
+                .update_memory_if_unmodified_with_metadata(id, expected_updated_at, parsed.update, parsed.metadata_patch, &principal)
+                .await
+            {
+                Ok(outcome) if outcome.outcome == WriteOutcome::Applied => match engine.get_memory(&id, Some(&principal)).await {
+                    Ok(Some(memory)) => {
+                        let metadata = engine.get_metadata(&id).await.unwrap_or(None);
+                        let audit = engine.query_audit_log(&id, 20_usize).await.unwrap_or_default();
+                        DataMsg::Updated {
+                            memory: Box::new(memory),
+                            metadata,
+                            audit,
+                            generation,
+                        }
+                    }
+                    Ok(None) => DataMsg::MutationFailed {
+                        message: "memory became unavailable after saving".into(),
+                        generation,
+                    },
+                    Err(error) => DataMsg::MutationFailed {
+                        message: format!("saved, but refresh failed: {error}"),
+                        generation,
+                    },
+                },
+                Ok(outcome) => DataMsg::MutationFailed {
+                    message: match outcome.outcome {
+                        WriteOutcome::NotFound => "memory no longer exists".into(),
+                        WriteOutcome::Denied => "this principal cannot modify the selected memory".into(),
+                        WriteOutcome::Applied => "unexpected update outcome".into(),
+                    },
+                    generation,
+                },
+                Err(error) => DataMsg::MutationFailed {
+                    message: error.to_string(),
+                    generation,
+                },
+            };
+            drop(tx.send(msg));
+        });
+    }
+
+    fn spawn_delete(&mut self) {
+        if self.pending {
+            return;
+        }
+        let Some(principal) = self.principal.clone() else {
+            self.status = Status::NotHeld("deletion requires --principal or server.principal".into());
+            return;
+        };
+        let Some(detail) = self.detail.as_ref() else { return };
+        self.operation_generation = self.operation_generation.saturating_add(1_u64);
+        let generation = self.operation_generation;
+        self.pending = true;
+        self.status = Status::Note("forgetting memory\u{2026}".into());
+        let engine = self.engine.clone();
+        let tx = self.data_tx.clone();
+        let id = detail.memory.id;
+        let expected_updated_at = detail.memory.updated_at;
+        #[expect(unused_results, reason = "JoinHandle intentionally dropped — the result arrives via the data channel")]
+        tokio::spawn(async move {
+            let msg = match engine.delete_memory_if_unmodified(&id, expected_updated_at, &principal).await {
+                Ok(WriteOutcome::Applied) => DataMsg::Deleted { id, generation },
+                Ok(WriteOutcome::NotFound) => DataMsg::MutationFailed {
+                    message: "memory no longer exists".into(),
+                    generation,
+                },
+                Ok(WriteOutcome::Denied) => DataMsg::MutationFailed {
+                    message: "this principal cannot delete the selected memory".into(),
+                    generation,
+                },
+                Err(error) => DataMsg::MutationFailed {
+                    message: error.to_string(),
+                    generation,
+                },
+            };
+            drop(tx.send(msg));
+        });
     }
 
     fn move_selection(&mut self, down: bool) {
@@ -469,7 +789,10 @@ fn redact_audit(audit: &mut [AuditEntry]) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use ratatui::{
         Terminal,
@@ -501,6 +824,33 @@ mod tests {
         }
     }
 
+    struct FailingEmbedding;
+
+    impl EmbeddingProvider for FailingEmbedding {
+        fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, EmbeddingError>> {
+            Box::pin(async { Err(EmbeddingError::Permanent(std::io::Error::other("provider rejected test input").into())) })
+        }
+
+        fn health_check(&self) -> BoxFuture<'_, Result<(), EmbeddingError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct CountingEmbedding {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl EmbeddingProvider for CountingEmbedding {
+        fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, EmbeddingError>> {
+            let _previous = self.calls.fetch_add(1_usize, Ordering::SeqCst);
+            Box::pin(async { Ok(vec![1.0_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS]) })
+        }
+
+        fn health_check(&self) -> BoxFuture<'_, Result<(), EmbeddingError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
     async fn app_with_memories(contents: &[&str]) -> (App<SqliteStore>, mpsc::UnboundedReceiver<DataMsg>) {
         let store = SqliteStore::in_memory().unwrap();
         for content in contents {
@@ -514,6 +864,10 @@ mod tests {
 
     fn press(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn press_with(code: KeyCode, modifiers: KeyModifiers) -> Event {
+        Event::Key(KeyEvent::new(code, modifiers))
     }
 
     #[tokio::test]
@@ -650,6 +1004,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn detail_edit_saves_fields_metadata_and_embedding_atomically() {
+        let (mut app, mut rx) = app_with_memories(&["original memory"]).await;
+        app.principal = Some("operator".into());
+        app.bootstrap().await;
+        app.on_data(rx.recv().await.unwrap());
+        let id = app.rows[0].memory.id;
+
+        app.on_event(press(KeyCode::Enter)).await;
+        app.on_event(press(KeyCode::Char('e'))).await;
+        let edit = app.edit.as_mut().unwrap();
+        edit.content.value = "revised memory".into();
+        edit.tags.value = "alpha, beta".into();
+        edit.importance.value = "0.90".into();
+        edit.expiry.value = "2026-08-01T12:00:00Z".into();
+        edit.metadata.value = r#"{"summary":"revised summary","agent_label":"operator"}"#.into();
+        app.on_event(press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
+        assert!(app.pending);
+
+        app.on_data(rx.recv().await.unwrap());
+        assert_eq!(app.mode, Mode::Detail);
+        assert!(!app.pending);
+        let stored = app.engine.store().get(&id, Some("operator")).await.unwrap().unwrap();
+        assert_eq!(stored.content, "revised memory");
+        assert_eq!(stored.tags, vec!["alpha", "beta"]);
+        assert_eq!(stored.importance, crate::types::Importance::new(0.9_f64));
+        assert!(stored.expires_at.is_some());
+        assert!(stored.has_embedding);
+        assert!(app.engine.store().fetch_embeddings_for_ids(&[id]).await.unwrap().contains_key(&id));
+        let metadata = app.engine.get_metadata(&id).await.unwrap().unwrap();
+        assert_eq!(metadata.summary.as_deref(), Some("revised summary"));
+        assert_eq!(metadata.agent_label.as_deref(), Some("operator"));
+    }
+
+    #[tokio::test]
+    async fn embedding_failure_preserves_original_memory_and_draft() {
+        let store = SqliteStore::in_memory().unwrap();
+        let memory = Memory::new_for_test("original".into(), Vec::new(), Provenance::default(), AccessPolicy::Public);
+        let id = store.store(&memory, None).await.unwrap();
+        let engine = LocalHoldEngine::new(store, Arc::new(FailingEmbedding), LimitsConfig::default(), SearchConfig::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new(engine, Theme::detect(), Some("operator".into()), tx);
+        app.bootstrap().await;
+        app.on_data(rx.recv().await.unwrap());
+        app.on_event(press(KeyCode::Enter)).await;
+        app.on_event(press(KeyCode::Char('e'))).await;
+        app.edit.as_mut().unwrap().content.value = "rejected revision".into();
+        app.on_event(press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
+        app.on_data(rx.recv().await.unwrap());
+
+        assert_eq!(app.mode, Mode::Edit);
+        assert!(app.edit.as_ref().unwrap().dirty());
+        assert!(matches!(app.status, Status::NotHeld(_)));
+        let stored = app.engine.store().get(&id, Some("operator")).await.unwrap().unwrap();
+        assert_eq!(stored.content, "original");
+        assert!(!stored.has_embedding);
+    }
+
+    #[tokio::test]
+    async fn metadata_only_edit_does_not_initialize_embedding() {
+        let store = SqliteStore::in_memory().unwrap();
+        let memory = Memory::new_for_test("unchanged".into(), Vec::new(), Provenance::default(), AccessPolicy::Public);
+        let id = store.store(&memory, None).await.unwrap();
+        let calls = Arc::new(AtomicUsize::new(0_usize));
+        let engine = LocalHoldEngine::new(
+            store,
+            Arc::new(CountingEmbedding { calls: Arc::clone(&calls) }),
+            LimitsConfig::default(),
+            SearchConfig::default(),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new(engine, Theme::detect(), Some("operator".into()), tx);
+        app.bootstrap().await;
+        app.on_data(rx.recv().await.unwrap());
+        app.on_event(press(KeyCode::Enter)).await;
+        app.on_event(press(KeyCode::Char('e'))).await;
+        app.edit.as_mut().unwrap().metadata.value = r#"{"summary":"card only","agent_label":null}"#.into();
+        app.on_event(press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
+        app.on_data(rx.recv().await.unwrap());
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0_usize);
+        assert_eq!(app.engine.store().get(&id, Some("operator")).await.unwrap().unwrap().content, "unchanged");
+        assert_eq!(app.engine.get_metadata(&id).await.unwrap().unwrap().summary.as_deref(), Some("card only"));
+    }
+
+    #[tokio::test]
+    async fn delete_requires_confirmation_and_keeps_nearest_selection() {
+        let (mut app, mut rx) = app_with_memories(&["first", "second"]).await;
+        app.principal = Some("operator".into());
+        app.bootstrap().await;
+        app.on_data(rx.recv().await.unwrap());
+        let id = app.rows[0].memory.id;
+
+        app.on_event(press(KeyCode::Enter)).await;
+        app.on_event(press(KeyCode::Char('d'))).await;
+        assert_eq!(app.mode, Mode::ConfirmDelete);
+        app.on_event(press(KeyCode::Char('y'))).await;
+        assert!(app.pending);
+        app.on_data(rx.recv().await.unwrap());
+
+        assert_eq!(app.mode, Mode::Browse);
+        assert!(!app.rows.iter().any(|row| row.memory.id == id));
+        assert!(app.engine.store().get(&id, Some("operator")).await.unwrap().is_none());
+        assert_eq!(app.row_selected, 0_usize);
+    }
+
+    #[tokio::test]
+    async fn stale_edit_is_refused_and_draft_is_preserved() {
+        let (mut app, mut rx) = app_with_memories(&["original"]).await;
+        app.principal = Some("operator".into());
+        app.bootstrap().await;
+        app.on_data(rx.recv().await.unwrap());
+        let id = app.rows[0].memory.id;
+        app.on_event(press(KeyCode::Enter)).await;
+
+        let external = crate::types::MemoryUpdate {
+            content: Some("external revision".into()),
+            ..crate::types::MemoryUpdate::default()
+        };
+        let outcome = app.engine.update_memory(id, external, "operator").await.unwrap();
+        assert_eq!(outcome.outcome, crate::types::WriteOutcome::Applied);
+
+        app.on_event(press(KeyCode::Char('e'))).await;
+        app.edit.as_mut().unwrap().content.value = "stale local revision".into();
+        app.on_event(press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
+        app.on_data(rx.recv().await.unwrap());
+
+        assert_eq!(app.mode, Mode::Edit);
+        assert!(app.edit.as_ref().unwrap().dirty());
+        assert!(matches!(app.status, Status::NotHeld(_)));
+        let stored = app.engine.store().get(&id, Some("operator")).await.unwrap().unwrap();
+        assert_eq!(stored.content, "external revision");
+    }
+
+    #[tokio::test]
     async fn frame_renders_brand_chrome() {
         let (mut app, mut rx) = app_with_memories(&["the keep stands"]).await;
         app.bootstrap().await;
@@ -664,5 +1152,42 @@ mod tests {
         assert!(rendered.contains('\u{2580}'), "the battlement rule should be drawn");
         assert!(rendered.contains("held"), "the status line should speak the brand verb");
         assert!(rendered.contains("reranker off"), "persistent startup notices should be visible in the TUI");
+    }
+
+    #[tokio::test]
+    async fn edit_input_is_frozen_while_a_save_is_pending() {
+        let (mut app, mut rx) = app_with_memories(&["original"]).await;
+        app.principal = Some("operator".into());
+        app.bootstrap().await;
+        app.on_data(rx.recv().await.unwrap());
+        app.on_event(press(KeyCode::Enter)).await;
+        app.on_event(press(KeyCode::Char('e'))).await;
+        app.pending = true;
+        let original = app.edit.as_ref().unwrap().content.value.clone();
+
+        app.on_event(press(KeyCode::Char('x'))).await;
+
+        assert_eq!(app.edit.as_ref().unwrap().content.value, original);
+    }
+
+    #[tokio::test]
+    async fn editor_and_confirmation_render_in_a_narrow_terminal() {
+        let (mut app, mut rx) = app_with_memories(&["a narrow keep with a long memory"]).await;
+        app.principal = Some("operator".into());
+        app.bootstrap().await;
+        app.on_data(rx.recv().await.unwrap());
+        app.on_event(press(KeyCode::Enter)).await;
+        app.on_event(press(KeyCode::Char('e'))).await;
+
+        let mut terminal = Terminal::new(TestBackend::new(60_u16, 18_u16)).unwrap();
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        let rendered: String = terminal.backend().buffer().content().iter().map(ratatui::buffer::Cell::symbol).collect();
+        assert!(rendered.contains("EDIT MEMORY"));
+
+        app.mode = Mode::ConfirmDelete;
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        let rendered: String = terminal.backend().buffer().content().iter().map(ratatui::buffer::Cell::symbol).collect();
+        assert!(rendered.contains("CONFIRM"));
+        assert!(rendered.contains("Forget this memory"));
     }
 }

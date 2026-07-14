@@ -140,7 +140,7 @@ const fn root_usage() -> &'static str {
 }
 
 async fn try_run_ui_cli() -> Option<CliExitResult> {
-    const USAGE: &str = "Usage: hold ui [--principal <NAME>]\n\nBrowse and search the hold interactively. Opens the configured store\nread-only alongside any running LocalHold process (SQLite uses WAL for\nconcurrent readers; PostgreSQL is shared by nature).\n\nOptions:\n  --principal <NAME>  Read visibility principal (defaults to server.principal)\n  -h, --help          Print help";
+    const USAGE: &str = "Usage: hold ui [--principal <NAME>]\n\nBrowse, search, edit, and delete memories interactively. Explicit mutations\nuse the configured principal and the normal audited authorization path.\n\nOptions:\n  --principal <NAME>  Visibility and write principal (defaults to server.principal)\n  -h, --help          Print help";
 
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     if args.first().is_none_or(|argument| argument != "ui") {

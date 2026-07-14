@@ -194,10 +194,12 @@ current evidence and limitations.
 `hold ui` opens an interactive terminal browser over the configured store:
 scopes on the left, memories on the right, `/` to search (with `m` cycling
 keyword, text, semantic, and hybrid modes), and `enter` to inspect a memory
-with its audit trail. The UI is read-only and opens the store alongside any
-running LocalHold process — SQLite uses WAL for concurrent readers, and
-PostgreSQL is shared by nature. `--principal` overrides the read-visibility
-principal, which defaults to `server.principal`.
+with its audit trail. From the detail view, `e` edits content, tags,
+importance, expiry, and card metadata; `d` deletes after confirmation.
+`Ctrl+S` saves an edit, and `Esc` cancels. Browsing remains side-effect-free,
+while mutations use the normal audited authorization path and require
+`--principal` or `server.principal`. SQLite WAL and PostgreSQL allow the UI
+to run alongside a serving LocalHold process.
 
 ## MCP Client Setup
 

@@ -1,11 +1,12 @@
-//! Interactive terminal UI (`hold ui`) for browsing and searching the hold.
+//! Interactive terminal UI (`hold ui`) for browsing and managing the hold.
 //!
-//! The UI opens the configured store directly (SQLite in WAL mode supports
-//! concurrent readers alongside a running server; `PostgreSQL` is shared by
-//! nature), so it works whether or not a `LocalHold` process is serving MCP.
-//! It is read-only: browsing records no activity and writes nothing.
+//! The UI opens the configured store directly. SQLite WAL mode and `PostgreSQL`
+//! both support concurrent access alongside a running server. Browsing remains
+//! side-effect-free; explicit edit and delete commands use normal audited
+//! authorization paths.
 
 mod app;
+mod editor;
 mod theme;
 mod view;
 
@@ -30,7 +31,7 @@ type UiError = Box<dyn std::error::Error + Send + Sync>;
 #[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct UiOptions {
-    /// Principal used for read visibility; defaults to `server.principal`.
+    /// Principal used for visibility and writes; defaults to `server.principal`.
     pub principal: Option<String>,
 }
 
@@ -49,31 +50,48 @@ impl UiOptions {
 /// Returns an error when config loading, store opening, or terminal setup fails.
 pub async fn run(options: UiOptions) -> Result<i32, UiError> {
     let config = Config::load()?;
+    let principal = resolve_principal(&config, options)?;
+    let writable = principal.is_some();
     let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
     match config.database.backend {
         DatabaseBackend::Sqlite => {
             let db_path = config.database.sqlite_path().to_path_buf();
-            let store = SqliteStore::open_read_only_with_clock(&db_path, config.embedding.dimensions(), Arc::clone(&clock))?;
+            let store = if writable {
+                SqliteStore::open_with_clock(&db_path, config.embedding.dimensions(), Arc::clone(&clock))?
+            } else {
+                SqliteStore::open_read_only_with_clock(&db_path, config.embedding.dimensions(), Arc::clone(&clock))?
+            };
             if let Some(profile) = active_embedding_profile(&config.embedding) {
-                store.check_embedding_profile(&profile).await?;
+                if writable {
+                    store.verify_embedding_profile(&profile).await?;
+                } else {
+                    store.check_embedding_profile(&profile).await?;
+                }
             }
-            run_with_store(store, config, clock, options).await
+            run_with_store(store, config, clock, principal).await
         }
         DatabaseBackend::Postgres => {
-            let store = PostgresStore::open_read_only_with_clock(&config.database.postgres, config.embedding.dimensions(), Arc::clone(&clock)).await?;
+            let store = if writable {
+                PostgresStore::open_with_clock(&config.database.postgres, config.embedding.dimensions(), Arc::clone(&clock)).await?
+            } else {
+                PostgresStore::open_read_only_with_clock(&config.database.postgres, config.embedding.dimensions(), Arc::clone(&clock)).await?
+            };
             if let Some(profile) = active_embedding_profile(&config.embedding) {
-                store.check_embedding_profile(&profile).await?;
+                if writable {
+                    store.verify_embedding_profile(&profile).await?;
+                } else {
+                    store.check_embedding_profile(&profile).await?;
+                }
             }
-            run_with_store(store, config, clock, options).await
+            run_with_store(store, config, clock, principal).await
         }
     }
 }
 
-async fn run_with_store<S>(store: S, config: Config, clock: Arc<dyn Clock>, options: UiOptions) -> Result<i32, UiError>
+async fn run_with_store<S>(store: S, config: Config, clock: Arc<dyn Clock>, principal: Option<String>) -> Result<i32, UiError>
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
-    let principal = resolve_principal(&config, options)?;
     let mut startup_notice = None;
 
     #[cfg(feature = "reranker")]

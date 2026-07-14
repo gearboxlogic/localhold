@@ -540,6 +540,95 @@ fn apply_authorized_update_with_metadata(
     Ok(outcome)
 }
 
+#[expect(clippy::too_many_arguments, reason = "atomic TUI revise needs revision, fields, metadata, embedding, principal, and audit")]
+fn apply_authorized_update_if_unmodified_with_metadata(
+    conn: &mut Connection,
+    vector_index: &SqliteVecIndex,
+    id: &MemoryId,
+    expected_updated_at: chrono::DateTime<chrono::Utc>,
+    update: &MemoryUpdate,
+    metadata_patch: Option<&MetadataPatch>,
+    embedding: Option<&[f32]>,
+    principal: &str,
+    now: &str,
+    audit: &AuditDraft,
+) -> Result<AuthorizedUpdateOutcome, StoreError> {
+    if update.content.is_some() != embedding.is_some() {
+        return Err(StoreError::Conflict("replacement content and embedding must be supplied together".into()));
+    }
+
+    let tx = sqlite_write_tx(conn)?;
+    let id_str = id.to_string();
+    let Some(existing) = fetch_memory_by_id(&tx, &id_str)? else {
+        tx.commit()?;
+        return Ok(AuthorizedUpdateOutcome {
+            outcome: WriteOutcome::NotFound,
+            reembed_revision: None,
+        });
+    };
+    if !existing.has_write_access(principal) {
+        tx.commit()?;
+        return Ok(AuthorizedUpdateOutcome {
+            outcome: WriteOutcome::Denied,
+            reembed_revision: None,
+        });
+    }
+    if existing.updated_at != expected_updated_at {
+        return Err(StoreError::Conflict(format!("memory {id} changed after it was opened")));
+    }
+
+    let mut outcome = apply_update_inner(&tx, vector_index, &id_str, update, now)?;
+    if let Some(embedding) = embedding {
+        vector_index.upsert(&tx, &id_str, embedding)?;
+        let affected = tx.execute("UPDATE memories SET has_embedding = 1 WHERE id = ?1", params![id_str])?;
+        if affected == 0 {
+            return Err(StoreError::Conflict(format!("memory {id} changed while saving")));
+        }
+        outcome.reembed_revision = None;
+    }
+    if let Some(patch) = metadata_patch {
+        let existing_metadata = get_metadata_conn(&tx, id)?;
+        let metadata = merge_metadata_patch(*id, patch, existing_metadata.as_ref(), existing.provenance.source_conversation.as_deref(), principal);
+        upsert_metadata_conn(&tx, &metadata, now)?;
+    }
+    let audit = update_audit_draft_for_locked_memory(audit, update, &existing);
+    insert_audit_draft(&tx, id, &audit)?;
+    tx.commit()?;
+    Ok(outcome)
+}
+
+#[expect(clippy::too_many_arguments, reason = "atomic delete needs connection, identity, revision, principal, timestamp, and audit")]
+fn apply_authorized_delete_if_unmodified(
+    conn: &mut Connection,
+    id: &MemoryId,
+    expected_updated_at: chrono::DateTime<chrono::Utc>,
+    principal: &str,
+    deleted_at: &str,
+    audit: &AuditDraft,
+) -> Result<WriteOutcome, StoreError> {
+    let tx = sqlite_write_tx(conn)?;
+    let id_str = id.to_string();
+    let Some(existing) = fetch_memory_by_id(&tx, &id_str)? else {
+        tx.commit()?;
+        return Ok(WriteOutcome::NotFound);
+    };
+    if !existing.has_write_access(principal) {
+        tx.commit()?;
+        return Ok(WriteOutcome::Denied);
+    }
+    if existing.updated_at != expected_updated_at {
+        return Err(StoreError::Conflict(format!("memory {id} changed after it was opened")));
+    }
+
+    insert_tombstone(&tx, &existing, deleted_at, Some(principal))?;
+    let affected = tx.execute("DELETE FROM memories WHERE id = ?1", params![id_str])?;
+    if affected > 0 {
+        insert_audit_draft(&tx, id, audit)?;
+    }
+    tx.commit()?;
+    Ok(if affected > 0 { WriteOutcome::Applied } else { WriteOutcome::NotFound })
+}
+
 /// Maximum number of IDs per `IN (…)` clause in bulk operations, staying
 /// well under SQLite's default `SQLITE_MAX_VARIABLE_NUMBER` limit (999).
 pub(crate) const SQLITE_MAX_CHUNK: usize = 900;
@@ -654,6 +743,7 @@ const fn has_column_updates(update: &MemoryUpdate) -> bool {
         || update.tags.is_some()
         || update.access_policy.is_some()
         || update.importance.is_some()
+        || update.expires_at.is_some()
         || update.confidence.is_some()
         || update.source_conversation.is_some()
 }
@@ -745,6 +835,9 @@ fn build_set_clause(update: &MemoryUpdate, now: &str) -> Result<SetClauseBuilder
     }
     if let Some(importance) = update.importance {
         builder.push("importance", Box::new(importance.value()));
+    }
+    if let Some(expires_at) = update.expires_at {
+        builder.push("expires_at", Box::new(expires_at.map(|value| value.to_rfc3339())));
     }
     if let Some(confidence) = update.confidence {
         builder.push("confidence", Box::new(confidence.value()));
@@ -1398,6 +1491,42 @@ impl SqliteStore {
             .await
     }
 
+    #[expect(clippy::too_many_arguments, reason = "atomic TUI revise needs revision, fields, metadata, embedding, principal, and audit")]
+    pub(crate) async fn update_authorized_if_unmodified_with_metadata_audited_impl(
+        &self,
+        id: &MemoryId,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+        update: &MemoryUpdate,
+        metadata_patch: Option<&MetadataPatch>,
+        embedding: Option<&[f32]>,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<AuthorizedUpdateOutcome, StoreError> {
+        let id_value = *id;
+        let update = update.clone();
+        let metadata_patch = metadata_patch.cloned();
+        let embedding = embedding.map(<[f32]>::to_vec);
+        let caller = principal.to_owned();
+        let now = self.clock_now().to_rfc3339();
+        let audit = audit.clone();
+        let vector_index = self.vector_index();
+        self.with_conn(move |conn| {
+            apply_authorized_update_if_unmodified_with_metadata(
+                conn,
+                &vector_index,
+                &id_value,
+                expected_updated_at,
+                &update,
+                metadata_patch.as_ref(),
+                embedding.as_deref(),
+                &caller,
+                &now,
+                &audit,
+            )
+        })
+        .await
+    }
+
     pub(crate) async fn delete_authorized_impl(&self, id: &MemoryId, principal: &str) -> Result<WriteOutcome, StoreError> {
         self.delete_authorized_audited_impl(id, principal, None).await
     }
@@ -1408,6 +1537,21 @@ impl SqliteStore {
         let deleted_at = self.clock_now().to_rfc3339();
         let audit = audit.cloned();
         self.with_conn(move |conn| apply_authorized_delete(conn, &id_str, &caller, &deleted_at, audit.as_ref()))
+            .await
+    }
+
+    pub(crate) async fn delete_authorized_if_unmodified_audited_impl(
+        &self,
+        id: &MemoryId,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<WriteOutcome, StoreError> {
+        let id_value = *id;
+        let caller = principal.to_owned();
+        let deleted_at = self.clock_now().to_rfc3339();
+        let audit = audit.clone();
+        self.with_conn(move |conn| apply_authorized_delete_if_unmodified(conn, &id_value, expected_updated_at, &caller, &deleted_at, &audit))
             .await
     }
 

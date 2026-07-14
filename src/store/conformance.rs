@@ -377,7 +377,9 @@ where
     let metadata_patch = MetadataPatch {
         scope_key: Some(format!("contract/revised/{case}")),
         summary: Some(format!("revised summary {case}")),
+        clear_summary: false,
         agent_label: Some("conformance-agent".into()),
+        clear_agent_label: false,
     };
     let metadata_audit = AuditDraft {
         action: AuditAction::Update,
@@ -406,6 +408,112 @@ where
         metadata_details.get("old_content_hash"),
         Some(&json!(super::crud::content_hash(&content_after_audit_update)))
     );
+
+    let interactive = memory(MemorySpec {
+        content: format!("interactive original {case}"),
+        tags: vec![case_tag.clone(), "interactive".into()],
+        source_agent: OWNER,
+        scope: scope.clone(),
+        origin: origin.clone(),
+        access_policy: AccessPolicy::Public,
+        created_at: time_after(base, 16),
+    });
+    let interactive_id = store.store(&interactive, Some(&embedding(embedding_dimensions, 20.0_f32))).await.unwrap();
+    let interactive_metadata = MemoryMetadata {
+        memory_id: interactive_id,
+        scope_key: Some(scope.clone()),
+        summary: Some("interactive summary".into()),
+        agent_label: Some("interactive agent".into()),
+        created_by_principal: Some(OWNER.into()),
+        quality_flags: Vec::new(),
+        schema_version: 1,
+    };
+    store.upsert_metadata(interactive_metadata).await.unwrap();
+    let loaded = store.get(&interactive_id, Some(OWNER)).await.unwrap().unwrap();
+    let replacement_content = format!("interactive revised {case}");
+    let replacement_expiry = Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).single().unwrap();
+    let replacement_update = MemoryUpdate {
+        content: Some(replacement_content.clone()),
+        tags: Some(vec![case_tag.clone(), "revised-interactive".into()]),
+        expires_at: Some(Some(replacement_expiry)),
+        importance: Some(Importance::new(0.9_f64)),
+        ..MemoryUpdate::default()
+    };
+    let replacement_metadata = MetadataPatch {
+        scope_key: None,
+        summary: None,
+        clear_summary: true,
+        agent_label: Some("revised agent".into()),
+        clear_agent_label: false,
+    };
+    let replacement_audit = AuditDraft {
+        action: AuditAction::Update,
+        caller_agent: Some(OWNER.into()),
+        timestamp: time_after(base, 17),
+        details: Some(json!({"interactive": true})),
+    };
+    let replacement_embedding = embedding(embedding_dimensions, 21.0_f32);
+    let interactive_outcome = store
+        .update_authorized_if_unmodified_with_metadata_audited(
+            &interactive_id,
+            loaded.updated_at,
+            &replacement_update,
+            Some(&replacement_metadata),
+            Some(&replacement_embedding),
+            OWNER,
+            &replacement_audit,
+        )
+        .await
+        .unwrap();
+    assert_eq!(interactive_outcome.outcome, WriteOutcome::Applied);
+    assert!(interactive_outcome.reembed_revision.is_none());
+    let revised = store.get(&interactive_id, Some(OWNER)).await.unwrap().unwrap();
+    assert_eq!(revised.content, replacement_content);
+    assert_eq!(revised.expires_at, Some(replacement_expiry));
+    assert!(revised.has_embedding);
+    assert_eq!(
+        store.fetch_embeddings_for_ids(&[interactive_id]).await.unwrap().get(&interactive_id),
+        Some(&replacement_embedding)
+    );
+    let revised_metadata = store.get_metadata(&interactive_id).await.unwrap().unwrap();
+    assert!(revised_metadata.summary.is_none());
+    assert_eq!(revised_metadata.agent_label.as_deref(), Some("revised agent"));
+
+    let stale_error = store
+        .update_authorized_if_unmodified_with_metadata_audited(
+            &interactive_id,
+            loaded.updated_at,
+            &MemoryUpdate {
+                content: Some("stale overwrite".into()),
+                ..MemoryUpdate::default()
+            },
+            None,
+            Some(&embedding(embedding_dimensions, 22.0_f32)),
+            OWNER,
+            &replacement_audit,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(stale_error, StoreError::Conflict(_)));
+    assert_eq!(store.get(&interactive_id, Some(OWNER)).await.unwrap().unwrap().content, replacement_content);
+
+    let delete_audit = AuditDraft {
+        action: AuditAction::Delete,
+        caller_agent: Some(OWNER.into()),
+        timestamp: time_after(base, 18),
+        details: Some(json!({"interactive": true})),
+    };
+    let stale_delete = store
+        .delete_authorized_if_unmodified_audited(&interactive_id, loaded.updated_at, OWNER, &delete_audit)
+        .await
+        .unwrap_err();
+    assert!(matches!(stale_delete, StoreError::Conflict(_)));
+    let delete_outcome = store
+        .delete_authorized_if_unmodified_audited(&interactive_id, revised.updated_at, OWNER, &delete_audit)
+        .await
+        .unwrap();
+    assert_eq!(delete_outcome, WriteOutcome::Applied);
+    assert!(store.get(&interactive_id, Some(OWNER)).await.unwrap().is_none());
 
     let from_scope = format!("contract/from/{case}");
     let to_scope = format!("contract/to/{case}");

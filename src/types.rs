@@ -850,15 +850,19 @@ pub struct MetadataPatch {
     pub scope_key: Option<String>,
     /// Replacement compact summary.
     pub summary: Option<String>,
+    /// Clear the compact summary when no replacement is supplied.
+    pub clear_summary: bool,
     /// Replacement human-readable agent label.
     pub agent_label: Option<String>,
+    /// Clear the agent label when no replacement is supplied.
+    pub clear_agent_label: bool,
 }
 
 impl MetadataPatch {
     /// Whether this patch has no changes to apply.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.scope_key.is_none() && self.summary.is_none() && self.agent_label.is_none()
+        self.scope_key.is_none() && self.summary.is_none() && !self.clear_summary && self.agent_label.is_none() && !self.clear_agent_label
     }
 }
 
@@ -1120,6 +1124,8 @@ pub struct MemoryUpdate {
     pub access_policy: Option<AccessPolicy>,
     /// New importance score in the range `[0.0, 1.0]`.
     pub importance: Option<Importance>,
+    /// Replacement expiry. `Some(None)` clears an existing expiry.
+    pub expires_at: Option<Option<DateTime<Utc>>>,
     /// New confidence score in the range `[0.0, 1.0]`.
     pub confidence: Option<Confidence>,
     /// New conversation scope for filtering.

@@ -840,6 +840,39 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         Ok(outcome)
     }
 
+    /// Atomically revise a memory loaded at `expected_updated_at`.
+    ///
+    /// Replacement content is embedded before the store transaction begins;
+    /// the transaction then commits fields, metadata, vector, and audit
+    /// together. A provider or revision conflict leaves the original intact.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, embedding, authorization/store, or concurrency
+    /// errors without partially applying the revision.
+    #[expect(clippy::too_many_arguments, reason = "interactive revise needs identity, revision, fields, metadata, and principal")]
+    pub async fn update_memory_if_unmodified_with_metadata(
+        &self,
+        id: MemoryId,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+        mut update: MemoryUpdate,
+        metadata_patch: Option<MetadataPatch>,
+        principal: &str,
+    ) -> Result<AuthorizedUpdateOutcome, EngineError> {
+        self.prepare_update(&mut update)?;
+        let embedding = match update.content.as_deref() {
+            Some(content) => Some(self.orchestrator.embedding().embed(content).await?),
+            None => None,
+        };
+        let details = metadata_patch.is_some().then(|| serde_json::json!({"metadata": true, "interactive": true}));
+        let audit = self.audit_draft(AuditAction::Update, Some(principal.to_owned()), details);
+        Ok(self
+            .orchestrator
+            .store()
+            .update_authorized_if_unmodified_with_metadata_audited(&id, expected_updated_at, &update, metadata_patch.as_ref(), embedding.as_deref(), principal, &audit)
+            .await?)
+    }
+
     /// Validate content, tags, and entities fields of an update payload.
     fn validate_update_fields(&self, update: &MemoryUpdate) -> Result<(), EngineError> {
         if let Some(content) = &update.content {
@@ -884,6 +917,20 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         let audit = self.audit_draft(AuditAction::Delete, Some(principal.to_owned()), None);
         let outcome = self.orchestrator.store().delete_authorized_audited(id, principal, &audit).await?;
         Ok(outcome)
+    }
+
+    /// Delete a memory only if its loaded content revision is still current.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Store` on persistence or concurrency failure.
+    pub async fn delete_memory_if_unmodified(&self, id: &MemoryId, expected_updated_at: chrono::DateTime<chrono::Utc>, principal: &str) -> Result<WriteOutcome, EngineError> {
+        let audit = self.audit_draft(AuditAction::Delete, Some(principal.to_owned()), Some(serde_json::json!({"interactive": true})));
+        Ok(self
+            .orchestrator
+            .store()
+            .delete_authorized_if_unmodified_audited(id, expected_updated_at, principal, &audit)
+            .await?)
     }
 
     /// Reassign conversation scope for matching memories the caller may write.

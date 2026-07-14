@@ -129,6 +129,19 @@ fn reranker_gate_invalid_threshold_is_structured_without_hardware_access() {
     assert!(!root.exists(), "invalid gate options must not initialize storage or model artifacts");
 }
 
+#[cfg(feature = "reranker-cuda")]
+#[test]
+fn reranker_gate_rejects_malformed_environment_override() {
+    let root = unique_db_path("reranker-gate-malformed-env").with_extension("root");
+    let (mut command, _config_dir) = config_binary_command(&root);
+    command.env("LOCALHOLD_RERANKER_PRECISION", "f16");
+    let output = command.args(["reranker", "gate", "--iterations", "0", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1_i32));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8(output.stderr).unwrap().contains("LOCALHOLD_* environment override is malformed"));
+    assert!(!root.exists(), "malformed gate configuration must not initialize storage or model artifacts");
+}
+
 #[cfg(feature = "reranker")]
 fn read_http_request_headers(stream: &mut impl Read) -> std::io::Result<Vec<u8>> {
     const MAX_HEADER_BYTES: usize = 16 * 1024;

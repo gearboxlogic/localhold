@@ -381,6 +381,7 @@ async fn run_with(config: &RerankerConfig, options: &GateOptions, clock: Arc<dyn
         loaded_resources: cuda_loaded_resources,
         concurrency: cuda_concurrency,
     });
+    report.failures.extend(non_finite_score_failures(&cpu_scores, &cuda_scores));
     report.parity = Some(compare_scores(&cpu_scores, &cuda_scores, options.parity_top_k));
     drop(cuda_provider);
 
@@ -405,6 +406,17 @@ async fn run_with(config: &RerankerConfig, options: &GateOptions, clock: Arc<dyn
         report.exit_code = 0_i32;
     }
     report
+}
+
+fn non_finite_score_failures(cpu: &[Vec<RerankerScore>], cuda: &[Vec<RerankerScore>]) -> Vec<String> {
+    let mut failures = Vec::new();
+    if cpu.iter().flatten().any(|score| !score.score.is_finite()) {
+        failures.push("CPU parity corpus contained a non-finite score".into());
+    }
+    if cuda.iter().flatten().any(|score| !score.score.is_finite()) {
+        failures.push("CUDA parity corpus contained a non-finite score".into());
+    }
+    failures
 }
 
 fn validate_options(options: &GateOptions) -> Vec<String> {
@@ -737,6 +749,16 @@ mod tests {
         let parity = compare_scores(&cpu, &cuda, 2);
         assert!((parity.minimum_observed_overlap - 0.5_f64).abs() < f64::EPSILON);
         assert!((parity.maximum_observed_score_delta - 0.71_f64).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parity_rejects_non_finite_scores_from_either_provider() {
+        let cpu = vec![vec![RerankerScore::new(0, f64::NAN)]];
+        let cuda = vec![vec![RerankerScore::new(0, f64::INFINITY)]];
+        assert_eq!(non_finite_score_failures(&cpu, &cuda), vec![
+            "CPU parity corpus contained a non-finite score",
+            "CUDA parity corpus contained a non-finite score"
+        ]);
     }
 
     #[test]

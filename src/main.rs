@@ -283,7 +283,7 @@ async fn run_reranker_gate_cli(args: &[OsString]) -> CliExitResult {
         index = index.saturating_add(2);
     }
 
-    let config = Config::load()?;
+    let config = localhold::config::operator::load_effective_strict()?;
     let report = localhold::reranker::gate::run(&config.search.reranker, &options).await;
     write_stdout(&report.to_json()?)?;
     Ok(report.exit_code)

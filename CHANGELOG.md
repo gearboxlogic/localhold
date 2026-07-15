@@ -3,33 +3,59 @@
 All notable changes to LocalHold will be documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/). During the
-`0.x` beta series, release notes will identify compatibility and data migration
+`0.x` series, release notes identify compatibility and data migration
 requirements explicitly.
 
 ## [Unreleased]
 
-- Added `hold embeddings status [--json]` with provider health, secret-free
-  configured/stored profile identity, SQLite and PostgreSQL vector coverage,
-  consistency diagnostics, stable states, and automation-friendly exit codes.
+## [0.2.0] - 2026-07-14
+
+- Added `hold ui`, an interactive terminal browser with search, detail,
+  metadata, history, edit, expiry, and delete workflows. Browsing remains
+  read-only; write access is acquired only for confirmed mutations.
+- Added optimistic concurrency for interactive memory edits and deletes across
+  SQLite and PostgreSQL. A separate record revision detects metadata and
+  lifecycle changes without making unchanged content appear freshly updated.
+- Added supported WAL-safe SQLite backup and restore commands with validation,
+  dry runs, cross-process coordination, retained recovery snapshots, and
+  transactional rollback when replacement or post-write validation fails.
+- Added `hold doctor` with stable text and JSON diagnostics for configuration,
+  storage schemas, embedding profiles, vector consistency, reranker health,
+  and repairable versus blocking conditions.
+- Added `hold config init`, `hold config validate`, and `hold config paths` for
+  safe operator setup, validation, and active-path discovery.
+- Added model artifact operator commands and `hold embeddings status [--json]`
+  with provider health, secret-free configured/stored profile identity, vector
+  coverage, consistency diagnostics, stable states, and automation-friendly
+  exit codes.
 - Added explicit reranker execution-provider policy with `auto`, `cpu`, and
-  `cuda` modes, truthful compiled/selected/active provider reporting, and
-  optional required-mode startup enforcement.
-- Made CUDA-capable builds fall back visibly to a CPU session only in `auto`
-  mode; an explicit `cuda` request never silently falls back.
-- Replaced the built-in reranker's raw ONNX graph with a checksum-pinned fused
-  FP32 artifact, and added an opt-in fused FP16 profile for explicit CUDA use.
-  FP16 is rejected with CPU or `auto` fallback because it trades some ranking
+  `cuda` modes, truthful compiled/selected/active reporting, required-mode
+  startup enforcement, and process-safe model cache downloads.
+- Replaced the built-in reranker raw ONNX graph with a checksum-pinned fused
+  FP32 artifact and added an opt-in fused FP16 profile for explicit CUDA use.
+  FP16 is rejected with CPU or `auto` fallback because it trades ranking
   precision for lower weight storage and faster CUDA reranking.
-- Added a deterministic Linux x86_64 CUDA 12 release archive with checksum-pinned
-  ONNX Runtime/CUDA/cuDNN inputs, private sibling-library loading, per-file
-  manifests and notices, Ubuntu 22.04/glibc-floor enforcement, clean-host
-  validation, and an exact-artifact protected GPU gate that blocks publication
-  on parity, performance, or resource failure.
+- Expanded release packaging with a deterministic Linux x86_64 CUDA 12 archive
+  alongside the existing Linux CPU and Windows preview archives, and hardened
+  them with pinned runtime inputs, private library loading, manifests, notices,
+  checksums, extracted-artifact smoke tests, and Ubuntu 22.04/glibc-floor
+  enforcement.
+- Added a protected real-GPU release gate that validates the exact CUDA archive
+  for native dependency closure, clean-host startup, FP32/FP16 parity,
+  performance, and resource limits before publication.
+- Added the LocalHold brand identity and maintained design-system assets.
+- Hardened schema diagnostics, PostgreSQL index checks, redaction boundaries,
+  release smoke tests, and CUDA runtime error reporting; removed retired API
+  artifacts and made runtime time testable without wall-clock sleeps.
+- Compatibility: opening a SQLite v1 database upgrades it to schema v2, and
+  restore upgrades a strictly validated v1 backup only on a private staging
+  copy. Older binaries reject schema v2 databases. PostgreSQL startup adds the
+  matching record-revision migration automatically.
 
 ## [0.1.0-beta.3] - 2026-07-10
 
-- Corrected MCP initialize metadata to report LocalHold's name and package
-  version instead of the underlying SDK's identity.
+- Corrected MCP initialize metadata to report LocalHold package name and
+  version instead of the underlying SDK identity.
 
 ## [0.1.0-beta.2] - 2026-07-10
 
@@ -53,7 +79,8 @@ requirements explicitly.
 - Added reproducible Linux CPU and Windows preview release archives with
   extracted-artifact smoke tests, checksums, and automated GitHub prereleases.
 
-[Unreleased]: https://github.com/gearboxlogic/localhold/compare/v0.1.0-beta.3...HEAD
+[Unreleased]: https://github.com/gearboxlogic/localhold/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/gearboxlogic/localhold/compare/v0.1.0-beta.3...v0.2.0
 [0.1.0-beta.3]: https://github.com/gearboxlogic/localhold/compare/v0.1.0-beta.2...v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/gearboxlogic/localhold/compare/v0.1.0-beta.1...v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/gearboxlogic/localhold/tree/v0.1.0-beta.1

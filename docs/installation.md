@@ -116,7 +116,7 @@ Clone a tagged release, review the tag and release notes, then install the CPU
 build for the current user:
 
 ```sh
-git clone --branch v0.1.0-beta.3 --depth 1 \
+git clone --branch v0.2.0 --depth 1 \
   https://github.com/gearboxlogic/localhold.git
 cd localhold
 ./script/install.sh

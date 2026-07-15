@@ -1,6 +1,6 @@
 # Installation
 
-LocalHold is not published to crates.io. GitHub prereleases provide CPU binary
+LocalHold is not published to crates.io. GitHub releases provide CPU binary
 archives for Linux x86_64 and Windows x86_64 plus a self-contained CUDA 12
 reranker archive for Linux x86_64. Building a locked checkout remains available
 for other prefixes and custom CUDA installations.

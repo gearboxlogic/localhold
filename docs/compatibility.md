@@ -34,12 +34,13 @@ Pre-release development databases containing the retired
 stops with an actionable error instead of importing or ignoring that data. Back
 up and reset those databases before starting the current release.
 
-Current SQLite databases carry `PRAGMA user_version = 1`, the first schema
-contract after the pre-1.0 lineage reset. Startup migrates an otherwise
-compatible unversioned database to this contract, but refuses a database whose
-version is newer than the running binary. Supported backups and restores expose
-and validate this value; the JSON report's separate `schema_version` identifies
-the report format itself.
+Current SQLite databases carry `PRAGMA user_version = 2`. Startup upgrades a
+schema-v1 database to this contract and migrates an otherwise compatible
+unversioned database, but refuses a database whose version is newer than the
+running binary. Supported backups and restores expose and validate this value;
+restore can upgrade a strictly validated v1 backup on a private staging copy.
+The JSON report's separate `schema_version` identifies the report format
+itself.
 
 ## Protocol Compatibility
 

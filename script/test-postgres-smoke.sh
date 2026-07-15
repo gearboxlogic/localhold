@@ -64,6 +64,9 @@ main() {
   say "Running ignored PostgreSQL binary startup smoke test"
   LOCALHOLD_POSTGRES_URL="$url" cargo test -p localhold --test integration binary_smoke::binary_starts_with_postgres_backend --locked -- --ignored --test-threads=1
 
+  say "Running ignored PostgreSQL disabled-migration startup smoke test"
+  LOCALHOLD_POSTGRES_URL="$url" cargo test -p localhold --test integration binary_smoke::binary_rejects_empty_postgres_when_auto_migrate_is_disabled --locked -- --ignored --test-threads=1
+
   say "Running ignored PostgreSQL binary migration smoke test"
   LOCALHOLD_POSTGRES_URL="$url" cargo test -p localhold --test integration binary_smoke::binary_migrates_sqlite_to_postgres --locked -- --ignored --test-threads=1
 

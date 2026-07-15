@@ -8,10 +8,19 @@ requirements explicitly.
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-07-14
+## [0.2.0] - 2026-07-15
 
-- Changed malformed typed `LOCALHOLD_*` environment overrides to fail startup and operator commands without echoing their values; `hold doctor` now reports configuration failure and skips dependent probes when effective configuration is unavailable.
-- Changed PostgreSQL startup to reject absent, partial, incompatible, or conflicting managed schemas before serving requests, including when automatic migration is disabled.
+- Changed malformed typed `LOCALHOLD_*` environment overrides to fail startup
+  and operator commands without echoing their values; `hold doctor` now reports
+  configuration failure and skips dependent probes when effective
+  configuration is unavailable.
+- Changed PostgreSQL startup to validate the resolved managed schema before
+  serving: automatic migration bootstraps or repairs compatible schemas,
+  disabled migration rejects absent or partial schemas, and all modes reject
+  incompatible or conflicting schemas.
+- Changed PostgreSQL schema initialization and migration to run atomically
+  under a serialized advisory lock, with a configurable bound on each lock wait
+  and exact migration-ledger validation.
 - Added `hold ui`, an interactive terminal browser with search, detail,
   metadata, history, edit, expiry, and delete workflows. Browsing remains
   read-only; write access is acquired only for confirmed mutations.
@@ -47,12 +56,13 @@ requirements explicitly.
   performance, and resource limits before publication.
 - Added the LocalHold brand identity and maintained design-system assets.
 - Hardened schema diagnostics, PostgreSQL index checks, redaction boundaries,
-  release smoke tests, and CUDA runtime error reporting; removed retired API
-  artifacts and made runtime time testable without wall-clock sleeps.
+  pgvector-backed PostgreSQL CI coverage, release smoke tests, and CUDA runtime
+  error reporting; removed retired API artifacts and made runtime time testable
+  without wall-clock sleeps.
 - Compatibility: opening a SQLite v1 database upgrades it to schema v2, and
   restore upgrades a strictly validated v1 backup only on a private staging
   copy. Older binaries reject schema v2 databases. PostgreSQL startup adds the
-  matching record-revision migration automatically.
+  matching record-revision migration when automatic migration is enabled.
 
 ## [0.1.0-beta.3] - 2026-07-10
 

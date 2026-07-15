@@ -867,21 +867,24 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
         pool.close().await;
         return check("storage", DiagnosticStatus::Failed, "PostgreSQL runtime table or sequence privileges are incomplete");
     }
-    let constraints_current: Result<bool, _> = query_scalar(
-        "SELECT
-            EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memories'::regclass AND confrelid = 'memories'::regclass AND contype = 'f' AND convalidated AND confdeltype = 'n' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'superseded_by')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'id')]::smallint[])
-            AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_entities'::regclass AND confrelid = 'memories'::regclass AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memory_entities'::regclass AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'id')]::smallint[])
-            AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_embeddings'::regclass AND confrelid = 'memories'::regclass AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memory_embeddings'::regclass AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'id')]::smallint[])
-            AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_metadata'::regclass AND confrelid = 'memories'::regclass AND contype = 'f' AND convalidated AND confdeltype = 'c' AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memory_metadata'::regclass AND attname = 'memory_id')]::smallint[] AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'id')]::smallint[])",
-    )
-    .fetch_one(&pool)
-    .await;
-    if !matches!(constraints_current, Ok(true)) {
+    let current_schema_only = config.database.postgres.auto_migrate;
+    let relationships_current = crate::store::migration::validate_postgres_runtime_relationships(&pool, current_schema_only).await.is_ok();
+    let relationships_compatible = if relationships_current {
+        true
+    } else if config.database.postgres.auto_migrate {
+        crate::store::migration::validate_postgres_runtime_relationships_before_migration(&pool, current_schema_only)
+            .await
+            .is_ok()
+    } else {
+        false
+    };
+    let indexes_compatible = crate::store::migration::postgres_runtime_indexes_compatible(&pool, current_schema_only, config.database.postgres.auto_migrate).await;
+    if !relationships_compatible || !matches!(indexes_compatible, Ok(true)) {
         pool.close().await;
         return check(
             "storage",
             DiagnosticStatus::Failed,
-            "PostgreSQL relational constraints do not match runtime cascade and audit requirements",
+            "PostgreSQL relational constraints or indexes are incompatible with startup requirements",
         );
     }
     let migration: Result<Option<i64>, _> = if config.database.postgres.auto_migrate {
@@ -899,57 +902,18 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
     } else {
         Ok(true)
     };
-    let audit_fk_exists: Result<bool, _> =
-        query_scalar("SELECT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_audit_log'::regclass AND contype = 'f' AND confrelid = 'memories'::regclass)")
-            .fetch_one(&pool)
-            .await;
+    let retained_history_fk_exists: Result<bool, _> = query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid IN (to_regclass('memory_audit_log'), to_regclass('memory_tombstones')) AND contype = 'f' AND confrelid = to_regclass('memories'))",
+    )
+    .fetch_one(&pool)
+    .await;
     let current_columns: Result<i64, _> = query_scalar(
         "SELECT COUNT(*) FROM pg_attribute WHERE attrelid = to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memories') ELSE 'memories' END) AND attname IN ('embedding_claimed_at', 'embedding_claim_token', 'confidence') AND NOT attisdropped",
     )
     .bind(config.database.postgres.auto_migrate)
     .fetch_one(&pool)
     .await;
-    let indexes_current: Result<bool, _> = query_scalar(
-        "SELECT COALESCE(bool_and(COALESCE(
-            indexes.relkind = 'i'
-            AND index_data.indrelid = to_regclass(required.table_name)
-            AND index_data.indisvalid
-            AND index_data.indisready
-            AND index_data.indnkeyatts = required.key_count
-            AND (required.expected_keys IS NULL OR (
-                SELECT string_agg(regexp_replace(lower(pg_get_indexdef(indexes.oid, key_number, TRUE)), '[[:space:]]', '', 'g'), ',' ORDER BY key_number)
-                FROM generate_series(1, required.key_count) AS key_number
-            ) = required.expected_keys)
-            AND position(required.definition_fragment IN lower(pg_get_indexdef(indexes.oid))) > 0
-            AND ((required.predicate IS NULL AND index_data.indpred IS NULL)
-                 OR regexp_replace(lower(pg_get_expr(index_data.indpred, index_data.indrelid, TRUE)), '[()[:space:]]', '', 'g') = required.predicate)
-        , FALSE)), FALSE)
-        FROM (VALUES
-            ('idx_memories_created_at', 'memories', 1, 'created_at', 'created_at desc', NULL),
-            ('idx_memories_expires_at', 'memories', 1, 'expires_at', 'expires_at', 'expires_atisnotnull'),
-            ('idx_memories_has_embedding', 'memories', 1, 'has_embedding', 'has_embedding', NULL),
-            ('idx_memories_memory_type', 'memories', 1, 'memory_type', 'memory_type', NULL),
-            ('idx_memories_superseded_by', 'memories', 1, 'superseded_by', 'superseded_by', 'superseded_byisnotnull'),
-            ('idx_memories_tags_gin', 'memories', 1, 'tags', 'using gin (tags)', NULL),
-            ('idx_memories_source_agent', 'memories', 1, '(provenance->>''source_agent''::text)', 'source_agent', NULL),
-            ('idx_memories_source_conversation', 'memories', 1, '(provenance->>''source_conversation''::text)', 'source_conversation', NULL),
-            ('idx_memories_origin_conversation', 'memories', 1, '(provenance->>''origin_conversation''::text)', 'origin_conversation', NULL),
-            ('idx_memories_effective_origin_conversation', 'memories', 1, 'coalesce(provenance->>''origin_conversation''::text,provenance->>''source_conversation''::text)', 'coalesce', NULL),
-            ('idx_memories_access_type', 'memories', 1, '(access_policy->>''type''::text)', 'access_policy', NULL),
-            ('idx_memories_content_fts', 'memories', 1, 'to_tsvector(''simple''::regconfig,content)', 'to_tsvector', NULL),
-            ('idx_memories_embedding_claim', 'memories', 4, 'has_embedding,embedding_claimed_at,created_at,id', 'embedding_claimed_at', 'has_embedding=false'),
-            ('idx_memory_entities_entity', 'memory_entities', 1, 'entity', '(entity)', NULL),
-            ('idx_memory_entities_entity_type', 'memory_entities', 1, 'entity_type', 'entity_type', NULL),
-            ('idx_audit_log_memory_id', 'memory_audit_log', 1, 'memory_id', 'memory_id', NULL),
-            ('idx_audit_log_timestamp', 'memory_audit_log', 1, '\"timestamp\"', '\"timestamp\" desc', NULL),
-            ('idx_memory_tombstones_deleted_at', 'memory_tombstones', 1, 'deleted_at', 'deleted_at desc', NULL),
-            ('idx_memory_metadata_scope_key', 'memory_metadata', 1, 'scope_key', 'scope_key', NULL)
-        ) AS required(name, table_name, key_count, expected_keys, definition_fragment, predicate)
-        LEFT JOIN pg_class AS indexes ON indexes.oid = to_regclass(required.name)
-        LEFT JOIN pg_index AS index_data ON index_data.indexrelid = indexes.oid",
-    )
-    .fetch_one(&pool)
-    .await;
+    let indexes_current = crate::store::migration::postgres_runtime_indexes_compatible(&pool, config.database.postgres.auto_migrate, false).await;
     let owns_managed_tables: Result<bool, _> = query_scalar(
         "SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), FALSE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_metadata', 'memory_tombstones', 'scope_registry')",
     )
@@ -970,7 +934,7 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
         migration,
         migration_rows_current,
         migration_identities_compatible,
-        audit_fk_exists,
+        retained_history_fk_exists,
         current_columns,
         indexes_current,
         vector_type,
@@ -980,7 +944,7 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
         migration,
         migration_rows_current,
         migration_identities_compatible,
-        audit_fk_exists,
+        retained_history_fk_exists,
         current_columns,
         indexes_current,
         vector_type,
@@ -991,7 +955,7 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
             Ok(migration),
             Ok(migration_rows_current),
             Ok(migration_identities_compatible),
-            Ok(audit_fk_exists),
+            Ok(retained_history_fk_exists),
             Ok(current_columns),
             Ok(indexes_current),
             Ok(vector_type),
@@ -1001,7 +965,7 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
             migration,
             migration_rows_current,
             migration_identities_compatible,
-            audit_fk_exists,
+            retained_history_fk_exists,
             current_columns,
             indexes_current,
             vector_type,
@@ -1051,7 +1015,13 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
             "PostgreSQL auto-migration is enabled but the configured role does not own every managed table",
         );
     }
-    if migration == Some(PostgresStore::CURRENT_SCHEMA_VERSION) && migration_rows_current && current_columns == 3_i64 && indexes_current && !audit_fk_exists {
+    if migration == Some(PostgresStore::CURRENT_SCHEMA_VERSION)
+        && migration_rows_current
+        && relationships_current
+        && current_columns == 3_i64
+        && indexes_current
+        && !retained_history_fk_exists
+    {
         check("storage", DiagnosticStatus::Healthy, "PostgreSQL is reachable and the LocalHold schema is current")
     } else if config.database.postgres.auto_migrate {
         check("storage", DiagnosticStatus::Degraded, "PostgreSQL is reachable but a normal startup migration is required")
@@ -1253,6 +1223,8 @@ fn finalize(build: BuildInfo, config_source: Option<String>, data_path: Option<S
 
 #[cfg(test)]
 mod tests {
+    use sqlx_core::query::query;
+
     use super::*;
 
     #[test]
@@ -1283,6 +1255,70 @@ mod tests {
         let rendered = report.render_text();
         assert!(!rendered.contains("\n[failed]"));
         assert!(!rendered.contains('\r'));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn postgres_doctor_distinguishes_repairable_and_incompatible_schema_states() {
+        let url = std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
+        let schema = format!("localhold_doctor_{}", crate::types::MemoryId::new().to_string().to_lowercase());
+        let admin = PgPoolOptions::new().max_connections(1).connect(&url).await.unwrap();
+        let _created = query(sqlx_core::sql_str::AssertSqlSafe(format!("CREATE SCHEMA {schema}"))).execute(&admin).await.unwrap();
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let postgres = crate::config::PostgresDatabaseConfig {
+            url: format!("{url}{separator}options=-csearch_path%3D{schema}%2Cpublic"),
+            max_connections: 2,
+            auto_migrate: true,
+        };
+        drop(PostgresStore::open(&postgres, 3_usize).await.unwrap());
+        let scoped = PgPoolOptions::new().max_connections(1).connect(&postgres.url).await.unwrap();
+        let mut config = Config::default();
+        config.database.backend = DatabaseBackend::Postgres;
+        config.database.postgres = postgres.clone();
+        config.embedding = EmbeddingConfig::Noop { dimensions: 3 };
+        let clock = crate::clock::SystemClock::new();
+
+        let _legacy_fk = query(
+            "ALTER TABLE memory_audit_log ADD CONSTRAINT legacy_audit_memory_fkey
+             FOREIGN KEY (memory_id) REFERENCES memories(id)",
+        )
+        .execute(&scoped)
+        .await
+        .unwrap();
+        let legacy_fk_status = postgres_check(&config, &clock).await.status;
+        drop(PostgresStore::open(&postgres, 3_usize).await.unwrap());
+
+        let _missing = query("DROP INDEX idx_memories_content_fts").execute(&scoped).await.unwrap();
+        let missing_index_status = postgres_check(&config, &clock).await.status;
+        drop(PostgresStore::open(&postgres, 3_usize).await.unwrap());
+
+        let _missing = query("DROP INDEX idx_memories_content_fts").execute(&scoped).await.unwrap();
+        let _wrong = query("CREATE INDEX idx_memories_content_fts ON memories(id)").execute(&scoped).await.unwrap();
+        let wrong_index_status = postgres_check(&config, &clock).await.status;
+        let wrong_index_startup_rejected = PostgresStore::open(&postgres, 3_usize).await.is_err();
+        let _removed_wrong = query("DROP INDEX idx_memories_content_fts").execute(&scoped).await.unwrap();
+        drop(PostgresStore::open(&postgres, 3_usize).await.unwrap());
+
+        let _extra_unique = query("CREATE UNIQUE INDEX unexpected_doctor_content_unique ON memories(content)")
+            .execute(&scoped)
+            .await
+            .unwrap();
+        let unique_index_status = postgres_check(&config, &clock).await.status;
+        let unique_index_startup_rejected = PostgresStore::open(&postgres, 3_usize).await.is_err();
+
+        scoped.close().await;
+        let _dropped = query(sqlx_core::sql_str::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
+
+        assert_eq!(legacy_fk_status, DiagnosticStatus::Degraded);
+        assert_eq!(missing_index_status, DiagnosticStatus::Degraded);
+        assert_eq!(wrong_index_status, DiagnosticStatus::Failed);
+        assert!(wrong_index_startup_rejected);
+        assert_eq!(unique_index_status, DiagnosticStatus::Failed);
+        assert!(unique_index_startup_rejected);
     }
 
     #[test]

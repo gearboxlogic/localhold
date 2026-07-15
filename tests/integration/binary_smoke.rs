@@ -2128,6 +2128,30 @@ fn binary_starts_with_postgres_backend() {
 }
 
 #[test]
+#[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+fn binary_rejects_empty_postgres_when_auto_migrate_is_disabled() {
+    let url = postgres_smoke_url();
+    drop_postgres_smoke_schema(&url);
+    let root = unique_db_path("bin-postgres-no-migrate").with_extension("config");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hold"));
+    let _config_dir = isolate_user_config_dir(&mut command, &root);
+    command.env("LOCALHOLD_DB_BACKEND", "postgres");
+    command.env("LOCALHOLD_POSTGRES_URL", &url);
+    command.env("LOCALHOLD_POSTGRES_MAX_CONNECTIONS", "1");
+    command.env("LOCALHOLD_POSTGRES_AUTO_MIGRATE", "false");
+    command.env("LOCALHOLD_EMBEDDING_DIMENSIONS", "3");
+    command.env("LOCALHOLD_TRANSPORT", "stdio");
+
+    let output = command.output().unwrap();
+
+    assert!(!output.status.success(), "empty PostgreSQL must fail startup when auto-migration is disabled");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("PostgreSQL database is not initialized"), "{stderr}");
+    assert!(!stderr.contains(&url), "startup error must not expose the PostgreSQL URL");
+    let _cleanup = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn binary_prints_migration_help_without_config() {
     for args in [&["migrate", "--help"][..], &["migrate", "sqlite-to-postgres", "--help"][..]] {
         let output = Command::new(env!("CARGO_BIN_EXE_hold")).args(args).output().unwrap();

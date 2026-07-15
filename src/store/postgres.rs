@@ -16,7 +16,7 @@ use sqlx_postgres::{PgPool, PgPoolOptions, PgRow, Postgres};
 use super::{
     BulkAuthOutcome, EmbeddingMap, EmbeddingNeighbor, EmbeddingProfile, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter, ReassignScopeOutcome, RecordUseOutcome,
     ReembedClaim, merge_metadata_patch,
-    migration::{reject_retired_postgres_schema, validate_existing_postgres_schema},
+    migration::{reject_retired_postgres_schema, validate_ready_postgres_schema},
     query::{
         DEFAULT_LIST_LIMIT, MAX_SCAN_ROWS, MAX_VEC_CANDIDATES, OVERFETCH_FACTOR, apply_access_policy_for_filter, escape_like, normalize_filter, sort_by_distance, usize_to_i64,
     },
@@ -195,12 +195,14 @@ impl PostgresStore {
     /// Latest schema migration recorded by this binary.
     pub const CURRENT_SCHEMA_VERSION: i64 = 3;
 
-    /// Open a `PostgreSQL` connection pool and optionally initialize schema.
+    /// Open a `PostgreSQL` connection pool, optionally initialize schema, and
+    /// verify that the schema resolved for requests is ready.
     ///
     /// # Errors
     ///
     /// Returns `StoreError` if the pool cannot connect, migration DDL fails,
-    /// or an existing vector table has incompatible dimensions.
+    /// the resolved schema is not initialized or current, or an existing vector
+    /// table has incompatible dimensions.
     pub async fn open(config: &PostgresDatabaseConfig, embedding_dimensions: usize) -> Result<Self, StoreError> {
         Self::open_with_clock(config, embedding_dimensions, Arc::new(SystemClock::new())).await
     }
@@ -210,13 +212,17 @@ impl PostgresStore {
     /// # Errors
     ///
     /// Returns a store error if connection, retired-schema validation, schema
-    /// initialization, or vector dimension validation fails.
+    /// initialization, readiness validation, or vector dimension validation
+    /// fails.
     pub async fn open_with_clock(config: &PostgresDatabaseConfig, embedding_dimensions: usize, clock: Arc<dyn Clock>) -> Result<Self, StoreError> {
         validate_bootstrap_inputs(config, embedding_dimensions)?;
         let pool = PgPoolOptions::new().max_connections(config.max_connections).connect(&config.url).await?;
         reject_retired_postgres_schema(&pool, true).await?;
         if config.auto_migrate {
             init_schema(&pool, embedding_dimensions).await?;
+            validate_current_postgres_store_ready(&pool, embedding_dimensions).await?;
+        } else {
+            validate_postgres_runtime_ready(&pool, embedding_dimensions).await?;
         }
         Ok(Self {
             inner: Arc::new(PostgresInner {
@@ -247,16 +253,7 @@ impl PostgresStore {
             })
             .connect(&config.url)
             .await?;
-        let initialized: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'memories')) IS NOT NULL")
-            .fetch_one(&pool)
-            .await?;
-        if !initialized {
-            return Err(StoreError::Conflict(
-                "PostgreSQL database is not initialized; start LocalHold once to create the current schema".into(),
-            ));
-        }
-        validate_existing_postgres_schema(&pool, embedding_dimensions, true, true).await?;
-        validate_current_migration_metadata(&pool).await?;
+        validate_current_postgres_store_ready(&pool, embedding_dimensions).await?;
         Ok(Self {
             inner: Arc::new(PostgresInner {
                 pool,
@@ -3565,12 +3562,81 @@ async fn validate_current_migration_metadata(pool: &PgPool) -> Result<(), StoreE
     Ok(())
 }
 
+async fn validate_current_postgres_store_ready(pool: &PgPool, embedding_dimensions: usize) -> Result<(), StoreError> {
+    validate_ready_postgres_schema(pool, embedding_dimensions, true, true).await?;
+    validate_current_migration_metadata(pool).await
+}
+
+async fn validate_postgres_runtime_ready(pool: &PgPool, embedding_dimensions: usize) -> Result<(), StoreError> {
+    validate_ready_postgres_schema(pool, embedding_dimensions, false, false).await
+}
+
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+
     use chrono::TimeZone as _;
+    use futures::FutureExt as _;
 
     use super::*;
     use crate::types::AuditAction;
+
+    fn postgres_test_url() -> String {
+        std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into())
+    }
+
+    fn postgres_test_config(encoded_search_path: &str, auto_migrate: bool) -> PostgresDatabaseConfig {
+        let url = postgres_test_url();
+        let separator = if url.contains('?') { "&" } else { "?" };
+        PostgresDatabaseConfig {
+            url: format!("{url}{separator}options=-csearch_path%3D{encoded_search_path}"),
+            max_connections: 1,
+            auto_migrate,
+        }
+    }
+
+    async fn with_isolated_postgres_schema<Test, TestFuture, Output>(prefix: &str, auto_migrate: bool, test: Test) -> Output
+    where
+        Test: FnOnce(PgPool, String, PostgresDatabaseConfig) -> TestFuture,
+        TestFuture: Future<Output = Output>,
+    {
+        let url = postgres_test_url();
+        let schema = format!("{prefix}_{}", MemoryId::new().to_string().to_lowercase());
+        let admin = PgPoolOptions::new().max_connections(1).connect(&url).await.unwrap();
+        let _created = sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}"))).execute(&admin).await.unwrap();
+        let config = postgres_test_config(&format!("{schema}%2Cpublic"), auto_migrate);
+        let outcome = std::panic::AssertUnwindSafe(test(admin.clone(), schema.clone(), config)).catch_unwind().await;
+        let cleanup = sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE"))).execute(&admin).await;
+        admin.close().await;
+        match outcome {
+            Ok(output) => {
+                let _cleanup = cleanup.unwrap();
+                output
+            }
+            Err(payload) => {
+                let _cleanup = cleanup;
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+
+    async fn assert_runtime_schema_later_in_search_path(managed_schema: String, managed_config: PostgresDatabaseConfig) {
+        drop(PostgresStore::open(&managed_config, 3_usize).await.unwrap());
+        with_isolated_postgres_schema("localhold_runtime_first", false, |admin, runtime_schema, _runtime_config| async move {
+            let _table = sqlx::query(AssertSqlSafe(format!("CREATE TABLE {runtime_schema}.index_shadow (id TEXT)")))
+                .execute(&admin)
+                .await
+                .unwrap();
+            let _index = sqlx::query(AssertSqlSafe(format!("CREATE INDEX idx_memories_content_fts ON {runtime_schema}.index_shadow (id)")))
+                .execute(&admin)
+                .await
+                .unwrap();
+            let config = postgres_test_config(&format!("{runtime_schema}%2C{managed_schema}%2Cpublic"), false);
+            let store = PostgresStore::open(&config, 3_usize).await.unwrap();
+            assert_eq!(store.embedding_dimensions(), 3_usize);
+        })
+        .await;
+    }
 
     #[test]
     fn parse_vector_dimensions_extracts_pgvector_typmod() {
@@ -3675,6 +3741,279 @@ mod tests {
             .await
             .unwrap();
         assert!(has_tombstone_table, "bootstrap should create the tombstone table");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn open_without_auto_migrate_rejects_empty_schema_without_creating_objects() {
+        with_isolated_postgres_schema("localhold_runtime_empty", false, |_admin, schema, _config| async move {
+            let config = postgres_test_config(&schema, false);
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let table_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pg_tables WHERE schemaname = current_schema()")
+                .fetch_one(&scoped)
+                .await
+                .unwrap();
+            scoped.close().await;
+
+            assert!(error.to_string().contains("not initialized"), "{error}");
+            assert_eq!(table_count, 0_i64, "disabled migrations must not create schema objects");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn open_without_auto_migrate_accepts_bootstrapped_schema() {
+        with_isolated_postgres_schema("localhold_runtime_current", true, |_admin, _schema, mut config| async move {
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+            config.auto_migrate = false;
+
+            let store = PostgresStore::open(&config, 3_usize).await.unwrap();
+            assert_eq!(store.embedding_dimensions(), 3_usize);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn open_without_auto_migrate_resolves_schema_later_in_search_path() {
+        with_isolated_postgres_schema("localhold_runtime_managed", true, |_admin, managed_schema, managed_config| async move {
+            assert_runtime_schema_later_in_search_path(managed_schema, managed_config).await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn open_without_auto_migrate_rejects_partial_schema() {
+        with_isolated_postgres_schema("localhold_runtime_partial", false, |_admin, schema, _config| async move {
+            let config = postgres_test_config(&schema, false);
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _created = sqlx::query("CREATE TABLE memories (id TEXT PRIMARY KEY)").execute(&scoped).await.unwrap();
+            scoped.close().await;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("partial managed schema"), "{error}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn open_without_auto_migrate_does_not_require_migration_metadata() {
+        with_isolated_postgres_schema("localhold_runtime_no_ledger", true, |_admin, _schema, mut config| async move {
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _dropped = sqlx::query("DROP TABLE localhold_migrations").execute(&scoped).await.unwrap();
+            scoped.close().await;
+            config.auto_migrate = false;
+
+            let _store = PostgresStore::open(&config, 3_usize).await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn open_without_auto_migrate_rejects_missing_runtime_claim_columns() {
+        with_isolated_postgres_schema("localhold_runtime_claims", true, |_admin, _schema, mut config| async move {
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _altered = sqlx::query("ALTER TABLE memories DROP COLUMN embedding_claimed_at, DROP COLUMN embedding_claim_token")
+                .execute(&scoped)
+                .await
+                .unwrap();
+            scoped.close().await;
+            config.auto_migrate = false;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("embedding_claimed_at"), "{error}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn open_without_auto_migrate_rejects_retired_audit_foreign_key() {
+        with_isolated_postgres_schema("localhold_runtime_audit_fk", true, |_admin, _schema, mut config| async move {
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _altered = sqlx::query(
+                "ALTER TABLE memory_audit_log ADD CONSTRAINT memory_audit_log_memory_id_fkey
+                 FOREIGN KEY (memory_id) REFERENCES memories(id)",
+            )
+            .execute(&scoped)
+            .await
+            .unwrap();
+            scoped.close().await;
+            config.auto_migrate = false;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("retained history requirements"), "{error}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn open_without_auto_migrate_rejects_missing_runtime_index() {
+        with_isolated_postgres_schema("localhold_runtime_missing_index", true, |_admin, _schema, mut config| async move {
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _dropped = sqlx::query("DROP INDEX idx_memories_content_fts").execute(&scoped).await.unwrap();
+            scoped.close().await;
+            config.auto_migrate = false;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("indexes do not match"), "{error}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn open_with_auto_migrate_repairs_missing_runtime_index() {
+        with_isolated_postgres_schema("localhold_runtime_repair_index", true, |_admin, _schema, config| async move {
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _dropped = sqlx::query("DROP INDEX idx_memories_content_fts").execute(&scoped).await.unwrap();
+            scoped.close().await;
+
+            let _store = PostgresStore::open(&config, 3_usize).await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn open_with_auto_migrate_rejects_wrong_canonical_index() {
+        with_isolated_postgres_schema("localhold_runtime_wrong_index", true, |_admin, _schema, config| async move {
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _dropped = sqlx::query("DROP INDEX idx_memories_content_fts").execute(&scoped).await.unwrap();
+            let _created = sqlx::query("CREATE INDEX idx_memories_content_fts ON memories(id)").execute(&scoped).await.unwrap();
+            scoped.close().await;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("indexes do not match"), "{error}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn open_with_auto_migrate_rejects_unique_canonical_secondary_index() {
+        with_isolated_postgres_schema("localhold_runtime_unique_index", true, |_admin, _schema, config| async move {
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _dropped = sqlx::query("DROP INDEX idx_memory_entities_entity").execute(&scoped).await.unwrap();
+            let _created = sqlx::query("CREATE UNIQUE INDEX idx_memory_entities_entity ON memory_entities(entity)")
+                .execute(&scoped)
+                .await
+                .unwrap();
+            scoped.close().await;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("indexes do not match"), "{error}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn open_without_auto_migrate_rejects_unexpected_unique_index() {
+        with_isolated_postgres_schema("localhold_runtime_extra_unique", true, |_admin, _schema, mut config| async move {
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _created = sqlx::query("CREATE UNIQUE INDEX unexpected_memories_content_unique ON memories(content)")
+                .execute(&scoped)
+                .await
+                .unwrap();
+            scoped.close().await;
+            config.auto_migrate = false;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("indexes do not match"), "{error}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn open_without_auto_migrate_rejects_semantically_different_required_key_index() {
+        with_isolated_postgres_schema("localhold_runtime_key_semantics", true, |_admin, _schema, mut config| async move {
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _created = sqlx::query("CREATE UNIQUE INDEX unexpected_migration_name_unique ON localhold_migrations(name COLLATE \"en-US-x-icu\")")
+                .execute(&scoped)
+                .await
+                .unwrap();
+            scoped.close().await;
+            config.auto_migrate = false;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("indexes do not match"), "{error}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn open_without_auto_migrate_rejects_extra_runtime_foreign_key() {
+        with_isolated_postgres_schema("localhold_runtime_extra_fk", true, |_admin, _schema, mut config| async move {
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _altered = sqlx::query(
+                "ALTER TABLE memory_entities ADD CONSTRAINT memory_entities_memory_id_extra_fkey
+                 FOREIGN KEY (memory_id) REFERENCES memories(id)",
+            )
+            .execute(&scoped)
+            .await
+            .unwrap();
+            scoped.close().await;
+            config.auto_migrate = false;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("unexpected foreign key constraints"), "{error}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn open_with_auto_migrate_rejects_missing_runtime_foreign_key() {
+        with_isolated_postgres_schema("localhold_runtime_fk", true, |_admin, _schema, config| async move {
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _altered = sqlx::query("ALTER TABLE memory_entities DROP CONSTRAINT memory_entities_memory_id_fkey")
+                .execute(&scoped)
+                .await
+                .unwrap();
+            scoped.close().await;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("memory_entities.memory_id"), "{error}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn open_with_auto_migrate_rejects_conflicting_migration_identity() {
+        with_isolated_postgres_schema("localhold_migration_conflict", true, |_admin, _schema, config| async move {
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _updated = sqlx::query("UPDATE localhold_migrations SET name = CHR(99) WHERE version = 2")
+                .execute(&scoped)
+                .await
+                .unwrap();
+            scoped.close().await;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("migration metadata is not current"), "{error}");
+        })
+        .await;
     }
 
     #[tokio::test]

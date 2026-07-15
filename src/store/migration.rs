@@ -154,6 +154,12 @@ const POSTGRES_REQUIRED_KEYS: &[PostgresKeyExpectation] = &[
     PostgresKeyExpectation::new("memory_metadata", &["memory_id"]),
     PostgresKeyExpectation::new("embedding_profile", &["singleton"]),
 ];
+const POSTGRES_REQUIRED_FOREIGN_KEYS: &[PostgresForeignKeyExpectation] = &[
+    PostgresForeignKeyExpectation::new("memories", "superseded_by", "memories", "id", "n"),
+    PostgresForeignKeyExpectation::new("memory_entities", "memory_id", "memories", "id", "c"),
+    PostgresForeignKeyExpectation::new("memory_embeddings", "memory_id", "memories", "id", "c"),
+    PostgresForeignKeyExpectation::new("memory_metadata", "memory_id", "memories", "id", "c"),
+];
 const SQLITE_MEMORIES_COLUMNS: &[&str] = &[
     "id",
     "content",
@@ -268,6 +274,27 @@ impl PostgresColumnExpectation {
 struct PostgresKeyExpectation {
     table: &'static str,
     columns: &'static [&'static str],
+}
+
+#[derive(Clone, Copy)]
+struct PostgresForeignKeyExpectation {
+    child_table: &'static str,
+    child_column: &'static str,
+    parent_table: &'static str,
+    parent_column: &'static str,
+    delete_action: &'static str,
+}
+
+impl PostgresForeignKeyExpectation {
+    const fn new(child_table: &'static str, child_column: &'static str, parent_table: &'static str, parent_column: &'static str, delete_action: &'static str) -> Self {
+        Self {
+            child_table,
+            child_column,
+            parent_table,
+            parent_column,
+            delete_action,
+        }
+    }
 }
 
 struct SqliteTableExpectation {
@@ -1959,6 +1986,261 @@ pub(crate) async fn validate_existing_postgres_schema(
     }
     validate_postgres_column_type(pool, "memory_embeddings", "embedding", &format!("vector({embedding_dimensions})"), current_schema_only).await?;
     Ok(())
+}
+
+pub(crate) async fn validate_ready_postgres_schema(
+    pool: &PgPool,
+    embedding_dimensions: usize,
+    current_schema_only: bool,
+    include_migration_metadata: bool,
+) -> Result<(), StoreError> {
+    validate_existing_postgres_schema(pool, embedding_dimensions, current_schema_only, include_migration_metadata).await?;
+    if !postgres_table_exists(pool, "memories", current_schema_only).await? {
+        return Err(StoreError::Conflict(
+            "PostgreSQL database is not initialized; enable database.postgres.auto_migrate or start LocalHold once with migrations enabled".into(),
+        ));
+    }
+    for expectation in POSTGRES_OPTIONAL_COLUMNS {
+        validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
+    }
+    validate_postgres_runtime_relationships(pool, current_schema_only).await?;
+    if !postgres_runtime_indexes_compatible(pool, current_schema_only, false).await? {
+        return Err(StoreError::Conflict("PostgreSQL managed schema indexes do not match runtime requirements".into()));
+    }
+    Ok(())
+}
+
+pub(crate) async fn postgres_runtime_indexes_compatible(pool: &PgPool, current_schema_only: bool, allow_absent: bool) -> Result<bool, SqlxError> {
+    let canonical: bool = query_scalar(
+        r#"SELECT COALESCE(bool_and(
+            ($2 AND indexes.oid IS NULL) OR COALESCE(
+                indexes.relkind = 'i'
+                AND index_data.indrelid = to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), required.table_name) ELSE required.table_name END)
+                AND index_data.indisvalid
+                AND index_data.indisready
+                AND index_data.indislive
+                AND NOT index_data.indisunique
+                AND NOT index_data.indisprimary
+                AND NOT index_data.indisexclusion
+                AND index_data.indnkeyatts = required.key_count
+                AND (required.expected_keys IS NULL OR (
+                    SELECT string_agg(regexp_replace(lower(pg_get_indexdef(indexes.oid, key_number, TRUE)), '[[:space:]]', '', 'g'), ',' ORDER BY key_number)
+                    FROM generate_series(1, required.key_count) AS key_number
+                ) = required.expected_keys)
+                AND position(required.definition_fragment IN lower(pg_get_indexdef(indexes.oid))) > 0
+                AND ((required.predicate IS NULL AND index_data.indpred IS NULL)
+                     OR regexp_replace(lower(pg_get_expr(index_data.indpred, index_data.indrelid, TRUE)), '[()[:space:]]', '', 'g') = required.predicate)
+            , FALSE)
+        ), FALSE)
+        FROM (VALUES
+            ('idx_memories_created_at', 'memories', 1, 'created_at', 'created_at desc', NULL),
+            ('idx_memories_expires_at', 'memories', 1, 'expires_at', 'expires_at', 'expires_atisnotnull'),
+            ('idx_memories_has_embedding', 'memories', 1, 'has_embedding', 'has_embedding', NULL),
+            ('idx_memories_memory_type', 'memories', 1, 'memory_type', 'memory_type', NULL),
+            ('idx_memories_superseded_by', 'memories', 1, 'superseded_by', 'superseded_by', 'superseded_byisnotnull'),
+            ('idx_memories_tags_gin', 'memories', 1, 'tags', 'using gin (tags)', NULL),
+            ('idx_memories_source_agent', 'memories', 1, '(provenance->>''source_agent''::text)', 'source_agent', NULL),
+            ('idx_memories_source_conversation', 'memories', 1, '(provenance->>''source_conversation''::text)', 'source_conversation', NULL),
+            ('idx_memories_origin_conversation', 'memories', 1, '(provenance->>''origin_conversation''::text)', 'origin_conversation', NULL),
+            ('idx_memories_effective_origin_conversation', 'memories', 1, 'coalesce(provenance->>''origin_conversation''::text,provenance->>''source_conversation''::text)', 'coalesce', NULL),
+            ('idx_memories_access_type', 'memories', 1, '(access_policy->>''type''::text)', 'access_policy', NULL),
+            ('idx_memories_content_fts', 'memories', 1, 'to_tsvector(''simple''::regconfig,content)', 'to_tsvector', NULL),
+            ('idx_memories_embedding_claim', 'memories', 4, 'has_embedding,embedding_claimed_at,created_at,id', 'embedding_claimed_at', 'has_embedding=false'),
+            ('idx_memory_entities_entity', 'memory_entities', 1, 'entity', '(entity)', NULL),
+            ('idx_memory_entities_entity_type', 'memory_entities', 1, 'entity_type', 'entity_type', NULL),
+            ('idx_audit_log_memory_id', 'memory_audit_log', 1, 'memory_id', 'memory_id', NULL),
+            ('idx_audit_log_timestamp', 'memory_audit_log', 1, '"timestamp"', '"timestamp" desc', NULL),
+            ('idx_memory_tombstones_deleted_at', 'memory_tombstones', 1, 'deleted_at', 'deleted_at desc', NULL),
+            ('idx_memory_metadata_scope_key', 'memory_metadata', 1, 'scope_key', 'scope_key', NULL)
+        ) AS required(name, table_name, key_count, expected_keys, definition_fragment, predicate)
+        LEFT JOIN pg_class AS managed_table ON managed_table.oid = to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), required.table_name) ELSE required.table_name END)
+        LEFT JOIN pg_class AS indexes ON indexes.relnamespace = managed_table.relnamespace AND indexes.relname = required.name
+        LEFT JOIN pg_index AS index_data ON index_data.indexrelid = indexes.oid"#,
+    )
+    .bind(current_schema_only)
+    .bind(allow_absent)
+    .fetch_one(pool)
+    .await?;
+    if !canonical {
+        return Ok(false);
+    }
+    postgres_restrictive_indexes_compatible(pool, current_schema_only).await
+}
+
+async fn postgres_restrictive_indexes_compatible(pool: &PgPool, current_schema_only: bool) -> Result<bool, SqlxError> {
+    let rows = query(
+        "SELECT managed.relname AS table_name,
+                restrictive.indisexclusion,
+                COALESCE((to_jsonb(restrictive)->>'indnullsnotdistinct')::boolean, FALSE) AS indnullsnotdistinct,
+                restrictive.indpred IS NOT NULL AS has_predicate,
+                EXISTS(
+                    SELECT 1
+                    FROM unnest(
+                        restrictive.indkey::smallint[],
+                        restrictive.indclass::oid[],
+                        restrictive.indcollation::oid[]
+                    ) WITH ORDINALITY AS key(attnum, opclass_oid, collation_oid, ordinal)
+                    LEFT JOIN pg_attribute AS key_attribute
+                      ON key_attribute.attrelid = restrictive.indrelid
+                     AND key_attribute.attnum = key.attnum
+                    LEFT JOIN pg_opclass AS key_opclass ON key_opclass.oid = key.opclass_oid
+                    WHERE key.ordinal <= restrictive.indnkeyatts
+                      AND (
+                          key_attribute.attnum IS NULL
+                          OR key.collation_oid <> key_attribute.attcollation
+                          OR NOT COALESCE(key_opclass.opcdefault, FALSE)
+                      )
+                ) AS has_nondefault_key_semantics,
+                restrictive.indnkeyatts::bigint AS key_column_count,
+                ARRAY(
+                    SELECT regexp_replace(lower(pg_get_indexdef(restrictive.indexrelid, key_number, TRUE)), '[[:space:]]', '', 'g')
+                    FROM generate_series(1, restrictive.indnkeyatts) AS key_number
+                    ORDER BY regexp_replace(lower(pg_get_indexdef(restrictive.indexrelid, key_number, TRUE)), '[[:space:]]', '', 'g')
+                )::text[] AS key_definitions
+         FROM pg_index AS restrictive
+         JOIN pg_class AS managed ON managed.oid = restrictive.indrelid
+         WHERE restrictive.indrelid = ANY(ARRAY[
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'localhold_migrations') ELSE 'localhold_migrations' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memories') ELSE 'memories' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_entities') ELSE 'memory_entities' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_embeddings') ELSE 'memory_embeddings' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_audit_log') ELSE 'memory_audit_log' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_tombstones') ELSE 'memory_tombstones' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'scope_registry') ELSE 'scope_registry' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_metadata') ELSE 'memory_metadata' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'embedding_profile') ELSE 'embedding_profile' END)
+         ])
+           AND restrictive.indisvalid
+           AND restrictive.indisready
+           AND restrictive.indislive
+           AND (restrictive.indisunique OR restrictive.indisexclusion)",
+    )
+    .bind(current_schema_only)
+    .fetch_all(pool)
+    .await?;
+
+    for row in rows {
+        let table: String = row.try_get("table_name")?;
+        let exclusion: bool = row.try_get("indisexclusion")?;
+        let nulls_not_distinct: bool = row.try_get("indnullsnotdistinct")?;
+        let has_predicate: bool = row.try_get("has_predicate")?;
+        let has_nondefault_key_semantics: bool = row.try_get("has_nondefault_key_semantics")?;
+        let key_column_count: i64 = row.try_get("key_column_count")?;
+        let key_definitions: Vec<String> = row.try_get("key_definitions")?;
+        let allowed = !exclusion
+            && !nulls_not_distinct
+            && !has_predicate
+            && !has_nondefault_key_semantics
+            && usize::try_from(key_column_count).ok() == Some(key_definitions.len())
+            && POSTGRES_REQUIRED_KEYS
+                .iter()
+                .any(|expectation| expectation.table == table && sorted_key_columns(expectation.columns) == key_definitions);
+        if !allowed {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+pub(crate) async fn validate_postgres_runtime_relationships(pool: &PgPool, current_schema_only: bool) -> Result<(), StoreError> {
+    validate_postgres_runtime_relationships_mode(pool, current_schema_only, false).await
+}
+
+pub(crate) async fn validate_postgres_runtime_relationships_before_migration(pool: &PgPool, current_schema_only: bool) -> Result<(), StoreError> {
+    validate_postgres_runtime_relationships_mode(pool, current_schema_only, true).await
+}
+
+async fn validate_postgres_runtime_relationships_mode(pool: &PgPool, current_schema_only: bool, allow_legacy_audit_fk: bool) -> Result<(), StoreError> {
+    for expectation in POSTGRES_REQUIRED_FOREIGN_KEYS {
+        if !postgres_foreign_key_matches(pool, *expectation, current_schema_only).await? {
+            return Err(StoreError::Conflict(format!(
+                "PostgreSQL relational constraint {}.{} does not match runtime cascade requirements",
+                expectation.child_table, expectation.child_column
+            )));
+        }
+    }
+    let audit_foreign_key_count = postgres_foreign_key_count_to(pool, "memory_audit_log", "memories", current_schema_only).await?;
+    if !allow_legacy_audit_fk && audit_foreign_key_count != 0_i64 {
+        return Err(StoreError::Conflict(
+            "PostgreSQL relational constraint on memory_audit_log is incompatible with retained history requirements".into(),
+        ));
+    }
+    if postgres_foreign_key_count_to(pool, "memory_tombstones", "memories", current_schema_only).await? != 0_i64 {
+        return Err(StoreError::Conflict(
+            "PostgreSQL relational constraint on memory_tombstones is incompatible with retained history requirements".into(),
+        ));
+    }
+    let foreign_key_count = postgres_managed_foreign_key_count(pool, current_schema_only).await?;
+    let expected_count = i64::try_from(POSTGRES_REQUIRED_FOREIGN_KEYS.len())
+        .unwrap_or(i64::MAX)
+        .saturating_add(if allow_legacy_audit_fk { audit_foreign_key_count } else { 0_i64 });
+    if foreign_key_count != expected_count {
+        return Err(StoreError::Conflict("PostgreSQL managed schema contains unexpected foreign key constraints".into()));
+    }
+    Ok(())
+}
+
+async fn postgres_managed_foreign_key_count(pool: &PgPool, current_schema_only: bool) -> Result<i64, StoreError> {
+    query_scalar(
+        "SELECT COUNT(*)
+         FROM pg_constraint AS foreign_key
+         WHERE foreign_key.contype = 'f'
+           AND foreign_key.conrelid = ANY(ARRAY[
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memories') ELSE 'memories' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_entities') ELSE 'memory_entities' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_embeddings') ELSE 'memory_embeddings' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_audit_log') ELSE 'memory_audit_log' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_tombstones') ELSE 'memory_tombstones' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'scope_registry') ELSE 'scope_registry' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_metadata') ELSE 'memory_metadata' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'embedding_profile') ELSE 'embedding_profile' END)
+           ])",
+    )
+    .bind(current_schema_only)
+    .fetch_one(pool)
+    .await
+    .map_err(StoreError::from)
+}
+
+async fn postgres_foreign_key_matches(pool: &PgPool, expectation: PostgresForeignKeyExpectation, current_schema_only: bool) -> Result<bool, StoreError> {
+    query_scalar(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM pg_constraint AS foreign_key
+            WHERE foreign_key.conrelid = to_regclass(CASE WHEN $6 THEN format('%I.%I', current_schema(), $1) ELSE $1 END)
+              AND foreign_key.confrelid = to_regclass(CASE WHEN $6 THEN format('%I.%I', current_schema(), $3) ELSE $3 END)
+              AND foreign_key.contype = 'f'
+              AND foreign_key.convalidated
+              AND foreign_key.confdeltype::text = $5
+              AND foreign_key.conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = foreign_key.conrelid AND attname = $2 AND NOT attisdropped)]::smallint[]
+              AND foreign_key.confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = foreign_key.confrelid AND attname = $4 AND NOT attisdropped)]::smallint[]
+        )",
+    )
+    .bind(expectation.child_table)
+    .bind(expectation.child_column)
+    .bind(expectation.parent_table)
+    .bind(expectation.parent_column)
+    .bind(expectation.delete_action)
+    .bind(current_schema_only)
+    .fetch_one(pool)
+    .await
+    .map_err(StoreError::from)
+}
+
+async fn postgres_foreign_key_count_to(pool: &PgPool, child_table: &str, parent_table: &str, current_schema_only: bool) -> Result<i64, StoreError> {
+    query_scalar(
+        "SELECT COUNT(*)
+         FROM pg_constraint AS foreign_key
+         WHERE foreign_key.conrelid = to_regclass(CASE WHEN $3 THEN format('%I.%I', current_schema(), $1) ELSE $1 END)
+           AND foreign_key.confrelid = to_regclass(CASE WHEN $3 THEN format('%I.%I', current_schema(), $2) ELSE $2 END)
+           AND foreign_key.contype = 'f'",
+    )
+    .bind(child_table)
+    .bind(parent_table)
+    .bind(current_schema_only)
+    .fetch_one(pool)
+    .await
+    .map_err(StoreError::from)
 }
 
 /// Validate every managed `PostgreSQL` table that is already present while

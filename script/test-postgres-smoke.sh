@@ -8,14 +8,33 @@ say() { printf "\n==> %s\n" "$*"; }
 die() { printf "\nERROR: %s\n" "$*" >&2; exit 1; }
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"; }
 
-image="${LOCALHOLD_POSTGRES_IMAGE:-pgvector/pgvector:pg16}"
+# pgvector/pgvector:0.8.5-pg16, pinned to its immutable registry digest.
+image="${LOCALHOLD_POSTGRES_IMAGE:-docker.io/pgvector/pgvector@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb}"
 container="${LOCALHOLD_POSTGRES_CONTAINER:-localhold-postgres-smoke}"
 port="${LOCALHOLD_POSTGRES_PORT:-55432}"
 container_cli="${LOCALHOLD_CONTAINER_CLI:-docker}"
-url="postgres://localhold:localhold@localhost:${port}/localhold"
+url="postgres://localhold:localhold@127.0.0.1:${port}/localhold"
+
+print_sanitized_container_logs() {
+  "$container_cli" logs "$container" 2>&1 \
+    | sed -E \
+      -e 's#(postgres(ql)?://)[^/@[:space:]]+:[^/@[:space:]]+@#\1[redacted]@#g' \
+      -e 's/(POSTGRES_PASSWORD=)[^[:space:]]+/\1[redacted]/g' \
+      -e 's/(password[= ]+)[^[:space:]]+/\1[redacted]/Ig' \
+    >&2 || true
+}
 
 cleanup() {
+  local status=$?
+  trap - EXIT
+
+  if [[ "$status" -ne 0 ]]; then
+    say "PostgreSQL container logs (credentials redacted)" >&2
+    print_sanitized_container_logs
+  fi
+
   "$container_cli" rm -f "$container" >/dev/null 2>&1 || true
+  exit "$status"
 }
 
 main() {
@@ -31,7 +50,7 @@ main() {
   "$container_cli" run \
     --detach \
     --name "$container" \
-    --publish "${port}:5432" \
+    --publish "127.0.0.1:${port}:5432" \
     --env POSTGRES_USER=localhold \
     --env POSTGRES_PASSWORD=localhold \
     --env POSTGRES_DB=localhold \
@@ -55,6 +74,9 @@ main() {
 
   say "Running ignored PostgreSQL migration smoke test"
   LOCALHOLD_POSTGRES_URL="$url" cargo test -p localhold store::migration::tests:: --locked -- --ignored --test-threads=1
+
+  say "Running ignored PostgreSQL doctor smoke tests"
+  LOCALHOLD_POSTGRES_URL="$url" cargo test -p localhold doctor::tests::postgres_doctor_ --locked -- --ignored --test-threads=1
 
   say "Resetting PostgreSQL schema before binary smoke tests"
   "$container_cli" exec -e PGPASSWORD=localhold "$container" \

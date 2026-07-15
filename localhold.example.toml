@@ -13,9 +13,11 @@ path = "~/.local/share/localhold/localhold.db"
 [database.postgres]
 url = "postgres://localhold:localhold@localhost:5432/localhold"
 max_connections = 5
+migration_lock_timeout_secs = 5 # Whole seconds; valid range: 1..=2147483
 auto_migrate = true
 # Env: LOCALHOLD_DB_BACKEND, LOCALHOLD_DB_PATH,
 #      LOCALHOLD_POSTGRES_URL, LOCALHOLD_POSTGRES_MAX_CONNECTIONS,
+#      LOCALHOLD_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS,
 #      LOCALHOLD_POSTGRES_AUTO_MIGRATE
 
 [embedding]

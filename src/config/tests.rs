@@ -42,6 +42,7 @@ fn default_config_has_sane_values() {
     assert!(config.database.sqlite_path().ends_with("localhold/localhold.db"));
     assert_eq!(config.database.postgres.url, "postgres://localhold:localhold@localhost:5432/localhold");
     assert_eq!(config.database.postgres.max_connections, 5);
+    assert_eq!(config.database.postgres.migration_lock_timeout_secs, 5);
     assert!(config.database.postgres.auto_migrate);
     assert_eq!(config.limits.max_search_limit, 50);
     assert_eq!(config.limits.max_candidate_pool_size, MAX_CANDIDATE_POOL_SIZE_CEILING);
@@ -99,12 +100,14 @@ fn debug_redacts_postgres_url_credentials_but_keeps_pool_settings() {
     let config = PostgresDatabaseConfig {
         url: "postgres://private-user:private-password@db.example/localhold".into(),
         max_connections: 17,
+        migration_lock_timeout_secs: 23,
         auto_migrate: false,
     };
 
     let debug = format!("{config:?}");
     assert!(debug.contains("[REDACTED]"));
     assert!(debug.contains("max_connections: 17"));
+    assert!(debug.contains("migration_lock_timeout_secs: 23"));
     assert!(debug.contains("auto_migrate: false"));
     assert!(!debug.contains("private-user"));
     assert!(!debug.contains("private-password"));
@@ -184,6 +187,7 @@ fn env_overrides_apply_all_fields() {
         ("LOCALHOLD_DB_PATH", "/tmp/localhold-test.db"),
         ("LOCALHOLD_POSTGRES_URL", "postgresql://localhold:secret@localhost:5433/localhold_test"),
         ("LOCALHOLD_POSTGRES_MAX_CONNECTIONS", "12"),
+        ("LOCALHOLD_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS", "23"),
         ("LOCALHOLD_POSTGRES_AUTO_MIGRATE", "false"),
         ("LOCALHOLD_EMBEDDING_BASE_URL", "http://example.local/v1"),
         ("LOCALHOLD_EMBEDDING_MODEL", "embed-model"),
@@ -218,6 +222,7 @@ fn env_overrides_apply_all_fields() {
     assert_eq!(config.database.sqlite_path(), Path::new("/tmp/localhold-test.db"));
     assert_eq!(config.database.postgres.url, "postgresql://localhold:secret@localhost:5433/localhold_test");
     assert_eq!(config.database.postgres.max_connections, 12);
+    assert_eq!(config.database.postgres.migration_lock_timeout_secs, 23);
     assert!(!config.database.postgres.auto_migrate);
     assert_eq!(embedding.base_url, "http://example.local/v1");
     assert_eq!(embedding.model, "embed-model");
@@ -248,6 +253,7 @@ fn env_overrides_apply_all_fields() {
 fn malformed_typed_env_override_is_rejected_without_echoing_value() {
     for (key, secret) in [
         ("LOCALHOLD_POSTGRES_AUTO_MIGRATE", "not-a-boolean-secret"),
+        ("LOCALHOLD_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS", "not-a-timeout-secret"),
         ("LOCALHOLD_EMBEDDING_AUTH_MODE", "not-an-auth-mode-secret"),
         ("LOCALHOLD_EMBEDDING_SEND_DIMENSIONS", "not-a-boolean-secret"),
         ("LOCALHOLD_EMBEDDING_DIMENSIONS", "not-a-dimension-secret"),
@@ -369,13 +375,20 @@ fn database_config_legacy_path_alias_from_toml() {
 
 #[test]
 fn database_config_postgres_from_toml() {
-    let toml_str = "[database]\nbackend = \"postgres\"\n\n[database.postgres]\nurl = \"postgresql://localhold:secret@localhost:5433/localhold_test\"\nmax_connections = 9\nauto_migrate = false\n";
+    let toml_str = "[database]\nbackend = \"postgres\"\n\n[database.postgres]\nurl = \"postgresql://localhold:secret@localhost:5433/localhold_test\"\nmax_connections = 9\nmigration_lock_timeout_secs = 23\nauto_migrate = false\n";
     let mut config: Config = toml::from_str(toml_str).unwrap();
     config.validate(&no_env()).unwrap();
     assert_eq!(config.database.backend, DatabaseBackend::Postgres);
     assert_eq!(config.database.postgres.url, "postgresql://localhold:secret@localhost:5433/localhold_test");
     assert_eq!(config.database.postgres.max_connections, 9);
+    assert_eq!(config.database.postgres.migration_lock_timeout_secs, 23);
     assert!(!config.database.postgres.auto_migrate);
+}
+
+#[test]
+fn database_config_legacy_postgres_toml_uses_default_migration_lock_timeout() {
+    let config: Config = toml::from_str("[database.postgres]\nmax_connections = 9\nauto_migrate = false\n").unwrap();
+    assert_eq!(config.database.postgres.migration_lock_timeout_secs, 5);
 }
 
 #[test]
@@ -443,6 +456,25 @@ fn validate_database_config_rejects_zero_postgres_connections() {
     };
     let err = validate_database_config(&mut config).unwrap_err();
     assert!(err.to_string().contains("database.postgres.max_connections"));
+}
+
+#[test]
+fn validate_database_config_enforces_postgres_migration_lock_timeout_bounds() {
+    let config_with_timeout = |migration_lock_timeout_secs| DatabaseConfig {
+        backend: DatabaseBackend::Postgres,
+        postgres: PostgresDatabaseConfig {
+            migration_lock_timeout_secs,
+            ..PostgresDatabaseConfig::default()
+        },
+        ..DatabaseConfig::default()
+    };
+
+    validate_database_config(&mut config_with_timeout(MAX_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS)).unwrap();
+    for migration_lock_timeout_secs in [0, MAX_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS + 1] {
+        let mut config = config_with_timeout(migration_lock_timeout_secs);
+        let err = validate_database_config(&mut config).unwrap_err();
+        assert!(err.to_string().contains("database.postgres.migration_lock_timeout_secs"));
+    }
 }
 
 #[test]

@@ -281,7 +281,13 @@ backend = "postgres"
 
 [database.postgres]
 url = "postgres://localhold:password@localhost:5432/localhold"
+migration_lock_timeout_secs = 5
 ```
+
+`migration_lock_timeout_secs` bounds how long each PostgreSQL schema-migration
+lock acquisition waits. Override it with
+`LOCALHOLD_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS` when slower migrations need a
+larger lock-wait budget.
 
 Check installation and runtime readiness without creating or migrating storage
 or downloading models:

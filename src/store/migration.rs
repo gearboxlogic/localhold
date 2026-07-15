@@ -4125,10 +4125,14 @@ mod tests {
         let _locked = query("LOCK TABLE memories IN ACCESS SHARE MODE").execute(&mut *blocker).await.unwrap();
 
         let options = sqlite_options(&source_path, false, true);
+        let started = std::time::Instant::now();
         let err = migrate_sqlite_to_postgres(&options).await.unwrap_err();
 
-        assert!(err.to_string().contains("timed out waiting for PostgreSQL target table locks"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "schema migration timeout was not bounded");
+        assert!(err.to_string().contains("timed out waiting for PostgreSQL schema migration locks"), "{err}");
         blocker.rollback().await.unwrap();
+        let report = migrate_sqlite_to_postgres(&options).await.unwrap();
+        assert_eq!(report.target_after.unwrap().memories, 2_u64);
         drop_postgres_migration_schema().await;
     }
 
@@ -4442,6 +4446,7 @@ mod tests {
         let config = PostgresDatabaseConfig {
             url: postgres_smoke_url(),
             max_connections: 1_u32,
+            migration_lock_timeout_secs: 5,
             auto_migrate: true,
         };
         PostgresStore::open(&config, TEST_EMBEDDING_DIMENSIONS).await.unwrap()

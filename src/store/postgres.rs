@@ -7,16 +7,19 @@ use std::{
 
 use chrono::{DateTime, Utc};
 mod sqlx {
-    pub(crate) use sqlx_core::{query::query, query_builder::QueryBuilder, query_scalar::query_scalar, row::Row, sql_str::AssertSqlSafe, transaction::Transaction, types};
+    pub(crate) use sqlx_core::{
+        error::Error, query::query, query_builder::QueryBuilder, query_scalar::query_scalar, row::Row, sql_str::AssertSqlSafe, transaction::Transaction, types,
+    };
 }
 
-use sqlx::{AssertSqlSafe, QueryBuilder, Row as _, Transaction, types::Json};
+use sqlx::{AssertSqlSafe, Error as SqlxError, QueryBuilder, Row as _, Transaction, types::Json};
 use sqlx_postgres::{PgPool, PgPoolOptions, PgRow, Postgres};
 
 use super::{
     BulkAuthOutcome, EmbeddingMap, EmbeddingNeighbor, EmbeddingProfile, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter, ReassignScopeOutcome, RecordUseOutcome,
     ReembedClaim, merge_metadata_patch,
     migration::{reject_retired_postgres_schema, validate_ready_postgres_schema},
+    postgres_migrations::{CURRENT_SCHEMA_VERSION, MIGRATIONS, MigrationMetadataState, classify_migration_rows, read_migration_metadata_state},
     query::{
         DEFAULT_LIST_LIMIT, MAX_SCAN_ROWS, MAX_VEC_CANDIDATES, OVERFETCH_FACTOR, apply_access_policy_for_filter, escape_like, normalize_filter, sort_by_distance, usize_to_i64,
     },
@@ -25,7 +28,7 @@ use super::{
 };
 use crate::{
     clock::{Clock, SystemClock},
-    config::PostgresDatabaseConfig,
+    config::{MAX_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS, PostgresDatabaseConfig},
     error::{ParseEnumError, StoreError},
     scoring::decay_mass,
     types::{
@@ -40,6 +43,13 @@ const UNRESOLVED_SCOPE: &str = "inbox/unresolved";
 const POSTGRES_COUNT_PAGE_SIZE: usize = 500;
 const EMBEDDING_CLAIM_LEASE_SECS: i64 = 300;
 const EMBEDDING_PROFILE_ADVISORY_LOCK: i64 = 5_499_250_768_369_920_844;
+const SCHEMA_MIGRATION_ADVISORY_LOCK: i64 = 5_499_250_768_369_920_845;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExistingVectorPolicy {
+    Validate,
+    RebuildAfterMigration,
+}
 
 const CREATE_MIGRATIONS_TABLE: &str = "
     CREATE TABLE IF NOT EXISTS localhold_migrations (
@@ -193,7 +203,7 @@ pub struct PostgresStore {
 
 impl PostgresStore {
     /// Latest schema migration recorded by this binary.
-    pub const CURRENT_SCHEMA_VERSION: i64 = 3;
+    pub const CURRENT_SCHEMA_VERSION: i64 = CURRENT_SCHEMA_VERSION;
 
     /// Open a `PostgreSQL` connection pool, optionally initialize schema, and
     /// verify that the schema resolved for requests is ready.
@@ -219,7 +229,7 @@ impl PostgresStore {
         let pool = PgPoolOptions::new().max_connections(config.max_connections).connect(&config.url).await?;
         reject_retired_postgres_schema(&pool, true).await?;
         if config.auto_migrate {
-            init_schema(&pool, embedding_dimensions).await?;
+            init_schema(&pool, embedding_dimensions, ExistingVectorPolicy::Validate, config.migration_lock_timeout_secs).await?;
             validate_current_postgres_store_ready(&pool, embedding_dimensions).await?;
         } else {
             validate_postgres_runtime_ready(&pool, embedding_dimensions).await?;
@@ -344,12 +354,7 @@ impl PostgresStore {
         validate_bootstrap_inputs(config, profile.dimensions)?;
         let pool = PgPoolOptions::new().max_connections(config.max_connections).connect(&config.url).await?;
         reject_retired_postgres_schema(&pool, true).await?;
-        execute_statement(&pool, CREATE_VECTOR_EXTENSION).await?;
-        execute_statement(&pool, CREATE_MIGRATIONS_TABLE).await?;
-        execute_statements(&pool, POSTGRES_SCHEMA_STATEMENTS).await?;
-        migrate_embedding_claim_columns(&pool).await?;
-        migrate_record_revision_column(&pool).await?;
-        record_migration(&pool, Self::CURRENT_SCHEMA_VERSION, "record_revision").await?;
+        init_schema(&pool, profile.dimensions, ExistingVectorPolicy::RebuildAfterMigration, config.migration_lock_timeout_secs).await?;
 
         let mut tx = pool.begin().await?;
         lock_embedding_profile(&mut tx).await?;
@@ -3312,33 +3317,51 @@ fn validate_bootstrap_inputs(config: &PostgresDatabaseConfig, embedding_dimensio
     if config.max_connections == 0 {
         return Err(StoreError::Conflict("database.postgres.max_connections must be greater than zero".into()));
     }
+    if config.migration_lock_timeout_secs == 0 || config.migration_lock_timeout_secs > MAX_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS {
+        return Err(StoreError::Conflict("database.postgres.migration_lock_timeout_secs must be between 1 and 2147483".into()));
+    }
     Ok(())
 }
 
-async fn init_schema(pool: &PgPool, embedding_dimensions: usize) -> Result<(), StoreError> {
-    execute_statement(pool, CREATE_VECTOR_EXTENSION).await?;
-    execute_statement(pool, CREATE_MIGRATIONS_TABLE).await?;
-    check_vector_dimensions(pool, embedding_dimensions).await?;
-    execute_statements(pool, POSTGRES_SCHEMA_STATEMENTS).await?;
-    migrate_embedding_claim_columns(pool).await?;
-    migrate_record_revision_column(pool).await?;
-    migrate_audit_log_remove_memory_fk(pool).await?;
-    execute_dynamic_statement(pool, &memory_embeddings_ddl(embedding_dimensions)?).await?;
-    check_vector_dimensions(pool, embedding_dimensions).await?;
-    record_migration(pool, 1_i64, "bootstrap_schema").await?;
-    record_migration(pool, 2_i64, "audit_log_without_memory_fk").await?;
-    record_migration(pool, PostgresStore::CURRENT_SCHEMA_VERSION, "record_revision").await?;
+async fn init_schema(pool: &PgPool, embedding_dimensions: usize, vector_policy: ExistingVectorPolicy, migration_lock_timeout_secs: u32) -> Result<(), StoreError> {
+    let lock_timeout = format!("{migration_lock_timeout_secs}s");
+    let mut tx = pool.begin().await?;
+    let _timeout = sqlx::query("SELECT set_config('lock_timeout', $1, true)").bind(&lock_timeout).execute(&mut *tx).await?;
+    let _locked = sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SCHEMA_MIGRATION_ADVISORY_LOCK)
+        .execute(&mut *tx)
+        .await
+        .map_err(postgres_schema_lock_error)?;
+
+    execute_statement(&mut tx, CREATE_VECTOR_EXTENSION).await?;
+    execute_statement(&mut tx, CREATE_MIGRATIONS_TABLE).await?;
+    if vector_policy == ExistingVectorPolicy::Validate {
+        check_vector_dimensions_tx(&mut tx, embedding_dimensions).await?;
+    }
+    execute_statements(&mut tx, POSTGRES_SCHEMA_STATEMENTS).await?;
+    migrate_embedding_claim_columns(&mut tx).await?;
+    migrate_record_revision_column(&mut tx).await?;
+    migrate_audit_log_remove_memory_fk(&mut tx).await?;
+    execute_dynamic_statement(&mut tx, &memory_embeddings_ddl(embedding_dimensions)?).await?;
+    if vector_policy == ExistingVectorPolicy::Validate {
+        check_vector_dimensions_tx(&mut tx, embedding_dimensions).await?;
+    }
+    for migration in MIGRATIONS {
+        record_migration(&mut tx, migration.version(), migration.name()).await?;
+    }
+    validate_current_migration_metadata_tx(&mut tx).await?;
+    tx.commit().await?;
     Ok(())
 }
 
-async fn migrate_record_revision_column(pool: &PgPool) -> Result<(), StoreError> {
-    execute_statement(pool, "ALTER TABLE memories ADD COLUMN IF NOT EXISTS record_revision BIGINT NOT NULL DEFAULT 0").await
+async fn migrate_record_revision_column(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
+    execute_statement(tx, "ALTER TABLE memories ADD COLUMN IF NOT EXISTS record_revision BIGINT NOT NULL DEFAULT 0").await
 }
 
-async fn migrate_embedding_claim_columns(pool: &PgPool) -> Result<(), StoreError> {
-    if !embedding_claim_columns_exist(pool).await? {
+async fn migrate_embedding_claim_columns(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
+    if !embedding_claim_columns_exist(tx).await? {
         execute_statement(
-            pool,
+            tx,
             "
             ALTER TABLE memories
                 ADD COLUMN IF NOT EXISTS embedding_claimed_at TIMESTAMPTZ,
@@ -3348,13 +3371,13 @@ async fn migrate_embedding_claim_columns(pool: &PgPool) -> Result<(), StoreError
         .await?;
     }
     execute_statement(
-        pool,
+        tx,
         "CREATE INDEX IF NOT EXISTS idx_memories_embedding_claim ON memories(has_embedding, embedding_claimed_at, created_at, id) WHERE has_embedding = FALSE",
     )
     .await
 }
 
-async fn embedding_claim_columns_exist(pool: &PgPool) -> Result<bool, StoreError> {
+async fn embedding_claim_columns_exist(tx: &mut Transaction<'_, Postgres>) -> Result<bool, StoreError> {
     let count: i64 = sqlx::query_scalar(
         "
         SELECT COUNT(*)
@@ -3364,14 +3387,15 @@ async fn embedding_claim_columns_exist(pool: &PgPool) -> Result<bool, StoreError
           AND column_name IN ('embedding_claimed_at', 'embedding_claim_token')
         ",
     )
-    .fetch_one(pool)
-    .await?;
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(postgres_schema_lock_error)?;
     Ok(count == 2_i64)
 }
 
-async fn migrate_audit_log_remove_memory_fk(pool: &PgPool) -> Result<(), StoreError> {
+async fn migrate_audit_log_remove_memory_fk(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
     execute_statement(
-        pool,
+        tx,
         "
         DO $$
         DECLARE
@@ -3392,21 +3416,31 @@ async fn migrate_audit_log_remove_memory_fk(pool: &PgPool) -> Result<(), StoreEr
     .await
 }
 
-async fn execute_statements(pool: &PgPool, statements: &[&'static str]) -> Result<(), StoreError> {
+async fn execute_statements(tx: &mut Transaction<'_, Postgres>, statements: &[&'static str]) -> Result<(), StoreError> {
     for statement in statements {
-        execute_statement(pool, statement).await?;
+        execute_statement(tx, statement).await?;
     }
     Ok(())
 }
 
-async fn execute_statement(pool: &PgPool, statement: &'static str) -> Result<(), StoreError> {
-    let _result = sqlx::query(statement).execute(pool).await?;
+async fn execute_statement(tx: &mut Transaction<'_, Postgres>, statement: &'static str) -> Result<(), StoreError> {
+    let _result = sqlx::query(statement).execute(&mut **tx).await.map_err(postgres_schema_lock_error)?;
     Ok(())
 }
 
-async fn execute_dynamic_statement(pool: &PgPool, statement: &str) -> Result<(), StoreError> {
-    let _result = sqlx::query(AssertSqlSafe(statement)).execute(pool).await?;
+async fn execute_dynamic_statement(tx: &mut Transaction<'_, Postgres>, statement: &str) -> Result<(), StoreError> {
+    let _result = sqlx::query(AssertSqlSafe(statement)).execute(&mut **tx).await.map_err(postgres_schema_lock_error)?;
     Ok(())
+}
+
+#[expect(clippy::wildcard_enum_match_arm, reason = "non-lock SQLx errors should preserve StoreError conversion")]
+fn postgres_schema_lock_error(error: SqlxError) -> StoreError {
+    match &error {
+        SqlxError::Database(database_error) if database_error.code().as_deref() == Some("55P03") => {
+            StoreError::Conflict("timed out waiting for PostgreSQL schema migration locks within the configured timeout".into())
+        }
+        _ => StoreError::from(error),
+    }
 }
 
 async fn upsert_embedding_profile_executor(tx: &mut Transaction<'_, Postgres>, profile: &EmbeddingProfile) -> Result<(), StoreError> {
@@ -3485,7 +3519,7 @@ fn memory_embeddings_ddl(embedding_dimensions: usize) -> Result<String, StoreErr
     ))
 }
 
-async fn check_vector_dimensions(pool: &PgPool, embedding_dimensions: usize) -> Result<(), StoreError> {
+async fn check_vector_dimensions_tx(tx: &mut Transaction<'_, Postgres>, embedding_dimensions: usize) -> Result<(), StoreError> {
     let existing_type: Option<String> = sqlx::query_scalar(
         "
         SELECT format_type(attribute.atttypid, attribute.atttypmod)
@@ -3495,13 +3529,17 @@ async fn check_vector_dimensions(pool: &PgPool, embedding_dimensions: usize) -> 
           AND NOT attribute.attisdropped
         ",
     )
-    .fetch_optional(pool)
-    .await?;
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(postgres_schema_lock_error)?;
+    validate_vector_dimensions(existing_type.as_deref(), embedding_dimensions)
+}
 
+fn validate_vector_dimensions(existing_type: Option<&str>, embedding_dimensions: usize) -> Result<(), StoreError> {
     let Some(existing_type) = existing_type else {
         return Ok(());
     };
-    let Some(existing_dimensions) = parse_vector_dimensions(&existing_type) else {
+    let Some(existing_dimensions) = parse_vector_dimensions(existing_type) else {
         return Err(StoreError::Conflict(format!(
             "existing memory_embeddings.embedding type is {existing_type}, expected vector({embedding_dimensions})"
         )));
@@ -3520,7 +3558,7 @@ fn parse_vector_dimensions(formatted_type: &str) -> Option<usize> {
     inner.parse().ok()
 }
 
-async fn record_migration(pool: &PgPool, version: i64, name: &'static str) -> Result<(), StoreError> {
+async fn record_migration(tx: &mut Transaction<'_, Postgres>, version: i64, name: &'static str) -> Result<(), StoreError> {
     let _result = sqlx::query(
         "
         INSERT INTO localhold_migrations (version, name)
@@ -3530,36 +3568,34 @@ async fn record_migration(pool: &PgPool, version: i64, name: &'static str) -> Re
     )
     .bind(version)
     .bind(name)
-    .execute(pool)
-    .await?;
+    .execute(&mut **tx)
+    .await
+    .map_err(postgres_schema_lock_error)?;
+    Ok(())
+}
+
+async fn validate_current_migration_metadata_tx(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
+    let rows = sqlx::query("SELECT version, name FROM localhold_migrations ORDER BY version")
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(postgres_schema_lock_error)?
+        .into_iter()
+        .map(|row| Ok((row.try_get("version")?, row.try_get("name")?)))
+        .collect::<Result<Vec<(i64, String)>, SqlxError>>()?;
+    validate_current_migration_state(classify_migration_rows(&rows))
+}
+
+fn validate_current_migration_state(state: MigrationMetadataState) -> Result<(), StoreError> {
+    if state != MigrationMetadataState::Current {
+        return Err(StoreError::Conflict(
+            "PostgreSQL schema migration metadata is not current; start LocalHold once to apply migrations".into(),
+        ));
+    }
     Ok(())
 }
 
 async fn validate_current_migration_metadata(pool: &PgPool) -> Result<(), StoreError> {
-    let table_exists: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'localhold_migrations')) IS NOT NULL")
-        .fetch_one(pool)
-        .await?;
-    if !table_exists {
-        return Err(StoreError::Conflict(
-            "PostgreSQL schema migration metadata is not current; start LocalHold once to apply migrations".into(),
-        ));
-    }
-    let current: bool = sqlx::query_scalar(
-        "SELECT
-            COUNT(*) = 3
-            AND COUNT(*) FILTER (WHERE version = 1 AND name = 'bootstrap_schema') = 1
-            AND COUNT(*) FILTER (WHERE version = 2 AND name = 'audit_log_without_memory_fk') = 1
-            AND COUNT(*) FILTER (WHERE version = 3 AND name = 'record_revision') = 1
-         FROM localhold_migrations",
-    )
-    .fetch_one(pool)
-    .await?;
-    if !current {
-        return Err(StoreError::Conflict(
-            "PostgreSQL schema migration metadata is not current; start LocalHold once to apply migrations".into(),
-        ));
-    }
-    Ok(())
+    validate_current_migration_state(read_migration_metadata_state(pool).await?)
 }
 
 async fn validate_current_postgres_store_ready(pool: &PgPool, embedding_dimensions: usize) -> Result<(), StoreError> {
@@ -3591,6 +3627,7 @@ mod tests {
         PostgresDatabaseConfig {
             url: format!("{url}{separator}options=-csearch_path%3D{encoded_search_path}"),
             max_connections: 1,
+            migration_lock_timeout_secs: 5,
             auto_migrate,
         }
     }
@@ -3722,6 +3759,7 @@ mod tests {
         let config = PostgresDatabaseConfig {
             url,
             max_connections: 1,
+            migration_lock_timeout_secs: 5,
             auto_migrate: true,
         };
 
@@ -3982,6 +4020,135 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn concurrent_fresh_opens_serialize_migrations_and_record_exact_manifest() {
+        with_isolated_postgres_schema("localhold_migration_concurrent", true, |_admin, _schema, config| async move {
+            let first_config = config.clone();
+            let second_config = config.clone();
+            let (first, second) = tokio::join!(PostgresStore::open(&first_config, 3_usize), PostgresStore::open(&second_config, 3_usize));
+            drop(first.unwrap());
+            drop(second.unwrap());
+
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let rows = sqlx::query("SELECT version, name FROM localhold_migrations ORDER BY version")
+                .fetch_all(&scoped)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|row| (row.get::<i64, _>("version"), row.get::<String, _>("name")))
+                .collect::<Vec<_>>();
+            let expected = MIGRATIONS.iter().map(|migration| (migration.version(), migration.name().to_owned())).collect::<Vec<_>>();
+            scoped.close().await;
+
+            assert_eq!(rows, expected);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn schema_migration_advisory_lock_times_out_without_partial_ddl_and_retries() {
+        with_isolated_postgres_schema("localhold_migration_advisory", true, |admin, schema, mut config| async move {
+            config.migration_lock_timeout_secs = 1;
+            let mut blocker = admin.begin().await.unwrap();
+            let _locked = sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(SCHEMA_MIGRATION_ADVISORY_LOCK)
+                .execute(&mut *blocker)
+                .await
+                .unwrap();
+
+            let started = std::time::Instant::now();
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(started.elapsed() < std::time::Duration::from_secs(5), "configured schema migration timeout was not bounded");
+            assert!(error.to_string().contains("schema migration locks"), "{error}");
+
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let table_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pg_tables WHERE schemaname = $1")
+                .bind(&schema)
+                .fetch_one(&scoped)
+                .await
+                .unwrap();
+            scoped.close().await;
+            assert_eq!(table_count, 0_i64, "timed-out migration must not leave partial schema objects");
+
+            blocker.rollback().await.unwrap();
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn schema_migration_table_lock_timeout_rolls_back_and_retries() {
+        with_isolated_postgres_schema("localhold_migration_table_lock", true, |_admin, _schema, config| async move {
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let mut blocker = scoped.begin().await.unwrap();
+            let _locked = sqlx::query("LOCK TABLE memories IN ACCESS SHARE MODE").execute(&mut *blocker).await.unwrap();
+
+            let started = std::time::Instant::now();
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "schema DDL timeout was not bounded");
+            assert!(error.to_string().contains("schema migration locks"), "{error}");
+
+            blocker.rollback().await.unwrap();
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn auto_migrate_repairs_missing_known_ledger_row() {
+        with_isolated_postgres_schema("localhold_migration_repair_ledger", true, |_admin, _schema, config| async move {
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _deleted = sqlx::query("DELETE FROM localhold_migrations WHERE version = 2").execute(&scoped).await.unwrap();
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+
+            let state = read_migration_metadata_state(&scoped).await.unwrap();
+            scoped.close().await;
+            assert_eq!(state, MigrationMetadataState::Current);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn reindex_changes_vector_dimensions_and_preserves_full_manifest() {
+        with_isolated_postgres_schema("localhold_reindex_manifest", true, |_admin, _schema, config| async move {
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+            let profile = EmbeddingProfile::openai_compatible("http://localhost:11434/v1", "test-model", 4_usize);
+            PostgresStore::reindex_embeddings(&config, &profile).await.unwrap();
+
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            assert_eq!(read_migration_metadata_state(&scoped).await.unwrap(), MigrationMetadataState::Current);
+            let vector_type: String = sqlx::query_scalar(
+                "SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'memory_embeddings'::regclass AND attname = 'embedding'",
+            )
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            let profile_dimensions: i64 = sqlx::query_scalar("SELECT dimensions FROM embedding_profile WHERE singleton = 1")
+                .fetch_one(&scoped)
+                .await
+                .unwrap();
+            let table_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_metadata', 'memory_tombstones', 'scope_registry')",
+            )
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            scoped.close().await;
+            assert_eq!(vector_type, "vector(4)");
+            assert_eq!(profile_dimensions, 4_i64);
+            assert_eq!(table_count, 9_i64);
+            drop(PostgresStore::open(&config, 4_usize).await.unwrap());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn open_with_auto_migrate_rejects_missing_runtime_foreign_key() {
         with_isolated_postgres_schema("localhold_runtime_fk", true, |_admin, _schema, config| async move {
             drop(PostgresStore::open(&config, 3_usize).await.unwrap());
@@ -4023,6 +4190,7 @@ mod tests {
         let config = PostgresDatabaseConfig {
             url,
             max_connections: 1,
+            migration_lock_timeout_secs: 5,
             auto_migrate: true,
         };
         drop(PostgresStore::open(&config, 3_usize).await.unwrap());
@@ -4044,6 +4212,7 @@ mod tests {
         let config = PostgresDatabaseConfig {
             url: url.clone(),
             max_connections: 1,
+            migration_lock_timeout_secs: 5,
             auto_migrate: true,
         };
         drop(PostgresStore::open(&config, 3_usize).await.unwrap());
@@ -4055,6 +4224,7 @@ mod tests {
         let scoped_config = PostgresDatabaseConfig {
             url: format!("{url}{separator}options=-csearch_path%3D{schema}%2Cpublic"),
             max_connections: 1,
+            migration_lock_timeout_secs: 5,
             auto_migrate: false,
         };
 
@@ -4077,6 +4247,7 @@ mod tests {
         let scoped_config = PostgresDatabaseConfig {
             url: format!("{url}{separator}options=-csearch_path%3D{schema}%2Cpublic"),
             max_connections: 1,
+            migration_lock_timeout_secs: 5,
             auto_migrate: true,
         };
         drop(PostgresStore::open(&scoped_config, 3_usize).await.unwrap());
@@ -4572,6 +4743,7 @@ mod tests {
         let config = PostgresDatabaseConfig {
             url,
             max_connections: 2,
+            migration_lock_timeout_secs: 5,
             auto_migrate: true,
         };
         let store = PostgresStore::open(&config, 3_usize).await.unwrap();
@@ -4747,6 +4919,7 @@ mod tests {
         let config = PostgresDatabaseConfig {
             url,
             max_connections: 1,
+            migration_lock_timeout_secs: 5,
             auto_migrate: true,
         };
         let store = PostgresStore::open(&config, 3_usize).await.unwrap();
@@ -4901,6 +5074,7 @@ mod tests {
         let config = PostgresDatabaseConfig {
             url,
             max_connections: 1,
+            migration_lock_timeout_secs: 5,
             auto_migrate: true,
         };
         PostgresStore::open(&config, 3_usize).await.unwrap()

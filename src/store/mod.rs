@@ -7,6 +7,7 @@ pub(crate) mod conformance;
 pub(crate) mod crud;
 pub mod migration;
 mod postgres;
+pub(crate) mod postgres_migrations;
 mod query;
 mod schema;
 mod search;

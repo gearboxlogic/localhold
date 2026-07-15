@@ -18,6 +18,8 @@ use crate::{
 
 /// Machine-readable doctor report schema version.
 pub const REPORT_SCHEMA_VERSION: u32 = 1;
+const POSTGRES_MIGRATION_ROWS_CURRENT_QUERY: &str = "SELECT COUNT(*) = 3 FROM localhold_migrations WHERE (version = 1 AND name = 'bootstrap_schema') OR (version = 2 AND name = 'audit_log_without_memory_fk') OR (version = 3 AND name = 'record_revision')";
+const POSTGRES_MIGRATION_IDENTITIES_COMPATIBLE_QUERY: &str = "SELECT NOT EXISTS(SELECT 1 FROM localhold_migrations WHERE ((version = 1 AND name = 'bootstrap_schema') OR (version = 2 AND name = 'audit_log_without_memory_fk') OR (version = 3 AND name = 'record_revision')) IS NOT TRUE)";
 
 /// Exit code used when every diagnostic is healthy.
 pub const EXIT_HEALTHY: i32 = 0;
@@ -897,16 +899,12 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
         Ok(Some(PostgresStore::CURRENT_SCHEMA_VERSION))
     };
     let migration_rows_current: Result<bool, _> = if config.database.postgres.auto_migrate {
-        query_scalar("SELECT COUNT(*) = 2 FROM localhold_migrations WHERE (version = 1 AND name = 'bootstrap_schema') OR (version = 2 AND name = 'audit_log_without_memory_fk')")
-            .fetch_one(&pool)
-            .await
+        query_scalar(POSTGRES_MIGRATION_ROWS_CURRENT_QUERY).fetch_one(&pool).await
     } else {
         Ok(true)
     };
     let migration_identities_compatible: Result<bool, _> = if config.database.postgres.auto_migrate {
-        query_scalar("SELECT NOT EXISTS(SELECT 1 FROM localhold_migrations WHERE ((version = 1 AND name = 'bootstrap_schema') OR (version = 2 AND name = 'audit_log_without_memory_fk')) IS NOT TRUE)")
-            .fetch_one(&pool)
-            .await
+        query_scalar(POSTGRES_MIGRATION_IDENTITIES_COMPATIBLE_QUERY).fetch_one(&pool).await
     } else {
         Ok(true)
     };
@@ -1294,5 +1292,16 @@ mod tests {
         let rendered = report.render_text();
         assert!(!rendered.contains("\n[failed]"));
         assert!(!rendered.contains('\r'));
+    }
+
+    #[test]
+    fn postgres_migration_queries_cover_the_current_schema_version() {
+        assert_eq!(PostgresStore::CURRENT_SCHEMA_VERSION, 3_i64);
+        for query in [POSTGRES_MIGRATION_ROWS_CURRENT_QUERY, POSTGRES_MIGRATION_IDENTITIES_COMPATIBLE_QUERY] {
+            assert!(
+                query.contains("version = 3 AND name = 'record_revision'"),
+                "doctor migration query must recognize the current PostgreSQL migration identity"
+            );
+        }
     }
 }

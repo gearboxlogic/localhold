@@ -25,7 +25,7 @@ does not start or manage model servers.
 
 ## Install A Release
 
-GitHub prereleases provide Linux x86_64 CPU and CUDA 12 archives plus a Windows
+GitHub releases provide Linux x86_64 CPU and CUDA 12 archives plus a Windows
 x86_64 preview archive. Each archive contains `hold`, the example
 configuration, current documentation, and license notices. The CUDA archive
 also carries its checksum-pinned ONNX Runtime/CUDA/cuDNN user-space runtime and

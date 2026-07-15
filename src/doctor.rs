@@ -10,16 +10,19 @@ use serde::Serialize;
 use sqlx_core::query_scalar::query_scalar;
 use sqlx_postgres::{PgPool, PgPoolOptions};
 
+#[cfg(test)]
+use crate::store::PostgresStore;
 use crate::{
     config::{Config, DatabaseBackend, EmbeddingConfig},
     embedding::status::EmbeddingProviderHealth,
-    store::{EmbeddingProfile, PostgresStore, SqliteStore},
+    store::{
+        EmbeddingProfile, SqliteStore,
+        postgres_migrations::{MigrationMetadataState, read_migration_metadata_state},
+    },
 };
 
 /// Machine-readable doctor report schema version.
 pub const REPORT_SCHEMA_VERSION: u32 = 1;
-const POSTGRES_MIGRATION_ROWS_CURRENT_QUERY: &str = "SELECT COUNT(*) = 3 FROM localhold_migrations WHERE (version = 1 AND name = 'bootstrap_schema') OR (version = 2 AND name = 'audit_log_without_memory_fk') OR (version = 3 AND name = 'record_revision')";
-const POSTGRES_MIGRATION_IDENTITIES_COMPATIBLE_QUERY: &str = "SELECT NOT EXISTS(SELECT 1 FROM localhold_migrations WHERE ((version = 1 AND name = 'bootstrap_schema') OR (version = 2 AND name = 'audit_log_without_memory_fk') OR (version = 3 AND name = 'record_revision')) IS NOT TRUE)";
 
 /// Exit code used when every diagnostic is healthy.
 pub const EXIT_HEALTHY: i32 = 0;
@@ -887,20 +890,10 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
             "PostgreSQL relational constraints or indexes are incompatible with startup requirements",
         );
     }
-    let migration: Result<Option<i64>, _> = if config.database.postgres.auto_migrate {
-        query_scalar("SELECT MAX(version) FROM localhold_migrations").fetch_one(&pool).await
+    let migration_metadata = if config.database.postgres.auto_migrate {
+        read_migration_metadata_state(&pool).await
     } else {
-        Ok(Some(PostgresStore::CURRENT_SCHEMA_VERSION))
-    };
-    let migration_rows_current: Result<bool, _> = if config.database.postgres.auto_migrate {
-        query_scalar(POSTGRES_MIGRATION_ROWS_CURRENT_QUERY).fetch_one(&pool).await
-    } else {
-        Ok(true)
-    };
-    let migration_identities_compatible: Result<bool, _> = if config.database.postgres.auto_migrate {
-        query_scalar(POSTGRES_MIGRATION_IDENTITIES_COMPATIBLE_QUERY).fetch_one(&pool).await
-    } else {
-        Ok(true)
+        Ok(MigrationMetadataState::Current)
     };
     let retained_history_fk_exists: Result<bool, _> = query_scalar(
         "SELECT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid IN (to_regclass('memory_audit_log'), to_regclass('memory_tombstones')) AND contype = 'f' AND confrelid = to_regclass('memories'))",
@@ -930,64 +923,21 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
         Ok(true)
     };
     pool.close().await;
-    let (
-        migration,
-        migration_rows_current,
-        migration_identities_compatible,
+    let (Ok(migration_metadata), Ok(retained_history_fk_exists), Ok(current_columns), Ok(indexes_current), Ok(vector_type), Ok(profile_compatible), Ok(owns_managed_tables)) = (
+        migration_metadata,
         retained_history_fk_exists,
         current_columns,
         indexes_current,
         vector_type,
         profile_compatible,
         owns_managed_tables,
-    ) = match (
-        migration,
-        migration_rows_current,
-        migration_identities_compatible,
-        retained_history_fk_exists,
-        current_columns,
-        indexes_current,
-        vector_type,
-        profile_compatible,
-        owns_managed_tables,
-    ) {
-        (
-            Ok(migration),
-            Ok(migration_rows_current),
-            Ok(migration_identities_compatible),
-            Ok(retained_history_fk_exists),
-            Ok(current_columns),
-            Ok(indexes_current),
-            Ok(vector_type),
-            Ok(profile_compatible),
-            Ok(owns_managed_tables),
-        ) => (
-            migration,
-            migration_rows_current,
-            migration_identities_compatible,
-            retained_history_fk_exists,
-            current_columns,
-            indexes_current,
-            vector_type,
-            profile_compatible,
-            owns_managed_tables,
-        ),
-        (Err(_error), ..)
-        | (_, Err(_error), ..)
-        | (_, _, Err(_error), ..)
-        | (_, _, _, Err(_error), ..)
-        | (_, _, _, _, Err(_error), ..)
-        | (_, _, _, _, _, Err(_error), ..)
-        | (_, _, _, _, _, _, Err(_error), ..)
-        | (_, _, _, _, _, _, _, Err(_error), _)
-        | (_, _, _, _, _, _, _, _, Err(_error)) => {
-            return check("storage", DiagnosticStatus::Failed, "PostgreSQL schema compatibility queries failed");
-        }
+    ) else {
+        return check("storage", DiagnosticStatus::Failed, "PostgreSQL schema compatibility queries failed");
     };
-    if migration.is_some_and(|version| version > PostgresStore::CURRENT_SCHEMA_VERSION) {
+    if migration_metadata == MigrationMetadataState::Newer {
         return check("storage", DiagnosticStatus::Failed, "PostgreSQL schema is newer than this LocalHold binary supports");
     }
-    if !migration_identities_compatible {
+    if migration_metadata == MigrationMetadataState::Incompatible {
         return check(
             "storage",
             DiagnosticStatus::Failed,
@@ -1015,13 +965,7 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
             "PostgreSQL auto-migration is enabled but the configured role does not own every managed table",
         );
     }
-    if migration == Some(PostgresStore::CURRENT_SCHEMA_VERSION)
-        && migration_rows_current
-        && relationships_current
-        && current_columns == 3_i64
-        && indexes_current
-        && !retained_history_fk_exists
-    {
+    if migration_metadata == MigrationMetadataState::Current && relationships_current && current_columns == 3_i64 && indexes_current && !retained_history_fk_exists {
         check("storage", DiagnosticStatus::Healthy, "PostgreSQL is reachable and the LocalHold schema is current")
     } else if config.database.postgres.auto_migrate {
         check("storage", DiagnosticStatus::Degraded, "PostgreSQL is reachable but a normal startup migration is required")
@@ -1321,14 +1265,66 @@ mod tests {
         assert!(unique_index_startup_rejected);
     }
 
-    #[test]
-    fn postgres_migration_queries_cover_the_current_schema_version() {
-        assert_eq!(PostgresStore::CURRENT_SCHEMA_VERSION, 3_i64);
-        for query in [POSTGRES_MIGRATION_ROWS_CURRENT_QUERY, POSTGRES_MIGRATION_IDENTITIES_COMPATIBLE_QUERY] {
-            assert!(
-                query.contains("version = 3 AND name = 'record_revision'"),
-                "doctor migration query must recognize the current PostgreSQL migration identity"
-            );
-        }
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    async fn postgres_doctor_classifies_migration_ledger_states() {
+        let url = std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
+        let schema = format!("localhold_doctor_ledger_{}", crate::types::MemoryId::new().to_string().to_lowercase());
+        let admin = PgPoolOptions::new().max_connections(1).connect(&url).await.unwrap();
+        let _created = query(sqlx_core::sql_str::AssertSqlSafe(format!("CREATE SCHEMA {schema}"))).execute(&admin).await.unwrap();
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let postgres = crate::config::PostgresDatabaseConfig {
+            url: format!("{url}{separator}options=-csearch_path%3D{schema}%2Cpublic"),
+            max_connections: 2,
+            auto_migrate: true,
+        };
+        drop(PostgresStore::open(&postgres, 3_usize).await.unwrap());
+        let scoped = PgPoolOptions::new().max_connections(1).connect(&postgres.url).await.unwrap();
+        let mut config = Config::default();
+        config.database.backend = DatabaseBackend::Postgres;
+        config.database.postgres = postgres.clone();
+        config.embedding = EmbeddingConfig::Noop { dimensions: 3 };
+        let clock = crate::clock::SystemClock::new();
+
+        let _deleted = query("DELETE FROM localhold_migrations WHERE version = 2").execute(&scoped).await.unwrap();
+        let missing = postgres_check(&config, &clock).await;
+        drop(PostgresStore::open(&postgres, 3_usize).await.unwrap());
+
+        let _wrong = query("UPDATE localhold_migrations SET name = 'wrong_identity' WHERE version = 2")
+            .execute(&scoped)
+            .await
+            .unwrap();
+        let wrong = postgres_check(&config, &clock).await;
+        let _restored = query("UPDATE localhold_migrations SET name = 'audit_log_without_memory_fk' WHERE version = 2")
+            .execute(&scoped)
+            .await
+            .unwrap();
+
+        let _future = query("INSERT INTO localhold_migrations (version, name) VALUES (4, 'future_migration')")
+            .execute(&scoped)
+            .await
+            .unwrap();
+        let future = postgres_check(&config, &clock).await;
+        let _removed_future = query("DELETE FROM localhold_migrations WHERE version = 4").execute(&scoped).await.unwrap();
+
+        let _wrong = query("UPDATE localhold_migrations SET name = 'runtime_ignored_identity' WHERE version = 2")
+            .execute(&scoped)
+            .await
+            .unwrap();
+        config.database.postgres.auto_migrate = false;
+        let runtime_without_ledger = postgres_check(&config, &clock).await;
+
+        scoped.close().await;
+        let _dropped = query(sqlx_core::sql_str::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
+
+        assert_eq!(missing.status, DiagnosticStatus::Degraded);
+        assert_eq!(wrong.status, DiagnosticStatus::Failed);
+        assert_eq!(future.status, DiagnosticStatus::Failed);
+        assert!(future.summary.contains("newer"));
+        assert_eq!(runtime_without_ledger.status, DiagnosticStatus::Healthy);
     }
 }

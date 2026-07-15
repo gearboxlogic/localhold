@@ -773,10 +773,10 @@ where
 }
 
 fn parse_log_level(level: &str) -> tracing_subscriber::EnvFilter {
-    level.parse().unwrap_or_else(|e| {
+    level.parse().unwrap_or_else(|_error| {
         #[expect(unused_must_use, reason = "best-effort stderr warning before tracing is ready")]
         {
-            writeln!(std::io::stderr(), "warning: invalid log_level '{level}', falling back to default: {e}");
+            writeln!(std::io::stderr(), "warning: invalid configured log level, falling back to default");
         }
         tracing_subscriber::EnvFilter::default()
     })

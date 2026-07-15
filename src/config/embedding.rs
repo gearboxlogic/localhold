@@ -231,7 +231,7 @@ fn is_loopback_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().is_ok_and(|address| address.is_loopback())
 }
 
-pub(super) fn apply_embedding_env(config: &mut EmbeddingConfig, env: &HashMap<String, String>) {
+pub(super) fn apply_embedding_env(config: &mut EmbeddingConfig, env: &HashMap<String, String>) -> Result<(), EngineError> {
     const PROVIDER_KEYS: [&str; 7] = [
         "LOCALHOLD_EMBEDDING_BASE_URL",
         "LOCALHOLD_EMBEDDING_MODEL",
@@ -260,12 +260,13 @@ pub(super) fn apply_embedding_env(config: &mut EmbeddingConfig, env: &HashMap<St
             if let Some(value) = env.get("LOCALHOLD_EMBEDDING_API_KEY") {
                 openai_compatible.api_key = Some(value.clone());
             }
-            apply_parsed_env(env, "LOCALHOLD_EMBEDDING_AUTH_MODE", &mut openai_compatible.auth_mode);
-            apply_parsed_env(env, "LOCALHOLD_EMBEDDING_SEND_DIMENSIONS", &mut openai_compatible.send_dimensions);
-            apply_parsed_env(env, "LOCALHOLD_EMBEDDING_HEALTH_CHECK", &mut openai_compatible.health_check);
-            apply_parsed_env(env, "LOCALHOLD_EMBEDDING_ALLOW_INSECURE_HTTP", &mut openai_compatible.allow_insecure_http);
-            apply_parsed_env(env, "LOCALHOLD_EMBEDDING_DIMENSIONS", dimensions);
+            apply_parsed_env(env, "LOCALHOLD_EMBEDDING_AUTH_MODE", &mut openai_compatible.auth_mode)?;
+            apply_parsed_env(env, "LOCALHOLD_EMBEDDING_SEND_DIMENSIONS", &mut openai_compatible.send_dimensions)?;
+            apply_parsed_env(env, "LOCALHOLD_EMBEDDING_HEALTH_CHECK", &mut openai_compatible.health_check)?;
+            apply_parsed_env(env, "LOCALHOLD_EMBEDDING_ALLOW_INSECURE_HTTP", &mut openai_compatible.allow_insecure_http)?;
+            apply_parsed_env(env, "LOCALHOLD_EMBEDDING_DIMENSIONS", dimensions)?;
         }
-        EmbeddingConfig::Noop { dimensions } => apply_parsed_env(env, "LOCALHOLD_EMBEDDING_DIMENSIONS", dimensions),
+        EmbeddingConfig::Noop { dimensions } => apply_parsed_env(env, "LOCALHOLD_EMBEDDING_DIMENSIONS", dimensions)?,
     }
+    Ok(())
 }

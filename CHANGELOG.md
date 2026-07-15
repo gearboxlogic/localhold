@@ -10,6 +10,7 @@ requirements explicitly.
 
 ## [0.2.0] - 2026-07-14
 
+- Changed malformed typed `LOCALHOLD_*` environment overrides to fail startup and operator commands without echoing their values; `hold doctor` now reports configuration failure and skips dependent probes when effective configuration is unavailable.
 - Added `hold ui`, an interactive terminal browser with search, detail,
   metadata, history, edit, expiry, and delete workflows. Browsing remains
   read-only; write access is acquired only for confirmed mutations.

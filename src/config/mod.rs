@@ -4,7 +4,6 @@ mod embedding;
 pub mod operator;
 
 use std::{
-    cell::Cell,
     collections::HashMap,
     fmt,
     io::Write as _,
@@ -726,38 +725,19 @@ impl Default for ServerConfig {
     }
 }
 
-thread_local! {
-    static ENV_PARSE_WARNING: Cell<bool> = const { Cell::new(false) };
-}
-
-#[expect(unused_must_use, reason = "best-effort stderr warning before tracing is ready")]
-fn warn_env_parse(var: &str, _value: &str) {
-    ENV_PARSE_WARNING.set(true);
-    writeln!(std::io::stderr(), "warning: ignoring unparseable value for {var}");
-}
-
-/// Consume the malformed-environment flag for the current thread.
+/// Look up `var` in the env map and parse it into `target`.
 ///
-/// A caller that needs to associate warnings with one config load owns the
-/// drain: call this immediately before loading, then exactly once afterward.
-/// Config loading must not consume the flag internally or it can hide a
-/// malformed override from that caller.
-pub(crate) fn take_env_parse_warning() -> bool {
-    ENV_PARSE_WARNING.replace(false)
+/// Errors identify the variable but never include its potentially sensitive
+/// value.
+fn apply_parsed_env<T: FromStr>(env: &HashMap<String, String>, var: &str, target: &mut T) -> Result<(), EngineError> {
+    if let Some(v) = env.get(var) {
+        *target = v.parse().map_err(|_error| malformed_env_override(var))?;
+    }
+    Ok(())
 }
 
-/// Look up `var` in the env map and parse it into `target`. Logs a warning if the value is
-/// present but unparseable.
-fn apply_parsed_env<T: FromStr>(env: &HashMap<String, String>, var: &str, target: &mut T)
-where
-    T::Err: fmt::Display,
-{
-    if let Some(v) = env.get(var) {
-        match v.parse() {
-            Ok(parsed) => *target = parsed,
-            Err(_) => warn_env_parse(var, v),
-        }
-    }
+fn malformed_env_override(var: &str) -> EngineError {
+    EngineError::config(format!("{var} environment override is malformed"))
 }
 
 fn normalize_http_header_name(value: &str) -> Result<String, EngineError> {
@@ -824,7 +804,8 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns `EngineError::Config` if a config file exists but cannot be read or parsed.
+    /// Returns `EngineError::Config` if a config file cannot be read or parsed,
+    /// a recognized environment override is malformed, or validation fails.
     pub fn load() -> Result<Self, EngineError> {
         Self::load_with_source().map(|(config, _source)| config)
     }
@@ -841,7 +822,7 @@ impl Config {
     pub fn load_with_source() -> Result<ConfigWithSource, EngineError> {
         let config_dir = user_config_dir();
         let candidates = user_config_candidates(config_dir.as_deref());
-        let env_map = collect_localhold_env_vars();
+        let env_map = collect_localhold_env_vars()?;
         Self::load_from_sources_with_source(&candidates, &env_map)
     }
 
@@ -857,8 +838,8 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns `EngineError::Config` if a config file exists but cannot be read or parsed,
-    /// or if validation fails.
+    /// Returns `EngineError::Config` if a config file cannot be read or parsed,
+    /// a recognized environment override is malformed, or validation fails.
     pub fn load_from_sources(paths: &[PathBuf], env_map: &HashMap<String, String>) -> Result<Self, EngineError> {
         Self::load_from_sources_with_source(paths, env_map).map(|(config, _source)| config)
     }
@@ -874,7 +855,7 @@ impl Config {
             }
         }
         let mut config = config.unwrap_or_default();
-        config.apply_env_from_map(env_map);
+        config.apply_env_from_map(env_map)?;
         config.resolve_paths()?;
         config.validate(env_map)?;
         Ok((config, source))
@@ -886,98 +867,102 @@ impl Config {
     }
 
     #[expect(clippy::too_many_lines, reason = "centralized config env override table is intentionally linear")]
-    fn apply_env_from_map(&mut self, env: &HashMap<String, String>) {
-        apply_parsed_env(env, "LOCALHOLD_DB_BACKEND", &mut self.database.backend);
+    fn apply_env_from_map(&mut self, env: &HashMap<String, String>) -> Result<(), EngineError> {
+        apply_parsed_env(env, "LOCALHOLD_DB_BACKEND", &mut self.database.backend)?;
         if let Some(v) = env.get("LOCALHOLD_DB_PATH") {
             self.database.path = Some(PathBuf::from(v));
         }
         if let Some(v) = env.get("LOCALHOLD_POSTGRES_URL") {
             self.database.postgres.url.clone_from(v);
         }
-        apply_parsed_env(env, "LOCALHOLD_POSTGRES_MAX_CONNECTIONS", &mut self.database.postgres.max_connections);
-        apply_parsed_env(env, "LOCALHOLD_POSTGRES_AUTO_MIGRATE", &mut self.database.postgres.auto_migrate);
-        apply_embedding_env(&mut self.embedding, env);
+        apply_parsed_env(env, "LOCALHOLD_POSTGRES_MAX_CONNECTIONS", &mut self.database.postgres.max_connections)?;
+        apply_parsed_env(env, "LOCALHOLD_POSTGRES_AUTO_MIGRATE", &mut self.database.postgres.auto_migrate)?;
+        apply_embedding_env(&mut self.embedding, env)?;
         if let Some(v) = env.get("LOCALHOLD_LOG_LEVEL") {
+            let _parsed = v.parse::<tracing_subscriber::EnvFilter>().map_err(|_error| malformed_env_override("LOCALHOLD_LOG_LEVEL"))?;
             self.server.log_level.clone_from(v);
         }
         if let Some(v) = env.get("LOCALHOLD_PRINCIPAL") {
             self.server.principal = Some(v.clone());
         }
-        apply_parsed_env(env, "LOCALHOLD_ANONYMOUS_POLICY", &mut self.server.anonymous_policy);
-        apply_parsed_env(env, "LOCALHOLD_TRANSPORT", &mut self.server.transport);
+        apply_parsed_env(env, "LOCALHOLD_ANONYMOUS_POLICY", &mut self.server.anonymous_policy)?;
+        apply_parsed_env(env, "LOCALHOLD_TRANSPORT", &mut self.server.transport)?;
         if let Some(v) = env.get("LOCALHOLD_HTTP_HOST") {
             self.server.host.clone_from(v);
         }
-        apply_parsed_env(env, "LOCALHOLD_HTTP_PORT", &mut self.server.port);
+        apply_parsed_env(env, "LOCALHOLD_HTTP_PORT", &mut self.server.port)?;
         if let Some(v) = env.get("LOCALHOLD_HTTP_PATH") {
             self.server.path.clone_from(v);
         }
         if let Some(v) = env.get("LOCALHOLD_HTTP_AUTH_TOKEN") {
             self.server.http_auth_token = Some(v.clone());
         }
-        apply_parsed_env(env, "LOCALHOLD_HTTP_PRINCIPAL_MODE", &mut self.server.http_principal_mode);
+        apply_parsed_env(env, "LOCALHOLD_HTTP_PRINCIPAL_MODE", &mut self.server.http_principal_mode)?;
         if let Some(v) = env.get("LOCALHOLD_HTTP_PRINCIPAL") {
             self.server.http_principal.clone_from(v);
         }
         if let Some(v) = env.get("LOCALHOLD_HTTP_PRINCIPAL_HEADER") {
+            let _normalized = normalize_http_header_name(v).map_err(|_error| malformed_env_override("LOCALHOLD_HTTP_PRINCIPAL_HEADER"))?;
             self.server.http_principal_header.clone_from(v);
         }
         if let Some(v) = env.get("LOCALHOLD_HTTP_ALLOWED_HOSTS") {
-            self.server.http_allowed_hosts = v.split(',').map(str::trim).filter(|host| !host.is_empty()).map(ToOwned::to_owned).collect();
+            let hosts = v.split(',').map(str::trim).filter(|host| !host.is_empty()).map(ToOwned::to_owned).collect::<Vec<_>>();
+            validate_http_allowed_hosts(&hosts).map_err(|_error| malformed_env_override("LOCALHOLD_HTTP_ALLOWED_HOSTS"))?;
+            self.server.http_allowed_hosts = hosts;
         }
-        apply_parsed_env(env, "LOCALHOLD_HTTP_MAX_BODY_BYTES", &mut self.server.max_body_bytes);
-        apply_parsed_env(env, "LOCALHOLD_HTTP_MAX_SESSIONS", &mut self.server.http_max_sessions);
-        apply_parsed_env(env, "LOCALHOLD_HTTP_SESSION_IDLE_TIMEOUT_SECS", &mut self.server.http_session_idle_timeout_secs);
-        apply_parsed_env(env, "LOCALHOLD_ADMIN_TOOLS_ENABLED", &mut self.server.admin_tools_enabled);
-        apply_parsed_env(env, "LOCALHOLD_MAX_SEARCH_LIMIT", &mut self.limits.max_search_limit);
-        apply_parsed_env(env, "LOCALHOLD_MAX_CANDIDATE_POOL_SIZE", &mut self.limits.max_candidate_pool_size);
-        apply_parsed_env(env, "LOCALHOLD_MAX_LIST_LIMIT", &mut self.limits.max_list_limit);
-        apply_parsed_env(env, "LOCALHOLD_MAX_CONTENT_LENGTH", &mut self.limits.max_content_length);
-        apply_parsed_env(env, "LOCALHOLD_MAX_TAGS_PER_MEMORY", &mut self.limits.max_tags_per_memory);
-        apply_parsed_env(env, "LOCALHOLD_MAX_TAG_LENGTH", &mut self.limits.max_tag_length);
-        apply_parsed_env(env, "LOCALHOLD_MAX_BATCH_SIZE", &mut self.limits.max_batch_size);
-        apply_parsed_env(env, "LOCALHOLD_MAX_REEMBED_LIMIT", &mut self.limits.max_reembed_limit);
-        apply_parsed_env(env, "LOCALHOLD_EMBEDDING_TIMEOUT", &mut self.limits.embedding_timeout_secs);
-        apply_parsed_env(env, "LOCALHOLD_MAX_CONCURRENT_EMBEDDING_REQUESTS", &mut self.limits.max_concurrent_embedding_requests);
-        apply_parsed_env(env, "LOCALHOLD_EMBEDDING_BATCH_SIZE", &mut self.limits.embedding_batch_size);
-        apply_parsed_env(env, "LOCALHOLD_EMBEDDING_MAX_RETRIES", &mut self.limits.embedding_max_retries);
-        apply_parsed_env(env, "LOCALHOLD_EMBEDDING_RETRY_INITIAL_BACKOFF_MS", &mut self.limits.embedding_retry_initial_backoff_ms);
-        apply_parsed_env(env, "LOCALHOLD_EMBEDDING_RETRY_MAX_BACKOFF_MS", &mut self.limits.embedding_retry_max_backoff_ms);
-        apply_parsed_env(env, "LOCALHOLD_SHUTDOWN_TIMEOUT", &mut self.limits.shutdown_timeout_secs);
-        apply_parsed_env(env, "LOCALHOLD_MAX_TOP_TAGS_LIMIT", &mut self.limits.max_top_tags_limit);
-        apply_parsed_env(env, "LOCALHOLD_MAX_HISTORY_LIMIT", &mut self.limits.max_history_limit);
-        apply_parsed_env(env, "LOCALHOLD_CONSOLIDATION_NEIGHBOR_LIMIT", &mut self.limits.consolidation_neighbor_limit);
-        apply_parsed_env(env, "LOCALHOLD_MAX_ENTITIES_PER_MEMORY", &mut self.limits.max_entities_per_memory);
-        apply_parsed_env(env, "LOCALHOLD_MAX_ENTITY_FIELD_LENGTH", &mut self.limits.max_entity_field_length);
-        apply_parsed_env(env, "LOCALHOLD_RRF_K", &mut self.search.rrf_k);
-        apply_parsed_env(env, "LOCALHOLD_RRF_SEMANTIC_WEIGHT", &mut self.search.rrf_semantic_weight);
-        apply_parsed_env(env, "LOCALHOLD_RRF_KEYWORD_WEIGHT", &mut self.search.rrf_keyword_weight);
-        apply_parsed_env(env, "LOCALHOLD_DEFAULT_SEARCH_MODE", &mut self.search.default_mode);
-        apply_parsed_env(env, "LOCALHOLD_SEMANTIC_CANDIDATE_K", &mut self.search.semantic_candidate_k);
-        apply_parsed_env(env, "LOCALHOLD_KEYWORD_CANDIDATE_K", &mut self.search.keyword_candidate_k);
-        apply_parsed_env(env, "LOCALHOLD_RERANK_TOP_M", &mut self.search.rerank_top_m);
-        apply_parsed_env(env, "LOCALHOLD_RERANKER_POOL_SIZE", &mut self.search.reranker.pool_size);
-        apply_parsed_env(env, "LOCALHOLD_RELEVANCE_WEIGHT", &mut self.search.relevance_weight);
+        apply_parsed_env(env, "LOCALHOLD_HTTP_MAX_BODY_BYTES", &mut self.server.max_body_bytes)?;
+        apply_parsed_env(env, "LOCALHOLD_HTTP_MAX_SESSIONS", &mut self.server.http_max_sessions)?;
+        apply_parsed_env(env, "LOCALHOLD_HTTP_SESSION_IDLE_TIMEOUT_SECS", &mut self.server.http_session_idle_timeout_secs)?;
+        apply_parsed_env(env, "LOCALHOLD_ADMIN_TOOLS_ENABLED", &mut self.server.admin_tools_enabled)?;
+        apply_parsed_env(env, "LOCALHOLD_MAX_SEARCH_LIMIT", &mut self.limits.max_search_limit)?;
+        apply_parsed_env(env, "LOCALHOLD_MAX_CANDIDATE_POOL_SIZE", &mut self.limits.max_candidate_pool_size)?;
+        apply_parsed_env(env, "LOCALHOLD_MAX_LIST_LIMIT", &mut self.limits.max_list_limit)?;
+        apply_parsed_env(env, "LOCALHOLD_MAX_CONTENT_LENGTH", &mut self.limits.max_content_length)?;
+        apply_parsed_env(env, "LOCALHOLD_MAX_TAGS_PER_MEMORY", &mut self.limits.max_tags_per_memory)?;
+        apply_parsed_env(env, "LOCALHOLD_MAX_TAG_LENGTH", &mut self.limits.max_tag_length)?;
+        apply_parsed_env(env, "LOCALHOLD_MAX_BATCH_SIZE", &mut self.limits.max_batch_size)?;
+        apply_parsed_env(env, "LOCALHOLD_MAX_REEMBED_LIMIT", &mut self.limits.max_reembed_limit)?;
+        apply_parsed_env(env, "LOCALHOLD_EMBEDDING_TIMEOUT", &mut self.limits.embedding_timeout_secs)?;
+        apply_parsed_env(env, "LOCALHOLD_MAX_CONCURRENT_EMBEDDING_REQUESTS", &mut self.limits.max_concurrent_embedding_requests)?;
+        apply_parsed_env(env, "LOCALHOLD_EMBEDDING_BATCH_SIZE", &mut self.limits.embedding_batch_size)?;
+        apply_parsed_env(env, "LOCALHOLD_EMBEDDING_MAX_RETRIES", &mut self.limits.embedding_max_retries)?;
+        apply_parsed_env(env, "LOCALHOLD_EMBEDDING_RETRY_INITIAL_BACKOFF_MS", &mut self.limits.embedding_retry_initial_backoff_ms)?;
+        apply_parsed_env(env, "LOCALHOLD_EMBEDDING_RETRY_MAX_BACKOFF_MS", &mut self.limits.embedding_retry_max_backoff_ms)?;
+        apply_parsed_env(env, "LOCALHOLD_SHUTDOWN_TIMEOUT", &mut self.limits.shutdown_timeout_secs)?;
+        apply_parsed_env(env, "LOCALHOLD_MAX_TOP_TAGS_LIMIT", &mut self.limits.max_top_tags_limit)?;
+        apply_parsed_env(env, "LOCALHOLD_MAX_HISTORY_LIMIT", &mut self.limits.max_history_limit)?;
+        apply_parsed_env(env, "LOCALHOLD_CONSOLIDATION_NEIGHBOR_LIMIT", &mut self.limits.consolidation_neighbor_limit)?;
+        apply_parsed_env(env, "LOCALHOLD_MAX_ENTITIES_PER_MEMORY", &mut self.limits.max_entities_per_memory)?;
+        apply_parsed_env(env, "LOCALHOLD_MAX_ENTITY_FIELD_LENGTH", &mut self.limits.max_entity_field_length)?;
+        apply_parsed_env(env, "LOCALHOLD_RRF_K", &mut self.search.rrf_k)?;
+        apply_parsed_env(env, "LOCALHOLD_RRF_SEMANTIC_WEIGHT", &mut self.search.rrf_semantic_weight)?;
+        apply_parsed_env(env, "LOCALHOLD_RRF_KEYWORD_WEIGHT", &mut self.search.rrf_keyword_weight)?;
+        apply_parsed_env(env, "LOCALHOLD_DEFAULT_SEARCH_MODE", &mut self.search.default_mode)?;
+        apply_parsed_env(env, "LOCALHOLD_SEMANTIC_CANDIDATE_K", &mut self.search.semantic_candidate_k)?;
+        apply_parsed_env(env, "LOCALHOLD_KEYWORD_CANDIDATE_K", &mut self.search.keyword_candidate_k)?;
+        apply_parsed_env(env, "LOCALHOLD_RERANK_TOP_M", &mut self.search.rerank_top_m)?;
+        apply_parsed_env(env, "LOCALHOLD_RERANKER_POOL_SIZE", &mut self.search.reranker.pool_size)?;
+        apply_parsed_env(env, "LOCALHOLD_RELEVANCE_WEIGHT", &mut self.search.relevance_weight)?;
         // Backward compat: apply deprecated aliases first so the new name
         // takes precedence when both are set during migration.
-        apply_parsed_env(env, "LOCALHOLD_RECENCY_WEIGHT", &mut self.search.activity_weight);
-        apply_parsed_env(env, "LOCALHOLD_ACTIVITY_WEIGHT", &mut self.search.activity_weight);
-        apply_parsed_env(env, "LOCALHOLD_IMPORTANCE_WEIGHT", &mut self.search.importance_weight);
-        apply_parsed_env(env, "LOCALHOLD_RECENCY_HALF_LIFE_HOURS", &mut self.search.activity_half_life_hours);
-        apply_parsed_env(env, "LOCALHOLD_ACTIVITY_HALF_LIFE_HOURS", &mut self.search.activity_half_life_hours);
-        apply_parsed_env(env, "LOCALHOLD_ACTIVITY_SATURATION", &mut self.search.activity_saturation);
-        apply_parsed_env(env, "LOCALHOLD_FRESHNESS_WEIGHT", &mut self.search.freshness_weight);
-        apply_parsed_env(env, "LOCALHOLD_FRESHNESS_HALF_LIFE_SEMANTIC_DAYS", &mut self.search.freshness_half_life_semantic_days);
-        apply_parsed_env(env, "LOCALHOLD_FRESHNESS_HALF_LIFE_EPISODIC_DAYS", &mut self.search.freshness_half_life_episodic_days);
-        apply_parsed_env(env, "LOCALHOLD_FRESHNESS_HALF_LIFE_PROCEDURAL_DAYS", &mut self.search.freshness_half_life_procedural_days);
-        apply_parsed_env(env, "LOCALHOLD_CONFIDENCE_WEIGHT", &mut self.search.confidence_weight);
-        apply_parsed_env(env, "LOCALHOLD_RELEVANCE_FLOOR", &mut self.search.relevance_floor);
-        apply_parsed_env(env, "LOCALHOLD_RELEVANCE_FLOOR_PENALTY", &mut self.search.relevance_floor_penalty);
-        apply_parsed_env(env, "LOCALHOLD_SUPERSEDED_PENALTY", &mut self.search.superseded_penalty);
-        apply_parsed_env(env, "LOCALHOLD_RERANKER_ENABLED", &mut self.search.reranker.enabled);
-        apply_parsed_env(env, "LOCALHOLD_RERANKER_EXECUTION_PROVIDER", &mut self.search.reranker.execution_provider);
-        apply_parsed_env(env, "LOCALHOLD_RERANKER_PRECISION", &mut self.search.reranker.precision);
-        apply_parsed_env(env, "LOCALHOLD_RERANKER_REQUIRED", &mut self.search.reranker.required);
+        apply_parsed_env(env, "LOCALHOLD_RECENCY_WEIGHT", &mut self.search.activity_weight)?;
+        apply_parsed_env(env, "LOCALHOLD_ACTIVITY_WEIGHT", &mut self.search.activity_weight)?;
+        apply_parsed_env(env, "LOCALHOLD_IMPORTANCE_WEIGHT", &mut self.search.importance_weight)?;
+        apply_parsed_env(env, "LOCALHOLD_RECENCY_HALF_LIFE_HOURS", &mut self.search.activity_half_life_hours)?;
+        apply_parsed_env(env, "LOCALHOLD_ACTIVITY_HALF_LIFE_HOURS", &mut self.search.activity_half_life_hours)?;
+        apply_parsed_env(env, "LOCALHOLD_ACTIVITY_SATURATION", &mut self.search.activity_saturation)?;
+        apply_parsed_env(env, "LOCALHOLD_FRESHNESS_WEIGHT", &mut self.search.freshness_weight)?;
+        apply_parsed_env(env, "LOCALHOLD_FRESHNESS_HALF_LIFE_SEMANTIC_DAYS", &mut self.search.freshness_half_life_semantic_days)?;
+        apply_parsed_env(env, "LOCALHOLD_FRESHNESS_HALF_LIFE_EPISODIC_DAYS", &mut self.search.freshness_half_life_episodic_days)?;
+        apply_parsed_env(env, "LOCALHOLD_FRESHNESS_HALF_LIFE_PROCEDURAL_DAYS", &mut self.search.freshness_half_life_procedural_days)?;
+        apply_parsed_env(env, "LOCALHOLD_CONFIDENCE_WEIGHT", &mut self.search.confidence_weight)?;
+        apply_parsed_env(env, "LOCALHOLD_RELEVANCE_FLOOR", &mut self.search.relevance_floor)?;
+        apply_parsed_env(env, "LOCALHOLD_RELEVANCE_FLOOR_PENALTY", &mut self.search.relevance_floor_penalty)?;
+        apply_parsed_env(env, "LOCALHOLD_SUPERSEDED_PENALTY", &mut self.search.superseded_penalty)?;
+        apply_parsed_env(env, "LOCALHOLD_RERANKER_ENABLED", &mut self.search.reranker.enabled)?;
+        apply_parsed_env(env, "LOCALHOLD_RERANKER_EXECUTION_PROVIDER", &mut self.search.reranker.execution_provider)?;
+        apply_parsed_env(env, "LOCALHOLD_RERANKER_PRECISION", &mut self.search.reranker.precision)?;
+        apply_parsed_env(env, "LOCALHOLD_RERANKER_REQUIRED", &mut self.search.reranker.required)?;
         if let Some(v) = env.get("LOCALHOLD_RERANKER_MODEL") {
             self.search.reranker.model.clone_from(v);
         }
@@ -993,12 +978,13 @@ impl Config {
         if let Some(v) = env.get("LOCALHOLD_RERANKER_TOKENIZER_SHA256") {
             self.search.reranker.tokenizer_sha256.clone_from(v);
         }
-        apply_parsed_env(env, "LOCALHOLD_RERANKER_BLEND_WEIGHT", &mut self.search.reranker.blend_weight);
+        apply_parsed_env(env, "LOCALHOLD_RERANKER_BLEND_WEIGHT", &mut self.search.reranker.blend_weight)?;
         if let Some(v) = env.get("LOCALHOLD_RERANKER_CACHE_DIR") {
             self.search.reranker.cache_dir.clone_from(v);
         }
-        apply_parsed_env(env, "LOCALHOLD_DUPLICATE_SUPPRESSION_ENABLED", &mut self.search.duplicate_suppression.enabled);
-        apply_parsed_env(env, "LOCALHOLD_DUPLICATE_SUPPRESSION_LAMBDA", &mut self.search.duplicate_suppression.lambda);
+        apply_parsed_env(env, "LOCALHOLD_DUPLICATE_SUPPRESSION_ENABLED", &mut self.search.duplicate_suppression.enabled)?;
+        apply_parsed_env(env, "LOCALHOLD_DUPLICATE_SUPPRESSION_LAMBDA", &mut self.search.duplicate_suppression.lambda)?;
+        Ok(())
     }
 
     fn resolve_paths(&mut self) -> Result<(), EngineError> {
@@ -1094,10 +1080,14 @@ pub(crate) fn validate_server_config(config: &ServerConfig) -> Result<(), Engine
         ));
     }
     validate_http_path(&config.path)?;
-    if config.http_allowed_hosts.is_empty() {
+    validate_http_allowed_hosts(&config.http_allowed_hosts)
+}
+
+fn validate_http_allowed_hosts(hosts: &[String]) -> Result<(), EngineError> {
+    if hosts.is_empty() {
         return Err(EngineError::config("server.http_allowed_hosts must contain at least one host"));
     }
-    for host in &config.http_allowed_hosts {
+    for host in hosts {
         if host == "*" || host.bytes().any(|byte| byte.is_ascii_whitespace()) || host.contains('/') || host.contains('?') || host.contains('#') {
             return Err(EngineError::config(format!("server.http_allowed_hosts contains an invalid host: {host:?}")));
         }
@@ -1325,7 +1315,7 @@ pub(crate) fn is_builtin_default_reranker_model(model: &str) -> bool {
 
 /// Collect all `LOCALHOLD_*` env vars into a map for [`Config::load_from_sources`].
 #[expect(clippy::too_many_lines, reason = "explicit environment allowlist is intentionally centralized")]
-fn collect_localhold_env_vars() -> HashMap<String, String> {
+fn collect_localhold_env_vars() -> Result<HashMap<String, String>, EngineError> {
     let keys = [
         "LOCALHOLD_DB_BACKEND",
         "LOCALHOLD_DB_PATH",
@@ -1413,7 +1403,17 @@ fn collect_localhold_env_vars() -> HashMap<String, String> {
         "LOCALHOLD_DUPLICATE_SUPPRESSION_ENABLED",
         "LOCALHOLD_DUPLICATE_SUPPRESSION_LAMBDA",
     ];
-    keys.into_iter().filter_map(|key| std::env::var(key).ok().map(|v| (key.to_owned(), v))).collect()
+    let mut env = HashMap::new();
+    for key in keys {
+        match std::env::var(key) {
+            Ok(value) => {
+                let _previous = env.insert(key.to_owned(), value);
+            }
+            Err(std::env::VarError::NotPresent) => {}
+            Err(std::env::VarError::NotUnicode(_value)) => return Err(malformed_env_override(key)),
+        }
+    }
+    Ok(env)
 }
 
 #[cfg(test)]

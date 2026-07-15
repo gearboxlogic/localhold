@@ -28,7 +28,7 @@ use super::{
 };
 use crate::{
     clock::{Clock, SystemClock},
-    config::PostgresDatabaseConfig,
+    config::{MAX_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS, PostgresDatabaseConfig},
     error::{ParseEnumError, StoreError},
     scoring::decay_mass,
     types::{
@@ -44,7 +44,6 @@ const POSTGRES_COUNT_PAGE_SIZE: usize = 500;
 const EMBEDDING_CLAIM_LEASE_SECS: i64 = 300;
 const EMBEDDING_PROFILE_ADVISORY_LOCK: i64 = 5_499_250_768_369_920_844;
 const SCHEMA_MIGRATION_ADVISORY_LOCK: i64 = 5_499_250_768_369_920_845;
-const SCHEMA_MIGRATION_LOCK_TIMEOUT: &str = "5s";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExistingVectorPolicy {
@@ -230,7 +229,7 @@ impl PostgresStore {
         let pool = PgPoolOptions::new().max_connections(config.max_connections).connect(&config.url).await?;
         reject_retired_postgres_schema(&pool, true).await?;
         if config.auto_migrate {
-            init_schema(&pool, embedding_dimensions, ExistingVectorPolicy::Validate).await?;
+            init_schema(&pool, embedding_dimensions, ExistingVectorPolicy::Validate, config.migration_lock_timeout_secs).await?;
             validate_current_postgres_store_ready(&pool, embedding_dimensions).await?;
         } else {
             validate_postgres_runtime_ready(&pool, embedding_dimensions).await?;
@@ -355,7 +354,7 @@ impl PostgresStore {
         validate_bootstrap_inputs(config, profile.dimensions)?;
         let pool = PgPoolOptions::new().max_connections(config.max_connections).connect(&config.url).await?;
         reject_retired_postgres_schema(&pool, true).await?;
-        init_schema(&pool, profile.dimensions, ExistingVectorPolicy::RebuildAfterMigration).await?;
+        init_schema(&pool, profile.dimensions, ExistingVectorPolicy::RebuildAfterMigration, config.migration_lock_timeout_secs).await?;
 
         let mut tx = pool.begin().await?;
         lock_embedding_profile(&mut tx).await?;
@@ -3318,15 +3317,16 @@ fn validate_bootstrap_inputs(config: &PostgresDatabaseConfig, embedding_dimensio
     if config.max_connections == 0 {
         return Err(StoreError::Conflict("database.postgres.max_connections must be greater than zero".into()));
     }
+    if config.migration_lock_timeout_secs == 0 || config.migration_lock_timeout_secs > MAX_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS {
+        return Err(StoreError::Conflict("database.postgres.migration_lock_timeout_secs must be between 1 and 2147483".into()));
+    }
     Ok(())
 }
 
-async fn init_schema(pool: &PgPool, embedding_dimensions: usize, vector_policy: ExistingVectorPolicy) -> Result<(), StoreError> {
+async fn init_schema(pool: &PgPool, embedding_dimensions: usize, vector_policy: ExistingVectorPolicy, migration_lock_timeout_secs: u32) -> Result<(), StoreError> {
+    let lock_timeout = format!("{migration_lock_timeout_secs}s");
     let mut tx = pool.begin().await?;
-    let _timeout = sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-        .bind(SCHEMA_MIGRATION_LOCK_TIMEOUT)
-        .execute(&mut *tx)
-        .await?;
+    let _timeout = sqlx::query("SELECT set_config('lock_timeout', $1, true)").bind(&lock_timeout).execute(&mut *tx).await?;
     let _locked = sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(SCHEMA_MIGRATION_ADVISORY_LOCK)
         .execute(&mut *tx)
@@ -3437,7 +3437,7 @@ async fn execute_dynamic_statement(tx: &mut Transaction<'_, Postgres>, statement
 fn postgres_schema_lock_error(error: SqlxError) -> StoreError {
     match &error {
         SqlxError::Database(database_error) if database_error.code().as_deref() == Some("55P03") => {
-            StoreError::Conflict(format!("timed out waiting for PostgreSQL schema migration locks after {SCHEMA_MIGRATION_LOCK_TIMEOUT}"))
+            StoreError::Conflict("timed out waiting for PostgreSQL schema migration locks within the configured timeout".into())
         }
         _ => StoreError::from(error),
     }
@@ -3627,6 +3627,7 @@ mod tests {
         PostgresDatabaseConfig {
             url: format!("{url}{separator}options=-csearch_path%3D{encoded_search_path}"),
             max_connections: 1,
+            migration_lock_timeout_secs: 5,
             auto_migrate,
         }
     }
@@ -3758,6 +3759,7 @@ mod tests {
         let config = PostgresDatabaseConfig {
             url,
             max_connections: 1,
+            migration_lock_timeout_secs: 5,
             auto_migrate: true,
         };
 
@@ -4045,7 +4047,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn schema_migration_advisory_lock_times_out_without_partial_ddl_and_retries() {
-        with_isolated_postgres_schema("localhold_migration_advisory", true, |admin, schema, config| async move {
+        with_isolated_postgres_schema("localhold_migration_advisory", true, |admin, schema, mut config| async move {
+            config.migration_lock_timeout_secs = 1;
             let mut blocker = admin.begin().await.unwrap();
             let _locked = sqlx::query("SELECT pg_advisory_xact_lock($1)")
                 .bind(SCHEMA_MIGRATION_ADVISORY_LOCK)
@@ -4055,8 +4058,8 @@ mod tests {
 
             let started = std::time::Instant::now();
             let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
-            assert!(started.elapsed() < std::time::Duration::from_secs(10), "schema migration timeout was not bounded");
-            assert!(error.to_string().contains("schema migration locks after 5s"), "{error}");
+            assert!(started.elapsed() < std::time::Duration::from_secs(5), "configured schema migration timeout was not bounded");
+            assert!(error.to_string().contains("schema migration locks"), "{error}");
 
             let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
             let table_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pg_tables WHERE schemaname = $1")
@@ -4085,7 +4088,7 @@ mod tests {
             let started = std::time::Instant::now();
             let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
             assert!(started.elapsed() < std::time::Duration::from_secs(10), "schema DDL timeout was not bounded");
-            assert!(error.to_string().contains("schema migration locks after 5s"), "{error}");
+            assert!(error.to_string().contains("schema migration locks"), "{error}");
 
             blocker.rollback().await.unwrap();
             drop(PostgresStore::open(&config, 3_usize).await.unwrap());
@@ -4187,6 +4190,7 @@ mod tests {
         let config = PostgresDatabaseConfig {
             url,
             max_connections: 1,
+            migration_lock_timeout_secs: 5,
             auto_migrate: true,
         };
         drop(PostgresStore::open(&config, 3_usize).await.unwrap());
@@ -4208,6 +4212,7 @@ mod tests {
         let config = PostgresDatabaseConfig {
             url: url.clone(),
             max_connections: 1,
+            migration_lock_timeout_secs: 5,
             auto_migrate: true,
         };
         drop(PostgresStore::open(&config, 3_usize).await.unwrap());
@@ -4219,6 +4224,7 @@ mod tests {
         let scoped_config = PostgresDatabaseConfig {
             url: format!("{url}{separator}options=-csearch_path%3D{schema}%2Cpublic"),
             max_connections: 1,
+            migration_lock_timeout_secs: 5,
             auto_migrate: false,
         };
 
@@ -4241,6 +4247,7 @@ mod tests {
         let scoped_config = PostgresDatabaseConfig {
             url: format!("{url}{separator}options=-csearch_path%3D{schema}%2Cpublic"),
             max_connections: 1,
+            migration_lock_timeout_secs: 5,
             auto_migrate: true,
         };
         drop(PostgresStore::open(&scoped_config, 3_usize).await.unwrap());
@@ -4736,6 +4743,7 @@ mod tests {
         let config = PostgresDatabaseConfig {
             url,
             max_connections: 2,
+            migration_lock_timeout_secs: 5,
             auto_migrate: true,
         };
         let store = PostgresStore::open(&config, 3_usize).await.unwrap();
@@ -4911,6 +4919,7 @@ mod tests {
         let config = PostgresDatabaseConfig {
             url,
             max_connections: 1,
+            migration_lock_timeout_secs: 5,
             auto_migrate: true,
         };
         let store = PostgresStore::open(&config, 3_usize).await.unwrap();
@@ -5065,6 +5074,7 @@ mod tests {
         let config = PostgresDatabaseConfig {
             url,
             max_connections: 1,
+            migration_lock_timeout_secs: 5,
             auto_migrate: true,
         };
         PostgresStore::open(&config, 3_usize).await.unwrap()

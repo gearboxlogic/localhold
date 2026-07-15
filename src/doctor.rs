@@ -1212,6 +1212,7 @@ mod tests {
         let postgres = crate::config::PostgresDatabaseConfig {
             url: format!("{url}{separator}options=-csearch_path%3D{schema}%2Cpublic"),
             max_connections: 2,
+            migration_lock_timeout_secs: 5,
             auto_migrate: true,
         };
         drop(PostgresStore::open(&postgres, 3_usize).await.unwrap());
@@ -1276,6 +1277,7 @@ mod tests {
         let postgres = crate::config::PostgresDatabaseConfig {
             url: format!("{url}{separator}options=-csearch_path%3D{schema}%2Cpublic"),
             max_connections: 2,
+            migration_lock_timeout_secs: 5,
             auto_migrate: true,
         };
         drop(PostgresStore::open(&postgres, 3_usize).await.unwrap());

@@ -41,6 +41,10 @@ pub const DEFAULT_HTTP_MAX_SESSIONS: usize = 128;
 pub const DEFAULT_HTTP_SESSION_IDLE_TIMEOUT_SECS: u64 = 900;
 /// Maximum candidate-pool size supported by all current search backends.
 pub const MAX_CANDIDATE_POOL_SIZE_CEILING: usize = 1000;
+/// Default wait budget for `PostgreSQL` schema migration locks.
+pub(crate) const DEFAULT_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS: u32 = 5;
+/// Largest `PostgreSQL` lock timeout representable in whole seconds.
+pub(crate) const MAX_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS: u32 = 2_147_483;
 
 /// Requested ONNX Runtime execution provider for reranking.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -484,6 +488,8 @@ pub struct PostgresDatabaseConfig {
     pub url: String,
     /// Maximum pooled connections.
     pub max_connections: u32,
+    /// Maximum seconds to wait for schema migration locks.
+    pub migration_lock_timeout_secs: u32,
     /// Whether startup should create/migrate the schema.
     pub auto_migrate: bool,
 }
@@ -493,6 +499,7 @@ impl fmt::Debug for PostgresDatabaseConfig {
         f.debug_struct("PostgresDatabaseConfig")
             .field("url", &"[REDACTED]")
             .field("max_connections", &self.max_connections)
+            .field("migration_lock_timeout_secs", &self.migration_lock_timeout_secs)
             .field("auto_migrate", &self.auto_migrate)
             .finish()
     }
@@ -681,6 +688,7 @@ impl Default for PostgresDatabaseConfig {
         Self {
             url: "postgres://localhold:localhold@localhost:5432/localhold".into(),
             max_connections: 5,
+            migration_lock_timeout_secs: DEFAULT_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS,
             auto_migrate: true,
         }
     }
@@ -876,6 +884,11 @@ impl Config {
             self.database.postgres.url.clone_from(v);
         }
         apply_parsed_env(env, "LOCALHOLD_POSTGRES_MAX_CONNECTIONS", &mut self.database.postgres.max_connections)?;
+        apply_parsed_env(
+            env,
+            "LOCALHOLD_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS",
+            &mut self.database.postgres.migration_lock_timeout_secs,
+        )?;
         apply_parsed_env(env, "LOCALHOLD_POSTGRES_AUTO_MIGRATE", &mut self.database.postgres.auto_migrate)?;
         apply_embedding_env(&mut self.embedding, env)?;
         if let Some(v) = env.get("LOCALHOLD_LOG_LEVEL") {
@@ -1174,6 +1187,9 @@ fn validate_database_config(config: &mut DatabaseConfig) -> Result<(), EngineErr
             if config.postgres.max_connections == 0 {
                 return Err(EngineError::config("database.postgres.max_connections must be greater than zero"));
             }
+            if config.postgres.migration_lock_timeout_secs == 0 || config.postgres.migration_lock_timeout_secs > MAX_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS {
+                return Err(EngineError::config("database.postgres.migration_lock_timeout_secs must be between 1 and 2147483"));
+            }
         }
     }
     Ok(())
@@ -1321,6 +1337,7 @@ fn collect_localhold_env_vars() -> Result<HashMap<String, String>, EngineError> 
         "LOCALHOLD_DB_PATH",
         "LOCALHOLD_POSTGRES_URL",
         "LOCALHOLD_POSTGRES_MAX_CONNECTIONS",
+        "LOCALHOLD_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS",
         "LOCALHOLD_POSTGRES_AUTO_MIGRATE",
         "LOCALHOLD_EMBEDDING_BASE_URL",
         "LOCALHOLD_EMBEDDING_MODEL",

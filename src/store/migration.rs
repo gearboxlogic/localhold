@@ -4446,6 +4446,7 @@ mod tests {
         let config = PostgresDatabaseConfig {
             url: postgres_smoke_url(),
             max_connections: 1_u32,
+            migration_lock_timeout_secs: 5,
             auto_migrate: true,
         };
         PostgresStore::open(&config, TEST_EMBEDDING_DIMENSIONS).await.unwrap()

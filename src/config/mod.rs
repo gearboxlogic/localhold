@@ -731,9 +731,13 @@ impl Default for ServerConfig {
 /// value.
 fn apply_parsed_env<T: FromStr>(env: &HashMap<String, String>, var: &str, target: &mut T) -> Result<(), EngineError> {
     if let Some(v) = env.get(var) {
-        *target = v.parse().map_err(|_error| EngineError::config(format!("{var} environment override is malformed")))?;
+        *target = v.parse().map_err(|_error| malformed_env_override(var))?;
     }
     Ok(())
+}
+
+fn malformed_env_override(var: &str) -> EngineError {
+    EngineError::config(format!("{var} environment override is malformed"))
 }
 
 fn normalize_http_header_name(value: &str) -> Result<String, EngineError> {
@@ -800,7 +804,8 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns `EngineError::Config` if a config file exists but cannot be read or parsed.
+    /// Returns `EngineError::Config` if a config file cannot be read or parsed,
+    /// a recognized environment override is malformed, or validation fails.
     pub fn load() -> Result<Self, EngineError> {
         Self::load_with_source().map(|(config, _source)| config)
     }
@@ -817,7 +822,7 @@ impl Config {
     pub fn load_with_source() -> Result<ConfigWithSource, EngineError> {
         let config_dir = user_config_dir();
         let candidates = user_config_candidates(config_dir.as_deref());
-        let env_map = collect_localhold_env_vars();
+        let env_map = collect_localhold_env_vars()?;
         Self::load_from_sources_with_source(&candidates, &env_map)
     }
 
@@ -833,8 +838,8 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns `EngineError::Config` if a config file exists but cannot be read or parsed,
-    /// or if validation fails.
+    /// Returns `EngineError::Config` if a config file cannot be read or parsed,
+    /// a recognized environment override is malformed, or validation fails.
     pub fn load_from_sources(paths: &[PathBuf], env_map: &HashMap<String, String>) -> Result<Self, EngineError> {
         Self::load_from_sources_with_source(paths, env_map).map(|(config, _source)| config)
     }
@@ -874,6 +879,7 @@ impl Config {
         apply_parsed_env(env, "LOCALHOLD_POSTGRES_AUTO_MIGRATE", &mut self.database.postgres.auto_migrate)?;
         apply_embedding_env(&mut self.embedding, env)?;
         if let Some(v) = env.get("LOCALHOLD_LOG_LEVEL") {
+            let _parsed = v.parse::<tracing_subscriber::EnvFilter>().map_err(|_error| malformed_env_override("LOCALHOLD_LOG_LEVEL"))?;
             self.server.log_level.clone_from(v);
         }
         if let Some(v) = env.get("LOCALHOLD_PRINCIPAL") {
@@ -896,10 +902,13 @@ impl Config {
             self.server.http_principal.clone_from(v);
         }
         if let Some(v) = env.get("LOCALHOLD_HTTP_PRINCIPAL_HEADER") {
+            let _normalized = normalize_http_header_name(v).map_err(|_error| malformed_env_override("LOCALHOLD_HTTP_PRINCIPAL_HEADER"))?;
             self.server.http_principal_header.clone_from(v);
         }
         if let Some(v) = env.get("LOCALHOLD_HTTP_ALLOWED_HOSTS") {
-            self.server.http_allowed_hosts = v.split(',').map(str::trim).filter(|host| !host.is_empty()).map(ToOwned::to_owned).collect();
+            let hosts = v.split(',').map(str::trim).filter(|host| !host.is_empty()).map(ToOwned::to_owned).collect::<Vec<_>>();
+            validate_http_allowed_hosts(&hosts).map_err(|_error| malformed_env_override("LOCALHOLD_HTTP_ALLOWED_HOSTS"))?;
+            self.server.http_allowed_hosts = hosts;
         }
         apply_parsed_env(env, "LOCALHOLD_HTTP_MAX_BODY_BYTES", &mut self.server.max_body_bytes)?;
         apply_parsed_env(env, "LOCALHOLD_HTTP_MAX_SESSIONS", &mut self.server.http_max_sessions)?;
@@ -1071,10 +1080,14 @@ pub(crate) fn validate_server_config(config: &ServerConfig) -> Result<(), Engine
         ));
     }
     validate_http_path(&config.path)?;
-    if config.http_allowed_hosts.is_empty() {
+    validate_http_allowed_hosts(&config.http_allowed_hosts)
+}
+
+fn validate_http_allowed_hosts(hosts: &[String]) -> Result<(), EngineError> {
+    if hosts.is_empty() {
         return Err(EngineError::config("server.http_allowed_hosts must contain at least one host"));
     }
-    for host in &config.http_allowed_hosts {
+    for host in hosts {
         if host == "*" || host.bytes().any(|byte| byte.is_ascii_whitespace()) || host.contains('/') || host.contains('?') || host.contains('#') {
             return Err(EngineError::config(format!("server.http_allowed_hosts contains an invalid host: {host:?}")));
         }
@@ -1302,7 +1315,7 @@ pub(crate) fn is_builtin_default_reranker_model(model: &str) -> bool {
 
 /// Collect all `LOCALHOLD_*` env vars into a map for [`Config::load_from_sources`].
 #[expect(clippy::too_many_lines, reason = "explicit environment allowlist is intentionally centralized")]
-fn collect_localhold_env_vars() -> HashMap<String, String> {
+fn collect_localhold_env_vars() -> Result<HashMap<String, String>, EngineError> {
     let keys = [
         "LOCALHOLD_DB_BACKEND",
         "LOCALHOLD_DB_PATH",
@@ -1390,7 +1403,17 @@ fn collect_localhold_env_vars() -> HashMap<String, String> {
         "LOCALHOLD_DUPLICATE_SUPPRESSION_ENABLED",
         "LOCALHOLD_DUPLICATE_SUPPRESSION_LAMBDA",
     ];
-    keys.into_iter().filter_map(|key| std::env::var(key).ok().map(|v| (key.to_owned(), v))).collect()
+    let mut env = HashMap::new();
+    for key in keys {
+        match std::env::var(key) {
+            Ok(value) => {
+                let _previous = env.insert(key.to_owned(), value);
+            }
+            Err(std::env::VarError::NotPresent) => {}
+            Err(std::env::VarError::NotUnicode(_value)) => return Err(malformed_env_override(key)),
+        }
+    }
+    Ok(env)
 }
 
 #[cfg(test)]

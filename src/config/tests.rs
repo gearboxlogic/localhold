@@ -246,15 +246,23 @@ fn env_overrides_apply_all_fields() {
 
 #[test]
 fn malformed_typed_env_override_is_rejected_without_echoing_value() {
-    let secret = "not-a-boolean-secret";
-    let env = env_with(&[("LOCALHOLD_POSTGRES_AUTO_MIGRATE", secret)]);
-
-    let error = Config::load_from_sources(&[], &env).unwrap_err();
-    let message = error.to_string();
-    assert!(matches!(error, EngineError::Config(_)));
-    assert!(message.contains("LOCALHOLD_POSTGRES_AUTO_MIGRATE"));
-    assert!(message.contains("environment override is malformed"));
-    assert!(!message.contains(secret));
+    for (key, secret) in [
+        ("LOCALHOLD_POSTGRES_AUTO_MIGRATE", "not-a-boolean-secret"),
+        ("LOCALHOLD_EMBEDDING_AUTH_MODE", "not-an-auth-mode-secret"),
+        ("LOCALHOLD_EMBEDDING_SEND_DIMENSIONS", "not-a-boolean-secret"),
+        ("LOCALHOLD_EMBEDDING_DIMENSIONS", "not-a-dimension-secret"),
+        ("LOCALHOLD_LOG_LEVEL", "not-a-filter[secret"),
+        ("LOCALHOLD_HTTP_PRINCIPAL_HEADER", "invalid header secret"),
+        ("LOCALHOLD_HTTP_ALLOWED_HOSTS", "invalid host secret"),
+    ] {
+        let env = env_with(&[(key, secret)]);
+        let error = Config::load_from_sources(&[], &env).unwrap_err();
+        let message = error.to_string();
+        assert!(matches!(error, EngineError::Config(_)));
+        assert!(message.contains(key), "unexpected error for {key}: {message}");
+        assert!(message.contains("environment override is malformed"));
+        assert!(!message.contains(secret));
+    }
 }
 
 #[test]
@@ -514,7 +522,7 @@ fn load_from_sources_applies_env_overrides() {
 fn load_from_sources_rejects_invalid_http_principal_header() {
     let env = env_with(&[("LOCALHOLD_HTTP_PRINCIPAL_HEADER", "bad header")]);
     let err = Config::load_from_sources(&[], &env).unwrap_err();
-    assert!(err.to_string().contains("server.http_principal_header"));
+    assert!(err.to_string().contains("LOCALHOLD_HTTP_PRINCIPAL_HEADER"));
 }
 
 #[test]

@@ -161,7 +161,9 @@ fn reranker_gate_rejects_malformed_environment_override() {
     let output = command.args(["reranker", "gate", "--iterations", "0", "--json"]).output().unwrap();
     assert_eq!(output.status.code(), Some(1_i32));
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8(output.stderr).unwrap().contains("LOCALHOLD_* environment override is malformed"));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("LOCALHOLD_RERANKER_PRECISION environment override is malformed"));
+    assert!(!stderr.contains("f16"));
     assert!(!root.exists(), "malformed gate configuration must not initialize storage or model artifacts");
 }
 
@@ -364,6 +366,44 @@ fn server_startup_rejects_malformed_auto_migrate_without_echoing_value() {
     assert!(combined.contains("LOCALHOLD_POSTGRES_AUTO_MIGRATE"));
     assert!(!combined.contains("not-a-boolean-secret"));
     assert!(!db_path.exists(), "invalid startup configuration must not initialize storage");
+    let _cleanup = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn server_startup_rejects_malformed_log_filter_without_echoing_value() {
+    let root = unique_db_path("startup-malformed-log-filter").with_extension("root");
+    let db_path = root.join("must-not-exist.db");
+    let (mut command, _config_dir) = config_binary_command(&root);
+    command.env("LOCALHOLD_DB_PATH", &db_path);
+    command.env("LOCALHOLD_LOG_LEVEL", "log-secret-ABC123[");
+
+    let output = command.output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1_i32));
+    let combined = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(combined.contains("LOCALHOLD_LOG_LEVEL"));
+    assert!(!combined.contains("log-secret-ABC123"));
+    assert!(!db_path.exists(), "invalid log filter must not initialize storage");
+    let _cleanup = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn server_startup_rejects_non_unicode_recognized_override() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt as _};
+
+    let root = unique_db_path("startup-non-unicode-env").with_extension("root");
+    let db_path = root.join("must-not-exist.db");
+    let (mut command, _config_dir) = config_binary_command(&root);
+    command.env("LOCALHOLD_DB_PATH", &db_path);
+    command.env("LOCALHOLD_POSTGRES_AUTO_MIGRATE", OsString::from_vec(vec![b'f', b'a', 0xff]));
+
+    let output = command.output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1_i32));
+    let combined = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(combined.contains("LOCALHOLD_POSTGRES_AUTO_MIGRATE"));
+    assert!(!db_path.exists(), "non-Unicode environment must not initialize storage");
     let _cleanup = std::fs::remove_dir_all(root);
 }
 

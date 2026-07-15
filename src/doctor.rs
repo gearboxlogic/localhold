@@ -157,11 +157,9 @@ async fn run_with_clock(options: DoctorOptions, clock: std::sync::Arc<dyn crate:
 
 async fn run_with_clock_inner(options: DoctorOptions, clock: std::sync::Arc<dyn crate::clock::Clock>) -> DoctorReport {
     let build = build_info();
-    let _stale_parse_warning = crate::config::take_env_parse_warning();
     let (config, source) = match Config::load_with_source() {
         Ok(loaded) => loaded,
         Err(_error) => {
-            let _current_parse_warning = crate::config::take_env_parse_warning();
             let checks = vec![
                 check("build", DiagnosticStatus::Healthy, build_summary(&build)),
                 check(
@@ -175,7 +173,7 @@ async fn run_with_clock_inner(options: DoctorOptions, clock: std::sync::Arc<dyn 
     };
 
     let mut checks = vec![check("build", DiagnosticStatus::Healthy, build_summary(&build))];
-    checks.push(config_check(source.as_deref(), crate::config::take_env_parse_warning()));
+    checks.push(config_check(source.as_deref()));
     checks.push(filesystem_check(&config));
     checks.push(Box::pin(storage_check(&config, clock.as_ref())).await);
     checks.push(embedding_check(&config, std::sync::Arc::clone(&clock)).await);
@@ -212,14 +210,7 @@ fn build_summary(build: &BuildInfo) -> String {
     )
 }
 
-fn config_check(source: Option<&Path>, ignored_invalid_override: bool) -> DiagnosticCheck {
-    if ignored_invalid_override {
-        return check(
-            "configuration",
-            DiagnosticStatus::Degraded,
-            "configuration loaded, but at least one malformed environment override was ignored",
-        );
-    }
+fn config_check(source: Option<&Path>) -> DiagnosticCheck {
     let Some(path) = source else {
         return check("configuration", DiagnosticStatus::Healthy, "defaults and LOCALHOLD_* environment overrides validated");
     };

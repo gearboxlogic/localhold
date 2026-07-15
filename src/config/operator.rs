@@ -15,23 +15,14 @@ pub const EXIT_VALID: i32 = 0;
 /// Exit code used when configuration is invalid or cannot be loaded.
 pub const EXIT_INVALID: i32 = 1;
 
-/// Load the effective configuration while rejecting malformed environment overrides.
-///
-/// Unlike the normal server startup loader, this operator-facing loader does not
-/// permit an invalid `LOCALHOLD_*` value to fall back to the configured default.
+/// Load the effective configuration.
 ///
 /// # Errors
 ///
 /// Returns a configuration error when the file cannot be loaded or validated,
 /// or when any recognized environment override is malformed.
 pub fn load_effective_strict() -> Result<Config, EngineError> {
-    let _stale_parse_warning = super::take_env_parse_warning();
-    let loaded = Config::load();
-    let malformed_override = super::take_env_parse_warning();
-    if malformed_override {
-        return Err(EngineError::config("at least one LOCALHOLD_* environment override is malformed; its value was ignored"));
-    }
-    loaded
+    Config::load()
 }
 
 const STARTER_CONFIG: &str = r#"# LocalHold configuration
@@ -131,11 +122,9 @@ impl ConfigValidationReport {
     #[must_use]
     pub fn validate() -> Self {
         let paths = ConfigPathsReport::discover();
-        let _stale_parse_warning = super::take_env_parse_warning();
         let loaded = Config::load_with_source();
-        let malformed_override = super::take_env_parse_warning();
         match loaded {
-            Ok((_config, source)) if !malformed_override => {
+            Ok((_config, source)) => {
                 let config_path = source.as_deref().map(display_path);
                 let summary = config_path.as_ref().map_or_else(
                     || "defaults and LOCALHOLD_* environment overrides are valid".to_owned(),
@@ -149,10 +138,6 @@ impl ConfigValidationReport {
                     summary,
                 }
             }
-            Ok((_config, source)) => Self::invalid(
-                source.as_deref().map(display_path),
-                "at least one LOCALHOLD_* environment override is malformed; its value was ignored",
-            ),
             Err(_error) => Self::invalid(
                 paths.active_path,
                 "configuration could not be loaded or validated; secret-bearing parser context was suppressed",

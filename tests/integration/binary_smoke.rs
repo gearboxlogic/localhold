@@ -350,6 +350,24 @@ fn config_validate_accepts_effective_starter_without_opening_database() {
 }
 
 #[test]
+fn server_startup_rejects_malformed_auto_migrate_without_echoing_value() {
+    let root = unique_db_path("startup-malformed-auto-migrate").with_extension("root");
+    let db_path = root.join("must-not-exist.db");
+    let (mut command, _config_dir) = config_binary_command(&root);
+    command.env("LOCALHOLD_DB_PATH", &db_path);
+    command.env("LOCALHOLD_POSTGRES_AUTO_MIGRATE", "not-a-boolean-secret");
+
+    let output = command.output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1_i32));
+    let combined = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(combined.contains("LOCALHOLD_POSTGRES_AUTO_MIGRATE"));
+    assert!(!combined.contains("not-a-boolean-secret"));
+    assert!(!db_path.exists(), "invalid startup configuration must not initialize storage");
+    let _cleanup = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn config_validate_rejects_invalid_file_without_leaking_parser_context() {
     let root = unique_db_path("config-validate-invalid").with_extension("root");
     let (mut command, config_dir) = config_binary_command(&root);
@@ -380,7 +398,7 @@ fn config_validate_rejects_malformed_environment_override_without_echoing_value(
     assert_eq!(output.status.code(), Some(1_i32));
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["valid"], false);
-    assert!(report["summary"].as_str().unwrap().contains("environment override is malformed"));
+    assert!(report["summary"].as_str().unwrap().contains("could not be loaded or validated"));
     let combined = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     assert!(!combined.contains("environment-secret-XYZ987"));
     let _cleanup = std::fs::remove_dir_all(root);
@@ -1825,20 +1843,18 @@ fn doctor_redacts_configured_embedding_identity_from_all_output() {
 }
 
 #[test]
-fn doctor_degrades_for_malformed_typed_env_without_echoing_value() {
+fn doctor_fails_for_malformed_typed_env_without_echoing_value() {
     let db_path = unique_db_path("doctor-invalid-typed-env");
     let mut command = base_binary_command(&db_path);
     command.env("LOCALHOLD_DB_BACKEND", "postgresql-with-password-secret");
     let output = command.args(["doctor", "--json"]).output().unwrap();
-    assert_eq!(output.status.code(), Some(2_i32));
+    assert_eq!(output.status.code(), Some(1_i32));
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(
-        report["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|check| check["name"] == "configuration" && check["status"] == "degraded")
-    );
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["checks"].as_array().unwrap().len(), 2);
+    assert_eq!(report["checks"][1]["name"], "configuration");
+    assert_eq!(report["checks"][1]["status"], "failed");
+    assert!(!db_path.exists(), "invalid environment must not initialize storage");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("postgresql-with-password-secret"));
 }

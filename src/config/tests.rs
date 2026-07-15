@@ -131,7 +131,7 @@ fn limits_config_loadable_from_toml() {
 fn env_overrides_apply() {
     let env = env_with(&[("LOCALHOLD_EMBEDDING_MODEL", "test-model")]);
     let mut config = Config::default();
-    config.apply_env_from_map(&env);
+    config.apply_env_from_map(&env).unwrap();
     assert_eq!(config.embedding.openai_compatible().unwrap().model, "test-model");
 }
 
@@ -142,11 +142,13 @@ fn reranker_provider_policy_loads_from_toml_and_env() {
     assert_eq!(config.search.reranker.precision, RerankerPrecision::Fp32);
     assert!(!config.search.reranker.required);
 
-    config.apply_env_from_map(&env_with(&[
-        ("LOCALHOLD_RERANKER_EXECUTION_PROVIDER", "cuda"),
-        ("LOCALHOLD_RERANKER_PRECISION", "fp16"),
-        ("LOCALHOLD_RERANKER_REQUIRED", "true"),
-    ]));
+    config
+        .apply_env_from_map(&env_with(&[
+            ("LOCALHOLD_RERANKER_EXECUTION_PROVIDER", "cuda"),
+            ("LOCALHOLD_RERANKER_PRECISION", "fp16"),
+            ("LOCALHOLD_RERANKER_REQUIRED", "true"),
+        ]))
+        .unwrap();
     assert_eq!(config.search.reranker.execution_provider, RerankerExecutionProvider::Cuda);
     assert_eq!(config.search.reranker.precision, RerankerPrecision::Fp16);
     assert!(config.search.reranker.required);
@@ -168,7 +170,7 @@ fn reranker_precision_rejects_unknown_value() {
 fn env_overrides_keep_rerank_top_m_and_deprecated_pool_size_separate() {
     let env = env_with(&[("LOCALHOLD_RERANK_TOP_M", "25"), ("LOCALHOLD_RERANKER_POOL_SIZE", "40")]);
     let mut config = Config::default();
-    config.apply_env_from_map(&env);
+    config.apply_env_from_map(&env).unwrap();
     config.validate(&std::collections::HashMap::new()).unwrap();
 
     assert_eq!(config.search.rerank_top_m, 25);
@@ -176,7 +178,7 @@ fn env_overrides_keep_rerank_top_m_and_deprecated_pool_size_separate() {
 }
 
 #[test]
-fn env_overrides_apply_all_fields_and_ignore_unparseable_values() {
+fn env_overrides_apply_all_fields() {
     let env = env_with(&[
         ("LOCALHOLD_DB_BACKEND", "postgres"),
         ("LOCALHOLD_DB_PATH", "/tmp/localhold-test.db"),
@@ -195,7 +197,7 @@ fn env_overrides_apply_all_fields_and_ignore_unparseable_values() {
         ("LOCALHOLD_ANONYMOUS_POLICY", "deny_all"),
         ("LOCALHOLD_TRANSPORT", "http"),
         ("LOCALHOLD_HTTP_HOST", "0.0.0.0"),
-        ("LOCALHOLD_HTTP_PORT", "invalid-http-port"),
+        ("LOCALHOLD_HTTP_PORT", "8090"),
         ("LOCALHOLD_HTTP_PATH", "/memory"),
         ("LOCALHOLD_HTTP_AUTH_TOKEN", "secret-token"),
         ("LOCALHOLD_HTTP_PRINCIPAL_MODE", "trusted_proxy"),
@@ -209,8 +211,7 @@ fn env_overrides_apply_all_fields_and_ignore_unparseable_values() {
     ]);
 
     let mut config = Config::default();
-    let original_http_port = config.server.port;
-    config.apply_env_from_map(&env);
+    config.apply_env_from_map(&env).unwrap();
 
     let embedding = config.embedding.openai_compatible().unwrap();
     assert_eq!(config.database.backend, DatabaseBackend::Postgres);
@@ -230,7 +231,7 @@ fn env_overrides_apply_all_fields_and_ignore_unparseable_values() {
     assert_eq!(config.server.anonymous_policy, AnonymousPolicy::DenyAll);
     assert_eq!(config.server.transport, Transport::Http);
     assert_eq!(config.server.host, "0.0.0.0");
-    assert_eq!(config.server.port, original_http_port);
+    assert_eq!(config.server.port, 8090);
     assert_eq!(config.server.path, "/memory");
     assert_eq!(config.server.http_auth_token.as_deref(), Some("secret-token"));
     assert_eq!(config.server.http_principal_mode, HttpPrincipalMode::TrustedProxy);
@@ -241,6 +242,19 @@ fn env_overrides_apply_all_fields_and_ignore_unparseable_values() {
     assert_eq!(config.server.http_max_sessions, 24);
     assert_eq!(config.server.http_session_idle_timeout_secs, 600);
     assert!(config.server.admin_tools_enabled);
+}
+
+#[test]
+fn malformed_typed_env_override_is_rejected_without_echoing_value() {
+    let secret = "not-a-boolean-secret";
+    let env = env_with(&[("LOCALHOLD_POSTGRES_AUTO_MIGRATE", secret)]);
+
+    let error = Config::load_from_sources(&[], &env).unwrap_err();
+    let message = error.to_string();
+    assert!(matches!(error, EngineError::Config(_)));
+    assert!(message.contains("LOCALHOLD_POSTGRES_AUTO_MIGRATE"));
+    assert!(message.contains("environment override is malformed"));
+    assert!(!message.contains(secret));
 }
 
 #[test]
@@ -266,7 +280,7 @@ fn env_overrides_apply_limits() {
     ]);
 
     let mut config = Config::default();
-    config.apply_env_from_map(&env);
+    config.apply_env_from_map(&env).unwrap();
 
     assert_eq!(config.limits.max_search_limit, 42);
     assert_eq!(config.limits.max_candidate_pool_size, 500);

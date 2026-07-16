@@ -131,7 +131,7 @@ fn resolve_downloaded_model_paths(config: &RerankerConfig, pins: &DownloadPins) 
     // creating the download lock. This keeps normal server startup compatible
     // with read-only model mounts while retaining repair behavior for missing
     // or mismatched artifacts in writable caches.
-    if onnx_path.is_file() && tokenizer_path.is_file() && verify_file_sha256(&onnx_path, &pins.model_sha256)? && verify_file_sha256(&tokenizer_path, &pins.tokenizer_sha256)? {
+    if verify_file_sha256_optimistically(&onnx_path, &pins.model_sha256)? && verify_file_sha256_optimistically(&tokenizer_path, &pins.tokenizer_sha256)? {
         return Ok(ModelPaths { onnx_path, tokenizer_path });
     }
 
@@ -338,6 +338,13 @@ fn verify_file_sha256(path: &Path, expected_sha256: &str) -> Result<bool, Rerank
     let mut file = File::open(path).map_err(|e| RerankerError::Permanent(Box::new(e)))?;
     let actual_sha256 = sha256_reader(&mut file)?;
     Ok(actual_sha256.eq_ignore_ascii_case(expected_sha256))
+}
+
+fn verify_file_sha256_optimistically(path: &Path, expected_sha256: &str) -> Result<bool, RerankerError> {
+    match verify_file_sha256(path, expected_sha256) {
+        Err(RerankerError::Permanent(error)) if error.downcast_ref::<std::io::Error>().is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => Ok(false),
+        result => result,
+    }
 }
 
 fn sha256_reader<R: Read>(reader: &mut R) -> Result<String, RerankerError> {
@@ -625,6 +632,34 @@ mod tests {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(model_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+    }
+
+    #[test]
+    fn optimistic_not_found_falls_back_to_locked_repair() {
+        let cache = TempDir::new().unwrap();
+        let server = MockArtifactServer::start(false);
+        let config = RerankerConfig {
+            model: "test/model".into(),
+            revision: "revision".into(),
+            cache_dir: cache.path().to_string_lossy().into_owned(),
+            model_sha256: sha256_bytes(MODEL_BYTES),
+            tokenizer_sha256: sha256_bytes(TOKENIZER_BYTES),
+            ..RerankerConfig::default()
+        };
+        let mut pins = resolve_download_pins(&config).unwrap();
+        pins.model_url = format!("{}/model.onnx", server.base_url);
+        pins.tokenizer_url = format!("{}/tokenizer.json", server.base_url);
+        let model_dir = cache.path().join("test--model@revision");
+        let tokenizer_path = model_dir.join("tokenizer.json");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(model_dir.join("model.onnx"), MODEL_BYTES).unwrap();
+
+        assert!(!verify_file_sha256_optimistically(&tokenizer_path, &pins.tokenizer_sha256).unwrap());
+        let paths = resolve_downloaded_model_paths(&config, &pins).unwrap();
+
+        assert_eq!(paths.tokenizer_path, tokenizer_path);
+        assert_eq!(std::fs::read(paths.tokenizer_path).unwrap(), TOKENIZER_BYTES);
+        assert_eq!(server.request_count(), 1, "the locked fallback should repair only the missing tokenizer");
     }
 
     #[test]

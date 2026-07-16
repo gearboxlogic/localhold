@@ -125,8 +125,17 @@ fn resolve_downloaded_model_paths(config: &RerankerConfig, pins: &DownloadPins) 
     let onnx_path = model_dir.join("model.onnx");
     let tokenizer_path = model_dir.join("tokenizer.json");
 
-    // Download missing files
     info!("resolving reranker model '{}' at revision {} in {}", config.model, pins.revision, model_dir.display());
+
+    // A pre-provisioned, hash-verified cache is safe to consume without
+    // creating the download lock. This keeps normal server startup compatible
+    // with read-only model mounts while retaining repair behavior for missing
+    // or mismatched artifacts in writable caches.
+    if onnx_path.is_file() && tokenizer_path.is_file() && verify_file_sha256(&onnx_path, &pins.model_sha256)? && verify_file_sha256(&tokenizer_path, &pins.tokenizer_sha256)? {
+        return Ok(ModelPaths { onnx_path, tokenizer_path });
+    }
+
+    // Download or repair incomplete cache entries under the persistent lock.
     std::fs::create_dir_all(&model_dir).map_err(|e| RerankerError::Permanent(Box::new(e)))?;
 
     let lock = open_cache_lock(&model_dir)?;
@@ -581,6 +590,41 @@ mod tests {
             assert_eq!(paths.onnx_path.parent().unwrap(), cache.path().join(expected_cache));
         }
         assert_eq!(server.request_count(), 4);
+    }
+
+    #[test]
+    fn complete_verified_cache_is_consumed_without_writes() {
+        let cache = TempDir::new().unwrap();
+        let config = RerankerConfig {
+            model: "test/model".into(),
+            revision: "revision".into(),
+            cache_dir: cache.path().to_string_lossy().into_owned(),
+            model_sha256: sha256_bytes(MODEL_BYTES),
+            tokenizer_sha256: sha256_bytes(TOKENIZER_BYTES),
+            ..RerankerConfig::default()
+        };
+        let model_dir = cache.path().join("test--model@revision");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(model_dir.join("model.onnx"), MODEL_BYTES).unwrap();
+        std::fs::write(model_dir.join("tokenizer.json"), TOKENIZER_BYTES).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&model_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+
+        let paths = resolve_model_paths(&config).unwrap();
+
+        assert_eq!(paths.onnx_path, model_dir.join("model.onnx"));
+        assert_eq!(paths.tokenizer_path, model_dir.join("tokenizer.json"));
+        assert!(!model_dir.join(CACHE_LOCK_FILE).exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(model_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
 
     #[test]

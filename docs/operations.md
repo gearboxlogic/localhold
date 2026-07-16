@@ -99,11 +99,14 @@ checksum-pinned fused artifacts derived from the immutable upstream revision.
 
 Multiple LocalHold processes may share a reranker cache when they run as the
 same operating-system user or otherwise have compatible directory permissions.
-Downloads are coordinated per model and revision with a persistent
-`.download.lock` file. Artifacts are written to unique staging files, verified
-against their configured SHA-256 hashes, and only then moved into place. A
-crashed process releases its operating-system lock automatically; the next
-process removes abandoned staging files and resumes with a fresh download.
+An already complete cache entry is verified by SHA-256 and consumed without
+creating files, so pre-provisioned caches may be mounted read-only. Downloads
+and repairs require a writable cache and are coordinated per model and revision
+with a persistent `.download.lock` file. Artifacts are written to unique staging
+files, verified against their configured SHA-256 hashes, and only then moved
+into place. A crashed process releases its operating-system lock automatically;
+the next process removes abandoned staging files and resumes with a fresh
+download.
 
 All processes sharing one model-and-revision cache entry must use the same
 expected hashes. Do not share a writable cache between mutually untrusted

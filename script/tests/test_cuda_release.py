@@ -17,6 +17,7 @@ from unittest import mock
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
+REPOSITORY_ROOT = SCRIPT_DIR.parent
 
 
 def load_script(name: str) -> ModuleType:
@@ -192,6 +193,17 @@ class PackageReleaseTests(unittest.TestCase):
 
             self.assertEqual(first.read_bytes(), second.read_bytes())
             subprocess.run(["zstd", "--test", str(first)], check=True, capture_output=True)
+
+
+class GpuReleaseWorkflowTests(unittest.TestCase):
+    def test_missing_dependency_assertion_uses_doctor_summary(self) -> None:
+        workflow = (REPOSITORY_ROOT / ".github/workflows/gpu-release-gate.yml").read_text(
+            encoding="utf-8"
+        )
+        diagnostic = 'contains("bundled CUDA 12 runtime")'
+
+        self.assertIn(f".summary | {diagnostic}", workflow)
+        self.assertNotIn(f".message | {diagnostic}", workflow)
 
 
 if __name__ == "__main__":

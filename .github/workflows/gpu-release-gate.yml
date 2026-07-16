@@ -317,7 +317,7 @@ jobs:
           jq '{schema_version, case: "missing_bundled_dependency", status, exit_code, reranker: (.checks[] | select(.name == "reranker") | {name, status})}' \
             "$RUNNER_TEMP/missing-dependency.json" >gate-evidence/missing-dependency.json
           test "$status" -eq 1
-          jq -e '.checks[] | select(.name == "reranker") | .status == "failed" and (.message | contains("bundled CUDA 12 runtime"))' \
+          jq -e '.checks[] | select(.name == "reranker") | .status == "failed" and (.summary | contains("bundled CUDA 12 runtime"))' \
             "$RUNNER_TEMP/missing-dependency.json" >/dev/null
           if grep -Fq "panicked" "$RUNNER_TEMP/missing-dependency.stderr"; then
             exit 1

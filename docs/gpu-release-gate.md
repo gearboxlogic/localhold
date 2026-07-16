@@ -9,22 +9,38 @@ and records real inference, ranking parity, performance, and resource evidence.
 The GPU workflow is intentionally unavailable to pull requests. Run it only
 by manual dispatch from a protected `main` or tag ref, or as the CUDA job of
 the release workflow for an annotated tag whose commit was validated as part
-of `main`. The runner must carry all of these labels:
+of `main`. The one-job runner must carry all of these labels:
 
 ```text
-self-hosted, linux, x64, localhold-gpu-release
+self-hosted, linux, x64, localhold-gpu-release,
+gpu-run-<workflow-run-id>-<run-attempt>
 ```
 
 Attach the job to a protected `cuda-release` environment. Restrict environment
-approval and workflow dispatch to release maintainers, use an ephemeral runner
-when possible, and never register a general-purpose repository runner with the
-`localhold-gpu-release` label. The runner needs NVIDIA driver 570.26 or newer,
-standard archive/inspection tools, GitHub artifact access, and a pre-populated
-hash-verified model cache. It does not compile the binary or fetch upstream
-runtime inputs, and it does not use a runner-installed ONNX Runtime, CUDA
-toolkit, cuDNN, Python ML environment, or dynamic-loader path. It must not
-expose database credentials, agent configuration, signing keys, or unrelated
-services.
+approval and workflow dispatch to release maintainers. Allow a maintainer to
+approve their own deployment only when solo release operation requires it, and
+disable administrator bypass. Limit deployments to protected `main` and
+protected release tags.
+
+Create a repository-scoped JIT runner only after the deployment is approved.
+Give it the exact per-attempt `gpu-run-...` label required by the queued job,
+allow it to execute one job, and require automatic deregistration afterward.
+Never register a persistent or general-purpose repository runner with either
+GPU label. The runner needs NVIDIA driver 570.26 or newer, standard
+archive/inspection tools, GitHub artifact access, and a pre-populated,
+hash-verified model cache mounted read-only at `/models`. It does not compile
+the binary or fetch upstream runtime inputs, and it does not use a
+runner-installed ONNX Runtime, CUDA toolkit, cuDNN, Python ML environment, or
+dynamic-loader path.
+
+Run the job as an unprivileged account in an ephemeral container with only the
+required GPU device, model cache, fresh work storage, and private diagnostics
+available. Drop capabilities, prohibit privilege escalation, and do not expose
+host networking, container-engine sockets, SSH agents, Git configuration,
+browser data, personal directories, credentials, agent configuration, signing
+keys, or unrelated services. Remove the container and writable work storage
+after every attempt. Keep diagnostics private, access-restricted, and subject
+to a short retention policy.
 
 The workflow uploads only sanitized gate JSON. Reports contain provider, precision,
 aggregate timing, throughput, RSS, VRAM, parity, thresholds, and failure text;

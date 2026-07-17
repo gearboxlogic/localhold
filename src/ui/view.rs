@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Clear, List, ListState, Paragraph, Row as TableRow, Table, TableState, Wrap},
+    widgets::{Block, Clear, HighlightSpacing, List, ListState, Paragraph, Row as TableRow, Table, TableState, Wrap},
 };
 
 use crate::{
@@ -23,6 +23,10 @@ use crate::{
 
 /// One battlement unit: eight merlons, four gaps.
 const BATTLEMENT_UNIT: &str = "\u{2580}\u{2580}\u{2580}\u{2580}\u{2580}\u{2580}\u{2580}\u{2580}    ";
+
+/// Scope rows reserve two border cells and one selection-marker cell.
+const SCOPE_LIST_CHROME_WIDTH: u16 = 3_u16;
+const SCOPE_HIGHLIGHT_SYMBOL: &str = "\u{258c}";
 
 /// Render one frame.
 pub(crate) fn draw<S>(frame: &mut Frame<'_>, app: &App<S>)
@@ -81,7 +85,7 @@ fn draw_scopes<S>(frame: &mut Frame<'_>, app: &App<S>, area: Rect)
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
-    let width = usize::from(area.width.saturating_sub(2_u16));
+    let width = usize::from(area.width.saturating_sub(SCOPE_LIST_CHROME_WIDTH));
     let mut items = vec![scope_list_line("All memories", app.scope_total, width)];
     if app.scopes.is_empty() {
         items.push(Line::from(Span::styled("  no scoped memories", app.theme.label())));
@@ -91,7 +95,8 @@ where
     let list = List::new(items)
         .block(pane_block(" SCOPES ", app.focus == Focus::Scopes, app.theme.ident(), app.theme.label()))
         .highlight_style(app.theme.accent().bold())
-        .highlight_symbol("\u{258c}");
+        .highlight_symbol(SCOPE_HIGHLIGHT_SYMBOL)
+        .highlight_spacing(HighlightSpacing::Always);
     let mut state = ListState::default().with_selected(Some(app.scope_selected));
     frame.render_stateful_widget(list, area, &mut state);
 }
@@ -102,10 +107,18 @@ fn scope_list_line(label: &str, count: Option<u64>, width: usize) -> Line<'stati
         return Line::from(label);
     };
     let count = count.to_string();
-    let reserved = count.chars().count().saturating_add(1_usize);
+    let count_width = count.chars().count();
+    if count_width > width {
+        let mut overflow = " ".repeat(width.saturating_sub(1_usize));
+        if width > 0_usize {
+            overflow.push('\u{2026}');
+        }
+        return Line::from(overflow);
+    }
+    let reserved = count_width.saturating_add(1_usize);
     let label_width = width.saturating_sub(reserved);
     let mut fitted = label.chars().take(label_width).collect::<String>();
-    let padding = width.saturating_sub(fitted.chars().count()).saturating_sub(count.chars().count());
+    let padding = width.saturating_sub(fitted.chars().count()).saturating_sub(count_width);
     fitted.push_str(&" ".repeat(padding));
     fitted.push_str(&count);
     Line::from(fitted)
@@ -410,7 +423,38 @@ fn escape_terminal_text(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::escape_terminal_text;
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        widgets::{HighlightSpacing, List, ListState, StatefulWidget as _},
+    };
+
+    use super::{SCOPE_HIGHLIGHT_SYMBOL, escape_terminal_text, scope_list_line};
+
+    fn line_text(line: &ratatui::text::Line<'_>) -> String {
+        line.spans.iter().map(|span| span.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn scope_count_line_stays_within_available_width() {
+        assert_eq!(line_text(&scope_list_line("scope", Some(u64::MAX), 0_usize)), "");
+        assert_eq!(line_text(&scope_list_line("scope", Some(u64::MAX), 3_usize)), "  \u{2026}");
+        assert_eq!(line_text(&scope_list_line("scope", Some(u64::MAX), 20_usize)), u64::MAX.to_string());
+        assert_eq!(line_text(&scope_list_line("alpha", Some(42_u64), 8_usize)), "alpha 42");
+    }
+
+    #[test]
+    fn selected_scope_keeps_overflow_ellipsis_visible() {
+        let list = List::new([scope_list_line("scope", Some(u64::MAX), 3_usize)])
+            .highlight_symbol(SCOPE_HIGHLIGHT_SYMBOL)
+            .highlight_spacing(HighlightSpacing::Always);
+        let mut state = ListState::default().with_selected(Some(0_usize));
+        let mut buffer = Buffer::empty(Rect::new(0_u16, 0_u16, 4_u16, 1_u16));
+
+        list.render(buffer.area, &mut buffer, &mut state);
+
+        assert_eq!(buffer, Buffer::with_lines(["\u{258c}  \u{2026}"]));
+    }
 
     #[test]
     fn terminal_control_characters_are_visibly_escaped() {

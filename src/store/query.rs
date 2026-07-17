@@ -755,7 +755,7 @@ pub(crate) fn count_with_access_filter(
     let mut memory_type_counts: std::collections::BTreeMap<MemoryType, u64> = std::collections::BTreeMap::new();
     let mut oldest: Option<chrono::DateTime<chrono::Utc>> = None;
     let mut newest: Option<chrono::DateTime<chrono::Utc>> = None;
-    let mut scope_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut scope_counts: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
     let mut superseded_count = 0_u64;
 
     ScanConfig::new(conn, filter, caller, now, COUNT_PAGE_SIZE).run(|memory| {
@@ -774,18 +774,16 @@ pub(crate) fn count_with_access_filter(
         if let Some(agent) = &memory.provenance.source_agent {
             *agent_counts.entry(agent.clone()).or_insert(0) += 1;
         }
-        // memory_type breakdown
         #[expect(clippy::arithmetic_side_effects, reason = "memory_type count overflow is unreachable with u64")]
         {
             *memory_type_counts.entry(memory.memory_type).or_insert(0) += 1;
         }
-        // Track oldest/newest
         let ts = memory.created_at;
         oldest = Some(oldest.map_or(ts, |o| o.min(ts)));
         newest = Some(newest.map_or(ts, |n| n.max(ts)));
-        // Track distinct scopes
         if let Some(scope) = &memory.provenance.source_conversation {
-            let _inserted = scope_set.insert(scope.clone());
+            let count = scope_counts.entry(scope.clone()).or_insert(0);
+            *count = count.saturating_add(1);
         }
         // Track superseded within the visible matching set.
         if memory.superseded_by.is_some() {
@@ -802,13 +800,9 @@ pub(crate) fn count_with_access_filter(
         sqlite_u64,
     )?;
 
-    // Storage bytes: page_count * page_size
-    let storage_bytes: Option<u64> = {
-        let page_count = conn.query_row("SELECT * FROM pragma_page_count()", [], sqlite_u64)?;
-        let page_size = conn.query_row("SELECT * FROM pragma_page_size()", [], sqlite_u64)?;
-        Some(page_count.saturating_mul(page_size))
-    };
-    let scope_count = u64::try_from(scope_set.len()).unwrap_or(u64::MAX);
+    let storage_bytes = sqlite_storage_bytes(conn)?;
+    let scope_count = u64::try_from(scope_counts.len()).unwrap_or(u64::MAX);
+    let by_scope = scope_counts.into_iter().collect();
 
     let mut by_tag: Vec<(String, u64)> = tag_counts.into_iter().collect();
     by_tag.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -832,9 +826,16 @@ pub(crate) fn count_with_access_filter(
         oldest_memory: oldest,
         newest_memory: newest,
         scope_count,
+        by_scope,
         by_memory_type,
         superseded_count,
     })
+}
+
+fn sqlite_storage_bytes(conn: &rusqlite::Connection) -> Result<Option<u64>, StoreError> {
+    let page_count = conn.query_row("SELECT * FROM pragma_page_count()", [], sqlite_u64)?;
+    let page_size = conn.query_row("SELECT * FROM pragma_page_size()", [], sqlite_u64)?;
+    Ok(Some(page_count.saturating_mul(page_size)))
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 //! Application state and update logic for `hold ui`.
 
-use std::{fmt, future::Future, pin::Pin, sync::Arc};
+use std::{collections::HashMap, fmt, future::Future, pin::Pin, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -62,6 +62,17 @@ pub(crate) struct Row {
     pub score: Option<f64>,
 }
 
+/// One visible, non-empty scope in the sidebar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScopeItem {
+    /// Exact persisted key used for filtering.
+    pub scope_key: String,
+    /// Compact human-readable label.
+    pub label: String,
+    /// Number of visible memories assigned to this exact scope.
+    pub count: u64,
+}
+
 /// State for the detail overlay.
 #[derive(Debug)]
 pub(crate) struct Detail {
@@ -85,6 +96,26 @@ pub(crate) enum DataMsg {
         /// The search mode the engine actually used; `None` for plain listing.
         mode: Option<SearchMode>,
         /// Generation stamp; stale responses are dropped.
+        generation: u64,
+    },
+    /// Authorized scope facets and optional registry definitions.
+    ScopeFacets {
+        /// Registered definitions used only to enrich labels.
+        definitions: Vec<ScopeDefinition>,
+        /// Visible counts by exact persisted scope key.
+        by_scope: Vec<(String, u64)>,
+        /// Total number of visible memories, including memories without a scope.
+        total: u64,
+        /// Nonfatal registry-loading warning.
+        registry_warning: Option<String>,
+        /// Facet generation; stale responses are dropped.
+        generation: u64,
+    },
+    /// Scope facet aggregation failed while row browsing remains available.
+    ScopeFacetsFailed {
+        /// Human-readable failure.
+        message: String,
+        /// Facet generation; stale responses are dropped.
         generation: u64,
     },
     /// An edit completed and the refreshed detail is available.
@@ -207,12 +238,18 @@ where
     pub principal: Option<String>,
     /// Stamp for in-flight data tasks; stale responses are dropped.
     pub generation: u64,
+    /// Stamp for in-flight scope facet tasks.
+    pub facet_generation: u64,
     /// Resolved tincture palette.
     pub theme: Theme,
     /// Clock snapshot used for relative ages, refreshed with the data.
     pub now: DateTime<Utc>,
-    /// Registered scopes; index 0 in the UI is the synthetic "(all)" entry.
-    pub scopes: Vec<ScopeDefinition>,
+    /// Visible, non-empty scopes; index 0 in the UI is the synthetic all entry.
+    pub scopes: Vec<ScopeItem>,
+    /// Total number of memories represented by the all entry, when available.
+    pub scope_total: Option<u64>,
+    /// Nonfatal scope-loading notice.
+    pub scope_notice: Option<String>,
     /// Selected index into the scope pane (0 = all scopes).
     pub scope_selected: usize,
     /// Rows currently shown in the memory table.
@@ -277,9 +314,12 @@ where
             data_tx,
             principal,
             generation: 0_u64,
+            facet_generation: 0_u64,
             theme,
             now,
             scopes: Vec::new(),
+            scope_total: None,
+            scope_notice: None,
             scope_selected: 0_usize,
             rows: Vec::new(),
             row_selected: 0_usize,
@@ -304,11 +344,20 @@ where
         self.mutation_engine.shutdown().await;
     }
 
-    /// Load scopes, then kick off the first bounded listing.
+    /// Kick off the first authorized scope facet and bounded memory listing.
     pub(crate) async fn bootstrap(&mut self) {
-        match self.engine.list_scopes().await {
-            Ok(scopes) => self.scopes = scopes,
-            Err(error) => self.status = Status::NotHeld(format!("scopes unavailable: {error}")),
+        let (definitions, stats) = tokio::join!(self.engine.list_scopes(), self.engine.count_memories(MemoryFilter::default(), self.ctx(), 0_usize),);
+        match stats {
+            Ok(stats) => {
+                let (definitions, registry_warning) = match definitions {
+                    Ok(definitions) => (definitions, None),
+                    Err(error) => (Vec::new(), Some(format!("scope names unavailable; showing keys: {error}"))),
+                };
+                self.apply_scope_facets(definitions, stats.by_scope, stats.total, registry_warning);
+            }
+            Err(error) => {
+                self.scope_notice = Some(format!("scope counts unavailable: {error}"));
+            }
         }
         self.refresh();
     }
@@ -341,6 +390,58 @@ where
         self.loading = true;
         self.now = self.engine.now();
         if self.query.is_empty() { self.spawn_list() } else { self.spawn_search() }
+    }
+
+    fn refresh_all(&mut self) {
+        self.refresh_scope_facets();
+        self.refresh();
+    }
+
+    fn refresh_scope_facets(&mut self) {
+        self.facet_generation = self.facet_generation.saturating_add(1_u64);
+        let generation = self.facet_generation;
+        let engine = self.engine.clone();
+        let tx = self.data_tx.clone();
+        let ctx = self.ctx();
+        #[expect(unused_results, reason = "JoinHandle intentionally dropped — the result arrives via the data channel")]
+        tokio::spawn(async move {
+            let (definitions, stats) = tokio::join!(engine.list_scopes(), engine.count_memories(MemoryFilter::default(), ctx, 0_usize),);
+            let msg = match stats {
+                Ok(stats) => {
+                    let (definitions, registry_warning) = match definitions {
+                        Ok(definitions) => (definitions, None),
+                        Err(error) => (Vec::new(), Some(format!("scope names unavailable; showing keys: {error}"))),
+                    };
+                    DataMsg::ScopeFacets {
+                        definitions,
+                        by_scope: stats.by_scope,
+                        total: stats.total,
+                        registry_warning,
+                        generation,
+                    }
+                }
+                Err(error) => DataMsg::ScopeFacetsFailed {
+                    message: format!("scope counts unavailable: {error}"),
+                    generation,
+                },
+            };
+            drop(tx.send(msg));
+        });
+    }
+
+    fn apply_scope_facets(&mut self, definitions: Vec<ScopeDefinition>, by_scope: Vec<(String, u64)>, total: u64, registry_warning: Option<String>) {
+        let selected = self.selected_scope();
+        self.scopes = build_scope_items(definitions, by_scope);
+        self.scope_total = Some(total);
+        self.scope_notice = registry_warning;
+        self.scope_selected = selected
+            .as_ref()
+            .and_then(|key| self.scopes.iter().position(|scope| &scope.scope_key == key))
+            .map_or(0_usize, |index| index.saturating_add(1_usize));
+        if selected.is_some() && self.scope_selected == 0_usize {
+            self.row_selected = 0_usize;
+            self.refresh();
+        }
     }
 
     fn spawn_list(&self) {
@@ -408,6 +509,18 @@ where
     #[expect(clippy::too_many_lines, reason = "the reducer keeps all generation-checked data transitions together")]
     pub(crate) fn on_data(&mut self, msg: DataMsg) {
         match msg {
+            DataMsg::ScopeFacets {
+                definitions,
+                by_scope,
+                total,
+                registry_warning,
+                generation,
+            } if generation == self.facet_generation => {
+                self.apply_scope_facets(definitions, by_scope, total, registry_warning);
+            }
+            DataMsg::ScopeFacetsFailed { message, generation } if generation == self.facet_generation => {
+                self.scope_notice = Some(message);
+            }
             DataMsg::Rows { rows, mode, generation } if generation == self.generation => {
                 self.rows = rows.into_iter().map(sanitize_row_for_view).collect();
                 self.executed_mode = mode;
@@ -461,6 +574,7 @@ where
                 self.edit = None;
                 self.mode = Mode::Browse;
                 self.status = Status::Held("memory revised and is no longer visible".into());
+                self.refresh_scope_facets();
             }
             DataMsg::UpdatedUnrefreshed { id, message, generation } if generation == self.operation_generation => {
                 self.pending = false;
@@ -479,6 +593,7 @@ where
                 self.edit = None;
                 self.mode = Mode::Browse;
                 self.status = Status::NotHeld("memory no longer exists".into());
+                self.refresh_scope_facets();
             }
             DataMsg::Deleted { id, generation } if generation == self.operation_generation => {
                 self.pending = false;
@@ -488,6 +603,7 @@ where
                 self.edit = None;
                 self.mode = Mode::Browse;
                 self.status = Status::Held("memory forgotten".into());
+                self.refresh_scope_facets();
             }
             DataMsg::MutationFailed { message, generation } if generation == self.operation_generation => {
                 self.pending = false;
@@ -496,7 +612,9 @@ where
                     self.mode = Mode::Detail;
                 }
             }
-            DataMsg::Rows { .. }
+            DataMsg::ScopeFacets { .. }
+            | DataMsg::ScopeFacetsFailed { .. }
+            | DataMsg::Rows { .. }
             | DataMsg::Failed { .. }
             | DataMsg::Updated { .. }
             | DataMsg::UpdatedInvisible { .. }
@@ -509,17 +627,15 @@ where
 
     fn results_status(&self) -> Status {
         let count = self.rows.len();
+        let scope = self.selected_scope().map_or_else(String::new, |key| format!(" · scope {key}"));
         if self.query.is_empty() {
-            if count == 0_usize {
-                return Status::Note("the hold is empty here \u{2014} remember something".into());
-            }
-            return Status::Held(format!("{count} memories"));
+            return browse_results_status(count, &scope);
         }
         let mode = self.executed_mode.map_or_else(String::new, |mode| format!(" ({mode})"));
         if count == 0_usize {
-            return Status::Note(format!("nothing found{mode}"));
+            return Status::Note(format!("nothing found{mode}{scope}"));
         }
-        Status::Held(format!("{count} results{mode}"))
+        Status::Held(format!("{count} results{mode}{scope}"))
     }
 
     fn request_quit(&mut self) {
@@ -554,14 +670,16 @@ where
     async fn key_browse(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') => self.request_quit(),
-            KeyCode::Tab => self.focus = if self.focus == Focus::Scopes { Focus::Memories } else { Focus::Scopes },
+            KeyCode::Tab | KeyCode::BackTab => self.focus = if self.focus == Focus::Scopes { Focus::Memories } else { Focus::Scopes },
+            KeyCode::Char('h') | KeyCode::Left => self.focus = Focus::Scopes,
+            KeyCode::Char('l') | KeyCode::Right => self.focus = Focus::Memories,
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(true),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(false),
             KeyCode::Char('g') | KeyCode::Home => self.jump_selection(true),
             KeyCode::Char('G') | KeyCode::End => self.jump_selection(false),
             KeyCode::Char('/') => self.mode = Mode::Search,
             KeyCode::Char('m') => self.cycle_mode(),
-            KeyCode::Char('r') => self.refresh(),
+            KeyCode::Char('r') => self.refresh_all(),
             KeyCode::Esc => {
                 if !self.query.is_empty() {
                     self.query.clear();
@@ -887,8 +1005,18 @@ where
     }
 
     fn jump_selection(&mut self, top: bool) {
-        if self.focus == Focus::Memories {
-            self.row_selected = if top { 0_usize } else { self.rows.len().saturating_sub(1_usize) };
+        match self.focus {
+            Focus::Memories => {
+                self.row_selected = if top { 0_usize } else { self.rows.len().saturating_sub(1_usize) };
+            }
+            Focus::Scopes => {
+                let next = if top { 0_usize } else { self.scopes.len() };
+                if next != self.scope_selected {
+                    self.scope_selected = next;
+                    self.row_selected = 0_usize;
+                    self.refresh();
+                }
+            }
         }
     }
 
@@ -905,6 +1033,74 @@ where
             self.refresh();
         }
     }
+}
+fn browse_results_status(count: usize, scope: &str) -> Status {
+    if count > 0_usize {
+        return Status::Held(format!("{count} memories{scope}"));
+    }
+    if scope.is_empty() {
+        return Status::Note("the hold is empty here \u{2014} remember something".into());
+    }
+    Status::Note(format!("nothing held{scope}"))
+}
+
+fn build_scope_items(definitions: Vec<ScopeDefinition>, by_scope: Vec<(String, u64)>) -> Vec<ScopeItem> {
+    let display_names = definitions
+        .into_iter()
+        .filter_map(|definition| {
+            let display_name = definition.display_name.trim();
+            (!display_name.is_empty()).then(|| (definition.scope_key, display_name.to_owned()))
+        })
+        .collect::<HashMap<_, _>>();
+    let keys = by_scope.iter().filter(|(_, count)| *count > 0_u64).map(|(scope, _)| scope.clone()).collect::<Vec<_>>();
+    let raw_keys = keys.iter().filter(|scope| !display_names.contains_key(*scope)).map(String::as_str).collect::<Vec<_>>();
+
+    let mut items = by_scope
+        .into_iter()
+        .filter(|(_, count)| *count > 0_u64)
+        .map(|(scope_key, count)| {
+            let label = display_names.get(&scope_key).cloned().unwrap_or_else(|| shortest_unique_scope_label(&scope_key, &raw_keys));
+            ScopeItem { scope_key, label, count }
+        })
+        .collect::<Vec<_>>();
+
+    let mut label_counts = HashMap::new();
+    for item in &items {
+        let count = label_counts.entry(item.label.to_lowercase()).or_insert(0_usize);
+        *count = count.saturating_add(1_usize);
+    }
+    let all_keys = keys.iter().map(String::as_str).collect::<Vec<_>>();
+    for item in &mut items {
+        if label_counts.get(&item.label.to_lowercase()).copied().unwrap_or_default() > 1_usize {
+            let suffix = shortest_unique_scope_label(&item.scope_key, &all_keys);
+            item.label = format!("{} · {suffix}", item.label);
+        }
+    }
+    items.sort_by(|left, right| {
+        left.label
+            .to_lowercase()
+            .cmp(&right.label.to_lowercase())
+            .then_with(|| left.scope_key.cmp(&right.scope_key))
+    });
+    items
+}
+
+fn shortest_unique_scope_label(scope: &str, peers: &[&str]) -> String {
+    let segments = scope.split(['/', '\\']).filter(|segment| !segment.is_empty()).collect::<Vec<_>>();
+    for depth in 1_usize..=segments.len() {
+        let candidate = segments[segments.len().saturating_sub(depth)..].join("/");
+        let matches = peers
+            .iter()
+            .filter(|peer| {
+                let peer_segments = peer.split(['/', '\\']).filter(|segment| !segment.is_empty()).collect::<Vec<_>>();
+                peer_segments.len() >= depth && peer_segments[peer_segments.len().saturating_sub(depth)..].join("/").eq_ignore_ascii_case(&candidate)
+            })
+            .count();
+        if matches == 1_usize {
+            return candidate;
+        }
+    }
+    scope.to_owned()
 }
 
 async fn refresh_updated_detail<S>(engine: &LocalHoldEngine<S>, id: MemoryId, principal: &str, generation: u64) -> DataMsg
@@ -966,14 +1162,14 @@ mod tests {
     };
     use tokio::sync::mpsc;
 
-    use super::{App, DataMsg, Mode, MutationEngineFactory, Row, Status};
+    use super::{App, DataMsg, Focus, Mode, MutationEngineFactory, Row, Status, build_scope_items};
     use crate::{
         config::{LimitsConfig, SearchConfig},
         embedding::{BoxFuture, EmbeddingProvider},
         engine::LocalHoldEngine,
         error::EmbeddingError,
         store::{MemoryReader as _, MemoryWriter as _, SqliteStore},
-        types::{AccessPolicy, Memory, MemoryUpdate, Provenance, RedactableField, WriteOutcome},
+        types::{AccessPolicy, Memory, MemoryUpdate, Provenance, RedactableField, ScopeDefinition, WriteOutcome},
         ui::{theme::Theme, view},
     };
 
@@ -1531,6 +1727,112 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0_usize);
         assert_eq!(app.mode, Mode::Edit);
         assert!(app.edit.as_ref().unwrap().dirty());
+    }
+
+    #[test]
+    fn scope_items_use_registry_names_unique_suffixes_and_nonzero_counts() {
+        let definitions = vec![ScopeDefinition {
+            scope_key: "org/registered".into(),
+            display_name: "Registered Project".into(),
+            description: None,
+            aliases: Vec::new(),
+            matchers: Vec::new(),
+            parent: None,
+            related: Vec::new(),
+        }];
+        let items = build_scope_items(definitions, vec![
+            ("/worktrees/alpha/project".into(), 2_u64),
+            ("/worktrees/beta/project".into(), 1_u64),
+            ("org/registered".into(), 3_u64),
+            ("unused".into(), 0_u64),
+        ]);
+
+        assert_eq!(items.iter().map(|item| (item.label.as_str(), item.count)).collect::<Vec<_>>(), vec![
+            ("alpha/project", 2_u64),
+            ("beta/project", 1_u64),
+            ("Registered Project", 3_u64)
+        ]);
+    }
+
+    #[tokio::test]
+    async fn stale_facets_are_dropped_and_missing_selection_falls_back_to_all() {
+        let (mut app, mut rx) = app_with_memories(&["visible"]).await;
+        app.facet_generation = 2_u64;
+        app.on_data(DataMsg::ScopeFacets {
+            definitions: Vec::new(),
+            by_scope: vec![("stale".into(), 9_u64)],
+            total: 9_u64,
+            registry_warning: None,
+            generation: 1_u64,
+        });
+        assert!(app.scopes.is_empty());
+        assert!(app.scope_total.is_none());
+
+        app.scopes = build_scope_items(Vec::new(), vec![("gone".into(), 1_u64)]);
+        app.scope_selected = 1_usize;
+        app.on_data(DataMsg::ScopeFacets {
+            definitions: Vec::new(),
+            by_scope: vec![("replacement".into(), 1_u64)],
+            total: 1_u64,
+            registry_warning: None,
+            generation: 2_u64,
+        });
+
+        assert_eq!(app.scope_selected, 0_usize);
+        assert!(app.loading);
+        assert!(matches!(rx.recv().await, Some(DataMsg::Rows { .. })));
+    }
+
+    #[tokio::test]
+    async fn scope_sidebar_lists_unregistered_scopes_and_filters_live() {
+        let store = SqliteStore::in_memory().unwrap();
+        for (content, scope) in [("alpha memory", "/worktrees/alpha/project"), ("beta memory", "/worktrees/beta/project")] {
+            let memory = Memory::new_for_test(content.into(), Vec::new(), Provenance::new_for_test(None, Some(scope.into()), None), AccessPolicy::Public);
+            let _id = store.store(&memory, None).await.unwrap();
+        }
+        let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new(engine, Theme::detect(), None, tx);
+
+        app.bootstrap().await;
+        assert_eq!(app.scope_total, Some(2_u64));
+        assert_eq!(app.scopes.iter().map(|scope| scope.label.as_str()).collect::<Vec<_>>(), vec![
+            "alpha/project",
+            "beta/project"
+        ]);
+        app.on_data(rx.recv().await.unwrap());
+        assert_eq!(app.rows.len(), 2_usize);
+
+        app.on_event(press(KeyCode::Left)).await;
+        assert_eq!(app.focus, Focus::Scopes);
+        app.on_event(press(KeyCode::Down)).await;
+        app.on_data(rx.recv().await.unwrap());
+
+        assert_eq!(app.selected_scope().as_deref(), Some("/worktrees/alpha/project"));
+        assert_eq!(app.rows.len(), 1_usize);
+        assert_eq!(app.rows[0].memory.content, "alpha memory");
+
+        let mut terminal = Terminal::new(TestBackend::new(100_u16, 24_u16)).unwrap();
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        let rendered: String = terminal.backend().buffer().content().iter().map(ratatui::buffer::Cell::symbol).collect();
+        assert!(rendered.contains("alpha/project"));
+        assert!(rendered.contains("j/k filter"));
+        app.on_event(press(KeyCode::End)).await;
+        app.on_data(rx.recv().await.unwrap());
+        assert_eq!(app.selected_scope().as_deref(), Some("/worktrees/beta/project"));
+        assert_eq!(app.rows[0].memory.content, "beta memory");
+
+        app.on_event(press(KeyCode::BackTab)).await;
+        assert_eq!(app.focus, Focus::Memories);
+        app.on_event(press(KeyCode::Char('/'))).await;
+        for ch in "beta".chars() {
+            app.on_event(press(KeyCode::Char(ch))).await;
+        }
+        app.on_event(press(KeyCode::Enter)).await;
+        app.on_data(rx.recv().await.unwrap());
+        assert_eq!(app.selected_scope().as_deref(), Some("/worktrees/beta/project"));
+        assert_eq!(app.rows.len(), 1_usize);
+        assert_eq!(app.rows[0].memory.content, "beta memory");
     }
 
     #[tokio::test]

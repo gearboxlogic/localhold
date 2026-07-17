@@ -674,7 +674,7 @@ impl PostgresStore {
             memory_type_counts,
             oldest,
             newest,
-            scope_set,
+            scope_counts,
             superseded_count,
         } = stats;
         let mut by_tag = tag_counts.into_iter().collect::<Vec<_>>();
@@ -684,6 +684,8 @@ impl PostgresStore {
         by_agent_label.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         let mut by_memory_type = memory_type_counts.into_iter().collect::<Vec<_>>();
         by_memory_type.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let scope_count = u64::try_from(scope_counts.len()).unwrap_or(u64::MAX);
+        let by_scope = scope_counts.into_iter().collect();
 
         Ok(MemoryStats {
             total,
@@ -695,7 +697,8 @@ impl PostgresStore {
             storage_bytes: Some(nonnegative_i64_to_u64(storage_raw)?),
             oldest_memory: oldest,
             newest_memory: newest,
-            scope_count: u64::try_from(scope_set.len()).unwrap_or(u64::MAX),
+            scope_count,
+            by_scope,
             by_memory_type,
             superseded_count,
         })
@@ -2884,7 +2887,7 @@ struct PostgresStatsAccumulator {
     memory_type_counts: BTreeMap<MemoryType, u64>,
     oldest: Option<DateTime<Utc>>,
     newest: Option<DateTime<Utc>>,
-    scope_set: HashSet<String>,
+    scope_counts: BTreeMap<String, u64>,
     superseded_count: u64,
 }
 
@@ -2904,7 +2907,7 @@ impl PostgresStatsAccumulator {
         self.oldest = Some(self.oldest.map_or(memory.created_at, |timestamp| timestamp.min(memory.created_at)));
         self.newest = Some(self.newest.map_or(memory.created_at, |timestamp| timestamp.max(memory.created_at)));
         if let Some(scope) = &memory.provenance.source_conversation {
-            let _inserted = self.scope_set.insert(scope.clone());
+            increment_count(&mut self.scope_counts, scope.clone());
         }
         if memory.superseded_by.is_some() {
             self.superseded_count = self.superseded_count.saturating_add(1);
@@ -4372,6 +4375,7 @@ mod tests {
         let newer = Utc.with_ymd_and_hms(2026, 5, 8, 11, 0, 0).single().unwrap();
         let mut target = test_memory_with_content("postgres filter pushdown needle target");
         target.tags = vec!["postgres-filter-target".into()];
+        target.provenance.source_conversation = Some("postgres/filter-target".into());
         target.created_at = older;
         target.updated_at = older;
         let target_id = store.store_impl(&target, None).await.unwrap();
@@ -4401,6 +4405,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(stats.by_scope, vec![("postgres/filter-target".into(), 1_u64)]);
         assert_eq!(stats.total, 1_u64);
 
         let text_results = store.search_by_text_impl("needle", 1_usize, target_filter, ctx).await.unwrap();

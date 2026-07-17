@@ -1615,6 +1615,8 @@ pub struct CountResponse {
     pub newest_memory: Option<String>,
     /// Number of distinct scope keys.
     pub scope_count: u64,
+    /// Breakdown of memory counts by current scope key.
+    pub by_scope: Vec<ScopeCount>,
     /// Breakdown of memory counts by memory type.
     pub by_memory_type: Vec<MemoryTypeCount>,
     /// Number of superseded memories.
@@ -1638,6 +1640,16 @@ pub struct AgentCount {
     /// The agent provenance label.
     pub agent_label: String,
     /// Number of memories with this label.
+    pub count: u64,
+}
+
+/// A current scope key and its associated memory count.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[non_exhaustive]
+pub struct ScopeCount {
+    /// Current scope key.
+    pub scope: String,
+    /// Number of memories with this scope.
     pub count: u64,
 }
 

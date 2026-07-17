@@ -81,14 +81,34 @@ fn draw_scopes<S>(frame: &mut Frame<'_>, app: &App<S>, area: Rect)
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
-    let mut items = vec![Line::from("(all scopes)")];
-    items.extend(app.scopes.iter().map(|scope| Line::from(escape_terminal_text(&scope.display_name))));
+    let width = usize::from(area.width.saturating_sub(2_u16));
+    let mut items = vec![scope_list_line("All memories", app.scope_total, width)];
+    if app.scopes.is_empty() {
+        items.push(Line::from(Span::styled("  no scoped memories", app.theme.label())));
+    } else {
+        items.extend(app.scopes.iter().map(|scope| scope_list_line(&scope.label, Some(scope.count), width)));
+    }
     let list = List::new(items)
         .block(pane_block(" SCOPES ", app.focus == Focus::Scopes, app.theme.ident(), app.theme.label()))
         .highlight_style(app.theme.accent().bold())
         .highlight_symbol("\u{258c}");
     let mut state = ListState::default().with_selected(Some(app.scope_selected));
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn scope_list_line(label: &str, count: Option<u64>, width: usize) -> Line<'static> {
+    let label = escape_terminal_text(label);
+    let Some(count) = count else {
+        return Line::from(label);
+    };
+    let count = count.to_string();
+    let reserved = count.chars().count().saturating_add(1_usize);
+    let label_width = width.saturating_sub(reserved);
+    let mut fitted = label.chars().take(label_width).collect::<String>();
+    let padding = width.saturating_sub(fitted.chars().count()).saturating_sub(count.chars().count());
+    fitted.push_str(&" ".repeat(padding));
+    fitted.push_str(&count);
+    Line::from(fitted)
 }
 
 fn draw_memories<S>(frame: &mut Frame<'_>, app: &App<S>, area: Rect)
@@ -178,12 +198,17 @@ where
     if let Some(notice) = &app.notice {
         line.push_span(Span::styled(format!("  ! {}", escape_terminal_text(notice)), app.theme.not_held()));
     }
+    if let Some(notice) = &app.scope_notice {
+        line.push_span(Span::styled(format!("  ! {}", escape_terminal_text(notice)), app.theme.not_held()));
+    }
     frame.render_widget(Paragraph::new(line), area);
-    let hint = match app.mode {
-        Mode::Browse | Mode::Search => "/ search  m mode  tab pane  enter open  q quit ",
-        Mode::Detail => "e edit  d delete  j/k scroll  esc close ",
-        Mode::Edit => "tab field  arrows edit  ctrl+s save  esc cancel ",
-        Mode::ConfirmDelete | Mode::ConfirmDiscard => "y confirm  n cancel ",
+    let hint = match (app.mode, app.focus) {
+        (Mode::Browse, Focus::Scopes) => "j/k filter  enter results  tab/\u{2192} memories  / search  q quit ",
+        (Mode::Browse, Focus::Memories) => "j/k move  enter open  tab/\u{2190} scopes  / search  q quit ",
+        (Mode::Search, _) => "type query  enter apply  esc browse ",
+        (Mode::Detail, _) => "e edit  d delete  j/k scroll  esc close ",
+        (Mode::Edit, _) => "tab field  arrows edit  ctrl+s save  esc cancel ",
+        (Mode::ConfirmDelete | Mode::ConfirmDiscard, _) => "y confirm  n cancel ",
     };
     let hints = Line::from(Span::styled(hint, app.theme.label()));
     frame.render_widget(Paragraph::new(hints).alignment(Alignment::Right), area);

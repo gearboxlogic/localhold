@@ -167,6 +167,12 @@ fn response_schema_count_response() {
 }
 
 #[test]
+fn response_schema_scope_count() {
+    let schema = schemars::schema_for!(params::ScopeCount);
+    insta::assert_json_snapshot!("response_schema_ScopeCount", schema);
+}
+
+#[test]
 fn response_schema_tag_count() {
     let schema = schemars::schema_for!(params::TagCount);
     insta::assert_json_snapshot!("response_schema_TagCount", schema);

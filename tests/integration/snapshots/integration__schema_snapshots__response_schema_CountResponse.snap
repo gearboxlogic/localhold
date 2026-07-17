@@ -75,6 +75,13 @@ expression: schema
       "format": "uint64",
       "minimum": 0
     },
+    "by_scope": {
+      "description": "Breakdown of memory counts by current scope key.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ScopeCount"
+      }
+    },
     "by_memory_type": {
       "description": "Breakdown of memory counts by memory type.",
       "type": "array",
@@ -97,6 +104,7 @@ expression: schema
     "by_tag",
     "by_agent_label",
     "scope_count",
+    "by_scope",
     "by_memory_type",
     "superseded_count"
   ],
@@ -138,6 +146,26 @@ expression: schema
       },
       "required": [
         "agent_label",
+        "count"
+      ]
+    },
+    "ScopeCount": {
+      "description": "A current scope key and its associated memory count.",
+      "type": "object",
+      "properties": {
+        "scope": {
+          "description": "Current scope key.",
+          "type": "string"
+        },
+        "count": {
+          "description": "Number of memories with this scope.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "scope",
         "count"
       ]
     },

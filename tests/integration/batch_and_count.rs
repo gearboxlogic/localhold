@@ -230,6 +230,10 @@ async fn admin_count_scope_filter_and_breakdown() {
     .await;
     assert_eq!(filtered.total, 1);
     assert_eq!(filtered.scope_count, 1, "scope_count should describe the filtered subset");
+    assert_eq!(filtered.by_scope.iter().map(|entry| (entry.scope.as_str(), entry.count)).collect::<Vec<_>>(), vec![(
+        "visible-scope",
+        1
+    )]);
     assert_eq!(filtered.superseded_count, 0, "new writes should not be superseded");
 }
 
@@ -260,6 +264,11 @@ async fn admin_count_reports_storage_scope_and_memory_type_breakdowns() {
     assert!(count.storage_bytes.is_some_and(|bytes| bytes > 0), "storage_bytes should be positive");
     assert!(count.oldest_memory.is_some(), "oldest_memory should be populated");
     assert!(count.newest_memory.is_some(), "newest_memory should be populated");
+    assert_eq!(
+        count.by_scope.iter().map(|entry| (entry.scope.as_str(), entry.count)).collect::<Vec<_>>(),
+        vec![("scope-a", 2), ("scope-b", 2)],
+        "scope breakdown should be deterministic and count exact assignments"
+    );
     assert_eq!(count.scope_count, 2, "scope_count should count distinct scopes");
     assert_eq!(count.superseded_count, 0, "new writes should not be superseded");
 

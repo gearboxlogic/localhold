@@ -7,7 +7,7 @@ use localhold::{
     engine::LocalHoldEngine,
     server::{
         LocalHoldServer,
-        params::{AdminListResponse, HistoryResponse, ReadManyResponse, ReadResponse, RecallResponse},
+        params::{AdminListResponse, CountResponse, HistoryResponse, ReadManyResponse, ReadResponse, RecallResponse},
     },
     store::{MemoryAdmin as _, MemoryWriter as _, SqliteStore},
     types::{AccessPolicy, AuditAction, Memory, MemoryId, MemoryMetadata, Provenance, RedactableField},
@@ -364,6 +364,10 @@ async fn redacted_hidden_filter_fields_do_not_disclose_memory_presence() {
 
     let visible_tag: AdminListResponse = call_tool(&client, "admin_list", json!({"tags": ["visible-tag"]})).await;
     assert_eq!(visible_tag.memories.iter().map(|card| card.id).collect::<Vec<_>>(), vec![ids[1]]);
+
+    let count: CountResponse = call_tool(&client, "admin_count", json!({})).await;
+    assert!(count.by_scope.is_empty(), "hidden provenance must not enter scope facets");
+    assert_eq!(count.scope_count, 0);
 }
 
 #[tokio::test]

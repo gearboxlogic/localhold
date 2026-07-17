@@ -37,7 +37,7 @@ thiserror = "2"
 
 # Date/time, IDs, logging
 chrono = { version = "0.4", features = ["serde"] }
-ulid = { version = "1", features = ["serde"] }
+ulid = { version = "3", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

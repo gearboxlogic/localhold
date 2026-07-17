@@ -1307,6 +1307,9 @@ pub struct MemoryStats {
     pub newest_memory: Option<DateTime<Utc>>,
     /// Number of distinct scope keys (`provenance.source_conversation`).
     pub scope_count: u64,
+    /// Memory counts grouped by current scope key.
+    #[serde(default)]
+    pub by_scope: Vec<(String, u64)>,
     /// Memory counts grouped by `memory_type`.
     pub by_memory_type: Vec<(MemoryType, u64)>,
     /// Number of memories that have been superseded.

@@ -14,8 +14,8 @@ use params::{
     ForgetParams, HandoffCandidate, HandoffParams, HandoffResponse, HandoffSuggestion, HistoryResponse, InventoryCard, MatchAction, MatchAssessment, MatchDiagnostics,
     MatchQuality, MatchScoreBasis, MemoryEntry, NextAction, OperationStatus, OperationSummary, QualityWarning, QualityWarningSeverity, ReadManyItemResponse, ReadManyParams,
     ReadManyResponse, ReadManyStatus, ReadParams, ReadResponse, ReassignScopeResponse, RecallCard, RecallParams, RecallResponse, RecommendedAction, RecommendedActionPriority,
-    RecommendedActionTool, ReembedResponse, RememberManyItemResponse, RememberManyParams, RememberManyResponse, RememberParams, RememberResponse, ReviseParams, ScopeEntry,
-    ScopeResolution, ScopeResolvedBy, TagCount, ToolError, ToolErrorCode, ToolErrorResponse, UpdateResponse,
+    RecommendedActionTool, ReembedResponse, RememberManyItemResponse, RememberManyParams, RememberManyResponse, RememberParams, RememberResponse, ReviseParams, ScopeCount,
+    ScopeEntry, ScopeResolution, ScopeResolvedBy, TagCount, ToolError, ToolErrorCode, ToolErrorResponse, UpdateResponse,
 };
 use rmcp::{
     RoleServer, ServerHandler,
@@ -2040,6 +2040,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             oldest_memory: stats.oldest_memory.map(|dt| dt.to_rfc3339()),
             newest_memory: stats.newest_memory.map(|dt| dt.to_rfc3339()),
             scope_count: stats.scope_count,
+            by_scope: stats.by_scope.into_iter().map(|(scope, count)| ScopeCount { scope, count }).collect(),
             by_memory_type: stats
                 .by_memory_type
                 .into_iter()

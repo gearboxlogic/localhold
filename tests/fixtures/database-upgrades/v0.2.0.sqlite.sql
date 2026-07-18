@@ -13,6 +13,21 @@ CREATE TRIGGER trg_memory_clear_superseded_by AFTER DELETE ON memories BEGIN
 END;
 ALTER TABLE memory_v2_metadata RENAME TO memory_metadata;
 DROP INDEX idx_memory_v2_metadata_scope_key;
+CREATE TABLE memory_metadata_v0_2 (
+    memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    scope_key TEXT,
+    summary TEXT,
+    agent_label TEXT,
+    created_by_principal TEXT,
+    quality_flags TEXT NOT NULL DEFAULT '[]',
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    migrated_at TEXT,
+    updated_at TEXT NOT NULL
+);
+INSERT INTO memory_metadata_v0_2
+SELECT memory_id, scope_key, summary, agent_label, created_by_principal, quality_flags, 1, migrated_at, updated_at
+FROM memory_metadata;
+DROP TABLE memory_metadata;
+ALTER TABLE memory_metadata_v0_2 RENAME TO memory_metadata;
 CREATE INDEX idx_memory_metadata_scope_key ON memory_metadata(scope_key);
-UPDATE memory_metadata SET schema_version = 1;
 PRAGMA user_version = 2;

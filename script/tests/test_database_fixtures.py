@@ -102,8 +102,9 @@ class DatabaseFixtureTests(unittest.TestCase):
             releases = manifest["releases"]
             assert isinstance(releases, list)
             tampered_base_hash = sha256(expand_fixture(included, fixture_root))
-            for release in releases[:2]:
-                release["sqlite"]["fixture_sha256"] = tampered_base_hash
+            for release in releases:
+                if release["sqlite"]["fixture"] == included.name:
+                    release["sqlite"]["fixture_sha256"] = tampered_base_hash
             self._write_manifest(manifest_path, manifest)
             with self.assertRaisesRegex(FixtureError, "v0.2.0 sqlite fixture checksum mismatch"):
                 validate_manifest(manifest_path=manifest_path)

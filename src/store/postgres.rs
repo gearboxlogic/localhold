@@ -18,7 +18,9 @@ use sqlx_postgres::{PgPool, PgPoolOptions, PgRow, Postgres};
 use super::{
     BulkAuthOutcome, EmbeddingMap, EmbeddingNeighbor, EmbeddingProfile, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter, ReassignScopeOutcome, RecordUseOutcome,
     ReembedClaim, merge_metadata_patch,
-    migration::{reject_retired_postgres_schema, validate_ready_postgres_schema},
+    migration::{
+        reject_retired_postgres_schema, validate_postgres_published_upgrade_relationships, validate_present_postgres_schema_for_published_upgrade, validate_ready_postgres_schema,
+    },
     postgres_migrations::{CURRENT_SCHEMA_VERSION, MIGRATIONS, MigrationMetadataState, classify_migration_rows, read_migration_metadata_state},
     query::{
         DEFAULT_LIST_LIMIT, MAX_SCAN_ROWS, MAX_VEC_CANDIDATES, OVERFETCH_FACTOR, apply_access_policy_for_filter, escape_like, normalize_filter, sort_by_distance, usize_to_i64,
@@ -228,6 +230,11 @@ impl PostgresStore {
         validate_bootstrap_inputs(config, embedding_dimensions)?;
         let pool = PgPoolOptions::new().max_connections(config.max_connections).connect(&config.url).await?;
         if config.auto_migrate {
+            let published_upgrade = validate_published_v2_metadata_upgrade(&pool).await?;
+            validate_present_postgres_schema_for_published_upgrade(&pool, embedding_dimensions, true, true).await?;
+            if published_upgrade {
+                validate_postgres_published_upgrade_relationships(&pool, true).await?;
+            }
             init_schema(&pool, embedding_dimensions, ExistingVectorPolicy::Validate, config.migration_lock_timeout_secs).await?;
             validate_current_postgres_store_ready(&pool, embedding_dimensions).await?;
         } else {
@@ -4436,6 +4443,40 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(state, (true, false, 2_i64), "failed migration must roll back DDL and ledger writes");
+            scoped.close().await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    async fn published_postgres_upgrade_rejects_incompatible_managed_index_before_metadata_migration() {
+        let fixture = postgres_fixture_sql("v0.1.0-beta.2-beta.3.postgres.sql");
+        with_isolated_postgres_schema("localhold_release_fixture_bad_index", true, |_admin, _schema, config| async move {
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+            let alteration = AssertSqlSafe("DROP INDEX idx_memories_created_at; CREATE INDEX idx_memories_created_at ON memories(content)".to_owned());
+            let _corrupted = sqlx_core::raw_sql::raw_sql(alteration).execute(&scoped).await.unwrap();
+            scoped.close().await;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("startup cannot safely replace"), "{error}");
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let state: (bool, bool, i64, serde_json::Value) = sqlx_core::query_as::query_as(
+                "SELECT
+                   to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL,
+                   to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL,
+                   (SELECT COUNT(*) FROM localhold_migrations),
+                   (SELECT quality_flags FROM memory_v2_metadata)",
+            )
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            assert_eq!(
+                state,
+                (true, false, 2_i64, serde_json::json!(["fixture"])),
+                "preflight refusal must not rename metadata or append to the ledger"
+            );
             scoped.close().await;
         })
         .await;

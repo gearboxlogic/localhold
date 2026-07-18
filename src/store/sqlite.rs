@@ -19,7 +19,7 @@ use sqlite_vec::sqlite3_vec_init;
 
 use super::{
     EmbeddingProfile, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter,
-    migration::{reject_retired_sqlite_schema, validate_sqlite_source_schema},
+    migration::{reject_retired_sqlite_schema, validate_present_sqlite_schema_for_published_upgrade, validate_sqlite_source_schema},
     sqlite_lease::{SqliteDatabaseLease, database_identity},
     vector::{SqliteVecIndex, VectorIndex as _},
 };
@@ -27,11 +27,11 @@ use crate::{
     clock::{Clock, SystemClock},
     error::StoreError,
     store::schema::{
-        MAIN_DDL, TRIGGER_DDL, existing_embedding_dimensions, migrate_create_audit_log, migrate_create_fts_index, migrate_create_memory_entities, migrate_create_memory_tombstones,
-        migrate_create_metadata, migrate_create_scope_registry, migrate_memories_add_activity_tracking, migrate_memories_add_confidence, migrate_memories_add_embedding_claims,
-        migrate_memories_add_embedding_revision, migrate_memories_add_importance, migrate_memories_add_memory_type, migrate_memories_add_record_revision,
-        migrate_memories_add_superseded_by, migrate_memories_add_updated_at, migrate_memories_align_impression_tracking, migrate_memories_backfill_origin_conversation,
-        migrate_memory_embedding_map_fk, migrate_published_v2_metadata,
+        MAIN_DDL, TRIGGER_DDL, check_dimension_mismatch, existing_embedding_dimensions, migrate_create_audit_log, migrate_create_fts_index, migrate_create_memory_entities,
+        migrate_create_memory_tombstones, migrate_create_metadata, migrate_create_scope_registry, migrate_memories_add_activity_tracking, migrate_memories_add_confidence,
+        migrate_memories_add_embedding_claims, migrate_memories_add_embedding_revision, migrate_memories_add_importance, migrate_memories_add_memory_type,
+        migrate_memories_add_record_revision, migrate_memories_add_superseded_by, migrate_memories_add_updated_at, migrate_memories_align_impression_tracking,
+        migrate_memories_backfill_origin_conversation, migrate_memory_embedding_map_fk, migrate_published_v2_metadata, validate_published_v2_metadata,
     },
     types::{
         AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MemoryTombstone, MemoryUpdate,
@@ -345,6 +345,9 @@ impl SqliteStore {
             )?;
             if has_published_metadata {
                 retain_pre_upgrade_backup_while_locked(database_path, self.inner.clock.as_ref())?;
+                let _published_metadata = validate_published_v2_metadata(&published_tx)?;
+                validate_present_sqlite_schema_for_published_upgrade(&published_tx)?;
+                check_dimension_mismatch(&published_tx, self.inner.vector_index.dimensions())?;
                 migrate_published_v2_metadata(&published_tx)?;
             }
             published_tx.commit()?;
@@ -1146,6 +1149,7 @@ mod tests {
         assert!(!retired_exists);
     }
     #[test]
+    #[expect(clippy::excessive_nesting, reason = "the release matrix validates tagged schema details inside each fixture")]
     fn every_published_sqlite_fixture_opens_and_preserves_managed_data() {
         let manifest: serde_json::Value = serde_json::from_str(FIXTURE_MANIFEST).unwrap();
         let releases = manifest["releases"].as_array().unwrap();
@@ -1167,6 +1171,12 @@ mod tests {
                     )
                     .unwrap();
                 assert!(trigger.contains("record_revision = record_revision + 1"), "v0.2.0 fixture must match the tagged trigger");
+                let schema_version_default: String = fixture_connection
+                    .query_row("SELECT dflt_value FROM pragma_table_info('memory_metadata') WHERE name = 'schema_version'", [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(schema_version_default, "1", "v0.2.0 fixture must match the tagged metadata default");
             }
 
             drop(SqliteStore::open(&path, 3_usize).unwrap());
@@ -1264,6 +1274,97 @@ mod tests {
             1_i64
         );
         assert_eq!(backup.query_row::<String, _, _>("PRAGMA quick_check", [], |row| row.get(0)).unwrap(), "ok");
+    }
+
+    #[test]
+    fn published_sqlite_upgrade_rejects_incompatible_managed_index_before_metadata_migration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("incompatible-managed-index.db");
+        build_sqlite_release_fixture(&path, BETA_FIXTURE);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP INDEX idx_memories_created_at; CREATE INDEX idx_memories_created_at ON memories(content)")
+            .unwrap();
+        drop(connection);
+
+        let error = SqliteStore::open(&path, 3_usize).unwrap_err();
+        assert!(
+            error.to_string().contains("required index idx_memories_created_at has an incompatible definition"),
+            "{error}"
+        );
+        let source = Connection::open(&path).unwrap();
+        let state: (bool, bool, String) = source
+            .query_row(
+                "SELECT
+                   EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_v2_metadata'),
+                   EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_metadata'),
+                   (SELECT quality_flags FROM memory_v2_metadata)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (true, false, "[\"fixture\"]".into()));
+        let backups = std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "bak"))
+            .count();
+        assert_eq!(backups, 1_usize, "preflight refusal must retain one verified backup");
+    }
+
+    #[test]
+    fn published_sqlite_dimension_mismatch_is_rejected_before_metadata_migration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dimension-mismatch.db");
+        build_sqlite_release_fixture(&path, BETA_FIXTURE);
+
+        let error = SqliteStore::open(&path, 4_usize).unwrap_err();
+        assert!(error.to_string().contains("memory_embeddings table has 3 dimensions but config specifies 4"), "{error}");
+        let source = Connection::open(&path).unwrap();
+        let user_version: u32 = source.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        let state: (bool, bool, i64, bool) = source
+            .query_row(
+                "SELECT
+                   EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_v2_metadata'),
+                   EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_metadata'),
+                   (SELECT COUNT(*) FROM memory_v2_metadata),
+                   EXISTS(SELECT 1 FROM pragma_table_info('memories') WHERE name='record_revision')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let metadata = source
+            .query_row(
+                "SELECT memory_id, scope_key, summary, agent_label, created_by_principal,
+                        quality_flags, CAST(schema_version AS TEXT), migrated_at, updated_at
+                 FROM memory_v2_metadata",
+                [],
+                |row| (0_usize..9_usize).map(|index| row.get(index)).collect::<Result<Vec<String>, _>>(),
+            )
+            .unwrap();
+        assert_eq!(user_version, 0_u32, "dimension refusal must not advance the schema version");
+        assert_eq!(state, (true, false, 1_i64, false), "dimension refusal must leave the beta schema untouched");
+        assert_eq!(
+            metadata,
+            [
+                "01J00000000000000000000000",
+                "project/localhold",
+                "fixture summary",
+                "fixture-agent",
+                "fixture-principal",
+                "[\"fixture\"]",
+                "2",
+                "2026-07-10T00:00:04Z",
+                "2026-07-10T00:00:05Z",
+            ],
+            "dimension refusal must preserve the complete legacy metadata payload"
+        );
+        let backups = std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "bak"))
+            .count();
+        assert_eq!(backups, 1_usize, "dimension refusal must retain one verified pre-upgrade backup");
     }
 
     #[test]

@@ -2170,16 +2170,29 @@ async fn postgres_restrictive_indexes_compatible(pool: &PgPool, current_schema_o
 }
 
 pub(crate) async fn validate_postgres_runtime_relationships(pool: &PgPool, current_schema_only: bool) -> Result<(), StoreError> {
-    validate_postgres_runtime_relationships_mode(pool, current_schema_only, false).await
+    validate_postgres_runtime_relationships_mode(pool, current_schema_only, false, false).await
 }
 
 pub(crate) async fn validate_postgres_runtime_relationships_before_migration(pool: &PgPool, current_schema_only: bool) -> Result<(), StoreError> {
-    validate_postgres_runtime_relationships_mode(pool, current_schema_only, true).await
+    validate_postgres_runtime_relationships_mode(pool, current_schema_only, true, false).await
 }
 
-async fn validate_postgres_runtime_relationships_mode(pool: &PgPool, current_schema_only: bool, allow_legacy_audit_fk: bool) -> Result<(), StoreError> {
-    for expectation in POSTGRES_REQUIRED_FOREIGN_KEYS {
-        if !postgres_foreign_key_matches(pool, *expectation, current_schema_only).await? {
+pub(crate) async fn validate_postgres_published_upgrade_relationships(pool: &PgPool, current_schema_only: bool) -> Result<(), StoreError> {
+    validate_postgres_runtime_relationships_mode(pool, current_schema_only, true, true).await
+}
+
+async fn validate_postgres_runtime_relationships_mode(
+    pool: &PgPool,
+    current_schema_only: bool,
+    allow_legacy_audit_fk: bool,
+    allow_published_metadata: bool,
+) -> Result<(), StoreError> {
+    for expected in POSTGRES_REQUIRED_FOREIGN_KEYS {
+        let mut expectation = *expected;
+        if allow_published_metadata && expectation.child_table == "memory_metadata" {
+            expectation.child_table = "memory_v2_metadata";
+        }
+        if !postgres_foreign_key_matches(pool, expectation, current_schema_only).await? {
             return Err(StoreError::Conflict(format!(
                 "PostgreSQL relational constraint {}.{} does not match runtime cascade requirements",
                 expectation.child_table, expectation.child_column
@@ -2197,7 +2210,8 @@ async fn validate_postgres_runtime_relationships_mode(pool: &PgPool, current_sch
             "PostgreSQL relational constraint on memory_tombstones is incompatible with retained history requirements".into(),
         ));
     }
-    let foreign_key_count = postgres_managed_foreign_key_count(pool, current_schema_only).await?;
+    let metadata_table = if allow_published_metadata { "memory_v2_metadata" } else { "memory_metadata" };
+    let foreign_key_count = postgres_managed_foreign_key_count(pool, current_schema_only, metadata_table).await?;
     let expected_count = i64::try_from(POSTGRES_REQUIRED_FOREIGN_KEYS.len())
         .unwrap_or(i64::MAX)
         .saturating_add(if allow_legacy_audit_fk { audit_foreign_key_count } else { 0_i64 });
@@ -2207,7 +2221,7 @@ async fn validate_postgres_runtime_relationships_mode(pool: &PgPool, current_sch
     Ok(())
 }
 
-async fn postgres_managed_foreign_key_count(pool: &PgPool, current_schema_only: bool) -> Result<i64, StoreError> {
+async fn postgres_managed_foreign_key_count(pool: &PgPool, current_schema_only: bool, metadata_table: &str) -> Result<i64, StoreError> {
     query_scalar(
         "SELECT COUNT(*)
          FROM pg_constraint AS foreign_key
@@ -2219,11 +2233,12 @@ async fn postgres_managed_foreign_key_count(pool: &PgPool, current_schema_only: 
                to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_audit_log') ELSE 'memory_audit_log' END),
                to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_tombstones') ELSE 'memory_tombstones' END),
                to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'scope_registry') ELSE 'scope_registry' END),
-               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_metadata') ELSE 'memory_metadata' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), $2) ELSE $2 END),
                to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'embedding_profile') ELSE 'embedding_profile' END)
            ])",
     )
     .bind(current_schema_only)
+    .bind(metadata_table)
     .fetch_one(pool)
     .await
     .map_err(StoreError::from)
@@ -2325,6 +2340,11 @@ async fn validate_present_postgres_schema_inner(
     }
     if postgres_table_exists(pool, "memory_embeddings", current_schema_only).await? {
         validate_postgres_column_type(pool, "memory_embeddings", "embedding", &format!("vector({embedding_dimensions})"), current_schema_only).await?;
+    }
+    if !postgres_runtime_indexes_compatible(pool, current_schema_only, true).await? {
+        return Err(StoreError::Conflict(
+            "PostgreSQL managed schema indexes do not match runtime requirements; an existing index is incompatible and startup cannot safely replace it".into(),
+        ));
     }
     Ok(())
 }

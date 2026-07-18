@@ -20,7 +20,7 @@ INCLUDE = re.compile(r"^\s*-- fixture-include: (\S+)\s*$")
 
 # Trusted offline inventory of public GitHub Releases. Keep this independent of
 # the mutable fixture manifest so deleting an old fixture cannot validate.
-PUBLISHED_DATABASE_RELEASES = frozenset({"v0.1.0-beta.2", "v0.1.0-beta.3", "v0.2.0"})
+PUBLISHED_DATABASE_RELEASES = frozenset({"v0.1.0-beta.1", "v0.1.0-beta.2", "v0.1.0-beta.3", "v0.2.0"})
 
 
 class FixtureError(RuntimeError):

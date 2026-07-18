@@ -357,14 +357,18 @@ controls.
 To migrate an existing SQLite database into an empty PostgreSQL database:
 
 ```sh
+export LOCALHOLD_POSTGRES_URL="postgres://localhold:password@localhost:5432/localhold"
+
 hold migrate sqlite-to-postgres \
   --sqlite ~/.local/share/localhold/localhold.db \
   --embedding-dimensions 768 \
   --dry-run
 ```
 
-Review the dry run, then repeat with `--yes`. The destination must not already
-contain user data.
+The destination can also be passed explicitly with `--postgres-url`, or read
+from a different environment variable via `--postgres-url-env`. Review the dry
+run, then repeat with `--yes`. The destination must not already contain user
+data.
 
 ## Recovery Checks
 

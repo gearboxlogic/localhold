@@ -201,3 +201,29 @@ hold --help
 Native operating-system packages remain a future distribution surface. They
 must preserve the documented binary/profile split and include the same notices,
 example configuration, and checksums as release archives.
+
+## MCP Client Setup
+
+Configure an MCP client to launch the installed `hold` binary over stdio:
+
+```json
+{
+  "mcpServers": {
+    "localhold": {
+      "command": "/absolute/path/to/hold"
+    }
+  }
+}
+```
+
+For clients with a command-based setup:
+
+```sh
+claude mcp add --scope user localhold /absolute/path/to/hold
+```
+
+The stdio server uses the configured `server.principal` as the trusted identity
+for that process. Run separate instances when clients require separate
+principals. For network access, see
+[HTTP Deployment](operations.md#http-deployment); HTTP requests never inherit
+the stdio principal.

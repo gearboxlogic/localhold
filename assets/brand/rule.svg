@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 8" role="presentation" aria-hidden="true">
+  <defs>
+    <pattern id="crenel" width="64" height="8" patternUnits="userSpaceOnUse">
+      <path d="M0 8 L0 3 L32 3 L32 8 Z" fill="#C89B3C"/>
+      <rect y="6" width="64" height="2" fill="#C89B3C"/>
+    </pattern>
+  </defs>
+  <rect width="1280" height="8" fill="url(#crenel)"/>
+</svg>

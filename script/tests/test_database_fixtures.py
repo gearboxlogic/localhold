@@ -1,0 +1,353 @@
+"""Tests for historical database fixture validation."""
+
+import copy
+import json
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import script.database_fixtures as database_fixtures
+from script.database_fixtures import (
+    current_release_tag,
+    FIXTURE_ROOT,
+    FixtureError,
+    expand_fixture,
+    sha256,
+    validate_repository_manifest,
+    validate_manifest,
+)
+
+
+class DatabaseFixtureTests(unittest.TestCase):
+    def _copied_manifest(self, directory: str) -> tuple[Path, dict[str, object]]:
+        fixture_root = Path(directory) / "database-upgrades"
+        shutil.copytree(FIXTURE_ROOT, fixture_root)
+        manifest_path = fixture_root / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return manifest_path, manifest
+
+    @staticmethod
+    def _write_manifest(path: Path, manifest: dict[str, object]) -> None:
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    @staticmethod
+    def _git(repo_root: Path, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+
+    def _future_release(self, manifest: dict[str, object], tag: str = "v0.3.0") -> dict[str, object]:
+        releases = manifest["releases"]
+        assert isinstance(releases, list)
+        future = copy.deepcopy(releases[-1])
+        assert isinstance(future, dict)
+        future["tag"] = tag
+        commit = database_fixtures._git_commit("HEAD", database_fixtures.REPO_ROOT)
+        self.assertIsNotNone(commit)
+        future["commit"] = commit
+        for backend in ("sqlite", "postgres"):
+            entry = future[backend]
+            assert isinstance(entry, dict)
+            source = entry["source"]
+            assert isinstance(source, str)
+            source_bytes = database_fixtures._git_bytes("HEAD", source, database_fixtures.REPO_ROOT)
+            self.assertIsNotNone(source_bytes)
+            entry["source_sha256"] = sha256(source_bytes or b"")
+        return future
+
+    def _ancestor_with_different_source(self, source: str, expected: str) -> str:
+        result = subprocess.run(
+            ["git", "rev-list", "HEAD", "--", source],
+            cwd=database_fixtures.REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for commit in result.stdout.splitlines():
+            source_bytes = database_fixtures._git_bytes(commit, source, database_fixtures.REPO_ROOT)
+            if source_bytes is not None and sha256(source_bytes) != expected:
+                return commit
+        self.fail(f"Git history has no ancestor with different source bytes for {source}")
+
+    def test_repository_manifest_and_checksums_are_valid(self) -> None:
+        validate_repository_manifest()
+
+    def test_repository_validation_tracks_cargo_release_candidate_without_test_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cargo_manifest_path = root / "Cargo.toml"
+            tag = "v0.3.0-rc.1+build.7"
+            cargo_manifest_path.write_text('[package]\nname = "localhold"\nversion = "0.3.0-rc.1+build.7"\n', encoding="utf-8")
+            manifest_path, manifest = self._copied_manifest(directory)
+            releases = manifest["releases"]
+            assert isinstance(releases, list)
+            releases.append(self._future_release(manifest, tag))
+            self._write_manifest(manifest_path, manifest)
+
+            self.assertEqual(current_release_tag(cargo_manifest_path), tag)
+            validate_repository_manifest(
+                repo_root=database_fixtures.REPO_ROOT,
+                manifest_path=manifest_path,
+                cargo_manifest_path=cargo_manifest_path,
+            )
+
+    def test_requested_release_must_have_fixture_coverage(self) -> None:
+        with self.assertRaisesRegex(FixtureError, "missing for release v9.9.9"):
+            validate_manifest("v9.9.9")
+
+    def test_inventory_rejects_missing_published_release(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path, manifest = self._copied_manifest(directory)
+            releases = manifest["releases"]
+            assert isinstance(releases, list)
+            manifest["releases"] = [release for release in releases if release["tag"] != "v0.1.0-beta.2"]
+            self._write_manifest(manifest_path, manifest)
+            with self.assertRaisesRegex(FixtureError, "missing published releases: v0.1.0-beta.2"):
+                validate_manifest(manifest_path=manifest_path)
+
+    def test_inventory_rejects_untrusted_extra_release(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path, manifest = self._copied_manifest(directory)
+            releases = manifest["releases"]
+            assert isinstance(releases, list)
+            extra = copy.deepcopy(releases[-1])
+            extra["tag"] = "v9.9.9"
+            releases.append(extra)
+            self._write_manifest(manifest_path, manifest)
+            with self.assertRaisesRegex(FixtureError, "outside trusted published inventory: v9.9.9"):
+                validate_manifest(manifest_path=manifest_path)
+
+    def test_v020_effective_checksum_covers_included_fixture_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path, manifest = self._copied_manifest(directory)
+            fixture_root = manifest_path.parent
+            included = fixture_root / "v0.1.0-beta.2-beta.3.sqlite.sql"
+            included.write_text(included.read_text(encoding="utf-8") + "\n-- tampered\n", encoding="utf-8")
+            releases = manifest["releases"]
+            assert isinstance(releases, list)
+            tampered_base_hash = sha256(expand_fixture(included, fixture_root))
+            for release in releases:
+                if release["sqlite"]["fixture"] == included.name:
+                    release["sqlite"]["fixture_sha256"] = tampered_base_hash
+            self._write_manifest(manifest_path, manifest)
+            with self.assertRaisesRegex(FixtureError, "v0.2.0 sqlite fixture checksum mismatch"):
+                validate_manifest(manifest_path=manifest_path)
+
+    def test_fixture_include_cycle_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "a.sql").write_text("-- fixture-include: b.sql\n", encoding="utf-8")
+            (root / "b.sql").write_text("-- fixture-include: a.sql\n", encoding="utf-8")
+            with self.assertRaisesRegex(FixtureError, "include cycle"):
+                expand_fixture(root / "a.sql", root)
+
+    def test_fixture_include_traversal_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "a.sql").write_text("-- fixture-include: ../outside.sql\n", encoding="utf-8")
+            with self.assertRaisesRegex(FixtureError, "must be a basename"):
+                expand_fixture(root / "a.sql", root)
+
+    def test_requested_published_release_cannot_fallback_to_same_name_branch_head(self) -> None:
+        real_git_commit = database_fixtures._git_commit
+        tag = "v0.1.0-beta.2"
+        exact_tag_ref = f"refs/tags/{tag}"
+        target_commit = real_git_commit(exact_tag_ref, database_fixtures.REPO_ROOT)
+        self.assertIsNotNone(target_commit)
+        requested_refs: list[str] = []
+
+        def branch_and_head_at_beta2(ref: str, repo_root: Path) -> str | None:
+            requested_refs.append(ref)
+            if ref == exact_tag_ref:
+                return None
+            if ref in {tag, "HEAD"}:
+                return target_commit
+            return real_git_commit(ref, repo_root)
+
+        with mock.patch("script.database_fixtures._git_commit", side_effect=branch_and_head_at_beta2):
+            with self.assertRaisesRegex(FixtureError, "historical tag is unavailable"):
+                validate_manifest(tag)
+        self.assertIn(exact_tag_ref, requested_refs)
+        self.assertNotIn(tag, requested_refs)
+        self.assertNotIn("HEAD", requested_refs)
+
+    def test_exact_tag_refs_accept_annotated_and_lightweight_tags_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo_root = Path(directory)
+            self._git(repo_root, "init")
+            self._git(repo_root, "config", "user.name", "LocalHold Tests")
+            self._git(repo_root, "config", "user.email", "localhold-tests@example.invalid")
+            source = repo_root / "schema.sql"
+            source.write_text("CREATE TABLE memories (id INTEGER);\n", encoding="utf-8")
+            self._git(repo_root, "add", "schema.sql")
+            self._git(repo_root, "commit", "-m", "fixture source")
+            commit = self._git(repo_root, "rev-parse", "HEAD")
+
+            self._git(repo_root, "branch", "v-branch-only")
+            self.assertEqual(database_fixtures._git_commit("v-branch-only", repo_root), commit)
+            self.assertIsNone(database_fixtures._git_commit("refs/tags/v-branch-only", repo_root))
+            self.assertIsNone(database_fixtures._git_bytes("refs/tags/v-branch-only", "schema.sql", repo_root))
+
+            self._git(repo_root, "tag", "v-lightweight")
+            self._git(repo_root, "tag", "-a", "v-annotated", "-m", "annotated fixture tag")
+            for tag in ("v-lightweight", "v-annotated"):
+                tag_ref = f"refs/tags/{tag}"
+                self.assertEqual(database_fixtures._git_commit(tag_ref, repo_root), commit)
+                self.assertEqual(
+                    database_fixtures._git_bytes(tag_ref, "schema.sql", repo_root),
+                    b"CREATE TABLE memories (id INTEGER);\n",
+                )
+
+    def test_historical_release_sources_use_exact_tag_refs(self) -> None:
+        real_git_bytes = database_fixtures._git_bytes
+        requested_refs: list[str] = []
+
+        def record_git_bytes(ref: str, source: str, repo_root: Path) -> bytes | None:
+            requested_refs.append(ref)
+            return real_git_bytes(ref, source, repo_root)
+
+        with mock.patch("script.database_fixtures._git_bytes", side_effect=record_git_bytes):
+            validate_manifest("v0.2.0")
+
+        for tag in database_fixtures.PUBLISHED_DATABASE_RELEASES:
+            self.assertIn(f"refs/tags/{tag}", requested_refs)
+            self.assertNotIn(tag, requested_refs)
+
+    def test_pretag_release_uses_exact_head_and_ancestor_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path, manifest = self._copied_manifest(directory)
+            future = self._future_release(manifest)
+            releases = manifest["releases"]
+            assert isinstance(releases, list)
+            releases.append(future)
+            self._write_manifest(manifest_path, manifest)
+            validate_manifest("v0.3.0", manifest_path=manifest_path)
+
+    def test_candidate_cannot_enter_published_inventory_before_tag_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path, manifest = self._copied_manifest(directory)
+            future = self._future_release(manifest)
+            releases = manifest["releases"]
+            assert isinstance(releases, list)
+            releases.append(future)
+            self._write_manifest(manifest_path, manifest)
+            tag = "v0.3.0"
+            exact_tag_ref = f"refs/tags/{tag}"
+            requested_refs: list[str] = []
+            real_git_commit = database_fixtures._git_commit
+
+            def missing_candidate_tag(ref: str, repo_root: Path) -> str | None:
+                requested_refs.append(ref)
+                if ref == exact_tag_ref:
+                    return None
+                return real_git_commit(ref, repo_root)
+
+            published = database_fixtures.PUBLISHED_DATABASE_RELEASES | {tag}
+            with (
+                mock.patch("script.database_fixtures.PUBLISHED_DATABASE_RELEASES", published),
+                mock.patch("script.database_fixtures._git_commit", side_effect=missing_candidate_tag),
+            ):
+                with self.assertRaisesRegex(FixtureError, "historical tag is unavailable"):
+                    validate_manifest(tag, manifest_path=manifest_path)
+            self.assertIn(exact_tag_ref, requested_refs)
+            self.assertNotIn("HEAD", requested_refs)
+
+    def test_pretag_release_rejects_existing_nonancestor_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path, manifest = self._copied_manifest(directory)
+            future = self._future_release(manifest)
+            releases = manifest["releases"]
+            assert isinstance(releases, list)
+            releases.append(future)
+            self._write_manifest(manifest_path, manifest)
+            real_is_ancestor = database_fixtures._git_is_ancestor
+            head_commit = database_fixtures._git_commit("HEAD", database_fixtures.REPO_ROOT)
+            future_commit = future["commit"]
+
+            def reject_future(ancestor: str, descendant: str, repo_root: Path) -> bool:
+                if ancestor == future_commit and descendant == head_commit:
+                    return False
+                return real_is_ancestor(ancestor, descendant, repo_root)
+
+            with mock.patch("script.database_fixtures._git_is_ancestor", side_effect=reject_future):
+                with self.assertRaisesRegex(FixtureError, "is not an ancestor of HEAD"):
+                    validate_manifest("v0.3.0", manifest_path=manifest_path)
+
+    def test_pretag_release_rejects_spoofed_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path, manifest = self._copied_manifest(directory)
+            future = self._future_release(manifest)
+            future["commit"] = "0" * 40
+            releases = manifest["releases"]
+            assert isinstance(releases, list)
+            releases.append(future)
+            self._write_manifest(manifest_path, manifest)
+            with self.assertRaisesRegex(FixtureError, "is not an ancestor of HEAD"):
+                validate_manifest("v0.3.0", manifest_path=manifest_path)
+
+    def test_pretag_release_rejects_ancestor_whose_declared_source_differs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path, manifest = self._copied_manifest(directory)
+            future = self._future_release(manifest)
+            sqlite_entry = future["sqlite"]
+            assert isinstance(sqlite_entry, dict)
+            expected = sqlite_entry["source_sha256"]
+            source = sqlite_entry["source"]
+            assert isinstance(expected, str)
+            assert isinstance(source, str)
+            future["commit"] = self._ancestor_with_different_source(source, expected)
+            releases = manifest["releases"]
+            assert isinstance(releases, list)
+            releases.append(future)
+            self._write_manifest(manifest_path, manifest)
+            with self.assertRaisesRegex(FixtureError, "declared provenance commit source checksum mismatch"):
+                validate_manifest("v0.3.0", manifest_path=manifest_path)
+
+    def test_pretag_release_rejects_source_hash_not_from_exact_head(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path, manifest = self._copied_manifest(directory)
+            future = self._future_release(manifest)
+            sqlite_entry = future["sqlite"]
+            assert isinstance(sqlite_entry, dict)
+            head_hash = sqlite_entry["source_sha256"]
+            source = sqlite_entry["source"]
+            assert isinstance(head_hash, str)
+            assert isinstance(source, str)
+            commit = self._ancestor_with_different_source(source, head_hash)
+            future["commit"] = commit
+            for backend in ("sqlite", "postgres"):
+                entry = future[backend]
+                assert isinstance(entry, dict)
+                backend_source = entry["source"]
+                assert isinstance(backend_source, str)
+                source_bytes = database_fixtures._git_bytes(commit, backend_source, database_fixtures.REPO_ROOT)
+                self.assertIsNotNone(source_bytes)
+                entry["source_sha256"] = sha256(source_bytes or b"")
+            releases = manifest["releases"]
+            assert isinstance(releases, list)
+            releases.append(future)
+            self._write_manifest(manifest_path, manifest)
+            with self.assertRaisesRegex(FixtureError, "v0.3.0 sqlite release source checksum mismatch"):
+                validate_manifest("v0.3.0", manifest_path=manifest_path)
+
+    def test_fixture_checksum_cannot_be_manifest_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path, manifest = self._copied_manifest(directory)
+            releases = manifest["releases"]
+            assert isinstance(releases, list)
+            releases[0]["sqlite"]["fixture_sha256"] = "0" * 64
+            self._write_manifest(manifest_path, manifest)
+            with self.assertRaisesRegex(FixtureError, "fixture checksum mismatch"):
+                validate_manifest(manifest_path=manifest_path)
+
+
+if __name__ == "__main__":
+    unittest.main()

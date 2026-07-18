@@ -2,7 +2,10 @@
 //! and `MemoryReader`/`MemoryWriter`/`MemoryAdmin` trait implementations (delegating to submodules).
 
 use std::{
-    path::Path,
+    ffi::OsString,
+    fs::OpenOptions,
+    io::ErrorKind,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -16,7 +19,7 @@ use sqlite_vec::sqlite3_vec_init;
 
 use super::{
     EmbeddingProfile, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter,
-    migration::{reject_retired_sqlite_schema, validate_sqlite_source_schema},
+    migration::{reject_retired_sqlite_schema, validate_present_sqlite_schema_for_published_upgrade, validate_sqlite_source_schema},
     sqlite_lease::{SqliteDatabaseLease, database_identity},
     vector::{SqliteVecIndex, VectorIndex as _},
 };
@@ -24,11 +27,11 @@ use crate::{
     clock::{Clock, SystemClock},
     error::StoreError,
     store::schema::{
-        MAIN_DDL, TRIGGER_DDL, existing_embedding_dimensions, migrate_create_audit_log, migrate_create_fts_index, migrate_create_memory_entities, migrate_create_memory_tombstones,
-        migrate_create_metadata, migrate_create_scope_registry, migrate_memories_add_activity_tracking, migrate_memories_add_confidence, migrate_memories_add_embedding_claims,
-        migrate_memories_add_embedding_revision, migrate_memories_add_importance, migrate_memories_add_memory_type, migrate_memories_add_record_revision,
-        migrate_memories_add_superseded_by, migrate_memories_add_updated_at, migrate_memories_align_impression_tracking, migrate_memories_backfill_origin_conversation,
-        migrate_memory_embedding_map_fk,
+        MAIN_DDL, TRIGGER_DDL, check_dimension_mismatch, existing_embedding_dimensions, migrate_create_audit_log, migrate_create_fts_index, migrate_create_memory_entities,
+        migrate_create_memory_tombstones, migrate_create_metadata, migrate_create_scope_registry, migrate_memories_add_activity_tracking, migrate_memories_add_confidence,
+        migrate_memories_add_embedding_claims, migrate_memories_add_embedding_revision, migrate_memories_add_importance, migrate_memories_add_memory_type,
+        migrate_memories_add_record_revision, migrate_memories_add_superseded_by, migrate_memories_add_updated_at, migrate_memories_align_impression_tracking,
+        migrate_memories_backfill_origin_conversation, migrate_memory_embedding_map_fk, migrate_published_v2_metadata, validate_published_v2_metadata,
     },
     types::{
         AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MemoryTombstone, MemoryUpdate,
@@ -55,6 +58,81 @@ struct SqliteInner {
 }
 
 pub(crate) const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn create_pre_upgrade_backup(conn: &Connection, database_path: &Path, clock: &dyn Clock) -> Result<PathBuf, StoreError> {
+    let timestamp = clock.now().format("%Y%m%dT%H%M%S%.6fZ");
+    let mut destination = None;
+    for collision in 0_u32..100_u32 {
+        let mut name = OsString::from(database_path.as_os_str());
+        let suffix = if collision == 0_u32 { String::new() } else { format!(".{collision}") };
+        name.push(format!(".pre-upgrade-{timestamp}{suffix}.bak"));
+        let candidate = PathBuf::from(name);
+        let mut options = OpenOptions::new();
+        let _options = options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let _options = options.mode(0o600);
+        }
+        match options.open(&candidate) {
+            Ok(file) => {
+                drop(file);
+                destination = Some(candidate);
+                break;
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(StoreError::MigrationFailed {
+                    step: "pre_upgrade_backup_reserve",
+                    source: Box::new(error),
+                });
+            }
+        }
+    }
+    let destination = destination.ok_or_else(|| StoreError::Conflict("cannot reserve a unique pre-upgrade backup after 100 attempts".into()))?;
+    let outcome = (|| {
+        let mut backup_connection = Connection::open_with_flags(&destination, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        {
+            let backup = rusqlite::backup::Backup::new(conn, &mut backup_connection)?;
+            backup.run_to_completion(256, Duration::ZERO, None)?;
+        }
+        let integrity: String = backup_connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        let contains_source: bool = backup_connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_v2_metadata')",
+            [],
+            |row| row.get(0),
+        )?;
+        if integrity != "ok" || !contains_source {
+            return Err(StoreError::Conflict(format!(
+                "pre-upgrade backup {} did not verify as a copy of the published-release schema",
+                destination.display()
+            )));
+        }
+        Ok(())
+    })();
+    if let Err(error) = outcome {
+        let _cleanup = std::fs::remove_file(&destination);
+        return Err(error);
+    }
+    Ok(destination)
+}
+
+/// Create the published-schema backup while the caller retains an immediate
+/// transaction on the migration connection.
+fn create_pre_upgrade_backup_while_locked(database_path: &Path, clock: &dyn Clock) -> Result<PathBuf, StoreError> {
+    let backup_source = Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    backup_source.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+    create_pre_upgrade_backup(&backup_source, database_path, clock)
+}
+
+fn retain_pre_upgrade_backup_while_locked(database_path: Option<&Path>, clock: &dyn Clock) -> Result<(), StoreError> {
+    let Some(path) = database_path else {
+        return Ok(());
+    };
+    let recovery = create_pre_upgrade_backup_while_locked(path, clock)?;
+    tracing::info!(path = %recovery.display(), "retained verified pre-upgrade SQLite backup");
+    Ok(())
+}
 
 /// Start a SQLite write transaction that serializes read-modify-write work
 /// against writers in other server processes.
@@ -116,7 +194,7 @@ impl SqliteStore {
                 _database_lease: Some(database_lease),
             }),
         };
-        store.init_schema()?;
+        store.init_schema(Some(path))?;
         Ok(store)
     }
 
@@ -139,7 +217,7 @@ impl SqliteStore {
                 _database_lease: None,
             }),
         };
-        store.init_schema()
+        store.init_schema(None)
     }
 
     /// Open an existing, current-schema SQLite store without creating files or
@@ -208,7 +286,7 @@ impl SqliteStore {
                 _database_lease: None,
             }),
         };
-        store.init_schema()?;
+        store.init_schema(None)?;
         Ok(store)
     }
 
@@ -249,14 +327,30 @@ impl SqliteStore {
             .map_err(|msg| StoreError::Database(format!("sqlite-vec registration failed: {msg}").into()))
     }
 
-    fn init_schema(&self) -> Result<(), StoreError> {
-        let conn = self.inner.conn.lock();
+    fn init_schema(&self, database_path: Option<&Path>) -> Result<(), StoreError> {
+        let mut conn = self.inner.conn.lock();
         let schema_version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if schema_version > crate::store::schema::SQLITE_SCHEMA_VERSION {
             return Err(StoreError::Conflict(format!(
                 "SQLite schema version {schema_version} is newer than this binary supports ({})",
                 crate::store::schema::SQLITE_SCHEMA_VERSION
             )));
+        }
+        {
+            let published_tx = sqlite_write_tx(&mut conn)?;
+            let has_published_metadata: bool = published_tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_v2_metadata')",
+                [],
+                |row| row.get(0),
+            )?;
+            if has_published_metadata {
+                retain_pre_upgrade_backup_while_locked(database_path, self.inner.clock.as_ref())?;
+                let _published_metadata = validate_published_v2_metadata(&published_tx)?;
+                validate_present_sqlite_schema_for_published_upgrade(&published_tx)?;
+                check_dimension_mismatch(&published_tx, self.inner.vector_index.dimensions())?;
+                migrate_published_v2_metadata(&published_tx)?;
+            }
+            published_tx.commit()?;
         }
         reject_retired_sqlite_schema(&conn)?;
 
@@ -848,6 +942,591 @@ mod tests {
         types::{AccessPolicy, Entity, Provenance, RedactableField, ScopeDefinition},
     };
 
+    const BETA_FIXTURE: &str = include_str!("../../tests/fixtures/database-upgrades/v0.1.0-beta.2-beta.3.sqlite.sql");
+    const FIXTURE_MANIFEST: &str = include_str!("../../tests/fixtures/database-upgrades/manifest.json");
+
+    fn sqlite_fixture_sql(name: &str, stack: &mut Vec<String>) -> String {
+        assert_eq!(
+            Path::new(name).file_name().and_then(|value| value.to_str()),
+            Some(name),
+            "fixture includes must be basenames"
+        );
+        assert!(!stack.iter().any(|entry| entry == name), "fixture include cycle: {stack:?} -> {name}");
+        stack.push(name.to_owned());
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/database-upgrades");
+        let source = std::fs::read_to_string(root.join(name)).unwrap();
+        let mut expanded = String::new();
+        for line in source.lines() {
+            if let Some(include) = line.trim().strip_prefix("-- fixture-include: ") {
+                expanded.push_str(&sqlite_fixture_sql(include, stack));
+            } else {
+                expanded.push_str(line);
+                expanded.push('\n');
+            }
+        }
+        let popped = stack.pop();
+        assert_eq!(popped.as_deref(), Some(name));
+        expanded
+    }
+
+    fn build_sqlite_release_fixture(path: &Path, fixture: &str) {
+        SqliteStore::register_extension().unwrap();
+        let connection = Connection::open(path).unwrap();
+        connection.execute_batch(fixture).unwrap();
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        clippy::type_complexity,
+        reason = "the historical fixture assertion deliberately covers every persisted field"
+    )]
+    fn assert_historical_fixture_survived(path: &Path) {
+        let connection = Connection::open(path).unwrap();
+        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(version, crate::store::schema::SQLITE_SCHEMA_VERSION);
+        let profile: (String, String, String, i64) = connection
+            .query_row("SELECT provider, endpoint, model, dimensions FROM embedding_profile WHERE singleton = 1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap();
+        assert_eq!(profile, ("openai-compatible".into(), "http://fixture.invalid/v1".into(), "fixture-model".into(), 3_i64));
+        let metadata: (String, String, i64) = connection
+            .query_row("SELECT scope_key, summary, schema_version FROM memory_metadata", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(metadata, ("project/localhold".into(), "fixture summary".into(), 1_i64));
+        let memory: (String, String, String, String, String, Option<String>) = connection
+            .query_row(
+                "SELECT id, content, tags, provenance, access_policy, superseded_by
+                 FROM memories WHERE id = '01J00000000000000000000000'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            memory,
+            (
+                "01J00000000000000000000000".into(),
+                "published fixture memory".into(),
+                "[\"upgrade\"]".into(),
+                "{\"source_agent\":\"fixture\",\"source_conversation\":\"release\",\"origin_conversation\":\"release\"}".into(),
+                "{\"type\":\"public\"}".into(),
+                Some("01J00000000000000000000002".into()),
+            )
+        );
+        let related_memory: (String, String, String, String, i64) = connection
+            .query_row(
+                "SELECT id, content, tags, provenance, has_embedding
+                 FROM memories WHERE id = '01J00000000000000000000002'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            related_memory,
+            (
+                "01J00000000000000000000002".into(),
+                "published related memory".into(),
+                "[\"upgrade\",\"relationship\"]".into(),
+                "{\"source_agent\":\"fixture-related\",\"source_conversation\":\"release\",\"origin_conversation\":\"release\"}".into(),
+                0_i64,
+            )
+        );
+        let memory_metrics: (i64, String, f64, i64, f64) = connection
+            .query_row(
+                "SELECT embedding_revision, memory_type, importance, impression_count, confidence
+                 FROM memories WHERE id = '01J00000000000000000000000'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(memory_metrics, (1_i64, "semantic".into(), 0.75_f64, 4_i64, 0.9_f64));
+        let embedding_map: (String, i64) = connection
+            .query_row("SELECT memory_id, vec_rowid FROM memory_embedding_map", [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        assert_eq!(embedding_map, ("01J00000000000000000000000".into(), 1_i64));
+        let embedding_distance: f64 = connection
+            .query_row("SELECT vec_distance_L2(embedding, '[0.1,0.2,0.3]') FROM memory_embeddings WHERE rowid = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(embedding_distance < f64::EPSILON);
+        let entity: (String, String, String) = connection
+            .query_row("SELECT memory_id, entity, entity_type FROM memory_entities", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(entity, ("01J00000000000000000000000".into(), "LocalHold".into(), "project".into()));
+        let audit: (String, String, Option<String>, String) = connection
+            .query_row("SELECT memory_id, action, caller_agent, details FROM memory_audit_log", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap();
+        assert_eq!(
+            audit,
+            ("01J00000000000000000000000".into(), "store".into(), Some("fixture".into()), "{\"release\":\"beta\"}".into())
+        );
+        let scope: (String, String, String, String, String, Option<String>, String) = connection
+            .query_row(
+                "SELECT scope_key, display_name, description, aliases, matchers, parent, related
+                 FROM scope_registry WHERE scope_key = 'project/localhold'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            scope,
+            (
+                "project/localhold".into(),
+                "LocalHold".into(),
+                "fixture scope".into(),
+                "[\"localhold\"]".into(),
+                "[\"*/localhold\"]".into(),
+                Some("org/gearbox".into()),
+                "[\"org/gearbox\"]".into()
+            )
+        );
+        let parent_scope: (String, Option<String>, String) = connection
+            .query_row("SELECT scope_key, parent, related FROM scope_registry WHERE scope_key = 'org/gearbox'", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(parent_scope, ("org/gearbox".into(), None, "[\"project/localhold\"]".into()));
+        let tombstone: (String, String, String, String, Option<String>) = connection
+            .query_row(
+                "SELECT memory_id, provenance, access_policy, deleted_at, deleted_by_principal FROM memory_tombstones",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            tombstone,
+            (
+                "01J00000000000000000000001".into(),
+                "{\"source_agent\":\"fixture\"}".into(),
+                "{\"type\":\"public\"}".into(),
+                "2026-07-10T00:00:06Z".into(),
+                Some("fixture-principal".into())
+            )
+        );
+        let metadata_details: (String, Option<String>, Option<String>, Option<String>, Option<String>, String, i64) = connection
+            .query_row(
+                "SELECT memory_id, scope_key, summary, agent_label, created_by_principal, quality_flags, schema_version
+                 FROM memory_metadata",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            metadata_details,
+            (
+                "01J00000000000000000000000".into(),
+                Some("project/localhold".into()),
+                Some("fixture summary".into()),
+                Some("fixture-agent".into()),
+                Some("fixture-principal".into()),
+                "[\"fixture\"]".into(),
+                1_i64
+            )
+        );
+
+        for (table, expected) in [
+            ("memories", 2_i64),
+            ("memory_embedding_map", 1_i64),
+            ("memory_audit_log", 1_i64),
+            ("scope_registry", 2_i64),
+            ("memory_tombstones", 1_i64),
+        ] {
+            let count: i64 = connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap();
+            assert_eq!(count, expected, "{table} data should survive upgrade");
+        }
+        let retired_exists: bool = connection
+            .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_v2_metadata')", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(!retired_exists);
+    }
+    #[test]
+    #[expect(clippy::excessive_nesting, reason = "the release matrix validates tagged schema details inside each fixture")]
+    fn every_published_sqlite_fixture_opens_and_preserves_managed_data() {
+        let manifest: serde_json::Value = serde_json::from_str(FIXTURE_MANIFEST).unwrap();
+        let releases = manifest["releases"].as_array().unwrap();
+        assert!(!releases.is_empty());
+        for release in releases {
+            let fixture_name = release["sqlite"]["fixture"].as_str().unwrap();
+            let release = release["tag"].as_str().unwrap();
+            let fixture = sqlite_fixture_sql(fixture_name, &mut Vec::new());
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(format!("{release}.db"));
+            build_sqlite_release_fixture(&path, &fixture);
+            if release == "v0.2.0" {
+                let fixture_connection = Connection::open(&path).unwrap();
+                let trigger: String = fixture_connection
+                    .query_row(
+                        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_memory_clear_superseded_by'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert!(trigger.contains("record_revision = record_revision + 1"), "v0.2.0 fixture must match the tagged trigger");
+                let schema_version_default: String = fixture_connection
+                    .query_row("SELECT dflt_value FROM pragma_table_info('memory_metadata') WHERE name = 'schema_version'", [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(schema_version_default, "1", "v0.2.0 fixture must match the tagged metadata default");
+            }
+
+            drop(SqliteStore::open(&path, 3_usize).unwrap());
+            assert_historical_fixture_survived(&path);
+        }
+    }
+
+    #[test]
+    fn published_sqlite_backup_and_migration_share_writer_locked_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("locked-snapshot.db");
+        build_sqlite_release_fixture(&path, BETA_FIXTURE);
+        let mut migrator = Connection::open(&path).unwrap();
+        migrator.busy_timeout(SQLITE_BUSY_TIMEOUT).unwrap();
+        let tx = sqlite_write_tx(&mut migrator).unwrap();
+        let backup = create_pre_upgrade_backup_while_locked(&path, &MockClock::pinned(base_time())).unwrap();
+
+        let writer = Connection::open(&path).unwrap();
+        writer.busy_timeout(Duration::ZERO).unwrap();
+        for statement in [
+            "UPDATE memory_v2_metadata SET quality_flags = '[7]'",
+            "ALTER TABLE memory_v2_metadata ADD COLUMN slipped_in TEXT",
+        ] {
+            let error = writer.execute_batch(statement).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    rusqlite::Error::SqliteFailure(code, _)
+                        if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                ),
+                "concurrent writer must be blocked for {statement}: {error:?}"
+            );
+        }
+
+        migrate_published_v2_metadata(&tx).unwrap();
+        tx.commit().unwrap();
+
+        let current = Connection::open(&path).unwrap();
+        let current_state: (bool, bool, String, i64) = current
+            .query_row(
+                "SELECT
+                   EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_v2_metadata'),
+                   EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_metadata'),
+                   (SELECT quality_flags FROM memory_metadata),
+                   (SELECT COUNT(*) FROM memories)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(current_state, (false, true, "[\"fixture\"]".into(), 2_i64));
+
+        let recovery = Connection::open_with_flags(backup, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let backup_state: (bool, String, i64) = recovery
+            .query_row(
+                "SELECT
+                   EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_v2_metadata'),
+                   (SELECT quality_flags FROM memory_v2_metadata),
+                   (SELECT COUNT(*) FROM memories)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(backup_state, (true, "[\"fixture\"]".into(), 2_i64));
+    }
+    #[test]
+    fn failed_published_sqlite_upgrade_keeps_source_and_verified_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("malformed.db");
+        build_sqlite_release_fixture(&path, BETA_FIXTURE);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute("UPDATE memory_v2_metadata SET schema_version = 99", []).unwrap();
+        drop(connection);
+
+        let error = SqliteStore::open(&path, 3_usize).unwrap_err();
+        assert!(error.to_string().contains("unexpected schema_version"), "{error}");
+        let source = Connection::open(&path).unwrap();
+        let legacy_rows: i64 = source.query_row("SELECT COUNT(*) FROM memory_v2_metadata", [], |row| row.get(0)).unwrap();
+        assert_eq!(legacy_rows, 1_i64, "failed migration must leave the source usable");
+        let backups = std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|candidate| candidate.to_string_lossy().contains(".pre-upgrade-") && candidate.extension().is_some_and(|extension| extension == "bak"))
+            .collect::<Vec<_>>();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(std::fs::metadata(&backups[0]).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+
+        assert_eq!(backups.len(), 1_usize);
+        let backup = Connection::open_with_flags(&backups[0], OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        assert_eq!(
+            backup.query_row::<i64, _, _>("SELECT COUNT(*) FROM memory_v2_metadata", [], |row| row.get(0)).unwrap(),
+            1_i64
+        );
+        assert_eq!(backup.query_row::<String, _, _>("PRAGMA quick_check", [], |row| row.get(0)).unwrap(), "ok");
+    }
+
+    #[test]
+    fn published_sqlite_upgrade_rejects_incompatible_managed_index_before_metadata_migration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("incompatible-managed-index.db");
+        build_sqlite_release_fixture(&path, BETA_FIXTURE);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP INDEX idx_memories_created_at; CREATE INDEX idx_memories_created_at ON memories(content)")
+            .unwrap();
+        drop(connection);
+
+        let error = SqliteStore::open(&path, 3_usize).unwrap_err();
+        assert!(
+            error.to_string().contains("required index idx_memories_created_at has an incompatible definition"),
+            "{error}"
+        );
+        let source = Connection::open(&path).unwrap();
+        let state: (bool, bool, String) = source
+            .query_row(
+                "SELECT
+                   EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_v2_metadata'),
+                   EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_metadata'),
+                   (SELECT quality_flags FROM memory_v2_metadata)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (true, false, "[\"fixture\"]".into()));
+        let backups = std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "bak"))
+            .count();
+        assert_eq!(backups, 1_usize, "preflight refusal must retain one verified backup");
+    }
+
+    #[test]
+    fn published_sqlite_dimension_mismatch_is_rejected_before_metadata_migration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dimension-mismatch.db");
+        build_sqlite_release_fixture(&path, BETA_FIXTURE);
+
+        let error = SqliteStore::open(&path, 4_usize).unwrap_err();
+        assert!(error.to_string().contains("memory_embeddings table has 3 dimensions but config specifies 4"), "{error}");
+        let source = Connection::open(&path).unwrap();
+        let user_version: u32 = source.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        let state: (bool, bool, i64, bool) = source
+            .query_row(
+                "SELECT
+                   EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_v2_metadata'),
+                   EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_metadata'),
+                   (SELECT COUNT(*) FROM memory_v2_metadata),
+                   EXISTS(SELECT 1 FROM pragma_table_info('memories') WHERE name='record_revision')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let metadata = source
+            .query_row(
+                "SELECT memory_id, scope_key, summary, agent_label, created_by_principal,
+                        quality_flags, CAST(schema_version AS TEXT), migrated_at, updated_at
+                 FROM memory_v2_metadata",
+                [],
+                |row| (0_usize..9_usize).map(|index| row.get(index)).collect::<Result<Vec<String>, _>>(),
+            )
+            .unwrap();
+        assert_eq!(user_version, 0_u32, "dimension refusal must not advance the schema version");
+        assert_eq!(state, (true, false, 1_i64, false), "dimension refusal must leave the beta schema untouched");
+        assert_eq!(
+            metadata,
+            [
+                "01J00000000000000000000000",
+                "project/localhold",
+                "fixture summary",
+                "fixture-agent",
+                "fixture-principal",
+                "[\"fixture\"]",
+                "2",
+                "2026-07-10T00:00:04Z",
+                "2026-07-10T00:00:05Z",
+            ],
+            "dimension refusal must preserve the complete legacy metadata payload"
+        );
+        let backups = std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "bak"))
+            .count();
+        assert_eq!(backups, 1_usize, "dimension refusal must retain one verified pre-upgrade backup");
+    }
+
+    #[test]
+    fn pre_upgrade_backup_never_overwrites_a_timestamp_collision() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("collision.db");
+        build_sqlite_release_fixture(&path, BETA_FIXTURE);
+        let clock = MockClock::pinned(base_time());
+        let collision = PathBuf::from(format!("{}.pre-upgrade-20250615T000000.000000Z.bak", path.display()));
+        std::fs::write(&collision, b"sentinel").unwrap();
+        let connection = Connection::open(&path).unwrap();
+
+        let backup = create_pre_upgrade_backup(&connection, &path, &clock).unwrap();
+
+        assert_ne!(backup, collision);
+        assert_eq!(std::fs::read(&collision).unwrap(), b"sentinel");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(std::fs::metadata(backup).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn published_sqlite_upgrade_rolls_back_after_copy_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rollback-after-copy.db");
+        build_sqlite_release_fixture(&path, BETA_FIXTURE);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute("CREATE INDEX idx_memory_metadata_scope_key ON memories(content)", []).unwrap();
+        drop(connection);
+
+        let error = SqliteStore::open(&path, 3_usize).unwrap_err();
+        assert!(error.to_string().contains("idx_memory_metadata_scope_key"), "{error}");
+        let source = Connection::open(&path).unwrap();
+        let state: (bool, bool, String) = source
+            .query_row(
+                "SELECT
+                   EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_v2_metadata'),
+                   EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_metadata'),
+                   (SELECT quality_flags FROM memory_v2_metadata)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (true, false, "[\"fixture\"]".into()));
+        let backup_count = std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "bak"))
+            .count();
+        assert_eq!(backup_count, 1_usize);
+    }
+
+    #[test]
+    fn published_sqlite_upgrade_rejects_malformed_metadata_payloads() {
+        for (name, quality_flags) in [
+            ("quality-object", "{\"fixture\":true}"),
+            ("quality-numeric-element", "[\"fixture\",7]"),
+            ("quality-object-element", "[{\"flag\":\"fixture\"}]"),
+        ] {
+            let fixture = BETA_FIXTURE.replace("'[\"fixture\"]', 2,", &format!("'{quality_flags}', 2,"));
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(format!("{name}.db"));
+            build_sqlite_release_fixture(&path, &fixture);
+            let error = SqliteStore::open(&path, 3_usize).unwrap_err();
+            assert!(error.to_string().contains("malformed quality_flags"), "{name}: {error}");
+            let source = Connection::open(&path).unwrap();
+            let retained: String = source.query_row("SELECT quality_flags FROM memory_v2_metadata", [], |row| row.get(0)).unwrap();
+            assert_eq!(retained, quality_flags, "{name}");
+        }
+    }
+
+    #[test]
+    fn published_sqlite_upgrade_rejects_wrong_legacy_contract_unchanged() {
+        for (name, fixture, alteration, expected) in [
+            (
+                "extra-column",
+                BETA_FIXTURE.to_owned(),
+                Some("ALTER TABLE memory_v2_metadata ADD COLUMN unexpected TEXT"),
+                "unexpected table contract",
+            ),
+            (
+                "wrong-type",
+                BETA_FIXTURE.replace("    summary TEXT,\n", "    summary BLOB,\n"),
+                None,
+                "unexpected table contract",
+            ),
+            (
+                "wrong-nullability",
+                BETA_FIXTURE.replace("    summary TEXT,\n", "    summary TEXT NOT NULL,\n"),
+                None,
+                "unexpected table contract",
+            ),
+            (
+                "wrong-index",
+                BETA_FIXTURE.to_owned(),
+                Some(
+                    "DROP INDEX idx_memory_v2_metadata_scope_key;
+                     CREATE INDEX idx_memory_v2_metadata_scope_key ON memory_v2_metadata(summary)",
+                ),
+                "unexpected indexes",
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(format!("{name}.db"));
+            build_sqlite_release_fixture(&path, &fixture);
+            if let Some(alteration) = alteration {
+                let connection = Connection::open(&path).unwrap();
+                connection.execute_batch(alteration).unwrap();
+            }
+
+            let error = SqliteStore::open(&path, 3_usize).unwrap_err();
+            assert!(error.to_string().contains(expected), "{name}: {error}");
+            let source = Connection::open(&path).unwrap();
+            let state: (i64, String) = source
+                .query_row(
+                    "SELECT
+                       (SELECT COUNT(*) FROM memory_v2_metadata),
+                       (SELECT content FROM memories WHERE id = '01J00000000000000000000000')",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(state, (1_i64, "published fixture memory".into()), "{name}");
+
+            let backups = std::fs::read_dir(directory.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|candidate| candidate.extension().is_some_and(|extension| extension == "bak"))
+                .collect::<Vec<_>>();
+            assert_eq!(backups.len(), 1_usize, "{name}");
+            let backup = Connection::open_with_flags(&backups[0], OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            assert_eq!(
+                backup.query_row::<i64, _, _>("SELECT COUNT(*) FROM memory_v2_metadata", [], |row| row.get(0)).unwrap(),
+                1_i64,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn conflicting_published_sqlite_metadata_tables_are_left_untouched() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("conflict.db");
+        build_sqlite_release_fixture(&path, BETA_FIXTURE);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute("CREATE TABLE memory_metadata (memory_id TEXT PRIMARY KEY)", []).unwrap();
+        drop(connection);
+
+        let error = SqliteStore::open(&path, 3_usize).unwrap_err();
+        assert!(error.to_string().contains("both memory_v2_metadata and memory_metadata"), "{error}");
+        let source = Connection::open(&path).unwrap();
+        for table in ["memory_v2_metadata", "memory_metadata"] {
+            let exists: bool = source
+                .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [table], |row| row.get(0))
+                .unwrap();
+            assert!(exists, "conflicting table {table} must not be changed");
+        }
+    }
+
     /// Fixed base time used by all non-time-sensitive tests.
     fn base_time() -> DateTime<Utc> {
         #[expect(clippy::expect_used, reason = "hardcoded valid date never fails")]
@@ -936,7 +1615,7 @@ mod tests {
         drop(SqliteStore::open(&path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap());
         let mut lease_path = database_identity(&path).unwrap().into_os_string();
         lease_path.push(".localhold.lock");
-        let lease_path = std::path::PathBuf::from(lease_path);
+        let lease_path = PathBuf::from(lease_path);
         std::fs::remove_file(&lease_path).unwrap();
 
         let error = SqliteStore::open_read_only_with_clock(&path, SqliteStore::DEFAULT_TEST_DIMENSIONS, Arc::new(MockClock::new())).unwrap_err();

@@ -1,0 +1,70 @@
+{
+  "format_version": 1,
+  "retention": "Keep every published beta, release-candidate, and stable fixture for the lifetime of its compatibility obligation. Retirement requires an explicit compatibility-policy change in a reviewed release.",
+  "releases": [
+    {
+      "tag": "v0.1.0-beta.1",
+      "commit": "eb36f9d1e41619ec85adf57189bc68f466d46e26",
+      "sqlite": {
+        "fixture": "v0.1.0-beta.2-beta.3.sqlite.sql",
+        "fixture_sha256": "7f7efab3e892df0cd3a07e00532ef2a89b99f7c2ac3b3b3f2f892d7e7c540c5d",
+        "source": "src/store/schema.rs",
+        "source_sha256": "b281ab655ab477221aa00561a05692b43f88db36a30aa8939a7b12e1c68769da"
+      },
+      "postgres": {
+        "fixture": "v0.1.0-beta.2-beta.3.postgres.sql",
+        "fixture_sha256": "ba433e92bd53aecc135d2d0f3ea34d9f3939d662f2f5e3cbea158f8d5cb4c0d3",
+        "source": "src/store/postgres.rs",
+        "source_sha256": "d04250a87ad81fc4b4366f2488ce86b49a18b665774ad5686d47d6a5b8d89eeb"
+      }
+    },
+    {
+      "tag": "v0.1.0-beta.2",
+      "commit": "9a2119bbcfc32f3640c6d86a0f0a25befa911962",
+      "sqlite": {
+        "fixture": "v0.1.0-beta.2-beta.3.sqlite.sql",
+        "fixture_sha256": "7f7efab3e892df0cd3a07e00532ef2a89b99f7c2ac3b3b3f2f892d7e7c540c5d",
+        "source": "src/store/schema.rs",
+        "source_sha256": "b281ab655ab477221aa00561a05692b43f88db36a30aa8939a7b12e1c68769da"
+      },
+      "postgres": {
+        "fixture": "v0.1.0-beta.2-beta.3.postgres.sql",
+        "fixture_sha256": "ba433e92bd53aecc135d2d0f3ea34d9f3939d662f2f5e3cbea158f8d5cb4c0d3",
+        "source": "src/store/postgres.rs",
+        "source_sha256": "d04250a87ad81fc4b4366f2488ce86b49a18b665774ad5686d47d6a5b8d89eeb"
+      }
+    },
+    {
+      "tag": "v0.1.0-beta.3",
+      "commit": "ea30d48362a76837f3bc7b9da98df7ea576f7ba9",
+      "sqlite": {
+        "fixture": "v0.1.0-beta.2-beta.3.sqlite.sql",
+        "fixture_sha256": "7f7efab3e892df0cd3a07e00532ef2a89b99f7c2ac3b3b3f2f892d7e7c540c5d",
+        "source": "src/store/schema.rs",
+        "source_sha256": "b281ab655ab477221aa00561a05692b43f88db36a30aa8939a7b12e1c68769da"
+      },
+      "postgres": {
+        "fixture": "v0.1.0-beta.2-beta.3.postgres.sql",
+        "fixture_sha256": "ba433e92bd53aecc135d2d0f3ea34d9f3939d662f2f5e3cbea158f8d5cb4c0d3",
+        "source": "src/store/postgres.rs",
+        "source_sha256": "d04250a87ad81fc4b4366f2488ce86b49a18b665774ad5686d47d6a5b8d89eeb"
+      }
+    },
+    {
+      "tag": "v0.2.0",
+      "commit": "23c0aa4ed0ffe906f88b87cbfc4e17d9a9505e68",
+      "sqlite": {
+        "fixture": "v0.2.0.sqlite.sql",
+        "fixture_sha256": "8370f3c861a08f17cbf49fb3b07456746f649274dfe97122dbdf1a7eda102d5f",
+        "source": "src/store/schema.rs",
+        "source_sha256": "a79fe50bf71be98d0bc0453cf35c202d26269a4aa29320018b43f67dca2eec15"
+      },
+      "postgres": {
+        "fixture": "v0.2.0.postgres.sql",
+        "fixture_sha256": "d92e095eef926eca3a998e01914377e18fdc6a5bfbbed4d1a297799de3068cc9",
+        "source": "src/store/postgres.rs",
+        "source_sha256": "1eee44d092c043cd08896e2a7125b2edd2407fa00db67d3035b286e906990b80"
+      }
+    }
+  ]
+}

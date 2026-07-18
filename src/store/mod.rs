@@ -18,7 +18,8 @@ pub(crate) mod vector;
 use std::{collections::HashMap, future::Future};
 
 pub use postgres::PostgresStore;
-pub(crate) use schema::existing_embedding_dimensions;
+pub(crate) use postgres::validate_published_v2_metadata_upgrade;
+pub(crate) use schema::{existing_embedding_dimensions, validate_published_v2_metadata};
 use serde::{Deserialize, Serialize};
 pub use sqlite::SqliteStore;
 pub(crate) use sqlite::sqlite_write_tx;

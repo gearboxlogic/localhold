@@ -291,6 +291,17 @@ self-contained file without overwriting an existing path. New Unix backup files
 use mode `0600`; Windows files inherit the destination directory's ACL. The
 destination directory must already exist.
 
+When startup encounters the `memory_v2_metadata` table written by the published
+beta releases, it first creates and verifies a self-contained
+`localhold.db.pre-upgrade-*.bak` beside the database. The backup includes
+committed WAL content and is retained whether migration succeeds or fails.
+Startup holds the SQLite writer lock from before that backup through legacy
+validation and migration, preventing another writer from changing the captured
+schema or data between those steps. If backup creation, permissions, or
+`quick_check` verification fails, startup stops before changing the legacy
+table. Keep this recovery copy until representative reads, scopes, audit
+entries, tombstones, metadata, and embedding checks pass.
+
 Always validate a restore first:
 
 ```sh
@@ -356,6 +367,10 @@ startup schema-migration lock acquisition waits; see
 configuration surface.
 
 ## PostgreSQL Backup And Restore
+
+PostgreSQL schema migration is transactional but does not create a server-side
+backup. Take and verify a managed snapshot or logical backup before starting a
+new LocalHold version; a rolled-back migration is not a substitute for recovery.
 
 Use the PostgreSQL tools that match the server version and follow the database
 operator's normal encryption and retention policy. A typical logical backup is:

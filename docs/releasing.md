@@ -6,12 +6,21 @@ the release workflow; maintainers do not upload locally built binaries.
 ## Prepare The Release
 
 1. Update the package version in `Cargo.toml` and refresh `Cargo.lock`.
-2. Move user-visible changes from `[Unreleased]` to a dated
+2. Add deterministic SQLite and PostgreSQL fixture builders for the release to
+   `tests/fixtures/database-upgrades/manifest.json`, including source provenance
+   and effective SHA-256 checksums. Do not add the candidate tag to
+   `PUBLISHED_DATABASE_RELEASES` yet: that immutable inventory contains only
+   releases whose exact tag already exists. `script/release.py validate vVERSION`
+   explicitly authorizes the one manifest candidate matching the current package
+   version and verifies its source against HEAD before the tag exists. Missing
+   published releases, unrequested candidates, and extra manifest entries still
+   fail validation.
+3. Move user-visible changes from `[Unreleased]` to a dated
    `[VERSION] - YYYY-MM-DD` section in `CHANGELOG.md`.
-3. Update the tagged source-install example in
+4. Update the tagged source-install example in
    [Installation](installation.md).
-4. Run `python3 script/release.py validate vVERSION` and `just check`.
-5. Open a release preparation pull request. Merge only after required CI is
+5. Run `python3 script/release.py validate vVERSION` and `just check`.
+6. Open a release preparation pull request. Merge only after required CI is
    green and the cloud bot approves the latest head commit, following
    [the contributor workflow](../CONTRIBUTING.md).
 
@@ -38,6 +47,13 @@ The tag must point to a commit contained in `main`. The release workflow then:
 6. extracts and smoke-tests all archives;
 7. creates `SHA256SUMS`; and
 8. publishes a GitHub prerelease when the version contains a prerelease suffix.
+
+After the release is published and the exact tag is available, open a focused
+follow-up pull request that adds the tag to `PUBLISHED_DATABASE_RELEASES`.
+Run `python3 script/release.py validate vVERSION` with the tag fetched locally;
+the candidate is now historical and must validate from `refs/tags/vVERSION`,
+never from HEAD. Do not add a candidate to the published inventory before its
+tag exists.
 
 After a successful release workflow, `Published Release Smoke` runs without a
 source checkout. It downloads the public assets on clean Linux and Windows

@@ -18,7 +18,10 @@ use sqlx_postgres::{PgPool, PgPoolOptions, PgRow, Postgres};
 use super::{
     BulkAuthOutcome, EmbeddingMap, EmbeddingNeighbor, EmbeddingProfile, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter, ReassignScopeOutcome, RecordUseOutcome,
     ReembedClaim, merge_metadata_patch,
-    migration::{reject_retired_postgres_schema, validate_ready_postgres_schema},
+    migration::{
+        PresentPostgresVectorPolicy, reject_retired_postgres_schema, validate_postgres_runtime_relationships_before_migration_connection,
+        validate_present_postgres_schema_connection, validate_ready_postgres_schema,
+    },
     postgres_migrations::{CURRENT_SCHEMA_VERSION, MIGRATIONS, MigrationMetadataState, classify_migration_rows, read_migration_metadata_state},
     query::{
         DEFAULT_LIST_LIMIT, MAX_SCAN_ROWS, MAX_VEC_CANDIDATES, OVERFETCH_FACTOR, apply_access_policy_for_filter, escape_like, normalize_filter, sort_by_distance, usize_to_i64,
@@ -45,10 +48,10 @@ const EMBEDDING_CLAIM_LEASE_SECS: i64 = 300;
 const EMBEDDING_PROFILE_ADVISORY_LOCK: i64 = 5_499_250_768_369_920_844;
 const SCHEMA_MIGRATION_ADVISORY_LOCK: i64 = 5_499_250_768_369_920_845;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExistingVectorPolicy {
+#[derive(Debug, Clone, Copy)]
+enum ExistingVectorPolicy<'a> {
     Validate,
-    RebuildAfterMigration,
+    RebuildAfterMigration(&'a EmbeddingProfile),
 }
 
 const CREATE_MIGRATIONS_TABLE: &str = "
@@ -227,11 +230,11 @@ impl PostgresStore {
     pub async fn open_with_clock(config: &PostgresDatabaseConfig, embedding_dimensions: usize, clock: Arc<dyn Clock>) -> Result<Self, StoreError> {
         validate_bootstrap_inputs(config, embedding_dimensions)?;
         let pool = PgPoolOptions::new().max_connections(config.max_connections).connect(&config.url).await?;
-        reject_retired_postgres_schema(&pool, true).await?;
         if config.auto_migrate {
-            init_schema(&pool, embedding_dimensions, ExistingVectorPolicy::Validate, config.migration_lock_timeout_secs).await?;
+            migrate_schema(&pool, embedding_dimensions, ExistingVectorPolicy::Validate, config.migration_lock_timeout_secs).await?;
             validate_current_postgres_store_ready(&pool, embedding_dimensions).await?;
         } else {
+            reject_retired_postgres_schema(&pool, true).await?;
             validate_postgres_runtime_ready(&pool, embedding_dimensions).await?;
         }
         Ok(Self {
@@ -353,19 +356,15 @@ impl PostgresStore {
     pub async fn reindex_embeddings(config: &PostgresDatabaseConfig, profile: &EmbeddingProfile) -> Result<(), StoreError> {
         validate_bootstrap_inputs(config, profile.dimensions)?;
         let pool = PgPoolOptions::new().max_connections(config.max_connections).connect(&config.url).await?;
-        reject_retired_postgres_schema(&pool, true).await?;
-        init_schema(&pool, profile.dimensions, ExistingVectorPolicy::RebuildAfterMigration, config.migration_lock_timeout_secs).await?;
+        migrate_schema(
+            &pool,
+            profile.dimensions,
+            ExistingVectorPolicy::RebuildAfterMigration(profile),
+            config.migration_lock_timeout_secs,
+        )
+        .await?;
 
-        let mut tx = pool.begin().await?;
-        lock_embedding_profile(&mut tx).await?;
-        let _dropped = sqlx::query("DROP TABLE IF EXISTS memory_embeddings").execute(&mut *tx).await?;
-        let _updated = sqlx::query("UPDATE memories SET has_embedding = FALSE, embedding_claimed_at = NULL, embedding_claim_token = NULL")
-            .execute(&mut *tx)
-            .await?;
-        let ddl = memory_embeddings_ddl(profile.dimensions)?;
-        let _created = sqlx::query(AssertSqlSafe(ddl)).execute(&mut *tx).await?;
-        upsert_embedding_profile_executor(&mut tx, profile).await?;
-        tx.commit().await?;
+        validate_current_postgres_store_ready(&pool, profile.dimensions).await?;
         Ok(())
     }
 
@@ -3326,7 +3325,20 @@ fn validate_bootstrap_inputs(config: &PostgresDatabaseConfig, embedding_dimensio
     Ok(())
 }
 
-async fn init_schema(pool: &PgPool, embedding_dimensions: usize, vector_policy: ExistingVectorPolicy, migration_lock_timeout_secs: u32) -> Result<(), StoreError> {
+const MANAGED_MIGRATION_TABLES: &[&str] = &[
+    "localhold_migrations",
+    "memories",
+    "memory_entities",
+    "memory_embeddings",
+    "memory_audit_log",
+    "memory_tombstones",
+    "scope_registry",
+    "memory_v2_metadata",
+    "memory_metadata",
+    "embedding_profile",
+];
+
+async fn migrate_schema(pool: &PgPool, embedding_dimensions: usize, vector_policy: ExistingVectorPolicy<'_>, migration_lock_timeout_secs: u32) -> Result<(), StoreError> {
     let lock_timeout = format!("{migration_lock_timeout_secs}s");
     let mut tx = pool.begin().await?;
     let _timeout = sqlx::query("SELECT set_config('lock_timeout', $1, true)").bind(&lock_timeout).execute(&mut *tx).await?;
@@ -3336,9 +3348,21 @@ async fn init_schema(pool: &PgPool, embedding_dimensions: usize, vector_policy: 
         .await
         .map_err(postgres_schema_lock_error)?;
 
+    lock_present_managed_tables(&mut tx).await?;
+    let published_upgrade = validate_published_v2_metadata_upgrade_tx(&mut tx).await?;
+    let present_vector_policy = match vector_policy {
+        ExistingVectorPolicy::Validate => PresentPostgresVectorPolicy::ValidateDimensions(embedding_dimensions),
+        ExistingVectorPolicy::RebuildAfterMigration(_) => PresentPostgresVectorPolicy::Rebuild,
+    };
+    validate_present_postgres_schema_connection(&mut tx, true, true, published_upgrade, present_vector_policy).await?;
+    validate_postgres_runtime_relationships_before_migration_connection(&mut tx, true, published_upgrade).await?;
+
+    // Every non-rebuildable contract has passed while the managed tables are
+    // locked. No persistent schema or vector mutation may precede this point.
     execute_statement(&mut tx, CREATE_VECTOR_EXTENSION).await?;
+    migrate_published_v2_metadata(&mut tx).await?;
     execute_statement(&mut tx, CREATE_MIGRATIONS_TABLE).await?;
-    if vector_policy == ExistingVectorPolicy::Validate {
+    if matches!(vector_policy, ExistingVectorPolicy::Validate) {
         check_vector_dimensions_tx(&mut tx, embedding_dimensions).await?;
     }
     execute_statements(&mut tx, POSTGRES_SCHEMA_STATEMENTS).await?;
@@ -3346,15 +3370,229 @@ async fn init_schema(pool: &PgPool, embedding_dimensions: usize, vector_policy: 
     migrate_record_revision_column(&mut tx).await?;
     migrate_audit_log_remove_memory_fk(&mut tx).await?;
     execute_dynamic_statement(&mut tx, &memory_embeddings_ddl(embedding_dimensions)?).await?;
-    if vector_policy == ExistingVectorPolicy::Validate {
+    if matches!(vector_policy, ExistingVectorPolicy::Validate) {
         check_vector_dimensions_tx(&mut tx, embedding_dimensions).await?;
     }
     for migration in MIGRATIONS {
         record_migration(&mut tx, migration.version(), migration.name()).await?;
     }
+    if let ExistingVectorPolicy::RebuildAfterMigration(profile) = vector_policy {
+        lock_embedding_profile(&mut tx).await?;
+        let _dropped = sqlx::query("DROP TABLE memory_embeddings").execute(&mut *tx).await?;
+        let _updated = sqlx::query("UPDATE memories SET has_embedding = FALSE, embedding_claimed_at = NULL, embedding_claim_token = NULL")
+            .execute(&mut *tx)
+            .await?;
+        execute_dynamic_statement(&mut tx, &memory_embeddings_ddl(profile.dimensions)?).await?;
+        upsert_embedding_profile_executor(&mut tx, profile).await?;
+    }
     validate_current_migration_metadata_tx(&mut tx).await?;
     tx.commit().await?;
     Ok(())
+}
+
+async fn lock_present_managed_tables(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
+    for table in MANAGED_MIGRATION_TABLES {
+        let exists: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), $1)) IS NOT NULL")
+            .bind(table)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(postgres_schema_lock_error)?;
+        if exists {
+            execute_dynamic_statement(tx, &format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE")).await?;
+        }
+    }
+    Ok(())
+}
+
+#[expect(clippy::too_many_lines, reason = "the fixed published schema contract is clearest as one auditable validation unit")]
+async fn validate_published_metadata_contract(tx: &mut Transaction<'_, Postgres>, table: &str, scope_index: &str, schema_version_default: &str) -> Result<(), StoreError> {
+    let columns = sqlx::query(
+        "SELECT column_name, udt_name, is_nullable = 'YES' AS nullable, column_default
+         FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = $1
+         ORDER BY ordinal_position",
+    )
+    .bind(table)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(postgres_schema_lock_error)?
+    .into_iter()
+    .map(|row| {
+        Ok((
+            row.try_get("column_name")?,
+            row.try_get("udt_name")?,
+            row.try_get("nullable")?,
+            row.try_get("column_default")?,
+        ))
+    })
+    .collect::<Result<Vec<(String, String, bool, Option<String>)>, SqlxError>>()?;
+    let expected = vec![
+        ("memory_id".into(), "text".into(), false, None),
+        ("scope_key".into(), "text".into(), true, None),
+        ("summary".into(), "text".into(), true, None),
+        ("agent_label".into(), "text".into(), true, None),
+        ("created_by_principal".into(), "text".into(), true, None),
+        ("quality_flags".into(), "jsonb".into(), false, Some("'[]'::jsonb".into())),
+        ("schema_version".into(), "int8".into(), false, Some(schema_version_default.into())),
+        ("migrated_at".into(), "timestamptz".into(), true, None),
+        ("updated_at".into(), "timestamptz".into(), false, None),
+    ];
+    if columns != expected {
+        return Err(StoreError::Conflict(format!(
+            "PostgreSQL published-release metadata table {table} has an unexpected column contract; restore from backup or repair it before retrying"
+        )));
+    }
+    let constraints_valid: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) = 2
+            AND COUNT(*) FILTER (WHERE contype = 'p' AND pg_get_constraintdef(oid) = 'PRIMARY KEY (memory_id)') = 1
+            AND COUNT(*) FILTER (
+                WHERE contype = 'f'
+                  AND pg_get_constraintdef(oid) = 'FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE'
+            ) = 1
+         FROM pg_constraint
+         WHERE conrelid = to_regclass(format('%I.%I', current_schema(), $1))",
+    )
+    .bind(table)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(postgres_schema_lock_error)?;
+    let indexes_valid: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) = 2
+            AND COUNT(*) FILTER (
+                WHERE index_class.relname = $2
+                  AND NOT index_data.indisunique
+                  AND index_data.indisvalid
+                  AND index_data.indisready
+                  AND index_data.indislive
+                  AND NOT index_data.indisprimary
+                  AND NOT index_data.indisexclusion
+                  AND index_class.relkind = 'i'
+                  AND access_method.amname = 'btree'
+                  AND index_data.indnkeyatts = 1
+                  AND index_data.indnatts = 1
+                  AND index_data.indexprs IS NULL
+                  AND pg_get_indexdef(index_class.oid, 1, TRUE) = 'scope_key'
+                  AND index_data.indpred IS NULL
+                  AND key_attribute.attname = 'scope_key'
+                  AND key_opclass.opcdefault
+                  AND index_data.indcollation[0] = key_attribute.attcollation
+            ) = 1
+         FROM pg_index AS index_data
+         JOIN pg_class AS index_class ON index_class.oid = index_data.indexrelid
+         JOIN pg_am AS access_method ON access_method.oid = index_class.relam
+         LEFT JOIN pg_attribute AS key_attribute
+           ON key_attribute.attrelid = index_data.indrelid
+          AND key_attribute.attnum = index_data.indkey[0]
+         LEFT JOIN pg_opclass AS key_opclass ON key_opclass.oid = index_data.indclass[0]
+         WHERE index_data.indrelid = to_regclass(format('%I.%I', current_schema(), $1))",
+    )
+    .bind(table)
+    .bind(scope_index)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(postgres_schema_lock_error)?;
+    if !constraints_valid || !indexes_valid {
+        return Err(StoreError::Conflict(format!(
+            "PostgreSQL published-release metadata table {table} has unexpected constraints or indexes; restore from backup or repair it before retrying"
+        )));
+    }
+    Ok(())
+}
+
+async fn lock_published_metadata(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
+    execute_statement(tx, "LOCK TABLE memory_v2_metadata IN ACCESS EXCLUSIVE MODE").await
+}
+
+async fn validate_published_v2_metadata(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
+    validate_published_metadata_contract(tx, "memory_v2_metadata", "idx_memory_v2_metadata_scope_key", "2").await?;
+    let invalid_versions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_v2_metadata WHERE schema_version IS DISTINCT FROM 2")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(postgres_schema_lock_error)?;
+    if invalid_versions != 0_i64 {
+        return Err(StoreError::Conflict(
+            "PostgreSQL published-release metadata contains an unexpected schema_version; restore from backup or repair it before retrying".into(),
+        ));
+    }
+    let invalid_quality_flags: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM memory_v2_metadata
+         WHERE quality_flags IS NULL
+            OR jsonb_typeof(quality_flags) <> 'array'
+            OR EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(quality_flags) = 'array' THEN quality_flags ELSE '[]'::jsonb END
+                ) AS flag
+                WHERE jsonb_typeof(flag) <> 'string'
+            )",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(postgres_schema_lock_error)?;
+    if invalid_quality_flags != 0_i64 {
+        return Err(StoreError::Conflict(
+            "PostgreSQL published-release metadata contains malformed quality_flags; expected a JSON array of strings".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_published_v2_metadata_upgrade_tx(tx: &mut Transaction<'_, Postgres>) -> Result<bool, StoreError> {
+    let legacy_exists: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(postgres_schema_lock_error)?;
+    if !legacy_exists {
+        return Ok(false);
+    }
+    let current_exists: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(postgres_schema_lock_error)?;
+    if current_exists {
+        return Err(StoreError::Conflict(
+            "PostgreSQL contains both memory_v2_metadata and memory_metadata; restore from the pre-upgrade backup or repair the conflicting tables before retrying".into(),
+        ));
+    }
+    lock_published_metadata(tx).await?;
+    validate_published_v2_metadata(tx).await?;
+    Ok(true)
+}
+
+pub(crate) async fn validate_published_v2_metadata_upgrade(pool: &PgPool, migration_lock_timeout_secs: u32) -> Result<bool, StoreError> {
+    let mut tx = pool.begin().await?;
+    let lock_timeout = format!("{migration_lock_timeout_secs}s");
+    let _timeout = sqlx::query("SELECT set_config('lock_timeout', $1, true)").bind(&lock_timeout).execute(&mut *tx).await?;
+    let published_upgrade = validate_published_v2_metadata_upgrade_tx(&mut tx).await?;
+    tx.rollback().await?;
+    Ok(published_upgrade)
+}
+
+async fn migrate_published_v2_metadata(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
+    let legacy_exists: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(postgres_schema_lock_error)?;
+    if !legacy_exists {
+        return Ok(());
+    }
+    let current_exists: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(postgres_schema_lock_error)?;
+    if current_exists {
+        return Err(StoreError::Conflict(
+            "PostgreSQL contains both memory_v2_metadata and memory_metadata; restore from the pre-upgrade backup or repair the conflicting tables before retrying".into(),
+        ));
+    }
+    lock_published_metadata(tx).await?;
+    validate_published_v2_metadata(tx).await?;
+    execute_statement(tx, "ALTER TABLE memory_v2_metadata RENAME TO memory_metadata").await?;
+    execute_statement(tx, "ALTER INDEX IF EXISTS idx_memory_v2_metadata_scope_key RENAME TO idx_memory_metadata_scope_key").await?;
+    execute_statement(tx, "UPDATE memory_metadata SET schema_version = 1").await?;
+    execute_statement(tx, "ALTER TABLE memory_metadata ALTER COLUMN schema_version SET DEFAULT 1").await?;
+    validate_published_metadata_contract(tx, "memory_metadata", "idx_memory_metadata_scope_key", "1").await
 }
 
 async fn migrate_record_revision_column(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
@@ -3620,6 +3858,43 @@ mod tests {
     use super::*;
     use crate::types::AuditAction;
 
+    const FIXTURE_MANIFEST: &str = include_str!("../../tests/fixtures/database-upgrades/manifest.json");
+
+    fn postgres_fixture_sql(name: &str) -> String {
+        postgres_fixture_sql_inner(name, &mut Vec::new())
+    }
+
+    fn postgres_fixture_sql_inner(name: &str, stack: &mut Vec<String>) -> String {
+        assert_eq!(
+            std::path::Path::new(name).file_name().and_then(|value| value.to_str()),
+            Some(name),
+            "fixture includes must be basenames"
+        );
+        assert!(!stack.iter().any(|entry| entry == name), "fixture include cycle: {stack:?} -> {name}");
+        stack.push(name.to_owned());
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/database-upgrades");
+        let source = std::fs::read_to_string(root.join(name)).unwrap();
+        let mut expanded = String::new();
+        for line in source.lines() {
+            if let Some(include) = line.trim().strip_prefix("-- fixture-include: ") {
+                expanded.push_str(&postgres_fixture_sql_inner(include, stack));
+            } else {
+                expanded.push_str(line);
+                expanded.push('\n');
+            }
+        }
+        let popped = stack.pop();
+        assert_eq!(popped.as_deref(), Some(name));
+        expanded
+    }
+
+    #[test]
+    #[should_panic(expected = "fixture include cycle")]
+    fn postgres_fixture_include_cycle_is_rejected() {
+        let mut stack = vec!["cycle.sql".to_owned()];
+        let _fixture = postgres_fixture_sql_inner("cycle.sql", &mut stack);
+    }
+
     fn postgres_test_url() -> String {
         std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into())
     }
@@ -3856,6 +4131,75 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with rootless Podman"]
+    async fn auto_migrate_completes_compatible_partial_schema_with_absent_child_tables() {
+        with_isolated_postgres_schema("localhold_runtime_partial_completion", true, |_admin, _schema, config| async move {
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _dropped = sqlx::query(
+                "DROP TABLE
+                    memory_entities,
+                    memory_embeddings,
+                    memory_audit_log,
+                    memory_tombstones,
+                    scope_registry,
+                    memory_metadata,
+                    embedding_profile,
+                    localhold_migrations",
+            )
+            .execute(&scoped)
+            .await
+            .unwrap();
+
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+            let table_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pg_tables
+                 WHERE schemaname = current_schema()
+                   AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_metadata', 'memory_tombstones', 'scope_registry')",
+            )
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            assert_eq!(table_count, 9_i64);
+            assert_eq!(read_migration_metadata_state(&scoped).await.unwrap(), MigrationMetadataState::Current);
+            scoped.close().await;
+        })
+        .await;
+    }
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with rootless Podman"]
+    async fn auto_migrate_rejects_child_only_partial_schema_without_mutation() {
+        let fixture = postgres_fixture_sql("v0.2.0.postgres.sql");
+        with_isolated_postgres_schema("localhold_runtime_child_only", true, |_admin, _schema, config| async move {
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+            let _dropped = sqlx::query("DROP TABLE memories CASCADE").execute(&scoped).await.unwrap();
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("memory_entities.memory_id"), "{error}");
+
+            let state: (bool, i64, i64, String, i64) = sqlx_core::query_as::query_as(
+                "SELECT
+                   to_regclass(format('%I.%I', current_schema(), 'memories')) IS NOT NULL,
+                   (SELECT COUNT(*) FROM memory_entities),
+                   (SELECT COUNT(*) FROM memory_embeddings),
+                   (SELECT embedding::text FROM memory_embeddings WHERE memory_id = '01J00000000000000000000000'),
+                   (SELECT COUNT(*) FROM localhold_migrations)",
+            )
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            assert_eq!(
+                state,
+                (false, 1_i64, 1_i64, "[0.1,0.2,0.3]".into(), 3_i64),
+                "child-only relationship rejection must not create or mutate managed data"
+            );
+            scoped.close().await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
     #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn open_without_auto_migrate_rejects_missing_runtime_claim_columns() {
         with_isolated_postgres_schema("localhold_runtime_claims", true, |_admin, _schema, mut config| async move {
@@ -4000,6 +4344,460 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    #[expect(
+        clippy::excessive_nesting,
+        clippy::too_many_lines,
+        clippy::type_complexity,
+        reason = "the release matrix exhaustively checks every persisted field inside an isolated schema"
+    )]
+    async fn every_published_postgres_fixture_migrates_and_preserves_managed_data() {
+        let manifest: serde_json::Value = serde_json::from_str(FIXTURE_MANIFEST).unwrap();
+        let releases = manifest["releases"].as_array().unwrap();
+        assert!(!releases.is_empty());
+        for release in releases {
+            let tag = release["tag"].as_str().unwrap().to_owned();
+            let fixture_name = release["postgres"]["fixture"].as_str().unwrap();
+            let fixture = postgres_fixture_sql(fixture_name);
+            with_isolated_postgres_schema("localhold_release_fixture", true, |_admin, _schema, config| async move {
+                let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+                let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+                scoped.close().await;
+
+                drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+                let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+                assert_eq!(read_migration_metadata_state(&scoped).await.unwrap(), MigrationMetadataState::Current, "{tag}");
+                let profile: (String, String, String, i64) =
+                    sqlx_core::query_as::query_as("SELECT provider, endpoint, model, dimensions FROM embedding_profile WHERE singleton = 1")
+                        .fetch_one(&scoped)
+                        .await
+                        .unwrap();
+                assert_eq!(
+                    profile,
+                    ("openai-compatible".into(), "http://fixture.invalid/v1".into(), "fixture-model".into(), 3_i64),
+                    "{tag}"
+                );
+                let metadata: (String, String, i64) = sqlx_core::query_as::query_as("SELECT scope_key, summary, schema_version FROM memory_metadata")
+                    .fetch_one(&scoped)
+                    .await
+                    .unwrap();
+                assert_eq!(metadata, ("project/localhold".into(), "fixture summary".into(), 1_i64), "{tag}");
+                let memory: (String, String, serde_json::Value, serde_json::Value, serde_json::Value, Option<String>) = sqlx_core::query_as::query_as(
+                    "SELECT id, content, tags, provenance, access_policy, superseded_by
+                         FROM memories WHERE id = '01J00000000000000000000000'",
+                )
+                .fetch_one(&scoped)
+                .await
+                .unwrap();
+                assert_eq!(
+                    memory,
+                    (
+                        "01J00000000000000000000000".into(),
+                        "published fixture memory".into(),
+                        serde_json::json!(["upgrade"]),
+                        serde_json::json!({"source_agent":"fixture","source_conversation":"release","origin_conversation":"release"}),
+                        serde_json::json!({"type":"public"}),
+                        Some("01J00000000000000000000002".into()),
+                    ),
+                    "{tag}"
+                );
+                let related_memory: (String, String, serde_json::Value, serde_json::Value, bool) = sqlx_core::query_as::query_as(
+                    "SELECT id, content, tags, provenance, has_embedding
+                         FROM memories WHERE id = '01J00000000000000000000002'",
+                )
+                .fetch_one(&scoped)
+                .await
+                .unwrap();
+                assert_eq!(
+                    related_memory,
+                    (
+                        "01J00000000000000000000002".into(),
+                        "published related memory".into(),
+                        serde_json::json!(["upgrade", "relationship"]),
+                        serde_json::json!({"source_agent":"fixture-related","source_conversation":"release","origin_conversation":"release"}),
+                        false,
+                    ),
+                    "{tag}"
+                );
+                let metrics: (i64, String, f64, i64, f64) = sqlx_core::query_as::query_as(
+                    "SELECT embedding_revision, memory_type, importance, impression_count, confidence
+                         FROM memories WHERE id = '01J00000000000000000000000'",
+                )
+                .fetch_one(&scoped)
+                .await
+                .unwrap();
+                assert_eq!(metrics, (1_i64, "semantic".into(), 0.75_f64, 4_i64, 0.9_f64), "{tag}");
+                let embedding: (String, String) = sqlx_core::query_as::query_as("SELECT memory_id, embedding::text FROM memory_embeddings")
+                    .fetch_one(&scoped)
+                    .await
+                    .unwrap();
+                assert_eq!(embedding, ("01J00000000000000000000000".into(), "[0.1,0.2,0.3]".into()), "{tag}");
+                let entity: (String, String, String) = sqlx_core::query_as::query_as("SELECT memory_id, entity, entity_type FROM memory_entities")
+                    .fetch_one(&scoped)
+                    .await
+                    .unwrap();
+                assert_eq!(entity, ("01J00000000000000000000000".into(), "LocalHold".into(), "project".into()), "{tag}");
+                let audit: (String, String, Option<String>, serde_json::Value) =
+                    sqlx_core::query_as::query_as("SELECT memory_id, action, caller_agent, details FROM memory_audit_log")
+                        .fetch_one(&scoped)
+                        .await
+                        .unwrap();
+                assert_eq!(
+                    audit,
+                    (
+                        "01J00000000000000000000000".into(),
+                        "store".into(),
+                        Some("fixture".into()),
+                        serde_json::json!({"release":"beta"})
+                    ),
+                    "{tag}"
+                );
+                let scope: (String, String, Option<String>, serde_json::Value, serde_json::Value, Option<String>, serde_json::Value) = sqlx_core::query_as::query_as(
+                    "SELECT scope_key, display_name, description, aliases, matchers, parent, related
+                         FROM scope_registry WHERE scope_key = 'project/localhold'",
+                )
+                .fetch_one(&scoped)
+                .await
+                .unwrap();
+                assert_eq!(
+                    scope,
+                    (
+                        "project/localhold".into(),
+                        "LocalHold".into(),
+                        Some("fixture scope".into()),
+                        serde_json::json!(["localhold"]),
+                        serde_json::json!(["*/localhold"]),
+                        Some("org/gearbox".into()),
+                        serde_json::json!(["org/gearbox"])
+                    ),
+                    "{tag}"
+                );
+                let parent_scope: (String, Option<String>, serde_json::Value) =
+                    sqlx_core::query_as::query_as("SELECT scope_key, parent, related FROM scope_registry WHERE scope_key = 'org/gearbox'")
+                        .fetch_one(&scoped)
+                        .await
+                        .unwrap();
+                assert_eq!(parent_scope, ("org/gearbox".into(), None, serde_json::json!(["project/localhold"])), "{tag}");
+                let tombstone: (String, serde_json::Value, serde_json::Value, bool, Option<String>) = sqlx_core::query_as::query_as(
+                    "SELECT memory_id, provenance, access_policy, deleted_at = TIMESTAMPTZ '2026-07-10T00:00:06Z', deleted_by_principal FROM memory_tombstones",
+                )
+                .fetch_one(&scoped)
+                .await
+                .unwrap();
+                assert_eq!(
+                    tombstone,
+                    (
+                        "01J00000000000000000000001".into(),
+                        serde_json::json!({"source_agent":"fixture"}),
+                        serde_json::json!({"type":"public"}),
+                        true,
+                        Some("fixture-principal".into())
+                    ),
+                    "{tag}"
+                );
+                let metadata_details: (String, Option<String>, Option<String>, Option<String>, Option<String>, serde_json::Value, i64) =
+                    sqlx_core::query_as::query_as("SELECT memory_id, scope_key, summary, agent_label, created_by_principal, quality_flags, schema_version FROM memory_metadata")
+                        .fetch_one(&scoped)
+                        .await
+                        .unwrap();
+                assert_eq!(
+                    metadata_details,
+                    (
+                        "01J00000000000000000000000".into(),
+                        Some("project/localhold".into()),
+                        Some("fixture summary".into()),
+                        Some("fixture-agent".into()),
+                        Some("fixture-principal".into()),
+                        serde_json::json!(["fixture"]),
+                        1_i64
+                    ),
+                    "{tag}"
+                );
+
+                for (table, expected) in [
+                    ("memories", 2_i64),
+                    ("memory_embeddings", 1_i64),
+                    ("memory_audit_log", 1_i64),
+                    ("scope_registry", 2_i64),
+                    ("memory_tombstones", 1_i64),
+                ] {
+                    let count: i64 = sqlx::query_scalar(AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}"))).fetch_one(&scoped).await.unwrap();
+                    assert_eq!(count, expected, "{tag} {table} data should survive upgrade");
+                }
+                let retired_exists: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL")
+                    .fetch_one(&scoped)
+                    .await
+                    .unwrap();
+                assert!(!retired_exists, "{tag}");
+                scoped.close().await;
+            })
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    async fn failed_published_postgres_upgrade_rolls_back_without_partial_schema() {
+        let fixture = postgres_fixture_sql("v0.1.0-beta.2-beta.3.postgres.sql");
+        with_isolated_postgres_schema("localhold_release_fixture_failed", true, |_admin, _schema, config| async move {
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+            let _corrupted = sqlx::query("UPDATE memory_v2_metadata SET schema_version = 99").execute(&scoped).await.unwrap();
+            scoped.close().await;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("unexpected schema_version"), "{error}");
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let state: (bool, bool, i64) = sqlx_core::query_as::query_as(
+                "SELECT
+                   to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL,
+                   to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL,
+                   (SELECT COUNT(*) FROM localhold_migrations)",
+            )
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            assert_eq!(state, (true, false, 2_i64), "failed migration must roll back DDL and ledger writes");
+            scoped.close().await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    async fn published_postgres_upgrade_rejects_incompatible_managed_index_before_metadata_migration() {
+        let fixture = postgres_fixture_sql("v0.1.0-beta.2-beta.3.postgres.sql");
+        with_isolated_postgres_schema("localhold_release_fixture_bad_index", true, |_admin, _schema, config| async move {
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+            let alteration = AssertSqlSafe("DROP INDEX idx_memories_created_at; CREATE INDEX idx_memories_created_at ON memories(content)".to_owned());
+            let _corrupted = sqlx_core::raw_sql::raw_sql(alteration).execute(&scoped).await.unwrap();
+            scoped.close().await;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("startup cannot safely replace"), "{error}");
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let state: (bool, bool, i64, serde_json::Value) = sqlx_core::query_as::query_as(
+                "SELECT
+                   to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL,
+                   to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL,
+                   (SELECT COUNT(*) FROM localhold_migrations),
+                   (SELECT quality_flags FROM memory_v2_metadata)",
+            )
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            assert_eq!(
+                state,
+                (true, false, 2_i64, serde_json::json!(["fixture"])),
+                "preflight refusal must not rename metadata or append to the ledger"
+            );
+            scoped.close().await;
+        })
+        .await;
+    }
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    #[expect(clippy::excessive_nesting, reason = "the compact adversarial matrix runs each mutation in an isolated schema")]
+    async fn published_postgres_upgrade_rejects_wrong_legacy_column_contracts_unchanged() {
+        for (label, alteration, expected) in [
+            (
+                "wrong_type",
+                "ALTER TABLE memory_v2_metadata ALTER COLUMN summary TYPE VARCHAR(255)",
+                "unexpected column contract",
+            ),
+            (
+                "null_schema_version",
+                "ALTER TABLE memory_v2_metadata ALTER COLUMN schema_version DROP NOT NULL; UPDATE memory_v2_metadata SET schema_version = NULL",
+                "unexpected column contract",
+            ),
+            ("extra_column", "ALTER TABLE memory_v2_metadata ADD COLUMN unexpected TEXT", "unexpected column contract"),
+            (
+                "hash_index",
+                "DROP INDEX idx_memory_v2_metadata_scope_key; CREATE INDEX idx_memory_v2_metadata_scope_key ON memory_v2_metadata USING hash (scope_key)",
+                "unexpected constraints or indexes",
+            ),
+        ] {
+            let fixture = postgres_fixture_sql("v0.1.0-beta.2-beta.3.postgres.sql");
+            with_isolated_postgres_schema("localhold_release_fixture_contract", true, |_admin, _schema, config| async move {
+                let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+                let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+                let _altered = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(alteration.to_owned())).execute(&scoped).await.unwrap();
+                scoped.close().await;
+
+                let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+                assert!(error.to_string().contains(expected), "{label}: {error}");
+                let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+                let state: (bool, bool, i64, String) = sqlx_core::query_as::query_as(
+                    "SELECT
+                       to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL,
+                       to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL,
+                       (SELECT COUNT(*) FROM localhold_migrations),
+                       (SELECT content FROM memories WHERE id = '01J00000000000000000000000')",
+                )
+                .fetch_one(&scoped)
+                .await
+                .unwrap();
+                assert_eq!(state, (true, false, 2_i64, "published fixture memory".into()), "{label}");
+                scoped.close().await;
+            })
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    async fn published_postgres_upgrade_lock_serializes_concurrent_malformed_writer() {
+        let fixture = postgres_fixture_sql("v0.1.0-beta.2-beta.3.postgres.sql");
+        with_isolated_postgres_schema("localhold_release_fixture_lock", true, |_admin, _schema, config| async move {
+            let scoped = PgPoolOptions::new().max_connections(2).connect(&config.url).await.unwrap();
+            let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+            let mut migration = scoped.begin().await.unwrap();
+            lock_published_metadata(&mut migration).await.unwrap();
+
+            let mut writer = scoped.acquire().await.unwrap();
+            let _timeout = sqlx::query("SELECT set_config('lock_timeout', '100ms', false)").execute(&mut *writer).await.unwrap();
+            let error = sqlx::query("UPDATE memory_v2_metadata SET quality_flags = '[7]'::jsonb")
+                .execute(&mut *writer)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("lock timeout"), "{error}");
+            drop(writer);
+
+            migrate_published_v2_metadata(&mut migration).await.unwrap();
+            migration.commit().await.unwrap();
+            let state: (bool, bool, serde_json::Value, i64) = sqlx_core::query_as::query_as(
+                "SELECT
+                   to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL,
+                   to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL,
+                   (SELECT quality_flags FROM memory_metadata),
+                   (SELECT COUNT(*) FROM memories)",
+            )
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            assert_eq!(state, (false, true, serde_json::json!(["fixture"]), 2_i64));
+            scoped.close().await;
+        })
+        .await;
+    }
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    #[expect(clippy::excessive_nesting, reason = "the compact adversarial matrix runs each payload in an isolated schema")]
+    async fn published_postgres_upgrade_rejects_malformed_quality_flags_unchanged() {
+        for (label, corrupted, expected) in [
+            ("object", "'{}'::jsonb", serde_json::json!({})),
+            ("numeric-element", "'[\"fixture\",7]'::jsonb", serde_json::json!(["fixture", 7_i64])),
+            ("object-element", "'[{\"flag\":\"fixture\"}]'::jsonb", serde_json::json!([{"flag":"fixture"}])),
+        ] {
+            let fixture = postgres_fixture_sql("v0.1.0-beta.2-beta.3.postgres.sql");
+            with_isolated_postgres_schema("localhold_release_fixture_quality", true, |_admin, _schema, config| async move {
+                let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+                let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+                let statement = AssertSqlSafe(format!("UPDATE memory_v2_metadata SET quality_flags = {corrupted}"));
+                let _corrupted = sqlx_core::raw_sql::raw_sql(statement).execute(&scoped).await.unwrap();
+                scoped.close().await;
+
+                let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+                assert!(error.to_string().contains("malformed quality_flags"), "{label}: {error}");
+                let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+                let retained: serde_json::Value = sqlx::query_scalar("SELECT quality_flags FROM memory_v2_metadata").fetch_one(&scoped).await.unwrap();
+                assert_eq!(retained, expected, "{label}");
+                scoped.close().await;
+            })
+            .await;
+        }
+    }
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    async fn published_postgres_upgrade_rolls_back_after_metadata_rename() {
+        let fixture = postgres_fixture_sql("v0.1.0-beta.2-beta.3.postgres.sql");
+        with_isolated_postgres_schema("localhold_release_fixture_rename_rollback", true, |_admin, _schema, config| async move {
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+            let _conflict = sqlx::query("CREATE INDEX idx_memory_metadata_scope_key ON memories(content)")
+                .execute(&scoped)
+                .await
+                .unwrap();
+            scoped.close().await;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("idx_memory_metadata_scope_key"), "{error}");
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let state: (bool, bool, i64, serde_json::Value) = sqlx_core::query_as::query_as(
+                "SELECT
+                   to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL,
+                   to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL,
+                   (SELECT COUNT(*) FROM localhold_migrations),
+                   (SELECT quality_flags FROM memory_v2_metadata)",
+            )
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            assert_eq!(state, (true, false, 2_i64, serde_json::json!(["fixture"])));
+            scoped.close().await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    async fn conflicting_published_postgres_metadata_tables_are_left_untouched() {
+        let fixture = postgres_fixture_sql("v0.1.0-beta.2-beta.3.postgres.sql");
+        with_isolated_postgres_schema("localhold_release_fixture_conflict", true, |_admin, _schema, config| async move {
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+            let _conflict = sqlx::query("CREATE TABLE memory_metadata (memory_id TEXT PRIMARY KEY)").execute(&scoped).await.unwrap();
+            scoped.close().await;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("both memory_v2_metadata and memory_metadata"), "{error}");
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let state: (bool, bool, i64) = sqlx_core::query_as::query_as(
+                "SELECT
+                   to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL,
+                   to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL,
+                   (SELECT COUNT(*) FROM localhold_migrations)",
+            )
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            assert_eq!(state, (true, true, 2_i64), "conflict refusal must not mutate either table or the ledger");
+            scoped.close().await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    async fn published_postgres_fixture_with_newer_ledger_is_refused_unchanged() {
+        let fixture = postgres_fixture_sql("v0.2.0.postgres.sql");
+        with_isolated_postgres_schema("localhold_release_fixture_newer", true, |_admin, _schema, config| async move {
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+            let future = CURRENT_SCHEMA_VERSION + 1_i64;
+            let _newer = sqlx::query("INSERT INTO localhold_migrations(version, name) VALUES ($1, 'future')")
+                .bind(future)
+                .execute(&scoped)
+                .await
+                .unwrap();
+            scoped.close().await;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("migration metadata is not current"), "{error}");
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM localhold_migrations WHERE version = $1")
+                .bind(future)
+                .fetch_one(&scoped)
+                .await
+                .unwrap();
+            assert_eq!(retained, 1_i64, "newer schema refusal must not mutate the source");
+            scoped.close().await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
     #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn open_without_auto_migrate_rejects_extra_runtime_foreign_key() {
         with_isolated_postgres_schema("localhold_runtime_extra_fk", true, |_admin, _schema, mut config| async move {
@@ -4100,6 +4898,43 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with rootless Podman"]
+    async fn published_upgrade_validation_lock_times_out_without_partial_migration() {
+        let fixture = postgres_fixture_sql("v0.1.0-beta.2-beta.3.postgres.sql");
+        with_isolated_postgres_schema("localhold_published_validation_lock", true, |_admin, _schema, mut config| async move {
+            config.migration_lock_timeout_secs = 1;
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+            let mut blocker = scoped.begin().await.unwrap();
+            let _locked = sqlx::query("LOCK TABLE memory_v2_metadata IN ACCESS EXCLUSIVE MODE").execute(&mut *blocker).await.unwrap();
+
+            let started = std::time::Instant::now();
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "published metadata validation timeout was not bounded"
+            );
+            assert!(error.to_string().contains("schema migration locks"), "{error}");
+
+            blocker.rollback().await.unwrap();
+            let state: (bool, bool, i64) = sqlx_core::query_as::query_as(
+                "SELECT
+                   to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL,
+                   to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL,
+                   (SELECT COUNT(*) FROM localhold_migrations)",
+            )
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            assert_eq!(state, (true, false, 2_i64), "timed-out validation must not partially migrate the published schema");
+            scoped.close().await;
+
+            drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+        })
+        .await;
+    }
+
+    #[tokio::test]
     #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn auto_migrate_repairs_missing_known_ledger_row() {
         with_isolated_postgres_schema("localhold_migration_repair_ledger", true, |_admin, _schema, config| async move {
@@ -4116,12 +4951,88 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with rootless Podman"]
+    async fn reindex_rejects_broken_relationship_without_clearing_vectors() {
+        let fixture = postgres_fixture_sql("v0.2.0.postgres.sql");
+        with_isolated_postgres_schema("localhold_reindex_relationship_preflight", true, |_admin, _schema, config| async move {
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+            let _altered = sqlx::query("ALTER TABLE memory_entities DROP CONSTRAINT memory_entities_memory_id_fkey")
+                .execute(&scoped)
+                .await
+                .unwrap();
+
+            let profile = EmbeddingProfile::openai_compatible("http://localhost:11434/v1", "reindexed-model", 4_usize);
+            let error = PostgresStore::reindex_embeddings(&config, &profile).await.unwrap_err();
+            assert!(error.to_string().contains("memory_entities.memory_id"), "{error}");
+
+            let state: (bool, i64, String, String, i64) = sqlx_core::query_as::query_as(
+                "SELECT
+                   (SELECT has_embedding FROM memories WHERE id = '01J00000000000000000000000'),
+                   (SELECT COUNT(*) FROM memory_embeddings),
+                   (SELECT embedding::text FROM memory_embeddings WHERE memory_id = '01J00000000000000000000000'),
+                   (SELECT format_type(atttypid, atttypmod) FROM pg_attribute
+                    WHERE attrelid = 'memory_embeddings'::regclass AND attname = 'embedding'),
+                   (SELECT dimensions FROM embedding_profile WHERE singleton = 1)",
+            )
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            assert_eq!(
+                state,
+                (true, 1_i64, "[0.1,0.2,0.3]".into(), "vector(3)".into(), 3_i64),
+                "relationship rejection must preserve vectors and their profile"
+            );
+            scoped.close().await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with rootless Podman"]
+    async fn reindex_rejects_non_vector_embedding_column_without_mutation() {
+        let fixture = postgres_fixture_sql("v0.2.0.postgres.sql");
+        with_isolated_postgres_schema("localhold_reindex_vector_type_preflight", true, |_admin, _schema, config| async move {
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+            let _altered = sqlx::query("ALTER TABLE memory_embeddings ALTER COLUMN embedding TYPE TEXT USING embedding::text")
+                .execute(&scoped)
+                .await
+                .unwrap();
+
+            let profile = EmbeddingProfile::openai_compatible("http://localhost:11434/v1", "reindexed-model", 4_usize);
+            let error = PostgresStore::reindex_embeddings(&config, &profile).await.unwrap_err();
+            assert!(error.to_string().contains("expected vector(n)"), "{error}");
+
+            let state: (bool, i64, String, String, i64) = sqlx_core::query_as::query_as(
+                "SELECT
+                   (SELECT has_embedding FROM memories WHERE id = '01J00000000000000000000000'),
+                   (SELECT COUNT(*) FROM memory_embeddings),
+                   (SELECT embedding FROM memory_embeddings WHERE memory_id = '01J00000000000000000000000'),
+                   (SELECT format_type(atttypid, atttypmod) FROM pg_attribute
+                    WHERE attrelid = 'memory_embeddings'::regclass AND attname = 'embedding'),
+                   (SELECT dimensions FROM embedding_profile WHERE singleton = 1)",
+            )
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            assert_eq!(
+                state,
+                (true, 1_i64, "[0.1,0.2,0.3]".into(), "text".into(), 3_i64),
+                "type rejection must preserve the malformed source for operator repair"
+            );
+            scoped.close().await;
+        })
+        .await;
+    }
+    #[tokio::test]
     #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn reindex_changes_vector_dimensions_and_preserves_full_manifest() {
         with_isolated_postgres_schema("localhold_reindex_manifest", true, |_admin, _schema, config| async move {
             drop(PostgresStore::open(&config, 3_usize).await.unwrap());
             let profile = EmbeddingProfile::openai_compatible("http://localhost:11434/v1", "test-model", 4_usize);
             PostgresStore::reindex_embeddings(&config, &profile).await.unwrap();
+
 
             let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
             assert_eq!(read_migration_metadata_state(&scoped).await.unwrap(), MigrationMetadataState::Current);
@@ -4145,6 +5056,56 @@ mod tests {
             assert_eq!(vector_type, "vector(4)");
             assert_eq!(profile_dimensions, 4_i64);
             assert_eq!(table_count, 9_i64);
+            drop(PostgresStore::open(&config, 4_usize).await.unwrap());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with rootless Podman"]
+    #[expect(clippy::type_complexity, reason = "one row captures the complete post-reindex compatibility state")]
+    async fn reindex_migrates_published_beta_metadata_before_rebuilding_vectors() {
+        let fixture = postgres_fixture_sql("v0.1.0-beta.2-beta.3.postgres.sql");
+        with_isolated_postgres_schema("localhold_reindex_published_beta", true, |_admin, _schema, config| async move {
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+            scoped.close().await;
+
+            let profile = EmbeddingProfile::openai_compatible("http://localhost:11434/v1", "reindexed-model", 4_usize);
+            PostgresStore::reindex_embeddings(&config, &profile).await.unwrap();
+
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let state: (bool, bool, String, String, bool, i64, String, i64) = sqlx_core::query_as::query_as(
+                "SELECT
+                   to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL,
+                   to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL,
+                   (SELECT content FROM memories WHERE id = '01J00000000000000000000000'),
+                   (SELECT summary FROM memory_metadata WHERE memory_id = '01J00000000000000000000000'),
+                   (SELECT has_embedding FROM memories WHERE id = '01J00000000000000000000000'),
+                   (SELECT COUNT(*) FROM memory_embeddings),
+                   (SELECT format_type(atttypid, atttypmod) FROM pg_attribute
+                    WHERE attrelid = 'memory_embeddings'::regclass AND attname = 'embedding'),
+                   (SELECT dimensions FROM embedding_profile WHERE singleton = 1)",
+            )
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            assert_eq!(
+                state,
+                (
+                    false,
+                    true,
+                    "published fixture memory".into(),
+                    "fixture summary".into(),
+                    false,
+                    0_i64,
+                    "vector(4)".into(),
+                    4_i64
+                )
+            );
+            assert_eq!(read_migration_metadata_state(&scoped).await.unwrap(), MigrationMetadataState::Current);
+            scoped.close().await;
+
             drop(PostgresStore::open(&config, 4_usize).await.unwrap());
         })
         .await;
@@ -4918,27 +5879,28 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
-    async fn postgres_reindex_rejects_retired_iteration_metadata_table() {
-        let url = std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
-        let config = PostgresDatabaseConfig {
-            url,
-            max_connections: 1,
-            migration_lock_timeout_secs: 5,
-            auto_migrate: true,
-        };
-        let store = PostgresStore::open(&config, 3_usize).await.unwrap();
-        reset_postgres_smoke_database(&store).await;
-        let _created = sqlx::query("CREATE TABLE memory_v2_metadata (memory_id TEXT PRIMARY KEY)")
-            .execute(store.pool())
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with rootless Podman"]
+    async fn postgres_reindex_rejects_malformed_published_metadata_without_partial_schema() {
+        with_isolated_postgres_schema("localhold_reindex_malformed_metadata", true, |_admin, _schema, config| async move {
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _created = sqlx::query("CREATE TABLE memory_v2_metadata (memory_id TEXT PRIMARY KEY)").execute(&scoped).await.unwrap();
+            let profile = EmbeddingProfile::openai_compatible("http://127.0.0.1:8000/v1", "test-model", 3_usize);
+
+            let error = PostgresStore::reindex_embeddings(&config, &profile).await.unwrap_err();
+
+            assert!(error.to_string().contains("unexpected column contract"), "{error}");
+            let state: (bool, bool) = sqlx_core::query_as::query_as(
+                "SELECT
+                   to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL,
+                   to_regclass(format('%I.%I', current_schema(), 'memories')) IS NOT NULL",
+            )
+            .fetch_one(&scoped)
             .await
             .unwrap();
-        let profile = EmbeddingProfile::openai_compatible("http://127.0.0.1:8000/v1", "test-model", 3_usize);
-
-        let error = PostgresStore::reindex_embeddings(&config, &profile).await.unwrap_err();
-
-        assert!(error.to_string().contains("unsupported prior-iteration table memory_v2_metadata"));
-        let _dropped = sqlx::query("DROP TABLE memory_v2_metadata").execute(store.pool()).await.unwrap();
+            assert_eq!(state, (true, false), "rejected reindex must not initialize a partial runtime schema");
+            scoped.close().await;
+        })
+        .await;
     }
 
     #[tokio::test]

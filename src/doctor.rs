@@ -378,7 +378,22 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
     if !matches!(integrity.as_deref(), Ok("ok")) {
         return check("storage", DiagnosticStatus::Failed, "SQLite quick_check did not report a healthy database");
     }
-    if crate::store::migration::validate_present_sqlite_schema(&connection).is_err() {
+    let published_metadata_upgrade = match crate::store::validate_published_v2_metadata(&connection) {
+        Ok(published_metadata_upgrade) => published_metadata_upgrade,
+        Err(_error) => {
+            return check(
+                "storage",
+                DiagnosticStatus::Failed,
+                "SQLite published-beta metadata is incompatible and startup will refuse to migrate it",
+            );
+        }
+    };
+    let present_schema = if published_metadata_upgrade {
+        crate::store::migration::validate_present_sqlite_schema_for_published_upgrade(&connection)
+    } else {
+        crate::store::migration::validate_present_sqlite_schema(&connection)
+    };
+    if present_schema.is_err() {
         return check(
             "storage",
             DiagnosticStatus::Failed,
@@ -476,7 +491,11 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
         return check(
             "storage",
             DiagnosticStatus::Degraded,
-            "SQLite is readable and internally consistent but requires a normal startup migration after backup",
+            if published_metadata_upgrade {
+                "SQLite contains supported published-beta metadata; normal startup will validate, back up, and migrate it"
+            } else {
+                "SQLite is readable and internally consistent but requires a normal startup migration after backup"
+            },
         );
     }
     if crate::store::migration::validate_sqlite_source_schema(&connection, config.embedding.dimensions()).is_err() {
@@ -732,21 +751,66 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
             }
         }
     }
-    if crate::store::migration::validate_present_postgres_schema(
-        &pool,
-        config.embedding.dimensions(),
-        config.database.postgres.auto_migrate,
-        config.database.postgres.auto_migrate,
-    )
-    .await
-    .is_err()
-    {
+    let published_metadata_upgrade = if config.database.postgres.auto_migrate {
+        match crate::store::validate_published_v2_metadata_upgrade(&pool, config.database.postgres.migration_lock_timeout_secs).await {
+            Ok(published_metadata_upgrade) => published_metadata_upgrade,
+            Err(_error) => {
+                pool.close().await;
+                return check(
+                    "storage",
+                    DiagnosticStatus::Failed,
+                    "PostgreSQL published-beta metadata is incompatible and startup will refuse to migrate it",
+                );
+            }
+        }
+    } else {
+        false
+    };
+    let present_schema = if published_metadata_upgrade {
+        crate::store::migration::validate_present_postgres_schema_for_published_upgrade(
+            &pool,
+            config.embedding.dimensions(),
+            config.database.postgres.auto_migrate,
+            config.database.postgres.auto_migrate,
+        )
+        .await
+    } else {
+        crate::store::migration::validate_present_postgres_schema(
+            &pool,
+            config.embedding.dimensions(),
+            config.database.postgres.auto_migrate,
+            config.database.postgres.auto_migrate,
+        )
+        .await
+    };
+    if present_schema.is_err() {
         pool.close().await;
         return check(
             "storage",
             DiagnosticStatus::Failed,
             "an existing PostgreSQL schema object is incompatible and cannot be repaired by a normal startup migration",
         );
+    }
+    if published_metadata_upgrade {
+        match read_migration_metadata_state(&pool).await {
+            Ok(MigrationMetadataState::Absent | MigrationMetadataState::Repairable | MigrationMetadataState::Current) => {}
+            Ok(MigrationMetadataState::Newer) => {
+                pool.close().await;
+                return check("storage", DiagnosticStatus::Failed, "PostgreSQL schema is newer than this LocalHold binary supports");
+            }
+            Ok(MigrationMetadataState::Incompatible) => {
+                pool.close().await;
+                return check(
+                    "storage",
+                    DiagnosticStatus::Failed,
+                    "PostgreSQL migration metadata conflicts with the expected migration identities",
+                );
+            }
+            Err(_error) => {
+                pool.close().await;
+                return check("storage", DiagnosticStatus::Failed, "PostgreSQL migration metadata could not be inspected");
+            }
+        }
     }
     let required_table_count = if config.database.postgres.auto_migrate { 9_i64 } else { 8_i64 };
     if schema_table_count > 0_i64 && schema_table_count < required_table_count {
@@ -762,13 +826,13 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
         .await;
         let can_repair: Result<bool, _> = if vector_installed {
             query_scalar(
-                "SELECT has_schema_privilege(current_schema(), 'CREATE') AND (SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), TRUE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_metadata', 'memory_tombstones', 'scope_registry'))",
+                "SELECT has_schema_privilege(current_schema(), 'CREATE') AND (SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), TRUE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_v2_metadata', 'memory_metadata', 'memory_tombstones', 'scope_registry'))",
             )
             .fetch_one(&pool)
             .await
         } else {
             query_scalar(
-                "SELECT has_schema_privilege(current_schema(), 'CREATE') AND has_database_privilege(current_database(), 'CREATE') AND (SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), TRUE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_metadata', 'memory_tombstones', 'scope_registry'))",
+                "SELECT has_schema_privilege(current_schema(), 'CREATE') AND has_database_privilege(current_database(), 'CREATE') AND (SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), TRUE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_v2_metadata', 'memory_metadata', 'memory_tombstones', 'scope_registry'))",
             )
             .fetch_one(&pool)
             .await
@@ -782,7 +846,11 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
             return check(
                 "storage",
                 DiagnosticStatus::Degraded,
-                "PostgreSQL has a compatible partial managed schema that normal startup can complete",
+                if published_metadata_upgrade {
+                    "PostgreSQL contains supported published-beta metadata; normal startup will validate and migrate it"
+                } else {
+                    "PostgreSQL has a compatible partial managed schema that normal startup can complete"
+                },
             );
         }
         return check(
@@ -1201,8 +1269,156 @@ mod tests {
         assert!(!rendered.contains('\r'));
     }
 
+    #[test]
+    fn sqlite_doctor_accepts_only_valid_published_beta_metadata() {
+        SqliteStore::register_extension().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("published-beta.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(include_str!("../tests/fixtures/database-upgrades/v0.1.0-beta.2-beta.3.sqlite.sql"))
+            .unwrap();
+        let present_schema = crate::store::migration::validate_present_sqlite_schema_for_published_upgrade(&connection);
+        assert!(present_schema.is_ok(), "{present_schema:?}");
+        drop(connection);
+
+        let config = Config {
+            embedding: EmbeddingConfig::Noop { dimensions: 3 },
+            ..Config::default()
+        };
+        let valid = sqlite_check(&config, &path);
+        assert_eq!(valid.status, DiagnosticStatus::Degraded);
+        assert!(valid.summary.contains("published-beta"), "{}", valid.summary);
+
+        let connection = Connection::open(&path).unwrap();
+        let _added = connection
+            .execute("ALTER TABLE memories ADD COLUMN record_revision TEXT NOT NULL DEFAULT 'bad'", [])
+            .unwrap();
+        drop(connection);
+        let invalid_record_revision = sqlite_check(&config, &path);
+        assert_eq!(invalid_record_revision.status, DiagnosticStatus::Failed);
+
+        let connection = Connection::open(&path).unwrap();
+        let _dropped = connection.execute("ALTER TABLE memories DROP COLUMN record_revision", []).unwrap();
+        connection
+            .execute_batch(
+                "DROP INDEX idx_memories_created_at;
+                 CREATE INDEX idx_memories_created_at ON memories(content);",
+            )
+            .unwrap();
+        drop(connection);
+        let invalid_managed_schema = sqlite_check(&config, &path);
+        assert_eq!(invalid_managed_schema.status, DiagnosticStatus::Failed);
+
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP INDEX idx_memories_created_at; CREATE INDEX idx_memories_created_at ON memories(created_at DESC);")
+            .unwrap();
+        let _corrupted = connection.execute("UPDATE memory_v2_metadata SET schema_version = 99", []).unwrap();
+        drop(connection);
+        let invalid = sqlite_check(&config, &path);
+        assert_eq!(invalid.status, DiagnosticStatus::Failed);
+        assert!(invalid.summary.contains("incompatible"), "{}", invalid.summary);
+    }
+
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    #[ignore = "requires rootless Podman or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    #[expect(clippy::too_many_lines, reason = "the ordered corruption matrix keeps each fail-closed classification auditable")]
+    async fn postgres_doctor_accepts_only_valid_published_beta_metadata() {
+        let url = std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
+        let schema = format!("localhold_doctor_published_{}", crate::types::MemoryId::new().to_string().to_lowercase());
+        let admin = PgPoolOptions::new().max_connections(1).connect(&url).await.unwrap();
+        let _created = query(sqlx_core::sql_str::AssertSqlSafe(format!("CREATE SCHEMA {schema}"))).execute(&admin).await.unwrap();
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let postgres = crate::config::PostgresDatabaseConfig {
+            url: format!("{url}{separator}options=-csearch_path%3D{schema}%2Cpublic"),
+            max_connections: 2,
+            migration_lock_timeout_secs: 5,
+            auto_migrate: true,
+        };
+        let scoped = PgPoolOptions::new().max_connections(1).connect(&postgres.url).await.unwrap();
+        let fixture = sqlx_core::sql_str::AssertSqlSafe(include_str!("../tests/fixtures/database-upgrades/v0.1.0-beta.2-beta.3.postgres.sql").to_owned());
+        let _built = sqlx_core::raw_sql::raw_sql(fixture).execute(&scoped).await.unwrap();
+        let present_schema = crate::store::migration::validate_present_postgres_schema_for_published_upgrade(&scoped, 3, true, true).await;
+        assert!(present_schema.is_ok(), "{present_schema:?}");
+        let config = Config {
+            database: crate::config::DatabaseConfig {
+                backend: DatabaseBackend::Postgres,
+                postgres,
+                ..crate::config::DatabaseConfig::default()
+            },
+            embedding: EmbeddingConfig::Noop { dimensions: 3 },
+            ..Config::default()
+        };
+        let clock = crate::clock::SystemClock::new();
+
+        let valid = postgres_check(&config, &clock).await;
+        assert_eq!(valid.status, DiagnosticStatus::Degraded);
+        assert!(valid.summary.contains("published-beta"), "{}", valid.summary);
+
+        let _future = query("INSERT INTO localhold_migrations(version, name) VALUES (99, 'future')")
+            .execute(&scoped)
+            .await
+            .unwrap();
+        let newer_ledger = postgres_check(&config, &clock).await;
+        assert_eq!(newer_ledger.status, DiagnosticStatus::Failed);
+        assert!(newer_ledger.summary.contains("newer"), "{}", newer_ledger.summary);
+        let _removed = query("DELETE FROM localhold_migrations WHERE version = 99").execute(&scoped).await.unwrap();
+
+        let _wrong = query("UPDATE localhold_migrations SET name = 'wrong_identity' WHERE version = 2")
+            .execute(&scoped)
+            .await
+            .unwrap();
+        let incompatible_ledger = postgres_check(&config, &clock).await;
+        assert_eq!(incompatible_ledger.status, DiagnosticStatus::Failed);
+        assert!(incompatible_ledger.summary.contains("identities"), "{}", incompatible_ledger.summary);
+        let _restored = query("UPDATE localhold_migrations SET name = 'audit_log_without_memory_fk' WHERE version = 2")
+            .execute(&scoped)
+            .await
+            .unwrap();
+
+        let _corrupted = query("ALTER TABLE memories ADD COLUMN record_revision INTEGER NOT NULL DEFAULT 0")
+            .execute(&scoped)
+            .await
+            .unwrap();
+        let invalid_record_revision = postgres_check(&config, &clock).await;
+        assert_eq!(invalid_record_revision.status, DiagnosticStatus::Failed);
+        let _restored = query("ALTER TABLE memories DROP COLUMN record_revision").execute(&scoped).await.unwrap();
+
+        let _corrupted = sqlx_core::raw_sql::raw_sql(sqlx_core::sql_str::AssertSqlSafe(
+            "ALTER TABLE memories ALTER COLUMN importance DROP DEFAULT;
+             ALTER TABLE memories ALTER COLUMN importance TYPE TEXT USING importance::text"
+                .to_owned(),
+        ))
+        .execute(&scoped)
+        .await
+        .unwrap();
+        let invalid_managed_schema = postgres_check(&config, &clock).await;
+        assert_eq!(invalid_managed_schema.status, DiagnosticStatus::Failed);
+
+        let _restored = sqlx_core::raw_sql::raw_sql(sqlx_core::sql_str::AssertSqlSafe(
+            "ALTER TABLE memories ALTER COLUMN importance TYPE DOUBLE PRECISION USING importance::double precision;
+             ALTER TABLE memories ALTER COLUMN importance SET DEFAULT 0.5"
+                .to_owned(),
+        ))
+        .execute(&scoped)
+        .await
+        .unwrap();
+        let _corrupted = query("UPDATE memory_v2_metadata SET schema_version = 99").execute(&scoped).await.unwrap();
+        let invalid = postgres_check(&config, &clock).await;
+        assert_eq!(invalid.status, DiagnosticStatus::Failed);
+        assert!(invalid.summary.contains("incompatible"), "{}", invalid.summary);
+
+        scoped.close().await;
+        let _dropped = query(sqlx_core::sql_str::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires rootless Podman or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn postgres_doctor_distinguishes_repairable_and_incompatible_schema_states() {
         let url = std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
         let schema = format!("localhold_doctor_{}", crate::types::MemoryId::new().to_string().to_lowercase());
@@ -1267,7 +1483,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    #[ignore = "requires rootless Podman or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn postgres_doctor_classifies_migration_ledger_states() {
         let url = std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
         let schema = format!("localhold_doctor_ledger_{}", crate::types::MemoryId::new().to_string().to_lowercase());
@@ -1302,12 +1518,18 @@ mod tests {
             .await
             .unwrap();
 
-        let _future = query("INSERT INTO localhold_migrations (version, name) VALUES (4, 'future_migration')")
+        let future_version = PostgresStore::CURRENT_SCHEMA_VERSION + 1_i64;
+        let _future = query("INSERT INTO localhold_migrations (version, name) VALUES ($1, 'future_migration')")
+            .bind(future_version)
             .execute(&scoped)
             .await
             .unwrap();
         let future = postgres_check(&config, &clock).await;
-        let _removed_future = query("DELETE FROM localhold_migrations WHERE version = 4").execute(&scoped).await.unwrap();
+        let _removed_future = query("DELETE FROM localhold_migrations WHERE version = $1")
+            .bind(future_version)
+            .execute(&scoped)
+            .await
+            .unwrap();
 
         let _wrong = query("UPDATE localhold_migrations SET name = 'runtime_ignored_identity' WHERE version = 2")
             .execute(&scoped)

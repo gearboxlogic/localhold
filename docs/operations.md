@@ -230,12 +230,18 @@ host = "127.0.0.1"
 port = 8080
 path = "/mcp"
 http_auth_token = "replace-with-a-secret"
+http_allowed_hosts = ["localhost", "127.0.0.1", "::1"]
 ```
 
 With this configuration the MCP endpoint is `http://127.0.0.1:8080/mcp`. HTTP
 requests never inherit the stdio principal. Without `http_auth_token`,
 requests are anonymous and the default policy allows public reads but denies
 writes.
+
+`http_allowed_hosts` rejects requests whose `Host` header is not listed, even
+with a valid bearer token. Reverse-proxy and private-network deployments must
+add the name or address clients actually use — for example
+`localhold.internal` or the LAN IP — to this allowlist.
 
 Bind to loopback unless a reverse proxy or private network boundary is in
 place. Set `server.http_auth_token` for every non-local deployment.
@@ -330,6 +336,24 @@ Reports include the validated database schema version, embedding profile,
 memory and embedding counts, byte size, replacement state, and recovery path.
 These commands intentionally reject `database.backend = "postgres"`; use the
 PostgreSQL-native workflow below for that backend.
+
+## PostgreSQL Backend
+
+PostgreSQL is opt-in. Select it in the database configuration:
+
+```toml
+[database]
+backend = "postgres"
+
+[database.postgres]
+url = "postgres://localhold:password@localhost:5432/localhold"
+```
+
+`LOCALHOLD_DB_BACKEND` and `LOCALHOLD_POSTGRES_URL` override these at runtime.
+`migration_lock_timeout_secs` in `[database.postgres]` bounds how long each
+startup schema-migration lock acquisition waits; see
+[localhold.example.toml](../localhold.example.toml) for the full PostgreSQL
+configuration surface.
 
 ## PostgreSQL Backup And Restore
 

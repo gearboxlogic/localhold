@@ -16,6 +16,11 @@ Do not include credentials, memory databases, model files, generated build
 output, personal paths, task journals, review transcripts, or internal planning
 documents.
 
+Repository documentation must describe a current user, operator, contributor,
+architecture, or policy need. Task journals, review transcripts, historical
+audits, and completed implementation plans belong in issues or the private
+development archive, not this repository.
+
 ## Development Setup
 
 First install the standard source-build requirements from

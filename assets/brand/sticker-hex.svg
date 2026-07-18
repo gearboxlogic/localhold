@@ -5,12 +5,20 @@
   <polygon points="433,38 833,269 833,731 433,962 33,731 33,269"
            fill="none" stroke="#C89B3C" stroke-width="6"/>
 
-  <!-- The Plan of the Hold -->
-  <g transform="translate(433 430) scale(8.8) translate(-32 -32)">
-    <path fill="none" stroke="#3D639C" stroke-width="2.4" d="
-      M32 10 L40 18 L46 18 L46 24 L54 32 L46 40 L46 46 L40 46 L32 54
-      L24 46 L18 46 L18 40 L10 32 L18 24 L18 18 L24 18 Z"/>
-    <circle fill="#C89B3C" cx="32" cy="32" r="3.2"/>
+  <!-- The Plan of the Hold: solid in argent — the subject voice -->
+  <g transform="translate(433 430) scale(10.5) translate(-32 -32)">
+    <path fill="#F2F4F6" fill-rule="evenodd" d="
+      M35.14 19.28 L36.90 16.85 L32.00 7.50 L27.10 16.85 L28.86 19.28 L20.87 25.08
+      L19.11 22.66 L8.70 24.43 L16.08 31.98 L18.93 31.05 L21.98 40.45 L19.13 41.37
+      L17.60 51.82 L27.06 47.14 L27.06 44.14 L36.94 44.14 L36.94 47.14 L46.40 51.82
+      L44.87 41.37 L42.02 40.45 L45.07 31.05 L47.92 31.98 L55.30 24.43 L44.89 22.66
+      L43.13 25.08 Z
+      M32.00 22.40 L22.87 29.03 L26.36 39.77 L30.60 39.77 L30.60 44.14 L33.40 44.14
+      L33.40 39.77 L37.64 39.77 L41.13 29.03 Z"/>
+    <path fill="none" stroke="#F2F4F6" stroke-width="1.1" stroke-linejoin="miter" d="
+      M26.22 16.99 L19.51 21.87 M15.94 32.86 L18.51 40.75
+      M45.49 40.75 L48.06 32.86 M44.49 21.87 L37.78 16.99"/>
+    <circle fill="#C89B3C" cx="32" cy="32" r="3.4"/>
   </g>
 
   <!-- Wordmark -->

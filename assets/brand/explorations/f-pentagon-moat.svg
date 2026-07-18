@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Plan of the Hold — pentagon with moat">
+  <rect width="64" height="64" fill="#10161E"/>
+  <path fill="none" stroke="#3D639C" stroke-width="0.8" stroke-linejoin="miter" d="M35.76 16.75 L37.95 13.74 L32.00 2.86 L26.05 13.74 L28.24 16.75 L18.66 23.71 L16.48 20.70 L4.29 23.00 L12.80 32.02 L16.34 30.87 L19.99 42.12 L16.46 43.27 L14.87 55.57 L26.08 50.27 L26.08 46.55 L37.92 46.55 L37.92 50.27 L49.13 55.57 L47.54 43.27 L44.01 42.12 L47.66 30.87 L51.20 32.02 L59.71 23.00 L47.52 20.70 L45.34 23.71 Z"/>
+  <path fill="none" stroke="#3D639C" stroke-width="2.0" stroke-linejoin="miter" d="M35.03 19.70 L36.80 17.28 L32.00 8.50 L27.20 17.28 L28.97 19.70 L21.24 25.32 L19.48 22.89 L9.65 24.74 L16.52 32.01 L19.37 31.09 L22.32 40.16 L19.47 41.09 L18.19 51.01 L27.23 46.73 L27.23 43.73 L36.77 43.73 L36.77 46.73 L45.81 51.01 L44.53 41.09 L41.68 40.16 L44.63 31.09 L47.48 32.01 L54.35 24.74 L44.52 22.89 L42.76 25.32 Z"/>
+  <path fill="none" stroke="#3D639C" stroke-width="1.4" stroke-linejoin="miter" d="M34.00 38.80 L36.94 38.80 L39.99 29.40 L32.00 23.60 L24.01 29.40 L27.06 38.80 L30.00 38.80"/>
+  <circle fill="#C89B3C" cx="32" cy="32" r="2.8"/>
+</svg>

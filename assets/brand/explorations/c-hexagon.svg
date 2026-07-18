@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Plan of the Hold — hexagon">
+  <rect width="64" height="64" fill="#10161E"/>
+  <path fill="none" stroke="#3D639C" stroke-width="2.2" stroke-linejoin="miter" d="M42.31 21.28 L44.74 19.88 L44.50 10.35 L36.12 14.91 L36.12 17.71 L27.88 17.71 L27.88 14.91 L19.50 10.35 L19.26 19.88 L21.69 21.28 L17.56 28.43 L15.14 27.03 L7.00 32.00 L15.14 36.97 L17.56 35.57 L21.69 42.72 L19.26 44.12 L19.50 53.65 L27.87 49.09 L27.87 46.29 L36.12 46.29 L36.12 49.09 L44.50 53.65 L44.74 44.12 L42.31 42.72 L46.44 35.57 L48.86 36.97 L57.00 32.00 L48.86 27.03 L46.44 28.43 Z"/>
+  <path fill="none" stroke="#3D639C" stroke-width="1.5" stroke-linejoin="miter" d="M34.00 39.97 L36.60 39.97 L41.20 32.00 L36.60 24.03 L27.40 24.03 L22.80 32.00 L27.40 39.97 L30.00 39.97"/>
+  <circle fill="#C89B3C" cx="32" cy="32" r="3.0"/>
+</svg>

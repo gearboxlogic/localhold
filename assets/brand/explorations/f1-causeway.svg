@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Plan of the Hold — pentagon moat with causeway">
+  <rect width="64" height="64" fill="#10161E"/>
+  <path fill="none" stroke="#3D639C" stroke-width="0.9" stroke-linejoin="miter" d="M34.30 46.08 L37.73 46.08 L37.73 49.08 L47.22 52.95 L46.47 42.72 L43.62 41.80 L47.16 30.90 L50.01 31.83 L56.63 24.00 L46.67 21.55 L44.91 23.98 L35.64 17.25 L37.40 14.82 L32.00 6.10 L26.60 14.82 L28.36 17.25 L19.09 23.98 L17.33 21.55 L7.37 24.00 L13.99 31.83 L16.84 30.90 L20.38 41.80 L17.53 42.72 L16.78 52.95 L26.27 49.08 L26.27 46.08 L29.70 46.08"/>
+  <path fill="none" stroke="#3D639C" stroke-width="2.1" stroke-linejoin="miter" d="M34.93 20.13 L36.69 17.70 L32.00 9.50 L27.31 17.70 L29.07 20.13 L21.61 25.55 L19.85 23.12 L10.60 25.05 L16.95 32.04 L19.80 31.12 L22.65 39.88 L19.80 40.81 L18.77 50.20 L27.39 46.33 L27.39 43.33 L36.61 43.33 L36.61 46.33 L45.23 50.20 L44.20 40.81 L41.35 39.88 L44.20 31.12 L47.05 32.04 L53.40 25.05 L44.15 23.12 L42.39 25.55 Z"/>
+  <path fill="none" stroke="#3D639C" stroke-width="1.4" stroke-linejoin="miter" d="M34.00 38.63 L36.82 38.63 L39.80 29.47 L32.00 23.80 L24.20 29.47 L27.18 38.63 L30.00 38.63"/>
+  <circle fill="#C89B3C" cx="32" cy="32" r="2.8"/>
+</svg>

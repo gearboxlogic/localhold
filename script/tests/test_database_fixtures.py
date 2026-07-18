@@ -37,7 +37,7 @@ class DatabaseFixtureTests(unittest.TestCase):
         future = copy.deepcopy(releases[-1])
         assert isinstance(future, dict)
         future["tag"] = "v0.3.0"
-        commit = database_fixtures._git_commit("HEAD^", database_fixtures.REPO_ROOT)
+        commit = database_fixtures._git_commit("HEAD", database_fixtures.REPO_ROOT)
         self.assertIsNotNone(commit)
         future["commit"] = commit
         for backend in ("sqlite", "postgres"):

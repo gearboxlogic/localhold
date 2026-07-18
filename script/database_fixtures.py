@@ -168,7 +168,7 @@ def _validate_backend(
 
 
 def validate_manifest(release_tag: str | None = None, *, repo_root: Path = REPO_ROOT, manifest_path: Path = MANIFEST_PATH) -> None:
-    """Validate every fixture and require coverage for ``release_tag`` when set."""
+    """Validate fixtures; an unpublished ``release_tag`` explicitly authorizes one pre-tag HEAD check."""
     manifest = _read_json(manifest_path)
     if manifest.get("format_version") != 1:
         raise FixtureError("fixture manifest format_version must be 1")
@@ -190,8 +190,14 @@ def validate_manifest(release_tag: str | None = None, *, repo_root: Path = REPO_
     if release_tag is not None and release_tag not in tags:
         raise FixtureError(f"database upgrade fixtures are missing for release {release_tag}")
 
+    # Only the caller can authorize one unpublished current release. A published
+    # release always requires its immutable tag, even when it is the requested tag.
+    pretag_release = (
+        release_tag if release_tag is not None and release_tag not in PUBLISHED_DATABASE_RELEASES else None
+    )
+    allowed_tags = PUBLISHED_DATABASE_RELEASES | ({pretag_release} if pretag_release is not None else set())
     missing_published = sorted(PUBLISHED_DATABASE_RELEASES.difference(tags))
-    unexpected = sorted(tags.difference(PUBLISHED_DATABASE_RELEASES))
+    unexpected = sorted(tags.difference(allowed_tags))
     if missing_published or unexpected:
         details: list[str] = []
         if missing_published:
@@ -202,12 +208,13 @@ def validate_manifest(release_tag: str | None = None, *, repo_root: Path = REPO_
 
     for release in releases:
         tag = release["tag"]
+        tag_ref = f"refs/tags/{tag}"
         commit = release.get("commit")
         if not isinstance(commit, str) or not COMMIT.fullmatch(commit):
             raise FixtureError(f"{tag} commit must be a lowercase 40-character Git object ID")
-        resolved_commit = _git_commit(tag, repo_root)
+        resolved_commit = _git_commit(tag_ref, repo_root)
         if resolved_commit is None:
-            if tag != release_tag:
+            if tag != pretag_release:
                 raise FixtureError(f"cannot verify {tag} fixture provenance: historical tag is unavailable")
             head_commit = _git_commit("HEAD", repo_root)
             if head_commit is None:
@@ -220,7 +227,7 @@ def validate_manifest(release_tag: str | None = None, *, repo_root: Path = REPO_
                 raise FixtureError(
                     f"{tag} fixture provenance commit {commit} is not an ancestor of tag commit {resolved_commit}"
                 )
-            source_ref = tag
+            source_ref = tag_ref
         _validate_backend(tag, "sqlite", release.get("sqlite"), repo_root, fixture_root, commit, source_ref)
         _validate_backend(tag, "postgres", release.get("postgres"), repo_root, fixture_root, commit, source_ref)
 

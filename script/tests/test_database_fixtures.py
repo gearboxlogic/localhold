@@ -31,6 +31,17 @@ class DatabaseFixtureTests(unittest.TestCase):
     def _write_manifest(path: Path, manifest: dict[str, object]) -> None:
         path.write_text(json.dumps(manifest), encoding="utf-8")
 
+    @staticmethod
+    def _git(repo_root: Path, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+
     def _future_release(self, manifest: dict[str, object]) -> dict[str, object]:
         releases = manifest["releases"]
         assert isinstance(releases, list)
@@ -124,17 +135,70 @@ class DatabaseFixtureTests(unittest.TestCase):
             with self.assertRaisesRegex(FixtureError, "must be a basename"):
                 expand_fixture(root / "a.sql", root)
 
-    def test_missing_historical_tag_fails_closed(self) -> None:
+    def test_requested_published_release_cannot_fallback_to_same_name_branch_head(self) -> None:
         real_git_commit = database_fixtures._git_commit
+        tag = "v0.1.0-beta.2"
+        exact_tag_ref = f"refs/tags/{tag}"
+        target_commit = real_git_commit(exact_tag_ref, database_fixtures.REPO_ROOT)
+        self.assertIsNotNone(target_commit)
+        requested_refs: list[str] = []
 
-        def missing_beta2(ref: str, repo_root: Path) -> str | None:
-            if ref == "v0.1.0-beta.2":
+        def branch_and_head_at_beta2(ref: str, repo_root: Path) -> str | None:
+            requested_refs.append(ref)
+            if ref == exact_tag_ref:
                 return None
+            if ref in {tag, "HEAD"}:
+                return target_commit
             return real_git_commit(ref, repo_root)
 
-        with mock.patch("script.database_fixtures._git_commit", side_effect=missing_beta2):
+        with mock.patch("script.database_fixtures._git_commit", side_effect=branch_and_head_at_beta2):
             with self.assertRaisesRegex(FixtureError, "historical tag is unavailable"):
-                validate_manifest("v0.2.0")
+                validate_manifest(tag)
+        self.assertIn(exact_tag_ref, requested_refs)
+        self.assertNotIn(tag, requested_refs)
+        self.assertNotIn("HEAD", requested_refs)
+
+    def test_exact_tag_refs_accept_annotated_and_lightweight_tags_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo_root = Path(directory)
+            self._git(repo_root, "init")
+            self._git(repo_root, "config", "user.name", "LocalHold Tests")
+            self._git(repo_root, "config", "user.email", "localhold-tests@example.invalid")
+            source = repo_root / "schema.sql"
+            source.write_text("CREATE TABLE memories (id INTEGER);\n", encoding="utf-8")
+            self._git(repo_root, "add", "schema.sql")
+            self._git(repo_root, "commit", "-m", "fixture source")
+            commit = self._git(repo_root, "rev-parse", "HEAD")
+
+            self._git(repo_root, "branch", "v-branch-only")
+            self.assertEqual(database_fixtures._git_commit("v-branch-only", repo_root), commit)
+            self.assertIsNone(database_fixtures._git_commit("refs/tags/v-branch-only", repo_root))
+            self.assertIsNone(database_fixtures._git_bytes("refs/tags/v-branch-only", "schema.sql", repo_root))
+
+            self._git(repo_root, "tag", "v-lightweight")
+            self._git(repo_root, "tag", "-a", "v-annotated", "-m", "annotated fixture tag")
+            for tag in ("v-lightweight", "v-annotated"):
+                tag_ref = f"refs/tags/{tag}"
+                self.assertEqual(database_fixtures._git_commit(tag_ref, repo_root), commit)
+                self.assertEqual(
+                    database_fixtures._git_bytes(tag_ref, "schema.sql", repo_root),
+                    b"CREATE TABLE memories (id INTEGER);\n",
+                )
+
+    def test_historical_release_sources_use_exact_tag_refs(self) -> None:
+        real_git_bytes = database_fixtures._git_bytes
+        requested_refs: list[str] = []
+
+        def record_git_bytes(ref: str, source: str, repo_root: Path) -> bytes | None:
+            requested_refs.append(ref)
+            return real_git_bytes(ref, source, repo_root)
+
+        with mock.patch("script.database_fixtures._git_bytes", side_effect=record_git_bytes):
+            validate_manifest("v0.2.0")
+
+        for tag in database_fixtures.PUBLISHED_DATABASE_RELEASES:
+            self.assertIn(f"refs/tags/{tag}", requested_refs)
+            self.assertNotIn(tag, requested_refs)
 
     def test_pretag_release_uses_exact_head_and_ancestor_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -144,9 +208,7 @@ class DatabaseFixtureTests(unittest.TestCase):
             assert isinstance(releases, list)
             releases.append(future)
             self._write_manifest(manifest_path, manifest)
-            inventory = database_fixtures.PUBLISHED_DATABASE_RELEASES | {"v0.3.0"}
-            with mock.patch("script.database_fixtures.PUBLISHED_DATABASE_RELEASES", inventory):
-                validate_manifest("v0.3.0", manifest_path=manifest_path)
+            validate_manifest("v0.3.0", manifest_path=manifest_path)
 
     def test_pretag_release_rejects_existing_nonancestor_commit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -156,7 +218,6 @@ class DatabaseFixtureTests(unittest.TestCase):
             assert isinstance(releases, list)
             releases.append(future)
             self._write_manifest(manifest_path, manifest)
-            inventory = database_fixtures.PUBLISHED_DATABASE_RELEASES | {"v0.3.0"}
             real_is_ancestor = database_fixtures._git_is_ancestor
             head_commit = database_fixtures._git_commit("HEAD", database_fixtures.REPO_ROOT)
             future_commit = future["commit"]
@@ -166,10 +227,7 @@ class DatabaseFixtureTests(unittest.TestCase):
                     return False
                 return real_is_ancestor(ancestor, descendant, repo_root)
 
-            with (
-                mock.patch("script.database_fixtures.PUBLISHED_DATABASE_RELEASES", inventory),
-                mock.patch("script.database_fixtures._git_is_ancestor", side_effect=reject_future),
-            ):
+            with mock.patch("script.database_fixtures._git_is_ancestor", side_effect=reject_future):
                 with self.assertRaisesRegex(FixtureError, "is not an ancestor of HEAD"):
                     validate_manifest("v0.3.0", manifest_path=manifest_path)
 
@@ -182,10 +240,8 @@ class DatabaseFixtureTests(unittest.TestCase):
             assert isinstance(releases, list)
             releases.append(future)
             self._write_manifest(manifest_path, manifest)
-            inventory = database_fixtures.PUBLISHED_DATABASE_RELEASES | {"v0.3.0"}
-            with mock.patch("script.database_fixtures.PUBLISHED_DATABASE_RELEASES", inventory):
-                with self.assertRaisesRegex(FixtureError, "is not an ancestor of HEAD"):
-                    validate_manifest("v0.3.0", manifest_path=manifest_path)
+            with self.assertRaisesRegex(FixtureError, "is not an ancestor of HEAD"):
+                validate_manifest("v0.3.0", manifest_path=manifest_path)
 
     def test_pretag_release_rejects_ancestor_whose_declared_source_differs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -202,10 +258,8 @@ class DatabaseFixtureTests(unittest.TestCase):
             assert isinstance(releases, list)
             releases.append(future)
             self._write_manifest(manifest_path, manifest)
-            inventory = database_fixtures.PUBLISHED_DATABASE_RELEASES | {"v0.3.0"}
-            with mock.patch("script.database_fixtures.PUBLISHED_DATABASE_RELEASES", inventory):
-                with self.assertRaisesRegex(FixtureError, "declared provenance commit source checksum mismatch"):
-                    validate_manifest("v0.3.0", manifest_path=manifest_path)
+            with self.assertRaisesRegex(FixtureError, "declared provenance commit source checksum mismatch"):
+                validate_manifest("v0.3.0", manifest_path=manifest_path)
 
     def test_pretag_release_rejects_source_hash_not_from_exact_head(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -231,10 +285,8 @@ class DatabaseFixtureTests(unittest.TestCase):
             assert isinstance(releases, list)
             releases.append(future)
             self._write_manifest(manifest_path, manifest)
-            inventory = database_fixtures.PUBLISHED_DATABASE_RELEASES | {"v0.3.0"}
-            with mock.patch("script.database_fixtures.PUBLISHED_DATABASE_RELEASES", inventory):
-                with self.assertRaisesRegex(FixtureError, "v0.3.0 sqlite release source checksum mismatch"):
-                    validate_manifest("v0.3.0", manifest_path=manifest_path)
+            with self.assertRaisesRegex(FixtureError, "v0.3.0 sqlite release source checksum mismatch"):
+                validate_manifest("v0.3.0", manifest_path=manifest_path)
 
     def test_fixture_checksum_cannot_be_manifest_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

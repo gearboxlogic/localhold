@@ -3457,24 +3457,7 @@ async fn lock_published_metadata(tx: &mut Transaction<'_, Postgres>) -> Result<(
     execute_statement(tx, "LOCK TABLE memory_v2_metadata IN ACCESS EXCLUSIVE MODE").await
 }
 
-async fn migrate_published_v2_metadata(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
-    let legacy_exists: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL")
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(postgres_schema_lock_error)?;
-    if !legacy_exists {
-        return Ok(());
-    }
-    let current_exists: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL")
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(postgres_schema_lock_error)?;
-    if current_exists {
-        return Err(StoreError::Conflict(
-            "PostgreSQL contains both memory_v2_metadata and memory_metadata; restore from the pre-upgrade backup or repair the conflicting tables before retrying".into(),
-        ));
-    }
-    lock_published_metadata(tx).await?;
+async fn validate_published_v2_metadata(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
     validate_published_metadata_contract(tx, "memory_v2_metadata", "idx_memory_v2_metadata_scope_key", "2").await?;
     let invalid_versions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_v2_metadata WHERE schema_version IS DISTINCT FROM 2")
         .fetch_one(&mut **tx)
@@ -3506,6 +3489,52 @@ async fn migrate_published_v2_metadata(tx: &mut Transaction<'_, Postgres>) -> Re
             "PostgreSQL published-release metadata contains malformed quality_flags; expected a JSON array of strings".into(),
         ));
     }
+    Ok(())
+}
+
+pub(crate) async fn validate_published_v2_metadata_upgrade(pool: &PgPool) -> Result<bool, StoreError> {
+    let mut tx = pool.begin().await?;
+    let legacy_exists: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL")
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(postgres_schema_lock_error)?;
+    if !legacy_exists {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    let current_exists: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL")
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(postgres_schema_lock_error)?;
+    if current_exists {
+        return Err(StoreError::Conflict(
+            "PostgreSQL contains both memory_v2_metadata and memory_metadata; restore from the pre-upgrade backup or repair the conflicting tables before retrying".into(),
+        ));
+    }
+    validate_published_v2_metadata(&mut tx).await?;
+    tx.rollback().await?;
+    Ok(true)
+}
+
+async fn migrate_published_v2_metadata(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
+    let legacy_exists: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(postgres_schema_lock_error)?;
+    if !legacy_exists {
+        return Ok(());
+    }
+    let current_exists: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(postgres_schema_lock_error)?;
+    if current_exists {
+        return Err(StoreError::Conflict(
+            "PostgreSQL contains both memory_v2_metadata and memory_metadata; restore from the pre-upgrade backup or repair the conflicting tables before retrying".into(),
+        ));
+    }
+    lock_published_metadata(tx).await?;
+    validate_published_v2_metadata(tx).await?;
     execute_statement(tx, "ALTER TABLE memory_v2_metadata RENAME TO memory_metadata").await?;
     execute_statement(tx, "ALTER INDEX IF EXISTS idx_memory_v2_metadata_scope_key RENAME TO idx_memory_metadata_scope_key").await?;
     execute_statement(tx, "UPDATE memory_metadata SET schema_version = 1").await?;

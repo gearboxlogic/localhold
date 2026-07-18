@@ -918,6 +918,16 @@ fn normalized_sqlite_schema_sql(conn: &Connection, object_type: &'static str, na
 /// Validate every managed SQLite table that is already present without
 /// requiring tables or columns that a supported startup migration may add.
 pub(crate) fn validate_present_sqlite_schema(conn: &Connection) -> Result<(), StoreError> {
+    validate_present_sqlite_schema_inner(conn, false)
+}
+
+/// Validate all present managed objects while allowing the separately
+/// validated metadata table written by published beta releases.
+pub(crate) fn validate_present_sqlite_schema_for_published_upgrade(conn: &Connection) -> Result<(), StoreError> {
+    validate_present_sqlite_schema_inner(conn, true)
+}
+
+fn validate_present_sqlite_schema_inner(conn: &Connection, allow_published_metadata: bool) -> Result<(), StoreError> {
     const MIGRATABLE_MEMORY_COLUMNS: &[&str] = &[
         "embedding_revision",
         "record_revision",
@@ -937,7 +947,9 @@ pub(crate) fn validate_present_sqlite_schema(conn: &Connection) -> Result<(), St
     if schema_version > super::schema::SQLITE_SCHEMA_VERSION {
         return Err(sqlite_newer_source_schema_error(schema_version));
     }
-    reject_retired_sqlite_schema(conn)?;
+    if !allow_published_metadata {
+        reject_retired_sqlite_schema(conn)?;
+    }
     for table in SQLITE_REQUIRED_TABLES {
         if sqlite_schema_sql(conn, "table", table.name)?.is_none() {
             validate_absent_sqlite_table_conflicts(conn, table.name)?;
@@ -956,6 +968,7 @@ pub(crate) fn validate_present_sqlite_schema(conn: &Connection) -> Result<(), St
             validate_sqlite_fts_external_content(&sql)?;
         }
         let columns = sqlite_table_columns(conn, table.name)?;
+        validate_published_sqlite_record_revision(table.name, &columns, allow_published_metadata)?;
         for column in table.columns {
             if table.name == "memories" && MIGRATABLE_MEMORY_COLUMNS.contains(column) {
                 continue;
@@ -983,7 +996,21 @@ pub(crate) fn validate_present_sqlite_schema(conn: &Connection) -> Result<(), St
             ));
         }
     }
-    validate_sqlite_managed_object_definitions(conn, true, SQLITE_CURRENT_CLEAR_SUPERSEDED_TRIGGER)?;
+    let clear_superseded_trigger = if allow_published_metadata {
+        SQLITE_V1_CLEAR_SUPERSEDED_TRIGGER
+    } else {
+        SQLITE_CURRENT_CLEAR_SUPERSEDED_TRIGGER
+    };
+    validate_sqlite_managed_object_definitions(conn, true, clear_superseded_trigger)?;
+    Ok(())
+}
+
+fn validate_published_sqlite_record_revision(table: &str, columns: &HashSet<String>, allow_published_metadata: bool) -> Result<(), StoreError> {
+    if allow_published_metadata && table == "memories" && columns.contains("record_revision") {
+        return Err(sqlite_source_schema_error(
+            "published-beta memories table unexpectedly contains record_revision; startup only supports adding the canonical column",
+        ));
+    }
     Ok(())
 }
 
@@ -2251,7 +2278,30 @@ pub(crate) async fn validate_present_postgres_schema(
     current_schema_only: bool,
     include_migration_metadata: bool,
 ) -> Result<(), StoreError> {
-    reject_retired_postgres_schema(pool, current_schema_only).await?;
+    validate_present_postgres_schema_inner(pool, embedding_dimensions, current_schema_only, include_migration_metadata, false).await
+}
+
+/// Validate all present managed objects while allowing the separately
+/// validated metadata table written by published beta releases.
+pub(crate) async fn validate_present_postgres_schema_for_published_upgrade(
+    pool: &PgPool,
+    embedding_dimensions: usize,
+    current_schema_only: bool,
+    include_migration_metadata: bool,
+) -> Result<(), StoreError> {
+    validate_present_postgres_schema_inner(pool, embedding_dimensions, current_schema_only, include_migration_metadata, true).await
+}
+
+async fn validate_present_postgres_schema_inner(
+    pool: &PgPool,
+    embedding_dimensions: usize,
+    current_schema_only: bool,
+    include_migration_metadata: bool,
+    allow_published_metadata: bool,
+) -> Result<(), StoreError> {
+    if !allow_published_metadata {
+        reject_retired_postgres_schema(pool, current_schema_only).await?;
+    }
     for table in std::iter::once(&POSTGRES_MIGRATIONS_TABLE)
         .filter(|_| include_migration_metadata)
         .chain(POSTGRES_USER_TABLES.iter())
@@ -2261,12 +2311,16 @@ pub(crate) async fn validate_present_postgres_schema(
         }
         validate_postgres_table_kind(pool, table, current_schema_only).await?;
         for expectation in POSTGRES_REQUIRED_COLUMNS.iter().filter(|expectation| expectation.table == *table) {
+            if allow_published_metadata && expectation.table == "memories" && expectation.column == "record_revision" {
+                validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
+                continue;
+            }
             validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
         }
         for expectation in POSTGRES_OPTIONAL_COLUMNS.iter().filter(|expectation| expectation.table == *table) {
             validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
         }
-        validate_postgres_table_contracts(pool, table, current_schema_only).await?;
+        validate_postgres_table_contracts_inner(pool, table, current_schema_only, allow_published_metadata).await?;
         validate_postgres_required_keys(pool, table, current_schema_only).await?;
     }
     if postgres_table_exists(pool, "memory_embeddings", current_schema_only).await? {
@@ -2301,6 +2355,10 @@ async fn validate_postgres_required_keys(pool: &PgPool, table: &'static str, cur
 }
 
 async fn validate_postgres_table_contracts(pool: &PgPool, table: &'static str, current_schema_only: bool) -> Result<(), StoreError> {
+    validate_postgres_table_contracts_inner(pool, table, current_schema_only, false).await
+}
+
+async fn validate_postgres_table_contracts_inner(pool: &PgPool, table: &'static str, current_schema_only: bool, allow_missing_record_revision: bool) -> Result<(), StoreError> {
     for expectation in POSTGRES_REQUIRED_COLUMNS
         .iter()
         .chain(POSTGRES_OPTIONAL_COLUMNS.iter())
@@ -2323,6 +2381,13 @@ async fn validate_postgres_table_contracts(pool: &PgPool, table: &'static str, c
         validate_postgres_not_null_column(pool, table, "embedding", current_schema_only).await?;
     }
     for (_, column, expected_default) in POSTGRES_REQUIRED_DEFAULTS.iter().filter(|(expected_table, ..)| *expected_table == table) {
+        if allow_missing_record_revision
+            && table == "memories"
+            && *column == "record_revision"
+            && postgres_column_not_null(pool, table, column, current_schema_only).await?.is_none()
+        {
+            continue;
+        }
         validate_postgres_default_contract(pool, table, column, expected_default, current_schema_only).await?;
     }
     if table == "memories" {

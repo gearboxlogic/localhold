@@ -483,15 +483,10 @@ pub(crate) fn migrate_create_metadata(conn: &Connection) -> Result<(), StoreErro
     Ok(())
 }
 
-/// Upgrade the metadata table written by the published beta releases.
-///
-/// The caller must hold an immediate transaction. Validation and the copy then
-/// share one writer-locked snapshot, so malformed rows or a conflicting current
-/// table leave the public-release schema untouched.
 #[expect(clippy::too_many_lines, reason = "the fixed published schema contract is clearest as one auditable validation unit")]
-pub(crate) fn migrate_published_v2_metadata(conn: &Transaction<'_>) -> Result<(), StoreError> {
+pub(crate) fn validate_published_v2_metadata(conn: &Connection) -> Result<bool, StoreError> {
     if !has_table(conn, "memory_v2_metadata")? {
-        return Ok(());
+        return Ok(false);
     }
     if has_table(conn, "memory_metadata")? {
         return Err(StoreError::Conflict(
@@ -627,6 +622,18 @@ pub(crate) fn migrate_published_v2_metadata(conn: &Transaction<'_>) -> Result<()
         return Err(StoreError::Conflict(
             "SQLite published-release metadata contains malformed quality_flags; expected a JSON array of strings and retained the pre-upgrade backup".into(),
         ));
+    }
+    Ok(true)
+}
+
+/// Upgrade the metadata table written by the published beta releases.
+///
+/// The caller must hold an immediate transaction. Validation and the copy then
+/// share one writer-locked snapshot, so malformed rows or a conflicting current
+/// table leave the public-release schema untouched.
+pub(crate) fn migrate_published_v2_metadata(conn: &Transaction<'_>) -> Result<(), StoreError> {
+    if !validate_published_v2_metadata(conn)? {
+        return Ok(());
     }
 
     conn.execute_batch(

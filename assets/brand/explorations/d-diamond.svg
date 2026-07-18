@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Plan of the Hold — diamond">
+  <rect width="64" height="64" fill="#10161E"/>
+  <path fill="none" stroke="#3D639C" stroke-width="2.2" stroke-linejoin="miter" d="M34.83 17.86 L37.66 15.03 L32.00 6.00 L26.34 15.03 L29.17 17.86 L17.86 29.17 L15.03 26.34 L6.00 32.00 L15.03 37.66 L17.86 34.83 L29.17 46.14 L26.34 48.97 L32.00 58.00 L37.66 48.97 L34.83 46.14 L46.14 34.83 L48.97 37.66 L58.00 32.00 L48.97 26.34 L46.14 29.17 Z"/>
+  <path fill="none" stroke="#3D639C" stroke-width="1.5" stroke-linejoin="miter" d="M38.36 35.54 L41.90 32.00 L32.00 22.10 L22.10 32.00 L32.00 41.90 L35.54 38.36"/>
+  <circle fill="#C89B3C" cx="32" cy="32" r="3.0"/>
+</svg>

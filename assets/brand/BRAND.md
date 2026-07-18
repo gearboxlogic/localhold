@@ -12,12 +12,13 @@ is between generic-modern and castle-flavored, pick the castle.
 | File | Name | Role |
 |---|---|---|
 | `keep.svg` | The Keep | Primary mark. A solid tower, door standing **open** — the hold has no lock, because there is no lock-in. |
-| `bastion-plan.svg` | The Plan of the Hold | Secondary mark. A star fort in plan view, one gold point held at center. Banners, stickers, large decorative use. |
+| `bastion-plan.svg` | The Plan of the Hold | Secondary mark. A pentagonal star fort in plan view — solid like the Keep, courtyard carved out, gate open through the south wall, counterscarp walls leaving the approach clear, one gold point held at center. Banners, stickers, large decorative use. |
 | `icon.svg` | App icon | The Keep in argent on an azure field. Favicons, avatars, launchers. |
 | `lockup.svg` | Lockup | The Keep + wordmark. Headers and docs. |
 | `banner.svg` | README banner | 1280×320 hero for GitHub. |
 | `social-card.svg` | Social card | 1280×640 OG image for the repo's social preview. |
 | `sticker-hex.svg` | Hex sticker | Standard pointy-top hex die-cut; the fort inside its own walls. |
+| `rule.svg` | Battlement rule | Standalone crenellated divider for README/docs section breaks. One per break. |
 | `exports/` | Raster exports | `favicon.ico` (16/32/48) and icon PNGs at 16/32/180/512. |
 
 Rules:
@@ -25,9 +26,13 @@ Rules:
 - Marks are ink (`currentColor`) plus at most one gold accent (`var(--lh-or)`).
   Never recolor the gold; never add a second accent.
 - Clear space around the Keep: at least the width of one merlon (1/4 mark width).
-- Minimum sizes: Keep 16 px; Plan of the Hold 24 px (step its stroke from 3 up to
-  6 in the 64-unit viewBox when rendering below 32 px).
-- The door stays open. Never add a lock, keyhole, or shield overlay to the marks.
+- Minimum sizes: Keep 16 px; Plan of the Hold 48 px with its counterscarp
+  strokes, 24 px without them (drop the four detached strokes, keep the fort).
+- Both marks are solid, never line-drawn. The Plan speaks in two tinctures:
+  argent when it is the subject (stickers, standalone use), azure when it is
+  the ground behind the lockup (card, banner). Never outline it.
+- The door stays open. Never add a lock, keyhole, or shield overlay to the
+  marks. On the Plan this is the south gate and the open approach.
 
 ## Tinctures
 

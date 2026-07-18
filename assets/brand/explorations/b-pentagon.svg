@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Plan of the Hold — pentagon">
+  <rect width="64" height="64" fill="#10161E"/>
+  <path fill="none" stroke="#3D639C" stroke-width="2.2" stroke-linejoin="miter" d="M35.35 18.43 L37.23 15.84 L32.00 6.00 L26.77 15.84 L28.65 18.43 L20.13 24.62 L18.25 22.03 L7.27 23.97 L15.02 31.98 L18.06 30.99 L21.32 41.01 L18.27 42.00 L16.72 53.03 L26.73 48.14 L26.73 44.94 L37.27 44.94 L37.27 48.14 L47.28 53.03 L45.73 42.00 L42.68 41.01 L45.94 30.99 L48.98 31.98 L56.73 23.97 L45.75 22.03 L43.87 24.62 Z"/>
+  <path fill="none" stroke="#3D639C" stroke-width="1.5" stroke-linejoin="miter" d="M34.00 39.44 L37.41 39.44 L40.75 29.16 L32.00 22.80 L23.25 29.16 L26.59 39.44 L30.00 39.44"/>
+  <circle fill="#C89B3C" cx="32" cy="32" r="3.0"/>
+</svg>

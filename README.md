@@ -1,64 +1,44 @@
 <img src="assets/brand/banner.svg" alt="LocalHold — searchable context that stays yours" width="100%">
 
 [![CI](https://github.com/gearboxlogic/localhold/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/gearboxlogic/localhold/actions/workflows/ci.yml)
-[![Dependency freshness](https://github.com/gearboxlogic/localhold/actions/workflows/outdated.yml/badge.svg?branch=main)](https://github.com/gearboxlogic/localhold/actions/workflows/outdated.yml)
+[![Release](https://img.shields.io/github/v/release/gearboxlogic/localhold?color=C89B3C&label=release)](https://github.com/gearboxlogic/localhold/releases/latest)
+[![License](https://img.shields.io/badge/license-Apache--2.0-1F3A5F)](LICENSE)
 
-LocalHold is local context infrastructure for AI agents. It runs as a standalone
+**LocalHold is local memory for AI agents.** It runs as a standalone
 [Model Context Protocol](https://modelcontextprotocol.io/) server and keeps
-durable, searchable memory independent of any one agent or model provider.
+durable, searchable context on your own machine — independent of any one
+agent, editor, or model provider.
 
-LocalHold is in early beta. Linux CPU is the primary supported environment.
+The mark on the banner is a keep with its door standing open. There is no lock
+on the hold, because there is no lock-in: memories live in a plain SQLite file
+you can read, back up, migrate, or walk away with. Every agent you run can
+remember into the same store and recall from it later, and the record stays
+yours.
+
+LocalHold is in early beta. Linux CPU is the primary supported environment;
 Windows, PostgreSQL, and CUDA reranking are preview surfaces.
 
 ## What It Provides
 
-- SQLite storage by default, with optional PostgreSQL and `pgvector`
-- MCP over stdio or streamable HTTP
+- one durable store shared by every agent: scoped memories, access policies,
+  audit history, and maintenance tools
 - keyword, semantic, hybrid, and text fallback search
-- OpenAI-compatible embedding endpoints, including local and cloud providers
+- MCP over stdio or streamable HTTP
+- SQLite storage by default, with optional PostgreSQL and `pgvector`
+- OpenAI-compatible embedding endpoints — local servers such as vLLM,
+  llama.cpp, and Ollama, or cloud providers
 - optional ONNX cross-encoder reranking on CPU or CUDA
-- scoped memories, access policies, audit history, and maintenance tools
+- `hold ui`, a terminal browser over everything the store holds
 
 Storage is local by default. When an external embedding provider is enabled,
 memory content and search queries are sent to the configured endpoint. LocalHold
 does not start or manage model servers.
 
-## Install A Release
+## Quickstart
 
-GitHub releases provide Linux x86_64 CPU and CUDA 12 archives plus a Windows
-x86_64 preview archive. Each archive contains `hold`, the example
-configuration, current documentation, and license notices. The CUDA archive
-also carries its checksum-pinned ONNX Runtime/CUDA/cuDNN user-space runtime and
-does not require Python or a CUDA toolkit installation. Verify downloads with
-the accompanying `SHA256SUMS` file before extracting them. See
-[Installation](docs/installation.md) for the archive layout, compatibility
-matrix, and commands.
-
-## Build From Source
-
-Required for the standard CPU source install:
-
-- Git
-- Rust 1.97 with Cargo (the checked-in toolchain file pins this version)
-- C and C++ compilers, CMake, and Make or Ninja
-- on Linux, `pkg-config` and OpenSSL development headers
-- network access to download Rust crates and the pinned ONNX Runtime artifact
-
-For example, install the native packages with:
-
-```sh
-# Fedora
-sudo dnf install gcc gcc-c++ cmake make pkgconf-pkg-config openssl-devel
-
-# Debian/Ubuntu
-sudo apt install build-essential cmake pkg-config libssl-dev
-```
-
-These are build requirements, not runtime service dependencies. `mise`, `just`,
-ShellCheck, nextest, cargo-deny, and gitleaks are contributor/CI tools and are
-not required to install or run `hold`. CUDA, PostgreSQL/pgvector, and an
-OpenAI-compatible embedding endpoint are needed only when their corresponding
-optional features are used.
+Install a [release archive](https://github.com/gearboxlogic/localhold/releases)
+— Linux x86_64 CPU and CUDA 12, plus a Windows x86_64 preview — or build from
+source:
 
 ```sh
 git clone https://github.com/gearboxlogic/localhold.git
@@ -68,29 +48,53 @@ export PATH="$HOME/.local/bin:$PATH"
 hold
 ```
 
-The standard install includes CPU reranker support, but reranking remains
-disabled until configured. See [Installation](docs/installation.md) for custom
-prefixes, macOS and Windows prerequisites, the CUDA release archive, and custom
-CUDA source builds.
+Then point an MCP client at the binary over stdio:
+
+```json
+{
+  "mcpServers": {
+    "localhold": {
+      "command": "/absolute/path/to/hold"
+    }
+  }
+}
+```
+
+For clients with a command-based setup:
+
+```sh
+claude mcp add --scope user localhold /absolute/path/to/hold
+```
+
+That is the whole setup. Out of the box search is keyword and text only —
+fully local, no model servers, nothing to download. Configure an embedding
+endpoint later for semantic search. See [Installation](docs/installation.md)
+for prerequisites, archive verification, and client details.
+
+## Browse The Hold
+
+`hold ui` opens an interactive terminal browser over the store: scopes in the
+left pane, search with mode cycling across keyword, text, semantic, and hybrid,
+and a detail view with each memory's audit trail. Browsing is side-effect-free;
+edits and deletions go through the normal audited authorization path.
+
+<!-- TODO: `hold ui` screenshot or recording here -->
+
+See [Browse The Hold](docs/browse.md) for navigation and editing keys.
+
+<img src="assets/brand/rule.svg" alt="" width="100%" height="8">
 
 ## Configuration
 
 LocalHold reads `~/.config/localhold/localhold.toml` on Linux and the
-equivalent platform user-config directory elsewhere. It never loads config
+equivalent platform user-config directory elsewhere; it never loads config
 implicitly from the current working directory. Runtime overrides use
-`LOCALHOLD_*` environment variables. See
-[localhold.example.toml](localhold.example.toml) for the complete configuration
-surface.
+`LOCALHOLD_*` environment variables. `hold config init` creates a starter file,
+and `hold config validate` checks the effective settings without opening
+storage. See [localhold.example.toml](localhold.example.toml) for the complete
+configuration surface.
 
-Use `hold config paths` to show the canonical and active paths, `hold config
-init` to create a minimal starter without replacing an existing file, and
-`hold config validate` to validate the effective file and environment settings
-without opening storage, contacting model providers, or starting the server.
-Add `--json` to any of these commands for the versioned machine-readable
-report.
-
-The default provider is `noop`, which keeps search local and text-only. To use
-semantic search, configure an OpenAI-compatible `/v1` endpoint:
+To enable semantic search, configure an OpenAI-compatible `/v1` endpoint:
 
 ```toml
 [embedding]
@@ -100,238 +104,45 @@ dimensions = 768
 [embedding.openai_compatible]
 base_url = "http://127.0.0.1:8000/v1"
 model = "nomic-embed-text"
-# api_key = "..."
 ```
 
-The endpoint must implement `POST /embeddings` beneath the configured base URL.
-The default startup check also requires `GET /models`; set
-`health_check = "disabled"` for providers that omit that route. vLLM,
-llama.cpp, Ollama, and hosted services can be used when they expose this
-contract.
-See [Embedding Providers](docs/embedding-providers.md) for cloud authentication,
-dimensions, health checks, and transport security.
-
-LocalHold records the endpoint, model, and dimensions that produced stored
-vectors and refuses to mix a different vector space. To change any of them,
-preserve a backup and run `hold embeddings reindex --yes`; memory content and
-metadata are retained while vectors are rebuilt after the next start.
-
-Inspect the configured and stored profiles, provider health, and rebuild
-progress without starting the MCP server:
-
-```sh
-hold embeddings status
-hold embeddings status --json
-```
-
-The report includes vector coverage and claim counts but never API keys or
-memory content. See [Operations](docs/operations.md#embedding-status) for its
-states and exit codes.
-
-### Reranking
-
-Enable the built-in CPU reranker with:
+To enable the built-in cross-encoder reranker:
 
 ```toml
 [search.reranker]
 enabled = true
 execution_provider = "cpu"
-precision = "fp32"
 ```
 
-The pinned, fused FP32 model and tokenizer are downloaded on first use. FP32
-is also the default for CUDA and `auto`, so a CUDA failure can safely fall back
-to CPU. For offline deployments, set `model_path` and provide the model files
-in advance.
-
-Operators can fetch the configured managed artifacts explicitly, or verify a
-cache without starting the server:
-
-```sh
-hold models fetch --yes
-hold models verify
-hold models verify --json
-```
-
-`models verify` is offline, creates no paths, and hashes both the ONNX model
-and tokenizer. Direct-file deployments must configure `model_sha256` and
-`tokenizer_sha256` for this command to report `verified`. See
-[Operations](docs/operations.md#reranker-model-artifacts) for exit codes and
-the versioned JSON contract.
-
-Build against a custom CUDA runtime from source with:
-
-```sh
-just build-release-reranker-cuda
-```
-
-The CUDA-capable binary supports `auto`, `cpu`, and `cuda`. `auto` prefers CUDA
-after successful model inference and falls back visibly to CPU; `cpu` never
-registers CUDA; explicit `cuda` never falls back to a CPU session. ONNX Runtime
-may still place individual graph nodes on CPU. Set `required = true` when
-startup must fail unless reranking is active. The CUDA release archive requires
-only its documented NVIDIA driver and standard host-library floor; custom
-source builds must provide compatible ONNX Runtime/CUDA libraries. CUDA does
-not affect embedding placement; embedding compute happens at the selected
-OpenAI-compatible endpoint.
-
-CUDA users may opt into the smaller, faster fused FP16 artifact:
-
-```toml
-[search.reranker]
-enabled = true
-execution_provider = "cuda"
-precision = "fp16"
-```
-
-FP16 is CUDA-only and can change the order of closely scored results. Treat it
-as a latency/VRAM optimization, validate ranking quality on your own corpus,
-and see [Operations](docs/operations.md#reranker-model-precision) for the
-current evidence and limitations.
-
-## Browse The Hold
-
-`hold ui` opens an interactive terminal browser over the configured store.
-The left pane lists every non-empty scope visible to the current principal,
-including unregistered scope keys, with exact-assignment counts. Registered
-display names are used when available; long path-like keys are shortened to a
-unique trailing name. Use `tab` or the left/right arrows to change panes and
-`j`/`k` or the up/down arrows to apply a scope filter immediately. Scope
-filters remain active while searching; tags are separate metadata and are not
-scope rows.
-
-Use `/` to search (with `m` cycling keyword, text, semantic, and hybrid
-modes), and `enter` to inspect a memory with its audit trail. From the detail
-view, `e` edits content, tags, importance, expiry, and card metadata; `d`
-deletes after confirmation.
-`Ctrl+S` saves an edit, and `Esc` cancels. Browsing remains side-effect-free,
-while mutations use the normal audited authorization path and require
-`--principal` or `server.principal`. SQLite WAL and PostgreSQL allow the UI
-to run alongside a serving LocalHold process. Tags are edited as a JSON string
-array (for example `["decision","client,west"]`) so punctuation inside a tag
-is preserved exactly.
-
-## MCP Client Setup
-
-Build the binary, then configure an MCP client to launch `hold` over stdio:
-
-```json
-{
-  "mcpServers": {
-    "localhold": {
-      "command": "/absolute/path/to/localhold/target/release/hold"
-    }
-  }
-}
-```
-
-For clients with a command-based setup:
-
-```sh
-claude mcp add --scope user localhold /absolute/path/to/localhold/target/release/hold
-```
-
-The stdio server uses the configured `server.principal` as the trusted identity
-for that process. Run separate instances when clients require separate
-principals.
-
-### HTTP Transport
-
-```toml
-[server]
-transport = "http"
-host = "127.0.0.1"
-port = 8080
-path = "/mcp"
-http_auth_token = "replace-with-a-secret"
-http_principal_mode = "fixed"
-http_principal = "http"
-http_allowed_hosts = ["localhost", "127.0.0.1", "::1"]
-```
-
-The MCP endpoint is `http://127.0.0.1:8080/mcp`. HTTP requests never inherit
-the stdio principal. Without `http_auth_token`, requests are anonymous and the
-default policy allows public reads but denies writes.
-
-The default `fixed` mode assigns every valid bearer token the configured
-`http_principal`; caller-supplied identity headers are ignored. For distinct
-caller identities, select `trusted_proxy` mode only behind an authenticating
-proxy that overwrites `x-localhold-principal` and prevents direct access to
-LocalHold.
+LocalHold records the vector space that produced stored embeddings and refuses
+to mix a different one; `hold embeddings reindex` rebuilds vectors after a
+provider change. See [Embedding Providers](docs/embedding-providers.md) for
+authentication, health checks, and transport security, and
+[Operations](docs/operations.md) for reranker artifacts, execution providers,
+precision, and HTTP deployment.
 
 ## Storage
 
-SQLite is the default backend and stores data under
-`~/.local/share/localhold/localhold.db`. Create a WAL-consistent online backup,
-validate a restore, and then apply it explicitly with:
-
-```sh
-hold backup ./localhold-backup.db
-hold restore ./localhold-backup.db --dry-run
-# Stop every LocalHold process using the database, then:
-hold restore ./localhold-backup.db --yes
-```
-
-Backup never overwrites an existing destination. Restore validates schema,
-integrity, and embedding identity before replacement, refuses while another
-LocalHold process holds the database open, and retains a pre-restore recovery
-snapshot. The recovery snapshot preserves the current database even when its
-invalid schema, embedding metadata, or unreadable SQLite contents are the
-reason for restoring; unreadable databases and their sidecars are retained as
-a byte-for-byte recovery bundle. Only the incoming backup must pass
-validation. Add `--json` to any command for stable automation output.
-
-PostgreSQL is opt-in:
-
-```toml
-[database]
-backend = "postgres"
-
-[database.postgres]
-url = "postgres://localhold:password@localhost:5432/localhold"
-migration_lock_timeout_secs = 5
-```
-
-`migration_lock_timeout_secs` bounds how long each PostgreSQL schema-migration
-lock acquisition waits. Override it with
-`LOCALHOLD_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS` when slower migrations need a
-larger lock-wait budget.
-
-Check installation and runtime readiness without creating or migrating storage
-or downloading models:
-
-```sh
-hold doctor
-hold doctor --json
-```
-
-See [Operations](docs/operations.md) for diagnostic exit codes and the explicit
-reranker download opt-in.
-
-To migrate an existing SQLite database into an empty PostgreSQL database:
-
-```sh
-hold migrate sqlite-to-postgres \
-  --sqlite ~/.local/share/localhold/localhold.db \
-  --embedding-dimensions 768 \
-  --dry-run
-```
-
-Review the dry run, then repeat with `--yes`. The destination must not already
-contain user data.
+SQLite is the default backend, stored under
+`~/.local/share/localhold/localhold.db`. `hold backup` and `hold restore`
+provide WAL-consistent online backups with validation, and `hold doctor`
+checks installation and runtime readiness. PostgreSQL is opt-in, and
+`hold migrate sqlite-to-postgres` moves an existing store across. See
+[Operations](docs/operations.md) for backup, restore, migration, and
+diagnostics.
 
 ## MCP Tools
 
 The everyday API consists of `brief`, `recall`, `read`, `read_many`,
 `remember`, `remember_many`, `handoff`, `revise`, and `forget`. Maintenance and
-migration operations use explicit `admin_*` tools. Those privileged routes are
-removed from discovery and dispatch by default; operators must set
-`server.admin_tools_enabled = true` for a dedicated maintenance instance.
+migration operations use explicit `admin_*` tools, which are removed from
+discovery and dispatch unless an operator enables them for a dedicated
+maintenance instance.
 
-See [docs/agent-api.md](docs/agent-api.md) for tool semantics and
-[docs/architecture.md](docs/architecture.md) for the current system design.
-Operators should also read [Operations](docs/operations.md) and the
-[Compatibility Policy](docs/compatibility.md).
+See [Agent API](docs/agent-api.md) for tool semantics,
+[Architecture](docs/architecture.md) for the system design,
+[Operations](docs/operations.md) for running LocalHold, and the
+[Compatibility Policy](docs/compatibility.md) for what upgrades preserve.
 
 ## Development
 
@@ -341,16 +152,9 @@ just test
 just check
 ```
 
-`just check` runs formatting, clippy, dependency policy, and tests. Linux and
-Windows checks also run in GitHub Actions. Windows support is preview and is
-validated by CI rather than a machine-specific local clone.
-
-Repository documentation must describe a current user, operator, contributor,
-architecture, or policy need. Task journals, review transcripts, historical
-audits, and completed implementation plans belong in issues or the private
-development archive, not this repository.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request and
+`just check` runs formatting, clippy, dependency policy, and tests; Linux and
+Windows checks also run in GitHub Actions. See
+[CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request and
 [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 ## License

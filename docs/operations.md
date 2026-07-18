@@ -336,6 +336,25 @@ Test restore procedures on a disposable database. PostgreSQL preview support
 does not replace managed-service snapshots, point-in-time recovery, or access
 controls.
 
+## Migrating SQLite To PostgreSQL
+
+To migrate an existing SQLite database into an empty PostgreSQL database:
+
+```sh
+hold migrate sqlite-to-postgres \
+  --sqlite ~/.local/share/localhold/localhold.db \
+  --embedding-dimensions 768 \
+  --dry-run
+```
+
+Review the dry run, then repeat with `--yes`. The destination must not already
+contain user data.
+
+`migration_lock_timeout_secs` in `[database.postgres]` bounds how long each
+PostgreSQL schema-migration lock acquisition waits. Override it with
+`LOCALHOLD_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS` when slower migrations need a
+larger lock-wait budget.
+
 ## Recovery Checks
 
 ### Embedding status

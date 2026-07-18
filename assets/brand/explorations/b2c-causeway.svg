@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Plan of the Hold — counterscarp with causeway">
+  <rect width="64" height="64" fill="#10161E"/>
+  <path fill="none" stroke="#3D639C" stroke-width="2.2" stroke-linejoin="miter" d="M35.14 19.28 L36.90 16.85 L32.00 7.50 L27.10 16.85 L28.86 19.28 L20.87 25.08 L19.11 22.66 L8.70 24.43 L16.08 31.98 L18.93 31.05 L21.98 40.45 L19.13 41.37 L17.60 51.82 L27.06 47.14 L27.06 44.14 L36.94 44.14 L36.94 47.14 L46.40 51.82 L44.87 41.37 L42.02 40.45 L45.07 31.05 L47.92 31.98 L55.30 24.43 L44.89 22.66 L43.13 25.08 Z"/>
+  <path fill="none" stroke="#3D639C" stroke-width="1.0" stroke-linejoin="miter" d="M25.90 17.23 L19.83 21.64 M16.07 33.23 L18.38 40.37 M28.25 47.54 L29.80 47.54 M34.20 47.54 L35.75 47.54 M45.62 40.37 L47.93 33.23 M44.17 21.64 L38.10 17.23"/>
+  <path fill="none" stroke="#3D639C" stroke-width="1.5" stroke-linejoin="miter" d="M34.00 39.12 L37.17 39.12 L40.37 29.28 L32.00 23.20 L23.63 29.28 L26.83 39.12 L30.00 39.12"/>
+  <circle fill="#C89B3C" cx="32" cy="32" r="2.9"/>
+</svg>

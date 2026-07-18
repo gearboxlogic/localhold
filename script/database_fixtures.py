@@ -133,9 +133,9 @@ def _validate_backend(
     if actual_fixture != expected_fixture:
         raise FixtureError(f"{tag} {backend} fixture checksum mismatch: expected {expected_fixture}, got {actual_fixture}")
     sql = fixture_bytes.decode("utf-8")
-    if "CREATE TABLE" not in sql and "fixture-include:" not in sql:
+    if "CREATE TABLE" not in sql:
         raise FixtureError(f"{tag} {backend} fixture does not build a schema")
-    if "INSERT INTO" not in sql and "fixture-include:" not in sql:
+    if "INSERT INTO" not in sql:
         raise FixtureError(f"{tag} {backend} fixture does not contain survival data")
 
     source = value["source"]

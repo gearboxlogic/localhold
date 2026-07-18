@@ -3779,18 +3779,38 @@ mod tests {
     const FIXTURE_MANIFEST: &str = include_str!("../../tests/fixtures/database-upgrades/manifest.json");
 
     fn postgres_fixture_sql(name: &str) -> String {
+        postgres_fixture_sql_inner(name, &mut Vec::new())
+    }
+
+    fn postgres_fixture_sql_inner(name: &str, stack: &mut Vec<String>) -> String {
+        assert_eq!(
+            std::path::Path::new(name).file_name().and_then(|value| value.to_str()),
+            Some(name),
+            "fixture includes must be basenames"
+        );
+        assert!(!stack.iter().any(|entry| entry == name), "fixture include cycle: {stack:?} -> {name}");
+        stack.push(name.to_owned());
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/database-upgrades");
         let source = std::fs::read_to_string(root.join(name)).unwrap();
         let mut expanded = String::new();
         for line in source.lines() {
             if let Some(include) = line.trim().strip_prefix("-- fixture-include: ") {
-                expanded.push_str(&postgres_fixture_sql(include));
+                expanded.push_str(&postgres_fixture_sql_inner(include, stack));
             } else {
                 expanded.push_str(line);
                 expanded.push('\n');
             }
         }
+        let popped = stack.pop();
+        assert_eq!(popped.as_deref(), Some(name));
         expanded
+    }
+
+    #[test]
+    #[should_panic(expected = "fixture include cycle")]
+    fn postgres_fixture_include_cycle_is_rejected() {
+        let mut stack = vec!["cycle.sql".to_owned()];
+        let _fixture = postgres_fixture_sql_inner("cycle.sql", &mut stack);
     }
 
     fn postgres_test_url() -> String {

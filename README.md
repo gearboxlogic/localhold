@@ -78,11 +78,7 @@ left pane, search with mode cycling across keyword, text, semantic, and hybrid,
 and a detail view with each memory's audit trail. Browsing is side-effect-free;
 edits and deletions go through the normal audited authorization path.
 
-<!-- TODO: `hold ui` screenshot or recording here -->
-
 See [Browse The Hold](docs/browse.md) for navigation and editing keys.
-
-<img src="assets/brand/rule.svg" alt="" width="100%" height="8">
 
 ## Configuration
 
@@ -115,7 +111,7 @@ execution_provider = "cpu"
 ```
 
 LocalHold records the vector space that produced stored embeddings and refuses
-to mix a different one; `hold embeddings reindex` rebuilds vectors after a
+to mix a different one; `hold embeddings reindex --yes` rebuilds vectors after a
 provider change. See [Embedding Providers](docs/embedding-providers.md) for
 authentication, health checks, and transport security, and
 [Operations](docs/operations.md) for reranker artifacts, execution providers,

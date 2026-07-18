@@ -221,6 +221,22 @@ includes checksums, transformation provenance, and license notices.
 
 ## HTTP Deployment
 
+Enable the streamable HTTP transport in the server configuration:
+
+```toml
+[server]
+transport = "http"
+host = "127.0.0.1"
+port = 8080
+path = "/mcp"
+http_auth_token = "replace-with-a-secret"
+```
+
+With this configuration the MCP endpoint is `http://127.0.0.1:8080/mcp`. HTTP
+requests never inherit the stdio principal. Without `http_auth_token`,
+requests are anonymous and the default policy allows public reads but denies
+writes.
+
 Bind to loopback unless a reverse proxy or private network boundary is in
 place. Set `server.http_auth_token` for every non-local deployment.
 
@@ -349,11 +365,6 @@ hold migrate sqlite-to-postgres \
 
 Review the dry run, then repeat with `--yes`. The destination must not already
 contain user data.
-
-`migration_lock_timeout_secs` in `[database.postgres]` bounds how long each
-PostgreSQL schema-migration lock acquisition waits. Override it with
-`LOCALHOLD_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS` when slower migrations need a
-larger lock-wait budget.
 
 ## Recovery Checks
 

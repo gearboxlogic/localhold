@@ -36,7 +36,7 @@ jobs:
           key: ubuntu-22.04-rust-${{ hashFiles('Cargo.lock', 'mise.lock') }}
           restore-keys: ubuntu-22.04-rust-
 
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
           version: 2026.7.5
 
@@ -62,7 +62,7 @@ jobs:
           key: ${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'mise.lock') }}
           restore-keys: ${{ runner.os }}-rust-
 
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
           version: 2026.7.5
 
@@ -123,7 +123,7 @@ jobs:
           key: ${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'mise.lock') }}
           restore-keys: ${{ runner.os }}-rust-
 
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
           version: 2026.7.5
 
@@ -155,7 +155,7 @@ jobs:
           key: ${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'mise.lock') }}
           restore-keys: ${{ runner.os }}-rust-
 
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
           version: 2026.7.5
 

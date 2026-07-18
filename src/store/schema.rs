@@ -1,6 +1,6 @@
 //! DDL definitions and schema migrations for the memories database.
 
-use rusqlite::{Connection, OptionalExtension as _};
+use rusqlite::{Connection, OptionalExtension as _, Transaction};
 
 use crate::error::StoreError;
 
@@ -480,6 +480,177 @@ pub(crate) fn migrate_create_scope_registry(conn: &Connection) -> Result<(), Sto
 /// Create the metadata table for fresh and existing databases.
 pub(crate) fn migrate_create_metadata(conn: &Connection) -> Result<(), StoreError> {
     conn.execute_batch(METADATA_DDL)?;
+    Ok(())
+}
+
+/// Upgrade the metadata table written by the published beta releases.
+///
+/// The caller must hold an immediate transaction. Validation and the copy then
+/// share one writer-locked snapshot, so malformed rows or a conflicting current
+/// table leave the public-release schema untouched.
+#[expect(clippy::too_many_lines, reason = "the fixed published schema contract is clearest as one auditable validation unit")]
+pub(crate) fn migrate_published_v2_metadata(conn: &Transaction<'_>) -> Result<(), StoreError> {
+    if !has_table(conn, "memory_v2_metadata")? {
+        return Ok(());
+    }
+    if has_table(conn, "memory_metadata")? {
+        return Err(StoreError::Conflict(
+            "SQLite contains both memory_v2_metadata and memory_metadata; restore the pre-upgrade backup or repair the conflicting tables before retrying".into(),
+        ));
+    }
+    let columns = {
+        let mut statement = conn.prepare("PRAGMA table_info('memory_v2_metadata')")?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, bool>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let expected_columns = vec![
+        (0_i64, "memory_id".into(), "TEXT".into(), false, None, 1_i64),
+        (1_i64, "scope_key".into(), "TEXT".into(), false, None, 0_i64),
+        (2_i64, "summary".into(), "TEXT".into(), false, None, 0_i64),
+        (3_i64, "agent_label".into(), "TEXT".into(), false, None, 0_i64),
+        (4_i64, "created_by_principal".into(), "TEXT".into(), false, None, 0_i64),
+        (5_i64, "quality_flags".into(), "TEXT".into(), true, Some("'[]'".into()), 0_i64),
+        (6_i64, "schema_version".into(), "INTEGER".into(), true, Some("2".into()), 0_i64),
+        (7_i64, "migrated_at".into(), "TEXT".into(), false, None, 0_i64),
+        (8_i64, "updated_at".into(), "TEXT".into(), true, None, 0_i64),
+    ];
+    if columns != expected_columns {
+        return Err(StoreError::Conflict(
+            "SQLite published-release metadata table has an unexpected table contract; the pre-upgrade backup was retained".into(),
+        ));
+    }
+    let foreign_keys = {
+        let mut statement = conn.prepare("PRAGMA foreign_key_list('memory_v2_metadata')")?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let expected_foreign_keys = vec![(
+        0_i64,
+        0_i64,
+        "memories".into(),
+        "memory_id".into(),
+        "id".into(),
+        "NO ACTION".into(),
+        "CASCADE".into(),
+        "NONE".into(),
+    )];
+    if foreign_keys != expected_foreign_keys {
+        return Err(StoreError::Conflict(
+            "SQLite published-release metadata table has unexpected foreign keys; the pre-upgrade backup was retained".into(),
+        ));
+    }
+    let indexes = {
+        let mut statement = conn.prepare("SELECT name, \"unique\", origin, partial FROM pragma_index_list('memory_v2_metadata') ORDER BY name")?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?, row.get::<_, String>(2)?, row.get::<_, bool>(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let expected_indexes = vec![
+        ("idx_memory_v2_metadata_scope_key".into(), false, "c".into(), false),
+        ("sqlite_autoindex_memory_v2_metadata_1".into(), true, "pk".into(), false),
+    ];
+    let scope_index = {
+        let mut statement = conn.prepare(
+            "SELECT seqno, cid, name, \"desc\", coll, key
+             FROM pragma_index_xinfo('idx_memory_v2_metadata_scope_key')
+             ORDER BY seqno",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, bool>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, bool>(5)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let expected_scope_index = vec![
+        (0_i64, 1_i64, Some("scope_key".into()), false, Some("BINARY".into()), true),
+        (1_i64, -1_i64, None, false, Some("BINARY".into()), false),
+    ];
+    if indexes != expected_indexes || scope_index != expected_scope_index {
+        return Err(StoreError::Conflict(
+            "SQLite published-release metadata table has unexpected indexes; the pre-upgrade backup was retained".into(),
+        ));
+    }
+    let invalid_versions: i64 = conn.query_row("SELECT COUNT(*) FROM memory_v2_metadata WHERE schema_version IS NULL OR schema_version <> 2", [], |row| {
+        row.get(0)
+    })?;
+    if invalid_versions != 0 {
+        return Err(StoreError::Conflict(
+            "SQLite published-release metadata table contains an unexpected schema_version; the pre-upgrade backup was retained".into(),
+        ));
+    }
+    let invalid_quality_flags: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memory_v2_metadata
+         WHERE quality_flags IS NULL
+            OR CASE WHEN json_valid(quality_flags) THEN json_type(quality_flags) <> 'array' ELSE 1 END
+            OR EXISTS (
+                SELECT 1
+                FROM json_each(
+                    CASE WHEN json_valid(quality_flags) AND json_type(quality_flags) = 'array' THEN quality_flags ELSE '[]' END
+                )
+                WHERE json_each.type <> 'text'
+            )",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid_quality_flags != 0 {
+        return Err(StoreError::Conflict(
+            "SQLite published-release metadata contains malformed quality_flags; expected a JSON array of strings and retained the pre-upgrade backup".into(),
+        ));
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE memory_metadata (
+             memory_id            TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+             scope_key            TEXT,
+             summary              TEXT,
+             agent_label          TEXT,
+             created_by_principal TEXT,
+             quality_flags        TEXT NOT NULL DEFAULT '[]',
+             schema_version       INTEGER NOT NULL DEFAULT 1,
+             migrated_at          TEXT,
+             updated_at           TEXT NOT NULL
+         );
+         INSERT INTO memory_metadata (
+             memory_id, scope_key, summary, agent_label, created_by_principal,
+             quality_flags, schema_version, migrated_at, updated_at
+         )
+         SELECT memory_id, scope_key, summary, agent_label, created_by_principal,
+                quality_flags, 1, migrated_at, updated_at
+         FROM memory_v2_metadata;
+         CREATE INDEX idx_memory_metadata_scope_key ON memory_metadata(scope_key);
+         DROP TABLE memory_v2_metadata;",
+    )?;
     Ok(())
 }
 

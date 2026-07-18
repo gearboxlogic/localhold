@@ -29,10 +29,13 @@ a release explicitly documents a rollback procedure.
 Back up the active store before upgrades, storage migrations, bulk maintenance,
 or embedding-provider changes. See [Operations](operations.md).
 
-Pre-release development databases containing the retired
-`memory_v2_metadata` table are not compatible with the current schema. LocalHold
-stops with an actionable error instead of importing or ignoring that data. Back
-up and reset those databases before starting the current release.
+The published `v0.1.0-beta.2` and `v0.1.0-beta.3` schemas used the table name
+`memory_v2_metadata`. Normal startup migrates that table to `memory_metadata`
+without replacing memory content or metadata relationships. SQLite retains a
+verified, mode-`0600` pre-upgrade backup first; PostgreSQL performs the schema
+change in its migration transaction and relies on the operator's required
+pre-upgrade snapshot. A database containing both table names, malformed legacy
+metadata, or unexpected metadata versions is refused without partial migration.
 
 Current SQLite databases carry `PRAGMA user_version = 2`. Startup upgrades a
 schema-v1 database to this contract and migrates an otherwise compatible
@@ -41,6 +44,13 @@ running binary. Supported backups and restores expose and validate this value;
 restore can upgrade a strictly validated v1 backup on a private staging copy.
 The JSON report's separate `schema_version` identifies the report format
 itself.
+
+Deterministic SQLite and PostgreSQL fixtures cover every published beta, release
+candidate, and stable schema. CI verifies their checksums and source provenance,
+then opens or migrates every manifest entry and checks embedding profiles, audit
+history, scopes, tombstones, metadata, memories, and embeddings. Fixtures remain
+for the lifetime of the release's compatibility obligation; removing one
+requires an explicit, reviewed compatibility-policy change in a release.
 
 ## Protocol Compatibility
 

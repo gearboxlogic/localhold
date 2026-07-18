@@ -227,11 +227,11 @@ impl PostgresStore {
     pub async fn open_with_clock(config: &PostgresDatabaseConfig, embedding_dimensions: usize, clock: Arc<dyn Clock>) -> Result<Self, StoreError> {
         validate_bootstrap_inputs(config, embedding_dimensions)?;
         let pool = PgPoolOptions::new().max_connections(config.max_connections).connect(&config.url).await?;
-        reject_retired_postgres_schema(&pool, true).await?;
         if config.auto_migrate {
             init_schema(&pool, embedding_dimensions, ExistingVectorPolicy::Validate, config.migration_lock_timeout_secs).await?;
             validate_current_postgres_store_ready(&pool, embedding_dimensions).await?;
         } else {
+            reject_retired_postgres_schema(&pool, true).await?;
             validate_postgres_runtime_ready(&pool, embedding_dimensions).await?;
         }
         Ok(Self {
@@ -3337,6 +3337,7 @@ async fn init_schema(pool: &PgPool, embedding_dimensions: usize, vector_policy: 
         .map_err(postgres_schema_lock_error)?;
 
     execute_statement(&mut tx, CREATE_VECTOR_EXTENSION).await?;
+    migrate_published_v2_metadata(&mut tx).await?;
     execute_statement(&mut tx, CREATE_MIGRATIONS_TABLE).await?;
     if vector_policy == ExistingVectorPolicy::Validate {
         check_vector_dimensions_tx(&mut tx, embedding_dimensions).await?;
@@ -3355,6 +3356,161 @@ async fn init_schema(pool: &PgPool, embedding_dimensions: usize, vector_policy: 
     validate_current_migration_metadata_tx(&mut tx).await?;
     tx.commit().await?;
     Ok(())
+}
+
+#[expect(clippy::too_many_lines, reason = "the fixed published schema contract is clearest as one auditable validation unit")]
+async fn validate_published_metadata_contract(tx: &mut Transaction<'_, Postgres>, table: &str, scope_index: &str, schema_version_default: &str) -> Result<(), StoreError> {
+    let columns = sqlx::query(
+        "SELECT column_name, udt_name, is_nullable = 'YES' AS nullable, column_default
+         FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = $1
+         ORDER BY ordinal_position",
+    )
+    .bind(table)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(postgres_schema_lock_error)?
+    .into_iter()
+    .map(|row| {
+        Ok((
+            row.try_get("column_name")?,
+            row.try_get("udt_name")?,
+            row.try_get("nullable")?,
+            row.try_get("column_default")?,
+        ))
+    })
+    .collect::<Result<Vec<(String, String, bool, Option<String>)>, SqlxError>>()?;
+    let expected = vec![
+        ("memory_id".into(), "text".into(), false, None),
+        ("scope_key".into(), "text".into(), true, None),
+        ("summary".into(), "text".into(), true, None),
+        ("agent_label".into(), "text".into(), true, None),
+        ("created_by_principal".into(), "text".into(), true, None),
+        ("quality_flags".into(), "jsonb".into(), false, Some("'[]'::jsonb".into())),
+        ("schema_version".into(), "int8".into(), false, Some(schema_version_default.into())),
+        ("migrated_at".into(), "timestamptz".into(), true, None),
+        ("updated_at".into(), "timestamptz".into(), false, None),
+    ];
+    if columns != expected {
+        return Err(StoreError::Conflict(format!(
+            "PostgreSQL published-release metadata table {table} has an unexpected column contract; restore from backup or repair it before retrying"
+        )));
+    }
+    let constraints_valid: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) = 2
+            AND COUNT(*) FILTER (WHERE contype = 'p' AND pg_get_constraintdef(oid) = 'PRIMARY KEY (memory_id)') = 1
+            AND COUNT(*) FILTER (
+                WHERE contype = 'f'
+                  AND pg_get_constraintdef(oid) = 'FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE'
+            ) = 1
+         FROM pg_constraint
+         WHERE conrelid = to_regclass(format('%I.%I', current_schema(), $1))",
+    )
+    .bind(table)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(postgres_schema_lock_error)?;
+    let indexes_valid: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) = 2
+            AND COUNT(*) FILTER (
+                WHERE index_class.relname = $2
+                  AND NOT index_data.indisunique
+                  AND index_data.indisvalid
+                  AND index_data.indisready
+                  AND index_data.indislive
+                  AND NOT index_data.indisprimary
+                  AND NOT index_data.indisexclusion
+                  AND index_class.relkind = 'i'
+                  AND access_method.amname = 'btree'
+                  AND index_data.indnkeyatts = 1
+                  AND index_data.indnatts = 1
+                  AND index_data.indexprs IS NULL
+                  AND pg_get_indexdef(index_class.oid, 1, TRUE) = 'scope_key'
+                  AND index_data.indpred IS NULL
+                  AND key_attribute.attname = 'scope_key'
+                  AND key_opclass.opcdefault
+                  AND index_data.indcollation[0] = key_attribute.attcollation
+            ) = 1
+         FROM pg_index AS index_data
+         JOIN pg_class AS index_class ON index_class.oid = index_data.indexrelid
+         JOIN pg_am AS access_method ON access_method.oid = index_class.relam
+         LEFT JOIN pg_attribute AS key_attribute
+           ON key_attribute.attrelid = index_data.indrelid
+          AND key_attribute.attnum = index_data.indkey[0]
+         LEFT JOIN pg_opclass AS key_opclass ON key_opclass.oid = index_data.indclass[0]
+         WHERE index_data.indrelid = to_regclass(format('%I.%I', current_schema(), $1))",
+    )
+    .bind(table)
+    .bind(scope_index)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(postgres_schema_lock_error)?;
+    if !constraints_valid || !indexes_valid {
+        return Err(StoreError::Conflict(format!(
+            "PostgreSQL published-release metadata table {table} has unexpected constraints or indexes; restore from backup or repair it before retrying"
+        )));
+    }
+    Ok(())
+}
+
+async fn lock_published_metadata(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
+    execute_statement(tx, "LOCK TABLE memory_v2_metadata IN ACCESS EXCLUSIVE MODE").await
+}
+
+async fn migrate_published_v2_metadata(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
+    let legacy_exists: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(postgres_schema_lock_error)?;
+    if !legacy_exists {
+        return Ok(());
+    }
+    let current_exists: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(postgres_schema_lock_error)?;
+    if current_exists {
+        return Err(StoreError::Conflict(
+            "PostgreSQL contains both memory_v2_metadata and memory_metadata; restore from the pre-upgrade backup or repair the conflicting tables before retrying".into(),
+        ));
+    }
+    lock_published_metadata(tx).await?;
+    validate_published_metadata_contract(tx, "memory_v2_metadata", "idx_memory_v2_metadata_scope_key", "2").await?;
+    let invalid_versions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_v2_metadata WHERE schema_version IS DISTINCT FROM 2")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(postgres_schema_lock_error)?;
+    if invalid_versions != 0_i64 {
+        return Err(StoreError::Conflict(
+            "PostgreSQL published-release metadata contains an unexpected schema_version; restore from backup or repair it before retrying".into(),
+        ));
+    }
+    let invalid_quality_flags: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM memory_v2_metadata
+         WHERE quality_flags IS NULL
+            OR jsonb_typeof(quality_flags) <> 'array'
+            OR EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(quality_flags) = 'array' THEN quality_flags ELSE '[]'::jsonb END
+                ) AS flag
+                WHERE jsonb_typeof(flag) <> 'string'
+            )",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(postgres_schema_lock_error)?;
+    if invalid_quality_flags != 0_i64 {
+        return Err(StoreError::Conflict(
+            "PostgreSQL published-release metadata contains malformed quality_flags; expected a JSON array of strings".into(),
+        ));
+    }
+    execute_statement(tx, "ALTER TABLE memory_v2_metadata RENAME TO memory_metadata").await?;
+    execute_statement(tx, "ALTER INDEX IF EXISTS idx_memory_v2_metadata_scope_key RENAME TO idx_memory_metadata_scope_key").await?;
+    execute_statement(tx, "UPDATE memory_metadata SET schema_version = 1").await?;
+    execute_statement(tx, "ALTER TABLE memory_metadata ALTER COLUMN schema_version SET DEFAULT 1").await?;
+    validate_published_metadata_contract(tx, "memory_metadata", "idx_memory_metadata_scope_key", "1").await
 }
 
 async fn migrate_record_revision_column(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
@@ -3619,6 +3775,23 @@ mod tests {
 
     use super::*;
     use crate::types::AuditAction;
+
+    const FIXTURE_MANIFEST: &str = include_str!("../../tests/fixtures/database-upgrades/manifest.json");
+
+    fn postgres_fixture_sql(name: &str) -> String {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/database-upgrades");
+        let source = std::fs::read_to_string(root.join(name)).unwrap();
+        let mut expanded = String::new();
+        for line in source.lines() {
+            if let Some(include) = line.trim().strip_prefix("-- fixture-include: ") {
+                expanded.push_str(&postgres_fixture_sql(include));
+            } else {
+                expanded.push_str(line);
+                expanded.push('\n');
+            }
+        }
+        expanded
+    }
 
     fn postgres_test_url() -> String {
         std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into())
@@ -3995,6 +4168,426 @@ mod tests {
 
             let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
             assert!(error.to_string().contains("indexes do not match"), "{error}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    #[expect(
+        clippy::excessive_nesting,
+        clippy::too_many_lines,
+        clippy::type_complexity,
+        reason = "the release matrix exhaustively checks every persisted field inside an isolated schema"
+    )]
+    async fn every_published_postgres_fixture_migrates_and_preserves_managed_data() {
+        let manifest: serde_json::Value = serde_json::from_str(FIXTURE_MANIFEST).unwrap();
+        let releases = manifest["releases"].as_array().unwrap();
+        assert!(!releases.is_empty());
+        for release in releases {
+            let tag = release["tag"].as_str().unwrap().to_owned();
+            let fixture_name = release["postgres"]["fixture"].as_str().unwrap();
+            let fixture = postgres_fixture_sql(fixture_name);
+            with_isolated_postgres_schema("localhold_release_fixture", true, |_admin, _schema, config| async move {
+                let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+                let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+                scoped.close().await;
+
+                drop(PostgresStore::open(&config, 3_usize).await.unwrap());
+                let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+                assert_eq!(read_migration_metadata_state(&scoped).await.unwrap(), MigrationMetadataState::Current, "{tag}");
+                let profile: (String, String, String, i64) =
+                    sqlx_core::query_as::query_as("SELECT provider, endpoint, model, dimensions FROM embedding_profile WHERE singleton = 1")
+                        .fetch_one(&scoped)
+                        .await
+                        .unwrap();
+                assert_eq!(
+                    profile,
+                    ("openai-compatible".into(), "http://fixture.invalid/v1".into(), "fixture-model".into(), 3_i64),
+                    "{tag}"
+                );
+                let metadata: (String, String, i64) = sqlx_core::query_as::query_as("SELECT scope_key, summary, schema_version FROM memory_metadata")
+                    .fetch_one(&scoped)
+                    .await
+                    .unwrap();
+                assert_eq!(metadata, ("project/localhold".into(), "fixture summary".into(), 1_i64), "{tag}");
+                let memory: (String, String, serde_json::Value, serde_json::Value, serde_json::Value, Option<String>) = sqlx_core::query_as::query_as(
+                    "SELECT id, content, tags, provenance, access_policy, superseded_by
+                         FROM memories WHERE id = '01J00000000000000000000000'",
+                )
+                .fetch_one(&scoped)
+                .await
+                .unwrap();
+                assert_eq!(
+                    memory,
+                    (
+                        "01J00000000000000000000000".into(),
+                        "published fixture memory".into(),
+                        serde_json::json!(["upgrade"]),
+                        serde_json::json!({"source_agent":"fixture","source_conversation":"release","origin_conversation":"release"}),
+                        serde_json::json!({"type":"public"}),
+                        Some("01J00000000000000000000002".into()),
+                    ),
+                    "{tag}"
+                );
+                let related_memory: (String, String, serde_json::Value, serde_json::Value, bool) = sqlx_core::query_as::query_as(
+                    "SELECT id, content, tags, provenance, has_embedding
+                         FROM memories WHERE id = '01J00000000000000000000002'",
+                )
+                .fetch_one(&scoped)
+                .await
+                .unwrap();
+                assert_eq!(
+                    related_memory,
+                    (
+                        "01J00000000000000000000002".into(),
+                        "published related memory".into(),
+                        serde_json::json!(["upgrade", "relationship"]),
+                        serde_json::json!({"source_agent":"fixture-related","source_conversation":"release","origin_conversation":"release"}),
+                        false,
+                    ),
+                    "{tag}"
+                );
+                let metrics: (i64, String, f64, i64, f64) = sqlx_core::query_as::query_as(
+                    "SELECT embedding_revision, memory_type, importance, impression_count, confidence
+                         FROM memories WHERE id = '01J00000000000000000000000'",
+                )
+                .fetch_one(&scoped)
+                .await
+                .unwrap();
+                assert_eq!(metrics, (1_i64, "semantic".into(), 0.75_f64, 4_i64, 0.9_f64), "{tag}");
+                let embedding: (String, String) = sqlx_core::query_as::query_as("SELECT memory_id, embedding::text FROM memory_embeddings")
+                    .fetch_one(&scoped)
+                    .await
+                    .unwrap();
+                assert_eq!(embedding, ("01J00000000000000000000000".into(), "[0.1,0.2,0.3]".into()), "{tag}");
+                let entity: (String, String, String) = sqlx_core::query_as::query_as("SELECT memory_id, entity, entity_type FROM memory_entities")
+                    .fetch_one(&scoped)
+                    .await
+                    .unwrap();
+                assert_eq!(entity, ("01J00000000000000000000000".into(), "LocalHold".into(), "project".into()), "{tag}");
+                let audit: (String, String, Option<String>, serde_json::Value) =
+                    sqlx_core::query_as::query_as("SELECT memory_id, action, caller_agent, details FROM memory_audit_log")
+                        .fetch_one(&scoped)
+                        .await
+                        .unwrap();
+                assert_eq!(
+                    audit,
+                    (
+                        "01J00000000000000000000000".into(),
+                        "store".into(),
+                        Some("fixture".into()),
+                        serde_json::json!({"release":"beta"})
+                    ),
+                    "{tag}"
+                );
+                let scope: (String, String, Option<String>, serde_json::Value, serde_json::Value, Option<String>, serde_json::Value) = sqlx_core::query_as::query_as(
+                    "SELECT scope_key, display_name, description, aliases, matchers, parent, related
+                         FROM scope_registry WHERE scope_key = 'project/localhold'",
+                )
+                .fetch_one(&scoped)
+                .await
+                .unwrap();
+                assert_eq!(
+                    scope,
+                    (
+                        "project/localhold".into(),
+                        "LocalHold".into(),
+                        Some("fixture scope".into()),
+                        serde_json::json!(["localhold"]),
+                        serde_json::json!(["*/localhold"]),
+                        Some("org/gearbox".into()),
+                        serde_json::json!(["org/gearbox"])
+                    ),
+                    "{tag}"
+                );
+                let parent_scope: (String, Option<String>, serde_json::Value) =
+                    sqlx_core::query_as::query_as("SELECT scope_key, parent, related FROM scope_registry WHERE scope_key = 'org/gearbox'")
+                        .fetch_one(&scoped)
+                        .await
+                        .unwrap();
+                assert_eq!(parent_scope, ("org/gearbox".into(), None, serde_json::json!(["project/localhold"])), "{tag}");
+                let tombstone: (String, serde_json::Value, serde_json::Value, bool, Option<String>) = sqlx_core::query_as::query_as(
+                    "SELECT memory_id, provenance, access_policy, deleted_at = TIMESTAMPTZ '2026-07-10T00:00:06Z', deleted_by_principal FROM memory_tombstones",
+                )
+                .fetch_one(&scoped)
+                .await
+                .unwrap();
+                assert_eq!(
+                    tombstone,
+                    (
+                        "01J00000000000000000000001".into(),
+                        serde_json::json!({"source_agent":"fixture"}),
+                        serde_json::json!({"type":"public"}),
+                        true,
+                        Some("fixture-principal".into())
+                    ),
+                    "{tag}"
+                );
+                let metadata_details: (String, Option<String>, Option<String>, Option<String>, Option<String>, serde_json::Value, i64) =
+                    sqlx_core::query_as::query_as("SELECT memory_id, scope_key, summary, agent_label, created_by_principal, quality_flags, schema_version FROM memory_metadata")
+                        .fetch_one(&scoped)
+                        .await
+                        .unwrap();
+                assert_eq!(
+                    metadata_details,
+                    (
+                        "01J00000000000000000000000".into(),
+                        Some("project/localhold".into()),
+                        Some("fixture summary".into()),
+                        Some("fixture-agent".into()),
+                        Some("fixture-principal".into()),
+                        serde_json::json!(["fixture"]),
+                        1_i64
+                    ),
+                    "{tag}"
+                );
+
+                for (table, expected) in [
+                    ("memories", 2_i64),
+                    ("memory_embeddings", 1_i64),
+                    ("memory_audit_log", 1_i64),
+                    ("scope_registry", 2_i64),
+                    ("memory_tombstones", 1_i64),
+                ] {
+                    let count: i64 = sqlx::query_scalar(AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}"))).fetch_one(&scoped).await.unwrap();
+                    assert_eq!(count, expected, "{tag} {table} data should survive upgrade");
+                }
+                let retired_exists: bool = sqlx::query_scalar("SELECT to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL")
+                    .fetch_one(&scoped)
+                    .await
+                    .unwrap();
+                assert!(!retired_exists, "{tag}");
+                scoped.close().await;
+            })
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    async fn failed_published_postgres_upgrade_rolls_back_without_partial_schema() {
+        let fixture = postgres_fixture_sql("v0.1.0-beta.2-beta.3.postgres.sql");
+        with_isolated_postgres_schema("localhold_release_fixture_failed", true, |_admin, _schema, config| async move {
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+            let _corrupted = sqlx::query("UPDATE memory_v2_metadata SET schema_version = 99").execute(&scoped).await.unwrap();
+            scoped.close().await;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("unexpected schema_version"), "{error}");
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let state: (bool, bool, i64) = sqlx_core::query_as::query_as(
+                "SELECT
+                   to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL,
+                   to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL,
+                   (SELECT COUNT(*) FROM localhold_migrations)",
+            )
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            assert_eq!(state, (true, false, 2_i64), "failed migration must roll back DDL and ledger writes");
+            scoped.close().await;
+        })
+        .await;
+    }
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    #[expect(clippy::excessive_nesting, reason = "the compact adversarial matrix runs each mutation in an isolated schema")]
+    async fn published_postgres_upgrade_rejects_wrong_legacy_column_contracts_unchanged() {
+        for (label, alteration, expected) in [
+            (
+                "wrong_type",
+                "ALTER TABLE memory_v2_metadata ALTER COLUMN summary TYPE VARCHAR(255)",
+                "unexpected column contract",
+            ),
+            (
+                "null_schema_version",
+                "ALTER TABLE memory_v2_metadata ALTER COLUMN schema_version DROP NOT NULL; UPDATE memory_v2_metadata SET schema_version = NULL",
+                "unexpected column contract",
+            ),
+            ("extra_column", "ALTER TABLE memory_v2_metadata ADD COLUMN unexpected TEXT", "unexpected column contract"),
+            (
+                "hash_index",
+                "DROP INDEX idx_memory_v2_metadata_scope_key; CREATE INDEX idx_memory_v2_metadata_scope_key ON memory_v2_metadata USING hash (scope_key)",
+                "unexpected constraints or indexes",
+            ),
+        ] {
+            let fixture = postgres_fixture_sql("v0.1.0-beta.2-beta.3.postgres.sql");
+            with_isolated_postgres_schema("localhold_release_fixture_contract", true, |_admin, _schema, config| async move {
+                let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+                let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+                let _altered = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(alteration.to_owned())).execute(&scoped).await.unwrap();
+                scoped.close().await;
+
+                let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+                assert!(error.to_string().contains(expected), "{label}: {error}");
+                let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+                let state: (bool, bool, i64, String) = sqlx_core::query_as::query_as(
+                    "SELECT
+                       to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL,
+                       to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL,
+                       (SELECT COUNT(*) FROM localhold_migrations),
+                       (SELECT content FROM memories WHERE id = '01J00000000000000000000000')",
+                )
+                .fetch_one(&scoped)
+                .await
+                .unwrap();
+                assert_eq!(state, (true, false, 2_i64, "published fixture memory".into()), "{label}");
+                scoped.close().await;
+            })
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    async fn published_postgres_upgrade_lock_serializes_concurrent_malformed_writer() {
+        let fixture = postgres_fixture_sql("v0.1.0-beta.2-beta.3.postgres.sql");
+        with_isolated_postgres_schema("localhold_release_fixture_lock", true, |_admin, _schema, config| async move {
+            let scoped = PgPoolOptions::new().max_connections(2).connect(&config.url).await.unwrap();
+            let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+            let mut migration = scoped.begin().await.unwrap();
+            lock_published_metadata(&mut migration).await.unwrap();
+
+            let mut writer = scoped.acquire().await.unwrap();
+            let _timeout = sqlx::query("SELECT set_config('lock_timeout', '100ms', false)").execute(&mut *writer).await.unwrap();
+            let error = sqlx::query("UPDATE memory_v2_metadata SET quality_flags = '[7]'::jsonb")
+                .execute(&mut *writer)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("lock timeout"), "{error}");
+            drop(writer);
+
+            migrate_published_v2_metadata(&mut migration).await.unwrap();
+            migration.commit().await.unwrap();
+            let state: (bool, bool, serde_json::Value, i64) = sqlx_core::query_as::query_as(
+                "SELECT
+                   to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL,
+                   to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL,
+                   (SELECT quality_flags FROM memory_metadata),
+                   (SELECT COUNT(*) FROM memories)",
+            )
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            assert_eq!(state, (false, true, serde_json::json!(["fixture"]), 2_i64));
+            scoped.close().await;
+        })
+        .await;
+    }
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    #[expect(clippy::excessive_nesting, reason = "the compact adversarial matrix runs each payload in an isolated schema")]
+    async fn published_postgres_upgrade_rejects_malformed_quality_flags_unchanged() {
+        for (label, corrupted, expected) in [
+            ("object", "'{}'::jsonb", serde_json::json!({})),
+            ("numeric-element", "'[\"fixture\",7]'::jsonb", serde_json::json!(["fixture", 7_i64])),
+            ("object-element", "'[{\"flag\":\"fixture\"}]'::jsonb", serde_json::json!([{"flag":"fixture"}])),
+        ] {
+            let fixture = postgres_fixture_sql("v0.1.0-beta.2-beta.3.postgres.sql");
+            with_isolated_postgres_schema("localhold_release_fixture_quality", true, |_admin, _schema, config| async move {
+                let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+                let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+                let statement = AssertSqlSafe(format!("UPDATE memory_v2_metadata SET quality_flags = {corrupted}"));
+                let _corrupted = sqlx_core::raw_sql::raw_sql(statement).execute(&scoped).await.unwrap();
+                scoped.close().await;
+
+                let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+                assert!(error.to_string().contains("malformed quality_flags"), "{label}: {error}");
+                let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+                let retained: serde_json::Value = sqlx::query_scalar("SELECT quality_flags FROM memory_v2_metadata").fetch_one(&scoped).await.unwrap();
+                assert_eq!(retained, expected, "{label}");
+                scoped.close().await;
+            })
+            .await;
+        }
+    }
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    async fn published_postgres_upgrade_rolls_back_after_metadata_rename() {
+        let fixture = postgres_fixture_sql("v0.1.0-beta.2-beta.3.postgres.sql");
+        with_isolated_postgres_schema("localhold_release_fixture_rename_rollback", true, |_admin, _schema, config| async move {
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+            let _conflict = sqlx::query("CREATE INDEX idx_memory_metadata_scope_key ON memories(content)")
+                .execute(&scoped)
+                .await
+                .unwrap();
+            scoped.close().await;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("idx_memory_metadata_scope_key"), "{error}");
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let state: (bool, bool, i64, serde_json::Value) = sqlx_core::query_as::query_as(
+                "SELECT
+                   to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL,
+                   to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL,
+                   (SELECT COUNT(*) FROM localhold_migrations),
+                   (SELECT quality_flags FROM memory_v2_metadata)",
+            )
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            assert_eq!(state, (true, false, 2_i64, serde_json::json!(["fixture"])));
+            scoped.close().await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    async fn conflicting_published_postgres_metadata_tables_are_left_untouched() {
+        let fixture = postgres_fixture_sql("v0.1.0-beta.2-beta.3.postgres.sql");
+        with_isolated_postgres_schema("localhold_release_fixture_conflict", true, |_admin, _schema, config| async move {
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+            let _conflict = sqlx::query("CREATE TABLE memory_metadata (memory_id TEXT PRIMARY KEY)").execute(&scoped).await.unwrap();
+            scoped.close().await;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("both memory_v2_metadata and memory_metadata"), "{error}");
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let state: (bool, bool, i64) = sqlx_core::query_as::query_as(
+                "SELECT
+                   to_regclass(format('%I.%I', current_schema(), 'memory_v2_metadata')) IS NOT NULL,
+                   to_regclass(format('%I.%I', current_schema(), 'memory_metadata')) IS NOT NULL,
+                   (SELECT COUNT(*) FROM localhold_migrations)",
+            )
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            assert_eq!(state, (true, true, 2_i64), "conflict refusal must not mutate either table or the ledger");
+            scoped.close().await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    async fn published_postgres_fixture_with_newer_ledger_is_refused_unchanged() {
+        let fixture = postgres_fixture_sql("v0.2.0.postgres.sql");
+        with_isolated_postgres_schema("localhold_release_fixture_newer", true, |_admin, _schema, config| async move {
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let _built = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(fixture)).execute(&scoped).await.unwrap();
+            let future = CURRENT_SCHEMA_VERSION + 1_i64;
+            let _newer = sqlx::query("INSERT INTO localhold_migrations(version, name) VALUES ($1, 'future')")
+                .bind(future)
+                .execute(&scoped)
+                .await
+                .unwrap();
+            scoped.close().await;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains("migration metadata is not current"), "{error}");
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM localhold_migrations WHERE version = $1")
+                .bind(future)
+                .fetch_one(&scoped)
+                .await
+                .unwrap();
+            assert_eq!(retained, 1_i64, "newer schema refusal must not mutate the source");
+            scoped.close().await;
         })
         .await;
     }

@@ -11,6 +11,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:
+    from script.database_fixtures import FixtureError, validate_manifest
+except ModuleNotFoundError:
+    from database_fixtures import FixtureError, validate_manifest
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SEMVER_TAG = re.compile(
@@ -112,6 +117,7 @@ def validate(tag: str | None) -> None:
     """Validate metadata shared by local and GitHub release workflows."""
     resolved, version = resolve_tag(tag)
     changelog_notes(version)
+    validate_manifest(resolved)
 
     installation = (REPO_ROOT / "docs" / "installation.md").read_text(
         encoding="utf-8"
@@ -161,7 +167,7 @@ def main() -> int:
             else:
                 args.output.parent.mkdir(parents=True, exist_ok=True)
                 args.output.write_text(notes, encoding="utf-8")
-    except (ReleaseError, subprocess.CalledProcessError, OSError, KeyError, json.JSONDecodeError) as error:
+    except (FixtureError, ReleaseError, subprocess.CalledProcessError, OSError, KeyError, json.JSONDecodeError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     return 0

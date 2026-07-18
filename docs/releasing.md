@@ -6,12 +6,18 @@ the release workflow; maintainers do not upload locally built binaries.
 ## Prepare The Release
 
 1. Update the package version in `Cargo.toml` and refresh `Cargo.lock`.
-2. Move user-visible changes from `[Unreleased]` to a dated
+2. Add deterministic SQLite and PostgreSQL fixture builders for the release to
+   `tests/fixtures/database-upgrades/manifest.json`, including source provenance
+   and effective SHA-256 checksums. In the same reviewed change, add the tag to
+   `PUBLISHED_DATABASE_RELEASES` in `script/database_fixtures.py`. The trusted
+   inventory and manifest must contain exactly the same tags; missing or extra
+   releases fail `script/release.py validate`.
+3. Move user-visible changes from `[Unreleased]` to a dated
    `[VERSION] - YYYY-MM-DD` section in `CHANGELOG.md`.
-3. Update the tagged source-install example in
+4. Update the tagged source-install example in
    [Installation](installation.md).
-4. Run `python3 script/release.py validate vVERSION` and `just check`.
-5. Open a release preparation pull request. Merge only after required CI is
+5. Run `python3 script/release.py validate vVERSION` and `just check`.
+6. Open a release preparation pull request. Merge only after required CI is
    green and the cloud bot approves the latest head commit, following
    [the contributor workflow](../CONTRIBUTING.md).
 

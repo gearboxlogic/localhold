@@ -1302,12 +1302,18 @@ mod tests {
             .await
             .unwrap();
 
-        let _future = query("INSERT INTO localhold_migrations (version, name) VALUES (4, 'future_migration')")
+        let future_version = PostgresStore::CURRENT_SCHEMA_VERSION + 1_i64;
+        let _future = query("INSERT INTO localhold_migrations (version, name) VALUES ($1, 'future_migration')")
+            .bind(future_version)
             .execute(&scoped)
             .await
             .unwrap();
         let future = postgres_check(&config, &clock).await;
-        let _removed_future = query("DELETE FROM localhold_migrations WHERE version = 4").execute(&scoped).await.unwrap();
+        let _removed_future = query("DELETE FROM localhold_migrations WHERE version = $1")
+            .bind(future_version)
+            .execute(&scoped)
+            .await
+            .unwrap();
 
         let _wrong = query("UPDATE localhold_migrations SET name = 'runtime_ignored_identity' WHERE version = 2")
             .execute(&scoped)

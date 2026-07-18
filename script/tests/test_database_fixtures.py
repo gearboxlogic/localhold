@@ -11,10 +11,12 @@ from unittest import mock
 
 import script.database_fixtures as database_fixtures
 from script.database_fixtures import (
+    current_release_tag,
     FIXTURE_ROOT,
     FixtureError,
     expand_fixture,
     sha256,
+    validate_repository_manifest,
     validate_manifest,
 )
 
@@ -42,12 +44,12 @@ class DatabaseFixtureTests(unittest.TestCase):
         )
         return result.stdout.strip()
 
-    def _future_release(self, manifest: dict[str, object]) -> dict[str, object]:
+    def _future_release(self, manifest: dict[str, object], tag: str = "v0.3.0") -> dict[str, object]:
         releases = manifest["releases"]
         assert isinstance(releases, list)
         future = copy.deepcopy(releases[-1])
         assert isinstance(future, dict)
-        future["tag"] = "v0.3.0"
+        future["tag"] = tag
         commit = database_fixtures._git_commit("HEAD", database_fixtures.REPO_ROOT)
         self.assertIsNotNone(commit)
         future["commit"] = commit
@@ -76,7 +78,26 @@ class DatabaseFixtureTests(unittest.TestCase):
         self.fail(f"Git history has no ancestor with different source bytes for {source}")
 
     def test_repository_manifest_and_checksums_are_valid(self) -> None:
-        validate_manifest("v0.2.0")
+        validate_repository_manifest()
+
+    def test_repository_validation_tracks_cargo_release_candidate_without_test_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cargo_manifest_path = root / "Cargo.toml"
+            tag = "v0.3.0-rc.1+build.7"
+            cargo_manifest_path.write_text('[package]\nname = "localhold"\nversion = "0.3.0-rc.1+build.7"\n', encoding="utf-8")
+            manifest_path, manifest = self._copied_manifest(directory)
+            releases = manifest["releases"]
+            assert isinstance(releases, list)
+            releases.append(self._future_release(manifest, tag))
+            self._write_manifest(manifest_path, manifest)
+
+            self.assertEqual(current_release_tag(cargo_manifest_path), tag)
+            validate_repository_manifest(
+                repo_root=database_fixtures.REPO_ROOT,
+                manifest_path=manifest_path,
+                cargo_manifest_path=cargo_manifest_path,
+            )
 
     def test_requested_release_must_have_fixture_coverage(self) -> None:
         with self.assertRaisesRegex(FixtureError, "missing for release v9.9.9"):
@@ -209,6 +230,35 @@ class DatabaseFixtureTests(unittest.TestCase):
             releases.append(future)
             self._write_manifest(manifest_path, manifest)
             validate_manifest("v0.3.0", manifest_path=manifest_path)
+
+    def test_candidate_cannot_enter_published_inventory_before_tag_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path, manifest = self._copied_manifest(directory)
+            future = self._future_release(manifest)
+            releases = manifest["releases"]
+            assert isinstance(releases, list)
+            releases.append(future)
+            self._write_manifest(manifest_path, manifest)
+            tag = "v0.3.0"
+            exact_tag_ref = f"refs/tags/{tag}"
+            requested_refs: list[str] = []
+            real_git_commit = database_fixtures._git_commit
+
+            def missing_candidate_tag(ref: str, repo_root: Path) -> str | None:
+                requested_refs.append(ref)
+                if ref == exact_tag_ref:
+                    return None
+                return real_git_commit(ref, repo_root)
+
+            published = database_fixtures.PUBLISHED_DATABASE_RELEASES | {tag}
+            with (
+                mock.patch("script.database_fixtures.PUBLISHED_DATABASE_RELEASES", published),
+                mock.patch("script.database_fixtures._git_commit", side_effect=missing_candidate_tag),
+            ):
+                with self.assertRaisesRegex(FixtureError, "historical tag is unavailable"):
+                    validate_manifest(tag, manifest_path=manifest_path)
+            self.assertIn(exact_tag_ref, requested_refs)
+            self.assertNotIn("HEAD", requested_refs)
 
     def test_pretag_release_rejects_existing_nonancestor_commit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

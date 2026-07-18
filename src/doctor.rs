@@ -752,7 +752,7 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
         }
     }
     let published_metadata_upgrade = if config.database.postgres.auto_migrate {
-        match crate::store::validate_published_v2_metadata_upgrade(&pool).await {
+        match crate::store::validate_published_v2_metadata_upgrade(&pool, config.database.postgres.migration_lock_timeout_secs).await {
             Ok(published_metadata_upgrade) => published_metadata_upgrade,
             Err(_error) => {
                 pool.close().await;

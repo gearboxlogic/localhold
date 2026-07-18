@@ -29,8 +29,9 @@ a release explicitly documents a rollback procedure.
 Back up the active store before upgrades, storage migrations, bulk maintenance,
 or embedding-provider changes. See [Operations](operations.md).
 
-The published `v0.1.0-beta.2` and `v0.1.0-beta.3` schemas used the table name
-`memory_v2_metadata`. Normal startup migrates that table to `memory_metadata`
+The published `v0.1.0-beta.1`, `v0.1.0-beta.2`, and `v0.1.0-beta.3` schemas
+used the table name `memory_v2_metadata`. Normal startup migrates that table
+to `memory_metadata`
 without replacing memory content or metadata relationships. SQLite retains a
 verified, mode-`0600` pre-upgrade backup first; PostgreSQL performs the schema
 change in its migration transaction and relies on the operator's required

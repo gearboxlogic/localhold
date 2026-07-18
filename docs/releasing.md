@@ -8,10 +8,13 @@ the release workflow; maintainers do not upload locally built binaries.
 1. Update the package version in `Cargo.toml` and refresh `Cargo.lock`.
 2. Add deterministic SQLite and PostgreSQL fixture builders for the release to
    `tests/fixtures/database-upgrades/manifest.json`, including source provenance
-   and effective SHA-256 checksums. In the same reviewed change, add the tag to
-   `PUBLISHED_DATABASE_RELEASES` in `script/database_fixtures.py`. The trusted
-   inventory and manifest must contain exactly the same tags; missing or extra
-   releases fail `script/release.py validate`.
+   and effective SHA-256 checksums. Do not add the candidate tag to
+   `PUBLISHED_DATABASE_RELEASES` yet: that immutable inventory contains only
+   releases whose exact tag already exists. `script/release.py validate vVERSION`
+   explicitly authorizes the one manifest candidate matching the current package
+   version and verifies its source against HEAD before the tag exists. Missing
+   published releases, unrequested candidates, and extra manifest entries still
+   fail validation.
 3. Move user-visible changes from `[Unreleased]` to a dated
    `[VERSION] - YYYY-MM-DD` section in `CHANGELOG.md`.
 4. Update the tagged source-install example in
@@ -44,6 +47,13 @@ The tag must point to a commit contained in `main`. The release workflow then:
 6. extracts and smoke-tests all archives;
 7. creates `SHA256SUMS`; and
 8. publishes a GitHub prerelease when the version contains a prerelease suffix.
+
+After the release is published and the exact tag is available, open a focused
+follow-up pull request that adds the tag to `PUBLISHED_DATABASE_RELEASES`.
+Run `python3 script/release.py validate vVERSION` with the tag fetched locally;
+the candidate is now historical and must validate from `refs/tags/vVERSION`,
+never from HEAD. Do not add a candidate to the published inventory before its
+tag exists.
 
 After a successful release workflow, `Published Release Smoke` runs without a
 source checkout. It downloads the public assets on clean Linux and Windows

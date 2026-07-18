@@ -12,17 +12,12 @@ import sys
 from pathlib import Path
 
 try:
-    from script.database_fixtures import FixtureError, validate_manifest
+    from script.database_fixtures import SEMVER_TAG, FixtureError, validate_manifest
 except ModuleNotFoundError:
-    from database_fixtures import FixtureError, validate_manifest
+    from database_fixtures import SEMVER_TAG, FixtureError, validate_manifest
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SEMVER_TAG = re.compile(
-    r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
-    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
-    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
-)
 PACKAGE_FILES = (
     "README.md",
     "CHANGELOG.md",

@@ -11,7 +11,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, types::ToSql};
 use sqlx_core::{Error as SqlxError, query::query, query_scalar::query_scalar, row::Row as _, sql_str::AssertSqlSafe, transaction::Transaction, types::Json};
-use sqlx_postgres::{PgPool, PgPoolOptions, PgRow, Postgres};
+use sqlx_postgres::{PgConnection, PgPool, PgPoolOptions, PgRow, Postgres};
 
 use super::{
     EmbeddingProfile, PostgresStore, SqliteStore,
@@ -1972,20 +1972,30 @@ pub(crate) async fn validate_existing_postgres_schema(
     current_schema_only: bool,
     include_migration_metadata: bool,
 ) -> Result<(), StoreError> {
-    reject_retired_postgres_schema(pool, current_schema_only).await?;
-    if include_migration_metadata && postgres_table_exists(pool, POSTGRES_MIGRATIONS_TABLE, current_schema_only).await? {
-        validate_postgres_table_kind(pool, POSTGRES_MIGRATIONS_TABLE, current_schema_only).await?;
+    let mut connection = pool.acquire().await?;
+    validate_existing_postgres_schema_connection(&mut connection, embedding_dimensions, current_schema_only, include_migration_metadata).await
+}
+
+async fn validate_existing_postgres_schema_connection(
+    connection: &mut PgConnection,
+    embedding_dimensions: usize,
+    current_schema_only: bool,
+    include_migration_metadata: bool,
+) -> Result<(), StoreError> {
+    reject_retired_postgres_schema_connection(connection, current_schema_only).await?;
+    if include_migration_metadata && postgres_table_exists_connection(connection, POSTGRES_MIGRATIONS_TABLE, current_schema_only).await? {
+        validate_postgres_table_kind_connection(connection, POSTGRES_MIGRATIONS_TABLE, current_schema_only).await?;
         for expectation in POSTGRES_REQUIRED_COLUMNS.iter().filter(|expectation| expectation.table == POSTGRES_MIGRATIONS_TABLE) {
-            validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
+            validate_postgres_column_type_connection(connection, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
         }
-        validate_postgres_table_contracts(pool, POSTGRES_MIGRATIONS_TABLE, current_schema_only).await?;
-        validate_postgres_required_keys(pool, POSTGRES_MIGRATIONS_TABLE, current_schema_only).await?;
+        validate_postgres_table_contracts_connection(connection, POSTGRES_MIGRATIONS_TABLE, current_schema_only).await?;
+        validate_postgres_required_keys_connection(connection, POSTGRES_MIGRATIONS_TABLE, current_schema_only).await?;
     }
 
     let mut existing = HashSet::new();
     for table in POSTGRES_USER_TABLES {
-        if postgres_table_exists(pool, table, current_schema_only).await? {
-            validate_postgres_table_kind(pool, table, current_schema_only).await?;
+        if postgres_table_exists_connection(connection, table, current_schema_only).await? {
+            validate_postgres_table_kind_connection(connection, table, current_schema_only).await?;
             let _inserted = existing.insert(*table);
         }
     }
@@ -2002,16 +2012,23 @@ pub(crate) async fn validate_existing_postgres_schema(
     }
 
     for expectation in POSTGRES_REQUIRED_COLUMNS.iter().filter(|expectation| expectation.table != POSTGRES_MIGRATIONS_TABLE) {
-        validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
+        validate_postgres_column_type_connection(connection, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
     }
     for expectation in POSTGRES_OPTIONAL_COLUMNS {
-        validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
+        validate_optional_postgres_column_type_connection(connection, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
     }
     for table in POSTGRES_USER_TABLES {
-        validate_postgres_table_contracts(pool, table, current_schema_only).await?;
-        validate_postgres_required_keys(pool, table, current_schema_only).await?;
+        validate_postgres_table_contracts_connection(connection, table, current_schema_only).await?;
+        validate_postgres_required_keys_connection(connection, table, current_schema_only).await?;
     }
-    validate_postgres_column_type(pool, "memory_embeddings", "embedding", &format!("vector({embedding_dimensions})"), current_schema_only).await?;
+    validate_postgres_column_type_connection(
+        connection,
+        "memory_embeddings",
+        "embedding",
+        &format!("vector({embedding_dimensions})"),
+        current_schema_only,
+    )
+    .await?;
     Ok(())
 }
 
@@ -2027,9 +2044,11 @@ pub(crate) async fn validate_ready_postgres_schema(
             "PostgreSQL database is not initialized; enable database.postgres.auto_migrate or start LocalHold once with migrations enabled".into(),
         ));
     }
+    let mut connection = pool.acquire().await?;
     for expectation in POSTGRES_OPTIONAL_COLUMNS {
-        validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
+        validate_postgres_column_type_connection(&mut connection, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
     }
+    drop(connection);
     validate_postgres_runtime_relationships(pool, current_schema_only).await?;
     if !postgres_runtime_indexes_compatible(pool, current_schema_only, false).await? {
         return Err(StoreError::Conflict("PostgreSQL managed schema indexes do not match runtime requirements".into()));
@@ -2038,6 +2057,11 @@ pub(crate) async fn validate_ready_postgres_schema(
 }
 
 pub(crate) async fn postgres_runtime_indexes_compatible(pool: &PgPool, current_schema_only: bool, allow_absent: bool) -> Result<bool, SqlxError> {
+    let mut connection = pool.acquire().await?;
+    postgres_runtime_indexes_compatible_connection(&mut connection, current_schema_only, allow_absent).await
+}
+
+async fn postgres_runtime_indexes_compatible_connection(connection: &mut PgConnection, current_schema_only: bool, allow_absent: bool) -> Result<bool, SqlxError> {
     let canonical: bool = query_scalar(
         r#"SELECT COALESCE(bool_and(
             ($2 AND indexes.oid IS NULL) OR COALESCE(
@@ -2086,15 +2110,15 @@ pub(crate) async fn postgres_runtime_indexes_compatible(pool: &PgPool, current_s
     )
     .bind(current_schema_only)
     .bind(allow_absent)
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?;
     if !canonical {
         return Ok(false);
     }
-    postgres_restrictive_indexes_compatible(pool, current_schema_only).await
+    postgres_restrictive_indexes_compatible_connection(connection, current_schema_only).await
 }
 
-async fn postgres_restrictive_indexes_compatible(pool: &PgPool, current_schema_only: bool) -> Result<bool, SqlxError> {
+async fn postgres_restrictive_indexes_compatible_connection(connection: &mut PgConnection, current_schema_only: bool) -> Result<bool, SqlxError> {
     let rows = query(
         "SELECT managed.relname AS table_name,
                 restrictive.indisexclusion,
@@ -2143,7 +2167,7 @@ async fn postgres_restrictive_indexes_compatible(pool: &PgPool, current_schema_o
            AND (restrictive.indisunique OR restrictive.indisexclusion)",
     )
     .bind(current_schema_only)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     for row in rows {
@@ -2169,59 +2193,82 @@ async fn postgres_restrictive_indexes_compatible(pool: &PgPool, current_schema_o
     Ok(true)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PostgresRelationshipValidationMode {
+    Runtime,
+    Migration,
+    PublishedMigration,
+}
+
 pub(crate) async fn validate_postgres_runtime_relationships(pool: &PgPool, current_schema_only: bool) -> Result<(), StoreError> {
-    validate_postgres_runtime_relationships_mode(pool, current_schema_only, false, false).await
+    let mut connection = pool.acquire().await?;
+    validate_postgres_runtime_relationships_mode_connection(&mut connection, current_schema_only, PostgresRelationshipValidationMode::Runtime).await
 }
 
 pub(crate) async fn validate_postgres_runtime_relationships_before_migration(pool: &PgPool, current_schema_only: bool) -> Result<(), StoreError> {
-    validate_postgres_runtime_relationships_mode(pool, current_schema_only, true, false).await
+    let mut connection = pool.acquire().await?;
+    validate_postgres_runtime_relationships_mode_connection(&mut connection, current_schema_only, PostgresRelationshipValidationMode::Migration).await
 }
 
-pub(crate) async fn validate_postgres_published_upgrade_relationships(pool: &PgPool, current_schema_only: bool) -> Result<(), StoreError> {
-    validate_postgres_runtime_relationships_mode(pool, current_schema_only, true, true).await
-}
-
-async fn validate_postgres_runtime_relationships_mode(
-    pool: &PgPool,
+pub(crate) async fn validate_postgres_runtime_relationships_before_migration_connection(
+    connection: &mut PgConnection,
     current_schema_only: bool,
-    allow_legacy_audit_fk: bool,
     allow_published_metadata: bool,
 ) -> Result<(), StoreError> {
+    let mode = if allow_published_metadata {
+        PostgresRelationshipValidationMode::PublishedMigration
+    } else {
+        PostgresRelationshipValidationMode::Migration
+    };
+    validate_postgres_runtime_relationships_mode_connection(connection, current_schema_only, mode).await
+}
+
+async fn validate_postgres_runtime_relationships_mode_connection(
+    connection: &mut PgConnection,
+    current_schema_only: bool,
+    mode: PostgresRelationshipValidationMode,
+) -> Result<(), StoreError> {
+    let allow_legacy_audit_fk = mode != PostgresRelationshipValidationMode::Runtime;
+    let allow_published_metadata = mode == PostgresRelationshipValidationMode::PublishedMigration;
+    let allow_absent_child_tables = mode != PostgresRelationshipValidationMode::Runtime;
+    let mut required_foreign_key_count = 0_i64;
     for expected in POSTGRES_REQUIRED_FOREIGN_KEYS {
         let mut expectation = *expected;
         if allow_published_metadata && expectation.child_table == "memory_metadata" {
             expectation.child_table = "memory_v2_metadata";
         }
-        if !postgres_foreign_key_matches(pool, expectation, current_schema_only).await? {
+        if allow_absent_child_tables && !postgres_table_exists_connection(connection, expectation.child_table, current_schema_only).await? {
+            continue;
+        }
+        required_foreign_key_count = required_foreign_key_count.saturating_add(1_i64);
+        if !postgres_foreign_key_matches_connection(connection, expectation, current_schema_only).await? {
             return Err(StoreError::Conflict(format!(
                 "PostgreSQL relational constraint {}.{} does not match runtime cascade requirements",
                 expectation.child_table, expectation.child_column
             )));
         }
     }
-    let audit_foreign_key_count = postgres_foreign_key_count_to(pool, "memory_audit_log", "memories", current_schema_only).await?;
+    let audit_foreign_key_count = postgres_foreign_key_count_to_connection(connection, "memory_audit_log", "memories", current_schema_only).await?;
     if !allow_legacy_audit_fk && audit_foreign_key_count != 0_i64 {
         return Err(StoreError::Conflict(
             "PostgreSQL relational constraint on memory_audit_log is incompatible with retained history requirements".into(),
         ));
     }
-    if postgres_foreign_key_count_to(pool, "memory_tombstones", "memories", current_schema_only).await? != 0_i64 {
+    if postgres_foreign_key_count_to_connection(connection, "memory_tombstones", "memories", current_schema_only).await? != 0_i64 {
         return Err(StoreError::Conflict(
             "PostgreSQL relational constraint on memory_tombstones is incompatible with retained history requirements".into(),
         ));
     }
     let metadata_table = if allow_published_metadata { "memory_v2_metadata" } else { "memory_metadata" };
-    let foreign_key_count = postgres_managed_foreign_key_count(pool, current_schema_only, metadata_table).await?;
-    let expected_count = i64::try_from(POSTGRES_REQUIRED_FOREIGN_KEYS.len())
-        .unwrap_or(i64::MAX)
-        .saturating_add(if allow_legacy_audit_fk { audit_foreign_key_count } else { 0_i64 });
+    let foreign_key_count = postgres_managed_foreign_key_count_connection(connection, current_schema_only, metadata_table).await?;
+    let expected_count = required_foreign_key_count.saturating_add(if allow_legacy_audit_fk { audit_foreign_key_count } else { 0_i64 });
     if foreign_key_count != expected_count {
         return Err(StoreError::Conflict("PostgreSQL managed schema contains unexpected foreign key constraints".into()));
     }
     Ok(())
 }
 
-async fn postgres_managed_foreign_key_count(pool: &PgPool, current_schema_only: bool, metadata_table: &str) -> Result<i64, StoreError> {
+async fn postgres_managed_foreign_key_count_connection(connection: &mut PgConnection, current_schema_only: bool, metadata_table: &str) -> Result<i64, StoreError> {
     query_scalar(
         "SELECT COUNT(*)
          FROM pg_constraint AS foreign_key
@@ -2239,12 +2286,12 @@ async fn postgres_managed_foreign_key_count(pool: &PgPool, current_schema_only: 
     )
     .bind(current_schema_only)
     .bind(metadata_table)
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await
     .map_err(StoreError::from)
 }
 
-async fn postgres_foreign_key_matches(pool: &PgPool, expectation: PostgresForeignKeyExpectation, current_schema_only: bool) -> Result<bool, StoreError> {
+async fn postgres_foreign_key_matches_connection(connection: &mut PgConnection, expectation: PostgresForeignKeyExpectation, current_schema_only: bool) -> Result<bool, StoreError> {
     query_scalar(
         "SELECT EXISTS(
             SELECT 1
@@ -2264,12 +2311,12 @@ async fn postgres_foreign_key_matches(pool: &PgPool, expectation: PostgresForeig
     .bind(expectation.parent_column)
     .bind(expectation.delete_action)
     .bind(current_schema_only)
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await
     .map_err(StoreError::from)
 }
 
-async fn postgres_foreign_key_count_to(pool: &PgPool, child_table: &str, parent_table: &str, current_schema_only: bool) -> Result<i64, StoreError> {
+async fn postgres_foreign_key_count_to_connection(connection: &mut PgConnection, child_table: &str, parent_table: &str, current_schema_only: bool) -> Result<i64, StoreError> {
     query_scalar(
         "SELECT COUNT(*)
          FROM pg_constraint AS foreign_key
@@ -2280,9 +2327,15 @@ async fn postgres_foreign_key_count_to(pool: &PgPool, child_table: &str, parent_
     .bind(child_table)
     .bind(parent_table)
     .bind(current_schema_only)
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await
     .map_err(StoreError::from)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PresentPostgresVectorPolicy {
+    ValidateDimensions(usize),
+    Rebuild,
 }
 
 /// Validate every managed `PostgreSQL` table that is already present while
@@ -2293,7 +2346,15 @@ pub(crate) async fn validate_present_postgres_schema(
     current_schema_only: bool,
     include_migration_metadata: bool,
 ) -> Result<(), StoreError> {
-    validate_present_postgres_schema_inner(pool, embedding_dimensions, current_schema_only, include_migration_metadata, false).await
+    let mut connection = pool.acquire().await?;
+    validate_present_postgres_schema_connection(
+        &mut connection,
+        current_schema_only,
+        include_migration_metadata,
+        false,
+        PresentPostgresVectorPolicy::ValidateDimensions(embedding_dimensions),
+    )
+    .await
 }
 
 /// Validate all present managed objects while allowing the separately
@@ -2304,44 +2365,73 @@ pub(crate) async fn validate_present_postgres_schema_for_published_upgrade(
     current_schema_only: bool,
     include_migration_metadata: bool,
 ) -> Result<(), StoreError> {
-    validate_present_postgres_schema_inner(pool, embedding_dimensions, current_schema_only, include_migration_metadata, true).await
+    let mut connection = pool.acquire().await?;
+    validate_present_postgres_schema_connection(
+        &mut connection,
+        current_schema_only,
+        include_migration_metadata,
+        true,
+        PresentPostgresVectorPolicy::ValidateDimensions(embedding_dimensions),
+    )
+    .await
 }
 
-async fn validate_present_postgres_schema_inner(
-    pool: &PgPool,
-    embedding_dimensions: usize,
+pub(crate) async fn validate_present_postgres_schema_connection(
+    connection: &mut PgConnection,
     current_schema_only: bool,
     include_migration_metadata: bool,
     allow_published_metadata: bool,
+    vector_policy: PresentPostgresVectorPolicy,
 ) -> Result<(), StoreError> {
     if !allow_published_metadata {
-        reject_retired_postgres_schema(pool, current_schema_only).await?;
+        reject_retired_postgres_schema_connection(connection, current_schema_only).await?;
     }
     for table in std::iter::once(&POSTGRES_MIGRATIONS_TABLE)
         .filter(|_| include_migration_metadata)
         .chain(POSTGRES_USER_TABLES.iter())
     {
-        if !postgres_table_exists(pool, table, current_schema_only).await? {
+        if !postgres_table_exists_connection(connection, table, current_schema_only).await? {
             continue;
         }
-        validate_postgres_table_kind(pool, table, current_schema_only).await?;
+        validate_postgres_table_kind_connection(connection, table, current_schema_only).await?;
         for expectation in POSTGRES_REQUIRED_COLUMNS.iter().filter(|expectation| expectation.table == *table) {
             if allow_published_metadata && expectation.table == "memories" && expectation.column == "record_revision" {
-                validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
+                validate_optional_postgres_column_type_connection(connection, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
                 continue;
             }
-            validate_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
+            validate_postgres_column_type_connection(connection, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
         }
         for expectation in POSTGRES_OPTIONAL_COLUMNS.iter().filter(|expectation| expectation.table == *table) {
-            validate_optional_postgres_column_type(pool, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
+            validate_optional_postgres_column_type_connection(connection, expectation.table, expectation.column, expectation.formatted_type, current_schema_only).await?;
         }
-        validate_postgres_table_contracts_inner(pool, table, current_schema_only, allow_published_metadata).await?;
-        validate_postgres_required_keys(pool, table, current_schema_only).await?;
+        validate_postgres_table_contracts_inner_connection(connection, table, current_schema_only, allow_published_metadata).await?;
+        validate_postgres_required_keys_connection(connection, table, current_schema_only).await?;
     }
-    if postgres_table_exists(pool, "memory_embeddings", current_schema_only).await? {
-        validate_postgres_column_type(pool, "memory_embeddings", "embedding", &format!("vector({embedding_dimensions})"), current_schema_only).await?;
+    if postgres_table_exists_connection(connection, "memory_embeddings", current_schema_only).await? {
+        match vector_policy {
+            PresentPostgresVectorPolicy::ValidateDimensions(embedding_dimensions) => {
+                validate_postgres_column_type_connection(
+                    connection,
+                    "memory_embeddings",
+                    "embedding",
+                    &format!("vector({embedding_dimensions})"),
+                    current_schema_only,
+                )
+                .await?;
+            }
+            PresentPostgresVectorPolicy::Rebuild => {
+                let actual = postgres_column_type_connection(connection, "memory_embeddings", "embedding", current_schema_only).await?;
+                if actual.as_deref().and_then(parse_pgvector_dimensions).is_none() {
+                    return Err(StoreError::Conflict(format!(
+                        "PostgreSQL target column memory_embeddings.embedding has type {}, expected vector(n)",
+                        actual.as_deref().unwrap_or("<missing>")
+                    )));
+                }
+                validate_postgres_not_null_column_connection(connection, "memory_embeddings", "embedding", current_schema_only).await?;
+            }
+        }
     }
-    if !postgres_runtime_indexes_compatible(pool, current_schema_only, true).await? {
+    if !postgres_runtime_indexes_compatible_connection(connection, current_schema_only, true).await? {
         return Err(StoreError::Conflict(
             "PostgreSQL managed schema indexes do not match runtime requirements; an existing index is incompatible and startup cannot safely replace it".into(),
         ));
@@ -2359,7 +2449,12 @@ pub(crate) fn reject_retired_sqlite_schema(conn: &Connection) -> Result<(), Stor
 }
 
 pub(crate) async fn reject_retired_postgres_schema(pool: &PgPool, current_schema_only: bool) -> Result<(), StoreError> {
-    if postgres_table_exists(pool, RETIRED_METADATA_TABLE, current_schema_only).await? {
+    let mut connection = pool.acquire().await?;
+    reject_retired_postgres_schema_connection(&mut connection, current_schema_only).await
+}
+
+async fn reject_retired_postgres_schema_connection(connection: &mut PgConnection, current_schema_only: bool) -> Result<(), StoreError> {
+    if postgres_table_exists_connection(connection, RETIRED_METADATA_TABLE, current_schema_only).await? {
         return Err(StoreError::Conflict(format!(
             "PostgreSQL contains unsupported prior-iteration table {RETIRED_METADATA_TABLE}; back up and reset the database before using this LocalHold version"
         )));
@@ -2367,24 +2462,29 @@ pub(crate) async fn reject_retired_postgres_schema(pool: &PgPool, current_schema
     Ok(())
 }
 
-async fn validate_postgres_required_keys(pool: &PgPool, table: &'static str, current_schema_only: bool) -> Result<(), StoreError> {
+async fn validate_postgres_required_keys_connection(connection: &mut PgConnection, table: &'static str, current_schema_only: bool) -> Result<(), StoreError> {
     for expectation in POSTGRES_REQUIRED_KEYS.iter().filter(|expectation| expectation.table == table) {
-        validate_postgres_unique_or_primary_key(pool, expectation.table, expectation.columns, current_schema_only).await?;
+        validate_postgres_unique_or_primary_key_connection(connection, expectation.table, expectation.columns, current_schema_only).await?;
     }
     Ok(())
 }
 
-async fn validate_postgres_table_contracts(pool: &PgPool, table: &'static str, current_schema_only: bool) -> Result<(), StoreError> {
-    validate_postgres_table_contracts_inner(pool, table, current_schema_only, false).await
+async fn validate_postgres_table_contracts_connection(connection: &mut PgConnection, table: &'static str, current_schema_only: bool) -> Result<(), StoreError> {
+    validate_postgres_table_contracts_inner_connection(connection, table, current_schema_only, false).await
 }
 
-async fn validate_postgres_table_contracts_inner(pool: &PgPool, table: &'static str, current_schema_only: bool, allow_missing_record_revision: bool) -> Result<(), StoreError> {
+async fn validate_postgres_table_contracts_inner_connection(
+    connection: &mut PgConnection,
+    table: &'static str,
+    current_schema_only: bool,
+    allow_missing_record_revision: bool,
+) -> Result<(), StoreError> {
     for expectation in POSTGRES_REQUIRED_COLUMNS
         .iter()
         .chain(POSTGRES_OPTIONAL_COLUMNS.iter())
         .filter(|expectation| expectation.table == table)
     {
-        let actual = postgres_column_not_null(pool, table, expectation.column, current_schema_only).await?;
+        let actual = postgres_column_not_null_connection(connection, table, expectation.column, current_schema_only).await?;
         let Some(actual) = actual else {
             continue;
         };
@@ -2398,48 +2498,63 @@ async fn validate_postgres_table_contracts_inner(pool: &PgPool, table: &'static 
         }
     }
     if table == "memory_embeddings" {
-        validate_postgres_not_null_column(pool, table, "embedding", current_schema_only).await?;
+        validate_postgres_not_null_column_connection(connection, table, "embedding", current_schema_only).await?;
     }
     for (_, column, expected_default) in POSTGRES_REQUIRED_DEFAULTS.iter().filter(|(expected_table, ..)| *expected_table == table) {
         if allow_missing_record_revision
             && table == "memories"
             && *column == "record_revision"
-            && postgres_column_not_null(pool, table, column, current_schema_only).await?.is_none()
+            && postgres_column_not_null_connection(connection, table, column, current_schema_only).await?.is_none()
         {
             continue;
         }
-        validate_postgres_default_contract(pool, table, column, expected_default, current_schema_only).await?;
+        validate_postgres_default_contract_connection(connection, table, column, expected_default, current_schema_only).await?;
     }
     if table == "memories" {
-        validate_postgres_embedding_revision_default(pool, current_schema_only).await?;
+        validate_postgres_embedding_revision_default_connection(connection, current_schema_only).await?;
     }
     if table == "memory_audit_log" {
-        validate_postgres_serial_default(pool, table, "id", current_schema_only).await?;
+        validate_postgres_serial_default_connection(connection, table, "id", current_schema_only).await?;
     }
     Ok(())
 }
 
-async fn postgres_column_not_null(pool: &PgPool, table: &'static str, column: &'static str, current_schema_only: bool) -> Result<Option<bool>, StoreError> {
+async fn postgres_column_not_null_connection(
+    connection: &mut PgConnection,
+    table: &'static str,
+    column: &'static str,
+    current_schema_only: bool,
+) -> Result<Option<bool>, StoreError> {
     query_scalar(
         "SELECT attribute.attnotnull FROM pg_attribute AS attribute WHERE attribute.attrelid = to_regclass(CASE WHEN $3 THEN format('%I.%I', current_schema(), $1) ELSE $1 END) AND attribute.attname = $2 AND NOT attribute.attisdropped",
     )
     .bind(table)
     .bind(column)
     .bind(current_schema_only)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await
     .map_err(StoreError::from)
 }
 
-async fn validate_postgres_not_null_column(pool: &PgPool, table: &'static str, column: &'static str, current_schema_only: bool) -> Result<(), StoreError> {
-    if postgres_column_not_null(pool, table, column, current_schema_only).await? == Some(true) {
+async fn validate_postgres_not_null_column_connection(
+    connection: &mut PgConnection,
+    table: &'static str,
+    column: &'static str,
+    current_schema_only: bool,
+) -> Result<(), StoreError> {
+    if postgres_column_not_null_connection(connection, table, column, current_schema_only).await? == Some(true) {
         Ok(())
     } else {
         Err(StoreError::Conflict(format!("PostgreSQL target column {table}.{column} must be NOT NULL")))
     }
 }
 
-async fn validate_postgres_serial_default(pool: &PgPool, table: &'static str, column: &'static str, current_schema_only: bool) -> Result<(), StoreError> {
+async fn validate_postgres_serial_default_connection(
+    connection: &mut PgConnection,
+    table: &'static str,
+    column: &'static str,
+    current_schema_only: bool,
+) -> Result<(), StoreError> {
     let sequence_name: Option<String> = query_scalar(
         "SELECT format('%I.%I', sequence_namespace.nspname, sequence.relname)
             FROM pg_attribute AS attribute
@@ -2465,19 +2580,23 @@ async fn validate_postgres_serial_default(pool: &PgPool, table: &'static str, co
     .bind(table)
     .bind(column)
     .bind(current_schema_only)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
     let Some(sequence_name) = sequence_name else {
         return Err(StoreError::Conflict(format!(
             "PostgreSQL target column {table}.{column} must default from its owned sequence"
         )));
     };
-    let sequence_state = query(AssertSqlSafe(format!("SELECT last_value, is_called FROM {sequence_name}"))).fetch_one(pool).await?;
+    let sequence_state = query(AssertSqlSafe(format!("SELECT last_value, is_called FROM {sequence_name}")))
+        .fetch_one(&mut *connection)
+        .await?;
     let last_value: i64 = sequence_state.try_get("last_value")?;
     let is_called: bool = sequence_state.try_get("is_called")?;
     let next_value = if is_called { last_value.checked_add(1) } else { Some(last_value) };
-    let qualified_table = postgres_qualified_relation_name(pool, table, current_schema_only).await?;
-    let max_id: Option<i64> = query_scalar(AssertSqlSafe(format!("SELECT MAX({column}) FROM {qualified_table}"))).fetch_one(pool).await?;
+    let qualified_table = postgres_qualified_relation_name_connection(connection, table, current_schema_only).await?;
+    let max_id: Option<i64> = query_scalar(AssertSqlSafe(format!("SELECT MAX({column}) FROM {qualified_table}")))
+        .fetch_one(&mut *connection)
+        .await?;
     if next_value.is_some_and(|next| max_id.is_none_or(|maximum| next > maximum)) {
         Ok(())
     } else {
@@ -2487,19 +2606,19 @@ async fn validate_postgres_serial_default(pool: &PgPool, table: &'static str, co
     }
 }
 
-async fn postgres_qualified_relation_name(pool: &PgPool, table: &'static str, current_schema_only: bool) -> Result<String, StoreError> {
+async fn postgres_qualified_relation_name_connection(connection: &mut PgConnection, table: &'static str, current_schema_only: bool) -> Result<String, StoreError> {
     query_scalar(
         "SELECT format('%I.%I', namespace.nspname, relation.relname) FROM pg_class AS relation JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE relation.oid = to_regclass(CASE WHEN $2 THEN format('%I.%I', current_schema(), $1) ELSE $1 END)",
     )
     .bind(table)
     .bind(current_schema_only)
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await
     .map_err(StoreError::from)
 }
 
-async fn validate_postgres_default_contract(
-    pool: &PgPool,
+async fn validate_postgres_default_contract_connection(
+    connection: &mut PgConnection,
     table: &'static str,
     column: &'static str,
     expected_default: &'static str,
@@ -2512,7 +2631,7 @@ async fn validate_postgres_default_contract(
     .bind(column)
     .bind(expected_default)
     .bind(current_schema_only)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
     if contract == Some(true) {
         Ok(())
@@ -2523,12 +2642,12 @@ async fn validate_postgres_default_contract(
     }
 }
 
-async fn validate_postgres_embedding_revision_default(pool: &PgPool, current_schema_only: bool) -> Result<(), StoreError> {
+async fn validate_postgres_embedding_revision_default_connection(connection: &mut PgConnection, current_schema_only: bool) -> Result<(), StoreError> {
     let default: Option<String> = query_scalar(
         "SELECT pg_get_expr(definition.adbin, definition.adrelid) FROM pg_attribute AS attribute LEFT JOIN pg_attrdef AS definition ON definition.adrelid = attribute.attrelid AND definition.adnum = attribute.attnum WHERE attribute.attrelid = to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memories') ELSE 'memories' END) AND attribute.attname = 'embedding_revision' AND NOT attribute.attisdropped",
     )
     .bind(current_schema_only)
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?;
     let default_is_zero = default.as_deref().is_some_and(|value| {
         let normalized = value.trim().trim_matches(['(', ')']);
@@ -2544,19 +2663,24 @@ async fn validate_postgres_embedding_revision_default(pool: &PgPool, current_sch
 }
 
 async fn postgres_table_exists(pool: &PgPool, table: &'static str, current_schema_only: bool) -> Result<bool, StoreError> {
+    let mut connection = pool.acquire().await?;
+    postgres_table_exists_connection(&mut connection, table, current_schema_only).await
+}
+
+async fn postgres_table_exists_connection(connection: &mut PgConnection, table: &'static str, current_schema_only: bool) -> Result<bool, StoreError> {
     query_scalar("SELECT to_regclass(CASE WHEN $2 THEN format('%I.%I', current_schema(), $1) ELSE $1 END) IS NOT NULL")
         .bind(table)
         .bind(current_schema_only)
-        .fetch_one(pool)
+        .fetch_one(&mut *connection)
         .await
         .map_err(StoreError::from)
 }
 
-async fn validate_postgres_table_kind(pool: &PgPool, table: &'static str, current_schema_only: bool) -> Result<(), StoreError> {
+async fn validate_postgres_table_kind_connection(connection: &mut PgConnection, table: &'static str, current_schema_only: bool) -> Result<(), StoreError> {
     let relkind: Option<String> = query_scalar("SELECT relkind::text FROM pg_class WHERE oid = to_regclass(CASE WHEN $2 THEN format('%I.%I', current_schema(), $1) ELSE $1 END)")
         .bind(table)
         .bind(current_schema_only)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *connection)
         .await?;
     match relkind.as_deref() {
         Some("r" | "p") | None => Ok(()),
@@ -2564,8 +2688,14 @@ async fn validate_postgres_table_kind(pool: &PgPool, table: &'static str, curren
     }
 }
 
-async fn validate_postgres_column_type(pool: &PgPool, table: &'static str, column: &'static str, expected_type: &str, current_schema_only: bool) -> Result<(), StoreError> {
-    let actual_type = postgres_column_type(pool, table, column, current_schema_only).await?;
+async fn validate_postgres_column_type_connection(
+    connection: &mut PgConnection,
+    table: &'static str,
+    column: &'static str,
+    expected_type: &str,
+    current_schema_only: bool,
+) -> Result<(), StoreError> {
+    let actual_type = postgres_column_type_connection(connection, table, column, current_schema_only).await?;
 
     match actual_type {
         Some(actual_type) if actual_type == expected_type => Ok(()),
@@ -2576,14 +2706,14 @@ async fn validate_postgres_column_type(pool: &PgPool, table: &'static str, colum
     }
 }
 
-async fn validate_optional_postgres_column_type(
-    pool: &PgPool,
+async fn validate_optional_postgres_column_type_connection(
+    connection: &mut PgConnection,
     table: &'static str,
     column: &'static str,
     expected_type: &str,
     current_schema_only: bool,
 ) -> Result<(), StoreError> {
-    let actual_type = postgres_column_type(pool, table, column, current_schema_only).await?;
+    let actual_type = postgres_column_type_connection(connection, table, column, current_schema_only).await?;
 
     match actual_type {
         Some(actual_type) if actual_type == expected_type => Ok(()),
@@ -2594,7 +2724,12 @@ async fn validate_optional_postgres_column_type(
     }
 }
 
-async fn postgres_column_type(pool: &PgPool, table: &'static str, column: &'static str, current_schema_only: bool) -> Result<Option<String>, StoreError> {
+async fn postgres_column_type_connection(
+    connection: &mut PgConnection,
+    table: &'static str,
+    column: &'static str,
+    current_schema_only: bool,
+) -> Result<Option<String>, StoreError> {
     query_scalar(
         "
         SELECT format_type(attribute.atttypid, attribute.atttypmod)
@@ -2607,12 +2742,17 @@ async fn postgres_column_type(pool: &PgPool, table: &'static str, column: &'stat
     .bind(table)
     .bind(column)
     .bind(current_schema_only)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await
     .map_err(StoreError::from)
 }
 
-async fn validate_postgres_unique_or_primary_key(pool: &PgPool, table: &'static str, columns: &'static [&'static str], current_schema_only: bool) -> Result<(), StoreError> {
+async fn validate_postgres_unique_or_primary_key_connection(
+    connection: &mut PgConnection,
+    table: &'static str,
+    columns: &'static [&'static str],
+    current_schema_only: bool,
+) -> Result<(), StoreError> {
     let expected_columns = sorted_key_columns(columns);
     let has_key: bool = query_scalar(
         "
@@ -2644,7 +2784,7 @@ async fn validate_postgres_unique_or_primary_key(pool: &PgPool, table: &'static 
     .bind(table)
     .bind(&expected_columns)
     .bind(current_schema_only)
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?;
 
     if !has_key {

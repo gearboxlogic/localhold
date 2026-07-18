@@ -7,13 +7,20 @@ import hashlib
 import json
 import re
 import subprocess
+import tomllib
 from pathlib import Path
 from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+CARGO_MANIFEST_PATH = REPO_ROOT / "Cargo.toml"
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "database-upgrades"
 MANIFEST_PATH = FIXTURE_ROOT / "manifest.json"
+SEMVER_TAG = re.compile(
+    r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 INCLUDE = re.compile(r"^\s*-- fixture-include: (\S+)\s*$")
@@ -232,6 +239,29 @@ def validate_manifest(release_tag: str | None = None, *, repo_root: Path = REPO_
         _validate_backend(tag, "postgres", release.get("postgres"), repo_root, fixture_root, commit, source_ref)
 
 
+def current_release_tag(cargo_manifest_path: Path = CARGO_MANIFEST_PATH) -> str:
+    """Return the exact release tag implied by the reviewed Cargo package version."""
+    try:
+        manifest = tomllib.loads(cargo_manifest_path.read_text(encoding="utf-8"))
+        package = manifest["package"]
+        version = package["version"]
+    except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError) as error:
+        raise FixtureError(f"cannot read Cargo package version from {cargo_manifest_path}: {error}") from error
+    if not isinstance(version, str) or not SEMVER_TAG.fullmatch(f"v{version}"):
+        raise FixtureError(f"Cargo package version is not a release version: {version!r}")
+    return f"v{version}"
+
+
+def validate_repository_manifest(
+    *,
+    repo_root: Path = REPO_ROOT,
+    manifest_path: Path = MANIFEST_PATH,
+    cargo_manifest_path: Path = CARGO_MANIFEST_PATH,
+) -> None:
+    """Validate repository fixtures for the current Cargo release candidate."""
+    validate_manifest(current_release_tag(cargo_manifest_path), repo_root=repo_root, manifest_path=manifest_path)
+
+
 if __name__ == "__main__":
-    validate_manifest()
+    validate_repository_manifest()
     print("database upgrade fixtures valid")

@@ -1888,7 +1888,10 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let rendered = rendered_text(buffer);
         assert!(rendered.contains("localhold"), "header should carry the wordmark");
-        assert!(rendered.contains("mode hybrid"), "the header should name the concrete configured mode");
+        assert!(
+            rendered.contains("mode auto"),
+            "the header should name the configured automatic mode before a search executes"
+        );
         assert!(rendered.contains("SCOPES"), "scope pane should be titled");
         assert!(rendered.contains("MEMORIES"), "memory pane should be titled");
         assert!(rendered.contains('\u{2580}'), "the battlement rule should be drawn");
@@ -1906,10 +1909,14 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100_u16, 24_u16)).unwrap();
 
         let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
-        assert!(rendered_text(terminal.backend().buffer()).contains("mode hybrid"));
+        assert!(rendered_text(terminal.backend().buffer()).contains("mode auto"));
 
         app.mode = Mode::Search;
         app.loading = true;
+        app.requested_mode = Some(crate::types::SearchMode::Auto);
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        assert!(rendered_text(terminal.backend().buffer()).contains("mode auto"));
+
         app.requested_mode = Some(crate::types::SearchMode::Keyword);
         let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
         assert!(rendered_text(terminal.backend().buffer()).contains("mode keyword"));

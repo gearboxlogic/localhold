@@ -82,17 +82,10 @@ where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
     let configured = app.engine.search_config().default_mode;
-    let mode = if app.loading {
-        app.requested_mode.unwrap_or(configured)
-    } else {
-        app.executed_mode.or(app.requested_mode).unwrap_or(configured)
-    };
-    match mode {
-        crate::types::SearchMode::Semantic => crate::types::SearchMode::Semantic,
-        crate::types::SearchMode::Text => crate::types::SearchMode::Text,
-        crate::types::SearchMode::Keyword => crate::types::SearchMode::Keyword,
-        crate::types::SearchMode::Auto | crate::types::SearchMode::Hybrid => crate::types::SearchMode::Hybrid,
+    if app.loading {
+        return app.requested_mode.unwrap_or(configured);
     }
+    app.executed_mode.or(app.requested_mode).unwrap_or(configured)
 }
 
 fn pane_block(title: &str, focused: bool, app_ident: Style, label: Style) -> Block<'_> {

@@ -529,6 +529,7 @@ where
                 self.status = self.results_status();
             }
             DataMsg::Failed { message, generation } if generation == self.generation => {
+                self.executed_mode = None;
                 self.loading = false;
                 self.status = Status::NotHeld(message);
             }
@@ -1497,13 +1498,46 @@ mod tests {
         let (mut app, mut rx) = app_with_memories(&["the keep stands"]).await;
         app.bootstrap().await;
         app.on_data(rx.recv().await.unwrap());
+
+        let generation = app.generation;
+        let rows = std::mem::take(&mut app.rows);
+        app.on_data(DataMsg::Rows {
+            rows,
+            mode: Some(crate::types::SearchMode::Text),
+            generation,
+        });
         let fresh = app.rows.len();
+        app.loading = true;
+        app.requested_mode = Some(crate::types::SearchMode::Text);
+        let mut terminal = Terminal::new(TestBackend::new(100_u16, 24_u16)).unwrap();
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        assert!(rendered_text(terminal.backend().buffer()).contains("mode text"));
+
         app.on_data(DataMsg::Failed {
             message: "late failure".into(),
             generation: 0_u64,
         });
         assert_eq!(app.rows.len(), fresh, "stale responses must not disturb the view");
         assert!(matches!(app.status, Status::Held(_)), "stale failures must not overwrite status");
+        assert_eq!(
+            app.executed_mode,
+            Some(crate::types::SearchMode::Text),
+            "stale failures must not clear the last executed mode"
+        );
+        assert!(app.loading, "stale failures must not finish the current refresh");
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        assert!(rendered_text(terminal.backend().buffer()).contains("mode text"));
+
+        app.requested_mode = Some(crate::types::SearchMode::Hybrid);
+        app.on_data(DataMsg::Failed {
+            message: "current failure".into(),
+            generation,
+        });
+        assert_eq!(app.executed_mode, None, "current failures must clear the old executed mode");
+        assert!(!app.loading, "current failures must finish the refresh");
+        assert!(matches!(&app.status, Status::NotHeld(message) if message == "current failure"));
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        assert!(rendered_text(terminal.backend().buffer()).contains("mode hybrid"));
     }
 
     #[tokio::test]
@@ -1928,6 +1962,16 @@ mod tests {
         });
         let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
         assert!(rendered_text(terminal.backend().buffer()).contains("mode text"));
+
+        app.loading = true;
+        app.requested_mode = Some(crate::types::SearchMode::Hybrid);
+        app.on_data(DataMsg::Failed {
+            message: "search failed".into(),
+            generation: app.generation,
+        });
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        assert!(rendered_text(terminal.backend().buffer()).contains("mode hybrid"));
+        assert_eq!(app.executed_mode, None, "a failed refresh must not retain the previous executed mode");
     }
 
     #[tokio::test]

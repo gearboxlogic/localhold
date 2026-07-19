@@ -60,20 +60,32 @@ fn draw_header<S>(frame: &mut Frame<'_>, app: &App<S>, area: Rect)
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
-    let mut spans = vec![Span::raw(" local"), Span::styled("hold", app.theme.accent()), Span::styled("  \u{bb} ", app.theme.label())];
+    let emphasis = Style::default().bold();
+    let mut spans = vec![Span::raw(" local"), Span::styled("hold", emphasis), Span::styled("  \u{bb} ", app.theme.label())];
     if app.query.is_empty() && app.mode != Mode::Search {
         spans.push(Span::styled("press / to search the hold", app.theme.label()));
     } else {
         spans.push(Span::raw(escape_terminal_text(&app.query)));
     }
     if app.mode == Mode::Search {
-        spans.push(Span::styled("\u{2588}", app.theme.accent()));
+        spans.push(Span::styled("\u{2588}", emphasis));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
-    let mode = app.requested_mode.map_or_else(|| "default".to_owned(), |mode| mode.to_string());
+    let mode = active_search_mode(app).to_string();
     let right = Line::from(vec![Span::styled("mode ", app.theme.label()), Span::styled(mode, app.theme.ident()), Span::raw(" ")]);
     frame.render_widget(Paragraph::new(right).alignment(Alignment::Right), area);
+}
+
+fn active_search_mode<S>(app: &App<S>) -> crate::types::SearchMode
+where
+    S: MemoryStore + Clone + fmt::Debug + 'static,
+{
+    let configured = app.engine.search_config().default_mode;
+    if app.loading {
+        return app.requested_mode.unwrap_or(configured);
+    }
+    app.executed_mode.or(app.requested_mode).unwrap_or(configured)
 }
 
 fn pane_block(title: &str, focused: bool, app_ident: Style, label: Style) -> Block<'_> {
@@ -85,26 +97,28 @@ fn draw_scopes<S>(frame: &mut Frame<'_>, app: &App<S>, area: Rect)
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
+    let selected_style = Style::default().bold();
+    let marker_style = if app.focus == Focus::Scopes { selected_style } else { app.theme.label() };
     let width = usize::from(area.width.saturating_sub(SCOPE_LIST_CHROME_WIDTH));
-    let mut items = vec![scope_list_line("All memories", app.scope_total, width)];
+    let mut items = vec![scope_list_line("All memories", app.scope_total, width, Style::default())];
     if app.scopes.is_empty() {
         items.push(Line::from(Span::styled("  no scoped memories", app.theme.label())));
     } else {
-        items.extend(app.scopes.iter().map(|scope| scope_list_line(&scope.label, Some(scope.count), width)));
+        items.extend(app.scopes.iter().map(|scope| scope_list_line(&scope.label, Some(scope.count), width, app.theme.ident())));
     }
     let list = List::new(items)
         .block(pane_block(" SCOPES ", app.focus == Focus::Scopes, app.theme.ident(), app.theme.label()))
-        .highlight_style(app.theme.accent().bold())
-        .highlight_symbol(SCOPE_HIGHLIGHT_SYMBOL)
+        .highlight_style(selected_style)
+        .highlight_symbol(Line::styled(SCOPE_HIGHLIGHT_SYMBOL, marker_style))
         .highlight_spacing(HighlightSpacing::Always);
     let mut state = ListState::default().with_selected(Some(app.scope_selected));
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn scope_list_line(label: &str, count: Option<u64>, width: usize) -> Line<'static> {
+fn scope_list_line(label: &str, count: Option<u64>, width: usize, style: Style) -> Line<'static> {
     let label = escape_terminal_text(label);
     let Some(count) = count else {
-        return Line::from(label);
+        return Line::styled(label, style);
     };
     let count = count.to_string();
     let count_width = count.chars().count();
@@ -113,7 +127,7 @@ fn scope_list_line(label: &str, count: Option<u64>, width: usize) -> Line<'stati
         if width > 0_usize {
             overflow.push('\u{2026}');
         }
-        return Line::from(overflow);
+        return Line::styled(overflow, style);
     }
     let reserved = count_width.saturating_add(1_usize);
     let label_width = width.saturating_sub(reserved);
@@ -121,7 +135,7 @@ fn scope_list_line(label: &str, count: Option<u64>, width: usize) -> Line<'stati
     let padding = width.saturating_sub(fitted.chars().count()).saturating_sub(count_width);
     fitted.push_str(&" ".repeat(padding));
     fitted.push_str(&count);
-    Line::from(fitted)
+    Line::styled(fitted, style)
 }
 
 fn draw_memories<S>(frame: &mut Frame<'_>, app: &App<S>, area: Rect)
@@ -139,11 +153,13 @@ where
         ])
     });
     let widths = [Constraint::Length(5), Constraint::Length(10), Constraint::Length(5), Constraint::Min(20)];
+    let selected_style = Style::default().bold();
+    let marker_style = if app.focus == Focus::Memories { selected_style } else { app.theme.label() };
     let table = Table::new(rows, widths)
         .header(header)
         .block(pane_block(" MEMORIES ", app.focus == Focus::Memories, app.theme.ident(), app.theme.label()))
-        .row_highlight_style(app.theme.accent().bold())
-        .highlight_symbol("\u{258c}");
+        .row_highlight_style(selected_style)
+        .highlight_symbol(Line::styled("\u{258c}", marker_style));
     let mut state = TableState::default().with_selected(Some(app.row_selected));
     frame.render_stateful_widget(table, area, &mut state);
 }
@@ -233,7 +249,7 @@ where
 {
     let popup = main;
     frame.render_widget(Clear, popup);
-    let block = Block::bordered().border_style(app.theme.accent()).title(Span::styled(" MEMORY ", app.theme.label()));
+    let block = Block::bordered().border_style(app.theme.label()).title(Span::styled(" MEMORY ", app.theme.label()));
     let mut lines = meta_lines(app, &detail.memory);
     if let Some(metadata) = &detail.metadata {
         lines.push(Line::from(vec![
@@ -299,7 +315,7 @@ where
 {
     frame.render_widget(Clear, area);
     let title = if app.pending { " EDIT MEMORY \u{b7} SAVING " } else { " EDIT MEMORY " };
-    let block = Block::bordered().border_style(app.theme.accent()).title(Span::styled(title, app.theme.label()));
+    let block = Block::bordered().border_style(app.theme.label()).title(Span::styled(title, app.theme.label()));
     let mut lines = vec![
         Line::from(vec![
             Span::styled("id         ", app.theme.label()),
@@ -335,7 +351,7 @@ where
 {
     let active = edit.field == field;
     let marker = if active { "\u{258c} " } else { "  " };
-    let label_style = if active { app.theme.accent().bold() } else { app.theme.label() };
+    let label_style = if active { Style::default().bold() } else { app.theme.label() };
     lines.push(Line::from(vec![Span::styled(marker, label_style), Span::styled(field.label(), label_style)]));
     let mut value = input.value.clone();
     if active && !app.pending {
@@ -426,6 +442,7 @@ mod tests {
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
+        style::{Color, Style},
         widgets::{HighlightSpacing, List, ListState, StatefulWidget as _},
     };
 
@@ -437,15 +454,22 @@ mod tests {
 
     #[test]
     fn scope_count_line_stays_within_available_width() {
-        assert_eq!(line_text(&scope_list_line("scope", Some(u64::MAX), 0_usize)), "");
-        assert_eq!(line_text(&scope_list_line("scope", Some(u64::MAX), 3_usize)), "  \u{2026}");
-        assert_eq!(line_text(&scope_list_line("scope", Some(u64::MAX), 20_usize)), u64::MAX.to_string());
-        assert_eq!(line_text(&scope_list_line("alpha", Some(42_u64), 8_usize)), "alpha 42");
+        let style = Style::default();
+        assert_eq!(line_text(&scope_list_line("scope", Some(u64::MAX), 0_usize, style)), "");
+        assert_eq!(line_text(&scope_list_line("scope", Some(u64::MAX), 3_usize, style)), "  \u{2026}");
+        assert_eq!(line_text(&scope_list_line("scope", Some(u64::MAX), 20_usize, style)), u64::MAX.to_string());
+        assert_eq!(line_text(&scope_list_line("alpha", Some(42_u64), 8_usize, style)), "alpha 42");
+    }
+
+    #[test]
+    fn scope_count_line_preserves_identifier_style() {
+        let line = scope_list_line("project:localhold", Some(7_u64), 24_usize, Style::default().fg(Color::Blue));
+        assert_eq!(line.style.fg, Some(Color::Blue));
     }
 
     #[test]
     fn selected_scope_keeps_overflow_ellipsis_visible() {
-        let list = List::new([scope_list_line("scope", Some(u64::MAX), 3_usize)])
+        let list = List::new([scope_list_line("scope", Some(u64::MAX), 3_usize, Style::default())])
             .highlight_symbol(SCOPE_HIGHLIGHT_SYMBOL)
             .highlight_spacing(HighlightSpacing::Always);
         let mut state = ListState::default().with_selected(Some(0_usize));

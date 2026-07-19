@@ -529,6 +529,7 @@ where
                 self.status = self.results_status();
             }
             DataMsg::Failed { message, generation } if generation == self.generation => {
+                self.executed_mode = None;
                 self.loading = false;
                 self.status = Status::NotHeld(message);
             }
@@ -1158,7 +1159,9 @@ mod tests {
     use ratatui::{
         Terminal,
         backend::TestBackend,
+        buffer::Buffer,
         crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers},
+        style::{Color, Modifier},
     };
     use tokio::sync::mpsc;
 
@@ -1229,6 +1232,44 @@ mod tests {
 
     fn press_with(code: KeyCode, modifiers: KeyModifiers) -> Event {
         Event::Key(KeyEvent::new(code, modifiers))
+    }
+
+    fn rendered_text(buffer: &Buffer) -> String {
+        buffer.content().iter().map(ratatui::buffer::Cell::symbol).collect()
+    }
+
+    fn find_text_start(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
+        for y in 0_u16..buffer.area.height {
+            let row = (0_u16..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+            if let Some(byte_start) = row.find(needle) {
+                let x = u16::try_from(row.get(..byte_start)?.chars().count()).ok()?;
+                return Some((x, y));
+            }
+        }
+        None
+    }
+
+    fn assert_text_color(buffer: &Buffer, text: &str, expected: Color) {
+        let position = find_text_start(buffer, text);
+        assert!(position.is_some(), "{text:?} was not rendered");
+        let (start_x, y) = position.unwrap();
+        for (offset, _) in text.chars().enumerate() {
+            let x = start_x.saturating_add(u16::try_from(offset).unwrap());
+            assert_eq!(buffer[(x, y)].fg, expected, "unexpected color at ({x}, {y}) in {text:?}");
+        }
+    }
+
+    fn assert_gold_is_battlement_only(buffer: &Buffer, gold: Color) {
+        let rule_y = buffer.area.height.saturating_sub(2_u16);
+        let gold_positions = (0_u16..buffer.area.height)
+            .flat_map(|y| (0_u16..buffer.area.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| buffer[(x, y)].fg == gold)
+            .collect::<Vec<_>>();
+        assert!(!gold_positions.is_empty(), "the battlement rule should retain the gold accent");
+        assert!(
+            gold_positions.iter().all(|&(_, y)| y == rule_y),
+            "gold must be confined to the battlement row, found {gold_positions:?}"
+        );
     }
 
     #[tokio::test]
@@ -1457,13 +1498,46 @@ mod tests {
         let (mut app, mut rx) = app_with_memories(&["the keep stands"]).await;
         app.bootstrap().await;
         app.on_data(rx.recv().await.unwrap());
+
+        let generation = app.generation;
+        let rows = std::mem::take(&mut app.rows);
+        app.on_data(DataMsg::Rows {
+            rows,
+            mode: Some(crate::types::SearchMode::Text),
+            generation,
+        });
         let fresh = app.rows.len();
+        app.loading = true;
+        app.requested_mode = Some(crate::types::SearchMode::Text);
+        let mut terminal = Terminal::new(TestBackend::new(100_u16, 24_u16)).unwrap();
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        assert!(rendered_text(terminal.backend().buffer()).contains("mode text"));
+
         app.on_data(DataMsg::Failed {
             message: "late failure".into(),
             generation: 0_u64,
         });
         assert_eq!(app.rows.len(), fresh, "stale responses must not disturb the view");
         assert!(matches!(app.status, Status::Held(_)), "stale failures must not overwrite status");
+        assert_eq!(
+            app.executed_mode,
+            Some(crate::types::SearchMode::Text),
+            "stale failures must not clear the last executed mode"
+        );
+        assert!(app.loading, "stale failures must not finish the current refresh");
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        assert!(rendered_text(terminal.backend().buffer()).contains("mode text"));
+
+        app.requested_mode = Some(crate::types::SearchMode::Hybrid);
+        app.on_data(DataMsg::Failed {
+            message: "current failure".into(),
+            generation,
+        });
+        assert_eq!(app.executed_mode, None, "current failures must clear the old executed mode");
+        assert!(!app.loading, "current failures must finish the refresh");
+        assert!(matches!(&app.status, Status::NotHeld(message) if message == "current failure"));
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        assert!(rendered_text(terminal.backend().buffer()).contains("mode hybrid"));
     }
 
     #[tokio::test]
@@ -1814,9 +1888,11 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(100_u16, 24_u16)).unwrap();
         let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
-        let rendered: String = terminal.backend().buffer().content().iter().map(ratatui::buffer::Cell::symbol).collect();
+        let buffer = terminal.backend().buffer();
+        let rendered = rendered_text(buffer);
         assert!(rendered.contains("alpha/project"));
         assert!(rendered.contains("j/k filter"));
+        assert_text_color(buffer, "alpha/project", app.theme.azure);
         app.on_event(press(KeyCode::End)).await;
         app.on_data(rx.recv().await.unwrap());
         assert_eq!(app.selected_scope().as_deref(), Some("/worktrees/beta/project"));
@@ -1843,13 +1919,76 @@ mod tests {
         app.notice = Some("reranker off: artifacts are not cached".into());
         let mut terminal = Terminal::new(TestBackend::new(100_u16, 24_u16)).unwrap();
         let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
-        let rendered: String = terminal.backend().buffer().content().iter().map(ratatui::buffer::Cell::symbol).collect();
+        let buffer = terminal.backend().buffer();
+        let rendered = rendered_text(buffer);
         assert!(rendered.contains("localhold"), "header should carry the wordmark");
+        assert!(
+            rendered.contains("mode auto"),
+            "the header should name the configured automatic mode before a search executes"
+        );
         assert!(rendered.contains("SCOPES"), "scope pane should be titled");
         assert!(rendered.contains("MEMORIES"), "memory pane should be titled");
         assert!(rendered.contains('\u{2580}'), "the battlement rule should be drawn");
         assert!(rendered.contains("held"), "the status line should speak the brand verb");
         assert!(rendered.contains("reranker off"), "persistent startup notices should be visible in the TUI");
+        assert_text_color(buffer, "semantic", Color::Reset);
+        assert_gold_is_battlement_only(buffer, app.theme.or);
+    }
+
+    #[tokio::test]
+    async fn header_tracks_requested_and_executed_search_modes() {
+        let (mut app, mut rx) = app_with_memories(&["searchable memory"]).await;
+        app.bootstrap().await;
+        app.on_data(rx.recv().await.unwrap());
+        let mut terminal = Terminal::new(TestBackend::new(100_u16, 24_u16)).unwrap();
+
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        assert!(rendered_text(terminal.backend().buffer()).contains("mode auto"));
+
+        app.mode = Mode::Search;
+        app.loading = true;
+        app.requested_mode = Some(crate::types::SearchMode::Auto);
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        assert!(rendered_text(terminal.backend().buffer()).contains("mode auto"));
+
+        app.requested_mode = Some(crate::types::SearchMode::Keyword);
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        assert!(rendered_text(terminal.backend().buffer()).contains("mode keyword"));
+
+        app.on_data(DataMsg::Rows {
+            rows: Vec::new(),
+            mode: Some(crate::types::SearchMode::Text),
+            generation: app.generation,
+        });
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        assert!(rendered_text(terminal.backend().buffer()).contains("mode text"));
+
+        app.loading = true;
+        app.requested_mode = Some(crate::types::SearchMode::Hybrid);
+        app.on_data(DataMsg::Failed {
+            message: "search failed".into(),
+            generation: app.generation,
+        });
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        assert!(rendered_text(terminal.backend().buffer()).contains("mode hybrid"));
+        assert_eq!(app.executed_mode, None, "a failed refresh must not retain the previous executed mode");
+    }
+
+    #[tokio::test]
+    async fn detail_uses_dim_border_and_keeps_gold_in_the_battlement() {
+        let (mut app, mut rx) = app_with_memories(&["detail memory"]).await;
+        app.bootstrap().await;
+        app.on_data(rx.recv().await.unwrap());
+        app.on_event(press(KeyCode::Enter)).await;
+
+        let mut terminal = Terminal::new(TestBackend::new(100_u16, 24_u16)).unwrap();
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert!(rendered_text(buffer).contains("MEMORY"));
+        assert_eq!(buffer[(0_u16, 1_u16)].fg, Color::Reset);
+        assert!(buffer[(0_u16, 1_u16)].modifier.contains(Modifier::DIM));
+        assert_gold_is_battlement_only(buffer, app.theme.or);
     }
 
     #[tokio::test]

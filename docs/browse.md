@@ -14,8 +14,11 @@ scope rows.
 
 ## Search And Inspection
 
-Use `/` to search, with `m` cycling keyword, text, semantic, and hybrid modes,
-and `enter` to inspect a memory with its audit trail.
+Use `/` to search, with `m` cycling keyword, text, semantic, hybrid, and
+auto modes. Auto lets the engine choose the best available retrieval path and
+fall back when embedding or full-text search is unavailable. The header shows
+the requested mode while a search is pending and the concrete mode used after
+results arrive. Use `enter` to inspect a memory with its audit trail.
 
 ## Editing
 

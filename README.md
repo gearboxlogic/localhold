@@ -74,9 +74,15 @@ for prerequisites, archive verification, and client details.
 ## Browse The Hold
 
 `hold ui` opens an interactive terminal browser over the store: scopes in the
-left pane, search with mode cycling across keyword, text, semantic, and hybrid,
-and a detail view with each memory's audit trail. Browsing is side-effect-free;
-edits and deletions go through the normal audited authorization path.
+left pane; search mode cycling across keyword, text, semantic, hybrid, and auto;
+and a detail view with each memory's audit trail. Auto chooses the best
+available retrieval fallback. Browsing is side-effect-free; edits and deletions
+go through the normal audited authorization path.
+
+<img src="assets/brand/hold-ui.gif" alt="hold ui browse, keyword search, and memory detail views with scoped memories" width="100%">
+
+The recording uses an explicitly selected hybrid browse mode before switching
+to keyword search, then opens the selected memory's detail view.
 
 See [Browse The Hold](docs/browse.md) for navigation and editing keys.
 

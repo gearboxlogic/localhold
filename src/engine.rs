@@ -1037,6 +1037,27 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         Ok(self.orchestrator.store().count(filter, ctx, clamped).await?)
     }
 
+    fn validate_batch_companion_len(field: &'static str, label: &str, companion_len: usize, memories_len: usize) -> Result<(), EngineError> {
+        if companion_len == memories_len {
+            return Ok(());
+        }
+        Err(EngineError::Validation(ValidationError::new(
+            field,
+            format!("{label} length ({companion_len}) must match memories length ({memories_len})"),
+        )))
+    }
+
+    fn batch_store_audits(&self, memories: &[Memory], supersedes_list: &[Option<MemoryId>]) -> Vec<AuditDraft> {
+        memories
+            .iter()
+            .zip(supersedes_list)
+            .map(|(memory, supersedes)| {
+                let details = supersedes.as_ref().map(|id| serde_json::json!({"supersedes": id.to_string()}));
+                self.audit_draft(AuditAction::Store, memory.provenance.source_agent.clone(), details)
+            })
+            .collect()
+    }
+
     /// Store multiple memories atomically, spawning embed tasks for each.
     ///
     /// Delegates to the [`EmbeddingOrchestrator`] which enforces the
@@ -1047,24 +1068,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
     /// Returns `EngineError::Validation` if the batch is empty or oversized,
     /// or `EngineError::Store` if the batch write fails.
     pub async fn batch_store(&self, memories: Vec<Memory>, supersedes_list: Vec<Option<MemoryId>>) -> Result<Vec<MemoryId>, EngineError> {
-        if memories.len() != supersedes_list.len() {
-            return Err(EngineError::Validation(ValidationError::new(
-                "supersedes",
-                format!("supersedes list length ({}) must match memories length ({})", supersedes_list.len(), memories.len()),
-            )));
-        }
-
-        // Capture per-memory write principals before the Vec is moved into the orchestrator.
-        let principals: Vec<Option<String>> = memories.iter().map(|m| m.provenance.source_agent.clone()).collect();
+        Self::validate_batch_companion_len("supersedes", "supersedes list", supersedes_list.len(), memories.len())?;
         let embed_admission = self.orchestrator.begin_embed_admission()?;
-        let audits: Vec<AuditDraft> = principals
-            .iter()
-            .zip(supersedes_list.iter())
-            .map(|(principal, sup)| {
-                let details = sup.as_ref().map(|s| serde_json::json!({"supersedes": s.to_string()}));
-                self.audit_draft(AuditAction::Store, principal.clone(), details)
-            })
-            .collect();
+        let audits = self.batch_store_audits(&memories, &supersedes_list);
 
         let ids = self
             .orchestrator
@@ -1087,29 +1093,10 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         supersedes_list: Vec<Option<MemoryId>>,
         metadata: Vec<MemoryMetadata>,
     ) -> Result<Vec<MemoryId>, EngineError> {
-        if memories.len() != supersedes_list.len() {
-            return Err(EngineError::Validation(ValidationError::new(
-                "supersedes",
-                format!("supersedes list length ({}) must match memories length ({})", supersedes_list.len(), memories.len()),
-            )));
-        }
-        if memories.len() != metadata.len() {
-            return Err(EngineError::Validation(ValidationError::new(
-                "metadata",
-                format!("metadata length ({}) must match memories length ({})", metadata.len(), memories.len()),
-            )));
-        }
-
-        let principals: Vec<Option<String>> = memories.iter().map(|m| m.provenance.source_agent.clone()).collect();
+        Self::validate_batch_companion_len("supersedes", "supersedes list", supersedes_list.len(), memories.len())?;
+        Self::validate_batch_companion_len("metadata", "metadata", metadata.len(), memories.len())?;
         let embed_admission = self.orchestrator.begin_embed_admission()?;
-        let audits: Vec<AuditDraft> = principals
-            .iter()
-            .zip(supersedes_list.iter())
-            .map(|(principal, sup)| {
-                let details = sup.as_ref().map(|s| serde_json::json!({"supersedes": s.to_string()}));
-                self.audit_draft(AuditAction::Store, principal.clone(), details)
-            })
-            .collect();
+        let audits = self.batch_store_audits(&memories, &supersedes_list);
 
         let ids = self
             .orchestrator
@@ -2515,6 +2502,20 @@ mod tests {
         assert!(store.get(&ids[0], None).await.unwrap().unwrap().has_embedding);
         assert!(!store.get(&ids[1], None).await.unwrap().unwrap().has_embedding);
         assert!(store.get(&ids[2], None).await.unwrap().unwrap().has_embedding);
+    }
+
+    #[tokio::test]
+    async fn batch_store_rejects_misaligned_companions() {
+        let engine = make_engine();
+        let memory = engine.build_memory(test_input("item"), engine.now()).unwrap();
+        let supersedes_error = engine.batch_store(vec![memory], Vec::new()).await.unwrap_err();
+        assert!(matches!(&supersedes_error, EngineError::Validation(_)));
+        assert_eq!(supersedes_error.to_string(), "supersedes: supersedes list length (0) must match memories length (1)");
+
+        let memory = engine.build_memory(test_input("item"), engine.now()).unwrap();
+        let metadata_error = engine.batch_store_with_metadata(vec![memory], vec![None], Vec::new()).await.unwrap_err();
+        assert!(matches!(&metadata_error, EngineError::Validation(_)));
+        assert_eq!(metadata_error.to_string(), "metadata: metadata length (0) must match memories length (1)");
     }
 
     #[tokio::test]

@@ -44,6 +44,13 @@ fn migration_failed(step: &'static str, source: impl Into<Box<dyn std::error::Er
     StoreError::MigrationFailed { step, source: source.into() }
 }
 
+fn run_migration_step<T, E>(step: &'static str, result: Result<T, E>) -> Result<T, StoreError>
+where
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    result.map_err(|error| migration_failed(step, error))
+}
+
 #[derive(Debug)]
 struct SqliteInner {
     conn: Mutex<Connection>,
@@ -365,41 +372,40 @@ impl SqliteStore {
             }
         };
         self.inner.vector_index.init_schema(&conn)?;
-        migrate_memories_add_embedding_revision(&conn).map_err(|e| migration_failed("add_embedding_revision", e))?;
-        migrate_memories_add_record_revision(&conn).map_err(|e| migration_failed("add_record_revision", e))?;
-        migrate_memories_add_embedding_claims(&conn).map_err(|e| migration_failed("add_embedding_claims", e))?;
-        migrate_memories_backfill_origin_conversation(&conn).map_err(|e| migration_failed("backfill_origin_conversation", e))?;
-        migrate_memory_embedding_map_fk(&conn).map_err(|e| migration_failed("memory_embedding_map_fk", e))?;
+        run_migration_step("add_embedding_revision", migrate_memories_add_embedding_revision(&conn))?;
+        run_migration_step("add_record_revision", migrate_memories_add_record_revision(&conn))?;
+        run_migration_step("add_embedding_claims", migrate_memories_add_embedding_claims(&conn))?;
+        run_migration_step("backfill_origin_conversation", migrate_memories_backfill_origin_conversation(&conn))?;
+        run_migration_step("memory_embedding_map_fk", migrate_memory_embedding_map_fk(&conn))?;
         // Wave 1 migrations
-        migrate_memories_add_memory_type(&conn).map_err(|e| migration_failed("add_memory_type", e))?;
-        migrate_memories_add_importance(&conn).map_err(|e| migration_failed("add_importance", e))?;
-        migrate_memories_align_impression_tracking(&conn).map_err(|e| migration_failed("align_impression_tracking", e))?;
+        run_migration_step("add_memory_type", migrate_memories_add_memory_type(&conn))?;
+        run_migration_step("add_importance", migrate_memories_add_importance(&conn))?;
+        run_migration_step("align_impression_tracking", migrate_memories_align_impression_tracking(&conn))?;
         // Wave 2 migrations
-        migrate_memories_add_superseded_by(&conn).map_err(|e| migration_failed("add_superseded_by", e))?;
+        run_migration_step("add_superseded_by", migrate_memories_add_superseded_by(&conn))?;
         // Wave 3 migrations
-        migrate_create_memory_entities(&conn).map_err(|e| migration_failed("create_memory_entities", e))?;
+        run_migration_step("create_memory_entities", migrate_create_memory_entities(&conn))?;
         // Second pass: re-run MAIN_DDL after migrations so indexes on
         // migration-added columns (e.g. `memory_type`) are created for legacy
         // databases. All statements use IF NOT EXISTS, so this is idempotent.
         if first_pass_failed {
-            conn.execute_batch(MAIN_DDL).map_err(|e| migration_failed("main_ddl_retry", e))?;
+            run_migration_step("main_ddl_retry", conn.execute_batch(MAIN_DDL))?;
         }
-        conn.execute_batch("DROP TRIGGER IF EXISTS trg_memory_clear_superseded_by")
-            .map_err(|e| migration_failed("refresh_superseded_trigger", e))?;
-        conn.execute_batch(TRIGGER_DDL).map_err(|e| migration_failed("trigger_ddl", e))?;
+        run_migration_step("refresh_superseded_trigger", conn.execute_batch("DROP TRIGGER IF EXISTS trg_memory_clear_superseded_by"))?;
+        run_migration_step("trigger_ddl", conn.execute_batch(TRIGGER_DDL))?;
 
-        let fts_available = migrate_create_fts_index(&conn).map_err(|e| migration_failed("create_fts_index", e))?;
+        let fts_available = run_migration_step("create_fts_index", migrate_create_fts_index(&conn))?;
         self.inner.fts_available.store(fts_available, Ordering::Release);
         // Wave 4 migrations
-        migrate_create_audit_log(&conn).map_err(|e| migration_failed("create_audit_log", e))?;
+        run_migration_step("create_audit_log", migrate_create_audit_log(&conn))?;
         // Wave 5 migrations (ranking overhaul)
-        migrate_memories_add_activity_tracking(&conn).map_err(|e| migration_failed("add_activity_tracking", e))?;
-        migrate_memories_add_updated_at(&conn).map_err(|e| migration_failed("add_updated_at", e))?;
-        migrate_memories_add_confidence(&conn).map_err(|e| migration_failed("add_confidence", e))?;
+        run_migration_step("add_activity_tracking", migrate_memories_add_activity_tracking(&conn))?;
+        run_migration_step("add_updated_at", migrate_memories_add_updated_at(&conn))?;
+        run_migration_step("add_confidence", migrate_memories_add_confidence(&conn))?;
         // migrations
-        migrate_create_scope_registry(&conn).map_err(|e| migration_failed("create_scope_registry", e))?;
-        migrate_create_metadata(&conn).map_err(|e| migration_failed("create_metadata", e))?;
-        migrate_create_memory_tombstones(&conn).map_err(|e| migration_failed("create_memory_tombstones", e))?;
+        run_migration_step("create_scope_registry", migrate_create_scope_registry(&conn))?;
+        run_migration_step("create_metadata", migrate_create_metadata(&conn))?;
+        run_migration_step("create_memory_tombstones", migrate_create_memory_tombstones(&conn))?;
         conn.pragma_update(None, "user_version", crate::store::schema::SQLITE_SCHEMA_VERSION)?;
 
         drop(conn);

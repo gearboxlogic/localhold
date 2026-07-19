@@ -78,6 +78,8 @@ left pane, search with mode cycling across keyword, text, semantic, and hybrid,
 and a detail view with each memory's audit trail. Browsing is side-effect-free;
 edits and deletions go through the normal audited authorization path.
 
+<img src="assets/brand/hold-ui.gif" alt="hold ui browse, keyword search, and memory detail views with scoped memories" width="100%">
+
 See [Browse The Hold](docs/browse.md) for navigation and editing keys.
 
 ## Configuration

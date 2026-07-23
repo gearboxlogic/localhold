@@ -23,6 +23,7 @@ pub(crate) use schema::{existing_embedding_dimensions, validate_published_v2_met
 use serde::{Deserialize, Serialize};
 pub use sqlite::SqliteStore;
 pub(crate) use sqlite::sqlite_write_tx;
+#[cfg(unix)]
 pub(crate) use sqlite_lease::database_identity as sqlite_database_identity;
 
 use crate::{

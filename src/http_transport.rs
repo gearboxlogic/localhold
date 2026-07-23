@@ -33,9 +33,9 @@ use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
 use crate::{
     clock::{Clock, SystemClock},
-    config::{ServerConfig, validate_server_config},
+    config::{HttpPrincipalMode, ServerConfig, validate_server_config},
     error::EngineError,
-    http_auth::bearer_matches,
+    http_auth::{bearer_matches, trusted_proxy_principal},
     server::LocalHoldServer,
     store::MemoryStore,
 };
@@ -90,7 +90,14 @@ where
     let mut router = Router::new().route_service(&config.path, service);
 
     if let Some(token) = config.http_auth_token.as_deref() {
-        router = router.route_layer(middleware::from_fn_with_state(Arc::<str>::from(token), require_bearer));
+        let trusted_proxy_header = (config.http_principal_mode == HttpPrincipalMode::TrustedProxy).then(|| Arc::<str>::from(config.http_principal_header.as_str()));
+        router = router.route_layer(middleware::from_fn_with_state(
+            HttpAuthRequirements {
+                bearer_token: Arc::<str>::from(token),
+                trusted_proxy_header,
+            },
+            require_http_auth,
+        ));
     }
 
     Ok(router.layer(RequestBodyLimitLayer::new(config.max_body_bytes)).layer(TraceLayer::new_for_http()))
@@ -319,12 +326,34 @@ impl SessionManager for CappedSessionManager {
     }
 }
 
-async fn require_bearer(State(expected): State<Arc<str>>, request: Request, next: Next) -> Response {
-    if bearer_matches(request.headers(), &expected) {
-        return next.run(request).await;
+#[derive(Clone, Debug)]
+struct HttpAuthRequirements {
+    bearer_token: Arc<str>,
+    trusted_proxy_header: Option<Arc<str>>,
+}
+
+async fn require_http_auth(State(requirements): State<HttpAuthRequirements>, request: Request, next: Next) -> Response {
+    if !bearer_matches(request.headers(), &requirements.bearer_token) {
+        tracing::warn!(method = %request.method(), path = %request.uri().path(), "rejected unauthenticated HTTP MCP request");
+        return unauthorized_response();
     }
 
-    tracing::warn!(method = %request.method(), path = %request.uri().path(), "rejected unauthenticated HTTP MCP request");
+    if let Some(header_name) = requirements.trusted_proxy_header.as_deref()
+        && trusted_proxy_principal(request.headers(), header_name).is_none()
+    {
+        tracing::warn!(
+            method = %request.method(),
+            path = %request.uri().path(),
+            principal_header = header_name,
+            "rejected HTTP MCP request without a trusted proxy principal"
+        );
+        return unauthorized_response();
+    }
+
+    next.run(request).await
+}
+
+fn unauthorized_response() -> Response {
     (StatusCode::UNAUTHORIZED, [(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"))], "Unauthorized").into_response()
 }
 

@@ -505,8 +505,57 @@ where
         });
     }
 
+    fn apply_rows(&mut self, rows: Vec<Row>, mode: Option<SearchMode>) {
+        self.rows = rows.into_iter().map(sanitize_row_for_view).collect();
+        self.executed_mode = mode;
+        self.loading = false;
+        self.row_selected = self.row_selected.min(self.rows.len().saturating_sub(1_usize));
+        self.status = self.results_status();
+    }
+
+    fn apply_updated_memory(&mut self, memory: Memory, metadata: Option<MemoryMetadata>, mut audit: Vec<AuditEntry>, refresh_warning: Option<String>) {
+        self.pending = false;
+        let refresh_results = !self.query.is_empty();
+        let memory = memory.sanitize_for_wire();
+        let metadata = if memory.was_redacted { None } else { metadata };
+        if memory.was_redacted {
+            redact_audit(&mut audit);
+        }
+        if let Some(row) = self.rows.iter_mut().find(|row| row.memory.id == memory.id) {
+            row.memory = memory.clone();
+            row.score = None;
+        }
+        self.detail = Some(Detail {
+            memory,
+            metadata,
+            audit,
+            scroll: 0_u16,
+        });
+        self.edit = None;
+        self.mode = Mode::Detail;
+        self.status = refresh_warning.map_or_else(
+            || Status::Held("memory revised".into()),
+            |warning| Status::NotHeld(format!("memory revised, but {warning}")),
+        );
+        if refresh_results {
+            self.refresh();
+        }
+    }
+
+    fn remove_memory_from_view(&mut self, id: MemoryId, status: Status, refresh_scope_facets: bool) {
+        self.pending = false;
+        self.rows.retain(|row| row.memory.id != id);
+        self.row_selected = self.row_selected.min(self.rows.len().saturating_sub(1_usize));
+        self.detail = None;
+        self.edit = None;
+        self.mode = Mode::Browse;
+        self.status = status;
+        if refresh_scope_facets {
+            self.refresh_scope_facets();
+        }
+    }
+
     /// Fold a completed data or mutation task into the state.
-    #[expect(clippy::too_many_lines, reason = "the reducer keeps all generation-checked data transitions together")]
     pub(crate) fn on_data(&mut self, msg: DataMsg) {
         match msg {
             DataMsg::ScopeFacets {
@@ -522,11 +571,7 @@ where
                 self.scope_notice = Some(message);
             }
             DataMsg::Rows { rows, mode, generation } if generation == self.generation => {
-                self.rows = rows.into_iter().map(sanitize_row_for_view).collect();
-                self.executed_mode = mode;
-                self.loading = false;
-                self.row_selected = self.row_selected.min(self.rows.len().saturating_sub(1_usize));
-                self.status = self.results_status();
+                self.apply_rows(rows, mode);
             }
             DataMsg::Failed { message, generation } if generation == self.generation => {
                 self.executed_mode = None;
@@ -536,75 +581,23 @@ where
             DataMsg::Updated {
                 memory,
                 metadata,
-                mut audit,
+                audit,
                 refresh_warning,
                 generation,
             } if generation == self.operation_generation => {
-                self.pending = false;
-                let refresh_results = !self.query.is_empty();
-                let memory = (*memory).sanitize_for_wire();
-                let metadata = if memory.was_redacted { None } else { metadata };
-                if memory.was_redacted {
-                    redact_audit(&mut audit);
-                }
-                if let Some(row) = self.rows.iter_mut().find(|row| row.memory.id == memory.id) {
-                    row.memory = memory.clone();
-                    row.score = None;
-                }
-                self.detail = Some(Detail {
-                    memory,
-                    metadata,
-                    audit,
-                    scroll: 0_u16,
-                });
-                self.edit = None;
-                self.mode = Mode::Detail;
-                self.status = refresh_warning.map_or_else(
-                    || Status::Held("memory revised".into()),
-                    |warning| Status::NotHeld(format!("memory revised, but {warning}")),
-                );
-                if refresh_results {
-                    self.refresh();
-                }
+                self.apply_updated_memory(*memory, metadata, audit, refresh_warning);
             }
             DataMsg::UpdatedInvisible { id, generation } if generation == self.operation_generation => {
-                self.pending = false;
-                self.rows.retain(|row| row.memory.id != id);
-                self.row_selected = self.row_selected.min(self.rows.len().saturating_sub(1_usize));
-                self.detail = None;
-                self.edit = None;
-                self.mode = Mode::Browse;
-                self.status = Status::Held("memory revised and is no longer visible".into());
-                self.refresh_scope_facets();
+                self.remove_memory_from_view(id, Status::Held("memory revised and is no longer visible".into()), true);
             }
             DataMsg::UpdatedUnrefreshed { id, message, generation } if generation == self.operation_generation => {
-                self.pending = false;
-                self.rows.retain(|row| row.memory.id != id);
-                self.row_selected = self.row_selected.min(self.rows.len().saturating_sub(1_usize));
-                self.detail = None;
-                self.edit = None;
-                self.mode = Mode::Browse;
-                self.status = Status::NotHeld(format!("memory revised, but refresh failed: {message}"));
+                self.remove_memory_from_view(id, Status::NotHeld(format!("memory revised, but refresh failed: {message}")), false);
             }
             DataMsg::Missing { id, generation } if generation == self.operation_generation => {
-                self.pending = false;
-                self.rows.retain(|row| row.memory.id != id);
-                self.row_selected = self.row_selected.min(self.rows.len().saturating_sub(1_usize));
-                self.detail = None;
-                self.edit = None;
-                self.mode = Mode::Browse;
-                self.status = Status::NotHeld("memory no longer exists".into());
-                self.refresh_scope_facets();
+                self.remove_memory_from_view(id, Status::NotHeld("memory no longer exists".into()), true);
             }
             DataMsg::Deleted { id, generation } if generation == self.operation_generation => {
-                self.pending = false;
-                self.rows.retain(|row| row.memory.id != id);
-                self.row_selected = self.row_selected.min(self.rows.len().saturating_sub(1_usize));
-                self.detail = None;
-                self.edit = None;
-                self.mode = Mode::Browse;
-                self.status = Status::Held("memory forgotten".into());
-                self.refresh_scope_facets();
+                self.remove_memory_from_view(id, Status::Held("memory forgotten".into()), true);
             }
             DataMsg::MutationFailed { message, generation } if generation == self.operation_generation => {
                 self.pending = false;

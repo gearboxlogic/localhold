@@ -95,11 +95,48 @@ struct MemoryView {
     metadata: Option<MemoryMetadata>,
 }
 
+struct PreparedRemember {
+    memory: Memory,
+    supersedes: Option<MemoryId>,
+    metadata: MemoryMetadata,
+    scope_resolution: ScopeResolution,
+    duplicate_candidates: Vec<DuplicateCandidateCard>,
+    warnings: Vec<QualityWarning>,
+}
+
+enum PrepareRememberError {
+    Invalid {
+        error: crate::error::ValidationError,
+        suggested_fix: &'static str,
+    },
+    Engine(EngineError),
+}
+
+impl PrepareRememberError {
+    const fn invalid(error: crate::error::ValidationError, suggested_fix: &'static str) -> Self {
+        Self::Invalid { error, suggested_fix }
+    }
+
+    fn into_tool_result(self, item_index: Option<usize>) -> Result<CallToolResult, rmcp::ErrorData> {
+        match self {
+            Self::Invalid { error, suggested_fix } => {
+                let field = item_index.map_or_else(|| error.field.clone(), |index| format!("memories[{index}].{}", error.field));
+                Ok(tool_error(ToolErrorCode::InvalidParams, Some(&field), error.to_string(), Some(suggested_fix), false))
+            }
+            Self::Engine(error) => Err(error.into()),
+        }
+    }
+}
+
+struct PreparedHandoffWrite {
+    memory: Memory,
+    supersedes: Option<MemoryId>,
+    metadata: MemoryMetadata,
+}
+
 struct PreparedHandoff {
     suggestion: HandoffSuggestion,
-    memory: Option<Memory>,
-    supersedes: Option<MemoryId>,
-    metadata: Option<MemoryMetadata>,
+    write: Option<PreparedHandoffWrite>,
 }
 
 impl MemoryView {
@@ -629,6 +666,69 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         Ok(cards)
     }
 
+    async fn prepare_remember(&self, params: RememberParams, principal: String, now: chrono::DateTime<chrono::Utc>) -> Result<PreparedRemember, PrepareRememberError> {
+        let summary = trim_optional_text(params.summary);
+        let agent_label = trim_optional_text(params.agent_label);
+        let context_hints = normalize_optional_string_array("context_hints", Some(params.context_hints))
+            .map_err(|error| PrepareRememberError::invalid(error, "Remove blank values from context_hints."))?
+            .unwrap_or_default();
+        let scope_resolution = self.resolve_scope(params.scope, &context_hints).await.map_err(PrepareRememberError::Engine)?;
+        let scope = scope_resolution.scope.clone();
+        let unresolved_scope = scope_resolution.unresolved_scope;
+        let memory_input = params::MemoryInput {
+            content: params.content,
+            tags: params.tags,
+            source_agent: Some(principal.clone()),
+            source_conversation: Some(scope.clone()),
+            origin_conversation: Some(scope.clone()),
+            source_user: None,
+            ttl_seconds: None,
+            access_policy: params.access_policy,
+            memory_type: params.memory_type,
+            importance: params.importance,
+            confidence: params.confidence,
+            supersedes: None,
+            entities: params.entities,
+        };
+        let input = StoreMemoryInput::try_from(memory_input).map_err(|error| PrepareRememberError::invalid(error, "Provide valid memory content and metadata."))?;
+        let supersedes = input.supersedes;
+        let memory = self.engine.build_memory(input, now).map_err(|error| match error {
+            EngineError::Validation(error) => PrepareRememberError::invalid(error, "Provide valid memory content and metadata."),
+            engine_error @ (EngineError::Config(_)
+            | EngineError::Store(_)
+            | EngineError::EmbeddingUnavailable(_)
+            | EngineError::SearchUnavailable(_)
+            | EngineError::Embedding(_)
+            | EngineError::ShuttingDown) => PrepareRememberError::Engine(engine_error),
+        })?;
+        let mut warnings = write_quality_warnings(&memory.content, summary.as_deref(), unresolved_scope, &memory.tags, memory.entities.len());
+        let duplicate_candidates = self.duplicate_candidates(&memory.content, &scope, Some(&principal)).await.unwrap_or_default();
+        if !duplicate_candidates.is_empty() {
+            warnings.push(quality_warning(
+                "duplicate_candidate",
+                "similar memories already exist; review duplicate_candidates before relying on this write",
+            ));
+        }
+        let quality_flags = warnings.iter().map(|warning| warning.code.clone()).collect();
+        let metadata = MemoryMetadata {
+            memory_id: memory.id,
+            scope_key: Some(scope),
+            summary,
+            agent_label,
+            created_by_principal: Some(principal),
+            quality_flags,
+            schema_version: 1,
+        };
+        Ok(PreparedRemember {
+            memory,
+            supersedes,
+            metadata,
+            scope_resolution,
+            duplicate_candidates,
+            warnings,
+        })
+    }
+
     /// Drain all in-flight background tasks (embedding generation).
     /// Times out after [`LimitsConfig::shutdown_timeout_secs`] to prevent
     /// indefinite hangs on unresponsive providers.
@@ -1147,83 +1247,20 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let Some(principal) = self.write_principal_for(request_principal.as_deref()) else {
             return Ok(Self::anonymous_write_denied());
         };
-        let summary = trim_optional_text(params.summary.clone());
-        let agent_label = trim_optional_text(params.agent_label.clone());
-        let context_hints = match normalize_optional_string_array("context_hints", Some(params.context_hints)) {
-            Ok(context_hints) => context_hints.unwrap_or_default(),
-            Err(err) => {
-                return Ok(tool_error(
-                    ToolErrorCode::InvalidParams,
-                    Some(&err.field),
-                    err.to_string(),
-                    Some("Remove blank values from context_hints."),
-                    false,
-                ));
-            }
+        let prepared = match self.prepare_remember(params, principal, self.engine.now()).await {
+            Ok(prepared) => prepared,
+            Err(error) => return error.into_tool_result(None),
         };
-        let scope_resolution = self.resolve_scope(params.scope.clone(), &context_hints).await?;
+        let PreparedRemember {
+            memory,
+            supersedes,
+            metadata,
+            scope_resolution,
+            duplicate_candidates,
+            warnings,
+        } = prepared;
         let scope = scope_resolution.scope.clone();
         let unresolved_scope = scope_resolution.unresolved_scope;
-        let memory_input = params::MemoryInput {
-            content: params.content,
-            tags: params.tags,
-            source_agent: Some(principal.clone()),
-            source_conversation: Some(scope.clone()),
-            origin_conversation: Some(scope.clone()),
-            source_user: None,
-            ttl_seconds: None,
-            access_policy: params.access_policy,
-            memory_type: params.memory_type,
-            importance: params.importance,
-            confidence: params.confidence,
-            supersedes: None,
-            entities: params.entities,
-        };
-        let now = self.engine.now();
-        let input = match StoreMemoryInput::try_from(memory_input) {
-            Ok(input) => input,
-            Err(err) => {
-                return Ok(tool_error(
-                    ToolErrorCode::InvalidParams,
-                    Some(&err.field),
-                    err.to_string(),
-                    Some("Provide valid memory content and metadata."),
-                    false,
-                ));
-            }
-        };
-        let supersedes = input.supersedes;
-        let memory = match self.engine.build_memory(input, now) {
-            Ok(memory) => memory,
-            Err(EngineError::Validation(err)) => {
-                return Ok(tool_error(
-                    ToolErrorCode::InvalidParams,
-                    Some(&err.field),
-                    err.to_string(),
-                    Some("Provide valid memory content and metadata."),
-                    false,
-                ));
-            }
-            Err(err) => return Err(err.into()),
-        };
-        let mut warnings = write_quality_warnings(&memory.content, summary.as_deref(), unresolved_scope, &memory.tags, memory.entities.len());
-        let duplicate_candidates = self.duplicate_candidates(&memory.content, &scope, Some(&principal)).await.unwrap_or_default();
-        if !duplicate_candidates.is_empty() {
-            warnings.push(quality_warning(
-                "duplicate_candidate",
-                "similar memories already exist; review duplicate_candidates before relying on this write",
-            ));
-        }
-        let quality_flags = warnings.iter().map(|warning| warning.code.clone()).collect();
-        let metadata = MemoryMetadata {
-            memory_id: memory.id,
-            scope_key: Some(scope.clone()),
-            summary,
-            agent_label,
-            created_by_principal: Some(principal),
-            quality_flags,
-            schema_version: 1,
-        };
         let id = self.engine.store_memory_with_metadata(memory, supersedes.as_ref(), &metadata).await?;
         let next_action = next_action_for_warnings(&warnings);
         success_json(&RememberResponse {
@@ -1255,93 +1292,31 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         }
 
         let now = self.engine.now();
-        let mut prepared = Vec::with_capacity(params.memories.len());
+        let mut memories = Vec::with_capacity(params.memories.len());
         let mut supersedes_list = Vec::with_capacity(params.memories.len());
         let mut metadata = Vec::with_capacity(params.memories.len());
         let mut item_responses = Vec::with_capacity(params.memories.len());
         let mut all_warnings = Vec::new();
 
-        for (i, params) in params.memories.into_iter().map(RememberParams::from).enumerate() {
-            let summary = trim_optional_text(params.summary.clone());
-            let agent_label = trim_optional_text(params.agent_label.clone());
-            let context_hints = match normalize_optional_string_array("context_hints", Some(params.context_hints)) {
-                Ok(context_hints) => context_hints.unwrap_or_default(),
-                Err(err) => {
-                    return Ok(tool_error(
-                        ToolErrorCode::InvalidParams,
-                        Some(&format!("memories[{i}].{}", err.field)),
-                        err.to_string(),
-                        Some("Remove blank values from context_hints."),
-                        false,
-                    ));
-                }
+        for (index, params) in params.memories.into_iter().map(RememberParams::from).enumerate() {
+            let prepared = match self.prepare_remember(params, principal.clone(), now).await {
+                Ok(prepared) => prepared,
+                Err(error) => return error.into_tool_result(Some(index)),
             };
-            let scope_resolution = self.resolve_scope(params.scope.clone(), &context_hints).await?;
+            let PreparedRemember {
+                memory,
+                supersedes,
+                metadata: metadata_item,
+                scope_resolution,
+                duplicate_candidates,
+                warnings,
+            } = prepared;
             let scope = scope_resolution.scope.clone();
             let unresolved_scope = scope_resolution.unresolved_scope;
-            let memory_input = params::MemoryInput {
-                content: params.content,
-                tags: params.tags,
-                source_agent: Some(principal.clone()),
-                source_conversation: Some(scope.clone()),
-                origin_conversation: Some(scope.clone()),
-                source_user: None,
-                ttl_seconds: None,
-                access_policy: params.access_policy,
-                memory_type: params.memory_type,
-                importance: params.importance,
-                confidence: params.confidence,
-                supersedes: None,
-                entities: params.entities,
-            };
-            let input = match StoreMemoryInput::try_from(memory_input) {
-                Ok(input) => input,
-                Err(err) => {
-                    return Ok(tool_error(
-                        ToolErrorCode::InvalidParams,
-                        Some(&format!("memories[{i}].{}", err.field)),
-                        err.to_string(),
-                        Some("Provide valid memory content and metadata."),
-                        false,
-                    ));
-                }
-            };
-            let supersedes = input.supersedes;
-            let memory = match self.engine.build_memory(input, now) {
-                Ok(memory) => memory,
-                Err(EngineError::Validation(err)) => {
-                    return Ok(tool_error(
-                        ToolErrorCode::InvalidParams,
-                        Some(&format!("memories[{i}].{}", err.field)),
-                        err.to_string(),
-                        Some("Provide valid memory content and metadata."),
-                        false,
-                    ));
-                }
-                Err(err) => return Err(err.into()),
-            };
-            let mut warnings = write_quality_warnings(&memory.content, summary.as_deref(), unresolved_scope, &memory.tags, memory.entities.len());
-            let duplicate_candidates = self.duplicate_candidates(&memory.content, &scope, Some(&principal)).await.unwrap_or_default();
-            if !duplicate_candidates.is_empty() {
-                warnings.push(quality_warning(
-                    "duplicate_candidate",
-                    "similar memories already exist; review duplicate_candidates before relying on this write",
-                ));
-            }
-            let quality_flags = warnings.iter().map(|warning| warning.code.clone()).collect();
-            let metadata_item = MemoryMetadata {
-                memory_id: memory.id,
-                scope_key: Some(scope.clone()),
-                summary,
-                agent_label,
-                created_by_principal: Some(principal.clone()),
-                quality_flags,
-                schema_version: 1,
-            };
-            prepared.push(memory);
+            memories.push(memory);
             supersedes_list.push(supersedes);
             metadata.push(metadata_item);
-            all_warnings.extend(warnings.clone());
+            all_warnings.extend(warnings.iter().cloned());
             item_responses.push(RememberManyItemResponse {
                 id: MemoryId::new(),
                 scope,
@@ -1352,7 +1327,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             });
         }
 
-        let ids = self.engine.batch_store_with_metadata(prepared, supersedes_list, metadata).await?;
+        let ids = self.engine.batch_store_with_metadata(memories, supersedes_list, metadata).await?;
         for (id, response) in ids.iter().copied().zip(item_responses.iter_mut()) {
             response.id = id;
         }
@@ -1731,6 +1706,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 None => return Ok(Self::anonymous_write_denied()),
             }
         } else {
+            if !self.read_allowed_for(request_principal.as_deref()) {
+                return Ok(Self::anonymous_read_denied());
+            }
             None
         };
         if let Some(error) = batch_len_tool_error(
@@ -1801,8 +1779,8 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             let quality_flags = warnings.iter().map(|warning| warning.code.clone()).collect();
             let next_action = next_action_for_warnings(&warnings);
             all_warnings.extend(warnings.clone());
-            let (memory, supersedes, metadata) = if let Some((memory, supersedes)) = commit_payload {
-                let metadata = MemoryMetadata {
+            let write = commit_payload.map(|(memory, supersedes)| PreparedHandoffWrite {
+                metadata: MemoryMetadata {
                     memory_id: memory.id,
                     scope_key: Some(resolved_scope.clone()),
                     summary: metadata_summary,
@@ -1810,11 +1788,10 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     created_by_principal: write_principal.clone(),
                     quality_flags,
                     schema_version: 1,
-                };
-                (Some(memory), supersedes, Some(metadata))
-            } else {
-                (None, None, None)
-            };
+                },
+                memory,
+                supersedes,
+            });
             prepared.push(PreparedHandoff {
                 suggestion: HandoffSuggestion {
                     content,
@@ -1826,9 +1803,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     duplicate_candidates,
                     next_action,
                 },
-                memory,
-                supersedes,
-                metadata,
+                write,
             });
         }
 
@@ -1839,11 +1814,11 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             let mut suggestion_indexes = Vec::with_capacity(prepared.len());
 
             for (index, item) in prepared.iter_mut().enumerate() {
-                if let (Some(memory), Some(metadata_item)) = (item.memory.take(), item.metadata.take()) {
+                if let Some(write) = item.write.take() {
                     suggestion_indexes.push(index);
-                    supersedes.push(item.supersedes.take());
-                    memories.push(memory);
-                    metadata.push(metadata_item);
+                    supersedes.push(write.supersedes);
+                    memories.push(write.memory);
+                    metadata.push(write.metadata);
                 }
             }
 

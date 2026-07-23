@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use axum::http::{HeaderName, HeaderValue};
 use localhold::{
     clock::Clock,
-    config::{AnonymousPolicy, DEFAULT_HTTP_PRINCIPAL_HEADER, LimitsConfig, SearchConfig, ServerConfig},
+    config::{AnonymousPolicy, DEFAULT_HTTP_PRINCIPAL_HEADER, HttpPrincipalMode, LimitsConfig, SearchConfig, ServerConfig},
     embedding::{BoxFuture, EmbeddingProvider, NoopEmbedding},
     engine::LocalHoldEngine,
     error::EmbeddingError,
@@ -575,7 +575,14 @@ pub(crate) async fn spawn_http_server_with_trusted_proxy_auth(
         Some(http_auth_token.to_owned()),
         HttpPrincipalSource::trusted_proxy_header(DEFAULT_HTTP_PRINCIPAL_HEADER),
     );
-    spawn_http_server_inner(server, localhold::config::DEFAULT_HTTP_MAX_BODY_BYTES, Some(http_auth_token), None).await
+    spawn_http_server_inner_with_principal_mode(
+        server,
+        localhold::config::DEFAULT_HTTP_MAX_BODY_BYTES,
+        Some(http_auth_token),
+        HttpPrincipalMode::TrustedProxy,
+        None,
+    )
+    .await
 }
 
 /// Spawn an HTTP MCP server with a caller-supplied embedding provider and clock.
@@ -599,6 +606,16 @@ async fn spawn_http_server_inner(
     http_auth_token: Option<&str>,
     http_allowed_hosts: Option<Vec<String>>,
 ) -> (String, CancellationToken, LocalHoldServer) {
+    spawn_http_server_inner_with_principal_mode(server, max_body_bytes, http_auth_token, HttpPrincipalMode::Fixed, http_allowed_hosts).await
+}
+
+async fn spawn_http_server_inner_with_principal_mode(
+    server: LocalHoldServer,
+    max_body_bytes: usize,
+    http_auth_token: Option<&str>,
+    http_principal_mode: HttpPrincipalMode,
+    http_allowed_hosts: Option<Vec<String>>,
+) -> (String, CancellationToken, LocalHoldServer) {
     let server_ref = server.clone();
 
     let ct = CancellationToken::new();
@@ -606,6 +623,7 @@ async fn spawn_http_server_inner(
     config.max_body_bytes = max_body_bytes;
     config.admin_tools_enabled = true;
     config.http_auth_token = http_auth_token.map(ToOwned::to_owned);
+    config.http_principal_mode = http_principal_mode;
     if let Some(http_allowed_hosts) = http_allowed_hosts {
         config.http_allowed_hosts = http_allowed_hosts;
     }

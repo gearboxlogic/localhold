@@ -8,6 +8,10 @@ requirements explicitly.
 
 ## [Unreleased]
 
+- Changed OpenAI-compatible provider HTTP failures to discard response bodies
+  while preserving status, retry classification, and valid `Retry-After`
+  delays, preventing provider-controlled text from reaching clients or logs.
+
 ## [0.2.0] - 2026-07-15
 
 - Changed malformed typed `LOCALHOLD_*` environment overrides to fail startup

@@ -33,7 +33,9 @@ out of order; LocalHold restores input order using each item index.
 
 Successful embedding response bodies are limited to 16 MiB, and model-list
 response bodies are limited to 1 MiB. LocalHold enforces these limits while
-streaming even when the provider omits `Content-Length`.
+streaming even when the provider omits `Content-Length`. Provider HTTP error
+bodies are discarded; runtime errors retain the HTTP status and retry
+classification without returning provider-controlled body text.
 
 ## Authentication
 

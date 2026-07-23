@@ -1706,6 +1706,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 None => return Ok(Self::anonymous_write_denied()),
             }
         } else {
+            if !self.read_allowed_for(request_principal.as_deref()) {
+                return Ok(Self::anonymous_read_denied());
+            }
             None
         };
         if let Some(error) = batch_len_tool_error(

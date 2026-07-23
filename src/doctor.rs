@@ -235,31 +235,29 @@ fn permissions_check(config: &Config, source: Option<&Path>) -> DiagnosticCheck 
     use std::os::unix::fs::PermissionsExt as _;
 
     let mut paths = Vec::new();
+    let mut sidecar_identity_warning = None;
     if let Some(source) = source {
         paths.push(("configuration file", source.to_path_buf()));
     }
     if config.database.backend == DatabaseBackend::Sqlite {
         let database = config.database.sqlite_path();
         paths.push(("SQLite database", database.to_path_buf()));
-        let sidecar_database = match sqlite_database_identity(database) {
-            Ok(identity) => identity,
-            Err(error) => {
-                return check(
-                    "permissions",
-                    DiagnosticStatus::Degraded,
-                    format!(
-                        "SQLite database identity at {} could not be resolved for sidecar permission checks: {error}; doctor did not change it",
-                        database.display()
-                    ),
-                );
-            }
-        };
-        paths.push(("SQLite WAL sidecar", sqlite_sidecar_path(&sidecar_database, "-wal")));
-        paths.push(("SQLite shared-memory sidecar", sqlite_sidecar_path(&sidecar_database, "-shm")));
         if is_default_sqlite_path(database)
             && let Some(parent) = database.parent().filter(|parent| !parent.as_os_str().is_empty())
         {
             paths.push(("default SQLite data directory", parent.to_path_buf()));
+        }
+        match sqlite_database_identity(database) {
+            Ok(sidecar_database) => {
+                paths.push(("SQLite WAL sidecar", sqlite_sidecar_path(&sidecar_database, "-wal")));
+                paths.push(("SQLite shared-memory sidecar", sqlite_sidecar_path(&sidecar_database, "-shm")));
+            }
+            Err(error) => {
+                sidecar_identity_warning = Some(format!(
+                    "SQLite database identity at {} could not be resolved for sidecar permission checks: {error}; doctor did not change it",
+                    database.display()
+                ));
+            }
         }
     }
 
@@ -278,6 +276,10 @@ fn permissions_check(config: &Config, source: Option<&Path>) -> DiagnosticCheck 
                 ),
             );
         }
+    }
+
+    if let Some(summary) = sidecar_identity_warning {
+        return check("permissions", DiagnosticStatus::Degraded, summary);
     }
 
     check(
@@ -1369,6 +1371,32 @@ mod tests {
 
         std::fs::set_permissions(&database_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(permissions_check(&config, Some(&config_path)).status, DiagnosticStatus::Healthy);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_diagnostics_check_existing_config_before_unresolved_database_identity() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("localhold.toml");
+        let database_path = directory.path().join("missing").join("localhold.db");
+        std::fs::write(&config_path, b"[server]\n").unwrap();
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let mut config = Config::default();
+        config.database.sqlite.path.clone_from(&database_path);
+
+        let config_result = permissions_check(&config, Some(&config_path));
+        assert_eq!(config_result.status, DiagnosticStatus::Degraded);
+        assert!(config_result.summary.contains("configuration file"));
+        assert!(config_result.summary.contains("0644"));
+        assert_eq!(config_path.metadata().unwrap().permissions().mode() & 0o777, 0o644);
+
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let identity_result = permissions_check(&config, Some(&config_path));
+        assert_eq!(identity_result.status, DiagnosticStatus::Degraded);
+        assert!(identity_result.summary.contains("could not be resolved for sidecar permission checks"));
     }
 
     #[cfg(unix)]

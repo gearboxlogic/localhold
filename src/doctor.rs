@@ -168,7 +168,7 @@ async fn run_with_clock_inner(options: DoctorOptions, clock: std::sync::Arc<dyn 
     let (config, source) = match Config::load_with_source() {
         Ok(loaded) => loaded,
         Err(_error) => {
-            let mut checks = vec![
+            let base_checks = vec![
                 check("build", DiagnosticStatus::Healthy, build_summary(&build)),
                 check(
                     "configuration",
@@ -177,9 +177,15 @@ async fn run_with_clock_inner(options: DoctorOptions, clock: std::sync::Arc<dyn 
                 ),
             ];
             #[cfg(unix)]
-            if let Some(permissions) = invalid_config_permissions_check() {
-                checks.push(permissions);
-            }
+            let checks = {
+                let mut checks = base_checks;
+                if let Some(permissions) = invalid_config_permissions_check() {
+                    checks.push(permissions);
+                }
+                checks
+            };
+            #[cfg(not(unix))]
+            let checks = base_checks;
             return finalize(build, None, None, checks);
         }
     };

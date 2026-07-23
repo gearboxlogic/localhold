@@ -16,7 +16,7 @@ remember into the same store and recall from it later, and the record stays
 yours.
 
 LocalHold is in early beta. Linux CPU is the primary supported environment;
-Windows, PostgreSQL, and CUDA reranking are preview surfaces.
+streamable HTTP, Windows, PostgreSQL, and CUDA reranking are preview surfaces.
 
 ## What It Provides
 
@@ -32,7 +32,9 @@ Windows, PostgreSQL, and CUDA reranking are preview surfaces.
 
 Storage is local by default. When an external embedding provider is enabled,
 memory content and search queries are sent to the configured endpoint. LocalHold
-does not start or manage model servers.
+does not start or manage model servers. Review the
+[security, privacy, and threat model](docs/security-and-privacy.md) before using
+network storage, HTTP transport, or external compute.
 
 ## Quickstart
 
@@ -144,7 +146,9 @@ maintenance instance.
 See [Agent API](docs/agent-api.md) for tool semantics,
 [Architecture](docs/architecture.md) for the system design,
 [Operations](docs/operations.md) for running LocalHold, and the
-[Compatibility Policy](docs/compatibility.md) for what upgrades preserve.
+[Compatibility Policy](docs/compatibility.md) for what upgrades preserve. The
+[Security, Privacy, And Threat Model](docs/security-and-privacy.md) maps stored
+data, network paths, identities, and operator-owned controls.
 
 ## Development
 

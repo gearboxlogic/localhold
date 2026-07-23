@@ -147,3 +147,6 @@ time—must drive their successful path.
 
 - Example configuration: [../localhold.example.toml](../localhold.example.toml)
 - Agent API: [agent-api.md](agent-api.md)
+- Operations: [operations.md](operations.md)
+- Security, privacy, and threat model: [security-and-privacy.md](security-and-privacy.md)
+- Compatibility policy: [compatibility.md](compatibility.md)

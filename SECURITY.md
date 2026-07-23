@@ -19,3 +19,7 @@ other sensitive data in the report.
 Gearbox Logic LLC will acknowledge a report, assess severity, coordinate a fix,
 and publish an advisory when appropriate. No fixed response deadline is
 promised during the beta period.
+
+For documented trust boundaries, data movement, deployment assumptions, and
+residual risks, see the
+[Security, Privacy, And Threat Model](docs/security-and-privacy.md).

@@ -3,7 +3,9 @@
 LocalHold uses one OpenAI-compatible HTTP contract for local and cloud
 embeddings. It does not start or manage the model service. Memory content is
 sent to the selected endpoint when memories are indexed, and search queries are
-sent when semantic retrieval runs.
+sent when semantic retrieval runs. The
+[security, privacy, and threat model](security-and-privacy.md) describes the
+provider boundary, stored vectors, error logging, and fully local alternative.
 
 ## Request Contract
 
@@ -59,6 +61,12 @@ calling an unsupported health route.
 HTTPS is required for non-loopback endpoints. Plain HTTP remains available for
 `localhost` and loopback IP addresses so local vLLM, llama.cpp, or Ollama
 services work without TLS.
+
+The HTTP client honors system proxy environment variables, including
+`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, and lowercase equivalents.
+A proxy can therefore receive embedding inputs and API key headers. Audit the
+server process environment and use `NO_PROXY` for loopback or private endpoints
+that must not cross that additional boundary.
 
 For a trusted private network that intentionally uses plaintext HTTP, set
 `allow_insecure_http = true`. This exposes memory content, queries, and API keys

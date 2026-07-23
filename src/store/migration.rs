@@ -327,7 +327,7 @@ impl PostgresKeyExpectation {
 }
 
 /// Options for migrating a SQLite database into an empty `PostgreSQL` database.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SqliteToPostgresOptions {
     /// Source SQLite database path.
@@ -342,6 +342,19 @@ pub struct SqliteToPostgresOptions {
     pub dry_run: bool,
     /// Required for actual imports.
     pub yes: bool,
+}
+
+impl std::fmt::Debug for SqliteToPostgresOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteToPostgresOptions")
+            .field("sqlite_path", &self.sqlite_path)
+            .field("postgres_url", &"[REDACTED]")
+            .field("embedding_dimensions", &self.embedding_dimensions)
+            .field("batch_size", &self.batch_size)
+            .field("dry_run", &self.dry_run)
+            .field("yes", &self.yes)
+            .finish()
+    }
 }
 
 impl SqliteToPostgresOptions {
@@ -1708,7 +1721,7 @@ async fn fetch_postgres_embeddings_tx(tx: &mut Transaction<'_, Postgres>, ids: &
         let id_str: String = row.try_get("memory_id")?;
         let embedding_text: String = row.try_get("embedding")?;
         let id = parse_memory_id_store(&id_str, "memory_embeddings.memory_id")?;
-        let embedding = parse_pgvector_text(&embedding_text).ok_or_else(|| StoreError::Conflict(format!("target memory {id} has invalid pgvector text: {embedding_text}")))?;
+        let embedding = parse_pgvector_text(&embedding_text).ok_or_else(|| invalid_pgvector_text_error(&id, &embedding_text))?;
         if embedding.len() != embedding_dimensions {
             return Err(StoreError::Conflict(format!(
                 "target memory {id} has embedding dimension {}, expected {embedding_dimensions}",
@@ -1718,6 +1731,10 @@ async fn fetch_postgres_embeddings_tx(tx: &mut Transaction<'_, Postgres>, ids: &
         let _previous = result.insert(id, embedding);
     }
     Ok(result)
+}
+
+fn invalid_pgvector_text_error(id: &MemoryId, text: &str) -> StoreError {
+    StoreError::Conflict(format!("target memory {id} has invalid pgvector text ({} bytes)", text.len()))
 }
 
 fn parse_pgvector_text(raw: &str) -> Option<Vec<f32>> {
@@ -3429,6 +3446,42 @@ mod tests {
         assert_eq!(parsed.embedding_dimensions, 768_usize);
         assert!(parsed.dry_run);
         assert!(!parsed.yes);
+    }
+
+    #[test]
+    fn debug_redacts_migration_postgres_url_but_keeps_non_secret_options() {
+        let options = SqliteToPostgresOptions {
+            sqlite_path: PathBuf::from("source.db"),
+            postgres_url: "postgres://private-user:private-password@db.example/localhold".into(),
+            embedding_dimensions: 384,
+            batch_size: 73,
+            dry_run: true,
+            yes: false,
+        };
+
+        let debug = format!("{options:?}");
+        assert!(debug.contains("source.db"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("embedding_dimensions: 384"));
+        assert!(debug.contains("batch_size: 73"));
+        assert!(debug.contains("dry_run: true"));
+        assert!(!debug.contains("private-user"));
+        assert!(!debug.contains("private-password"));
+        assert!(!debug.contains("db.example"));
+    }
+
+    #[test]
+    fn invalid_pgvector_error_redacts_vector_text() {
+        const VECTOR_TEXT: &str = "[0.125,not-a-number,derived-secret-sentinel]";
+        let id = MemoryId::new();
+
+        let error = invalid_pgvector_text_error(&id, VECTOR_TEXT);
+        let message = error.to_string();
+
+        assert!(message.contains(&id.to_string()));
+        assert!(message.contains(&format!("{} bytes", VECTOR_TEXT.len())));
+        assert!(!message.contains(VECTOR_TEXT));
+        assert!(!message.contains("derived-secret-sentinel"));
     }
 
     #[test]

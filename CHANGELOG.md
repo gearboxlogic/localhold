@@ -8,6 +8,10 @@ requirements explicitly.
 
 ## [Unreleased]
 
+- Redacted HTTP bearer tokens and migration PostgreSQL URLs from configuration
+  debug output, and removed complete embedding values from malformed-vector
+  diagnostics.
+
 ## [0.2.0] - 2026-07-15
 
 - Changed malformed typed `LOCALHOLD_*` environment overrides to fail startup

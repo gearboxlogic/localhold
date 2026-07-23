@@ -115,6 +115,25 @@ fn debug_redacts_postgres_url_credentials_but_keeps_pool_settings() {
 }
 
 #[test]
+fn debug_redacts_http_auth_token_but_keeps_server_settings() {
+    let config = ServerConfig {
+        transport: Transport::Http,
+        host: "server.example".into(),
+        port: 4312,
+        http_auth_token: Some("super-secret-http-token".into()),
+        admin_tools_enabled: true,
+        ..ServerConfig::default()
+    };
+
+    let debug = format!("{config:?}");
+    assert!(debug.contains("server.example"));
+    assert!(debug.contains("port: 4312"));
+    assert!(debug.contains("[REDACTED]"));
+    assert!(debug.contains("admin_tools_enabled: true"));
+    assert!(!debug.contains("super-secret-http-token"));
+}
+
+#[test]
 fn limits_config_loadable_from_toml() {
     let toml_str = "[limits]\nmax_search_limit = 42\nmax_candidate_pool_size = 500\nembedding_timeout_secs = 60\nmax_concurrent_embedding_requests = 4\nembedding_batch_size = 16\nembedding_max_retries = 5\nembedding_retry_initial_backoff_ms = 750\nembedding_retry_max_backoff_ms = 45000\n";
     let config: Config = toml::from_str(toml_str).unwrap();

@@ -1919,6 +1919,35 @@ fn doctor_json_returns_failed_report_for_invalid_config_without_echoing_contents
     assert!(!db_path.exists(), "failed configuration must not create storage");
 }
 
+#[cfg(unix)]
+#[test]
+fn doctor_reports_unsafe_permissions_for_malformed_config_without_echoing_contents() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = unique_db_path("doctor-invalid-config-permissions").with_extension("root");
+    let (mut command, config_dir) = config_binary_command(&root);
+    let config_path = config_dir.join("localhold/localhold.toml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(&config_path, "[server]\nhttp_auth_token = \"doctor-parser-secret-ABC123\n").unwrap();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1_i32));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+    let permissions = report["checks"].as_array().unwrap().iter().find(|check| check["name"] == "permissions").unwrap();
+    assert_eq!(permissions["status"], "degraded");
+    assert!(permissions["summary"].as_str().unwrap().contains("configuration file"));
+    assert!(permissions["summary"].as_str().unwrap().contains("0644"));
+    let combined = format!("{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    assert!(!combined.contains("doctor-parser-secret-ABC123"));
+    assert_eq!(config_path.metadata().unwrap().permissions().mode() & 0o777, 0o644);
+
+    let _cleanup = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn doctor_redacts_configured_embedding_identity_from_all_output() {
     let db_path = unique_db_path("doctor-redacted-identity");

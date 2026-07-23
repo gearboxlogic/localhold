@@ -12,8 +12,6 @@ use sqlx_postgres::{PgPool, PgPoolOptions};
 
 #[cfg(test)]
 use crate::store::PostgresStore;
-#[cfg(unix)]
-use crate::{config::is_default_sqlite_path, store::sqlite_database_identity};
 use crate::{
     config::{Config, DatabaseBackend, EmbeddingConfig},
     embedding::status::EmbeddingProviderHealth,
@@ -21,6 +19,11 @@ use crate::{
         EmbeddingProfile, SqliteStore,
         postgres_migrations::{MigrationMetadataState, read_migration_metadata_state},
     },
+};
+#[cfg(unix)]
+use crate::{
+    config::{is_default_sqlite_path, user_config_candidates, user_config_dir},
+    store::sqlite_database_identity,
 };
 
 /// Machine-readable doctor report schema version.
@@ -165,7 +168,7 @@ async fn run_with_clock_inner(options: DoctorOptions, clock: std::sync::Arc<dyn 
     let (config, source) = match Config::load_with_source() {
         Ok(loaded) => loaded,
         Err(_error) => {
-            let checks = vec![
+            let mut checks = vec![
                 check("build", DiagnosticStatus::Healthy, build_summary(&build)),
                 check(
                     "configuration",
@@ -173,6 +176,10 @@ async fn run_with_clock_inner(options: DoctorOptions, clock: std::sync::Arc<dyn 
                     "configuration could not be loaded or validated; no secret-bearing parser context was emitted",
                 ),
             ];
+            #[cfg(unix)]
+            if let Some(permissions) = invalid_config_permissions_check() {
+                checks.push(permissions);
+            }
             return finalize(build, None, None, checks);
         }
     };
@@ -231,9 +238,14 @@ fn config_check(source: Option<&Path>) -> DiagnosticCheck {
 }
 
 #[cfg(unix)]
-fn permissions_check(config: &Config, source: Option<&Path>) -> DiagnosticCheck {
-    use std::os::unix::fs::PermissionsExt as _;
+fn invalid_config_permissions_check() -> Option<DiagnosticCheck> {
+    let config_dir = user_config_dir();
+    let source = user_config_candidates(config_dir.as_deref()).into_iter().find(|path| path.exists())?;
+    insecure_permissions_check([("configuration file", source)])
+}
 
+#[cfg(unix)]
+fn permissions_check(config: &Config, source: Option<&Path>) -> DiagnosticCheck {
     let mut paths = Vec::new();
     let mut sidecar_identity_warning = None;
     if let Some(source) = source {
@@ -261,21 +273,8 @@ fn permissions_check(config: &Config, source: Option<&Path>) -> DiagnosticCheck 
         }
     }
 
-    for (label, path) in paths {
-        let Ok(metadata) = path.metadata() else {
-            continue;
-        };
-        let mode = metadata.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
-            return check(
-                "permissions",
-                DiagnosticStatus::Degraded,
-                format!(
-                    "{label} at {} has Unix mode {mode:04o}; remove group/other permission bits explicitly; doctor did not change it",
-                    path.display()
-                ),
-            );
-        }
+    if let Some(issue) = insecure_permissions_check(paths) {
+        return issue;
     }
 
     if let Some(summary) = sidecar_identity_warning {
@@ -287,6 +286,29 @@ fn permissions_check(config: &Config, source: Option<&Path>) -> DiagnosticCheck 
         DiagnosticStatus::Healthy,
         "existing local configuration and SQLite storage paths do not grant group or other access",
     )
+}
+
+#[cfg(unix)]
+fn insecure_permissions_check(paths: impl IntoIterator<Item = (&'static str, PathBuf)>) -> Option<DiagnosticCheck> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    for (label, path) in paths {
+        let Ok(metadata) = path.metadata() else {
+            continue;
+        };
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Some(check(
+                "permissions",
+                DiagnosticStatus::Degraded,
+                format!(
+                    "{label} at {} has Unix mode {mode:04o}; remove group/other permission bits explicitly; doctor did not change it",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    None
 }
 
 #[cfg(not(unix))]

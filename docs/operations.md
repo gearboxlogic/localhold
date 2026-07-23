@@ -271,9 +271,6 @@ Use `trusted_proxy` only when all of the following are true:
   and isolated transport; and
 - the proxy limits requests, connections, and failed authentication attempts.
 
-LocalHold rejects trusted-proxy requests whose principal header is missing,
-empty, or invalid; it does not fall back to anonymous authorization.
-
 Treat the streamable HTTP transport as a trusted-service deployment surface,
 not as an internet-facing authentication service.
 

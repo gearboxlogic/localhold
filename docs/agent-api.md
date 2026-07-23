@@ -139,10 +139,13 @@ Access policy may be `"public"` shorthand, or a structured object such as
 `{ "type": "restricted", "allowed": ["agent-1"] }` or
 `{ "type": "redacted", "visible_fields": ["tags"] }`.
 
-Redacted memories whose `visible_fields` omit `content` are not discoverable by
-semantic, keyword, text, duplicate-candidate, reranker, or consolidation paths
-for callers who cannot see content. Hidden tags, provenance/scope, and entities
-also do not satisfy filters for callers whose redacted view hides those fields.
+Redacted memories whose `visible_fields` omit `content` are removed from
+caller-visible semantic, keyword, text, duplicate-candidate, and consolidation
+results and from reranker input. Hidden tags, provenance/scope, and entities
+also do not satisfy application filters for callers whose redacted view hides
+those fields. Shared full-text and ANN indexes still generate and rank
+candidates before application policy filtering; see
+[Search authorization and noninterference](security-and-privacy.md#search-authorization-and-noninterference).
 Use `restricted` when a private allowlist should retain full content search, or
 include fields in `visible_fields` only when the redacted view should remain
 discoverable by those fields.
@@ -319,7 +322,7 @@ Responses that resolve scope include `scope_resolution` with the resolved
 Redaction is applied as an access-controlled view across reads, search,
 diagnostics, metadata, and audit/history surfaces. The behavior changed as a
 breaking security fix: hidden redacted content and hidden redacted metadata no
-longer make memories discoverable to unauthorized callers.
+longer make memories appear in returned results for unauthorized callers.
 
 | Surface | Before | After |
 |---------|--------|-------|

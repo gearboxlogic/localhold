@@ -31,6 +31,10 @@ out of order; LocalHold restores input order using each item index.
 }
 ```
 
+Successful embedding response bodies are limited to 16 MiB, and model-list
+response bodies are limited to 1 MiB. LocalHold enforces these limits while
+streaming even when the provider omits `Content-Length`.
+
 ## Authentication
 
 `auth_mode = "bearer"` sends `Authorization: Bearer <api_key>` and is the

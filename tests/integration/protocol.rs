@@ -1918,6 +1918,17 @@ async fn anonymous_public_read_only_allows_public_recall_and_blocks_writes() {
     assert_eq!(read_many.results[0].status, ReadManyStatus::Found);
     assert!(!read_many.results[0].activity_recorded, "anonymous read_many does not create owner activity");
 
+    let handoff: HandoffResponse = call_tool(
+        &client,
+        "handoff",
+        json!({
+            "candidates": ["anonymous public read-only handoff preview"]
+        }),
+    )
+    .await;
+    assert!(!handoff.committed);
+    assert_eq!(handoff.suggested_writes.len(), 1_usize);
+
     let err = call_tool_error(
         &client,
         "remember",
@@ -1955,6 +1966,25 @@ async fn anonymous_deny_all_blocks_reads() {
 
     let scope_list_err = call_tool_error(&client, "admin_scope_list", json!({})).await;
     assert!(scope_list_err.contains("anonymous reads are disabled"));
+
+    let handoff_err = call_tool_error(
+        &client,
+        "handoff",
+        json!({
+            "candidates": [
+                {
+                    "content": "deny anonymous handoff preview before candidate work",
+                    "context_hints": [""]
+                }
+            ]
+        }),
+    )
+    .await;
+    assert!(handoff_err.contains("anonymous reads are disabled"));
+    assert!(
+        !handoff_err.contains("context_hints"),
+        "authorization should fail before candidate validation: {handoff_err}"
+    );
 }
 
 #[tokio::test]

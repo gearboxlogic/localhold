@@ -182,6 +182,34 @@ async fn http_bad_bearer_does_not_fall_back_to_launch_principal() {
 }
 
 #[tokio::test]
+async fn http_trusted_proxy_requires_non_empty_principal_header() {
+    let (url, ct, server) = setup_http_noop_server_with_trusted_proxy_auth(None, AnonymousPolicy::PublicReadWrite, "secret-token").await;
+
+    for principal in [None, Some("")] {
+        let request = raw_mcp_post(&url, RAW_INITIALIZE).header(AUTHORIZATION, "Bearer secret-token");
+        let request = if let Some(principal) = principal {
+            request.header(localhold::config::DEFAULT_HTTP_PRINCIPAL_HEADER, principal)
+        } else {
+            request
+        };
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers().get(WWW_AUTHENTICATE).unwrap(), "Bearer");
+    }
+
+    let authenticated = raw_mcp_post(&url, RAW_INITIALIZE)
+        .header(AUTHORIZATION, "Bearer secret-token")
+        .header(localhold::config::DEFAULT_HTTP_PRINCIPAL_HEADER, "alice")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(authenticated.status(), StatusCode::OK);
+
+    ct.cancel();
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn http_endpoint_path_is_exact() {
     let (url, ct, server) = setup_http_noop_server().await;
 

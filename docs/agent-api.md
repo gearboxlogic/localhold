@@ -170,7 +170,8 @@ Responses include an `operation` envelope and per-memory `id`, resolved `scope`,
 
 Validates agent-supplied candidate memory bullets. It previews suggested writes
 by default and persists normalized candidates only when `commit` is `true`;
-warnings are advisory.
+warnings are advisory. Preview is a read operation governed by the caller's
+read authorization; committing requires write authorization.
 
 Inputs:
 
@@ -237,7 +238,8 @@ In the default `fixed` HTTP mode, caller-supplied principal headers are ignored
 and every valid endpoint token maps to `server.http_principal`. The
 `trusted_proxy` mode accepts `x-localhold-principal` only for deployments where
 an authenticating proxy overwrites that header and direct access to LocalHold is
-blocked.
+blocked. Every trusted-proxy request must include a non-empty verified principal
+header; otherwise LocalHold rejects it instead of applying the anonymous policy.
 
 `agent_label` and MCP client metadata are provenance only. They never grant
 write, update, delete, admin, or restricted-read access.

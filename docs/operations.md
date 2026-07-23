@@ -258,6 +258,9 @@ Use `trusted_proxy` only when all of the following are true:
 - the proxy writes its verified principal into that header; and
 - the proxy supplies LocalHold's endpoint bearer token.
 
+LocalHold rejects trusted-proxy requests whose principal header is missing,
+empty, or invalid; it does not fall back to anonymous authorization.
+
 Treat the streamable HTTP transport as a trusted-service deployment surface,
 not as an internet-facing authentication service.
 

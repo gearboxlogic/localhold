@@ -880,8 +880,8 @@ impl MemoryWriter for SqliteStore {
 }
 
 impl MemoryAdmin for SqliteStore {
-    async fn evict_expired(&self) -> Result<u64, StoreError> {
-        self.evict_expired_impl().await
+    async fn evict_expired(&self, principal: &str, audit: &AuditDraft) -> Result<u64, StoreError> {
+        self.evict_expired_impl(principal, audit).await
     }
 
     async fn reassign_scope(&self, from_scope: &str, to_scope: &str, origin_conversation: Option<&str>, principal: &str) -> Result<super::ReassignScopeOutcome, StoreError> {
@@ -2519,6 +2519,12 @@ mod tests {
         let clock: Arc<dyn Clock> = Arc::new(MockClock::pinned(base_time()));
         let store = SqliteStore::in_memory_with_clock(Arc::clone(&clock)).unwrap();
         let now = clock.now();
+        let audit = AuditDraft {
+            action: AuditAction::Delete,
+            caller_agent: Some("cleanup-agent".into()),
+            timestamp: now,
+            details: Some(serde_json::json!({"reason": "expired"})),
+        };
 
         let mut expired = make_memory("expired", &[], now);
         expired.expires_at = Some(now - chrono::Duration::seconds(1));
@@ -2526,7 +2532,7 @@ mod tests {
 
         store.store(&make_memory("fresh", &[], now), None).await.unwrap();
 
-        let deleted = store.evict_expired().await.unwrap();
+        let deleted = store.evict_expired("cleanup-agent", &audit).await.unwrap();
         assert_eq!(deleted, 1);
 
         let listed = store.list(MemoryFilter::default(), QueryContext::default()).await.unwrap();
@@ -2534,10 +2540,39 @@ mod tests {
         assert_eq!(listed[0].content, "fresh");
         let tombstone = store.get_tombstone(&expired_id).await.unwrap().unwrap();
         assert_eq!(tombstone.memory_id, expired_id);
-        assert_eq!(tombstone.deleted_by_principal, None);
+        assert_eq!(tombstone.deleted_by_principal.as_deref(), Some("cleanup-agent"));
+        let history = store.query_audit_log(&expired_id, 10_usize).await.unwrap();
+        assert_eq!(history.len(), 1_usize);
+        assert_eq!(history[0].action, AuditAction::Delete);
+        assert_eq!(history[0].caller_agent.as_deref(), Some("cleanup-agent"));
+        assert_eq!(history[0].details, Some(serde_json::json!({"reason": "expired"})));
 
-        let deleted_again = store.evict_expired().await.unwrap();
+        let deleted_again = store.evict_expired("cleanup-agent", &audit).await.unwrap();
         assert_eq!(deleted_again, 0);
+        assert_eq!(store.query_audit_log(&expired_id, 10_usize).await.unwrap().len(), 1_usize);
+    }
+
+    #[tokio::test]
+    async fn evict_expired_rolls_back_when_audit_insert_fails() {
+        let clock: Arc<dyn Clock> = Arc::new(MockClock::pinned(base_time()));
+        let store = SqliteStore::in_memory_with_clock(Arc::clone(&clock)).unwrap();
+        let now = clock.now();
+        let mut expired = make_memory("expired audit rollback", &[], now);
+        expired.expires_at = Some(now - chrono::Duration::seconds(1));
+        let expired_id = store.store(&expired, None).await.unwrap();
+        drop_table(&store, "memory_audit_log").await;
+        let audit = AuditDraft {
+            action: AuditAction::Delete,
+            caller_agent: Some("cleanup-agent".into()),
+            timestamp: now,
+            details: Some(serde_json::json!({"reason": "expired"})),
+        };
+
+        let error = store.evict_expired("cleanup-agent", &audit).await.unwrap_err();
+
+        assert!(error.to_string().contains("memory_audit_log"));
+        assert_eq!(store.count(MemoryFilter::default(), QueryContext::default(), 10_usize).await.unwrap().expired, 1_u64);
+        assert!(store.get_tombstone(&expired_id).await.unwrap().is_none());
     }
 
     #[tokio::test]

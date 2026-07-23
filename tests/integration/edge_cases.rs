@@ -7,8 +7,8 @@ use localhold::{
         LocalHoldServer,
         params::{AdminListResponse, EvictExpiredResponse, ReadResponse, RecallResponse, ReembedResponse, RememberManyResponse, RememberResponse},
     },
-    store::{MemoryWriter as _, SqliteStore},
-    types::{AccessPolicy, Memory, Provenance, SearchMode},
+    store::{MemoryReader as _, MemoryWriter as _, SqliteStore},
+    types::{AccessPolicy, AuditAction, Memory, Provenance, SearchMode},
 };
 use serde_json::json;
 
@@ -130,15 +130,24 @@ async fn admin_cleanup_expired_deletes_only_expired_memories() {
     let (client, server) = setup_server_with(Arc::new(NoopEmbedding::new())).await;
     let provenance = Provenance::new_for_test(Some("agent".into()), Some("cleanup-scope".into()), Some("cleanup-scope".into()));
 
-    let mut expired = Memory::new_for_test("short-lived".into(), vec![], provenance.clone(), AccessPolicy::Public);
+    let mut expired = Memory::new_for_test("short-lived".into(), vec![], provenance.clone(), AccessPolicy::Restricted {
+        allowed: vec!["different-principal".into()],
+    });
     expired.expires_at = Some(Utc::now() - TimeDelta::seconds(60));
-    let _expired_id = server.store().store(&expired, None).await.unwrap();
+    let expired_id = server.store().store(&expired, None).await.unwrap();
 
     let durable = Memory::new_for_test("durable".into(), vec![], provenance, AccessPolicy::Public);
     let durable_id = server.store().store(&durable, None).await.unwrap();
 
     let cleaned: EvictExpiredResponse = call_tool(&client, "admin_cleanup_expired", json!({})).await;
     assert_eq!(cleaned.deleted, 1);
+    let tombstone = server.store().get_tombstone(&expired_id).await.unwrap().unwrap();
+    assert_eq!(tombstone.deleted_by_principal.as_deref(), Some("stdio"));
+    let history = server.store().query_audit_log(&expired_id, 10_usize).await.unwrap();
+    assert_eq!(history.len(), 1_usize);
+    assert_eq!(history[0].action, AuditAction::Delete);
+    assert_eq!(history[0].caller_agent.as_deref(), Some("stdio"));
+    assert_eq!(history[0].details, Some(json!({"reason": "expired"})));
 
     let listed: AdminListResponse = call_tool(&client, "admin_list", json!({})).await;
     assert_eq!(listed.count, 1);

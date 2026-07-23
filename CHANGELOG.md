@@ -8,6 +8,11 @@ requirements explicitly.
 
 ## [Unreleased]
 
+- Changed whole-store expiry cleanup to record the server-resolved principal in
+  each tombstone and transactional per-memory delete audit row; cleanup still
+  selects all expired memories without per-memory policy filtering.
+  `MemoryAdmin::evict_expired` now requires that principal and audit draft.
+
 ## [0.2.0] - 2026-07-15
 
 - Changed malformed typed `LOCALHOLD_*` environment overrides to fail startup

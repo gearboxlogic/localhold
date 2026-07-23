@@ -1985,7 +1985,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let Some(principal) = self.write_principal_for(request_principal.as_deref()) else {
             return Ok(Self::anonymous_write_denied());
         };
-        let deleted = self.engine.evict_expired().await?;
+        let deleted = self.engine.evict_expired(&principal).await?;
         tracing::info!(principal = principal.as_str(), deleted, "admin_cleanup_expired completed");
         success_json(&EvictExpiredResponse {
             operation: operation_summary(OperationStatus::Applied, deleted, Vec::new(), NextAction::None),

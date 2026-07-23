@@ -8,6 +8,11 @@ requirements explicitly.
 
 ## [Unreleased]
 
+- Hardened Unix local storage creation with mode `0700` for a new default data
+  directory and `0600` for new SQLite databases, while preserving existing and
+  custom-directory modes; `hold doctor` now reports permissive existing local
+  paths without modifying them.
+
 ## [0.2.0] - 2026-07-15
 
 - Changed malformed typed `LOCALHOLD_*` environment overrides to fail startup

@@ -10,6 +10,8 @@ use serde::Serialize;
 use sqlx_core::query_scalar::query_scalar;
 use sqlx_postgres::{PgPool, PgPoolOptions};
 
+#[cfg(unix)]
+use crate::config::is_default_sqlite_path;
 #[cfg(test)]
 use crate::store::PostgresStore;
 use crate::{
@@ -178,6 +180,7 @@ async fn run_with_clock_inner(options: DoctorOptions, clock: std::sync::Arc<dyn 
     let mut checks = vec![check("build", DiagnosticStatus::Healthy, build_summary(&build))];
     checks.push(config_check(source.as_deref()));
     checks.push(filesystem_check(&config));
+    checks.push(permissions_check(&config, source.as_deref()));
     checks.push(Box::pin(storage_check(&config, clock.as_ref())).await);
     checks.push(embedding_check(&config, std::sync::Arc::clone(&clock)).await);
     checks.push(reranker_check(&config, options, clock).await);
@@ -225,6 +228,59 @@ fn config_check(source: Option<&Path>) -> DiagnosticCheck {
             format!("configured file is no longer readable at {}", path.display()),
         ),
     }
+}
+
+#[cfg(unix)]
+fn permissions_check(config: &Config, source: Option<&Path>) -> DiagnosticCheck {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut paths = Vec::new();
+    if let Some(source) = source {
+        paths.push(("configuration file", source.to_path_buf()));
+    }
+    if config.database.backend == DatabaseBackend::Sqlite {
+        let database = config.database.sqlite_path();
+        paths.push(("SQLite database", database.to_path_buf()));
+        paths.push(("SQLite WAL sidecar", sqlite_sidecar_path(database, "-wal")));
+        paths.push(("SQLite shared-memory sidecar", sqlite_sidecar_path(database, "-shm")));
+        if is_default_sqlite_path(database)
+            && let Some(parent) = database.parent().filter(|parent| !parent.as_os_str().is_empty())
+        {
+            paths.push(("default SQLite data directory", parent.to_path_buf()));
+        }
+    }
+
+    for (label, path) in paths {
+        let Ok(metadata) = path.metadata() else {
+            continue;
+        };
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return check(
+                "permissions",
+                DiagnosticStatus::Degraded,
+                format!(
+                    "{label} at {} has Unix mode {mode:04o}; remove group/other permission bits explicitly; doctor did not change it",
+                    path.display()
+                ),
+            );
+        }
+    }
+
+    check(
+        "permissions",
+        DiagnosticStatus::Healthy,
+        "existing local configuration and SQLite storage paths do not grant group or other access",
+    )
+}
+
+#[cfg(not(unix))]
+fn permissions_check(_config: &Config, _source: Option<&Path>) -> DiagnosticCheck {
+    check(
+        "permissions",
+        DiagnosticStatus::Healthy,
+        "Unix permission-bit diagnostics do not apply; protect inherited Windows ACLs",
+    )
 }
 
 fn filesystem_check(config: &Config) -> DiagnosticCheck {
@@ -1267,6 +1323,39 @@ mod tests {
         let rendered = report.render_text();
         assert!(!rendered.contains("\n[failed]"));
         assert!(!rendered.contains('\r'));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_diagnostics_report_but_do_not_repair_existing_paths() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("localhold.toml");
+        let database_path = directory.path().join("localhold.db");
+        std::fs::write(&config_path, b"[server]\n").unwrap();
+        std::fs::write(&database_path, b"database fixture").unwrap();
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&database_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        let mut config = Config::default();
+        config.database.sqlite.path.clone_from(&database_path);
+
+        let config_result = permissions_check(&config, Some(&config_path));
+        assert_eq!(config_result.status, DiagnosticStatus::Degraded);
+        assert!(config_result.summary.contains("configuration file"));
+        assert!(config_result.summary.contains("0644"));
+        assert_eq!(config_path.metadata().unwrap().permissions().mode() & 0o777, 0o644);
+
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let database_result = permissions_check(&config, Some(&config_path));
+        assert_eq!(database_result.status, DiagnosticStatus::Degraded);
+        assert!(database_result.summary.contains("SQLite database"));
+        assert!(database_result.summary.contains("0640"));
+        assert_eq!(database_path.metadata().unwrap().permissions().mode() & 0o777, 0o640);
+
+        std::fs::set_permissions(&database_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(permissions_check(&config, Some(&config_path)).status, DiagnosticStatus::Healthy);
     }
 
     #[test]

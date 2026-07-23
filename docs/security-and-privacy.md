@@ -104,10 +104,14 @@ controlled by the database operator rather than encrypted by LocalHold.
 
 Use full-disk, filesystem, volume, or managed-database encryption as appropriate.
 Restrict the database directory, backup destinations, PostgreSQL roles, and
-operator accounts. New SQLite backup files and the SQLite coordination lock use
-mode `0600` on Unix; normal database and sidecar permissions still depend on
-the containing directory and process umask. Windows files inherit directory
-ACLs.
+operator accounts. On Unix, LocalHold creates a missing platform-default data
+directory with mode `0700` and new SQLite database, backup, and coordination
+lock files with mode `0600`. It does not change permissions on existing
+databases or directories, including custom database directories. SQLite
+sidecars remain subject to SQLite and the filesystem. `hold doctor` reports
+group/other permission bits on an existing configuration file, SQLite database,
+WAL or shared-memory sidecar, or default data directory without changing them.
+Windows files inherit directory ACLs.
 
 Anyone with direct database or backup access bypasses LocalHold's MCP access
 policies. Do not treat a `restricted` or `redacted` memory as encryption.
@@ -314,8 +318,9 @@ Normal configuration loading uses only the platform user configuration file and
 documented `LOCALHOLD_*` variables, not a file in the current directory. The
 SQLite-to-PostgreSQL migration command can explicitly select another environment
 variable with `--postgres-url-env`. `hold config init` creates a Unix file with
-mode `0600`, but LocalHold does not repair permissions on an existing file.
-Environment variables and process arguments are visible according to
+mode `0600`. LocalHold does not repair permissions on an existing file; `hold
+doctor` reports permissive Unix configuration and SQLite storage modes as
+degraded. Environment variables and process arguments are visible according to
 operating-system process-inspection rules.
 
 Focused `Debug` implementations for the embedding provider and PostgreSQL
@@ -394,7 +399,7 @@ responsibility to protect the surrounding network and storage.
 | Sensitive data appears in logs | Normal diagnostics omit credentials/content; focused database/provider config types have redacted debug output | Provider errors, arbitrary debug output, proxy bodies/headers, PostgreSQL statements/parameters, and operational metadata can reach logs or clients. Minimize, protect, and review every log sink. |
 | A permitted writer plants malicious instructions or false memory | Stored content retains provenance and access policy; write authorization limits who can mutate an existing memory | New content is stored as supplied and may later enter an agent's context. Deny anonymous writes, isolate mutually untrusted writers, review provenance, and treat recalled text as untrusted data rather than executable authority. |
 | HTTP resource exhaustion | Request-body, session-count, and idle-session limits bound some retained state | LocalHold has no general request, connection, or failed-auth rate limiter, and active streams are not idle-reaped. Enforce those limits at the proxy and monitor session capacity. |
-| Database or backup theft | Unix coordination/backup files receive restrictive creation modes in supported paths | No application encryption. Use encrypted storage, strict ACLs, protected backups, and database roles. |
+| Database or backup theft | New default Unix data directories and new SQLite database/coordination/backup files receive owner-only creation modes; doctor reports permissive existing local paths without changing them | No application encryption, and custom or existing directory policy remains operator-controlled. Use encrypted storage, strict ACLs, protected backups, and database roles. |
 | Deleted data is recovered | Active content is removed and minimal tombstones retain authorization context | Free pages, WAL, replicas, logs, and backups can retain data. Enforce external retention/destruction. |
 | Malicious or replaced reranker artifact | Built-in artifacts are revision/hash pinned and verified before publication | Operator-managed direct model files and shared writable caches remain trusted inputs. Pre-provision read-only verified files. |
 | Compromised release artifact or checksum manifest | Release downloads include a checksum manifest | Archives and checksums share one GitHub publication boundary and are not independently signed or attested. Pin reviewed source and use a trusted build pipeline when provenance requirements exceed that boundary. |

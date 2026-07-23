@@ -10,10 +10,10 @@ use serde::Serialize;
 use sqlx_core::query_scalar::query_scalar;
 use sqlx_postgres::{PgPool, PgPoolOptions};
 
-#[cfg(unix)]
-use crate::config::is_default_sqlite_path;
 #[cfg(test)]
 use crate::store::PostgresStore;
+#[cfg(unix)]
+use crate::{config::is_default_sqlite_path, store::sqlite_database_identity};
 use crate::{
     config::{Config, DatabaseBackend, EmbeddingConfig},
     embedding::status::EmbeddingProviderHealth,
@@ -241,8 +241,21 @@ fn permissions_check(config: &Config, source: Option<&Path>) -> DiagnosticCheck 
     if config.database.backend == DatabaseBackend::Sqlite {
         let database = config.database.sqlite_path();
         paths.push(("SQLite database", database.to_path_buf()));
-        paths.push(("SQLite WAL sidecar", sqlite_sidecar_path(database, "-wal")));
-        paths.push(("SQLite shared-memory sidecar", sqlite_sidecar_path(database, "-shm")));
+        let sidecar_database = match sqlite_database_identity(database) {
+            Ok(identity) => identity,
+            Err(error) => {
+                return check(
+                    "permissions",
+                    DiagnosticStatus::Degraded,
+                    format!(
+                        "SQLite database identity at {} could not be resolved for sidecar permission checks: {error}; doctor did not change it",
+                        database.display()
+                    ),
+                );
+            }
+        };
+        paths.push(("SQLite WAL sidecar", sqlite_sidecar_path(&sidecar_database, "-wal")));
+        paths.push(("SQLite shared-memory sidecar", sqlite_sidecar_path(&sidecar_database, "-shm")));
         if is_default_sqlite_path(database)
             && let Some(parent) = database.parent().filter(|parent| !parent.as_os_str().is_empty())
         {
@@ -1356,6 +1369,32 @@ mod tests {
 
         std::fs::set_permissions(&database_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(permissions_check(&config, Some(&config_path)).status, DiagnosticStatus::Healthy);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_diagnostics_resolve_sidecars_beside_symlink_target() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("current.db");
+        let alias_path = directory.path().join("alias.db");
+        let wal_path = directory.path().join("current.db-wal");
+        std::fs::write(&database_path, b"database fixture").unwrap();
+        std::fs::set_permissions(&database_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        symlink(&database_path, &alias_path).unwrap();
+        std::fs::write(&wal_path, b"WAL fixture").unwrap();
+        std::fs::set_permissions(&wal_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let mut config = Config::default();
+        config.database.sqlite.path.clone_from(&alias_path);
+
+        let result = permissions_check(&config, None);
+
+        assert_eq!(result.status, DiagnosticStatus::Degraded);
+        assert!(result.summary.contains("SQLite WAL sidecar"));
+        assert!(result.summary.contains(&wal_path.display().to_string()));
+        assert_eq!(wal_path.metadata().unwrap().permissions().mode() & 0o777, 0o644);
     }
 
     #[test]

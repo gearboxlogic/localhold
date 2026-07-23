@@ -34,3 +34,10 @@ Tags are edited as a JSON string array (for example
 Browsing remains side-effect-free, while mutations use the normal audited
 authorization path and require `--principal` or `server.principal`. SQLite WAL
 and PostgreSQL allow the UI to run alongside a serving LocalHold process.
+
+The UI opens the configured store directly. `--principal` and
+`server.principal` are trusted local assertions used for policy evaluation, not
+authentication. Anyone who can run `hold ui` with the database credential can
+select another principal, and direct database access bypasses LocalHold policy.
+Protect the process, configuration, and database at the operating-system and
+database boundaries; do not use the TUI principal for multi-user isolation.

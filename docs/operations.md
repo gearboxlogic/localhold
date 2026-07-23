@@ -2,7 +2,9 @@
 
 This guide covers configuration, privacy boundaries, backup, and recovery for
 operators running LocalHold from a release archive or source. Managed service
-definitions are not available during the early beta.
+definitions are not available during the early beta. Read the
+[security, privacy, and threat model](security-and-privacy.md) before exposing a
+transport, selecting network storage, or sending content to external compute.
 
 ## Readiness diagnostics
 
@@ -244,7 +246,12 @@ add the name or address clients actually use — for example
 `localhold.internal` or the LAN IP — to this allowlist.
 
 Bind to loopback unless a reverse proxy or private network boundary is in
-place. Set `server.http_auth_token` for every non-local deployment.
+place. Set `server.http_auth_token` for every non-local deployment. LocalHold
+serves plaintext HTTP and has no general request, connection, or failed-auth
+rate limiter. TLS from the client to a reverse proxy does not protect the
+proxy-to-LocalHold hop. Keep that backend hop on loopback on the same trusted
+host, or protect and isolate it with an encrypted tunnel or equivalent private
+network. The proxy must enforce the missing limits.
 
 `server.http_principal_mode = "fixed"` is the safe default. Every request with
 the valid bearer token receives `server.http_principal`, and caller-supplied
@@ -255,8 +262,14 @@ Use `trusted_proxy` only when all of the following are true:
 - clients cannot connect directly to LocalHold;
 - the proxy authenticates each caller;
 - the proxy removes any client-supplied `x-localhold-principal` header;
-- the proxy writes its verified principal into that header; and
-- the proxy supplies LocalHold's endpoint bearer token.
+- the proxy writes a nonempty verified principal into that header on every
+  request; missing or blank identity is rejected rather than treated as
+  anonymous;
+- the proxy supplies LocalHold's endpoint bearer token;
+- clients use TLS or another protected transport to the proxy;
+- the proxy-to-LocalHold hop stays on loopback or uses an equivalently protected
+  and isolated transport; and
+- the proxy limits requests, connections, and failed authentication attempts.
 
 Treat the streamable HTTP transport as a trusted-service deployment surface,
 not as an internet-facing authentication service.
@@ -266,7 +279,8 @@ default). Clients should close sessions with the MCP HTTP `DELETE` flow when
 finished. Abandoned sessions are reaped after
 `server.http_session_idle_timeout_secs` (15 minutes by default), while active
 SSE streams remain protected. `server.max_body_bytes` separately bounds each
-request body.
+request body. Proxy-side connection limits are required because an active
+stream is not reaped as idle.
 
 Privileged `admin_*` tools are disabled by default. Run a dedicated maintenance
 instance with `server.admin_tools_enabled = true` only while an operator needs
@@ -360,11 +374,61 @@ backend = "postgres"
 url = "postgres://localhold:password@localhost:5432/localhold"
 ```
 
+`password` is a non-production placeholder. Use a generated, least-privilege
+credential and protect it through the configuration or environment controls
+described above.
+
+The current LocalHold build has no PostgreSQL TLS implementation. The default
+or preferred TLS mode can fall back to plaintext; `require` and
+certificate-verifying modes fail to connect rather than creating an encrypted
+connection.
+Keep the database on a trusted local boundary or provide an operator-managed
+encrypted tunnel between LocalHold and PostgreSQL.
+
+In addition to a password in the URL, the SQLx driver can use `PGPASSWORD`,
+`PGPASSFILE`, or the default PostgreSQL passfile. Restrict those sources and
+validate passfile syntax before startup: dependency warnings for malformed
+entries can include the original line and password. A URL password overrides
+`PGPASSWORD`; passfiles are consulted only when neither source supplies a
+password. An unusable or nonmatching custom passfile can fall through to the
+default passfile. Remove the password from the example URL before relying on an
+environment variable or passfile.
+
 `LOCALHOLD_DB_BACKEND` and `LOCALHOLD_POSTGRES_URL` override these at runtime.
 `migration_lock_timeout_secs` in `[database.postgres]` bounds how long each
 startup schema-migration lock acquisition waits; see
 [localhold.example.toml](../localhold.example.toml) for the full PostgreSQL
 configuration surface.
+
+### PostgreSQL migration and runtime roles
+
+`database.postgres.auto_migrate` defaults to `true`. In that mode the one
+configured URL is used both to run schema migrations and to serve requests.
+The role must be able to create objects in the resolved schema, own every
+managed table, write migration metadata, and install `pgvector` when the
+extension is absent. Leaving those permissions on the long-running service
+credential increases the effect of a credential or process compromise.
+
+For a reduced-privilege runtime:
+
+1. Back up the database and stop ordinary LocalHold instances.
+2. In an operator-only maintenance context, use a dedicated owner/migrator
+   credential with `auto_migrate = true`. Pre-install `pgvector` with a database
+   administrator when extension creation is not delegated. Start the new
+   LocalHold binary and let its transactional startup migration complete, then
+   stop that maintenance instance.
+3. Grant a separate runtime role `USAGE` on the resolved schema and only the
+   current LocalHold runtime table and sequence privileges. It needs the
+   application DML privileges checked by `hold doctor`, including sequence
+   `USAGE` for audit IDs; it does not need schema `CREATE` or managed-table
+   ownership when migrations are disabled.
+4. Configure the service with the runtime credential and
+   `auto_migrate = false`, then run `hold doctor` before serving traffic.
+
+Repeat the maintenance-credential step for each upgrade before restarting the
+runtime role. LocalHold currently has one PostgreSQL URL per process and no
+separate migration URL, migrate-only command, or automatic credential handoff,
+so operators must switch credentials and isolate the migration process.
 
 ## PostgreSQL Backup And Restore
 
@@ -403,6 +467,10 @@ hold migrate sqlite-to-postgres \
   --embedding-dimensions 768 \
   --dry-run
 ```
+
+Replace the example password with a generated, least-privilege credential. The
+environment avoids placing the URL in the `hold` argument list, but its value is
+still visible according to the operating system's process-inspection rules.
 
 The destination can also be passed explicitly with `--postgres-url`, or read
 from a different environment variable via `--postgres-url-env`. Review the dry

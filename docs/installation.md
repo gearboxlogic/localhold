@@ -32,6 +32,15 @@ single versioned root containing `bin/hold` (or `hold.exe`),
 `localhold.example.toml`, maintained documentation, the changelog, and license
 notices.
 
+The archives and `SHA256SUMS` are published through the same GitHub release.
+The checksum detects corruption or a mismatched download, but it is not an
+independent signature and does not protect against compromise of the
+repository, release workflow, maintainer, tag, runner, or GitHub release
+account. Current releases do not provide signed archives, a software bill of
+materials, or artifact attestations. For a stronger provenance boundary,
+review and pin the source commit and build the locked source in a trusted
+pipeline.
+
 Linux archives are built on Ubuntu 22.04 and require glibc 2.35 or newer plus
 the normal C++ runtime library. Windows archives require a supported Windows
 installation with the Microsoft Visual C++ Redistributable. Both archives

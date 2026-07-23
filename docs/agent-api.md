@@ -321,7 +321,7 @@ longer make memories discoverable to unauthorized callers.
 
 | Surface | Before | After |
 |---------|--------|-------|
-| `recall` | Hidden content, embeddings, tags, scope, or entities could still influence matching or filters. | Hidden content is not searched by semantic, keyword, text, duplicate, reranker, or consolidation paths; hidden tags, scope/provenance, and entities do not satisfy filters. |
+| `recall` | Hidden content, embeddings, tags, scope, or entities could still influence matching or filters. | Candidate records are policy-filtered and field-redacted before return or reranking, so hidden fields are not disclosed in result payloads or reranker input. Shared full-text and ANN indexes still generate and rank candidates before application filtering, so inaccessible rows can affect query work, timing, preliminary ranks, and candidate ceilings. |
 | `read` | Redacted content could be hidden while server-added metadata or diagnostics could still reveal hidden context. | Redacted callers receive only policy-visible memory fields and visible metadata. Hidden summary, scope, agent label, creator, quality flags, and diagnostics stay omitted. |
 | `read_many` | Per-item reads had the same redacted metadata risks as `read`. | Each found item uses the same redacted view as `read`; unreadable items remain `not_found`. |
 | `admin_list` | Inventory views could reveal hidden metadata or match hidden fields through filters. | Inventory rows and filters obey the caller's visible field set. |
@@ -358,6 +358,12 @@ use the server-resolved principal. `admin_list` and
 `admin_scope_list` are read-like and follow the configured anonymous read
 policy. Migration reporting and repair tools require a write-capable principal
 because they expose whole-store maintenance state.
+
+The tools do not all have the same reach: scope registration, bulk
+re-embedding, expiry cleanup, statistics, and metadata maintenance include
+global or mixed-scope behavior. See the
+[admin capability matrix](security-and-privacy.md#admin-tools) before enabling
+them.
 
 Admin inventory filters use the same agent-facing vocabulary as core tools:
 

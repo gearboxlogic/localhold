@@ -11,9 +11,13 @@ backend = "sqlite" # "sqlite" or "postgres"
 path = "~/.local/share/localhold/localhold.db"
 
 [database.postgres]
+# Development placeholder only. Use a generated credential or protected
+# credential source for any real PostgreSQL deployment.
 url = "postgres://localhold:localhold@localhost:5432/localhold"
 max_connections = 5
 migration_lock_timeout_secs = 5 # Whole seconds; valid range: 1..=2147483
+# true uses this same credential for migration DDL and runtime access. For a
+# reduced-privilege service role, migrate separately, then set this to false.
 auto_migrate = true
 # Env: LOCALHOLD_DB_BACKEND, LOCALHOLD_DB_PATH,
 #      LOCALHOLD_POSTGRES_URL, LOCALHOLD_POSTGRES_MAX_CONNECTIONS,

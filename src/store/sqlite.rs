@@ -86,11 +86,6 @@ fn create_secure_database_if_missing(path: &Path) -> Result<(), StoreError> {
     }
 }
 
-#[cfg(not(unix))]
-const fn create_secure_database_if_missing(_path: &Path) -> Result<(), StoreError> {
-    Ok(())
-}
-
 #[cfg(unix)]
 fn create_default_data_directory(path: &Path) -> Result<(), StoreError> {
     if path.is_dir() {
@@ -253,6 +248,7 @@ impl SqliteStore {
     pub fn open_with_clock(path: &Path, embedding_dimensions: usize, clock: Arc<dyn Clock>) -> Result<Self, StoreError> {
         Self::register_extension()?;
         let database_lease = SqliteDatabaseLease::shared(path)?;
+        #[cfg(unix)]
         create_secure_database_if_missing(path)?;
         let conn = Connection::open(path)?;
         conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
@@ -565,6 +561,7 @@ impl SqliteStore {
     /// Returns an error when the database cannot be opened or its vector table
     /// cannot be reset atomically.
     pub async fn reindex_embeddings(path: &Path, profile: &EmbeddingProfile) -> Result<(), StoreError> {
+        #[cfg(unix)]
         create_secure_database_if_missing(path)?;
         let probe = Connection::open(path)?;
         let existing_dimensions = existing_embedding_dimensions(&probe)?;

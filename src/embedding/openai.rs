@@ -7,7 +7,7 @@ use reqwest::{
     StatusCode,
     header::{AUTHORIZATION, HeaderMap, RETRY_AFTER},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{BoxFuture, EmbeddingProvider};
 use crate::{
@@ -15,6 +15,9 @@ use crate::{
     config::{EmbeddingHealthCheck, OpenAiAuthMode, OpenAiCompatibleConfig},
     error::EmbeddingError,
 };
+
+const MAX_EMBEDDING_RESPONSE_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_MODELS_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
 
 /// Embedding provider backed by an OpenAI-compatible `/v1/embeddings` endpoint.
 pub struct OpenAiEmbedding {
@@ -143,6 +146,29 @@ async fn read_error_body(mut response: reqwest::Response) -> String {
     }
 }
 
+fn oversized_success_body(context: &str, max_bytes: usize) -> EmbeddingError {
+    EmbeddingError::Permanent(format!("openai-compatible {context} exceeds the {max_bytes}-byte response limit").into())
+}
+
+async fn read_success_json<T: DeserializeOwned>(mut response: reqwest::Response, max_bytes: usize, context: &str) -> Result<T, EmbeddingError> {
+    let max_bytes_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    if response.content_length().is_some_and(|length| length > max_bytes_u64) {
+        return Err(oversized_success_body(context, max_bytes));
+    }
+
+    let initial_capacity = response.content_length().and_then(|length| usize::try_from(length).ok()).unwrap_or_default();
+    let mut body = Vec::with_capacity(initial_capacity);
+    while let Some(chunk) = response.chunk().await.map_err(classify_reqwest_error)? {
+        let next_len = body.len().checked_add(chunk.len()).ok_or_else(|| oversized_success_body(context, max_bytes))?;
+        if next_len > max_bytes {
+            return Err(oversized_success_body(context, max_bytes));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    serde_json::from_slice(&body).map_err(|error| EmbeddingError::Permanent(format!("failed to decode openai-compatible {context}: {error}").into()))
+}
+
 fn validate_and_normalize(embedding: &mut [f32], expected_dimensions: usize) -> Result<(), EmbeddingError> {
     if embedding.len() != expected_dimensions {
         return Err(EmbeddingError::Permanent(
@@ -253,7 +279,7 @@ impl OpenAiEmbedding {
             return Err(classify_http_status(status, context, &body, retry_after));
         }
 
-        let response = response.json::<EmbeddingResponse>().await.map_err(classify_reqwest_error)?;
+        let response = read_success_json::<EmbeddingResponse>(response, MAX_EMBEDDING_RESPONSE_BODY_BYTES, "embedding response").await?;
         ordered_embeddings(response, expected_count, self.dimensions)
     }
 
@@ -294,7 +320,7 @@ impl OpenAiEmbedding {
             return Err(classify_http_status(status, "health check", &body, retry_after));
         }
 
-        let models = response.json::<ModelsResponse>().await.map_err(classify_reqwest_error)?;
+        let models = read_success_json::<ModelsResponse>(response, MAX_MODELS_RESPONSE_BODY_BYTES, "model-list response").await?;
         let model_found = models.data.iter().any(|model| model.id == self.model || model.id.starts_with(&format!("{}:", self.model)));
         if !model_found {
             return Err(EmbeddingError::Permanent(
@@ -335,6 +361,7 @@ impl EmbeddingProvider for OpenAiEmbedding {
 #[cfg(test)]
 mod tests {
     use std::{
+        convert::Infallible,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -344,16 +371,19 @@ mod tests {
 
     use axum::{
         Router,
-        body::to_bytes,
+        body::{Body, Bytes, to_bytes},
         extract::{Request, State},
-        http::{StatusCode, header::AUTHORIZATION as AXUM_AUTHORIZATION},
-        response::Redirect,
+        http::{
+            StatusCode,
+            header::{AUTHORIZATION as AXUM_AUTHORIZATION, CONTENT_LENGTH},
+        },
+        response::{Redirect, Response},
         routing::{get, post},
     };
     use serde_json::{Value, json};
     use tokio::task::JoinHandle;
 
-    use super::OpenAiEmbedding;
+    use super::{MAX_EMBEDDING_RESPONSE_BODY_BYTES, MAX_MODELS_RESPONSE_BODY_BYTES, OpenAiEmbedding, read_success_json};
     use crate::{
         clock::MockClock,
         config::{EmbeddingHealthCheck, OpenAiAuthMode, OpenAiCompatibleConfig},
@@ -434,6 +464,27 @@ mod tests {
 
     async fn oversized_error_handler() -> (StatusCode, String) {
         (StatusCode::BAD_REQUEST, "x".repeat(5_000))
+    }
+
+    async fn oversized_embedding_success_handler() -> Response {
+        let body = Body::from_stream(futures::stream::pending::<Result<Bytes, Infallible>>());
+        Response::builder()
+            .header(CONTENT_LENGTH, MAX_EMBEDDING_RESPONSE_BODY_BYTES.saturating_add(1))
+            .body(body)
+            .unwrap()
+    }
+
+    async fn oversized_models_success_handler() -> Response {
+        let body = Body::from_stream(futures::stream::pending::<Result<Bytes, Infallible>>());
+        Response::builder()
+            .header(CONTENT_LENGTH, MAX_MODELS_RESPONSE_BODY_BYTES.saturating_add(1))
+            .body(body)
+            .unwrap()
+    }
+
+    async fn oversized_chunked_success_handler() -> Response {
+        let chunks = futures::stream::iter([Ok::<_, Infallible>(Bytes::from(vec![b' '; 32])), Ok::<_, Infallible>(Bytes::from_static(b"x"))]);
+        Response::new(Body::from_stream(chunks))
     }
 
     async fn hanging_embeddings_handler() -> (StatusCode, &'static str) {
@@ -726,6 +777,48 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("<truncated>"));
         assert!(message.len() < 4_300);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn oversized_embedding_success_body_is_rejected_from_content_length() {
+        let app = Router::new().route("/v1/embeddings", post(oversized_embedding_success_handler));
+        let (provider, server) = provider_for_router(app).await;
+
+        let error = provider.embed("hello").await.unwrap_err();
+        assert!(matches!(error, EmbeddingError::Permanent(_)));
+        let message = error.to_string();
+        assert!(message.contains("embedding response"), "unexpected error: {message}");
+        assert!(message.contains("response limit"), "unexpected error: {message}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn oversized_models_success_body_is_rejected_from_content_length() {
+        let app = Router::new().route("/v1/models", get(oversized_models_success_handler));
+        let (provider, server) = provider_for_router(app).await;
+
+        let error = provider.health_check().await.unwrap_err();
+        assert!(matches!(error, EmbeddingError::Permanent(_)));
+        let message = error.to_string();
+        assert!(message.contains("model-list response"), "unexpected error: {message}");
+        assert!(message.contains("response limit"), "unexpected error: {message}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn chunked_success_body_is_bounded_while_streaming() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let _result = axum::serve(listener, Router::new().route("/body", get(oversized_chunked_success_handler))).await;
+        });
+        let response = reqwest::get(format!("http://127.0.0.1:{port}/body")).await.unwrap();
+        assert_eq!(response.content_length(), None);
+
+        let error = read_success_json::<Value>(response, 32, "test response").await.unwrap_err();
+        assert!(matches!(error, EmbeddingError::Permanent(_)));
+        assert!(error.to_string().contains("32-byte response limit"));
         server.abort();
     }
 

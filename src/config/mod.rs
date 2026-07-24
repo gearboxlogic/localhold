@@ -506,7 +506,7 @@ impl fmt::Debug for PostgresDatabaseConfig {
 }
 
 /// MCP server configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[non_exhaustive]
 pub struct ServerConfig {
@@ -545,6 +545,29 @@ pub struct ServerConfig {
     pub http_session_idle_timeout_secs: u64,
     /// Expose privileged `admin_*` maintenance tools.
     pub admin_tools_enabled: bool,
+}
+
+impl fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("transport", &self.transport)
+            .field("log_level", &self.log_level)
+            .field("principal", &self.principal)
+            .field("anonymous_policy", &self.anonymous_policy)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("path", &self.path)
+            .field("http_auth_token", &self.http_auth_token.as_ref().map(|_| "[REDACTED]"))
+            .field("http_principal_mode", &self.http_principal_mode)
+            .field("http_principal", &self.http_principal)
+            .field("http_principal_header", &self.http_principal_header)
+            .field("http_allowed_hosts", &self.http_allowed_hosts)
+            .field("max_body_bytes", &self.max_body_bytes)
+            .field("http_max_sessions", &self.http_max_sessions)
+            .field("http_session_idle_timeout_secs", &self.http_session_idle_timeout_secs)
+            .field("admin_tools_enabled", &self.admin_tools_enabled)
+            .finish()
+    }
 }
 
 /// Operational limits and validation caps.

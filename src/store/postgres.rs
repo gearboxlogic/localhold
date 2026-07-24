@@ -3263,7 +3263,11 @@ async fn fetch_embeddings_for_ids(pool: &PgPool, ids: &[MemoryId]) -> Result<Emb
             Some(embedding) if !embedding.is_empty() => {
                 let _previous = result.insert(id, embedding);
             }
-            _ => tracing::warn!(memory_id = %id, embedding = embedding_text, "invalid PostgreSQL vector text in fetch_embeddings_for_ids"),
+            _ => tracing::warn!(
+                memory_id = %id,
+                embedding_text_bytes = embedding_text.len(),
+                "invalid PostgreSQL vector text in fetch_embeddings_for_ids"
+            ),
         }
     }
     Ok(result)

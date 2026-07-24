@@ -8,6 +8,9 @@ requirements explicitly.
 
 ## [Unreleased]
 
+- Redacted HTTP bearer tokens and migration PostgreSQL URLs from configuration
+  debug output, and removed complete embedding values from malformed-vector
+  diagnostics.
 - Changed OpenAI-compatible provider HTTP failures to discard response bodies
   while preserving status, retry classification, and valid `Retry-After`
   delays, preventing provider-controlled text from reaching clients or logs.

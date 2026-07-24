@@ -322,15 +322,15 @@ doctor` reports permissive Unix configuration and SQLite storage modes as
 degraded. Environment variables and process arguments are visible according to
 operating-system process-inspection rules.
 
-Focused `Debug` implementations for the embedding provider and PostgreSQL
-database config suppress their API key or URL, and diagnostic JSON omits
-credentials, content, and provider error bodies. This is not a general promise
-that arbitrary Rust debug output is secret-safe: the wider server config and
-migration option structures can contain an HTTP token or PostgreSQL URL. Do not
-log configuration structures. Logs can still include database/cache paths,
-endpoint and model identity, memory and session identifiers, principals, and
-sanitized provider status/context or network error text. Invalid PostgreSQL
-vector rows and some migration errors can include a complete derived vector.
+Focused `Debug` implementations for the embedding provider, database config,
+server config, and SQLite-to-PostgreSQL migration options suppress API keys,
+HTTP tokens, and PostgreSQL URLs. Diagnostic JSON omits credentials and content,
+provider HTTP error bodies are discarded rather than included in runtime errors
+or logs, and malformed PostgreSQL vector diagnostics omit vector values. This
+is not a general promise that arbitrary Rust debug output is secret-safe. Logs
+can still include database/cache paths, endpoint and model identity, memory and
+session identifiers, principals, and sanitized provider status/context or
+network error text.
 SQLx warnings can include malformed passfile lines or unrecognized
 connection-URL parameter values, so never put secrets in unknown URL
 parameters. Malformed TOML errors can include source context. Keep stderr and
@@ -396,7 +396,7 @@ responsibility to protect the surrounding network and storage.
 | Credential or content interception | HTTPS required for non-loopback embedding endpoints; redirects disabled | The HTTP server is plaintext, and the current PostgreSQL build has no TLS implementation. Protect both HTTP hops and use an encrypted database tunnel when PostgreSQL traffic crosses an untrusted boundary. |
 | Cloud provider retains sensitive data | Provider is opt-in; default `noop` sends nothing | LocalHold cannot enforce provider retention. Review contracts and avoid cloud embeddings for content that cannot leave the host. |
 | Malicious provider exhausts memory or bandwidth | Successful embedding/model-list bodies have streaming size caps; provider HTTP error bodies are discarded; request timeouts and embedding concurrency are bounded | A provider can still delay responses and several processes have independent limits. Apply endpoint, egress, and aggregate concurrency controls. |
-| Sensitive data appears in logs | Normal diagnostics omit credentials/content; provider HTTP error bodies are discarded; focused database/provider config types have redacted debug output | Arbitrary debug output, proxy bodies/headers, PostgreSQL statements/parameters, and operational metadata can reach logs or clients. Minimize, protect, and review every log sink. |
+| Sensitive data appears in logs | Normal diagnostics omit credentials/content; provider HTTP error bodies are discarded; malformed PostgreSQL vector diagnostics omit vector values; focused database, provider, server, and migration-option types have redacted debug output | Arbitrary debug output, proxy bodies/headers, PostgreSQL statements/parameters, network errors, and operational metadata can reach logs or clients. Minimize, protect, and review every log sink. |
 | A permitted writer plants malicious instructions or false memory | Stored content retains provenance and access policy; write authorization limits who can mutate an existing memory | New content is stored as supplied and may later enter an agent's context. Deny anonymous writes, isolate mutually untrusted writers, review provenance, and treat recalled text as untrusted data rather than executable authority. |
 | HTTP resource exhaustion | Request-body, session-count, and idle-session limits bound some retained state | LocalHold has no general request, connection, or failed-auth rate limiter, and active streams are not idle-reaped. Enforce those limits at the proxy and monitor session capacity. |
 | Database or backup theft | New default Unix data directories and new SQLite database/coordination/backup files receive owner-only creation modes; doctor reports permissive existing local paths without changing them | No application encryption, and custom or existing directory policy remains operator-controlled. Use encrypted storage, strict ACLs, protected backups, and database roles. |

@@ -984,52 +984,56 @@ struct ReembedClaimSelection<'a> {
 fn claim_for_reembed_conn(conn: &mut Connection, selection: &ReembedClaimSelection<'_>) -> Result<Vec<ReembedClaim>, StoreError> {
     let limit_i64 = usize_to_i64(selection.limit, "reembed limit")?;
     let tx = sqlite_write_tx(conn)?;
+    // Freeze the authorized, limited ID set before leasing it and keep content
+    // out of candidate sorting; RETURNING reads content only for claimed rows.
     let mut stmt = tx.prepare(
-        "SELECT id, content, embedding_revision
-         FROM memories
-         WHERE has_embedding = 0
-           AND (embedding_claimed_at IS NULL OR embedding_claimed_at <= ?1)
-           AND (
-               ?2 IS NULL
-               OR json_extract(provenance, '$.source_agent') = ?2
-               OR (
-                   json_extract(access_policy, '$.type') = 'public'
-                   AND json_extract(provenance, '$.source_agent') IS NULL
-               )
-               OR (
-                   json_extract(access_policy, '$.type') = 'restricted'
-                   AND EXISTS (
-                       SELECT 1
-                       FROM json_each(access_policy, '$.allowed')
-                       WHERE value = ?2
+        "WITH candidates(id, embedding_revision) AS MATERIALIZED (
+             SELECT id, embedding_revision
+             FROM memories
+             WHERE has_embedding = 0
+               AND (embedding_claimed_at IS NULL OR embedding_claimed_at <= ?1)
+               AND (
+                   ?2 IS NULL
+                   OR json_extract(provenance, '$.source_agent') = ?2
+                   OR (
+                       json_extract(access_policy, '$.type') = 'public'
+                       AND json_extract(provenance, '$.source_agent') IS NULL
+                   )
+                   OR (
+                       json_extract(access_policy, '$.type') = 'restricted'
+                       AND EXISTS (
+                           SELECT 1
+                           FROM json_each(access_policy, '$.allowed')
+                           WHERE value = ?2
+                       )
                    )
                )
+             ORDER BY created_at ASC, id ASC
+             LIMIT ?3
+         )
+         UPDATE memories
+         SET embedding_claimed_at = ?4,
+             embedding_claim_token = ?5
+         WHERE has_embedding = 0
+           AND (embedding_claimed_at IS NULL OR embedding_claimed_at <= ?1)
+           AND EXISTS (
+               SELECT 1
+               FROM candidates
+               WHERE candidates.id = memories.id
+                 AND candidates.embedding_revision = memories.embedding_revision
            )
-         ORDER BY created_at ASC, id ASC
-         LIMIT ?3",
+         RETURNING id, content, embedding_revision",
     )?;
-    let candidates = stmt
-        .query_map(params![selection.expired_before, selection.principal, limit_i64], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
-        })?
+    let rows = stmt
+        .query_map(
+            params![selection.expired_before, selection.principal, limit_i64, selection.now, selection.claim_token],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)),
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     drop(stmt);
 
-    let mut claims = Vec::with_capacity(candidates.len());
-    for (id_str, content, embedding_revision) in candidates {
-        let affected = tx.execute(
-            "UPDATE memories
-             SET embedding_claimed_at = ?1,
-                 embedding_claim_token = ?2
-             WHERE id = ?3
-                 AND has_embedding = 0
-               AND embedding_revision = ?4
-               AND (embedding_claimed_at IS NULL OR embedding_claimed_at <= ?5)",
-            params![selection.now, selection.claim_token, id_str, embedding_revision, selection.expired_before],
-        )?;
-        if affected == 0 {
-            continue;
-        }
+    let mut claims = Vec::with_capacity(rows.len());
+    for (id_str, content, embedding_revision) in rows {
         let id: MemoryId = id_str.parse().map_err(|e| StoreError::Serialization(format!("invalid memory id: {e}").into()))?;
         claims.push(ReembedClaim {
             id,

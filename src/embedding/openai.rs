@@ -104,8 +104,8 @@ fn classify_reqwest_error(err: reqwest::Error) -> EmbeddingError {
     }
 }
 
-fn classify_http_status(status: StatusCode, context: &str, body: &str, retry_after: Option<Duration>) -> EmbeddingError {
-    let message = format!("openai-compatible {context} failed with HTTP {status}: {body}");
+fn classify_http_status(status: StatusCode, context: &str, retry_after: Option<Duration>) -> EmbeddingError {
+    let message = format!("openai-compatible {context} failed with HTTP {status}");
     if status == StatusCode::TOO_MANY_REQUESTS {
         EmbeddingError::RateLimited {
             source: message.into(),
@@ -125,25 +125,6 @@ fn parse_retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
     }
     let retry_at = httpdate::parse_http_date(value).ok()?;
     Some(retry_at.duration_since(now).unwrap_or_default())
-}
-
-async fn read_error_body(mut response: reqwest::Response) -> String {
-    const MAX_ERROR_BODY_BYTES: usize = 4_096;
-
-    let mut body = Vec::with_capacity(MAX_ERROR_BODY_BYTES);
-    loop {
-        match response.chunk().await {
-            Ok(Some(chunk)) => {
-                let remaining = MAX_ERROR_BODY_BYTES.saturating_sub(body.len());
-                body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-                if chunk.len() > remaining {
-                    return format!("{}<truncated>", String::from_utf8_lossy(&body));
-                }
-            }
-            Ok(None) => return String::from_utf8_lossy(&body).into_owned(),
-            Err(error) => return format!("<failed to read response body: {error}>"),
-        }
-    }
 }
 
 fn oversized_success_body(context: &str, max_bytes: usize) -> EmbeddingError {
@@ -275,8 +256,7 @@ impl OpenAiEmbedding {
         let status = response.status();
         if !status.is_success() {
             let retry_after = parse_retry_after(response.headers(), self.clock.now().into());
-            let body = read_error_body(response).await;
-            return Err(classify_http_status(status, context, &body, retry_after));
+            return Err(classify_http_status(status, context, retry_after));
         }
 
         let response = read_success_json::<EmbeddingResponse>(response, MAX_EMBEDDING_RESPONSE_BODY_BYTES, "embedding response").await?;
@@ -316,8 +296,7 @@ impl OpenAiEmbedding {
         let status = response.status();
         if !status.is_success() {
             let retry_after = parse_retry_after(response.headers(), self.clock.now().into());
-            let body = read_error_body(response).await;
-            return Err(classify_http_status(status, "health check", &body, retry_after));
+            return Err(classify_http_status(status, "health check", retry_after));
         }
 
         let models = read_success_json::<ModelsResponse>(response, MAX_MODELS_RESPONSE_BODY_BYTES, "model-list response").await?;
@@ -460,10 +439,6 @@ mod tests {
 
     async fn rate_limited_embeddings_handler() -> (StatusCode, [(&'static str, &'static str); 1], &'static str) {
         (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "4")], "quota exceeded")
-    }
-
-    async fn oversized_error_handler() -> (StatusCode, String) {
-        (StatusCode::BAD_REQUEST, "x".repeat(5_000))
     }
 
     async fn oversized_embedding_success_handler() -> Response {
@@ -737,7 +712,10 @@ mod tests {
     async fn http_5xx_is_transient() {
         let (provider, server) = setup_provider_with_status(StatusCode::SERVICE_UNAVAILABLE, "upstream down", StatusCode::OK, r#"{"data":[{"id":"test-model"}]}"#, 3).await;
         let err = provider.embed("hello").await.unwrap_err();
-        assert!(matches!(err, EmbeddingError::Transient(_)));
+        assert!(matches!(&err, EmbeddingError::Transient(_)));
+        let message = err.to_string();
+        assert!(message.contains("embedding request failed with HTTP 503 Service Unavailable"));
+        assert!(!message.contains("upstream down"));
         server.abort();
     }
 
@@ -748,12 +726,13 @@ mod tests {
 
         let error = provider.embed("hello").await.unwrap_err();
         assert!(matches!(
-            error,
+            &error,
             EmbeddingError::RateLimited {
                 retry_after: Some(delay),
                 ..
-            } if delay == Duration::from_secs(4)
+            } if *delay == Duration::from_secs(4)
         ));
+        assert!(!error.to_string().contains("quota exceeded"));
         server.abort();
     }
 
@@ -769,14 +748,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_error_body_is_truncated() {
-        let app = Router::new().route("/v1/embeddings", post(oversized_error_handler));
-        let (provider, server) = provider_for_router(app).await;
+    async fn provider_error_body_is_not_exposed() {
+        const SENTINEL: &str = "provider-echoed-secret-sentinel";
+        let (provider, server) = setup_provider_with_status(StatusCode::BAD_REQUEST, SENTINEL, StatusCode::OK, r#"{"data":[{"id":"test-model"}]}"#, 3).await;
 
-        let error = provider.embed("hello").await.unwrap_err();
+        let error = provider.embed("sensitive memory content").await.unwrap_err();
+        assert!(matches!(&error, EmbeddingError::Permanent(_)));
         let message = error.to_string();
-        assert!(message.contains("<truncated>"));
-        assert!(message.len() < 4_300);
+        assert!(message.contains("embedding request failed with HTTP 400 Bad Request"));
+        assert!(!message.contains(SENTINEL));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn health_check_error_body_is_not_exposed() {
+        const SENTINEL: &str = "provider-echoed-api-key-sentinel";
+        let (provider, server) = setup_provider_with_status(StatusCode::OK, r#"{"data":[]}"#, StatusCode::UNAUTHORIZED, SENTINEL, 3).await;
+
+        let error = provider.health_check().await.unwrap_err();
+        assert!(matches!(&error, EmbeddingError::Permanent(_)));
+        let message = error.to_string();
+        assert!(message.contains("health check failed with HTTP 401 Unauthorized"));
+        assert!(!message.contains(SENTINEL));
         server.abort();
     }
 

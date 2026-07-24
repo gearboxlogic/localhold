@@ -8,6 +8,9 @@ requirements explicitly.
 
 ## [Unreleased]
 
+- Changed OpenAI-compatible provider HTTP failures to discard response bodies
+  while preserving status, retry classification, and valid `Retry-After`
+  delays, preventing provider-controlled text from reaching clients or logs.
 - Changed whole-store expiry cleanup to record the server-resolved principal in
   each tombstone and transactional per-memory delete audit row; cleanup still
   selects all expired memories without per-memory policy filtering.

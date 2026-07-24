@@ -2159,7 +2159,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         success_json(&response)
     }
 
-    #[tool(description = "Write/admin: trigger re-embedding for one memory or a capped batch of unembedded memories using the server-resolved principal.")]
+    #[tool(
+        description = "Write/admin: trigger re-embedding for one memory or a capped batch of unembedded memories after checking write access for the server-resolved principal."
+    )]
     async fn admin_reembed(&self, context: RequestContext<RoleServer>, Parameters(params): Parameters<AdminReembedParams>) -> Result<CallToolResult, rmcp::ErrorData> {
         let request_principal = self.principal_for_context(&context);
         let Some(principal) = self.write_principal_for(request_principal.as_deref()) else {
@@ -2176,7 +2178,10 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         {
             return Ok(error);
         }
-        let request = params.id.map_or(ReembedRequest::Bulk { limit: bulk_limit }, |id| ReembedRequest::Single { id, principal });
+        let request = match params.id {
+            Some(id) => ReembedRequest::Single { id, principal },
+            None => ReembedRequest::Bulk { limit: bulk_limit, principal },
+        };
 
         let outcome = self.engine.reembed(request).await?;
         match outcome {

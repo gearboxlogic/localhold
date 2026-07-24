@@ -836,6 +836,10 @@ impl MemoryWriter for SqliteStore {
         self.claim_for_reembed_impl(limit).await
     }
 
+    async fn claim_for_reembed_authorized(&self, principal: &str, limit: usize) -> Result<Vec<super::ReembedClaim>, StoreError> {
+        self.claim_for_reembed_authorized_impl(principal, limit).await
+    }
+
     async fn release_embedding_claim(&self, id: &MemoryId, expected_revision: i64, claim_token: &str) -> Result<bool, StoreError> {
         self.release_embedding_claim_impl(id, expected_revision, claim_token).await
     }

@@ -3,12 +3,14 @@ use std::{sync::Arc, time::Duration};
 use localhold::{
     config::LimitsConfig,
     server::params::{AdminListResponse, ReadResponse, ReembedResponse, RememberResponse, UpdateResponse},
+    store::{MemoryReader as _, MemoryWriter as _, SqliteStore},
+    types::{AccessPolicy, Memory, Provenance},
 };
 use serde_json::json;
 
 use super::helpers::{
     ToggleableEmbedding, assert_invalid_params_contains, await_embeddings, call_tool, call_tool_error, setup_embedding_server, setup_noop_server, setup_noop_server_with_limits,
-    setup_server_with, setup_server_with_limits,
+    setup_server_with, setup_server_with_limits, setup_server_with_store,
 };
 
 #[tokio::test]
@@ -34,6 +36,52 @@ async fn admin_reembed_bulk_unembedded() {
 
     let listed: AdminListResponse = call_tool(&client, "admin_list", json!({"has_embedding": true})).await;
     assert_eq!(listed.count, 3, "all 3 should now have embeddings");
+}
+
+#[tokio::test]
+async fn admin_reembed_bulk_applies_write_authorization_before_limit() {
+    let store = SqliteStore::in_memory().unwrap();
+    let base = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH;
+
+    let mut inaccessible = Memory::new_for_test(
+        "inaccessible reembed content".into(),
+        Vec::new(),
+        Provenance::new_for_test(Some("other-agent".into()), None, None),
+        AccessPolicy::Restricted {
+            allowed: vec!["other-agent".into()],
+        },
+    );
+    inaccessible.created_at = base;
+    inaccessible.updated_at = base;
+    let inaccessible_id = store.store(&inaccessible, None).await.unwrap();
+
+    let mut authorized = Memory::new_for_test(
+        "authorized reembed content".into(),
+        Vec::new(),
+        Provenance::new_for_test(Some("stdio".into()), None, None),
+        AccessPolicy::Public,
+    );
+    let later = base.checked_add_signed(chrono::Duration::seconds(1)).unwrap();
+    authorized.created_at = later;
+    authorized.updated_at = later;
+    let authorized_id = store.store(&authorized, None).await.unwrap();
+
+    let (embedding, _enabled) = ToggleableEmbedding::new(true);
+    let (client, server) = setup_server_with_store(store.clone(), Arc::new(embedding)).await;
+
+    let response: ReembedResponse = call_tool(&client, "admin_reembed", json!({"limit": 1_i32})).await;
+    assert_eq!(response.queued, 1, "the authorized row should fill the limit past the older denied row");
+    await_embeddings(&server, Duration::from_secs(5)).await;
+
+    let authorized_after = store.get(&authorized_id, Some("stdio")).await.unwrap().unwrap();
+    assert!(authorized_after.has_embedding);
+    let inaccessible_after = store.get(&inaccessible_id, Some("other-agent")).await.unwrap().unwrap();
+    assert!(!inaccessible_after.has_embedding, "content outside the caller's write authority must not be embedded");
+
+    let retry: ReembedResponse = call_tool(&client, "admin_reembed", json!({"limit": 1_i32})).await;
+    assert_eq!(retry.queued, 0, "inaccessible rows should remain invisible to the bulk maintenance caller");
+
+    server.shutdown().await;
 }
 
 #[tokio::test]

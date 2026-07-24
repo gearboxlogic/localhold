@@ -973,19 +973,43 @@ fn apply_update_inner(conn: &Connection, vector_index: &SqliteVecIndex, id_str: 
     })
 }
 
-fn claim_for_reembed_conn(conn: &mut Connection, limit: usize, now: &str, expired_before: &str, claim_token: &str) -> Result<Vec<ReembedClaim>, StoreError> {
-    let limit_i64 = usize_to_i64(limit, "reembed limit")?;
+struct ReembedClaimSelection<'a> {
+    principal: Option<&'a str>,
+    limit: usize,
+    now: &'a str,
+    expired_before: &'a str,
+    claim_token: &'a str,
+}
+
+fn claim_for_reembed_conn(conn: &mut Connection, selection: &ReembedClaimSelection<'_>) -> Result<Vec<ReembedClaim>, StoreError> {
+    let limit_i64 = usize_to_i64(selection.limit, "reembed limit")?;
     let tx = sqlite_write_tx(conn)?;
     let mut stmt = tx.prepare(
         "SELECT id, content, embedding_revision
          FROM memories
          WHERE has_embedding = 0
            AND (embedding_claimed_at IS NULL OR embedding_claimed_at <= ?1)
+           AND (
+               ?2 IS NULL
+               OR json_extract(provenance, '$.source_agent') = ?2
+               OR (
+                   json_extract(access_policy, '$.type') = 'public'
+                   AND json_extract(provenance, '$.source_agent') IS NULL
+               )
+               OR (
+                   json_extract(access_policy, '$.type') = 'restricted'
+                   AND EXISTS (
+                       SELECT 1
+                       FROM json_each(access_policy, '$.allowed')
+                       WHERE value = ?2
+                   )
+               )
+           )
          ORDER BY created_at ASC, id ASC
-         LIMIT ?2",
+         LIMIT ?3",
     )?;
     let candidates = stmt
-        .query_map(params![expired_before, limit_i64], |row| {
+        .query_map(params![selection.expired_before, selection.principal, limit_i64], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -998,10 +1022,10 @@ fn claim_for_reembed_conn(conn: &mut Connection, limit: usize, now: &str, expire
              SET embedding_claimed_at = ?1,
                  embedding_claim_token = ?2
              WHERE id = ?3
-               AND has_embedding = 0
+                 AND has_embedding = 0
                AND embedding_revision = ?4
                AND (embedding_claimed_at IS NULL OR embedding_claimed_at <= ?5)",
-            params![now, claim_token, id_str, embedding_revision, expired_before],
+            params![selection.now, selection.claim_token, id_str, embedding_revision, selection.expired_before],
         )?;
         if affected == 0 {
             continue;
@@ -1011,7 +1035,7 @@ fn claim_for_reembed_conn(conn: &mut Connection, limit: usize, now: &str, expire
             id,
             content,
             embedding_revision,
-            claim_token: claim_token.to_owned(),
+            claim_token: selection.claim_token.to_owned(),
         });
     }
     tx.commit()?;
@@ -1692,7 +1716,7 @@ impl SqliteStore {
         .await
     }
 
-    pub(crate) async fn claim_for_reembed_impl(&self, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
+    async fn claim_for_reembed_with_principal_impl(&self, principal: Option<&str>, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -1703,8 +1727,25 @@ impl SqliteStore {
             .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
             .to_rfc3339();
         let claim_token = MemoryId::new().to_string();
-        self.with_conn(move |conn| claim_for_reembed_conn(conn, limit, &now_str, &expired_before, &claim_token))
-            .await
+        let principal = principal.map(ToOwned::to_owned);
+        self.with_conn(move |conn| {
+            claim_for_reembed_conn(conn, &ReembedClaimSelection {
+                principal: principal.as_deref(),
+                limit,
+                now: &now_str,
+                expired_before: &expired_before,
+                claim_token: &claim_token,
+            })
+        })
+        .await
+    }
+
+    pub(crate) async fn claim_for_reembed_impl(&self, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
+        self.claim_for_reembed_with_principal_impl(None, limit).await
+    }
+
+    pub(crate) async fn claim_for_reembed_authorized_impl(&self, principal: &str, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
+        self.claim_for_reembed_with_principal_impl(Some(principal), limit).await
     }
 
     pub(crate) async fn release_embedding_claim_impl(&self, id: &MemoryId, expected_revision: i64, claim_token: &str) -> Result<bool, StoreError> {

@@ -885,7 +885,7 @@ impl PostgresStore {
             .collect()
     }
 
-    pub(crate) async fn claim_for_reembed_impl(&self, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
+    async fn claim_for_reembed_with_principal_impl(&self, principal: Option<&str>, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -902,12 +902,25 @@ impl PostgresStore {
             FROM memories
             WHERE has_embedding = FALSE
               AND (embedding_claimed_at IS NULL OR embedding_claimed_at <= $1)
+              AND (
+                  $2::TEXT IS NULL
+                  OR provenance->>'source_agent' = $2
+                  OR (
+                      access_policy->>'type' = 'public'
+                      AND provenance->>'source_agent' IS NULL
+                  )
+                  OR (
+                      access_policy->>'type' = 'restricted'
+                      AND (access_policy->'allowed') ? $2
+                  )
+              )
             ORDER BY created_at ASC, id ASC
-            LIMIT $2
+            LIMIT $3
             FOR UPDATE SKIP LOCKED
             ",
         )
         .bind(expired_before)
+        .bind(principal)
         .bind(limit_i64)
         .fetch_all(&mut *tx)
         .await?;
@@ -947,6 +960,14 @@ impl PostgresStore {
         }
         tx.commit().await?;
         Ok(claims)
+    }
+
+    pub(crate) async fn claim_for_reembed_impl(&self, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
+        self.claim_for_reembed_with_principal_impl(None, limit).await
+    }
+
+    pub(crate) async fn claim_for_reembed_authorized_impl(&self, principal: &str, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
+        self.claim_for_reembed_with_principal_impl(Some(principal), limit).await
     }
 
     pub(crate) async fn release_embedding_claim_impl(&self, id: &MemoryId, expected_revision: i64, claim_token: &str) -> Result<bool, StoreError> {
@@ -2057,6 +2078,10 @@ impl MemoryWriter for PostgresStore {
 
     async fn claim_for_reembed(&self, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
         self.claim_for_reembed_impl(limit).await
+    }
+
+    async fn claim_for_reembed_authorized(&self, principal: &str, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
+        self.claim_for_reembed_authorized_impl(principal, limit).await
     }
 
     async fn release_embedding_claim(&self, id: &MemoryId, expected_revision: i64, claim_token: &str) -> Result<bool, StoreError> {

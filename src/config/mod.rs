@@ -666,6 +666,11 @@ fn default_sqlite_path() -> PathBuf {
         .join("localhold.db")
 }
 
+pub(crate) fn is_default_sqlite_path(path: &Path) -> bool {
+    let base = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
+    path == base.join("localhold").join("localhold.db")
+}
+
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {

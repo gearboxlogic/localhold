@@ -25,6 +25,7 @@ use super::{
 };
 use crate::{
     clock::{Clock, SystemClock},
+    config::is_default_sqlite_path,
     error::StoreError,
     store::schema::{
         MAIN_DDL, TRIGGER_DDL, check_dimension_mismatch, existing_embedding_dimensions, migrate_create_audit_log, migrate_create_fts_index, migrate_create_memory_entities,
@@ -65,6 +66,50 @@ struct SqliteInner {
 }
 
 pub(crate) const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(unix)]
+fn create_secure_database_if_missing(path: &Path) -> Result<(), StoreError> {
+    let path = database_identity(path).map_err(|error| StoreError::Database(Box::new(error)))?;
+    let mut options = OpenOptions::new();
+    let _configured = options.read(true).write(true).create_new(true);
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let _mode = options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(file) => {
+            drop(file);
+            Ok(())
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(StoreError::Database(Box::new(error))),
+    }
+}
+
+#[cfg(unix)]
+fn create_default_data_directory(path: &Path) -> Result<(), StoreError> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|error| StoreError::Database(Box::new(error)))?;
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let _mode = builder.mode(0o700);
+    }
+    match builder.create(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        Err(error) => Err(StoreError::Database(Box::new(error))),
+    }
+}
+
+#[cfg(not(unix))]
+fn create_default_data_directory(path: &Path) -> Result<(), StoreError> {
+    std::fs::create_dir_all(path).map_err(|error| StoreError::Database(Box::new(error)))
+}
 
 fn create_pre_upgrade_backup(conn: &Connection, database_path: &Path, clock: &dyn Clock) -> Result<PathBuf, StoreError> {
     let timestamp = clock.now().format("%Y%m%dT%H%M%S%.6fZ");
@@ -167,6 +212,25 @@ impl SqliteStore {
     /// the parameter-level contract is enforced at the C ABI level by SQLite itself.
     const _FFI_SIG_CHECK: unsafe extern "C" fn() = sqlite3_vec_init;
 
+    /// Create a missing SQLite parent directory without changing permissions on
+    /// an existing directory.
+    ///
+    /// On Unix, a newly created platform-default `LocalHold` data directory uses
+    /// owner-only mode `0700`. Custom directories retain normal platform
+    /// creation semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the parent path cannot be created.
+    pub fn ensure_parent_directory(path: &Path) -> Result<(), StoreError> {
+        let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+        if is_default_sqlite_path(path) {
+            create_default_data_directory(parent)
+        } else {
+            std::fs::create_dir_all(parent).map_err(|error| StoreError::Database(Box::new(error)))
+        }
+    }
+
     /// Open a store at the given path, creating the database if needed.
     ///
     /// # Errors
@@ -184,6 +248,8 @@ impl SqliteStore {
     pub fn open_with_clock(path: &Path, embedding_dimensions: usize, clock: Arc<dyn Clock>) -> Result<Self, StoreError> {
         Self::register_extension()?;
         let database_lease = SqliteDatabaseLease::shared(path)?;
+        #[cfg(unix)]
+        create_secure_database_if_missing(path)?;
         let conn = Connection::open(path)?;
         conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
         // WAL mode allows concurrent reads during writes (important for HTTP transport
@@ -495,6 +561,8 @@ impl SqliteStore {
     /// Returns an error when the database cannot be opened or its vector table
     /// cannot be reset atomically.
     pub async fn reindex_embeddings(path: &Path, profile: &EmbeddingProfile) -> Result<(), StoreError> {
+        #[cfg(unix)]
+        create_secure_database_if_missing(path)?;
         let probe = Connection::open(path)?;
         let existing_dimensions = existing_embedding_dimensions(&probe)?;
         drop(probe);
@@ -880,8 +948,8 @@ impl MemoryWriter for SqliteStore {
 }
 
 impl MemoryAdmin for SqliteStore {
-    async fn evict_expired(&self) -> Result<u64, StoreError> {
-        self.evict_expired_impl().await
+    async fn evict_expired(&self, principal: &str, audit: &AuditDraft) -> Result<u64, StoreError> {
+        self.evict_expired_impl(principal, audit).await
     }
 
     async fn reassign_scope(&self, from_scope: &str, to_scope: &str, origin_conversation: Option<&str>, principal: &str) -> Result<super::ReassignScopeOutcome, StoreError> {
@@ -1590,6 +1658,54 @@ mod tests {
         drop(connection);
         let error = SqliteStore::open(&future_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap_err();
         assert!(error.to_string().contains("newer than this binary supports"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_database_is_owner_only_without_repairing_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("permissions.db");
+        drop(SqliteStore::open(&path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap());
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        drop(SqliteStore::open(&path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640,
+            "opening an existing database must not repair operator-selected permissions"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_data_directory_is_owner_only_without_repairing_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let data_directory = directory.path().join("localhold");
+        create_default_data_directory(&data_directory).unwrap();
+        assert_eq!(std::fs::metadata(&data_directory).unwrap().permissions().mode() & 0o777, 0o700);
+
+        std::fs::set_permissions(&data_directory, std::fs::Permissions::from_mode(0o750)).unwrap();
+        create_default_data_directory(&data_directory).unwrap();
+        assert_eq!(
+            std::fs::metadata(&data_directory).unwrap().permissions().mode() & 0o777,
+            0o750,
+            "an existing data directory must not be repaired"
+        );
+
+        let custom_directory = directory.path().join("custom");
+        std::fs::create_dir_all(&custom_directory).unwrap();
+        std::fs::set_permissions(&custom_directory, std::fs::Permissions::from_mode(0o750)).unwrap();
+        SqliteStore::ensure_parent_directory(&custom_directory.join("custom.db")).unwrap();
+        assert_eq!(
+            std::fs::metadata(&custom_directory).unwrap().permissions().mode() & 0o777,
+            0o750,
+            "an existing custom directory must retain operator-selected permissions"
+        );
     }
 
     #[test]
@@ -2519,6 +2635,12 @@ mod tests {
         let clock: Arc<dyn Clock> = Arc::new(MockClock::pinned(base_time()));
         let store = SqliteStore::in_memory_with_clock(Arc::clone(&clock)).unwrap();
         let now = clock.now();
+        let audit = AuditDraft {
+            action: AuditAction::Delete,
+            caller_agent: Some("cleanup-agent".into()),
+            timestamp: now,
+            details: Some(serde_json::json!({"reason": "expired"})),
+        };
 
         let mut expired = make_memory("expired", &[], now);
         expired.expires_at = Some(now - chrono::Duration::seconds(1));
@@ -2526,7 +2648,7 @@ mod tests {
 
         store.store(&make_memory("fresh", &[], now), None).await.unwrap();
 
-        let deleted = store.evict_expired().await.unwrap();
+        let deleted = store.evict_expired("cleanup-agent", &audit).await.unwrap();
         assert_eq!(deleted, 1);
 
         let listed = store.list(MemoryFilter::default(), QueryContext::default()).await.unwrap();
@@ -2534,10 +2656,39 @@ mod tests {
         assert_eq!(listed[0].content, "fresh");
         let tombstone = store.get_tombstone(&expired_id).await.unwrap().unwrap();
         assert_eq!(tombstone.memory_id, expired_id);
-        assert_eq!(tombstone.deleted_by_principal, None);
+        assert_eq!(tombstone.deleted_by_principal.as_deref(), Some("cleanup-agent"));
+        let history = store.query_audit_log(&expired_id, 10_usize).await.unwrap();
+        assert_eq!(history.len(), 1_usize);
+        assert_eq!(history[0].action, AuditAction::Delete);
+        assert_eq!(history[0].caller_agent.as_deref(), Some("cleanup-agent"));
+        assert_eq!(history[0].details, Some(serde_json::json!({"reason": "expired"})));
 
-        let deleted_again = store.evict_expired().await.unwrap();
+        let deleted_again = store.evict_expired("cleanup-agent", &audit).await.unwrap();
         assert_eq!(deleted_again, 0);
+        assert_eq!(store.query_audit_log(&expired_id, 10_usize).await.unwrap().len(), 1_usize);
+    }
+
+    #[tokio::test]
+    async fn evict_expired_rolls_back_when_audit_insert_fails() {
+        let clock: Arc<dyn Clock> = Arc::new(MockClock::pinned(base_time()));
+        let store = SqliteStore::in_memory_with_clock(Arc::clone(&clock)).unwrap();
+        let now = clock.now();
+        let mut expired = make_memory("expired audit rollback", &[], now);
+        expired.expires_at = Some(now - chrono::Duration::seconds(1));
+        let expired_id = store.store(&expired, None).await.unwrap();
+        drop_table(&store, "memory_audit_log").await;
+        let audit = AuditDraft {
+            action: AuditAction::Delete,
+            caller_agent: Some("cleanup-agent".into()),
+            timestamp: now,
+            details: Some(serde_json::json!({"reason": "expired"})),
+        };
+
+        let error = store.evict_expired("cleanup-agent", &audit).await.unwrap_err();
+
+        assert!(error.to_string().contains("memory_audit_log"));
+        assert_eq!(store.count(MemoryFilter::default(), QueryContext::default(), 10_usize).await.unwrap().expired, 1_u64);
+        assert!(store.get_tombstone(&expired_id).await.unwrap().is_none());
     }
 
     #[tokio::test]

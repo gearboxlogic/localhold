@@ -488,8 +488,8 @@ impl<S: MemoryWriter + Send + Sync> MemoryWriter for ChaosStore<S> {
 }
 
 impl<S: MemoryAdmin + Send + Sync> MemoryAdmin for ChaosStore<S> {
-    async fn evict_expired(&self) -> Result<u64, StoreError> {
-        self.inner.evict_expired().await
+    async fn evict_expired(&self, principal: &str, audit: &AuditDraft) -> Result<u64, StoreError> {
+        self.inner.evict_expired(principal, audit).await
     }
 
     async fn reassign_scope(&self, from_scope: &str, to_scope: &str, origin_conversation: Option<&str>, principal: &str) -> Result<ReassignScopeOutcome, StoreError> {

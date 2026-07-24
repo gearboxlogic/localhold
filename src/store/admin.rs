@@ -28,9 +28,11 @@ fn sqlite_count(row: &rusqlite::Row<'_>) -> rusqlite::Result<u64> {
 
 #[expect(clippy::multiple_inherent_impl, reason = "SqliteStore methods are split across submodules by concern")]
 impl SqliteStore {
-    pub(crate) async fn evict_expired_impl(&self) -> Result<u64, StoreError> {
+    pub(crate) async fn evict_expired_impl(&self, principal: &str, audit: &AuditDraft) -> Result<u64, StoreError> {
         let now = self.clock_now().to_rfc3339();
-        self.with_conn(move |conn| evict_expired_conn(conn, &now)).await
+        let principal = principal.to_owned();
+        let audit = audit.clone();
+        self.with_conn(move |conn| evict_expired_conn(conn, &now, &principal, &audit)).await
     }
 
     pub(crate) async fn set_embedding_impl(&self, id: &MemoryId, embedding: &[f32], expected_revision: i64) -> Result<(), StoreError> {
@@ -585,7 +587,7 @@ fn apply_reassign_scope(conn: &mut Connection, params: ReassignScopeApply<'_>) -
     Ok(ReassignScopeOutcome { applied_ids: authorized_ids })
 }
 
-fn evict_expired_conn(conn: &mut Connection, now: &str) -> Result<u64, StoreError> {
+fn evict_expired_conn(conn: &mut Connection, now: &str, principal: &str, audit: &AuditDraft) -> Result<u64, StoreError> {
     let tx = sqlite_write_tx(conn)?;
     let mut stmt = tx.prepare(
         "SELECT id
@@ -601,8 +603,12 @@ fn evict_expired_conn(conn: &mut Connection, now: &str) -> Result<u64, StoreErro
         let Some(memory) = fetch_memory_by_id(&tx, &id)? else {
             continue;
         };
-        insert_tombstone(&tx, &memory, now, None)?;
-        deleted = deleted.saturating_add(tx.execute("DELETE FROM memories WHERE id = ?1", params![id])?);
+        insert_tombstone(&tx, &memory, now, Some(principal))?;
+        let affected = tx.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+        if affected > 0 {
+            insert_audit_draft(&tx, &memory.id, audit)?;
+            deleted = deleted.saturating_add(affected);
+        }
     }
     tx.commit()?;
     u64::try_from(deleted).map_err(|e| StoreError::Serialization(Box::new(e)))

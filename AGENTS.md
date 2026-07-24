@@ -50,20 +50,24 @@ policy documentation.
 ## Pull Request Workflow
 
 - Open a focused pull request after local verification and report its URL.
-- Every push requires a new cloud-agent review for the resulting head commit.
-  An eyes reaction from the cloud bot means review is in progress; a thumbs-up
-  reaction means that head commit is approved.
-- If a review does not start after a push, comment exactly `@codex` on the pull
-  request to nudge the cloud bot.
+- Greptile reviews a pull request only once, as its initial review. Do not
+  re-invoke or nudge Greptile after subsequent pushes.
+- Every push requires a new Codex review for the resulting head commit. An eyes
+  reaction from Codex means review is in progress; a thumbs-up reaction means
+  that head commit is approved.
+- If a Codex review does not start after a push, comment exactly `@codex` on
+  the pull request to nudge it.
 - Inspect and address actionable review findings, then rerun the affected
   checks and push the fixes to the same pull request. The push requires another
-  review, even if an earlier commit received a thumbs-up.
+  Codex review, even if an earlier commit received a thumbs-up. Do not request
+  another Greptile review.
 - Reply to every review comment before resolving its thread. When addressed,
   summarize the fix and validation in the reply. When intentionally not
   addressed, explain the technical rationale in the reply. Resolve the thread
   after posting either response.
-- Merge only when all required CI checks are green and the cloud bot has given
-  the latest head commit a thumbs-up. Neither condition is sufficient alone.
+- Merge only when all required CI checks are green, the initial Greptile review
+  has no outstanding actionable findings, and Codex has given the latest head
+  commit a thumbs-up.
 
 ## Definition Of Done
 
@@ -72,4 +76,5 @@ policy documentation.
 - Required checks pass, or the exact gap is reported.
 - The diff contains no generated output, secrets, personal paths, or unrelated
   files.
-- Required CI is green and the latest head commit has cloud-agent approval.
+- Required CI is green, the initial Greptile review has no outstanding
+  actionable findings, and Codex has approved the latest head commit.

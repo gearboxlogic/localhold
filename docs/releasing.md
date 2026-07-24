@@ -21,8 +21,9 @@ the release workflow; maintainers do not upload locally built binaries.
    [Installation](installation.md).
 5. Run `python3 script/release.py validate vVERSION` and `just check`.
 6. Open a release preparation pull request. Merge only after required CI is
-   green and the cloud bot approves the latest head commit, following
-   [the contributor workflow](../CONTRIBUTING.md).
+   green, the one-time initial Greptile review has no outstanding actionable
+   findings, and Codex approves the latest head commit, following [the
+   contributor workflow](../CONTRIBUTING.md).
 
 ## Publish
 

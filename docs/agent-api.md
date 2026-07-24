@@ -364,11 +364,17 @@ use the server-resolved principal. `admin_list` and
 policy. Migration reporting and repair tools require a write-capable principal
 because they expose whole-store maintenance state.
 
-The tools do not all have the same reach: scope registration, bulk
-re-embedding, expiry cleanup, statistics, and metadata maintenance include
-global or mixed-scope behavior. See the
+The tools do not all have the same reach: scope registration, expiry cleanup,
+statistics, and metadata maintenance include global or mixed-scope behavior.
+See the
 [admin capability matrix](security-and-privacy.md#admin-tools) before enabling
 them.
+
+Bulk `admin_reembed` applies the same per-memory write policy as single-ID
+re-embedding before filling its limit. Inaccessible rows remain unclaimed and
+their count is not returned. Automatic startup and provider-recovery
+re-embedding is separate process-owned, whole-store work: configuring an
+embedding provider opts the store into that provider boundary.
 
 Admin inventory filters use the same agent-facing vocabulary as core tools:
 

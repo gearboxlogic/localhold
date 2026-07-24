@@ -735,7 +735,7 @@ pub struct AdminHistoryParams {
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
 pub struct AdminReembedParams {
-    /// Specific memory ID to re-embed. When omitted, re-embeds all memories without embeddings.
+    /// Specific memory ID to re-embed. When omitted, selects an authorized batch of memories without embeddings.
     #[serde(default)]
     pub id: Option<MemoryId>,
     /// Maximum number of memories to re-embed in bulk mode (when `id` is omitted). Defaults to a server-configured limit.

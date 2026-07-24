@@ -128,7 +128,6 @@ pub(crate) struct SearchRequest {
 /// What to re-embed: a single memory or a bulk batch.
 #[derive(Debug)]
 #[non_exhaustive]
-#[expect(variant_size_differences, reason = "Single carries an id + principal; boxing adds indirection for a two-variant enum")]
 pub enum ReembedRequest {
     /// Re-embed a single memory by ID, authorized by `principal`.
     Single {
@@ -137,8 +136,18 @@ pub enum ReembedRequest {
         /// Server-resolved principal for write-access check.
         principal: String,
     },
-    /// Re-embed up to `limit` memories that lack embeddings.
+    /// Re-embed up to `limit` authorized memories that lack embeddings.
     Bulk {
+        /// Maximum number of memories to queue.
+        limit: usize,
+        /// Server-resolved principal for per-memory write-access checks.
+        principal: String,
+    },
+    /// Process-owned recovery for all unembedded memories.
+    ///
+    /// This is not exposed as an MCP request. The operator-selected embedding
+    /// provider is a whole-store boundary during startup and provider recovery.
+    Recovery {
         /// Maximum number of memories to queue.
         limit: usize,
     },
@@ -1117,7 +1126,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
     /// `EngineError::EmbeddingUnavailable` if the health check fails,
     /// or `EngineError::Store` on persistence-layer failure.
     pub async fn reembed(&self, request: ReembedRequest) -> Result<ReembedOutcome, EngineError> {
-        if let ReembedRequest::Bulk { limit } = &request {
+        if let ReembedRequest::Bulk { limit, .. } | ReembedRequest::Recovery { limit } = &request {
             validate_batch_len("limit", *limit, self.limits.max_reembed_limit)?;
         }
 
@@ -1133,7 +1142,13 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
                 let queued = self.orchestrator.spawn_embed_task_or_run_inline(&embed_admission, id, content, revision).await;
                 Ok(ReembedOutcome::Queued(usize::from(queued)))
             }
-            ReembedRequest::Bulk { limit } => {
+            ReembedRequest::Bulk { limit, principal } => {
+                let embed_admission = self.orchestrator.begin_embed_admission()?;
+                let claims = store.claim_for_reembed_authorized(&principal, limit).await?;
+                let count = self.orchestrator.spawn_claimed_embed_batches_or_run_inline(&embed_admission, claims).await;
+                Ok(ReembedOutcome::Queued(count))
+            }
+            ReembedRequest::Recovery { limit } => {
                 let embed_admission = self.orchestrator.begin_embed_admission()?;
                 let claims = store.claim_for_reembed(limit).await?;
                 let count = self.orchestrator.spawn_claimed_embed_batches_or_run_inline(&embed_admission, claims).await;
@@ -1850,7 +1865,13 @@ mod tests {
         let engine = make_engine_with_embedding(Arc::new(HealthyEmbedding));
         let (tx, shutdown) = begin_shutdown(&engine).await;
 
-        let err = engine.reembed(ReembedRequest::Bulk { limit: 1 }).await.unwrap_err();
+        let err = engine
+            .reembed(ReembedRequest::Bulk {
+                limit: 1,
+                principal: "test-agent".into(),
+            })
+            .await
+            .unwrap_err();
         assert!(matches!(err, EngineError::ShuttingDown));
 
         tx.send(()).unwrap();
@@ -1866,7 +1887,14 @@ mod tests {
         let engine = LocalHoldEngine::new_with_clock(store, embedding, LimitsConfig::default(), SearchConfig::default(), Arc::<MockClock>::clone(&clock));
 
         let reembed_engine = engine.clone();
-        let reembed = tokio::spawn(async move { reembed_engine.reembed(ReembedRequest::Bulk { limit: 1 }).await });
+        let reembed = tokio::spawn(async move {
+            reembed_engine
+                .reembed(ReembedRequest::Bulk {
+                    limit: 1,
+                    principal: "test-agent".into(),
+                })
+                .await
+        });
 
         embedding_waiter.wait_until_started().await;
 
@@ -2546,7 +2574,13 @@ mod tests {
     #[tokio::test]
     async fn reembed_bulk_health_check_failure() {
         let engine = make_engine(); // NoopEmbedding fails health check
-        let err = engine.reembed(ReembedRequest::Bulk { limit: 10 }).await.unwrap_err();
+        let err = engine
+            .reembed(ReembedRequest::Bulk {
+                limit: 10,
+                principal: "test-agent".into(),
+            })
+            .await
+            .unwrap_err();
         assert!(matches!(err, EngineError::Embedding(_)));
     }
 
@@ -2570,7 +2604,13 @@ mod tests {
             ..LimitsConfig::default()
         };
         let engine = make_engine_with_limits(limits);
-        let err = engine.reembed(ReembedRequest::Bulk { limit: 10 }).await.unwrap_err();
+        let err = engine
+            .reembed(ReembedRequest::Bulk {
+                limit: 10,
+                principal: "test-agent".into(),
+            })
+            .await
+            .unwrap_err();
         assert!(matches!(err, EngineError::Validation(_)));
     }
 
@@ -2591,7 +2631,13 @@ mod tests {
         let engine_provider: Arc<dyn EmbeddingProvider> = Arc::<BatchCountingEmbedding>::clone(&provider);
         let engine = LocalHoldEngine::new(store.clone(), engine_provider, limits, SearchConfig::default());
 
-        let outcome = engine.reembed(ReembedRequest::Bulk { limit: 5 }).await.unwrap();
+        let outcome = engine
+            .reembed(ReembedRequest::Bulk {
+                limit: 5,
+                principal: "test-agent".into(),
+            })
+            .await
+            .unwrap();
         assert!(matches!(outcome, ReembedOutcome::Queued(5)));
         engine.shutdown_for_test(Duration::from_secs(1)).await;
 

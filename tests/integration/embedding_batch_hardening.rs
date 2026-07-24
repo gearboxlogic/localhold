@@ -151,8 +151,14 @@ async fn two_instances_partition_durable_reembed_claims() {
     let second_engine = LocalHoldEngine::new(second_store, second_provider, limits, SearchConfig::default());
 
     let (first, second) = tokio::join!(
-        first_engine.reembed(ReembedRequest::Bulk { limit: contents.len() }),
-        second_engine.reembed(ReembedRequest::Bulk { limit: contents.len() })
+        first_engine.reembed(ReembedRequest::Bulk {
+            limit: contents.len(),
+            principal: "reembed-worker".into(),
+        }),
+        second_engine.reembed(ReembedRequest::Bulk {
+            limit: contents.len(),
+            principal: "reembed-worker".into(),
+        })
     );
     let first = first.unwrap();
     let second = second.unwrap();

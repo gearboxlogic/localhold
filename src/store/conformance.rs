@@ -1,5 +1,7 @@
 //! Shared store contract checks for every `MemoryStore` backend.
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Duration, TimeZone as _, Utc};
 use serde_json::json;
 
@@ -299,37 +301,7 @@ where
         .unwrap();
     assert_eq!(store.get_metadata(&id).await.unwrap(), Some(metadata));
 
-    let unembedded = memory(MemorySpec {
-        content: format!("needs reembed {case}"),
-        tags: vec![case_tag.clone(), "reembed".into()],
-        source_agent: OWNER,
-        scope: scope.clone(),
-        origin: origin.clone(),
-        access_policy: AccessPolicy::Public,
-        created_at: time_after(base, 10),
-    });
-    let unembedded_id = store.store(&unembedded, None).await.unwrap();
-    assert!(
-        store
-            .list_for_reembed(50)
-            .await
-            .unwrap()
-            .iter()
-            .any(|(id, content, _)| *id == unembedded_id && content == &unembedded.content)
-    );
-    let claims = store.claim_for_reembed(50).await.unwrap().into_iter().collect::<Vec<_>>();
-    assert!(claims.iter().any(|claim| claim.id == unembedded_id), "expected reembed claim for {unembedded_id}");
-    let claim = claims.into_iter().find(|claim| claim.id == unembedded_id).unwrap();
-    assert_eq!(
-        store.get_for_reembed(&unembedded_id, OWNER).await.unwrap(),
-        Some((unembedded.content.clone(), claim.embedding_revision))
-    );
-    store
-        .set_embedding(&unembedded_id, &embedding(embedding_dimensions, 9.0_f32), claim.embedding_revision)
-        .await
-        .unwrap();
-    assert!(!store.release_embedding_claim(&unembedded_id, claim.embedding_revision, &claim.claim_token).await.unwrap());
-    assert!(store.fetch_embeddings_for_ids(&[unembedded_id]).await.unwrap().contains_key(&unembedded_id));
+    assert_reembed_claim_contract(store, embedding_dimensions, &case, base).await;
 
     let update = MemoryUpdate {
         content: Some(format!("updated content {case}")),
@@ -339,7 +311,7 @@ where
     assert_eq!(updated.outcome, WriteOutcome::Applied);
     assert!(updated.reembed_revision.is_some());
 
-    let use_now = time_after(base, 11);
+    let use_now = time_after(base, 13);
     let use_outcome = store.record_memory_use(&[primary_id, MemoryId::new()], OWNER, 1.0_f64, use_now, 24.0_f64).await.unwrap();
     assert_eq!(use_outcome.recorded, 1_u64);
     assert_eq!(use_outcome.not_found, 1_u64);
@@ -717,6 +689,124 @@ where
     let tombstone = store.get_tombstone(&delete_id).await.unwrap().unwrap();
     assert_eq!(tombstone.memory_id, delete_id);
     assert_eq!(tombstone.deleted_by_principal.as_deref(), Some(OWNER));
+}
+
+struct ReembedPolicyCase {
+    name: &'static str,
+    source_agent: Option<&'static str>,
+    access_policy: AccessPolicy,
+    authorized: bool,
+}
+
+impl ReembedPolicyCase {
+    fn new(name: &'static str, source_agent: Option<&'static str>, access_policy: AccessPolicy, authorized: bool) -> Self {
+        Self {
+            name,
+            source_agent,
+            access_policy,
+            authorized,
+        }
+    }
+}
+
+fn reembed_policy_cases() -> [ReembedPolicyCase; 9] {
+    [
+        ReembedPolicyCase::new("public-non-owner", Some(VIEWER), AccessPolicy::Public, false),
+        ReembedPolicyCase::new("public-owner", Some(OWNER), AccessPolicy::Public, true),
+        ReembedPolicyCase::new("public-ownerless", None, AccessPolicy::Public, true),
+        ReembedPolicyCase::new("restricted-owner", Some(OWNER), AccessPolicy::Restricted { allowed: Vec::new() }, true),
+        ReembedPolicyCase::new(
+            "restricted-allowlisted-non-owner",
+            Some(VIEWER),
+            AccessPolicy::Restricted { allowed: vec![OWNER.into()] },
+            true,
+        ),
+        ReembedPolicyCase::new("restricted-denied", Some(VIEWER), AccessPolicy::Restricted { allowed: vec![ALLOWED.into()] }, false),
+        ReembedPolicyCase::new(
+            "redacted-owner",
+            Some(OWNER),
+            AccessPolicy::Redacted {
+                visible_fields: vec![RedactableField::Content],
+            },
+            true,
+        ),
+        ReembedPolicyCase::new(
+            "redacted-non-owner",
+            Some(VIEWER),
+            AccessPolicy::Redacted {
+                visible_fields: vec![RedactableField::Content],
+            },
+            false,
+        ),
+        ReembedPolicyCase::new(
+            "redacted-ownerless",
+            None,
+            AccessPolicy::Redacted {
+                visible_fields: vec![RedactableField::Content],
+            },
+            false,
+        ),
+    ]
+}
+
+async fn assert_reembed_claim_contract<S>(store: &S, embedding_dimensions: usize, case: &str, base: DateTime<Utc>)
+where
+    S: MemoryStore,
+{
+    let policy_cases = reembed_policy_cases();
+    let mut expected_authorized = BTreeSet::new();
+    let mut expected_recovery = BTreeSet::new();
+    let mut all_ids = Vec::with_capacity(policy_cases.len());
+    for (offset, policy_case) in policy_cases.into_iter().enumerate() {
+        let mut candidate = memory(MemorySpec {
+            content: format!("reembed {} {case}", policy_case.name),
+            tags: vec![format!("contract-{case}"), "reembed-policy".into()],
+            source_agent: OWNER,
+            scope: format!("contract/reembed/{case}"),
+            origin: format!("contract/reembed-origin/{case}"),
+            access_policy: policy_case.access_policy,
+            created_at: time_after(base, i64::try_from(offset).unwrap()),
+        });
+        candidate.provenance.source_agent = policy_case.source_agent.map(str::to_owned);
+        assert_eq!(candidate.has_write_access(OWNER), policy_case.authorized, "invalid {} fixture", policy_case.name);
+        let id = store.store(&candidate, None).await.unwrap();
+        if policy_case.authorized {
+            assert!(expected_authorized.insert(id));
+        } else {
+            assert!(expected_recovery.insert(id));
+        }
+        all_ids.push(id);
+    }
+
+    let listed_ids = store.list_for_reembed(all_ids.len()).await.unwrap().into_iter().map(|(id, ..)| id).collect::<BTreeSet<_>>();
+    assert_eq!(
+        listed_ids,
+        all_ids.iter().copied().collect(),
+        "unrestricted listing must include every unembedded policy case"
+    );
+
+    let authorized_claims = store.claim_for_reembed_authorized(OWNER, expected_authorized.len()).await.unwrap();
+    let actual_authorized = authorized_claims.iter().map(|claim| claim.id).collect::<BTreeSet<_>>();
+    assert_eq!(actual_authorized, expected_authorized, "authorized claim policy must match Memory::has_write_access");
+
+    let recovery_claims = store.claim_for_reembed(expected_recovery.len()).await.unwrap();
+    let actual_recovery = recovery_claims.iter().map(|claim| claim.id).collect::<BTreeSet<_>>();
+    assert_eq!(actual_recovery, expected_recovery, "process-owned recovery must include rows denied to the caller");
+
+    let completed_claim = authorized_claims.first().unwrap().clone();
+    for claim in authorized_claims.iter().chain(&recovery_claims) {
+        store
+            .set_embedding(&claim.id, &embedding(embedding_dimensions, 9.0_f32), claim.embedding_revision)
+            .await
+            .unwrap();
+    }
+    assert!(
+        !store
+            .release_embedding_claim(&completed_claim.id, completed_claim.embedding_revision, &completed_claim.claim_token)
+            .await
+            .unwrap()
+    );
+    assert_eq!(store.fetch_embeddings_for_ids(&all_ids).await.unwrap().len(), all_ids.len());
 }
 
 /// Exercise invalid vector values consistently across every backend entry point.

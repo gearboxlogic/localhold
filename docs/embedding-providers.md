@@ -112,6 +112,12 @@ the wrong number of vectors, LocalHold retries that chunk one input at a time
 so one invalid record does not block valid records. Transient and rate-limit
 failures are not expanded into individual requests.
 
+Caller-triggered bulk `admin_reembed` selects only memories the
+server-resolved principal may write, applying authorization before its limit.
+Automatic startup and provider-recovery re-embedding remains whole-store
+operator work because configuring the provider establishes that boundary for
+the store.
+
 Concurrency and retry limits are per LocalHold process. When several instances
 share a database and one hosted endpoint, size
 `max_concurrent_embedding_requests` for their aggregate traffic; LocalHold does

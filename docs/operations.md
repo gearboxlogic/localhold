@@ -38,9 +38,11 @@ credentials, memory content, PostgreSQL URLs, or provider error bodies.
 Examples of degraded results include a missing SQLite database that normal
 startup would create, a schema that needs a normal startup migration, an
 unavailable optional embedding endpoint, or an enabled reranker whose model is
-not cached when downloads were not allowed. Corrupt storage, unreachable
-required storage, invalid configuration, and unavailable required reranking
-are failed results.
+not cached when downloads were not allowed. On Unix, an existing configuration
+file, SQLite database or WAL sidecar, or default data directory with group/other
+permission bits is also degraded; the diagnostic never changes permissions.
+Corrupt storage, unreachable required storage, invalid configuration, and
+unavailable required reranking are failed results.
 
 ## Configuration
 
@@ -70,12 +72,13 @@ hold config validate
 path without loading configuration. `config init` creates a minimal starter at
 the canonical path and refuses to replace any existing path; edit or replace
 an existing file explicitly. On Unix, the new file is created with mode
-`0600`. `config validate` checks the effective file plus `LOCALHOLD_*`
-overrides, but does not open storage, contact embedding or reranking providers,
-download models, or start a transport. Validation exits `0` when valid and `1`
-when invalid or unreadable; `config init` also exits `1` when creation is
-refused or fails. Parser details are suppressed on validation failure because
-TOML diagnostics can contain secret-bearing source lines.
+`0600`. `hold doctor` reports group/other permission bits on an existing config
+file but leaves the mode unchanged. `config validate` checks the effective file
+plus `LOCALHOLD_*` overrides, but does not open storage, contact embedding or
+reranking providers, download models, or start a transport. Validation exits
+`0` when valid and `1` when invalid or unreadable; `config init` also exits `1`
+when creation is refused or fails. Parser details are suppressed on validation
+failure because TOML diagnostics can contain secret-bearing source lines.
 
 All three commands accept `--json`. Their output includes `schema_version: 1`;
 automation should reject unknown schema versions before consuming other

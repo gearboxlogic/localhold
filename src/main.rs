@@ -90,11 +90,7 @@ async fn main() -> AppResult {
     match config.database.backend {
         DatabaseBackend::Sqlite => {
             let db_path = config.database.sqlite_path().to_path_buf();
-            if let Some(parent) = db_path.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                std::fs::create_dir_all(parent)?;
-            }
+            SqliteStore::ensure_parent_directory(&db_path)?;
             let store = SqliteStore::open_with_clock(&db_path, config.embedding.dimensions(), Arc::clone(&clock))?;
             if let Some(profile) = &embedding_profile {
                 store.verify_embedding_profile(profile).await?;
@@ -550,11 +546,7 @@ async fn run_embeddings_cli(args: &[OsString]) -> Result<i32, Box<dyn std::error
             match config.database.backend {
                 DatabaseBackend::Sqlite => {
                     let path = config.database.sqlite_path();
-                    if let Some(parent) = path.parent()
-                        && !parent.as_os_str().is_empty()
-                    {
-                        std::fs::create_dir_all(parent)?;
-                    }
+                    SqliteStore::ensure_parent_directory(path)?;
                     SqliteStore::reindex_embeddings(path, &profile).await?;
                 }
                 DatabaseBackend::Postgres => PostgresStore::reindex_embeddings(&config.database.postgres, &profile).await?,

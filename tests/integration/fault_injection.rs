@@ -357,6 +357,10 @@ impl<S: MemoryWriter + Send + Sync> MemoryWriter for ChaosStore<S> {
         self.inner.claim_for_reembed(limit).await
     }
 
+    async fn claim_for_reembed_authorized(&self, principal: &str, limit: usize) -> Result<Vec<localhold::store::ReembedClaim>, StoreError> {
+        self.inner.claim_for_reembed_authorized(principal, limit).await
+    }
+
     async fn release_embedding_claim(&self, id: &MemoryId, expected_revision: i64, claim_token: &str) -> Result<bool, StoreError> {
         self.inner.release_embedding_claim(id, expected_revision, claim_token).await
     }

@@ -746,7 +746,7 @@ where
     let batch_size = engine.limits().max_reembed_limit;
     let mut total = 0_usize;
     loop {
-        match engine.reembed(ReembedRequest::Bulk { limit: batch_size }).await {
+        match engine.reembed(ReembedRequest::Recovery { limit: batch_size }).await {
             Ok(ReembedOutcome::Queued(0)) => return total,
             Ok(ReembedOutcome::Queued(n)) => {
                 total = total.saturating_add(n);

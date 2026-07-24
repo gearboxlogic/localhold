@@ -326,11 +326,19 @@ pub trait MemoryWriter: Send + Sync {
     /// current memory revision.
     fn set_embedding(&self, id: &MemoryId, embedding: &[f32], expected_revision: i64) -> impl Future<Output = Result<(), StoreError>> + Send;
 
-    /// Claim unembedded memory revisions for background re-embedding.
+    /// Claim unembedded memory revisions for process-owned recovery.
     ///
-    /// Claimed rows are hidden from subsequent claim attempts until the lease
-    /// expires or the claim is released/completed.
+    /// This whole-store operation is reserved for startup and embedding
+    /// provider recovery, where the configured provider is an operator-owned
+    /// storage boundary. Claimed rows are hidden from subsequent claim
+    /// attempts until the lease expires or the claim is released/completed.
     fn claim_for_reembed(&self, limit: usize) -> impl Future<Output = Result<Vec<ReembedClaim>, StoreError>> + Send;
+
+    /// Claim unembedded memory revisions that `principal` may write.
+    ///
+    /// Authorization is applied before `limit`, so inaccessible rows neither
+    /// consume the caller's limit nor receive leases.
+    fn claim_for_reembed_authorized(&self, principal: &str, limit: usize) -> impl Future<Output = Result<Vec<ReembedClaim>, StoreError>> + Send;
 
     /// Release a previously claimed unembedded memory revision.
     ///

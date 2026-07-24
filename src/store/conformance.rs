@@ -299,6 +299,16 @@ where
         .unwrap();
     assert_eq!(store.get_metadata(&id).await.unwrap(), Some(metadata));
 
+    let inaccessible_unembedded = memory(MemorySpec {
+        content: format!("inaccessible reembed {case}"),
+        tags: vec![case_tag.clone(), "reembed-denied".into()],
+        source_agent: VIEWER,
+        scope: scope.clone(),
+        origin: origin.clone(),
+        access_policy: AccessPolicy::Restricted { allowed: vec![VIEWER.into()] },
+        created_at: time_after(base, 10),
+    });
+    let inaccessible_unembedded_id = store.store(&inaccessible_unembedded, None).await.unwrap();
     let unembedded = memory(MemorySpec {
         content: format!("needs reembed {case}"),
         tags: vec![case_tag.clone(), "reembed".into()],
@@ -306,9 +316,19 @@ where
         scope: scope.clone(),
         origin: origin.clone(),
         access_policy: AccessPolicy::Public,
-        created_at: time_after(base, 10),
+        created_at: time_after(base, 11),
     });
     let unembedded_id = store.store(&unembedded, None).await.unwrap();
+    let second_unembedded = memory(MemorySpec {
+        content: format!("also needs reembed {case}"),
+        tags: vec![case_tag.clone(), "reembed".into()],
+        source_agent: OWNER,
+        scope: scope.clone(),
+        origin: origin.clone(),
+        access_policy: AccessPolicy::Public,
+        created_at: time_after(base, 12),
+    });
+    let second_unembedded_id = store.store(&second_unembedded, None).await.unwrap();
     assert!(
         store
             .list_for_reembed(50)
@@ -317,9 +337,11 @@ where
             .iter()
             .any(|(id, content, _)| *id == unembedded_id && content == &unembedded.content)
     );
-    let claims = store.claim_for_reembed(50).await.unwrap().into_iter().collect::<Vec<_>>();
-    assert!(claims.iter().any(|claim| claim.id == unembedded_id), "expected reembed claim for {unembedded_id}");
-    let claim = claims.into_iter().find(|claim| claim.id == unembedded_id).unwrap();
+    let claims = store.claim_for_reembed_authorized(OWNER, 2).await.unwrap();
+    assert_eq!(claims.len(), 2, "authorized batch limit should be filled past inaccessible older rows");
+    let claim = claims.iter().find(|claim| claim.id == unembedded_id).unwrap();
+    let second_claim = claims.iter().find(|claim| claim.id == second_unembedded_id).unwrap();
+    assert_eq!(claim.claim_token, second_claim.claim_token, "one batch must share one durable claim token");
     assert_eq!(
         store.get_for_reembed(&unembedded_id, OWNER).await.unwrap(),
         Some((unembedded.content.clone(), claim.embedding_revision))
@@ -328,8 +350,25 @@ where
         .set_embedding(&unembedded_id, &embedding(embedding_dimensions, 9.0_f32), claim.embedding_revision)
         .await
         .unwrap();
+    store
+        .set_embedding(&second_unembedded_id, &embedding(embedding_dimensions, 9.25_f32), second_claim.embedding_revision)
+        .await
+        .unwrap();
     assert!(!store.release_embedding_claim(&unembedded_id, claim.embedding_revision, &claim.claim_token).await.unwrap());
-    assert!(store.fetch_embeddings_for_ids(&[unembedded_id]).await.unwrap().contains_key(&unembedded_id));
+    let reembedded = store.fetch_embeddings_for_ids(&[unembedded_id, second_unembedded_id]).await.unwrap();
+    assert!(reembedded.contains_key(&unembedded_id));
+    assert!(reembedded.contains_key(&second_unembedded_id));
+    assert!(
+        store.claim_for_reembed_authorized(OWNER, 50).await.unwrap().is_empty(),
+        "inaccessible rows must remain unclaimed for the requesting principal"
+    );
+    let viewer_claims = store.claim_for_reembed_authorized(VIEWER, 1).await.unwrap();
+    assert_eq!(viewer_claims.len(), 1);
+    assert_eq!(viewer_claims[0].id, inaccessible_unembedded_id);
+    store
+        .set_embedding(&inaccessible_unembedded_id, &embedding(embedding_dimensions, 9.5_f32), viewer_claims[0].embedding_revision)
+        .await
+        .unwrap();
 
     let update = MemoryUpdate {
         content: Some(format!("updated content {case}")),
@@ -339,7 +378,7 @@ where
     assert_eq!(updated.outcome, WriteOutcome::Applied);
     assert!(updated.reembed_revision.is_some());
 
-    let use_now = time_after(base, 11);
+    let use_now = time_after(base, 13);
     let use_outcome = store.record_memory_use(&[primary_id, MemoryId::new()], OWNER, 1.0_f64, use_now, 24.0_f64).await.unwrap();
     assert_eq!(use_outcome.recorded, 1_u64);
     assert_eq!(use_outcome.not_found, 1_u64);

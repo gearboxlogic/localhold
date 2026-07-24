@@ -885,7 +885,7 @@ impl PostgresStore {
             .collect()
     }
 
-    pub(crate) async fn claim_for_reembed_impl(&self, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
+    async fn claim_for_reembed_with_principal_impl(&self, principal: Option<&str>, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -896,19 +896,47 @@ impl PostgresStore {
             .unwrap_or(DateTime::<Utc>::MIN_UTC);
         let claim_token = MemoryId::new().to_string();
         let mut tx = self.pool().begin().await?;
+        // Freeze and lock the authorized, limited ID set before leasing it.
+        // Content is returned only for claimed rows, never carried through the sort.
         let rows = sqlx::query(
             "
-            SELECT id, content, embedding_revision
-            FROM memories
-            WHERE has_embedding = FALSE
-              AND (embedding_claimed_at IS NULL OR embedding_claimed_at <= $1)
-            ORDER BY created_at ASC, id ASC
-            LIMIT $2
-            FOR UPDATE SKIP LOCKED
+            WITH candidates(id, embedding_revision) AS MATERIALIZED (
+                SELECT id, embedding_revision
+                FROM memories
+                WHERE has_embedding = FALSE
+                  AND (embedding_claimed_at IS NULL OR embedding_claimed_at <= $1)
+                  AND (
+                      $2::TEXT IS NULL
+                      OR provenance->>'source_agent' = $2
+                      OR (
+                          access_policy->>'type' = 'public'
+                          AND provenance->>'source_agent' IS NULL
+                      )
+                      OR (
+                          access_policy->>'type' = 'restricted'
+                          AND (access_policy->'allowed') ? $2
+                      )
+                  )
+                ORDER BY created_at ASC, id ASC
+                LIMIT $3
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE memories AS target
+            SET embedding_claimed_at = $4,
+                embedding_claim_token = $5
+            FROM candidates
+            WHERE target.id = candidates.id
+              AND target.has_embedding = FALSE
+              AND target.embedding_revision = candidates.embedding_revision
+              AND (target.embedding_claimed_at IS NULL OR target.embedding_claimed_at <= $1)
+            RETURNING target.id, target.content, target.embedding_revision
             ",
         )
         .bind(expired_before)
+        .bind(principal)
         .bind(limit_i64)
+        .bind(now)
+        .bind(&claim_token)
         .fetch_all(&mut *tx)
         .await?;
 
@@ -917,27 +945,6 @@ impl PostgresStore {
             let id_str: String = row.try_get("id")?;
             let content: String = row.try_get("content")?;
             let embedding_revision: i64 = row.try_get("embedding_revision")?;
-            let result = sqlx::query(
-                "
-                UPDATE memories
-                SET embedding_claimed_at = $1,
-                    embedding_claim_token = $2
-                WHERE id = $3
-                  AND has_embedding = FALSE
-                  AND embedding_revision = $4
-                  AND (embedding_claimed_at IS NULL OR embedding_claimed_at <= $5)
-                ",
-            )
-            .bind(now)
-            .bind(&claim_token)
-            .bind(&id_str)
-            .bind(embedding_revision)
-            .bind(expired_before)
-            .execute(&mut *tx)
-            .await?;
-            if result.rows_affected() == 0 {
-                continue;
-            }
             claims.push(ReembedClaim {
                 id: parse_memory_id(&id_str, "id")?,
                 content,
@@ -947,6 +954,14 @@ impl PostgresStore {
         }
         tx.commit().await?;
         Ok(claims)
+    }
+
+    pub(crate) async fn claim_for_reembed_impl(&self, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
+        self.claim_for_reembed_with_principal_impl(None, limit).await
+    }
+
+    pub(crate) async fn claim_for_reembed_authorized_impl(&self, principal: &str, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
+        self.claim_for_reembed_with_principal_impl(Some(principal), limit).await
     }
 
     pub(crate) async fn release_embedding_claim_impl(&self, id: &MemoryId, expected_revision: i64, claim_token: &str) -> Result<bool, StoreError> {
@@ -2057,6 +2072,10 @@ impl MemoryWriter for PostgresStore {
 
     async fn claim_for_reembed(&self, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
         self.claim_for_reembed_impl(limit).await
+    }
+
+    async fn claim_for_reembed_authorized(&self, principal: &str, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
+        self.claim_for_reembed_authorized_impl(principal, limit).await
     }
 
     async fn release_embedding_claim(&self, id: &MemoryId, expected_revision: i64, claim_token: &str) -> Result<bool, StoreError> {

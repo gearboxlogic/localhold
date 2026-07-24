@@ -8,6 +8,10 @@ requirements explicitly.
 
 ## [Unreleased]
 
+- Changed bulk `admin_reembed` to apply per-memory write authorization before
+  its limit, leaving inaccessible rows unclaimed and undisclosed while
+  preserving process-owned whole-store startup/provider recovery. Authorized
+  batches are selected and leased with one database statement per backend.
 - Redacted HTTP bearer tokens and migration PostgreSQL URLs from configuration
   debug output, and removed complete embedding values from malformed-vector
   diagnostics.

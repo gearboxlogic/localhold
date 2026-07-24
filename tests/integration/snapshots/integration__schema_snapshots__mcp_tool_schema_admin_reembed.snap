@@ -4,7 +4,7 @@ expression: tool
 ---
 {
   "name": "admin_reembed",
-  "description": "Write/admin: trigger re-embedding for one memory or a capped batch of unembedded memories using the server-resolved principal.",
+  "description": "Write/admin: trigger re-embedding for one memory or a capped batch of unembedded memories after checking write access for the server-resolved principal.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$defs": {
@@ -15,7 +15,7 @@ expression: tool
     },
     "properties": {
       "id": {
-        "description": "Specific memory ID to re-embed. When omitted, re-embeds all memories without embeddings.",
+        "description": "Specific memory ID to re-embed. When omitted, selects an authorized batch of memories without embeddings.",
         "$ref": "#/$defs/MemoryId"
       },
       "limit": {

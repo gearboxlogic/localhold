@@ -87,6 +87,25 @@ pub struct ReembedClaim {
     pub claim_token: String,
 }
 
+/// Authorization boundary used while selecting durable re-embedding claims.
+///
+/// Keeping recovery explicit prevents a missing principal from silently
+/// widening caller-triggered maintenance into whole-store work.
+#[derive(Debug)]
+enum ReembedClaimScope {
+    Recovery,
+    Authorized(String),
+}
+
+impl ReembedClaimScope {
+    const fn principal(&self) -> Option<&str> {
+        match self {
+            Self::Recovery => None,
+            Self::Authorized(principal) => Some(principal.as_str()),
+        }
+    }
+}
+
 /// A memory paired with its optional pre-computed embedding vector.
 ///
 /// Primarily used for store internals (batch operations, consolidation queries)

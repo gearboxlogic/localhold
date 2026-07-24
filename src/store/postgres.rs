@@ -17,7 +17,7 @@ use sqlx_postgres::{PgPool, PgPoolOptions, PgRow, Postgres};
 
 use super::{
     BulkAuthOutcome, EmbeddingMap, EmbeddingNeighbor, EmbeddingProfile, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter, ReassignScopeOutcome, RecordUseOutcome,
-    ReembedClaim, merge_metadata_patch,
+    ReembedClaim, ReembedClaimScope, merge_metadata_patch,
     migration::{
         PresentPostgresVectorPolicy, reject_retired_postgres_schema, validate_postgres_runtime_relationships_before_migration_connection,
         validate_present_postgres_schema_connection, validate_ready_postgres_schema,
@@ -885,7 +885,7 @@ impl PostgresStore {
             .collect()
     }
 
-    async fn claim_for_reembed_with_principal_impl(&self, principal: Option<&str>, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
+    async fn claim_for_reembed_with_scope_impl(&self, scope: ReembedClaimScope, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -896,7 +896,7 @@ impl PostgresStore {
             .unwrap_or(DateTime::<Utc>::MIN_UTC);
         let claim_token = MemoryId::new().to_string();
         let mut tx = self.pool().begin().await?;
-        // Freeze and lock the authorized, limited ID set before leasing it.
+        // Freeze and lock the eligible, limited ID set before leasing it.
         // Content is returned only for claimed rows, never carried through the sort.
         let rows = sqlx::query(
             "
@@ -933,7 +933,7 @@ impl PostgresStore {
             ",
         )
         .bind(expired_before)
-        .bind(principal)
+        .bind(scope.principal())
         .bind(limit_i64)
         .bind(now)
         .bind(&claim_token)
@@ -957,11 +957,11 @@ impl PostgresStore {
     }
 
     pub(crate) async fn claim_for_reembed_impl(&self, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
-        self.claim_for_reembed_with_principal_impl(None, limit).await
+        self.claim_for_reembed_with_scope_impl(ReembedClaimScope::Recovery, limit).await
     }
 
     pub(crate) async fn claim_for_reembed_authorized_impl(&self, principal: &str, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
-        self.claim_for_reembed_with_principal_impl(Some(principal), limit).await
+        self.claim_for_reembed_with_scope_impl(ReembedClaimScope::Authorized(principal.to_owned()), limit).await
     }
 
     pub(crate) async fn release_embedding_claim_impl(&self, id: &MemoryId, expected_revision: i64, claim_token: &str) -> Result<bool, StoreError> {

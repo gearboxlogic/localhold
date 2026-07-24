@@ -3,7 +3,7 @@
 use rusqlite::{Connection, OptionalExtension as _, params};
 
 use super::{
-    EmbeddingProfile, ReembedClaim, SqliteStore, merge_metadata_patch,
+    EmbeddingProfile, ReembedClaim, ReembedClaimScope, SqliteStore, merge_metadata_patch,
     query::{MEMORY_COLUMN_COUNT, MEMORY_COLUMNS, row_to_memory, usize_to_i64},
     sqlite::ensure_embedding_profile_matches,
     sqlite_write_tx, update_audit_draft_for_locked_memory,
@@ -973,18 +973,18 @@ fn apply_update_inner(conn: &Connection, vector_index: &SqliteVecIndex, id_str: 
     })
 }
 
-struct ReembedClaimSelection<'a> {
-    principal: Option<&'a str>,
+struct ReembedClaimParams<'a> {
+    scope: &'a ReembedClaimScope,
     limit: usize,
     now: &'a str,
     expired_before: &'a str,
     claim_token: &'a str,
 }
 
-fn claim_for_reembed_conn(conn: &mut Connection, selection: &ReembedClaimSelection<'_>) -> Result<Vec<ReembedClaim>, StoreError> {
-    let limit_i64 = usize_to_i64(selection.limit, "reembed limit")?;
+fn claim_for_reembed_conn(conn: &mut Connection, params: &ReembedClaimParams<'_>) -> Result<Vec<ReembedClaim>, StoreError> {
+    let limit_i64 = usize_to_i64(params.limit, "reembed limit")?;
     let tx = sqlite_write_tx(conn)?;
-    // Freeze the authorized, limited ID set before leasing it and keep content
+    // Freeze the eligible, limited ID set before leasing it and keep content
     // out of candidate sorting; RETURNING reads content only for claimed rows.
     let mut stmt = tx.prepare(
         "WITH candidates(id, embedding_revision) AS MATERIALIZED (
@@ -1011,24 +1011,20 @@ fn claim_for_reembed_conn(conn: &mut Connection, selection: &ReembedClaimSelecti
              ORDER BY created_at ASC, id ASC
              LIMIT ?3
          )
-         UPDATE memories
+         UPDATE memories AS target
          SET embedding_claimed_at = ?4,
              embedding_claim_token = ?5
-         WHERE has_embedding = 0
-           AND (embedding_claimed_at IS NULL OR embedding_claimed_at <= ?1)
-           AND EXISTS (
-               SELECT 1
-               FROM candidates
-               WHERE candidates.id = memories.id
-                 AND candidates.embedding_revision = memories.embedding_revision
-           )
+         FROM candidates
+         WHERE target.id = candidates.id
+           AND target.has_embedding = 0
+           AND target.embedding_revision = candidates.embedding_revision
+           AND (target.embedding_claimed_at IS NULL OR target.embedding_claimed_at <= ?1)
          RETURNING id, content, embedding_revision",
     )?;
     let rows = stmt
-        .query_map(
-            params![selection.expired_before, selection.principal, limit_i64, selection.now, selection.claim_token],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)),
-        )?
+        .query_map(params![params.expired_before, params.scope.principal(), limit_i64, params.now, params.claim_token], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+        })?
         .collect::<Result<Vec<_>, _>>()?;
     drop(stmt);
 
@@ -1039,7 +1035,7 @@ fn claim_for_reembed_conn(conn: &mut Connection, selection: &ReembedClaimSelecti
             id,
             content,
             embedding_revision,
-            claim_token: selection.claim_token.to_owned(),
+            claim_token: params.claim_token.to_owned(),
         });
     }
     tx.commit()?;
@@ -1720,7 +1716,7 @@ impl SqliteStore {
         .await
     }
 
-    async fn claim_for_reembed_with_principal_impl(&self, principal: Option<&str>, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
+    async fn claim_for_reembed_with_scope_impl(&self, scope: ReembedClaimScope, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -1731,10 +1727,9 @@ impl SqliteStore {
             .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
             .to_rfc3339();
         let claim_token = MemoryId::new().to_string();
-        let principal = principal.map(ToOwned::to_owned);
         self.with_conn(move |conn| {
-            claim_for_reembed_conn(conn, &ReembedClaimSelection {
-                principal: principal.as_deref(),
+            claim_for_reembed_conn(conn, &ReembedClaimParams {
+                scope: &scope,
                 limit,
                 now: &now_str,
                 expired_before: &expired_before,
@@ -1745,11 +1740,11 @@ impl SqliteStore {
     }
 
     pub(crate) async fn claim_for_reembed_impl(&self, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
-        self.claim_for_reembed_with_principal_impl(None, limit).await
+        self.claim_for_reembed_with_scope_impl(ReembedClaimScope::Recovery, limit).await
     }
 
     pub(crate) async fn claim_for_reembed_authorized_impl(&self, principal: &str, limit: usize) -> Result<Vec<ReembedClaim>, StoreError> {
-        self.claim_for_reembed_with_principal_impl(Some(principal), limit).await
+        self.claim_for_reembed_with_scope_impl(ReembedClaimScope::Authorized(principal.to_owned()), limit).await
     }
 
     pub(crate) async fn release_embedding_claim_impl(&self, id: &MemoryId, expected_revision: i64, claim_token: &str) -> Result<bool, StoreError> {

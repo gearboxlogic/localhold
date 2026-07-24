@@ -753,7 +753,8 @@ fn ensure_distinct_paths(first: &Path, second: &Path) -> Result<(), MaintenanceF
 
 fn ensure_restore_parent(destination: &Path) -> Result<(), MaintenanceFailure> {
     let parent = destination.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent).map_err(|error| MaintenanceFailure::failed(format!("cannot create restore destination directory {}: {error}", parent.display())))
+    SqliteStore::ensure_parent_directory(destination)
+        .map_err(|error| MaintenanceFailure::failed(format!("cannot create restore destination directory {}: {error}", parent.display())))
 }
 
 fn ensure_new_destination(destination: &Path) -> Result<(), MaintenanceFailure> {

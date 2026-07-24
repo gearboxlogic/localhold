@@ -8,6 +8,10 @@ requirements explicitly.
 
 ## [Unreleased]
 
+- Changed whole-store expiry cleanup to record the server-resolved principal in
+  each tombstone and transactional per-memory delete audit row; cleanup still
+  selects all expired memories without per-memory policy filtering.
+  `MemoryAdmin::evict_expired` now requires that principal and audit draft.
 - Hardened Unix local storage creation with mode `0700` for a new default data
   directory and `0600` for new SQLite databases, while preserving existing and
   custom-directory modes; `hold doctor` now reports permissive existing local

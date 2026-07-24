@@ -123,11 +123,11 @@ rows and retains a minimal tombstone so later audit-history reads can still be
 authorized. TTL expiry alone only hides a memory from ordinary reads and
 searches; the content and derived data remain stored until an enabled
 `admin_cleanup_expired` operation removes expired rows. That whole-store cleanup
-requires a write-capable principal, but it does not apply each memory's policy
-or create the same per-memory audit entry as an ordinary delete. Its tombstones
-also do not durably identify the principal that ran the cleanup. Audit rows and
-tombstones have no automatic retention limit. Supersession is not deletion:
-the older memory remains stored and can be requested explicitly.
+requires a write-capable principal, but it does not apply each memory's policy.
+Every cleanup deletion records the server-resolved principal in its tombstone
+and a transactional per-memory delete audit row. Audit rows and tombstones have
+no automatic retention limit. Supersession is not deletion: the older memory
+remains stored and can be requested explicitly.
 
 Database deletion is not secure erasure. Deleted values can remain in SQLite
 free pages or WAL, PostgreSQL MVCC/WAL and replicas, snapshots, logs, and older
@@ -298,7 +298,7 @@ agents cannot reach. Capabilities have different authorization scopes:
 | Global scope registry | `admin_scope_list`, `admin_scope_register` | Listing returns every registered scope to a read-allowed caller. Registration requires a write-capable principal but can replace any scope definition; scopes have no per-scope owner policy. |
 | Policy-checked memory changes | `admin_bulk_update`, `admin_bulk_delete`, `admin_reassign_scope`, `admin_consolidate`, single-ID `admin_reembed` | Require a write-capable principal and check write access for affected memories. Shared ANN candidate work can still be influenced by other rows. |
 | Whole-store embedding queue | bulk `admin_reembed` | Requires a write-capable principal at the route, then claims unembedded rows without per-memory authorization and can send their content to the configured provider. |
-| Whole-store expiry cleanup | `admin_cleanup_expired` | Requires a write-capable principal but deletes all expired rows without per-memory policy checks; its audit and tombstone behavior differs from ordinary deletion. |
+| Whole-store expiry cleanup | `admin_cleanup_expired` | Requires a write-capable principal and records it in a tombstone and transactional delete audit row for every removed memory, but still deletes all expired rows without per-memory policy checks. |
 | Whole-store metadata maintenance | `admin_migration_report`, `admin_migrate_metadata` | Restricted to a local, authenticated stdio context. Reporting exposes whole-store state; migration can add metadata across the store. |
 
 Enabling admin routes should therefore be treated as granting maintenance

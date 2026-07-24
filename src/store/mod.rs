@@ -484,8 +484,11 @@ pub trait MemoryWriter: Send + Sync {
 
 /// Administrative operations: eviction, scope reassignment.
 pub trait MemoryAdmin: Send + Sync {
-    /// Remove all expired memories and return the number of deleted rows.
-    fn evict_expired(&self) -> impl Future<Output = Result<u64, StoreError>> + Send;
+    /// Remove all expired memories, attributing every deletion to `principal`.
+    ///
+    /// The audit row and authorization tombstone for each deleted memory are
+    /// committed atomically with that deletion.
+    fn evict_expired(&self, principal: &str, audit: &AuditDraft) -> impl Future<Output = Result<u64, StoreError>> + Send;
 
     /// Reassign conversation scope for matching memories.
     ///

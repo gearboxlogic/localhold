@@ -364,9 +364,10 @@ use the server-resolved principal. `admin_list` and
 policy. Migration reporting and repair tools require a write-capable principal
 because they expose whole-store maintenance state.
 
-The tools do not all have the same reach: scope registration, expiry cleanup,
-statistics, and metadata maintenance include global or mixed-scope behavior.
-See the
+The tools do not all have the same reach: scope registration, statistics, and
+metadata maintenance include global or mixed-scope behavior. Expiry cleanup
+defaults to per-memory write authorization, while its explicit whole-store mode
+is restricted to authenticated local stdio. See the
 [admin capability matrix](security-and-privacy.md#admin-tools) before enabling
 them.
 
@@ -375,6 +376,12 @@ re-embedding before filling its limit. Inaccessible rows remain unclaimed and
 their count is not returned. Automatic startup and provider-recovery
 re-embedding is separate process-owned, whole-store work: configuring an
 embedding provider opts the store into that provider boundary.
+
+`admin_cleanup_expired` defaults to `mode = "authorized"` and deletes only
+expired memories the server-resolved principal may write. Inaccessible rows
+are not deleted or counted. `mode = "all"` is explicit whole-store retention
+maintenance and is accepted only by an authenticated local stdio instance.
+Both modes create a per-memory tombstone and transactional delete audit row.
 
 Admin inventory filters use the same agent-facing vocabulary as core tools:
 
@@ -397,7 +404,8 @@ Mutation and maintenance responses use an action-oriented `operation` envelope:
 memories. Mutations that require audit fail and roll back if their audit row
 cannot be inserted. Expiry cleanup writes one delete audit row and an
 authorization tombstone naming the server-resolved principal for every removed
-memory, while retaining its documented whole-store selection behavior.
+memory. Its default selection applies per-memory write authorization; explicit
+local `mode = "all"` selects the whole store.
 Redacted history views omit principal and details. For deleted memories,
 history is authorized by the deletion tombstone; legacy deleted memories or
 manually purged tombstones return empty history.

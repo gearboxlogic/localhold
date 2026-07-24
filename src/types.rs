@@ -661,17 +661,7 @@ impl Memory {
     /// explicitly allowed agents.
     #[must_use]
     pub fn has_write_access(&self, caller: &str) -> bool {
-        let owner = self.provenance.source_agent.as_deref();
-        let is_owner = owner == Some(caller);
-        match &self.access_policy {
-            // Ownerless legacy/public memories should remain maintainable:
-            // if no owner is set, allow authenticated callers to write.
-            AccessPolicy::Public => owner.is_none() || is_owner,
-            // Redacted memories require an explicit owner — ownerless redacted
-            // memories deny all writes to prevent privilege escalation.
-            AccessPolicy::Redacted { .. } => is_owner,
-            AccessPolicy::Restricted { allowed } => is_owner || allowed.iter().any(|a| a == caller),
-        }
+        write_access_allowed(&self.provenance, &self.access_policy, caller)
     }
 
     /// Return the optimistic-concurrency token for a full-access record.
@@ -769,6 +759,25 @@ impl Memory {
             AccessLevel::Redacted => Some(self.redacted()),
             AccessLevel::Denied => None,
         }
+    }
+}
+
+/// Evaluate the canonical write policy from its minimal authorization envelope.
+///
+/// Store maintenance paths use this after selecting only provenance and policy
+/// fields, avoiding full-memory deserialization without duplicating policy
+/// semantics.
+pub(crate) fn write_access_allowed(provenance: &Provenance, access_policy: &AccessPolicy, caller: &str) -> bool {
+    let owner = provenance.source_agent.as_deref();
+    let is_owner = owner == Some(caller);
+    match access_policy {
+        // Ownerless legacy/public memories should remain maintainable:
+        // if no owner is set, allow authenticated callers to write.
+        AccessPolicy::Public => owner.is_none() || is_owner,
+        // Redacted memories require an explicit owner — ownerless redacted
+        // memories deny all writes to prevent privilege escalation.
+        AccessPolicy::Redacted { .. } => is_owner,
+        AccessPolicy::Restricted { allowed } => is_owner || allowed.iter().any(|a| a == caller),
     }
 }
 

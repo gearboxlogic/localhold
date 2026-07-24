@@ -3,7 +3,7 @@
 use rusqlite::{Connection, OptionalExtension as _, params};
 
 use super::{
-    EmbeddingProfile, ReembedClaim, ReembedClaimScope, SqliteStore, merge_metadata_patch,
+    EmbeddingProfile, MemoryAuthorizationRef, ReembedClaim, ReembedClaimScope, SqliteStore, merge_metadata_patch,
     query::{MEMORY_COLUMN_COUNT, MEMORY_COLUMNS, row_to_memory, usize_to_i64},
     sqlite::ensure_embedding_profile_matches,
     sqlite_write_tx, update_audit_draft_for_locked_memory,
@@ -463,8 +463,13 @@ pub(crate) fn fetch_memory_by_id(conn: &Connection, id_str: &str) -> Result<Opti
 
 /// Insert or replace a deleted-memory authorization tombstone.
 pub(crate) fn insert_tombstone(conn: &Connection, memory: &Memory, deleted_at: &str, deleted_by: Option<&str>) -> Result<(), StoreError> {
-    let provenance = serde_json::to_string(&memory.provenance)?;
-    let access_policy = serde_json::to_string(&memory.access_policy)?;
+    insert_authorization_tombstone(conn, MemoryAuthorizationRef::from(memory), deleted_at, deleted_by)
+}
+
+/// Insert or replace a tombstone from an already-locked authorization envelope.
+pub(crate) fn insert_authorization_tombstone(conn: &Connection, memory: MemoryAuthorizationRef<'_>, deleted_at: &str, deleted_by: Option<&str>) -> Result<(), StoreError> {
+    let provenance = serde_json::to_string(memory.provenance)?;
+    let access_policy = serde_json::to_string(memory.access_policy)?;
     #[expect(unused_results, reason = "UPSERT row count is not useful")]
     conn.execute(
         "INSERT INTO memory_tombstones (memory_id, provenance, access_policy, deleted_at, deleted_by_principal)

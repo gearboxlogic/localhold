@@ -6,10 +6,14 @@
 
 use std::time::Duration;
 
+use chrono::{TimeDelta, Utc};
 use localhold::{
     config::AnonymousPolicy,
-    server::params::{AdminListResponse, DeleteResponse, HistoryResponse, ReadResponse, RecallResponse, RememberManyResponse, RememberResponse, UpdateResponse},
-    types::{AuditAction, SearchMode},
+    server::params::{
+        AdminListResponse, DeleteResponse, EvictExpiredResponse, HistoryResponse, ReadResponse, RecallResponse, RememberManyResponse, RememberResponse, UpdateResponse,
+    },
+    store::{MemoryReader as _, MemoryWriter as _},
+    types::{AccessPolicy, AuditAction, Memory, Provenance, SearchMode},
 };
 use reqwest::{
     RequestBuilder, StatusCode,
@@ -137,15 +141,51 @@ async fn http_without_auth_does_not_inherit_launch_principal() {
 }
 
 #[tokio::test]
-async fn http_migration_tools_require_local_admin_context() {
+async fn http_whole_store_maintenance_requires_local_admin_context() {
     let (url, ct, server) = setup_http_noop_server_with_auth(Some("launch"), AnonymousPolicy::PublicReadOnly, Some("secret-token")).await;
     let client = connect_http_client_with_auth(&url, "secret-token", "alice").await;
+
+    let mut authorized = Memory::new_for_test(
+        "http authorized expired".into(),
+        Vec::new(),
+        Provenance::new_for_test(Some(TEST_HTTP_PRINCIPAL.into()), None, None),
+        AccessPolicy::Public,
+    );
+    authorized.expires_at = Some(Utc::now() - TimeDelta::seconds(60));
+    let authorized_id = server.store().store(&authorized, None).await.unwrap();
+
+    let mut denied = Memory::new_for_test(
+        "http denied expired".into(),
+        Vec::new(),
+        Provenance::new_for_test(Some("different-principal".into()), None, None),
+        AccessPolicy::Public,
+    );
+    denied.expires_at = Some(Utc::now() - TimeDelta::seconds(60));
+    let denied_id = server.store().store(&denied, None).await.unwrap();
 
     let report_err = call_tool_error(&client, "admin_migration_report", json!({})).await;
     assert!(report_err.contains("local server admin"), "expected local-admin denial, got: {report_err}");
 
     let migrate_err = call_tool_error(&client, "admin_migrate_metadata", json!({"dry_run": true})).await;
     assert!(migrate_err.contains("local server admin"), "expected local-admin denial, got: {migrate_err}");
+
+    let cleanup_err = call_tool_error(&client, "admin_cleanup_expired", json!({"mode": "all"})).await;
+    assert!(cleanup_err.contains("local server admin"), "expected local-admin denial, got: {cleanup_err}");
+    assert!(server.store().get_tombstone(&authorized_id).await.unwrap().is_none());
+    assert!(server.store().get_tombstone(&denied_id).await.unwrap().is_none());
+
+    let cleanup: EvictExpiredResponse = call_tool(&client, "admin_cleanup_expired", json!({})).await;
+    assert_eq!(cleanup.deleted, 1);
+    assert_eq!(
+        server
+            .store()
+            .get_tombstone(&authorized_id)
+            .await
+            .unwrap()
+            .and_then(|tombstone| tombstone.deleted_by_principal),
+        Some(TEST_HTTP_PRINCIPAL.into())
+    );
+    assert!(server.store().get_tombstone(&denied_id).await.unwrap().is_none());
 
     ct.cancel();
     server.shutdown().await;

@@ -16,8 +16,8 @@ use sqlx::{AssertSqlSafe, Error as SqlxError, QueryBuilder, Row as _, Transactio
 use sqlx_postgres::{PgPool, PgPoolOptions, PgRow, Postgres};
 
 use super::{
-    BulkAuthOutcome, EmbeddingMap, EmbeddingNeighbor, EmbeddingProfile, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter, ReassignScopeOutcome, RecordUseOutcome,
-    ReembedClaim, ReembedClaimScope, merge_metadata_patch,
+    BulkAuthOutcome, EmbeddingMap, EmbeddingNeighbor, EmbeddingProfile, ExpiredCleanupScope, MemoryAdmin, MemoryAuthorizationEnvelope, MemoryAuthorizationRef, MemoryReader,
+    MemoryWithEmbedding, MemoryWriter, ReassignScopeOutcome, RecordUseOutcome, ReembedClaim, ReembedClaimScope, merge_metadata_patch,
     migration::{
         PresentPostgresVectorPolicy, reject_retired_postgres_schema, validate_postgres_runtime_relationships_before_migration_connection,
         validate_present_postgres_schema_connection, validate_ready_postgres_schema,
@@ -1164,30 +1164,63 @@ impl PostgresStore {
     }
 
     pub(crate) async fn evict_expired_impl(&self, principal: &str, audit: &AuditDraft) -> Result<u64, StoreError> {
+        self.evict_expired_with_scope_impl(ExpiredCleanupScope::Authorized { actor: principal.to_owned() }, audit)
+            .await
+    }
+
+    pub(crate) async fn evict_expired_all_impl(&self, principal: &str, audit: &AuditDraft) -> Result<u64, StoreError> {
+        self.evict_expired_with_scope_impl(ExpiredCleanupScope::All { actor: principal.to_owned() }, audit).await
+    }
+
+    async fn evict_expired_with_scope_impl(&self, scope: ExpiredCleanupScope, audit: &AuditDraft) -> Result<u64, StoreError> {
         let now = self.clock_now();
         let mut tx = self.pool().begin().await?;
         let rows = sqlx::query(
             "
-            SELECT id
+            SELECT id, provenance, access_policy
             FROM memories
             WHERE expires_at IS NOT NULL AND expires_at <= $1
+              AND (
+                  $2::TEXT IS NULL
+                  OR provenance->>'source_agent' = $2
+                  OR (
+                      access_policy->>'type' = 'public'
+                      AND provenance->>'source_agent' IS NULL
+                  )
+                  OR (
+                      access_policy->>'type' = 'restricted'
+                      AND (access_policy->'allowed') ? $2
+                  )
+              )
             ORDER BY expires_at ASC, id ASC
             FOR UPDATE
             ",
         )
         .bind(now)
+        .bind(scope.authorization_principal())
         .fetch_all(&mut *tx)
         .await?;
         let mut deleted = 0_u64;
         for row in rows {
             let id_str: String = row.try_get("id")?;
-            let id = parse_memory_id(&id_str, "id")?;
-            let Some(existing) = fetch_memory_by_id_for_update_tx(&mut tx, &id).await? else {
-                continue;
+            let provenance: Json<Provenance> = row.try_get("provenance")?;
+            let access_policy: Json<AccessPolicy> = row.try_get("access_policy")?;
+            let memory = MemoryAuthorizationEnvelope {
+                id: parse_memory_id(&id_str, "id")?,
+                provenance: provenance.0,
+                access_policy: access_policy.0,
             };
-            insert_tombstone_tx(&mut tx, &existing, now, Some(principal)).await?;
-            if delete_memory_tx(&mut tx, &id).await? {
-                insert_audit_draft_tx(&mut tx, &id, audit).await?;
+            // SQL narrows candidates efficiently; this shared Rust policy
+            // remains the fail-closed authority if JSON representations evolve.
+            if scope
+                .authorization_principal()
+                .is_some_and(|authorized_principal| !memory.has_write_access(authorized_principal))
+            {
+                continue;
+            }
+            insert_authorization_tombstone_tx(&mut tx, MemoryAuthorizationRef::from(&memory), now, Some(scope.actor())).await?;
+            if delete_memory_tx(&mut tx, &memory.id).await? {
+                insert_audit_draft_tx(&mut tx, &memory.id, audit).await?;
                 deleted = deleted.saturating_add(1);
             }
         }
@@ -2200,6 +2233,10 @@ impl MemoryAdmin for PostgresStore {
         self.evict_expired_impl(principal, audit).await
     }
 
+    async fn evict_expired_all(&self, principal: &str, audit: &AuditDraft) -> Result<u64, StoreError> {
+        self.evict_expired_all_impl(principal, audit).await
+    }
+
     async fn reassign_scope(&self, from_scope: &str, to_scope: &str, origin_conversation: Option<&str>, principal: &str) -> Result<ReassignScopeOutcome, StoreError> {
         self.reassign_scope_impl(from_scope, to_scope, origin_conversation, principal).await
     }
@@ -2489,6 +2526,15 @@ async fn delete_memory_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId) -> 
 }
 
 async fn insert_tombstone_tx(tx: &mut Transaction<'_, Postgres>, memory: &Memory, deleted_at: DateTime<Utc>, deleted_by: Option<&str>) -> Result<(), StoreError> {
+    insert_authorization_tombstone_tx(tx, MemoryAuthorizationRef::from(memory), deleted_at, deleted_by).await
+}
+
+async fn insert_authorization_tombstone_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    memory: MemoryAuthorizationRef<'_>,
+    deleted_at: DateTime<Utc>,
+    deleted_by: Option<&str>,
+) -> Result<(), StoreError> {
     let _result = sqlx::query(
         "
         INSERT INTO memory_tombstones (memory_id, provenance, access_policy, deleted_at, deleted_by_principal)
@@ -5975,7 +6021,7 @@ mod tests {
             action: AuditAction::Delete,
             caller_agent: Some("postgres-cleanup-agent".into()),
             timestamp,
-            details: Some(serde_json::json!({"reason": "expired"})),
+            details: Some(serde_json::json!({"mode": "authorized", "reason": "expired"})),
         };
         assert_eq!(MemoryAdmin::evict_expired(store, "postgres-cleanup-agent", &cleanup_audit).await.unwrap(), 1_u64);
         let expired_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM memories WHERE id = $1)")
@@ -5990,7 +6036,7 @@ mod tests {
         assert_eq!(history.len(), 1_usize);
         assert_eq!(history[0].action, AuditAction::Delete);
         assert_eq!(history[0].caller_agent.as_deref(), Some("postgres-cleanup-agent"));
-        assert_eq!(history[0].details, Some(serde_json::json!({"reason": "expired"})));
+        assert_eq!(history[0].details, Some(serde_json::json!({"mode": "authorized", "reason": "expired"})));
     }
 
     #[tokio::test]
@@ -6018,6 +6064,7 @@ mod tests {
 
         let mut expired = test_memory_with_content("postgres trait expired");
         expired.tags = vec!["postgres-trait".into()];
+        expired.provenance.source_agent = Some("postgres-cleanup-agent".into());
         expired.provenance.source_conversation = Some(format!("postgres-trait-expired/{}", MemoryId::new()));
         expired.expires_at = Some(Utc.with_ymd_and_hms(2026, 5, 8, 11, 0, 0).single().unwrap());
         let expired_id = MemoryWriter::store(&store, &expired, None).await.unwrap();

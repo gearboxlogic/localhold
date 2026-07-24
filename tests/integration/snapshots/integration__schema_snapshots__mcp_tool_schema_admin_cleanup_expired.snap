@@ -4,9 +4,33 @@ expression: tool
 ---
 {
   "name": "admin_cleanup_expired",
-  "description": "Write/admin: destructively evict all expired TTL memories using the server-resolved principal.",
+  "description": "Write/admin: destructively evict expired TTL memories using the server-resolved principal. mode defaults to authorized per-memory write policy; mode=all is explicit whole-store maintenance restricted to authenticated local stdio.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$defs": {
+      "AdminCleanupExpiredMode": {
+        "description": "Reach of an expired-memory cleanup request.",
+        "oneOf": [
+          {
+            "description": "Delete only expired memories the server-resolved principal may write.",
+            "type": "string",
+            "const": "authorized"
+          },
+          {
+            "description": "Delete every expired memory from a local authenticated stdio instance.",
+            "type": "string",
+            "const": "all"
+          }
+        ]
+      }
+    },
+    "properties": {
+      "mode": {
+        "description": "Cleanup reach. Defaults to policy-authorized memories only.",
+        "$ref": "#/$defs/AdminCleanupExpiredMode",
+        "default": "authorized"
+      }
+    },
     "type": "object"
   }
 }

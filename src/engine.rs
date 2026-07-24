@@ -971,14 +971,35 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         Ok(count)
     }
 
-    /// Evict all expired memories and attribute each deletion to `principal`.
+    /// Evict expired memories `principal` may write.
     ///
     /// # Errors
     ///
     /// Returns `EngineError::Store` on persistence-layer failure.
     pub async fn evict_expired(&self, principal: &str) -> Result<u64, EngineError> {
-        let audit = self.audit_draft(AuditAction::Delete, Some(principal.to_owned()), Some(serde_json::json!({"reason": "expired"})));
+        let audit = self.audit_draft(
+            AuditAction::Delete,
+            Some(principal.to_owned()),
+            Some(serde_json::json!({"mode": "authorized", "reason": "expired"})),
+        );
         Ok(self.orchestrator.store().evict_expired(principal, &audit).await?)
+    }
+
+    /// Evict every expired memory as explicit whole-store maintenance.
+    ///
+    /// The server transport is responsible for restricting this operation to
+    /// an authenticated local operator context.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Store` on persistence-layer failure.
+    pub async fn evict_expired_all(&self, principal: &str) -> Result<u64, EngineError> {
+        let audit = self.audit_draft(
+            AuditAction::Delete,
+            Some(principal.to_owned()),
+            Some(serde_json::json!({"mode": "all", "reason": "expired"})),
+        );
+        Ok(self.orchestrator.store().evict_expired_all(principal, &audit).await?)
     }
 
     /// Register or replace a scope definition.

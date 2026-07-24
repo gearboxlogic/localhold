@@ -128,26 +128,45 @@ async fn admin_list_text_search_filters_results() {
 #[tokio::test]
 async fn admin_cleanup_expired_deletes_only_expired_memories() {
     let (client, server) = setup_server_with(Arc::new(NoopEmbedding::new())).await;
-    let provenance = Provenance::new_for_test(Some("agent".into()), Some("cleanup-scope".into()), Some("cleanup-scope".into()));
+    let authorized_provenance = Provenance::new_for_test(Some("stdio".into()), Some("cleanup-scope".into()), Some("cleanup-scope".into()));
+    let denied_provenance = Provenance::new_for_test(Some("agent".into()), Some("cleanup-scope".into()), Some("cleanup-scope".into()));
 
-    let mut expired = Memory::new_for_test("short-lived".into(), vec![], provenance.clone(), AccessPolicy::Restricted {
+    let mut authorized_expired = Memory::new_for_test("authorized short-lived".into(), vec![], authorized_provenance.clone(), AccessPolicy::Restricted {
+        allowed: Vec::new(),
+    });
+    authorized_expired.expires_at = Some(Utc::now() - TimeDelta::seconds(60));
+    let authorized_expired_id = server.store().store(&authorized_expired, None).await.unwrap();
+
+    let mut denied_expired = Memory::new_for_test("denied short-lived".into(), vec![], denied_provenance, AccessPolicy::Restricted {
         allowed: vec!["different-principal".into()],
     });
-    expired.expires_at = Some(Utc::now() - TimeDelta::seconds(60));
-    let expired_id = server.store().store(&expired, None).await.unwrap();
+    denied_expired.expires_at = Some(Utc::now() - TimeDelta::seconds(60));
+    let denied_expired_id = server.store().store(&denied_expired, None).await.unwrap();
 
-    let durable = Memory::new_for_test("durable".into(), vec![], provenance, AccessPolicy::Public);
+    let durable = Memory::new_for_test("durable".into(), vec![], authorized_provenance, AccessPolicy::Public);
     let durable_id = server.store().store(&durable, None).await.unwrap();
 
     let cleaned: EvictExpiredResponse = call_tool(&client, "admin_cleanup_expired", json!({})).await;
     assert_eq!(cleaned.deleted, 1);
-    let tombstone = server.store().get_tombstone(&expired_id).await.unwrap().unwrap();
+    let tombstone = server.store().get_tombstone(&authorized_expired_id).await.unwrap().unwrap();
     assert_eq!(tombstone.deleted_by_principal.as_deref(), Some("stdio"));
-    let history = server.store().query_audit_log(&expired_id, 10_usize).await.unwrap();
+    let history = server.store().query_audit_log(&authorized_expired_id, 10_usize).await.unwrap();
     assert_eq!(history.len(), 1_usize);
     assert_eq!(history[0].action, AuditAction::Delete);
     assert_eq!(history[0].caller_agent.as_deref(), Some("stdio"));
-    assert_eq!(history[0].details, Some(json!({"reason": "expired"})));
+    assert_eq!(history[0].details, Some(json!({"mode": "authorized", "reason": "expired"})));
+    assert!(server.store().get_tombstone(&denied_expired_id).await.unwrap().is_none());
+    assert!(server.store().query_audit_log(&denied_expired_id, 10_usize).await.unwrap().is_empty());
+
+    let cleaned_all: EvictExpiredResponse = call_tool(&client, "admin_cleanup_expired", json!({"mode": "all"})).await;
+    assert_eq!(cleaned_all.deleted, 1);
+    let denied_tombstone = server.store().get_tombstone(&denied_expired_id).await.unwrap().unwrap();
+    assert_eq!(denied_tombstone.deleted_by_principal.as_deref(), Some("stdio"));
+    let denied_history = server.store().query_audit_log(&denied_expired_id, 10_usize).await.unwrap();
+    assert_eq!(denied_history.len(), 1_usize);
+    assert_eq!(denied_history[0].action, AuditAction::Delete);
+    assert_eq!(denied_history[0].caller_agent.as_deref(), Some("stdio"));
+    assert_eq!(denied_history[0].details, Some(json!({"mode": "all", "reason": "expired"})));
 
     let listed: AdminListResponse = call_tool(&client, "admin_list", json!({})).await;
     assert_eq!(listed.count, 1);
@@ -156,6 +175,8 @@ async fn admin_cleanup_expired_deletes_only_expired_memories() {
 
     let cleaned_again: EvictExpiredResponse = call_tool(&client, "admin_cleanup_expired", json!({})).await;
     assert_eq!(cleaned_again.deleted, 0);
+    let cleaned_all_again: EvictExpiredResponse = call_tool(&client, "admin_cleanup_expired", json!({"mode": "all"})).await;
+    assert_eq!(cleaned_all_again.deleted, 0);
 }
 
 #[tokio::test]

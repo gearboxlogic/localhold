@@ -5,8 +5,8 @@ use std::collections::HashSet;
 use rusqlite::{Connection, OptionalExtension as _, params};
 
 use super::{
-    ReassignScopeOutcome, SqliteStore,
-    crud::{SQLITE_MAX_CHUNK, fetch_memory_by_id, get_metadata_conn, insert_audit_draft, insert_tombstone, upsert_metadata_conn},
+    ExpiredCleanupScope, MemoryAuthorizationEnvelope, MemoryAuthorizationRef, ReassignScopeOutcome, SqliteStore,
+    crud::{SQLITE_MAX_CHUNK, fetch_memory_by_id, get_metadata_conn, insert_audit_draft, insert_authorization_tombstone, upsert_metadata_conn},
     query::{DEFAULT_LIST_LIMIT, OVERFETCH_FACTOR, ScanConfig, count_with_access_filter, normalize_filter},
     sqlite_write_tx,
     vector::{VectorIndex as _, validate_embedding_vector},
@@ -14,8 +14,8 @@ use super::{
 use crate::{
     error::StoreError,
     types::{
-        AuditDraft, LARGE_CONTENT_WARNING_THRESHOLD_BYTES, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MetadataMigrationOutcome, MetadataMigrationReport,
-        QueryContext, ScopeDefinition,
+        AccessPolicy, AuditDraft, LARGE_CONTENT_WARNING_THRESHOLD_BYTES, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MetadataMigrationOutcome,
+        MetadataMigrationReport, Provenance, QueryContext, ScopeDefinition,
     },
 };
 
@@ -29,10 +29,18 @@ fn sqlite_count(row: &rusqlite::Row<'_>) -> rusqlite::Result<u64> {
 #[expect(clippy::multiple_inherent_impl, reason = "SqliteStore methods are split across submodules by concern")]
 impl SqliteStore {
     pub(crate) async fn evict_expired_impl(&self, principal: &str, audit: &AuditDraft) -> Result<u64, StoreError> {
+        self.evict_expired_with_scope_impl(ExpiredCleanupScope::Authorized { actor: principal.to_owned() }, audit)
+            .await
+    }
+
+    pub(crate) async fn evict_expired_all_impl(&self, principal: &str, audit: &AuditDraft) -> Result<u64, StoreError> {
+        self.evict_expired_with_scope_impl(ExpiredCleanupScope::All { actor: principal.to_owned() }, audit).await
+    }
+
+    async fn evict_expired_with_scope_impl(&self, scope: ExpiredCleanupScope, audit: &AuditDraft) -> Result<u64, StoreError> {
         let now = self.clock_now().to_rfc3339();
-        let principal = principal.to_owned();
         let audit = audit.clone();
-        self.with_conn(move |conn| evict_expired_conn(conn, &now, &principal, &audit)).await
+        self.with_conn(move |conn| evict_expired_conn(conn, &now, &scope, &audit)).await
     }
 
     pub(crate) async fn set_embedding_impl(&self, id: &MemoryId, embedding: &[f32], expected_revision: i64) -> Result<(), StoreError> {
@@ -587,24 +595,56 @@ fn apply_reassign_scope(conn: &mut Connection, params: ReassignScopeApply<'_>) -
     Ok(ReassignScopeOutcome { applied_ids: authorized_ids })
 }
 
-fn evict_expired_conn(conn: &mut Connection, now: &str, principal: &str, audit: &AuditDraft) -> Result<u64, StoreError> {
+fn evict_expired_conn(conn: &mut Connection, now: &str, scope: &ExpiredCleanupScope, audit: &AuditDraft) -> Result<u64, StoreError> {
     let tx = sqlite_write_tx(conn)?;
     let mut stmt = tx.prepare(
-        "SELECT id
+        "SELECT id, provenance, access_policy
          FROM memories
          WHERE expires_at IS NOT NULL AND expires_at <= ?1
+           AND (
+               ?2 IS NULL
+               OR json_extract(provenance, '$.source_agent') = ?2
+               OR (
+                   json_extract(access_policy, '$.type') = 'public'
+                   AND json_extract(provenance, '$.source_agent') IS NULL
+               )
+               OR (
+                   json_extract(access_policy, '$.type') = 'restricted'
+                   AND EXISTS (
+                       SELECT 1
+                       FROM json_each(access_policy, '$.allowed')
+                       WHERE value = ?2
+                   )
+               )
+           )
          ORDER BY expires_at ASC, id ASC",
     )?;
-    let expired_ids = stmt.query_map(params![now], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+    let expired = stmt
+        .query_and_then(params![now, scope.authorization_principal()], |row| {
+            let id: String = row.get(0)?;
+            Ok(MemoryAuthorizationEnvelope {
+                id: id
+                    .parse::<MemoryId>()
+                    .map_err(|error| StoreError::Serialization(format!("invalid memory id: {error}").into()))?,
+                provenance: serde_json::from_str::<Provenance>(&row.get::<_, String>(1)?)?,
+                access_policy: serde_json::from_str::<AccessPolicy>(&row.get::<_, String>(2)?)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, StoreError>>()?;
     drop(stmt);
 
     let mut deleted = 0_usize;
-    for id in expired_ids {
-        let Some(memory) = fetch_memory_by_id(&tx, &id)? else {
+    for memory in expired {
+        // SQL narrows candidates efficiently; this shared Rust policy remains
+        // the fail-closed authority if serialized representations evolve.
+        if scope
+            .authorization_principal()
+            .is_some_and(|authorized_principal| !memory.has_write_access(authorized_principal))
+        {
             continue;
-        };
-        insert_tombstone(&tx, &memory, now, Some(principal))?;
-        let affected = tx.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+        }
+        insert_authorization_tombstone(&tx, MemoryAuthorizationRef::from(&memory), now, Some(scope.actor()))?;
+        let affected = tx.execute("DELETE FROM memories WHERE id = ?1", params![memory.id.to_string()])?;
         if affected > 0 {
             insert_audit_draft(&tx, &memory.id, audit)?;
             deleted = deleted.saturating_add(affected);

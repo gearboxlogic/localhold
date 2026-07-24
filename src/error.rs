@@ -139,7 +139,7 @@ pub enum EmbeddingError {
     /// The provider rejected work because its current capacity or quota was exhausted.
     #[error("embedding provider rate limited the request: {source}")]
     RateLimited {
-        /// Provider or HTTP error describing the rejection.
+        /// Sanitized provider or HTTP error describing the rejection.
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
         /// Provider-requested delay before another attempt, when supplied.

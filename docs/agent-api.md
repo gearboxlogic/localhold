@@ -389,9 +389,12 @@ Mutation and maintenance responses use an action-oriented `operation` envelope:
 
 `admin_history` exposes transactional mutation audit history for visible
 memories. Mutations that require audit fail and roll back if their audit row
-cannot be inserted. Redacted history views omit principal and details.
-For deleted memories, history is authorized by the deletion tombstone; legacy
-deleted memories or manually purged tombstones return empty history.
+cannot be inserted. Expiry cleanup writes one delete audit row and an
+authorization tombstone naming the server-resolved principal for every removed
+memory, while retaining its documented whole-store selection behavior.
+Redacted history views omit principal and details. For deleted memories,
+history is authorized by the deletion tombstone; legacy deleted memories or
+manually purged tombstones return empty history.
 
 ## Legacy Metadata Migration
 

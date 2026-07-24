@@ -1148,7 +1148,7 @@ impl PostgresStore {
         Ok(deleted)
     }
 
-    pub(crate) async fn evict_expired_impl(&self) -> Result<u64, StoreError> {
+    pub(crate) async fn evict_expired_impl(&self, principal: &str, audit: &AuditDraft) -> Result<u64, StoreError> {
         let now = self.clock_now();
         let mut tx = self.pool().begin().await?;
         let rows = sqlx::query(
@@ -1170,8 +1170,9 @@ impl PostgresStore {
             let Some(existing) = fetch_memory_by_id_for_update_tx(&mut tx, &id).await? else {
                 continue;
             };
-            insert_tombstone_tx(&mut tx, &existing, now, None).await?;
+            insert_tombstone_tx(&mut tx, &existing, now, Some(principal)).await?;
             if delete_memory_tx(&mut tx, &id).await? {
+                insert_audit_draft_tx(&mut tx, &id, audit).await?;
                 deleted = deleted.saturating_add(1);
             }
         }
@@ -2176,8 +2177,8 @@ impl MemoryWriter for PostgresStore {
 }
 
 impl MemoryAdmin for PostgresStore {
-    async fn evict_expired(&self) -> Result<u64, StoreError> {
-        self.evict_expired_impl().await
+    async fn evict_expired(&self, principal: &str, audit: &AuditDraft) -> Result<u64, StoreError> {
+        self.evict_expired_impl(principal, audit).await
     }
 
     async fn reassign_scope(&self, from_scope: &str, to_scope: &str, origin_conversation: Option<&str>, principal: &str) -> Result<ReassignScopeOutcome, StoreError> {
@@ -5950,6 +5951,29 @@ mod tests {
         assert!(err.to_string().contains("supersedes length"));
     }
 
+    async fn assert_expiry_cleanup_attribution(store: &PostgresStore, expired_id: &MemoryId, timestamp: DateTime<Utc>) {
+        let cleanup_audit = AuditDraft {
+            action: AuditAction::Delete,
+            caller_agent: Some("postgres-cleanup-agent".into()),
+            timestamp,
+            details: Some(serde_json::json!({"reason": "expired"})),
+        };
+        assert_eq!(MemoryAdmin::evict_expired(store, "postgres-cleanup-agent", &cleanup_audit).await.unwrap(), 1_u64);
+        let expired_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM memories WHERE id = $1)")
+            .bind(expired_id.to_string())
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert!(!expired_exists);
+        let tombstone = MemoryReader::get_tombstone(store, expired_id).await.unwrap().unwrap();
+        assert_eq!(tombstone.deleted_by_principal.as_deref(), Some("postgres-cleanup-agent"));
+        let history = MemoryReader::query_audit_log(store, expired_id, 10_usize).await.unwrap();
+        assert_eq!(history.len(), 1_usize);
+        assert_eq!(history[0].action, AuditAction::Delete);
+        assert_eq!(history[0].caller_agent.as_deref(), Some("postgres-cleanup-agent"));
+        assert_eq!(history[0].details, Some(serde_json::json!({"reason": "expired"})));
+    }
+
     #[tokio::test]
     #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
     async fn memory_store_traits_and_admin_helpers_against_postgres() {
@@ -6031,13 +6055,7 @@ mod tests {
         assert_eq!(moved.provenance.source_conversation.as_deref(), Some(to_scope.as_str()));
         assert_eq!(moved.provenance.origin_conversation.as_deref(), Some(from_scope.as_str()));
 
-        assert_eq!(MemoryAdmin::evict_expired(&store).await.unwrap(), 1_u64);
-        let expired_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM memories WHERE id = $1)")
-            .bind(expired_id.to_string())
-            .fetch_one(store.pool())
-            .await
-            .unwrap();
-        assert!(!expired_exists);
+        assert_expiry_cleanup_attribution(&store, &expired_id, use_now).await;
     }
 
     async fn open_postgres_smoke_store() -> PostgresStore {

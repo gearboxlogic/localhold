@@ -810,6 +810,34 @@ fn binary_starts_in_stdio_mode() {
     let _cleanup = std::fs::remove_file(db_path);
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn default_startup_creates_owner_only_storage_permissions() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = unique_db_path("default-storage-permissions").with_extension("root");
+    let data_home = root.join("data");
+    let data_directory = data_home.join("localhold");
+    let database = data_directory.join("localhold.db");
+    let (mut cmd, _config_dir) = config_binary_command(&root);
+    cmd.env("XDG_DATA_HOME", &data_home);
+    cmd.env("LOCALHOLD_TRANSPORT", "stdio");
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().unwrap();
+    initialize_stdio_child(&mut child);
+    let stderr = wait_for_startup_log(&mut child, "default-storage-permissions", "localhold MCP server running on stdio");
+
+    assert_eq!(data_directory.metadata().unwrap().permissions().mode() & 0o777, 0o700);
+    assert_eq!(database.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+
+    terminate_child(&mut child);
+    let _stderr = stderr.join().unwrap();
+    let _cleanup = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn embeddings_status_json_reports_rebuild_progress_and_secret_free_profiles() {
     let database = TemporarySqliteDb::new("embeddings-status-rebuilding");
@@ -1049,6 +1077,29 @@ fn doctor_reports_healthy_for_current_sqlite_database() {
     assert!(stdout.contains("[healthy] storage:"));
 
     drop(store);
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _cleanup = std::fs::remove_file(db_path);
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_reports_permissive_database_without_changing_its_mode() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let db_path = unique_db_path("doctor-permissive-database");
+    drop(SqliteStore::open(&db_path, SqliteStore::DEFAULT_TEST_DIMENSIONS).unwrap());
+    std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let output = base_binary_command(&db_path).args(["doctor", "--json"]).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(2_i32));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let permissions = report["checks"].as_array().unwrap().iter().find(|check| check["name"] == "permissions").unwrap();
+    assert_eq!(permissions["status"], "degraded");
+    assert!(permissions["summary"].as_str().unwrap().contains("0644"));
+    assert_eq!(std::fs::metadata(&db_path).unwrap().permissions().mode() & 0o777, 0o644);
+
     let _cleanup = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _cleanup = std::fs::remove_file(db_path.with_extension("db-wal"));
     let _cleanup = std::fs::remove_file(db_path);
@@ -1866,6 +1917,35 @@ fn doctor_json_returns_failed_report_for_invalid_config_without_echoing_contents
     assert_eq!(report["checks"][1]["name"], "configuration");
     assert!(!stdout.contains("must-not-appear"));
     assert!(!db_path.exists(), "failed configuration must not create storage");
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_reports_unsafe_permissions_for_malformed_config_without_echoing_contents() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = unique_db_path("doctor-invalid-config-permissions").with_extension("root");
+    let (mut command, config_dir) = config_binary_command(&root);
+    let config_path = config_dir.join("localhold/localhold.toml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(&config_path, "[server]\nhttp_auth_token = \"doctor-parser-secret-ABC123\n").unwrap();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let output = command.args(["doctor", "--json"]).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1_i32));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+    let permissions = report["checks"].as_array().unwrap().iter().find(|check| check["name"] == "permissions").unwrap();
+    assert_eq!(permissions["status"], "degraded");
+    assert!(permissions["summary"].as_str().unwrap().contains("configuration file"));
+    assert!(permissions["summary"].as_str().unwrap().contains("0644"));
+    let combined = format!("{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    assert!(!combined.contains("doctor-parser-secret-ABC123"));
+    assert_eq!(config_path.metadata().unwrap().permissions().mode() & 0o777, 0o644);
+
+    let _cleanup = std::fs::remove_dir_all(root);
 }
 
 #[test]

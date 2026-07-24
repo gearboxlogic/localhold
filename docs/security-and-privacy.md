@@ -104,10 +104,14 @@ controlled by the database operator rather than encrypted by LocalHold.
 
 Use full-disk, filesystem, volume, or managed-database encryption as appropriate.
 Restrict the database directory, backup destinations, PostgreSQL roles, and
-operator accounts. New SQLite backup files and the SQLite coordination lock use
-mode `0600` on Unix; normal database and sidecar permissions still depend on
-the containing directory and process umask. Windows files inherit directory
-ACLs.
+operator accounts. On Unix, LocalHold creates a missing platform-default data
+directory with mode `0700` and new SQLite database, backup, and coordination
+lock files with mode `0600`. It does not change permissions on existing
+databases or directories, including custom database directories. SQLite
+sidecars remain subject to SQLite and the filesystem. `hold doctor` reports
+group/other permission bits on an existing configuration file, SQLite database,
+WAL or shared-memory sidecar, or default data directory without changing them.
+Windows files inherit directory ACLs.
 
 Anyone with direct database or backup access bypasses LocalHold's MCP access
 policies. Do not treat a `restricted` or `redacted` memory as encryption.
@@ -119,11 +123,11 @@ rows and retains a minimal tombstone so later audit-history reads can still be
 authorized. TTL expiry alone only hides a memory from ordinary reads and
 searches; the content and derived data remain stored until an enabled
 `admin_cleanup_expired` operation removes expired rows. That whole-store cleanup
-requires a write-capable principal, but it does not apply each memory's policy
-or create the same per-memory audit entry as an ordinary delete. Its tombstones
-also do not durably identify the principal that ran the cleanup. Audit rows and
-tombstones have no automatic retention limit. Supersession is not deletion:
-the older memory remains stored and can be requested explicitly.
+requires a write-capable principal, but it does not apply each memory's policy.
+Every cleanup deletion records the server-resolved principal in its tombstone
+and a transactional per-memory delete audit row. Audit rows and tombstones have
+no automatic retention limit. Supersession is not deletion: the older memory
+remains stored and can be requested explicitly.
 
 Database deletion is not secure erasure. Deleted values can remain in SQLite
 free pages or WAL, PostgreSQL MVCC/WAL and replicas, snapshots, logs, and older
@@ -154,11 +158,10 @@ traffic.
 Successful embedding response bodies are limited to 16 MiB and successful
 model-list responses to 1 MiB. LocalHold enforces both limits while streaming,
 including when the provider omits `Content-Length`. Provider HTTP error bodies
-are also bounded but can be included in runtime errors and logs. A provider
-that echoes an input or credential can therefore disclose it to the LocalHold
-client or stderr. Treat provider errors and logs as sensitive and configure the
-endpoint not to echo request data. These per-response caps do not replace
-provider timeouts, concurrency limits, or aggregate network controls.
+are discarded rather than included in runtime errors or logs; LocalHold retains
+the HTTP status, operation context, retry classification, and valid
+`Retry-After` delay. These controls do not replace provider timeouts,
+concurrency limits, or aggregate network controls.
 
 Intermediaries have their own logging boundaries. Configure reverse proxies,
 WAFs, and access logs not to record authorization headers or MCP request/response
@@ -294,7 +297,7 @@ agents cannot reach. Capabilities have different authorization scopes:
 | Global scope registry | `admin_scope_list`, `admin_scope_register` | Listing returns every registered scope to a read-allowed caller. Registration requires a write-capable principal but can replace any scope definition; scopes have no per-scope owner policy. |
 | Policy-checked memory changes | `admin_bulk_update`, `admin_bulk_delete`, `admin_reassign_scope`, `admin_consolidate`, single-ID `admin_reembed` | Require a write-capable principal and check write access for affected memories. Shared ANN candidate work can still be influenced by other rows. |
 | Whole-store embedding queue | bulk `admin_reembed` | Requires a write-capable principal at the route, then claims unembedded rows without per-memory authorization and can send their content to the configured provider. |
-| Whole-store expiry cleanup | `admin_cleanup_expired` | Requires a write-capable principal but deletes all expired rows without per-memory policy checks; its audit and tombstone behavior differs from ordinary deletion. |
+| Whole-store expiry cleanup | `admin_cleanup_expired` | Requires a write-capable principal and records it in a tombstone and transactional delete audit row for every removed memory, but still deletes all expired rows without per-memory policy checks. |
 | Whole-store metadata maintenance | `admin_migration_report`, `admin_migrate_metadata` | Restricted to a local, authenticated stdio context. Reporting exposes whole-store state; migration can add metadata across the store. |
 
 Enabling admin routes should therefore be treated as granting maintenance
@@ -314,17 +317,20 @@ Normal configuration loading uses only the platform user configuration file and
 documented `LOCALHOLD_*` variables, not a file in the current directory. The
 SQLite-to-PostgreSQL migration command can explicitly select another environment
 variable with `--postgres-url-env`. `hold config init` creates a Unix file with
-mode `0600`, but LocalHold does not repair permissions on an existing file.
-Environment variables and process arguments are visible according to
+mode `0600`. LocalHold does not repair permissions on an existing file; `hold
+doctor` reports permissive Unix configuration and SQLite storage modes as
+degraded. Environment variables and process arguments are visible according to
 operating-system process-inspection rules.
 
 Focused `Debug` implementations for the embedding provider, database config,
 server config, and SQLite-to-PostgreSQL migration options suppress API keys,
-HTTP tokens, and PostgreSQL URLs. Diagnostic JSON omits credentials, content,
-and provider error bodies, and malformed PostgreSQL vector diagnostics omit
-vector values. This is not a general promise that arbitrary Rust debug output
-is secret-safe. Logs can still include database/cache paths, endpoint and model
-identity, memory and session identifiers, principals, and provider error text.
+HTTP tokens, and PostgreSQL URLs. Diagnostic JSON omits credentials and content,
+provider HTTP error bodies are discarded rather than included in runtime errors
+or logs, and malformed PostgreSQL vector diagnostics omit vector values. This
+is not a general promise that arbitrary Rust debug output is secret-safe. Logs
+can still include database/cache paths, endpoint and model identity, memory and
+session identifiers, principals, and sanitized provider status/context or
+network error text.
 SQLx warnings can include malformed passfile lines or unrecognized
 connection-URL parameter values, so never put secrets in unknown URL
 parameters. Malformed TOML errors can include source context. Keep stderr and
@@ -389,11 +395,11 @@ responsibility to protect the surrounding network and storage.
 | Forged trusted-proxy identity | Trusted-proxy mode requires the endpoint token and a nonempty principal header | LocalHold does not authenticate proxy origin or sign headers. Block direct access, overwrite the header at the proxy, and protect both network hops. |
 | Credential or content interception | HTTPS required for non-loopback embedding endpoints; redirects disabled | The HTTP server is plaintext, and the current PostgreSQL build has no TLS implementation. Protect both HTTP hops and use an encrypted database tunnel when PostgreSQL traffic crosses an untrusted boundary. |
 | Cloud provider retains sensitive data | Provider is opt-in; default `noop` sends nothing | LocalHold cannot enforce provider retention. Review contracts and avoid cloud embeddings for content that cannot leave the host. |
-| Malicious provider exhausts memory or bandwidth | Successful embedding/model-list bodies and provider error bodies have streaming size caps; request timeouts and embedding concurrency are bounded | A provider can still delay responses and several processes have independent limits. Apply endpoint, egress, and aggregate concurrency controls. |
-| Sensitive data appears in logs | Normal diagnostics omit credentials/content; malformed PostgreSQL vector diagnostics omit vector values; focused database, provider, server, and migration-option types have redacted debug output | Provider errors, arbitrary debug output, proxy bodies/headers, PostgreSQL statements/parameters, and operational metadata can reach logs or clients. Minimize, protect, and review every log sink. |
+| Malicious provider exhausts memory or bandwidth | Successful embedding/model-list bodies have streaming size caps; provider HTTP error bodies are discarded; request timeouts and embedding concurrency are bounded | A provider can still delay responses and several processes have independent limits. Apply endpoint, egress, and aggregate concurrency controls. |
+| Sensitive data appears in logs | Normal diagnostics omit credentials/content; provider HTTP error bodies are discarded; malformed PostgreSQL vector diagnostics omit vector values; focused database, provider, server, and migration-option types have redacted debug output | Arbitrary debug output, proxy bodies/headers, PostgreSQL statements/parameters, network errors, and operational metadata can reach logs or clients. Minimize, protect, and review every log sink. |
 | A permitted writer plants malicious instructions or false memory | Stored content retains provenance and access policy; write authorization limits who can mutate an existing memory | New content is stored as supplied and may later enter an agent's context. Deny anonymous writes, isolate mutually untrusted writers, review provenance, and treat recalled text as untrusted data rather than executable authority. |
 | HTTP resource exhaustion | Request-body, session-count, and idle-session limits bound some retained state | LocalHold has no general request, connection, or failed-auth rate limiter, and active streams are not idle-reaped. Enforce those limits at the proxy and monitor session capacity. |
-| Database or backup theft | Unix coordination/backup files receive restrictive creation modes in supported paths | No application encryption. Use encrypted storage, strict ACLs, protected backups, and database roles. |
+| Database or backup theft | New default Unix data directories and new SQLite database/coordination/backup files receive owner-only creation modes; doctor reports permissive existing local paths without changing them | No application encryption, and custom or existing directory policy remains operator-controlled. Use encrypted storage, strict ACLs, protected backups, and database roles. |
 | Deleted data is recovered | Active content is removed and minimal tombstones retain authorization context | Free pages, WAL, replicas, logs, and backups can retain data. Enforce external retention/destruction. |
 | Malicious or replaced reranker artifact | Built-in artifacts are revision/hash pinned and verified before publication | Operator-managed direct model files and shared writable caches remain trusted inputs. Pre-provision read-only verified files. |
 | Compromised release artifact or checksum manifest | Release downloads include a checksum manifest | Archives and checksums share one GitHub publication boundary and are not independently signed or attested. Pin reviewed source and use a trusted build pipeline when provenance requirements exceed that boundary. |

@@ -29,8 +29,8 @@ pub(crate) use sqlite_lease::database_identity as sqlite_database_identity;
 use crate::{
     error::StoreError,
     types::{
-        AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MemoryTombstone, MemoryUpdate,
-        MetadataMigrationOutcome, MetadataMigrationReport, MetadataPatch, QueryContext, ScopeDefinition, SearchResult, WriteOutcome,
+        AccessPolicy, AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MemoryTombstone, MemoryUpdate,
+        MetadataMigrationOutcome, MetadataMigrationReport, MetadataPatch, Provenance, QueryContext, ScopeDefinition, SearchResult, WriteOutcome,
     },
 };
 
@@ -102,6 +102,73 @@ impl ReembedClaimScope {
         match self {
             Self::Recovery => None,
             Self::Authorized(principal) => Some(principal.as_str()),
+        }
+    }
+}
+
+/// Authorization boundary used while selecting expired memories for cleanup.
+///
+/// Keeping whole-store cleanup explicit prevents a missing principal from
+/// silently widening caller-triggered deletion.
+#[derive(Debug)]
+enum ExpiredCleanupScope {
+    All { actor: String },
+    Authorized { actor: String },
+}
+
+impl ExpiredCleanupScope {
+    const fn actor(&self) -> &str {
+        match self {
+            Self::All { actor } | Self::Authorized { actor } => actor.as_str(),
+        }
+    }
+
+    const fn authorization_principal(&self) -> Option<&str> {
+        match self {
+            Self::All { .. } => None,
+            Self::Authorized { actor } => Some(actor.as_str()),
+        }
+    }
+}
+
+/// Minimal fields needed to authorize and tombstone a locked memory row.
+#[derive(Debug)]
+struct MemoryAuthorizationEnvelope {
+    id: MemoryId,
+    provenance: Provenance,
+    access_policy: AccessPolicy,
+}
+
+impl MemoryAuthorizationEnvelope {
+    fn has_write_access(&self, principal: &str) -> bool {
+        crate::types::write_access_allowed(&self.provenance, &self.access_policy, principal)
+    }
+}
+
+/// Borrowed view of the fields persisted in an authorization tombstone.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MemoryAuthorizationRef<'a> {
+    id: &'a MemoryId,
+    provenance: &'a Provenance,
+    access_policy: &'a AccessPolicy,
+}
+
+impl<'a> From<&'a Memory> for MemoryAuthorizationRef<'a> {
+    fn from(memory: &'a Memory) -> Self {
+        Self {
+            id: &memory.id,
+            provenance: &memory.provenance,
+            access_policy: &memory.access_policy,
+        }
+    }
+}
+
+impl<'a> From<&'a MemoryAuthorizationEnvelope> for MemoryAuthorizationRef<'a> {
+    fn from(memory: &'a MemoryAuthorizationEnvelope) -> Self {
+        Self {
+            id: &memory.id,
+            provenance: &memory.provenance,
+            access_policy: &memory.access_policy,
         }
     }
 }
@@ -511,11 +578,18 @@ pub trait MemoryWriter: Send + Sync {
 
 /// Administrative operations: eviction, scope reassignment.
 pub trait MemoryAdmin: Send + Sync {
-    /// Remove all expired memories, attributing every deletion to `principal`.
+    /// Remove expired memories `principal` may write.
     ///
     /// The audit row and authorization tombstone for each deleted memory are
-    /// committed atomically with that deletion.
+    /// committed atomically with that deletion. Inaccessible rows are neither
+    /// deleted nor included in the returned count.
     fn evict_expired(&self, principal: &str, audit: &AuditDraft) -> impl Future<Output = Result<u64, StoreError>> + Send;
+
+    /// Remove every expired memory as explicit whole-store maintenance.
+    ///
+    /// The caller must enforce the operator boundary before invoking this
+    /// store-level capability.
+    fn evict_expired_all(&self, principal: &str, audit: &AuditDraft) -> impl Future<Output = Result<u64, StoreError>> + Send;
 
     /// Reassign conversation scope for matching memories.
     ///

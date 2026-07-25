@@ -496,6 +496,10 @@ impl<S: MemoryAdmin + Send + Sync> MemoryAdmin for ChaosStore<S> {
         self.inner.evict_expired(principal, audit).await
     }
 
+    async fn evict_expired_all(&self, principal: &str, audit: &AuditDraft) -> Result<u64, StoreError> {
+        self.inner.evict_expired_all(principal, audit).await
+    }
+
     async fn reassign_scope(&self, from_scope: &str, to_scope: &str, origin_conversation: Option<&str>, principal: &str) -> Result<ReassignScopeOutcome, StoreError> {
         self.inner.reassign_scope(from_scope, to_scope, origin_conversation, principal).await
     }

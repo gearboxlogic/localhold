@@ -1975,18 +1975,29 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         })
     }
 
-    #[tool(description = "Write/admin: destructively evict all expired TTL memories using the server-resolved principal.")]
+    #[tool(
+        description = "Write/admin: destructively evict expired TTL memories using the server-resolved principal. mode defaults to authorized per-memory write policy; mode=all is explicit whole-store maintenance restricted to authenticated local stdio."
+    )]
     async fn admin_cleanup_expired(
         &self,
         context: RequestContext<RoleServer>,
-        Parameters(_params): Parameters<AdminCleanupExpiredParams>,
+        Parameters(params): Parameters<AdminCleanupExpiredParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let mode = params.mode;
+        if matches!(mode, params::AdminCleanupExpiredMode::All)
+            && let Some(error) = self.local_admin_error_for_context(&context)
+        {
+            return Ok(error);
+        }
         let request_principal = self.principal_for_context(&context);
         let Some(principal) = self.write_principal_for(request_principal.as_deref()) else {
             return Ok(Self::anonymous_write_denied());
         };
-        let deleted = self.engine.evict_expired(&principal).await?;
-        tracing::info!(principal = principal.as_str(), deleted, "admin_cleanup_expired completed");
+        let deleted = match mode {
+            params::AdminCleanupExpiredMode::Authorized => self.engine.evict_expired(&principal).await?,
+            params::AdminCleanupExpiredMode::All => self.engine.evict_expired_all(&principal).await?,
+        };
+        tracing::info!(principal = principal.as_str(), mode = mode.as_str(), deleted, "admin_cleanup_expired completed");
         success_json(&EvictExpiredResponse {
             operation: operation_summary(OperationStatus::Applied, deleted, Vec::new(), NextAction::None),
             deleted,

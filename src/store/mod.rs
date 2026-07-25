@@ -907,15 +907,10 @@ pub trait MemoryAdmin: Send + Sync {
     fn metadata_migration_report(&self) -> impl Future<Output = Result<MetadataMigrationReport, StoreError>> + Send;
 
     /// Add metadata rows for existing memories without rewriting original content.
-    fn migrate_metadata(&self, registered_scope_keys: &[String], dry_run: bool) -> impl Future<Output = Result<MetadataMigrationOutcome, StoreError>> + Send;
+    fn migrate_metadata(&self, dry_run: bool) -> impl Future<Output = Result<MetadataMigrationOutcome, StoreError>> + Send;
 
     /// Add metadata rows and audit each inserted row in one transaction.
-    fn migrate_metadata_audited(
-        &self,
-        registered_scope_keys: &[String],
-        dry_run: bool,
-        audit: &AuditDraft,
-    ) -> impl Future<Output = Result<MetadataMigrationOutcome, StoreError>> + Send;
+    fn migrate_metadata_audited(&self, dry_run: bool, audit: &AuditDraft) -> impl Future<Output = Result<MetadataMigrationOutcome, StoreError>> + Send;
 }
 
 /// Combined trait for full memory store access: read, write, and admin.
@@ -934,11 +929,12 @@ pub(crate) fn merge_metadata_patch(memory_id: MemoryId, patch: &MetadataPatch, e
         .or_else(|| existing.and_then(|metadata| metadata.scope_key.clone()))
         .or_else(|| fallback_scope.map(ToOwned::to_owned));
     let mut quality_flags = existing.map_or_else(Vec::new, |metadata| metadata.quality_flags.clone());
-    if let Some(scope_key) = patch.scope_key.as_deref() {
-        quality_flags.retain(|flag| flag != "missing_scope");
-        if crate::types::normalize_context_key(scope_key) == crate::context::UNRESOLVED_CONTEXT_KEY {
-            quality_flags.push("missing_scope".into());
-        }
+    quality_flags.retain(|flag| flag != "missing_scope");
+    if scope_key
+        .as_deref()
+        .is_none_or(|key| crate::types::normalize_context_key(key) == crate::context::UNRESOLVED_CONTEXT_KEY)
+    {
+        quality_flags.push("missing_scope".into());
     }
     MemoryMetadata {
         memory_id,
@@ -980,5 +976,43 @@ fn audit_details_with_old_content_hash(details: Option<serde_json::Value>, old_c
             "details": value,
         }),
         None => serde_json::json!({"old_content_hash": old_content_hash}),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metadata(memory_id: MemoryId, scope_key: Option<&str>, quality_flags: &[&str]) -> MemoryMetadata {
+        MemoryMetadata {
+            memory_id,
+            scope_key: scope_key.map(ToOwned::to_owned),
+            summary: None,
+            agent_label: None,
+            created_by_principal: Some("owner".into()),
+            quality_flags: quality_flags.iter().map(ToString::to_string).collect(),
+            schema_version: 1,
+        }
+    }
+
+    #[test]
+    fn merge_metadata_patch_recomputes_missing_scope_from_the_effective_scope() {
+        let memory_id = MemoryId::new();
+        let existing = metadata(memory_id, Some("project/localhold"), &["missing_scope", "manual"]);
+
+        let merged = merge_metadata_patch(memory_id, &MetadataPatch::default(), Some(&existing), Some("inbox/unresolved"), "owner");
+
+        assert_eq!(merged.scope_key.as_deref(), Some("project/localhold"));
+        assert_eq!(merged.quality_flags, vec!["manual"]);
+    }
+
+    #[test]
+    fn merge_metadata_patch_marks_a_contextless_effective_scope_unresolved() {
+        let memory_id = MemoryId::new();
+
+        let merged = merge_metadata_patch(memory_id, &MetadataPatch::default(), None, None, "owner");
+
+        assert_eq!(merged.scope_key, None);
+        assert_eq!(merged.quality_flags, vec!["missing_scope"]);
     }
 }

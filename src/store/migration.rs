@@ -515,14 +515,14 @@ const SQLITE_REQUIRED_TRIGGERS: &[&str] = &[
     "trg_memory_fts_update",
     "trg_memory_fts_delete",
 ];
-pub(crate) const SQLITE_V1_SCHEMA_VERSION: u32 = 2;
+pub(crate) const SQLITE_V2_SCHEMA_VERSION: u32 = 2;
 const _: () = assert!(
-    super::schema::SQLITE_SCHEMA_VERSION == SQLITE_V1_SCHEMA_VERSION + 1,
+    super::schema::SQLITE_SCHEMA_VERSION == SQLITE_V2_SCHEMA_VERSION + 1,
     "the previous-version restore upgrade contract must be revised when SQLite schema version changes"
 );
 const SQLITE_CURRENT_CLEAR_SUPERSEDED_TRIGGER: &str =
     "after delete on memories begin update memories set superseded_by = null, record_revision = record_revision + 1 where superseded_by = old.id; end";
-const SQLITE_V1_CLEAR_SUPERSEDED_TRIGGER: &str = "after delete on memories begin update memories set superseded_by = null where superseded_by = old.id; end";
+const SQLITE_V2_CLEAR_SUPERSEDED_TRIGGER: &str = "after delete on memories begin update memories set superseded_by = null where superseded_by = old.id; end";
 
 struct PostgresColumnExpectation {
     table: &'static str,
@@ -1234,11 +1234,11 @@ pub(crate) fn validate_sqlite_source_schema(conn: &Connection, embedding_dimensi
 }
 
 /// Validate the immediately previous SQLite contract before upgrading a private restore stage.
-pub(crate) fn validate_sqlite_v1_source_schema_for_upgrade(conn: &Connection, embedding_dimensions: usize) -> Result<(), StoreError> {
+pub(crate) fn validate_sqlite_v2_source_schema_for_upgrade(conn: &Connection, embedding_dimensions: usize) -> Result<(), StoreError> {
     let schema_version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if schema_version != SQLITE_V1_SCHEMA_VERSION {
+    if schema_version != SQLITE_V2_SCHEMA_VERSION {
         return Err(sqlite_source_schema_error(format!(
-            "schema version is {schema_version}, expected supported upgrade source {SQLITE_V1_SCHEMA_VERSION}"
+            "schema version is {schema_version}, expected supported upgrade source {SQLITE_V2_SCHEMA_VERSION}"
         )));
     }
     reject_retired_sqlite_schema(conn)?;
@@ -1487,7 +1487,7 @@ fn validate_present_sqlite_schema_inner(conn: &Connection, allow_published_metad
         }
     }
     let clear_superseded_trigger = if allow_published_metadata {
-        SQLITE_V1_CLEAR_SUPERSEDED_TRIGGER
+        SQLITE_V2_CLEAR_SUPERSEDED_TRIGGER
     } else {
         SQLITE_CURRENT_CLEAR_SUPERSEDED_TRIGGER
     };

@@ -18,7 +18,7 @@ use serde::Serialize;
 
 use super::{
     EmbeddingProfile, SqliteStore, existing_embedding_dimensions,
-    migration::{SQLITE_V1_SCHEMA_VERSION, validate_sqlite_source_schema, validate_sqlite_v1_source_schema_for_upgrade},
+    migration::{SQLITE_V2_SCHEMA_VERSION, validate_sqlite_source_schema, validate_sqlite_v2_source_schema_for_upgrade},
     schema::SQLITE_SCHEMA_VERSION,
     sqlite::read_embedding_profile,
     sqlite_lease::{ExclusiveLeaseError, SqliteDatabaseLease},
@@ -652,10 +652,10 @@ fn prepare_restore_stage(path: &Path, embedding_dimensions: usize) -> Result<(),
     if schema_version == SQLITE_SCHEMA_VERSION {
         return Ok(());
     }
-    if schema_version != SQLITE_V1_SCHEMA_VERSION {
+    if schema_version != SQLITE_V2_SCHEMA_VERSION {
         return validate_sqlite_source_schema(&connection, embedding_dimensions).map_err(|error| MaintenanceFailure::invalid(error.to_string()));
     }
-    validate_sqlite_v1_source_schema_for_upgrade(&connection, embedding_dimensions).map_err(|error| MaintenanceFailure::invalid(error.to_string()))?;
+    validate_sqlite_v2_source_schema_for_upgrade(&connection, embedding_dimensions).map_err(|error| MaintenanceFailure::invalid(error.to_string()))?;
     drop(connection);
 
     SqliteStore::migrate_restore_stage(path, embedding_dimensions).map_err(|error| store_failure(&error))?;
@@ -1218,7 +1218,7 @@ mod tests {
     async fn restore_upgrades_a_valid_v2_backup_on_the_private_stage() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source.db");
-        let backup_path = directory.path().join("snapshot-v1.db");
+        let backup_path = directory.path().join("snapshot-v2.db");
         let target = directory.path().join("target.db");
         let expected = profile("model-a");
         let source_store = seed_database(&source, "source", &expected).await;
@@ -1263,7 +1263,7 @@ mod tests {
                  PRAGMA foreign_keys = ON;",
             )
             .unwrap();
-        connection.pragma_update(None, "user_version", SQLITE_V1_SCHEMA_VERSION).unwrap();
+        connection.pragma_update(None, "user_version", SQLITE_V2_SCHEMA_VERSION).unwrap();
         drop(connection);
 
         let dry_run = restore(RestoreOptions::new(target.clone(), backup_path.clone(), DIMENSIONS, Some(expected.clone())).dry_run(true)).await;
@@ -1271,7 +1271,7 @@ mod tests {
         assert_eq!(dry_run.database_schema_version, Some(SQLITE_SCHEMA_VERSION));
         let untouched_backup = Connection::open_with_flags(&backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let backup_version: u32 = untouched_backup.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
-        assert_eq!(backup_version, SQLITE_V1_SCHEMA_VERSION, "restore must migrate only its private stage");
+        assert_eq!(backup_version, SQLITE_V2_SCHEMA_VERSION, "restore must migrate only its private stage");
         drop(untouched_backup);
 
         let restored = restore(RestoreOptions::new(target.clone(), backup_path, DIMENSIONS, Some(expected)).confirmed(true)).await;

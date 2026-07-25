@@ -8,8 +8,9 @@ use localhold::{
     engine::LocalHoldEngine,
     error::EngineError,
     store::{MemoryReader as _, MemoryWriter as _, SqliteStore},
-    types::{AccessPolicy, Memory, MemoryFilter, Provenance, QueryContext, WriteOutcome},
+    types::{AccessPolicy, AuditAction, AuditDraft, Memory, MemoryFilter, MemoryUpdate, Provenance, QueryContext, WriteOutcome},
 };
+use serde_json::json;
 
 use super::{
     fault_injection::{
@@ -30,6 +31,34 @@ fn make_memory(content: &str) -> Memory {
 
 fn make_engine(store: ChaosStore<SqliteStore>, embedding: Arc<dyn localhold::embedding::EmbeddingProvider>) -> LocalHoldEngine<ChaosStore<SqliteStore>> {
     LocalHoldEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default())
+}
+
+#[tokio::test]
+async fn context_aware_update_wrappers_obey_the_store_fault_plan() {
+    let inner = SqliteStore::in_memory().unwrap();
+    let memory = make_memory("context-aware update remains unchanged");
+    let id = inner.store(&memory, None).await.unwrap();
+    let store = chaos_store_always_fail_store(inner.clone());
+    let mut update = MemoryUpdate::default();
+    update.content = Some("fault plan must reject this update".into());
+    let audit: AuditDraft = serde_json::from_value(json!({
+        "action": AuditAction::Update,
+        "caller_agent": "test-agent",
+        "timestamp": memory.updated_at,
+    }))
+    .unwrap();
+
+    let update_error = store
+        .update_authorized_with_metadata_contexts_audited(&id, &update, None, None, "test-agent", &audit, None)
+        .await
+        .unwrap_err();
+    assert!(update_error.to_string().contains("chaos"));
+    let optimistic_error = store
+        .update_authorized_if_unmodified_with_metadata_contexts_audited(&id, memory.record_revision, &update, None, None, None, "test-agent", &audit, None)
+        .await
+        .unwrap_err();
+    assert!(optimistic_error.to_string().contains("chaos"));
+    assert_eq!(inner.get(&id, Some("test-agent")).await.unwrap().unwrap().content, memory.content);
 }
 
 // ---------------------------------------------------------------------------

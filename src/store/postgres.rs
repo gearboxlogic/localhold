@@ -2440,9 +2440,13 @@ impl PostgresStore {
             "
             SELECT COUNT(*)
             FROM memories AS m
-            LEFT JOIN memory_metadata AS meta ON meta.memory_id = m.id
-            WHERE COALESCE(meta.scope_key, m.provenance->>'source_conversation') IS NULL
-               OR COALESCE(meta.scope_key, m.provenance->>'source_conversation') = $1
+            LEFT JOIN memory_contexts AS primary_membership
+              ON primary_membership.memory_id = m.id
+             AND primary_membership.ordinal = 0
+            LEFT JOIN contexts AS primary_context
+              ON primary_context.id = primary_membership.context_id
+            WHERE primary_context.context_key IS NULL
+               OR primary_context.context_key = $1
             ",
         )
         .bind(UNRESOLVED_CONTEXT_KEY)
@@ -2494,30 +2498,25 @@ impl PostgresStore {
         })
     }
 
-    pub(crate) async fn migrate_metadata_impl(&self, registered_scope_keys: &[String], dry_run: bool) -> Result<MetadataMigrationOutcome, StoreError> {
-        self.migrate_metadata_audited_impl(registered_scope_keys, dry_run, None).await
+    pub(crate) async fn migrate_metadata_impl(&self, dry_run: bool) -> Result<MetadataMigrationOutcome, StoreError> {
+        self.migrate_metadata_audited_impl(dry_run, None).await
     }
 
-    pub(crate) async fn migrate_metadata_audited_impl(
-        &self,
-        _registered_scope_keys: &[String],
-        dry_run: bool,
-        audit: Option<&AuditDraft>,
-    ) -> Result<MetadataMigrationOutcome, StoreError> {
-        let skipped_existing = count_query(self.pool(), "SELECT COUNT(*) FROM memory_metadata").await?;
-        let candidates = load_metadata_migration_candidates(self.pool()).await?;
-        let candidate_count = u64::try_from(candidates.len()).map_err(|e| StoreError::Serialization(Box::new(e)))?;
-        let prepared_rows = candidates.into_iter().map(prepare_metadata_migration_metadata).collect::<Vec<_>>();
-        let mut report = metadata_migration_outcome(candidate_count, skipped_existing, &prepared_rows);
-
+    pub(crate) async fn migrate_metadata_audited_impl(&self, dry_run: bool, audit: Option<&AuditDraft>) -> Result<MetadataMigrationOutcome, StoreError> {
         if dry_run {
-            return Ok(report);
+            let skipped_existing = count_query(self.pool(), "SELECT COUNT(*) FROM memory_metadata").await?;
+            let candidates = load_metadata_migration_candidates(self.pool()).await?;
+            return Ok(prepare_postgres_metadata_migration(skipped_existing, candidates)?.report);
         }
 
         let mut tx = self.pool().begin().await?;
-        report.migrated = insert_metadata_migration_rows(&mut tx, &prepared_rows, self.clock_now(), audit).await?;
+        let skipped_existing_raw = sqlx::query_scalar::<Postgres, i64>("SELECT COUNT(*) FROM memory_metadata").fetch_one(&mut *tx).await?;
+        let skipped_existing = nonnegative_i64_to_u64(skipped_existing_raw)?;
+        let candidates = load_locked_metadata_migration_candidates(&mut tx).await?;
+        let mut preparation = prepare_postgres_metadata_migration(skipped_existing, candidates)?;
+        preparation.report.migrated = insert_metadata_migration_rows(&mut tx, &preparation.rows, self.clock_now(), audit).await?;
         tx.commit().await?;
-        Ok(report)
+        Ok(preparation.report)
     }
 }
 
@@ -2924,12 +2923,12 @@ impl MemoryAdmin for PostgresStore {
         self.metadata_migration_report_impl().await
     }
 
-    async fn migrate_metadata(&self, registered_scope_keys: &[String], dry_run: bool) -> Result<MetadataMigrationOutcome, StoreError> {
-        self.migrate_metadata_impl(registered_scope_keys, dry_run).await
+    async fn migrate_metadata(&self, dry_run: bool) -> Result<MetadataMigrationOutcome, StoreError> {
+        self.migrate_metadata_impl(dry_run).await
     }
 
-    async fn migrate_metadata_audited(&self, registered_scope_keys: &[String], dry_run: bool, audit: &AuditDraft) -> Result<MetadataMigrationOutcome, StoreError> {
-        self.migrate_metadata_audited_impl(registered_scope_keys, dry_run, Some(audit)).await
+    async fn migrate_metadata_audited(&self, dry_run: bool, audit: &AuditDraft) -> Result<MetadataMigrationOutcome, StoreError> {
+        self.migrate_metadata_audited_impl(dry_run, Some(audit)).await
     }
 }
 
@@ -3803,8 +3802,23 @@ struct PreparedMigrationMetadata {
     code_derived: bool,
 }
 
+struct PostgresMetadataMigrationPreparation {
+    rows: Vec<PreparedMigrationMetadata>,
+    report: MetadataMigrationOutcome,
+}
+
 async fn load_metadata_migration_candidates(pool: &PgPool) -> Result<Vec<MigrationCandidate>, StoreError> {
-    let rows = sqlx::query(
+    let rows = sqlx::query(metadata_migration_candidates_sql(false)).fetch_all(pool).await?;
+    parse_metadata_migration_candidates(rows)
+}
+
+async fn load_locked_metadata_migration_candidates(tx: &mut Transaction<'_, Postgres>) -> Result<Vec<MigrationCandidate>, StoreError> {
+    let rows = sqlx::query(metadata_migration_candidates_sql(true)).fetch_all(&mut **tx).await?;
+    parse_metadata_migration_candidates(rows)
+}
+
+const fn metadata_migration_candidates_sql(lock_memories: bool) -> &'static str {
+    if lock_memories {
         "
         SELECT
             m.id,
@@ -3820,11 +3834,29 @@ async fn load_metadata_migration_candidates(pool: &PgPool) -> Result<Vec<Migrati
           ON primary_context.id = primary_membership.context_id
         WHERE meta.memory_id IS NULL
         ORDER BY m.created_at, m.id
-        ",
-    )
-    .fetch_all(pool)
-    .await?;
+        FOR UPDATE OF m
+        "
+    } else {
+        "
+        SELECT
+            m.id,
+            m.content,
+            m.provenance->>'source_agent' AS source_agent,
+            primary_context.context_key AS primary_context_key
+        FROM memories AS m
+        LEFT JOIN memory_metadata AS meta ON meta.memory_id = m.id
+        LEFT JOIN memory_contexts AS primary_membership
+          ON primary_membership.memory_id = m.id
+         AND primary_membership.ordinal = 0
+        LEFT JOIN contexts AS primary_context
+          ON primary_context.id = primary_membership.context_id
+        WHERE meta.memory_id IS NULL
+        ORDER BY m.created_at, m.id
+        "
+    }
+}
 
+fn parse_metadata_migration_candidates(rows: Vec<PgRow>) -> Result<Vec<MigrationCandidate>, StoreError> {
     rows.into_iter()
         .map(|row| {
             Ok(MigrationCandidate {
@@ -3853,6 +3885,13 @@ fn prepare_metadata_migration_metadata(candidate: MigrationCandidate) -> Prepare
     }
 }
 
+fn prepare_postgres_metadata_migration(skipped_existing: u64, candidates: Vec<MigrationCandidate>) -> Result<PostgresMetadataMigrationPreparation, StoreError> {
+    let candidate_count = u64::try_from(candidates.len()).map_err(|e| StoreError::Serialization(Box::new(e)))?;
+    let prepared_rows = candidates.into_iter().map(prepare_metadata_migration_metadata).collect::<Vec<_>>();
+    let report = metadata_migration_outcome(candidate_count, skipped_existing, &prepared_rows);
+    Ok(PostgresMetadataMigrationPreparation { rows: prepared_rows, report })
+}
+
 fn metadata_migration_outcome(candidate_count: u64, skipped_existing: u64, prepared_rows: &[PreparedMigrationMetadata]) -> MetadataMigrationOutcome {
     MetadataMigrationOutcome {
         candidate_count,
@@ -3877,19 +3916,7 @@ async fn insert_metadata_migration_rows(
 ) -> Result<u64, StoreError> {
     let mut migrated = 0_u64;
     for row in prepared_rows {
-        let _locked_memory = sqlx::query("SELECT id FROM memories WHERE id = $1 FOR UPDATE").bind(&row.id).fetch_one(&mut **tx).await?;
-        let primary_context_key = sqlx::query_scalar::<Postgres, String>(
-            "SELECT context_row.context_key
-             FROM memory_contexts AS membership
-             JOIN contexts AS context_row ON context_row.id = membership.context_id
-             WHERE membership.memory_id = $1
-               AND membership.ordinal = 0",
-        )
-        .bind(&row.id)
-        .fetch_optional(&mut **tx)
-        .await?;
-        let scope_key = primary_context_key.as_deref().unwrap_or(&row.scope_key);
-        let quality_flags = migration_quality_flags(scope_key == UNRESOLVED_CONTEXT_KEY, row.oversized, row.code_derived);
+        let quality_flags = migration_quality_flags(row.unresolved_scope, row.oversized, row.code_derived);
         let result = sqlx::query(
             "
             INSERT INTO memory_metadata (
@@ -3900,7 +3927,7 @@ async fn insert_metadata_migration_rows(
             ",
         )
         .bind(&row.id)
-        .bind(scope_key)
+        .bind(&row.scope_key)
         .bind(&row.agent_label)
         .bind(Json(quality_flags))
         .bind(now)
@@ -8447,6 +8474,15 @@ mod tests {
         let mut unresolved_memory = test_memory_with_content("fn postgres_code_dump() {}");
         unresolved_memory.provenance.source_conversation = None;
         let unresolved_id = store.store_impl(&unresolved_memory, None).await.unwrap();
+        let _updated = sqlx::query(
+            "UPDATE memories
+             SET provenance = jsonb_set(provenance, '{source_conversation}', to_jsonb('legacy/looks-resolved'::text), TRUE)
+             WHERE id = $1",
+        )
+        .bind(unresolved_id.to_string())
+        .execute(store.pool())
+        .await
+        .unwrap();
 
         let report = store.metadata_migration_report_impl().await.unwrap();
         assert_eq!(report.total_memories, 3_u64);
@@ -8454,14 +8490,14 @@ mod tests {
         assert_eq!(report.missing_metadata, 2_u64);
         assert_eq!(report.unresolved_scope, 1_u64);
 
-        let dry_run = store.migrate_metadata_impl(std::slice::from_ref(&scope_key), true).await.unwrap();
+        let dry_run = store.migrate_metadata_impl(true).await.unwrap();
         assert_eq!(dry_run.candidate_count, 2_u64);
         assert_eq!(dry_run.skipped_existing, 1_u64);
         assert_eq!(dry_run.migrated, 0_u64);
         assert_eq!(dry_run.unresolved_scope, 1_u64);
         assert_eq!(dry_run.code_derived, 1_u64);
 
-        let applied = store.migrate_metadata_impl(std::slice::from_ref(&scope_key), false).await.unwrap();
+        let applied = store.migrate_metadata_impl(false).await.unwrap();
         assert_eq!(applied.migrated, 2_u64);
         let registered_metadata = store.get_metadata_impl(&registered_id).await.unwrap().unwrap();
         assert_eq!(registered_metadata.scope_key.as_deref(), Some(scope_key.as_str()));

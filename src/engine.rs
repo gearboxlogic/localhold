@@ -1215,9 +1215,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
     /// # Errors
     ///
     /// Returns `EngineError::Store` if the persistence layer rejects the migration pass.
-    pub async fn migrate_metadata(&self, registered_scope_keys: &[String], dry_run: bool, principal: &str) -> Result<MetadataMigrationOutcome, EngineError> {
+    pub async fn migrate_metadata(&self, dry_run: bool, principal: &str) -> Result<MetadataMigrationOutcome, EngineError> {
         let audit = self.audit_draft(AuditAction::Update, Some(principal.to_owned()), Some(serde_json::json!({"metadata_migration": true})));
-        Ok(self.orchestrator.store().migrate_metadata_audited(registered_scope_keys, dry_run, &audit).await?)
+        Ok(self.orchestrator.store().migrate_metadata_audited(dry_run, &audit).await?)
     }
 
     /// Return aggregate statistics about stored memories.

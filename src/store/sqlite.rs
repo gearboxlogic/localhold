@@ -15,7 +15,8 @@ use std::{
 };
 
 use parking_lot::{Mutex, RwLock};
-use rusqlite::{Connection, OpenFlags, OptionalExtension as _, Transaction, TransactionBehavior, ffi::sqlite3_auto_extension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension as _, Transaction, TransactionBehavior, ffi::sqlite3_auto_extension, types::ValueRef};
+use sha2::{Digest as _, Sha256};
 use sqlite_vec::sqlite3_vec_init;
 
 use super::{
@@ -181,10 +182,155 @@ fn create_pre_upgrade_backup_while_locked(database_path: &Path, clock: &dyn Cloc
     create_pre_upgrade_backup(&backup_source, database_path, clock, source_version, source_table)
 }
 
-fn retain_pre_upgrade_backup_while_locked(database_path: Option<&Path>, clock: &dyn Clock, source_version: u32, source_table: Option<&str>) -> Result<(), StoreError> {
+#[expect(clippy::big_endian_bytes, reason = "backup fingerprints need a stable byte order across host architectures")]
+fn hash_sqlite_value(hasher: &mut Sha256, value: ValueRef<'_>) {
+    match value {
+        ValueRef::Null => hasher.update([0_u8]),
+        ValueRef::Integer(value) => {
+            hasher.update([1_u8]);
+            hasher.update(value.to_be_bytes());
+        }
+        ValueRef::Real(value) => {
+            hasher.update([2_u8]);
+            hasher.update(value.to_bits().to_be_bytes());
+        }
+        ValueRef::Text(value) => {
+            hasher.update([3_u8]);
+            hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+            hasher.update(value);
+        }
+        ValueRef::Blob(value) => {
+            hasher.update([4_u8]);
+            hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+            hasher.update(value);
+        }
+    }
+}
+
+#[expect(clippy::big_endian_bytes, reason = "backup fingerprints need a stable byte order across host architectures")]
+fn sqlite_logical_fingerprint(connection: &Connection) -> Result<[u8; 32], StoreError> {
+    let user_version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let mut schema_statement = connection.prepare(
+        "SELECT type, name, tbl_name, rootpage, sql
+         FROM sqlite_master
+         ORDER BY type, name",
+    )?;
+    let schema_rows = schema_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(schema_statement);
+
+    let mut hasher = Sha256::new();
+    hasher.update(user_version.to_be_bytes());
+    let mut table_names = Vec::new();
+    for (object_type, name, table_name, root_page, sql) in schema_rows {
+        hash_sqlite_value(&mut hasher, ValueRef::Text(object_type.as_bytes()));
+        hash_sqlite_value(&mut hasher, ValueRef::Text(name.as_bytes()));
+        hash_sqlite_value(&mut hasher, ValueRef::Text(table_name.as_bytes()));
+        hash_sqlite_value(&mut hasher, ValueRef::Integer(root_page));
+        hash_sqlite_value(&mut hasher, sql.as_deref().map_or(ValueRef::Null, |sql| ValueRef::Text(sql.as_bytes())));
+        if object_type == "table" {
+            table_names.push(name);
+        }
+    }
+
+    for table_name in table_names {
+        let quoted_name = table_name.replace('"', "\"\"");
+        let base_query = format!("SELECT * FROM \"{quoted_name}\"");
+        let column_count = connection.prepare(&base_query)?.column_count();
+        let query = if column_count == 0 {
+            base_query
+        } else {
+            let order = (1..=column_count).map(|position| position.to_string()).collect::<Vec<_>>().join(", ");
+            format!("{base_query} ORDER BY {order}")
+        };
+        let mut statement = connection.prepare(&query)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            hasher.update(u64::try_from(column_count).unwrap_or(u64::MAX).to_be_bytes());
+            for column in 0..column_count {
+                hash_sqlite_value(&mut hasher, row.get_ref(column)?);
+            }
+        }
+    }
+
+    Ok(hasher.finalize().into())
+}
+
+fn reusable_pre_upgrade_backup(candidate: &Path, source_fingerprint: &[u8; 32], source_version: u32, source_table: Option<&str>) -> bool {
+    let Ok(connection) = Connection::open_with_flags(candidate, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX) else {
+        return false;
+    };
+    let Ok(integrity) = connection.query_row::<String, _, _>("PRAGMA quick_check", [], |row| row.get(0)) else {
+        return false;
+    };
+    let Ok(backup_version) = connection.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0)) else {
+        return false;
+    };
+    let contains_source = source_table.is_none_or(|source_table| {
+        connection
+            .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)", [source_table], |row| {
+                row.get::<_, bool>(0)
+            })
+            .unwrap_or(false)
+    });
+    if integrity != "ok" || backup_version != source_version || !contains_source {
+        return false;
+    }
+    sqlite_logical_fingerprint(&connection).is_ok_and(|candidate_fingerprint| candidate_fingerprint == *source_fingerprint)
+}
+
+#[expect(clippy::filetype_is_file, reason = "only regular adjacent files may be reused; symlinks and special files are rejected")]
+fn find_reusable_pre_upgrade_backup(source: &Connection, database_path: &Path, source_version: u32, source_table: Option<&str>) -> Result<Option<PathBuf>, StoreError> {
+    let source_fingerprint = sqlite_logical_fingerprint(source)?;
+    let Some(database_name) = database_path.file_name() else {
+        return Ok(None);
+    };
+    let prefix = format!("{}.pre-upgrade-", database_name.to_string_lossy());
+    let parent = database_path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let entries = std::fs::read_dir(parent).map_err(|error| StoreError::MigrationFailed {
+        step: "pre_upgrade_backup_discovery",
+        source: Box::new(error),
+    })?;
+    let mut candidates = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|file_type| file_type.is_file()))
+        .map(|entry| entry.path())
+        .filter(|candidate| {
+            candidate.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                name.starts_with(&prefix) && name.ends_with(".bak")
+            })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_unstable_by(|left, right| right.file_name().cmp(&left.file_name()));
+    Ok(candidates
+        .into_iter()
+        .find(|candidate| reusable_pre_upgrade_backup(candidate, &source_fingerprint, source_version, source_table)))
+}
+
+fn retain_pre_upgrade_backup_while_locked(
+    source: &Connection,
+    database_path: Option<&Path>,
+    clock: &dyn Clock,
+    source_version: u32,
+    source_table: Option<&str>,
+) -> Result<(), StoreError> {
     let Some(path) = database_path else {
         return Ok(());
     };
+    if let Some(recovery) = find_reusable_pre_upgrade_backup(source, path, source_version, source_table)? {
+        tracing::info!(path = %recovery.display(), "reusing verified pre-upgrade SQLite backup");
+        return Ok(());
+    }
     let recovery = create_pre_upgrade_backup_while_locked(path, clock, source_version, source_table)?;
     tracing::info!(path = %recovery.display(), "retained verified pre-upgrade SQLite backup");
     Ok(())
@@ -430,7 +576,7 @@ impl SqliteStore {
             .optional()?;
         let needs_backup = schema_version < crate::store::schema::SQLITE_SCHEMA_VERSION && (schema_version != 0_u32 || source_table.is_some());
         if needs_backup {
-            retain_pre_upgrade_backup_while_locked(database_path, self.inner.clock.as_ref(), schema_version, source_table.as_deref())?;
+            retain_pre_upgrade_backup_while_locked(&published_tx, database_path, self.inner.clock.as_ref(), schema_version, source_table.as_deref())?;
         }
         if has_published_metadata {
             let _published_metadata = validate_published_v2_metadata(&published_tx)?;
@@ -1125,12 +1271,12 @@ impl MemoryAdmin for SqliteStore {
         self.metadata_migration_report_impl().await
     }
 
-    async fn migrate_metadata(&self, registered_scope_keys: &[String], dry_run: bool) -> Result<MetadataMigrationOutcome, StoreError> {
-        self.migrate_metadata_impl(registered_scope_keys, dry_run).await
+    async fn migrate_metadata(&self, dry_run: bool) -> Result<MetadataMigrationOutcome, StoreError> {
+        self.migrate_metadata_impl(dry_run).await
     }
 
-    async fn migrate_metadata_audited(&self, registered_scope_keys: &[String], dry_run: bool, audit: &AuditDraft) -> Result<MetadataMigrationOutcome, StoreError> {
-        self.migrate_metadata_audited_impl(registered_scope_keys, dry_run, Some(audit)).await
+    async fn migrate_metadata_audited(&self, dry_run: bool, audit: &AuditDraft) -> Result<MetadataMigrationOutcome, StoreError> {
+        self.migrate_metadata_audited_impl(dry_run, Some(audit)).await
     }
 }
 
@@ -2267,6 +2413,8 @@ mod tests {
 
         let error = SqliteStore::open(&path, 3_usize).unwrap_err();
         assert!(error.to_string().contains("unexpected schema_version"), "{error}");
+        let repeated_error = SqliteStore::open(&path, 3_usize).unwrap_err();
+        assert!(repeated_error.to_string().contains("unexpected schema_version"), "{repeated_error}");
         let source = Connection::open(&path).unwrap();
         let legacy_rows: i64 = source.query_row("SELECT COUNT(*) FROM memory_v2_metadata", [], |row| row.get(0)).unwrap();
         assert_eq!(legacy_rows, 1_i64, "failed migration must leave the source usable");
@@ -2282,13 +2430,25 @@ mod tests {
             assert_eq!(std::fs::metadata(&backups[0]).unwrap().permissions().mode() & 0o777, 0o600);
         }
 
-        assert_eq!(backups.len(), 1_usize);
+        assert_eq!(backups.len(), 1_usize, "an unchanged failed upgrade must reuse its verified recovery copy");
         let backup = Connection::open_with_flags(&backups[0], OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         assert_eq!(
             backup.query_row::<i64, _, _>("SELECT COUNT(*) FROM memory_v2_metadata", [], |row| row.get(0)).unwrap(),
             1_i64
         );
         assert_eq!(backup.query_row::<String, _, _>("PRAGMA quick_check", [], |row| row.get(0)).unwrap(), "ok");
+        drop(backup);
+
+        let _updated = source.execute("UPDATE memory_v2_metadata SET summary = 'changed after retained backup'", []).unwrap();
+        drop(source);
+        let changed_error = SqliteStore::open(&path, 3_usize).unwrap_err();
+        assert!(changed_error.to_string().contains("unexpected schema_version"), "{changed_error}");
+        let changed_backups = std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "bak"))
+            .count();
+        assert_eq!(changed_backups, 2_usize, "a changed source must receive a fresh recovery copy");
     }
 
     #[test]
@@ -3026,8 +3186,26 @@ mod tests {
         let store = SqliteStore::in_memory().unwrap();
         let mem = make_memory("metadata migration audited", &[], base_time());
         let id = store.store(&mem, None).await.unwrap();
+        let id_text = id.to_string();
+        store
+            .with_conn(move |conn| {
+                let _updated = conn.execute(
+                    "UPDATE memories
+                     SET provenance = json_set(provenance, '$.source_conversation', 'legacy/looks-resolved')
+                     WHERE id = ?1",
+                    [id_text],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let migration_report = store.metadata_migration_report().await.unwrap();
+        assert_eq!(
+            migration_report.unresolved_scope, 1_u64,
+            "migration reporting must ignore the provenance compatibility cache"
+        );
 
-        let report = store.migrate_metadata_audited(&[], false, &audit_draft(AuditAction::Update)).await.unwrap();
+        let report = store.migrate_metadata_audited(false, &audit_draft(AuditAction::Update)).await.unwrap();
 
         assert_eq!(report.migrated, 1_u64);
         assert_eq!(store.get_metadata(&id).await.unwrap().unwrap().schema_version, 1_i64);
@@ -3035,7 +3213,7 @@ mod tests {
         assert_eq!(history.len(), 1_usize);
         assert_eq!(history[0].action, AuditAction::Update);
 
-        let second_report = store.migrate_metadata_audited(&[], false, &audit_draft(AuditAction::Update)).await.unwrap();
+        let second_report = store.migrate_metadata_audited(false, &audit_draft(AuditAction::Update)).await.unwrap();
         assert_eq!(second_report.migrated, 0_u64);
         assert_eq!(store.query_audit_log(&id, 10).await.unwrap().len(), 1_usize);
     }

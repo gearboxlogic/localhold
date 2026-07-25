@@ -4215,14 +4215,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let Some(principal) = self.write_principal_for(self.principal_for_context(&context).as_deref()) else {
             return Ok(Self::anonymous_write_denied());
         };
-        let registered_scope_keys = self
-            .engine
-            .list_scopes_for_principal(&principal)
-            .await?
-            .into_iter()
-            .map(|scope| scope.scope_key)
-            .collect::<Vec<_>>();
-        let report = self.engine.migrate_metadata(&registered_scope_keys, params.dry_run, &principal).await?;
+        let report = self.engine.migrate_metadata(params.dry_run, &principal).await?;
         let status = if params.dry_run { OperationStatus::Preview } else { OperationStatus::Applied };
         success_json(&AdminMigrateMetadataResponse {
             operation: operation_summary(status, report.migrated, Vec::new(), NextAction::None),

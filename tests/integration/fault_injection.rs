@@ -459,6 +459,9 @@ impl<S: MemoryWriter + Send + Sync> MemoryWriter for ChaosStore<S> {
         audit: &AuditDraft,
         context_audit: Option<&ContextAuditDraft>,
     ) -> Result<AuthorizedUpdateOutcome, StoreError> {
+        if let Some(err) = self.store_plan.should_fail() {
+            return Err(err);
+        }
         self.inner
             .update_authorized_with_metadata_contexts_audited(id, update, metadata_patch, context_ids, principal, audit, context_audit)
             .await
@@ -494,6 +497,9 @@ impl<S: MemoryWriter + Send + Sync> MemoryWriter for ChaosStore<S> {
         audit: &AuditDraft,
         context_audit: Option<&ContextAuditDraft>,
     ) -> Result<AuthorizedUpdateOutcome, StoreError> {
+        if let Some(err) = self.store_plan.should_fail() {
+            return Err(err);
+        }
         self.inner
             .update_authorized_if_unmodified_with_metadata_contexts_audited(id, expected_revision, update, metadata_patch, context_ids, embedding, principal, audit, context_audit)
             .await
@@ -648,12 +654,12 @@ impl<S: MemoryAdmin + Send + Sync> MemoryAdmin for ChaosStore<S> {
         self.inner.metadata_migration_report().await
     }
 
-    async fn migrate_metadata(&self, registered_scope_keys: &[String], dry_run: bool) -> Result<MetadataMigrationOutcome, StoreError> {
-        self.inner.migrate_metadata(registered_scope_keys, dry_run).await
+    async fn migrate_metadata(&self, dry_run: bool) -> Result<MetadataMigrationOutcome, StoreError> {
+        self.inner.migrate_metadata(dry_run).await
     }
 
-    async fn migrate_metadata_audited(&self, registered_scope_keys: &[String], dry_run: bool, audit: &AuditDraft) -> Result<MetadataMigrationOutcome, StoreError> {
-        self.inner.migrate_metadata_audited(registered_scope_keys, dry_run, audit).await
+    async fn migrate_metadata_audited(&self, dry_run: bool, audit: &AuditDraft) -> Result<MetadataMigrationOutcome, StoreError> {
+        self.inner.migrate_metadata_audited(dry_run, audit).await
     }
 }
 

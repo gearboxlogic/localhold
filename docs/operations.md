@@ -309,8 +309,9 @@ then publishes a self-contained file without overwriting an existing path. New U
 use mode `0600`; Windows files inherit the destination directory's ACL. The
 destination directory must already exist.
 
-When startup encounters the `memory_v2_metadata` table written by the published
-beta releases, it first creates and verifies a self-contained
+When startup encounters a pre-v3 SQLite database, including the
+`memory_v2_metadata` table written by published beta releases, it first creates
+and verifies a self-contained
 `localhold.db.pre-upgrade-*.bak` beside the database. The backup includes
 committed WAL content and is retained whether migration succeeds or fails.
 Startup holds the SQLite writer lock from before that backup through legacy
@@ -319,7 +320,11 @@ schema or data between those steps. If backup creation, permissions, or
 `quick_check` verification fails, startup stops before changing the legacy
 table. Keep this recovery copy until representative reads, governed contexts,
 compatibility scopes, audit entries, tombstones, metadata, and embedding checks
-pass.
+pass. Repeated failed starts reuse the newest verified backup for the same
+source schema only while neither the database nor its WAL is newer than that
+copy; otherwise startup creates a fresh recovery copy. After validating a
+successful upgrade, operators may prune older `pre-upgrade` copies according to
+their normal backup-retention policy.
 
 Always validate a restore first:
 

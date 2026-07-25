@@ -93,10 +93,10 @@ where
         WriteOutcome::Applied
     );
     assert!(store.get_metadata(&metadata_gap_id).await.unwrap().is_none());
-    let preview = store.migrate_metadata(&[], true).await.unwrap();
+    let preview = store.migrate_metadata(true).await.unwrap();
     assert_eq!(preview.candidate_count, 1);
     assert_eq!(preview.unresolved_scope, 0);
-    let applied = store.migrate_metadata(&[], false).await.unwrap();
+    let applied = store.migrate_metadata(false).await.unwrap();
     assert_eq!(applied.migrated, 1);
     let migrated_metadata = store.get_metadata(&metadata_gap_id).await.unwrap().unwrap();
     assert_eq!(migrated_metadata.scope_key.as_deref(), Some(scope.as_str()));

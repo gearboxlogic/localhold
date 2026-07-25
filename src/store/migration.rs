@@ -3184,6 +3184,11 @@ pub(crate) async fn validate_ready_postgres_schema(
 }
 
 async fn validate_postgres_context_integrity(pool: &PgPool) -> Result<(), StoreError> {
+    let mut connection = pool.acquire().await?;
+    validate_postgres_context_integrity_connection(&mut connection).await
+}
+
+pub(crate) async fn validate_postgres_context_integrity_connection(connection: &mut PgConnection) -> Result<(), StoreError> {
     let has_cycle: bool = query_scalar(
         "WITH RECURSIVE rooted(id) AS (
              SELECT id
@@ -3200,7 +3205,7 @@ async fn validate_postgres_context_integrity(pool: &PgPool) -> Result<(), StoreE
              WHERE id NOT IN (SELECT id FROM rooted)
          )",
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?;
     if has_cycle {
         return Err(StoreError::Conflict("PostgreSQL context hierarchy contains a parent cycle".into()));
@@ -3213,7 +3218,7 @@ async fn validate_postgres_context_integrity(pool: &PgPool) -> Result<(), StoreE
              HAVING MIN(ordinal) <> 0 OR MAX(ordinal) <> COUNT(*) - 1
          )",
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?;
     if invalid_ordinals {
         return Err(StoreError::Conflict("PostgreSQL memory context ordinals must be contiguous and start at zero".into()));
@@ -3229,7 +3234,7 @@ async fn validate_postgres_context_integrity(pool: &PgPool) -> Result<(), StoreE
                AND metadata.scope_key <> context_row.context_key
          )",
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?;
     if mismatched_cache {
         return Err(StoreError::Conflict(
@@ -4798,6 +4803,24 @@ fn comparable_contexts(mut contexts: MigrationContextData) -> MigrationContextDa
     for event in &mut contexts.audit_events {
         event.timestamp = truncate_to_micros(event.timestamp);
     }
+    contexts.kinds.sort_by(|left, right| left.kind.cmp(&right.kind));
+    contexts.contexts.sort_by_key(|item| item.definition.id);
+    contexts.aliases.sort_by_key(|item| (item.context_id, item.normalized_alias.clone()));
+    contexts.identities.sort_by_key(|item| {
+        (
+            item.context_id,
+            item.identity.scheme.clone(),
+            item.identity.namespace.clone(),
+            item.identity.fingerprint.clone(),
+        )
+    });
+    contexts.hints.sort_by_key(|item| (item.context_id, item.normalized_hint.clone()));
+    contexts.grants.sort_by_key(|item| (item.context_id, item.grantee_principal.clone()));
+    contexts.relations.sort_by_key(|item| (item.from_context_id, item.to_context_id, item.relation.clone()));
+    contexts.memberships.sort_by_key(|item| (item.memory_id, item.ordinal, item.context_id));
+    contexts.policies.sort_by_key(|item| (item.layer.clone(), item.principal.clone(), item.kind.clone()));
+    contexts.anchor_overrides.sort_by_key(|item| (item.anchor_context_id, item.principal.clone()));
+    contexts.audit_events.sort_by_key(|item| item.id);
     contexts
 }
 
@@ -4823,8 +4846,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        store::{MemoryAdmin as _, MemoryReader as _, MemoryWriter as _},
-        types::{AccessPolicy, Confidence, Entity, Importance, Memory, MemoryFilter, MemoryType, Provenance, QueryContext, ScopeDefinition},
+        context::ContextAuditDraft,
+        store::{ContextReader as _, ContextWriter as _, MemoryAdmin as _, MemoryReader as _, MemoryWriter as _},
+        types::{AccessPolicy, Confidence, Entity, Importance, Memory, MemoryFilter, MemoryType, Provenance, QueryContext, ScopeDefinition, WriteOutcome},
     };
 
     const TEST_EMBEDDING_DIMENSIONS: usize = 3;
@@ -4836,6 +4860,51 @@ mod tests {
         constraint: &'static str,
         expected_error: &'static str,
         cascade: bool,
+    }
+
+    #[test]
+    fn comparable_contexts_is_independent_of_backend_text_collation_order() {
+        let context_id = ContextId::new();
+        let now = fixed_time(0);
+        let left = MigrationContextData {
+            aliases: vec![
+                MigrationContextAlias {
+                    context_id,
+                    alias: "Bob".into(),
+                    normalized_alias: "bob".into(),
+                    created_at: now,
+                },
+                MigrationContextAlias {
+                    context_id,
+                    alias: "alice".into(),
+                    normalized_alias: "alice".into(),
+                    created_at: now,
+                },
+            ],
+            grants: vec![
+                ContextGrant {
+                    context_id,
+                    grantee_principal: "Bob".into(),
+                    granted_by: "operator".into(),
+                    created_at: now,
+                },
+                ContextGrant {
+                    context_id,
+                    grantee_principal: "alice".into(),
+                    granted_by: "operator".into(),
+                    created_at: now,
+                },
+            ],
+            ..MigrationContextData::default()
+        };
+        let mut right = left.clone();
+        right.aliases.reverse();
+        right.grants.reverse();
+
+        assert_eq!(
+            serde_json::to_value(comparable_contexts(left)).unwrap(),
+            serde_json::to_value(comparable_contexts(right)).unwrap()
+        );
     }
 
     #[derive(Debug)]
@@ -5327,14 +5396,6 @@ mod tests {
         let source_path = temp.path().join("source.db");
         let fixture = seed_sqlite_source(&source_path).await;
         corrupt_sqlite_source(&source_path, move |conn| {
-            let inserted = conn.execute(
-                "INSERT INTO memory_contexts (memory_id, context_id, ordinal, created_at)
-                 SELECT ?1, id, 0, ?2
-                 FROM contexts
-                 WHERE context_key = ?3",
-                rusqlite::params![fixture.old_id.to_string(), fixed_time(9_u32).to_rfc3339(), fixture.scope.scope_key],
-            )?;
-            assert_eq!(inserted, 1_usize, "expected to insert one governed membership");
             let deleted = conn.execute("DELETE FROM memory_metadata WHERE memory_id = ?1", [fixture.old_id.to_string()])?;
             assert_eq!(deleted, 1_usize, "expected to delete one optional metadata cache row");
             Ok(())
@@ -5343,7 +5404,7 @@ mod tests {
         let snapshot = export_sqlite(&sqlite_options(&source_path, true, false)).await.unwrap();
 
         assert!(snapshot.metadata.is_empty());
-        assert_eq!(snapshot.contexts.memberships.len(), 1_usize);
+        assert_eq!(snapshot.contexts.memberships.len(), 2_usize);
     }
 
     #[tokio::test]
@@ -5351,6 +5412,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source_path = temp.path().join("source.db");
         let _fixture = seed_sqlite_source(&source_path).await;
+        corrupt_sqlite_source(&source_path, |conn| {
+            let deleted = conn.execute("DELETE FROM memory_contexts", [])?;
+            assert_eq!(deleted, 2_usize, "expected to delete both governed memberships");
+            Ok(())
+        });
 
         let snapshot = export_sqlite(&sqlite_options(&source_path, true, false)).await.unwrap();
 
@@ -6320,7 +6386,30 @@ mod tests {
             parent: Some("migration".into()),
             related: vec!["migration/related".into()],
         };
-        store.register_scope(scope.clone()).await.unwrap();
+        store.register_scope_for_principal(scope.clone(), "migration-agent").await.unwrap();
+        let context_id = store
+            .list_context_records("migration-agent", false, 0_usize, 10_usize)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|record| record.context.key == scope.scope_key)
+            .unwrap()
+            .context
+            .id;
+        for memory_id in [old_id, new_id] {
+            assert_eq!(
+                store
+                    .replace_memory_contexts(
+                        &memory_id,
+                        &[context_id],
+                        "migration-agent",
+                        &ContextAuditDraft::new("migration-agent", "migration_fixture_membership").with_context(context_id),
+                    )
+                    .await
+                    .unwrap(),
+                WriteOutcome::Applied
+            );
+        }
 
         let metadata = MemoryMetadata {
             memory_id: old_id,
@@ -6437,9 +6526,10 @@ mod tests {
                 contexts: 3_u64,
                 context_aliases: 1_u64,
                 context_hints: 1_u64,
-                context_grants: 3_u64,
+                context_grants: 0_u64,
                 context_relations: 1_u64,
-                context_audit_events: 1_u64,
+                memory_contexts: 2_u64,
+                context_audit_events: 6_u64,
                 metadata: 1_u64,
                 embedding_profiles: 1_u64,
                 ..MigrationTableCounts::default()

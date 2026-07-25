@@ -35,9 +35,27 @@ fn response_schema_duplicate_candidate_card() {
 }
 
 #[test]
+fn response_schema_context_resolve_response() {
+    let schema = schemars::schema_for!(params::ContextResolveResponse);
+    insta::assert_json_snapshot!("response_schema_ContextResolveResponse", schema);
+}
+
+#[test]
+fn response_schema_context_create_response() {
+    let schema = schemars::schema_for!(params::ContextCreateResponse);
+    insta::assert_json_snapshot!("response_schema_ContextCreateResponse", schema);
+}
+
+#[test]
 fn response_schema_remember_response() {
     let schema = schemars::schema_for!(params::RememberResponse);
     insta::assert_json_snapshot!("response_schema_RememberResponse", schema);
+}
+
+#[test]
+fn response_schema_remember_many_response() {
+    let schema = schemars::schema_for!(params::RememberManyResponse);
+    insta::assert_json_snapshot!("response_schema_RememberManyResponse", schema);
 }
 
 #[test]
@@ -131,6 +149,30 @@ fn response_schema_handoff_response() {
 }
 
 #[test]
+fn response_schema_admin_scope_register_response() {
+    let schema = schemars::schema_for!(params::AdminScopeRegisterResponse);
+    insta::assert_json_snapshot!("response_schema_AdminScopeRegisterResponse", schema);
+}
+
+#[test]
+fn response_schema_admin_scope_list_response() {
+    let schema = schemars::schema_for!(params::AdminScopeListResponse);
+    insta::assert_json_snapshot!("response_schema_AdminScopeListResponse", schema);
+}
+
+#[test]
+fn response_schema_admin_migration_report_response() {
+    let schema = schemars::schema_for!(params::AdminMigrationReportResponse);
+    insta::assert_json_snapshot!("response_schema_AdminMigrationReportResponse", schema);
+}
+
+#[test]
+fn response_schema_admin_list_response() {
+    let schema = schemars::schema_for!(params::AdminListResponse);
+    insta::assert_json_snapshot!("response_schema_AdminListResponse", schema);
+}
+
+#[test]
 fn response_schema_memory_entry() {
     let schema = schemars::schema_for!(params::MemoryEntry);
     insta::assert_json_snapshot!("response_schema_MemoryEntry", schema);
@@ -194,6 +236,30 @@ fn response_schema_reembed_response() {
 fn response_schema_admin_migrate_metadata_response() {
     let schema = schemars::schema_for!(params::AdminMigrateMetadataResponse);
     insta::assert_json_snapshot!("response_schema_AdminMigrateMetadataResponse", schema);
+}
+
+#[test]
+fn response_schema_bulk_delete_response() {
+    let schema = schemars::schema_for!(params::BulkDeleteResponse);
+    insta::assert_json_snapshot!("response_schema_BulkDeleteResponse", schema);
+}
+
+#[test]
+fn response_schema_bulk_update_response() {
+    let schema = schemars::schema_for!(params::BulkUpdateResponse);
+    insta::assert_json_snapshot!("response_schema_BulkUpdateResponse", schema);
+}
+
+#[test]
+fn response_schema_consolidate_response() {
+    let schema = schemars::schema_for!(params::ConsolidateResponse);
+    insta::assert_json_snapshot!("response_schema_ConsolidateResponse", schema);
+}
+
+#[test]
+fn response_schema_history_response() {
+    let schema = schemars::schema_for!(params::HistoryResponse);
+    insta::assert_json_snapshot!("response_schema_HistoryResponse", schema);
 }
 
 // ---------------------------------------------------------------------------

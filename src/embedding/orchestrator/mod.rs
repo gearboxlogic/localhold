@@ -202,7 +202,11 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
             .into_iter()
             .map(|memory| {
                 contents.push(Arc::from(memory.content.as_str()));
-                MemoryWithEmbedding { memory, embedding: None }
+                MemoryWithEmbedding {
+                    memory,
+                    embedding: None,
+                    context_ids: Vec::new(),
+                }
             })
             .collect();
 
@@ -252,7 +256,11 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
             .into_iter()
             .map(|memory| {
                 contents.push(Arc::from(memory.content.as_str()));
-                MemoryWithEmbedding { memory, embedding: None }
+                MemoryWithEmbedding {
+                    memory,
+                    embedding: None,
+                    context_ids: Vec::new(),
+                }
             })
             .collect();
 
@@ -301,7 +309,11 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
             .into_iter()
             .map(|memory| {
                 contents.push(Arc::from(memory.content.as_str()));
-                MemoryWithEmbedding { memory, embedding: None }
+                MemoryWithEmbedding {
+                    memory,
+                    embedding: None,
+                    context_ids: Vec::new(),
+                }
             })
             .collect::<Vec<_>>();
         let ids = self

@@ -12,15 +12,16 @@ use super::{
     vector::{VectorIndex as _, validate_embedding_vector},
 };
 use crate::{
-    context::{ContextId, ContextKind, LEGACY_ALL_PRINCIPALS_GRANT, LEGACY_SYSTEM_PRINCIPAL, validate_implicit_legacy_context_key, validate_legacy_scope_definition},
+    context::{
+        ContextId, ContextKind, LEGACY_ALL_PRINCIPALS_GRANT, LEGACY_SYSTEM_PRINCIPAL, OPERATOR_PRINCIPAL, UNRESOLVED_CONTEXT_KEY as UNRESOLVED_SCOPE,
+        validate_implicit_legacy_context_key, validate_legacy_scope_definition,
+    },
     error::StoreError,
     types::{
         AccessPolicy, AuditDraft, LARGE_CONTENT_WARNING_THRESHOLD_BYTES, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MetadataMigrationOutcome,
         MetadataMigrationReport, Provenance, QueryContext, ScopeDefinition, normalize_context_key,
     },
 };
-
-const UNRESOLVED_SCOPE: &str = "inbox/unresolved";
 
 fn sqlite_count(row: &rusqlite::Row<'_>) -> rusqlite::Result<u64> {
     let count: i64 = row.get(0)?;
@@ -144,22 +145,22 @@ impl SqliteStore {
 
     pub(crate) async fn register_scope_impl(&self, scope: ScopeDefinition) -> Result<(), StoreError> {
         let now = self.clock_now().to_rfc3339();
-        self.with_conn(move |conn| register_legacy_scope_context(conn, &scope, &now, None)).await
+        self.with_conn(move |conn| register_legacy_scope_context(conn, &scope, &now, OPERATOR_PRINCIPAL)).await
     }
 
     pub(crate) async fn list_scopes_impl(&self) -> Result<Vec<ScopeDefinition>, StoreError> {
-        self.with_conn(move |conn| list_legacy_scope_contexts(conn, None)).await
+        self.with_conn(move |conn| list_legacy_scope_contexts(conn, OPERATOR_PRINCIPAL)).await
     }
 
     pub(crate) async fn register_scope_for_principal_impl(&self, scope: ScopeDefinition, principal: &str) -> Result<(), StoreError> {
         let now = self.clock_now().to_rfc3339();
         let principal = principal.to_owned();
-        self.with_conn(move |conn| register_legacy_scope_context(conn, &scope, &now, Some(&principal))).await
+        self.with_conn(move |conn| register_legacy_scope_context(conn, &scope, &now, &principal)).await
     }
 
     pub(crate) async fn list_scopes_for_principal_impl(&self, principal: &str) -> Result<Vec<ScopeDefinition>, StoreError> {
         let principal = principal.to_owned();
-        self.with_conn(move |conn| list_legacy_scope_contexts(conn, Some(&principal))).await
+        self.with_conn(move |conn| list_legacy_scope_contexts(conn, &principal)).await
     }
 
     pub(crate) async fn upsert_metadata_impl(&self, metadata: MemoryMetadata) -> Result<(), StoreError> {
@@ -173,7 +174,24 @@ impl SqliteStore {
             let tx = sqlite_write_tx(conn)?;
             let id = metadata.memory_id;
             let id_str = id.to_string();
-            let _existing = fetch_memory_by_id(&tx, &id_str)?.ok_or_else(|| StoreError::NotFound(format!("memory not found: {id}")))?;
+            let existing = fetch_memory_by_id(&tx, &id_str)?.ok_or_else(|| StoreError::NotFound(format!("memory not found: {id}")))?;
+            let expected_scope = tx
+                .query_row(
+                    "SELECT context_row.context_key
+                     FROM memory_contexts AS membership
+                     JOIN contexts AS context_row ON context_row.id = membership.context_id
+                     WHERE membership.memory_id = ?1
+                       AND membership.ordinal = 0",
+                    [&id_str],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .unwrap_or_else(|| UNRESOLVED_SCOPE.to_owned());
+            if metadata.scope_key.as_deref() != Some(expected_scope.as_str()) || existing.provenance.source_conversation.as_deref() != Some(expected_scope.as_str()) {
+                return Err(StoreError::Conflict(
+                    "metadata and provenance compatibility scopes must match the memory's primary governed context; replace governed memberships instead".into(),
+                ));
+            }
             upsert_metadata_conn(&tx, &metadata, &now.to_rfc3339())?;
             let affected = tx.execute("UPDATE memories SET record_revision = record_revision + 1 WHERE id = ?1", params![id_str])?;
             if affected == 0 {
@@ -246,8 +264,8 @@ impl SqliteStore {
                  FROM memories AS m
                  LEFT JOIN memory_metadata AS meta ON meta.memory_id = m.id
                  WHERE COALESCE(meta.scope_key, json_extract(m.provenance, '$.source_conversation')) IS NULL
-                    OR COALESCE(meta.scope_key, json_extract(m.provenance, '$.source_conversation')) = 'inbox/unresolved'",
-                [],
+                    OR COALESCE(meta.scope_key, json_extract(m.provenance, '$.source_conversation')) = ?1",
+                [UNRESOLVED_SCOPE],
                 sqlite_count,
             )?;
             let duplicate_candidates: u64 = conn.query_row(
@@ -297,21 +315,17 @@ impl SqliteStore {
 
     pub(crate) async fn migrate_metadata_audited_impl(
         &self,
-        registered_scope_keys: &[String],
+        _registered_scope_keys: &[String],
         dry_run: bool,
         audit: Option<&AuditDraft>,
     ) -> Result<MetadataMigrationOutcome, StoreError> {
-        let registered_scope_keys = registered_scope_keys.iter().cloned().collect::<HashSet<_>>();
         let now = self.clock_now().to_rfc3339();
         let audit = audit.cloned();
         self.with_conn(move |conn| {
             let skipped_existing = conn.query_row("SELECT COUNT(*) FROM memory_metadata", [], sqlite_count)?;
             let candidates = load_metadata_migration_candidates(conn)?;
             let candidate_count = u64::try_from(candidates.len()).map_err(|e| StoreError::Serialization(Box::new(e)))?;
-            let prepared_rows = candidates
-                .into_iter()
-                .map(|candidate| prepare_metadata_migration_metadata(candidate, &registered_scope_keys))
-                .collect::<Vec<_>>();
+            let prepared_rows = candidates.into_iter().map(prepare_metadata_migration_metadata).collect::<Vec<_>>();
             let mut report = metadata_migration_outcome(candidate_count, skipped_existing, &prepared_rows);
 
             if dry_run {
@@ -324,58 +338,11 @@ impl SqliteStore {
     }
 }
 
-fn ensure_legacy_scope_context(tx: &Transaction<'_>, key: &str, display_name: Option<&str>, description: Option<&str>, now: &str) -> Result<String, StoreError> {
-    let normalized = normalize_context_key(key);
-    if normalized.is_empty() || normalized == UNRESOLVED_SCOPE {
-        return Err(StoreError::Conflict("legacy scope key cannot be blank or inbox/unresolved".into()));
-    }
-    let kind = ContextKind::from_legacy_scope(key);
-    if let Some(id) = tx
-        .query_row(
-            "SELECT id FROM contexts
-             WHERE owner_principal = ?1 AND kind = ?2 AND normalized_key = ?3",
-            params![LEGACY_SYSTEM_PRINCIPAL, kind.as_str(), normalized],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-    {
-        if let Some(display_name) = display_name {
-            let _updated = tx.execute(
-                "UPDATE contexts
-                 SET display_name = ?1, description = ?2, updated_at = ?3
-                 WHERE id = ?4",
-                params![display_name, description, now, id],
-            )?;
-        }
-        return Ok(id);
-    }
-    let id = ContextId::new().to_string();
-    let fallback_display = key.rsplit('/').find(|part| !part.is_empty()).unwrap_or(key);
-    let _inserted = tx.execute(
-        "INSERT INTO contexts (
-            id, kind, context_key, normalized_key, display_name, description,
-            owner_principal, guidance, parent_id, lifecycle, frozen, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, 'active', 1, ?8, ?8)",
-        params![
-            id,
-            kind.as_str(),
-            key.trim(),
-            normalized,
-            display_name.unwrap_or(fallback_display),
-            description,
-            LEGACY_SYSTEM_PRINCIPAL,
-            now,
-        ],
-    )?;
-    let _granted = tx.execute(
-        "INSERT INTO context_grants (context_id, grantee_principal, granted_by, created_at)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![id, LEGACY_ALL_PRINCIPALS_GRANT, LEGACY_SYSTEM_PRINCIPAL, now],
-    )?;
-    Ok(id)
-}
-
-#[expect(clippy::too_many_arguments, reason = "legacy adapter needs definition fields, principal, and transaction timestamp")]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "legacy adapter validates exact reuse and transactionally audits creation"
+)]
 fn ensure_private_legacy_scope_context(
     tx: &Transaction<'_>,
     key: &str,
@@ -392,7 +359,9 @@ fn ensure_private_legacy_scope_context(
         .query_row(
             "SELECT id, kind, frozen, lifecycle
              FROM contexts
-             WHERE owner_principal = ?1 AND normalized_key = ?2",
+             WHERE owner_principal = ?1
+               AND normalized_key = ?2
+               AND kind = 'custom'",
             params![principal, normalized],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, String>(3)?)),
         )
@@ -456,22 +425,18 @@ fn ensure_private_legacy_scope_context(
             now,
         ],
     )?;
+    let _audited = tx.execute(
+        "INSERT INTO context_audit_events (
+            actor_principal, action, context_id, memory_id, timestamp, details
+         ) VALUES (?1, 'legacy_scope_context_created', ?2, NULL, ?3, ?4)",
+        params![principal, id, now, serde_json::json!({"legacy_scope_key": key}).to_string(),],
+    )?;
     Ok(id)
 }
 
-#[expect(clippy::too_many_arguments, reason = "compatibility routing carries definition fields, optional principal, and timestamp")]
-fn ensure_admin_scope_context(
-    tx: &Transaction<'_>,
-    key: &str,
-    display_name: Option<&str>,
-    description: Option<&str>,
-    now: &str,
-    principal: Option<&str>,
-) -> Result<String, StoreError> {
-    principal.map_or_else(
-        || ensure_legacy_scope_context(tx, key, display_name, description, now),
-        |principal| ensure_private_legacy_scope_context(tx, key, display_name, description, principal, now),
-    )
+#[expect(clippy::too_many_arguments, reason = "compatibility routing carries definition fields, principal, and timestamp")]
+fn ensure_admin_scope_context(tx: &Transaction<'_>, key: &str, display_name: Option<&str>, description: Option<&str>, now: &str, principal: &str) -> Result<String, StoreError> {
+    ensure_private_legacy_scope_context(tx, key, display_name, description, principal, now)
 }
 
 fn resolve_or_create_private_legacy_context(tx: &Transaction<'_>, key: &str, principal: &str, now: &str) -> Result<String, StoreError> {
@@ -553,7 +518,7 @@ fn resolve_or_create_private_legacy_context(tx: &Transaction<'_>, key: &str, pri
 }
 
 #[expect(clippy::too_many_lines, reason = "legacy adapter atomically synchronizes one compatibility context and its relationships")]
-fn register_legacy_scope_context(conn: &mut Connection, scope: &ScopeDefinition, now: &str, principal: Option<&str>) -> Result<(), StoreError> {
+fn register_legacy_scope_context(conn: &mut Connection, scope: &ScopeDefinition, now: &str, principal: &str) -> Result<(), StoreError> {
     validate_legacy_scope_definition(scope).map_err(StoreError::Conflict)?;
     let tx = sqlite_write_tx(conn)?;
     let context_id = ensure_admin_scope_context(&tx, &scope.scope_key, Some(&scope.display_name), scope.description.as_deref(), now, principal)?;
@@ -635,18 +600,13 @@ fn register_legacy_scope_context(conn: &mut Connection, scope: &ScopeDefinition,
         "INSERT INTO context_audit_events (
             actor_principal, action, context_id, memory_id, timestamp, details
          ) VALUES (?1, 'legacy_scope_register', ?2, NULL, ?3, ?4)",
-        params![
-            principal.unwrap_or(LEGACY_SYSTEM_PRINCIPAL),
-            context_id,
-            now,
-            serde_json::json!({"legacy_scope_key": scope.scope_key}).to_string(),
-        ],
+        params![principal, context_id, now, serde_json::json!({"legacy_scope_key": scope.scope_key}).to_string(),],
     )?;
     tx.commit()?;
     Ok(())
 }
 
-fn list_legacy_scope_contexts(conn: &Connection, principal: Option<&str>) -> Result<Vec<ScopeDefinition>, StoreError> {
+fn list_legacy_scope_contexts(conn: &Connection, principal: &str) -> Result<Vec<ScopeDefinition>, StoreError> {
     let base_rows = {
         let mut statement = conn.prepare(
             "SELECT context_row.id, context_row.context_key, context_row.display_name,
@@ -654,11 +614,8 @@ fn list_legacy_scope_contexts(conn: &Connection, principal: Option<&str>) -> Res
              FROM contexts AS context_row
              LEFT JOIN contexts AS parent ON parent.id = context_row.parent_id
              WHERE (
-                    (?2 IS NULL AND context_row.owner_principal = ?1 AND context_row.frozen = 1)
-                 OR (?2 IS NOT NULL AND (
-                        (context_row.owner_principal = ?2 AND context_row.kind = 'custom' AND context_row.frozen = 0)
-                     OR (context_row.owner_principal = ?1 AND context_row.frozen = 1)
-                 ))
+                    (context_row.owner_principal = ?2 AND context_row.kind = 'custom' AND context_row.frozen = 0)
+                 OR (context_row.owner_principal = ?1 AND context_row.frozen = 1)
              )
                AND context_row.lifecycle = 'active'
                AND EXISTS (
@@ -717,14 +674,13 @@ struct MigrationCandidate {
     id: String,
     content: String,
     source_agent: Option<String>,
-    source_conversation: Option<String>,
+    primary_context_key: Option<String>,
 }
 
 struct PreparedMigrationMetadata {
     id: String,
     scope_key: String,
     agent_label: Option<String>,
-    quality_flags: Vec<String>,
     unresolved_scope: bool,
     oversized: bool,
     code_derived: bool,
@@ -736,9 +692,14 @@ fn load_metadata_migration_candidates(conn: &Connection) -> Result<Vec<Migration
             m.id,
             m.content,
             json_extract(m.provenance, '$.source_agent') AS source_agent,
-            json_extract(m.provenance, '$.source_conversation') AS source_conversation
+            primary_context.context_key AS primary_context_key
          FROM memories AS m
          LEFT JOIN memory_metadata AS meta ON meta.memory_id = m.id
+         LEFT JOIN memory_contexts AS primary_membership
+           ON primary_membership.memory_id = m.id
+          AND primary_membership.ordinal = 0
+         LEFT JOIN contexts AS primary_context
+           ON primary_context.id = primary_membership.context_id
          WHERE meta.memory_id IS NULL
          ORDER BY m.created_at, m.id",
     )?;
@@ -747,18 +708,14 @@ fn load_metadata_migration_candidates(conn: &Connection) -> Result<Vec<Migration
             id: row.get(0)?,
             content: row.get(1)?,
             source_agent: row.get(2)?,
-            source_conversation: row.get(3)?,
+            primary_context_key: row.get(3)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-fn prepare_metadata_migration_metadata(candidate: MigrationCandidate, registered_scope_keys: &HashSet<String>) -> PreparedMigrationMetadata {
-    let scope_key = candidate
-        .source_conversation
-        .as_deref()
-        .filter(|scope| registered_scope_keys.contains(*scope))
-        .map_or_else(|| UNRESOLVED_SCOPE.to_owned(), ToOwned::to_owned);
+fn prepare_metadata_migration_metadata(candidate: MigrationCandidate) -> PreparedMigrationMetadata {
+    let scope_key = candidate.primary_context_key.unwrap_or_else(|| UNRESOLVED_SCOPE.to_owned());
     let unresolved_scope = scope_key == UNRESOLVED_SCOPE;
     let oversized = candidate.content.len() > LARGE_CONTENT_WARNING_THRESHOLD_BYTES;
     let code_derived = looks_code_derived(&candidate.content);
@@ -767,7 +724,6 @@ fn prepare_metadata_migration_metadata(candidate: MigrationCandidate, registered
         id: candidate.id,
         scope_key,
         agent_label: candidate.source_agent,
-        quality_flags: migration_quality_flags(unresolved_scope, oversized, code_derived),
         unresolved_scope,
         oversized,
         code_derived,
@@ -801,14 +757,26 @@ fn insert_metadata_migration_rows(conn: &mut Connection, prepared_rows: &[Prepar
     let tx = sqlite_write_tx(conn)?;
     let mut migrated = 0_u64;
     for row in prepared_rows {
-        let quality_flags_json = serde_json::to_string(&row.quality_flags)?;
+        let primary_context_key = tx
+            .query_row(
+                "SELECT context_row.context_key
+                 FROM memory_contexts AS membership
+                 JOIN contexts AS context_row ON context_row.id = membership.context_id
+                 WHERE membership.memory_id = ?1
+                   AND membership.ordinal = 0",
+                [&row.id],
+                |query_row| query_row.get::<_, String>(0),
+            )
+            .optional()?;
+        let scope_key = primary_context_key.as_deref().unwrap_or(&row.scope_key);
+        let quality_flags_json = serde_json::to_string(&migration_quality_flags(scope_key == UNRESOLVED_SCOPE, row.oversized, row.code_derived))?;
         let inserted = tx.execute(
             "INSERT INTO memory_metadata (
                 memory_id, scope_key, summary, agent_label, created_by_principal,
                 quality_flags, schema_version, migrated_at, updated_at
              ) VALUES (?1, ?2, NULL, ?3, NULL, ?4, 1, ?5, ?5)
              ON CONFLICT(memory_id) DO NOTHING",
-            params![row.id, row.scope_key, row.agent_label, quality_flags_json, now],
+            params![row.id, scope_key, row.agent_label, quality_flags_json, now],
         )?;
         if inserted > 0 {
             let memory_id = row.id.parse().map_err(|e| StoreError::Serialization(format!("invalid memory id: {e}").into()))?;

@@ -1139,6 +1139,25 @@ pub struct ContextResolveResponse {
     pub next_offset: Option<usize>,
 }
 
+/// Safe identity metadata returned only to the creator.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[non_exhaustive]
+pub struct ContextIdentityDescriptor {
+    /// Normalized identity scheme.
+    pub scheme: String,
+    /// Safe redacted label; the stored fingerprint is never exposed.
+    pub redacted_label: String,
+}
+
+impl From<&crate::context::ContextIdentity> for ContextIdentityDescriptor {
+    fn from(identity: &crate::context::ContextIdentity) -> Self {
+        Self {
+            scheme: identity.scheme.clone(),
+            redacted_label: identity.redacted_label.clone(),
+        }
+    }
+}
+
 /// Response from `context_create`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
@@ -1149,7 +1168,7 @@ pub struct ContextCreateResponse {
     pub created: bool,
     /// Safe stored identity metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub identity: Option<crate::context::ContextIdentity>,
+    pub identity: Option<ContextIdentityDescriptor>,
     /// Policy guidance applied to creation.
     pub policy_guidance: Vec<String>,
 }

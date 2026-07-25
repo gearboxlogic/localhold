@@ -68,7 +68,7 @@ proptest! {
                 &client,
                 "admin_list",
                 json!({"scope": "inbox/unresolved"}),
-                "legacy scope has no unique governed context",
+                "compatibility label for contextless memories",
             )
             .await;
         });

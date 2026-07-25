@@ -21,12 +21,13 @@ use super::{
     context_store::{insert_initial_memory_contexts_postgres, replace_memory_contexts_postgres_tx},
     merge_metadata_patch,
     migration::{
-        PresentPostgresVectorPolicy, reject_retired_postgres_schema, validate_postgres_runtime_relationships_before_migration_connection,
-        validate_present_postgres_schema_connection, validate_ready_postgres_schema,
+        PresentPostgresVectorPolicy, reject_retired_postgres_schema, validate_postgres_context_integrity_connection,
+        validate_postgres_runtime_relationships_before_migration_connection, validate_present_postgres_schema_connection, validate_ready_postgres_schema,
     },
     postgres_migrations::{CURRENT_SCHEMA_VERSION, MIGRATIONS, MigrationMetadataState, classify_migration_rows, read_migration_metadata_state},
     query::{
-        DEFAULT_LIST_LIMIT, MAX_SCAN_ROWS, MAX_VEC_CANDIDATES, OVERFETCH_FACTOR, apply_access_policy_for_filter, escape_like, normalize_filter, sort_by_distance, usize_to_i64,
+        DEFAULT_LIST_LIMIT, MAX_SCAN_ROWS, MAX_VEC_CANDIDATES, OVERFETCH_FACTOR, apply_access_policy_for_filter, compatibility_scope_label, escape_like, normalize_filter,
+        sort_by_distance, usize_to_i64,
     },
     update_audit_draft_for_locked_memory,
     vector::{VectorBatch, VectorHit, validate_embedding_vector},
@@ -35,8 +36,8 @@ use crate::{
     clock::{Clock, SystemClock},
     config::{MAX_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS, PostgresDatabaseConfig},
     context::{
-        ContextAuditDraft, ContextId, ContextKind, LEGACY_ALL_PRINCIPALS_GRANT, LEGACY_SYSTEM_PRINCIPAL, UNRESOLVED_CONTEXT_KEY, validate_implicit_legacy_context_key,
-        validate_legacy_scope_definition,
+        ContextAuditDraft, ContextId, ContextKind, LEGACY_ALL_PRINCIPALS_GRANT, LEGACY_SYSTEM_PRINCIPAL, OPERATOR_PRINCIPAL, UNRESOLVED_CONTEXT_KEY, effective_legacy_scope_key,
+        validate_implicit_legacy_context_key, validate_legacy_scope_definition,
     },
     error::{ParseEnumError, StoreError},
     scoring::decay_mass,
@@ -1376,14 +1377,24 @@ impl PostgresStore {
             return Ok(Vec::new());
         }
         let limit = usize_to_i64(limit, "list-with-embeddings limit")?;
+        let now = self.clock_now();
         let mut builder = QueryBuilder::<Postgres>::new(format!(
             "SELECT {MEMORY_COLUMNS}
              FROM memories
              WHERE has_embedding = TRUE
                AND superseded_by IS NULL
-               AND (
-                   provenance->>'source_agent' = "
+               AND (expires_at IS NULL OR expires_at > "
         ));
+        let _ = builder.push_bind(now).push(
+            ")
+               AND EXISTS (
+                   SELECT 1
+                   FROM memory_embeddings AS candidate_embedding
+                   WHERE candidate_embedding.memory_id = memories.id
+               )
+               AND (
+                   provenance->>'source_agent' = ",
+        );
         let _ = builder
             .push_bind(principal.to_owned())
             .push(
@@ -1459,12 +1470,33 @@ impl PostgresStore {
         let memories = rows.iter().map(row_to_memory).collect::<Result<Vec<_>, _>>()?;
         let ids = memories.iter().map(|memory| memory.id).collect::<Vec<_>>();
         let mut embeddings = fetch_embeddings_for_ids(self.pool(), &ids).await?;
+        let membership_ids = ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let membership_rows = sqlx::query(
+            "SELECT membership.memory_id, membership.context_id
+             FROM memory_contexts AS membership
+             WHERE membership.memory_id = ANY($1)
+             ORDER BY membership.memory_id, membership.ordinal",
+        )
+        .bind(membership_ids)
+        .fetch_all(self.pool())
+        .await?;
+        let mut context_ids_by_memory = HashMap::<MemoryId, Vec<ContextId>>::new();
+        for row in &membership_rows {
+            let memory_id = row.try_get::<String, _>("memory_id")?.parse().map_err(|error| StoreError::Serialization(Box::new(error)))?;
+            let context_id = row
+                .try_get::<String, _>("context_id")?
+                .parse()
+                .map_err(|error| StoreError::Serialization(Box::new(error)))?;
+            context_ids_by_memory.entry(memory_id).or_default().push(context_id);
+        }
         let mut results = Vec::with_capacity(memories.len());
         for memory in memories {
             if let Some(embedding) = embeddings.remove(&memory.id) {
+                let context_ids = context_ids_by_memory.remove(&memory.id).unwrap_or_default();
                 results.push(MemoryWithEmbedding {
                     memory,
                     embedding: Some(embedding),
+                    context_ids,
                 });
             } else {
                 tracing::warn!(memory_id = %memory.id, "memory has has_embedding=true but no PostgreSQL vector row");
@@ -1473,25 +1505,49 @@ impl PostgresStore {
         Ok(results)
     }
 
-    pub(crate) async fn find_embedding_neighbors_impl(&self, embedding: &[f32], max_l2_distance: f64, limit: usize) -> Result<Vec<EmbeddingNeighbor>, StoreError> {
-        if limit == 0 {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "candidate-bounded neighbor lookup needs source, candidates, vector, threshold, and limit"
+    )]
+    pub(crate) async fn find_embedding_neighbors_impl(
+        &self,
+        source_memory_id: &MemoryId,
+        candidate_ids: &[MemoryId],
+        embedding: &[f32],
+        max_l2_distance: f64,
+        limit: usize,
+    ) -> Result<Vec<EmbeddingNeighbor>, StoreError> {
+        if limit == 0 || candidate_ids.is_empty() {
             return Ok(Vec::new());
         }
         validate_embedding_dimensions(embedding, self.embedding_dimensions())?;
         let vector = pgvector_literal(embedding);
+        let candidate_ids = candidate_ids.iter().map(ToString::to_string).collect::<Vec<_>>();
         let limit = usize_to_i64(limit, "neighbor limit")?;
         let rows = sqlx::query(
             "
-            SELECT e.memory_id, (e.embedding <-> $1::vector)::double precision AS distance
-            FROM memory_embeddings AS e
-            JOIN memories AS m ON m.id = e.memory_id
-            WHERE m.superseded_by IS NULL
-              AND (e.embedding <-> $1::vector) <= $2
-            ORDER BY e.embedding <-> $1::vector
-            LIMIT $3
+            WITH candidates AS MATERIALIZED (
+                SELECT e.memory_id, e.embedding
+                FROM memory_embeddings AS e
+                JOIN memories AS m ON m.id = e.memory_id
+                WHERE e.memory_id = ANY($2)
+                  AND e.memory_id <> $3
+                  AND m.superseded_by IS NULL
+            ),
+            ranked_candidates AS MATERIALIZED (
+                SELECT memory_id, (embedding <-> $1::vector)::double precision AS distance
+                FROM candidates
+            )
+            SELECT memory_id, distance
+            FROM ranked_candidates
+            WHERE distance <= $4
+            ORDER BY distance, memory_id
+            LIMIT $5
             ",
         )
         .bind(vector)
+        .bind(candidate_ids)
+        .bind(source_memory_id.to_string())
         .bind(max_l2_distance)
         .bind(limit)
         .fetch_all(self.pool())
@@ -1578,6 +1634,7 @@ impl PostgresStore {
 
     pub(crate) async fn update_impl(&self, id: &MemoryId, update: &MemoryUpdate) -> Result<bool, StoreError> {
         let mut tx = self.pool().begin().await?;
+        validate_compatibility_cache_update_tx(&mut tx, id, update, None).await?;
         let outcome = apply_update_tx(&mut tx, id, update, self.clock_now()).await?;
         tx.commit().await?;
         Ok(outcome.outcome == WriteOutcome::Applied)
@@ -1651,6 +1708,7 @@ impl PostgresStore {
             });
         }
 
+        validate_compatibility_cache_update_tx(&mut tx, id, update, None).await?;
         let outcome = apply_update_tx(&mut tx, id, update, self.clock_now()).await?;
         if outcome.outcome == WriteOutcome::Applied
             && let Some(audit) = audit
@@ -1687,6 +1745,7 @@ impl PostgresStore {
             });
         }
 
+        validate_compatibility_cache_update_tx(&mut tx, id, update, metadata_patch).await?;
         let now = self.clock_now();
         let outcome = apply_update_tx(&mut tx, id, update, now).await?;
         let metadata_only = metadata_patch.is_some() && !has_column_updates(update) && update.entities.is_none();
@@ -1740,6 +1799,9 @@ impl PostgresStore {
                 outcome: WriteOutcome::Denied,
                 reembed_revision: None,
             });
+        }
+        if context_ids.is_none() {
+            validate_compatibility_cache_update_tx(&mut tx, id, update, metadata_patch).await?;
         }
         let now = self.clock_now();
         let outcome = apply_update_tx(&mut tx, id, update, now).await?;
@@ -1816,6 +1878,9 @@ impl PostgresStore {
         }
         if existing.record_revision != expected_revision {
             return Err(StoreError::Conflict(format!("memory {id} changed after it was opened")));
+        }
+        if context_ids.is_none() {
+            validate_compatibility_cache_update_tx(&mut tx, id, update, metadata_patch).await?;
         }
 
         let now = self.clock_now();
@@ -1997,6 +2062,7 @@ impl PostgresStore {
                 denied = denied.saturating_add(1);
                 continue;
             }
+            validate_compatibility_cache_update_tx(&mut tx, &id, &update, None).await?;
             let outcome = apply_update_tx(&mut tx, &id, &update, now).await?;
             if outcome.outcome == WriteOutcome::Applied {
                 insert_optional_audit_draft_tx(&mut tx, &id, audit).await?;
@@ -2069,11 +2135,6 @@ impl PostgresStore {
         audit: Option<&AuditDraft>,
     ) -> Result<ReassignScopeOutcome, StoreError> {
         let mut tx = self.pool().begin().await?;
-        let target_context_id = resolve_or_create_private_postgres_legacy_context(&mut tx, to_scope, principal, self.clock_now()).await?;
-        let target_scope_key = sqlx::query_scalar::<Postgres, String>("SELECT context_key FROM contexts WHERE id = $1")
-            .bind(&target_context_id)
-            .fetch_one(&mut *tx)
-            .await?;
         let rows = if let Some(origin) = origin_conversation {
             sqlx::query(
                 "
@@ -2082,6 +2143,7 @@ impl PostgresStore {
                 WHERE provenance->>'source_conversation' = $1
                   AND COALESCE(provenance->>'origin_conversation', provenance->>'source_conversation') = $2
                 ORDER BY created_at ASC, id ASC
+                FOR UPDATE
                 ",
             )
             .bind(from_scope)
@@ -2095,6 +2157,7 @@ impl PostgresStore {
                 FROM memories
                 WHERE provenance->>'source_conversation' = $1
                 ORDER BY created_at ASC, id ASC
+                FOR UPDATE
                 ",
             )
             .bind(from_scope)
@@ -2102,17 +2165,28 @@ impl PostgresStore {
             .await?
         };
 
-        let mut applied_ids = Vec::new();
+        let mut applied_ids = Vec::with_capacity(rows.len());
         for row in rows {
             let id_str: String = row.try_get("id")?;
             let id = parse_memory_id(&id_str, "id")?;
             let Some(memory) = fetch_memory_by_id_for_update_tx(&mut tx, &id).await? else {
                 continue;
             };
-            if !memory.has_write_access(principal) {
-                continue;
+            if memory.has_write_access(principal) {
+                applied_ids.push(id);
             }
+        }
+        if applied_ids.is_empty() {
+            tx.commit().await?;
+            return Ok(ReassignScopeOutcome { applied_ids });
+        }
 
+        let target_context_id = resolve_or_create_private_postgres_legacy_context(&mut tx, to_scope, principal, self.clock_now()).await?;
+        let target_scope_key = sqlx::query_scalar::<Postgres, String>("SELECT context_key FROM contexts WHERE id = $1")
+            .bind(&target_context_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        for id in &applied_ids {
             let metadata_updated_at = self.clock_now();
             let _result = sqlx::query(
                 "
@@ -2198,9 +2272,8 @@ impl PostgresStore {
             .execute(&mut *tx)
             .await?;
             if let Some(audit) = audit {
-                insert_audit_draft_tx(&mut tx, &id, audit).await?;
+                insert_audit_draft_tx(&mut tx, id, audit).await?;
             }
-            applied_ids.push(id);
         }
         tx.commit().await?;
         Ok(ReassignScopeOutcome { applied_ids })
@@ -2268,19 +2341,19 @@ impl PostgresStore {
     }
 
     pub(crate) async fn register_scope_impl(&self, scope: ScopeDefinition) -> Result<(), StoreError> {
-        register_postgres_legacy_scope_context(self.pool(), &scope, self.clock_now(), None).await
+        register_postgres_legacy_scope_context(self.pool(), &scope, self.clock_now(), OPERATOR_PRINCIPAL).await
     }
 
     pub(crate) async fn list_scopes_impl(&self) -> Result<Vec<ScopeDefinition>, StoreError> {
-        list_postgres_legacy_scope_contexts(self.pool(), None).await
+        list_postgres_legacy_scope_contexts(self.pool(), OPERATOR_PRINCIPAL).await
     }
 
     pub(crate) async fn register_scope_for_principal_impl(&self, scope: ScopeDefinition, principal: &str) -> Result<(), StoreError> {
-        register_postgres_legacy_scope_context(self.pool(), &scope, self.clock_now(), Some(principal)).await
+        register_postgres_legacy_scope_context(self.pool(), &scope, self.clock_now(), principal).await
     }
 
     pub(crate) async fn list_scopes_for_principal_impl(&self, principal: &str) -> Result<Vec<ScopeDefinition>, StoreError> {
-        list_postgres_legacy_scope_contexts(self.pool(), Some(principal)).await
+        list_postgres_legacy_scope_contexts(self.pool(), principal).await
     }
 
     pub(crate) async fn upsert_metadata_impl(&self, metadata: MemoryMetadata) -> Result<(), StoreError> {
@@ -2290,9 +2363,25 @@ impl PostgresStore {
     pub(crate) async fn upsert_metadata_audited_impl(&self, metadata: MemoryMetadata, audit: Option<&AuditDraft>) -> Result<(), StoreError> {
         let mut tx = self.pool().begin().await?;
         let id = metadata.memory_id;
-        let _existing = fetch_memory_by_id_for_update_tx(&mut tx, &id)
+        let existing = fetch_memory_by_id_for_update_tx(&mut tx, &id)
             .await?
             .ok_or_else(|| StoreError::NotFound(format!("memory not found: {id}")))?;
+        let expected_scope = sqlx::query_scalar::<Postgres, String>(
+            "SELECT context_row.context_key
+             FROM memory_contexts AS membership
+             JOIN contexts AS context_row ON context_row.id = membership.context_id
+             WHERE membership.memory_id = $1
+               AND membership.ordinal = 0",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or_else(|| UNRESOLVED_CONTEXT_KEY.to_owned());
+        if metadata.scope_key.as_deref() != Some(expected_scope.as_str()) || existing.provenance.source_conversation.as_deref() != Some(expected_scope.as_str()) {
+            return Err(StoreError::Conflict(
+                "metadata and provenance compatibility scopes must match the memory's primary governed context; replace governed memberships instead".into(),
+            ));
+        }
         upsert_metadata_tx(&mut tx, &metadata, self.clock_now()).await?;
         increment_record_revision_tx(&mut tx, &id, "updating metadata").await?;
         insert_optional_audit_draft_tx(&mut tx, &id, audit).await?;
@@ -2411,18 +2500,14 @@ impl PostgresStore {
 
     pub(crate) async fn migrate_metadata_audited_impl(
         &self,
-        registered_scope_keys: &[String],
+        _registered_scope_keys: &[String],
         dry_run: bool,
         audit: Option<&AuditDraft>,
     ) -> Result<MetadataMigrationOutcome, StoreError> {
-        let registered_scope_keys = registered_scope_keys.iter().cloned().collect::<HashSet<_>>();
         let skipped_existing = count_query(self.pool(), "SELECT COUNT(*) FROM memory_metadata").await?;
         let candidates = load_metadata_migration_candidates(self.pool()).await?;
         let candidate_count = u64::try_from(candidates.len()).map_err(|e| StoreError::Serialization(Box::new(e)))?;
-        let prepared_rows = candidates
-            .into_iter()
-            .map(|candidate| prepare_metadata_migration_metadata(candidate, &registered_scope_keys))
-            .collect::<Vec<_>>();
+        let prepared_rows = candidates.into_iter().map(prepare_metadata_migration_metadata).collect::<Vec<_>>();
         let mut report = metadata_migration_outcome(candidate_count, skipped_existing, &prepared_rows);
 
         if dry_run {
@@ -2506,8 +2591,15 @@ impl MemoryReader for PostgresStore {
         self.fetch_embeddings_for_ids_impl(ids).await
     }
 
-    async fn find_embedding_neighbors(&self, embedding: &[f32], max_l2_distance: f64, limit: usize) -> Result<Vec<EmbeddingNeighbor>, StoreError> {
-        self.find_embedding_neighbors_impl(embedding, max_l2_distance, limit).await
+    async fn find_embedding_neighbors(
+        &self,
+        source_memory_id: &MemoryId,
+        candidate_ids: &[MemoryId],
+        embedding: &[f32],
+        max_l2_distance: f64,
+        limit: usize,
+    ) -> Result<Vec<EmbeddingNeighbor>, StoreError> {
+        self.find_embedding_neighbors_impl(source_memory_id, candidate_ids, embedding, max_l2_distance, limit).await
     }
 }
 
@@ -3167,6 +3259,49 @@ fn next_memory_revision(now: DateTime<Utc>, previous: DateTime<Utc>) -> DateTime
     previous.checked_add_signed(chrono::Duration::microseconds(1_i64)).map_or(now, |minimum| now.max(minimum))
 }
 
+async fn validate_compatibility_cache_update_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &MemoryId,
+    update: &MemoryUpdate,
+    metadata_patch: Option<&MetadataPatch>,
+) -> Result<(), StoreError> {
+    if update.source_conversation.is_none() && metadata_patch.and_then(|patch| patch.scope_key.as_ref()).is_none() {
+        return Ok(());
+    }
+    let expected_scope = sqlx::query_scalar::<Postgres, String>(
+        "SELECT COALESCE(
+             (
+                 SELECT context_row.context_key
+                 FROM memory_contexts AS membership
+                 JOIN contexts AS context_row ON context_row.id = membership.context_id
+                 WHERE membership.memory_id = memory_row.id
+                   AND membership.ordinal = 0
+             ),
+             $2
+         )
+         FROM memories AS memory_row
+         WHERE memory_row.id = $1",
+    )
+    .bind(id.to_string())
+    .bind(UNRESOLVED_CONTEXT_KEY)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(expected_scope) = expected_scope else {
+        return Ok(());
+    };
+    if update.source_conversation.as_deref().is_some_and(|scope| scope != expected_scope) {
+        return Err(StoreError::Conflict(
+            "provenance compatibility scope must match the primary governed context; replace governed memberships instead".into(),
+        ));
+    }
+    if metadata_patch.and_then(|patch| patch.scope_key.as_deref()).is_some_and(|scope| scope != expected_scope) {
+        return Err(StoreError::Conflict(
+            "metadata compatibility scope must match the primary governed context; replace governed memberships instead".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[expect(clippy::too_many_lines, reason = "the dynamic update builder keeps all memory fields and revision handling together")]
 async fn apply_update_tx(tx: &mut Transaction<'_, Postgres>, id: &MemoryId, update: &MemoryUpdate, now: DateTime<Utc>) -> Result<AuthorizedUpdateOutcome, StoreError> {
     let content_changed = update.content.is_some();
@@ -3340,8 +3475,9 @@ async fn record_visible_memory_rows(pool: &PgPool, rows: Vec<PgRow>, ctx: &Postg
     }
     let memory_ids = memories.iter().map(|memory| memory.id).collect::<Vec<_>>();
     let visible_primary_contexts = visible_postgres_primary_context_keys(pool, ctx.caller, &memory_ids).await?;
+    let membership_presence = postgres_memory_context_membership_presence(pool, &memory_ids).await?;
     for memory in memories {
-        let scope = (!memory.was_redacted).then(|| visible_primary_contexts.get(&memory.id).cloned().unwrap_or_else(|| UNRESOLVED_CONTEXT_KEY.to_owned()));
+        let scope = (!memory.was_redacted).then(|| compatibility_scope_label(&memory.id, &visible_primary_contexts, &membership_presence));
         stats.record(&memory, scope);
     }
     Ok(())
@@ -3358,7 +3494,6 @@ async fn visible_postgres_primary_context_keys(pool: &PgPool, caller: Option<&st
          JOIN contexts AS context_row ON context_row.id = membership.context_id
          WHERE membership.ordinal = 0
            AND membership.memory_id = ANY($2)
-           AND context_row.lifecycle = 'active'
            AND (
                context_row.owner_principal = $1 OR EXISTS (
                    SELECT 1 FROM context_grants AS grant_row
@@ -3376,6 +3511,24 @@ async fn visible_postgres_primary_context_keys(pool: &PgPool, caller: Option<&st
             let memory_id: String = row.try_get("memory_id")?;
             Ok((parse_memory_id(&memory_id, "memory_contexts.memory_id")?, row.try_get("context_key")?))
         })
+        .collect()
+}
+
+async fn postgres_memory_context_membership_presence(pool: &PgPool, memory_ids: &[MemoryId]) -> Result<HashSet<MemoryId>, StoreError> {
+    if memory_ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let memory_ids = memory_ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let rows = sqlx::query_scalar::<Postgres, String>(
+        "SELECT DISTINCT memory_id
+         FROM memory_contexts
+         WHERE memory_id = ANY($1)",
+    )
+    .bind(memory_ids)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|id| id.parse::<MemoryId>().map_err(|error| StoreError::Serialization(Box::new(error))))
         .collect()
 }
 
@@ -3638,14 +3791,13 @@ struct MigrationCandidate {
     id: String,
     content: String,
     source_agent: Option<String>,
-    source_conversation: Option<String>,
+    primary_context_key: Option<String>,
 }
 
 struct PreparedMigrationMetadata {
     id: String,
     scope_key: String,
     agent_label: Option<String>,
-    quality_flags: Vec<String>,
     unresolved_scope: bool,
     oversized: bool,
     code_derived: bool,
@@ -3658,9 +3810,14 @@ async fn load_metadata_migration_candidates(pool: &PgPool) -> Result<Vec<Migrati
             m.id,
             m.content,
             m.provenance->>'source_agent' AS source_agent,
-            m.provenance->>'source_conversation' AS source_conversation
+            primary_context.context_key AS primary_context_key
         FROM memories AS m
         LEFT JOIN memory_metadata AS meta ON meta.memory_id = m.id
+        LEFT JOIN memory_contexts AS primary_membership
+          ON primary_membership.memory_id = m.id
+         AND primary_membership.ordinal = 0
+        LEFT JOIN contexts AS primary_context
+          ON primary_context.id = primary_membership.context_id
         WHERE meta.memory_id IS NULL
         ORDER BY m.created_at, m.id
         ",
@@ -3674,18 +3831,14 @@ async fn load_metadata_migration_candidates(pool: &PgPool) -> Result<Vec<Migrati
                 id: row.try_get("id")?,
                 content: row.try_get("content")?,
                 source_agent: row.try_get("source_agent")?,
-                source_conversation: row.try_get("source_conversation")?,
+                primary_context_key: row.try_get("primary_context_key")?,
             })
         })
         .collect()
 }
 
-fn prepare_metadata_migration_metadata(candidate: MigrationCandidate, registered_scope_keys: &HashSet<String>) -> PreparedMigrationMetadata {
-    let scope_key = candidate
-        .source_conversation
-        .as_deref()
-        .filter(|scope| registered_scope_keys.contains(*scope))
-        .map_or_else(|| UNRESOLVED_CONTEXT_KEY.to_owned(), ToOwned::to_owned);
+fn prepare_metadata_migration_metadata(candidate: MigrationCandidate) -> PreparedMigrationMetadata {
+    let scope_key = candidate.primary_context_key.unwrap_or_else(|| UNRESOLVED_CONTEXT_KEY.to_owned());
     let unresolved_scope = scope_key == UNRESOLVED_CONTEXT_KEY;
     let oversized = candidate.content.len() > LARGE_CONTENT_WARNING_THRESHOLD_BYTES;
     let code_derived = looks_code_derived(&candidate.content);
@@ -3694,7 +3847,6 @@ fn prepare_metadata_migration_metadata(candidate: MigrationCandidate, registered
         id: candidate.id,
         scope_key,
         agent_label: candidate.source_agent,
-        quality_flags: migration_quality_flags(unresolved_scope, oversized, code_derived),
         unresolved_scope,
         oversized,
         code_derived,
@@ -3725,6 +3877,19 @@ async fn insert_metadata_migration_rows(
 ) -> Result<u64, StoreError> {
     let mut migrated = 0_u64;
     for row in prepared_rows {
+        let _locked_memory = sqlx::query("SELECT id FROM memories WHERE id = $1 FOR UPDATE").bind(&row.id).fetch_one(&mut **tx).await?;
+        let primary_context_key = sqlx::query_scalar::<Postgres, String>(
+            "SELECT context_row.context_key
+             FROM memory_contexts AS membership
+             JOIN contexts AS context_row ON context_row.id = membership.context_id
+             WHERE membership.memory_id = $1
+               AND membership.ordinal = 0",
+        )
+        .bind(&row.id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let scope_key = primary_context_key.as_deref().unwrap_or(&row.scope_key);
+        let quality_flags = migration_quality_flags(scope_key == UNRESOLVED_CONTEXT_KEY, row.oversized, row.code_derived);
         let result = sqlx::query(
             "
             INSERT INTO memory_metadata (
@@ -3735,9 +3900,9 @@ async fn insert_metadata_migration_rows(
             ",
         )
         .bind(&row.id)
-        .bind(&row.scope_key)
+        .bind(scope_key)
         .bind(&row.agent_label)
-        .bind(Json(row.quality_flags.clone()))
+        .bind(Json(quality_flags))
         .bind(now)
         .execute(&mut **tx)
         .await?;
@@ -4156,6 +4321,7 @@ async fn migrate_schema(pool: &PgPool, embedding_dimensions: usize, vector_polic
         execute_dynamic_statement(&mut tx, &memory_embeddings_ddl(profile.dimensions)?).await?;
         upsert_embedding_profile_executor(&mut tx, profile).await?;
     }
+    validate_postgres_context_integrity_connection(&mut tx).await?;
     validate_current_migration_metadata_tx(&mut tx).await?;
     tx.commit().await?;
     Ok(())
@@ -4173,6 +4339,7 @@ struct PostgresLegacyScope {
     related: Vec<String>,
     updated_at: DateTime<Utc>,
     registered: bool,
+    globally_visible: bool,
 }
 
 impl PostgresLegacyScope {
@@ -4189,6 +4356,7 @@ impl PostgresLegacyScope {
             related: Vec::new(),
             updated_at: now,
             registered: false,
+            globally_visible: false,
         }
     }
 }
@@ -4233,58 +4401,60 @@ async fn migrate_contexts_v5(tx: &mut Transaction<'_, Postgres>) -> Result<(), S
         }
         return Ok(());
     }
-    if !registry_exists {
-        if recorded_versions.0 {
-            return Err(StoreError::Conflict(
-                "PostgreSQL v4 database is missing scope_registry; restore from backup or repair the schema before retrying".into(),
-            ));
-        }
-        return Ok(());
+    if registry_exists {
+        validate_postgres_legacy_scope_registry(tx).await?;
+    } else if recorded_versions.0 {
+        return Err(StoreError::Conflict(
+            "PostgreSQL v4 database is missing scope_registry; restore from backup or repair the schema before retrying".into(),
+        ));
     }
-    validate_postgres_legacy_scope_registry(tx).await?;
+    validate_legacy_memory_json_postgres(tx).await?;
 
     let now: DateTime<Utc> = sqlx::query_scalar("SELECT NOW()").fetch_one(&mut **tx).await.map_err(postgres_schema_lock_error)?;
     let mut scopes = BTreeMap::<String, PostgresLegacyScope>::new();
-    let rows = sqlx::query(
-        "SELECT scope_key, display_name, description, aliases, matchers, parent, related, updated_at
-         FROM scope_registry
-         ORDER BY scope_key",
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(postgres_schema_lock_error)?;
-    for row in rows {
-        let key: String = row.try_get("scope_key")?;
-        let normalized = normalize_context_key(&key);
-        if normalized.is_empty() {
-            return Err(StoreError::Conflict("legacy scope registry contains a blank key".into()));
-        }
-        if normalized == UNRESOLVED_CONTEXT_KEY {
-            continue;
-        }
-        let Json(aliases): Json<Vec<String>> = row.try_get("aliases")?;
-        let Json(hints): Json<Vec<String>> = row.try_get("matchers")?;
-        let Json(related): Json<Vec<String>> = row.try_get("related")?;
-        let scope = PostgresLegacyScope {
-            kind: ContextKind::from_legacy_scope(&key),
-            key,
-            display_name: row.try_get("display_name")?,
-            description: row.try_get("description")?,
-            aliases,
-            hints,
-            parent: row.try_get("parent")?,
-            related,
-            updated_at: row.try_get("updated_at")?,
-            registered: true,
-        };
-        validate_postgres_legacy_migration_scope(&scope)?;
-        if let Some(existing) = scopes.insert(normalized.clone(), scope)
-            && existing.key != scopes[&normalized].key
-        {
-            return Err(StoreError::Conflict(format!(
-                "legacy scope keys {:?} and {:?} normalize to the same governed context",
-                existing.key, scopes[&normalized].key
-            )));
+    if registry_exists {
+        let rows = sqlx::query(
+            "SELECT scope_key, display_name, description, aliases, matchers, parent, related, updated_at
+             FROM scope_registry
+             ORDER BY scope_key",
+        )
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(postgres_schema_lock_error)?;
+        for row in rows {
+            let key: String = row.try_get("scope_key")?;
+            let normalized = normalize_context_key(&key);
+            if normalized.is_empty() {
+                return Err(StoreError::Conflict("legacy scope registry contains a blank key".into()));
+            }
+            if normalized == UNRESOLVED_CONTEXT_KEY {
+                continue;
+            }
+            let Json(aliases): Json<Vec<String>> = row.try_get("aliases")?;
+            let Json(hints): Json<Vec<String>> = row.try_get("matchers")?;
+            let Json(related): Json<Vec<String>> = row.try_get("related")?;
+            let scope = PostgresLegacyScope {
+                kind: ContextKind::from_legacy_scope(&key),
+                key,
+                display_name: row.try_get("display_name")?,
+                description: row.try_get("description")?,
+                aliases,
+                hints,
+                parent: row.try_get("parent")?,
+                related,
+                updated_at: row.try_get("updated_at")?,
+                registered: true,
+                globally_visible: true,
+            };
+            validate_postgres_legacy_migration_scope(&scope)?;
+            if let Some(existing) = scopes.insert(normalized.clone(), scope)
+                && existing.key != scopes[&normalized].key
+            {
+                return Err(StoreError::Conflict(format!(
+                    "legacy scope keys {:?} and {:?} normalize to the same governed context",
+                    existing.key, scopes[&normalized].key
+                )));
+            }
         }
     }
 
@@ -4294,25 +4464,32 @@ async fn migrate_contexts_v5(tx: &mut Transaction<'_, Postgres>) -> Result<(), S
         referenced_keys.extend(scope.related.iter().cloned());
     }
     for key in referenced_keys {
-        insert_raw_postgres_legacy_scope(&mut scopes, key, now)?;
+        insert_raw_postgres_legacy_scope(&mut scopes, key, now, true)?;
     }
     let raw_scope_rows = sqlx::query(
-        "SELECT DISTINCT COALESCE(
-             NULLIF(BTRIM(meta.scope_key), ''),
-             NULLIF(BTRIM(memory.provenance->>'source_conversation'), '')
-         ) AS scope_key
+        "SELECT DISTINCT meta.scope_key AS metadata_scope,
+                memory.provenance->>'source_conversation' AS provenance_scope
          FROM memories AS memory
          LEFT JOIN memory_metadata AS meta ON meta.memory_id = memory.id",
     )
     .fetch_all(&mut **tx)
     .await
     .map_err(postgres_schema_lock_error)?;
-    for row in raw_scope_rows {
-        let key: Option<String> = row.try_get("scope_key")?;
-        if let Some(key) = key
-            && key != UNRESOLVED_CONTEXT_KEY
-        {
-            insert_raw_postgres_legacy_scope(&mut scopes, key, now)?;
+    let mut raw_keys = raw_scope_rows
+        .iter()
+        .map(|row| {
+            let metadata_scope = row.try_get::<Option<String>, _>("metadata_scope")?;
+            let provenance_scope = row.try_get::<Option<String>, _>("provenance_scope")?;
+            Ok::<_, SqlxError>(effective_legacy_scope_key(metadata_scope.as_deref(), provenance_scope.as_deref()))
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    raw_keys.sort();
+    for key in raw_keys {
+        if normalize_context_key(&key) != UNRESOLVED_CONTEXT_KEY {
+            insert_raw_postgres_legacy_scope(&mut scopes, key, now, false)?;
         }
     }
 
@@ -4336,17 +4513,19 @@ async fn migrate_contexts_v5(tx: &mut Transaction<'_, Postgres>) -> Result<(), S
         .execute(&mut **tx)
         .await
         .map_err(postgres_schema_lock_error)?;
-        let _granted = sqlx::query(
-            "INSERT INTO context_grants (context_id, grantee_principal, granted_by, created_at)
-             VALUES ($1, $2, $3, $4)",
-        )
-        .bind(id.to_string())
-        .bind(LEGACY_ALL_PRINCIPALS_GRANT)
-        .bind(LEGACY_SYSTEM_PRINCIPAL)
-        .bind(scope.updated_at)
-        .execute(&mut **tx)
-        .await
-        .map_err(postgres_schema_lock_error)?;
+        if scope.globally_visible {
+            let _granted = sqlx::query(
+                "INSERT INTO context_grants (context_id, grantee_principal, granted_by, created_at)
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(id.to_string())
+            .bind(LEGACY_ALL_PRINCIPALS_GRANT)
+            .bind(LEGACY_SYSTEM_PRINCIPAL)
+            .bind(now)
+            .execute(&mut **tx)
+            .await
+            .map_err(postgres_schema_lock_error)?;
+        }
         for alias in &scope.aliases {
             let normalized = normalize_context_key(alias);
             if !normalized.is_empty() {
@@ -4358,7 +4537,7 @@ async fn migrate_contexts_v5(tx: &mut Transaction<'_, Postgres>) -> Result<(), S
                 .bind(id.to_string())
                 .bind(alias)
                 .bind(normalized)
-                .bind(scope.updated_at)
+                .bind(now)
                 .execute(&mut **tx)
                 .await
                 .map_err(postgres_schema_lock_error)?;
@@ -4375,7 +4554,7 @@ async fn migrate_contexts_v5(tx: &mut Transaction<'_, Postgres>) -> Result<(), S
                 .bind(id.to_string())
                 .bind(hint)
                 .bind(normalized)
-                .bind(scope.updated_at)
+                .bind(now)
                 .execute(&mut **tx)
                 .await
                 .map_err(postgres_schema_lock_error)?;
@@ -4390,7 +4569,7 @@ async fn migrate_contexts_v5(tx: &mut Transaction<'_, Postgres>) -> Result<(), S
         .bind(LEGACY_SYSTEM_PRINCIPAL)
         .bind(audit_action)
         .bind(id.to_string())
-        .bind(scope.updated_at)
+        .bind(now)
         .bind(Json(serde_json::json!({"legacy_scope_key": scope.key})))
         .execute(&mut **tx)
         .await
@@ -4402,6 +4581,9 @@ async fn migrate_contexts_v5(tx: &mut Transaction<'_, Postgres>) -> Result<(), S
     for (normalized_key, scope) in &scopes {
         if let Some(parent_key) = &scope.parent {
             let parent_normalized = normalize_context_key(parent_key);
+            if parent_normalized == UNRESOLVED_CONTEXT_KEY {
+                continue;
+            }
             let parent_id = ids
                 .get(&parent_normalized)
                 .ok_or_else(|| StoreError::Conflict(format!("legacy scope {:?} references missing parent {parent_key:?}", scope.key)))?;
@@ -4414,7 +4596,7 @@ async fn migrate_contexts_v5(tx: &mut Transaction<'_, Postgres>) -> Result<(), S
         }
         for related_key in &scope.related {
             let related_normalized = normalize_context_key(related_key);
-            if related_normalized == *normalized_key {
+            if related_normalized == UNRESOLVED_CONTEXT_KEY || related_normalized == *normalized_key {
                 continue;
             }
             let related_id = ids
@@ -4428,7 +4610,7 @@ async fn migrate_contexts_v5(tx: &mut Transaction<'_, Postgres>) -> Result<(), S
             )
             .bind(ids[normalized_key].to_string())
             .bind(related_id.to_string())
-            .bind(scope.updated_at)
+            .bind(now)
             .execute(&mut **tx)
             .await
             .map_err(postgres_schema_lock_error)?;
@@ -4436,10 +4618,9 @@ async fn migrate_contexts_v5(tx: &mut Transaction<'_, Postgres>) -> Result<(), S
     }
 
     let membership_rows = sqlx::query(
-        "SELECT memory.id, COALESCE(
-             NULLIF(BTRIM(meta.scope_key), ''),
-             NULLIF(BTRIM(memory.provenance->>'source_conversation'), '')
-         ) AS scope_key
+        "SELECT memory.id,
+                meta.scope_key AS metadata_scope,
+                memory.provenance->>'source_conversation' AS provenance_scope
          FROM memories AS memory
          LEFT JOIN memory_metadata AS meta ON meta.memory_id = memory.id",
     )
@@ -4448,10 +4629,11 @@ async fn migrate_contexts_v5(tx: &mut Transaction<'_, Postgres>) -> Result<(), S
     .map_err(postgres_schema_lock_error)?;
     for row in membership_rows {
         let memory_id: String = row.try_get("id")?;
-        let scope_key: Option<String> = row.try_get("scope_key")?;
-        if let Some(scope_key) = scope_key {
+        let metadata_scope: Option<String> = row.try_get("metadata_scope")?;
+        let provenance_scope: Option<String> = row.try_get("provenance_scope")?;
+        if let Some(scope_key) = effective_legacy_scope_key(metadata_scope.as_deref(), provenance_scope.as_deref()) {
             let normalized = normalize_context_key(&scope_key);
-            if normalized == UNRESOLVED_CONTEXT_KEY {
+            if normalized.is_empty() || normalized == UNRESOLVED_CONTEXT_KEY {
                 continue;
             }
             let context_id = ids
@@ -4473,24 +4655,154 @@ async fn migrate_contexts_v5(tx: &mut Transaction<'_, Postgres>) -> Result<(), S
             .await
             .map_err(postgres_schema_lock_error)?;
             let _canonicalized = sqlx::query("UPDATE memory_metadata SET scope_key = $1 WHERE memory_id = $2")
-                .bind(canonical_key)
-                .bind(memory_id)
+                .bind(&canonical_key)
+                .bind(&memory_id)
                 .execute(&mut **tx)
                 .await
                 .map_err(postgres_schema_lock_error)?;
+            let _canonicalized_provenance = sqlx::query(
+                "UPDATE memories
+                 SET provenance = jsonb_set(provenance, '{source_conversation}', to_jsonb($1::text), TRUE)
+                 WHERE id = $2",
+            )
+            .bind(canonical_key)
+            .bind(memory_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(postgres_schema_lock_error)?;
         }
     }
+    grant_migrated_raw_contexts_postgres(tx, now).await?;
     let _updated = sqlx::query(
         "UPDATE memory_metadata
          SET scope_key = $1, updated_at = NOW()
-         WHERE memory_id NOT IN (SELECT memory_id FROM memory_contexts)
-           AND (scope_key IS NULL OR BTRIM(scope_key) = '' OR scope_key = $1)",
+         WHERE memory_id NOT IN (SELECT memory_id FROM memory_contexts)",
     )
     .bind(UNRESOLVED_CONTEXT_KEY)
     .execute(&mut **tx)
     .await
     .map_err(postgres_schema_lock_error)?;
-    execute_statement(tx, "DROP TABLE scope_registry").await
+    let _updated_provenance = sqlx::query(
+        "UPDATE memories
+         SET provenance = jsonb_set(provenance, '{source_conversation}', to_jsonb($1::text), TRUE)
+         WHERE id NOT IN (SELECT memory_id FROM memory_contexts)",
+    )
+    .bind(UNRESOLVED_CONTEXT_KEY)
+    .execute(&mut **tx)
+    .await
+    .map_err(postgres_schema_lock_error)?;
+    if registry_exists {
+        execute_statement(tx, "DROP TABLE scope_registry").await?;
+    }
+    Ok(())
+}
+
+async fn validate_legacy_memory_json_postgres(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
+    let rows = sqlx::query("SELECT id, provenance::text AS provenance, access_policy::text AS access_policy FROM memories ORDER BY id")
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(postgres_schema_lock_error)?;
+    for row in rows {
+        let memory_id: String = row.try_get("id")?;
+        let provenance: String = row.try_get("provenance")?;
+        let access_policy: String = row.try_get("access_policy")?;
+        let _provenance = serde_json::from_str::<serde_json::Value>(&provenance)
+            .ok()
+            .filter(serde_json::Value::is_object)
+            .and_then(|value| serde_json::from_value::<Provenance>(value).ok())
+            .ok_or_else(|| StoreError::Conflict(format!("legacy memory {memory_id} contains malformed provenance JSON")))?;
+        let _access_policy = serde_json::from_str::<serde_json::Value>(&access_policy)
+            .ok()
+            .filter(serde_json::Value::is_object)
+            .and_then(|value| serde_json::from_value::<AccessPolicy>(value).ok())
+            .ok_or_else(|| StoreError::Conflict(format!("legacy memory {memory_id} contains malformed access_policy JSON")))?;
+    }
+    Ok(())
+}
+
+#[expect(clippy::too_many_lines, reason = "the three access-policy grant derivations remain adjacent for migration review")]
+async fn grant_migrated_raw_contexts_postgres(tx: &mut Transaction<'_, Postgres>, now: DateTime<Utc>) -> Result<(), StoreError> {
+    let _broad_grants = sqlx::query(
+        "INSERT INTO context_grants (
+             context_id, grantee_principal, granted_by, created_at
+         )
+         SELECT DISTINCT membership.context_id, $1, $2, $3
+         FROM memory_contexts AS membership
+         JOIN memories AS memory ON memory.id = membership.memory_id
+         JOIN context_audit_events AS audit
+           ON audit.context_id = membership.context_id
+          AND audit.action = 'migrate_raw_scope'
+         WHERE memory.access_policy->>'type' = 'public'
+            OR (
+                memory.access_policy->>'type' = 'redacted'
+                AND COALESCE(memory.access_policy->'visible_fields', '[]'::jsonb) ? 'provenance'
+            )
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(LEGACY_ALL_PRINCIPALS_GRANT)
+    .bind(LEGACY_SYSTEM_PRINCIPAL)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(postgres_schema_lock_error)?;
+    let _owner_grants = sqlx::query(
+        "INSERT INTO context_grants (
+             context_id, grantee_principal, granted_by, created_at
+         )
+         SELECT DISTINCT membership.context_id,
+                memory.provenance->>'source_agent',
+                $1,
+                $2
+         FROM memory_contexts AS membership
+         JOIN memories AS memory ON memory.id = membership.memory_id
+         JOIN context_audit_events AS audit
+           ON audit.context_id = membership.context_id
+          AND audit.action = 'migrate_raw_scope'
+         WHERE BTRIM(COALESCE(memory.provenance->>'source_agent', '')) <> ''
+           AND memory.provenance->>'source_agent' <> $3
+           AND NOT EXISTS (
+               SELECT 1 FROM context_grants AS grant_row
+               WHERE grant_row.context_id = membership.context_id
+                 AND grant_row.grantee_principal = $3
+           )
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(LEGACY_SYSTEM_PRINCIPAL)
+    .bind(now)
+    .bind(LEGACY_ALL_PRINCIPALS_GRANT)
+    .execute(&mut **tx)
+    .await
+    .map_err(postgres_schema_lock_error)?;
+    let _restricted_grants = sqlx::query(
+        "INSERT INTO context_grants (
+             context_id, grantee_principal, granted_by, created_at
+         )
+         SELECT DISTINCT membership.context_id, allowed.principal, $1, $2
+         FROM memory_contexts AS membership
+         JOIN memories AS memory ON memory.id = membership.memory_id
+         JOIN context_audit_events AS audit
+           ON audit.context_id = membership.context_id
+          AND audit.action = 'migrate_raw_scope'
+         CROSS JOIN LATERAL jsonb_array_elements_text(
+             COALESCE(memory.access_policy->'allowed', '[]'::jsonb)
+         ) AS allowed(principal)
+         WHERE memory.access_policy->>'type' = 'restricted'
+           AND BTRIM(allowed.principal) <> ''
+           AND allowed.principal <> $3
+           AND NOT EXISTS (
+               SELECT 1 FROM context_grants AS grant_row
+               WHERE grant_row.context_id = membership.context_id
+                 AND grant_row.grantee_principal = $3
+           )
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(LEGACY_SYSTEM_PRINCIPAL)
+    .bind(now)
+    .bind(LEGACY_ALL_PRINCIPALS_GRANT)
+    .execute(&mut **tx)
+    .await
+    .map_err(postgres_schema_lock_error)?;
+    Ok(())
 }
 
 async fn validate_postgres_legacy_scope_registry(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
@@ -4545,13 +4857,14 @@ async fn validate_postgres_legacy_scope_registry(tx: &mut Transaction<'_, Postgr
     Ok(())
 }
 
-fn insert_raw_postgres_legacy_scope(scopes: &mut BTreeMap<String, PostgresLegacyScope>, key: String, now: DateTime<Utc>) -> Result<(), StoreError> {
+fn insert_raw_postgres_legacy_scope(scopes: &mut BTreeMap<String, PostgresLegacyScope>, key: String, now: DateTime<Utc>, globally_visible: bool) -> Result<(), StoreError> {
     if key.trim().is_empty() {
         return Err(StoreError::Conflict("legacy scope cannot be migrated because its key is blank".into()));
     }
     let normalized = normalize_context_key(&key);
     if !normalized.is_empty() && normalized != UNRESOLVED_CONTEXT_KEY {
-        let _entry = scopes.entry(normalized).or_insert_with(|| PostgresLegacyScope::raw(key, now));
+        let scope = scopes.entry(normalized).or_insert_with(|| PostgresLegacyScope::raw(key, now));
+        scope.globally_visible |= globally_visible;
     }
     Ok(())
 }
@@ -4590,74 +4903,6 @@ fn validate_postgres_legacy_parent_graph(scopes: &BTreeMap<String, PostgresLegac
     Ok(())
 }
 
-async fn ensure_postgres_legacy_scope_context(
-    tx: &mut Transaction<'_, Postgres>,
-    key: &str,
-    display_name: Option<&str>,
-    description: Option<&str>,
-    now: DateTime<Utc>,
-) -> Result<String, StoreError> {
-    let normalized = normalize_context_key(key);
-    if normalized.is_empty() || normalized == UNRESOLVED_CONTEXT_KEY {
-        return Err(StoreError::Conflict("legacy scope key cannot be blank or inbox/unresolved".into()));
-    }
-    let kind = ContextKind::from_legacy_scope(key);
-    let existing: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM contexts
-         WHERE owner_principal = $1 AND kind = $2 AND normalized_key = $3",
-    )
-    .bind(LEGACY_SYSTEM_PRINCIPAL)
-    .bind(kind.as_str())
-    .bind(&normalized)
-    .fetch_optional(&mut **tx)
-    .await?;
-    if let Some(id) = existing {
-        if let Some(display_name) = display_name {
-            let _updated = sqlx::query(
-                "UPDATE contexts
-                 SET display_name = $1, description = $2, updated_at = $3
-                 WHERE id = $4",
-            )
-            .bind(display_name)
-            .bind(description)
-            .bind(now)
-            .bind(&id)
-            .execute(&mut **tx)
-            .await?;
-        }
-        return Ok(id);
-    }
-    let id = ContextId::new().to_string();
-    let fallback_display = key.rsplit('/').find(|part| !part.is_empty()).unwrap_or(key);
-    let _inserted = sqlx::query(
-        "INSERT INTO contexts (
-            id, kind, context_key, normalized_key, display_name, description,
-            owner_principal, guidance, parent_id, lifecycle, frozen, created_at, updated_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, NULL, 'active', TRUE, $8, $8)",
-    )
-    .bind(&id)
-    .bind(kind.as_str())
-    .bind(key.trim())
-    .bind(normalized)
-    .bind(display_name.unwrap_or(fallback_display))
-    .bind(description)
-    .bind(LEGACY_SYSTEM_PRINCIPAL)
-    .bind(now)
-    .execute(&mut **tx)
-    .await?;
-    let _granted = sqlx::query(
-        "INSERT INTO context_grants (context_id, grantee_principal, granted_by, created_at)
-         VALUES ($1, $2, $3, $4)",
-    )
-    .bind(&id)
-    .bind(LEGACY_ALL_PRINCIPALS_GRANT)
-    .bind(LEGACY_SYSTEM_PRINCIPAL)
-    .bind(now)
-    .execute(&mut **tx)
-    .await?;
-    Ok(id)
-}
-
 #[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -4678,7 +4923,9 @@ async fn ensure_private_postgres_admin_scope_context(
     let existing = sqlx::query(
         "SELECT id, kind, frozen, lifecycle
          FROM contexts
-         WHERE owner_principal = $1 AND normalized_key = $2",
+         WHERE owner_principal = $1
+           AND normalized_key = $2
+           AND kind = 'custom'",
     )
     .bind(principal)
     .bind(&normalized)
@@ -4751,23 +4998,30 @@ async fn ensure_private_postgres_admin_scope_context(
     .bind(now)
     .execute(&mut **tx)
     .await?;
+    let _audited = sqlx::query(
+        "INSERT INTO context_audit_events (
+            actor_principal, action, context_id, memory_id, timestamp, details
+         ) VALUES ($1, 'legacy_scope_context_created', $2, NULL, $3, $4)",
+    )
+    .bind(principal)
+    .bind(&id)
+    .bind(now)
+    .bind(Json(serde_json::json!({"legacy_scope_key": key})))
+    .execute(&mut **tx)
+    .await?;
     Ok(id)
 }
 
-#[expect(clippy::too_many_arguments, reason = "compatibility routing carries definition fields, optional principal, and timestamp")]
+#[expect(clippy::too_many_arguments, reason = "compatibility routing carries definition fields, principal, and timestamp")]
 async fn ensure_postgres_admin_scope_context(
     tx: &mut Transaction<'_, Postgres>,
     key: &str,
     display_name: Option<&str>,
     description: Option<&str>,
     now: DateTime<Utc>,
-    principal: Option<&str>,
+    principal: &str,
 ) -> Result<String, StoreError> {
-    if let Some(principal) = principal {
-        ensure_private_postgres_admin_scope_context(tx, key, display_name, description, principal, now).await
-    } else {
-        ensure_postgres_legacy_scope_context(tx, key, display_name, description, now).await
-    }
+    ensure_private_postgres_admin_scope_context(tx, key, display_name, description, principal, now).await
 }
 
 #[expect(
@@ -4829,11 +5083,13 @@ async fn resolve_or_create_private_postgres_legacy_context(tx: &mut Transaction<
 
     let id = ContextId::new().to_string();
     let display_name = key.rsplit('/').find(|part| !part.is_empty()).unwrap_or(key);
-    let _inserted = sqlx::query(
+    let inserted_id = sqlx::query_scalar::<Postgres, String>(
         "INSERT INTO contexts (
             id, kind, context_key, normalized_key, display_name, description,
             owner_principal, guidance, parent_id, lifecycle, frozen, created_at, updated_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, 'active', FALSE, $9, $9)",
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, 'active', FALSE, $9, $9)
+         ON CONFLICT (owner_principal, kind, normalized_key) DO NOTHING
+         RETURNING id",
     )
     .bind(&id)
     .bind(ContextKind::CUSTOM)
@@ -4844,27 +5100,47 @@ async fn resolve_or_create_private_postgres_legacy_context(tx: &mut Transaction<
     .bind(principal)
     .bind("Migrate this workflow to governed context IDs.")
     .bind(now)
-    .execute(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await?;
+    let Some(inserted_id) = inserted_id else {
+        let winner = sqlx::query(
+            "SELECT id, lifecycle
+             FROM contexts
+             WHERE owner_principal = $1
+               AND kind = 'custom'
+               AND normalized_key = $2",
+        )
+        .bind(principal)
+        .bind(normalize_context_key(key))
+        .fetch_one(&mut **tx)
+        .await?;
+        let lifecycle: String = winner.try_get("lifecycle")?;
+        if lifecycle != "active" {
+            return Err(StoreError::Conflict(
+                "legacy scope is archived; reactivate it in the TUI before using legacy administration".into(),
+            ));
+        }
+        return winner.try_get("id").map_err(StoreError::from);
+    };
     let _audit = sqlx::query(
         "INSERT INTO context_audit_events (
             actor_principal, action, context_id, memory_id, timestamp, details
          ) VALUES ($1, 'legacy_scope_context_created', $2, NULL, $3, $4)",
     )
     .bind(principal)
-    .bind(&id)
+    .bind(&inserted_id)
     .bind(now)
     .bind(Json(serde_json::json!({"legacy_scope_key": key})))
     .execute(&mut **tx)
     .await?;
-    Ok(id)
+    Ok(inserted_id)
 }
 
 #[expect(
     clippy::too_many_lines,
     reason = "legacy scope registration atomically updates the canonical context and its aliases, hints, hierarchy, relations, and audit"
 )]
-async fn register_postgres_legacy_scope_context(pool: &PgPool, scope: &ScopeDefinition, now: DateTime<Utc>, principal: Option<&str>) -> Result<(), StoreError> {
+async fn register_postgres_legacy_scope_context(pool: &PgPool, scope: &ScopeDefinition, now: DateTime<Utc>, principal: &str) -> Result<(), StoreError> {
     validate_legacy_scope_definition(scope).map_err(StoreError::Conflict)?;
     let mut tx = pool.begin().await?;
     let _locked = sqlx::query("LOCK TABLE contexts IN SHARE ROW EXCLUSIVE MODE").execute(&mut *tx).await?;
@@ -4973,7 +5249,7 @@ async fn register_postgres_legacy_scope_context(pool: &PgPool, scope: &ScopeDefi
             actor_principal, action, context_id, memory_id, timestamp, details
          ) VALUES ($1, 'legacy_scope_register', $2, NULL, $3, $4)",
     )
-    .bind(principal.unwrap_or(LEGACY_SYSTEM_PRINCIPAL))
+    .bind(principal)
     .bind(&context_id)
     .bind(now)
     .bind(Json(serde_json::json!({"legacy_scope_key": scope.scope_key})))
@@ -4983,18 +5259,15 @@ async fn register_postgres_legacy_scope_context(pool: &PgPool, scope: &ScopeDefi
     Ok(())
 }
 
-async fn list_postgres_legacy_scope_contexts(pool: &PgPool, principal: Option<&str>) -> Result<Vec<ScopeDefinition>, StoreError> {
+async fn list_postgres_legacy_scope_contexts(pool: &PgPool, principal: &str) -> Result<Vec<ScopeDefinition>, StoreError> {
     let base_rows = sqlx::query(
         "SELECT context_row.id, context_row.context_key, context_row.display_name,
                 context_row.description, parent.context_key AS parent_key
          FROM contexts AS context_row
          LEFT JOIN contexts AS parent ON parent.id = context_row.parent_id
          WHERE (
-                ($2::text IS NULL AND context_row.owner_principal = $1 AND context_row.frozen = TRUE)
-             OR ($2::text IS NOT NULL AND (
-                    (context_row.owner_principal = $2 AND context_row.kind = 'custom' AND context_row.frozen = FALSE)
-                 OR (context_row.owner_principal = $1 AND context_row.frozen = TRUE)
-             ))
+                (context_row.owner_principal = $2 AND context_row.kind = 'custom' AND context_row.frozen = FALSE)
+             OR (context_row.owner_principal = $1 AND context_row.frozen = TRUE)
          )
            AND context_row.lifecycle = 'active'
            AND EXISTS (
@@ -6186,7 +6459,7 @@ mod tests {
                         "01J00000000000000000000000".into(),
                         "published fixture memory".into(),
                         serde_json::json!(["upgrade"]),
-                        serde_json::json!({"source_agent":"fixture","source_conversation":"release","origin_conversation":"release"}),
+                        serde_json::json!({"source_agent":"fixture","source_conversation":"project/localhold","origin_conversation":"release"}),
                         serde_json::json!({"type":"public"}),
                         Some("01J00000000000000000000002".into()),
                     ),
@@ -6380,6 +6653,77 @@ mod tests {
         .await;
     }
 
+    async fn assert_governed_context_migration_rejects_malformed_memory_json(prefix: &str, field: &'static str) {
+        with_isolated_postgres_schema(prefix, true, |_admin, _schema, config| async move {
+            let store = PostgresStore::open(&config, 3_usize).await.unwrap();
+            let memory = test_memory_with_content("postgres malformed legacy JSON");
+            let memory_id = store.store_impl(&memory, None).await.unwrap();
+            drop(store);
+
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let downgrade = AssertSqlSafe(
+                "DELETE FROM localhold_migrations WHERE version = 5;
+                 DROP TABLE
+                    context_audit_events,
+                    context_anchor_overrides,
+                    context_kind_policies,
+                    memory_contexts,
+                    context_relations,
+                    context_grants,
+                    context_resolver_hints,
+                    context_identities,
+                    context_aliases,
+                    contexts,
+                    context_kinds
+                 CASCADE;
+                 CREATE TABLE scope_registry (
+                    scope_key TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    description TEXT,
+                    aliases JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    matchers JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    parent TEXT,
+                    related JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    updated_at TIMESTAMPTZ NOT NULL
+                 )"
+                .to_owned(),
+            );
+            let _downgraded = sqlx_core::raw_sql::raw_sql(downgrade).execute(&scoped).await.unwrap();
+            let malformed = AssertSqlSafe(format!("UPDATE memories SET {field} = '[]'::jsonb WHERE id = $1"));
+            let _updated = sqlx::query(malformed).bind(memory_id.to_string()).execute(&scoped).await.unwrap();
+            scoped.close().await;
+
+            let error = PostgresStore::open(&config, 3_usize).await.unwrap_err();
+            assert!(error.to_string().contains(&format!("malformed {field} JSON")), "{error}");
+
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let state: (i64, bool, serde_json::Value) = sqlx_core::query_as::query_as(
+                "SELECT
+                    (SELECT COUNT(*) FROM localhold_migrations WHERE version = 5),
+                    to_regclass(format('%I.%I', current_schema(), 'contexts')) IS NOT NULL,
+                    CASE
+                        WHEN $1 = 'provenance' THEN (SELECT provenance FROM memories WHERE id = $2)
+                        ELSE (SELECT access_policy FROM memories WHERE id = $2)
+                    END",
+            )
+            .bind(field)
+            .bind(memory_id.to_string())
+            .fetch_one(&scoped)
+            .await
+            .unwrap();
+            scoped.close().await;
+            assert_eq!(state, (0_i64, false, serde_json::json!([])));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    async fn governed_context_migration_rejects_malformed_memory_json_without_partial_migration() {
+        assert_governed_context_migration_rejects_malformed_memory_json("localhold_context_v5_malformed_provenance", "provenance").await;
+        assert_governed_context_migration_rejects_malformed_memory_json("localhold_context_v5_malformed_access", "access_policy").await;
+    }
+
     #[tokio::test]
     #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
     #[expect(
@@ -6388,11 +6732,22 @@ mod tests {
     )]
     async fn governed_context_migration_canonicalizes_legacy_metadata_scope() {
         type PreservedLegacyContext = (String, String, Option<String>, i64, i64);
+        type MigratedArtifacts = (
+            DateTime<Utc>,
+            DateTime<Utc>,
+            DateTime<Utc>,
+            DateTime<Utc>,
+            DateTime<Utc>,
+            DateTime<Utc>,
+            Option<String>,
+            i64,
+        );
 
         with_isolated_postgres_schema("localhold_context_v5_canonical_scope", true, |_admin, _schema, config| async move {
             let store = PostgresStore::open(&config, 3_usize).await.unwrap();
             let mut memory = test_memory_with_content("postgres context migration canonical scope");
             memory.provenance.source_conversation = Some(" PROJECT/FOO ".into());
+            memory.provenance.origin_conversation = Some(" Project/Foo Original ".into());
             let metadata = MemoryMetadata {
                 memory_id: memory.id,
                 scope_key: Some(" PROJECT/FOO ".into()),
@@ -6403,6 +6758,46 @@ mod tests {
                 schema_version: 1,
             };
             let memory_id = store.store_with_metadata_impl(&memory, None, None, &metadata).await.unwrap();
+            let mut private_memory = test_memory_with_content("postgres raw private context migration");
+            private_memory.provenance.source_agent = Some("raw-owner".into());
+            private_memory.provenance.source_conversation = Some(" PRIVATE/RAW ".into());
+            private_memory.access_policy = AccessPolicy::Restricted {
+                allowed: vec!["raw-collaborator".into(), LEGACY_ALL_PRINCIPALS_GRANT.into()],
+            };
+            let private_metadata = MemoryMetadata {
+                memory_id: private_memory.id,
+                scope_key: Some(" PRIVATE/RAW ".into()),
+                summary: None,
+                agent_label: None,
+                created_by_principal: Some("raw-owner".into()),
+                quality_flags: Vec::new(),
+                schema_version: 1,
+            };
+            let private_memory_id = store.store_with_metadata_impl(&private_memory, None, None, &private_metadata).await.unwrap();
+            let mut private_variant = test_memory_with_content("postgres raw private lowercase variant");
+            private_variant.provenance.source_agent = Some("raw-owner".into());
+            private_variant.provenance.source_conversation = Some("private/raw".into());
+            private_variant.access_policy = AccessPolicy::Restricted {
+                allowed: vec!["raw-collaborator".into()],
+            };
+            let private_variant_id = store.store_impl(&private_variant, None).await.unwrap();
+            let mut sentinel_owner_memory = test_memory_with_content("postgres raw sentinel-owner context migration");
+            sentinel_owner_memory.provenance.source_agent = Some(LEGACY_ALL_PRINCIPALS_GRANT.into());
+            sentinel_owner_memory.provenance.source_conversation = Some("sentinel/raw".into());
+            sentinel_owner_memory.access_policy = AccessPolicy::Restricted { allowed: Vec::new() };
+            let sentinel_owner_memory_id = store.store_impl(&sentinel_owner_memory, None).await.unwrap();
+            let mut unresolved_memory = test_memory_with_content("postgres unresolved context migration");
+            unresolved_memory.provenance.source_conversation = Some(" Inbox/Unresolved ".into());
+            let unresolved_metadata = MemoryMetadata {
+                memory_id: unresolved_memory.id,
+                scope_key: Some(" Inbox/Unresolved ".into()),
+                summary: None,
+                agent_label: None,
+                created_by_principal: Some("postgres-test-agent".into()),
+                quality_flags: Vec::new(),
+                schema_version: 1,
+            };
+            let unresolved_memory_id = store.store_with_metadata_impl(&unresolved_memory, None, None, &unresolved_metadata).await.unwrap();
             drop(store);
 
             let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
@@ -6434,7 +6829,12 @@ mod tests {
                  INSERT INTO scope_registry (
                     scope_key, display_name, description, aliases, matchers, parent, related, updated_at
                  ) VALUES (
-                    'project/Foo', 'Foo', NULL, '[]'::jsonb, '[]'::jsonb, NULL, '[]'::jsonb, NOW()
+                    'project/Foo', 'Foo', NULL,
+                    '[\"foo-alias\"]'::jsonb,
+                    '[\"/srv/foo\"]'::jsonb,
+                    ' Inbox/Unresolved ',
+                    '[\"INBOX/UNRESOLVED\"]'::jsonb,
+                    '2001-01-01T00:00:00Z'::timestamptz
                  )"
                 .to_owned(),
             );
@@ -6470,11 +6870,14 @@ mod tests {
             scoped.close().await;
 
             let migrated = PostgresStore::open(&config, 3_usize).await.unwrap();
-            let canonical: (String, String) = sqlx_core::query_as::query_as(
-                "SELECT metadata.scope_key, context_row.context_key
+            let canonical: (String, String, String, String) = sqlx_core::query_as::query_as(
+                "SELECT metadata.scope_key, context_row.context_key,
+                        memory.provenance->>'source_conversation',
+                        memory.provenance->>'origin_conversation'
                  FROM memory_metadata AS metadata
                  JOIN memory_contexts AS membership ON membership.memory_id = metadata.memory_id
                  JOIN contexts AS context_row ON context_row.id = membership.context_id
+                 JOIN memories AS memory ON memory.id = metadata.memory_id
                  WHERE metadata.memory_id = $1 AND membership.ordinal = 0",
             )
             .bind(memory_id.to_string())
@@ -6482,7 +6885,86 @@ mod tests {
             .await
             .unwrap();
 
-            assert_eq!(canonical, ("project/Foo".into(), "project/Foo".into()));
+            assert_eq!(
+                canonical,
+                ("project/Foo".into(), "project/Foo".into(), "project/Foo".into(), " Project/Foo Original ".into(),)
+            );
+            let migrated_artifacts: MigratedArtifacts = sqlx_core::query_as::query_as(
+                "SELECT context_row.created_at,
+                            context_row.updated_at,
+                            (SELECT MIN(created_at) FROM context_grants WHERE context_id = context_row.id),
+                            (SELECT MIN(created_at) FROM context_aliases WHERE context_id = context_row.id),
+                            (SELECT MIN(created_at) FROM context_resolver_hints WHERE context_id = context_row.id),
+                            (SELECT MIN(timestamp) FROM context_audit_events WHERE context_id = context_row.id),
+                            context_row.parent_id,
+                            (SELECT COUNT(*) FROM context_relations WHERE from_context_id = context_row.id)
+                     FROM contexts AS context_row
+                     WHERE context_row.context_key = 'project/Foo'",
+            )
+            .fetch_one(migrated.pool())
+            .await
+            .unwrap();
+            assert_eq!(migrated_artifacts.0, migrated_artifacts.1);
+            assert!(
+                [migrated_artifacts.2, migrated_artifacts.3, migrated_artifacts.4, migrated_artifacts.5]
+                    .into_iter()
+                    .all(|artifact_time| artifact_time > migrated_artifacts.1)
+            );
+            assert!(migrated_artifacts.6.is_none());
+            assert_eq!(migrated_artifacts.7, 0_i64);
+            let private_context: (String, String) = sqlx_core::query_as::query_as(
+                "SELECT context_row.context_key, memory.provenance->>'source_conversation'
+                 FROM memory_contexts AS membership
+                 JOIN contexts AS context_row ON context_row.id = membership.context_id
+                 JOIN memories AS memory ON memory.id = membership.memory_id
+                 WHERE membership.memory_id = $1",
+            )
+            .bind(private_memory_id.to_string())
+            .fetch_one(migrated.pool())
+            .await
+            .unwrap();
+            assert_eq!(private_context, ("PRIVATE/RAW".into(), "PRIVATE/RAW".into()));
+            let private_variant_scope: String = sqlx::query_scalar("SELECT provenance->>'source_conversation' FROM memories WHERE id = $1")
+                .bind(private_variant_id.to_string())
+                .fetch_one(migrated.pool())
+                .await
+                .unwrap();
+            assert_eq!(private_variant_scope, "PRIVATE/RAW");
+            let private_grants: Vec<String> = sqlx::query_scalar(
+                "SELECT grant_row.grantee_principal
+                 FROM context_grants AS grant_row
+                 JOIN contexts AS context_row ON context_row.id = grant_row.context_id
+                 WHERE context_row.context_key = 'PRIVATE/RAW'
+                 ORDER BY grant_row.grantee_principal",
+            )
+            .fetch_all(migrated.pool())
+            .await
+            .unwrap();
+            assert_eq!(private_grants, vec!["raw-collaborator", "raw-owner"]);
+            let sentinel_grants: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*)
+                 FROM context_grants AS grant_row
+                 JOIN memory_contexts AS membership ON membership.context_id = grant_row.context_id
+                 WHERE membership.memory_id = $1",
+            )
+            .bind(sentinel_owner_memory_id.to_string())
+            .fetch_one(migrated.pool())
+            .await
+            .unwrap();
+            assert_eq!(sentinel_grants, 0_i64);
+            let unresolved: (String, String, i64) = sqlx_core::query_as::query_as(
+                "SELECT metadata.scope_key,
+                        memory.provenance->>'source_conversation',
+                        (SELECT COUNT(*) FROM memory_contexts AS membership WHERE membership.memory_id = memory.id)
+                 FROM memories AS memory
+                 JOIN memory_metadata AS metadata ON metadata.memory_id = memory.id
+                 WHERE memory.id = $1",
+            )
+            .bind(unresolved_memory_id.to_string())
+            .fetch_one(migrated.pool())
+            .await
+            .unwrap();
+            assert_eq!(unresolved, (UNRESOLVED_CONTEXT_KEY.into(), UNRESOLVED_CONTEXT_KEY.into(), 0_i64));
             let preserved: PreservedLegacyContext = sqlx_core::query_as::query_as(
                 "SELECT context_row.context_key,
                         context_row.display_name,
@@ -6513,6 +6995,54 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(empty_description.as_deref(), Some(""));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with pgvector; run just test-postgres-smoke with Podman or another container runtime"]
+    async fn populated_legacy_postgres_without_scope_registry_backfills_raw_scopes() {
+        with_isolated_postgres_schema("localhold_context_missing_registry", true, |_admin, _schema, config| async move {
+            let store = PostgresStore::open(&config, 3_usize).await.unwrap();
+            let memory = test_memory_with_content("populated legacy postgres without registry");
+            let memory_id = store.store(&memory, None).await.unwrap();
+            drop(store);
+
+            let scoped = PgPoolOptions::new().max_connections(1).connect(&config.url).await.unwrap();
+            let downgrade = AssertSqlSafe(
+                "DELETE FROM localhold_migrations WHERE version IN (4, 5);
+                 DROP TABLE
+                    context_audit_events,
+                    context_anchor_overrides,
+                    context_kind_policies,
+                    memory_contexts,
+                    context_relations,
+                    context_grants,
+                    context_resolver_hints,
+                    context_identities,
+                    context_aliases,
+                    contexts,
+                    context_kinds
+                 CASCADE"
+                    .to_owned(),
+            );
+            let _downgraded = sqlx_core::raw_sql::raw_sql(downgrade).execute(&scoped).await.unwrap();
+            scoped.close().await;
+
+            let migrated = PostgresStore::open(&config, 3_usize).await.unwrap();
+            let context: (String, String) = sqlx_core::query_as::query_as(
+                "SELECT context_row.context_key, grant_row.grantee_principal
+                 FROM memory_contexts AS membership
+                 JOIN contexts AS context_row ON context_row.id = membership.context_id
+                 JOIN context_grants AS grant_row ON grant_row.context_id = context_row.id
+                 WHERE membership.memory_id = $1",
+            )
+            .bind(memory_id.to_string())
+            .fetch_one(migrated.pool())
+            .await
+            .unwrap();
+            assert_eq!(memory.provenance.source_agent.as_deref(), Some(context.1.as_str()));
+            assert_eq!(memory.provenance.source_conversation.as_deref(), Some(context.0.as_str()));
         })
         .await;
     }
@@ -7453,15 +7983,18 @@ mod tests {
 
         let scope = format!("postgres-neighbor/{}", MemoryId::new());
         store
-            .register_scope_impl(ScopeDefinition {
-                scope_key: scope.clone(),
-                display_name: scope.clone(),
-                description: None,
-                aliases: Vec::new(),
-                matchers: Vec::new(),
-                parent: None,
-                related: Vec::new(),
-            })
+            .register_scope_for_principal_impl(
+                ScopeDefinition {
+                    scope_key: scope.clone(),
+                    display_name: scope.clone(),
+                    description: None,
+                    aliases: Vec::new(),
+                    matchers: Vec::new(),
+                    parent: None,
+                    related: Vec::new(),
+                },
+                "postgres-test-agent",
+            )
             .await
             .unwrap();
         let context_id = store
@@ -7512,12 +8045,16 @@ mod tests {
         assert!(!scoped_ids.contains(&superseded_id));
         assert!(scoped.iter().all(|entry| entry.embedding.is_some()));
 
-        let neighbors = store.find_embedding_neighbors_impl(&[0.0_f32, 0.0_f32, 0.0_f32], 0.2_f64, 10_usize).await.unwrap();
+        let candidate_ids = [base_id, neighbor_id, superseded_id];
+        let neighbors = store
+            .find_embedding_neighbors_impl(&base_id, &candidate_ids, &[0.0_f32, 0.0_f32, 0.0_f32], 0.2_f64, 10_usize)
+            .await
+            .unwrap();
         assert!(neighbors.iter().any(|(id, distance)| *id == neighbor_id && *distance <= 0.2_f64));
         assert!(!neighbors.iter().any(|(id, _)| *id == superseded_id));
         assert!(
             store
-                .find_embedding_neighbors_impl(&[0.0_f32, 0.0_f32, 0.0_f32], 0.2_f64, 0_usize)
+                .find_embedding_neighbors_impl(&base_id, &candidate_ids, &[0.0_f32, 0.0_f32, 0.0_f32], 0.2_f64, 0_usize)
                 .await
                 .unwrap()
                 .is_empty()
@@ -7530,6 +8067,7 @@ mod tests {
         let store = open_postgres_smoke_store().await;
         let mut memory = test_memory_with_content("postgres writable memory");
         memory.tags = vec!["postgres-write".into()];
+        memory.provenance.source_conversation = Some(UNRESOLVED_CONTEXT_KEY.into());
         let id = store.store_impl(&memory, Some(&[0.1_f32, 0.2_f32, 0.3_f32])).await.unwrap();
 
         let denied = store
@@ -7546,14 +8084,12 @@ mod tests {
         assert_eq!(denied.outcome, WriteOutcome::Denied);
 
         let updated_entity = Entity::new("Updated Entity", "test").unwrap();
-        let new_scope = format!("postgres-updated/{}", MemoryId::new());
         let updated = store
             .update_authorized_impl(
                 &id,
                 &MemoryUpdate {
                     content: Some("postgres updated content".into()),
                     tags: Some(vec!["postgres-updated".into()]),
-                    source_conversation: Some(new_scope.clone()),
                     entities: Some(vec![updated_entity.clone()]),
                     ..MemoryUpdate::default()
                 },
@@ -7567,7 +8103,7 @@ mod tests {
         let fetched = store.get_impl(&id, Some("postgres-test-agent")).await.unwrap().unwrap();
         assert_eq!(fetched.content, "postgres updated content");
         assert_eq!(fetched.tags, vec!["postgres-updated"]);
-        assert_eq!(fetched.provenance.source_conversation.as_deref(), Some(new_scope.as_str()));
+        assert_eq!(fetched.provenance.source_conversation.as_deref(), Some(UNRESOLVED_CONTEXT_KEY));
         assert_eq!(fetched.entities, vec![updated_entity]);
         assert!(!fetched.has_embedding, "content updates should clear stale embeddings");
 
@@ -7622,10 +8158,12 @@ mod tests {
                 MemoryWithEmbedding {
                     memory: batch_one.clone(),
                     embedding: None,
+                    context_ids: Vec::new(),
                 },
                 MemoryWithEmbedding {
                     memory: batch_two.clone(),
                     embedding: Some(vec![0.4_f32, 0.5_f32, 0.6_f32]),
+                    context_ids: Vec::new(),
                 },
             ])
             .await
@@ -7689,10 +8227,12 @@ mod tests {
                     MemoryWithEmbedding {
                         memory: batch_new.clone(),
                         embedding: None,
+                        context_ids: Vec::new(),
                     },
                     MemoryWithEmbedding {
                         memory: batch_plain.clone(),
                         embedding: None,
+                        context_ids: Vec::new(),
                     },
                 ],
                 &[Some(batch_old.id), None],
@@ -7752,6 +8292,7 @@ mod tests {
                 &[MemoryWithEmbedding {
                     memory: new_memory.clone(),
                     embedding: None,
+                    context_ids: Vec::new(),
                 }],
                 &[Some(MemoryId::new())],
             )
@@ -7803,17 +8344,58 @@ mod tests {
             related: vec!["postgres-related".into()],
         };
         store.register_scope_impl(scope.clone()).await.unwrap();
-        assert_eq!(store.list_scopes_impl().await.unwrap(), vec![scope]);
+        assert_eq!(store.list_scopes_impl().await.unwrap(), vec![scope.clone()]);
+        let governance: (String, bool, i64) = sqlx_core::query_as::query_as(
+            "SELECT context_row.owner_principal, context_row.frozen,
+                    (SELECT COUNT(*) FROM context_grants AS grant_row
+                     WHERE grant_row.context_id = context_row.id)
+             FROM contexts AS context_row
+             WHERE context_row.context_key = $1",
+        )
+        .bind(&scope.scope_key)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(governance, (OPERATOR_PRINCIPAL.into(), false, 0_i64));
     }
 
     #[tokio::test]
     #[ignore = "requires Docker or local PostgreSQL with pgvector; set LOCALHOLD_POSTGRES_URL if not using the default smoke URL"]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the PostgreSQL metadata migration regression covers canonical context, unresolved, idempotence, and rollback cases together"
+    )]
     async fn metadata_and_migration_against_postgres() {
         let store = open_postgres_smoke_store().await;
         reset_postgres_smoke_database(&store).await;
+        let scope_key = format!("postgres-migration/{}", MemoryId::new());
+        store
+            .register_scope_for_principal_impl(ScopeDefinition::new(scope_key.clone(), "Postgres migration"), "postgres-test-agent")
+            .await
+            .unwrap();
+        let context_id = store
+            .list_context_records("postgres-test-agent", false, 0_usize, 10_usize)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|record| record.context.key == scope_key)
+            .unwrap()
+            .context
+            .id;
         let memory = test_memory_with_content("postgres metadata memory");
         let id = store.store_impl(&memory, None).await.unwrap();
-        let scope_key = format!("postgres-migration/{}", MemoryId::new());
+        assert_eq!(
+            store
+                .replace_memory_contexts(
+                    &id,
+                    &[context_id],
+                    "postgres-test-agent",
+                    &ContextAuditDraft::new("postgres-test-agent", "postgres_metadata_test_membership").with_context(context_id),
+                )
+                .await
+                .unwrap(),
+            WriteOutcome::Applied
+        );
 
         let metadata = MemoryMetadata {
             memory_id: id,
@@ -7850,6 +8432,18 @@ mod tests {
         let mut registered_memory = test_memory_with_content("postgres registered migration memory");
         registered_memory.provenance.source_conversation = Some(scope_key.clone());
         let registered_id = store.store_impl(&registered_memory, None).await.unwrap();
+        assert_eq!(
+            store
+                .replace_memory_contexts(
+                    &registered_id,
+                    &[context_id],
+                    "postgres-test-agent",
+                    &ContextAuditDraft::new("postgres-test-agent", "postgres_migration_candidate_membership").with_context(context_id),
+                )
+                .await
+                .unwrap(),
+            WriteOutcome::Applied
+        );
         let mut unresolved_memory = test_memory_with_content("fn postgres_code_dump() {}");
         unresolved_memory.provenance.source_conversation = None;
         let unresolved_id = store.store_impl(&unresolved_memory, None).await.unwrap();
@@ -7916,10 +8510,12 @@ mod tests {
             MemoryWithEmbedding {
                 memory: first.clone(),
                 embedding: None,
+                context_ids: Vec::new(),
             },
             MemoryWithEmbedding {
                 memory: second.clone(),
                 embedding: None,
+                context_ids: Vec::new(),
             },
         ];
         let metadata = vec![

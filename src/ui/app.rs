@@ -1186,8 +1186,13 @@ where
             self.status = Status::NotHeld("context editing requires a configured principal".into());
             return;
         };
-        if self.context_manager.as_ref().is_some_and(|manager| manager.pane == ContextManagerPane::OperatorPolicy) && principal != OPERATOR_PRINCIPAL {
-            self.status = Status::NotHeld(format!("operator defaults require --principal {OPERATOR_PRINCIPAL}"));
+        if self
+            .context_manager
+            .as_ref()
+            .is_some_and(|manager| matches!(manager.pane, ContextManagerPane::Kinds | ContextManagerPane::OperatorPolicy))
+            && principal != OPERATOR_PRINCIPAL
+        {
+            self.status = Status::NotHeld(format!("operator context controls require --principal {OPERATOR_PRINCIPAL}"));
             return;
         }
         let Some(manager) = self.context_manager.as_mut() else { return };
@@ -2751,7 +2756,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn context_manager_rejects_operator_policy_edit_for_non_operator_principal() {
+    async fn context_manager_rejects_operator_controls_for_non_operator_principal() {
         let store = SqliteStore::in_memory().unwrap();
         let id = ContextId::new();
         let _created = store
@@ -2768,12 +2773,12 @@ mod tests {
         app.focus = Focus::Contexts;
         app.context_cursor = 1;
         app.on_event(press(KeyCode::Char('c'))).await;
-        app.context_manager.as_mut().unwrap().pane = ContextManagerPane::OperatorPolicy;
-
-        app.on_event(press(KeyCode::Char('e'))).await;
-
-        assert_eq!(app.mode, Mode::ContextManager);
-        assert!(matches!(&app.status, Status::NotHeld(message) if message.contains("principal operator")));
+        for pane in [ContextManagerPane::OperatorPolicy, ContextManagerPane::Kinds] {
+            app.context_manager.as_mut().unwrap().pane = pane;
+            app.on_event(press(KeyCode::Char('e'))).await;
+            assert_eq!(app.mode, Mode::ContextManager);
+            assert!(matches!(&app.status, Status::NotHeld(message) if message.contains("principal operator")));
+        }
     }
 
     #[tokio::test]

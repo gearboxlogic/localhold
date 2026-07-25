@@ -254,6 +254,7 @@ mod tests {
                 was_redacted: false,
             },
             embedding,
+            context_ids: Vec::new(),
         }
     }
 

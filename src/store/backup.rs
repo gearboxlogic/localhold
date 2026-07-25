@@ -932,7 +932,8 @@ mod tests {
     use super::*;
     use crate::{
         clock::MockClock,
-        store::{MemoryAdmin as _, MemoryWriter as _},
+        context::ContextAuditDraft,
+        store::{ContextReader as _, ContextWriter as _, MemoryAdmin as _, MemoryWriter as _},
         types::{AccessPolicy, AuditAction, AuditDraft, Entity, Memory, MemoryMetadata, Provenance, ScopeDefinition, WriteOutcome},
     };
 
@@ -971,6 +972,30 @@ mod tests {
     async fn seed_database(path: &Path, label: &str, profile: &EmbeddingProfile) -> SqliteStore {
         let store = SqliteStore::open(path, DIMENSIONS).unwrap();
         store.verify_embedding_profile(profile).await.unwrap();
+        store
+            .register_scope_for_principal(
+                ScopeDefinition {
+                    scope_key: "scope/test".into(),
+                    display_name: "Test scope".into(),
+                    description: Some("backup fixture".into()),
+                    aliases: vec!["fixture".into()],
+                    matchers: vec!["/tmp/fixture".into()],
+                    parent: None,
+                    related: Vec::new(),
+                },
+                "owner",
+            )
+            .await
+            .unwrap();
+        let context_id = store
+            .list_context_records("owner", false, 0_usize, 10_usize)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|record| record.context.key == "scope/test")
+            .unwrap()
+            .context
+            .id;
 
         let provenance = Provenance::new_for_test(Some("owner".into()), Some("scope/test".into()), Some("origin/test".into()));
         let mut memory = Memory::new_for_test(format!("{label} live memory"), vec!["backup".into()], provenance.clone(), AccessPolicy::Public);
@@ -982,6 +1007,18 @@ mod tests {
             details: Some(serde_json::json!({"fixture": label})),
         };
         let memory_id = store.store_audited(&memory, Some(&[0.1_f32, 0.2_f32, 0.3_f32]), &audit).await.unwrap();
+        assert_eq!(
+            store
+                .replace_memory_contexts(
+                    &memory_id,
+                    &[context_id],
+                    "owner",
+                    &ContextAuditDraft::new("owner", "backup_fixture_membership").with_context(context_id),
+                )
+                .await
+                .unwrap(),
+            WriteOutcome::Applied
+        );
         store
             .upsert_metadata(MemoryMetadata {
                 memory_id,
@@ -991,18 +1028,6 @@ mod tests {
                 created_by_principal: Some("owner".into()),
                 quality_flags: vec!["fixture".into()],
                 schema_version: 1,
-            })
-            .await
-            .unwrap();
-        store
-            .register_scope(ScopeDefinition {
-                scope_key: "scope/test".into(),
-                display_name: "Test scope".into(),
-                description: Some("backup fixture".into()),
-                aliases: vec!["fixture".into()],
-                matchers: vec!["/tmp/fixture".into()],
-                parent: None,
-                related: Vec::new(),
             })
             .await
             .unwrap();

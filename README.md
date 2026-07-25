@@ -140,11 +140,12 @@ diagnostics.
 
 ## MCP Tools
 
-The everyday API consists of `brief`, `recall`, `read`, `read_many`,
-`remember`, `remember_many`, `handoff`, `revise`, and `forget`. Maintenance and
-migration operations use explicit `admin_*` tools, which are removed from
-discovery and dispatch unless an operator enables them for a dedicated
-maintenance instance.
+The everyday API consists of `brief`, `context_resolve`, `context_create`,
+`recall`, `read`, `read_many`, `remember`, `remember_many`, `handoff`, `revise`,
+and `forget`. Governed writes require a resolvable context, a policy default, or
+explicit unresolved deferral. Maintenance and migration operations use
+explicit `admin_*` tools, which are removed from discovery and dispatch unless
+an operator enables them for a dedicated maintenance instance.
 
 See [Agent API](docs/agent-api.md) for tool semantics,
 [Architecture](docs/architecture.md) for the system design,

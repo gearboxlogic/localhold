@@ -8,7 +8,7 @@ use chrono::Utc;
 use localhold::{
     clock::MockClock,
     config::{AnonymousPolicy, LimitsConfig, SearchConfig},
-    context::{ContextAuditDraft, ContextCreateDraft, ContextId, ContextKind, ContextKindPolicy, ContextKindPolicyDraft, ContextLifecycle, ContextPolicyLayer},
+    context::{ContextAuditDraft, ContextCreateDraft, ContextId, ContextKind, ContextKindPolicy, ContextKindPolicyDraft, ContextLifecycle, ContextPolicyLayer, OPERATOR_PRINCIPAL},
     embedding::NoopEmbedding,
     engine::LocalHoldEngine,
     reranker::{RerankerError, RerankerProvider, RerankerScore},
@@ -16,7 +16,7 @@ use localhold::{
         LocalHoldServer,
         params::{
             AdminListResponse, AdminMigrateMetadataResponse, AdminMigrationReportResponse, BriefResponse, BulkDeleteResponse, BulkUpdateResponse, ConsolidateResponse,
-            ContextCreateResponse, ContextResolveResponse, CountResponse, HandoffResponse, HistoryResponse, MatchAction, MatchQuality, OperationStatus, QualityWarning,
+            ContextCreateResponse, ContextResolveResponse, CountResponse, HandoffResponse, HistoryResponse, MatchAction, MatchQuality, NextAction, OperationStatus, QualityWarning,
             QualityWarningSeverity, ReadManyResponse, ReadManyStatus, ReadResponse, ReassignScopeResponse, RecallResponse, RecommendedActionPriority, RecommendedActionTool,
             RememberManyResponse, RememberResponse, ScopeResolvedBy, ToolErrorCode, ToolErrorResponse, UpdateResponse,
         },
@@ -777,7 +777,7 @@ async fn destructive_admin_filters_reject_unknown_legacy_scopes_without_broadeni
         &client,
         "admin_bulk_delete",
         json!({"scope": "project/filter-typo"}),
-        "legacy scope has no unique governed context",
+        "explicit legacy scope does not resolve",
     )
     .await;
     assert_invalid_params_contains(
@@ -787,21 +787,21 @@ async fn destructive_admin_filters_reject_unknown_legacy_scopes_without_broadeni
             "scopes": ["project/filter-safety", "project/filter-typo"],
             "set_tags": ["unsafe"]
         }),
-        "legacy scope has no unique governed context",
+        "explicit legacy scope does not resolve",
     )
     .await;
     assert_invalid_params_contains(
         &client,
         "admin_bulk_delete",
         json!({"scope": "inbox/unresolved"}),
-        "legacy scope has no unique governed context",
+        "compatibility label for contextless memories",
     )
     .await;
     assert_invalid_params_contains(
         &client,
         "admin_bulk_update",
         json!({"scope": "inbox/unresolved", "set_tags": ["unsafe"]}),
-        "legacy scope has no unique governed context",
+        "compatibility label for contextless memories",
     )
     .await;
 
@@ -810,7 +810,7 @@ async fn destructive_admin_filters_reject_unknown_legacy_scopes_without_broadeni
 }
 
 #[tokio::test]
-async fn unscoped_bulk_mutations_include_explicitly_deferred_contextless_memories() {
+async fn omitted_and_empty_context_bulk_mutations_include_explicitly_deferred_memories() {
     let client = setup_noop_server().await;
     let update_target: RememberResponse = call_tool(
         &client,
@@ -838,19 +838,172 @@ async fn unscoped_bulk_mutations_include_explicitly_deferred_contextless_memorie
         "admin_bulk_update",
         json!({
             "tags": ["contextless-update"],
+            "context": {},
             "set_tags": ["contextless-updated"]
         }),
     )
     .await;
     assert_eq!(updated.matched, 1);
     assert_eq!(updated.updated, 1);
+    assert_warning_codes(&updated.operation.warnings, &["contextless_maintenance_scope"]);
     let read: ReadResponse = call_tool(&client, "read", json!({"id": update_target.id})).await;
     assert_eq!(read.memory.tags, ["contextless-updated"]);
 
     let deleted: BulkDeleteResponse = call_tool(&client, "admin_bulk_delete", json!({"tags": ["contextless-delete"]})).await;
     assert_eq!(deleted.matched, 1);
     assert_eq!(deleted.deleted, 1);
+    assert_warning_codes(&deleted.operation.warnings, &["contextless_maintenance_scope"]);
     assert_invalid_params_contains(&client, "read", json!({"id": delete_target.id}), "memory not found").await;
+}
+
+#[tokio::test]
+async fn required_context_policy_cannot_be_bypassed_by_explicit_deferral() {
+    for (layer, policy_principal, actor) in [(ContextPolicyLayer::Principal, "stdio", "stdio"), (ContextPolicyLayer::Operator, "", OPERATOR_PRINCIPAL)] {
+        let (client, server) = setup_server_with(Arc::new(NoopEmbedding::new())).await;
+        let mut policy = ContextKindPolicy::default();
+        policy.required = Some(true);
+        server
+            .store()
+            .upsert_context_kind_policy(
+                &ContextKindPolicyDraft::new(layer, policy_principal, ContextKind::new(ContextKind::PROJECT).unwrap(), policy),
+                actor,
+                &ContextAuditDraft::new(actor, "required_context_policy_test"),
+            )
+            .await
+            .unwrap();
+
+        let error = call_tool_error(
+            &client,
+            "remember",
+            json!({
+                "content": format!("required policy deferral attempt for {layer:?}"),
+                "context": {"allow_unresolved": true}
+            }),
+        )
+        .await;
+        assert_eq!(parse_tool_error(&error).error.code, ToolErrorCode::ContextRequired);
+    }
+}
+
+#[tokio::test]
+async fn required_policy_default_is_applied_even_when_deferral_is_requested() {
+    let (client, server) = setup_server_with(Arc::new(NoopEmbedding::new())).await;
+    let context_id = ContextId::new();
+    let _context = server
+        .store()
+        .create_context(
+            &ContextCreateDraft::private(
+                context_id,
+                ContextKind::new(ContextKind::PROJECT).unwrap(),
+                "project/required-default",
+                "Required default",
+                "stdio",
+            ),
+            &ContextAuditDraft::new("stdio", "required_default_created").with_context(context_id),
+        )
+        .await
+        .unwrap();
+    let mut policy = ContextKindPolicy::default();
+    policy.required = Some(true);
+    policy.default_context_id = Some(context_id);
+    server
+        .store()
+        .upsert_context_kind_policy(
+            &ContextKindPolicyDraft::new(ContextPolicyLayer::Principal, "stdio", ContextKind::new(ContextKind::PROJECT).unwrap(), policy),
+            "stdio",
+            &ContextAuditDraft::new("stdio", "required_default_policy").with_context(context_id),
+        )
+        .await
+        .unwrap();
+
+    let remembered: RememberResponse = call_tool(
+        &client,
+        "remember",
+        json!({
+            "content": "required default wins over requested deferral",
+            "context": {"allow_unresolved": true}
+        }),
+    )
+    .await;
+
+    assert!(!remembered.unresolved_scope);
+    assert_eq!(remembered.contexts.iter().map(|context| context.id).collect::<Vec<_>>(), [context_id]);
+}
+
+#[tokio::test]
+async fn empty_context_envelopes_match_omitted_broad_read_semantics() {
+    let (client, server) = setup_server_with_auth(Arc::new(NoopEmbedding::new()), Some("viewer"), AnonymousPolicy::DenyAll).await;
+    let context_id = ContextId::new();
+    let _context = server
+        .store()
+        .create_context(
+            &ContextCreateDraft::private(
+                context_id,
+                ContextKind::new(ContextKind::PROJECT).unwrap(),
+                "project/empty-envelope",
+                "Empty envelope",
+                "owner",
+            ),
+            &ContextAuditDraft::new("owner", "empty_envelope_context_created").with_context(context_id),
+        )
+        .await
+        .unwrap();
+    server
+        .store()
+        .grant_context_use(
+            &context_id,
+            "viewer",
+            "owner",
+            &ContextAuditDraft::new("owner", "empty_envelope_context_granted").with_context(context_id),
+        )
+        .await
+        .unwrap();
+    let memory = Memory::new_for_test(
+        "emptyenvelopeneedle redacted broad result".into(),
+        vec!["empty-envelope".into()],
+        Provenance::new_for_test(Some("owner".into()), Some("project/empty-envelope".into()), Some("historical/origin".into())),
+        AccessPolicy::Redacted {
+            visible_fields: vec![localhold::types::RedactableField::Content, localhold::types::RedactableField::Tags],
+        },
+    );
+    let memory_id = server.store().store(&memory, None).await.unwrap();
+    let mut membership_audit = ContextAuditDraft::new("owner", "empty_envelope_membership").with_context(context_id);
+    membership_audit.memory_id = Some(memory_id);
+    let _outcome = server.store().replace_memory_contexts(&memory_id, &[context_id], "owner", &membership_audit).await.unwrap();
+
+    let omitted_recall: RecallResponse = call_tool(&client, "recall", json!({"query": "emptyenvelopeneedle", "search_mode": "text"})).await;
+    let empty_recall: RecallResponse = call_tool(&client, "recall", json!({"query": "emptyenvelopeneedle", "search_mode": "text", "context": {}})).await;
+    assert!(omitted_recall.context_resolution.broad_search);
+    assert!(empty_recall.context_resolution.broad_search);
+    assert!(omitted_recall.results.iter().any(|card| card.id == memory_id));
+    assert!(empty_recall.results.iter().any(|card| card.id == memory_id));
+
+    let explicit_recall: RecallResponse = call_tool(
+        &client,
+        "recall",
+        json!({
+            "query": "emptyenvelopeneedle",
+            "search_mode": "text",
+            "context": {"refs": [{"id": context_id}]}
+        }),
+    )
+    .await;
+    assert!(
+        explicit_recall.results.iter().all(|card| card.id != memory_id),
+        "an actual membership filter must retain the redaction-oracle guard"
+    );
+
+    let omitted_brief: BriefResponse = call_tool(&client, "brief", json!({"query": "emptyenvelopeneedle"})).await;
+    let empty_brief: BriefResponse = call_tool(&client, "brief", json!({"query": "emptyenvelopeneedle", "context": {}})).await;
+    assert!(omitted_brief.context_resolution.broad_search);
+    assert!(empty_brief.context_resolution.broad_search);
+    assert!(omitted_brief.relevant.iter().any(|card| card.id == memory_id));
+    assert!(empty_brief.relevant.iter().any(|card| card.id == memory_id));
+
+    let omitted_admin: AdminListResponse = call_tool(&client, "admin_list", json!({"tags": ["empty-envelope"]})).await;
+    let empty_admin: AdminListResponse = call_tool(&client, "admin_list", json!({"tags": ["empty-envelope"], "context": {}})).await;
+    assert!(omitted_admin.memories.iter().any(|card| card.id == memory_id));
+    assert!(empty_admin.memories.iter().any(|card| card.id == memory_id));
 }
 
 #[tokio::test]
@@ -996,7 +1149,7 @@ async fn destructive_admin_alias_filters_fail_closed_when_policy_rejects_the_con
         &client,
         "admin_bulk_delete",
         json!({"scope": "filter-alias"}),
-        "legacy scope has no unique governed context",
+        "effective policy denies context kind project",
     )
     .await;
     let read: ReadResponse = call_tool(&client, "read", json!({"id": remembered.id})).await;
@@ -1108,14 +1261,15 @@ async fn admin_count_redacts_private_context_keys_on_public_memories() {
     assert_eq!(membership, localhold::types::WriteOutcome::Applied);
 
     let read: ReadResponse = call_tool(&client, "read", json!({"id": id})).await;
-    assert_eq!(read.scope.as_deref(), Some("inbox/unresolved"));
+    assert_eq!(read.scope, None);
+    assert!(!read.unresolved_scope);
     assert!(read.contexts.is_empty());
 
     let count: CountResponse = call_tool(&client, "admin_count", json!({})).await;
 
     assert_eq!(count.scope_count, 1);
     assert_eq!(count.by_scope.len(), 1);
-    assert_eq!(count.by_scope[0].scope, "inbox/unresolved");
+    assert_eq!(count.by_scope[0].scope, "[redacted]");
     assert_eq!(count.by_scope[0].count, 1);
 }
 
@@ -1810,6 +1964,45 @@ async fn remember_warns_when_duplicate_candidates_exist() {
 }
 
 #[tokio::test]
+async fn explicitly_deferred_writes_do_not_search_unrelated_contexts_for_duplicates() {
+    let client = setup_noop_server().await;
+    let content = "explicitly deferred duplicate isolation regression";
+    let _contexted: RememberResponse = call_tool(
+        &client,
+        "remember",
+        json!({
+            "content": content,
+            "scope": "project/unrelated-duplicate-context"
+        }),
+    )
+    .await;
+
+    let first_deferred: RememberResponse = call_tool(
+        &client,
+        "remember",
+        json!({
+            "content": content,
+            "context": {"allow_unresolved": true}
+        }),
+    )
+    .await;
+    let second_deferred: RememberResponse = call_tool(
+        &client,
+        "remember",
+        json!({
+            "content": content,
+            "context": {"allow_unresolved": true}
+        }),
+    )
+    .await;
+
+    assert!(first_deferred.duplicate_candidates.is_empty());
+    assert!(second_deferred.duplicate_candidates.is_empty());
+    assert!(first_deferred.warnings.iter().all(|warning| warning.code != "duplicate_candidate"));
+    assert!(second_deferred.warnings.iter().all(|warning| warning.code != "duplicate_candidate"));
+}
+
+#[tokio::test]
 async fn remember_quality_warnings_are_advisory() {
     let client = setup_noop_server().await;
     let content = format!("{}\n```rust\nfn derived_from_code() {{}}\n```", "oversized agent memory candidate ".repeat(160));
@@ -1942,6 +2135,62 @@ async fn revise_classifies_unresolved_memory_from_context_hints() {
     assert_eq!(recalled.count, 1_usize);
     assert_eq!(recalled.results[0].id, remembered.id);
     assert_eq!(recalled.results[0].scope, "gearboxlogic/localhold");
+}
+
+#[tokio::test]
+async fn revise_explicit_deferral_updates_warnings_and_stored_quality_flags() {
+    let client = setup_noop_server().await;
+    let _registered: serde_json::Value = call_tool(
+        &client,
+        "admin_scope_register",
+        json!({
+            "scope_key": "gearboxlogic/localhold",
+            "display_name": "LocalHold"
+        }),
+    )
+    .await;
+    let remembered: RememberResponse = call_tool(
+        &client,
+        "remember",
+        json!({
+            "content": "revise explicit context deferral quality flags",
+            "scope": "gearboxlogic/localhold"
+        }),
+    )
+    .await;
+
+    let deferred: UpdateResponse = call_tool(
+        &client,
+        "revise",
+        json!({
+            "id": remembered.id,
+            "context": {"allow_unresolved": true}
+        }),
+    )
+    .await;
+    assert!(deferred.updated);
+    assert_eq!(deferred.operation.next_action, NextAction::ClassifyScope);
+    assert!(deferred.operation.warnings.iter().any(|warning| warning.code == "missing_scope"));
+
+    let unresolved: ReadResponse = call_tool(&client, "read", json!({"id": remembered.id})).await;
+    assert_eq!(unresolved.scope.as_deref(), Some("inbox/unresolved"));
+    assert!(unresolved.unresolved_scope);
+    assert!(unresolved.quality_flags.iter().any(|flag| flag == "missing_scope"));
+
+    let classified: UpdateResponse = call_tool(
+        &client,
+        "revise",
+        json!({
+            "id": remembered.id,
+            "scope": "gearboxlogic/localhold"
+        }),
+    )
+    .await;
+    assert!(classified.updated);
+    let resolved: ReadResponse = call_tool(&client, "read", json!({"id": remembered.id})).await;
+    assert_eq!(resolved.scope.as_deref(), Some("gearboxlogic/localhold"));
+    assert!(!resolved.unresolved_scope);
+    assert!(resolved.quality_flags.iter().all(|flag| flag != "missing_scope"));
 }
 
 #[tokio::test]
@@ -2180,6 +2429,147 @@ async fn legacy_revise_rejects_hidden_companion_context_without_changing_members
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression exercises hidden-primary behavior across create, grant, write, revoke, read, and recall"
+)]
+async fn hidden_primary_is_not_promoted_or_reported_as_unresolved() {
+    let (client, server) = setup_server_with(Arc::new(NoopEmbedding::new())).await;
+    let hidden_primary_id = ContextId::new();
+    let visible_secondary_id = ContextId::new();
+    let _hidden_primary = server
+        .store()
+        .create_context(
+            &ContextCreateDraft::private(
+                hidden_primary_id,
+                ContextKind::new(ContextKind::CUSTOM).unwrap(),
+                "custom/hidden-primary",
+                "Hidden primary",
+                "other-owner",
+            ),
+            &ContextAuditDraft::new("other-owner", "test_hidden_primary_created").with_context(hidden_primary_id),
+        )
+        .await
+        .unwrap();
+    let _visible_secondary = server
+        .store()
+        .create_context(
+            &ContextCreateDraft::private(
+                visible_secondary_id,
+                ContextKind::new(ContextKind::CUSTOM).unwrap(),
+                "custom/visible-secondary",
+                "Visible secondary",
+                "stdio",
+            ),
+            &ContextAuditDraft::new("stdio", "test_visible_secondary_created").with_context(visible_secondary_id),
+        )
+        .await
+        .unwrap();
+    server
+        .store()
+        .grant_context_use(
+            &hidden_primary_id,
+            "stdio",
+            "other-owner",
+            &ContextAuditDraft::new("other-owner", "test_hidden_primary_granted").with_context(hidden_primary_id),
+        )
+        .await
+        .unwrap();
+    let remembered: RememberResponse = call_tool(
+        &client,
+        "remember",
+        json!({
+            "content": "hidden primary response semantics",
+            "context": {"refs": [{"id": hidden_primary_id}, {"id": visible_secondary_id}]}
+        }),
+    )
+    .await;
+    server
+        .store()
+        .revoke_context_use(
+            &hidden_primary_id,
+            "stdio",
+            "other-owner",
+            &ContextAuditDraft::new("other-owner", "test_hidden_primary_revoked").with_context(hidden_primary_id),
+        )
+        .await
+        .unwrap();
+
+    let read: ReadResponse = call_tool(&client, "read", json!({"id": remembered.id})).await;
+    assert_eq!(read.scope, None);
+    assert!(!read.unresolved_scope);
+    assert_eq!(read.contexts.iter().map(|context| context.id).collect::<Vec<_>>(), vec![visible_secondary_id]);
+
+    let recalled: RecallResponse = call_tool(
+        &client,
+        "recall",
+        json!({
+            "query": "hidden primary response semantics",
+            "context": {"refs": [{"id": visible_secondary_id}]}
+        }),
+    )
+    .await;
+    assert_eq!(recalled.count, 1);
+    assert_eq!(recalled.results[0].scope, "[redacted]");
+    assert_eq!(recalled.results[0].contexts.iter().map(|context| context.id).collect::<Vec<_>>(), vec![
+        visible_secondary_id
+    ]);
+}
+
+#[tokio::test]
+async fn legacy_revise_replaces_only_primary_and_preserves_visible_companions() {
+    let (client, server) = setup_server_with(Arc::new(NoopEmbedding::new())).await;
+    let primary_id = ContextId::new();
+    let companion_id = ContextId::new();
+    for (id, kind, key, display_name) in [
+        (primary_id, ContextKind::new(ContextKind::CUSTOM).unwrap(), "legacy/revise-old-primary", "Old primary"),
+        (companion_id, ContextKind::new(ContextKind::DOMAIN).unwrap(), "domain/revise-companion", "Revise companion"),
+    ] {
+        let _created = server
+            .store()
+            .create_context(
+                &ContextCreateDraft::private(id, kind, key, display_name, "stdio"),
+                &ContextAuditDraft::new("stdio", "test_legacy_revise_context_created").with_context(id),
+            )
+            .await
+            .unwrap();
+    }
+    let remembered: RememberResponse = call_tool(
+        &client,
+        "remember",
+        json!({
+            "content": "legacy revise primary replacement semantics",
+            "context": {"refs": [{"id": primary_id}, {"id": companion_id}]}
+        }),
+    )
+    .await;
+    let _registered: serde_json::Value = call_tool(
+        &client,
+        "admin_scope_register",
+        json!({
+            "scope_key": "legacy/revise-new-primary",
+            "display_name": "New primary"
+        }),
+    )
+    .await;
+
+    let revised: UpdateResponse = call_tool(
+        &client,
+        "revise",
+        json!({
+            "id": remembered.id,
+            "scope": "legacy/revise-new-primary"
+        }),
+    )
+    .await;
+    assert!(revised.updated);
+    assert_eq!(revised.contexts.iter().map(|context| context.key.as_str()).collect::<Vec<_>>(), vec![
+        "legacy/revise-new-primary",
+        "domain/revise-companion"
+    ]);
+}
+
+#[tokio::test]
 async fn fuzzy_creation_retry_never_echoes_raw_identity_or_parent_values() {
     let client = setup_noop_server().await;
     let secret_identity = "identity-secret-must-not-return";
@@ -2253,6 +2643,7 @@ async fn governed_context_tools_resolve_identities_and_enforce_applicability() {
     assert_eq!(identity.scheme, "git_remote");
     assert!(!identity.redacted_label.contains("secret-token"));
     assert!(!identity.redacted_label.contains("credential"));
+    assert!(!serde_json::to_string(&project).unwrap().contains("fingerprint"));
 
     let reused: ContextCreateResponse = call_tool(
         &client,
@@ -2270,6 +2661,7 @@ async fn governed_context_tools_resolve_identities_and_enforce_applicability() {
     .await;
     assert!(!reused.created);
     assert_eq!(reused.context.id, project.context.id);
+    assert!(reused.identity.is_none(), "exact reuse must not disclose stored identity metadata");
 
     let resolved: ContextResolveResponse = call_tool(
         &client,
@@ -2391,6 +2783,129 @@ async fn governed_context_tools_resolve_identities_and_enforce_applicability() {
     let archived = parse_tool_error(&archived_error);
     assert_eq!(archived.error.code, ToolErrorCode::Conflict);
     assert!(archived.error.message.contains("archived"));
+}
+
+#[tokio::test]
+async fn explicit_legacy_creation_policy_applies_without_breaking_default_compatibility() {
+    let (client, server) = setup_server_with(Arc::new(NoopEmbedding::new())).await;
+    let mut creation_denied_policy = ContextKindPolicy::default();
+    creation_denied_policy.agent_creation = Some(false);
+    server
+        .store()
+        .upsert_context_kind_policy(
+            &ContextKindPolicyDraft::new(
+                ContextPolicyLayer::Principal,
+                "stdio",
+                ContextKind::new(ContextKind::CUSTOM).unwrap(),
+                creation_denied_policy,
+            ),
+            "stdio",
+            &ContextAuditDraft::new("stdio", "test_legacy_creation_denied"),
+        )
+        .await
+        .unwrap();
+    let denied = call_tool_error(&client, "remember", json!({"content": "explicit custom creation denial", "scope": "legacy/policy-denied"})).await;
+    assert_eq!(parse_tool_error(&denied).error.code, ToolErrorCode::AccessDenied);
+
+    let mut identity_required_policy = ContextKindPolicy::default();
+    identity_required_policy.agent_creation = Some(true);
+    identity_required_policy.require_identity = Some(true);
+    server
+        .store()
+        .upsert_context_kind_policy(
+            &ContextKindPolicyDraft::new(
+                ContextPolicyLayer::Principal,
+                "stdio",
+                ContextKind::new(ContextKind::CUSTOM).unwrap(),
+                identity_required_policy,
+            ),
+            "stdio",
+            &ContextAuditDraft::new("stdio", "test_legacy_identity_required"),
+        )
+        .await
+        .unwrap();
+    let identity_required = call_tool_error(&client, "remember", json!({"content": "legacy identity requirement", "scope": "legacy/identity-required"})).await;
+    assert_eq!(parse_tool_error(&identity_required).error.code, ToolErrorCode::ContextRequired);
+
+    let default_client = setup_noop_server().await;
+    let remembered: RememberResponse = call_tool(
+        &default_client,
+        "remember",
+        json!({"content": "default legacy compatibility remains available", "scope": "legacy/default-compatible"}),
+    )
+    .await;
+    assert_eq!(remembered.scope, "legacy/default-compatible");
+}
+
+#[tokio::test]
+async fn duplicate_detection_does_not_disclose_redacted_memory_membership() {
+    let (client, server) = setup_server_with_auth(Arc::new(NoopEmbedding::new()), Some("viewer"), AnonymousPolicy::DenyAll).await;
+    let context_id = ContextId::new();
+    let _created = server
+        .store()
+        .create_context(
+            &ContextCreateDraft::private(
+                context_id,
+                ContextKind::new(ContextKind::PROJECT).unwrap(),
+                "project/redacted-duplicate",
+                "Redacted duplicate",
+                "owner",
+            ),
+            &ContextAuditDraft::new("owner", "test_redacted_duplicate_context").with_context(context_id),
+        )
+        .await
+        .unwrap();
+    server
+        .store()
+        .grant_context_use(
+            &context_id,
+            "viewer",
+            "owner",
+            &ContextAuditDraft::new("owner", "test_redacted_duplicate_grant").with_context(context_id),
+        )
+        .await
+        .unwrap();
+    let content = "redacted duplicate membership oracle";
+    let hidden = Memory::new_for_test(
+        content.into(),
+        Vec::new(),
+        Provenance::new_for_test(Some("owner".into()), Some("project/redacted-duplicate".into()), None),
+        AccessPolicy::Redacted {
+            visible_fields: vec![localhold::types::RedactableField::Content],
+        },
+    );
+    let hidden_id = server.store().store(&hidden, None).await.unwrap();
+    let _membership = server
+        .store()
+        .replace_memory_contexts(
+            &hidden_id,
+            &[context_id],
+            "owner",
+            &ContextAuditDraft::new("owner", "test_redacted_duplicate_membership").with_context(context_id),
+        )
+        .await
+        .unwrap();
+
+    let remembered: RememberResponse = call_tool(
+        &client,
+        "remember",
+        json!({
+            "content": content,
+            "context": {"refs": [{"id": context_id}]}
+        }),
+    )
+    .await;
+    assert!(remembered.duplicate_candidates.is_empty());
+    assert!(remembered.warnings.iter().all(|warning| warning.code != "duplicate_candidate"));
+}
+
+#[tokio::test]
+async fn admin_context_resolution_errors_remain_structured_in_band() {
+    let client = setup_noop_server().await;
+    let error = call_tool_error(&client, "admin_count", json!({"context": {"refs": [{"id": ContextId::new()}]}})).await;
+    let structured = parse_tool_error(&error);
+    assert_eq!(structured.error.code, ToolErrorCode::ContextRequired);
+    assert!(!structured.error.recommended_actions.is_empty());
 }
 
 #[tokio::test]
@@ -3060,7 +3575,10 @@ async fn anonymous_public_read_only_allows_public_recall_and_blocks_writes() {
         &client,
         "handoff",
         json!({
-            "candidates": ["anonymous public read-only handoff preview"]
+            "candidates": [{
+                "content": "anonymous public read-only handoff preview",
+                "context": {"allow_unresolved": true}
+            }]
         }),
     )
     .await;
@@ -3181,20 +3699,20 @@ async fn metadata_migration_backfills_legacy_rows_non_destructively() {
     assert!(dry_run.dry_run);
     assert_eq!(dry_run.report.candidate_count, 2);
     assert_eq!(dry_run.report.migrated, 0);
-    assert_eq!(dry_run.report.unresolved_scope, 1);
+    assert_eq!(dry_run.report.unresolved_scope, 2);
     assert_eq!(dry_run.report.missing_summary, 2);
 
     let applied: AdminMigrateMetadataResponse = call_tool(&client, "admin_migrate_metadata", json!({})).await;
     assert!(!applied.dry_run);
     assert_eq!(applied.report.candidate_count, 2);
     assert_eq!(applied.report.migrated, 2);
-    assert_eq!(applied.report.unresolved_scope, 1);
+    assert_eq!(applied.report.unresolved_scope, 2);
 
     let after: AdminMigrationReportResponse = call_tool(&client, "admin_migration_report", json!({})).await;
     assert_eq!(after.report.metadata_rows, 2);
     assert_eq!(after.report.missing_metadata, 0);
     assert_eq!(after.report.missing_summary, 2);
-    assert_eq!(after.report.unresolved_scope, 1);
+    assert_eq!(after.report.unresolved_scope, 2);
 
     let scoped_read: ReadResponse = call_tool(&client, "read", json!({"id": scoped_id})).await;
     assert_eq!(scoped_read.memory.content, "legacy scoped durable fact for metadata migration");
@@ -3265,6 +3783,28 @@ async fn metadata_migration_is_idempotent_and_preserves_existing_metadata() {
     assert_eq!(read.memory.content, "legacy idempotent migration row keeps original content");
     assert_eq!(read.agent_label.as_deref(), Some("legacy-agent"));
     assert!(read.contexts.is_empty(), "metadata migration leaves relevance classification explicit");
+}
+
+#[tokio::test]
+async fn reserved_configured_principals_are_not_mcp_identities() {
+    for principal in ["operator", "@localhold/legacy-system", "*", "anonymous"] {
+        let client = setup_noop_server_with_auth(Some(principal), AnonymousPolicy::DenyAll).await;
+        let write_error = call_tool_error(
+            &client,
+            "remember",
+            json!({
+                "content": format!("reserved configured principal {principal}"),
+                "context": {"allow_unresolved": true}
+            }),
+        )
+        .await;
+        let structured = parse_tool_error(&write_error);
+        assert_eq!(structured.error.code, ToolErrorCode::AnonymousWriteDenied);
+        assert!(
+            structured.error.message.contains("anonymous writes are disabled"),
+            "reserved configured principal {principal:?} must not authenticate MCP writes"
+        );
+    }
 }
 
 #[tokio::test]
@@ -3348,6 +3888,23 @@ async fn handoff_commit_validates_all_candidates_before_writing() {
 
     let count: CountResponse = call_tool(&client, "admin_count", json!({})).await;
     assert_eq!(count.total, 0, "invalid committed handoff must not partially write earlier candidates");
+}
+
+#[tokio::test]
+async fn handoff_preview_validates_candidates_before_suggesting_writes() {
+    let client = setup_noop_server().await;
+
+    assert_invalid_params_contains(
+        &client,
+        "handoff",
+        json!({
+            "candidates": [
+                {"content": "   ", "context": {"allow_unresolved": true}}
+            ]
+        }),
+        "blank",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -3442,7 +3999,8 @@ async fn handoff_rejects_empty_batch() {
 
 #[tokio::test]
 async fn handoff_accepts_string_shorthand_candidates() {
-    let client = setup_noop_server().await;
+    let (client, server) = setup_server_with(Arc::new(NoopEmbedding::new())).await;
+    let _default_context = configure_stdio_default_context(server.store()).await;
 
     let handoff: HandoffResponse = call_tool(
         &client,
@@ -3459,8 +4017,8 @@ async fn handoff_accepts_string_shorthand_candidates() {
     assert_eq!(handoff.operation.status, OperationStatus::Preview);
     assert_eq!(handoff.suggested_writes.len(), 1_usize);
     assert_eq!(handoff.suggested_writes[0].content, "handoff shorthand candidate should preview as content");
-    assert_eq!(handoff.suggested_writes[0].scope, "inbox/unresolved");
-    assert!(handoff.suggested_writes[0].unresolved_scope);
+    assert_eq!(handoff.suggested_writes[0].scope, "project/protocol-default");
+    assert!(!handoff.suggested_writes[0].unresolved_scope);
     assert!(handoff.suggested_writes[0].id.is_none());
 }
 
@@ -3499,6 +4057,36 @@ async fn handoff_warns_when_duplicate_candidates_exist() {
 
     assert_eq!(handoff.suggested_writes.len(), 1_usize);
     assert!(handoff.suggested_writes[0].warnings.iter().any(|warning| warning.code == "duplicate_candidate"));
+}
+
+#[tokio::test]
+async fn explicitly_deferred_handoff_skips_cross_context_duplicate_search() {
+    let client = setup_noop_server().await;
+    let content = "deferred handoff duplicate isolation regression";
+    let _existing: RememberResponse = call_tool(
+        &client,
+        "remember",
+        json!({
+            "content": content,
+            "scope": "project/unrelated-handoff-context"
+        }),
+    )
+    .await;
+
+    let handoff: HandoffResponse = call_tool(
+        &client,
+        "handoff",
+        json!({
+            "candidates": [{
+                "content": content,
+                "context": {"allow_unresolved": true}
+            }]
+        }),
+    )
+    .await;
+
+    assert!(handoff.suggested_writes[0].duplicate_candidates.is_empty());
+    assert!(handoff.suggested_writes[0].warnings.iter().all(|warning| warning.code != "duplicate_candidate"));
 }
 
 #[tokio::test]
@@ -3587,6 +4175,9 @@ async fn server_info_has_capabilities() {
     assert!(info.capabilities.tools.is_some(), "server should advertise tools capability");
     let instructions = info.instructions.as_deref().unwrap_or_default();
     assert!(instructions.contains("brief"), "server instructions should guide agents to the core workflow");
+    assert!(instructions.contains("context_resolve"));
+    assert!(instructions.contains("context_create"));
+    assert!(instructions.contains("explicit unresolved deferral"));
     assert!(
         instructions.contains("Retired memory_* names are not part of the public MCP tool surface"),
         "server instructions should not imply legacy tools are available"

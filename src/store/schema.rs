@@ -6,9 +6,9 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 
 use crate::{
-    context::{ContextId, ContextKind, LEGACY_ALL_PRINCIPALS_GRANT, LEGACY_SYSTEM_PRINCIPAL, UNRESOLVED_CONTEXT_KEY},
+    context::{ContextId, ContextKind, LEGACY_ALL_PRINCIPALS_GRANT, LEGACY_SYSTEM_PRINCIPAL, UNRESOLVED_CONTEXT_KEY, effective_legacy_scope_key},
     error::StoreError,
-    types::normalize_context_key,
+    types::{AccessPolicy, Provenance, normalize_context_key},
 };
 
 /// Current on-disk SQLite schema contract.
@@ -634,6 +634,7 @@ struct LegacyScope {
     related: Vec<String>,
     updated_at: Option<String>,
     registered: bool,
+    globally_visible: bool,
 }
 
 impl LegacyScope {
@@ -650,6 +651,7 @@ impl LegacyScope {
             related: Vec::new(),
             updated_at: None,
             registered: false,
+            globally_visible: false,
         }
     }
 }
@@ -671,17 +673,17 @@ pub(crate) fn migrate_contexts_v3_validated(conn: &mut Connection, source_versio
 }
 
 fn migrate_contexts_v3_inner(conn: &mut Connection, _source_version: u32, now: DateTime<Utc>, embedding_dimensions: Option<usize>) -> Result<(), StoreError> {
-    let tx = super::sqlite::sqlite_write_tx(conn)?;
-    let current_version: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let current_version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if current_version > SQLITE_SCHEMA_VERSION {
         return Err(StoreError::Conflict(format!(
             "SQLite schema version {current_version} is newer than this binary supports ({SQLITE_SCHEMA_VERSION})"
         )));
     }
-    let registry_exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scope_registry')", [], |row| {
-        row.get(0)
-    })?;
     if current_version == SQLITE_SCHEMA_VERSION {
+        let tx = conn.transaction()?;
+        let registry_exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scope_registry')", [], |row| {
+            row.get(0)
+        })?;
         if registry_exists {
             return Err(StoreError::Conflict(
                 "SQLite v3 contains retired scope_registry; remove the stray table or restore a valid current backup".into(),
@@ -693,7 +695,29 @@ fn migrate_contexts_v3_inner(conn: &mut Connection, _source_version: u32, now: D
         tx.commit()?;
         return Ok(());
     }
-    if current_version == 2 && !registry_exists {
+    let tx = super::sqlite::sqlite_write_tx(conn)?;
+    let locked_version: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if locked_version > SQLITE_SCHEMA_VERSION {
+        return Err(StoreError::Conflict(format!(
+            "SQLite schema version {locked_version} is newer than this binary supports ({SQLITE_SCHEMA_VERSION})"
+        )));
+    }
+    let registry_exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scope_registry')", [], |row| {
+        row.get(0)
+    })?;
+    if locked_version == SQLITE_SCHEMA_VERSION {
+        if registry_exists {
+            return Err(StoreError::Conflict(
+                "SQLite v3 contains retired scope_registry; remove the stray table or restore a valid current backup".into(),
+            ));
+        }
+        if let Some(embedding_dimensions) = embedding_dimensions {
+            crate::store::migration::validate_sqlite_source_schema(&tx, embedding_dimensions)?;
+        }
+        tx.commit()?;
+        return Ok(());
+    }
+    if locked_version == 2 && !registry_exists {
         return Err(StoreError::Conflict(
             "SQLite v2 database is missing scope_registry; restore from backup or repair the schema before retrying".into(),
         ));
@@ -705,8 +729,8 @@ fn migrate_contexts_v3_inner(conn: &mut Connection, _source_version: u32, now: D
     tx.execute_batch(CONTEXT_DDL)?;
     insert_builtin_context_kinds(&tx, &now.to_rfc3339())?;
 
+    migrate_legacy_scopes(&tx, &now.to_rfc3339(), registry_exists)?;
     if registry_exists {
-        migrate_legacy_scopes(&tx, &now.to_rfc3339())?;
         let _dropped = tx.execute("DROP TABLE scope_registry", [])?;
     }
 
@@ -794,9 +818,10 @@ fn insert_builtin_context_kinds(tx: &Transaction<'_>, now: &str) -> Result<(), S
 }
 
 #[expect(clippy::too_many_lines, reason = "the legacy scope backfill is one auditable all-or-nothing migration")]
-fn migrate_legacy_scopes(tx: &Transaction<'_>, now: &str) -> Result<(), StoreError> {
+fn migrate_legacy_scopes(tx: &Transaction<'_>, now: &str, registry_exists: bool) -> Result<(), StoreError> {
+    validate_legacy_memory_json_sqlite(tx)?;
     let mut scopes = BTreeMap::<String, LegacyScope>::new();
-    {
+    if registry_exists {
         let mut statement = tx.prepare(
             "SELECT scope_key, display_name, description, aliases, matchers, parent, related, updated_at
              FROM scope_registry
@@ -817,17 +842,18 @@ fn migrate_legacy_scopes(tx: &Transaction<'_>, now: &str) -> Result<(), StoreErr
                 related: serde_json::from_str(&related).map_err(|error| rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(error)))?,
                 updated_at: row.get(7)?,
                 registered: true,
+                globally_visible: true,
             })
         })?;
         for result in rows {
             let scope = result?;
-            validate_sqlite_legacy_migration_scope(&scope)?;
             let normalized = normalize_context_key(&scope.key);
-            if normalized.is_empty() {
-                return Err(StoreError::Conflict("legacy scope registry contains a blank key".into()));
-            }
             if normalized == UNRESOLVED_CONTEXT_KEY {
                 continue;
+            }
+            validate_sqlite_legacy_migration_scope(&scope)?;
+            if normalized.is_empty() {
+                return Err(StoreError::Conflict("legacy scope registry contains a blank key".into()));
             }
             if let Some(existing) = scopes.insert(normalized.clone(), scope)
                 && existing.key != scopes[&normalized].key
@@ -846,24 +872,26 @@ fn migrate_legacy_scopes(tx: &Transaction<'_>, now: &str) -> Result<(), StoreErr
         referenced_keys.extend(scope.related.iter().cloned());
     }
     for key in referenced_keys {
-        insert_raw_legacy_scope(&mut scopes, key)?;
+        insert_raw_legacy_scope(&mut scopes, key, true)?;
     }
 
     {
         let mut statement = tx.prepare(
-            "SELECT DISTINCT COALESCE(
-                 NULLIF(trim(meta.scope_key), ''),
-                 NULLIF(trim(json_extract(memory.provenance, '$.source_conversation')), '')
-             )
+            "SELECT DISTINCT meta.scope_key,
+                    json_extract(memory.provenance, '$.source_conversation')
              FROM memories AS memory
              LEFT JOIN memory_metadata AS meta ON meta.memory_id = memory.id",
         )?;
-        let rows = statement.query_map([], |row| row.get::<_, Option<String>>(0))?;
-        for result in rows {
-            if let Some(key) = result?
-                && key != "inbox/unresolved"
-            {
-                insert_raw_legacy_scope(&mut scopes, key)?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)))?;
+        let mut raw_keys = rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(|(metadata_scope, provenance_scope)| effective_legacy_scope_key(metadata_scope.as_deref(), provenance_scope.as_deref()))
+            .collect::<Vec<_>>();
+        raw_keys.sort();
+        for key in raw_keys {
+            if normalize_context_key(&key) != UNRESOLVED_CONTEXT_KEY {
+                insert_raw_legacy_scope(&mut scopes, key, false)?;
             }
         }
     }
@@ -888,11 +916,13 @@ fn migrate_legacy_scopes(tx: &Transaction<'_>, now: &str) -> Result<(), StoreErr
                 context_timestamp,
             ],
         )?;
-        let _granted = tx.execute(
-            "INSERT INTO context_grants (context_id, grantee_principal, granted_by, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![id.to_string(), LEGACY_ALL_PRINCIPALS_GRANT, LEGACY_SYSTEM_PRINCIPAL, now],
-        )?;
+        if scope.globally_visible {
+            let _granted = tx.execute(
+                "INSERT INTO context_grants (context_id, grantee_principal, granted_by, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![id.to_string(), LEGACY_ALL_PRINCIPALS_GRANT, LEGACY_SYSTEM_PRINCIPAL, now],
+            )?;
+        }
         for alias in &scope.aliases {
             let normalized = normalize_context_key(alias);
             if !normalized.is_empty() {
@@ -933,6 +963,9 @@ fn migrate_legacy_scopes(tx: &Transaction<'_>, now: &str) -> Result<(), StoreErr
     for (normalized_key, scope) in &scopes {
         if let Some(parent_key) = &scope.parent {
             let parent_normalized = normalize_context_key(parent_key);
+            if parent_normalized == UNRESOLVED_CONTEXT_KEY {
+                continue;
+            }
             let parent_id = ids
                 .get(&parent_normalized)
                 .ok_or_else(|| StoreError::Conflict(format!("legacy scope {:?} references missing parent {parent_key:?}", scope.key)))?;
@@ -943,7 +976,7 @@ fn migrate_legacy_scopes(tx: &Transaction<'_>, now: &str) -> Result<(), StoreErr
         }
         for related_key in &scope.related {
             let related_normalized = normalize_context_key(related_key);
-            if related_normalized == *normalized_key {
+            if related_normalized == UNRESOLVED_CONTEXT_KEY || related_normalized == *normalized_key {
                 continue;
             }
             let related_id = ids
@@ -961,21 +994,19 @@ fn migrate_legacy_scopes(tx: &Transaction<'_>, now: &str) -> Result<(), StoreErr
     let mut memberships = Vec::<(String, String)>::new();
     {
         let mut statement = tx.prepare(
-            "SELECT memory.id, COALESCE(
-                 NULLIF(trim(meta.scope_key), ''),
-                 NULLIF(trim(json_extract(memory.provenance, '$.source_conversation')), '')
-             )
+            "SELECT memory.id, meta.scope_key,
+                    json_extract(memory.provenance, '$.source_conversation')
              FROM memories AS memory
              LEFT JOIN memory_metadata AS meta ON meta.memory_id = memory.id",
         )?;
-        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?)))?;
         for result in rows {
-            let (memory_id, scope_key) = result?;
-            let Some(scope_key) = scope_key else {
+            let (memory_id, metadata_scope, provenance_scope) = result?;
+            let Some(scope_key) = effective_legacy_scope_key(metadata_scope.as_deref(), provenance_scope.as_deref()) else {
                 continue;
             };
             let normalized = normalize_context_key(&scope_key);
-            if normalized == UNRESOLVED_CONTEXT_KEY {
+            if normalized.is_empty() || normalized == UNRESOLVED_CONTEXT_KEY {
                 continue;
             }
             memberships.push((memory_id, normalized));
@@ -995,25 +1026,126 @@ fn migrate_legacy_scopes(tx: &Transaction<'_>, now: &str) -> Result<(), StoreErr
             params![&memory_id, context_id.to_string(), now],
         )?;
         let _canonicalized = tx.execute("UPDATE memory_metadata SET scope_key = ?1 WHERE memory_id = ?2", params![canonical_key, memory_id])?;
+        let _canonicalized_provenance = tx.execute(
+            "UPDATE memories
+             SET provenance = json_set(provenance, '$.source_conversation', ?1)
+             WHERE id = ?2",
+            params![canonical_key, memory_id],
+        )?;
     }
 
+    grant_migrated_raw_contexts_sqlite(tx, now)?;
     let _updated = tx.execute(
         "UPDATE memory_metadata
          SET scope_key = ?1, updated_at = ?2
-         WHERE memory_id NOT IN (SELECT memory_id FROM memory_contexts)
-           AND (scope_key IS NULL OR trim(scope_key) = '' OR scope_key = ?1)",
+         WHERE memory_id NOT IN (SELECT memory_id FROM memory_contexts)",
         params![UNRESOLVED_CONTEXT_KEY, now],
+    )?;
+    let _updated_provenance = tx.execute(
+        "UPDATE memories
+         SET provenance = json_set(provenance, '$.source_conversation', ?1)
+         WHERE id NOT IN (SELECT memory_id FROM memory_contexts)",
+        [UNRESOLVED_CONTEXT_KEY],
     )?;
     Ok(())
 }
 
-fn insert_raw_legacy_scope(scopes: &mut BTreeMap<String, LegacyScope>, key: String) -> Result<(), StoreError> {
+fn validate_legacy_memory_json_sqlite(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    let mut statement = tx.prepare("SELECT id, provenance, access_policy FROM memories ORDER BY id")?;
+    let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?;
+    for row in rows {
+        let (memory_id, provenance, access_policy) = row?;
+        let _provenance = serde_json::from_str::<serde_json::Value>(&provenance)
+            .ok()
+            .filter(serde_json::Value::is_object)
+            .and_then(|value| serde_json::from_value::<Provenance>(value).ok())
+            .ok_or_else(|| StoreError::Conflict(format!("legacy memory {memory_id} contains malformed provenance JSON")))?;
+        let _access_policy = serde_json::from_str::<serde_json::Value>(&access_policy)
+            .ok()
+            .filter(serde_json::Value::is_object)
+            .and_then(|value| serde_json::from_value::<AccessPolicy>(value).ok())
+            .ok_or_else(|| StoreError::Conflict(format!("legacy memory {memory_id} contains malformed access_policy JSON")))?;
+    }
+    Ok(())
+}
+
+fn grant_migrated_raw_contexts_sqlite(tx: &Transaction<'_>, now: &str) -> Result<(), StoreError> {
+    let _broad_grants = tx.execute(
+        "INSERT OR IGNORE INTO context_grants (
+             context_id, grantee_principal, granted_by, created_at
+         )
+         SELECT DISTINCT membership.context_id, ?1, ?2, ?3
+         FROM memory_contexts AS membership
+         JOIN memories AS memory ON memory.id = membership.memory_id
+         JOIN context_audit_events AS audit
+           ON audit.context_id = membership.context_id
+          AND audit.action = 'migrate_raw_scope'
+         WHERE json_extract(memory.access_policy, '$.type') = 'public'
+            OR (
+                json_extract(memory.access_policy, '$.type') = 'redacted'
+                AND EXISTS (
+                    SELECT 1
+                    FROM json_each(memory.access_policy, '$.visible_fields') AS visible
+                    WHERE visible.value = 'provenance'
+                )
+            )",
+        params![LEGACY_ALL_PRINCIPALS_GRANT, LEGACY_SYSTEM_PRINCIPAL, now],
+    )?;
+    let _owner_grants = tx.execute(
+        "INSERT OR IGNORE INTO context_grants (
+             context_id, grantee_principal, granted_by, created_at
+         )
+         SELECT DISTINCT membership.context_id,
+                json_extract(memory.provenance, '$.source_agent'),
+                ?1,
+                ?2
+         FROM memory_contexts AS membership
+         JOIN memories AS memory ON memory.id = membership.memory_id
+         JOIN context_audit_events AS audit
+           ON audit.context_id = membership.context_id
+          AND audit.action = 'migrate_raw_scope'
+         WHERE trim(COALESCE(json_extract(memory.provenance, '$.source_agent'), '')) <> ''
+           AND json_extract(memory.provenance, '$.source_agent') <> ?3
+           AND NOT EXISTS (
+               SELECT 1 FROM context_grants AS grant_row
+               WHERE grant_row.context_id = membership.context_id
+                 AND grant_row.grantee_principal = ?3
+           )",
+        params![LEGACY_SYSTEM_PRINCIPAL, now, LEGACY_ALL_PRINCIPALS_GRANT],
+    )?;
+    let _restricted_grants = tx.execute(
+        "INSERT OR IGNORE INTO context_grants (
+             context_id, grantee_principal, granted_by, created_at
+         )
+         SELECT DISTINCT membership.context_id, allowed.value, ?1, ?2
+         FROM memory_contexts AS membership
+         JOIN memories AS memory ON memory.id = membership.memory_id
+         JOIN context_audit_events AS audit
+           ON audit.context_id = membership.context_id
+          AND audit.action = 'migrate_raw_scope'
+         JOIN json_each(memory.access_policy, '$.allowed') AS allowed
+         WHERE json_extract(memory.access_policy, '$.type') = 'restricted'
+           AND allowed.type = 'text'
+           AND trim(allowed.value) <> ''
+           AND allowed.value <> ?3
+           AND NOT EXISTS (
+               SELECT 1 FROM context_grants AS grant_row
+               WHERE grant_row.context_id = membership.context_id
+                 AND grant_row.grantee_principal = ?3
+           )",
+        params![LEGACY_SYSTEM_PRINCIPAL, now, LEGACY_ALL_PRINCIPALS_GRANT],
+    )?;
+    Ok(())
+}
+
+fn insert_raw_legacy_scope(scopes: &mut BTreeMap<String, LegacyScope>, key: String, globally_visible: bool) -> Result<(), StoreError> {
     if key.trim().is_empty() {
         return Err(StoreError::Conflict("legacy scope cannot be migrated because its key is blank".into()));
     }
     let normalized = normalize_context_key(&key);
     if !normalized.is_empty() && normalized != UNRESOLVED_CONTEXT_KEY {
-        let _entry = scopes.entry(normalized).or_insert_with(|| LegacyScope::raw(key));
+        let scope = scopes.entry(normalized).or_insert_with(|| LegacyScope::raw(key));
+        scope.globally_visible |= globally_visible;
     }
     Ok(())
 }

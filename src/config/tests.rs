@@ -765,6 +765,18 @@ fn validate_server_config_rejects_empty_fixed_http_principal() {
 }
 
 #[test]
+fn validate_server_config_rejects_reserved_fixed_http_principals() {
+    for principal in ["operator", "@localhold/legacy-system", "*", "anonymous"] {
+        let config = ServerConfig {
+            http_principal: principal.into(),
+            ..ServerConfig::default()
+        };
+        let error = validate_server_config(&config).unwrap_err();
+        assert!(error.to_string().contains("reserved"), "{principal}: {error}");
+    }
+}
+
+#[test]
 fn validate_server_config_requires_auth_for_http_trusted_proxy_mode() {
     let config = ServerConfig {
         transport: Transport::Http,

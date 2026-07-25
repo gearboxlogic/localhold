@@ -10,20 +10,19 @@ use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, params};
 use sqlx_core::{query::query, query_scalar::query_scalar, row::Row as _, sql_str::AssertSqlSafe, types::Json};
 use sqlx_postgres::{PgRow, Postgres};
 
-use super::{ContextReader, ContextWriter, PostgresStore, SqliteStore, crud::fetch_memory_by_id, sqlite_write_tx};
+use super::{ContextReader, ContextWriter, MemoryContextPresence, PostgresStore, SqliteStore, crud::fetch_memory_by_id, sqlite_write_tx};
 use crate::{
     context::{
         ContextAnchorPolicy, ContextAnchorPolicyDraft, ContextAnchorPolicyRecord, ContextAuditDraft, ContextAuditEvent, ContextCreateDraft, ContextDefinition,
         ContextDefinitionPatch, ContextExactLookup, ContextGrant, ContextId, ContextIdentity, ContextKind, ContextKindDefinition, ContextKindDraft, ContextKindPolicy,
         ContextKindPolicyDraft, ContextKindPolicyRecord, ContextLifecycle, ContextPolicyLayer, ContextRecord, ContextSimilarityQuery, LEGACY_ALL_PRINCIPALS_GRANT,
         LEGACY_SYSTEM_PRINCIPAL, MAX_CONTEXT_CONFIRMATIONS, MAX_CONTEXT_DESCRIPTION_LEN, MAX_CONTEXT_DISPLAY_NAME_LEN, MAX_CONTEXT_HINTS, MAX_CONTEXT_REFS,
-        MAX_CONTEXT_SURFACE_LEN, MemoryContext, OPERATOR_PRINCIPAL,
+        MAX_CONTEXT_SURFACE_LEN, MemoryContext, OPERATOR_PRINCIPAL, UNRESOLVED_CONTEXT_KEY as UNRESOLVED_SCOPE,
     },
     error::StoreError,
     types::{AccessLevel, AccessPolicy, MemoryId, Provenance, WriteOutcome, normalize_context_key, write_access_allowed},
 };
 
-const UNRESOLVED_SCOPE: &str = "inbox/unresolved";
 const MAX_CONTEXT_PAGE_SIZE: usize = 500;
 const MAX_CONTEXT_AUDIT_PAGE_SIZE: usize = 500;
 
@@ -221,6 +220,77 @@ fn fetch_sqlite_context_record(conn: &Connection, context: ContextDefinition) ->
     })
 }
 
+fn fetch_sqlite_context_records(conn: &Connection, contexts: Vec<ContextDefinition>) -> Result<Vec<ContextRecord>, StoreError> {
+    if contexts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let context_ids = contexts.iter().map(|context| context.id.to_string()).collect::<Vec<_>>();
+    let context_ids_json = serde_json::to_string(&context_ids)?;
+    let positions = context_ids.iter().enumerate().map(|(index, id)| (id.clone(), index)).collect::<HashMap<_, _>>();
+    let mut records = contexts
+        .into_iter()
+        .map(|context| ContextRecord {
+            context,
+            aliases: Vec::new(),
+            identities: Vec::new(),
+            hints: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+
+    {
+        let mut statement = conn.prepare(
+            "SELECT context_id, alias
+             FROM context_aliases
+             WHERE context_id IN (SELECT value FROM json_each(?1))
+             ORDER BY context_id, normalized_alias",
+        )?;
+        let mut rows = statement.query([&context_ids_json])?;
+        while let Some(row) = rows.next()? {
+            let context_id: String = row.get(0)?;
+            if let Some(index) = positions.get(&context_id) {
+                records[*index].aliases.push(row.get(1)?);
+            }
+        }
+    }
+    {
+        let mut statement = conn.prepare(
+            "SELECT context_id, scheme, namespace, fingerprint, redacted_label
+             FROM context_identities
+             WHERE context_id IN (SELECT value FROM json_each(?1))
+             ORDER BY context_id, scheme, namespace, fingerprint",
+        )?;
+        let mut rows = statement.query([&context_ids_json])?;
+        while let Some(row) = rows.next()? {
+            let context_id: String = row.get(0)?;
+            if let Some(index) = positions.get(&context_id) {
+                let namespace: String = row.get(2)?;
+                records[*index].identities.push(ContextIdentity {
+                    scheme: row.get(1)?,
+                    namespace: (!namespace.is_empty()).then_some(namespace),
+                    fingerprint: row.get(3)?,
+                    redacted_label: row.get(4)?,
+                });
+            }
+        }
+    }
+    {
+        let mut statement = conn.prepare(
+            "SELECT context_id, hint
+             FROM context_resolver_hints
+             WHERE context_id IN (SELECT value FROM json_each(?1))
+             ORDER BY context_id, normalized_hint",
+        )?;
+        let mut rows = statement.query([&context_ids_json])?;
+        while let Some(row) = rows.next()? {
+            let context_id: String = row.get(0)?;
+            if let Some(index) = positions.get(&context_id) {
+                records[*index].hints.push(row.get(1)?);
+            }
+        }
+    }
+    Ok(records)
+}
+
 fn context_use_allowed(tx: &Transaction<'_>, context_id: &ContextId, principal: &str, require_active: bool) -> Result<bool, StoreError> {
     let lifecycle_clause = if require_active { "AND context_row.lifecycle = 'active'" } else { "" };
     let sql = format!(
@@ -235,18 +305,23 @@ fn context_use_allowed(tx: &Transaction<'_>, context_id: &ContextId, principal: 
     Ok(tx.query_row(&sql, params![principal, context_id.to_string()], |row| row.get(0))?)
 }
 
+fn normalize_explicit_grantee(grantee: &str) -> Result<String, StoreError> {
+    let grantee = grantee.trim();
+    if grantee.is_empty() || crate::http_auth::is_reserved_principal(grantee) {
+        return Err(StoreError::Conflict("ordinary context grants require one explicit non-reserved principal".into()));
+    }
+    Ok(grantee.to_owned())
+}
+
 fn normalize_explicit_grantees(grantees: &[String]) -> Result<Vec<String>, StoreError> {
     let mut normalized = Vec::with_capacity(grantees.len());
     let mut unique = HashSet::with_capacity(grantees.len());
     for grantee in grantees {
-        let grantee = grantee.trim();
-        if grantee.is_empty() || grantee == LEGACY_ALL_PRINCIPALS_GRANT {
-            return Err(StoreError::Conflict("ordinary context grants require explicit non-wildcard principals".into()));
-        }
-        if !unique.insert(grantee.to_owned()) {
+        let grantee = normalize_explicit_grantee(grantee)?;
+        if !unique.insert(grantee.clone()) {
             return Err(StoreError::Conflict("context grant principals must be unique".into()));
         }
-        normalized.push(grantee.to_owned());
+        normalized.push(grantee);
     }
     Ok(normalized)
 }
@@ -264,13 +339,31 @@ pub(crate) fn insert_initial_memory_contexts_sqlite(
     audit: &ContextAuditDraft,
     now: &str,
 ) -> Result<(), StoreError> {
+    insert_memory_contexts_sqlite(tx, memory_id, context_ids, principal, compatibility_scope, audit, now, &HashSet::new())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "membership insertion validates authorization, compatibility cache, preserved inactive memberships, audit, and timestamp"
+)]
+fn insert_memory_contexts_sqlite(
+    tx: &Transaction<'_>,
+    memory_id: &MemoryId,
+    context_ids: &[ContextId],
+    principal: &str,
+    compatibility_scope: &str,
+    audit: &ContextAuditDraft,
+    now: &str,
+    preserved_context_ids: &HashSet<ContextId>,
+) -> Result<(), StoreError> {
     validate_audit_actor(audit, principal)?;
     let unique = context_ids.iter().copied().collect::<HashSet<_>>();
     if unique.len() != context_ids.len() {
         return Err(StoreError::Conflict("memory context memberships must be unique".into()));
     }
     for context_id in context_ids {
-        if !context_use_allowed(tx, context_id, principal, true)? {
+        let require_active = !preserved_context_ids.contains(context_id);
+        if !context_use_allowed(tx, context_id, principal, require_active)? {
             return Err(StoreError::Conflict(format!(
                 "context {context_id} is unavailable, archived, or not granted to principal {principal:?}"
             )));
@@ -310,8 +403,14 @@ pub(crate) fn replace_memory_contexts_sqlite_tx(
     audit: &ContextAuditDraft,
     now: &str,
 ) -> Result<(), StoreError> {
+    let mut statement = tx.prepare("SELECT context_id FROM memory_contexts WHERE memory_id = ?1")?;
+    let preserved_context_ids = statement
+        .query_map([memory_id.to_string()], |row| row.get::<_, String>(0))?
+        .map(|result| result.and_then(|id| ContextId::from_str(&id).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))))
+        .collect::<Result<HashSet<_>, _>>()?;
+    drop(statement);
     let _removed = tx.execute("DELETE FROM memory_contexts WHERE memory_id = ?1", [memory_id.to_string()])?;
-    insert_initial_memory_contexts_sqlite(tx, memory_id, context_ids, principal, compatibility_scope, audit, now)?;
+    insert_memory_contexts_sqlite(tx, memory_id, context_ids, principal, compatibility_scope, audit, now, &preserved_context_ids)?;
     let _updated_metadata = tx.execute("UPDATE memory_metadata SET scope_key = ?1, updated_at = ?2 WHERE memory_id = ?3", params![
         compatibility_scope,
         now,
@@ -426,6 +525,17 @@ fn memory_read_allowed(provenance: &Provenance, access_policy: &AccessPolicy, pr
     }
 }
 
+fn readable_membership_memory_id(row: (String, String, String), principal: &str) -> Result<Option<MemoryId>, StoreError> {
+    let (memory_id, provenance, access_policy) = row;
+    let provenance = serde_json::from_str::<Provenance>(&provenance)?;
+    let access_policy = serde_json::from_str::<AccessPolicy>(&access_policy)?;
+    if !memory_read_allowed(&provenance, &access_policy, principal) {
+        return Ok(None);
+    }
+    let memory_id = MemoryId::from_str(&memory_id).map_err(|error| StoreError::Serialization(Box::new(error)))?;
+    Ok(Some(memory_id))
+}
+
 fn validate_create_draft(draft: &ContextCreateDraft, audit: &ContextAuditDraft) -> Result<(), StoreError> {
     validate_audit_actor(audit, &draft.owner_principal)?;
     if draft.key.trim().is_empty() || draft.key.len() > MAX_CONTEXT_SURFACE_LEN || draft.normalized_key != normalize_context_key(&draft.key) {
@@ -514,6 +624,59 @@ fn create_context_conn(conn: &mut Connection, draft: &ContextCreateDraft, audit:
         && !context_use_allowed(&tx, &parent_id, &draft.owner_principal, true)?
     {
         return Err(StoreError::Conflict(format!("parent context {parent_id} is unavailable, archived, or not granted")));
+    }
+    let exact_key_or_alias: bool = tx.query_row(
+        &format!(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM contexts AS context_row
+                 WHERE context_row.kind = ?2
+                   AND {}
+                   AND (
+                       context_row.normalized_key = ?3 OR EXISTS (
+                           SELECT 1
+                           FROM context_aliases AS alias_row
+                           WHERE alias_row.context_id = context_row.id
+                             AND alias_row.normalized_alias = ?3
+                       )
+                   )
+             )",
+            context_visible_sql("context_row")
+        ),
+        params![draft.owner_principal, draft.kind.as_str(), draft.normalized_key],
+        |row| row.get(0),
+    )?;
+    let mut exact_identity = false;
+    for identity in &draft.identities {
+        exact_identity = tx.query_row(
+            &format!(
+                "SELECT EXISTS(
+                     SELECT 1
+                     FROM context_identities AS identity_row
+                     JOIN contexts AS context_row ON context_row.id = identity_row.context_id
+                     WHERE context_row.kind = ?2
+                       AND {}
+                       AND identity_row.scheme = ?3
+                       AND identity_row.namespace = ?4
+                       AND identity_row.fingerprint = ?5
+                 )",
+                context_visible_sql("context_row")
+            ),
+            params![
+                draft.owner_principal,
+                draft.kind.as_str(),
+                identity.scheme,
+                identity.namespace.as_deref().unwrap_or_default(),
+                identity.fingerprint,
+            ],
+            |row| row.get(0),
+        )?;
+        if exact_identity {
+            break;
+        }
+    }
+    if exact_key_or_alias || exact_identity {
+        return Err(StoreError::Conflict("exact visible context key, alias, or identity already exists".into()));
     }
     let existing = {
         let sql = format!(
@@ -724,9 +887,7 @@ fn grant_context_use_conn(
     now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
     validate_audit_actor(audit, principal)?;
-    if grantee_principal.trim().is_empty() || grantee_principal == LEGACY_ALL_PRINCIPALS_GRANT {
-        return Err(StoreError::Conflict("ordinary context grants require one explicit principal".into()));
-    }
+    let grantee_principal = normalize_explicit_grantee(grantee_principal)?;
     let tx = sqlite_write_tx(conn)?;
     require_mutable_owned_context(&tx, &context_id, principal)?;
     let now = now.to_rfc3339();
@@ -764,8 +925,15 @@ fn replace_memory_contexts_conn(
     if !write_access_allowed(&memory.provenance, &memory.access_policy, principal) {
         return Ok(WriteOutcome::Denied);
     }
+    let mut statement = tx.prepare("SELECT context_id FROM memory_contexts WHERE memory_id = ?1")?;
+    let preserved_context_ids = statement
+        .query_map([memory_id.to_string()], |row| row.get::<_, String>(0))?
+        .map(|result| result.and_then(|id| ContextId::from_str(&id).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))))
+        .collect::<Result<HashSet<_>, _>>()?;
+    drop(statement);
     for context_id in context_ids {
-        if !context_use_allowed(&tx, context_id, principal, true)? {
+        let require_active = !preserved_context_ids.contains(context_id);
+        if !context_use_allowed(&tx, context_id, principal, require_active)? {
             return Err(StoreError::Conflict(format!(
                 "context {context_id} is unavailable, archived, or not granted to principal {principal:?}"
             )));
@@ -854,10 +1022,8 @@ impl ContextReader for SqliteStore {
             );
             let mut statement = conn.prepare(&sql)?;
             let rows = statement.query_map(params![principal, limit, offset], read_context_row)?.collect::<Result<Vec<_>, _>>()?;
-            rows.into_iter()
-                .map(parse_context_row)
-                .map(|result| result.and_then(|context| fetch_sqlite_context_record(conn, context)))
-                .collect()
+            let contexts = rows.into_iter().map(parse_context_row).collect::<Result<Vec<_>, _>>()?;
+            fetch_sqlite_context_records(conn, contexts)
         })
         .await
     }
@@ -995,7 +1161,6 @@ impl ContextReader for SqliteStore {
                      FROM contexts AS child
                      JOIN descendants AS selected_parent ON child.parent_id = selected_parent.id
                      WHERE ?3
-                       AND child.lifecycle = 'active'
                        AND {}
                  ),
                  effective(id) AS (
@@ -1005,8 +1170,7 @@ impl ContextReader for SqliteStore {
                      FROM contexts AS parent
                      JOIN contexts AS child ON child.parent_id = parent.id
                      JOIN effective AS effective_child ON effective_child.id = child.id
-                     WHERE parent.lifecycle = 'active'
-                       AND {}
+                     WHERE {}
                  )
                  SELECT {CONTEXT_COLUMNS}
                  FROM contexts AS context_row
@@ -1089,6 +1253,29 @@ impl ContextReader for SqliteStore {
         .await
     }
 
+    async fn get_memory_context_presence_batch(&self, memory_ids: &[MemoryId], principal: &str) -> Result<MemoryContextPresence, StoreError> {
+        if memory_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let ids_json = serde_json::to_string(&memory_ids.iter().map(ToString::to_string).collect::<Vec<_>>())?;
+        let principal = principal.to_owned();
+        self.with_conn(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT DISTINCT memory_row.id, memory_row.provenance, memory_row.access_policy
+                 FROM memories AS memory_row
+                 JOIN memory_contexts AS membership ON membership.memory_id = memory_row.id
+                 WHERE memory_row.id IN (SELECT value FROM json_each(?1))",
+            )?;
+            let rows = statement.query_map([ids_json], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?;
+            let mut present = HashSet::new();
+            for row in rows {
+                present.extend(readable_membership_memory_id(row?, &principal)?);
+            }
+            Ok(present)
+        })
+        .await
+    }
+
     async fn count_memory_contexts_for_write(&self, memory_id: &MemoryId, principal: &str) -> Result<Option<usize>, StoreError> {
         let owned_memory_id = *memory_id;
         let principal = principal.to_owned();
@@ -1111,8 +1298,11 @@ impl ContextReader for SqliteStore {
         let principal = principal.to_owned();
         let limit = sqlite_usize(limit.min(MAX_CONTEXT_AUDIT_PAGE_SIZE), "context audit limit")?;
         self.with_conn(move |conn| {
-            if fetch_context_authorized(conn, &owned_context_id, &principal)?.is_none() {
+            let Some(context) = fetch_context_authorized(conn, &owned_context_id, &principal)? else {
                 return Err(StoreError::NotFound(format!("context not found: {owned_context_id}")));
+            };
+            if context.owner_principal != principal {
+                return Ok(Vec::new());
             }
             let mut statement = conn.prepare(
                 "SELECT id, actor_principal, action, context_id, memory_id, timestamp, details
@@ -1289,7 +1479,9 @@ fn expand_context_definitions(definitions: &[ContextDefinition], direct_ids: &[C
             let parent = by_id
                 .get(&parent_id)
                 .ok_or_else(|| StoreError::Conflict(format!("context {direct_id} references unavailable parent {parent_id}")))?;
-            append_context_once(&mut result, &mut included, parent);
+            if parent.lifecycle == ContextLifecycle::Active {
+                append_context_once(&mut result, &mut included, parent);
+            }
             cursor = parent.parent_id;
         }
     }
@@ -1386,9 +1578,7 @@ impl ContextWriter for SqliteStore {
         let now = self.clock_now();
         self.with_conn(move |conn| {
             validate_audit_actor(&audit, &principal)?;
-            if grantee_principal.trim().is_empty() || grantee_principal == LEGACY_ALL_PRINCIPALS_GRANT {
-                return Err(StoreError::Conflict("ordinary grant revocation requires one explicit principal".into()));
-            }
+            let grantee_principal = normalize_explicit_grantee(&grantee_principal)?;
             let tx = sqlite_write_tx(conn)?;
             require_mutable_owned_context(&tx, &owned_context_id, &principal)?;
             let _removed = tx.execute("DELETE FROM context_grants WHERE context_id = ?1 AND grantee_principal = ?2", params![
@@ -1536,6 +1726,9 @@ impl ContextWriter for SqliteStore {
         let now = self.clock_now().to_rfc3339();
         self.with_conn(move |conn| {
             validate_audit_actor(&audit, &principal)?;
+            if principal != OPERATOR_PRINCIPAL {
+                return Err(StoreError::Conflict(format!("context kind mutation requires principal {OPERATOR_PRINCIPAL:?}")));
+            }
             let display_name = draft.display_name.trim();
             if display_name.is_empty() {
                 return Err(StoreError::Conflict("context kind display name cannot be blank".into()));
@@ -1803,6 +1996,26 @@ async fn postgres_context_use_allowed(
         .await?)
 }
 
+async fn lock_postgres_contexts_for_membership(tx: &mut sqlx_core::transaction::Transaction<'_, Postgres>, context_ids: &[ContextId]) -> Result<(), StoreError> {
+    let mut context_ids = context_ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+    context_ids.sort_unstable();
+    context_ids.dedup();
+    if context_ids.is_empty() {
+        return Ok(());
+    }
+    let _locked_ids = query_scalar::<Postgres, String>(
+        "SELECT id
+         FROM contexts
+         WHERE id = ANY($1)
+         ORDER BY id
+         FOR KEY SHARE",
+    )
+    .bind(context_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 async fn require_postgres_mutable_owned_context(tx: &mut sqlx_core::transaction::Transaction<'_, Postgres>, context_id: &ContextId, principal: &str) -> Result<(), StoreError> {
     let row = query("SELECT owner_principal, frozen FROM contexts WHERE id = $1 FOR UPDATE")
         .bind(context_id.to_string())
@@ -1887,14 +2100,32 @@ pub(crate) async fn insert_initial_memory_contexts_postgres(
     audit: &ContextAuditDraft,
     now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
+    insert_memory_contexts_postgres(tx, memory_id, context_ids, principal, compatibility_scope, audit, now, &HashSet::new()).await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "membership insertion validates authorization, compatibility cache, preserved inactive memberships, audit, and timestamp"
+)]
+async fn insert_memory_contexts_postgres(
+    tx: &mut sqlx_core::transaction::Transaction<'_, Postgres>,
+    memory_id: &MemoryId,
+    context_ids: &[ContextId],
+    principal: &str,
+    compatibility_scope: &str,
+    audit: &ContextAuditDraft,
+    now: DateTime<Utc>,
+    preserved_context_ids: &HashSet<ContextId>,
+) -> Result<(), StoreError> {
     validate_audit_actor(audit, principal)?;
-    let _locked = query("LOCK TABLE contexts, context_grants IN SHARE MODE").execute(&mut **tx).await?;
     let unique = context_ids.iter().copied().collect::<HashSet<_>>();
     if unique.len() != context_ids.len() {
         return Err(StoreError::Conflict("memory context memberships must be unique".into()));
     }
+    lock_postgres_contexts_for_membership(tx, context_ids).await?;
     for context_id in context_ids {
-        if !postgres_context_use_allowed(tx, context_id, principal, true).await? {
+        let require_active = !preserved_context_ids.contains(context_id);
+        if !postgres_context_use_allowed(tx, context_id, principal, require_active).await? {
             return Err(StoreError::Conflict(format!(
                 "context {context_id} is unavailable, archived, or not granted to principal {principal:?}"
             )));
@@ -1942,11 +2173,18 @@ pub(crate) async fn replace_memory_contexts_postgres_tx(
     audit: &ContextAuditDraft,
     now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
+    let preserved_context_ids = query_scalar::<Postgres, String>("SELECT context_id FROM memory_contexts WHERE memory_id = $1")
+        .bind(memory_id.to_string())
+        .fetch_all(&mut **tx)
+        .await?
+        .into_iter()
+        .map(|id| ContextId::from_str(&id).map_err(|error| StoreError::Serialization(Box::new(error))))
+        .collect::<Result<HashSet<_>, _>>()?;
     let _removed = query("DELETE FROM memory_contexts WHERE memory_id = $1")
         .bind(memory_id.to_string())
         .execute(&mut **tx)
         .await?;
-    insert_initial_memory_contexts_postgres(tx, memory_id, context_ids, principal, compatibility_scope, audit, now).await?;
+    insert_memory_contexts_postgres(tx, memory_id, context_ids, principal, compatibility_scope, audit, now, &preserved_context_ids).await?;
     let _updated_metadata = query("UPDATE memory_metadata SET scope_key = $1, updated_at = $2 WHERE memory_id = $3")
         .bind(compatibility_scope)
         .bind(now)
@@ -2215,7 +2453,6 @@ impl ContextReader for PostgresStore {
                  FROM contexts AS child
                  JOIN descendants AS selected_parent ON child.parent_id = selected_parent.id
                  WHERE $3
-                   AND child.lifecycle = 'active'
                    AND (
                        child.owner_principal = $1 OR EXISTS (
                            SELECT 1 FROM context_grants AS grant_row
@@ -2231,8 +2468,7 @@ impl ContextReader for PostgresStore {
                  FROM contexts AS parent
                  JOIN contexts AS child ON child.parent_id = parent.id
                  JOIN effective AS effective_child ON effective_child.id = child.id
-                 WHERE parent.lifecycle = 'active'
-                   AND (
+                 WHERE (
                        parent.owner_principal = $1 OR EXISTS (
                            SELECT 1 FROM context_grants AS grant_row
                            WHERE grant_row.context_id = parent.id
@@ -2352,6 +2588,32 @@ impl ContextReader for PostgresStore {
         Ok(memberships)
     }
 
+    async fn get_memory_context_presence_batch(&self, memory_ids: &[MemoryId], principal: &str) -> Result<MemoryContextPresence, StoreError> {
+        if memory_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let ids = memory_ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let rows = query(
+            "SELECT DISTINCT memory_row.id, memory_row.provenance, memory_row.access_policy
+             FROM memories AS memory_row
+             JOIN memory_contexts AS membership ON membership.memory_id = memory_row.id
+             WHERE memory_row.id = ANY($1)",
+        )
+        .bind(ids)
+        .fetch_all(self.pool())
+        .await?;
+        let mut present = HashSet::new();
+        for row in &rows {
+            let Json(provenance): Json<Provenance> = row.try_get("provenance")?;
+            let Json(access_policy): Json<AccessPolicy> = row.try_get("access_policy")?;
+            if memory_read_allowed(&provenance, &access_policy, principal) {
+                let memory_id = MemoryId::from_str(&row.try_get::<String, _>("id")?).map_err(|error| StoreError::Serialization(Box::new(error)))?;
+                let _inserted = present.insert(memory_id);
+            }
+        }
+        Ok(present)
+    }
+
     async fn count_memory_contexts_for_write(&self, memory_id: &MemoryId, principal: &str) -> Result<Option<usize>, StoreError> {
         let authorization = query("SELECT provenance, access_policy FROM memories WHERE id = $1")
             .bind(memory_id.to_string())
@@ -2374,8 +2636,11 @@ impl ContextReader for PostgresStore {
     }
 
     async fn query_context_audit(&self, context_id: &ContextId, principal: &str, limit: usize) -> Result<Vec<ContextAuditEvent>, StoreError> {
-        if self.get_context(context_id, principal).await?.is_none() {
+        let Some(context) = self.get_context(context_id, principal).await? else {
             return Err(StoreError::NotFound(format!("context not found: {context_id}")));
+        };
+        if context.owner_principal != principal {
+            return Ok(Vec::new());
         }
         let limit = i64::try_from(limit.min(MAX_CONTEXT_AUDIT_PAGE_SIZE)).map_err(|error| StoreError::Conflict(format!("context audit limit exceeds BIGINT: {error}")))?;
         let rows = query(
@@ -2546,6 +2811,69 @@ impl ContextWriter for PostgresStore {
             && !postgres_context_use_allowed(&mut tx, &parent_id, &draft.owner_principal, true).await?
         {
             return Err(StoreError::Conflict(format!("parent context {parent_id} is unavailable, archived, or not granted")));
+        }
+        let exact_key_or_alias: bool = query_scalar(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM contexts AS context_row
+                 WHERE context_row.kind = $2
+                   AND (
+                       context_row.owner_principal = $1 OR EXISTS (
+                           SELECT 1
+                           FROM context_grants AS grant_row
+                           WHERE grant_row.context_id = context_row.id
+                             AND grant_row.grantee_principal IN ($1, '*')
+                       )
+                   )
+                   AND (
+                       context_row.normalized_key = $3 OR EXISTS (
+                           SELECT 1
+                           FROM context_aliases AS alias_row
+                           WHERE alias_row.context_id = context_row.id
+                             AND alias_row.normalized_alias = $3
+                       )
+                   )
+             )",
+        )
+        .bind(&draft.owner_principal)
+        .bind(draft.kind.as_str())
+        .bind(&draft.normalized_key)
+        .fetch_one(&mut *tx)
+        .await?;
+        let mut exact_identity = false;
+        for identity in &draft.identities {
+            exact_identity = query_scalar(
+                "SELECT EXISTS(
+                     SELECT 1
+                     FROM context_identities AS identity_row
+                     JOIN contexts AS context_row ON context_row.id = identity_row.context_id
+                     WHERE context_row.kind = $2
+                       AND (
+                           context_row.owner_principal = $1 OR EXISTS (
+                               SELECT 1
+                               FROM context_grants AS grant_row
+                               WHERE grant_row.context_id = context_row.id
+                                 AND grant_row.grantee_principal IN ($1, '*')
+                           )
+                       )
+                       AND identity_row.scheme = $3
+                       AND identity_row.namespace = $4
+                       AND identity_row.fingerprint = $5
+                 )",
+            )
+            .bind(&draft.owner_principal)
+            .bind(draft.kind.as_str())
+            .bind(&identity.scheme)
+            .bind(identity.namespace.as_deref().unwrap_or_default())
+            .bind(&identity.fingerprint)
+            .fetch_one(&mut *tx)
+            .await?;
+            if exact_identity {
+                break;
+            }
+        }
+        if exact_key_or_alias || exact_identity {
+            return Err(StoreError::Conflict("exact visible context key, alias, or identity already exists".into()));
         }
         let existing_rows = query(
             "SELECT context_row.id, context_row.context_key, context_row.display_name,
@@ -2758,9 +3086,7 @@ impl ContextWriter for PostgresStore {
 
     async fn grant_context_use(&self, context_id: &ContextId, grantee_principal: &str, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
         validate_audit_actor(audit, principal)?;
-        if grantee_principal.trim().is_empty() || grantee_principal == LEGACY_ALL_PRINCIPALS_GRANT {
-            return Err(StoreError::Conflict("ordinary context grants require one explicit principal".into()));
-        }
+        let grantee_principal = normalize_explicit_grantee(grantee_principal)?;
         let mut tx = self.pool().begin().await?;
         require_postgres_mutable_owned_context(&mut tx, context_id, principal).await?;
         let now = self.clock_now();
@@ -2784,9 +3110,7 @@ impl ContextWriter for PostgresStore {
 
     async fn revoke_context_use(&self, context_id: &ContextId, grantee_principal: &str, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
         validate_audit_actor(audit, principal)?;
-        if grantee_principal.trim().is_empty() || grantee_principal == LEGACY_ALL_PRINCIPALS_GRANT {
-            return Err(StoreError::Conflict("ordinary grant revocation requires one explicit principal".into()));
-        }
+        let grantee_principal = normalize_explicit_grantee(grantee_principal)?;
         let mut tx = self.pool().begin().await?;
         require_postgres_mutable_owned_context(&mut tx, context_id, principal).await?;
         let now = self.clock_now();
@@ -2945,6 +3269,9 @@ impl ContextWriter for PostgresStore {
 
     async fn upsert_context_kind(&self, draft: &ContextKindDraft, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
         validate_audit_actor(audit, principal)?;
+        if principal != OPERATOR_PRINCIPAL {
+            return Err(StoreError::Conflict(format!("context kind mutation requires principal {OPERATOR_PRINCIPAL:?}")));
+        }
         let display_name = draft.display_name.trim();
         if display_name.is_empty() {
             return Err(StoreError::Conflict("context kind display name cannot be blank".into()));
@@ -3131,6 +3458,10 @@ impl ContextWriter for PostgresStore {
         Ok(removed == 1)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "membership replacement keeps authorization, locking, cache synchronization, and audit in one transaction"
+    )]
     async fn replace_memory_contexts(&self, memory_id: &MemoryId, context_ids: &[ContextId], principal: &str, audit: &ContextAuditDraft) -> Result<WriteOutcome, StoreError> {
         validate_audit_actor(audit, principal)?;
         let unique = context_ids.iter().copied().collect::<HashSet<_>>();
@@ -3138,7 +3469,6 @@ impl ContextWriter for PostgresStore {
             return Err(StoreError::Conflict("memory context memberships must be unique".into()));
         }
         let mut tx = self.pool().begin().await?;
-        let _locked = query("LOCK TABLE contexts, context_grants IN SHARE MODE").execute(&mut *tx).await?;
         let authorization = query("SELECT provenance, access_policy FROM memories WHERE id = $1 FOR UPDATE")
             .bind(memory_id.to_string())
             .fetch_optional(&mut *tx)
@@ -3151,8 +3481,17 @@ impl ContextWriter for PostgresStore {
         if !write_access_allowed(&provenance, &access_policy, principal) {
             return Ok(WriteOutcome::Denied);
         }
+        let preserved_context_ids = query_scalar::<Postgres, String>("SELECT context_id FROM memory_contexts WHERE memory_id = $1")
+            .bind(memory_id.to_string())
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .map(|id| ContextId::from_str(&id).map_err(|error| StoreError::Serialization(Box::new(error))))
+            .collect::<Result<HashSet<_>, _>>()?;
+        lock_postgres_contexts_for_membership(&mut tx, context_ids).await?;
         for context_id in context_ids {
-            if !postgres_context_use_allowed(&mut tx, context_id, principal, true).await? {
+            let require_active = !preserved_context_ids.contains(context_id);
+            if !postgres_context_use_allowed(&mut tx, context_id, principal, require_active).await? {
                 return Err(StoreError::Conflict(format!(
                     "context {context_id} is unavailable, archived, or not granted to principal {principal:?}"
                 )));

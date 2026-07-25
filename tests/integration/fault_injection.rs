@@ -20,7 +20,7 @@ use localhold::{
     },
     embedding::{BoxFuture, EmbeddingProvider},
     error::{EmbeddingError, StoreError},
-    store::{ContextReader, ContextWriter, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter, ReassignScopeOutcome},
+    store::{ContextReader, ContextWriter, MemoryAdmin, MemoryContextPresence, MemoryReader, MemoryWithEmbedding, MemoryWriter, ReassignScopeOutcome},
     types::{
         AuditDraft, AuthorizedUpdateOutcome, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MemoryUpdate, MetadataMigrationOutcome, MetadataMigrationReport,
         QueryContext, ScopeDefinition, SearchResult, WriteOutcome,
@@ -251,8 +251,17 @@ impl<S: MemoryReader + Send + Sync> MemoryReader for ChaosStore<S> {
         self.inner.fetch_embeddings_for_ids(ids).await
     }
 
-    async fn find_embedding_neighbors(&self, embedding: &[f32], max_l2_distance: f64, limit: usize) -> Result<Vec<(MemoryId, f64)>, StoreError> {
-        self.inner.find_embedding_neighbors(embedding, max_l2_distance, limit).await
+    async fn find_embedding_neighbors(
+        &self,
+        source_memory_id: &MemoryId,
+        candidate_ids: &[MemoryId],
+        embedding: &[f32],
+        max_l2_distance: f64,
+        limit: usize,
+    ) -> Result<Vec<(MemoryId, f64)>, StoreError> {
+        self.inner
+            .find_embedding_neighbors(source_memory_id, candidate_ids, embedding, max_l2_distance, limit)
+            .await
     }
 }
 
@@ -696,6 +705,13 @@ impl<S: ContextReader + Send + Sync> ContextReader for ChaosStore<S> {
             return Err(error);
         }
         self.inner.get_memory_contexts_batch(memory_ids, principal).await
+    }
+
+    async fn get_memory_context_presence_batch(&self, memory_ids: &[MemoryId], principal: &str) -> Result<MemoryContextPresence, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.get_memory_context_presence_batch(memory_ids, principal).await
     }
 
     async fn count_memory_contexts_for_write(&self, memory_id: &MemoryId, principal: &str) -> Result<Option<usize>, StoreError> {

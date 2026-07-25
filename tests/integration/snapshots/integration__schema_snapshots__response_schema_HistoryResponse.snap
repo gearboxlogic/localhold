@@ -1,0 +1,98 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HistoryResponse",
+  "description": "Response from `admin_history`.",
+  "type": "object",
+  "properties": {
+    "entries": {
+      "description": "Audit log entries for the requested memory.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AuditEntryResponse"
+      }
+    }
+  },
+  "required": [
+    "entries"
+  ],
+  "$defs": {
+    "AuditEntryResponse": {
+      "description": "A single audit log entry in the history response.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "description": "What happened: `store`, `update`, `delete`, `supersede`, `consolidate`, etc.",
+          "$ref": "#/$defs/AuditAction"
+        },
+        "principal": {
+          "description": "Trusted principal that performed the action.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timestamp": {
+          "description": "When it happened (RFC 3339).",
+          "type": "string",
+          "format": "date-time"
+        },
+        "details": {
+          "description": "Action-specific context."
+        }
+      },
+      "required": [
+        "action",
+        "timestamp"
+      ]
+    },
+    "AuditAction": {
+      "description": "Typed audit action for structured audit logging.\n\nEach variant corresponds to a distinct engine operation that is recorded\nin the audit trail.",
+      "oneOf": [
+        {
+          "description": "A new memory was stored.",
+          "type": "string",
+          "const": "store"
+        },
+        {
+          "description": "An existing memory was updated.",
+          "type": "string",
+          "const": "update"
+        },
+        {
+          "description": "A memory was deleted.",
+          "type": "string",
+          "const": "delete"
+        },
+        {
+          "description": "A memory was superseded by a newer version.",
+          "type": "string",
+          "const": "supersede"
+        },
+        {
+          "description": "Memories were deleted in bulk.",
+          "type": "string",
+          "const": "bulk_delete"
+        },
+        {
+          "description": "Memories were updated in bulk.",
+          "type": "string",
+          "const": "bulk_update"
+        },
+        {
+          "description": "Duplicate memories were consolidated.",
+          "type": "string",
+          "const": "consolidate"
+        },
+        {
+          "description": "Memories were reassigned to a different scope.",
+          "type": "string",
+          "const": "reassign"
+        }
+      ]
+    }
+  }
+}

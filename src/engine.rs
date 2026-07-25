@@ -1145,7 +1145,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         Ok(self.orchestrator.store().evict_expired_all(principal, &audit).await?)
     }
 
-    /// Register or replace a scope definition.
+    /// Register or replace an operator-owned private compatibility definition.
     ///
     /// # Errors
     ///
@@ -1154,7 +1154,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         Ok(self.orchestrator.store().register_scope(scope).await?)
     }
 
-    /// List registered scope definitions.
+    /// List operator-owned and migrated frozen compatibility definitions.
     ///
     /// # Errors
     ///
@@ -1477,7 +1477,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
     pub(crate) async fn consolidate_memories(
         &self,
         principal: &str,
-        context_ids: Option<&[ContextId]>,
+        context_ids: &[ContextId],
         legacy_context_ids_any: Option<&[ContextId]>,
         similarity_threshold: f64,
         limit: usize,
@@ -1494,9 +1494,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         // inaccessible rows never consume the bounded candidate budget.
         let candidate_limit = self.consolidation_candidate_limit();
         let mut memories = store
-            .list_with_embeddings(context_ids, legacy_context_ids_any, principal, candidate_limit.saturating_add(1))
+            .list_with_embeddings(Some(context_ids), legacy_context_ids_any, principal, candidate_limit.saturating_add(1))
             .await?;
-        let capped = memories.len() > candidate_limit;
+        let mut capped = memories.len() > candidate_limit;
         memories.truncate(candidate_limit);
         let candidate_count = memories.len();
 
@@ -1509,8 +1509,12 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
             });
         }
 
-        // BFS frontier expansion: discover neighbor pairs via ANN index.
-        let pairs = self.bfs_discover_pairs(store, &memories, similarity_threshold).await?;
+        // Discover a bounded, profile-compatible neighbor graph. Backends may
+        // use exact candidate-set scans, so the work budget prevents
+        // candidate_count² distance evaluation from becoming a request-level
+        // availability hazard.
+        let (pairs, distance_work_capped) = self.bfs_discover_pairs(store, &memories, similarity_threshold).await?;
+        capped |= distance_work_capped;
 
         let groups = find_duplicate_groups_from_pairs(&memories, &pairs, limit);
 
@@ -1536,22 +1540,31 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         })
     }
 
-    /// BFS frontier expansion over the ANN similarity graph.
+    /// BFS frontier expansion over the profile-compatible similarity graph.
     ///
-    /// For each unclustered memory, queries its ANN neighbors within the
+    /// For each unclustered memory, queries its nearest neighbors within the
     /// similarity threshold, then expands the frontier to newly discovered
     /// neighbors. Produces the sparse edge list for union-find clustering.
     ///
-    /// Complexity: O(n log n) — each memory is visited at most once as a
-    /// frontier node, triggering one ANN index lookup.
-    async fn bfs_discover_pairs(&self, store: &S, memories: &[crate::store::MemoryWithEmbedding], similarity_threshold: f64) -> Result<Vec<NeighborPair>, EngineError> {
+    /// Backends may evaluate a supplied candidate set exactly. The estimated
+    /// number of candidate-vector comparisons is therefore bounded by
+    /// `candidate_count × neighbor_limit`; exhausting that budget returns the
+    /// discovered prefix and marks the enclosing operation capped.
+    async fn bfs_discover_pairs(&self, store: &S, memories: &[crate::store::MemoryWithEmbedding], similarity_threshold: f64) -> Result<(Vec<NeighborPair>, bool), EngineError> {
         use std::collections::{HashMap, HashSet, VecDeque};
 
         let max_l2 = cosine_to_l2_threshold(similarity_threshold);
         let neighbor_limit = self.consolidation_neighbor_limit();
+        let distance_work_budget = memories.len().saturating_mul(neighbor_limit);
+        let mut estimated_distance_work = 0_usize;
+        let mut work_capped = false;
 
         // Build ID → index lookup.
         let id_to_idx: HashMap<MemoryId, usize> = memories.iter().enumerate().map(|(i, m)| (m.memory.id, i)).collect();
+        let mut candidate_ids_by_profile = HashMap::<Vec<ContextId>, Vec<MemoryId>>::new();
+        for memory in memories {
+            candidate_ids_by_profile.entry(memory.context_ids.clone()).or_default().push(memory.memory.id);
+        }
 
         let mut clustered: HashSet<usize> = HashSet::new();
         let mut queried: HashSet<usize> = HashSet::with_capacity(memories.len());
@@ -1583,7 +1596,18 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
                 let Some(current_emb) = memories[current_idx].embedding.as_deref() else {
                     continue;
                 };
-                let neighbors = store.find_embedding_neighbors(current_emb, max_l2, neighbor_limit).await?;
+                let candidate_ids = candidate_ids_by_profile
+                    .get(&memories[current_idx].context_ids)
+                    .ok_or_else(|| EngineError::Store(crate::error::StoreError::Conflict("consolidation candidate profile was not indexed".into())))?;
+                let next_work = estimated_distance_work.saturating_add(candidate_ids.len());
+                if next_work > distance_work_budget {
+                    work_capped = true;
+                    break;
+                }
+                estimated_distance_work = next_work;
+                let neighbors = store
+                    .find_embedding_neighbors(&memories[current_idx].memory.id, candidate_ids, current_emb, max_l2, neighbor_limit)
+                    .await?;
                 collect_bfs_neighbors(
                     &neighbors,
                     memories,
@@ -1598,9 +1622,12 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
             }
 
             clustered.extend(&cluster_members);
+            if work_capped {
+                break;
+            }
         }
 
-        Ok(pairs)
+        Ok((pairs, work_capped))
     }
 
     /// Mark non-representative members of a duplicate group as superseded.
@@ -1672,6 +1699,13 @@ fn collect_bfs_neighbors(
         let Some(&neighbor_idx) = id_to_idx.get(&neighbor_id) else {
             continue;
         };
+        // Supersession preserves the representative's ordered membership
+        // profile, including its compatibility-primary context.
+        // Merging across profiles would make the superseded fact disappear
+        // from contexts that only the replaced memory belonged to.
+        if memories[neighbor_idx].context_ids != memories[current_idx].context_ids {
+            continue;
+        }
         if cluster_members.contains(&neighbor_idx) {
             continue;
         }
@@ -1723,9 +1757,10 @@ mod tests {
     use crate::{
         clock::MockClock,
         config::LimitsConfig,
+        context::{ContextAuditDraft, ContextCreateDraft, ContextKind},
         embedding::{BoxFuture, EmbeddingProvider, NoopEmbedding},
         error::EmbeddingError,
-        store::{MemoryReader as _, MemoryWriter as _, SqliteStore},
+        store::{ContextWriter as _, MemoryReader as _, MemoryWriter as _, SqliteStore},
     };
 
     struct HealthyEmbedding;
@@ -1911,6 +1946,24 @@ mod tests {
         let store = SqliteStore::in_memory().unwrap();
         let embedding = Arc::new(NoopEmbedding::new());
         LocalHoldEngine::new(store, embedding, LimitsConfig::default(), search_config)
+    }
+
+    async fn create_consolidation_context(store: &SqliteStore, owner: &str, key: &str) -> ContextId {
+        let context_id = ContextId::new();
+        let _context = store
+            .create_context(
+                &ContextCreateDraft::private(context_id, ContextKind::new(ContextKind::PROJECT).unwrap(), key, "Consolidation test", owner),
+                &ContextAuditDraft::new(owner, "consolidation_test_context_created").with_context(context_id),
+            )
+            .await
+            .unwrap();
+        context_id
+    }
+
+    async fn attach_consolidation_context(store: &SqliteStore, memory_id: MemoryId, context_id: ContextId, actor: &str) {
+        let mut audit = ContextAuditDraft::new(actor, "consolidation_test_membership").with_context(context_id);
+        audit.memory_id = Some(memory_id);
+        let _outcome = store.replace_memory_contexts(&memory_id, &[context_id], actor, &audit).await.unwrap();
     }
 
     fn fixed_id(value: &str) -> MemoryId {
@@ -3129,28 +3182,28 @@ mod tests {
     #[tokio::test]
     async fn consolidate_rejects_negative_threshold() {
         let engine = make_engine();
-        let err = engine.consolidate_memories("test-agent", None, None, -0.1_f64, 10, false).await.unwrap_err();
+        let err = engine.consolidate_memories("test-agent", &[], None, -0.1_f64, 10, false).await.unwrap_err();
         assert!(matches!(err, EngineError::Validation(_)), "negative threshold should be rejected");
     }
 
     #[tokio::test]
     async fn consolidate_rejects_threshold_above_one() {
         let engine = make_engine();
-        let err = engine.consolidate_memories("test-agent", None, None, 1.1_f64, 10, false).await.unwrap_err();
+        let err = engine.consolidate_memories("test-agent", &[], None, 1.1_f64, 10, false).await.unwrap_err();
         assert!(matches!(err, EngineError::Validation(_)), "threshold > 1.0 should be rejected");
     }
 
     #[tokio::test]
     async fn consolidate_rejects_nan_threshold() {
         let engine = make_engine();
-        let err = engine.consolidate_memories("test-agent", None, None, f64::NAN, 10, false).await.unwrap_err();
+        let err = engine.consolidate_memories("test-agent", &[], None, f64::NAN, 10, false).await.unwrap_err();
         assert!(matches!(err, EngineError::Validation(_)), "NaN threshold should be rejected");
     }
 
     #[tokio::test]
     async fn consolidate_rejects_infinite_threshold() {
         let engine = make_engine();
-        let err = engine.consolidate_memories("test-agent", None, None, f64::INFINITY, 10, false).await.unwrap_err();
+        let err = engine.consolidate_memories("test-agent", &[], None, f64::INFINITY, 10, false).await.unwrap_err();
         assert!(matches!(err, EngineError::Validation(_)), "infinite threshold should be rejected");
     }
 
@@ -3159,14 +3212,14 @@ mod tests {
         let engine = make_engine();
         // With NoopEmbedding, no memories will have embeddings, so no groups will form.
         // The key test is that dry_run=true returns merged=false.
-        let result = engine.consolidate_memories("test-agent", None, None, 0.9_f64, 10, true).await.unwrap();
+        let result = engine.consolidate_memories("test-agent", &[], None, 0.9_f64, 10, true).await.unwrap();
         assert!(!result.merged, "dry_run should produce merged=false");
     }
 
     #[tokio::test]
     async fn consolidate_empty_store_returns_no_groups() {
         let engine = make_engine();
-        let result = engine.consolidate_memories("test-agent", None, None, 0.9_f64, 10, false).await.unwrap();
+        let result = engine.consolidate_memories("test-agent", &[], None, 0.9_f64, 10, false).await.unwrap();
         assert!(result.groups.is_empty(), "empty store should produce no groups");
         assert!(!result.merged, "empty store should not merge");
     }
@@ -3177,7 +3230,7 @@ mod tests {
         let memory = engine.build_memory(test_input("single memory"), engine.now()).unwrap();
         engine.store_memory(memory, None).await.unwrap();
 
-        let result = engine.consolidate_memories("test-agent", None, None, 0.9_f64, 10, false).await.unwrap();
+        let result = engine.consolidate_memories("test-agent", &[], None, 0.9_f64, 10, false).await.unwrap();
         // NoopEmbedding means no embeddings, so list_with_embeddings returns nothing.
         assert!(result.groups.is_empty());
     }
@@ -3185,14 +3238,14 @@ mod tests {
     #[tokio::test]
     async fn consolidate_threshold_boundary_zero_accepts() {
         let engine = make_engine();
-        let result = engine.consolidate_memories("test-agent", None, None, 0.0_f64, 10, true).await.unwrap();
+        let result = engine.consolidate_memories("test-agent", &[], None, 0.0_f64, 10, true).await.unwrap();
         assert!(!result.merged);
     }
 
     #[tokio::test]
     async fn consolidate_threshold_boundary_one_accepts() {
         let engine = make_engine();
-        let result = engine.consolidate_memories("test-agent", None, None, 1.0_f64, 10, true).await.unwrap();
+        let result = engine.consolidate_memories("test-agent", &[], None, 1.0_f64, 10, true).await.unwrap();
         assert!(!result.merged);
     }
 
@@ -3200,6 +3253,16 @@ mod tests {
     async fn consolidate_ignores_memories_caller_cannot_write() {
         let store = SqliteStore::in_memory().unwrap();
         let engine = make_engine_with_store(store.clone(), Arc::new(NoopEmbedding::new()));
+        let context_id = create_consolidation_context(&store, "other", "project/consolidation-authorization").await;
+        store
+            .grant_context_use(
+                &context_id,
+                "caller",
+                "other",
+                &ContextAuditDraft::new("other", "consolidation_test_context_granted").with_context(context_id),
+            )
+            .await
+            .unwrap();
         let mut caller_owned = engine.build_memory(test_input("caller-owned"), engine.now()).unwrap();
         caller_owned.provenance.source_agent = Some("caller".into());
 
@@ -3211,8 +3274,10 @@ mod tests {
         emb[0] = 1.0;
         let caller_id = store.store(&caller_owned, Some(&emb)).await.unwrap();
         let hidden_id = store.store(&hidden, Some(&emb)).await.unwrap();
+        attach_consolidation_context(&store, caller_id, context_id, "caller").await;
+        attach_consolidation_context(&store, hidden_id, context_id, "other").await;
 
-        let result = engine.consolidate_memories("caller", None, None, 0.9, 10, false).await.unwrap();
+        let result = engine.consolidate_memories("caller", &[context_id], None, 0.9, 10, false).await.unwrap();
         assert!(result.groups.is_empty(), "non-writable memories should not participate in consolidation");
         assert!(!result.merged);
 
@@ -3230,19 +3295,77 @@ mod tests {
             ..LimitsConfig::default()
         };
         let engine = LocalHoldEngine::new(store.clone(), Arc::new(NoopEmbedding::new()), limits, SearchConfig::default());
+        let context_id = create_consolidation_context(&store, "caller", "project/consolidation-cap").await;
         let mut embedding = vec![0.0_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS];
         embedding[0] = 1.0_f32;
         for content in ["first candidate", "second candidate"] {
             let mut memory = engine.build_memory(test_input(content), engine.now()).unwrap();
             memory.provenance.source_agent = Some("caller".into());
-            let _id = store.store(&memory, Some(&embedding)).await.unwrap();
+            let id = store.store(&memory, Some(&embedding)).await.unwrap();
+            attach_consolidation_context(&store, id, context_id, "caller").await;
         }
 
-        let result = engine.consolidate_memories("caller", None, None, 0.9_f64, 10, true).await.unwrap();
+        let result = engine.consolidate_memories("caller", &[context_id], None, 0.9_f64, 10, true).await.unwrap();
 
         assert_eq!(result.candidate_count, 1);
         assert!(result.capped);
         assert!(result.groups.is_empty());
+    }
+
+    #[tokio::test]
+    async fn consolidation_neighbor_limit_is_applied_after_ordered_profile_filtering() {
+        let store = SqliteStore::in_memory().unwrap();
+        let limits = LimitsConfig {
+            consolidation_neighbor_limit: 1,
+            ..LimitsConfig::default()
+        };
+        let engine = LocalHoldEngine::new(store.clone(), Arc::new(NoopEmbedding::new()), limits, SearchConfig::default());
+        let project_id = create_consolidation_context(&store, "caller", "project/consolidation-profile-limit").await;
+        let domain_id = ContextId::new();
+        let _domain = store
+            .create_context(
+                &ContextCreateDraft::private(
+                    domain_id,
+                    ContextKind::new(ContextKind::DOMAIN).unwrap(),
+                    "domain/consolidation-profile-limit",
+                    "Consolidation profile domain",
+                    "caller",
+                ),
+                &ContextAuditDraft::new("caller", "consolidation_profile_domain_created").with_context(domain_id),
+            )
+            .await
+            .unwrap();
+
+        let mut source_embedding = vec![0.0_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS];
+        source_embedding[0] = 1.0_f32;
+        let mut target_embedding = source_embedding.clone();
+        target_embedding[0] = 0.99_f32;
+        target_embedding[1] = 0.01_f32;
+        let mut ids = Vec::new();
+        for (content, embedding) in [
+            ("profile source", source_embedding.as_slice()),
+            ("closer different-profile distractor", source_embedding.as_slice()),
+            ("same-profile target", target_embedding.as_slice()),
+        ] {
+            let mut memory = engine.build_memory(test_input(content), engine.now()).unwrap();
+            memory.provenance.source_agent = Some("caller".into());
+            ids.push(store.store(&memory, Some(embedding)).await.unwrap());
+        }
+        for memory_id in [ids[0], ids[2]] {
+            attach_consolidation_context(&store, memory_id, project_id, "caller").await;
+        }
+        let mut distractor_audit = ContextAuditDraft::new("caller", "consolidation_distractor_memberships").with_context(project_id);
+        distractor_audit.memory_id = Some(ids[1]);
+        let _outcome = store.replace_memory_contexts(&ids[1], &[project_id, domain_id], "caller", &distractor_audit).await.unwrap();
+
+        let result = engine.consolidate_memories("caller", &[project_id, domain_id], None, 0.9_f64, 10, true).await.unwrap();
+
+        assert!(
+            result.groups.iter().any(|group| group.member_ids.contains(&ids[0]) && group.member_ids.contains(&ids[2])),
+            "a closer different-profile candidate must not consume the same-profile neighbor budget"
+        );
+        assert!(result.groups.iter().all(|group| !group.member_ids.contains(&ids[1])));
+        assert!(result.capped, "the exact-distance work budget must be reported when it truncates frontier expansion");
     }
 
     #[test]
@@ -3265,6 +3388,7 @@ mod tests {
             .map(|content| crate::store::MemoryWithEmbedding {
                 memory: engine.build_memory(test_input(content), engine.now()).unwrap(),
                 embedding: Some(vec![1.0_f32, 0.0_f32]),
+                context_ids: Vec::new(),
             })
             .collect::<Vec<_>>();
         let id_to_idx = memories.iter().enumerate().map(|(index, memory)| (memory.memory.id, index)).collect();
@@ -3279,6 +3403,33 @@ mod tests {
         assert_eq!(pairs.len(), 1, "the edge must still connect the components");
         assert!(cluster_members.contains(&1));
         assert!(frontier.is_empty(), "a globally queried node must not trigger another ANN lookup");
+    }
+
+    #[test]
+    fn consolidation_rejects_edges_between_different_membership_profiles() {
+        let engine = make_engine();
+        let contexts = [ContextId::new(), ContextId::new()];
+        let memories = contexts
+            .into_iter()
+            .enumerate()
+            .map(|(index, context_id)| crate::store::MemoryWithEmbedding {
+                memory: engine.build_memory(test_input(&format!("profile {index}")), engine.now()).unwrap(),
+                embedding: Some(vec![1.0_f32, 0.0_f32]),
+                context_ids: vec![context_id],
+            })
+            .collect::<Vec<_>>();
+        let id_to_idx = memories.iter().enumerate().map(|(index, memory)| (memory.memory.id, index)).collect();
+        let queried = std::collections::HashSet::new();
+        let mut cluster_members = std::collections::HashSet::from([0]);
+        let mut frontier = std::collections::VecDeque::new();
+        let mut pairs = Vec::new();
+        let neighbors = [(memories[1].memory.id, 0.0_f64)];
+
+        collect_bfs_neighbors(&neighbors, &memories, &id_to_idx, 0.9_f64, 0, &queried, &mut cluster_members, &mut frontier, &mut pairs);
+
+        assert!(pairs.is_empty());
+        assert_eq!(cluster_members, std::collections::HashSet::from([0]));
+        assert!(frontier.is_empty());
     }
 
     // -- Fix regression: tags are trimmed on storage (#4) ---------------------

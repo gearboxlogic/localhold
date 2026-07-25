@@ -38,8 +38,8 @@ use crate::{
     context::{
         ContextAnchorPolicyRecord, ContextAuditDraft, ContextCreateDraft, ContextDescriptor, ContextEnvelope, ContextExactLookup, ContextId, ContextKind, ContextKindDefinition,
         ContextKindPolicyRecord, ContextPolicyLayer, ContextRecord, ContextReference, EffectiveContextPolicy, MAX_CONTEXT_CONFIRMATIONS, MAX_CONTEXT_DESCRIPTION_LEN,
-        MAX_CONTEXT_DISPLAY_NAME_LEN, MAX_CONTEXT_HINTS, MAX_CONTEXT_REFS, MAX_CONTEXT_SURFACE_LEN, evaluate_context_policy, legacy_scope_display_name, normalize_context_identity,
-        validate_implicit_legacy_context_key, validate_legacy_scope_definition, validate_legacy_scope_key,
+        MAX_CONTEXT_DISPLAY_NAME_LEN, MAX_CONTEXT_HINTS, MAX_CONTEXT_REFS, MAX_CONTEXT_SURFACE_LEN, UNRESOLVED_CONTEXT_KEY as UNRESOLVED_SCOPE, evaluate_context_policy,
+        legacy_scope_display_name, normalize_context_identity, validate_implicit_legacy_context_key, validate_legacy_scope_definition, validate_legacy_scope_key,
     },
     embedding::EmbeddingProvider,
     engine::{BulkUpdateFields, LocalHoldEngine, ReembedOutcome, ReembedRequest, SearchRequest, StoreMemoryInput},
@@ -52,7 +52,6 @@ use crate::{
     validation::{normalize_non_empty, normalize_optional_non_empty, normalize_optional_string_array, validate_batch_len, validate_optional_non_empty},
 };
 
-const UNRESOLVED_SCOPE: &str = "inbox/unresolved";
 const REDACTED_SCOPE: &str = "[redacted]";
 const SERVER_PRINCIPAL: &str = "stdio";
 const HTTP_PRINCIPAL: &str = "http";
@@ -105,6 +104,8 @@ struct MemoryView {
     memory: Memory,
     metadata: Option<MemoryMetadata>,
     contexts: Vec<ContextDescriptor>,
+    primary_context_key: Option<String>,
+    has_context_memberships: bool,
 }
 
 struct PreparedRemember {
@@ -145,6 +146,39 @@ impl PrepareRememberError {
     }
 }
 
+enum AdminFilterError {
+    Engine(EngineError),
+    Tool(CallToolResult),
+}
+
+impl From<EngineError> for AdminFilterError {
+    fn from(error: EngineError) -> Self {
+        Self::Engine(error)
+    }
+}
+
+impl From<crate::error::ValidationError> for AdminFilterError {
+    fn from(error: crate::error::ValidationError) -> Self {
+        Self::Engine(error.into())
+    }
+}
+
+impl AdminFilterError {
+    fn into_tool_result(self) -> Result<CallToolResult, rmcp::ErrorData> {
+        match self {
+            Self::Engine(EngineError::Validation(error)) => Ok(tool_error(
+                ToolErrorCode::InvalidParams,
+                Some(&error.field),
+                error.to_string(),
+                Some("Correct the invalid administrative filter and retry."),
+                false,
+            )),
+            Self::Engine(error) => Err(error.into()),
+            Self::Tool(result) => Ok(result),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ResolvedContextSelection {
     resolution: ContextResolution,
@@ -173,8 +207,14 @@ struct PreparedHandoff {
 }
 
 impl MemoryView {
-    const fn new(memory: Memory, metadata: Option<MemoryMetadata>, contexts: Vec<ContextDescriptor>) -> Self {
-        Self { memory, metadata, contexts }
+    const fn new(memory: Memory, metadata: Option<MemoryMetadata>, contexts: Vec<ContextDescriptor>, primary_context_key: Option<String>, has_context_memberships: bool) -> Self {
+        Self {
+            memory,
+            metadata,
+            contexts,
+            primary_context_key,
+            has_context_memberships,
+        }
     }
 
     const fn is_redacted(&self) -> bool {
@@ -204,12 +244,20 @@ impl MemoryView {
         if !self.provenance_visible() {
             return None;
         }
-        Some(self.contexts.first().map_or_else(|| UNRESOLVED_SCOPE.to_owned(), |context| context.key.clone()))
+        if let Some(primary_context_key) = &self.primary_context_key {
+            return Some(primary_context_key.clone());
+        }
+        (!self.has_context_memberships).then(|| UNRESOLVED_SCOPE.to_owned())
     }
 
     fn card_scope(&self) -> String {
-        self.scope()
-            .unwrap_or_else(|| if self.is_redacted() { REDACTED_SCOPE.to_owned() } else { UNRESOLVED_SCOPE.to_owned() })
+        self.scope().unwrap_or_else(|| {
+            if self.is_redacted() || self.has_context_memberships {
+                REDACTED_SCOPE.to_owned()
+            } else {
+                UNRESOLVED_SCOPE.to_owned()
+            }
+        })
     }
 
     fn unresolved_scope(&self) -> bool {
@@ -416,6 +464,12 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         self.principal.as_deref()
     }
 
+    fn configured_mcp_principal(&self) -> Option<&str> {
+        self.principal()
+            .map(str::trim)
+            .filter(|principal| !principal.is_empty() && !crate::http_auth::is_reserved_principal(principal))
+    }
+
     fn caller_context_for(principal: Option<&str>) -> QueryContext {
         QueryContext {
             principal: principal.map(ToOwned::to_owned),
@@ -426,7 +480,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         if context.extensions.get::<Parts>().is_some() {
             return self.http_principal_for_context(context);
         }
-        self.principal().map(ToOwned::to_owned)
+        self.configured_mcp_principal().map(ToOwned::to_owned)
     }
 
     fn http_principal_for_context(&self, context: &RequestContext<RoleServer>) -> Option<String> {
@@ -463,7 +517,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         if context.extensions.get::<Parts>().is_some() {
             return Some(Self::local_admin_denied());
         }
-        if self.principal().is_none() {
+        if self.configured_mcp_principal().is_none() {
             return Some(Self::anonymous_write_denied());
         }
         None
@@ -508,26 +562,31 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
 
     async fn memory_views(&self, memories: Vec<Memory>, principal: Option<&str>) -> Result<Vec<MemoryView>, EngineError> {
         let memory_ids = memories.iter().map(|memory| memory.id).collect::<Vec<_>>();
-        let (metadata, memberships) = tokio::try_join!(
+        let (metadata, memberships, membership_presence) = tokio::try_join!(
             self.engine.store().get_metadata_batch(&memory_ids),
             self.engine.store().get_memory_contexts_batch(&memory_ids, principal.unwrap_or(ANONYMOUS_PRINCIPAL)),
+            self.engine.store().get_memory_context_presence_batch(&memory_ids, principal.unwrap_or(ANONYMOUS_PRINCIPAL)),
         )?;
         Ok(memories
             .into_iter()
             .map(|memory| {
+                let visible_memberships = memberships.get(&memory.id).cloned().unwrap_or_default();
+                let primary_context_key = (!memory.was_redacted)
+                    .then(|| {
+                        visible_memberships
+                            .iter()
+                            .find(|membership| membership.ordinal == 0)
+                            .map(|membership| membership.context.key.clone())
+                    })
+                    .flatten();
                 let contexts = if memory.was_redacted {
                     Vec::new()
                 } else {
-                    memberships
-                        .get(&memory.id)
-                        .cloned()
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|membership| ContextDescriptor::from(&membership.context))
-                        .collect()
+                    visible_memberships.iter().map(|membership| ContextDescriptor::from(&membership.context)).collect()
                 };
                 let memory_metadata = metadata.get(&memory.id).cloned();
-                MemoryView::new(memory, memory_metadata, contexts)
+                let has_context_memberships = membership_presence.contains(&memory.id);
+                MemoryView::new(memory, memory_metadata, contexts, primary_context_key, has_context_memberships)
             })
             .collect())
     }
@@ -726,6 +785,25 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
 
     fn context_resolution_error(code: ToolErrorCode, field: &str, message: impl Into<String>, candidates: Vec<ContextCandidate>) -> CallToolResult {
         Self::context_resolution_error_with_guidance(code, field, message, candidates, context_policy_guidance())
+    }
+
+    fn context_expansion_error(field: &'static str, error: crate::error::StoreError) -> CallToolResult {
+        match error {
+            crate::error::StoreError::NotFound(message) | crate::error::StoreError::Conflict(message) => tool_error(
+                ToolErrorCode::Conflict,
+                Some(field),
+                message,
+                Some("Resolve active authorized contexts and retry without unavailable or cyclic hierarchy members."),
+                false,
+            ),
+            crate::error::StoreError::Database(_) | crate::error::StoreError::Serialization(_) | crate::error::StoreError::MigrationFailed { .. } => tool_error(
+                ToolErrorCode::Internal,
+                Some(field),
+                "context hierarchy expansion failed in the persistence backend",
+                Some("Retry after checking backend health."),
+                true,
+            ),
+        }
     }
 
     #[expect(clippy::needless_pass_by_value, reason = "structured tool errors take ownership of candidates and guidance")]
@@ -1063,16 +1141,27 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         }
 
         if direct_ids.is_empty() {
-            if governed_write && envelope.allow_unresolved {
-                let policies = policy_state
-                    .kinds
-                    .iter()
-                    .map(|definition| Self::effective_policy_for(&policy_state, &[], &definition.kind, &[]))
-                    .collect::<Vec<_>>();
+            let policies = policy_state
+                .kinds
+                .iter()
+                .map(|definition| Self::effective_policy_for(&policy_state, &[], &definition.kind, &[]))
+                .collect::<Vec<_>>();
+            let policy_guidance = Self::policy_guidance_for(policies.clone());
+            if policies.iter().any(|policy| !policy.ambiguities.is_empty()) {
+                return Err(Self::context_resolution_error_with_guidance(
+                    ToolErrorCode::ContextAmbiguous,
+                    "context",
+                    "effective context policy is ambiguous",
+                    candidates,
+                    policy_guidance,
+                ));
+            }
+            let required_by_policy = policies.iter().any(|policy| policy.required);
+            if governed_write && envelope.allow_unresolved && !required_by_policy {
                 return Ok(ResolvedContextSelection {
                     resolution: ContextResolution {
                         candidates,
-                        policy_guidance: Self::policy_guidance_for(policies),
+                        policy_guidance,
                         unresolved: true,
                         ..ContextResolution::default()
                     },
@@ -1081,24 +1170,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     created_legacy_context: None,
                 });
             }
-            let policies = policy_state
-                .kinds
-                .iter()
-                .map(|definition| Self::effective_policy_for(&policy_state, &[], &definition.kind, &[]))
-                .collect::<Vec<_>>();
-            let policy_guidance = Self::policy_guidance_for(policies.clone());
             if governed_write && envelope.refs.is_empty() && envelope.hints.is_empty() && query.is_none() {
                 let mut missing_required = Vec::new();
                 for policy in &policies {
-                    if !policy.ambiguities.is_empty() {
-                        return Err(Self::context_resolution_error_with_guidance(
-                            ToolErrorCode::ContextAmbiguous,
-                            "context",
-                            "effective context policy is ambiguous",
-                            candidates,
-                            policy_guidance,
-                        ));
-                    }
                     if !policy.allowed {
                         if policy.required {
                             missing_required.push(format!("required kind {} is denied", policy.kind));
@@ -1190,15 +1264,12 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             }
         }
 
-        let initial_effective = self.engine.store().expand_context_selection(&direct_ids, principal, false).await.map_err(|error| {
-            tool_error(
-                ToolErrorCode::Conflict,
-                Some("context"),
-                error.to_string(),
-                Some("Resolve active contexts and retry without archived or cyclic hierarchy members."),
-                false,
-            )
-        })?;
+        let initial_effective = self
+            .engine
+            .store()
+            .expand_context_selection(&direct_ids, principal, false)
+            .await
+            .map_err(|error| Self::context_expansion_error("context", error))?;
         let initial_effective_ids = initial_effective.iter().map(|context| context.id).collect::<Vec<_>>();
         let policy_records = initial_effective
             .iter()
@@ -1265,15 +1336,11 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         }
         let include_descendants = envelope.include_descendants || policies.iter().any(|policy| direct_kinds.contains(&policy.kind) && policy.include_descendants);
         let effective = if include_descendants {
-            self.engine.store().expand_context_selection(&direct_ids, principal, true).await.map_err(|error| {
-                tool_error(
-                    ToolErrorCode::Conflict,
-                    Some("context"),
-                    error.to_string(),
-                    Some("Resolve active contexts and retry without archived or cyclic hierarchy members."),
-                    false,
-                )
-            })?
+            self.engine
+                .store()
+                .expand_context_selection(&direct_ids, principal, true)
+                .await
+                .map_err(|error| Self::context_expansion_error("context", error))?
         } else {
             initial_effective
         };
@@ -1395,6 +1462,41 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                         false,
                     ));
                 }
+                let policy_state = self.context_policy_state(principal).await.map_err(|error| {
+                    tool_error(
+                        ToolErrorCode::Internal,
+                        Some("scope"),
+                        error.to_string(),
+                        Some("Retry after checking context-policy storage."),
+                        true,
+                    )
+                })?;
+                let custom_kind = ContextKind::custom();
+                let explicit_custom_policies = policy_state.kind_policies.iter().filter(|record| record.kind == custom_kind).collect::<Vec<_>>();
+                let effective_policy = Self::effective_policy_for(&policy_state, &[], &custom_kind, &[]);
+                let policy_guidance = Self::policy_guidance_for([effective_policy.clone()]);
+                if !effective_policy.allowed || explicit_custom_policies.iter().any(|record| record.policy.agent_creation == Some(false)) {
+                    return Err(tool_error_with_details(
+                        ToolErrorCode::AccessDenied,
+                        Some("scope"),
+                        "effective policy denies implicit legacy custom-context creation",
+                        Some("Select an existing context or ask an operator to adjust the explicit custom-context creation policy."),
+                        false,
+                        Some(serde_json::json!({ "policy_guidance": policy_guidance })),
+                        Vec::new(),
+                    ));
+                }
+                if explicit_custom_policies.iter().any(|record| record.policy.require_identity == Some(true)) {
+                    return Err(tool_error_with_details(
+                        ToolErrorCode::ContextRequired,
+                        Some("scope"),
+                        "effective policy requires a durable identity and legacy scope cannot supply one",
+                        Some("Use context_create with a durable identity, then retry the write with a context reference."),
+                        false,
+                        Some(serde_json::json!({ "policy_guidance": policy_guidance })),
+                        Vec::new(),
+                    ));
+                }
                 let id = ContextId::new();
                 let draft = ContextCreateDraft {
                     id,
@@ -1488,7 +1590,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         Ok(selection)
     }
 
-    async fn resolve_admin_context_id(&self, principal: &str, context_id: ContextId, ineligible_message: &'static str) -> Result<ResolvedContextSelection, EngineError> {
+    async fn resolve_admin_context_id(&self, principal: &str, context_id: ContextId) -> Result<ResolvedContextSelection, AdminFilterError> {
         let envelope = ContextEnvelope {
             refs: vec![ContextReference {
                 id: Some(context_id),
@@ -1498,10 +1600,10 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         };
         self.resolve_context_selection(principal, Some(&envelope), None, false)
             .await
-            .map_err(|_error| crate::error::ValidationError::new("scope", ineligible_message).into())
+            .map_err(AdminFilterError::Tool)
     }
 
-    async fn resolve_direct_admin_legacy_context(&self, principal: &str, value: String) -> Result<ResolvedContextSelection, EngineError> {
+    async fn resolve_direct_admin_legacy_context(&self, principal: &str, value: String) -> Result<ResolvedContextSelection, AdminFilterError> {
         let exact_matches = self
             .engine
             .store()
@@ -1509,23 +1611,31 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 kind: None,
                 normalized_key: normalize_context_key(&value),
             })
-            .await?;
+            .await
+            .map_err(EngineError::from)?;
         match exact_matches.as_slice() {
-            [exact] => {
-                self.resolve_admin_context_id(principal, exact.context.id, "legacy scope has no unique governed context")
-                    .await
-            }
+            [exact] => self.resolve_admin_context_id(principal, exact.context.id).await,
             [] => {
-                let resolution = self.resolve_scope(principal, Some(value), &[]).await?;
-                self.resolve_legacy_context_selection(principal, &resolution, false)
-                    .await
-                    .map_err(|_error| crate::error::ValidationError::new("scope", "legacy scope has no unique governed context").into())
+                let resolution = self.resolve_scope(principal, Some(value), &[]).await.map_err(AdminFilterError::Engine)?;
+                self.resolve_legacy_context_selection(principal, &resolution, false).await.map_err(AdminFilterError::Tool)
             }
-            _ => Err(crate::error::ValidationError::new("scope", "legacy scope resolves to multiple governed contexts").into()),
+            _ => Err(AdminFilterError::Tool(Self::context_resolution_error(
+                ToolErrorCode::ContextAmbiguous,
+                "scope",
+                "legacy scope resolves to multiple governed contexts",
+                exact_matches
+                    .iter()
+                    .map(|record| ContextCandidate {
+                        context: ContextDescriptor::from(&record.context),
+                        score: 1.0,
+                        matched_by: vec!["legacy_scope".into()],
+                    })
+                    .collect(),
+            ))),
         }
     }
 
-    async fn resolve_generated_admin_ancestor(&self, principal: &str, value: &str) -> Result<Option<ResolvedContextSelection>, EngineError> {
+    async fn resolve_generated_admin_ancestor(&self, principal: &str, value: &str) -> Result<Option<ResolvedContextSelection>, AdminFilterError> {
         let generated_matches = self
             .engine
             .store()
@@ -1533,21 +1643,31 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 kind: None,
                 normalized_key: normalize_context_key(value),
             })
-            .await?;
+            .await
+            .map_err(EngineError::from)?;
         match generated_matches.as_slice() {
-            [generated] => self
-                .resolve_admin_context_id(principal, generated.context.id, "generated ancestor is not an eligible governed context")
-                .await
-                .map(Some),
+            [generated] => self.resolve_admin_context_id(principal, generated.context.id).await.map(Some),
             [] => Ok(None),
-            _ => Err(crate::error::ValidationError::new("scope", "generated ancestor resolves to multiple governed contexts").into()),
+            _ => Err(AdminFilterError::Tool(Self::context_resolution_error(
+                ToolErrorCode::ContextAmbiguous,
+                "scope",
+                "generated ancestor resolves to multiple governed contexts",
+                generated_matches
+                    .iter()
+                    .map(|record| ContextCandidate {
+                        context: ContextDescriptor::from(&record.context),
+                        score: 1.0,
+                        matched_by: vec!["legacy_scope_ancestor".into()],
+                    })
+                    .collect(),
+            ))),
         }
     }
 
-    async fn resolve_admin_legacy_context_ids(&self, principal: &str, mut values: Vec<String>, expand_legacy_scopes: bool) -> Result<Vec<ContextId>, EngineError> {
+    async fn resolve_admin_legacy_context_ids(&self, principal: &str, mut values: Vec<String>, expand_legacy_scopes: bool) -> Result<Vec<ContextId>, AdminFilterError> {
         let directly_requested = values.iter().map(|value| normalize_context_key(value)).collect::<HashSet<_>>();
         if expand_legacy_scopes {
-            values = expand_scope_keys(&values)?;
+            values = expand_scope_keys(&values).map_err(EngineError::from)?;
         }
         let mut ids = Vec::new();
         let mut seen_ids = HashSet::new();
@@ -1563,12 +1683,22 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             ids.extend(selection.effective_ids.into_iter().filter(|id| seen_ids.insert(*id)));
         }
         if ids.is_empty() {
-            return Err(crate::error::ValidationError::new("scope", "legacy scope filter resolved to no governed contexts").into());
+            return Err(AdminFilterError::Tool(Self::context_resolution_error(
+                ToolErrorCode::ContextRequired,
+                "scope",
+                "legacy scope filter resolved to no governed contexts",
+                Vec::new(),
+            )));
         }
         Ok(ids)
     }
 
-    async fn common_filter_from_admin(&self, fields: AdminFilterFields, principal: Option<&str>, expand_legacy_scopes: bool) -> Result<params::CommonFilterFields, EngineError> {
+    async fn common_filter_from_admin(
+        &self,
+        fields: AdminFilterFields,
+        principal: Option<&str>,
+        expand_legacy_scopes: bool,
+    ) -> Result<params::CommonFilterFields, AdminFilterError> {
         reject_removed_admin_field(fields.deprecated_source_agent.is_some(), "source_agent", "agent_label")?;
         reject_removed_admin_field(fields.deprecated_source_conversation.is_some(), "source_conversation", "scope")?;
         reject_removed_admin_field(fields.deprecated_origin_conversation.is_some(), "origin_conversation", "origin_scope")?;
@@ -1579,24 +1709,24 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             return Err(crate::error::ValidationError::new("context", "context cannot be combined with legacy scope or scopes").into());
         }
         let resolution_principal = principal.unwrap_or(ANONYMOUS_PRINCIPAL);
-        let explicit_context_filter = fields.context.is_some() || normalized_scope.is_some() || !normalized_scopes.is_empty();
-        let (context_ids, legacy_context_ids_any) = if let Some(envelope) = fields.context.as_ref() {
+        let (context_ids, legacy_context_ids_any, explicit_context_filter) = if let Some(envelope) = fields.context.as_ref() {
             let ids = self
                 .resolve_context_selection(resolution_principal, Some(envelope), None, false)
                 .await
-                .map_err(|_error| crate::error::ValidationError::new("context", "context selection did not resolve uniquely"))?
+                .map_err(AdminFilterError::Tool)?
                 .effective_ids;
-            (Some(ids), None)
+            let explicit = !ids.is_empty();
+            (Some(ids), None, explicit)
         } else if !normalized_scopes.is_empty() {
             let mut values = normalized_scope.into_iter().collect::<Vec<_>>();
             values.extend(normalized_scopes);
             let ids = self.resolve_admin_legacy_context_ids(resolution_principal, values, expand_legacy_scopes).await?;
-            (None, Some(ids))
+            (None, Some(ids), true)
         } else if let Some(scope) = normalized_scope {
             let ids = self.resolve_admin_legacy_context_ids(resolution_principal, vec![scope], expand_legacy_scopes).await?;
-            (Some(ids), None)
+            (Some(ids), None, true)
         } else {
-            (Some(Vec::new()), None)
+            (Some(Vec::new()), None, false)
         };
         let agent_label = normalize_optional_non_empty("agent_label", fields.agent_label).map_err(EngineError::from)?;
         let origin_scope = normalize_legacy_scope_value("origin_scope", fields.origin_scope).map_err(EngineError::from)?;
@@ -1618,8 +1748,12 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
     }
 
     async fn duplicate_candidates(&self, content: &str, context_ids: Option<Vec<ContextId>>, principal: Option<&str>) -> Result<Vec<DuplicateCandidateCard>, EngineError> {
+        if context_ids.as_ref().is_some_and(Vec::is_empty) {
+            return Ok(Vec::new());
+        }
         let filter = MemoryFilter {
             context_ids,
+            explicit_context_filter: true,
             ..MemoryFilter::default()
         };
         let outcome = self
@@ -1946,6 +2080,11 @@ fn quality_warning(code: &str, message: impl Into<String>) -> QualityWarning {
             QualityWarningSeverity::Info,
             Some("query"),
             Some("Broaden the query or scope, or add memories for this context."),
+        ),
+        "contextless_maintenance_scope" => (
+            QualityWarningSeverity::Warning,
+            Some("context"),
+            Some("Supply an explicit context filter when memories without an active context must be excluded from the maintenance operation."),
         ),
         _ => (QualityWarningSeverity::Warning, None, None),
     };
@@ -2580,7 +2719,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
     }
 
     #[tool(
-        description = "Create a private governed context when effective policy permits it. Exact ID/key/identity matches are always reused; fuzzy duplicate candidates require confirm_distinct_from."
+        description = "Create a private governed context when effective policy permits it. Exact key, alias, or identity matches are always reused; fuzzy duplicate candidates require confirm_distinct_from."
     )]
     async fn context_create(&self, context: RequestContext<RoleServer>, Parameters(params): Parameters<ContextCreateParams>) -> Result<CallToolResult, rmcp::ErrorData> {
         let request_principal = self.principal_for_context(&context);
@@ -2661,7 +2800,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     return Ok(tool_error_with_details(
                         ToolErrorCode::Conflict,
                         Some("key"),
-                        "exact context key or identity belongs to an archived context",
+                        "exact context key, alias, or identity belongs to an archived context",
                         Some("Reactivate the reserved context in the TUI; agent tools cannot replace archived identities."),
                         false,
                         Some(serde_json::json!({
@@ -2675,7 +2814,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 return success_json(&ContextCreateResponse {
                     context: ContextDescriptor::from(&record.context),
                     created: false,
-                    identity: record.identities.first().cloned(),
+                    identity: None,
                     policy_guidance: Self::policy_guidance_for([policy]),
                 });
             }
@@ -2691,7 +2830,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 return Ok(Self::context_resolution_error(
                     ToolErrorCode::ContextAmbiguous,
                     "key",
-                    "exact context key or identity matched multiple authorized contexts",
+                    "exact context key, alias, or identity matched multiple authorized contexts",
                     candidates,
                 ));
             }
@@ -2709,26 +2848,19 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         } else {
             None
         };
-        let parent_effective_ids = if let Some(parent_id) = parent_id {
-            self.engine
-                .store()
-                .expand_context_selection(&[parent_id], &principal, false)
-                .await
-                .map_err(EngineError::from)?
-                .into_iter()
-                .map(|context| context.id)
-                .collect::<Vec<_>>()
+        let parent_effective = if let Some(parent_id) = parent_id {
+            match self.engine.store().expand_context_selection(&[parent_id], &principal, false).await {
+                Ok(contexts) => contexts,
+                Err(error) => return Ok(Self::context_expansion_error("parent", error)),
+            }
         } else {
             Vec::new()
         };
+        let parent_effective_ids = parent_effective.iter().map(|context| context.id).collect::<Vec<_>>();
         let parent_policy_records = if parent_effective_ids.is_empty() {
             Vec::new()
         } else {
-            self.engine
-                .store()
-                .expand_context_selection(&parent_effective_ids, &principal, false)
-                .await
-                .map_err(EngineError::from)?
+            parent_effective
                 .into_iter()
                 .map(|context| ContextRecord {
                     context,
@@ -2797,7 +2929,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             .iter()
             .filter(|record| {
                 record.context.kind == params.kind
-                    && (normalize_context_key(&record.context.key) == normalized_key || identity.as_ref().is_some_and(|identity| record.identities.contains(identity)))
+                    && (normalize_context_key(&record.context.key) == normalized_key
+                        || record.aliases.iter().any(|alias| normalize_context_key(alias) == normalized_key)
+                        || identity.as_ref().is_some_and(|identity| record.identities.contains(identity)))
             })
             .collect::<Vec<_>>();
         match late_exact.as_slice() {
@@ -2806,7 +2940,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 return success_json(&ContextCreateResponse {
                     context: ContextDescriptor::from(&record.context),
                     created: false,
-                    identity: record.identities.first().cloned(),
+                    identity: None,
                     policy_guidance: Self::policy_guidance_for([policy]),
                 });
             }
@@ -2822,7 +2956,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 return Ok(Self::context_resolution_error(
                     ToolErrorCode::ContextAmbiguous,
                     "key",
-                    "exact context key or identity matched multiple authorized contexts",
+                    "exact context key, alias, or identity matched multiple authorized contexts",
                     candidates,
                 ));
             }
@@ -2884,6 +3018,18 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let created = match self.engine.store().create_context(&draft, &audit).await {
             Ok(created) => created,
             Err(crate::error::StoreError::Conflict(message)) if message.starts_with("fuzzy context candidates changed") => {
+                let Ok(current_records) = self.authorized_context_records(&draft.owner_principal).await else {
+                    return Ok(tool_error(
+                        ToolErrorCode::Internal,
+                        Some("confirm_distinct_from"),
+                        "context candidates changed and could not be refreshed",
+                        Some("Call context_resolve after checking backend health, then retry."),
+                        true,
+                    ));
+                };
+                let current_candidates = fuzzy_context_candidates(&current_records, &format!("{} {}", draft.key, draft.display_name), Some(&draft.kind));
+                let mut current_ids = current_candidates.iter().map(|candidate| candidate.context.id).collect::<Vec<_>>();
+                current_ids.sort_unstable();
                 return Ok(tool_error_with_details(
                     ToolErrorCode::ContextAmbiguous,
                     Some("confirm_distinct_from"),
@@ -2891,8 +3037,10 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     Some("Resolve the current candidates and retry with a fresh confirmation set."),
                     true,
                     Some(serde_json::json!({
+                        "candidates": current_candidates,
+                        "policy_guidance": policy_guidance,
                         "retry": {
-                            "confirm_distinct_from": []
+                            "confirm_distinct_from": current_ids
                         }
                     })),
                     Vec::new(),
@@ -2930,7 +3078,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     return success_json(&ContextCreateResponse {
                         context: ContextDescriptor::from(&winner.context),
                         created: false,
-                        identity: winner.identities.first().cloned(),
+                        identity: None,
                         policy_guidance,
                     });
                 }
@@ -2938,7 +3086,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     ToolErrorCode::Conflict,
                     Some("key"),
                     "context creation conflicted with a concurrent exact definition",
-                    Some("Resolve the exact key or identity and retry using the returned context."),
+                    Some("Resolve the exact key, alias, or identity and retry using the returned context."),
                     true,
                     Some(serde_json::json!({
                         "candidates": winners.iter().map(|record| ContextDescriptor::from(&record.context)).collect::<Vec<_>>(),
@@ -2952,7 +3100,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         success_json(&ContextCreateResponse {
             context: ContextDescriptor::from(&created),
             created: true,
-            identity,
+            identity: identity.as_ref().map(params::ContextIdentityDescriptor::from),
             policy_guidance,
         })
     }
@@ -3168,7 +3316,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             (None, selection)
         };
         filter.context_ids = Some(context_selection.effective_ids.clone());
-        filter.explicit_context_filter = params.context.is_some() || scope_resolution.is_some();
+        filter.explicit_context_filter = !context_selection.effective_ids.is_empty();
         let outcome = self
             .engine
             .search_memories(SearchRequest {
@@ -3361,6 +3509,12 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 .map_or_else(|| UNRESOLVED_SCOPE.to_owned(), |context| context.key.clone());
             replacement_context_ids = Some(selection.direct_ids);
             context_resolution = Some(selection.resolution);
+            if replacement_context_ids.as_ref().is_some_and(Vec::is_empty) {
+                operation_warnings.push(quality_warning(
+                    "missing_scope",
+                    format!("context classification was explicitly deferred; memory was placed in {UNRESOLVED_SCOPE}"),
+                ));
+            }
             Some(scope)
         } else if params.scope.is_some() || !context_hints.is_empty() {
             let resolution = self.resolve_scope(&principal, params.scope, &context_hints).await?;
@@ -3427,7 +3581,13 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 ));
             };
             let mut contexts = vec![selected_id];
-            contexts.extend(existing.into_iter().map(|membership| membership.context.id).filter(|context_id| *context_id != selected_id));
+            contexts.extend(
+                existing
+                    .into_iter()
+                    .filter(|membership| membership.ordinal != 0)
+                    .map(|membership| membership.context.id)
+                    .filter(|context_id| *context_id != selected_id),
+            );
             replacement_context_ids = Some(contexts);
             context_resolution = Some(selection.resolution);
             operation_warnings.push(quality_warning(
@@ -3493,6 +3653,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 false,
             )),
             WriteOutcome::Applied => {
+                let next_action = next_action_for_warnings(&operation_warnings);
                 let contexts = self
                     .engine
                     .store()
@@ -3503,7 +3664,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     .map(|membership| ContextDescriptor::from(&membership.context))
                     .collect();
                 success_json(&UpdateResponse {
-                    operation: operation_summary(OperationStatus::Applied, 1, operation_warnings, NextAction::None),
+                    operation: operation_summary(OperationStatus::Applied, 1, operation_warnings, next_action),
                     updated: true,
                     scope_resolution,
                     context_resolution,
@@ -3607,7 +3768,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             (None, selection)
         };
         filter.context_ids = Some(context_selection.effective_ids.clone());
-        filter.explicit_context_filter = params.context.is_some() || scope_requested;
+        filter.explicit_context_filter = !context_selection.effective_ids.is_empty();
         let outcome = self
             .engine
             .search_memories(SearchRequest {
@@ -3733,46 +3894,40 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     false,
                 ));
             }
-            let raw_entities_len = entities.len();
-            let mut commit_payload = if commit {
-                let memory_input = params::MemoryInput {
-                    content: content.clone(),
-                    tags: tags.clone(),
-                    source_agent: write_principal.clone(),
-                    source_conversation: Some(UNRESOLVED_SCOPE.to_owned()),
-                    origin_conversation: Some(UNRESOLVED_SCOPE.to_owned()),
-                    source_user: None,
-                    ttl_seconds: None,
-                    access_policy: None,
-                    memory_type,
-                    importance: None,
-                    confidence: None,
-                    supersedes: None,
-                    entities,
-                };
-                let now = self.engine.now();
-                let input = match StoreMemoryInput::try_from(memory_input) {
-                    Ok(input) => input,
-                    Err(error) => {
-                        self.rollback_created_legacy_contexts(&mut created_legacy_contexts, cleanup_principal).await?;
-                        return Err(EngineError::from(error).into());
-                    }
-                };
-                let supersedes = input.supersedes;
-                let memory = match self.engine.build_memory(input, now) {
-                    Ok(memory) => memory,
-                    Err(error) => {
-                        self.rollback_created_legacy_contexts(&mut created_legacy_contexts, cleanup_principal).await?;
-                        return Err(error.into());
-                    }
-                };
-                Some((memory, supersedes))
-            } else {
-                None
+            let memory_input = params::MemoryInput {
+                content: content.clone(),
+                tags: tags.clone(),
+                source_agent: write_principal.clone().or_else(|| request_principal.clone()),
+                source_conversation: Some(UNRESOLVED_SCOPE.to_owned()),
+                origin_conversation: Some(UNRESOLVED_SCOPE.to_owned()),
+                source_user: None,
+                ttl_seconds: None,
+                access_policy: None,
+                memory_type,
+                importance: None,
+                confidence: None,
+                supersedes: None,
+                entities,
+            };
+            let now = self.engine.now();
+            let input = match StoreMemoryInput::try_from(memory_input) {
+                Ok(input) => input,
+                Err(error) => {
+                    self.rollback_created_legacy_contexts(&mut created_legacy_contexts, cleanup_principal).await?;
+                    return Err(EngineError::from(error).into());
+                }
+            };
+            let supersedes = input.supersedes;
+            let mut memory = match self.engine.build_memory(input, now) {
+                Ok(memory) => memory,
+                Err(error) => {
+                    self.rollback_created_legacy_contexts(&mut created_legacy_contexts, cleanup_principal).await?;
+                    return Err(error.into());
+                }
             };
             let resolution_principal = write_principal.as_deref().or(request_principal.as_deref()).unwrap_or(ANONYMOUS_PRINCIPAL);
             let (context_selection, scope_resolution, used_legacy_adapter) = if let Some(envelope) = context_envelope.as_ref() {
-                let selection = match self.resolve_context_selection(resolution_principal, Some(envelope), None, commit).await {
+                let selection = match self.resolve_context_selection(resolution_principal, Some(envelope), None, true).await {
                     Ok(selection) => selection,
                     Err(error) => {
                         self.rollback_created_legacy_contexts(&mut created_legacy_contexts, cleanup_principal).await?;
@@ -3813,7 +3968,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 let scope_resolution = canonicalize_legacy_scope_resolution(scope_resolution, &selection);
                 (selection, scope_resolution, true)
             } else {
-                let selection = match self.resolve_context_selection(resolution_principal, None, None, commit).await {
+                let selection = match self.resolve_context_selection(resolution_principal, None, None, true).await {
                     Ok(selection) => selection,
                     Err(error) => {
                         self.rollback_created_legacy_contexts(&mut created_legacy_contexts, cleanup_principal).await?;
@@ -3841,13 +3996,11 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             created_legacy_contexts.extend(context_selection.created_legacy_context);
             let resolved_scope = scope_resolution.scope.clone();
             let unresolved_scope = scope_resolution.unresolved_scope;
-            if let Some((memory, _supersedes)) = commit_payload.as_mut() {
-                memory.provenance.source_conversation = Some(resolved_scope.clone());
-                memory.provenance.origin_conversation = Some(resolved_scope.clone());
-            }
-            let warning_content = commit_payload.as_ref().map_or(content.as_str(), |(memory, _)| memory.content.as_str());
-            let warning_tags = commit_payload.as_ref().map_or(tags.as_slice(), |(memory, _)| memory.tags.as_slice());
-            let warning_entities_len = commit_payload.as_ref().map_or(raw_entities_len, |(memory, _)| memory.entities.len());
+            memory.provenance.source_conversation = Some(resolved_scope.clone());
+            memory.provenance.origin_conversation = Some(resolved_scope.clone());
+            let warning_content = memory.content.as_str();
+            let warning_tags = memory.tags.as_slice();
+            let warning_entities_len = memory.entities.len();
             let mut warnings = write_quality_warnings(warning_content, summary.as_deref(), unresolved_scope, warning_tags, warning_entities_len);
             if used_legacy_adapter {
                 warnings.push(quality_warning("legacy_scope_adapter", "legacy scope input was adapted to governed context membership"));
@@ -3866,7 +4019,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             let quality_flags = warnings.iter().map(|warning| warning.code.clone()).collect();
             let next_action = next_action_for_warnings(&warnings);
             all_warnings.extend(warnings.clone());
-            let write = commit_payload.map(|(memory, supersedes)| PreparedHandoffWrite {
+            let write = commit.then(|| PreparedHandoffWrite {
                 metadata: MemoryMetadata {
                     memory_id: memory.id,
                     scope_key: Some(resolved_scope.clone()),
@@ -4011,7 +4164,10 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             return Ok(Self::anonymous_read_denied());
         }
         let expand_scopes = params.expand_scopes.unwrap_or(true);
-        let common = self.common_filter_from_admin(params.filter, request_principal.as_deref(), expand_scopes).await?;
+        let common = match self.common_filter_from_admin(params.filter, request_principal.as_deref(), expand_scopes).await {
+            Ok(common) => common,
+            Err(error) => return error.into_tool_result(),
+        };
         let (mut filter, ctx) = validate_and_normalize_filter(&common)?;
         filter.text_search = normalize_text_search(params.text_search)?;
         filter.has_embedding = params.has_embedding;
@@ -4133,7 +4289,10 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             return Ok(Self::anonymous_read_denied());
         }
         let expand_scopes = params.expand_scopes.unwrap_or(true);
-        let common = self.common_filter_from_admin(params.filter, request_principal.as_deref(), expand_scopes).await?;
+        let common = match self.common_filter_from_admin(params.filter, request_principal.as_deref(), expand_scopes).await {
+            Ok(common) => common,
+            Err(error) => return error.into_tool_result(),
+        };
         let (mut filter, ctx) = validate_and_normalize_filter(&common)?;
         maybe_expand_scope_hierarchy(&mut filter, expand_scopes).map_err(EngineError::from)?;
         let stats = self.engine.count_memories(filter, ctx, params.top_tags_limit).await?;
@@ -4169,8 +4328,12 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             return Ok(Self::anonymous_write_denied());
         };
         let expand_scopes = params.expand_scopes.unwrap_or(true);
-        let common = self.common_filter_from_admin(params.filter, Some(&principal), expand_scopes).await?;
+        let common = match self.common_filter_from_admin(params.filter, Some(&principal), expand_scopes).await {
+            Ok(common) => common,
+            Err(error) => return error.into_tool_result(),
+        };
         let (mut filter, mut ctx) = validate_and_normalize_filter(&common)?;
+        let includes_contextless = !common.explicit_context_filter;
         if !common.explicit_context_filter {
             filter.context_ids = None;
         }
@@ -4179,7 +4342,16 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         maybe_expand_scope_hierarchy(&mut filter, expand_scopes).map_err(EngineError::from)?;
 
         let result = self.engine.bulk_delete(&principal, filter, ctx).await?;
-        let mut operation = operation_summary(OperationStatus::Applied, result.deleted, Vec::new(), NextAction::None);
+        let warnings = if includes_contextless {
+            vec![quality_warning(
+                "contextless_maintenance_scope",
+                "No context filter was supplied, so this maintenance operation also considered memories with no active context, including explicitly deferred and archived-only rows that broad admin reads omit.",
+            )]
+        } else {
+            Vec::new()
+        };
+        let next_action = next_action_for_warnings(&warnings);
+        let mut operation = operation_summary(OperationStatus::Applied, result.deleted, warnings, next_action);
         operation.matched = Some(result.matched);
         operation.capped = result.capped;
         success_json(&BulkDeleteResponse {
@@ -4199,8 +4371,12 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             return Ok(Self::anonymous_write_denied());
         };
         let expand_scopes = params.expand_scopes.unwrap_or(true);
-        let common = self.common_filter_from_admin(params.filter, Some(&principal), expand_scopes).await?;
+        let common = match self.common_filter_from_admin(params.filter, Some(&principal), expand_scopes).await {
+            Ok(common) => common,
+            Err(error) => return error.into_tool_result(),
+        };
         let (mut filter, mut ctx) = validate_and_normalize_filter(&common)?;
+        let includes_contextless = !common.explicit_context_filter;
         if !common.explicit_context_filter {
             filter.context_ids = None;
         }
@@ -4216,7 +4392,16 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         };
 
         let result = self.engine.bulk_update(&principal, filter, ctx, fields).await?;
-        let mut operation = operation_summary(OperationStatus::Applied, result.updated, Vec::new(), NextAction::None);
+        let warnings = if includes_contextless {
+            vec![quality_warning(
+                "contextless_maintenance_scope",
+                "No context filter was supplied, so this maintenance operation also considered memories with no active context, including explicitly deferred and archived-only rows that broad admin reads omit.",
+            )]
+        } else {
+            Vec::new()
+        };
+        let next_action = next_action_for_warnings(&warnings);
+        let mut operation = operation_summary(OperationStatus::Applied, result.updated, warnings, next_action);
         operation.matched = Some(result.matched);
         operation.denied = Some(result.denied);
         operation.capped = result.capped;
@@ -4258,10 +4443,16 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         } else if !scopes.is_empty() {
             let mut values = scope.into_iter().collect::<Vec<_>>();
             values.extend(scopes);
-            let ids = self.resolve_admin_legacy_context_ids(&principal, values, false).await?;
+            let ids = match self.resolve_admin_legacy_context_ids(&principal, values, false).await {
+                Ok(ids) => ids,
+                Err(error) => return error.into_tool_result(),
+            };
             (Vec::new(), Some(ids))
         } else if let Some(scope) = scope {
-            let ids = self.resolve_admin_legacy_context_ids(&principal, vec![scope], false).await?;
+            let ids = match self.resolve_admin_legacy_context_ids(&principal, vec![scope], false).await {
+                Ok(ids) => ids,
+                Err(error) => return error.into_tool_result(),
+            };
             (ids, None)
         } else {
             (Vec::new(), None)
@@ -4271,7 +4462,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             .engine
             .consolidate_memories(
                 &principal,
-                Some(context_ids.as_slice()),
+                &context_ids,
                 legacy_context_ids_any.as_deref(),
                 params.similarity_threshold,
                 params.limit,
@@ -4437,7 +4628,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> ServerHandler for Local
         info.instructions = Some(format!(
             "LocalHold is a deterministic local memory server. For normal agent work, start with \
              brief, use recall to get compact relevant cards, read or read_many to fetch full memory \
-             content and record activity, and remember to store durable new information. Use handoff to validate \
+             content and record activity, and remember to store durable new information. Use context_resolve \
+             to select governed contexts and context_create when policy permits; governed writes need a resolved \
+             context, a policy default, or explicit unresolved deferral. Use handoff to validate \
              candidate memories before persisting them. revise and forget modify existing memories \
              using the server-resolved principal.{admin_instructions} \
              Retired memory_* names are not part of the public MCP tool surface."

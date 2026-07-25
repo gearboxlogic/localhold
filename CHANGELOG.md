@@ -12,6 +12,12 @@ requirements explicitly.
   membership, including private owned contexts, typed identities, hierarchy,
   grants, lifecycle and policy controls, agent resolution and creation tools,
   multi-context retrieval, and legacy scope compatibility adapters.
+- Changed contextless `remember`, `remember_many`, and committed `handoff`
+  calls to return
+  `context_required` unless policy supplies a unique safe default. Existing
+  callers must send the governed context envelope, retain a legacy `scope`
+  adapter, configure a safe default, or explicitly defer with
+  `context.allow_unresolved = true`.
 - Added automatic SQLite v2-to-v3 and PostgreSQL v4-to-v5 migrations that
   backfill existing scopes into canonical context memberships and retire the
   legacy scope registry while preserving compatibility metadata.

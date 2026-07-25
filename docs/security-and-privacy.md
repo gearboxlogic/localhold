@@ -95,6 +95,12 @@ Embeddings are derived from content and may reveal information about it. Treat
 vectors, full-text indexes, audit rows, governed context metadata, and entity names as
 sensitive even when they do not contain the original sentence verbatim.
 
+Identity fingerprints are pseudonymous derived data, not encryption. They are
+currently unkeyed hashes, so low-entropy or guessable repository and
+namespaced identifiers can be tested offline by anyone with database or backup
+access. Agent responses never expose the fingerprint; protect databases and
+backups as sensitive data.
+
 ### Plaintext at rest
 
 LocalHold does not encrypt database columns or files. SQLite databases, WAL and
@@ -223,7 +229,8 @@ identities.
 The bearer token authenticates access to the whole MCP endpoint. In the default
 `fixed` mode, every valid token maps to one `server.http_principal`; it is an
 endpoint credential, not a per-user credential. Caller-supplied identity headers
-are ignored.
+are ignored. Fixed principals cannot use LocalHold's reserved internal names:
+`operator`, `@localhold/legacy-system`, `anonymous`, or `*`.
 
 Without `server.http_auth_token`, HTTP requests are anonymous. The default
 `public_read_only` policy permits reads of public memories and denies writes.
@@ -241,8 +248,8 @@ authentication or transport encryption.
 `trusted_proxy` accepts the configured principal header only after the endpoint
 bearer token passes. LocalHold does not verify proxy source IPs or authenticate
 the principal header itself. A missing, blank, or invalid principal header is
-rejected instead of becoming an anonymous request. The deployment is safe only
-when:
+rejected instead of becoming an anonymous request. Reserved internal principal
+names are rejected here as well. The deployment is safe only when:
 
 - clients cannot connect directly to LocalHold;
 - the proxy authenticates every caller;
@@ -299,6 +306,24 @@ explicitly granted contexts. New contexts are private. Exact archived
 identities remain reserved and agent creation cannot reactivate them. Context
 grants permit selection only and do not grant memory access.
 
+Applicability evaluates every active kind attached to a readable memory, even
+when the caller cannot see a particular context definition. Comparing a broad
+authorized search with explicit visible-context searches can therefore reveal
+that an unmatched hidden kind exists, but not its key or identity. Treat this
+limited result-shape channel as part of the documented noninterference limits
+and use separate stores for mutually hostile tenants.
+
+Archiving a context preserves its memberships and reserved identities but
+removes it from active retrieval. Memories with no other active membership
+remain available by authorized direct ID and return to governed search after
+TUI reactivation.
+
+During upgrade, former registered global scopes retain wildcard use grants.
+Raw-only historical scopes receive grants only for principals that could read
+the attached restricted memories, unless an attached memory was public (or
+explicitly exposed provenance through redaction), in which case compatibility
+visibility remains broad.
+
 ### Admin tools
 
 Admin routes are absent from discovery and dispatch unless
@@ -311,7 +336,7 @@ agents cannot reach. Capabilities have different authorization scopes:
 | Policy-filtered reads | `admin_list`, `admin_history` | Return only memories or history visible to the server-resolved principal. Redacted history omits principal and details. |
 | Mixed-scope statistics | `admin_count` | Memory breakdowns are policy-filtered, but expired-row count and physical database size are store-wide diagnostics. |
 | Legacy scope adapters | `admin_scope_list`, `admin_scope_register`, `admin_reassign_scope` | Registration and reassignment create principal-owned private custom contexts; migrated frozen contexts remain read-only and there is no independent global scope registry. Run them only as migration aids. |
-| Policy-checked memory changes | `admin_bulk_update`, `admin_bulk_delete`, `admin_reassign_scope`, `admin_consolidate`, `admin_reembed`, default `admin_cleanup_expired` | Require a write-capable principal and check write access for affected memories. Consolidation and bulk re-embedding apply authorization before their limits. Consolidation reports capped partial runs; bulk re-embedding leaves inaccessible rows unclaimed and does not report their count. Authorized expiry cleanup likewise neither deletes nor counts inaccessible rows. |
+| Policy-checked memory changes | `admin_bulk_update`, `admin_bulk_delete`, `admin_reassign_scope`, `admin_consolidate`, `admin_reembed`, default `admin_cleanup_expired` | Require a write-capable principal and check write access for affected memories. Unfiltered bulk update/delete (including an empty context envelope) also consider authorized rows with no active context, including explicitly deferred and archived-only rows, and return `contextless_maintenance_scope`; broad admin reads omit those rows and are not mutation previews. Consolidation excludes rows with no active context and expired rows, constrains neighbor work to authorized applicable candidates with the same ordered membership profile before its limit, and merges only identical profiles, including compatibility-primary order. Consolidation and bulk re-embedding apply authorization before their limits. Consolidation reports capped partial runs; bulk re-embedding leaves inaccessible rows unclaimed and does not report their count. Authorized expiry cleanup likewise neither deletes nor counts inaccessible rows. |
 | Whole-store expiry cleanup | `admin_cleanup_expired` with `mode = "all"` | Restricted to an authenticated local stdio context. Records the maintenance principal in each tombstone and the principal plus cleanup mode in a transactional delete audit row for every removed memory. |
 | Whole-store metadata maintenance | `admin_migration_report`, `admin_migrate_metadata` | Restricted to a local, authenticated stdio context. Reporting exposes whole-store state; migration can add metadata across the store. |
 

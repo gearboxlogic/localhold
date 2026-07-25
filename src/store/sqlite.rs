@@ -112,7 +112,7 @@ fn create_default_data_directory(path: &Path) -> Result<(), StoreError> {
     std::fs::create_dir_all(path).map_err(|error| StoreError::Database(Box::new(error)))
 }
 
-fn create_pre_upgrade_backup(conn: &Connection, database_path: &Path, clock: &dyn Clock) -> Result<PathBuf, StoreError> {
+fn create_pre_upgrade_backup(conn: &Connection, database_path: &Path, clock: &dyn Clock, source_version: u32, source_table: Option<&str>) -> Result<PathBuf, StoreError> {
     let timestamp = clock.now().format("%Y%m%dT%H%M%S%.6fZ");
     let mut destination = None;
     for collision in 0_u32..100_u32 {
@@ -150,15 +150,18 @@ fn create_pre_upgrade_backup(conn: &Connection, database_path: &Path, clock: &dy
             backup.run_to_completion(256, Duration::ZERO, None)?;
         }
         let integrity: String = backup_connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
-        let contains_source: bool = backup_connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_v2_metadata')",
-            [],
-            |row| row.get(0),
-        )?;
-        if integrity != "ok" || !contains_source {
+        let backup_version: u32 = backup_connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let contains_source = if let Some(source_table) = source_table {
+            backup_connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)", [source_table], |row| {
+                row.get::<_, bool>(0)
+            })?
+        } else {
+            true
+        };
+        if integrity != "ok" || backup_version != source_version || !contains_source {
             return Err(StoreError::Conflict(format!(
-                "pre-upgrade backup {} did not verify as a copy of the published-release schema",
-                destination.display()
+                "pre-upgrade backup {} did not verify as a copy of SQLite schema version {source_version}",
+                destination.display(),
             )));
         }
         Ok(())
@@ -170,19 +173,19 @@ fn create_pre_upgrade_backup(conn: &Connection, database_path: &Path, clock: &dy
     Ok(destination)
 }
 
-/// Create the published-schema backup while the caller retains an immediate
+/// Create a pre-upgrade backup while the caller retains an immediate
 /// transaction on the migration connection.
-fn create_pre_upgrade_backup_while_locked(database_path: &Path, clock: &dyn Clock) -> Result<PathBuf, StoreError> {
+fn create_pre_upgrade_backup_while_locked(database_path: &Path, clock: &dyn Clock, source_version: u32, source_table: Option<&str>) -> Result<PathBuf, StoreError> {
     let backup_source = Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
     backup_source.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
-    create_pre_upgrade_backup(&backup_source, database_path, clock)
+    create_pre_upgrade_backup(&backup_source, database_path, clock, source_version, source_table)
 }
 
-fn retain_pre_upgrade_backup_while_locked(database_path: Option<&Path>, clock: &dyn Clock) -> Result<(), StoreError> {
+fn retain_pre_upgrade_backup_while_locked(database_path: Option<&Path>, clock: &dyn Clock, source_version: u32, source_table: Option<&str>) -> Result<(), StoreError> {
     let Some(path) = database_path else {
         return Ok(());
     };
-    let recovery = create_pre_upgrade_backup_while_locked(path, clock)?;
+    let recovery = create_pre_upgrade_backup_while_locked(path, clock, source_version, source_table)?;
     tracing::info!(path = %recovery.display(), "retained verified pre-upgrade SQLite backup");
     Ok(())
 }
@@ -401,6 +404,44 @@ impl SqliteStore {
             .map_err(|msg| StoreError::Database(format!("sqlite-vec registration failed: {msg}").into()))
     }
 
+    fn prepare_pre_v3_upgrade(&self, conn: &mut Connection, database_path: Option<&Path>, schema_version: u32) -> Result<(), StoreError> {
+        let published_tx = sqlite_write_tx(conn)?;
+        let has_published_metadata: bool = published_tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_v2_metadata')",
+            [],
+            |row| row.get(0),
+        )?;
+        let source_table = published_tx
+            .query_row(
+                "SELECT name
+                 FROM sqlite_master
+                 WHERE type = 'table'
+                   AND name IN ('memory_v2_metadata', 'memory_metadata', 'scope_registry', 'memories')
+                 ORDER BY CASE name
+                     WHEN 'memory_v2_metadata' THEN 0
+                     WHEN 'memories' THEN 1
+                     WHEN 'memory_metadata' THEN 2
+                     ELSE 3
+                 END
+                 LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let needs_backup = schema_version < crate::store::schema::SQLITE_SCHEMA_VERSION && (schema_version != 0_u32 || source_table.is_some());
+        if needs_backup {
+            retain_pre_upgrade_backup_while_locked(database_path, self.inner.clock.as_ref(), schema_version, source_table.as_deref())?;
+        }
+        if has_published_metadata {
+            let _published_metadata = validate_published_v2_metadata(&published_tx)?;
+            validate_present_sqlite_schema_for_published_upgrade(&published_tx)?;
+            check_dimension_mismatch(&published_tx, self.inner.vector_index.dimensions())?;
+            migrate_published_v2_metadata(&published_tx)?;
+        }
+        published_tx.commit()?;
+        Ok(())
+    }
+
     fn init_schema(&self, database_path: Option<&Path>) -> Result<(), StoreError> {
         let mut conn = self.inner.conn.lock();
         let schema_version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -410,22 +451,7 @@ impl SqliteStore {
                 crate::store::schema::SQLITE_SCHEMA_VERSION
             )));
         }
-        {
-            let published_tx = sqlite_write_tx(&mut conn)?;
-            let has_published_metadata: bool = published_tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_v2_metadata')",
-                [],
-                |row| row.get(0),
-            )?;
-            if has_published_metadata {
-                retain_pre_upgrade_backup_while_locked(database_path, self.inner.clock.as_ref())?;
-                let _published_metadata = validate_published_v2_metadata(&published_tx)?;
-                validate_present_sqlite_schema_for_published_upgrade(&published_tx)?;
-                check_dimension_mismatch(&published_tx, self.inner.vector_index.dimensions())?;
-                migrate_published_v2_metadata(&published_tx)?;
-            }
-            published_tx.commit()?;
-        }
+        self.prepare_pre_v3_upgrade(&mut conn, database_path, schema_version)?;
         reject_retired_sqlite_schema(&conn)?;
 
         // First pass: create tables and indexes for fresh databases. For legacy
@@ -762,8 +788,15 @@ impl MemoryReader for SqliteStore {
         self.fetch_embeddings_for_ids_impl(ids).await
     }
 
-    async fn find_embedding_neighbors(&self, embedding: &[f32], max_l2_distance: f64, limit: usize) -> Result<Vec<super::EmbeddingNeighbor>, StoreError> {
-        self.find_embedding_neighbors_impl(embedding, max_l2_distance, limit).await
+    async fn find_embedding_neighbors(
+        &self,
+        source_memory_id: &MemoryId,
+        candidate_ids: &[MemoryId],
+        embedding: &[f32],
+        max_l2_distance: f64,
+        limit: usize,
+    ) -> Result<Vec<super::EmbeddingNeighbor>, StoreError> {
+        self.find_embedding_neighbors_impl(source_memory_id, candidate_ids, embedding, max_l2_distance, limit).await
     }
 }
 
@@ -1117,7 +1150,8 @@ mod tests {
     use crate::{
         clock::MockClock,
         context::{
-            ContextAuditDraft, ContextCreateDraft, ContextId, ContextKind, ContextLifecycle, MAX_CONTEXT_DESCRIPTION_LEN, MAX_CONTEXT_DISPLAY_NAME_LEN, UNRESOLVED_CONTEXT_KEY,
+            ContextAuditDraft, ContextCreateDraft, ContextId, ContextKind, ContextLifecycle, LEGACY_ALL_PRINCIPALS_GRANT, MAX_CONTEXT_DESCRIPTION_LEN,
+            MAX_CONTEXT_DISPLAY_NAME_LEN, OPERATOR_PRINCIPAL, UNRESOLVED_CONTEXT_KEY,
         },
         store::{
             ContextWriter as _,
@@ -1160,7 +1194,8 @@ mod tests {
                 "PRAGMA user_version = 2;
                  CREATE TABLE memories (
                     id TEXT PRIMARY KEY,
-                    provenance TEXT NOT NULL
+                    provenance TEXT NOT NULL,
+                    access_policy TEXT NOT NULL DEFAULT '{\"type\":\"public\"}'
                  );
                  CREATE TABLE memory_metadata (
                     memory_id TEXT PRIMARY KEY,
@@ -1200,13 +1235,41 @@ mod tests {
         assert!(!sqlite_table_exists(&connection, "contexts").unwrap());
     }
 
+    #[test]
+    fn contexts_v3_rejects_malformed_legacy_memory_json_without_partial_migration() {
+        for (field, provenance, access_policy) in [
+            ("provenance", "{", "{\"type\":\"public\"}"),
+            ("provenance", "[]", "{\"type\":\"public\"}"),
+            ("access_policy", "{\"source_agent\":\"owner\",\"source_conversation\":\"project/malformed\"}", "{"),
+            ("access_policy", "{\"source_agent\":\"owner\",\"source_conversation\":\"project/malformed\"}", "[]"),
+        ] {
+            let mut connection = Connection::open_in_memory().unwrap();
+            create_minimal_v2_context_fixture(&connection, "project/malformed");
+            connection
+                .execute(
+                    "INSERT INTO memories (id, provenance, access_policy)
+                     VALUES ('malformed-memory', ?1, ?2)",
+                    rusqlite::params![provenance, access_policy],
+                )
+                .unwrap();
+
+            let error = migrate_contexts_v3(&mut connection, 2_u32, base_time()).unwrap_err();
+            assert!(error.to_string().contains(&format!("malformed {field} JSON")), "{error}");
+            let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+            assert_eq!(version, 2_u32);
+            assert!(sqlite_table_exists(&connection, "scope_registry").unwrap());
+            assert!(!sqlite_table_exists(&connection, "contexts").unwrap());
+        }
+    }
+
     fn create_minimal_v2_context_fixture(connection: &Connection, scope_key: &str) {
         connection
             .execute_batch(
                 "PRAGMA user_version = 2;
                  CREATE TABLE memories (
                     id TEXT PRIMARY KEY,
-                    provenance TEXT NOT NULL
+                    provenance TEXT NOT NULL,
+                    access_policy TEXT NOT NULL DEFAULT '{\"type\":\"public\"}'
                  );
                  CREATE TABLE memory_metadata (
                     memory_id TEXT PRIMARY KEY,
@@ -1277,6 +1340,154 @@ mod tests {
     }
 
     #[test]
+    fn reserved_unresolved_registry_row_is_skipped_before_definition_validation() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_minimal_v2_context_fixture(&connection, UNRESOLVED_CONTEXT_KEY);
+        connection
+            .execute(
+                "UPDATE scope_registry
+                 SET aliases = '[\"\"]',
+                     matchers = '[\"\"]',
+                     parent = ' ',
+                     related = '[\"\"]'",
+                [],
+            )
+            .unwrap();
+
+        migrate_contexts_v3(&mut connection, 2_u32, base_time()).unwrap();
+
+        let count: i64 = connection.query_row("SELECT COUNT(*) FROM contexts", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn reserved_unresolved_parent_and_relation_are_omitted_during_v3_migration() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_minimal_v2_context_fixture(&connection, "project/reserved-links");
+        connection
+            .execute(
+                "UPDATE scope_registry
+                 SET parent = ' Inbox/Unresolved ',
+                     related = '[\"INBOX/UNRESOLVED\"]'",
+                [],
+            )
+            .unwrap();
+
+        migrate_contexts_v3(&mut connection, 2_u32, base_time()).unwrap();
+
+        let parent: Option<String> = connection
+            .query_row("SELECT parent_id FROM contexts WHERE normalized_key = 'project/reserved-links'", [], |row| row.get(0))
+            .unwrap();
+        let relations: i64 = connection.query_row("SELECT COUNT(*) FROM context_relations", [], |row| row.get(0)).unwrap();
+        assert!(parent.is_none());
+        assert_eq!(relations, 0);
+    }
+
+    #[test]
+    fn raw_scope_case_variants_choose_a_deterministic_canonical_key() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA user_version = 1;
+                 CREATE TABLE memories (
+                    id TEXT PRIMARY KEY,
+                    provenance TEXT NOT NULL,
+                    access_policy TEXT NOT NULL DEFAULT '{\"type\":\"public\"}'
+                 );
+                 CREATE TABLE memory_metadata (
+                    memory_id TEXT PRIMARY KEY,
+                    scope_key TEXT,
+                    updated_at TEXT NOT NULL
+                 );
+                 INSERT INTO memories (id, provenance) VALUES
+                    ('lower-first', '{\"source_conversation\":\"zeta/raw\"}'),
+                    ('upper-second', '{\"source_conversation\":\"ZETA/RAW\"}');",
+            )
+            .unwrap();
+
+        migrate_contexts_v3(&mut connection, 1_u32, base_time()).unwrap();
+
+        let context_keys = {
+            let mut statement = connection.prepare("SELECT context_key FROM contexts").unwrap();
+            statement.query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        let source_scopes = {
+            let mut statement = connection
+                .prepare("SELECT json_extract(provenance, '$.source_conversation') FROM memories ORDER BY id")
+                .unwrap();
+            statement.query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(context_keys, ["ZETA/RAW"]);
+        assert_eq!(source_scopes, ["ZETA/RAW", "ZETA/RAW"]);
+    }
+
+    #[test]
+    fn unicode_whitespace_legacy_scopes_fall_back_or_remain_unresolved() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA user_version = 1;
+                 CREATE TABLE memories (
+                    id TEXT PRIMARY KEY,
+                    provenance TEXT NOT NULL,
+                    access_policy TEXT NOT NULL DEFAULT '{\"type\":\"public\"}'
+                 );
+                 CREATE TABLE memory_metadata (
+                    memory_id TEXT PRIMARY KEY,
+                    scope_key TEXT,
+                    updated_at TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO memories (id, provenance) VALUES
+                    ('fallback', ?1),
+                    ('unresolved', ?2)",
+                rusqlite::params![
+                    serde_json::json!({"source_conversation": "project/from-provenance"}).to_string(),
+                    serde_json::json!({"source_conversation": "\u{00a0}"}).to_string(),
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO memory_metadata (memory_id, scope_key, updated_at)
+                 VALUES ('fallback', ?1, '2026-07-25T00:00:00Z')",
+                ["\t"],
+            )
+            .unwrap();
+
+        migrate_contexts_v3(&mut connection, 1_u32, base_time()).unwrap();
+
+        let fallback_context: String = connection
+            .query_row(
+                "SELECT context_row.context_key
+                 FROM memory_contexts AS membership
+                 JOIN contexts AS context_row ON context_row.id = membership.context_id
+                 WHERE membership.memory_id = 'fallback'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let unresolved_memberships: i64 = connection
+            .query_row("SELECT COUNT(*) FROM memory_contexts WHERE memory_id = 'unresolved'", [], |row| row.get(0))
+            .unwrap();
+        let unresolved_scope: String = connection
+            .query_row(
+                "SELECT json_extract(provenance, '$.source_conversation')
+                 FROM memories
+                 WHERE id = 'unresolved'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fallback_context, "project/from-provenance");
+        assert_eq!(unresolved_memberships, 0);
+        assert_eq!(unresolved_scope, UNRESOLVED_CONTEXT_KEY);
+    }
+
+    #[test]
     fn normalized_reserved_memory_scopes_remain_contextless_during_v3_migration() {
         let mut connection = Connection::open_in_memory().unwrap();
         create_minimal_v2_context_fixture(&connection, "Inbox/Unresolved");
@@ -1302,6 +1513,15 @@ mod tests {
 
         let memberships: i64 = connection.query_row("SELECT COUNT(*) FROM memory_contexts", [], |row| row.get(0)).unwrap();
         assert_eq!(memberships, 0);
+        let provenance_scopes = {
+            let mut statement = connection
+                .prepare("SELECT json_extract(provenance, '$.source_conversation') FROM memories ORDER BY id")
+                .unwrap();
+            statement.query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(provenance_scopes, vec![UNRESOLVED_CONTEXT_KEY, UNRESOLVED_CONTEXT_KEY]);
+        let metadata_scope: String = connection.query_row("SELECT scope_key FROM memory_metadata", [], |row| row.get(0)).unwrap();
+        assert_eq!(metadata_scope, UNRESOLVED_CONTEXT_KEY);
     }
 
     #[test]
@@ -1319,7 +1539,10 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO memories (id, provenance)
-                 VALUES ('canonicalized-without-metadata', '{\"source_conversation\":\" project/foo \"}')",
+                 VALUES (
+                    'canonicalized-without-metadata',
+                    '{\"source_conversation\":\" project/foo \",\"origin_conversation\":\" Project/Foo Original \"}'
+                 )",
                 [],
             )
             .unwrap();
@@ -1358,6 +1581,147 @@ mod tests {
             .unwrap();
         assert_eq!(missing_metadata_membership_key, cache);
         assert_eq!(missing_metadata_rows, 0_i64);
+        let provenance_scopes = {
+            let mut statement = connection
+                .prepare("SELECT json_extract(provenance, '$.source_conversation') FROM memories ORDER BY id")
+                .unwrap();
+            statement.query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(provenance_scopes, vec!["project/Foo", "project/Foo"]);
+        let origin_scope: String = connection
+            .query_row(
+                "SELECT json_extract(provenance, '$.origin_conversation')
+                 FROM memories
+                 WHERE id = 'canonicalized-without-metadata'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(origin_scope, " Project/Foo Original ");
+    }
+
+    #[test]
+    fn populated_legacy_database_without_scope_registry_backfills_raw_scopes() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA user_version = 1;
+                 CREATE TABLE memories (
+                    id TEXT PRIMARY KEY,
+                    provenance TEXT NOT NULL,
+                    access_policy TEXT NOT NULL
+                 );
+                 CREATE TABLE memory_metadata (
+                    memory_id TEXT PRIMARY KEY,
+                    scope_key TEXT,
+                    updated_at TEXT NOT NULL
+                 );
+                 INSERT INTO memories (id, provenance, access_policy)
+                 VALUES (
+                    'legacy',
+                    '{\"source_agent\":\"legacy-owner\",\"source_conversation\":\"raw/legacy\"}',
+                    '{\"type\":\"public\"}'
+                 );",
+            )
+            .unwrap();
+
+        migrate_contexts_v3(&mut connection, 1_u32, base_time()).unwrap();
+
+        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(version, crate::store::schema::SQLITE_SCHEMA_VERSION);
+        let migrated: (String, String) = connection
+            .query_row(
+                "SELECT context_row.context_key, grant_row.grantee_principal
+                 FROM memory_contexts AS membership
+                 JOIN contexts AS context_row ON context_row.id = membership.context_id
+                 JOIN context_grants AS grant_row ON grant_row.context_id = context_row.id
+                 WHERE membership.memory_id = 'legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(migrated, ("raw/legacy".into(), LEGACY_ALL_PRINCIPALS_GRANT.into()));
+    }
+
+    #[test]
+    fn raw_legacy_context_visibility_follows_memory_access() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_minimal_v2_context_fixture(&connection, "project/registered");
+        connection
+            .execute_batch(
+                "INSERT INTO memories (id, provenance, access_policy)
+                 VALUES (
+                    'private-memory',
+                    '{\"source_agent\":\"owner\",\"source_conversation\":\"private/raw\"}',
+                    '{\"type\":\"restricted\",\"allowed\":[\"collaborator\",\"*\"]}'
+                 );
+                 INSERT INTO memory_metadata (memory_id, scope_key, updated_at)
+                 VALUES ('private-memory', 'private/raw', '2026-07-25T00:00:00Z');
+                 INSERT INTO memories (id, provenance, access_policy)
+                 VALUES (
+                    'sentinel-owner-memory',
+                    '{\"source_agent\":\"*\",\"source_conversation\":\"sentinel/raw\"}',
+                    '{\"type\":\"restricted\",\"allowed\":[]}'
+                 );
+                 INSERT INTO memories (id, provenance, access_policy)
+                 VALUES (
+                    'public-memory',
+                    '{\"source_agent\":\"publisher\",\"source_conversation\":\"public/raw\"}',
+                    '{\"type\":\"public\"}'
+                 );",
+            )
+            .unwrap();
+
+        migrate_contexts_v3(&mut connection, 2_u32, base_time()).unwrap();
+
+        let private_grants = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT grant_row.grantee_principal
+                     FROM context_grants AS grant_row
+                     JOIN contexts AS context_row ON context_row.id = grant_row.context_id
+                     WHERE context_row.context_key = 'private/raw'
+                     ORDER BY grant_row.grantee_principal",
+                )
+                .unwrap();
+            statement.query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(private_grants, vec!["collaborator", "owner"]);
+        let sentinel_grants: i64 = connection
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM context_grants AS grant_row
+                 JOIN contexts AS context_row ON context_row.id = grant_row.context_id
+                 WHERE context_row.context_key = 'sentinel/raw'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sentinel_grants, 0_i64);
+        let public_grants: Vec<String> = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT grant_row.grantee_principal
+                     FROM context_grants AS grant_row
+                     JOIN contexts AS context_row ON context_row.id = grant_row.context_id
+                     WHERE context_row.context_key = 'public/raw'
+                     ORDER BY grant_row.grantee_principal",
+                )
+                .unwrap();
+            statement.query_map([], |row| row.get(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(public_grants, vec!["*"]);
+        let registered_grant: String = connection
+            .query_row(
+                "SELECT grant_row.grantee_principal
+                 FROM context_grants AS grant_row
+                 JOIN contexts AS context_row ON context_row.id = grant_row.context_id
+                 WHERE context_row.context_key = 'project/registered'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(registered_grant, LEGACY_ALL_PRINCIPALS_GRANT);
     }
 
     #[test]
@@ -1572,7 +1936,7 @@ mod tests {
                 "01J00000000000000000000000".into(),
                 "published fixture memory".into(),
                 "[\"upgrade\"]".into(),
-                "{\"source_agent\":\"fixture\",\"source_conversation\":\"release\",\"origin_conversation\":\"release\"}".into(),
+                "{\"source_agent\":\"fixture\",\"source_conversation\":\"project/localhold\",\"origin_conversation\":\"release\"}".into(),
                 "{\"type\":\"public\"}".into(),
                 Some("01J00000000000000000000002".into()),
             )
@@ -1791,6 +2155,51 @@ mod tests {
     }
 
     #[test]
+    fn governed_context_upgrade_retains_verified_v2_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("context-v2.db");
+        let fixture = sqlite_fixture_sql("v0.2.0.sqlite.sql", &mut Vec::new());
+        build_sqlite_release_fixture(&path, &fixture);
+
+        drop(SqliteStore::open(&path, 3_usize).unwrap());
+
+        let backups = std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|candidate| candidate.to_string_lossy().contains(".pre-upgrade-") && candidate.extension().is_some_and(|extension| extension == "bak"))
+            .collect::<Vec<_>>();
+        assert_eq!(backups.len(), 1_usize);
+
+        let backup = Connection::open_with_flags(&backups[0], OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let backup_version: u32 = backup.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        let backup_registry = sqlite_table_exists(&backup, "scope_registry").unwrap();
+        assert_eq!(backup_version, 2_u32);
+        assert!(backup_registry);
+        assert_eq!(backup.query_row::<String, _, _>("PRAGMA quick_check", [], |row| row.get(0)).unwrap(), "ok");
+
+        let upgraded = Connection::open(&path).unwrap();
+        let upgraded_version: u32 = upgraded.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(upgraded_version, crate::store::schema::SQLITE_SCHEMA_VERSION);
+        assert!(!sqlite_table_exists(&upgraded, "scope_registry").unwrap());
+    }
+
+    #[test]
+    fn fresh_sqlite_store_does_not_create_pre_upgrade_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fresh.db");
+
+        drop(SqliteStore::open(&path, 3_usize).unwrap());
+
+        let backups = std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "bak"))
+            .count();
+        assert_eq!(backups, 0_usize);
+    }
+
+    #[test]
     fn published_sqlite_backup_and_migration_share_writer_locked_snapshot() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("locked-snapshot.db");
@@ -1798,7 +2207,7 @@ mod tests {
         let mut migrator = Connection::open(&path).unwrap();
         migrator.busy_timeout(SQLITE_BUSY_TIMEOUT).unwrap();
         let tx = sqlite_write_tx(&mut migrator).unwrap();
-        let backup = create_pre_upgrade_backup_while_locked(&path, &MockClock::pinned(base_time())).unwrap();
+        let backup = create_pre_upgrade_backup_while_locked(&path, &MockClock::pinned(base_time()), 0_u32, Some("memory_v2_metadata")).unwrap();
 
         let writer = Connection::open(&path).unwrap();
         writer.busy_timeout(Duration::ZERO).unwrap();
@@ -1983,7 +2392,7 @@ mod tests {
         std::fs::write(&collision, b"sentinel").unwrap();
         let connection = Connection::open(&path).unwrap();
 
-        let backup = create_pre_upgrade_backup(&connection, &path, &clock).unwrap();
+        let backup = create_pre_upgrade_backup(&connection, &path, &clock, 0_u32, Some("memory_v2_metadata")).unwrap();
 
         assert_ne!(backup, collision);
         assert_eq!(std::fs::read(&collision).unwrap(), b"sentinel");
@@ -2709,10 +3118,12 @@ mod tests {
             MemoryWithEmbedding {
                 memory: first.clone(),
                 embedding: None,
+                context_ids: Vec::new(),
             },
             MemoryWithEmbedding {
                 memory: second.clone(),
                 embedding: None,
+                context_ids: Vec::new(),
             },
         ];
         let metadata = vec![make_metadata(first.id), make_metadata(MemoryId::new())];
@@ -2732,10 +3143,12 @@ mod tests {
             MemoryWithEmbedding {
                 memory: first.clone(),
                 embedding: None,
+                context_ids: Vec::new(),
             },
             MemoryWithEmbedding {
                 memory: second.clone(),
                 embedding: None,
+                context_ids: Vec::new(),
             },
         ];
         let metadata = vec![make_metadata(first.id), make_metadata(second.id)];
@@ -2760,10 +3173,12 @@ mod tests {
             MemoryWithEmbedding {
                 memory: first.clone(),
                 embedding: None,
+                context_ids: Vec::new(),
             },
             MemoryWithEmbedding {
                 memory: second.clone(),
                 embedding: None,
+                context_ids: Vec::new(),
             },
         ];
         let mut wrong_metadata = make_metadata(existing.id);
@@ -4394,7 +4809,14 @@ mod tests {
         let store = SqliteStore::in_memory().unwrap();
         let mem = make_memory("batch-single", &["x"], base_time());
         let id = mem.id;
-        let ids = store.store_batch(&[MemoryWithEmbedding { memory: mem, embedding: None }]).await.unwrap();
+        let ids = store
+            .store_batch(&[MemoryWithEmbedding {
+                memory: mem,
+                embedding: None,
+                context_ids: Vec::new(),
+            }])
+            .await
+            .unwrap();
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0], id);
 
@@ -4409,6 +4831,7 @@ mod tests {
             .map(|i| MemoryWithEmbedding {
                 memory: make_memory(&format!("batch-{i}"), &[], base_time()),
                 embedding: None,
+                context_ids: Vec::new(),
             })
             .collect();
         let expected_ids: Vec<MemoryId> = batch.iter().map(|mwe| mwe.memory.id).collect();
@@ -4437,10 +4860,12 @@ mod tests {
                 MemoryWithEmbedding {
                     memory: mem_with,
                     embedding: Some(emb.clone()),
+                    context_ids: Vec::new(),
                 },
                 MemoryWithEmbedding {
                     memory: mem_without,
                     embedding: None,
+                    context_ids: Vec::new(),
                 },
             ])
             .await
@@ -5021,10 +5446,12 @@ mod tests {
         let new_mem = MemoryWithEmbedding {
             memory: make_memory("new info", &["tech"], base_time()),
             embedding: None,
+            context_ids: Vec::new(),
         };
         let no_supersede_mem = MemoryWithEmbedding {
             memory: make_memory("unrelated", &["other"], base_time()),
             embedding: None,
+            context_ids: Vec::new(),
         };
 
         let ids = store.store_batch_with_supersession(&[new_mem, no_supersede_mem], &[Some(old_id), None]).await.unwrap();
@@ -5081,6 +5508,22 @@ mod tests {
         assert_eq!(scopes[0].scope_key, "gearboxlogic/localhold");
         assert_eq!(scopes[0].aliases, vec!["recall"]);
         assert_eq!(scopes[0].parent.as_deref(), Some("gbl"));
+        let governance: (String, bool, i64) = reopened
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT context_row.owner_principal, context_row.frozen,
+                            (SELECT COUNT(*) FROM context_grants AS grant_row
+                             WHERE grant_row.context_id = context_row.id)
+                     FROM contexts AS context_row
+                     WHERE context_row.context_key = 'gearboxlogic/localhold'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(StoreError::from)
+            })
+            .await
+            .unwrap();
+        assert_eq!(governance, (OPERATOR_PRINCIPAL.into(), false, 0_i64));
         let registry_exists = reopened.with_conn(|conn| sqlite_table_exists(conn, "scope_registry")).await.unwrap();
         assert!(!registry_exists, "legacy administration must not restore a second scope registry");
     }

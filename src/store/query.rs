@@ -1,6 +1,9 @@
 //! Query building, paging helpers, and row deserialization for the memories table.
 
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr as _,
+};
 
 use rusqlite::params;
 
@@ -500,7 +503,7 @@ impl WhereClause {
                 .into(),
             );
             if !context_ids.is_empty() {
-                let placeholders = (0..context_ids.len()).map(|index| format!("?{}", wc.next_idx + index)).collect::<Vec<_>>();
+                let idx = wc.next_idx;
                 wc.conditions.push(format!(
                     "NOT EXISTS (
                         SELECT 1
@@ -517,13 +520,14 @@ impl WhereClause {
                               WHERE compatible_membership.memory_id = memories.id
                                 AND compatible_context.kind = attached_context.kind
                                 AND compatible_context.lifecycle = 'active'
-                                AND compatible_membership.context_id IN ({})
+                                AND compatible_membership.context_id IN (
+                                    SELECT CAST(value AS TEXT) FROM json_each(?{idx})
+                                )
                           )
-                    )",
-                    placeholders.join(", ")
+                    )"
                 ));
-                wc.params.extend(context_ids.iter().map(ToString::to_string));
-                wc.next_idx += context_ids.len();
+                wc.params.push(context_ids_json(context_ids));
+                wc.next_idx += 1;
             }
         }
 
@@ -824,7 +828,19 @@ fn fetch_page(conn: &rusqlite::Connection, sql: &str, params: &[&dyn rusqlite::t
     .map_err(StoreError::from)
 }
 
+pub(crate) fn compatibility_scope_label(memory_id: &MemoryId, visible_primary_contexts: &HashMap<MemoryId, String>, membership_presence: &HashSet<MemoryId>) -> String {
+    if let Some(scope) = visible_primary_contexts.get(memory_id) {
+        return scope.clone();
+    }
+    if membership_presence.contains(memory_id) {
+        "[redacted]".to_owned()
+    } else {
+        UNRESOLVED_CONTEXT_KEY.to_owned()
+    }
+}
+
 /// Count memories with access-policy post-filtering in Rust, accumulating tag/agent breakdowns.
+#[expect(clippy::too_many_lines, reason = "the single paged pass accumulates every public memory-stat dimension together")]
 pub(crate) fn count_with_access_filter(
     conn: &rusqlite::Connection,
     filter: &MemoryFilter,
@@ -845,6 +861,7 @@ pub(crate) fn count_with_access_filter(
     ScanConfig::new(conn, filter, caller, now, COUNT_PAGE_SIZE).run_pages(|memories| {
         let memory_ids = memories.iter().map(|memory| memory.id).collect::<Vec<_>>();
         let visible_primary_contexts = visible_primary_context_keys(conn, caller, &memory_ids)?;
+        let membership_presence = memory_context_membership_presence(conn, &memory_ids)?;
         for memory in memories {
             total = total.saturating_add(1);
             if memory.has_embedding {
@@ -866,7 +883,7 @@ pub(crate) fn count_with_access_filter(
             oldest = Some(oldest.map_or(ts, |o| o.min(ts)));
             newest = Some(newest.map_or(ts, |n| n.max(ts)));
             if !memory.was_redacted {
-                let scope = visible_primary_contexts.get(&memory.id).cloned().unwrap_or_else(|| UNRESOLVED_CONTEXT_KEY.to_owned());
+                let scope = compatibility_scope_label(&memory.id, &visible_primary_contexts, &membership_presence);
                 let count = scope_counts.entry(scope).or_insert(0);
                 *count = count.saturating_add(1);
             }
@@ -928,7 +945,6 @@ fn visible_primary_context_keys(conn: &rusqlite::Connection, caller: Option<&str
          JOIN contexts AS context_row ON context_row.id = membership.context_id
          WHERE membership.ordinal = 0
            AND membership.memory_id IN (SELECT value FROM json_each(?2))
-           AND context_row.lifecycle = 'active'
            AND (
                context_row.owner_principal = ?1 OR EXISTS (
                    SELECT 1 FROM context_grants AS grant_row
@@ -951,6 +967,26 @@ fn visible_primary_context_keys(conn: &rusqlite::Connection, caller: Option<&str
     .map_err(StoreError::from)
 }
 
+fn memory_context_membership_presence(conn: &rusqlite::Connection, memory_ids: &[MemoryId]) -> Result<HashSet<MemoryId>, StoreError> {
+    if memory_ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let memory_ids = serde_json::to_string(memory_ids)?;
+    let mut statement = conn.prepare(
+        "SELECT DISTINCT memory_id
+         FROM memory_contexts
+         WHERE memory_id IN (SELECT value FROM json_each(?1))",
+    )?;
+    statement
+        .query_map([memory_ids], |row| row.get::<_, String>(0))?
+        .map(|row| {
+            let id = row?;
+            MemoryId::from_str(&id).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))
+        })
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(StoreError::from)
+}
+
 fn sqlite_storage_bytes(conn: &rusqlite::Connection) -> Result<Option<u64>, StoreError> {
     let page_count = conn.query_row("SELECT * FROM pragma_page_count()", [], sqlite_u64)?;
     let page_size = conn.query_row("SELECT * FROM pragma_page_size()", [], sqlite_u64)?;
@@ -964,6 +1000,26 @@ fn sqlite_storage_bytes(conn: &rusqlite::Connection) -> Result<Option<u64>, Stor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_governed_context_sets_use_one_json_bind() {
+        let context_ids = std::iter::repeat_with(crate::context::ContextId::new).take(40_000_usize).collect::<Vec<_>>();
+        let baseline = WhereClause::from_filter(&MemoryFilter::default(), Some("owner"), 1, now());
+        let governed = WhereClause::from_filter(
+            &MemoryFilter {
+                context_ids: Some(context_ids),
+                ..MemoryFilter::default()
+            },
+            Some("owner"),
+            1,
+            now(),
+        );
+
+        assert_eq!(governed.params().len(), baseline.params().len() + 1);
+        assert!(governed.to_where_sql().contains("json_each"));
+        let encoded = serde_json::from_str::<Vec<String>>(governed.params().last().unwrap()).unwrap();
+        assert_eq!(encoded.len(), 40_000);
+    }
 
     #[test]
     fn page_primary_context_lookup_uses_memory_membership_index() {
@@ -997,7 +1053,6 @@ mod tests {
                  JOIN contexts AS context_row ON context_row.id = membership.context_id
                  WHERE membership.ordinal = 0
                    AND membership.memory_id IN (SELECT value FROM json_each(?2))
-                   AND context_row.lifecycle = 'active'
                    AND (
                        context_row.owner_principal = ?1 OR EXISTS (
                            SELECT 1 FROM context_grants AS grant_row

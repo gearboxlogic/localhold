@@ -123,7 +123,9 @@ warnings are advisory. Missing governed context is a validation failure unless
 effective policy supplies a unique default or the caller explicitly sets
 `context.allow_unresolved`. Explicit references must all resolve; setting
 `allow_unresolved` never suppresses an invalid, missing, archived, or ambiguous
-explicit reference.
+explicit reference and never overrides a required context kind from effective
+policy. A required kind's unique authorized default is applied before
+deferral; otherwise the write returns `context_required`.
 
 Inputs:
 
@@ -179,7 +181,9 @@ Responses include an `operation` envelope and per-memory `id`, resolved `scope`,
 Validates agent-supplied candidate memory bullets. It previews suggested writes
 by default and persists normalized candidates only when `commit` is `true`;
 warnings are advisory. Preview is a read operation governed by the caller's
-read authorization; committing requires write authorization.
+read authorization, but it validates the same candidate and governed-context
+contract as commit without creating contexts or persisting memories. Committing
+requires write authorization.
 
 Inputs:
 
@@ -325,7 +329,8 @@ Each ref uses exactly one locator: `id`, `kind` plus `key`, or `kind` plus a
 typed identity. Local paths are weak `hints`, never durable identities.
 Supported identities are normalized `git_remote`, policy-approved absolute
 `uri`, and `namespaced_id`. The store retains only a fingerprint and safe
-redacted label.
+redacted label. Agent responses expose the safe label, never the stored
+fingerprint.
 
 `context_resolve` resolves exact references, aliases, identities, queries, and
 hints. An empty request returns a paginated authorized catalog. Its response
@@ -333,7 +338,7 @@ always identifies direct and effective contexts, candidate ambiguity, policy
 guidance, broad-search state, and recommended actions.
 
 `context_create` creates a private context when effective policy permits.
-Exact key or identity matches reuse the existing context. Fuzzy candidates at
+Exact key, alias, or identity matches reuse the existing context. Fuzzy candidates at
 or above the duplicate threshold require a second call whose
 `confirm_distinct_from` contains every current candidate ID. By default agents
 may create only project contexts backed by a durable typed identity; other
@@ -344,13 +349,31 @@ descendants unless `include_descendants` is true or effective policy enables
 it. Retrieval uses OR among values of the same kind and AND across different
 kinds attached to a memory.
 
+Archiving preserves memberships and reserves aliases and identities, but an
+archived context no longer contributes an active retrieval membership. A
+memory whose only memberships are archived therefore leaves governed broad and
+filtered searches until an operator reactivates a context. Direct reads retain
+the ordered membership profile so reactivation and compatibility-primary
+lineage remain inspectable.
+
 Omitting context on `recall`, `brief`, and context-aware admin reads means an
 intentional broad authorized search over memories that have at least one
-membership. Contextless memories are excluded. Omitted governed writes fail
+membership. An empty envelope (`"context": {}`) has the same broad read
+semantics. Contextless memories are excluded. Omitted governed writes fail
 with `context_required` unless policy supplies a unique safe default.
 `{"context":{"allow_unresolved":true}}` is an explicit deferral: it stores no
 memberships and adds the unresolved warning only when no explicit reference
 failed. It does not turn a failed explicit locator into an unresolved write.
+
+Unfiltered `admin_bulk_update` and `admin_bulk_delete` are whole-authorized-set
+maintenance operations and also consider memories with no active context,
+including explicitly deferred contextless and archived-only memories. Their
+operation summaries return
+`contextless_maintenance_scope`; supply an explicit context filter when those
+rows must be excluded. An empty context envelope is broad, so it has the same
+maintenance reach and warning as omission. Consequently, an unfiltered `admin_list` or
+`admin_count` is not a destructive-operation preview because those reads omit
+memories with no active context.
 
 On `revise`, a supplied context envelope replaces the complete ordered
 membership set; omission preserves it. Cards return direct `contexts`. The
@@ -429,7 +452,11 @@ them.
 `admin_consolidate` applies write authorization before its configured candidate
 limit. Its response reports `candidate_count` and `capped`; when `capped` is
 true, the preview or merge covers only the newest authorized candidates in that
-run and must not be interpreted as a complete scan.
+run and must not be interpreted as a complete scan. Broad consolidation still
+requires at least one active membership, constrains neighbor work to the
+authorized applicable candidate set before its per-candidate limit, and merges
+only memories with identical active direct membership sets. Contextless
+memories never participate.
 
 Bulk `admin_reembed` applies the same per-memory write policy as single-ID
 re-embedding before filling its limit. Inaccessible rows remain unclaimed and
@@ -487,5 +514,6 @@ Use `admin_migration_report` first. It reports:
 Then run `admin_migrate_metadata` with `dry_run: true` to preview a
 non-destructive pass. A real pass inserts missing metadata rows only.
 
-Legacy scopes are backfilled only when they exactly match a registered
-`scope_key`. Other legacy rows are classified as `inbox/unresolved`.
+Metadata scope caches are derived only from a memory's primary governed
+membership. Contextless legacy rows are classified as `inbox/unresolved`;
+registering a similarly named context does not invent membership.

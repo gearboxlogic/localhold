@@ -16,7 +16,10 @@ mod sqlite;
 mod sqlite_lease;
 pub(crate) mod vector;
 
-use std::{collections::HashMap, future::Future};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+};
 
 pub use postgres::PostgresStore;
 pub(crate) use postgres::validate_published_v2_metadata_upgrade;
@@ -42,6 +45,9 @@ use crate::{
 
 /// Ordered direct context memberships keyed by their memory.
 pub type MemoryContextMap = HashMap<MemoryId, Vec<MemoryContext>>;
+/// Authorized memory IDs that have at least one direct context membership,
+/// regardless of whether the context definition is visible to the caller.
+pub type MemoryContextPresence = HashSet<MemoryId>;
 /// Authorized memories keyed by ID for batch reads.
 pub type MemoryMap = HashMap<MemoryId, Memory>;
 
@@ -77,6 +83,10 @@ pub trait ContextReader: Send + Sync {
     /// Return ordered direct context memberships for a batch of authorized
     /// memories without issuing one query per memory.
     fn get_memory_contexts_batch(&self, memory_ids: &[MemoryId], principal: &str) -> impl Future<Output = Result<MemoryContextMap, StoreError>> + Send;
+
+    /// Return authorized memories that have at least one direct membership,
+    /// without exposing hidden context definitions.
+    fn get_memory_context_presence_batch(&self, memory_ids: &[MemoryId], principal: &str) -> impl Future<Output = Result<MemoryContextPresence, StoreError>> + Send;
 
     /// Count all memberships on a memory the principal may write, including
     /// memberships whose context definition is not currently visible.
@@ -341,6 +351,12 @@ pub struct MemoryWithEmbedding {
     pub memory: Memory,
     /// Pre-computed embedding vector, if available.
     pub embedding: Option<Vec<f32>>,
+    /// Active direct governed-context memberships, in primary order. The
+    /// ordering is semantically significant for consolidation because ordinal
+    /// zero is the compatibility-primary context.
+    ///
+    /// Populated by consolidation reads. Batch-write callers leave this empty.
+    pub context_ids: Vec<ContextId>,
 }
 
 /// Outcome of a bulk write operation with per-item authorization.
@@ -476,9 +492,21 @@ pub trait MemoryReader: Send + Sync {
 
     /// Find nearest neighbors for an embedding within an L2 distance threshold.
     ///
-    /// Returns `(neighbor_memory_id, l2_distance)` pairs. Self-matches and
-    /// superseded memories are excluded.
-    fn find_embedding_neighbors(&self, embedding: &[f32], max_l2_distance: f64, limit: usize) -> impl Future<Output = Result<Vec<EmbeddingNeighbor>, StoreError>> + Send;
+    /// Returns `(neighbor_memory_id, l2_distance)` pairs from the supplied
+    /// canonical consolidation candidate set. Self-matches and superseded
+    /// memories are excluded before the bounded nearest-neighbor limit.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "candidate-bounded neighbor lookup needs source, candidates, vector, threshold, and limit"
+    )]
+    fn find_embedding_neighbors(
+        &self,
+        source_memory_id: &MemoryId,
+        candidate_ids: &[MemoryId],
+        embedding: &[f32],
+        max_l2_distance: f64,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<EmbeddingNeighbor>, StoreError>> + Send;
 }
 
 /// Write operations: store, update, delete, batch store, set embedding,
@@ -849,10 +877,10 @@ pub trait MemoryAdmin: Send + Sync {
         audit: &AuditDraft,
     ) -> impl Future<Output = Result<ReassignScopeOutcome, StoreError>> + Send;
 
-    /// Register or replace a scope definition.
+    /// Register or replace an operator-owned private compatibility definition.
     fn register_scope(&self, scope: ScopeDefinition) -> impl Future<Output = Result<(), StoreError>> + Send;
 
-    /// List all registered scope definitions ordered by key.
+    /// List operator-owned and migrated frozen compatibility definitions.
     fn list_scopes(&self) -> impl Future<Output = Result<Vec<ScopeDefinition>, StoreError>> + Send;
 
     /// Register or replace a principal-owned private custom context through
@@ -900,13 +928,21 @@ pub trait MemoryStore: MemoryReader + MemoryWriter + MemoryAdmin + ContextStore 
 impl<T: MemoryReader + MemoryWriter + MemoryAdmin + ContextStore> MemoryStore for T {}
 
 pub(crate) fn merge_metadata_patch(memory_id: MemoryId, patch: &MetadataPatch, existing: Option<&MemoryMetadata>, fallback_scope: Option<&str>, principal: &str) -> MemoryMetadata {
+    let scope_key = patch
+        .scope_key
+        .clone()
+        .or_else(|| existing.and_then(|metadata| metadata.scope_key.clone()))
+        .or_else(|| fallback_scope.map(ToOwned::to_owned));
+    let mut quality_flags = existing.map_or_else(Vec::new, |metadata| metadata.quality_flags.clone());
+    if let Some(scope_key) = patch.scope_key.as_deref() {
+        quality_flags.retain(|flag| flag != "missing_scope");
+        if crate::types::normalize_context_key(scope_key) == crate::context::UNRESOLVED_CONTEXT_KEY {
+            quality_flags.push("missing_scope".into());
+        }
+    }
     MemoryMetadata {
         memory_id,
-        scope_key: patch
-            .scope_key
-            .clone()
-            .or_else(|| existing.and_then(|metadata| metadata.scope_key.clone()))
-            .or_else(|| fallback_scope.map(ToOwned::to_owned)),
+        scope_key,
         summary: if patch.clear_summary {
             None
         } else {
@@ -918,7 +954,7 @@ pub(crate) fn merge_metadata_patch(memory_id: MemoryId, patch: &MetadataPatch, e
             patch.agent_label.clone().or_else(|| existing.and_then(|metadata| metadata.agent_label.clone()))
         },
         created_by_principal: existing.and_then(|metadata| metadata.created_by_principal.clone()).or_else(|| Some(principal.to_owned())),
-        quality_flags: existing.map_or_else(Vec::new, |metadata| metadata.quality_flags.clone()),
+        quality_flags,
         schema_version: 1,
     }
 }

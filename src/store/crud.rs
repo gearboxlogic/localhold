@@ -568,6 +568,7 @@ fn apply_authorized_update_with_metadata(
             reembed_revision: None,
         });
     }
+    validate_compatibility_cache_update(&tx, &id_str, update, metadata_patch)?;
 
     let revision_at = next_memory_revision(now, existing.updated_at);
     let revision_at_text = revision_at.to_rfc3339();
@@ -625,6 +626,9 @@ fn apply_authorized_update_with_metadata_contexts(
             outcome: WriteOutcome::Denied,
             reembed_revision: None,
         });
+    }
+    if context_ids.is_none() {
+        validate_compatibility_cache_update(&tx, &id_str, update, metadata_patch)?;
     }
     let revision_at = next_memory_revision(now, existing.updated_at);
     let revision_at_text = revision_at.to_rfc3339();
@@ -706,6 +710,9 @@ fn apply_authorized_update_if_unmodified_with_metadata(
     }
     if existing.record_revision != expected_revision {
         return Err(StoreError::Conflict(format!("memory {id} changed after it was opened")));
+    }
+    if context_ids.is_none() {
+        validate_compatibility_cache_update(&tx, &id_str, update, metadata_patch)?;
     }
 
     let revision_at = next_memory_revision(now, existing.updated_at);
@@ -882,6 +889,7 @@ pub(crate) fn bulk_update_ids(
                 denied = denied.saturating_add(1);
                 continue;
             }
+            validate_compatibility_cache_update(&tx, id_str, update, None)?;
             let revision_at = next_memory_revision(now, mem.updated_at).to_rfc3339();
             let outcome = apply_update_inner(&tx, vector_index, id_str, update, &revision_at)?;
             if outcome.outcome == WriteOutcome::Applied {
@@ -920,6 +928,7 @@ pub(crate) fn apply_update(
             reembed_revision: None,
         });
     };
+    validate_compatibility_cache_update(&tx, id_str, update, None)?;
     let revision_at = next_memory_revision(now, existing.updated_at).to_rfc3339();
     let outcome = apply_update_inner(&tx, vector_index, id_str, update, &revision_at)?;
     tx.commit()?;
@@ -935,6 +944,39 @@ const fn has_column_updates(update: &MemoryUpdate) -> bool {
         || update.expires_at.is_some()
         || update.confidence.is_some()
         || update.source_conversation.is_some()
+}
+
+fn compatibility_scope_key(conn: &Connection, memory_id: &str) -> Result<String, StoreError> {
+    Ok(conn
+        .query_row(
+            "SELECT context_row.context_key
+             FROM memory_contexts AS membership
+             JOIN contexts AS context_row ON context_row.id = membership.context_id
+             WHERE membership.memory_id = ?1
+               AND membership.ordinal = 0",
+            [memory_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| UNRESOLVED_CONTEXT_KEY.to_owned()))
+}
+
+fn validate_compatibility_cache_update(conn: &Connection, memory_id: &str, update: &MemoryUpdate, metadata_patch: Option<&MetadataPatch>) -> Result<(), StoreError> {
+    if update.source_conversation.is_none() && metadata_patch.and_then(|patch| patch.scope_key.as_ref()).is_none() {
+        return Ok(());
+    }
+    let expected_scope = compatibility_scope_key(conn, memory_id)?;
+    if update.source_conversation.as_deref().is_some_and(|scope| scope != expected_scope) {
+        return Err(StoreError::Conflict(
+            "provenance compatibility scope must match the primary governed context; replace governed memberships instead".into(),
+        ));
+    }
+    if metadata_patch.and_then(|patch| patch.scope_key.as_deref()).is_some_and(|scope| scope != expected_scope) {
+        return Err(StoreError::Conflict(
+            "metadata compatibility scope must match the primary governed context; replace governed memberships instead".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Builder for dynamic SQL `SET` clauses with numbered parameters.
@@ -1191,6 +1233,7 @@ fn list_memories_with_embeddings(
     context_ids: Option<&[ContextId]>,
     legacy_context_ids_any: Option<&[ContextId]>,
     principal: &str,
+    now: chrono::DateTime<chrono::Utc>,
     limit: usize,
 ) -> Result<Vec<super::MemoryWithEmbedding>, StoreError> {
     use std::fmt::Write as _;
@@ -1202,6 +1245,14 @@ fn list_memories_with_embeddings(
          FROM memories m \
          WHERE m.has_embedding = 1
            AND m.superseded_by IS NULL
+           AND (m.expires_at IS NULL OR m.expires_at > ?2)
+           AND EXISTS (
+               SELECT 1
+               FROM memory_embedding_map AS candidate_embedding_map
+               JOIN memory_embeddings AS candidate_embedding
+                 ON candidate_embedding.rowid = candidate_embedding_map.vec_rowid
+               WHERE candidate_embedding_map.memory_id = m.id
+           )
            AND (
                json_extract(m.provenance, '$.source_agent') = ?1
                OR (
@@ -1218,8 +1269,8 @@ fn list_memories_with_embeddings(
                )
            )"
     );
-    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(principal.to_owned())];
-    let mut next_idx = 2_usize;
+    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(principal.to_owned()), Box::new(now.to_rfc3339())];
+    let mut next_idx = 3_usize;
 
     if let Some(context_ids) = context_ids {
         sql.push_str(
@@ -1233,8 +1284,6 @@ fn list_memories_with_embeddings(
             )",
         );
         if !context_ids.is_empty() {
-            #[expect(clippy::arithmetic_side_effects, reason = "SQL parameter index increment — param count is always small")]
-            let placeholders: Vec<String> = (0..context_ids.len()).map(|i| format!("?{}", next_idx + i)).collect();
             #[expect(clippy::let_underscore_must_use, reason = "fmt::Write for String is infallible")]
             let _ = write!(
                 sql,
@@ -1253,15 +1302,14 @@ fn list_memories_with_embeddings(
                           WHERE compatible_membership.memory_id = m.id
                             AND compatible_context.kind = attached_context.kind
                             AND compatible_context.lifecycle = 'active'
-                            AND compatible_membership.context_id IN ({})
+                            AND compatible_membership.context_id IN (
+                                SELECT CAST(value AS TEXT) FROM json_each(?{next_idx})
+                            )
                       )
-                )",
-                placeholders.join(", ")
+                )"
             );
-            for id in context_ids {
-                params_vec.push(Box::new(id.to_string()));
-            }
-            next_idx = next_idx.saturating_add(context_ids.len());
+            params_vec.push(Box::new(context_ids_json(context_ids)));
+            next_idx = next_idx.saturating_add(1);
         }
     }
 
@@ -1288,7 +1336,7 @@ fn list_memories_with_embeddings(
 
     // write! on String is infallible — fmt::Write for String never fails.
     #[expect(clippy::let_underscore_must_use, reason = "fmt::Write for String is infallible")]
-    let _ = write!(sql, " ORDER BY m.created_at DESC LIMIT ?{next_idx}");
+    let _ = write!(sql, " ORDER BY m.created_at DESC, m.id DESC LIMIT ?{next_idx}");
     params_vec.push(Box::new(limit_i64));
 
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(AsRef::as_ref).collect();
@@ -1306,13 +1354,31 @@ fn list_memories_with_embeddings(
 
     let ids: Vec<MemoryId> = memories.iter().map(|memory| memory.id).collect();
     let mut embeddings = vector_index.fetch_many(conn, &ids)?;
+    let ids_json = serde_json::to_string(&ids.iter().map(ToString::to_string).collect::<Vec<_>>())?;
+    let mut membership_statement = conn.prepare(
+        "SELECT membership.memory_id, membership.context_id
+         FROM memory_contexts AS membership
+         WHERE membership.memory_id IN (SELECT CAST(value AS TEXT) FROM json_each(?1))
+         ORDER BY membership.memory_id, membership.ordinal",
+    )?;
+    let membership_rows = membership_statement
+        .query_map([ids_json], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut context_ids_by_memory = std::collections::HashMap::<MemoryId, Vec<ContextId>>::new();
+    for (memory_id, context_id) in membership_rows {
+        let memory_id = memory_id.parse().map_err(|error| StoreError::Serialization(Box::new(error)))?;
+        let context_id = context_id.parse().map_err(|error| StoreError::Serialization(Box::new(error)))?;
+        context_ids_by_memory.entry(memory_id).or_default().push(context_id);
+    }
     let mut results = Vec::with_capacity(memories.len());
 
     for memory in memories {
         if let Some(embedding) = embeddings.remove(&memory.id) {
+            let context_ids = context_ids_by_memory.remove(&memory.id).unwrap_or_default();
             results.push(super::MemoryWithEmbedding {
                 memory,
                 embedding: Some(embedding),
+                context_ids,
             });
         } else {
             tracing::warn!(memory_id = %memory.id, "memory has has_embedding=1 but no vector row");
@@ -1902,6 +1968,7 @@ impl SqliteStore {
                     reembed_revision: None,
                 });
             }
+            validate_compatibility_cache_update(&tx, &id_str, &update, None)?;
             let revision_at = next_memory_revision(now, existing.updated_at).to_rfc3339();
             let outcome = apply_update_inner(&tx, &vector_index, &id_str, &update, &revision_at)?;
             if outcome.outcome == WriteOutcome::Applied
@@ -2299,8 +2366,9 @@ impl SqliteStore {
         let context_ids = context_ids.map(<[ContextId]>::to_vec);
         let legacy_context_ids_any = legacy_context_ids_any.map(<[ContextId]>::to_vec);
         let principal = principal.to_owned();
+        let now = self.clock_now();
         let vector_index = self.vector_index();
-        self.with_conn(move |conn| list_memories_with_embeddings(conn, &vector_index, context_ids.as_deref(), legacy_context_ids_any.as_deref(), &principal, limit))
+        self.with_conn(move |conn| list_memories_with_embeddings(conn, &vector_index, context_ids.as_deref(), legacy_context_ids_any.as_deref(), &principal, now, limit))
             .await
     }
 

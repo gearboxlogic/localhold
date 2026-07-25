@@ -4,7 +4,7 @@ expression: tool
 ---
 {
   "name": "context_create",
-  "description": "Create a private governed context when effective policy permits it. Exact ID/key/identity matches are always reused; fuzzy duplicate candidates require confirm_distinct_from.",
+  "description": "Create a private governed context when effective policy permits it. Exact key, alias, or identity matches are always reused; fuzzy duplicate candidates require confirm_distinct_from.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$defs": {

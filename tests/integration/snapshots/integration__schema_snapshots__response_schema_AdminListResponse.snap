@@ -1,0 +1,274 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AdminListResponse",
+  "description": "Response from `admin_list`.",
+  "type": "object",
+  "properties": {
+    "count": {
+      "description": "Number of inventory cards returned.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "memories": {
+      "description": "Compact inventory cards.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/InventoryCard"
+      }
+    },
+    "warnings": {
+      "description": "Deterministic warnings.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/QualityWarning"
+      }
+    }
+  },
+  "required": [
+    "count",
+    "memories",
+    "warnings"
+  ],
+  "$defs": {
+    "InventoryCard": {
+      "description": "Compact inventory card for admin listing without query relevance.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Memory ID.",
+          "$ref": "#/$defs/MemoryId"
+        },
+        "summary_or_excerpt": {
+          "description": "Caller-supplied summary when available, otherwise a deterministic excerpt.",
+          "type": "string"
+        },
+        "scope": {
+          "description": "Scope label/key.",
+          "type": "string"
+        },
+        "contexts": {
+          "description": "Direct governed context memberships in primary order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextDescriptor"
+          }
+        },
+        "agent_label": {
+          "description": "Agent provenance label.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "description": "Creation timestamp.",
+          "type": "string"
+        },
+        "updated_at": {
+          "description": "Last-update timestamp.",
+          "type": "string"
+        },
+        "tags": {
+          "description": "Tags associated with the memory.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "entities": {
+          "description": "Typed entities attached to the memory.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Entity"
+          }
+        },
+        "memory_type": {
+          "description": "Memory classification.",
+          "$ref": "#/$defs/MemoryType"
+        },
+        "has_embedding": {
+          "description": "Whether the memory has an embedding.",
+          "type": "boolean"
+        },
+        "unresolved_scope": {
+          "description": "Whether the memory is unresolved.",
+          "type": "boolean"
+        },
+        "expired": {
+          "description": "Whether the memory is expired.",
+          "type": "boolean"
+        },
+        "superseded": {
+          "description": "Whether this memory has been superseded.",
+          "type": "boolean"
+        },
+        "quality_flags": {
+          "description": "quality flags.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "summary_or_excerpt",
+        "scope",
+        "contexts",
+        "created_at",
+        "updated_at",
+        "tags",
+        "memory_type",
+        "has_embedding",
+        "unresolved_scope",
+        "expired",
+        "superseded",
+        "quality_flags"
+      ]
+    },
+    "MemoryId": {
+      "description": "A ULID-formatted unique memory identifier",
+      "type": "string"
+    },
+    "ContextDescriptor": {
+      "description": "Safe context descriptor returned on memory cards and resolution results.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Stable opaque ID.",
+          "$ref": "#/$defs/ContextId"
+        },
+        "kind": {
+          "description": "Context kind.",
+          "$ref": "#/$defs/ContextKind"
+        },
+        "key": {
+          "description": "Immutable context key.",
+          "type": "string"
+        },
+        "display_name": {
+          "description": "Human-readable display name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "key",
+        "display_name"
+      ]
+    },
+    "ContextId": {
+      "description": "A ULID-formatted opaque context identifier",
+      "type": "string"
+    },
+    "ContextKind": {
+      "description": "Stable context kind. Built-in kinds and operator-defined kinds use the same\nrepresentation so adding a kind does not require a wire-protocol change.",
+      "type": "string"
+    },
+    "Entity": {
+      "description": "A caller-provided typed entity attached to a memory for entity-based retrieval.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The entity name (e.g., \"Alice\", \"example-agent\", \"RFC 9110\").",
+          "type": "string"
+        },
+        "type": {
+          "description": "The entity type (e.g., \"person\", \"project\", \"document\").",
+          "$ref": "#/$defs/EntityType"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ]
+    },
+    "EntityType": {
+      "description": "A validated entity type identifier",
+      "type": "string"
+    },
+    "MemoryType": {
+      "description": "Classifies the kind of knowledge a memory captures.",
+      "oneOf": [
+        {
+          "description": "Facts, definitions, or general knowledge.",
+          "type": "string",
+          "const": "semantic"
+        },
+        {
+          "description": "Events that happened at a specific time.",
+          "type": "string",
+          "const": "episodic"
+        },
+        {
+          "description": "Step-by-step instructions or how-tos.",
+          "type": "string",
+          "const": "procedural"
+        }
+      ]
+    },
+    "QualityWarning": {
+      "description": "A quality or classification warning returned by write tools.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "Stable warning code.",
+          "type": "string"
+        },
+        "severity": {
+          "description": "Severity for agent triage.",
+          "$ref": "#/$defs/QualityWarningSeverity"
+        },
+        "field": {
+          "description": "Optional request field path associated with this warning.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Human-readable warning message.",
+          "type": "string"
+        },
+        "suggested_fix": {
+          "description": "Optional suggested agent action.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "severity",
+        "message"
+      ]
+    },
+    "QualityWarningSeverity": {
+      "description": "Severity for quality warnings.",
+      "oneOf": [
+        {
+          "description": "Informational hint; the operation is usually usable.",
+          "type": "string",
+          "const": "info"
+        },
+        {
+          "description": "Warning worth reviewing before relying on the result.",
+          "type": "string",
+          "const": "warning"
+        },
+        {
+          "description": "Follow-up action is required for best results.",
+          "type": "string",
+          "const": "action_required"
+        }
+      ]
+    }
+  }
+}

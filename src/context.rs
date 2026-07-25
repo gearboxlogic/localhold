@@ -40,6 +40,16 @@ pub const OPERATOR_PRINCIPAL: &str = "operator";
 /// Compatibility value returned for memories with no governed memberships.
 pub const UNRESOLVED_CONTEXT_KEY: &str = "inbox/unresolved";
 
+/// Choose the effective legacy scope using Rust's Unicode-aware whitespace
+/// rules. Metadata remains primary, with provenance as the fallback.
+pub(crate) fn effective_legacy_scope_key(metadata_scope: Option<&str>, provenance_scope: Option<&str>) -> Option<String> {
+    metadata_scope
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| provenance_scope.map(str::trim).filter(|value| !value.is_empty()))
+        .map(ToOwned::to_owned)
+}
+
 /// Maximum number of exact locators accepted in one context envelope.
 pub const MAX_CONTEXT_REFS: usize = 32;
 /// Maximum number of weak hints accepted in one context envelope.
@@ -1026,11 +1036,9 @@ fn normalize_git_remote(raw: &str) -> Result<(String, String), String> {
     }
     let host = parsed.host_str().ok_or_else(|| "git_remote requires a host".to_owned())?.to_ascii_lowercase();
     let mut path = parsed.path().trim_matches('/').to_owned();
-    while path.ends_with('/') {
-        let _removed = path.pop();
-    }
-    if let Some(without_suffix) = path.strip_suffix(".git") {
-        path = without_suffix.to_owned();
+    let suffix_start = path.len().saturating_sub(4);
+    if path.get(suffix_start..).is_some_and(|suffix| suffix.eq_ignore_ascii_case(".git")) {
+        path.truncate(suffix_start);
     }
     if path.is_empty() {
         return Err("git_remote requires a repository path".into());
@@ -1341,6 +1349,31 @@ mod tests {
         assert!(!https.redacted_label.contains("Repo"));
         assert!(!format!("{https:?}").contains("token"));
         assert!(!format!("{https:?}").contains("secret"));
+    }
+
+    #[test]
+    fn git_remote_identity_normalizes_suffix_case_without_folding_repository_path() {
+        let upper_suffix = normalize_context_identity(&ContextIdentityInput {
+            scheme: "git_remote".into(),
+            value: "https://example.com/Acme/Widget.GIT".into(),
+            namespace: None,
+        })
+        .unwrap();
+        let no_suffix = normalize_context_identity(&ContextIdentityInput {
+            scheme: "git_remote".into(),
+            value: "git@example.com:Acme/Widget".into(),
+            namespace: None,
+        })
+        .unwrap();
+        let different_path_case = normalize_context_identity(&ContextIdentityInput {
+            scheme: "git_remote".into(),
+            value: "https://example.com/acme/widget.git".into(),
+            namespace: None,
+        })
+        .unwrap();
+
+        assert_eq!(upper_suffix, no_suffix);
+        assert_ne!(upper_suffix, different_path_case);
     }
 
     #[test]

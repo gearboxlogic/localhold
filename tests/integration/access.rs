@@ -129,6 +129,7 @@ async fn setup_seeded_server(principal: Option<&str>, seeds: Vec<Seed>) -> (Runn
     let store = SqliteStore::in_memory().unwrap();
     let mut ids = Vec::with_capacity(seeds.len());
     let mut memberships = BTreeMap::<(String, String), Vec<MemoryId>>::new();
+    let mut pending_metadata = Vec::new();
     for seed in seeds {
         let owner = seed.owner.unwrap_or("anonymous").to_owned();
         let context_key = seed
@@ -150,14 +151,17 @@ async fn setup_seeded_server(principal: Option<&str>, seeds: Vec<Seed>) -> (Runn
                 "schema_version": 1_i32,
             }))
             .unwrap();
-            store.upsert_metadata(metadata).await.unwrap();
+            pending_metadata.push(metadata);
         }
         memberships.entry((owner, context_key)).or_default().push(id);
         ids.push(id);
     }
-    let visible_to = principal.unwrap_or("anonymous");
     for ((owner, context_key), context_ids) in memberships {
+        let visible_to = principal.unwrap_or(&owner);
         attach_legacy_test_contexts(&store, &context_ids, &owner, visible_to, &context_key).await;
+    }
+    for metadata in pending_metadata {
+        store.upsert_metadata(metadata).await.unwrap();
     }
 
     let client = serve_store(principal, store).await;

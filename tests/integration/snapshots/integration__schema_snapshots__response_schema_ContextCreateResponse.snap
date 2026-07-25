@@ -1,0 +1,99 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ContextCreateResponse",
+  "description": "Response from `context_create`.",
+  "type": "object",
+  "properties": {
+    "context": {
+      "description": "Created or exactly reused context.",
+      "$ref": "#/$defs/ContextDescriptor"
+    },
+    "created": {
+      "description": "Whether a new row was created.",
+      "type": "boolean"
+    },
+    "identity": {
+      "description": "Safe stored identity metadata.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContextIdentityDescriptor"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "policy_guidance": {
+      "description": "Policy guidance applied to creation.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "context",
+    "created",
+    "policy_guidance"
+  ],
+  "$defs": {
+    "ContextDescriptor": {
+      "description": "Safe context descriptor returned on memory cards and resolution results.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Stable opaque ID.",
+          "$ref": "#/$defs/ContextId"
+        },
+        "kind": {
+          "description": "Context kind.",
+          "$ref": "#/$defs/ContextKind"
+        },
+        "key": {
+          "description": "Immutable context key.",
+          "type": "string"
+        },
+        "display_name": {
+          "description": "Human-readable display name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "key",
+        "display_name"
+      ]
+    },
+    "ContextId": {
+      "description": "A ULID-formatted opaque context identifier",
+      "type": "string"
+    },
+    "ContextKind": {
+      "description": "Stable context kind. Built-in kinds and operator-defined kinds use the same\nrepresentation so adding a kind does not require a wire-protocol change.",
+      "type": "string"
+    },
+    "ContextIdentityDescriptor": {
+      "description": "Safe identity metadata returned only to the creator.",
+      "type": "object",
+      "properties": {
+        "scheme": {
+          "description": "Normalized identity scheme.",
+          "type": "string"
+        },
+        "redacted_label": {
+          "description": "Safe redacted label; the stored fingerprint is never exposed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scheme",
+        "redacted_label"
+      ]
+    }
+  }
+}

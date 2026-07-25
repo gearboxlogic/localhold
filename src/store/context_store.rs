@@ -296,7 +296,9 @@ fn context_use_allowed(tx: &Transaction<'_>, context_id: &ContextId, principal: 
     let sql = format!(
         "SELECT EXISTS(
             SELECT 1 FROM contexts AS context_row
+            JOIN context_kinds AS kind_row ON kind_row.kind = context_row.kind
             WHERE context_row.id = ?2
+              AND kind_row.enabled
               {lifecycle_clause}
               AND {}
          )",
@@ -1985,7 +1987,9 @@ async fn postgres_context_use_allowed(
     let sql = format!(
         "SELECT EXISTS(
             SELECT 1 FROM contexts AS context_row
+            JOIN context_kinds AS kind_row ON kind_row.kind = context_row.kind
             WHERE context_row.id = $2
+              AND kind_row.enabled
               {lifecycle_clause}
               AND (
                   context_row.owner_principal = $1 OR EXISTS (
@@ -2017,7 +2021,21 @@ async fn lock_postgres_contexts_for_membership(tx: &mut sqlx_core::transaction::
          ORDER BY id
          FOR KEY SHARE",
     )
-    .bind(context_ids)
+    .bind(&context_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    let _locked_kinds = query_scalar::<Postgres, String>(
+        "SELECT kind_row.kind
+         FROM context_kinds AS kind_row
+         WHERE kind_row.kind IN (
+             SELECT context_row.kind
+             FROM contexts AS context_row
+             WHERE context_row.id = ANY($1)
+         )
+         ORDER BY kind_row.kind
+         FOR KEY SHARE",
+    )
+    .bind(&context_ids)
     .fetch_all(&mut **tx)
     .await?;
     Ok(())

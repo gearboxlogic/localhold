@@ -455,8 +455,9 @@ true, the preview or merge covers only the newest authorized candidates in that
 run and must not be interpreted as a complete scan. Broad consolidation still
 requires at least one active membership, constrains neighbor work to the
 authorized applicable candidate set before its per-candidate limit, and merges
-only memories with identical active direct membership sets. Contextless
-memories never participate.
+only memories with identical ordered direct membership profiles, including
+archived memberships and compatibility-primary order. Contextless memories
+never participate.
 
 Bulk `admin_reembed` applies the same per-memory write policy as single-ID
 re-embedding before filling its limit. Inaccessible rows remain unclaimed and

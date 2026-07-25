@@ -1483,6 +1483,93 @@ where
         .await
         .unwrap();
     assert!(store.list_context_kinds().await.unwrap().iter().any(|definition| definition.kind == user_kind));
+    let disabled_kind_context_id = ContextId::new();
+    let disabled_kind_key = format!("release-train/{case}");
+    let _disabled_kind_context = store
+        .create_context(
+            &ContextCreateDraft::private(disabled_kind_context_id, user_kind.clone(), disabled_kind_key.clone(), "Disabled release train", OWNER),
+            &context_audit("conformance_disabled_kind_context_created", Some(disabled_kind_context_id)),
+        )
+        .await
+        .unwrap();
+    store
+        .upsert_context_kind(
+            &ContextKindDraft {
+                kind: user_kind.clone(),
+                display_name: "Release train".into(),
+                enabled: false,
+            },
+            OPERATOR_PRINCIPAL,
+            &ContextAuditDraft::new(OPERATOR_PRINCIPAL, "conformance_context_kind_disabled"),
+        )
+        .await
+        .unwrap();
+
+    let disabled_initial = memory(MemorySpec {
+        content: format!("disabled kind initial membership {case}"),
+        tags: vec![format!("contract-{case}"), "disabled-kind-initial".into()],
+        source_agent: OWNER,
+        scope: disabled_kind_key.clone(),
+        origin: format!("contract/origin/{case}"),
+        access_policy: AccessPolicy::Public,
+        created_at: base,
+    });
+    let disabled_initial_error = store
+        .store_with_metadata_contexts_audited(
+            &disabled_initial,
+            None,
+            None,
+            &MemoryMetadata {
+                memory_id: disabled_initial.id,
+                scope_key: Some(disabled_kind_key.clone()),
+                summary: None,
+                agent_label: Some(OWNER.into()),
+                created_by_principal: Some(OWNER.into()),
+                quality_flags: Vec::new(),
+                schema_version: 1,
+            },
+            &[disabled_kind_context_id],
+            &AuditDraft {
+                action: AuditAction::Store,
+                caller_agent: Some(OWNER.into()),
+                timestamp: disabled_initial.created_at,
+                details: None,
+            },
+            &ContextAuditDraft {
+                actor_principal: OWNER.into(),
+                action: "conformance_disabled_kind_initial_membership_denied".into(),
+                context_id: Some(disabled_kind_context_id),
+                memory_id: Some(disabled_initial.id),
+                details: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(disabled_initial_error, StoreError::Conflict(_)));
+    assert!(store.get(&disabled_initial.id, None).await.unwrap().is_none());
+
+    let disabled_replacement = memory(MemorySpec {
+        content: format!("disabled kind replacement membership {case}"),
+        tags: vec![format!("contract-{case}"), "disabled-kind-replacement".into()],
+        source_agent: OWNER,
+        scope: format!("contract/scope/{case}"),
+        origin: format!("contract/origin/{case}"),
+        access_policy: AccessPolicy::Public,
+        created_at: base,
+    });
+    let disabled_replacement_id = store.store(&disabled_replacement, None).await.unwrap();
+    let disabled_replacement_error = store
+        .replace_memory_contexts(
+            &disabled_replacement_id,
+            &[disabled_kind_context_id],
+            OWNER,
+            &ContextAuditDraft::new(OWNER, "conformance_disabled_kind_replacement_denied").with_context(disabled_kind_context_id),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(disabled_replacement_error, StoreError::Conflict(_)));
+    assert!(store.get_memory_contexts(&disabled_replacement_id, OWNER).await.unwrap().is_empty());
+    assert!(store.delete(&disabled_replacement_id).await.unwrap());
 
     let policy_guarded_legacy_id = ContextId::new();
     let _policy_guarded_context = store

@@ -64,6 +64,11 @@ pub const MAX_CONTEXT_DESCRIPTION_LEN: usize = 4_096;
 pub const MAX_CONTEXT_IDENTITY_VALUE_LEN: usize = 4_096;
 /// Maximum number of duplicate candidates that creation may require callers to confirm.
 pub const MAX_CONTEXT_CONFIRMATIONS: usize = 5;
+/// Maximum number of active contexts one resolved selection may materialize.
+///
+/// This bounds ancestor and descendant expansion independently of the number
+/// of direct locators accepted by the public envelope.
+pub const MAX_EFFECTIVE_CONTEXTS: usize = 512;
 
 /// Validate the bounded legacy scope adapter before it creates governed
 /// contexts, aliases, hints, or relations.
@@ -928,6 +933,67 @@ pub fn evaluate_context_policy(
         guidance,
         ambiguities,
     }
+}
+
+/// Evaluate one context kind against operator, principal, and the
+/// most-specific active anchor policies.
+///
+/// Callers supply only policy records visible to the active principal.
+#[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "effective policy requires the independent kind, policy layers, hierarchy records, and active anchor set"
+)]
+pub fn evaluate_effective_context_policy(
+    kind: &ContextKind,
+    kinds: &[ContextKindDefinition],
+    kind_policies: &[ContextKindPolicyRecord],
+    anchor_policies: &[ContextAnchorPolicyRecord],
+    records: &[ContextRecord],
+    active_context_ids: &[ContextId],
+) -> EffectiveContextPolicy {
+    let operator = kind_policies
+        .iter()
+        .find(|record| record.layer == ContextPolicyLayer::Operator && &record.kind == kind)
+        .map(|record| &record.policy);
+    let principal = kind_policies
+        .iter()
+        .find(|record| record.layer == ContextPolicyLayer::Principal && &record.kind == kind)
+        .map(|record| &record.policy);
+    let active = active_context_ids.iter().copied().collect::<HashSet<_>>();
+    let mut anchor_records = anchor_policies
+        .iter()
+        .filter(|record| active.contains(&record.anchor_context_id) && record.policy.kinds.contains_key(kind.as_str()))
+        .collect::<Vec<_>>();
+    let anchor_ids = anchor_records.iter().map(|record| record.anchor_context_id).collect::<Vec<_>>();
+    anchor_records.retain(|candidate| {
+        !anchor_ids
+            .iter()
+            .any(|other_id| *other_id != candidate.anchor_context_id && context_is_ancestor(records, candidate.anchor_context_id, *other_id))
+    });
+    let anchors = anchor_records.iter().filter_map(|record| record.policy.kinds.get(kind.as_str())).collect::<Vec<_>>();
+    let mut effective = evaluate_context_policy(kind, operator, principal, &anchors);
+    if kinds.iter().find(|definition| &definition.kind == kind).is_none_or(|definition| !definition.enabled) {
+        effective.allowed = false;
+        effective.guidance.push(format!("Context kind {kind} is disabled by the operator."));
+    }
+    effective
+}
+
+fn context_is_ancestor(records: &[ContextRecord], ancestor_id: ContextId, descendant_id: ContextId) -> bool {
+    let by_id = records.iter().map(|record| (record.context.id, record.context.parent_id)).collect::<BTreeMap<_, _>>();
+    let mut cursor = by_id.get(&descendant_id).copied().flatten();
+    let mut visited = HashSet::new();
+    while let Some(context_id) = cursor {
+        if context_id == ancestor_id {
+            return true;
+        }
+        if !visited.insert(context_id) {
+            return false;
+        }
+        cursor = by_id.get(&context_id).copied().flatten();
+    }
+    false
 }
 
 fn default_identity_schemes() -> BTreeSet<String> {

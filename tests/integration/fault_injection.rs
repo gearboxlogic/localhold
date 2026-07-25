@@ -20,7 +20,7 @@ use localhold::{
     },
     embedding::{BoxFuture, EmbeddingProvider},
     error::{EmbeddingError, StoreError},
-    store::{ContextReader, ContextWriter, MemoryAdmin, MemoryContextPresence, MemoryReader, MemoryWithEmbedding, MemoryWriter, ReassignScopeOutcome},
+    store::{ConsolidationSnapshot, ContextReader, ContextWriter, MemoryAdmin, MemoryContextPresence, MemoryReader, MemoryWithEmbedding, MemoryWriter, ReassignScopeOutcome},
     types::{
         AuditDraft, AuthorizedUpdateOutcome, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MemoryUpdate, MetadataMigrationOutcome, MetadataMigrationReport,
         QueryContext, ScopeDefinition, SearchResult, WriteOutcome,
@@ -591,6 +591,18 @@ impl<S: MemoryWriter + Send + Sync> MemoryWriter for ChaosStore<S> {
 
     async fn mark_superseded_by_authorized_audited(&self, id: &MemoryId, superseded_by: &MemoryId, principal: &str, audit: &AuditDraft) -> Result<WriteOutcome, StoreError> {
         self.inner.mark_superseded_by_authorized_audited(id, superseded_by, principal, audit).await
+    }
+
+    async fn mark_superseded_by_authorized_audited_if_unchanged(
+        &self,
+        member: &ConsolidationSnapshot,
+        representative: &ConsolidationSnapshot,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<WriteOutcome, StoreError> {
+        self.inner
+            .mark_superseded_by_authorized_audited_if_unchanged(member, representative, principal, audit)
+            .await
     }
 }
 

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Duration, TimeZone as _, Utc};
 use serde_json::json;
 
-use super::{MemoryStore, MemoryWithEmbedding};
+use super::{ConsolidationSnapshot, MemoryStore, MemoryWithEmbedding};
 use crate::{
     context::{
         ContextAnchorPolicy, ContextAnchorPolicyDraft, ContextAuditDraft, ContextCreateDraft, ContextDefinitionPatch, ContextExactLookup, ContextId, ContextKind, ContextKindDraft,
@@ -949,7 +949,7 @@ where
         content: format!("delete me {case}"),
         tags: vec![case_tag, "delete".into()],
         source_agent: OWNER,
-        scope,
+        scope: scope.clone(),
         origin: format!("contract/delete-origin/{case}"),
         access_policy: AccessPolicy::Restricted { allowed: vec![ALLOWED.into()] },
         created_at: time_after(base, 14),
@@ -1001,6 +1001,120 @@ where
     let project_y = governed[1];
     let architecture = governed[2];
     let operations = governed[3];
+    let consolidation_member = memory(MemorySpec {
+        content: format!("guarded consolidation member {case}"),
+        tags: vec![format!("guarded-consolidation-{case}")],
+        source_agent: OWNER,
+        scope: scope.clone(),
+        origin: format!("contract/guarded-consolidation/member/{case}"),
+        access_policy: AccessPolicy::Public,
+        created_at: time_after(base, 28),
+    });
+    let consolidation_representative = memory(MemorySpec {
+        content: format!("guarded consolidation representative {case}"),
+        tags: vec![format!("guarded-consolidation-{case}")],
+        source_agent: OWNER,
+        scope: scope.clone(),
+        origin: format!("contract/guarded-consolidation/representative/{case}"),
+        access_policy: AccessPolicy::Public,
+        created_at: time_after(base, 28),
+    });
+    let consolidation_member_id = store.store(&consolidation_member, None).await.unwrap();
+    let consolidation_representative_id = store.store(&consolidation_representative, None).await.unwrap();
+    for memory_id in [consolidation_member_id, consolidation_representative_id] {
+        assert_eq!(
+            store
+                .replace_memory_contexts(&memory_id, &[project_x], OWNER, &ContextAuditDraft {
+                    actor_principal: OWNER.into(),
+                    action: "conformance_consolidation_context_set".into(),
+                    context_id: None,
+                    memory_id: Some(memory_id),
+                    details: None,
+                },)
+                .await
+                .unwrap(),
+            WriteOutcome::Applied
+        );
+    }
+    let member_snapshot = ConsolidationSnapshot {
+        memory_id: consolidation_member_id,
+        record_revision: store.get(&consolidation_member_id, Some(OWNER)).await.unwrap().unwrap().record_revision,
+        context_ids: vec![project_x],
+    };
+    let representative_snapshot = ConsolidationSnapshot {
+        memory_id: consolidation_representative_id,
+        record_revision: store.get(&consolidation_representative_id, Some(OWNER)).await.unwrap().unwrap().record_revision,
+        context_ids: vec![project_x],
+    };
+    assert_eq!(
+        store
+            .replace_memory_contexts(&consolidation_representative_id, &[project_y], OWNER, &ContextAuditDraft {
+                actor_principal: OWNER.into(),
+                action: "conformance_consolidation_profile_changed".into(),
+                context_id: None,
+                memory_id: Some(consolidation_representative_id),
+                details: None,
+            },)
+            .await
+            .unwrap(),
+        WriteOutcome::Applied
+    );
+    let consolidation_error = store
+        .mark_superseded_by_authorized_audited_if_unchanged(&member_snapshot, &representative_snapshot, OWNER, &AuditDraft {
+            action: AuditAction::Consolidate,
+            caller_agent: Some(OWNER.into()),
+            timestamp: time_after(base, 28),
+            details: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(consolidation_error, StoreError::Conflict(_)));
+    assert!(
+        store.get(&consolidation_member_id, Some(OWNER)).await.unwrap().unwrap().superseded_by.is_none(),
+        "a stale consolidation snapshot must not supersede the member"
+    );
+    assert_eq!(
+        store
+            .replace_memory_contexts(&consolidation_member_id, &[project_y], OWNER, &ContextAuditDraft {
+                actor_principal: OWNER.into(),
+                action: "conformance_consolidation_profile_aligned".into(),
+                context_id: None,
+                memory_id: Some(consolidation_member_id),
+                details: None,
+            },)
+            .await
+            .unwrap(),
+        WriteOutcome::Applied
+    );
+    let current_member = store.get(&consolidation_member_id, Some(OWNER)).await.unwrap().unwrap();
+    let current_representative = store.get(&consolidation_representative_id, Some(OWNER)).await.unwrap().unwrap();
+    let consolidation_outcome = store
+        .mark_superseded_by_authorized_audited_if_unchanged(
+            &ConsolidationSnapshot {
+                memory_id: consolidation_member_id,
+                record_revision: current_member.record_revision,
+                context_ids: vec![project_y],
+            },
+            &ConsolidationSnapshot {
+                memory_id: consolidation_representative_id,
+                record_revision: current_representative.record_revision,
+                context_ids: vec![project_y],
+            },
+            OWNER,
+            &AuditDraft {
+                action: AuditAction::Consolidate,
+                caller_agent: Some(OWNER.into()),
+                timestamp: time_after(base, 28),
+                details: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(consolidation_outcome, WriteOutcome::Applied);
+    assert_eq!(
+        store.get(&consolidation_member_id, Some(OWNER)).await.unwrap().unwrap().superseded_by,
+        Some(consolidation_representative_id)
+    );
     let optimistic_context_memory = memory(MemorySpec {
         content: format!("optimistic context replacement {case}"),
         tags: vec![format!("optimistic-context-{case}")],

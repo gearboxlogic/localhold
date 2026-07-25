@@ -1,9 +1,11 @@
 //! CRUD operations — store, get, update, delete, batch store, and audit logging.
 
+use std::str::FromStr as _;
+
 use rusqlite::{Connection, OptionalExtension as _, params};
 
 use super::{
-    EmbeddingProfile, MemoryAuthorizationRef, ReembedClaim, ReembedClaimScope, SqliteStore,
+    ConsolidationSnapshot, EmbeddingProfile, MemoryAuthorizationRef, ReembedClaim, ReembedClaimScope, SqliteStore,
     context_store::{insert_initial_memory_contexts_sqlite, replace_memory_contexts_sqlite_tx},
     merge_metadata_patch,
     query::{MEMORY_COLUMN_COUNT, MEMORY_COLUMNS, context_ids_json, hydrate_entities_for_memories, row_to_memory, usize_to_i64},
@@ -2419,6 +2421,56 @@ impl SqliteStore {
         .await
     }
 
+    pub(crate) async fn mark_superseded_by_authorized_audited_if_unchanged_impl(
+        &self,
+        member: &ConsolidationSnapshot,
+        representative: &ConsolidationSnapshot,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<WriteOutcome, StoreError> {
+        if member.memory_id == representative.memory_id {
+            return Err(StoreError::Conflict("a consolidation representative cannot supersede itself".into()));
+        }
+        if member.context_ids != representative.context_ids {
+            return Err(StoreError::Conflict("consolidation candidates must have identical ordered context profiles".into()));
+        }
+        let member = member.clone();
+        let representative = representative.clone();
+        let caller = principal.to_owned();
+        let audit = audit.clone();
+        let now = self.clock_now();
+        self.with_conn(move |conn| {
+            let tx = sqlite_write_tx(conn)?;
+            let member_id = member.memory_id.to_string();
+            let representative_id = representative.memory_id.to_string();
+            let Some(existing_member) = fetch_memory_by_id(&tx, &member_id)? else {
+                return Ok(WriteOutcome::NotFound);
+            };
+            let Some(existing_representative) = fetch_memory_by_id(&tx, &representative_id)? else {
+                return Ok(WriteOutcome::NotFound);
+            };
+            if !existing_member.has_write_access(&caller) {
+                return Ok(WriteOutcome::Denied);
+            }
+            let member_context_ids = sqlite_consolidation_context_profile(&tx, &member_id)?;
+            let representative_context_ids = sqlite_consolidation_context_profile(&tx, &representative_id)?;
+            if existing_member.record_revision != member.record_revision
+                || existing_representative.record_revision != representative.record_revision
+                || member_context_ids != member.context_ids
+                || representative_context_ids != representative.context_ids
+            {
+                return Err(StoreError::Conflict("consolidation candidates changed after discovery".into()));
+            }
+            let marked = mark_superseded(&tx, &member_id, &representative_id, now)?;
+            if marked {
+                insert_audit_draft(&tx, &existing_member.id, &audit)?;
+            }
+            tx.commit()?;
+            Ok(if marked { WriteOutcome::Applied } else { WriteOutcome::NotFound })
+        })
+        .await
+    }
+
     pub(crate) async fn get_for_reembed_impl(&self, id: &MemoryId, principal: &str) -> Result<Option<(String, i64)>, StoreError> {
         let id_str = id.to_string();
         let caller = principal.to_owned();
@@ -2434,6 +2486,22 @@ impl SqliteStore {
         })
         .await
     }
+}
+
+fn sqlite_consolidation_context_profile(conn: &Connection, memory_id: &str) -> Result<Vec<ContextId>, StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT context_id
+         FROM memory_contexts
+         WHERE memory_id = ?1
+         ORDER BY ordinal",
+    )?;
+    statement
+        .query_map([memory_id], |row| row.get::<_, String>(0))?
+        .map(|row| {
+            let context_id = row?;
+            ContextId::from_str(&context_id).map_err(|error| StoreError::Serialization(Box::new(error)))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

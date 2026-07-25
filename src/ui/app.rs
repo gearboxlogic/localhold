@@ -11,7 +11,7 @@ use crate::{
     context::{
         ContextAnchorPolicy, ContextAnchorPolicyDraft, ContextAnchorPolicyRecord, ContextAuditDraft, ContextAuditEvent, ContextDefinitionPatch, ContextDescriptor, ContextGrant,
         ContextId, ContextIdentity, ContextIdentityInput, ContextKind, ContextKindDefinition, ContextKindDraft, ContextKindPolicy, ContextKindPolicyDraft, ContextKindPolicyRecord,
-        ContextLifecycle, ContextPolicyLayer, ContextRecord, OPERATOR_PRINCIPAL, normalize_context_identity,
+        ContextLifecycle, ContextPolicyLayer, ContextRecord, MAX_EFFECTIVE_CONTEXTS, OPERATOR_PRINCIPAL, evaluate_effective_context_policy, normalize_context_identity,
     },
     engine::{LocalHoldEngine, SearchRequest},
     store::MemoryStore,
@@ -254,7 +254,7 @@ pub(crate) enum DataMsg {
     },
     /// Authorized governed context catalog.
     ContextCatalog {
-        /// Active contexts visible to the TUI principal.
+        /// Contexts visible to the TUI principal, including archived lineage.
         records: Vec<ContextRecord>,
         /// Total number of governed visible memories in broad-search mode.
         total: u64,
@@ -399,8 +399,11 @@ where
     pub theme: Theme,
     /// Clock snapshot used for relative ages, refreshed with the data.
     pub now: DateTime<Utc>,
-    /// Active authorized contexts, grouped by kind in the UI.
+    /// Authorized contexts currently shown in the sidebar.
     pub contexts: Vec<ContextItem>,
+    /// Complete authorized catalog, including archived lineage nodes hidden
+    /// from the default sidebar.
+    pub context_records: Vec<ContextRecord>,
     /// Whether the context catalog includes archived records for management.
     pub show_archived_contexts: bool,
     /// Total number of governed memories represented by broad search.
@@ -481,6 +484,7 @@ where
             theme,
             now,
             contexts: Vec::new(),
+            context_records: Vec::new(),
             show_archived_contexts: false,
             context_total: None,
             context_notice: None,
@@ -519,7 +523,7 @@ where
             ..MemoryFilter::default()
         };
         let (records, stats) = tokio::join!(
-            load_context_records(&self.engine, principal, self.show_archived_contexts),
+            load_context_records(&self.engine, principal, true),
             self.engine.count_memories(broad_filter, self.ctx(), 0_usize),
         );
         match stats {
@@ -555,43 +559,48 @@ where
     }
 
     /// Expand direct selections through ancestors and optional descendants.
-    pub(crate) fn effective_selected_context_ids(&self) -> Vec<ContextId> {
+    pub(crate) fn effective_selected_context_ids(&self) -> Result<Vec<ContextId>, String> {
+        if self.selected_context_ids.len() > MAX_EFFECTIVE_CONTEXTS {
+            return Err(effective_context_limit_message());
+        }
         let mut effective = self.selected_context_ids.clone();
         let mut included = effective.iter().copied().collect::<HashSet<_>>();
         for selected in &self.selected_context_ids {
             let cursor = self.context_parent_id(*selected);
-            self.append_context_ancestors(cursor, &mut included, &mut effective);
+            self.append_context_ancestors(cursor, &mut included, &mut effective)?;
         }
         if self.include_descendants {
-            self.append_context_descendants(&mut included, &mut effective);
+            self.append_context_descendants(&mut included, &mut effective)?;
         }
-        effective
+        Ok(effective)
     }
 
     fn context_parent_id(&self, context_id: ContextId) -> Option<ContextId> {
-        let parent_id = self
-            .contexts
+        self.context_records
             .iter()
-            .find(|item| item.record.context.id == context_id)
-            .filter(|item| item.record.context.lifecycle == ContextLifecycle::Active)
-            .and_then(|item| item.record.context.parent_id)?;
-        self.contexts
-            .iter()
-            .any(|item| item.record.context.id == parent_id && item.record.context.lifecycle == ContextLifecycle::Active)
-            .then_some(parent_id)
+            .find(|record| record.context.id == context_id)
+            .and_then(|record| record.context.parent_id)
     }
 
-    fn append_context_ancestors(&self, mut cursor: Option<ContextId>, included: &mut HashSet<ContextId>, effective: &mut Vec<ContextId>) {
+    fn context_is_active(&self, context_id: ContextId) -> bool {
+        self.context_records
+            .iter()
+            .find(|record| record.context.id == context_id)
+            .is_some_and(|record| record.context.lifecycle == ContextLifecycle::Active)
+    }
+
+    fn append_context_ancestors(&self, mut cursor: Option<ContextId>, included: &mut HashSet<ContextId>, effective: &mut Vec<ContextId>) -> Result<(), String> {
         let mut visited = HashSet::new();
         while let Some(parent_id) = cursor {
             if !visited.insert(parent_id) {
                 break;
             }
-            if included.insert(parent_id) {
-                effective.push(parent_id);
+            if self.context_is_active(parent_id) && !included.contains(&parent_id) {
+                append_effective_context(parent_id, included, effective)?;
             }
             cursor = self.context_parent_id(parent_id);
         }
+        Ok(())
     }
 
     fn has_selected_context_ancestor(&self, mut cursor: Option<ContextId>) -> bool {
@@ -608,14 +617,14 @@ where
         false
     }
 
-    fn append_context_descendants(&self, included: &mut HashSet<ContextId>, effective: &mut Vec<ContextId>) {
-        for item in &self.contexts {
-            let context_id = item.record.context.id;
-            if item.record.context.lifecycle == ContextLifecycle::Active && !included.contains(&context_id) && self.has_selected_context_ancestor(item.record.context.parent_id) {
-                let _inserted = included.insert(context_id);
-                effective.push(context_id);
+    fn append_context_descendants(&self, included: &mut HashSet<ContextId>, effective: &mut Vec<ContextId>) -> Result<(), String> {
+        for record in &self.context_records {
+            let context_id = record.context.id;
+            if record.context.lifecycle == ContextLifecycle::Active && !included.contains(&context_id) && self.has_selected_context_ancestor(record.context.parent_id) {
+                append_effective_context(context_id, included, effective)?;
             }
         }
+        Ok(())
     }
 
     fn discard_context_manager_edit(&mut self) {
@@ -624,12 +633,12 @@ where
         }
     }
 
-    fn filter(&self, limit: Option<usize>) -> MemoryFilter {
-        MemoryFilter {
-            context_ids: Some(self.effective_selected_context_ids()),
+    fn filter(&self, limit: Option<usize>) -> Result<MemoryFilter, String> {
+        Ok(MemoryFilter {
+            context_ids: Some(self.effective_selected_context_ids()?),
             limit,
             ..Default::default()
-        }
+        })
     }
 
     /// Re-run the visible listing or search under the current filter.
@@ -652,17 +661,13 @@ where
         let tx = self.data_tx.clone();
         let ctx = self.ctx();
         let principal = self.principal.clone().unwrap_or_else(|| "anonymous".into());
-        let include_archived = self.show_archived_contexts;
         #[expect(unused_results, reason = "JoinHandle intentionally dropped — the result arrives via the data channel")]
         tokio::spawn(async move {
             let broad_filter = MemoryFilter {
                 context_ids: Some(Vec::new()),
                 ..MemoryFilter::default()
             };
-            let (records, stats) = tokio::join!(
-                load_context_records(&engine, &principal, include_archived),
-                engine.count_memories(broad_filter, ctx, 0_usize),
-            );
+            let (records, stats) = tokio::join!(load_context_records(&engine, &principal, true), engine.count_memories(broad_filter, ctx, 0_usize),);
             let msg = match stats {
                 Ok(stats) => {
                     let (records, warning) = match records {
@@ -687,7 +692,14 @@ where
 
     fn apply_context_catalog(&mut self, records: Vec<ContextRecord>, total: Option<u64>, warning: Option<String>) {
         let cursor_id = self.cursor_context().map(|item| item.record.context.id);
-        self.contexts = records.into_iter().map(|record| ContextItem { record }).collect();
+        self.context_records = records;
+        self.contexts = self
+            .context_records
+            .iter()
+            .filter(|record| self.show_archived_contexts || record.context.lifecycle == ContextLifecycle::Active)
+            .cloned()
+            .map(|record| ContextItem { record })
+            .collect();
         self.context_total = total;
         self.context_notice = warning;
         let available = self
@@ -706,7 +718,13 @@ where
         let engine = self.engine.clone();
         let tx = self.data_tx.clone();
         let generation = self.generation;
-        let filter = self.filter(Some(200_usize));
+        let filter = match self.filter(Some(200_usize)) {
+            Ok(filter) => filter,
+            Err(message) => {
+                drop(tx.send(DataMsg::Failed { message, generation }));
+                return;
+            }
+        };
         let ctx = self.ctx();
         #[expect(unused_results, reason = "JoinHandle intentionally dropped — the result arrives via the data channel")]
         tokio::spawn(async move {
@@ -729,10 +747,17 @@ where
         let engine = self.engine.clone();
         let tx = self.data_tx.clone();
         let generation = self.generation;
+        let filter = match self.filter(None) {
+            Ok(filter) => filter,
+            Err(message) => {
+                drop(tx.send(DataMsg::Failed { message, generation }));
+                return;
+            }
+        };
         let request = SearchRequest {
             query: self.query.clone(),
             limit: 50_usize,
-            filter: self.filter(None),
+            filter,
             ctx: self.ctx(),
             max_distance: None,
             keywords: None,
@@ -951,7 +976,7 @@ where
             KeyCode::Char('/') => self.mode = Mode::Search,
             KeyCode::Char('m') => self.cycle_mode(),
             KeyCode::Char('r') => self.refresh_all(),
-            KeyCode::Char(' ') if self.focus == Focus::Contexts => self.toggle_cursor_context(),
+            KeyCode::Char(' ') if self.focus == Focus::Contexts => self.toggle_cursor_context().await,
             KeyCode::Char('x') if self.focus == Focus::Contexts => {
                 self.selected_context_ids.clear();
                 self.row_selected = 0;
@@ -1462,7 +1487,7 @@ where
         });
     }
 
-    fn toggle_cursor_context(&mut self) {
+    async fn toggle_cursor_context(&mut self) {
         let Some(context_id) = self.cursor_context().map(|item| item.record.context.id) else {
             self.selected_context_ids.clear();
             self.row_selected = 0;
@@ -1476,10 +1501,60 @@ where
         if let Some(index) = self.selected_context_ids.iter().position(|selected| *selected == context_id) {
             let _removed = self.selected_context_ids.remove(index);
         } else {
+            let mut proposed = self.selected_context_ids.clone();
+            proposed.push(context_id);
+            match self.context_selection_denial(&proposed).await {
+                Ok(Some(message)) => {
+                    self.status = Status::NotHeld(message);
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.status = Status::NotHeld(format!("context policy evaluation failed: {error}"));
+                    return;
+                }
+            }
             self.selected_context_ids.push(context_id);
         }
         self.row_selected = 0;
         self.refresh();
+    }
+
+    async fn context_selection_denial(&self, direct_ids: &[ContextId]) -> Result<Option<String>, crate::error::EngineError> {
+        let principal = self.principal.as_deref().unwrap_or("anonymous");
+        let store = self.engine.store();
+        let (effective, kinds, kind_policies, anchor_policies) = tokio::try_join!(
+            store.expand_context_selection(direct_ids, principal, false),
+            store.list_context_kinds(),
+            store.list_context_kind_policies(principal),
+            store.list_context_anchor_policies(principal),
+        )?;
+        let effective_ids = effective.iter().map(|context| context.id).collect::<Vec<_>>();
+        let direct_kinds = direct_ids
+            .iter()
+            .filter_map(|id| self.context_records.iter().find(|record| record.context.id == *id))
+            .map(|record| record.context.kind.clone())
+            .collect::<HashSet<_>>();
+        let policies = kinds
+            .iter()
+            .map(|definition| evaluate_effective_context_policy(&definition.kind, &kinds, &kind_policies, &anchor_policies, &self.context_records, &effective_ids))
+            .collect::<Vec<_>>();
+        if let Some(policy) = policies.iter().find(|policy| !policy.ambiguities.is_empty()) {
+            return Ok(Some(format!("effective policy for {} is ambiguous", policy.kind)));
+        }
+        if let Some(policy) = policies.iter().find(|policy| direct_kinds.contains(&policy.kind) && !policy.allowed) {
+            return Ok(Some(format!("effective policy denies context kind {}", policy.kind)));
+        }
+        for policy in policies.iter().filter(|policy| direct_kinds.contains(&policy.kind)) {
+            if let Some(allowed_companions) = &policy.allowed_companion_kinds
+                && let Some(disallowed) = direct_kinds
+                    .iter()
+                    .find(|candidate_kind| *candidate_kind != &policy.kind && !allowed_companions.contains(candidate_kind))
+            {
+                return Ok(Some(format!("effective {} policy does not allow companion kind {disallowed}", policy.kind)));
+            }
+        }
+        Ok(None)
     }
 
     fn move_selection(&mut self, down: bool) {
@@ -1894,11 +1969,27 @@ fn redact_audit(audit: &mut [AuditEntry]) {
     }
 }
 
+fn append_effective_context(context_id: ContextId, included: &mut HashSet<ContextId>, effective: &mut Vec<ContextId>) -> Result<(), String> {
+    if effective.len() >= MAX_EFFECTIVE_CONTEXTS {
+        return Err(effective_context_limit_message());
+    }
+    let _inserted = included.insert(context_id);
+    effective.push(context_id);
+    Ok(())
+}
+
+fn effective_context_limit_message() -> String {
+    format!("context selection expands beyond the maximum of {MAX_EFFECTIVE_CONTEXTS} effective contexts; narrow the selection or disable descendants")
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        collections::HashSet,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use ratatui::{
@@ -1910,10 +2001,10 @@ mod tests {
     };
     use tokio::sync::mpsc;
 
-    use super::{App, ContextManagerPane, DataMsg, Focus, Mode, MutationEngineFactory, Row, Status};
+    use super::{App, ContextManagerPane, DataMsg, Focus, MAX_EFFECTIVE_CONTEXTS, Mode, MutationEngineFactory, Row, Status, append_effective_context};
     use crate::{
         config::{LimitsConfig, SearchConfig},
-        context::{ContextAuditDraft, ContextCreateDraft, ContextId, ContextKind, ContextLifecycle, ContextPolicyLayer},
+        context::{ContextAuditDraft, ContextCreateDraft, ContextId, ContextKind, ContextKindPolicy, ContextKindPolicyDraft, ContextLifecycle, ContextPolicyLayer},
         embedding::{BoxFuture, EmbeddingProvider},
         engine::LocalHoldEngine,
         error::EmbeddingError,
@@ -1923,6 +2014,15 @@ mod tests {
     };
 
     struct FixedEmbedding;
+
+    #[test]
+    fn local_context_expansion_stops_at_the_effective_ceiling() {
+        let mut effective = std::iter::repeat_with(ContextId::new).take(MAX_EFFECTIVE_CONTEXTS).collect::<Vec<_>>();
+        let mut included = effective.iter().copied().collect::<HashSet<_>>();
+        let error = append_effective_context(ContextId::new(), &mut included, &mut effective).unwrap_err();
+        assert!(error.contains("maximum"));
+        assert_eq!(effective.len(), MAX_EFFECTIVE_CONTEXTS);
+    }
 
     impl EmbeddingProvider for FixedEmbedding {
         fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, EmbeddingError>> {
@@ -2717,6 +2817,84 @@ mod tests {
         app.on_data(rx.recv().await.unwrap());
         assert!(app.selected_context_ids.is_empty());
         assert_eq!(app.rows.len(), 2_usize);
+    }
+
+    #[tokio::test]
+    async fn context_sidebar_traverses_archived_lineage_without_selecting_archived_nodes() {
+        let store = SqliteStore::in_memory().unwrap();
+        let grandparent = create_test_context(&store, "project/lineage-grandparent", "Lineage grandparent").await;
+        let archived_parent = create_test_context(&store, "project/lineage-parent", "Lineage parent").await;
+        let child = create_test_context(&store, "project/lineage-child", "Lineage child").await;
+        store
+            .set_context_parent(
+                &archived_parent,
+                Some(&grandparent),
+                "operator",
+                &ContextAuditDraft::new("operator", "test_lineage_parent_set").with_context(archived_parent),
+            )
+            .await
+            .unwrap();
+        store
+            .set_context_parent(
+                &child,
+                Some(&archived_parent),
+                "operator",
+                &ContextAuditDraft::new("operator", "test_lineage_child_set").with_context(child),
+            )
+            .await
+            .unwrap();
+        store
+            .set_context_lifecycle(
+                &archived_parent,
+                ContextLifecycle::Archived,
+                "operator",
+                &ContextAuditDraft::new("operator", "test_lineage_parent_archived").with_context(archived_parent),
+            )
+            .await
+            .unwrap();
+        let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(engine, Theme::detect(), Some("operator".into()), tx);
+
+        app.bootstrap().await;
+        assert!(app.contexts.iter().all(|item| item.record.context.id != archived_parent));
+        app.focus = Focus::Contexts;
+        app.context_cursor = app.contexts.iter().position(|item| item.record.context.id == child).unwrap().saturating_add(1);
+        app.on_event(press(KeyCode::Char(' '))).await;
+
+        assert_eq!(app.selected_context_ids, vec![child]);
+        let effective = app.effective_selected_context_ids().unwrap().into_iter().collect::<HashSet<_>>();
+        assert!(effective.contains(&child));
+        assert!(effective.contains(&grandparent));
+        assert!(!effective.contains(&archived_parent));
+    }
+
+    #[tokio::test]
+    async fn context_sidebar_rejects_effectively_denied_kind() {
+        let store = SqliteStore::in_memory().unwrap();
+        let context_id = create_test_context(&store, "project/policy-denied", "Policy denied").await;
+        store
+            .upsert_context_kind_policy(
+                &ContextKindPolicyDraft::new(ContextPolicyLayer::Operator, "", ContextKind::new(ContextKind::PROJECT).unwrap(), ContextKindPolicy {
+                    allowed: Some(false),
+                    ..ContextKindPolicy::default()
+                }),
+                "operator",
+                &ContextAuditDraft::new("operator", "test_project_selection_denied"),
+            )
+            .await
+            .unwrap();
+        let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(engine, Theme::detect(), Some("operator".into()), tx);
+
+        app.bootstrap().await;
+        app.focus = Focus::Contexts;
+        app.context_cursor = app.contexts.iter().position(|item| item.record.context.id == context_id).unwrap().saturating_add(1);
+        app.on_event(press(KeyCode::Char(' '))).await;
+
+        assert!(app.selected_context_ids.is_empty());
+        assert!(matches!(&app.status, Status::NotHeld(message) if message.contains("denies context kind project")));
     }
 
     #[tokio::test]

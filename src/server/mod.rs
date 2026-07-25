@@ -37,9 +37,9 @@ use crate::{
     config::{AnonymousPolicy, LimitsConfig, SearchConfig},
     context::{
         ContextAnchorPolicyRecord, ContextAuditDraft, ContextCreateDraft, ContextDescriptor, ContextEnvelope, ContextExactLookup, ContextId, ContextKind, ContextKindDefinition,
-        ContextKindPolicyRecord, ContextPolicyLayer, ContextRecord, ContextReference, EffectiveContextPolicy, MAX_CONTEXT_CONFIRMATIONS, MAX_CONTEXT_DESCRIPTION_LEN,
-        MAX_CONTEXT_DISPLAY_NAME_LEN, MAX_CONTEXT_HINTS, MAX_CONTEXT_REFS, MAX_CONTEXT_SURFACE_LEN, UNRESOLVED_CONTEXT_KEY as UNRESOLVED_SCOPE, evaluate_context_policy,
-        legacy_scope_display_name, normalize_context_identity, validate_implicit_legacy_context_key, validate_legacy_scope_definition, validate_legacy_scope_key,
+        ContextKindPolicyRecord, ContextRecord, ContextReference, EffectiveContextPolicy, MAX_CONTEXT_CONFIRMATIONS, MAX_CONTEXT_DESCRIPTION_LEN, MAX_CONTEXT_DISPLAY_NAME_LEN,
+        MAX_CONTEXT_HINTS, MAX_CONTEXT_REFS, MAX_CONTEXT_SURFACE_LEN, UNRESOLVED_CONTEXT_KEY as UNRESOLVED_SCOPE, evaluate_effective_context_policy, legacy_scope_display_name,
+        normalize_context_identity, validate_implicit_legacy_context_key, validate_legacy_scope_definition, validate_legacy_scope_key,
     },
     embedding::EmbeddingProvider,
     engine::{BulkUpdateFields, LocalHoldEngine, ReembedOutcome, ReembedRequest, SearchRequest, StoreMemoryInput},
@@ -740,35 +740,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
     }
 
     fn effective_policy_for(state: &ContextPolicyState, records: &[ContextRecord], kind: &ContextKind, active_context_ids: &[ContextId]) -> EffectiveContextPolicy {
-        let operator = state
-            .kind_policies
-            .iter()
-            .find(|record| record.layer == ContextPolicyLayer::Operator && &record.kind == kind)
-            .map(|record| &record.policy);
-        let principal = state
-            .kind_policies
-            .iter()
-            .find(|record| record.layer == ContextPolicyLayer::Principal && &record.kind == kind)
-            .map(|record| &record.policy);
-        let active = active_context_ids.iter().copied().collect::<HashSet<_>>();
-        let mut anchor_records = state
-            .anchor_policies
-            .iter()
-            .filter(|record| active.contains(&record.anchor_context_id) && record.policy.kinds.contains_key(kind.as_str()))
-            .collect::<Vec<_>>();
-        let anchor_ids = anchor_records.iter().map(|record| record.anchor_context_id).collect::<Vec<_>>();
-        anchor_records.retain(|candidate| {
-            !anchor_ids
-                .iter()
-                .any(|other_id| *other_id != candidate.anchor_context_id && context_is_ancestor(records, candidate.anchor_context_id, *other_id))
-        });
-        let anchor_policies = anchor_records.iter().filter_map(|record| record.policy.kinds.get(kind.as_str())).collect::<Vec<_>>();
-        let mut effective = evaluate_context_policy(kind, operator, principal, &anchor_policies);
-        if state.kinds.iter().find(|definition| &definition.kind == kind).is_none_or(|definition| !definition.enabled) {
-            effective.allowed = false;
-            effective.guidance.push(format!("Context kind {kind} is disabled by the operator."));
-        }
-        effective
+        evaluate_effective_context_policy(kind, &state.kinds, &state.kind_policies, &state.anchor_policies, records, active_context_ids)
     }
 
     fn policy_guidance_for(effective: impl IntoIterator<Item = EffectiveContextPolicy>) -> Vec<String> {
@@ -795,7 +767,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 ToolErrorCode::Conflict,
                 Some(field),
                 message,
-                Some("Resolve active authorized contexts and retry without unavailable or cyclic hierarchy members."),
+                Some("Resolve fewer active contexts, disable descendant expansion, or retry without unavailable or cyclic hierarchy members."),
                 false,
             ),
             crate::error::StoreError::Database(_) | crate::error::StoreError::Serialization(_) | crate::error::StoreError::MigrationFailed { .. } => tool_error(
@@ -2135,22 +2107,6 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.contains(&value) {
         values.push(value);
     }
-}
-
-fn context_is_ancestor(records: &[ContextRecord], ancestor_id: ContextId, descendant_id: ContextId) -> bool {
-    let by_id = records.iter().map(|record| (record.context.id, record.context.parent_id)).collect::<BTreeMap<_, _>>();
-    let mut cursor = by_id.get(&descendant_id).copied().flatten();
-    let mut visited = HashSet::new();
-    while let Some(context_id) = cursor {
-        if context_id == ancestor_id {
-            return true;
-        }
-        if !visited.insert(context_id) {
-            return false;
-        }
-        cursor = by_id.get(&context_id).copied().flatten();
-    }
-    false
 }
 
 fn normalized_tokens(value: &str) -> HashSet<String> {

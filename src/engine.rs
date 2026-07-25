@@ -23,7 +23,7 @@ use crate::{
     embedding::{EmbeddingProvider, limited::ConcurrencyLimitedEmbedding, orchestrator::EmbeddingOrchestrator},
     error::{EngineError, ValidationError},
     scoring::{apply_composite_scoring, seed_retrieval_scores},
-    store::{MemoryStore, RecordUseOutcome},
+    store::{ConsolidationSnapshot, MemoryStore, RecordUseOutcome},
     types::{
         ANONYMOUS_PRINCIPAL, AccessPolicy, AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Confidence, Entity, Importance, Memory, MemoryFilter, MemoryId,
         MemoryMetadata, MemoryStats, MemoryTombstone, MemoryType, MemoryUpdate, MetadataMigrationOutcome, MetadataMigrationReport, MetadataPatch, Provenance, QueryContext,
@@ -1527,9 +1527,13 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
             });
         }
 
+        let snapshots = memories
+            .iter()
+            .map(|candidate| (candidate.memory.id, ConsolidationSnapshot::from(candidate)))
+            .collect::<std::collections::HashMap<_, _>>();
         // Merge: supersede non-representative members.
         for group in &groups {
-            self.merge_consolidation_group(store, group, principal).await?;
+            self.merge_consolidation_group(store, group, &snapshots, principal).await?;
         }
 
         Ok(ConsolidateResult {
@@ -1634,17 +1638,29 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
     ///
     /// Checks write access on each member before marking it superseded.
     /// Skips members the caller cannot modify.
-    async fn merge_consolidation_group(&self, store: &S, group: &DuplicateGroup, principal: &str) -> Result<(), EngineError> {
+    async fn merge_consolidation_group(
+        &self,
+        store: &S,
+        group: &DuplicateGroup,
+        snapshots: &std::collections::HashMap<MemoryId, ConsolidationSnapshot>,
+        principal: &str,
+    ) -> Result<(), EngineError> {
+        let representative = snapshots
+            .get(&group.representative_id)
+            .ok_or_else(|| crate::error::StoreError::Conflict("consolidation representative snapshot is unavailable".into()))?;
         for &member_id in group.member_ids.iter().filter(|&&id| id != group.representative_id) {
+            let member = snapshots
+                .get(&member_id)
+                .ok_or_else(|| crate::error::StoreError::Conflict("consolidation member snapshot is unavailable".into()))?;
             let details = serde_json::json!({
                 "representative_id": group.representative_id.to_string(),
                 "similarity": group.similarity,
             });
             let audit = self.audit_draft(AuditAction::Consolidate, Some(principal.to_owned()), Some(details));
-            let _outcome = match store.mark_superseded_by_authorized_audited(&member_id, &group.representative_id, principal, &audit).await {
+            let _outcome = match store.mark_superseded_by_authorized_audited_if_unchanged(member, representative, principal, &audit).await {
                 Ok(outcome) => outcome,
                 Err(crate::error::StoreError::Conflict(msg)) => {
-                    warn!(member_id = %member_id, reason = %msg, "skipping consolidation: memory already superseded");
+                    warn!(member_id = %member_id, reason = %msg, "skipping consolidation: candidate changed after discovery");
                     continue;
                 }
                 Err(e) => return Err(e.into()),

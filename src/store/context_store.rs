@@ -17,7 +17,7 @@ use crate::{
         ContextDefinitionPatch, ContextExactLookup, ContextGrant, ContextId, ContextIdentity, ContextKind, ContextKindDefinition, ContextKindDraft, ContextKindPolicy,
         ContextKindPolicyDraft, ContextKindPolicyRecord, ContextLifecycle, ContextPolicyLayer, ContextRecord, ContextSimilarityQuery, LEGACY_ALL_PRINCIPALS_GRANT,
         LEGACY_SYSTEM_PRINCIPAL, MAX_CONTEXT_CONFIRMATIONS, MAX_CONTEXT_DESCRIPTION_LEN, MAX_CONTEXT_DISPLAY_NAME_LEN, MAX_CONTEXT_HINTS, MAX_CONTEXT_REFS,
-        MAX_CONTEXT_SURFACE_LEN, MemoryContext, OPERATOR_PRINCIPAL, UNRESOLVED_CONTEXT_KEY as UNRESOLVED_SCOPE,
+        MAX_CONTEXT_SURFACE_LEN, MAX_EFFECTIVE_CONTEXTS, MemoryContext, OPERATOR_PRINCIPAL, UNRESOLVED_CONTEXT_KEY as UNRESOLVED_SCOPE,
     },
     error::StoreError,
     types::{AccessLevel, AccessPolicy, MemoryId, Provenance, WriteOutcome, normalize_context_key, write_access_allowed},
@@ -28,7 +28,11 @@ const MAX_CONTEXT_AUDIT_PAGE_SIZE: usize = 500;
 
 #[cfg(test)]
 mod query_plan_tests {
+    use chrono::{DateTime, Utc};
     use rusqlite::{Connection, params};
+
+    use super::{MAX_EFFECTIVE_CONTEXTS, expand_context_definitions};
+    use crate::context::{ContextDefinition, ContextId, ContextKind, ContextLifecycle};
 
     #[test]
     fn kind_constrained_alias_lookup_uses_alias_lookup_index() {
@@ -67,6 +71,29 @@ mod query_plan_tests {
             details.iter().any(|detail| detail.contains("idx_context_aliases_lookup")),
             "unexpected alias lookup plan: {details:?}"
         );
+    }
+
+    #[test]
+    fn effective_context_expansion_rejects_more_than_the_hard_ceiling() {
+        let now = DateTime::<Utc>::UNIX_EPOCH;
+        let definitions = (0..MAX_EFFECTIVE_CONTEXTS.saturating_add(1))
+            .map(|index| ContextDefinition {
+                id: ContextId::new(),
+                kind: ContextKind::new(ContextKind::PROJECT).unwrap(),
+                key: format!("project/effective-limit/{index}"),
+                display_name: format!("Effective limit {index}"),
+                description: None,
+                owner_principal: "owner".into(),
+                guidance: None,
+                parent_id: None,
+                lifecycle: ContextLifecycle::Active,
+                frozen: false,
+                created_at: now,
+                updated_at: now,
+            })
+            .collect::<Vec<_>>();
+        let error = expand_context_definitions(&definitions, &[definitions[0].id], true).unwrap_err();
+        assert!(matches!(error, crate::error::StoreError::Conflict(message) if message.contains("maximum")));
     }
 }
 
@@ -1173,17 +1200,21 @@ impl ContextReader for SqliteStore {
                      JOIN contexts AS child ON child.parent_id = parent.id
                      JOIN effective AS effective_child ON effective_child.id = child.id
                      WHERE {}
+                 ),
+                 capped(id) AS (
+                     SELECT id FROM effective LIMIT ?4
                  )
                  SELECT {CONTEXT_COLUMNS}
                  FROM contexts AS context_row
-                 JOIN effective AS selected_context ON selected_context.id = context_row.id
+                 JOIN capped AS selected_context ON selected_context.id = context_row.id
                  ORDER BY context_row.kind, context_row.normalized_key, context_row.id",
                 context_visible_sql("child"),
                 context_visible_sql("parent")
             );
             let mut statement = conn.prepare(&sql)?;
+            let expansion_limit = sqlite_usize(MAX_EFFECTIVE_CONTEXTS.saturating_add(1), "effective context limit")?;
             let rows = statement
-                .query_map(params![principal, selected_json, include_descendants], read_context_row)?
+                .query_map(params![principal, selected_json, include_descendants, expansion_limit], read_context_row)?
                 .collect::<Result<Vec<_>, _>>()?;
             let definitions = rows.into_iter().map(parse_context_row).collect::<Result<Vec<_>, _>>()?;
             expand_context_definitions(&definitions, &context_ids, include_descendants)
@@ -1468,6 +1499,11 @@ impl ContextReader for SqliteStore {
     reason = "hierarchy expansion performs cycle checks while walking ancestors and optional descendants"
 )]
 fn expand_context_definitions(definitions: &[ContextDefinition], direct_ids: &[ContextId], include_descendants: bool) -> Result<Vec<ContextDefinition>, StoreError> {
+    if definitions.len() > MAX_EFFECTIVE_CONTEXTS {
+        return Err(StoreError::Conflict(format!(
+            "context selection expands beyond the maximum of {MAX_EFFECTIVE_CONTEXTS} effective contexts"
+        )));
+    }
     let by_id = definitions.iter().cloned().map(|context| (context.id, context)).collect::<HashMap<_, _>>();
     let mut result = Vec::new();
     let mut included = HashSet::new();
@@ -2500,17 +2536,21 @@ impl ContextReader for PostgresStore {
                              AND grant_row.grantee_principal IN ($1, '*')
                        )
                    )
+             ),
+             capped(id) AS (
+                 SELECT id FROM effective LIMIT $4
              )
              SELECT context_row.id, context_row.kind, context_row.context_key,
                     context_row.display_name, context_row.description, context_row.owner_principal,
                     guidance, parent_id, lifecycle, frozen, created_at, updated_at
              FROM contexts AS context_row
-             JOIN effective AS selected_context ON selected_context.id = context_row.id
+             JOIN capped AS selected_context ON selected_context.id = context_row.id
              ORDER BY context_row.kind, context_row.normalized_key, context_row.id",
         )
         .bind(principal)
         .bind(selected_ids)
         .bind(include_descendants)
+        .bind(i64::try_from(MAX_EFFECTIVE_CONTEXTS.saturating_add(1)).map_err(|error| StoreError::Conflict(format!("effective context limit exceeds BIGINT: {error}")))?)
         .fetch_all(self.pool())
         .await?;
         let definitions = rows.iter().map(parse_postgres_context_row).collect::<Result<Vec<_>, _>>()?;

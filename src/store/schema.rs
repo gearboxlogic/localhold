@@ -1144,6 +1144,16 @@ fn insert_raw_legacy_scope(scopes: &mut BTreeMap<String, LegacyScope>, key: Stri
     }
     let normalized = normalize_context_key(&key);
     if !normalized.is_empty() && normalized != UNRESOLVED_CONTEXT_KEY {
+        if !globally_visible
+            && let Some(existing) = scopes.get(&normalized)
+            && !existing.registered
+            && existing.key != key
+        {
+            return Err(StoreError::Conflict(format!(
+                "legacy raw scope keys {:?} and {:?} normalize to the same governed context",
+                existing.key, key
+            )));
+        }
         let scope = scopes.entry(normalized).or_insert_with(|| LegacyScope::raw(key));
         scope.globally_visible |= globally_visible;
     }

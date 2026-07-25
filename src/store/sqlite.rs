@@ -20,7 +20,7 @@ use sha2::{Digest as _, Sha256};
 use sqlite_vec::sqlite3_vec_init;
 
 use super::{
-    EmbeddingProfile, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter,
+    ConsolidationSnapshot, EmbeddingProfile, MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter,
     migration::{reject_retired_sqlite_schema, validate_present_sqlite_schema_for_published_upgrade, validate_sqlite_source_schema},
     sqlite_lease::{SqliteDatabaseLease, database_identity},
     vector::{SqliteVecIndex, VectorIndex as _},
@@ -1209,6 +1209,16 @@ impl MemoryWriter for SqliteStore {
     async fn mark_superseded_by_authorized_audited(&self, id: &MemoryId, superseded_by: &MemoryId, principal: &str, audit: &AuditDraft) -> Result<WriteOutcome, StoreError> {
         self.mark_superseded_by_authorized_audited_impl(id, superseded_by, principal, Some(audit)).await
     }
+
+    async fn mark_superseded_by_authorized_audited_if_unchanged(
+        &self,
+        member: &ConsolidationSnapshot,
+        representative: &ConsolidationSnapshot,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<WriteOutcome, StoreError> {
+        self.mark_superseded_by_authorized_audited_if_unchanged_impl(member, representative, principal, audit).await
+    }
 }
 
 impl MemoryAdmin for SqliteStore {
@@ -1530,7 +1540,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_scope_case_variants_choose_a_deterministic_canonical_key() {
+    fn raw_scope_case_variants_are_rejected_before_v3_migration() {
         let mut connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
@@ -1551,20 +1561,11 @@ mod tests {
             )
             .unwrap();
 
-        migrate_contexts_v3(&mut connection, 1_u32, base_time()).unwrap();
-
-        let context_keys = {
-            let mut statement = connection.prepare("SELECT context_key FROM contexts").unwrap();
-            statement.query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
-        };
-        let source_scopes = {
-            let mut statement = connection
-                .prepare("SELECT json_extract(provenance, '$.source_conversation') FROM memories ORDER BY id")
-                .unwrap();
-            statement.query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
-        };
-        assert_eq!(context_keys, ["ZETA/RAW"]);
-        assert_eq!(source_scopes, ["ZETA/RAW", "ZETA/RAW"]);
+        let error = migrate_contexts_v3(&mut connection, 1_u32, base_time()).unwrap_err();
+        assert!(matches!(error, StoreError::Conflict(message) if message.contains("legacy raw scope keys")));
+        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(version, 1_u32, "the colliding migration must roll back");
+        assert!(!sqlite_table_exists(&connection, "contexts").unwrap());
     }
 
     #[test]

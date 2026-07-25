@@ -359,6 +359,28 @@ pub struct MemoryWithEmbedding {
     pub context_ids: Vec<ContextId>,
 }
 
+/// Optimistic state captured for one consolidation candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ConsolidationSnapshot {
+    /// Candidate memory ID.
+    pub memory_id: MemoryId,
+    /// User-visible record revision observed during candidate discovery.
+    pub record_revision: i64,
+    /// Complete ordered direct context profile observed during discovery.
+    pub context_ids: Vec<ContextId>,
+}
+
+impl From<&MemoryWithEmbedding> for ConsolidationSnapshot {
+    fn from(candidate: &MemoryWithEmbedding) -> Self {
+        Self {
+            memory_id: candidate.memory.id,
+            record_revision: candidate.memory.record_revision,
+            context_ids: candidate.context_ids.clone(),
+        }
+    }
+}
+
 /// Outcome of a bulk write operation with per-item authorization.
 ///
 /// Returned by [`MemoryWriter::bulk_delete_ids`] and [`MemoryWriter::bulk_update_ids`]
@@ -832,6 +854,16 @@ pub trait MemoryWriter: Send + Sync {
         &self,
         id: &MemoryId,
         superseded_by: &MemoryId,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> impl Future<Output = Result<WriteOutcome, StoreError>> + Send;
+
+    /// Consolidation supersession guarded by both candidates' captured
+    /// revisions and complete ordered context profiles.
+    fn mark_superseded_by_authorized_audited_if_unchanged(
+        &self,
+        member: &ConsolidationSnapshot,
+        representative: &ConsolidationSnapshot,
         principal: &str,
         audit: &AuditDraft,
     ) -> impl Future<Output = Result<WriteOutcome, StoreError>> + Send;

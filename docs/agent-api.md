@@ -346,8 +346,10 @@ kinds and policies are enabled in the TUI.
 
 Selecting a child includes its ancestors. Selecting a parent does not include
 descendants unless `include_descendants` is true or effective policy enables
-it. Retrieval uses OR among values of the same kind and AND across different
-kinds attached to a memory.
+it. One selection may resolve to at most 512 effective contexts; larger
+descendant trees return a structured conflict with guidance to narrow the
+selection or disable descendant expansion. Retrieval uses OR among values of
+the same kind and AND across different kinds attached to a memory.
 
 Archiving preserves memberships and reserves aliases and identities, but an
 archived context no longer contributes an active retrieval membership. A

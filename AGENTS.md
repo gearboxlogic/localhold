@@ -49,7 +49,10 @@ policy documentation.
 
 ## Pull Request Workflow
 
-- Open a focused pull request after local verification and report its URL.
+- Open a focused, ready-for-review pull request after local verification and
+  report its URL.
+- Create a draft pull request only when the user explicitly requests a draft.
+  Never default to draft status.
 - Greptile reviews a pull request only once, as its initial review. Do not
   re-invoke or nudge Greptile after subsequent pushes.
 - Every push requires a new Codex review for the resulting head commit. An eyes

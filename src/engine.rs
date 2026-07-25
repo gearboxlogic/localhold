@@ -470,7 +470,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         metadata: &MemoryMetadata,
         context_ids: &[ContextId],
     ) -> Result<MemoryId, EngineError> {
-        let principal = memory.provenance.source_agent.clone();
+        let principal = memory.provenance.source_agent.clone().filter(|principal| !principal.trim().is_empty());
         let actor = principal.clone().unwrap_or_else(|| ANONYMOUS_PRINCIPAL.to_owned());
         let embed_admission = self.orchestrator.begin_embed_admission()?;
         let audit = self.audit_draft(AuditAction::Store, principal, supersedes.map(|id| serde_json::json!({ "supersedes": id.to_string() })));
@@ -1532,13 +1532,11 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
             .map(|candidate| (candidate.memory.id, ConsolidationSnapshot::from(candidate)))
             .collect::<std::collections::HashMap<_, _>>();
         // Merge: supersede non-representative members.
-        for group in &groups {
-            self.merge_consolidation_group(store, group, &snapshots, principal).await?;
-        }
+        let merged = self.merge_consolidation_groups(store, &groups, &snapshots, principal).await?;
 
         Ok(ConsolidateResult {
             groups,
-            merged: true,
+            merged,
             candidate_count,
             capped,
         })
@@ -1638,16 +1636,31 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
     ///
     /// Checks write access on each member before marking it superseded.
     /// Skips members the caller cannot modify.
+    async fn merge_consolidation_groups(
+        &self,
+        store: &S,
+        groups: &[DuplicateGroup],
+        snapshots: &std::collections::HashMap<MemoryId, ConsolidationSnapshot>,
+        principal: &str,
+    ) -> Result<bool, EngineError> {
+        let mut merged = false;
+        for group in groups {
+            merged |= self.merge_consolidation_group(store, group, snapshots, principal).await?;
+        }
+        Ok(merged)
+    }
+
     async fn merge_consolidation_group(
         &self,
         store: &S,
         group: &DuplicateGroup,
         snapshots: &std::collections::HashMap<MemoryId, ConsolidationSnapshot>,
         principal: &str,
-    ) -> Result<(), EngineError> {
+    ) -> Result<bool, EngineError> {
         let representative = snapshots
             .get(&group.representative_id)
             .ok_or_else(|| crate::error::StoreError::Conflict("consolidation representative snapshot is unavailable".into()))?;
+        let mut merged = false;
         for &member_id in group.member_ids.iter().filter(|&&id| id != group.representative_id) {
             let member = snapshots
                 .get(&member_id)
@@ -1657,16 +1670,16 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
                 "similarity": group.similarity,
             });
             let audit = self.audit_draft(AuditAction::Consolidate, Some(principal.to_owned()), Some(details));
-            let _outcome = match store.mark_superseded_by_authorized_audited_if_unchanged(member, representative, principal, &audit).await {
-                Ok(outcome) => outcome,
+            match store.mark_superseded_by_authorized_audited_if_unchanged(member, representative, principal, &audit).await {
+                Ok(WriteOutcome::Applied) => merged = true,
+                Ok(WriteOutcome::NotFound | WriteOutcome::Denied) => {}
                 Err(crate::error::StoreError::Conflict(msg)) => {
                     warn!(member_id = %member_id, reason = %msg, "skipping consolidation: candidate changed after discovery");
-                    continue;
                 }
                 Err(e) => return Err(e.into()),
-            };
+            }
         }
-        Ok(())
+        Ok(merged)
     }
 
     /// Query the audit log for a specific memory.
@@ -3301,6 +3314,41 @@ mod tests {
         assert!(caller_after.superseded_by.is_none());
         let hidden_after = store.get(&hidden_id, Some("other")).await.unwrap().unwrap();
         assert!(hidden_after.superseded_by.is_none());
+    }
+
+    #[tokio::test]
+    async fn consolidation_reports_no_merge_when_every_candidate_changed() {
+        let store = SqliteStore::in_memory().unwrap();
+        let engine = make_engine_with_store(store.clone(), Arc::new(NoopEmbedding::new()));
+        let original_context = create_consolidation_context(&store, "caller", "project/consolidation-stale-original").await;
+        let changed_context = create_consolidation_context(&store, "caller", "project/consolidation-stale-changed").await;
+        let mut embedding = vec![0.0_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS];
+        embedding[0] = 1.0;
+        let mut ids = Vec::new();
+        for content in ["stale representative", "stale member"] {
+            let mut memory = engine.build_memory(test_input(content), engine.now()).unwrap();
+            memory.provenance.source_agent = Some("caller".into());
+            let id = store.store(&memory, Some(&embedding)).await.unwrap();
+            attach_consolidation_context(&store, id, original_context, "caller").await;
+            ids.push(id);
+        }
+        let candidates = store.list_with_embeddings(Some(std::slice::from_ref(&original_context)), None, "caller", 10).await.unwrap();
+        let snapshots = candidates
+            .iter()
+            .map(|candidate| (candidate.memory.id, ConsolidationSnapshot::from(candidate)))
+            .collect::<std::collections::HashMap<_, _>>();
+        let group = DuplicateGroup {
+            representative_id: ids[0],
+            member_ids: ids.clone(),
+            similarity: 1.0,
+            member_count: 2,
+        };
+
+        attach_consolidation_context(&store, ids[0], changed_context, "caller").await;
+        let merged = engine.merge_consolidation_groups(&store, &[group], &snapshots, "caller").await.unwrap();
+
+        assert!(!merged);
+        assert!(store.get(&ids[1], Some("caller")).await.unwrap().unwrap().superseded_by.is_none());
     }
 
     #[tokio::test]

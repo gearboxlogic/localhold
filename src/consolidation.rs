@@ -33,7 +33,7 @@ pub(crate) struct DuplicateGroup {
 pub(crate) struct ConsolidateResult {
     /// Groups of near-duplicate memories found.
     pub groups: Vec<DuplicateGroup>,
-    /// Whether merging was performed (`false` when `dry_run` is `true`).
+    /// Whether at least one duplicate member was superseded.
     pub merged: bool,
     /// Number of authorized candidates included in this run.
     pub candidate_count: usize,

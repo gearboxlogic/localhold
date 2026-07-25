@@ -1192,11 +1192,12 @@ impl ContextReader for SqliteStore {
     async fn get_memory_contexts(&self, memory_id: &MemoryId, principal: &str) -> Result<Vec<MemoryContext>, StoreError> {
         let owned_memory_id = *memory_id;
         let principal = principal.to_owned();
+        let now = self.clock_now();
         self.with_conn(move |conn| {
             let Some(memory) = fetch_memory_by_id(conn, &owned_memory_id.to_string())? else {
                 return Err(StoreError::NotFound(format!("memory not found: {owned_memory_id}")));
             };
-            if memory.check_access_level(Some(&principal)) == AccessLevel::Denied {
+            if memory.expires_at.is_some_and(|expires_at| now >= expires_at) || memory.check_access_level(Some(&principal)) == AccessLevel::Denied {
                 return Err(StoreError::NotFound(format!("memory not found: {owned_memory_id}")));
             }
             let sql = format!(
@@ -1230,6 +1231,7 @@ impl ContextReader for SqliteStore {
         }
         let ids_json = serde_json::to_string(&memory_ids.iter().map(ToString::to_string).collect::<Vec<_>>())?;
         let principal = principal.to_owned();
+        let now = self.clock_now().to_rfc3339();
         self.with_conn(move |conn| {
             let sql = format!(
                 "SELECT {CONTEXT_COLUMNS}, membership.ordinal, membership.memory_id,
@@ -1238,12 +1240,13 @@ impl ContextReader for SqliteStore {
                  JOIN memories AS memory_row ON memory_row.id = membership.memory_id
                  JOIN contexts AS context_row ON context_row.id = membership.context_id
                  WHERE membership.memory_id IN (SELECT value FROM json_each(?2))
+                   AND (memory_row.expires_at IS NULL OR memory_row.expires_at > ?3)
                    AND {}
                  ORDER BY membership.memory_id, membership.ordinal",
                 context_visible_sql("context_row")
             );
             let mut statement = conn.prepare(&sql)?;
-            let mut rows = statement.query(params![principal, ids_json])?;
+            let mut rows = statement.query(params![principal, ids_json, now])?;
             let mut memberships = HashMap::<MemoryId, Vec<MemoryContext>>::new();
             while let Some(row) = rows.next()? {
                 append_memory_context(&mut memberships, parse_sqlite_memory_context_batch_row(row, &principal)?);
@@ -1259,14 +1262,18 @@ impl ContextReader for SqliteStore {
         }
         let ids_json = serde_json::to_string(&memory_ids.iter().map(ToString::to_string).collect::<Vec<_>>())?;
         let principal = principal.to_owned();
+        let now = self.clock_now().to_rfc3339();
         self.with_conn(move |conn| {
             let mut statement = conn.prepare(
                 "SELECT DISTINCT memory_row.id, memory_row.provenance, memory_row.access_policy
                  FROM memories AS memory_row
                  JOIN memory_contexts AS membership ON membership.memory_id = memory_row.id
-                 WHERE memory_row.id IN (SELECT value FROM json_each(?1))",
+                 WHERE memory_row.id IN (SELECT value FROM json_each(?1))
+                   AND (memory_row.expires_at IS NULL OR memory_row.expires_at > ?2)",
             )?;
-            let rows = statement.query_map([ids_json], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?;
+            let rows = statement.query_map(params![ids_json, now], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })?;
             let mut present = HashSet::new();
             for row in rows {
                 present.extend(readable_membership_memory_id(row?, &principal)?);
@@ -2493,10 +2500,16 @@ impl ContextReader for PostgresStore {
     }
 
     async fn get_memory_contexts(&self, memory_id: &MemoryId, principal: &str) -> Result<Vec<MemoryContext>, StoreError> {
-        let authorization = query("SELECT provenance, access_policy FROM memories WHERE id = $1")
-            .bind(memory_id.to_string())
-            .fetch_optional(self.pool())
-            .await?;
+        let authorization = query(
+            "SELECT provenance, access_policy
+             FROM memories
+             WHERE id = $1
+               AND (expires_at IS NULL OR expires_at > $2)",
+        )
+        .bind(memory_id.to_string())
+        .bind(self.clock_now())
+        .fetch_optional(self.pool())
+        .await?;
         let Some(authorization) = authorization else {
             return Err(StoreError::NotFound(format!("memory not found: {memory_id}")));
         };
@@ -2557,6 +2570,7 @@ impl ContextReader for PostgresStore {
              JOIN memories AS memory_row ON memory_row.id = membership.memory_id
              JOIN contexts AS context_row ON context_row.id = membership.context_id
              WHERE membership.memory_id = ANY($2)
+               AND (memory_row.expires_at IS NULL OR memory_row.expires_at > $3)
                AND (
                    context_row.owner_principal = $1 OR EXISTS (
                        SELECT 1 FROM context_grants AS grant_row
@@ -2568,6 +2582,7 @@ impl ContextReader for PostgresStore {
         )
         .bind(principal)
         .bind(ids)
+        .bind(self.clock_now())
         .fetch_all(self.pool())
         .await?;
         let mut memberships = HashMap::<MemoryId, Vec<MemoryContext>>::new();
@@ -2597,9 +2612,11 @@ impl ContextReader for PostgresStore {
             "SELECT DISTINCT memory_row.id, memory_row.provenance, memory_row.access_policy
              FROM memories AS memory_row
              JOIN memory_contexts AS membership ON membership.memory_id = memory_row.id
-             WHERE memory_row.id = ANY($1)",
+             WHERE memory_row.id = ANY($1)
+               AND (memory_row.expires_at IS NULL OR memory_row.expires_at > $2)",
         )
         .bind(ids)
+        .bind(self.clock_now())
         .fetch_all(self.pool())
         .await?;
         let mut present = HashSet::new();

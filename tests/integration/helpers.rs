@@ -625,6 +625,19 @@ pub(crate) async fn spawn_http_server_with_auth(
     spawn_http_server_inner(server, localhold::config::DEFAULT_HTTP_MAX_BODY_BYTES, http_auth_token, None).await
 }
 
+/// Spawn an HTTP MCP server with an explicit fixed HTTP principal.
+pub(crate) async fn spawn_http_server_with_fixed_principal(
+    embedding: Arc<dyn EmbeddingProvider>,
+    anonymous_policy: AnonymousPolicy,
+    http_auth_token: &str,
+    http_principal: &str,
+) -> (String, CancellationToken, LocalHoldServer) {
+    let store = SqliteStore::in_memory().unwrap();
+    let engine = LocalHoldEngine::new(store, embedding, LimitsConfig::default(), SearchConfig::default());
+    let server = LocalHoldServer::from_engine_with_auth_and_http(engine, None, anonymous_policy, Some(http_auth_token.to_owned()), HttpPrincipalSource::fixed(http_principal));
+    spawn_http_server_inner(server, localhold::config::DEFAULT_HTTP_MAX_BODY_BYTES, Some(http_auth_token), None).await
+}
+
 /// Spawn an HTTP MCP server that trusts a proxy-only identity header.
 ///
 /// Tests using this helper model a deployment where clients cannot bypass the
@@ -750,6 +763,15 @@ pub(crate) async fn setup_http_noop_server_with_auth(
     http_auth_token: Option<&str>,
 ) -> (String, CancellationToken, LocalHoldServer) {
     spawn_http_server_with_auth(Arc::new(NoopEmbedding::new()), principal, anonymous_policy, http_auth_token).await
+}
+
+/// Spawn an HTTP MCP server with `NoopEmbedding` and an explicit fixed HTTP principal.
+pub(crate) async fn setup_http_noop_server_with_fixed_principal(
+    anonymous_policy: AnonymousPolicy,
+    http_auth_token: &str,
+    http_principal: &str,
+) -> (String, CancellationToken, LocalHoldServer) {
+    spawn_http_server_with_fixed_principal(Arc::new(NoopEmbedding::new()), anonymous_policy, http_auth_token, http_principal).await
 }
 
 /// Spawn an HTTP MCP server with `NoopEmbedding` behind a modeled trusted proxy.

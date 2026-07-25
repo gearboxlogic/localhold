@@ -835,9 +835,6 @@ struct ReassignScopeApply<'a> {
 )]
 fn apply_reassign_scope(conn: &mut Connection, params: ReassignScopeApply<'_>) -> Result<ReassignScopeOutcome, StoreError> {
     let tx = sqlite_write_tx(conn)?;
-    let target_context_id = resolve_or_create_private_legacy_context(&tx, params.to_scope, params.principal, params.now)?;
-    let target_scope_key: String = tx.query_row("SELECT context_key FROM contexts WHERE id = ?1", [&target_context_id], |row| row.get(0))?;
-
     let mut select_sql = "SELECT id FROM memories WHERE json_extract(provenance, '$.source_conversation') = ?1".to_owned();
     let mut select_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(params.from_scope.to_owned())];
     if let Some(origin) = params.origin_conversation {
@@ -870,6 +867,9 @@ fn apply_reassign_scope(conn: &mut Connection, params: ReassignScopeApply<'_>) -
         tx.commit()?;
         return Ok(ReassignScopeOutcome { applied_ids: authorized_ids });
     }
+
+    let target_context_id = resolve_or_create_private_legacy_context(&tx, params.to_scope, params.principal, params.now)?;
+    let target_scope_key: String = tx.query_row("SELECT context_key FROM contexts WHERE id = ?1", [&target_context_id], |row| row.get(0))?;
 
     let mut updated = 0_usize;
     for chunk in authorized_ids.chunks(SQLITE_MAX_CHUNK) {

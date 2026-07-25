@@ -77,15 +77,15 @@ pub trait ContextReader: Send + Sync {
         include_descendants: bool,
     ) -> impl Future<Output = Result<Vec<ContextDefinition>, StoreError>> + Send;
 
-    /// Return ordered direct context memberships for an authorized memory.
+    /// Return ordered direct context memberships for an authorized, unexpired memory.
     fn get_memory_contexts(&self, memory_id: &MemoryId, principal: &str) -> impl Future<Output = Result<Vec<MemoryContext>, StoreError>> + Send;
 
-    /// Return ordered direct context memberships for a batch of authorized
-    /// memories without issuing one query per memory.
+    /// Return ordered direct context memberships for a batch of authorized,
+    /// unexpired memories without issuing one query per memory.
     fn get_memory_contexts_batch(&self, memory_ids: &[MemoryId], principal: &str) -> impl Future<Output = Result<MemoryContextMap, StoreError>> + Send;
 
-    /// Return authorized memories that have at least one direct membership,
-    /// without exposing hidden context definitions.
+    /// Return authorized, unexpired memories that have at least one direct
+    /// membership, without exposing hidden context definitions.
     fn get_memory_context_presence_batch(&self, memory_ids: &[MemoryId], principal: &str) -> impl Future<Output = Result<MemoryContextPresence, StoreError>> + Send;
 
     /// Count all memberships on a memory the principal may write, including

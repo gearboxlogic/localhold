@@ -182,6 +182,17 @@ where
         consolidation_candidates.iter().all(|candidate| candidate.memory.id != expired_consolidation_id),
         "expired memories must not participate in consolidation"
     );
+    let expired_context_error = store.get_memory_contexts(&expired_consolidation_id, OWNER).await.unwrap_err();
+    assert!(
+        matches!(expired_context_error, StoreError::NotFound(_)),
+        "single context reads must hide expired memories: {expired_context_error}"
+    );
+    let context_batch = store.get_memory_contexts_batch(&[primary_id, expired_consolidation_id], OWNER).await.unwrap();
+    assert_eq!(context_batch[&primary_id][0].context.id, context_id);
+    assert!(!context_batch.contains_key(&expired_consolidation_id), "batch context reads must hide expired memories");
+    let context_presence = store.get_memory_context_presence_batch(&[primary_id, expired_consolidation_id], OWNER).await.unwrap();
+    assert!(context_presence.contains(&primary_id));
+    assert!(!context_presence.contains(&expired_consolidation_id), "context-presence reads must hide expired memories");
     assert!(store.delete(&expired_consolidation_id).await.unwrap());
 
     let retrieved = store.get(&primary_id, None).await.unwrap().unwrap();

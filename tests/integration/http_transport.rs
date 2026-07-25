@@ -24,7 +24,7 @@ use serde_json::json;
 use super::helpers::{
     TEST_HTTP_AUTH_TOKEN, TEST_HTTP_PRINCIPAL, await_embeddings, call_tool, call_tool_error, connect_http_client, connect_http_client_unauthenticated,
     connect_http_client_with_auth, connect_http_client_with_bearer, setup_http_embedding_server, setup_http_noop_server, setup_http_noop_server_with_auth,
-    setup_http_noop_server_with_trusted_proxy_auth, spawn_http_noop_server_with_allowed_hosts, spawn_http_noop_server_with_body_limit,
+    setup_http_noop_server_with_fixed_principal, setup_http_noop_server_with_trusted_proxy_auth, spawn_http_noop_server_with_allowed_hosts, spawn_http_noop_server_with_body_limit,
 };
 
 // ===========================================================================
@@ -123,6 +123,18 @@ async fn http_fixed_bearer_principal_enables_write_without_launch_principal() {
     let read: ReadResponse = call_tool(&authenticated_client, "read", json!({"id": remembered.id})).await;
     assert_eq!(read.agent_label.as_deref(), Some(TEST_HTTP_PRINCIPAL));
     assert_eq!(read.scope.as_deref(), Some("gearboxlogic/localhold"));
+
+    ct.cancel();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn http_fixed_bearer_principal_rejects_reserved_identity() {
+    let (url, ct, server) = setup_http_noop_server_with_fixed_principal(AnonymousPolicy::PublicReadOnly, "secret-token", "@localhold/legacy-system").await;
+
+    let authenticated_client = connect_http_client_with_bearer(&url, "secret-token").await;
+    let error = call_tool_error(&authenticated_client, "remember", json!({"content": "must not impersonate legacy system"})).await;
+    assert!(error.contains("anonymous writes are disabled"), "expected reserved-principal denial, got: {error}");
 
     ct.cancel();
     server.shutdown().await;

@@ -1300,7 +1300,7 @@ mod tests {
             MAX_CONTEXT_DISPLAY_NAME_LEN, OPERATOR_PRINCIPAL, UNRESOLVED_CONTEXT_KEY,
         },
         store::{
-            ContextWriter as _,
+            ContextReader as _, ContextWriter as _,
             schema::{
                 migrate_contexts_v3, migrate_memories_add_embedding_revision, migrate_memories_add_importance, migrate_memories_add_memory_type,
                 migrate_memories_add_record_revision, migrate_memories_add_superseded_by, migrate_memories_align_impression_tracking,
@@ -3642,6 +3642,25 @@ mod tests {
 
         let other_after = store.get(&other_id, None).await.unwrap().unwrap();
         assert_eq!(other_after.provenance.source_conversation.as_deref(), Some("project-1"));
+    }
+
+    #[tokio::test]
+    async fn reassign_scope_does_not_create_target_when_no_rows_are_authorized() {
+        let store = SqliteStore::in_memory().unwrap();
+
+        let mut other_owned = make_memory("other-owned", &[], base_time());
+        other_owned.provenance.source_agent = Some("other".into());
+        other_owned.provenance.source_conversation = Some("project-1".into());
+        let other_id = store.store(&other_owned, None).await.unwrap();
+
+        let reassigned = store.reassign_scope("project-1", "project/typo", None, "caller").await.unwrap();
+        assert!(reassigned.applied_ids.is_empty());
+        assert_eq!(
+            store.get(&other_id, None).await.unwrap().unwrap().provenance.source_conversation.as_deref(),
+            Some("project-1")
+        );
+        let caller_contexts = store.list_context_records("caller", true, 0, 500).await.unwrap();
+        assert!(caller_contexts.iter().all(|record| record.context.key != "project/typo"));
     }
 
     #[tokio::test]

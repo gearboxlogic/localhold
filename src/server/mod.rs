@@ -321,14 +321,16 @@ impl From<EngineError> for rmcp::ErrorData {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HttpPrincipalSource {
-    /// Every valid bearer token resolves to this fixed identity.
+    /// Every valid bearer token resolves to this fixed non-reserved identity.
+    ///
+    /// Empty and LocalHold-reserved principals are treated as unauthenticated.
     Fixed(String),
     /// Resolve identity from a header asserted by a trusted reverse proxy.
     TrustedProxyHeader(String),
 }
 
 impl HttpPrincipalSource {
-    /// Configure one fixed identity for all bearer-authenticated HTTP requests.
+    /// Configure one fixed, non-reserved identity for bearer-authenticated HTTP requests.
     pub fn fixed<P: Into<String>>(principal: P) -> Self {
         Self::Fixed(principal.into())
     }
@@ -492,7 +494,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         match &self.http_principal_source {
             HttpPrincipalSource::Fixed(principal) => {
                 let principal = principal.trim();
-                (!principal.is_empty()).then(|| principal.to_owned())
+                (!principal.is_empty() && !crate::http_auth::is_reserved_principal(principal)).then(|| principal.to_owned())
             }
             HttpPrincipalSource::TrustedProxyHeader(header_name) => crate::http_auth::trusted_proxy_principal(&parts.headers, header_name).map(ToOwned::to_owned),
         }

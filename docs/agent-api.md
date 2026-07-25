@@ -404,8 +404,8 @@ Mutation and maintenance responses use an action-oriented `operation` envelope:
 memories. Mutations that require audit fail and roll back if their audit row
 cannot be inserted. Expiry cleanup writes one delete audit row and an
 authorization tombstone naming the server-resolved principal for every removed
-memory. Its default selection applies per-memory write authorization; explicit
-local `mode = "all"` selects the whole store.
+memory; that cleanup's default selection applies per-memory write
+authorization, while explicit local `mode = "all"` selects the whole store.
 Redacted history views omit principal and details. For deleted memories,
 history is authorized by the deletion tombstone; legacy deleted memories or
 manually purged tombstones return empty history.

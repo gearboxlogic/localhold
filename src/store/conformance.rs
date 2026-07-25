@@ -176,7 +176,7 @@ where
     assert_eq!(fetched_embeddings.get(&primary_id).map(Vec::len), Some(embedding_dimensions));
     assert_eq!(fetched_embeddings.get(&primary_id).and_then(|v| v.first()).copied(), Some(0.0_f32));
 
-    let scoped_embeddings = store.list_with_embeddings(Some(std::slice::from_ref(&context_id)), OWNER, 10).await.unwrap();
+    let scoped_embeddings = store.list_with_embeddings(Some(std::slice::from_ref(&context_id)), None, OWNER, 10).await.unwrap();
     assert!(scoped_embeddings.iter().any(|entry| entry.memory.id == primary_id && entry.embedding.is_some()));
 
     let restricted = memory(MemorySpec {
@@ -205,7 +205,7 @@ where
     let denied_newer_id = store.store(&denied_newer, Some(&embedding(embedding_dimensions, 4.0_f32))).await.unwrap();
     assert_eq!(
         store
-            .list_with_embeddings(None, ALLOWED, 1)
+            .list_with_embeddings(None, None, ALLOWED, 1)
             .await
             .unwrap()
             .into_iter()
@@ -216,7 +216,7 @@ where
     );
     assert!(
         store
-            .list_with_embeddings(None, "intruder", 100)
+            .list_with_embeddings(None, None, "intruder", 100)
             .await
             .unwrap()
             .iter()
@@ -224,7 +224,7 @@ where
     );
     assert!(
         store
-            .list_with_embeddings(None, OWNER, 100)
+            .list_with_embeddings(None, None, OWNER, 100)
             .await
             .unwrap()
             .iter()
@@ -233,7 +233,7 @@ where
     );
     assert!(
         store
-            .list_with_embeddings(Some(&[]), OWNER, 100)
+            .list_with_embeddings(Some(&[]), None, OWNER, 100)
             .await
             .unwrap()
             .iter()
@@ -1429,6 +1429,49 @@ where
         .collect::<BTreeSet<_>>();
     assert_eq!(vector_applicable, expected);
 
+    let legacy_any_filter = MemoryFilter {
+        tags: applicability_filter.tags.clone(),
+        legacy_context_ids_any: Some(vec![project_x, architecture]),
+        limit: Some(20),
+        ..MemoryFilter::default()
+    };
+    let legacy_any = store
+        .list(legacy_any_filter.clone(), owner_ctx.clone())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|memory| memory.id)
+        .collect::<BTreeSet<_>>();
+    let legacy_any_expected = [applicability_ids[0], applicability_ids[2], applicability_ids[4], applicability_ids[5]]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        legacy_any, legacy_any_expected,
+        "legacy scopes must remain OR alternatives even when their governed kinds differ"
+    );
+    let legacy_any_vector = store
+        .search_by_embedding(&applicability_embedding, 20, &legacy_any_filter, &owner_ctx, Some(0.001_f64))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|result| result.memory.id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        legacy_any_vector, legacy_any_expected,
+        "legacy any-match membership must be applied before vector candidate work"
+    );
+    let legacy_any_embeddings = store
+        .list_with_embeddings(None, legacy_any_filter.legacy_context_ids_any.as_deref(), OWNER, 20)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|candidate| candidate.memory.id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        legacy_any_embeddings, legacy_any_expected,
+        "legacy any-match membership must also constrain consolidation candidates"
+    );
+
     store
         .set_context_lifecycle(
             &operations,
@@ -1448,7 +1491,7 @@ where
         "an archived selected context must not satisfy retrieval"
     );
     assert!(
-        store.list_with_embeddings(Some(&[operations]), OWNER, 20).await.unwrap().is_empty(),
+        store.list_with_embeddings(Some(&[operations]), None, OWNER, 20).await.unwrap().is_empty(),
         "consolidation candidates must reject an archived selected context"
     );
     let active_project_with_archived_companion = MemoryFilter {
@@ -1469,7 +1512,7 @@ where
         "archived companion memberships must not add an active applicability constraint"
     );
     let active_embedding_ids = store
-        .list_with_embeddings(Some(&[project_x, operations]), OWNER, 100)
+        .list_with_embeddings(Some(&[project_x, operations]), None, OWNER, 100)
         .await
         .unwrap()
         .into_iter()

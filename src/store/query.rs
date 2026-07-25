@@ -108,6 +108,10 @@ pub(crate) fn escape_like(s: &str) -> String {
     result
 }
 
+pub(crate) fn context_ids_json(context_ids: &[crate::context::ContextId]) -> String {
+    serde_json::Value::Array(context_ids.iter().map(|id| serde_json::Value::String(id.to_string())).collect()).to_string()
+}
+
 /// Allocation-free case-insensitive ASCII substring search.
 ///
 /// The `needle` must already be lowercased (e.g. via `normalize_filter`).
@@ -521,6 +525,26 @@ impl WhereClause {
                 wc.params.extend(context_ids.iter().map(ToString::to_string));
                 wc.next_idx += context_ids.len();
             }
+        }
+
+        if let Some(context_ids) = &filter.legacy_context_ids_any
+            && !context_ids.is_empty()
+        {
+            let idx = wc.next_idx;
+            wc.conditions.push(format!(
+                "memories.id IN (
+                    SELECT legacy_membership.memory_id
+                    FROM memory_contexts AS legacy_membership INDEXED BY idx_memory_contexts_context
+                    JOIN contexts AS legacy_context
+                      ON legacy_context.id = legacy_membership.context_id
+                    WHERE legacy_membership.context_id IN (
+                        SELECT CAST(value AS TEXT) FROM json_each(?{idx})
+                    )
+                      AND legacy_context.lifecycle = 'active'
+                )"
+            ));
+            wc.params.push(context_ids_json(context_ids));
+            wc.next_idx += 1;
         }
 
         // text_search (LIKE with escaped wildcards)

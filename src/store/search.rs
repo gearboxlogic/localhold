@@ -59,7 +59,7 @@ impl SqliteStore {
                 now,
                 max_distance,
             };
-            if filter.context_ids.is_some() {
+            if filter.context_ids.is_some() || filter.legacy_context_ids_any.as_ref().is_some_and(|context_ids| !context_ids.is_empty()) {
                 filtered_embedding_search_loop(conn, &emb, limit, &pf_ctx)
             } else {
                 embedding_search_loop(conn, &vector_index, &emb, limit, &pf_ctx)

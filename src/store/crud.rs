@@ -6,7 +6,7 @@ use super::{
     EmbeddingProfile, MemoryAuthorizationRef, ReembedClaim, ReembedClaimScope, SqliteStore,
     context_store::{insert_initial_memory_contexts_sqlite, replace_memory_contexts_sqlite_tx},
     merge_metadata_patch,
-    query::{MEMORY_COLUMN_COUNT, MEMORY_COLUMNS, hydrate_entities_for_memories, row_to_memory, usize_to_i64},
+    query::{MEMORY_COLUMN_COUNT, MEMORY_COLUMNS, context_ids_json, hydrate_entities_for_memories, row_to_memory, usize_to_i64},
     sqlite::ensure_embedding_profile_matches,
     sqlite_write_tx, update_audit_draft_for_locked_memory,
     vector::{SqliteVecIndex, VectorIndex, validate_embedding_vector},
@@ -1181,10 +1181,15 @@ fn claim_for_reembed_conn(conn: &mut Connection, params: &ReembedClaimParams<'_>
     clippy::too_many_lines,
     reason = "the governed applicability query keeps its indexed broad and selected-context branches together"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "connection, vector index, two distinct context compatibility modes, principal, and limit are independent query inputs"
+)]
 fn list_memories_with_embeddings(
     conn: &Connection,
     vector_index: &SqliteVecIndex,
     context_ids: Option<&[ContextId]>,
+    legacy_context_ids_any: Option<&[ContextId]>,
     principal: &str,
     limit: usize,
 ) -> Result<Vec<super::MemoryWithEmbedding>, StoreError> {
@@ -1258,6 +1263,27 @@ fn list_memories_with_embeddings(
             }
             next_idx = next_idx.saturating_add(context_ids.len());
         }
+    }
+
+    if let Some(context_ids) = legacy_context_ids_any
+        && !context_ids.is_empty()
+    {
+        #[expect(clippy::let_underscore_must_use, reason = "fmt::Write for String is infallible")]
+        let _ = write!(
+            sql,
+            " AND m.id IN (
+                SELECT legacy_membership.memory_id
+                FROM memory_contexts AS legacy_membership INDEXED BY idx_memory_contexts_context
+                JOIN contexts AS legacy_context
+                  ON legacy_context.id = legacy_membership.context_id
+                WHERE legacy_membership.context_id IN (
+                    SELECT CAST(value AS TEXT) FROM json_each(?{next_idx})
+                )
+                  AND legacy_context.lifecycle = 'active'
+            )"
+        );
+        params_vec.push(Box::new(context_ids_json(context_ids)));
+        next_idx = next_idx.saturating_add(1);
     }
 
     // write! on String is infallible — fmt::Write for String never fails.
@@ -2263,11 +2289,18 @@ impl SqliteStore {
         self.with_conn(move |conn| vector_index.fetch_many(conn, &ids)).await
     }
 
-    pub(crate) async fn list_with_embeddings_impl(&self, context_ids: Option<&[ContextId]>, principal: &str, limit: usize) -> Result<Vec<super::MemoryWithEmbedding>, StoreError> {
+    pub(crate) async fn list_with_embeddings_impl(
+        &self,
+        context_ids: Option<&[ContextId]>,
+        legacy_context_ids_any: Option<&[ContextId]>,
+        principal: &str,
+        limit: usize,
+    ) -> Result<Vec<super::MemoryWithEmbedding>, StoreError> {
         let context_ids = context_ids.map(<[ContextId]>::to_vec);
+        let legacy_context_ids_any = legacy_context_ids_any.map(<[ContextId]>::to_vec);
         let principal = principal.to_owned();
         let vector_index = self.vector_index();
-        self.with_conn(move |conn| list_memories_with_embeddings(conn, &vector_index, context_ids.as_deref(), &principal, limit))
+        self.with_conn(move |conn| list_memories_with_embeddings(conn, &vector_index, context_ids.as_deref(), legacy_context_ids_any.as_deref(), &principal, limit))
             .await
     }
 

@@ -810,6 +810,151 @@ async fn destructive_admin_filters_reject_unknown_legacy_scopes_without_broadeni
 }
 
 #[tokio::test]
+async fn unscoped_bulk_mutations_include_explicitly_deferred_contextless_memories() {
+    let client = setup_noop_server().await;
+    let update_target: RememberResponse = call_tool(
+        &client,
+        "remember",
+        json!({
+            "content": "contextless bulk update target",
+            "tags": ["contextless-update"],
+            "context": {"allow_unresolved": true}
+        }),
+    )
+    .await;
+    let delete_target: RememberResponse = call_tool(
+        &client,
+        "remember",
+        json!({
+            "content": "contextless bulk delete target",
+            "tags": ["contextless-delete"],
+            "context": {"allow_unresolved": true}
+        }),
+    )
+    .await;
+
+    let updated: BulkUpdateResponse = call_tool(
+        &client,
+        "admin_bulk_update",
+        json!({
+            "tags": ["contextless-update"],
+            "set_tags": ["contextless-updated"]
+        }),
+    )
+    .await;
+    assert_eq!(updated.matched, 1);
+    assert_eq!(updated.updated, 1);
+    let read: ReadResponse = call_tool(&client, "read", json!({"id": update_target.id})).await;
+    assert_eq!(read.memory.tags, ["contextless-updated"]);
+
+    let deleted: BulkDeleteResponse = call_tool(&client, "admin_bulk_delete", json!({"tags": ["contextless-delete"]})).await;
+    assert_eq!(deleted.matched, 1);
+    assert_eq!(deleted.deleted, 1);
+    assert_invalid_params_contains(&client, "read", json!({"id": delete_target.id}), "memory not found").await;
+}
+
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "one end-to-end regression covers all plural legacy-scope admin consumers")]
+async fn legacy_admin_scope_lists_preserve_any_match_across_context_kinds() {
+    let (client, server) = setup_embedding_server().await;
+    let project_id = ContextId::new();
+    let domain_id = ContextId::new();
+    let organization_id = ContextId::new();
+    let independent_prefix_id = ContextId::new();
+    for (id, kind, key, display_name) in [
+        (project_id, ContextKind::new(ContextKind::PROJECT).unwrap(), "project/legacy-any", "Legacy any project"),
+        (domain_id, ContextKind::new(ContextKind::DOMAIN).unwrap(), "domain/legacy-any", "Legacy any domain"),
+        (
+            organization_id,
+            ContextKind::new(ContextKind::ORGANIZATION).unwrap(),
+            "organization/legacy-any-companion",
+            "Legacy any organization companion",
+        ),
+        (
+            independent_prefix_id,
+            ContextKind::new(ContextKind::PROJECT).unwrap(),
+            "project",
+            "Independent project prefix",
+        ),
+    ] {
+        let _created = server
+            .store()
+            .create_context(
+                &ContextCreateDraft::private(id, kind, key, display_name, "stdio"),
+                &ContextAuditDraft::new("stdio", "legacy_any_context_created").with_context(id),
+            )
+            .await
+            .unwrap();
+    }
+    let _project: RememberResponse = call_tool(
+        &client,
+        "remember",
+        json!({
+            "content": "legacy any project memory",
+            "tags": ["legacy-any"],
+            "context": {"refs": [{"id": project_id}, {"id": organization_id}]}
+        }),
+    )
+    .await;
+    let _domain: RememberResponse = call_tool(
+        &client,
+        "remember",
+        json!({
+            "content": "legacy any domain memory",
+            "tags": ["legacy-any"],
+            "context": {"refs": [{"id": domain_id}]}
+        }),
+    )
+    .await;
+    let _independent_prefix: RememberResponse = call_tool(
+        &client,
+        "remember",
+        json!({
+            "content": "independent slash prefix must not be synthesized as a consolidation ancestor",
+            "tags": ["legacy-any-independent-prefix"],
+            "context": {"refs": [{"id": independent_prefix_id}]}
+        }),
+    )
+    .await;
+    await_embeddings(&server, Duration::from_secs(1)).await;
+    let scopes = ["project/legacy-any", "domain/legacy-any"];
+
+    let listed: AdminListResponse = call_tool(&client, "admin_list", json!({"scopes": scopes, "expand_scopes": false})).await;
+    assert_eq!(listed.count, 2);
+    let counted: CountResponse = call_tool(&client, "admin_count", json!({"scopes": scopes, "expand_scopes": false})).await;
+    assert_eq!(counted.total, 2);
+    let consolidated: ConsolidateResponse = call_tool(
+        &client,
+        "admin_consolidate",
+        json!({
+            "scopes": scopes,
+            "dry_run": true,
+            "similarity_threshold": 0.0_f64
+        }),
+    )
+    .await;
+    assert_eq!(
+        consolidated.candidate_count, 2,
+        "plural legacy scopes must use any-match without synthesizing independently registered slash-prefix contexts"
+    );
+    let updated: BulkUpdateResponse = call_tool(
+        &client,
+        "admin_bulk_update",
+        json!({
+            "scopes": scopes,
+            "expand_scopes": false,
+            "set_tags": ["legacy-any-updated"]
+        }),
+    )
+    .await;
+    assert_eq!(updated.matched, 2);
+    assert_eq!(updated.updated, 2);
+    let deleted: BulkDeleteResponse = call_tool(&client, "admin_bulk_delete", json!({"scopes": scopes, "expand_scopes": false})).await;
+    assert_eq!(deleted.matched, 2);
+    assert_eq!(deleted.deleted, 2);
+}
+
+#[tokio::test]
 async fn destructive_admin_alias_filters_fail_closed_when_policy_rejects_the_context() {
     let (client, server) = setup_server_with(Arc::new(NoopEmbedding::new())).await;
     let remembered: RememberResponse = call_tool(
@@ -1426,6 +1571,76 @@ async fn remember_many_accepts_string_shorthand_items() {
 
     let first: ReadResponse = call_tool(&client, "read", json!({"id": remembered.memories[0].id})).await;
     assert_eq!(first.memory.content, "remember_many shorthand first durable fact");
+}
+
+#[tokio::test]
+async fn omitted_context_skips_defaults_for_denied_optional_kinds() {
+    let (client, server) = setup_server_with(Arc::new(NoopEmbedding::new())).await;
+    let project_id = configure_stdio_default_context(server.store()).await;
+    let domain_id = ContextId::new();
+    let _domain = server
+        .store()
+        .create_context(
+            &ContextCreateDraft::private(
+                domain_id,
+                ContextKind::new(ContextKind::DOMAIN).unwrap(),
+                "domain/denied-default",
+                "Denied domain default",
+                "stdio",
+            ),
+            &ContextAuditDraft::new("stdio", "denied_domain_default_created").with_context(domain_id),
+        )
+        .await
+        .unwrap();
+    let mut domain_policy = ContextKindPolicy::default();
+    domain_policy.allowed = Some(false);
+    domain_policy.default_context_id = Some(domain_id);
+    server
+        .store()
+        .upsert_context_kind_policy(
+            &ContextKindPolicyDraft::new(ContextPolicyLayer::Principal, "stdio", ContextKind::new(ContextKind::DOMAIN).unwrap(), domain_policy),
+            "stdio",
+            &ContextAuditDraft::new("stdio", "denied_domain_default_configured").with_context(domain_id),
+        )
+        .await
+        .unwrap();
+
+    let result = client
+        .call_tool(call_tool_params("remember", json!({"content": "denied optional defaults must be ignored"})))
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    let text = result.content[0].as_text().unwrap();
+    let remembered: RememberResponse = serde_json::from_str(&text.text).unwrap();
+
+    assert_eq!(remembered.scope, "project/protocol-default");
+    assert_eq!(remembered.contexts.iter().map(|context| context.id).collect::<Vec<_>>(), vec![project_id]);
+}
+
+#[tokio::test]
+async fn legacy_scope_case_variants_use_the_canonical_context_key() {
+    let client = setup_noop_server().await;
+    let canonical: RememberResponse = call_tool(
+        &client,
+        "remember",
+        json!({
+            "content": "canonical legacy scope seed",
+            "scope": "project/canonical-legacy"
+        }),
+    )
+    .await;
+    let variant: RememberResponse = call_tool(
+        &client,
+        "remember",
+        json!({
+            "content": "case variant must reuse canonical legacy scope",
+            "scope": "PROJECT/CANONICAL-LEGACY"
+        }),
+    )
+    .await;
+
+    assert_eq!(variant.scope, "project/canonical-legacy");
+    assert_eq!(variant.contexts[0].id, canonical.contexts[0].id);
 }
 
 #[tokio::test]

@@ -1365,7 +1365,13 @@ impl PostgresStore {
     }
 
     #[expect(clippy::too_many_lines, reason = "the governed applicability query keeps authorization and indexed context branches together")]
-    pub(crate) async fn list_with_embeddings_impl(&self, context_ids: Option<&[ContextId]>, principal: &str, limit: usize) -> Result<Vec<MemoryWithEmbedding>, StoreError> {
+    pub(crate) async fn list_with_embeddings_impl(
+        &self,
+        context_ids: Option<&[ContextId]>,
+        legacy_context_ids_any: Option<&[ContextId]>,
+        principal: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryWithEmbedding>, StoreError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -1429,6 +1435,24 @@ impl PostgresStore {
                     .push_bind(ids)
                     .push(")))");
             }
+        }
+        if let Some(context_ids) = legacy_context_ids_any
+            && !context_ids.is_empty()
+        {
+            let ids = context_ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+            let _ = builder
+                .push(
+                    " AND EXISTS (
+                        SELECT 1
+                        FROM memory_contexts AS legacy_membership
+                        JOIN contexts AS legacy_context
+                          ON legacy_context.id = legacy_membership.context_id
+                        WHERE legacy_membership.memory_id = memories.id
+                          AND legacy_context.lifecycle = 'active'
+                          AND legacy_membership.context_id = ANY(",
+                )
+                .push_bind(ids)
+                .push("))");
         }
         let _ = builder.push(" ORDER BY created_at DESC, id DESC LIMIT ").push_bind(limit);
         let rows = builder.build().fetch_all(self.pool()).await?;
@@ -2460,8 +2484,14 @@ impl MemoryReader for PostgresStore {
         self.get_for_reembed_impl(id, principal).await
     }
 
-    async fn list_with_embeddings(&self, context_ids: Option<&[ContextId]>, principal: &str, limit: usize) -> Result<Vec<MemoryWithEmbedding>, StoreError> {
-        self.list_with_embeddings_impl(context_ids, principal, limit).await
+    async fn list_with_embeddings(
+        &self,
+        context_ids: Option<&[ContextId]>,
+        legacy_context_ids_any: Option<&[ContextId]>,
+        principal: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryWithEmbedding>, StoreError> {
+        self.list_with_embeddings_impl(context_ids, legacy_context_ids_any, principal, limit).await
     }
 
     async fn query_audit_log(&self, memory_id: &MemoryId, limit: usize) -> Result<Vec<AuditEntry>, StoreError> {
@@ -3437,6 +3467,26 @@ fn push_postgres_filter_conditions(builder: &mut QueryBuilder<Postgres>, filter:
                 .push_bind(context_ids)
                 .push(")))");
         }
+    }
+
+    if let Some(context_ids) = &filter.legacy_context_ids_any
+        && !context_ids.is_empty()
+    {
+        let context_ids = context_ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+        push_postgres_condition_separator(builder, has_condition);
+        let _ = builder
+            .push(
+                "EXISTS (
+                    SELECT 1
+                    FROM memory_contexts AS legacy_membership
+                    JOIN contexts AS legacy_context
+                      ON legacy_context.id = legacy_membership.context_id
+                    WHERE legacy_membership.memory_id = memories.id
+                      AND legacy_context.lifecycle = 'active'
+                      AND legacy_membership.context_id = ANY(",
+            )
+            .push_bind(context_ids)
+            .push("))");
     }
 
     if let Some(text) = &filter.text_search {
@@ -7453,7 +7503,7 @@ mod tests {
         assert!(!embeddings.contains_key(&no_embedding_id));
 
         let scoped = store
-            .list_with_embeddings_impl(Some(std::slice::from_ref(&context_id)), "postgres-test-agent", 10_usize)
+            .list_with_embeddings_impl(Some(std::slice::from_ref(&context_id)), None, "postgres-test-agent", 10_usize)
             .await
             .unwrap();
         let scoped_ids = scoped.iter().map(|entry| entry.memory.id).collect::<Vec<_>>();

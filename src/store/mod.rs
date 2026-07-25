@@ -454,7 +454,13 @@ pub trait MemoryReader: Send + Sync {
     /// applicability in storage, then returns up to `limit` memories that
     /// have embeddings.
     /// Each result includes the memory and its embedding vector.
-    fn list_with_embeddings(&self, context_ids: Option<&[ContextId]>, principal: &str, limit: usize) -> impl Future<Output = Result<Vec<MemoryWithEmbedding>, StoreError>> + Send;
+    fn list_with_embeddings(
+        &self,
+        context_ids: Option<&[ContextId]>,
+        legacy_context_ids_any: Option<&[ContextId]>,
+        principal: &str,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<MemoryWithEmbedding>, StoreError>> + Send;
 
     /// Query the audit log for a specific memory ID.
     fn query_audit_log(&self, memory_id: &MemoryId, limit: usize) -> impl Future<Output = Result<Vec<AuditEntry>, StoreError>> + Send;

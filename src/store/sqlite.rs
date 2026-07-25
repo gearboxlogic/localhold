@@ -740,8 +740,14 @@ impl MemoryReader for SqliteStore {
         self.get_for_reembed_impl(id, principal).await
     }
 
-    async fn list_with_embeddings(&self, context_ids: Option<&[crate::context::ContextId]>, principal: &str, limit: usize) -> Result<Vec<MemoryWithEmbedding>, StoreError> {
-        self.list_with_embeddings_impl(context_ids, principal, limit).await
+    async fn list_with_embeddings(
+        &self,
+        context_ids: Option<&[crate::context::ContextId]>,
+        legacy_context_ids_any: Option<&[crate::context::ContextId]>,
+        principal: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryWithEmbedding>, StoreError> {
+        self.list_with_embeddings_impl(context_ids, legacy_context_ids_any, principal, limit).await
     }
 
     async fn query_audit_log(&self, memory_id: &MemoryId, limit: usize) -> Result<Vec<AuditEntry>, StoreError> {
@@ -5115,5 +5121,20 @@ mod tests {
             "context-to-memory plan should use its covering index: {:?}",
             plans.1
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_context_any_filter_uses_one_bind_beyond_sqlite_variable_limit() {
+        let store = SqliteStore::in_memory().unwrap();
+        let context_ids = std::iter::repeat_with(ContextId::new).take(40_000_usize).collect::<Vec<_>>();
+        let filter = MemoryFilter {
+            legacy_context_ids_any: Some(context_ids),
+            limit: Some(1),
+            ..MemoryFilter::default()
+        };
+
+        let memories = store.list(filter, QueryContext { principal: Some("owner".into()) }).await.unwrap();
+
+        assert!(memories.is_empty());
     }
 }

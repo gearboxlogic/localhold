@@ -893,6 +893,7 @@ pub(crate) struct CommonFilterFields {
     #[serde(default)]
     pub scopes_any: Option<Vec<String>>,
     pub context_ids: Option<Vec<ContextId>>,
+    pub legacy_context_ids_any: Option<Vec<ContextId>>,
     pub explicit_context_filter: bool,
     /// Trusted principal identity from the hosting MCP runtime. When absent, only public memories are returned.
     #[serde(default)]

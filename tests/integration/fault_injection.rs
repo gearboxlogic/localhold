@@ -229,8 +229,14 @@ impl<S: MemoryReader + Send + Sync> MemoryReader for ChaosStore<S> {
         self.inner.get_for_reembed(id, principal).await
     }
 
-    async fn list_with_embeddings(&self, context_ids: Option<&[ContextId]>, principal: &str, limit: usize) -> Result<Vec<MemoryWithEmbedding>, StoreError> {
-        self.inner.list_with_embeddings(context_ids, principal, limit).await
+    async fn list_with_embeddings(
+        &self,
+        context_ids: Option<&[ContextId]>,
+        legacy_context_ids_any: Option<&[ContextId]>,
+        principal: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryWithEmbedding>, StoreError> {
+        self.inner.list_with_embeddings(context_ids, legacy_context_ids_any, principal, limit).await
     }
 
     async fn query_audit_log(&self, memory_id: &MemoryId, limit: usize) -> Result<Vec<localhold::types::AuditEntry>, StoreError> {

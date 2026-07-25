@@ -1478,6 +1478,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         &self,
         principal: &str,
         context_ids: Option<&[ContextId]>,
+        legacy_context_ids_any: Option<&[ContextId]>,
         similarity_threshold: f64,
         limit: usize,
         dry_run: bool,
@@ -1492,7 +1493,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         // Authorization and context applicability are applied before LIMIT so
         // inaccessible rows never consume the bounded candidate budget.
         let candidate_limit = self.consolidation_candidate_limit();
-        let mut memories = store.list_with_embeddings(context_ids, principal, candidate_limit.saturating_add(1)).await?;
+        let mut memories = store
+            .list_with_embeddings(context_ids, legacy_context_ids_any, principal, candidate_limit.saturating_add(1))
+            .await?;
         let capped = memories.len() > candidate_limit;
         memories.truncate(candidate_limit);
         let candidate_count = memories.len();
@@ -3126,28 +3129,28 @@ mod tests {
     #[tokio::test]
     async fn consolidate_rejects_negative_threshold() {
         let engine = make_engine();
-        let err = engine.consolidate_memories("test-agent", None, -0.1_f64, 10, false).await.unwrap_err();
+        let err = engine.consolidate_memories("test-agent", None, None, -0.1_f64, 10, false).await.unwrap_err();
         assert!(matches!(err, EngineError::Validation(_)), "negative threshold should be rejected");
     }
 
     #[tokio::test]
     async fn consolidate_rejects_threshold_above_one() {
         let engine = make_engine();
-        let err = engine.consolidate_memories("test-agent", None, 1.1_f64, 10, false).await.unwrap_err();
+        let err = engine.consolidate_memories("test-agent", None, None, 1.1_f64, 10, false).await.unwrap_err();
         assert!(matches!(err, EngineError::Validation(_)), "threshold > 1.0 should be rejected");
     }
 
     #[tokio::test]
     async fn consolidate_rejects_nan_threshold() {
         let engine = make_engine();
-        let err = engine.consolidate_memories("test-agent", None, f64::NAN, 10, false).await.unwrap_err();
+        let err = engine.consolidate_memories("test-agent", None, None, f64::NAN, 10, false).await.unwrap_err();
         assert!(matches!(err, EngineError::Validation(_)), "NaN threshold should be rejected");
     }
 
     #[tokio::test]
     async fn consolidate_rejects_infinite_threshold() {
         let engine = make_engine();
-        let err = engine.consolidate_memories("test-agent", None, f64::INFINITY, 10, false).await.unwrap_err();
+        let err = engine.consolidate_memories("test-agent", None, None, f64::INFINITY, 10, false).await.unwrap_err();
         assert!(matches!(err, EngineError::Validation(_)), "infinite threshold should be rejected");
     }
 
@@ -3156,14 +3159,14 @@ mod tests {
         let engine = make_engine();
         // With NoopEmbedding, no memories will have embeddings, so no groups will form.
         // The key test is that dry_run=true returns merged=false.
-        let result = engine.consolidate_memories("test-agent", None, 0.9_f64, 10, true).await.unwrap();
+        let result = engine.consolidate_memories("test-agent", None, None, 0.9_f64, 10, true).await.unwrap();
         assert!(!result.merged, "dry_run should produce merged=false");
     }
 
     #[tokio::test]
     async fn consolidate_empty_store_returns_no_groups() {
         let engine = make_engine();
-        let result = engine.consolidate_memories("test-agent", None, 0.9_f64, 10, false).await.unwrap();
+        let result = engine.consolidate_memories("test-agent", None, None, 0.9_f64, 10, false).await.unwrap();
         assert!(result.groups.is_empty(), "empty store should produce no groups");
         assert!(!result.merged, "empty store should not merge");
     }
@@ -3174,7 +3177,7 @@ mod tests {
         let memory = engine.build_memory(test_input("single memory"), engine.now()).unwrap();
         engine.store_memory(memory, None).await.unwrap();
 
-        let result = engine.consolidate_memories("test-agent", None, 0.9_f64, 10, false).await.unwrap();
+        let result = engine.consolidate_memories("test-agent", None, None, 0.9_f64, 10, false).await.unwrap();
         // NoopEmbedding means no embeddings, so list_with_embeddings returns nothing.
         assert!(result.groups.is_empty());
     }
@@ -3182,14 +3185,14 @@ mod tests {
     #[tokio::test]
     async fn consolidate_threshold_boundary_zero_accepts() {
         let engine = make_engine();
-        let result = engine.consolidate_memories("test-agent", None, 0.0_f64, 10, true).await.unwrap();
+        let result = engine.consolidate_memories("test-agent", None, None, 0.0_f64, 10, true).await.unwrap();
         assert!(!result.merged);
     }
 
     #[tokio::test]
     async fn consolidate_threshold_boundary_one_accepts() {
         let engine = make_engine();
-        let result = engine.consolidate_memories("test-agent", None, 1.0_f64, 10, true).await.unwrap();
+        let result = engine.consolidate_memories("test-agent", None, None, 1.0_f64, 10, true).await.unwrap();
         assert!(!result.merged);
     }
 
@@ -3209,7 +3212,7 @@ mod tests {
         let caller_id = store.store(&caller_owned, Some(&emb)).await.unwrap();
         let hidden_id = store.store(&hidden, Some(&emb)).await.unwrap();
 
-        let result = engine.consolidate_memories("caller", None, 0.9, 10, false).await.unwrap();
+        let result = engine.consolidate_memories("caller", None, None, 0.9, 10, false).await.unwrap();
         assert!(result.groups.is_empty(), "non-writable memories should not participate in consolidation");
         assert!(!result.merged);
 
@@ -3235,7 +3238,7 @@ mod tests {
             let _id = store.store(&memory, Some(&embedding)).await.unwrap();
         }
 
-        let result = engine.consolidate_memories("caller", None, 0.9_f64, 10, true).await.unwrap();
+        let result = engine.consolidate_memories("caller", None, None, 0.9_f64, 10, true).await.unwrap();
 
         assert_eq!(result.candidate_count, 1);
         assert!(result.capped);

@@ -1099,8 +1099,10 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                             policy_guidance,
                         ));
                     }
-                    if policy.required && !policy.allowed {
-                        missing_required.push(format!("required kind {} is denied", policy.kind));
+                    if !policy.allowed {
+                        if policy.required {
+                            missing_required.push(format!("required kind {} is denied", policy.kind));
+                        }
                         continue;
                     }
                     if let Some(default_id) = policy.default_context_id {
@@ -1578,17 +1580,23 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         }
         let resolution_principal = principal.unwrap_or(ANONYMOUS_PRINCIPAL);
         let explicit_context_filter = fields.context.is_some() || normalized_scope.is_some() || !normalized_scopes.is_empty();
-        let context_ids = if let Some(envelope) = fields.context.as_ref() {
-            self.resolve_context_selection(resolution_principal, Some(envelope), None, false)
+        let (context_ids, legacy_context_ids_any) = if let Some(envelope) = fields.context.as_ref() {
+            let ids = self
+                .resolve_context_selection(resolution_principal, Some(envelope), None, false)
                 .await
                 .map_err(|_error| crate::error::ValidationError::new("context", "context selection did not resolve uniquely"))?
-                .effective_ids
-        } else if normalized_scope.is_some() || !normalized_scopes.is_empty() {
+                .effective_ids;
+            (Some(ids), None)
+        } else if !normalized_scopes.is_empty() {
             let mut values = normalized_scope.into_iter().collect::<Vec<_>>();
             values.extend(normalized_scopes);
-            self.resolve_admin_legacy_context_ids(resolution_principal, values, expand_legacy_scopes).await?
+            let ids = self.resolve_admin_legacy_context_ids(resolution_principal, values, expand_legacy_scopes).await?;
+            (None, Some(ids))
+        } else if let Some(scope) = normalized_scope {
+            let ids = self.resolve_admin_legacy_context_ids(resolution_principal, vec![scope], expand_legacy_scopes).await?;
+            (Some(ids), None)
         } else {
-            Vec::new()
+            (Some(Vec::new()), None)
         };
         let agent_label = normalize_optional_non_empty("agent_label", fields.agent_label).map_err(EngineError::from)?;
         let origin_scope = normalize_legacy_scope_value("origin_scope", fields.origin_scope).map_err(EngineError::from)?;
@@ -1598,7 +1606,8 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             scope: None,
             origin_scope,
             scopes_any: None,
-            context_ids: Some(context_ids),
+            context_ids,
+            legacy_context_ids_any,
             explicit_context_filter,
             principal: principal.map(ToOwned::to_owned),
             memory_type: fields.memory_type,
@@ -1703,6 +1712,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 .resolve_legacy_context_selection(&principal, &scope_resolution, true)
                 .await
                 .map_err(PrepareRememberError::Tool)?;
+            let scope_resolution = canonicalize_legacy_scope_resolution(scope_resolution, &selection);
             (selection, scope_resolution, true)
         } else {
             let selection = self.resolve_context_selection(&principal, None, None, true).await.map_err(PrepareRememberError::Tool)?;
@@ -2329,6 +2339,15 @@ fn normalize_text_search(text_search: Option<String>) -> Result<Option<String>, 
     Ok(text_search)
 }
 
+/// Replace a legacy caller spelling with the selected context's immutable
+/// canonical key while preserving how the legacy value was resolved.
+fn canonicalize_legacy_scope_resolution(mut resolution: ScopeResolution, selection: &ResolvedContextSelection) -> ScopeResolution {
+    if let Some(primary) = selection.resolution.direct.first() {
+        resolution.scope.clone_from(&primary.key);
+    }
+    resolution
+}
+
 /// Expand one legacy scope key into compatibility ancestors by splitting on `/`.
 ///
 /// For example, `"org/project/conv"` becomes `["org/project/conv", "org/project", "org"]`.
@@ -2430,6 +2449,7 @@ impl TryFrom<&params::CommonFilterFields> for ValidatedFilter {
                 origin_scope,
                 scopes_any,
                 context_ids: fields.context_ids.clone(),
+                legacy_context_ids_any: fields.legacy_context_ids_any.clone(),
                 explicit_context_filter: fields.explicit_context_filter,
                 memory_type: fields.memory_type,
                 include_superseded: fields.include_superseded,
@@ -3128,6 +3148,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 Ok(selection) => selection,
                 Err(error) => return Ok(error),
             };
+            let resolution = canonicalize_legacy_scope_resolution(resolution, &selection);
             if resolution.unresolved_scope {
                 warnings.push(quality_warning(
                     "unresolved_scope",
@@ -3347,6 +3368,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 Ok(selection) => selection,
                 Err(error) => return Ok(error),
             };
+            let resolution = canonicalize_legacy_scope_resolution(resolution, &selection);
             created_legacy_context = selection.created_legacy_context;
             let memory = match self.engine.get_memory(&id, Some(&principal)).await {
                 Ok(memory) => memory,
@@ -3565,6 +3587,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 Ok(selection) => selection,
                 Err(error) => return Ok(error),
             };
+            let resolution = canonicalize_legacy_scope_resolution(resolution, &selection);
             if resolution.unresolved_scope {
                 warnings.push(quality_warning(
                     "unresolved_scope",
@@ -3787,6 +3810,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                         return Ok(error);
                     }
                 };
+                let scope_resolution = canonicalize_legacy_scope_resolution(scope_resolution, &selection);
                 (selection, scope_resolution, true)
             } else {
                 let selection = match self.resolve_context_selection(resolution_principal, None, None, commit).await {
@@ -4147,6 +4171,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let expand_scopes = params.expand_scopes.unwrap_or(true);
         let common = self.common_filter_from_admin(params.filter, Some(&principal), expand_scopes).await?;
         let (mut filter, mut ctx) = validate_and_normalize_filter(&common)?;
+        if !common.explicit_context_filter {
+            filter.context_ids = None;
+        }
         ctx.principal = Some(principal.clone());
         filter.text_search = normalize_text_search(params.text_search)?;
         maybe_expand_scope_hierarchy(&mut filter, expand_scopes).map_err(EngineError::from)?;
@@ -4174,6 +4201,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let expand_scopes = params.expand_scopes.unwrap_or(true);
         let common = self.common_filter_from_admin(params.filter, Some(&principal), expand_scopes).await?;
         let (mut filter, mut ctx) = validate_and_normalize_filter(&common)?;
+        if !common.explicit_context_filter {
+            filter.context_ids = None;
+        }
         ctx.principal = Some(principal.clone());
         filter.text_search = normalize_text_search(params.text_search)?;
         maybe_expand_scope_hierarchy(&mut filter, expand_scopes).map_err(EngineError::from)?;
@@ -4219,34 +4249,34 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 false,
             ));
         }
-        let context_ids = if let Some(envelope) = params.context.as_ref() {
+        let (context_ids, legacy_context_ids_any) = if let Some(envelope) = params.context.as_ref() {
             let selection = match self.resolve_context_selection(&principal, Some(envelope), None, false).await {
                 Ok(selection) => selection,
                 Err(error) => return Ok(error),
             };
-            selection.effective_ids
-        } else {
+            (selection.effective_ids, None)
+        } else if !scopes.is_empty() {
             let mut values = scope.into_iter().collect::<Vec<_>>();
             values.extend(scopes);
-            let mut resolved_ids = Vec::new();
-            for value in values {
-                let resolution = self.resolve_scope(&principal, Some(value), &[]).await?;
-                let selection = match self.resolve_legacy_context_selection(&principal, &resolution, false).await {
-                    Ok(selection) => selection,
-                    Err(error) => return Ok(error),
-                };
-                for id in selection.effective_ids {
-                    if !resolved_ids.contains(&id) {
-                        resolved_ids.push(id);
-                    }
-                }
-            }
-            resolved_ids
+            let ids = self.resolve_admin_legacy_context_ids(&principal, values, false).await?;
+            (Vec::new(), Some(ids))
+        } else if let Some(scope) = scope {
+            let ids = self.resolve_admin_legacy_context_ids(&principal, vec![scope], false).await?;
+            (ids, None)
+        } else {
+            (Vec::new(), None)
         };
 
         let result = self
             .engine
-            .consolidate_memories(&principal, Some(context_ids.as_slice()), params.similarity_threshold, params.limit, params.dry_run)
+            .consolidate_memories(
+                &principal,
+                Some(context_ids.as_slice()),
+                legacy_context_ids_any.as_deref(),
+                params.similarity_threshold,
+                params.limit,
+                params.dry_run,
+            )
             .await?;
 
         let mut operation = operation_summary(

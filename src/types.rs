@@ -1204,10 +1204,14 @@ pub struct MemoryFilter {
     ///
     /// `Some([])` is an intentionally broad governed search that still
     /// excludes contextless memories. A non-empty set applies the cross-kind
-    /// AND / same-kind OR membership rule. `None` is reserved for legacy
-    /// internal callers that have not opted into governed filtering.
+    /// AND / same-kind OR membership rule. `None` includes contextless rows
+    /// for internal authorized maintenance paths.
     #[serde(skip)]
     pub context_ids: Option<Vec<crate::context::ContextId>>,
+    /// Canonical context memberships accepted with any-match semantics for
+    /// the legacy `scopes` compatibility adapter.
+    #[serde(skip)]
+    pub legacy_context_ids_any: Option<Vec<crate::context::ContextId>>,
     /// Whether context selection was explicitly supplied by the caller.
     ///
     /// This is an internal redaction-oracle guard: explicit context filters

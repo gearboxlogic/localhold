@@ -618,11 +618,37 @@ pub struct AdminReassignScopeParams {
     pub(crate) deprecated_origin_conversation: Option<serde_json::Value>,
 }
 
+/// Reach of an expired-memory cleanup request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AdminCleanupExpiredMode {
+    /// Delete only expired memories the server-resolved principal may write.
+    #[default]
+    Authorized,
+    /// Delete every expired memory from a local authenticated stdio instance.
+    All,
+}
+
+impl AdminCleanupExpiredMode {
+    /// Stable wire name used in diagnostic records.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Authorized => "authorized",
+            Self::All => "all",
+        }
+    }
+}
+
 /// Parameters for admin expired-memory cleanup.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[non_exhaustive]
-#[expect(clippy::empty_structs_with_brackets, reason = "MCP params schema must remain an empty JSON object")]
-pub struct AdminCleanupExpiredParams {}
+pub struct AdminCleanupExpiredParams {
+    /// Cleanup reach. Defaults to policy-authorized memories only.
+    #[serde(default)]
+    pub mode: AdminCleanupExpiredMode,
+}
 
 /// Parameters for admin aggregate memory counts.
 #[derive(Debug, Deserialize, JsonSchema)]

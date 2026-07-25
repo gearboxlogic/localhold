@@ -122,12 +122,15 @@ Deleting a memory removes its active content, metadata, entities, and embedding
 rows and retains a minimal tombstone so later audit-history reads can still be
 authorized. TTL expiry alone only hides a memory from ordinary reads and
 searches; the content and derived data remain stored until an enabled
-`admin_cleanup_expired` operation removes expired rows. That whole-store cleanup
-requires a write-capable principal, but it does not apply each memory's policy.
-Every cleanup deletion records the server-resolved principal in its tombstone
-and a transactional per-memory delete audit row. Audit rows and tombstones have
-no automatic retention limit. Supersession is not deletion: the older memory
-remains stored and can be requested explicitly.
+`admin_cleanup_expired` operation removes expired rows. Its default
+`authorized` mode deletes only memories the server-resolved principal may
+write; inaccessible rows are neither deleted nor counted. Explicit `all` mode
+is whole-store retention maintenance restricted to an authenticated local
+stdio instance. Every cleanup deletion records the server-resolved principal
+in its tombstone and records the principal plus cleanup mode in a transactional
+per-memory delete audit row.
+Audit rows and tombstones have no automatic retention limit. Supersession is
+not deletion: the older memory remains stored and can be requested explicitly.
 
 Database deletion is not secure erasure. Deleted values can remain in SQLite
 free pages or WAL, PostgreSQL MVCC/WAL and replicas, snapshots, logs, and older
@@ -295,8 +298,8 @@ agents cannot reach. Capabilities have different authorization scopes:
 | Policy-filtered reads | `admin_list`, `admin_history` | Return only memories or history visible to the server-resolved principal. Redacted history omits principal and details. |
 | Mixed-scope statistics | `admin_count` | Memory breakdowns are policy-filtered, but expired-row count and physical database size are store-wide diagnostics. |
 | Global scope registry | `admin_scope_list`, `admin_scope_register` | Listing returns every registered scope to a read-allowed caller. Registration requires a write-capable principal but can replace any scope definition; scopes have no per-scope owner policy. |
-| Policy-checked memory changes | `admin_bulk_update`, `admin_bulk_delete`, `admin_reassign_scope`, `admin_consolidate`, `admin_reembed` | Require a write-capable principal and check write access for affected memories. Bulk re-embedding applies authorization before its limit, leaves inaccessible rows unclaimed, and does not report their count. Shared ANN candidate work can still be influenced by other rows. |
-| Whole-store expiry cleanup | `admin_cleanup_expired` | Requires a write-capable principal and records it in a tombstone and transactional delete audit row for every removed memory, but still deletes all expired rows without per-memory policy checks. |
+| Policy-checked memory changes | `admin_bulk_update`, `admin_bulk_delete`, `admin_reassign_scope`, `admin_consolidate`, `admin_reembed`, default `admin_cleanup_expired` | Require a write-capable principal and check write access for affected memories. Bulk re-embedding applies authorization before its limit, leaves inaccessible rows unclaimed, and does not report their count. Authorized expiry cleanup likewise neither deletes nor counts inaccessible rows. Shared ANN candidate work can still be influenced by other rows. |
+| Whole-store expiry cleanup | `admin_cleanup_expired` with `mode = "all"` | Restricted to an authenticated local stdio context. Records the maintenance principal in each tombstone and the principal plus cleanup mode in a transactional delete audit row for every removed memory. |
 | Whole-store metadata maintenance | `admin_migration_report`, `admin_migrate_metadata` | Restricted to a local, authenticated stdio context. Reporting exposes whole-store state; migration can add metadata across the store. |
 
 Automatic startup and provider-recovery re-embedding remains process-owned,
@@ -409,7 +412,7 @@ responsibility to protect the surrounding network and storage.
 | Compromised release artifact or checksum manifest | Release downloads include a checksum manifest | Archives and checksums share one GitHub publication boundary and are not independently signed or attested. Pin reviewed source and use a trusted build pipeline when provenance requirements exceed that boundary. |
 | Duplicate or stale embedding work | Durable claims and revision-checked vector writes | Expired claims can produce duplicate disclosure/cost. Coordinate process counts and provider limits. |
 | Overprivileged PostgreSQL runtime credential | `auto_migrate = false` supports a current schema under runtime-only table and sequence grants | The default `auto_migrate = true` uses the runtime URL for DDL and requires table ownership. Separate migration and runtime credentials operationally and disable runtime auto-migration. |
-| Destructive admin misuse | Admin routes are disabled by default; memory mutations, including bulk re-embedding, apply per-memory authorization; destructive writes use transactional audit behavior where defined | There is no separate admin role. Scope registry, expiry cleanup, statistics, and metadata migration still have global or mixed reach. Isolate maintenance instances and back up first. |
+| Destructive admin misuse | Admin routes are disabled by default; memory mutations, including bulk re-embedding and default expiry cleanup, apply per-memory authorization; destructive writes use transactional audit behavior where defined; whole-store expiry cleanup requires local authenticated stdio | There is no separate admin role. Scope registry, statistics, metadata migration, and explicitly selected local maintenance still have global or mixed reach. Isolate maintenance instances and back up first. |
 
 ## Secure Deployment Checklist
 

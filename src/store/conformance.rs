@@ -302,6 +302,7 @@ where
     assert_eq!(store.get_metadata(&id).await.unwrap(), Some(metadata));
 
     assert_reembed_claim_contract(store, embedding_dimensions, &case, base).await;
+    assert_expired_cleanup_contract(store, &case, base).await;
 
     let update = MemoryUpdate {
         content: Some(format!("updated content {case}")),
@@ -691,14 +692,14 @@ where
     assert_eq!(tombstone.deleted_by_principal.as_deref(), Some(OWNER));
 }
 
-struct ReembedPolicyCase {
+struct WritePolicyCase {
     name: &'static str,
     source_agent: Option<&'static str>,
     access_policy: AccessPolicy,
     authorized: bool,
 }
 
-impl ReembedPolicyCase {
+impl WritePolicyCase {
     fn new(name: &'static str, source_agent: Option<&'static str>, access_policy: AccessPolicy, authorized: bool) -> Self {
         Self {
             name,
@@ -709,20 +710,20 @@ impl ReembedPolicyCase {
     }
 }
 
-fn reembed_policy_cases() -> [ReembedPolicyCase; 9] {
+fn write_policy_cases() -> [WritePolicyCase; 9] {
     [
-        ReembedPolicyCase::new("public-non-owner", Some(VIEWER), AccessPolicy::Public, false),
-        ReembedPolicyCase::new("public-owner", Some(OWNER), AccessPolicy::Public, true),
-        ReembedPolicyCase::new("public-ownerless", None, AccessPolicy::Public, true),
-        ReembedPolicyCase::new("restricted-owner", Some(OWNER), AccessPolicy::Restricted { allowed: Vec::new() }, true),
-        ReembedPolicyCase::new(
+        WritePolicyCase::new("public-non-owner", Some(VIEWER), AccessPolicy::Public, false),
+        WritePolicyCase::new("public-owner", Some(OWNER), AccessPolicy::Public, true),
+        WritePolicyCase::new("public-ownerless", None, AccessPolicy::Public, true),
+        WritePolicyCase::new("restricted-owner", Some(OWNER), AccessPolicy::Restricted { allowed: Vec::new() }, true),
+        WritePolicyCase::new(
             "restricted-allowlisted-non-owner",
             Some(VIEWER),
             AccessPolicy::Restricted { allowed: vec![OWNER.into()] },
             true,
         ),
-        ReembedPolicyCase::new("restricted-denied", Some(VIEWER), AccessPolicy::Restricted { allowed: vec![ALLOWED.into()] }, false),
-        ReembedPolicyCase::new(
+        WritePolicyCase::new("restricted-denied", Some(VIEWER), AccessPolicy::Restricted { allowed: vec![ALLOWED.into()] }, false),
+        WritePolicyCase::new(
             "redacted-owner",
             Some(OWNER),
             AccessPolicy::Redacted {
@@ -730,7 +731,7 @@ fn reembed_policy_cases() -> [ReembedPolicyCase; 9] {
             },
             true,
         ),
-        ReembedPolicyCase::new(
+        WritePolicyCase::new(
             "redacted-non-owner",
             Some(VIEWER),
             AccessPolicy::Redacted {
@@ -738,7 +739,7 @@ fn reembed_policy_cases() -> [ReembedPolicyCase; 9] {
             },
             false,
         ),
-        ReembedPolicyCase::new(
+        WritePolicyCase::new(
             "redacted-ownerless",
             None,
             AccessPolicy::Redacted {
@@ -753,7 +754,7 @@ async fn assert_reembed_claim_contract<S>(store: &S, embedding_dimensions: usize
 where
     S: MemoryStore,
 {
-    let policy_cases = reembed_policy_cases();
+    let policy_cases = write_policy_cases();
     let mut expected_authorized = BTreeSet::new();
     let mut expected_recovery = BTreeSet::new();
     let mut all_ids = Vec::with_capacity(policy_cases.len());
@@ -807,6 +808,154 @@ where
             .unwrap()
     );
     assert_eq!(store.fetch_embeddings_for_ids(&all_ids).await.unwrap().len(), all_ids.len());
+}
+
+async fn assert_expired_cleanup_contract<S>(store: &S, case: &str, base: DateTime<Utc>)
+where
+    S: MemoryStore,
+{
+    let mut expired_cases = Vec::with_capacity(write_policy_cases().len());
+    for (offset, policy_case) in write_policy_cases().into_iter().enumerate() {
+        let offset = i64::try_from(offset).unwrap();
+        let mut expired = memory(MemorySpec {
+            content: format!("expired cleanup {} {case}", policy_case.name),
+            tags: vec![format!("contract-{case}"), "expired-cleanup-policy".into()],
+            source_agent: OWNER,
+            scope: format!("contract/cleanup/{case}"),
+            origin: format!("contract/cleanup-origin/{case}"),
+            access_policy: policy_case.access_policy,
+            created_at: time_after(base, 30_i64.saturating_add(offset)),
+        });
+        expired.provenance.source_agent = policy_case.source_agent.map(str::to_owned);
+        expired.expires_at = Some(time_after(base, 60_i64.saturating_add(offset)));
+        assert_eq!(expired.has_write_access(OWNER), policy_case.authorized, "invalid {} cleanup fixture", policy_case.name);
+        let id = store.store(&expired, None).await.unwrap();
+        expired_cases.push((id, policy_case.authorized));
+    }
+
+    let durable = memory(MemorySpec {
+        content: format!("durable cleanup control {case}"),
+        tags: vec![format!("contract-{case}"), "expired-cleanup-control".into()],
+        source_agent: OWNER,
+        scope: format!("contract/cleanup/{case}"),
+        origin: format!("contract/cleanup-origin/{case}"),
+        access_policy: AccessPolicy::Public,
+        created_at: time_after(base, 70),
+    });
+    let durable_id = store.store(&durable, None).await.unwrap();
+
+    let authorized_audit = AuditDraft {
+        action: AuditAction::Delete,
+        caller_agent: Some(OWNER.into()),
+        timestamp: time_after(base, 80),
+        details: Some(json!({"mode": "authorized", "reason": "expired"})),
+    };
+    let expected_authorized = expired_cases.iter().filter(|case| case.1).count();
+    assert_eq!(store.evict_expired(OWNER, &authorized_audit).await.unwrap(), u64::try_from(expected_authorized).unwrap());
+    assert_authorized_cleanup_records(store, &expired_cases, &authorized_audit).await;
+    assert_eq!(store.evict_expired(OWNER, &authorized_audit).await.unwrap(), 0);
+
+    let all_audit = AuditDraft {
+        action: AuditAction::Delete,
+        caller_agent: Some(OWNER.into()),
+        timestamp: time_after(base, 81),
+        details: Some(json!({"mode": "all", "reason": "expired"})),
+    };
+    let expected_all = expired_cases.iter().filter(|case| !case.1).count();
+    assert_eq!(store.evict_expired_all(OWNER, &all_audit).await.unwrap(), u64::try_from(expected_all).unwrap());
+    assert_whole_store_cleanup_records(store, &expired_cases, &all_audit).await;
+    assert!(store.get(&durable_id, Some(OWNER)).await.unwrap().is_some());
+    assert!(store.get_tombstone(&durable_id).await.unwrap().is_none());
+    assert_direct_whole_store_cleanup_contract(store, case, base).await;
+}
+
+async fn assert_authorized_cleanup_records<S>(store: &S, expired_cases: &[(MemoryId, bool)], audit: &AuditDraft)
+where
+    S: MemoryStore,
+{
+    for (id, authorized) in expired_cases {
+        let tombstone = store.get_tombstone(id).await.unwrap();
+        let history = store.query_audit_log(id, 10).await.unwrap();
+        if *authorized {
+            assert_cleanup_deletion_record(tombstone.as_ref(), &history, audit, "authorized cleanup");
+        } else {
+            assert!(tombstone.is_none(), "denied cleanup row must remain active");
+            assert!(history.is_empty(), "denied cleanup row must not receive an audit entry");
+        }
+    }
+}
+
+async fn assert_whole_store_cleanup_records<S>(store: &S, expired_cases: &[(MemoryId, bool)], audit: &AuditDraft)
+where
+    S: MemoryStore,
+{
+    for (id, authorized) in expired_cases {
+        if *authorized {
+            continue;
+        }
+        let tombstone = store.get_tombstone(id).await.unwrap();
+        let history = store.query_audit_log(id, 10).await.unwrap();
+        assert_cleanup_deletion_record(tombstone.as_ref(), &history, audit, "whole-store cleanup");
+    }
+}
+
+async fn assert_direct_whole_store_cleanup_contract<S>(store: &S, case: &str, base: DateTime<Utc>)
+where
+    S: MemoryStore,
+{
+    let direct_cases = [
+        ("authorized", Some(OWNER), AccessPolicy::Public, true),
+        (
+            "denied",
+            Some(VIEWER),
+            AccessPolicy::Redacted {
+                visible_fields: vec![RedactableField::Content],
+            },
+            false,
+        ),
+    ];
+    let mut ids = Vec::with_capacity(direct_cases.len());
+    for (offset, (name, source_agent, access_policy, authorized)) in direct_cases.into_iter().enumerate() {
+        let offset = i64::try_from(offset).unwrap();
+        let mut expired = memory(MemorySpec {
+            content: format!("direct whole-store cleanup {name} {case}"),
+            tags: vec![format!("contract-{case}"), "direct-expired-cleanup".into()],
+            source_agent: OWNER,
+            scope: format!("contract/direct-cleanup/{case}"),
+            origin: format!("contract/direct-cleanup-origin/{case}"),
+            access_policy,
+            created_at: time_after(base, 90_i64.saturating_add(offset)),
+        });
+        expired.provenance.source_agent = source_agent.map(str::to_owned);
+        expired.expires_at = Some(time_after(base, 100_i64.saturating_add(offset)));
+        assert_eq!(expired.has_write_access(OWNER), authorized, "invalid direct whole-store {name} fixture");
+        ids.push(store.store(&expired, None).await.unwrap());
+    }
+
+    let audit = AuditDraft {
+        action: AuditAction::Delete,
+        caller_agent: Some(OWNER.into()),
+        timestamp: time_after(base, 110),
+        details: Some(json!({"mode": "all", "reason": "expired"})),
+    };
+    assert_eq!(store.evict_expired_all(OWNER, &audit).await.unwrap(), u64::try_from(ids.len()).unwrap());
+    for id in ids {
+        let tombstone = store.get_tombstone(&id).await.unwrap();
+        let history = store.query_audit_log(&id, 10).await.unwrap();
+        assert_cleanup_deletion_record(tombstone.as_ref(), &history, &audit, "direct whole-store cleanup");
+    }
+}
+
+fn assert_cleanup_deletion_record(tombstone: Option<&crate::types::MemoryTombstone>, history: &[crate::types::AuditEntry], audit: &AuditDraft, operation: &str) {
+    assert_eq!(
+        tombstone.and_then(|row| row.deleted_by_principal.as_deref()),
+        Some(OWNER),
+        "{operation} must create an attributed tombstone"
+    );
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].action, AuditAction::Delete);
+    assert_eq!(history[0].caller_agent.as_deref(), Some(OWNER));
+    assert_eq!(history[0].details.as_ref(), audit.details.as_ref());
 }
 
 /// Exercise invalid vector values consistently across every backend entry point.

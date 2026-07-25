@@ -956,6 +956,10 @@ impl MemoryAdmin for SqliteStore {
         self.evict_expired_impl(principal, audit).await
     }
 
+    async fn evict_expired_all(&self, principal: &str, audit: &AuditDraft) -> Result<u64, StoreError> {
+        self.evict_expired_all_impl(principal, audit).await
+    }
+
     async fn reassign_scope(&self, from_scope: &str, to_scope: &str, origin_conversation: Option<&str>, principal: &str) -> Result<super::ReassignScopeOutcome, StoreError> {
         self.reassign_scope_impl(from_scope, to_scope, origin_conversation, principal).await
     }
@@ -2643,10 +2647,11 @@ mod tests {
             action: AuditAction::Delete,
             caller_agent: Some("cleanup-agent".into()),
             timestamp: now,
-            details: Some(serde_json::json!({"reason": "expired"})),
+            details: Some(serde_json::json!({"mode": "authorized", "reason": "expired"})),
         };
 
         let mut expired = make_memory("expired", &[], now);
+        expired.provenance.source_agent = Some("cleanup-agent".into());
         expired.expires_at = Some(now - chrono::Duration::seconds(1));
         let expired_id = store.store(&expired, None).await.unwrap();
 
@@ -2665,7 +2670,7 @@ mod tests {
         assert_eq!(history.len(), 1_usize);
         assert_eq!(history[0].action, AuditAction::Delete);
         assert_eq!(history[0].caller_agent.as_deref(), Some("cleanup-agent"));
-        assert_eq!(history[0].details, Some(serde_json::json!({"reason": "expired"})));
+        assert_eq!(history[0].details, Some(serde_json::json!({"mode": "authorized", "reason": "expired"})));
 
         let deleted_again = store.evict_expired("cleanup-agent", &audit).await.unwrap();
         assert_eq!(deleted_again, 0);
@@ -2678,6 +2683,7 @@ mod tests {
         let store = SqliteStore::in_memory_with_clock(Arc::clone(&clock)).unwrap();
         let now = clock.now();
         let mut expired = make_memory("expired audit rollback", &[], now);
+        expired.provenance.source_agent = Some("cleanup-agent".into());
         expired.expires_at = Some(now - chrono::Duration::seconds(1));
         let expired_id = store.store(&expired, None).await.unwrap();
         drop_table(&store, "memory_audit_log").await;
@@ -2685,7 +2691,7 @@ mod tests {
             action: AuditAction::Delete,
             caller_agent: Some("cleanup-agent".into()),
             timestamp: now,
-            details: Some(serde_json::json!({"reason": "expired"})),
+            details: Some(serde_json::json!({"mode": "authorized", "reason": "expired"})),
         };
 
         let error = store.evict_expired("cleanup-agent", &audit).await.unwrap_err();

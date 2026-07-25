@@ -39,6 +39,9 @@ change crosses transport, storage, authorization, embedding, or reranking
 boundaries. Windows is validated by GitHub Actions and is currently preview
 support. State any validation that could not be run.
 
+When using Claude Opus for local adversarial review, invoke the Claude CLI with
+`--effort high`. Do not use `--effort max`.
+
 ## Documentation
 
 Documentation in this repository must serve a current user, operator, or

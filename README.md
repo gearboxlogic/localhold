@@ -1,6 +1,7 @@
 <img src="assets/brand/banner.svg" alt="LocalHold — searchable context that stays yours" width="100%">
 
 [![CI](https://github.com/gearboxlogic/localhold/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/gearboxlogic/localhold/actions/workflows/ci.yml)
+[![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/gearboxlogic/localhold?utm_source=oss&utm_medium=github&utm_campaign=gearboxlogic%2Flocalhold&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)](https://coderabbit.ai)
 [![Release](https://img.shields.io/github/v/release/gearboxlogic/localhold?color=C89B3C&label=release)](https://github.com/gearboxlogic/localhold/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-1F3A5F)](LICENSE)
 

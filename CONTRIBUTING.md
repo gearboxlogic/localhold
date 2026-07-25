@@ -74,13 +74,16 @@ Windows support is preview and is validated in GitHub Actions.
 - Run `just check`, or state exactly which checks could not be run.
 - Greptile reviews a pull request only once, as its initial review. Do not
   re-invoke Greptile after subsequent pushes.
+- CodeRabbit is a required merge gate. Wait for its review of the latest commit
+  and address any actionable findings.
 - Every push receives a fresh Codex review. Address actionable findings and
   wait for Codex approval of the latest commit. If review does not start,
   comment `@codex` on the pull request to request it.
 - Reply to each review comment with the applied fix or the rationale for not
   changing it, then resolve the review thread.
-- Merge only when required CI is green, the initial Greptile review has no
-  outstanding actionable findings, and Codex has approved the latest commit.
+- Merge only when required CI is green, the initial Greptile and latest-commit
+  CodeRabbit reviews have no outstanding actionable findings, and Codex has
+  approved the latest commit.
 - Preserve compatibility unless the change is explicitly approved as breaking.
 
 See [AGENTS.md](AGENTS.md) for additional guidance used by automated coding

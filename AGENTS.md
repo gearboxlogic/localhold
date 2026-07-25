@@ -55,6 +55,8 @@ policy documentation.
   Never default to draft status.
 - Greptile reviews a pull request only once, as its initial review. Do not
   re-invoke or nudge Greptile after subsequent pushes.
+- CodeRabbit is a required merge gate. Its review must cover the latest head
+  commit and have no outstanding actionable findings.
 - Every push requires a new Codex review for the resulting head commit. An eyes
   reaction from Codex means review is in progress; a thumbs-up reaction means
   that head commit is approved.
@@ -68,9 +70,9 @@ policy documentation.
   summarize the fix and validation in the reply. When intentionally not
   addressed, explain the technical rationale in the reply. Resolve the thread
   after posting either response.
-- Merge only when all required CI checks are green, the initial Greptile review
-  has no outstanding actionable findings, and Codex has given the latest head
-  commit a thumbs-up.
+- Merge only when all required CI checks are green, the initial Greptile and
+  latest-head CodeRabbit reviews have no outstanding actionable findings, and
+  Codex has given the latest head commit a thumbs-up.
 
 ## Definition Of Done
 
@@ -79,5 +81,6 @@ policy documentation.
 - Required checks pass, or the exact gap is reported.
 - The diff contains no generated output, secrets, personal paths, or unrelated
   files.
-- Required CI is green, the initial Greptile review has no outstanding
-  actionable findings, and Codex has approved the latest head commit.
+- Required CI is green, the initial Greptile and latest-head CodeRabbit reviews
+  have no outstanding actionable findings, and Codex has approved the latest
+  head commit.

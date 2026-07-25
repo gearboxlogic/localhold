@@ -19,6 +19,7 @@ use crate::{
     clock::{Clock, SystemClock},
     config::{LimitsConfig, SearchConfig},
     consolidation::{NeighborPair, cosine_to_l2_threshold, find_duplicate_groups_from_pairs, l2_to_cosine},
+    context::{ContextAuditDraft, ContextId},
     embedding::{EmbeddingProvider, limited::ConcurrencyLimitedEmbedding, orchestrator::EmbeddingOrchestrator},
     error::{EngineError, ValidationError},
     scoring::{apply_composite_scoring, seed_retrieval_scores},
@@ -305,8 +306,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         &self.search_config
     }
 
-    /// Borrow the underlying store (needed by server for legacy-row seeding in tests).
-    #[cfg(any(test, feature = "testing"))]
+    /// Borrow the underlying store for context governance and test support.
     #[must_use]
     pub const fn store(&self) -> &S {
         self.orchestrator.store()
@@ -456,6 +456,36 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
             .await?;
 
         Ok(id)
+    }
+
+    /// Store a memory, metadata, and governed memberships atomically, then
+    /// spawn embedding work.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, persistence, or shutdown error when the atomic
+    /// write or embedding admission cannot complete.
+    pub async fn store_memory_with_metadata_contexts(
+        &self,
+        memory: Memory,
+        supersedes: Option<&MemoryId>,
+        metadata: &MemoryMetadata,
+        context_ids: &[ContextId],
+    ) -> Result<MemoryId, EngineError> {
+        let principal = memory.provenance.source_agent.clone();
+        let actor = principal.clone().unwrap_or_default();
+        let embed_admission = self.orchestrator.begin_embed_admission()?;
+        let audit = self.audit_draft(AuditAction::Store, principal, supersedes.map(|id| serde_json::json!({ "supersedes": id.to_string() })));
+        let context_audit = ContextAuditDraft {
+            actor_principal: actor,
+            action: "memory_contexts_initialized".to_owned(),
+            context_id: None,
+            memory_id: Some(memory.id),
+            details: Some(serde_json::json!({ "context_ids": context_ids })),
+        };
+        self.orchestrator
+            .store_and_embed_with_metadata_contexts(&embed_admission, memory, supersedes, metadata, context_ids, &audit, &context_audit)
+            .await
     }
 
     /// Search memories using the requested search mode, with automatic hybrid
@@ -850,6 +880,52 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         Ok(outcome)
     }
 
+    /// Atomically update a memory, metadata, and optional complete governed
+    /// membership set, then re-embed replacement content.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, authorization, persistence, or shutdown error.
+    #[expect(clippy::too_many_arguments, reason = "governed update combines memory, metadata, membership, and principal inputs")]
+    pub async fn update_memory_with_metadata_contexts(
+        &self,
+        id: MemoryId,
+        mut update: MemoryUpdate,
+        metadata_patch: Option<MetadataPatch>,
+        context_ids: Option<Vec<ContextId>>,
+        principal: &str,
+    ) -> Result<AuthorizedUpdateOutcome, EngineError> {
+        let embed_admission = update.content.as_ref().map(|_| self.orchestrator.begin_embed_admission()).transpose()?;
+        self.prepare_update(&mut update)?;
+        let audit = self.audit_draft(
+            AuditAction::Update,
+            Some(principal.to_owned()),
+            Some(serde_json::json!({
+                "metadata": metadata_patch.is_some(),
+                "contexts_replaced": context_ids.is_some()
+            })),
+        );
+        let context_audit = context_ids.as_ref().map(|ids| ContextAuditDraft {
+            actor_principal: principal.to_owned(),
+            action: "memory_contexts_replaced".to_owned(),
+            context_id: None,
+            memory_id: Some(id),
+            details: Some(serde_json::json!({ "context_ids": ids })),
+        });
+        self.orchestrator
+            .update_with_metadata_contexts_and_maybe_reembed(
+                embed_admission.as_ref(),
+                id,
+                &update,
+                metadata_patch.as_ref(),
+                context_ids.as_deref(),
+                principal,
+                &audit,
+                context_audit.as_ref(),
+            )
+            .await
+    }
+
     /// Revise a memory loaded at `expected_revision`, obtained from
     /// [`Memory::optimistic_revision`].
     ///
@@ -879,6 +955,66 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
             .orchestrator
             .store()
             .update_authorized_if_unmodified_with_metadata_audited(&id, expected_revision, &update, metadata_patch.as_ref(), None, principal, &audit)
+            .await?;
+        if let (Some(content), Some(revision), Some(admission)) = (new_content, outcome.reembed_revision, embed_admission.as_ref()) {
+            let _queued = self.orchestrator.spawn_embed_task_or_run_inline(admission, id, content, revision).await;
+        }
+        Ok(outcome)
+    }
+
+    /// Optimistically revise fields, metadata, and the complete direct context
+    /// membership set in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, authorization, revision-conflict, persistence, or
+    /// shutdown error.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "interactive governed revise needs identity, revision, fields, metadata, memberships, and principal"
+    )]
+    pub async fn update_memory_if_unmodified_with_metadata_contexts(
+        &self,
+        id: MemoryId,
+        expected_revision: i64,
+        mut update: MemoryUpdate,
+        metadata_patch: Option<MetadataPatch>,
+        context_ids: Option<Vec<ContextId>>,
+        principal: &str,
+    ) -> Result<AuthorizedUpdateOutcome, EngineError> {
+        let new_content = update.content.clone();
+        let embed_admission = new_content.as_ref().map(|_| self.orchestrator.begin_embed_admission()).transpose()?;
+        self.prepare_update(&mut update)?;
+        let audit = self.audit_draft(
+            AuditAction::Update,
+            Some(principal.to_owned()),
+            Some(serde_json::json!({
+                "metadata": metadata_patch.is_some(),
+                "contexts_replaced": context_ids.is_some(),
+                "interactive": true
+            })),
+        );
+        let context_audit = context_ids.as_ref().map(|ids| ContextAuditDraft {
+            actor_principal: principal.into(),
+            action: "memory_contexts_replaced".into(),
+            context_id: None,
+            memory_id: Some(id),
+            details: Some(serde_json::json!({"context_ids": ids})),
+        });
+        let outcome = self
+            .orchestrator
+            .store()
+            .update_authorized_if_unmodified_with_metadata_contexts_audited(
+                &id,
+                expected_revision,
+                &update,
+                metadata_patch.as_ref(),
+                context_ids.as_deref(),
+                None,
+                principal,
+                &audit,
+                context_audit.as_ref(),
+            )
             .await?;
         if let (Some(content), Some(revision), Some(admission)) = (new_content, outcome.reembed_revision, embed_admission.as_ref()) {
             let _queued = self.orchestrator.spawn_embed_task_or_run_inline(admission, id, content, revision).await;
@@ -1020,6 +1156,25 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         Ok(self.orchestrator.store().list_scopes().await?)
     }
 
+    /// Register or replace a private custom context through the legacy scope
+    /// compatibility surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Store` on persistence-layer failure.
+    pub async fn register_scope_for_principal(&self, scope: ScopeDefinition, principal: &str) -> Result<(), EngineError> {
+        Ok(self.orchestrator.store().register_scope_for_principal(scope, principal).await?)
+    }
+
+    /// List legacy compatibility definitions visible to one principal.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Store` on persistence-layer failure.
+    pub async fn list_scopes_for_principal(&self, principal: &str) -> Result<Vec<ScopeDefinition>, EngineError> {
+        Ok(self.orchestrator.store().list_scopes_for_principal(principal).await?)
+    }
+
     /// Upsert non-destructive metadata for an existing memory.
     ///
     /// # Errors
@@ -1135,6 +1290,50 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
             .await?;
 
         Ok(ids)
+    }
+
+    /// Store multiple memories, metadata, and governed memberships atomically,
+    /// then spawn embedding tasks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when companion arrays are misaligned, persistence
+    /// fails, or embedding work cannot be admitted.
+    pub async fn batch_store_with_metadata_contexts(
+        &self,
+        memories: Vec<Memory>,
+        supersedes_list: Vec<Option<MemoryId>>,
+        metadata: Vec<MemoryMetadata>,
+        context_ids: Vec<Vec<ContextId>>,
+    ) -> Result<Vec<MemoryId>, EngineError> {
+        Self::validate_batch_companion_len("supersedes", "supersedes list", supersedes_list.len(), memories.len())?;
+        Self::validate_batch_companion_len("metadata", "metadata", metadata.len(), memories.len())?;
+        Self::validate_batch_companion_len("context", "context membership sets", context_ids.len(), memories.len())?;
+        let embed_admission = self.orchestrator.begin_embed_admission()?;
+        let audits = self.batch_store_audits(&memories, &supersedes_list);
+        let context_audits = memories
+            .iter()
+            .zip(&context_ids)
+            .map(|(memory, ids)| ContextAuditDraft {
+                actor_principal: memory.provenance.source_agent.clone().unwrap_or_default(),
+                action: "memory_contexts_initialized".to_owned(),
+                context_id: None,
+                memory_id: Some(memory.id),
+                details: Some(serde_json::json!({ "context_ids": ids })),
+            })
+            .collect::<Vec<_>>();
+        self.orchestrator
+            .batch_store_and_embed_with_metadata_contexts(
+                &embed_admission,
+                memories,
+                &supersedes_list,
+                &metadata,
+                &context_ids,
+                &audits,
+                &context_audits,
+                self.limits.max_batch_size,
+            )
+            .await
     }
 
     /// Re-embed one or more memories. Checks embedding provider health first.
@@ -1254,7 +1453,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
     pub(crate) async fn consolidate_memories(
         &self,
         principal: &str,
-        scopes_any: Option<&[String]>,
+        context_ids: Option<&[ContextId]>,
         similarity_threshold: f64,
         limit: usize,
         dry_run: bool,
@@ -1269,7 +1468,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         // Fetch all non-superseded memories with embeddings. BFS is O(n log n),
         // so we use a very high limit instead of the old quadratic-constrained cap.
         let memories: Vec<_> = store
-            .list_with_embeddings(scopes_any, Self::MAX_CONSOLIDATION_FETCH)
+            .list_with_embeddings(context_ids, Self::MAX_CONSOLIDATION_FETCH)
             .await?
             .into_iter()
             .filter(|memory| memory.memory.has_write_access(principal))

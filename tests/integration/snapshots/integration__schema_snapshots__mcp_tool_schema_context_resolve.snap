@@ -3,8 +3,8 @@ source: tests/integration/schema_snapshots.rs
 expression: tool
 ---
 {
-  "name": "admin_consolidate",
-  "description": "Write/admin: find near-duplicate memories using the server-resolved principal. dry_run=true previews; dry_run=false merges by superseding duplicates.",
+  "name": "context_resolve",
+  "description": "Resolve governed context IDs, keys, typed identities, aliases, natural-language queries, and weak hints. An empty query returns a paginated authorized context catalog.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$defs": {
@@ -122,37 +122,32 @@ expression: tool
     },
     "properties": {
       "context": {
-        "description": "Governed multi-context selection. Omission means a broad authorized\nscan of contexted memories.",
-        "$ref": "#/$defs/ContextEnvelope"
-      },
-      "scope": {
-        "description": "Optional scope filter: registered scope key, alias, or value containing a registered matcher.",
-        "type": "string"
-      },
-      "scopes": {
-        "description": "Optional any-match scope filter: scope keys, aliases, or matcher-containing values.",
-        "type": "array",
-        "items": {
-          "type": "string"
+        "description": "Shared context-selection envelope.",
+        "$ref": "#/$defs/ContextEnvelope",
+        "default": {
+          "refs": [],
+          "hints": [],
+          "include_descendants": false,
+          "allow_unresolved": false
         }
       },
-      "similarity_threshold": {
-        "description": "Cosine similarity threshold for grouping (0.0–1.0). Default is 0.85.",
-        "type": "number",
-        "format": "double",
-        "default": 0.85
+      "query": {
+        "description": "Optional natural-language context query. With no refs, hints, or query,\nthe response is an authorized catalog page.",
+        "type": "string"
       },
-      "limit": {
-        "description": "Maximum number of duplicate groups to return. Default is 10.",
+      "offset": {
+        "description": "Catalog offset used only for an empty query.",
         "type": "integer",
         "format": "uint",
         "minimum": 0,
-        "default": 10
+        "default": 0
       },
-      "dry_run": {
-        "description": "When `true` (default), report duplicates without merging.\nWhen `false`, merge by superseding duplicate members.",
-        "type": "boolean",
-        "default": true
+      "limit": {
+        "description": "Catalog page size used only for an empty query.",
+        "type": "integer",
+        "format": "uint",
+        "minimum": 0,
+        "default": 20
       }
     },
     "type": "object"

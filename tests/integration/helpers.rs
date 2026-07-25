@@ -4,12 +4,13 @@ use axum::http::{HeaderName, HeaderValue};
 use localhold::{
     clock::Clock,
     config::{AnonymousPolicy, DEFAULT_HTTP_PRINCIPAL_HEADER, HttpPrincipalMode, LimitsConfig, SearchConfig, ServerConfig},
+    context::{ContextAuditDraft, ContextCreateDraft, ContextId, ContextKind},
     embedding::{BoxFuture, EmbeddingProvider, NoopEmbedding},
     engine::LocalHoldEngine,
     error::EmbeddingError,
     http_transport::build_router,
     server::{HttpPrincipalSource, LocalHoldServer},
-    store::{MemoryWriter as _, SqliteStore},
+    store::{ContextReader as _, ContextWriter as _, MemoryWriter as _, SqliteStore},
     types::{AccessPolicy, Memory, MemoryId, Provenance},
 };
 use parking_lot::Mutex;
@@ -412,6 +413,40 @@ pub(crate) async fn setup_noop_server_with_legacy_memories(seeds: Vec<LegacySeed
     setup_noop_server_with_auth_and_legacy_memories(seeds, Some("stdio"), AnonymousPolicy::PublicReadOnly).await
 }
 
+/// Attach an existing low-level test memory to a globally visible frozen
+/// compatibility context. Native store fixtures intentionally bypass the MCP
+/// governance layer, so retrieval tests must make membership explicit.
+pub(crate) async fn attach_legacy_test_contexts(store: &SqliteStore, memory_ids: &[MemoryId], principal: &str, visible_to: &str, scope: &str) {
+    let existing = store
+        .list_context_records(principal, true, 1_000, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.context.key == scope);
+    let context = if let Some(existing) = existing {
+        existing.context
+    } else {
+        let id = ContextId::new();
+        let audit = ContextAuditDraft::new(principal, "integration_test_context_create").with_context(id);
+        store
+            .create_context(
+                &ContextCreateDraft::private(id, ContextKind::new(ContextKind::CUSTOM).unwrap(), scope, scope, principal),
+                &audit,
+            )
+            .await
+            .unwrap()
+    };
+    if visible_to != principal {
+        let grant_audit = ContextAuditDraft::new(principal, "integration_test_context_grant").with_context(context.id);
+        store.grant_context_use(&context.id, visible_to, principal, &grant_audit).await.unwrap();
+    }
+    for memory_id in memory_ids {
+        let audit = ContextAuditDraft::new(principal, "integration_test_membership").with_context(context.id);
+        let outcome = store.replace_memory_contexts(memory_id, &[context.id], principal, &audit).await.unwrap();
+        assert_eq!(outcome, localhold::types::WriteOutcome::Applied, "test fixture membership should be applied");
+    }
+}
+
 pub(crate) async fn setup_noop_server_with_auth_and_legacy_memories(
     seeds: Vec<LegacySeed>,
     principal: Option<&str>,
@@ -454,11 +489,45 @@ pub(crate) fn call_tool_params(name: &str, args: serde_json::Value) -> CallToolR
 
 /// Call a tool by name with JSON arguments. Asserts success and deserializes the response.
 pub(crate) async fn call_tool<T: DeserializeOwned>(client: &RunningService<rmcp::RoleClient, ()>, name: &str, args: serde_json::Value) -> T {
-    let result = client.call_tool(call_tool_params(name, args)).await.unwrap();
+    let result = client.call_tool(call_tool_params(name, with_default_test_context(name, args))).await.unwrap();
     assert!(!result.is_error.unwrap_or(false), "tool {name} returned error: {}", extract_text(&result));
     let text = extract_text(&result);
     #[expect(clippy::panic, reason = "test helper: panic with diagnostic context on deserialization failure")]
     serde_json::from_str(text).unwrap_or_else(|e| panic!("failed to parse response from {name}: {e}\nraw: {text}"))
+}
+
+/// Keep broad integration tests focused on their target behavior by giving
+/// successful writes a deterministic legacy compatibility context. Tests for
+/// governed rejection use `call_tool_error`/`assert_invalid_params_contains`
+/// and therefore exercise the exact caller payload.
+fn with_default_test_context(name: &str, mut args: serde_json::Value) -> serde_json::Value {
+    const TEST_SCOPE: &str = "test/default";
+    let Some(object) = args.as_object_mut() else {
+        return args;
+    };
+    match name {
+        "remember" if !object.contains_key("context") && !object.contains_key("scope") && !object.contains_key("context_hints") => {
+            object.insert("scope".to_owned(), serde_json::Value::String(TEST_SCOPE.to_owned()));
+        }
+        "remember_many" => {
+            if let Some(memories) = object.get_mut("memories").and_then(serde_json::Value::as_array_mut) {
+                for memory in memories {
+                    apply_default_test_context(memory, TEST_SCOPE);
+                }
+            }
+        }
+        _ => {}
+    }
+    args
+}
+
+fn apply_default_test_context(memory: &mut serde_json::Value, scope: &str) {
+    let Some(memory) = memory.as_object_mut() else {
+        return;
+    };
+    if !memory.contains_key("context") && !memory.contains_key("scope") && !memory.contains_key("context_hints") {
+        memory.insert("scope".to_owned(), serde_json::Value::String(scope.to_owned()));
+    }
 }
 
 /// Call a tool expecting an application-level error (`is_error: true`). Returns the error text.

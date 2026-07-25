@@ -28,6 +28,16 @@ expression: schema
       "const": "remember"
     },
     {
+      "description": "Resolve or browse governed contexts.",
+      "type": "string",
+      "const": "context_resolve"
+    },
+    {
+      "description": "Create a governed context.",
+      "type": "string",
+      "const": "context_create"
+    },
+    {
       "description": "Register a missing scope definition.",
       "type": "string",
       "const": "admin_scope_register"

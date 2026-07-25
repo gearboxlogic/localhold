@@ -1,7 +1,7 @@
 //! Backend-specific data migration helpers.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     env::VarError,
     ffi::OsString,
     mem::size_of,
@@ -20,8 +20,9 @@ use super::{
 };
 use crate::{
     config::PostgresDatabaseConfig,
+    context::{ContextAuditEvent, ContextDefinition, ContextGrant, ContextId, ContextIdentity, ContextKind},
     error::{ParseEnumError, StoreError},
-    types::{AccessPolicy, AuditAction, AuditEntry, Entity, Memory, MemoryId, MemoryMetadata, MemoryTombstone, Provenance, ScopeDefinition},
+    types::{AccessPolicy, AuditAction, AuditEntry, Entity, Memory, MemoryId, MemoryMetadata, MemoryTombstone, Provenance},
 };
 
 const DEFAULT_BATCH_SIZE: usize = 500;
@@ -36,7 +37,17 @@ const POSTGRES_USER_TABLES: &[&str] = &[
     "memory_embeddings",
     "memory_audit_log",
     "memory_tombstones",
-    "scope_registry",
+    "context_kinds",
+    "contexts",
+    "context_aliases",
+    "context_identities",
+    "context_resolver_hints",
+    "context_grants",
+    "context_relations",
+    "memory_contexts",
+    "context_kind_policies",
+    "context_anchor_overrides",
+    "context_audit_events",
     "memory_metadata",
     "embedding_profile",
 ];
@@ -79,14 +90,69 @@ const POSTGRES_REQUIRED_COLUMNS: &[PostgresColumnExpectation] = &[
     PostgresColumnExpectation::new("memory_tombstones", "access_policy", "jsonb"),
     PostgresColumnExpectation::new("memory_tombstones", "deleted_at", "timestamp with time zone"),
     PostgresColumnExpectation::new("memory_tombstones", "deleted_by_principal", "text"),
-    PostgresColumnExpectation::new("scope_registry", "scope_key", "text"),
-    PostgresColumnExpectation::new("scope_registry", "display_name", "text"),
-    PostgresColumnExpectation::new("scope_registry", "description", "text"),
-    PostgresColumnExpectation::new("scope_registry", "aliases", "jsonb"),
-    PostgresColumnExpectation::new("scope_registry", "matchers", "jsonb"),
-    PostgresColumnExpectation::new("scope_registry", "parent", "text"),
-    PostgresColumnExpectation::new("scope_registry", "related", "jsonb"),
-    PostgresColumnExpectation::new("scope_registry", "updated_at", "timestamp with time zone"),
+    PostgresColumnExpectation::new("context_kinds", "kind", "text"),
+    PostgresColumnExpectation::new("context_kinds", "display_name", "text"),
+    PostgresColumnExpectation::new("context_kinds", "builtin", "boolean"),
+    PostgresColumnExpectation::new("context_kinds", "enabled", "boolean"),
+    PostgresColumnExpectation::new("context_kinds", "created_at", "timestamp with time zone"),
+    PostgresColumnExpectation::new("context_kinds", "updated_at", "timestamp with time zone"),
+    PostgresColumnExpectation::new("contexts", "id", "text"),
+    PostgresColumnExpectation::new("contexts", "kind", "text"),
+    PostgresColumnExpectation::new("contexts", "context_key", "text"),
+    PostgresColumnExpectation::new("contexts", "normalized_key", "text"),
+    PostgresColumnExpectation::new("contexts", "display_name", "text"),
+    PostgresColumnExpectation::new("contexts", "description", "text"),
+    PostgresColumnExpectation::new("contexts", "owner_principal", "text"),
+    PostgresColumnExpectation::new("contexts", "guidance", "text"),
+    PostgresColumnExpectation::new("contexts", "parent_id", "text"),
+    PostgresColumnExpectation::new("contexts", "lifecycle", "text"),
+    PostgresColumnExpectation::new("contexts", "frozen", "boolean"),
+    PostgresColumnExpectation::new("contexts", "created_at", "timestamp with time zone"),
+    PostgresColumnExpectation::new("contexts", "updated_at", "timestamp with time zone"),
+    PostgresColumnExpectation::new("context_aliases", "context_id", "text"),
+    PostgresColumnExpectation::new("context_aliases", "alias", "text"),
+    PostgresColumnExpectation::new("context_aliases", "normalized_alias", "text"),
+    PostgresColumnExpectation::new("context_aliases", "created_at", "timestamp with time zone"),
+    PostgresColumnExpectation::new("context_identities", "context_id", "text"),
+    PostgresColumnExpectation::new("context_identities", "owner_principal", "text"),
+    PostgresColumnExpectation::new("context_identities", "kind", "text"),
+    PostgresColumnExpectation::new("context_identities", "scheme", "text"),
+    PostgresColumnExpectation::new("context_identities", "namespace", "text"),
+    PostgresColumnExpectation::new("context_identities", "fingerprint", "text"),
+    PostgresColumnExpectation::new("context_identities", "redacted_label", "text"),
+    PostgresColumnExpectation::new("context_identities", "created_at", "timestamp with time zone"),
+    PostgresColumnExpectation::new("context_resolver_hints", "context_id", "text"),
+    PostgresColumnExpectation::new("context_resolver_hints", "hint", "text"),
+    PostgresColumnExpectation::new("context_resolver_hints", "normalized_hint", "text"),
+    PostgresColumnExpectation::new("context_resolver_hints", "created_at", "timestamp with time zone"),
+    PostgresColumnExpectation::new("context_grants", "context_id", "text"),
+    PostgresColumnExpectation::new("context_grants", "grantee_principal", "text"),
+    PostgresColumnExpectation::new("context_grants", "granted_by", "text"),
+    PostgresColumnExpectation::new("context_grants", "created_at", "timestamp with time zone"),
+    PostgresColumnExpectation::new("context_relations", "from_context_id", "text"),
+    PostgresColumnExpectation::new("context_relations", "to_context_id", "text"),
+    PostgresColumnExpectation::new("context_relations", "relation", "text"),
+    PostgresColumnExpectation::new("context_relations", "created_at", "timestamp with time zone"),
+    PostgresColumnExpectation::new("memory_contexts", "memory_id", "text"),
+    PostgresColumnExpectation::new("memory_contexts", "context_id", "text"),
+    PostgresColumnExpectation::new("memory_contexts", "ordinal", "bigint"),
+    PostgresColumnExpectation::new("memory_contexts", "created_at", "timestamp with time zone"),
+    PostgresColumnExpectation::new("context_kind_policies", "layer", "text"),
+    PostgresColumnExpectation::new("context_kind_policies", "principal", "text"),
+    PostgresColumnExpectation::new("context_kind_policies", "kind", "text"),
+    PostgresColumnExpectation::new("context_kind_policies", "policy_json", "jsonb"),
+    PostgresColumnExpectation::new("context_kind_policies", "updated_at", "timestamp with time zone"),
+    PostgresColumnExpectation::new("context_anchor_overrides", "anchor_context_id", "text"),
+    PostgresColumnExpectation::new("context_anchor_overrides", "principal", "text"),
+    PostgresColumnExpectation::new("context_anchor_overrides", "policy_json", "jsonb"),
+    PostgresColumnExpectation::new("context_anchor_overrides", "updated_at", "timestamp with time zone"),
+    PostgresColumnExpectation::new("context_audit_events", "id", "bigint"),
+    PostgresColumnExpectation::new("context_audit_events", "actor_principal", "text"),
+    PostgresColumnExpectation::new("context_audit_events", "action", "text"),
+    PostgresColumnExpectation::new("context_audit_events", "context_id", "text"),
+    PostgresColumnExpectation::new("context_audit_events", "memory_id", "text"),
+    PostgresColumnExpectation::new("context_audit_events", "timestamp", "timestamp with time zone"),
+    PostgresColumnExpectation::new("context_audit_events", "details", "jsonb"),
     PostgresColumnExpectation::new("memory_metadata", "memory_id", "text"),
     PostgresColumnExpectation::new("memory_metadata", "scope_key", "text"),
     PostgresColumnExpectation::new("memory_metadata", "summary", "text"),
@@ -116,8 +182,12 @@ const POSTGRES_NULLABLE_COLUMNS: &[(&str, &str)] = &[
     ("memory_audit_log", "caller_agent"),
     ("memory_audit_log", "details"),
     ("memory_tombstones", "deleted_by_principal"),
-    ("scope_registry", "description"),
-    ("scope_registry", "parent"),
+    ("contexts", "description"),
+    ("contexts", "guidance"),
+    ("contexts", "parent_id"),
+    ("context_audit_events", "context_id"),
+    ("context_audit_events", "memory_id"),
+    ("context_audit_events", "details"),
     ("memory_metadata", "scope_key"),
     ("memory_metadata", "summary"),
     ("memory_metadata", "agent_label"),
@@ -136,9 +206,12 @@ const POSTGRES_REQUIRED_DEFAULTS: &[PostgresDefaultExpectation] = &[
     ("memories", "updated_at", "now()"),
     ("memories", "confidence", "0.8"),
     ("memory_embeddings", "updated_at", "now()"),
-    ("scope_registry", "aliases", "'[]'::jsonb"),
-    ("scope_registry", "matchers", "'[]'::jsonb"),
-    ("scope_registry", "related", "'[]'::jsonb"),
+    ("context_kinds", "builtin", "false"),
+    ("context_kinds", "enabled", "true"),
+    ("contexts", "lifecycle", "'active'::text"),
+    ("contexts", "frozen", "false"),
+    ("context_identities", "namespace", "''::text"),
+    ("context_kind_policies", "principal", "''::text"),
     ("memory_metadata", "quality_flags", "'[]'::jsonb"),
     ("memory_metadata", "schema_version", "1"),
 ];
@@ -150,7 +223,20 @@ const POSTGRES_REQUIRED_KEYS: &[PostgresKeyExpectation] = &[
     PostgresKeyExpectation::new("memory_embeddings", &["memory_id"]),
     PostgresKeyExpectation::new("memory_audit_log", &["id"]),
     PostgresKeyExpectation::new("memory_tombstones", &["memory_id"]),
-    PostgresKeyExpectation::new("scope_registry", &["scope_key"]),
+    PostgresKeyExpectation::new("context_kinds", &["kind"]),
+    PostgresKeyExpectation::new("contexts", &["id"]),
+    PostgresKeyExpectation::new("contexts", &["owner_principal", "kind", "normalized_key"]),
+    PostgresKeyExpectation::new("context_aliases", &["context_id", "normalized_alias"]),
+    PostgresKeyExpectation::new("context_identities", &["context_id", "scheme", "namespace", "fingerprint"]),
+    PostgresKeyExpectation::new("context_identities", &["owner_principal", "kind", "scheme", "namespace", "fingerprint"]),
+    PostgresKeyExpectation::new("context_resolver_hints", &["context_id", "normalized_hint"]),
+    PostgresKeyExpectation::new("context_grants", &["context_id", "grantee_principal"]),
+    PostgresKeyExpectation::new("context_relations", &["from_context_id", "to_context_id", "relation"]),
+    PostgresKeyExpectation::new("memory_contexts", &["memory_id", "context_id"]),
+    PostgresKeyExpectation::new("memory_contexts", &["memory_id", "ordinal"]),
+    PostgresKeyExpectation::new("context_kind_policies", &["layer", "principal", "kind"]),
+    PostgresKeyExpectation::new("context_anchor_overrides", &["anchor_context_id", "principal"]),
+    PostgresKeyExpectation::new("context_audit_events", &["id"]),
     PostgresKeyExpectation::new("memory_metadata", &["memory_id"]),
     PostgresKeyExpectation::new("embedding_profile", &["singleton"]),
 ];
@@ -158,7 +244,32 @@ const POSTGRES_REQUIRED_FOREIGN_KEYS: &[PostgresForeignKeyExpectation] = &[
     PostgresForeignKeyExpectation::new("memories", "superseded_by", "memories", "id", "n"),
     PostgresForeignKeyExpectation::new("memory_entities", "memory_id", "memories", "id", "c"),
     PostgresForeignKeyExpectation::new("memory_embeddings", "memory_id", "memories", "id", "c"),
+    PostgresForeignKeyExpectation::new("contexts", "kind", "context_kinds", "kind", "r"),
+    PostgresForeignKeyExpectation::new("contexts", "parent_id", "contexts", "id", "r"),
+    PostgresForeignKeyExpectation::new("context_aliases", "context_id", "contexts", "id", "c"),
+    PostgresForeignKeyExpectation::new("context_identities", "context_id", "contexts", "id", "c"),
+    PostgresForeignKeyExpectation::new("context_resolver_hints", "context_id", "contexts", "id", "c"),
+    PostgresForeignKeyExpectation::new("context_grants", "context_id", "contexts", "id", "c"),
+    PostgresForeignKeyExpectation::new("context_relations", "from_context_id", "contexts", "id", "c"),
+    PostgresForeignKeyExpectation::new("context_relations", "to_context_id", "contexts", "id", "c"),
+    PostgresForeignKeyExpectation::new("memory_contexts", "memory_id", "memories", "id", "c"),
+    PostgresForeignKeyExpectation::new("memory_contexts", "context_id", "contexts", "id", "r"),
+    PostgresForeignKeyExpectation::new("context_kind_policies", "kind", "context_kinds", "kind", "r"),
+    PostgresForeignKeyExpectation::new("context_anchor_overrides", "anchor_context_id", "contexts", "id", "c"),
     PostgresForeignKeyExpectation::new("memory_metadata", "memory_id", "memories", "id", "c"),
+];
+const POSTGRES_REQUIRED_CHECKS: &[(&str, &str)] = &[
+    ("contexts", "lifecycle = ANY (ARRAY['active'::text, 'archived'::text])"),
+    ("contexts", "parent_id IS NULL OR parent_id <> id"),
+    ("context_relations", "from_context_id <> to_context_id"),
+    ("memory_contexts", "ordinal >= 0"),
+    ("context_kind_policies", "layer = ANY (ARRAY['operator'::text, 'principal'::text])"),
+    (
+        "context_kind_policies",
+        "layer = 'operator'::text AND principal = ''::text OR layer = 'principal'::text AND principal <> ''::text",
+    ),
+    ("embedding_profile", "singleton = 1"),
+    ("embedding_profile", "dimensions > 0"),
 ];
 const SQLITE_MEMORIES_COLUMNS: &[&str] = &[
     "id",
@@ -189,6 +300,40 @@ const SQLITE_MEMORY_ENTITIES_COLUMNS: &[&str] = &["memory_id", "entity", "entity
 const SQLITE_AUDIT_LOG_COLUMNS: &[&str] = &["id", "memory_id", "action", "caller_agent", "timestamp", "details"];
 const SQLITE_TOMBSTONE_COLUMNS: &[&str] = &["memory_id", "provenance", "access_policy", "deleted_at", "deleted_by_principal"];
 const SQLITE_SCOPE_REGISTRY_COLUMNS: &[&str] = &["scope_key", "display_name", "description", "aliases", "matchers", "parent", "related", "updated_at"];
+const SQLITE_CONTEXT_KIND_COLUMNS: &[&str] = &["kind", "display_name", "builtin", "enabled", "created_at", "updated_at"];
+const SQLITE_CONTEXT_COLUMNS: &[&str] = &[
+    "id",
+    "kind",
+    "context_key",
+    "normalized_key",
+    "display_name",
+    "description",
+    "owner_principal",
+    "guidance",
+    "parent_id",
+    "lifecycle",
+    "frozen",
+    "created_at",
+    "updated_at",
+];
+const SQLITE_CONTEXT_ALIAS_COLUMNS: &[&str] = &["context_id", "alias", "normalized_alias", "created_at"];
+const SQLITE_CONTEXT_IDENTITY_COLUMNS: &[&str] = &[
+    "context_id",
+    "owner_principal",
+    "kind",
+    "scheme",
+    "namespace",
+    "fingerprint",
+    "redacted_label",
+    "created_at",
+];
+const SQLITE_CONTEXT_HINT_COLUMNS: &[&str] = &["context_id", "hint", "normalized_hint", "created_at"];
+const SQLITE_CONTEXT_GRANT_COLUMNS: &[&str] = &["context_id", "grantee_principal", "granted_by", "created_at"];
+const SQLITE_CONTEXT_RELATION_COLUMNS: &[&str] = &["from_context_id", "to_context_id", "relation", "created_at"];
+const SQLITE_MEMORY_CONTEXT_COLUMNS: &[&str] = &["memory_id", "context_id", "ordinal", "created_at"];
+const SQLITE_CONTEXT_KIND_POLICY_COLUMNS: &[&str] = &["layer", "principal", "kind", "policy_json", "updated_at"];
+const SQLITE_CONTEXT_ANCHOR_OVERRIDE_COLUMNS: &[&str] = &["anchor_context_id", "principal", "policy_json", "updated_at"];
+const SQLITE_CONTEXT_AUDIT_COLUMNS: &[&str] = &["id", "actor_principal", "action", "context_id", "memory_id", "timestamp", "details"];
 const SQLITE_METADATA_COLUMNS: &[&str] = &[
     "memory_id",
     "scope_key",
@@ -210,11 +355,131 @@ const SQLITE_REQUIRED_TABLES: &[SqliteTableExpectation] = &[
     SqliteTableExpectation::new("memory_fts", SQLITE_FTS_COLUMNS, &[]),
     SqliteTableExpectation::new("memory_audit_log", SQLITE_AUDIT_LOG_COLUMNS, &[]),
     SqliteTableExpectation::new("memory_tombstones", SQLITE_TOMBSTONE_COLUMNS, &[]),
-    SqliteTableExpectation::new("scope_registry", SQLITE_SCOPE_REGISTRY_COLUMNS, &[]),
+    SqliteTableExpectation::new("context_kinds", SQLITE_CONTEXT_KIND_COLUMNS, &["check (builtin in (0, 1))", "check (enabled in (0, 1))"]),
+    SqliteTableExpectation::new("contexts", SQLITE_CONTEXT_COLUMNS, &[
+        "unique (owner_principal, kind, normalized_key)",
+        "check (lifecycle in ('active', 'archived'))",
+        "check (frozen in (0, 1))",
+        "check (parent_id is null or parent_id <> id)",
+    ]),
+    SqliteTableExpectation::new("context_aliases", SQLITE_CONTEXT_ALIAS_COLUMNS, &[]),
+    SqliteTableExpectation::new("context_identities", SQLITE_CONTEXT_IDENTITY_COLUMNS, &[
+        "unique (owner_principal, kind, scheme, namespace, fingerprint)",
+    ]),
+    SqliteTableExpectation::new("context_resolver_hints", SQLITE_CONTEXT_HINT_COLUMNS, &[]),
+    SqliteTableExpectation::new("context_grants", SQLITE_CONTEXT_GRANT_COLUMNS, &[]),
+    SqliteTableExpectation::new("context_relations", SQLITE_CONTEXT_RELATION_COLUMNS, &["check (from_context_id <> to_context_id)"]),
+    SqliteTableExpectation::new("memory_contexts", SQLITE_MEMORY_CONTEXT_COLUMNS, &["check (ordinal >= 0)", "unique (memory_id, ordinal)"]),
+    SqliteTableExpectation::new("context_kind_policies", SQLITE_CONTEXT_KIND_POLICY_COLUMNS, &[
+        "check (layer in ('operator', 'principal'))",
+        "check ((layer = 'operator' and principal = '') or (layer = 'principal' and principal <> ''))",
+    ]),
+    SqliteTableExpectation::new("context_anchor_overrides", SQLITE_CONTEXT_ANCHOR_OVERRIDE_COLUMNS, &[]),
+    SqliteTableExpectation::new("context_audit_events", SQLITE_CONTEXT_AUDIT_COLUMNS, &[]),
     SqliteTableExpectation::new("memory_metadata", SQLITE_METADATA_COLUMNS, &[]),
-    SqliteTableExpectation::new("embedding_profile", SQLITE_EMBEDDING_PROFILE_COLUMNS, &[]),
+    SqliteTableExpectation::new("embedding_profile", SQLITE_EMBEDDING_PROFILE_COLUMNS, &["check (singleton = 1)", "check (dimensions > 0)"]),
 ];
 const SQLITE_REQUIRED_KEYS: &[SqliteKeyExpectation] = &[
+    SqliteKeyExpectation::new("memories", &["id"]),
+    SqliteKeyExpectation::new("memory_embedding_map", &["memory_id"]),
+    SqliteKeyExpectation::new("memory_entities", &["memory_id", "entity", "entity_type"]),
+    SqliteKeyExpectation::new("memory_audit_log", &["id"]),
+    SqliteKeyExpectation::new("memory_tombstones", &["memory_id"]),
+    SqliteKeyExpectation::new("context_kinds", &["kind"]),
+    SqliteKeyExpectation::new("contexts", &["id"]),
+    SqliteKeyExpectation::new("context_aliases", &["context_id", "normalized_alias"]),
+    SqliteKeyExpectation::new("context_identities", &["context_id", "scheme", "namespace", "fingerprint"]),
+    SqliteKeyExpectation::new("context_resolver_hints", &["context_id", "normalized_hint"]),
+    SqliteKeyExpectation::new("context_grants", &["context_id", "grantee_principal"]),
+    SqliteKeyExpectation::new("context_relations", &["from_context_id", "to_context_id", "relation"]),
+    SqliteKeyExpectation::new("memory_contexts", &["memory_id", "context_id"]),
+    SqliteKeyExpectation::new("context_kind_policies", &["layer", "principal", "kind"]),
+    SqliteKeyExpectation::new("context_anchor_overrides", &["anchor_context_id", "principal"]),
+    SqliteKeyExpectation::new("context_audit_events", &["id"]),
+    SqliteKeyExpectation::new("memory_metadata", &["memory_id"]),
+    SqliteKeyExpectation::new("embedding_profile", &["singleton"]),
+];
+const SQLITE_CONTEXT_UNIQUE_KEYS: &[SqliteUniqueExpectation] = &[
+    SqliteUniqueExpectation::new("context_kinds", &[&["kind"]]),
+    SqliteUniqueExpectation::new("contexts", &[&["id"], &["owner_principal", "kind", "normalized_key"]]),
+    SqliteUniqueExpectation::new("context_aliases", &[&["context_id", "normalized_alias"]]),
+    SqliteUniqueExpectation::new("context_identities", &[&["context_id", "scheme", "namespace", "fingerprint"], &[
+        "owner_principal",
+        "kind",
+        "scheme",
+        "namespace",
+        "fingerprint",
+    ]]),
+    SqliteUniqueExpectation::new("context_resolver_hints", &[&["context_id", "normalized_hint"]]),
+    SqliteUniqueExpectation::new("context_grants", &[&["context_id", "grantee_principal"]]),
+    SqliteUniqueExpectation::new("context_relations", &[&["from_context_id", "to_context_id", "relation"]]),
+    SqliteUniqueExpectation::new("memory_contexts", &[&["memory_id", "context_id"], &["memory_id", "ordinal"]]),
+    SqliteUniqueExpectation::new("context_kind_policies", &[&["layer", "principal", "kind"]]),
+    SqliteUniqueExpectation::new("context_anchor_overrides", &[&["anchor_context_id", "principal"]]),
+    SqliteUniqueExpectation::new("context_audit_events", &[]),
+];
+const SQLITE_CONTEXT_FOREIGN_KEYS: &[SqliteForeignKeyExpectation] = &[
+    SqliteForeignKeyExpectation::new("contexts", "kind", "context_kinds", "kind", "RESTRICT"),
+    SqliteForeignKeyExpectation::new("contexts", "parent_id", "contexts", "id", "RESTRICT"),
+    SqliteForeignKeyExpectation::new("context_aliases", "context_id", "contexts", "id", "CASCADE"),
+    SqliteForeignKeyExpectation::new("context_identities", "context_id", "contexts", "id", "CASCADE"),
+    SqliteForeignKeyExpectation::new("context_resolver_hints", "context_id", "contexts", "id", "CASCADE"),
+    SqliteForeignKeyExpectation::new("context_grants", "context_id", "contexts", "id", "CASCADE"),
+    SqliteForeignKeyExpectation::new("context_relations", "from_context_id", "contexts", "id", "CASCADE"),
+    SqliteForeignKeyExpectation::new("context_relations", "to_context_id", "contexts", "id", "CASCADE"),
+    SqliteForeignKeyExpectation::new("memory_contexts", "memory_id", "memories", "id", "CASCADE"),
+    SqliteForeignKeyExpectation::new("memory_contexts", "context_id", "contexts", "id", "RESTRICT"),
+    SqliteForeignKeyExpectation::new("context_kind_policies", "kind", "context_kinds", "kind", "RESTRICT"),
+    SqliteForeignKeyExpectation::new("context_anchor_overrides", "anchor_context_id", "contexts", "id", "CASCADE"),
+];
+const SQLITE_REQUIRED_INDEXES: &[&str] = &[
+    "idx_memories_created_at",
+    "idx_memories_source_agent",
+    "idx_memories_source_conversation",
+    "idx_memories_origin_conversation",
+    "idx_memories_effective_origin_conversation",
+    "idx_memories_access_type",
+    "idx_memories_expires_at",
+    "idx_memories_has_embedding",
+    "idx_memories_embedding_claim",
+    "idx_memories_memory_type",
+    "idx_memories_superseded_by",
+    "idx_memory_entities_entity",
+    "idx_memory_entities_entity_type",
+    "idx_audit_log_memory_id",
+    "idx_audit_log_timestamp",
+    "idx_memory_tombstones_deleted_at",
+    "idx_memory_metadata_scope_key",
+    "idx_contexts_owner_kind_key",
+    "idx_contexts_kind_key",
+    "idx_contexts_key",
+    "idx_contexts_parent",
+    "idx_contexts_lifecycle",
+    "idx_context_aliases_lookup",
+    "idx_context_identities_lookup",
+    "idx_context_identities_exact",
+    "idx_context_resolver_hints_lookup",
+    "idx_context_grants_principal",
+    "idx_context_relations_reverse",
+    "idx_memory_contexts_memory",
+    "idx_memory_contexts_context",
+    "idx_context_audit_context",
+    "idx_context_audit_memory",
+    "idx_context_audit_timestamp",
+];
+const SQLITE_V2_REQUIRED_TABLES: &[SqliteTableExpectation] = &[
+    SqliteTableExpectation::new("memories", SQLITE_MEMORIES_COLUMNS, &[]),
+    SqliteTableExpectation::new("memory_embedding_map", SQLITE_EMBEDDING_MAP_COLUMNS, &[]),
+    SqliteTableExpectation::new("memory_embeddings", SQLITE_MEMORY_EMBEDDINGS_COLUMNS, &["using vec0", "float["]),
+    SqliteTableExpectation::new("memory_entities", SQLITE_MEMORY_ENTITIES_COLUMNS, &[]),
+    SqliteTableExpectation::new("memory_fts", SQLITE_FTS_COLUMNS, &[]),
+    SqliteTableExpectation::new("memory_audit_log", SQLITE_AUDIT_LOG_COLUMNS, &[]),
+    SqliteTableExpectation::new("memory_tombstones", SQLITE_TOMBSTONE_COLUMNS, &[]),
+    SqliteTableExpectation::new("scope_registry", SQLITE_SCOPE_REGISTRY_COLUMNS, &[]),
+    SqliteTableExpectation::new("memory_metadata", SQLITE_METADATA_COLUMNS, &[]),
+    SqliteTableExpectation::new("embedding_profile", SQLITE_EMBEDDING_PROFILE_COLUMNS, &["check (singleton = 1)", "check (dimensions > 0)"]),
+];
+const SQLITE_V2_REQUIRED_KEYS: &[SqliteKeyExpectation] = &[
     SqliteKeyExpectation::new("memories", &["id"]),
     SqliteKeyExpectation::new("memory_embedding_map", &["memory_id"]),
     SqliteKeyExpectation::new("memory_entities", &["memory_id", "entity", "entity_type"]),
@@ -224,7 +489,7 @@ const SQLITE_REQUIRED_KEYS: &[SqliteKeyExpectation] = &[
     SqliteKeyExpectation::new("memory_metadata", &["memory_id"]),
     SqliteKeyExpectation::new("embedding_profile", &["singleton"]),
 ];
-const SQLITE_REQUIRED_INDEXES: &[&str] = &[
+const SQLITE_V2_REQUIRED_INDEXES: &[&str] = &[
     "idx_memories_created_at",
     "idx_memories_source_agent",
     "idx_memories_source_conversation",
@@ -250,10 +515,10 @@ const SQLITE_REQUIRED_TRIGGERS: &[&str] = &[
     "trg_memory_fts_update",
     "trg_memory_fts_delete",
 ];
-pub(crate) const SQLITE_V1_SCHEMA_VERSION: u32 = 1;
+pub(crate) const SQLITE_V1_SCHEMA_VERSION: u32 = 2;
 const _: () = assert!(
     super::schema::SQLITE_SCHEMA_VERSION == SQLITE_V1_SCHEMA_VERSION + 1,
-    "the v1 restore upgrade contract must be revised when SQLite schema version changes"
+    "the previous-version restore upgrade contract must be revised when SQLite schema version changes"
 );
 const SQLITE_CURRENT_CLEAR_SUPERSEDED_TRIGGER: &str =
     "after delete on memories begin update memories set superseded_by = null, record_revision = record_revision + 1 where superseded_by = old.id; end";
@@ -312,6 +577,41 @@ impl SqliteTableExpectation {
 struct SqliteKeyExpectation {
     table: &'static str,
     columns: &'static [&'static str],
+}
+
+struct SqliteUniqueExpectation {
+    table: &'static str,
+    keys: &'static [&'static [&'static str]],
+}
+
+impl SqliteUniqueExpectation {
+    const fn new(table: &'static str, keys: &'static [&'static [&'static str]]) -> Self {
+        Self { table, keys }
+    }
+}
+
+struct SqliteForeignKeyExpectation {
+    child_table: &'static str,
+    child_column: &'static str,
+    parent_table: &'static str,
+    parent_column: &'static str,
+    update_action: &'static str,
+    delete_action: &'static str,
+    match_clause: &'static str,
+}
+
+impl SqliteForeignKeyExpectation {
+    const fn new(child_table: &'static str, child_column: &'static str, parent_table: &'static str, parent_column: &'static str, delete_action: &'static str) -> Self {
+        Self {
+            child_table,
+            child_column,
+            parent_table,
+            parent_column,
+            update_action: "NO ACTION",
+            delete_action,
+            match_clause: "NONE",
+        }
+    }
 }
 
 impl SqliteKeyExpectation {
@@ -504,8 +804,28 @@ pub struct MigrationTableCounts {
     pub audit_entries: u64,
     /// Deleted-memory tombstone rows.
     pub tombstones: u64,
-    /// Scope registry rows.
-    pub scopes: u64,
+    /// Context-kind definition rows, including the four built-in kinds.
+    pub context_kinds: u64,
+    /// Context definition rows.
+    pub contexts: u64,
+    /// Context alias rows.
+    pub context_aliases: u64,
+    /// Durable context identity rows.
+    pub context_identities: u64,
+    /// Weak context resolver-hint rows.
+    pub context_hints: u64,
+    /// Context use-grant rows.
+    pub context_grants: u64,
+    /// Context relation rows.
+    pub context_relations: u64,
+    /// Direct memory-context membership rows.
+    pub memory_contexts: u64,
+    /// Context kind-policy rows.
+    pub context_policies: u64,
+    /// Context anchor-override rows.
+    pub context_anchor_overrides: u64,
+    /// Context audit-event rows.
+    pub context_audit_events: u64,
     /// metadata rows.
     pub metadata: u64,
     /// Embedding vector-space profile rows (zero or one).
@@ -519,7 +839,20 @@ impl MigrationTableCounts {
             && self.embeddings == 0
             && self.audit_entries == 0
             && self.tombstones == 0
-            && self.scopes == 0
+            // A newly bootstrapped PostgreSQL target contains only these
+            // built-ins. They are upserted from the source during import so
+            // their timestamps and policy flags round-trip exactly.
+            && self.context_kinds <= 4
+            && self.contexts == 0
+            && self.context_aliases == 0
+            && self.context_identities == 0
+            && self.context_hints == 0
+            && self.context_grants == 0
+            && self.context_relations == 0
+            && self.memory_contexts == 0
+            && self.context_policies == 0
+            && self.context_anchor_overrides == 0
+            && self.context_audit_events == 0
             && self.metadata == 0
             && self.embedding_profiles == 0
     }
@@ -568,7 +901,17 @@ fn append_counts(output: &mut String, counts: MigrationTableCounts) {
     let _write_failed = writeln!(output, "  embeddings: {}", counts.embeddings).is_err();
     let _write_failed = writeln!(output, "  audit_entries: {}", counts.audit_entries).is_err();
     let _write_failed = writeln!(output, "  tombstones: {}", counts.tombstones).is_err();
-    let _write_failed = writeln!(output, "  scopes: {}", counts.scopes).is_err();
+    let _write_failed = writeln!(output, "  context_kinds: {}", counts.context_kinds).is_err();
+    let _write_failed = writeln!(output, "  contexts: {}", counts.contexts).is_err();
+    let _write_failed = writeln!(output, "  context_aliases: {}", counts.context_aliases).is_err();
+    let _write_failed = writeln!(output, "  context_identities: {}", counts.context_identities).is_err();
+    let _write_failed = writeln!(output, "  context_hints: {}", counts.context_hints).is_err();
+    let _write_failed = writeln!(output, "  context_grants: {}", counts.context_grants).is_err();
+    let _write_failed = writeln!(output, "  context_relations: {}", counts.context_relations).is_err();
+    let _write_failed = writeln!(output, "  memory_contexts: {}", counts.memory_contexts).is_err();
+    let _write_failed = writeln!(output, "  context_policies: {}", counts.context_policies).is_err();
+    let _write_failed = writeln!(output, "  context_anchor_overrides: {}", counts.context_anchor_overrides).is_err();
+    let _write_failed = writeln!(output, "  context_audit_events: {}", counts.context_audit_events).is_err();
     let _write_failed = writeln!(output, "  metadata: {}", counts.metadata).is_err();
     let _write_failed = writeln!(output, "  embedding_profiles: {}", counts.embedding_profiles).is_err();
 }
@@ -651,7 +994,7 @@ struct MigrationSnapshot {
     superseded_links: Vec<(MemoryId, MemoryId)>,
     audit_entries: Vec<MigrationAuditEntry>,
     tombstones: Vec<MigrationTombstone>,
-    scopes: Vec<MigrationScope>,
+    contexts: MigrationContextData,
     metadata: Vec<MigrationMetadata>,
     embedding_profile: Option<EmbeddingProfile>,
     counts: MigrationTableCounts,
@@ -676,10 +1019,93 @@ struct MigrationTombstone {
     tombstone: MemoryTombstone,
 }
 
-#[derive(Clone, Debug)]
-struct MigrationScope {
-    definition: ScopeDefinition,
+#[derive(Clone, Debug, serde::Serialize)]
+struct MigrationContextKind {
+    kind: String,
+    display_name: String,
+    builtin: bool,
+    enabled: bool,
+    created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct MigrationContext {
+    definition: ContextDefinition,
+    normalized_key: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct MigrationContextAlias {
+    context_id: ContextId,
+    alias: String,
+    normalized_alias: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct MigrationContextIdentity {
+    context_id: ContextId,
+    owner_principal: String,
+    kind: String,
+    identity: ContextIdentity,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct MigrationContextHint {
+    context_id: ContextId,
+    hint: String,
+    normalized_hint: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct MigrationContextRelation {
+    from_context_id: ContextId,
+    to_context_id: ContextId,
+    relation: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct MigrationMemoryContext {
+    memory_id: MemoryId,
+    context_id: ContextId,
+    ordinal: i64,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct MigrationContextPolicy {
+    layer: String,
+    principal: String,
+    kind: String,
+    policy: serde_json::Value,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct MigrationContextAnchorOverride {
+    anchor_context_id: ContextId,
+    principal: String,
+    policy: serde_json::Value,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+struct MigrationContextData {
+    kinds: Vec<MigrationContextKind>,
+    contexts: Vec<MigrationContext>,
+    aliases: Vec<MigrationContextAlias>,
+    identities: Vec<MigrationContextIdentity>,
+    hints: Vec<MigrationContextHint>,
+    grants: Vec<ContextGrant>,
+    relations: Vec<MigrationContextRelation>,
+    memberships: Vec<MigrationMemoryContext>,
+    policies: Vec<MigrationContextPolicy>,
+    anchor_overrides: Vec<MigrationContextAnchorOverride>,
+    audit_events: Vec<ContextAuditEvent>,
 }
 
 #[derive(Clone, Debug)]
@@ -754,7 +1180,7 @@ fn export_sqlite_conn(conn: &Connection, embedding_dimensions: usize) -> Result<
 
     let audit_entries = export_audit_entries(conn)?;
     let tombstones = export_tombstones(conn)?;
-    let scopes = export_scopes(conn)?;
+    let contexts = export_sqlite_contexts(conn)?;
     let metadata = export_metadata(conn)?;
     let counts = sqlite_counts(conn)?;
 
@@ -763,7 +1189,7 @@ fn export_sqlite_conn(conn: &Connection, embedding_dimensions: usize) -> Result<
         superseded_links,
         audit_entries,
         tombstones,
-        scopes,
+        contexts,
         metadata,
         embedding_profile: export_sqlite_embedding_profile(conn)?,
         counts,
@@ -782,22 +1208,28 @@ pub(crate) fn validate_sqlite_source_schema(conn: &Connection, embedding_dimensi
         )));
     }
     reject_retired_sqlite_schema(conn)?;
+    if sqlite_schema_sql(conn, "table", "scope_registry")?.is_some() {
+        return Err(sqlite_source_schema_error("current SQLite schema contains retired scope_registry"));
+    }
     for table in SQLITE_REQUIRED_TABLES {
         validate_sqlite_table(conn, table)?;
     }
     for key in SQLITE_REQUIRED_KEYS {
         validate_sqlite_primary_key(conn, key)?;
     }
+    validate_sqlite_context_unique_keys(conn)?;
+    validate_sqlite_context_foreign_keys(conn)?;
     for index in SQLITE_REQUIRED_INDEXES {
         validate_sqlite_schema_object_exists(conn, "index", index)?;
     }
     for trigger in SQLITE_REQUIRED_TRIGGERS {
         validate_sqlite_schema_object_exists(conn, "trigger", trigger)?;
     }
-    validate_sqlite_managed_object_definitions(conn, false, SQLITE_CURRENT_CLEAR_SUPERSEDED_TRIGGER)?;
+    validate_sqlite_managed_object_definitions(conn, false, true, SQLITE_CURRENT_CLEAR_SUPERSEDED_TRIGGER)?;
     super::schema::check_dimension_mismatch(conn, embedding_dimensions)?;
     validate_sqlite_foreign_key_integrity(conn)?;
     validate_embedding_map_integrity(conn)?;
+    validate_sqlite_context_integrity(conn)?;
     Ok(())
 }
 
@@ -810,27 +1242,28 @@ pub(crate) fn validate_sqlite_v1_source_schema_for_upgrade(conn: &Connection, em
         )));
     }
     reject_retired_sqlite_schema(conn)?;
-    for table in SQLITE_REQUIRED_TABLES {
-        let allowed_missing = if table.name == "memories" { &["record_revision"][..] } else { &[] };
-        validate_sqlite_table_allowing_missing(conn, table, allowed_missing)?;
+    for table in SQLITE_V2_REQUIRED_TABLES {
+        validate_sqlite_table_allowing_missing(conn, table, &[])?;
     }
-    for key in SQLITE_REQUIRED_KEYS {
+    for key in SQLITE_V2_REQUIRED_KEYS {
         validate_sqlite_primary_key(conn, key)?;
     }
-    for index in SQLITE_REQUIRED_INDEXES {
+    for index in SQLITE_V2_REQUIRED_INDEXES {
         validate_sqlite_schema_object_exists(conn, "index", index)?;
     }
     for trigger in SQLITE_REQUIRED_TRIGGERS {
         validate_sqlite_schema_object_exists(conn, "trigger", trigger)?;
     }
-    validate_sqlite_managed_object_definitions(conn, false, SQLITE_V1_CLEAR_SUPERSEDED_TRIGGER)?;
+    validate_sqlite_managed_object_definitions(conn, false, false, SQLITE_CURRENT_CLEAR_SUPERSEDED_TRIGGER)?;
     super::schema::check_dimension_mismatch(conn, embedding_dimensions)?;
     validate_sqlite_foreign_key_integrity(conn)?;
     validate_embedding_map_integrity(conn)?;
     Ok(())
 }
 
-fn validate_sqlite_managed_object_definitions(conn: &Connection, allow_missing: bool, clear_superseded_definition: &'static str) -> Result<(), StoreError> {
+#[expect(clippy::too_many_lines, reason = "managed SQLite object definitions are validated from one auditable manifest")]
+#[expect(clippy::excessive_nesting, reason = "optional migration-time objects require nested absent/conflict handling")]
+fn validate_sqlite_managed_object_definitions(conn: &Connection, allow_missing: bool, include_contexts: bool, clear_superseded_definition: &'static str) -> Result<(), StoreError> {
     const INDEX_DEFINITIONS: &[(&str, &str)] = &[
         ("idx_memories_created_at", "on memories(created_at desc)"),
         ("idx_memories_source_agent", "on memories(json_extract(provenance, '$.source_agent'))"),
@@ -855,6 +1288,30 @@ fn validate_sqlite_managed_object_definitions(conn: &Connection, allow_missing: 
         ("idx_audit_log_timestamp", "on memory_audit_log(timestamp desc)"),
         ("idx_memory_metadata_scope_key", "on memory_metadata(scope_key)"),
         ("idx_memory_tombstones_deleted_at", "on memory_tombstones(deleted_at desc)"),
+    ];
+    const CONTEXT_INDEX_DEFINITIONS: &[(&str, &str)] = &[
+        ("idx_contexts_owner_kind_key", "on contexts(owner_principal, kind, normalized_key)"),
+        ("idx_contexts_kind_key", "on contexts(kind, normalized_key, id)"),
+        ("idx_contexts_key", "on contexts(normalized_key, id)"),
+        ("idx_contexts_parent", "on contexts(parent_id) where parent_id is not null"),
+        ("idx_contexts_lifecycle", "on contexts(lifecycle, kind)"),
+        ("idx_context_aliases_lookup", "on context_aliases(normalized_alias, context_id)"),
+        (
+            "idx_context_identities_lookup",
+            "on context_identities(owner_principal, kind, scheme, namespace, fingerprint)",
+        ),
+        ("idx_context_identities_exact", "on context_identities(kind, scheme, namespace, fingerprint, context_id)"),
+        ("idx_context_resolver_hints_lookup", "on context_resolver_hints(normalized_hint, context_id)"),
+        ("idx_context_grants_principal", "on context_grants(grantee_principal, context_id)"),
+        ("idx_context_relations_reverse", "on context_relations(to_context_id, relation, from_context_id)"),
+        ("idx_memory_contexts_memory", "on memory_contexts(memory_id, ordinal, context_id)"),
+        ("idx_memory_contexts_context", "on memory_contexts(context_id, memory_id)"),
+        (
+            "idx_context_audit_context",
+            "on context_audit_events(context_id, timestamp desc) where context_id is not null",
+        ),
+        ("idx_context_audit_memory", "on context_audit_events(memory_id, timestamp desc) where memory_id is not null"),
+        ("idx_context_audit_timestamp", "on context_audit_events(timestamp desc)"),
     ];
     let trigger_definitions = [
         (
@@ -885,6 +1342,20 @@ fn validate_sqlite_managed_object_definitions(conn: &Connection, allow_missing: 
         };
         if sql != format!("create index {name} {expected}") {
             return Err(sqlite_source_schema_error(format!("required index {name} has an incompatible definition")));
+        }
+    }
+    if include_contexts {
+        for (name, expected) in CONTEXT_INDEX_DEFINITIONS {
+            let Some(sql) = normalized_sqlite_schema_sql(conn, "index", name)? else {
+                if allow_missing {
+                    reject_conflicting_sqlite_schema_object(conn, "index", name)?;
+                    continue;
+                }
+                return Err(sqlite_source_schema_error(format!("required index {name} is missing")));
+            };
+            if sql != format!("create index {name} {expected}") {
+                return Err(sqlite_source_schema_error(format!("required index {name} has an incompatible definition")));
+            }
         }
     }
     for (name, expected) in trigger_definitions {
@@ -940,6 +1411,10 @@ pub(crate) fn validate_present_sqlite_schema_for_published_upgrade(conn: &Connec
     validate_present_sqlite_schema_inner(conn, true)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "present-schema validation keeps the complete pre-migration SQLite contract in one reviewable pass"
+)]
 fn validate_present_sqlite_schema_inner(conn: &Connection, allow_published_metadata: bool) -> Result<(), StoreError> {
     const MIGRATABLE_MEMORY_COLUMNS: &[&str] = &[
         "embedding_revision",
@@ -968,15 +1443,17 @@ fn validate_present_sqlite_schema_inner(conn: &Connection, allow_published_metad
             validate_absent_sqlite_table_conflicts(conn, table.name)?;
             continue;
         }
-        let sql = sqlite_schema_sql(conn, "table", table.name)?.unwrap_or_default().to_ascii_lowercase();
+        let raw_sql = sqlite_schema_sql(conn, "table", table.name)?.unwrap_or_default();
+        let sql = normalize_sqlite_ddl(&sqlite_sql_without_comments(&raw_sql));
         for fragment in table.ddl_contains {
-            if !sql.contains(fragment) {
+            if !fragment.trim_start().to_ascii_lowercase().starts_with("check") && !sql.contains(&normalize_sqlite_ddl(fragment)) {
                 return Err(sqlite_source_schema_error(format!(
                     "table {} has unexpected DDL; expected declaration containing {fragment:?}",
                     table.name
                 )));
             }
         }
+        validate_sqlite_check_constraints(table, &raw_sql)?;
         if table.name == "memory_fts" {
             validate_sqlite_fts_external_content(&sql)?;
         }
@@ -1014,7 +1491,7 @@ fn validate_present_sqlite_schema_inner(conn: &Connection, allow_published_metad
     } else {
         SQLITE_CURRENT_CLEAR_SUPERSEDED_TRIGGER
     };
-    validate_sqlite_managed_object_definitions(conn, true, clear_superseded_trigger)?;
+    validate_sqlite_managed_object_definitions(conn, true, schema_version >= super::schema::SQLITE_SCHEMA_VERSION, clear_superseded_trigger)?;
     Ok(())
 }
 
@@ -1053,15 +1530,16 @@ fn validate_sqlite_table(conn: &Connection, expectation: &SqliteTableExpectation
 
 fn validate_sqlite_table_allowing_missing(conn: &Connection, expectation: &SqliteTableExpectation, allowed_missing_columns: &[&str]) -> Result<(), StoreError> {
     let sql = sqlite_schema_sql(conn, "table", expectation.name)?.ok_or_else(|| sqlite_source_schema_error(format!("required table {} is missing", expectation.name)))?;
-    let normalized_sql = sql.to_ascii_lowercase();
+    let normalized_sql = normalize_sqlite_ddl(&sqlite_sql_without_comments(&sql));
     for fragment in expectation.ddl_contains {
-        if !normalized_sql.contains(fragment) {
+        if !fragment.trim_start().to_ascii_lowercase().starts_with("check") && !normalized_sql.contains(&normalize_sqlite_ddl(fragment)) {
             return Err(sqlite_source_schema_error(format!(
                 "table {} has unexpected DDL; expected declaration containing {fragment:?}",
                 expectation.name
             )));
         }
     }
+    validate_sqlite_check_constraints(expectation, &sql)?;
     if expectation.name == "memory_fts" {
         validate_sqlite_fts_external_content(&sql)?;
     }
@@ -1296,6 +1774,132 @@ fn validate_sqlite_primary_key(conn: &Connection, expectation: &SqliteKeyExpecta
     Ok(())
 }
 
+fn validate_sqlite_context_unique_keys(conn: &Connection) -> Result<(), StoreError> {
+    for expectation in SQLITE_CONTEXT_UNIQUE_KEYS {
+        let mut index_statement = conn.prepare(&format!("PRAGMA index_list({})", quoted_sqlite_identifier(expectation.table)))?;
+        let indexes = index_statement
+            .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, bool>(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut actual = BTreeSet::new();
+        for (index, unique) in indexes {
+            if !unique {
+                continue;
+            }
+            let mut column_statement = conn.prepare(&format!("PRAGMA index_info({})", quoted_sqlite_identifier(&index)))?;
+            let mut ordered_columns = column_statement
+                .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            ordered_columns.sort_by_key(|(position, _)| *position);
+            let _inserted = actual.insert(ordered_columns.into_iter().map(|(_, column)| column).collect::<Vec<_>>());
+        }
+        let expected = expectation
+            .keys
+            .iter()
+            .map(|columns| columns.iter().map(|column| (*column).to_owned()).collect::<Vec<_>>())
+            .collect::<BTreeSet<_>>();
+        if actual != expected {
+            return Err(sqlite_source_schema_error(format!(
+                "table {} has unexpected UNIQUE keys: actual {actual:?}, expected {expected:?}",
+                expectation.table
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_sqlite_context_foreign_keys(conn: &Connection) -> Result<(), StoreError> {
+    let child_tables = SQLITE_CONTEXT_FOREIGN_KEYS.iter().map(|expectation| expectation.child_table).collect::<BTreeSet<_>>();
+    let mut actual = BTreeSet::new();
+    for child_table in child_tables {
+        let mut statement = conn.prepare(&format!("PRAGMA foreign_key_list({})", quoted_sqlite_identifier(child_table)))?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                child_table.to_owned(),
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?.to_ascii_uppercase(),
+                row.get::<_, String>(6)?.to_ascii_uppercase(),
+                row.get::<_, String>(7)?.to_ascii_uppercase(),
+            ))
+        })?;
+        actual.extend(rows.collect::<Result<Vec<_>, _>>()?);
+    }
+    let expected = SQLITE_CONTEXT_FOREIGN_KEYS
+        .iter()
+        .map(|expectation| {
+            (
+                expectation.child_table.to_owned(),
+                expectation.child_column.to_owned(),
+                expectation.parent_table.to_owned(),
+                expectation.parent_column.to_owned(),
+                expectation.update_action.to_owned(),
+                expectation.delete_action.to_owned(),
+                expectation.match_clause.to_owned(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if actual != expected {
+        return Err(sqlite_source_schema_error(format!(
+            "governed context foreign-key declarations differ from the current manifest: actual {actual:?}, expected {expected:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_sqlite_context_integrity(conn: &Connection) -> Result<(), StoreError> {
+    let has_cycle: bool = conn.query_row(
+        "WITH RECURSIVE walk(id, parent_id, path, cycle) AS (
+             SELECT id, parent_id, ',' || id || ',', 0
+             FROM contexts
+             UNION ALL
+             SELECT parent.id,
+                    parent.parent_id,
+                    walk.path || parent.id || ',',
+                    instr(walk.path, ',' || parent.id || ',') > 0
+             FROM walk
+             JOIN contexts AS parent ON parent.id = walk.parent_id
+             WHERE walk.cycle = 0
+         )
+         SELECT EXISTS(SELECT 1 FROM walk WHERE cycle = 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_cycle {
+        return Err(sqlite_source_schema_error("context hierarchy contains a parent cycle"));
+    }
+    let invalid_ordinals: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM memory_contexts
+             GROUP BY memory_id
+             HAVING MIN(ordinal) <> 0 OR MAX(ordinal) <> COUNT(*) - 1
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid_ordinals {
+        return Err(sqlite_source_schema_error("memory context ordinals must be contiguous and start at zero"));
+    }
+    let mismatched_primary: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM memory_contexts AS membership
+             JOIN contexts AS context_row ON context_row.id = membership.context_id
+             JOIN memory_metadata AS metadata ON metadata.memory_id = membership.memory_id
+             WHERE membership.ordinal = 0
+               AND NULLIF(trim(metadata.scope_key), '') IS NOT NULL
+               AND metadata.scope_key <> context_row.context_key
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if mismatched_primary {
+        return Err(sqlite_source_schema_error("memory_metadata.scope_key must equal the ordinal-zero governed context key"));
+    }
+    Ok(())
+}
+
 fn validate_sqlite_schema_object_exists(conn: &Connection, object_type: &'static str, name: &'static str) -> Result<(), StoreError> {
     if sqlite_schema_sql(conn, object_type, name)?.is_none() {
         return Err(sqlite_source_schema_error(format!("required {object_type} {name} is missing")));
@@ -1329,8 +1933,91 @@ fn sqlite_primary_key_columns(conn: &Connection, table: &'static str) -> Result<
     Ok(primary_key_columns.into_iter().map(|(_, name)| name).collect())
 }
 
-fn quoted_sqlite_identifier(name: &'static str) -> String {
+fn quoted_sqlite_identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+fn normalize_sqlite_ddl(value: &str) -> String {
+    value.to_ascii_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn validate_sqlite_check_constraints(expectation: &SqliteTableExpectation, sql: &str) -> Result<(), StoreError> {
+    let actual = sqlite_check_constraints(sql);
+    let expected = expectation
+        .ddl_contains
+        .iter()
+        .filter(|fragment| fragment.trim_start().to_ascii_lowercase().starts_with("check"))
+        .map(|fragment| normalize_sqlite_ddl(fragment))
+        .collect::<BTreeSet<_>>();
+    if actual != expected {
+        return Err(sqlite_source_schema_error(format!(
+            "table {} has unexpected CHECK constraints: actual {actual:?}, expected {expected:?}",
+            expectation.name
+        )));
+    }
+    Ok(())
+}
+
+#[expect(clippy::string_slice, reason = "SQL CHECK keywords, quotes, and parentheses are ASCII byte boundaries")]
+fn sqlite_check_constraints(sql: &str) -> BTreeSet<String> {
+    let executable = sqlite_sql_without_comments(sql);
+    let bytes = executable.as_bytes();
+    let mut checks = BTreeSet::new();
+    let mut index = 0_usize;
+    while index < bytes.len() {
+        if matches!(bytes[index], b'\'' | b'"' | b'`' | b'[') {
+            let terminator = if bytes[index] == b'[' { b']' } else { bytes[index] };
+            index = skip_sqlite_quoted(bytes, index, terminator);
+            continue;
+        }
+        if bytes[index].is_ascii_alphabetic() || bytes[index] == b'_' {
+            let word_start = index;
+            index = index.saturating_add(1);
+            while bytes.get(index).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_') {
+                index = index.saturating_add(1);
+            }
+            if !executable[word_start..index].eq_ignore_ascii_case("check") {
+                continue;
+            }
+            let mut open = index;
+            while bytes.get(open).is_some_and(u8::is_ascii_whitespace) {
+                open = open.saturating_add(1);
+            }
+            if bytes.get(open) != Some(&b'(') {
+                continue;
+            }
+            if let Some(end) = sqlite_check_constraint_end(bytes, open) {
+                let _inserted = checks.insert(normalize_sqlite_ddl(&executable[word_start..end]));
+                index = end;
+            }
+            continue;
+        }
+        index = index.saturating_add(1);
+    }
+    checks
+}
+
+fn sqlite_check_constraint_end(bytes: &[u8], mut cursor: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    while cursor < bytes.len() {
+        if matches!(bytes[cursor], b'\'' | b'"' | b'`' | b'[') {
+            let terminator = if bytes[cursor] == b'[' { b']' } else { bytes[cursor] };
+            cursor = skip_sqlite_quoted(bytes, cursor, terminator);
+            continue;
+        }
+        match bytes[cursor] {
+            b'(' => depth = depth.saturating_add(1),
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(cursor.saturating_add(1));
+                }
+            }
+            _ => {}
+        }
+        cursor = cursor.saturating_add(1);
+    }
+    None
 }
 
 pub(crate) fn validate_sqlite_foreign_key_integrity(conn: &Connection) -> Result<(), StoreError> {
@@ -1564,31 +2251,233 @@ fn export_tombstones(conn: &Connection) -> Result<Vec<MigrationTombstone>, Store
     rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
 }
 
-fn export_scopes(conn: &Connection) -> Result<Vec<MigrationScope>, StoreError> {
-    let mut stmt = conn.prepare(
-        "SELECT scope_key, display_name, description, aliases, matchers, parent, related, updated_at
-         FROM scope_registry
-         ORDER BY scope_key",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        let aliases_json: String = row.get(3)?;
-        let matchers_json: String = row.get(4)?;
-        let related_json: String = row.get(6)?;
-        let updated_at_str: String = row.get(7)?;
-        Ok(MigrationScope {
-            definition: ScopeDefinition {
-                scope_key: row.get(0)?,
-                display_name: row.get(1)?,
-                description: row.get(2)?,
-                aliases: parse_json_sql(&aliases_json, 3)?,
-                matchers: parse_json_sql(&matchers_json, 4)?,
-                parent: row.get(5)?,
-                related: parse_json_sql(&related_json, 6)?,
-            },
-            updated_at: parse_datetime_sql(&updated_at_str, 7)?,
-        })
-    })?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+#[expect(clippy::too_many_lines, reason = "all normalized context tables are exported together to preserve referential order")]
+fn export_sqlite_contexts(conn: &Connection) -> Result<MigrationContextData, StoreError> {
+    let kinds = {
+        let mut statement = conn.prepare("SELECT kind, display_name, builtin, enabled, created_at, updated_at FROM context_kinds ORDER BY kind")?;
+        statement
+            .query_map([], |row| {
+                let created_at: String = row.get(4)?;
+                let updated_at: String = row.get(5)?;
+                Ok(MigrationContextKind {
+                    kind: row.get(0)?,
+                    display_name: row.get(1)?,
+                    builtin: row.get(2)?,
+                    enabled: row.get(3)?,
+                    created_at: parse_datetime_sql(&created_at, 4)?,
+                    updated_at: parse_datetime_sql(&updated_at, 5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let contexts = {
+        let mut statement = conn.prepare(
+            "SELECT id, kind, context_key, normalized_key, display_name, description,
+                    owner_principal, guidance, parent_id, lifecycle, frozen, created_at, updated_at
+             FROM contexts ORDER BY id",
+        )?;
+        statement
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                let kind: String = row.get(1)?;
+                let parent_id: Option<String> = row.get(8)?;
+                let lifecycle: String = row.get(9)?;
+                let created_at: String = row.get(11)?;
+                let updated_at: String = row.get(12)?;
+                Ok(MigrationContext {
+                    definition: ContextDefinition {
+                        id: parse_context_id_sql(&id, 0)?,
+                        kind: ContextKind::new(kind).map_err(|error| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(error)))?,
+                        key: row.get(2)?,
+                        display_name: row.get(4)?,
+                        description: row.get(5)?,
+                        owner_principal: row.get(6)?,
+                        guidance: row.get(7)?,
+                        parent_id: parent_id.as_deref().map(|value| parse_context_id_sql(value, 8)).transpose()?,
+                        lifecycle: lifecycle
+                            .parse()
+                            .map_err(|error: ParseEnumError| rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(error)))?,
+                        frozen: row.get(10)?,
+                        created_at: parse_datetime_sql(&created_at, 11)?,
+                        updated_at: parse_datetime_sql(&updated_at, 12)?,
+                    },
+                    normalized_key: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let aliases = {
+        let mut statement = conn.prepare("SELECT context_id, alias, normalized_alias, created_at FROM context_aliases ORDER BY context_id, normalized_alias")?;
+        statement
+            .query_map([], |row| {
+                let context_id: String = row.get(0)?;
+                let created_at: String = row.get(3)?;
+                Ok(MigrationContextAlias {
+                    context_id: parse_context_id_sql(&context_id, 0)?,
+                    alias: row.get(1)?,
+                    normalized_alias: row.get(2)?,
+                    created_at: parse_datetime_sql(&created_at, 3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let identities = {
+        let mut statement = conn.prepare(
+            "SELECT context_id, owner_principal, kind, scheme, namespace,
+                    fingerprint, redacted_label, created_at
+             FROM context_identities
+             ORDER BY context_id, scheme, namespace, fingerprint",
+        )?;
+        statement
+            .query_map([], |row| {
+                let context_id: String = row.get(0)?;
+                let namespace: String = row.get(4)?;
+                let created_at: String = row.get(7)?;
+                Ok(MigrationContextIdentity {
+                    context_id: parse_context_id_sql(&context_id, 0)?,
+                    owner_principal: row.get(1)?,
+                    kind: row.get(2)?,
+                    identity: ContextIdentity {
+                        scheme: row.get(3)?,
+                        namespace: (!namespace.is_empty()).then_some(namespace),
+                        fingerprint: row.get(5)?,
+                        redacted_label: row.get(6)?,
+                    },
+                    created_at: parse_datetime_sql(&created_at, 7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let hints = {
+        let mut statement = conn.prepare("SELECT context_id, hint, normalized_hint, created_at FROM context_resolver_hints ORDER BY context_id, normalized_hint")?;
+        statement
+            .query_map([], |row| {
+                let context_id: String = row.get(0)?;
+                let created_at: String = row.get(3)?;
+                Ok(MigrationContextHint {
+                    context_id: parse_context_id_sql(&context_id, 0)?,
+                    hint: row.get(1)?,
+                    normalized_hint: row.get(2)?,
+                    created_at: parse_datetime_sql(&created_at, 3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let grants = {
+        let mut statement = conn.prepare("SELECT context_id, grantee_principal, granted_by, created_at FROM context_grants ORDER BY context_id, grantee_principal")?;
+        statement
+            .query_map([], |row| {
+                let context_id: String = row.get(0)?;
+                let created_at: String = row.get(3)?;
+                Ok(ContextGrant {
+                    context_id: parse_context_id_sql(&context_id, 0)?,
+                    grantee_principal: row.get(1)?,
+                    granted_by: row.get(2)?,
+                    created_at: parse_datetime_sql(&created_at, 3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let relations = {
+        let mut statement = conn.prepare("SELECT from_context_id, to_context_id, relation, created_at FROM context_relations ORDER BY from_context_id, to_context_id, relation")?;
+        statement
+            .query_map([], |row| {
+                let from_context_id: String = row.get(0)?;
+                let to_context_id: String = row.get(1)?;
+                let created_at: String = row.get(3)?;
+                Ok(MigrationContextRelation {
+                    from_context_id: parse_context_id_sql(&from_context_id, 0)?,
+                    to_context_id: parse_context_id_sql(&to_context_id, 1)?,
+                    relation: row.get(2)?,
+                    created_at: parse_datetime_sql(&created_at, 3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let memberships = {
+        let mut statement = conn.prepare("SELECT memory_id, context_id, ordinal, created_at FROM memory_contexts ORDER BY memory_id, ordinal")?;
+        statement
+            .query_map([], |row| {
+                let memory_id: String = row.get(0)?;
+                let context_id: String = row.get(1)?;
+                let created_at: String = row.get(3)?;
+                Ok(MigrationMemoryContext {
+                    memory_id: parse_memory_id_sql(&memory_id, 0)?,
+                    context_id: parse_context_id_sql(&context_id, 1)?,
+                    ordinal: row.get(2)?,
+                    created_at: parse_datetime_sql(&created_at, 3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let policies = {
+        let mut statement = conn.prepare("SELECT layer, principal, kind, policy_json, updated_at FROM context_kind_policies ORDER BY layer, principal, kind")?;
+        statement
+            .query_map([], |row| {
+                let policy: String = row.get(3)?;
+                let updated_at: String = row.get(4)?;
+                Ok(MigrationContextPolicy {
+                    layer: row.get(0)?,
+                    principal: row.get(1)?,
+                    kind: row.get(2)?,
+                    policy: parse_json_sql(&policy, 3)?,
+                    updated_at: parse_datetime_sql(&updated_at, 4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let anchor_overrides = {
+        let mut statement = conn.prepare("SELECT anchor_context_id, principal, policy_json, updated_at FROM context_anchor_overrides ORDER BY anchor_context_id, principal")?;
+        statement
+            .query_map([], |row| {
+                let anchor_context_id: String = row.get(0)?;
+                let policy: String = row.get(2)?;
+                let updated_at: String = row.get(3)?;
+                Ok(MigrationContextAnchorOverride {
+                    anchor_context_id: parse_context_id_sql(&anchor_context_id, 0)?,
+                    principal: row.get(1)?,
+                    policy: parse_json_sql(&policy, 2)?,
+                    updated_at: parse_datetime_sql(&updated_at, 3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let audit_events = {
+        let mut statement = conn.prepare(
+            "SELECT id, actor_principal, action, context_id, memory_id, timestamp, details
+             FROM context_audit_events ORDER BY id",
+        )?;
+        statement
+            .query_map([], |row| {
+                let context_id: Option<String> = row.get(3)?;
+                let memory_id: Option<String> = row.get(4)?;
+                let timestamp: String = row.get(5)?;
+                let details: Option<String> = row.get(6)?;
+                Ok(ContextAuditEvent {
+                    id: row.get(0)?,
+                    actor_principal: row.get(1)?,
+                    action: row.get(2)?,
+                    context_id: context_id.as_deref().map(|value| parse_context_id_sql(value, 3)).transpose()?,
+                    memory_id: memory_id.as_deref().map(|value| parse_memory_id_sql(value, 4)).transpose()?,
+                    timestamp: parse_datetime_sql(&timestamp, 5)?,
+                    details: details.as_deref().map(|value| parse_json_sql(value, 6)).transpose()?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    Ok(MigrationContextData {
+        kinds,
+        contexts,
+        aliases,
+        identities,
+        hints,
+        grants,
+        relations,
+        memberships,
+        policies,
+        anchor_overrides,
+        audit_events,
+    })
 }
 
 fn export_metadata(conn: &Connection) -> Result<Vec<MigrationMetadata>, StoreError> {
@@ -1667,7 +2556,7 @@ async fn export_postgres_tx(tx: &mut Transaction<'_, Postgres>, embedding_dimens
         superseded_links,
         audit_entries: export_postgres_audit_entries_tx(tx).await?,
         tombstones: export_postgres_tombstones_tx(tx).await?,
-        scopes: export_postgres_scopes_tx(tx).await?,
+        contexts: export_postgres_contexts_tx(tx).await?,
         metadata: export_postgres_metadata_tx(tx).await?,
         embedding_profile: export_postgres_embedding_profile_tx(tx).await?,
         counts: postgres_counts_tx(tx).await?,
@@ -1767,15 +2656,227 @@ async fn export_postgres_tombstones_tx(tx: &mut Transaction<'_, Postgres>) -> Re
     rows.iter().map(postgres_row_to_tombstone).collect()
 }
 
-async fn export_postgres_scopes_tx(tx: &mut Transaction<'_, Postgres>) -> Result<Vec<MigrationScope>, StoreError> {
-    let rows = query(
-        "SELECT scope_key, display_name, description, aliases, matchers, parent, related, updated_at
-         FROM scope_registry
-         ORDER BY scope_key ASC",
+#[expect(clippy::too_many_lines, reason = "all normalized context tables are exported together to preserve referential order")]
+async fn export_postgres_contexts_tx(tx: &mut Transaction<'_, Postgres>) -> Result<MigrationContextData, StoreError> {
+    let kinds = query("SELECT kind, display_name, builtin, enabled, created_at, updated_at FROM context_kinds ORDER BY kind")
+        .fetch_all(&mut **tx)
+        .await?
+        .iter()
+        .map(|row| {
+            Ok(MigrationContextKind {
+                kind: row.try_get("kind")?,
+                display_name: row.try_get("display_name")?,
+                builtin: row.try_get("builtin")?,
+                enabled: row.try_get("enabled")?,
+                created_at: row.try_get("created_at")?,
+                updated_at: row.try_get("updated_at")?,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    let contexts = query(
+        "SELECT id, kind, context_key, normalized_key, display_name, description,
+                owner_principal, guidance, parent_id, lifecycle, frozen, created_at, updated_at
+         FROM contexts ORDER BY id",
     )
     .fetch_all(&mut **tx)
-    .await?;
-    rows.iter().map(postgres_row_to_scope).collect()
+    .await?
+    .iter()
+    .map(|row| {
+        let id: String = row.try_get("id")?;
+        let kind: String = row.try_get("kind")?;
+        let parent_id: Option<String> = row.try_get("parent_id")?;
+        let lifecycle: String = row.try_get("lifecycle")?;
+        Ok(MigrationContext {
+            definition: ContextDefinition {
+                id: parse_context_id_store(&id, "contexts.id")?,
+                kind: ContextKind::new(kind).map_err(|error| StoreError::Serialization(Box::new(error)))?,
+                key: row.try_get("context_key")?,
+                display_name: row.try_get("display_name")?,
+                description: row.try_get("description")?,
+                owner_principal: row.try_get("owner_principal")?,
+                guidance: row.try_get("guidance")?,
+                parent_id: parent_id.as_deref().map(|value| parse_context_id_store(value, "contexts.parent_id")).transpose()?,
+                lifecycle: lifecycle.parse().map_err(|error: ParseEnumError| StoreError::Serialization(Box::new(error)))?,
+                frozen: row.try_get("frozen")?,
+                created_at: row.try_get("created_at")?,
+                updated_at: row.try_get("updated_at")?,
+            },
+            normalized_key: row.try_get("normalized_key")?,
+        })
+    })
+    .collect::<Result<Vec<_>, StoreError>>()?;
+    let aliases = query("SELECT context_id, alias, normalized_alias, created_at FROM context_aliases ORDER BY context_id, normalized_alias")
+        .fetch_all(&mut **tx)
+        .await?
+        .iter()
+        .map(|row| {
+            let context_id: String = row.try_get("context_id")?;
+            Ok(MigrationContextAlias {
+                context_id: parse_context_id_store(&context_id, "context_aliases.context_id")?,
+                alias: row.try_get("alias")?,
+                normalized_alias: row.try_get("normalized_alias")?,
+                created_at: row.try_get("created_at")?,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    let identities = query(
+        "SELECT context_id, owner_principal, kind, scheme, namespace,
+                fingerprint, redacted_label, created_at
+         FROM context_identities
+         ORDER BY context_id, scheme, namespace, fingerprint",
+    )
+    .fetch_all(&mut **tx)
+    .await?
+    .iter()
+    .map(|row| {
+        let context_id: String = row.try_get("context_id")?;
+        let namespace: String = row.try_get("namespace")?;
+        Ok(MigrationContextIdentity {
+            context_id: parse_context_id_store(&context_id, "context_identities.context_id")?,
+            owner_principal: row.try_get("owner_principal")?,
+            kind: row.try_get("kind")?,
+            identity: ContextIdentity {
+                scheme: row.try_get("scheme")?,
+                namespace: (!namespace.is_empty()).then_some(namespace),
+                fingerprint: row.try_get("fingerprint")?,
+                redacted_label: row.try_get("redacted_label")?,
+            },
+            created_at: row.try_get("created_at")?,
+        })
+    })
+    .collect::<Result<Vec<_>, StoreError>>()?;
+    let hints = query("SELECT context_id, hint, normalized_hint, created_at FROM context_resolver_hints ORDER BY context_id, normalized_hint")
+        .fetch_all(&mut **tx)
+        .await?
+        .iter()
+        .map(|row| {
+            let context_id: String = row.try_get("context_id")?;
+            Ok(MigrationContextHint {
+                context_id: parse_context_id_store(&context_id, "context_resolver_hints.context_id")?,
+                hint: row.try_get("hint")?,
+                normalized_hint: row.try_get("normalized_hint")?,
+                created_at: row.try_get("created_at")?,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    let grants = query("SELECT context_id, grantee_principal, granted_by, created_at FROM context_grants ORDER BY context_id, grantee_principal")
+        .fetch_all(&mut **tx)
+        .await?
+        .iter()
+        .map(|row| {
+            let context_id: String = row.try_get("context_id")?;
+            Ok(ContextGrant {
+                context_id: parse_context_id_store(&context_id, "context_grants.context_id")?,
+                grantee_principal: row.try_get("grantee_principal")?,
+                granted_by: row.try_get("granted_by")?,
+                created_at: row.try_get("created_at")?,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    let relations = query(
+        "SELECT from_context_id, to_context_id, relation, created_at
+         FROM context_relations ORDER BY from_context_id, to_context_id, relation",
+    )
+    .fetch_all(&mut **tx)
+    .await?
+    .iter()
+    .map(|row| {
+        let from_context_id: String = row.try_get("from_context_id")?;
+        let to_context_id: String = row.try_get("to_context_id")?;
+        Ok(MigrationContextRelation {
+            from_context_id: parse_context_id_store(&from_context_id, "context_relations.from_context_id")?,
+            to_context_id: parse_context_id_store(&to_context_id, "context_relations.to_context_id")?,
+            relation: row.try_get("relation")?,
+            created_at: row.try_get("created_at")?,
+        })
+    })
+    .collect::<Result<Vec<_>, StoreError>>()?;
+    let memberships = query("SELECT memory_id, context_id, ordinal, created_at FROM memory_contexts ORDER BY memory_id, ordinal")
+        .fetch_all(&mut **tx)
+        .await?
+        .iter()
+        .map(|row| {
+            let memory_id: String = row.try_get("memory_id")?;
+            let context_id: String = row.try_get("context_id")?;
+            Ok(MigrationMemoryContext {
+                memory_id: parse_memory_id_store(&memory_id, "memory_contexts.memory_id")?,
+                context_id: parse_context_id_store(&context_id, "memory_contexts.context_id")?,
+                ordinal: row.try_get("ordinal")?,
+                created_at: row.try_get("created_at")?,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    let policies = query("SELECT layer, principal, kind, policy_json, updated_at FROM context_kind_policies ORDER BY layer, principal, kind")
+        .fetch_all(&mut **tx)
+        .await?
+        .iter()
+        .map(|row| {
+            let Json(policy): Json<serde_json::Value> = row.try_get("policy_json")?;
+            Ok(MigrationContextPolicy {
+                layer: row.try_get("layer")?,
+                principal: row.try_get("principal")?,
+                kind: row.try_get("kind")?,
+                policy,
+                updated_at: row.try_get("updated_at")?,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    let anchor_overrides = query("SELECT anchor_context_id, principal, policy_json, updated_at FROM context_anchor_overrides ORDER BY anchor_context_id, principal")
+        .fetch_all(&mut **tx)
+        .await?
+        .iter()
+        .map(|row| {
+            let anchor_context_id: String = row.try_get("anchor_context_id")?;
+            let Json(policy): Json<serde_json::Value> = row.try_get("policy_json")?;
+            Ok(MigrationContextAnchorOverride {
+                anchor_context_id: parse_context_id_store(&anchor_context_id, "context_anchor_overrides.anchor_context_id")?,
+                principal: row.try_get("principal")?,
+                policy,
+                updated_at: row.try_get("updated_at")?,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    let audit_events = query(
+        "SELECT id, actor_principal, action, context_id, memory_id, timestamp, details
+         FROM context_audit_events ORDER BY id",
+    )
+    .fetch_all(&mut **tx)
+    .await?
+    .iter()
+    .map(|row| {
+        let context_id: Option<String> = row.try_get("context_id")?;
+        let memory_id: Option<String> = row.try_get("memory_id")?;
+        let details: Option<Json<serde_json::Value>> = row.try_get("details")?;
+        Ok(ContextAuditEvent {
+            id: row.try_get("id")?,
+            actor_principal: row.try_get("actor_principal")?,
+            action: row.try_get("action")?,
+            context_id: context_id
+                .as_deref()
+                .map(|value| parse_context_id_store(value, "context_audit_events.context_id"))
+                .transpose()?,
+            memory_id: memory_id
+                .as_deref()
+                .map(|value| parse_memory_id_store(value, "context_audit_events.memory_id"))
+                .transpose()?,
+            timestamp: row.try_get("timestamp")?,
+            details: details.map(|Json(value)| value),
+        })
+    })
+    .collect::<Result<Vec<_>, StoreError>>()?;
+    Ok(MigrationContextData {
+        kinds,
+        contexts,
+        aliases,
+        identities,
+        hints,
+        grants,
+        relations,
+        memberships,
+        policies,
+        anchor_overrides,
+        audit_events,
+    })
 }
 
 async fn export_postgres_metadata_tx(tx: &mut Transaction<'_, Postgres>) -> Result<Vec<MigrationMetadata>, StoreError> {
@@ -1868,24 +2969,6 @@ fn postgres_row_to_tombstone(row: &PgRow) -> Result<MigrationTombstone, StoreErr
     })
 }
 
-fn postgres_row_to_scope(row: &PgRow) -> Result<MigrationScope, StoreError> {
-    let aliases: Json<Vec<String>> = row.try_get("aliases")?;
-    let matchers: Json<Vec<String>> = row.try_get("matchers")?;
-    let related: Json<Vec<String>> = row.try_get("related")?;
-    Ok(MigrationScope {
-        definition: ScopeDefinition {
-            scope_key: row.try_get("scope_key")?,
-            display_name: row.try_get("display_name")?,
-            description: row.try_get("description")?,
-            aliases: aliases.0,
-            matchers: matchers.0,
-            parent: row.try_get("parent")?,
-            related: related.0,
-        },
-        updated_at: row.try_get("updated_at")?,
-    })
-}
-
 fn postgres_row_to_metadata(row: &PgRow) -> Result<MigrationMetadata, StoreError> {
     let memory_id: String = row.try_get("memory_id")?;
     let quality_flags: Json<Vec<String>> = row.try_get("quality_flags")?;
@@ -1910,10 +2993,22 @@ fn parse_memory_id_sql(value: &str, column: usize) -> Result<MemoryId, rusqlite:
         .map_err(|e| rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Text, Box::new(e)))
 }
 
+fn parse_context_id_sql(value: &str, column: usize) -> Result<ContextId, rusqlite::Error> {
+    value
+        .parse()
+        .map_err(|error| rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Text, Box::new(error)))
+}
+
 fn parse_memory_id_store(value: &str, field: &'static str) -> Result<MemoryId, StoreError> {
     value
         .parse()
         .map_err(|e| StoreError::Serialization(format!("invalid {field} memory id {value:?}: {e}").into()))
+}
+
+fn parse_context_id_store(value: &str, field: &'static str) -> Result<ContextId, StoreError> {
+    value
+        .parse()
+        .map_err(|error| StoreError::Serialization(format!("invalid {field} context id {value:?}: {error}").into()))
 }
 
 fn parse_enum_sql<T>(value: &str, column: usize) -> Result<T, rusqlite::Error>
@@ -1942,7 +3037,17 @@ fn sqlite_counts(conn: &Connection) -> Result<MigrationTableCounts, StoreError> 
         embeddings: sqlite_count(conn, "memory_embedding_map")?,
         audit_entries: sqlite_count(conn, "memory_audit_log")?,
         tombstones: sqlite_count(conn, "memory_tombstones")?,
-        scopes: sqlite_count(conn, "scope_registry")?,
+        context_kinds: sqlite_count(conn, "context_kinds")?,
+        contexts: sqlite_count(conn, "contexts")?,
+        context_aliases: sqlite_count(conn, "context_aliases")?,
+        context_identities: sqlite_count(conn, "context_identities")?,
+        context_hints: sqlite_count(conn, "context_resolver_hints")?,
+        context_grants: sqlite_count(conn, "context_grants")?,
+        context_relations: sqlite_count(conn, "context_relations")?,
+        memory_contexts: sqlite_count(conn, "memory_contexts")?,
+        context_policies: sqlite_count(conn, "context_kind_policies")?,
+        context_anchor_overrides: sqlite_count(conn, "context_anchor_overrides")?,
+        context_audit_events: sqlite_count(conn, "context_audit_events")?,
         metadata: sqlite_count(conn, "memory_metadata")?,
         embedding_profiles: sqlite_count(conn, "embedding_profile")?,
     })
@@ -2056,6 +3161,9 @@ pub(crate) async fn validate_ready_postgres_schema(
     include_migration_metadata: bool,
 ) -> Result<(), StoreError> {
     validate_existing_postgres_schema(pool, embedding_dimensions, current_schema_only, include_migration_metadata).await?;
+    if postgres_table_exists(pool, "scope_registry", current_schema_only).await? {
+        return Err(StoreError::Conflict("current PostgreSQL schema contains retired scope_registry".into()));
+    }
     if !postgres_table_exists(pool, "memories", current_schema_only).await? {
         return Err(StoreError::Conflict(
             "PostgreSQL database is not initialized; enable database.postgres.auto_migrate or start LocalHold once with migrations enabled".into(),
@@ -2067,8 +3175,64 @@ pub(crate) async fn validate_ready_postgres_schema(
     }
     drop(connection);
     validate_postgres_runtime_relationships(pool, current_schema_only).await?;
+    validate_postgres_context_integrity(pool).await?;
     if !postgres_runtime_indexes_compatible(pool, current_schema_only, false).await? {
         return Err(StoreError::Conflict("PostgreSQL managed schema indexes do not match runtime requirements".into()));
+    }
+    Ok(())
+}
+
+async fn validate_postgres_context_integrity(pool: &PgPool) -> Result<(), StoreError> {
+    let has_cycle: bool = query_scalar(
+        "WITH RECURSIVE walk(id, parent_id, path, cycle) AS (
+             SELECT id, parent_id, ARRAY[id], FALSE
+             FROM contexts
+             UNION ALL
+             SELECT parent.id,
+                    parent.parent_id,
+                    walk.path || parent.id,
+                    parent.id = ANY(walk.path)
+             FROM walk
+             JOIN contexts AS parent ON parent.id = walk.parent_id
+             WHERE NOT walk.cycle
+         )
+         SELECT EXISTS(SELECT 1 FROM walk WHERE cycle)",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_cycle {
+        return Err(StoreError::Conflict("PostgreSQL context hierarchy contains a parent cycle".into()));
+    }
+    let invalid_ordinals: bool = query_scalar(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM memory_contexts
+             GROUP BY memory_id
+             HAVING MIN(ordinal) <> 0 OR MAX(ordinal) <> COUNT(*) - 1
+         )",
+    )
+    .fetch_one(pool)
+    .await?;
+    if invalid_ordinals {
+        return Err(StoreError::Conflict("PostgreSQL memory context ordinals must be contiguous and start at zero".into()));
+    }
+    let mismatched_cache: bool = query_scalar(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM memory_contexts AS membership
+             JOIN contexts AS context_row ON context_row.id = membership.context_id
+             JOIN memory_metadata AS metadata ON metadata.memory_id = membership.memory_id
+             WHERE membership.ordinal = 0
+               AND NULLIF(trim(metadata.scope_key), '') IS NOT NULL
+               AND metadata.scope_key <> context_row.context_key
+         )",
+    )
+    .fetch_one(pool)
+    .await?;
+    if mismatched_cache {
+        return Err(StoreError::Conflict(
+            "PostgreSQL memory_metadata.scope_key must equal the ordinal-zero governed context key".into(),
+        ));
     }
     Ok(())
 }
@@ -2078,6 +3242,10 @@ pub(crate) async fn postgres_runtime_indexes_compatible(pool: &PgPool, current_s
     postgres_runtime_indexes_compatible_connection(&mut connection, current_schema_only, allow_absent).await
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the PostgreSQL index manifest is intentionally centralized so access methods, keys, predicates, and definitions stay auditable"
+)]
 async fn postgres_runtime_indexes_compatible_connection(connection: &mut PgConnection, current_schema_only: bool, allow_absent: bool) -> Result<bool, SqlxError> {
     let canonical: bool = query_scalar(
         r#"SELECT COALESCE(bool_and(
@@ -2090,6 +3258,10 @@ async fn postgres_runtime_indexes_compatible_connection(connection: &mut PgConne
                 AND NOT index_data.indisunique
                 AND NOT index_data.indisprimary
                 AND NOT index_data.indisexclusion
+                AND access_method.amname = CASE
+                    WHEN required.name IN ('idx_memories_tags_gin', 'idx_memories_content_fts') THEN 'gin'
+                    ELSE 'btree'
+                END
                 AND index_data.indnkeyatts = required.key_count
                 AND (required.expected_keys IS NULL OR (
                     SELECT string_agg(regexp_replace(lower(pg_get_indexdef(indexes.oid, key_number, TRUE)), '[[:space:]]', '', 'g'), ',' ORDER BY key_number)
@@ -2119,10 +3291,30 @@ async fn postgres_runtime_indexes_compatible_connection(connection: &mut PgConne
             ('idx_audit_log_memory_id', 'memory_audit_log', 1, 'memory_id', 'memory_id', NULL),
             ('idx_audit_log_timestamp', 'memory_audit_log', 1, '"timestamp"', '"timestamp" desc', NULL),
             ('idx_memory_tombstones_deleted_at', 'memory_tombstones', 1, 'deleted_at', 'deleted_at desc', NULL),
-            ('idx_memory_metadata_scope_key', 'memory_metadata', 1, 'scope_key', 'scope_key', NULL)
+            ('idx_memory_metadata_scope_key', 'memory_metadata', 1, 'scope_key', 'scope_key', NULL),
+            ('idx_contexts_owner_kind_key', 'contexts', 3, 'owner_principal,kind,normalized_key', 'normalized_key', NULL),
+            ('idx_contexts_kind_key', 'contexts', 3, 'kind,normalized_key,id', 'normalized_key', NULL),
+            ('idx_contexts_key', 'contexts', 2, 'normalized_key,id', 'normalized_key', NULL),
+            ('idx_contexts_parent', 'contexts', 1, 'parent_id', 'parent_id', 'parent_idisnotnull'),
+            ('idx_contexts_lifecycle', 'contexts', 2, 'lifecycle,kind', 'lifecycle', NULL),
+            ('idx_context_aliases_lookup', 'context_aliases', 2, 'normalized_alias,context_id', 'normalized_alias', NULL),
+            ('idx_context_identities_lookup', 'context_identities', 5, 'owner_principal,kind,scheme,namespace,fingerprint', 'fingerprint', NULL),
+            ('idx_context_identities_exact', 'context_identities', 5, 'kind,scheme,namespace,fingerprint,context_id', 'fingerprint', NULL),
+            ('idx_context_resolver_hints_lookup', 'context_resolver_hints', 2, 'normalized_hint,context_id', 'normalized_hint', NULL),
+            ('idx_context_grants_principal', 'context_grants', 2, 'grantee_principal,context_id', 'grantee_principal', NULL),
+            ('idx_context_relations_reverse', 'context_relations', 3, 'to_context_id,relation,from_context_id', 'to_context_id', NULL),
+            ('idx_memory_contexts_memory', 'memory_contexts', 3, 'memory_id,ordinal,context_id', 'ordinal', NULL),
+            ('idx_memory_contexts_context', 'memory_contexts', 2, 'context_id,memory_id', 'context_id', NULL),
+            ('idx_context_audit_context', 'context_audit_events', 2, 'context_id,"timestamp"', 'context_id', 'context_idisnotnull'),
+            ('idx_context_audit_memory', 'context_audit_events', 2, 'memory_id,"timestamp"', 'memory_id', 'memory_idisnotnull'),
+            ('idx_context_audit_timestamp', 'context_audit_events', 1, '"timestamp"', '"timestamp" desc', NULL)
         ) AS required(name, table_name, key_count, expected_keys, definition_fragment, predicate)
         LEFT JOIN pg_class AS managed_table ON managed_table.oid = to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), required.table_name) ELSE required.table_name END)
-        LEFT JOIN pg_class AS indexes ON indexes.relnamespace = managed_table.relnamespace AND indexes.relname = required.name
+        LEFT JOIN pg_namespace AS target_namespace ON target_namespace.nspname = current_schema()
+        LEFT JOIN pg_class AS indexes
+          ON indexes.relnamespace = COALESCE(managed_table.relnamespace, target_namespace.oid)
+         AND indexes.relname = required.name
+        LEFT JOIN pg_am AS access_method ON access_method.oid = indexes.relam
         LEFT JOIN pg_index AS index_data ON index_data.indexrelid = indexes.oid"#,
     )
     .bind(current_schema_only)
@@ -2135,6 +3327,7 @@ async fn postgres_runtime_indexes_compatible_connection(connection: &mut PgConne
     postgres_restrictive_indexes_compatible_connection(connection, current_schema_only).await
 }
 
+#[expect(clippy::too_many_lines, reason = "restrictive-index safety checks are kept in one catalog query and one validation loop")]
 async fn postgres_restrictive_indexes_compatible_connection(connection: &mut PgConnection, current_schema_only: bool) -> Result<bool, SqlxError> {
     let rows = query(
         "SELECT managed.relname AS table_name,
@@ -2174,7 +3367,17 @@ async fn postgres_restrictive_indexes_compatible_connection(connection: &mut PgC
              to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_embeddings') ELSE 'memory_embeddings' END),
              to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_audit_log') ELSE 'memory_audit_log' END),
              to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_tombstones') ELSE 'memory_tombstones' END),
-             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'scope_registry') ELSE 'scope_registry' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_kinds') ELSE 'context_kinds' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'contexts') ELSE 'contexts' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_aliases') ELSE 'context_aliases' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_identities') ELSE 'context_identities' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_resolver_hints') ELSE 'context_resolver_hints' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_grants') ELSE 'context_grants' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_relations') ELSE 'context_relations' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_contexts') ELSE 'memory_contexts' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_kind_policies') ELSE 'context_kind_policies' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_anchor_overrides') ELSE 'context_anchor_overrides' END),
+             to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_audit_events') ELSE 'context_audit_events' END),
              to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_metadata') ELSE 'memory_metadata' END),
              to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'embedding_profile') ELSE 'embedding_profile' END)
          ])
@@ -2296,7 +3499,17 @@ async fn postgres_managed_foreign_key_count_connection(connection: &mut PgConnec
                to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_embeddings') ELSE 'memory_embeddings' END),
                to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_audit_log') ELSE 'memory_audit_log' END),
                to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_tombstones') ELSE 'memory_tombstones' END),
-               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'scope_registry') ELSE 'scope_registry' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_kinds') ELSE 'context_kinds' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'contexts') ELSE 'contexts' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_aliases') ELSE 'context_aliases' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_identities') ELSE 'context_identities' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_resolver_hints') ELSE 'context_resolver_hints' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_grants') ELSE 'context_grants' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_relations') ELSE 'context_relations' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_contexts') ELSE 'memory_contexts' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_kind_policies') ELSE 'context_kind_policies' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_anchor_overrides') ELSE 'context_anchor_overrides' END),
+               to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_audit_events') ELSE 'context_audit_events' END),
                to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), $2) ELSE $2 END),
                to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'embedding_profile') ELSE 'embedding_profile' END)
            ])",
@@ -2317,7 +3530,11 @@ async fn postgres_foreign_key_matches_connection(connection: &mut PgConnection, 
               AND foreign_key.confrelid = to_regclass(CASE WHEN $6 THEN format('%I.%I', current_schema(), $3) ELSE $3 END)
               AND foreign_key.contype = 'f'
               AND foreign_key.convalidated
+              AND foreign_key.confupdtype = 'a'
               AND foreign_key.confdeltype::text = $5
+              AND foreign_key.confmatchtype = 's'
+              AND NOT foreign_key.condeferrable
+              AND NOT foreign_key.condeferred
               AND foreign_key.conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = foreign_key.conrelid AND attname = $2 AND NOT attisdropped)]::smallint[]
               AND foreign_key.confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = foreign_key.confrelid AND attname = $4 AND NOT attisdropped)]::smallint[]
         )",
@@ -2533,7 +3750,52 @@ async fn validate_postgres_table_contracts_inner_connection(
     if table == "memory_audit_log" {
         validate_postgres_serial_default_connection(connection, table, "id", current_schema_only).await?;
     }
+    validate_postgres_check_constraints_connection(connection, table, current_schema_only).await?;
     Ok(())
+}
+
+async fn validate_postgres_check_constraints_connection(connection: &mut PgConnection, table: &'static str, current_schema_only: bool) -> Result<(), StoreError> {
+    let rows = query(
+        "SELECT pg_get_expr(check_constraint.conbin, check_constraint.conrelid, TRUE) AS expression,
+                check_constraint.convalidated,
+                check_constraint.connoinherit
+         FROM pg_constraint AS check_constraint
+         WHERE check_constraint.conrelid = to_regclass(
+                   CASE WHEN $2 THEN format('%I.%I', current_schema(), $1) ELSE $1 END
+               )
+           AND check_constraint.contype = 'c'",
+    )
+    .bind(table)
+    .bind(current_schema_only)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut actual = BTreeSet::new();
+    for row in rows {
+        let validated: bool = row.try_get("convalidated")?;
+        let no_inherit: bool = row.try_get("connoinherit")?;
+        if !validated || no_inherit {
+            return Err(StoreError::Conflict(format!(
+                "PostgreSQL table {table} has a noncanonical CHECK constraint validation mode"
+            )));
+        }
+        let expression: String = row.try_get("expression")?;
+        let _inserted = actual.insert(normalize_postgres_check_expression(&expression));
+    }
+    let expected = POSTGRES_REQUIRED_CHECKS
+        .iter()
+        .filter(|(expected_table, _)| *expected_table == table)
+        .map(|(_, expression)| normalize_postgres_check_expression(expression))
+        .collect::<BTreeSet<_>>();
+    if actual != expected {
+        return Err(StoreError::Conflict(format!(
+            "PostgreSQL table {table} has unexpected CHECK constraints: actual {actual:?}, expected {expected:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_postgres_check_expression(value: &str) -> String {
+    value.chars().filter(|character| !character.is_ascii_whitespace()).flat_map(char::to_lowercase).collect()
 }
 
 async fn postgres_column_not_null_connection(
@@ -2831,7 +4093,17 @@ async fn postgres_counts_existing(pool: &PgPool) -> Result<MigrationTableCounts,
         embeddings: postgres_count_existing(pool, "memory_embeddings").await?,
         audit_entries: postgres_count_existing(pool, "memory_audit_log").await?,
         tombstones: postgres_count_existing(pool, "memory_tombstones").await?,
-        scopes: postgres_count_existing(pool, "scope_registry").await?,
+        context_kinds: postgres_count_existing(pool, "context_kinds").await?,
+        contexts: postgres_count_existing(pool, "contexts").await?,
+        context_aliases: postgres_count_existing(pool, "context_aliases").await?,
+        context_identities: postgres_count_existing(pool, "context_identities").await?,
+        context_hints: postgres_count_existing(pool, "context_resolver_hints").await?,
+        context_grants: postgres_count_existing(pool, "context_grants").await?,
+        context_relations: postgres_count_existing(pool, "context_relations").await?,
+        memory_contexts: postgres_count_existing(pool, "memory_contexts").await?,
+        context_policies: postgres_count_existing(pool, "context_kind_policies").await?,
+        context_anchor_overrides: postgres_count_existing(pool, "context_anchor_overrides").await?,
+        context_audit_events: postgres_count_existing(pool, "context_audit_events").await?,
         metadata: postgres_count_existing(pool, "memory_metadata").await?,
         embedding_profiles: postgres_count_existing(pool, "embedding_profile").await?,
     })
@@ -2887,7 +4159,17 @@ async fn postgres_counts_tx(tx: &mut Transaction<'_, Postgres>) -> Result<Migrat
         embeddings: postgres_count_tx(tx, "memory_embeddings").await?,
         audit_entries: postgres_count_tx(tx, "memory_audit_log").await?,
         tombstones: postgres_count_tx(tx, "memory_tombstones").await?,
-        scopes: postgres_count_tx(tx, "scope_registry").await?,
+        context_kinds: postgres_count_tx(tx, "context_kinds").await?,
+        contexts: postgres_count_tx(tx, "contexts").await?,
+        context_aliases: postgres_count_tx(tx, "context_aliases").await?,
+        context_identities: postgres_count_tx(tx, "context_identities").await?,
+        context_hints: postgres_count_tx(tx, "context_resolver_hints").await?,
+        context_grants: postgres_count_tx(tx, "context_grants").await?,
+        context_relations: postgres_count_tx(tx, "context_relations").await?,
+        memory_contexts: postgres_count_tx(tx, "memory_contexts").await?,
+        context_policies: postgres_count_tx(tx, "context_kind_policies").await?,
+        context_anchor_overrides: postgres_count_tx(tx, "context_anchor_overrides").await?,
+        context_audit_events: postgres_count_tx(tx, "context_audit_events").await?,
         metadata: postgres_count_tx(tx, "memory_metadata").await?,
         embedding_profiles: postgres_count_tx(tx, "embedding_profile").await?,
     })
@@ -2903,7 +4185,17 @@ async fn lock_postgres_user_tables(tx: &mut Transaction<'_, Postgres>) -> Result
             memory_embeddings,
             memory_audit_log,
             memory_tombstones,
-            scope_registry,
+            context_kinds,
+            contexts,
+            context_aliases,
+            context_identities,
+            context_resolver_hints,
+            context_grants,
+            context_relations,
+            memory_contexts,
+            context_kind_policies,
+            context_anchor_overrides,
+            context_audit_events,
             memory_metadata,
             embedding_profile
         IN ACCESS EXCLUSIVE MODE
@@ -2939,12 +4231,10 @@ async fn import_postgres(tx: &mut Transaction<'_, Postgres>, source: &MigrationS
     for (id, superseded_by) in &source.superseded_links {
         update_postgres_supersession(tx, id, superseded_by).await?;
     }
-    for scope in &source.scopes {
-        insert_postgres_scope(tx, scope).await?;
-    }
     for metadata in &source.metadata {
         insert_postgres_metadata(tx, metadata).await?;
     }
+    import_postgres_contexts(tx, &source.contexts).await?;
     for audit in &source.audit_entries {
         insert_postgres_audit_entry(tx, audit).await?;
     }
@@ -2955,6 +4245,7 @@ async fn import_postgres(tx: &mut Transaction<'_, Postgres>, source: &MigrationS
         insert_postgres_embedding_profile(tx, profile).await?;
     }
     reset_postgres_audit_sequence(tx).await?;
+    reset_postgres_context_audit_sequence(tx).await?;
     Ok(())
 }
 
@@ -3042,25 +4333,180 @@ async fn update_postgres_supersession(tx: &mut Transaction<'_, Postgres>, id: &M
     Ok(())
 }
 
-async fn insert_postgres_scope(tx: &mut Transaction<'_, Postgres>, scope: &MigrationScope) -> Result<(), StoreError> {
-    let definition = &scope.definition;
-    let _result = query(
-        "
-        INSERT INTO scope_registry (
-            scope_key, display_name, description, aliases, matchers, parent, related, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        ",
-    )
-    .bind(&definition.scope_key)
-    .bind(&definition.display_name)
-    .bind(&definition.description)
-    .bind(Json(definition.aliases.clone()))
-    .bind(Json(definition.matchers.clone()))
-    .bind(&definition.parent)
-    .bind(Json(definition.related.clone()))
-    .bind(scope.updated_at)
-    .execute(&mut **tx)
-    .await?;
+#[expect(clippy::too_many_lines, reason = "normalized context rows must be imported in foreign-key order")]
+async fn import_postgres_contexts(tx: &mut Transaction<'_, Postgres>, source: &MigrationContextData) -> Result<(), StoreError> {
+    for kind in &source.kinds {
+        let _upserted = query(
+            "INSERT INTO context_kinds (kind, display_name, builtin, enabled, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT(kind) DO UPDATE SET
+                 display_name = EXCLUDED.display_name,
+                 builtin = EXCLUDED.builtin,
+                 enabled = EXCLUDED.enabled,
+                 created_at = EXCLUDED.created_at,
+                 updated_at = EXCLUDED.updated_at",
+        )
+        .bind(&kind.kind)
+        .bind(&kind.display_name)
+        .bind(kind.builtin)
+        .bind(kind.enabled)
+        .bind(kind.created_at)
+        .bind(kind.updated_at)
+        .execute(&mut **tx)
+        .await?;
+    }
+    for context in &source.contexts {
+        let definition = &context.definition;
+        let _inserted = query(
+            "INSERT INTO contexts (
+                 id, kind, context_key, normalized_key, display_name, description,
+                 owner_principal, guidance, parent_id, lifecycle, frozen, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9, $10, $11, $12)",
+        )
+        .bind(definition.id.to_string())
+        .bind(definition.kind.as_str())
+        .bind(&definition.key)
+        .bind(&context.normalized_key)
+        .bind(&definition.display_name)
+        .bind(&definition.description)
+        .bind(&definition.owner_principal)
+        .bind(&definition.guidance)
+        .bind(definition.lifecycle.to_string())
+        .bind(definition.frozen)
+        .bind(definition.created_at)
+        .bind(definition.updated_at)
+        .execute(&mut **tx)
+        .await?;
+    }
+    for context in &source.contexts {
+        let Some(parent_id) = context.definition.parent_id else {
+            continue;
+        };
+        let _updated = query("UPDATE contexts SET parent_id = $1 WHERE id = $2")
+            .bind(parent_id.to_string())
+            .bind(context.definition.id.to_string())
+            .execute(&mut **tx)
+            .await?;
+    }
+    for alias in &source.aliases {
+        let _inserted = query(
+            "INSERT INTO context_aliases (context_id, alias, normalized_alias, created_at)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(alias.context_id.to_string())
+        .bind(&alias.alias)
+        .bind(&alias.normalized_alias)
+        .bind(alias.created_at)
+        .execute(&mut **tx)
+        .await?;
+    }
+    for identity in &source.identities {
+        let _inserted = query(
+            "INSERT INTO context_identities (
+                 context_id, owner_principal, kind, scheme, namespace,
+                 fingerprint, redacted_label, created_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(identity.context_id.to_string())
+        .bind(&identity.owner_principal)
+        .bind(&identity.kind)
+        .bind(&identity.identity.scheme)
+        .bind(identity.identity.namespace.as_deref().unwrap_or_default())
+        .bind(&identity.identity.fingerprint)
+        .bind(&identity.identity.redacted_label)
+        .bind(identity.created_at)
+        .execute(&mut **tx)
+        .await?;
+    }
+    for hint in &source.hints {
+        let _inserted = query(
+            "INSERT INTO context_resolver_hints (context_id, hint, normalized_hint, created_at)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(hint.context_id.to_string())
+        .bind(&hint.hint)
+        .bind(&hint.normalized_hint)
+        .bind(hint.created_at)
+        .execute(&mut **tx)
+        .await?;
+    }
+    for grant in &source.grants {
+        let _inserted = query(
+            "INSERT INTO context_grants (context_id, grantee_principal, granted_by, created_at)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(grant.context_id.to_string())
+        .bind(&grant.grantee_principal)
+        .bind(&grant.granted_by)
+        .bind(grant.created_at)
+        .execute(&mut **tx)
+        .await?;
+    }
+    for relation in &source.relations {
+        let _inserted = query(
+            "INSERT INTO context_relations (from_context_id, to_context_id, relation, created_at)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(relation.from_context_id.to_string())
+        .bind(relation.to_context_id.to_string())
+        .bind(&relation.relation)
+        .bind(relation.created_at)
+        .execute(&mut **tx)
+        .await?;
+    }
+    for membership in &source.memberships {
+        let _inserted = query(
+            "INSERT INTO memory_contexts (memory_id, context_id, ordinal, created_at)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(membership.memory_id.to_string())
+        .bind(membership.context_id.to_string())
+        .bind(membership.ordinal)
+        .bind(membership.created_at)
+        .execute(&mut **tx)
+        .await?;
+    }
+    for policy in &source.policies {
+        let _inserted = query(
+            "INSERT INTO context_kind_policies (layer, principal, kind, policy_json, updated_at)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(&policy.layer)
+        .bind(&policy.principal)
+        .bind(&policy.kind)
+        .bind(Json(policy.policy.clone()))
+        .bind(policy.updated_at)
+        .execute(&mut **tx)
+        .await?;
+    }
+    for policy in &source.anchor_overrides {
+        let _inserted = query(
+            "INSERT INTO context_anchor_overrides (anchor_context_id, principal, policy_json, updated_at)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(policy.anchor_context_id.to_string())
+        .bind(&policy.principal)
+        .bind(Json(policy.policy.clone()))
+        .bind(policy.updated_at)
+        .execute(&mut **tx)
+        .await?;
+    }
+    for event in &source.audit_events {
+        let _inserted = query(
+            "INSERT INTO context_audit_events (
+                 id, actor_principal, action, context_id, memory_id, timestamp, details
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(event.id)
+        .bind(&event.actor_principal)
+        .bind(&event.action)
+        .bind(event.context_id.map(|id| id.to_string()))
+        .bind(event.memory_id.map(|id| id.to_string()))
+        .bind(event.timestamp)
+        .bind(event.details.clone().map(Json))
+        .execute(&mut **tx)
+        .await?;
+    }
     Ok(())
 }
 
@@ -3155,6 +4601,22 @@ async fn reset_postgres_audit_sequence(tx: &mut Transaction<'_, Postgres>) -> Re
     Ok(())
 }
 
+async fn reset_postgres_context_audit_sequence(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
+    let _new_value: i64 = query_scalar(
+        "
+        SELECT setval(
+            pg_get_serial_sequence('context_audit_events', 'id'),
+            COALESCE(MAX(id), 1),
+            COUNT(*) > 0
+        )
+        FROM context_audit_events
+        ",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 fn pgvector_literal(embedding: &[f32]) -> String {
     let mut vector = String::from("[");
     for (idx, value) in embedding.iter().enumerate() {
@@ -3192,7 +4654,7 @@ struct ComparableSnapshot {
     superseded_links: Vec<(String, String)>,
     audit_entries: Vec<ComparableAuditEntry>,
     tombstones: Vec<ComparableTombstone>,
-    scopes: Vec<ComparableScope>,
+    contexts: MigrationContextData,
     metadata: Vec<ComparableMetadata>,
     embedding_profile: Option<EmbeddingProfile>,
 }
@@ -3221,12 +4683,6 @@ struct ComparableTombstone {
 }
 
 #[derive(serde::Serialize)]
-struct ComparableScope {
-    definition: ScopeDefinition,
-    updated_at_micros: i64,
-}
-
-#[derive(serde::Serialize)]
 struct ComparableMetadata {
     metadata: MemoryMetadata,
     migrated_at_micros: Option<i64>,
@@ -3250,9 +4706,6 @@ fn comparable_snapshot(snapshot: &MigrationSnapshot) -> Result<serde_json::Value
     let mut tombstones = snapshot.tombstones.iter().cloned().map(comparable_tombstone).collect::<Vec<_>>();
     tombstones.sort_by_key(|item| item.tombstone.memory_id.to_string());
 
-    let mut scopes = snapshot.scopes.iter().cloned().map(comparable_scope).collect::<Vec<_>>();
-    scopes.sort_by_key(|item| item.definition.scope_key.clone());
-
     let mut metadata = snapshot.metadata.iter().cloned().map(comparable_metadata).collect::<Vec<_>>();
     metadata.sort_by_key(|item| item.metadata.memory_id.to_string());
 
@@ -3261,7 +4714,7 @@ fn comparable_snapshot(snapshot: &MigrationSnapshot) -> Result<serde_json::Value
         superseded_links,
         audit_entries,
         tombstones,
-        scopes,
+        contexts: comparable_contexts(snapshot.contexts.clone()),
         metadata,
         embedding_profile: snapshot.embedding_profile.clone(),
     };
@@ -3299,19 +4752,51 @@ fn comparable_tombstone(mut item: MigrationTombstone) -> ComparableTombstone {
     ComparableTombstone { tombstone: item.tombstone }
 }
 
-fn comparable_scope(item: MigrationScope) -> ComparableScope {
-    ComparableScope {
-        definition: item.definition,
-        updated_at_micros: timestamp_micros(item.updated_at),
-    }
-}
-
 fn comparable_metadata(item: MigrationMetadata) -> ComparableMetadata {
     ComparableMetadata {
         metadata: item.metadata,
         migrated_at_micros: item.migrated_at.map(timestamp_micros),
         updated_at_micros: timestamp_micros(item.updated_at),
     }
+}
+
+fn comparable_contexts(mut contexts: MigrationContextData) -> MigrationContextData {
+    for kind in &mut contexts.kinds {
+        kind.created_at = truncate_to_micros(kind.created_at);
+        kind.updated_at = truncate_to_micros(kind.updated_at);
+    }
+    for context in &mut contexts.contexts {
+        context.definition.created_at = truncate_to_micros(context.definition.created_at);
+        context.definition.updated_at = truncate_to_micros(context.definition.updated_at);
+    }
+    for alias in &mut contexts.aliases {
+        alias.created_at = truncate_to_micros(alias.created_at);
+    }
+    for identity in &mut contexts.identities {
+        identity.created_at = truncate_to_micros(identity.created_at);
+    }
+    for hint in &mut contexts.hints {
+        hint.created_at = truncate_to_micros(hint.created_at);
+    }
+    for grant in &mut contexts.grants {
+        grant.created_at = truncate_to_micros(grant.created_at);
+    }
+    for relation in &mut contexts.relations {
+        relation.created_at = truncate_to_micros(relation.created_at);
+    }
+    for membership in &mut contexts.memberships {
+        membership.created_at = truncate_to_micros(membership.created_at);
+    }
+    for policy in &mut contexts.policies {
+        policy.updated_at = truncate_to_micros(policy.updated_at);
+    }
+    for policy in &mut contexts.anchor_overrides {
+        policy.updated_at = truncate_to_micros(policy.updated_at);
+    }
+    for event in &mut contexts.audit_events {
+        event.timestamp = truncate_to_micros(event.timestamp);
+    }
+    contexts
 }
 
 fn timestamp_micros(value: DateTime<Utc>) -> i64 {
@@ -3337,7 +4822,7 @@ mod tests {
     use super::*;
     use crate::{
         store::{MemoryAdmin as _, MemoryReader as _, MemoryWriter as _},
-        types::{AccessPolicy, Confidence, Entity, Importance, Memory, MemoryFilter, MemoryType, Provenance, QueryContext},
+        types::{AccessPolicy, Confidence, Entity, Importance, Memory, MemoryFilter, MemoryType, Provenance, QueryContext, ScopeDefinition},
     };
 
     const TEST_EMBEDDING_DIMENSIONS: usize = 3;
@@ -3394,6 +4879,75 @@ mod tests {
         let error = validate_sqlite_fts_external_content("CREATE VIRTUAL TABLE memory_fts USING fts5(content /*, content=memories, content_rowid=rowid, */)").unwrap_err();
 
         assert!(error.to_string().contains("external-content"));
+    }
+
+    #[test]
+    fn sqlite_table_contract_ignores_comment_decoys() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE guarded (
+                    frozen INTEGER /* CHECK (frozen IN (0, 1)) */
+                )",
+            )
+            .unwrap();
+        let expectation = SqliteTableExpectation::new("guarded", &["frozen"], &["check (frozen in (0, 1))"]);
+
+        let error = validate_sqlite_table(&connection, &expectation).unwrap_err();
+
+        assert!(error.to_string().contains("CHECK constraints"), "{error}");
+    }
+
+    #[test]
+    fn sqlite_table_contract_ignores_quoted_literal_decoys_and_rejects_extra_checks() {
+        let quoted = Connection::open_in_memory().unwrap();
+        quoted
+            .execute_batch(
+                "CREATE TABLE guarded (
+                    frozen INTEGER,
+                    decoy TEXT DEFAULT 'CHECK (frozen IN (0, 1))'
+                )",
+            )
+            .unwrap();
+        let expectation = SqliteTableExpectation::new("guarded", &["frozen"], &["check (frozen in (0, 1))"]);
+        let quoted_error = validate_sqlite_table(&quoted, &expectation).unwrap_err();
+        assert!(quoted_error.to_string().contains("CHECK constraints"));
+
+        let restrictive = Connection::open_in_memory().unwrap();
+        restrictive
+            .execute_batch(
+                "CREATE TABLE guarded (
+                    frozen INTEGER CHECK (frozen IN (0, 1)),
+                    CHECK (frozen = 1)
+                )",
+            )
+            .unwrap();
+        let restrictive_error = validate_sqlite_table(&restrictive, &expectation).unwrap_err();
+        assert!(restrictive_error.to_string().contains("CHECK constraints"));
+    }
+
+    #[test]
+    fn sqlite_context_foreign_key_manifest_rejects_update_action_changes() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(crate::store::schema::CONTEXT_DDL).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 ALTER TABLE context_aliases RENAME TO context_aliases_old;
+                 CREATE TABLE context_aliases (
+                     context_id TEXT NOT NULL REFERENCES contexts(id) ON UPDATE CASCADE ON DELETE CASCADE,
+                     alias TEXT NOT NULL,
+                     normalized_alias TEXT NOT NULL,
+                     created_at TEXT NOT NULL,
+                     PRIMARY KEY (context_id, normalized_alias)
+                 );
+                 DROP TABLE context_aliases_old;",
+            )
+            .unwrap();
+
+        let error = validate_sqlite_context_foreign_keys(&connection).unwrap_err();
+
+        assert!(error.to_string().contains("foreign-key declarations"));
     }
 
     #[test]
@@ -3694,9 +5248,10 @@ mod tests {
 
         assert_eq!(snapshot.counts, fixture.counts);
         assert_eq!(snapshot.superseded_links, vec![(fixture.old_id, fixture.new_id)]);
-        assert_eq!(snapshot.scopes.len(), 1_usize);
-        assert_eq!(snapshot.scopes[0].definition, fixture.scope);
-        assert_eq!(snapshot.scopes[0].updated_at, fixture.scope_updated_at);
+        let context = snapshot.contexts.contexts.iter().find(|context| context.definition.key == fixture.scope.scope_key).unwrap();
+        assert_eq!(context.definition.display_name, fixture.scope.display_name);
+        assert_eq!(context.definition.description, fixture.scope.description);
+        assert_eq!(context.definition.updated_at, fixture.scope_updated_at);
         assert_eq!(snapshot.metadata.len(), 1_usize);
         assert_eq!(snapshot.metadata[0].metadata, fixture.metadata);
         assert_eq!(snapshot.metadata[0].migrated_at, Some(fixture.metadata_migrated_at));
@@ -3721,6 +5276,43 @@ mod tests {
         let new = snapshot.memories.iter().find(|memory| memory.memory.id == fixture.new_id).unwrap();
         assert_eq!(new.embedding.as_ref(), Some(&fixture.new_embedding));
         assert_eq!(new.embedding_revision, fixture.new_embedding_revision);
+    }
+
+    #[tokio::test]
+    async fn sqlite_export_allows_context_membership_without_metadata_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join("source.db");
+        let fixture = seed_sqlite_source(&source_path).await;
+        corrupt_sqlite_source(&source_path, move |conn| {
+            let inserted = conn.execute(
+                "INSERT INTO memory_contexts (memory_id, context_id, ordinal, created_at)
+                 SELECT ?1, id, 0, ?2
+                 FROM contexts
+                 WHERE context_key = ?3",
+                rusqlite::params![fixture.old_id.to_string(), fixed_time(9_u32).to_rfc3339(), fixture.scope.scope_key],
+            )?;
+            assert_eq!(inserted, 1_usize, "expected to insert one governed membership");
+            let deleted = conn.execute("DELETE FROM memory_metadata WHERE memory_id = ?1", [fixture.old_id.to_string()])?;
+            assert_eq!(deleted, 1_usize, "expected to delete one optional metadata cache row");
+            Ok(())
+        });
+
+        let snapshot = export_sqlite(&sqlite_options(&source_path, true, false)).await.unwrap();
+
+        assert!(snapshot.metadata.is_empty());
+        assert_eq!(snapshot.contexts.memberships.len(), 1_usize);
+    }
+
+    #[tokio::test]
+    async fn sqlite_export_allows_metadata_cache_without_context_membership() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join("source.db");
+        let _fixture = seed_sqlite_source(&source_path).await;
+
+        let snapshot = export_sqlite(&sqlite_options(&source_path, true, false)).await.unwrap();
+
+        assert_eq!(snapshot.metadata.len(), 1_usize);
+        assert!(snapshot.contexts.memberships.is_empty());
     }
 
     #[tokio::test]
@@ -3976,7 +5568,10 @@ mod tests {
         let summary = migrate_sqlite_to_postgres(&options).await.unwrap();
 
         assert_eq!(summary.source, fixture.counts);
-        assert_eq!(summary.target_before, MigrationTableCounts::default());
+        assert_eq!(summary.target_before, MigrationTableCounts {
+            context_kinds: 4,
+            ..MigrationTableCounts::default()
+        });
         assert_eq!(summary.target_after, Some(fixture.counts));
         assert!(!summary.dry_run);
 
@@ -4016,7 +5611,7 @@ mod tests {
             .unwrap();
         assert_eq!(new_revision, fixture.new_embedding_revision);
 
-        let scope_updated_at: DateTime<Utc> = query_scalar("SELECT updated_at FROM scope_registry WHERE scope_key = $1")
+        let scope_updated_at: DateTime<Utc> = query_scalar("SELECT updated_at FROM contexts WHERE context_key = $1")
             .bind(&fixture.scope.scope_key)
             .fetch_one(target.pool())
             .await
@@ -4064,7 +5659,10 @@ mod tests {
         let summary = migrate_sqlite_to_postgres(&options).await.unwrap();
 
         assert_eq!(summary.source, fixture.counts);
-        assert_eq!(summary.target_before, MigrationTableCounts::default());
+        assert_eq!(summary.target_before, MigrationTableCounts {
+            context_kinds: 4,
+            ..MigrationTableCounts::default()
+        });
         assert_eq!(summary.target_after, Some(fixture.counts));
         let claim_column_count: i64 = query_scalar(
             "
@@ -4095,7 +5693,10 @@ mod tests {
         let summary = migrate_sqlite_to_postgres(&options).await.unwrap();
 
         assert_eq!(summary.source, fixture.counts);
-        assert_eq!(summary.target_before, MigrationTableCounts::default());
+        assert_eq!(summary.target_before, MigrationTableCounts {
+            context_kinds: 4,
+            ..MigrationTableCounts::default()
+        });
         assert_eq!(summary.target_after, Some(fixture.counts));
         let claim_column_count: i64 = query_scalar(
             "
@@ -4229,12 +5830,12 @@ mod tests {
         let _fixture = seed_sqlite_source(&source_path).await;
         reset_postgres_migration_database().await;
         let pool = open_postgres_pool(&postgres_smoke_url()).await.unwrap();
-        let _altered = query("ALTER TABLE scope_registry ALTER COLUMN description TYPE VARCHAR(100)").execute(&pool).await.unwrap();
+        let _altered = query("ALTER TABLE contexts ALTER COLUMN description TYPE VARCHAR(100)").execute(&pool).await.unwrap();
 
         let options = sqlite_options(&source_path, false, true);
         let err = migrate_sqlite_to_postgres(&options).await.unwrap_err();
 
-        assert!(err.to_string().contains("scope_registry.description"));
+        assert!(err.to_string().contains("contexts.description"));
         drop_postgres_migration_schema().await;
     }
 
@@ -4365,9 +5966,9 @@ mod tests {
                 cascade: false,
             },
             MissingManagedKeyCase {
-                table: "scope_registry",
-                constraint: "scope_registry_pkey",
-                expected_error: "scope_registry.scope_key",
+                table: "contexts",
+                constraint: "contexts_owner_principal_kind_normalized_key_key",
+                expected_error: "contexts(owner_principal, kind, normalized_key)",
                 cascade: false,
             },
             MissingManagedKeyCase {
@@ -4439,7 +6040,47 @@ mod tests {
                 ..MigrationTableCounts::default()
             },
             MigrationTableCounts {
-                scopes: 1,
+                context_kinds: 5,
+                ..MigrationTableCounts::default()
+            },
+            MigrationTableCounts {
+                contexts: 1,
+                ..MigrationTableCounts::default()
+            },
+            MigrationTableCounts {
+                context_aliases: 1,
+                ..MigrationTableCounts::default()
+            },
+            MigrationTableCounts {
+                context_identities: 1,
+                ..MigrationTableCounts::default()
+            },
+            MigrationTableCounts {
+                context_hints: 1,
+                ..MigrationTableCounts::default()
+            },
+            MigrationTableCounts {
+                context_grants: 1,
+                ..MigrationTableCounts::default()
+            },
+            MigrationTableCounts {
+                context_relations: 1,
+                ..MigrationTableCounts::default()
+            },
+            MigrationTableCounts {
+                memory_contexts: 1,
+                ..MigrationTableCounts::default()
+            },
+            MigrationTableCounts {
+                context_policies: 1,
+                ..MigrationTableCounts::default()
+            },
+            MigrationTableCounts {
+                context_anchor_overrides: 1,
+                ..MigrationTableCounts::default()
+            },
+            MigrationTableCounts {
+                context_audit_events: 1,
                 ..MigrationTableCounts::default()
             },
             MigrationTableCounts {
@@ -4503,7 +6144,7 @@ mod tests {
             superseded_links: Vec::new(),
             audit_entries: Vec::new(),
             tombstones: Vec::new(),
-            scopes: Vec::new(),
+            contexts: MigrationContextData::default(),
             metadata: Vec::new(),
             embedding_profile: None,
             counts: MigrationTableCounts::default(),
@@ -4577,7 +6218,7 @@ mod tests {
                     new_id_for_update
                 ])?;
                 assert_eq!(updated, 1_usize, "expected to update new memory embedding revision");
-                let updated = conn.execute("UPDATE scope_registry SET updated_at = ?1 WHERE scope_key = ?2", rusqlite::params![
+                let updated = conn.execute("UPDATE contexts SET updated_at = ?1 WHERE context_key = ?2", rusqlite::params![
                     scope_updated_at.to_rfc3339(),
                     scope_key_for_update
                 ])?;
@@ -4661,9 +6302,16 @@ mod tests {
                 embeddings: 2_u64,
                 audit_entries: 2_u64,
                 tombstones: 1_u64,
-                scopes: 1_u64,
+                context_kinds: 4_u64,
+                contexts: 3_u64,
+                context_aliases: 1_u64,
+                context_hints: 1_u64,
+                context_grants: 3_u64,
+                context_relations: 1_u64,
+                context_audit_events: 1_u64,
                 metadata: 1_u64,
                 embedding_profiles: 1_u64,
+                ..MigrationTableCounts::default()
             },
         }
     }
@@ -4736,14 +6384,23 @@ mod tests {
         let _result = query(
             "
             TRUNCATE TABLE
+                context_audit_events,
+                context_anchor_overrides,
+                context_kind_policies,
+                memory_contexts,
+                context_relations,
+                context_grants,
+                context_resolver_hints,
+                context_identities,
+                context_aliases,
+                contexts,
                 memory_audit_log,
                 memory_tombstones,
                 memory_metadata,
                 memory_entities,
                 memory_embeddings,
                 embedding_profile,
-                memories,
-                scope_registry
+                memories
             RESTART IDENTITY CASCADE
             ",
         )
@@ -4786,6 +6443,17 @@ mod tests {
         let _result = query(
             "
             DROP TABLE IF EXISTS
+                context_audit_events,
+                context_anchor_overrides,
+                context_kind_policies,
+                memory_contexts,
+                context_relations,
+                context_grants,
+                context_resolver_hints,
+                context_identities,
+                context_aliases,
+                contexts,
+                context_kinds,
                 memory_audit_log,
                 memory_tombstones,
                 memory_metadata,

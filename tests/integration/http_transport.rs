@@ -32,7 +32,7 @@ use super::helpers::{
 // ===========================================================================
 
 /// Number of MCP tools the server is expected to expose.
-const EXPECTED_TOOL_COUNT: usize = 22;
+const EXPECTED_TOOL_COUNT: usize = 24;
 
 const RAW_INITIALIZE: &str =
     r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"localhold-http-test","version":"1"}}}"#;

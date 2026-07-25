@@ -1,9 +1,9 @@
-use localhold::server::params::{AdminListResponse, DeleteResponse, RememberResponse};
+use localhold::server::params::{DeleteResponse, RememberResponse};
 use proptest::prelude::*;
 use serde_json::json;
 
 use super::strategies::fidelity_config;
-use crate::helpers::{call_tool, call_tool_error, setup_noop_server};
+use crate::helpers::{assert_invalid_params_contains, call_tool, call_tool_error, setup_noop_server};
 
 proptest! {
     #![proptest_config(fidelity_config())]
@@ -16,8 +16,12 @@ proptest! {
         rt.block_on(async {
             let client = setup_noop_server().await;
 
-            let remember_resp: RememberResponse = call_tool(&client, "remember", json!({"content": content}))
-            .await;
+            let remember_resp: RememberResponse = call_tool(
+                &client,
+                "remember",
+                json!({"content": content, "context": {"allow_unresolved": true}}),
+            )
+                .await;
 
             let del_resp: DeleteResponse = call_tool(
                 &client,
@@ -40,14 +44,19 @@ proptest! {
         });
     }
 
-    /// P6: Missing write scope lands in the unresolved inbox and is labeled for later classification.
+    /// P6: Explicitly deferred writes remain contextless and are labeled for later classification.
     #[test]
-    fn missing_scope_writes_to_unresolved_inbox(content in "[a-zA-Z0-9][a-zA-Z0-9 ]{0,99}") {
+    fn explicit_deferral_writes_to_unresolved_inbox(content in "[a-zA-Z0-9][a-zA-Z0-9 ]{0,99}") {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let client = setup_noop_server().await;
 
-            let remember_resp: RememberResponse = call_tool(&client, "remember", json!({"content": content})).await;
+            let remember_resp: RememberResponse = call_tool(
+                &client,
+                "remember",
+                json!({"content": content, "context": {"allow_unresolved": true}}),
+            )
+            .await;
             assert_eq!(remember_resp.scope, "inbox/unresolved");
             assert!(remember_resp.unresolved_scope, "missing scope should be marked unresolved");
             assert!(
@@ -55,14 +64,13 @@ proptest! {
                 "missing scope should emit a quality warning"
             );
 
-            let list_resp: AdminListResponse = call_tool(
+            assert_invalid_params_contains(
                 &client,
                 "admin_list",
                 json!({"scope": "inbox/unresolved"}),
+                "legacy scope has no unique governed context",
             )
             .await;
-            assert_eq!(list_resp.count, 1_usize, "unresolved memory should be visible in admin inventory");
-            assert!(list_resp.memories[0].unresolved_scope, "inventory card should preserve unresolved label");
         });
     }
 }

@@ -10,13 +10,13 @@
 
 use std::sync::LazyLock;
 
-use rusqlite::params;
+use zerocopy::IntoBytes as _;
 
 use super::{
     SqliteStore,
     crud::hydrate_entities_batch,
     query::{
-        MAX_SCAN_ROWS, MAX_VEC_CANDIDATES, MEMORY_COLUMN_COUNT, OVERFETCH_FACTOR, ScanConfig, apply_access_policy_for_filter, escape_like, needs_entity_hydration,
+        MAX_SCAN_ROWS, MAX_VEC_CANDIDATES, MEMORY_COLUMN_COUNT, OVERFETCH_FACTOR, ScanConfig, WhereClause, apply_access_policy_for_filter, escape_like, needs_entity_hydration,
         normalize_filter, row_to_memory, sort_by_distance, usize_to_i64,
     },
     vector::{SqliteVecIndex, VectorHit, VectorIndex as _},
@@ -59,7 +59,11 @@ impl SqliteStore {
                 now,
                 max_distance,
             };
-            embedding_search_loop(conn, &vector_index, &emb, limit, &pf_ctx)
+            if filter.context_ids.is_some() {
+                filtered_embedding_search_loop(conn, &emb, limit, &pf_ctx)
+            } else {
+                embedding_search_loop(conn, &vector_index, &emb, limit, &pf_ctx)
+            }
         })
         .await
     }
@@ -147,6 +151,68 @@ fn embedding_search_loop(
         fetch_size = fetch_size.saturating_mul(2);
     }
 
+    sort_by_distance(&mut results);
+    results.truncate(limit);
+    Ok(results)
+}
+
+/// Exact vector search over the SQL-prefiltered governed candidate set.
+///
+/// sqlite-vec's KNN virtual-table query cannot express normalized
+/// many-to-many context applicability. `vec_distance_L2` keeps distance work
+/// inside SQLite while the indexed membership predicate runs first.
+fn filtered_embedding_search_loop(conn: &rusqlite::Connection, emb: &[f32], limit: usize, pf_ctx: &PostFilterContext<'_>) -> Result<Vec<SearchResult>, StoreError> {
+    let wc = WhereClause::from_filter(pf_ctx.filter, pf_ctx.caller, 2, pf_ctx.now);
+    let where_sql = wc.to_where_sql();
+    let limit_index = wc.next_index();
+    let offset_index = limit_index.saturating_add(1);
+    let sql = format!(
+        "SELECT embedding_map.memory_id,
+                vec_distance_L2(vector_row.embedding, ?1) AS distance
+         FROM memory_embeddings AS vector_row
+         JOIN memory_embedding_map AS embedding_map
+           ON embedding_map.vec_rowid = vector_row.rowid
+         WHERE embedding_map.memory_id IN (
+             SELECT memories.id FROM memories{where_sql}
+         )
+         ORDER BY distance
+         LIMIT ?{limit_index} OFFSET ?{offset_index}"
+    );
+    let emb_bytes: &[u8] = emb.as_bytes();
+    let page_size = limit.saturating_mul(OVERFETCH_FACTOR).max(1);
+    let page_limit = usize_to_i64(page_size, "governed vector page size")?;
+    let mut offset = 0_usize;
+    let mut results = Vec::with_capacity(limit);
+    loop {
+        let page_offset = usize_to_i64(offset, "governed vector offset")?;
+        let mut bindings: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(wc.params().len().saturating_add(3));
+        bindings.push(&emb_bytes);
+        for value in wc.params() {
+            bindings.push(value);
+        }
+        bindings.push(&page_limit);
+        bindings.push(&page_offset);
+        let mut statement = conn.prepare(&sql)?;
+        let rows = statement
+            .query_map(&*bindings, |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let row_count = rows.len();
+        let hits = rows
+            .into_iter()
+            .filter_map(|(id, distance)| id.parse().ok().map(|memory_id| VectorHit { memory_id, distance }))
+            .collect::<Vec<_>>();
+        if !hits.is_empty() {
+            let hydrated = hydrate_candidates(conn, &hits)?;
+            post_filter_results(conn, &mut results, hydrated, &hits, pf_ctx)?;
+        }
+        if results.len() >= limit || row_count < page_size {
+            break;
+        }
+        offset = offset.saturating_add(page_size);
+        if offset >= MAX_SCAN_ROWS {
+            break;
+        }
+    }
     sort_by_distance(&mut results);
     results.truncate(limit);
     Ok(results)
@@ -327,15 +393,20 @@ fn fts_search_scan(
     let page_size = limit.saturating_mul(OVERFETCH_FACTOR).max(1);
     let filter_needs_entities = needs_entity_hydration(filter);
 
-    // FTS5 external-content: join back to memories for full rows.
-    // `rank` is the BM25 score (negative, more negative = more relevant).
+    // FTS5 external-content: join back to memories for full rows. The
+    // membership subquery applies every filter before BM25 candidate ranking.
+    let wc = WhereClause::from_filter(filter, caller, 2, now);
+    let where_sql = wc.to_where_sql();
+    let limit_index = wc.next_index();
+    let offset_index = limit_index.saturating_add(1);
     let sql = format!(
         "SELECT {}, fts.rank \
          FROM memory_fts fts \
          JOIN memories m ON m.rowid = fts.rowid \
-         WHERE memory_fts MATCH ?1 \
+         WHERE memory_fts MATCH ?1
+           AND m.id IN (SELECT memories.id FROM memories{where_sql}) \
          ORDER BY fts.rank, m.created_at DESC, m.id DESC \
-         LIMIT ?2 OFFSET ?3",
+         LIMIT ?{limit_index} OFFSET ?{offset_index}",
         *PREFIXED_COLUMNS
     );
 
@@ -354,7 +425,9 @@ fn fts_search_scan(
     let mut offset = 0_usize;
     loop {
         let offset_i64 = usize_to_i64(offset, "FTS offset")?;
-        let rows = match stmt.query_map(params![fts_query, limit_i64, offset_i64], |row| {
+        let fts_params = vec![fts_query.to_owned()];
+        let bindings = wc.bind_params(&fts_params, &limit_i64, &offset_i64);
+        let rows = match stmt.query_map(&*bindings, |row| {
             let memory = row_to_memory(row).map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
             let rank: f64 = row.get(MEMORY_COLUMN_COUNT)?;
             Ok((memory, rank))

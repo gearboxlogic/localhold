@@ -81,7 +81,7 @@ main() {
   say "Resetting PostgreSQL schema before binary smoke tests"
   "$container_cli" exec -e PGPASSWORD=localhold "$container" \
     psql -h 127.0.0.1 -U localhold -d localhold -v ON_ERROR_STOP=1 \
-    -c "DROP TABLE IF EXISTS memory_audit_log, memory_tombstones, memory_metadata, memory_v2_metadata, memory_entities, memory_embeddings, embedding_profile, memories, scope_registry, localhold_migrations CASCADE" >/dev/null
+    -c "DROP TABLE IF EXISTS context_audit_events, context_anchor_overrides, context_kind_policies, memory_contexts, context_relations, context_grants, context_resolver_hints, context_identities, context_aliases, contexts, context_kinds, memory_audit_log, memory_tombstones, memory_metadata, memory_v2_metadata, memory_entities, memory_embeddings, embedding_profile, memories, scope_registry, localhold_migrations CASCADE" >/dev/null
 
   say "Running ignored PostgreSQL binary startup smoke test"
   LOCALHOLD_POSTGRES_URL="$url" cargo test -p localhold --test integration binary_smoke::binary_starts_with_postgres_backend --locked -- --ignored --test-threads=1

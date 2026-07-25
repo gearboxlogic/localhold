@@ -1,7 +1,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::types::{AccessPolicy, Entity, Memory, MemoryId, MemoryType, MetadataMigrationOutcome, MetadataMigrationReport, ScopeDefinition, SearchMode};
+use crate::{
+    context::{ContextDescriptor, ContextEnvelope, ContextId, ContextIdentityInput, ContextKind, ContextReference},
+    types::{AccessPolicy, Entity, Memory, MemoryId, MemoryType, MetadataMigrationOutcome, MetadataMigrationReport, ScopeDefinition, SearchMode},
+};
 
 // -- Default‐value functions for serde(default = "...") --
 
@@ -233,7 +236,7 @@ pub(crate) struct MemoryInput {
 }
 
 /// Parameters for the `remember` tool.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[schemars(transform = strip_nullable)]
 #[non_exhaustive]
 pub struct RememberParams {
@@ -242,7 +245,13 @@ pub struct RememberParams {
     /// Optional caller-supplied compact summary. The server stores the original content unchanged.
     #[serde(default)]
     pub summary: Option<String>,
-    /// Scope key, alias, or value containing a registered matcher. If omitted and `context_hints` do not resolve, writes to `inbox/unresolved`.
+    /// Governed multi-context selection. Cannot be combined with `scope` or
+    /// `context_hints`.
+    #[serde(default)]
+    pub context: Option<ContextEnvelope>,
+    /// Legacy scope key, alias, or matcher-containing value. When both this and
+    /// `context` are omitted, governed policy must supply a safe default or the
+    /// write fails with `context_required`.
     #[serde(default)]
     pub scope: Option<String>,
     /// Path, git, or workflow hints matched against registered scope matchers when `scope` is omitted.
@@ -281,6 +290,10 @@ pub struct RecallParams {
     /// Maximum number of compact cards to return.
     #[serde(default = "default_recall_limit")]
     pub limit: usize,
+    /// Governed multi-context selection. Omission means an intentionally broad
+    /// authorized search over contexted memories.
+    #[serde(default)]
+    pub context: Option<ContextEnvelope>,
     /// Optional scope filter: registered scope key, alias, or value containing a registered matcher.
     #[serde(default)]
     pub scope: Option<String>,
@@ -324,6 +337,7 @@ impl From<RememberManyItem> for RememberParams {
             RememberManyItem::Content(content) => Self {
                 content,
                 summary: None,
+                context: None,
                 scope: None,
                 context_hints: Vec::new(),
                 agent_label: None,
@@ -381,6 +395,10 @@ pub struct ReviseParams {
     /// Replacement human-readable agent label. This does not grant access.
     #[serde(default)]
     pub agent_label: Option<String>,
+    /// Complete replacement governed membership set. Omission leaves
+    /// memberships unchanged.
+    #[serde(default)]
+    pub context: Option<ContextEnvelope>,
     /// Replacement scope: registered scope key, alias, or value containing a registered matcher.
     #[serde(default)]
     pub scope: Option<String>,
@@ -420,6 +438,10 @@ pub struct BriefParams {
     /// Optional topic or task query.
     #[serde(default)]
     pub query: Option<String>,
+    /// Governed multi-context selection. Omission means an intentionally broad
+    /// authorized search over contexted memories.
+    #[serde(default)]
+    pub context: Option<ContextEnvelope>,
     /// Optional scope filter: registered scope key, alias, or value containing a registered matcher.
     #[serde(default)]
     pub scope: Option<String>,
@@ -441,6 +463,9 @@ pub struct HandoffCandidate {
     /// Optional compact summary.
     #[serde(default)]
     pub summary: Option<String>,
+    /// Governed multi-context selection for this candidate.
+    #[serde(default)]
+    pub context: Option<ContextEnvelope>,
     /// Optional target scope: registered scope key, alias, or value containing a registered matcher.
     #[serde(default)]
     pub scope: Option<String>,
@@ -475,6 +500,7 @@ impl From<HandoffCandidateItem> for HandoffCandidate {
             HandoffCandidateItem::Content(content) => Self {
                 content,
                 summary: None,
+                context: None,
                 scope: None,
                 context_hints: Vec::new(),
                 tags: Vec::new(),
@@ -495,6 +521,53 @@ pub struct HandoffParams {
     /// Persist validated candidates when true. Defaults to preview-only.
     #[serde(default)]
     pub commit: bool,
+}
+
+/// Parameters for the `context_resolve` tool.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[schemars(transform = strip_nullable)]
+#[non_exhaustive]
+pub struct ContextResolveParams {
+    /// Shared context-selection envelope.
+    #[serde(default)]
+    pub context: ContextEnvelope,
+    /// Optional natural-language context query. With no refs, hints, or query,
+    /// the response is an authorized catalog page.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Catalog offset used only for an empty query.
+    #[serde(default)]
+    pub offset: usize,
+    /// Catalog page size used only for an empty query.
+    #[serde(default = "default_list_limit")]
+    pub limit: Option<usize>,
+}
+
+/// Parameters for the `context_create` tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(transform = strip_nullable)]
+#[non_exhaustive]
+pub struct ContextCreateParams {
+    /// Context kind.
+    pub kind: ContextKind,
+    /// Immutable human-readable key.
+    pub key: String,
+    /// Human display name.
+    pub display_name: String,
+    /// Optional description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Durable typed identity. Default agent policy requires this for project
+    /// context creation.
+    #[serde(default)]
+    pub identity: Option<ContextIdentityInput>,
+    /// Optional parent locator.
+    #[serde(default)]
+    pub parent: Option<ContextReference>,
+    /// Candidate IDs explicitly confirmed as distinct after fuzzy duplicate
+    /// detection.
+    #[serde(default)]
+    pub confirm_distinct_from: Vec<ContextId>,
 }
 
 /// Register or replace a scope definition.
@@ -560,6 +633,10 @@ pub struct AdminFilterFields {
     /// Filter to memories with this agent provenance label.
     #[serde(default)]
     pub agent_label: Option<String>,
+    /// Governed multi-context selection. Cannot be combined with legacy
+    /// `scope` or `scopes`.
+    #[serde(default)]
+    pub context: Option<ContextEnvelope>,
     /// Filter by scope key, alias, or value containing a registered matcher.
     #[serde(default)]
     pub scope: Option<String>,
@@ -723,6 +800,10 @@ pub struct AdminBulkUpdateParams {
     reason = "hidden deprecated serde alias is a handler-only trap and is skipped from MCP schemas"
 )]
 pub struct AdminConsolidateParams {
+    /// Governed multi-context selection. Omission means a broad authorized
+    /// scan of contexted memories.
+    #[serde(default)]
+    pub context: Option<ContextEnvelope>,
     /// Optional scope filter: registered scope key, alias, or value containing a registered matcher.
     #[serde(default)]
     pub scope: Option<String>,
@@ -811,6 +892,8 @@ pub(crate) struct CommonFilterFields {
     /// Filter to memories whose scope is any of these keys.
     #[serde(default)]
     pub scopes_any: Option<Vec<String>>,
+    pub context_ids: Option<Vec<ContextId>>,
+    pub explicit_context_filter: bool,
     /// Trusted principal identity from the hosting MCP runtime. When absent, only public memories are returned.
     #[serde(default)]
     pub principal: Option<String>,
@@ -850,6 +933,11 @@ pub enum ToolErrorCode {
     Unavailable,
     /// Request conflicts with current state.
     Conflict,
+    /// A governed write needs an explicit context or explicit unresolved
+    /// deferral.
+    ContextRequired,
+    /// A context locator or fuzzy query matched multiple authorized contexts.
+    ContextAmbiguous,
     /// Unexpected internal failure.
     Internal,
 }
@@ -870,6 +958,13 @@ pub struct ToolError {
     pub suggested_fix: Option<String>,
     /// Whether retrying the same request may succeed later.
     pub retryable: bool,
+    /// Secret-free structured diagnostics such as context candidates, policy
+    /// guidance, and complete retry arguments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+    /// Reusable next actions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recommended_actions: Vec<RecommendedAction>,
 }
 
 /// Response envelope returned as JSON text when a tool sets `is_error=true`.
@@ -998,6 +1093,66 @@ pub struct DuplicateCandidateCard {
     pub r#match: MatchAssessment,
 }
 
+/// Fuzzy or ambiguous authorized context candidate.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[non_exhaustive]
+pub struct ContextCandidate {
+    /// Safe context descriptor.
+    pub context: ContextDescriptor,
+    /// Similarity score from 0.0 to 1.0.
+    pub score: f64,
+    /// Matching surfaces, such as key, display name, alias, identity, or hint.
+    pub matched_by: Vec<String>,
+}
+
+/// Agent-facing governed context resolution.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[non_exhaustive]
+pub struct ContextResolution {
+    /// Directly selected contexts in caller order.
+    pub direct: Vec<ContextDescriptor>,
+    /// Direct selections plus ancestors and optional descendants.
+    pub effective: Vec<ContextDescriptor>,
+    /// Authorized ambiguous or fuzzy candidates.
+    pub candidates: Vec<ContextCandidate>,
+    /// Effective policy guidance.
+    pub policy_guidance: Vec<String>,
+    /// Whether omission intentionally selected a broad authorized search.
+    pub broad_search: bool,
+    /// Whether resolution remains intentionally deferred.
+    pub unresolved: bool,
+    /// Reusable recommended actions.
+    pub recommended_actions: Vec<RecommendedAction>,
+}
+
+/// Response from `context_resolve`.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[non_exhaustive]
+pub struct ContextResolveResponse {
+    /// Governed resolution details.
+    pub resolution: ContextResolution,
+    /// Authorized catalog page for an empty query.
+    pub catalog: Vec<ContextDescriptor>,
+    /// Next catalog offset when a full page was returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<usize>,
+}
+
+/// Response from `context_create`.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[non_exhaustive]
+pub struct ContextCreateResponse {
+    /// Created or exactly reused context.
+    pub context: ContextDescriptor,
+    /// Whether a new row was created.
+    pub created: bool,
+    /// Safe stored identity metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<crate::context::ContextIdentity>,
+    /// Policy guidance applied to creation.
+    pub policy_guidance: Vec<String>,
+}
+
 /// Response from `remember`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
@@ -1012,6 +1167,11 @@ pub struct RememberResponse {
     pub unresolved_scope: bool,
     /// How the scope was resolved.
     pub scope_resolution: ScopeResolution,
+    /// Governed context resolution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_resolution: Option<ContextResolution>,
+    /// Direct governed memberships.
+    pub contexts: Vec<ContextDescriptor>,
     /// Potential duplicate memories.
     pub duplicate_candidates: Vec<DuplicateCandidateCard>,
     /// Quality warnings for the accepted write.
@@ -1030,6 +1190,11 @@ pub struct RememberManyItemResponse {
     pub unresolved_scope: bool,
     /// How the scope was resolved.
     pub scope_resolution: ScopeResolution,
+    /// Governed context resolution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_resolution: Option<ContextResolution>,
+    /// Direct governed memberships.
+    pub contexts: Vec<ContextDescriptor>,
     /// Potential duplicate memories.
     pub duplicate_candidates: Vec<DuplicateCandidateCard>,
     /// Quality warnings for the accepted write.
@@ -1122,16 +1287,16 @@ pub struct MatchDiagnostics {
     pub ranking_score: Option<f64>,
 }
 
-/// Mechanism used to resolve a scope.
+/// Compatibility mechanism used to derive a legacy scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ScopeResolvedBy {
     /// Explicit scope key or raw explicit scope value.
     Explicit,
-    /// Scope registry alias matched.
+    /// A context alias matched.
     Alias,
-    /// Scope registry matcher matched an explicit scope or context hint.
+    /// A context resolver hint matched an explicit scope or legacy context hint.
     Matcher,
     /// No scope could be resolved.
     Unresolved,
@@ -1165,6 +1330,8 @@ pub struct RecallCard {
     pub summary_or_excerpt: String,
     /// Scope label/key.
     pub scope: String,
+    /// Direct governed context memberships in primary order.
+    pub contexts: Vec<ContextDescriptor>,
     /// Agent provenance label.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_label: Option<String>,
@@ -1196,6 +1363,8 @@ pub struct RecallResponse {
     /// Scope-resolution diagnostics when a scope or context hints were supplied.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_resolution: Option<ScopeResolution>,
+    /// Governed context selection, including broad-search state.
+    pub context_resolution: ContextResolution,
     /// Deterministic warnings about scope or retrieval quality.
     pub warnings: Vec<QualityWarning>,
     /// Compact result cards.
@@ -1216,6 +1385,8 @@ pub struct ReadResponse {
     /// Resolved scope key when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// Direct governed context memberships in primary order.
+    pub contexts: Vec<ContextDescriptor>,
     /// Agent provenance label when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_label: Option<String>,
@@ -1258,6 +1429,8 @@ pub struct ReadManyItemResponse {
     /// Resolved scope key when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// Direct governed context memberships in primary order.
+    pub contexts: Vec<ContextDescriptor>,
     /// Agent provenance label when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_label: Option<String>,
@@ -1295,6 +1468,10 @@ pub enum RecommendedActionTool {
     Recall,
     /// Store a new durable memory.
     Remember,
+    /// Resolve or browse governed contexts.
+    ContextResolve,
+    /// Create a governed context.
+    ContextCreate,
     /// Register a missing scope definition.
     AdminScopeRegister,
 }
@@ -1348,6 +1525,8 @@ pub struct BriefResponse {
     /// Scope-resolution diagnostics when a scope or context hints were supplied.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_resolution: Option<ScopeResolution>,
+    /// Governed context selection, candidates, policy, and broad-search state.
+    pub context_resolution: ContextResolution,
     /// Deterministic warnings about scope or empty context.
     pub warnings: Vec<QualityWarning>,
 }
@@ -1364,6 +1543,11 @@ pub struct HandoffSuggestion {
     pub unresolved_scope: bool,
     /// How the scope was resolved.
     pub scope_resolution: ScopeResolution,
+    /// Governed context resolution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_resolution: Option<ContextResolution>,
+    /// Direct governed memberships.
+    pub contexts: Vec<ContextDescriptor>,
     /// Quality warnings.
     pub warnings: Vec<QualityWarning>,
     /// Stored memory ID when `commit=true`.
@@ -1387,7 +1571,7 @@ pub struct HandoffResponse {
     pub suggested_writes: Vec<HandoffSuggestion>,
 }
 
-/// Scope registry entry.
+/// Legacy scope-administration view over one compatibility context.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct ScopeEntry {
@@ -1456,6 +1640,8 @@ pub struct InventoryCard {
     pub summary_or_excerpt: String,
     /// Scope label/key.
     pub scope: String,
+    /// Direct governed context memberships in primary order.
+    pub contexts: Vec<ContextDescriptor>,
     /// Agent provenance label.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_label: Option<String>,
@@ -1580,6 +1766,12 @@ pub struct UpdateResponse {
     /// Scope-resolution diagnostics when a scope or context hints were supplied.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_resolution: Option<ScopeResolution>,
+    /// Governed context replacement diagnostics when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_resolution: Option<ContextResolution>,
+    /// Direct memberships after a governed or legacy membership update.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contexts: Vec<ContextDescriptor>,
 }
 
 /// Response from `forget` and compatible admin delete operations.

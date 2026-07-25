@@ -13,8 +13,8 @@ use localhold::{
 use serde_json::json;
 
 use super::helpers::{
-    FailingEmbedding, ToggleableEmbedding, assert_invalid_params_contains, await_embeddings, call_tool, call_tool_params, setup_noop_server, setup_server_with,
-    setup_server_with_store,
+    FailingEmbedding, ToggleableEmbedding, assert_invalid_params_contains, attach_legacy_test_contexts, await_embeddings, call_tool, call_tool_params, setup_noop_server,
+    setup_server_with, setup_server_with_store,
 };
 
 struct InventorySeed<'a> {
@@ -37,7 +37,9 @@ async fn seed_inventory_memory(server: &LocalHoldServer, seed: InventorySeed<'_>
         provenance,
         AccessPolicy::Public,
     );
-    server.store().store(&memory, None).await.unwrap()
+    let id = server.store().store(&memory, None).await.unwrap();
+    attach_legacy_test_contexts(server.store(), &[id], seed.source_agent, "stdio", seed.source_conversation.unwrap_or("test/default")).await;
+    id
 }
 
 #[tokio::test]
@@ -50,8 +52,8 @@ async fn minimal_fields_defaults_apply() {
     assert_eq!(read.memory.content, "minimal");
     assert!(read.memory.tags.is_empty());
     assert!(read.memory.expires_at.is_none());
-    assert!(remembered.unresolved_scope);
-    assert_eq!(remembered.scope, "inbox/unresolved");
+    assert!(!remembered.unresolved_scope);
+    assert_eq!(remembered.scope, "test/default");
 }
 
 #[tokio::test]
@@ -145,6 +147,8 @@ async fn admin_cleanup_expired_deletes_only_expired_memories() {
 
     let durable = Memory::new_for_test("durable".into(), vec![], authorized_provenance, AccessPolicy::Public);
     let durable_id = server.store().store(&durable, None).await.unwrap();
+    attach_legacy_test_contexts(server.store(), &[authorized_expired_id, durable_id], "stdio", "stdio", "cleanup-scope").await;
+    attach_legacy_test_contexts(server.store(), &[denied_expired_id], "agent", "stdio", "cleanup-scope").await;
 
     let cleaned: EvictExpiredResponse = call_tool(&client, "admin_cleanup_expired", json!({})).await;
     assert_eq!(cleaned.deleted, 1);
@@ -188,6 +192,7 @@ async fn admin_list_hides_superseded_memories_unless_requested() {
     let old_id = server.store().store(&old, None).await.unwrap();
     let new = Memory::new_for_test("new version".into(), vec![], provenance, AccessPolicy::Public);
     let new_id = server.store().store_with_supersession(&new, None, &old_id).await.unwrap();
+    attach_legacy_test_contexts(server.store(), &[old_id, new_id], "agent", "stdio", "supersede-list").await;
 
     let old_read: ReadResponse = call_tool(&client, "read", json!({"id": old_id})).await;
     assert_eq!(old_read.memory.superseded_by, Some(new_id));
@@ -252,13 +257,13 @@ async fn admin_list_scope_expansion_matches_ancestor_scopes() {
         &client,
         "admin_list",
         json!({
-            "scope": "org/project/conv-123",
+            "scope": "org/project",
             "expand_scopes": false
         }),
     )
     .await;
-    assert_eq!(exact.count, 1, "disabled scope expansion should match exact scope only");
-    assert_eq!(exact.memories[0].id, conversation.id);
+    assert_eq!(exact.count, 1, "selecting a parent does not include descendants");
+    assert_eq!(exact.memories[0].id, project.id);
 
     let single: AdminListResponse = call_tool(
         &client,
@@ -320,6 +325,7 @@ async fn admin_list_filters_by_provenance_scope_tags_and_origin() {
         origin_conversation: Some("conv-a"),
     })
     .await;
+    attach_legacy_test_contexts(server.store(), &[], "stdio", "stdio", "conv-3").await;
 
     let combined: AdminListResponse = call_tool(&client, "admin_list", json!({"tags": ["a"], "agent_label": "bot1"})).await;
     assert_eq!(combined.count, 1);

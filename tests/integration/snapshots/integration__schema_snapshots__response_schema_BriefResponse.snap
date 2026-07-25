@@ -68,6 +68,10 @@ expression: schema
         }
       ]
     },
+    "context_resolution": {
+      "description": "Governed context selection, candidates, policy, and broad-search state.",
+      "$ref": "#/$defs/ContextResolution"
+    },
     "warnings": {
       "description": "Deterministic warnings about scope or empty context.",
       "type": "array",
@@ -84,6 +88,7 @@ expression: schema
     "stale_candidates",
     "suggested_reads",
     "recommended_actions",
+    "context_resolution",
     "warnings"
   ],
   "$defs": {
@@ -102,6 +107,13 @@ expression: schema
         "scope": {
           "description": "Scope label/key.",
           "type": "string"
+        },
+        "contexts": {
+          "description": "Direct governed context memberships in primary order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextDescriptor"
+          }
         },
         "agent_label": {
           "description": "Agent provenance label.",
@@ -145,6 +157,7 @@ expression: schema
         "id",
         "summary_or_excerpt",
         "scope",
+        "contexts",
         "created_at",
         "updated_at",
         "tags",
@@ -154,6 +167,42 @@ expression: schema
     },
     "MemoryId": {
       "description": "A ULID-formatted unique memory identifier",
+      "type": "string"
+    },
+    "ContextDescriptor": {
+      "description": "Safe context descriptor returned on memory cards and resolution results.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Stable opaque ID.",
+          "$ref": "#/$defs/ContextId"
+        },
+        "kind": {
+          "description": "Context kind.",
+          "$ref": "#/$defs/ContextKind"
+        },
+        "key": {
+          "description": "Immutable context key.",
+          "type": "string"
+        },
+        "display_name": {
+          "description": "Human-readable display name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "key",
+        "display_name"
+      ]
+    },
+    "ContextId": {
+      "description": "A ULID-formatted opaque context identifier",
+      "type": "string"
+    },
+    "ContextKind": {
+      "description": "Stable context kind. Built-in kinds and operator-defined kinds use the same\nrepresentation so adding a kind does not require a wire-protocol change.",
       "type": "string"
     },
     "Entity": {
@@ -368,6 +417,16 @@ expression: schema
           "const": "remember"
         },
         {
+          "description": "Resolve or browse governed contexts.",
+          "type": "string",
+          "const": "context_resolve"
+        },
+        {
+          "description": "Create a governed context.",
+          "type": "string",
+          "const": "context_create"
+        },
+        {
           "description": "Register a missing scope definition.",
           "type": "string",
           "const": "admin_scope_register"
@@ -432,7 +491,7 @@ expression: schema
       ]
     },
     "ScopeResolvedBy": {
-      "description": "Mechanism used to resolve a scope.",
+      "description": "Compatibility mechanism used to derive a legacy scope.",
       "oneOf": [
         {
           "description": "Explicit scope key or raw explicit scope value.",
@@ -440,12 +499,12 @@ expression: schema
           "const": "explicit"
         },
         {
-          "description": "Scope registry alias matched.",
+          "description": "A context alias matched.",
           "type": "string",
           "const": "alias"
         },
         {
-          "description": "Scope registry matcher matched an explicit scope or context hint.",
+          "description": "A context resolver hint matched an explicit scope or legacy context hint.",
           "type": "string",
           "const": "matcher"
         },
@@ -454,6 +513,91 @@ expression: schema
           "type": "string",
           "const": "unresolved"
         }
+      ]
+    },
+    "ContextResolution": {
+      "description": "Agent-facing governed context resolution.",
+      "type": "object",
+      "properties": {
+        "direct": {
+          "description": "Directly selected contexts in caller order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextDescriptor"
+          }
+        },
+        "effective": {
+          "description": "Direct selections plus ancestors and optional descendants.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextDescriptor"
+          }
+        },
+        "candidates": {
+          "description": "Authorized ambiguous or fuzzy candidates.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextCandidate"
+          }
+        },
+        "policy_guidance": {
+          "description": "Effective policy guidance.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "broad_search": {
+          "description": "Whether omission intentionally selected a broad authorized search.",
+          "type": "boolean"
+        },
+        "unresolved": {
+          "description": "Whether resolution remains intentionally deferred.",
+          "type": "boolean"
+        },
+        "recommended_actions": {
+          "description": "Reusable recommended actions.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RecommendedAction"
+          }
+        }
+      },
+      "required": [
+        "direct",
+        "effective",
+        "candidates",
+        "policy_guidance",
+        "broad_search",
+        "unresolved",
+        "recommended_actions"
+      ]
+    },
+    "ContextCandidate": {
+      "description": "Fuzzy or ambiguous authorized context candidate.",
+      "type": "object",
+      "properties": {
+        "context": {
+          "description": "Safe context descriptor.",
+          "$ref": "#/$defs/ContextDescriptor"
+        },
+        "score": {
+          "description": "Similarity score from 0.0 to 1.0.",
+          "type": "number",
+          "format": "double"
+        },
+        "matched_by": {
+          "description": "Matching surfaces, such as key, display name, alias, identity, or hint.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "context",
+        "score",
+        "matched_by"
       ]
     },
     "QualityWarning": {

@@ -4,6 +4,7 @@ mod admin;
 pub mod backup;
 #[cfg(test)]
 pub(crate) mod conformance;
+mod context_store;
 pub(crate) mod crud;
 pub mod migration;
 mod postgres;
@@ -27,12 +28,145 @@ pub(crate) use sqlite::sqlite_write_tx;
 pub(crate) use sqlite_lease::database_identity as sqlite_database_identity;
 
 use crate::{
+    context::{
+        ContextAnchorPolicyDraft, ContextAnchorPolicyRecord, ContextAuditDraft, ContextAuditEvent, ContextCreateDraft, ContextDefinition, ContextDefinitionPatch,
+        ContextExactLookup, ContextGrant, ContextId, ContextKindDefinition, ContextKindDraft, ContextKindPolicyDraft, ContextKindPolicyRecord, ContextLifecycle, ContextRecord,
+        MemoryContext,
+    },
     error::StoreError,
     types::{
         AccessPolicy, AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MemoryTombstone, MemoryUpdate,
         MetadataMigrationOutcome, MetadataMigrationReport, MetadataPatch, Provenance, QueryContext, ScopeDefinition, SearchResult, WriteOutcome,
     },
 };
+
+/// Read governed context definitions, memberships, and audit history.
+pub trait ContextReader: Send + Sync {
+    /// Fetch one context when the principal owns it or has an explicit use
+    /// grant. Archived definitions remain visible to authorized callers.
+    fn get_context(&self, id: &ContextId, principal: &str) -> impl Future<Output = Result<Option<ContextDefinition>, StoreError>> + Send;
+
+    /// Return a page of contexts the principal may use.
+    fn list_contexts(&self, principal: &str, include_archived: bool, offset: usize, limit: usize) -> impl Future<Output = Result<Vec<ContextDefinition>, StoreError>> + Send;
+
+    /// Return a page of authorized context definitions with their safe
+    /// aliases, fingerprinted identities, and weak hints.
+    fn list_context_records(&self, principal: &str, include_archived: bool, offset: usize, limit: usize) -> impl Future<Output = Result<Vec<ContextRecord>, StoreError>> + Send;
+
+    /// Resolve an indexed exact ID, normalized key/alias, or fingerprinted
+    /// identity within the caller's authorized context catalog.
+    fn find_context_records(&self, principal: &str, include_archived: bool, lookup: &ContextExactLookup) -> impl Future<Output = Result<Vec<ContextRecord>, StoreError>> + Send;
+
+    /// Expand direct selections through ancestors and, when requested,
+    /// descendants. Direct selections retain caller order.
+    fn expand_context_selection(
+        &self,
+        context_ids: &[ContextId],
+        principal: &str,
+        include_descendants: bool,
+    ) -> impl Future<Output = Result<Vec<ContextDefinition>, StoreError>> + Send;
+
+    /// Return ordered direct context memberships for an authorized memory.
+    fn get_memory_contexts(&self, memory_id: &MemoryId, principal: &str) -> impl Future<Output = Result<Vec<MemoryContext>, StoreError>> + Send;
+
+    /// Return recent context audit events visible to the principal.
+    fn query_context_audit(&self, context_id: &ContextId, principal: &str, limit: usize) -> impl Future<Output = Result<Vec<ContextAuditEvent>, StoreError>> + Send;
+
+    /// Return every configured context kind for the operator TUI.
+    fn list_context_kinds(&self) -> impl Future<Output = Result<Vec<ContextKindDefinition>, StoreError>> + Send;
+
+    /// Return operator policies and the selected principal's policy overrides.
+    fn list_context_kind_policies(&self, principal: &str) -> impl Future<Output = Result<Vec<ContextKindPolicyRecord>, StoreError>> + Send;
+
+    /// Return the selected principal's anchor overrides.
+    fn list_context_anchor_policies(&self, principal: &str) -> impl Future<Output = Result<Vec<ContextAnchorPolicyRecord>, StoreError>> + Send;
+
+    /// Return grants for a context visible to the caller. Grantee names are
+    /// exposed only to the owner.
+    fn list_context_grants(&self, context_id: &ContextId, principal: &str) -> impl Future<Output = Result<Vec<ContextGrant>, StoreError>> + Send;
+}
+
+/// Transactional governed context mutations.
+pub trait ContextWriter: Send + Sync {
+    /// Create a private context with aliases, identities, hints, parent, and
+    /// audit event in one transaction.
+    fn create_context(&self, draft: &ContextCreateDraft, audit: &ContextAuditDraft) -> impl Future<Output = Result<ContextDefinition, StoreError>> + Send;
+
+    /// Replace a context's parent after transactional cycle validation.
+    fn set_context_parent(
+        &self,
+        context_id: &ContextId,
+        parent_id: Option<&ContextId>,
+        principal: &str,
+        audit: &ContextAuditDraft,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Archive or reactivate an owned context. Frozen compatibility contexts
+    /// cannot be changed through this operation.
+    fn set_context_lifecycle(
+        &self,
+        context_id: &ContextId,
+        lifecycle: ContextLifecycle,
+        principal: &str,
+        audit: &ContextAuditDraft,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Add or replace an explicit context use grant.
+    fn grant_context_use(&self, context_id: &ContextId, grantee_principal: &str, principal: &str, audit: &ContextAuditDraft)
+    -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Revoke an explicit use grant from an owned context.
+    fn revoke_context_use(
+        &self,
+        context_id: &ContextId,
+        grantee_principal: &str,
+        principal: &str,
+        audit: &ContextAuditDraft,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Replace the complete explicit grant set in one audited transaction.
+    fn replace_context_grants(
+        &self,
+        context_id: &ContextId,
+        grantee_principals: &[String],
+        principal: &str,
+        audit: &ContextAuditDraft,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Replace mutable definition fields, aliases, identities, and resolver
+    /// hints in one audited transaction.
+    fn update_context_definition(
+        &self,
+        context_id: &ContextId,
+        patch: &ContextDefinitionPatch,
+        principal: &str,
+        audit: &ContextAuditDraft,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Add or update a TUI-managed context kind.
+    fn upsert_context_kind(&self, draft: &ContextKindDraft, principal: &str, audit: &ContextAuditDraft) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Replace one operator or principal kind policy.
+    fn upsert_context_kind_policy(&self, draft: &ContextKindPolicyDraft, principal: &str, audit: &ContextAuditDraft) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Replace one principal anchor override.
+    fn upsert_context_anchor_policy(&self, draft: &ContextAnchorPolicyDraft, principal: &str, audit: &ContextAuditDraft) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Replace the complete ordered direct membership set for a memory and
+    /// synchronize legacy scope caches in the same transaction.
+    fn replace_memory_contexts(
+        &self,
+        memory_id: &MemoryId,
+        context_ids: &[ContextId],
+        principal: &str,
+        audit: &ContextAuditDraft,
+    ) -> impl Future<Output = Result<WriteOutcome, StoreError>> + Send;
+}
+
+/// Full governed-context persistence contract.
+pub trait ContextStore: ContextReader + ContextWriter {}
+
+impl<T: ContextReader + ContextWriter> ContextStore for T {}
 
 /// Map from memory ID to its embedding vector.
 ///
@@ -288,9 +422,10 @@ pub trait MemoryReader: Send + Sync {
 
     /// Fetch memories with their embedding vectors for consolidation.
     ///
-    /// Applies optional scope filter, returns up to `limit` memories that have embeddings.
+    /// Applies canonical governed-context applicability, returns up to `limit`
+    /// memories that have embeddings.
     /// Each result includes the memory and its embedding vector.
-    fn list_with_embeddings(&self, scopes_any: Option<&[String]>, limit: usize) -> impl Future<Output = Result<Vec<MemoryWithEmbedding>, StoreError>> + Send;
+    fn list_with_embeddings(&self, context_ids: Option<&[ContextId]>, limit: usize) -> impl Future<Output = Result<Vec<MemoryWithEmbedding>, StoreError>> + Send;
 
     /// Query the audit log for a specific memory ID.
     fn query_audit_log(&self, memory_id: &MemoryId, limit: usize) -> impl Future<Output = Result<Vec<AuditEntry>, StoreError>> + Send;
@@ -358,6 +493,23 @@ pub trait MemoryWriter: Send + Sync {
         audit: &AuditDraft,
     ) -> impl Future<Output = Result<MemoryId, StoreError>> + Send;
 
+    /// Store a memory, required metadata, governed memberships, and both audit
+    /// rows in one transaction.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "governed audited store carries memory, embedding, supersession, metadata, memberships, and audits"
+    )]
+    fn store_with_metadata_contexts_audited(
+        &self,
+        memory: &Memory,
+        embedding: Option<&[f32]>,
+        supersedes_id: Option<&MemoryId>,
+        metadata: &MemoryMetadata,
+        context_ids: &[ContextId],
+        audit: &AuditDraft,
+        context_audit: &ContextAuditDraft,
+    ) -> impl Future<Output = Result<MemoryId, StoreError>> + Send;
+
     /// Store multiple memories atomically in a single transaction.
     /// Returns the list of assigned IDs in the same order as the input.
     fn store_batch(&self, memories: &[MemoryWithEmbedding]) -> impl Future<Output = Result<Vec<MemoryId>, StoreError>> + Send;
@@ -398,6 +550,19 @@ pub trait MemoryWriter: Send + Sync {
         supersedes: &[Option<MemoryId>],
         metadata: &[MemoryMetadata],
         audits: &[AuditDraft],
+    ) -> impl Future<Output = Result<Vec<MemoryId>, StoreError>> + Send;
+
+    /// Store a batch with required metadata, governed memberships, and audits
+    /// in one transaction.
+    #[expect(clippy::too_many_arguments, reason = "governed batch store carries memories, supersession, metadata, memberships, and audits")]
+    fn store_batch_with_metadata_contexts_audited(
+        &self,
+        memories: &[MemoryWithEmbedding],
+        supersedes: &[Option<MemoryId>],
+        metadata: &[MemoryMetadata],
+        context_ids: &[Vec<ContextId>],
+        audits: &[AuditDraft],
+        context_audits: &[ContextAuditDraft],
     ) -> impl Future<Output = Result<Vec<MemoryId>, StoreError>> + Send;
 
     /// Update fields of an existing memory. Returns `false` if the memory doesn't exist.
@@ -458,6 +623,20 @@ pub trait MemoryWriter: Send + Sync {
         audit: &AuditDraft,
     ) -> impl Future<Output = Result<AuthorizedUpdateOutcome, StoreError>> + Send;
 
+    /// Authorization-aware update with optional metadata and complete governed
+    /// membership replacement in one transaction.
+    #[expect(clippy::too_many_arguments, reason = "governed revise carries update, metadata, memberships, principal, and both audits")]
+    fn update_authorized_with_metadata_contexts_audited(
+        &self,
+        id: &MemoryId,
+        update: &MemoryUpdate,
+        metadata_patch: Option<&MetadataPatch>,
+        context_ids: Option<&[ContextId]>,
+        principal: &str,
+        audit: &AuditDraft,
+        context_audit: Option<&ContextAuditDraft>,
+    ) -> impl Future<Output = Result<AuthorizedUpdateOutcome, StoreError>> + Send;
+
     /// Authorization-aware, optimistic-concurrency update with optional
     /// metadata and replacement embedding in one transaction. Replacement
     /// content without a vector is committed as needing re-embedding. Obtain
@@ -472,6 +651,25 @@ pub trait MemoryWriter: Send + Sync {
         embedding: Option<&[f32]>,
         principal: &str,
         audit: &AuditDraft,
+    ) -> impl Future<Output = Result<AuthorizedUpdateOutcome, StoreError>> + Send;
+
+    /// Optimistic TUI update with optional complete governed membership
+    /// replacement in the same transaction.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "atomic governed TUI revise carries revision, fields, metadata, memberships, embedding, principal, and audits"
+    )]
+    fn update_authorized_if_unmodified_with_metadata_contexts_audited(
+        &self,
+        id: &MemoryId,
+        expected_revision: i64,
+        update: &MemoryUpdate,
+        metadata_patch: Option<&MetadataPatch>,
+        context_ids: Option<&[ContextId]>,
+        embedding: Option<&[f32]>,
+        principal: &str,
+        audit: &AuditDraft,
+        context_audit: Option<&ContextAuditDraft>,
     ) -> impl Future<Output = Result<AuthorizedUpdateOutcome, StoreError>> + Send;
 
     /// Authorization-aware delete. Checks write access before removing the memory.
@@ -622,6 +820,13 @@ pub trait MemoryAdmin: Send + Sync {
     /// List all registered scope definitions ordered by key.
     fn list_scopes(&self) -> impl Future<Output = Result<Vec<ScopeDefinition>, StoreError>> + Send;
 
+    /// Register or replace a principal-owned private custom context through
+    /// the legacy scope compatibility surface.
+    fn register_scope_for_principal(&self, scope: ScopeDefinition, principal: &str) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// List legacy compatibility definitions visible to one principal.
+    fn list_scopes_for_principal(&self, principal: &str) -> impl Future<Output = Result<Vec<ScopeDefinition>, StoreError>> + Send;
+
     /// Upsert non-destructive metadata for a memory.
     fn upsert_metadata(&self, metadata: MemoryMetadata) -> impl Future<Output = Result<(), StoreError>> + Send;
 
@@ -651,9 +856,9 @@ pub trait MemoryAdmin: Send + Sync {
 /// Implementations must populate and advance [`Memory::record_revision`] for
 /// every user-visible record mutation so optimistic writes remain sound.
 /// Automatically implemented for any type that implements all three sub-traits.
-pub trait MemoryStore: MemoryReader + MemoryWriter + MemoryAdmin {}
+pub trait MemoryStore: MemoryReader + MemoryWriter + MemoryAdmin + ContextStore {}
 
-impl<T: MemoryReader + MemoryWriter + MemoryAdmin> MemoryStore for T {}
+impl<T: MemoryReader + MemoryWriter + MemoryAdmin + ContextStore> MemoryStore for T {}
 
 pub(crate) fn merge_metadata_patch(memory_id: MemoryId, patch: &MetadataPatch, existing: Option<&MemoryMetadata>, fallback_scope: Option<&str>, principal: &str) -> MemoryMetadata {
     MemoryMetadata {

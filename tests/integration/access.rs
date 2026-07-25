@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::Utc;
 use localhold::{
@@ -15,7 +15,7 @@ use localhold::{
 use rmcp::{ServiceExt as _, service::RunningService};
 use serde_json::json;
 
-use super::helpers::{call_tool, call_tool_error};
+use super::helpers::{attach_legacy_test_contexts, call_tool, call_tool_error};
 
 #[derive(Clone)]
 struct Seed {
@@ -128,7 +128,14 @@ impl Seed {
 async fn setup_seeded_server(principal: Option<&str>, seeds: Vec<Seed>) -> (RunningService<rmcp::RoleClient, ()>, Vec<MemoryId>) {
     let store = SqliteStore::in_memory().unwrap();
     let mut ids = Vec::with_capacity(seeds.len());
+    let mut memberships = BTreeMap::<(String, String), Vec<MemoryId>>::new();
     for seed in seeds {
+        let owner = seed.owner.unwrap_or("anonymous").to_owned();
+        let context_key = seed
+            .scope
+            .or_else(|| seed.metadata.as_ref().and_then(|metadata| metadata.scope))
+            .unwrap_or("test/default")
+            .to_owned();
         let provenance = Provenance::new_for_test(seed.owner.map(ToOwned::to_owned), seed.scope.map(ToOwned::to_owned), None);
         let memory = Memory::new_for_test(seed.content.to_owned(), seed.tags.into_iter().map(ToOwned::to_owned).collect(), provenance, seed.policy);
         let id = store.store(&memory, None).await.unwrap();
@@ -145,7 +152,12 @@ async fn setup_seeded_server(principal: Option<&str>, seeds: Vec<Seed>) -> (Runn
             .unwrap();
             store.upsert_metadata(metadata).await.unwrap();
         }
+        memberships.entry((owner, context_key)).or_default().push(id);
         ids.push(id);
+    }
+    let visible_to = principal.unwrap_or("anonymous");
+    for ((owner, context_key), context_ids) in memberships {
+        attach_legacy_test_contexts(&store, &context_ids, &owner, visible_to, &context_key).await;
     }
 
     let client = serve_store(principal, store).await;
@@ -180,6 +192,25 @@ async fn redacted_policy_returns_full_content_for_owner_and_redacted_view_for_ot
     let (anonymous_client, anonymous_ids) = setup_seeded_server(None, vec![Seed::redacted("redacted secret", vec![RedactableField::Content])]).await;
     let err = call_tool_error(&anonymous_client, "read", json!({"id": anonymous_ids[0]})).await;
     assert!(err.contains("not found"), "expected anonymous redacted read to be denied, got: {err}");
+}
+
+#[tokio::test]
+async fn compatibility_scope_is_derived_from_primary_membership_without_metadata() {
+    let store = SqliteStore::in_memory().unwrap();
+    let memory = Memory::new_for_test(
+        "canonical primary membership".to_owned(),
+        Vec::new(),
+        Provenance::new_for_test(Some("owner".to_owned()), Some(" PROJECT/STALE ".to_owned()), None),
+        AccessPolicy::Public,
+    );
+    let id = store.store(&memory, None).await.unwrap();
+    attach_legacy_test_contexts(&store, &[id], "owner", "owner", "project/canonical").await;
+    let client = serve_store(Some("owner"), store).await;
+
+    let read: ReadResponse = call_tool(&client, "read", json!({"id": id})).await;
+
+    assert_eq!(read.scope.as_deref(), Some("project/canonical"));
+    assert_eq!(read.contexts.first().map(|context| context.key.as_str()), Some("project/canonical"));
 }
 
 #[tokio::test]
@@ -368,6 +399,39 @@ async fn redacted_hidden_filter_fields_do_not_disclose_memory_presence() {
     let count: CountResponse = call_tool(&client, "admin_count", json!({})).await;
     assert!(count.by_scope.is_empty(), "hidden provenance must not enter scope facets");
     assert_eq!(count.scope_count, 0);
+}
+
+#[tokio::test]
+async fn redacted_supersession_state_is_not_a_count_or_listing_oracle() {
+    let store = SqliteStore::in_memory().unwrap();
+    let policy = AccessPolicy::Redacted {
+        visible_fields: vec![RedactableField::Content],
+    };
+    let old = Memory::new_for_test(
+        "visible old revision".to_owned(),
+        Vec::new(),
+        Provenance::new_for_test(Some("owner".to_owned()), Some("project/redacted-history".to_owned()), None),
+        policy.clone(),
+    );
+    let old_id = store.store(&old, None).await.unwrap();
+    let replacement = Memory::new_for_test(
+        "visible current revision".to_owned(),
+        Vec::new(),
+        Provenance::new_for_test(Some("owner".to_owned()), Some("project/redacted-history".to_owned()), None),
+        policy,
+    );
+    let replacement_id = store.store_with_supersession(&replacement, None, &old_id).await.unwrap();
+    attach_legacy_test_contexts(&store, &[old_id, replacement_id], "owner", "other", "project/redacted-history").await;
+    let client = serve_store(Some("other"), store).await;
+
+    let current: CountResponse = call_tool(&client, "admin_count", json!({})).await;
+    let with_history: CountResponse = call_tool(&client, "admin_count", json!({"include_superseded": true})).await;
+    assert_eq!(current.total, 1_u64);
+    assert_eq!(with_history.total, current.total);
+    assert_eq!(with_history.superseded_count, 0_u64);
+
+    let listed: AdminListResponse = call_tool(&client, "admin_list", json!({"include_superseded": true})).await;
+    assert_eq!(listed.memories.iter().map(|card| card.id).collect::<Vec<_>>(), vec![replacement_id]);
 }
 
 #[tokio::test]

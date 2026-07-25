@@ -262,6 +262,13 @@ expression: schema
           "description": "Scope label/key.",
           "type": "string"
         },
+        "contexts": {
+          "description": "Direct governed context memberships in primary order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextDescriptor"
+          }
+        },
         "agent_label": {
           "description": "Agent provenance label.",
           "type": [
@@ -304,12 +311,49 @@ expression: schema
         "id",
         "summary_or_excerpt",
         "scope",
+        "contexts",
         "created_at",
         "updated_at",
         "tags",
         "match",
         "diagnostics"
       ]
+    },
+    "ContextDescriptor": {
+      "description": "Safe context descriptor returned on memory cards and resolution results.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Stable opaque ID.",
+          "$ref": "#/$defs/ContextId"
+        },
+        "kind": {
+          "description": "Context kind.",
+          "$ref": "#/$defs/ContextKind"
+        },
+        "key": {
+          "description": "Immutable context key.",
+          "type": "string"
+        },
+        "display_name": {
+          "description": "Human-readable display name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "key",
+        "display_name"
+      ]
+    },
+    "ContextId": {
+      "description": "A ULID-formatted opaque context identifier",
+      "type": "string"
+    },
+    "ContextKind": {
+      "description": "Stable context kind. Built-in kinds and operator-defined kinds use the same\nrepresentation so adding a kind does not require a wire-protocol change.",
+      "type": "string"
     },
     "Entity": {
       "description": "A caller-provided typed entity attached to a memory for entity-based retrieval.",

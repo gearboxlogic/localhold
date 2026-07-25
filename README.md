@@ -21,7 +21,7 @@ streamable HTTP, Windows, PostgreSQL, and CUDA reranking are preview surfaces.
 
 ## What It Provides
 
-- one durable store shared by every agent: scoped memories, access policies,
+- one durable store shared by every agent: multi-context memories, access policies,
   audit history, and maintenance tools
 - keyword, semantic, hybrid, and text fallback search
 - MCP over stdio or streamable HTTP
@@ -76,13 +76,15 @@ for prerequisites, archive verification, and client details.
 
 ## Browse The Hold
 
-`hold ui` opens an interactive terminal browser over the store: scopes in the
-left pane; search mode cycling across keyword, text, semantic, hybrid, and auto;
-and a detail view with each memory's audit trail. Auto chooses the best
-available retrieval fallback. Browsing is side-effect-free; edits and deletions
-go through the normal audited authorization path.
+`hold ui` opens an interactive terminal browser over the store: multi-select
+contexts grouped by kind in the left pane; search mode cycling across keyword,
+text, semantic, hybrid, and auto; memory context editing; and an operator
+Context Manager for definitions, hierarchy, grants, lifecycle, and policy.
+Auto chooses the best available retrieval fallback. Browsing is
+side-effect-free; edits and administrative changes go through audited
+authorization paths.
 
-<img src="assets/brand/hold-ui.gif" alt="hold ui browse, keyword search, and memory detail views with scoped memories" width="100%">
+<img src="assets/brand/hold-ui.gif" alt="hold ui browse, keyword search, and memory detail views with governed contexts" width="100%">
 
 The recording uses an explicitly selected hybrid browse mode before switching
 to keyword search, then opens the selected memory's detail view.

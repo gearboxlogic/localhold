@@ -38,18 +38,28 @@ change in its migration transaction and relies on the operator's required
 pre-upgrade snapshot. A database containing both table names, malformed legacy
 metadata, or unexpected metadata versions is refused without partial migration.
 
-Current SQLite databases carry `PRAGMA user_version = 2`. Startup upgrades a
-schema-v1 database to this contract and migrates an otherwise compatible
-unversioned database, but refuses a database whose version is newer than the
-running binary. Supported backups and restores expose and validate this value;
-restore can upgrade a strictly validated v1 backup on a private staging copy.
+Current SQLite databases carry `PRAGMA user_version = 3`. Startup upgrades
+schema-v1 and schema-v2 databases to this contract and migrates an otherwise
+compatible unversioned database, but refuses a database whose version is newer
+than the running binary. PostgreSQL's current migration ledger ends at version
+5 (`governed_contexts`). Supported backups and restores expose and validate
+these values; restore upgrades a strictly validated older backup on a private
+staging copy.
+
+The governed-context migration converts registered and raw legacy scopes into
+normalized contexts and ordered `memory_contexts` rows, keeps
+`inbox/unresolved` memories contextless, converts former global definitions
+into frozen system-owned compatibility contexts with their prior visibility,
+and removes `scope_registry` after successful backfill. `origin_scope` remains
+provenance. Compatibility `scope` fields survive as synchronized caches.
 The JSON report's separate `schema_version` identifies the report format
 itself.
 
 Deterministic SQLite and PostgreSQL fixtures cover every published beta, release
 candidate, and stable schema. CI verifies their checksums and source provenance,
 then opens or migrates every manifest entry and checks embedding profiles, audit
-history, scopes, tombstones, metadata, memories, and embeddings. Fixtures remain
+history, governed contexts, memberships, grants, policy, compatibility scopes,
+tombstones, metadata, memories, and embeddings. Fixtures remain
 for the lifetime of the release's compatibility obligation; removing one
 requires an explicit, reviewed compatibility-policy change in a release.
 

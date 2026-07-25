@@ -14,6 +14,7 @@ use tracing::{info, warn};
 
 use crate::{
     background_tasks::{BackgroundTaskKind, BackgroundTasks, EmbedAdmission},
+    context::{ContextAuditDraft, ContextId},
     embedding::{EmbeddingProvider, batch::BatchEmbeddingExecutor},
     error::{EngineError, StoreError, ValidationError},
     store::{MemoryStore, MemoryWithEmbedding},
@@ -142,6 +143,31 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
         Ok(id)
     }
 
+    /// Store memory, metadata, and governed memberships atomically before
+    /// spawning embedding work.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "governed audited write needs admission, memory, supersession, metadata, memberships, and audits"
+    )]
+    pub(crate) async fn store_and_embed_with_metadata_contexts(
+        &self,
+        admission: &EmbedAdmission,
+        memory: Memory,
+        supersedes: Option<&MemoryId>,
+        metadata: &MemoryMetadata,
+        context_ids: &[ContextId],
+        audit: &AuditDraft,
+        context_audit: &ContextAuditDraft,
+    ) -> Result<MemoryId, EngineError> {
+        let content = memory.content.clone();
+        let id = self
+            .store
+            .store_with_metadata_contexts_audited(&memory, None, supersedes, metadata, context_ids, audit, context_audit)
+            .await?;
+        let _queued = self.spawn_embed_task_or_run_inline(admission, id, content, 0).await;
+        Ok(id)
+    }
+
     /// Store multiple memories atomically and spawn embed tasks for each.
     ///
     /// Validates non-empty and batch size within the caller-provided limit.
@@ -248,6 +274,55 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
         Ok(ids)
     }
 
+    /// Store a governed batch atomically, then spawn embedding work.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "governed batch write needs admission, memories, supersession, metadata, memberships, audits, and caller cap"
+    )]
+    pub(crate) async fn batch_store_and_embed_with_metadata_contexts(
+        &self,
+        admission: &EmbedAdmission,
+        memories: Vec<Memory>,
+        supersedes_list: &[Option<MemoryId>],
+        metadata: &[MemoryMetadata],
+        context_ids: &[Vec<ContextId>],
+        audits: &[AuditDraft],
+        context_audits: &[ContextAuditDraft],
+        max_batch_size: usize,
+    ) -> Result<Vec<MemoryId>, EngineError> {
+        if memories.is_empty() {
+            return Err(ValidationError::new("memories", "batch cannot be empty").into());
+        }
+        if memories.len() > max_batch_size {
+            return Err(ValidationError::new("memories", format!("batch size {} exceeds maximum of {max_batch_size}", memories.len())).into());
+        }
+        let mut contents = Vec::with_capacity(memories.len());
+        let memories = memories
+            .into_iter()
+            .map(|memory| {
+                contents.push(Arc::from(memory.content.as_str()));
+                MemoryWithEmbedding { memory, embedding: None }
+            })
+            .collect::<Vec<_>>();
+        let ids = self
+            .store
+            .store_batch_with_metadata_contexts_audited(&memories, supersedes_list, metadata, context_ids, audits, context_audits)
+            .await?;
+        let work = ids
+            .iter()
+            .copied()
+            .zip(contents)
+            .map(|(id, content)| EmbedWork {
+                id,
+                content,
+                expected_revision: 0,
+                claim_token: None,
+            })
+            .collect();
+        let _queued = self.spawn_embed_batches_or_run_inline(admission, work).await;
+        Ok(ids)
+    }
+
     /// Update a memory with authorization check, spawning a re-embed task
     /// when content changes.
     ///
@@ -286,6 +361,32 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> EmbeddingOrchestrator<S
     ) -> Result<AuthorizedUpdateOutcome, EngineError> {
         let new_content = update.content.clone();
         let outcome = self.store.update_authorized_with_metadata_audited(&id, update, metadata_patch, principal, audit).await?;
+        maybe_reembed_after_update(self, embed_admission, id, new_content, &outcome).await;
+        Ok(outcome)
+    }
+
+    /// Atomically update a memory, metadata, and optional complete context
+    /// membership set, then re-embed changed content.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "governed revise needs embed admission, update, metadata, memberships, principal, and both audits"
+    )]
+    pub(crate) async fn update_with_metadata_contexts_and_maybe_reembed(
+        &self,
+        embed_admission: Option<&EmbedAdmission>,
+        id: MemoryId,
+        update: &MemoryUpdate,
+        metadata_patch: Option<&MetadataPatch>,
+        context_ids: Option<&[ContextId]>,
+        principal: &str,
+        audit: &AuditDraft,
+        context_audit: Option<&ContextAuditDraft>,
+    ) -> Result<AuthorizedUpdateOutcome, EngineError> {
+        let new_content = update.content.clone();
+        let outcome = self
+            .store
+            .update_authorized_with_metadata_contexts_audited(&id, update, metadata_patch, context_ids, principal, audit, context_audit)
+            .await?;
         maybe_reembed_after_update(self, embed_admission, id, new_content, &outcome).await;
         Ok(outcome)
     }

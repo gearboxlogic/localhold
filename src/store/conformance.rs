@@ -1,12 +1,16 @@
 //! Shared store contract checks for every `MemoryStore` backend.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, TimeZone as _, Utc};
 use serde_json::json;
 
 use super::{MemoryStore, MemoryWithEmbedding};
 use crate::{
+    context::{
+        ContextAnchorPolicy, ContextAnchorPolicyDraft, ContextAuditDraft, ContextCreateDraft, ContextDefinitionPatch, ContextExactLookup, ContextId, ContextKind, ContextKindDraft,
+        ContextKindPolicy, ContextKindPolicyDraft, ContextLifecycle, ContextPolicyLayer,
+    },
     error::StoreError,
     types::{
         AccessPolicy, AuditAction, AuditDraft, Confidence, Entity, Importance, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryType, MemoryUpdate, MetadataPatch, Provenance,
@@ -55,6 +59,15 @@ where
     };
     store.register_scope(scope_def.clone()).await.unwrap();
     assert!(store.list_scopes().await.unwrap().contains(&scope_def));
+    let context_id = store
+        .list_context_records(OWNER, false, 0, 500)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.context.key == scope)
+        .unwrap()
+        .context
+        .id;
 
     let primary_token = format!("contractneedlealpha{case}");
     let entity_name = format!("ContractEntity{case}");
@@ -72,6 +85,17 @@ where
     let primary_embedding = embedding(embedding_dimensions, 0.0_f32);
     let primary_id = store.store(&primary, Some(&primary_embedding)).await.unwrap();
     assert_eq!(primary_id, primary.id);
+    let context_audit = ContextAuditDraft {
+        actor_principal: OWNER.into(),
+        action: "conformance_membership".into(),
+        context_id: None,
+        memory_id: Some(primary_id),
+        details: None,
+    };
+    assert_eq!(
+        store.replace_memory_contexts(&primary_id, &[context_id], OWNER, &context_audit).await.unwrap(),
+        WriteOutcome::Applied
+    );
 
     let retrieved = store.get(&primary_id, None).await.unwrap().unwrap();
     assert_eq!(retrieved.content, primary.content);
@@ -110,7 +134,7 @@ where
     assert_eq!(fetched_embeddings.get(&primary_id).map(Vec::len), Some(embedding_dimensions));
     assert_eq!(fetched_embeddings.get(&primary_id).and_then(|v| v.first()).copied(), Some(0.0_f32));
 
-    let scoped_embeddings = store.list_with_embeddings(Some(std::slice::from_ref(&scope)), 10).await.unwrap();
+    let scoped_embeddings = store.list_with_embeddings(Some(std::slice::from_ref(&context_id)), 10).await.unwrap();
     assert!(scoped_embeddings.iter().any(|entry| entry.memory.id == primary_id && entry.embedding.is_some()));
 
     let restricted = memory(MemorySpec {
@@ -356,7 +380,7 @@ where
 
     let original_audited_content = audited.content.clone();
     let content_after_audit_update = format!("audited transactional update {case}");
-    let content_audit = AuditDraft {
+    let update_audit = AuditDraft {
         action: AuditAction::Update,
         caller_agent: Some(OWNER.into()),
         timestamp: time_after(base, 14),
@@ -366,11 +390,11 @@ where
         content: Some(content_after_audit_update.clone()),
         ..MemoryUpdate::default()
     };
-    let content_outcome = store.update_authorized_audited(&audited_id, &content_update, OWNER, &content_audit).await.unwrap();
+    let content_outcome = store.update_authorized_audited(&audited_id, &content_update, OWNER, &update_audit).await.unwrap();
     assert_eq!(content_outcome.outcome, WriteOutcome::Applied);
     let content_history = store.query_audit_log(&audited_id, 10).await.unwrap();
-    let content_audit_entry = content_history.iter().find(|entry| entry.timestamp == content_audit.timestamp).unwrap();
-    let content_details = content_audit_entry.details.as_ref().and_then(serde_json::Value::as_object).unwrap();
+    let update_audit_entry = content_history.iter().find(|entry| entry.timestamp == update_audit.timestamp).unwrap();
+    let content_details = update_audit_entry.details.as_ref().and_then(serde_json::Value::as_object).unwrap();
     assert_eq!(content_details.get("old_content_hash"), Some(&json!(super::crud::content_hash(&original_audited_content))));
     assert_eq!(content_details.get("case"), Some(&json!(case_tag)));
 
@@ -674,6 +698,11 @@ where
         "scope reassignment must advance the optimistic revision"
     );
     assert_eq!(moved.updated_at, opened_movable.updated_at, "scope reassignment must preserve content freshness");
+    let moved_contexts = store.get_memory_contexts(&movable_id, OWNER).await.unwrap();
+    assert_eq!(moved_contexts.len(), 1);
+    assert_eq!(moved_contexts[0].context.key, to_scope);
+    assert_eq!(moved_contexts[0].context.owner_principal, OWNER);
+    assert_eq!(moved_contexts[0].context.kind.as_str(), ContextKind::CUSTOM);
 
     let delete_me = memory(MemorySpec {
         content: format!("delete me {case}"),
@@ -690,6 +719,450 @@ where
     let tombstone = store.get_tombstone(&delete_id).await.unwrap().unwrap();
     assert_eq!(tombstone.memory_id, delete_id);
     assert_eq!(tombstone.deleted_by_principal.as_deref(), Some(OWNER));
+
+    let context_specs = [
+        ("project", format!("project/x/{case}"), "Project X"),
+        ("project", format!("project/y/{case}"), "Project Y"),
+        ("domain", format!("domain/architecture/{case}"), "Architecture"),
+        ("domain", format!("domain/operations/{case}"), "Operations"),
+    ];
+    let mut governed = Vec::new();
+    for (kind, key, display_name) in context_specs {
+        let id = ContextId::new();
+        let draft = ContextCreateDraft {
+            id,
+            kind: ContextKind::new(kind).unwrap(),
+            normalized_key: crate::types::normalize_context_key(&key),
+            key,
+            display_name: display_name.into(),
+            description: None,
+            owner_principal: OWNER.into(),
+            guidance: None,
+            parent_id: None,
+            aliases: Vec::new(),
+            identities: Vec::new(),
+            resolver_hints: Vec::new(),
+            confirm_distinct_from: Vec::new(),
+            enforce_fuzzy_confirmation: false,
+            frozen: false,
+        };
+        let audit = ContextAuditDraft {
+            actor_principal: OWNER.into(),
+            action: "conformance_context_created".into(),
+            context_id: Some(id),
+            memory_id: None,
+            details: None,
+        };
+        let created = store.create_context(&draft, &audit).await.unwrap();
+        governed.push(created.id);
+    }
+    let project_x = governed[0];
+    let project_y = governed[1];
+    let architecture = governed[2];
+    let operations = governed[3];
+    let fuzzy_domain_id = ContextId::new();
+    let mut fuzzy_domain = ContextCreateDraft::private(
+        fuzzy_domain_id,
+        ContextKind::new(ContextKind::DOMAIN).unwrap(),
+        format!("domain/architecture-copy/{case}"),
+        "Architecture",
+        OWNER,
+    );
+    fuzzy_domain.enforce_fuzzy_confirmation = true;
+    let fuzzy_error = store
+        .create_context(
+            &fuzzy_domain,
+            &ContextAuditDraft::new(OWNER, "conformance_fuzzy_domain_rejected").with_context(fuzzy_domain_id),
+        )
+        .await
+        .unwrap_err();
+    assert!(fuzzy_error.to_string().contains("fuzzy context candidates changed"));
+    fuzzy_domain.confirm_distinct_from = vec![architecture];
+    let _fuzzy_domain = store
+        .create_context(
+            &fuzzy_domain,
+            &ContextAuditDraft::new(OWNER, "conformance_fuzzy_domain_confirmed").with_context(fuzzy_domain_id),
+        )
+        .await
+        .unwrap();
+    let archived_legacy_key = format!("legacy/archived/{case}");
+    let archived_legacy_scope = ScopeDefinition {
+        scope_key: archived_legacy_key.clone(),
+        display_name: "Archived legacy adapter".into(),
+        description: None,
+        aliases: Vec::new(),
+        matchers: Vec::new(),
+        parent: None,
+        related: Vec::new(),
+    };
+    store.register_scope_for_principal(archived_legacy_scope.clone(), OWNER).await.unwrap();
+    let archived_record = store
+        .find_context_records(OWNER, false, &ContextExactLookup::Key {
+            kind: Some(ContextKind::custom()),
+            normalized_key: crate::types::normalize_context_key(&archived_legacy_key),
+        })
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    store
+        .set_context_lifecycle(
+            &archived_record.context.id,
+            ContextLifecycle::Archived,
+            OWNER,
+            &ContextAuditDraft::new(OWNER, "conformance_legacy_scope_archived").with_context(archived_record.context.id),
+        )
+        .await
+        .unwrap();
+    let archived_registration_error = store.register_scope_for_principal(archived_legacy_scope, OWNER).await.unwrap_err();
+    assert!(archived_registration_error.to_string().contains("reactivate it in the TUI"));
+    assert!(
+        store
+            .list_scopes_for_principal(OWNER)
+            .await
+            .unwrap()
+            .iter()
+            .all(|scope| scope.scope_key != archived_legacy_key)
+    );
+    let context_audit = |action: &str, context_id: Option<ContextId>| ContextAuditDraft {
+        actor_principal: OWNER.into(),
+        action: action.into(),
+        context_id,
+        memory_id: None,
+        details: None,
+    };
+    store
+        .update_context_definition(
+            &project_x,
+            &ContextDefinitionPatch {
+                display_name: "Project X renamed".into(),
+                description: Some("managed definition".into()),
+                guidance: Some("Use for project X work.".into()),
+                aliases: vec![format!("project-x-alias-{case}")],
+                identities: Vec::new(),
+                resolver_hints: vec![format!("project-x-hint-{case}")],
+            },
+            OWNER,
+            &context_audit("conformance_context_updated", Some(project_x)),
+        )
+        .await
+        .unwrap();
+    let project_x_record = store
+        .list_context_records(OWNER, false, 0, 500)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.context.id == project_x)
+        .unwrap();
+    assert_eq!(project_x_record.context.display_name, "Project X renamed");
+    assert_eq!(project_x_record.aliases, vec![format!("project-x-alias-{case}")]);
+
+    store
+        .grant_context_use(&project_x, VIEWER, OWNER, &context_audit("conformance_context_granted", Some(project_x)))
+        .await
+        .unwrap();
+    assert!(store.get_context(&project_x, VIEWER).await.unwrap().is_some());
+    assert_eq!(store.list_context_grants(&project_x, OWNER).await.unwrap().len(), 1);
+    assert!(store.list_context_grants(&project_x, VIEWER).await.unwrap().is_empty());
+    store
+        .revoke_context_use(&project_x, VIEWER, OWNER, &context_audit("conformance_context_grant_revoked", Some(project_x)))
+        .await
+        .unwrap();
+    assert!(store.get_context(&project_x, VIEWER).await.unwrap().is_none());
+    let replacement_grantees = vec![VIEWER.to_owned(), ALLOWED.to_owned()];
+    store
+        .replace_context_grants(
+            &project_x,
+            &replacement_grantees,
+            OWNER,
+            &context_audit("conformance_context_grants_replaced", Some(project_x)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .list_context_grants(&project_x, OWNER)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|grant| grant.grantee_principal)
+            .collect::<BTreeSet<_>>(),
+        replacement_grantees.into_iter().collect()
+    );
+    let duplicate_grantees = vec![VIEWER.to_owned(), format!(" {VIEWER} ")];
+    assert!(
+        store
+            .replace_context_grants(
+                &project_x,
+                &duplicate_grantees,
+                OWNER,
+                &context_audit("conformance_context_grants_invalid", Some(project_x)),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(store.list_context_grants(&project_x, OWNER).await.unwrap().len(), 2);
+
+    let lineage_viewer = format!("lineage-viewer-{case}");
+    store
+        .set_context_parent(&operations, Some(&architecture), OWNER, &context_audit("conformance_context_parent_set", Some(operations)))
+        .await
+        .unwrap();
+    store
+        .grant_context_use(&operations, &lineage_viewer, OWNER, &context_audit("conformance_child_context_granted", Some(operations)))
+        .await
+        .unwrap();
+    store
+        .grant_context_use(
+            &architecture,
+            &lineage_viewer,
+            OWNER,
+            &context_audit("conformance_parent_context_granted", Some(architecture)),
+        )
+        .await
+        .unwrap();
+    let child_selection = store.expand_context_selection(&[operations], &lineage_viewer, false).await.unwrap();
+    assert_eq!(
+        child_selection.iter().map(|context| context.id).collect::<BTreeSet<_>>(),
+        [operations, architecture].into_iter().collect(),
+        "an authorized child selection must include its authorized ancestor chain"
+    );
+
+    let foreign_owner = format!("foreign-owner-{case}");
+    let foreign_parent = ContextId::new();
+    let _foreign_context = store
+        .create_context(
+            &ContextCreateDraft::private(
+                foreign_parent,
+                ContextKind::new(ContextKind::DOMAIN).unwrap(),
+                format!("domain/foreign-parent/{case}"),
+                "Foreign parent",
+                &foreign_owner,
+            ),
+            &ContextAuditDraft::new(&foreign_owner, "conformance_foreign_parent_created").with_context(foreign_parent),
+        )
+        .await
+        .unwrap();
+    store
+        .grant_context_use(
+            &foreign_parent,
+            OWNER,
+            &foreign_owner,
+            &ContextAuditDraft::new(&foreign_owner, "conformance_foreign_parent_granted").with_context(foreign_parent),
+        )
+        .await
+        .unwrap();
+    store
+        .set_context_parent(
+            &project_y,
+            Some(&foreign_parent),
+            OWNER,
+            &context_audit("conformance_foreign_parent_selected", Some(project_y)),
+        )
+        .await
+        .unwrap();
+    store
+        .revoke_context_use(
+            &foreign_parent,
+            OWNER,
+            &foreign_owner,
+            &ContextAuditDraft::new(&foreign_owner, "conformance_foreign_parent_revoked").with_context(foreign_parent),
+        )
+        .await
+        .unwrap();
+    let unavailable_lineage = store.expand_context_selection(&[project_y], OWNER, false).await.unwrap_err();
+    assert!(unavailable_lineage.to_string().contains("unavailable parent"));
+
+    let case_prefix = case.chars().take(8).collect::<String>();
+    let user_kind = ContextKind::new(format!("release_train_{case_prefix}")).unwrap();
+    store
+        .upsert_context_kind(
+            &ContextKindDraft {
+                kind: user_kind.clone(),
+                display_name: "Release train".into(),
+                enabled: true,
+            },
+            OWNER,
+            &context_audit("conformance_context_kind_upserted", None),
+        )
+        .await
+        .unwrap();
+    assert!(store.list_context_kinds().await.unwrap().iter().any(|definition| definition.kind == user_kind));
+
+    store
+        .upsert_context_kind_policy(
+            &ContextKindPolicyDraft {
+                layer: ContextPolicyLayer::Principal,
+                principal: OWNER.into(),
+                kind: ContextKind::new(ContextKind::DOMAIN).unwrap(),
+                policy: ContextKindPolicy {
+                    agent_creation: Some(true),
+                    default_context_id: Some(architecture),
+                    guidance: Some("Conformance principal policy".into()),
+                    ..ContextKindPolicy::default()
+                },
+            },
+            OWNER,
+            &context_audit("conformance_context_policy_upserted", None),
+        )
+        .await
+        .unwrap();
+    let policies = store.list_context_kind_policies(OWNER).await.unwrap();
+    assert!(policies.iter().any(|record| record.kind.as_str() == ContextKind::DOMAIN));
+
+    let mut anchor_kinds = BTreeMap::new();
+    let _old = anchor_kinds.insert(ContextKind::DOMAIN.into(), ContextKindPolicy {
+        include_descendants: Some(true),
+        guidance: Some("Conformance anchor policy".into()),
+        ..ContextKindPolicy::default()
+    });
+    store
+        .upsert_context_anchor_policy(
+            &ContextAnchorPolicyDraft {
+                anchor_context_id: project_x,
+                principal: OWNER.into(),
+                policy: ContextAnchorPolicy { kinds: anchor_kinds },
+            },
+            OWNER,
+            &context_audit("conformance_anchor_policy_upserted", Some(project_x)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.list_context_anchor_policies(OWNER).await.unwrap().len(), 1);
+    assert!(!store.query_context_audit(&project_x, OWNER, 20).await.unwrap().is_empty());
+
+    let applicability_tag = format!("applicability-{case}");
+    let membership_sets = [
+        ("project x", vec![project_x]),
+        ("project y", vec![project_y]),
+        ("architecture", vec![architecture]),
+        ("operations", vec![operations]),
+        ("project x architecture", vec![project_x, architecture]),
+        ("project x operations", vec![project_x, operations]),
+    ];
+    let mut applicability_ids = Vec::new();
+    let applicability_embedding = embedding(embedding_dimensions, 12.0_f32);
+    for (index, (label, context_ids)) in membership_sets.into_iter().enumerate() {
+        let primary_key = store.get_context(&context_ids[0], OWNER).await.unwrap().unwrap().key;
+        let memory = memory(MemorySpec {
+            content: format!("{label} applicability {case}"),
+            tags: vec![applicability_tag.clone()],
+            source_agent: OWNER,
+            scope: primary_key.clone(),
+            origin: format!("contract/applicability/{case}/{index}"),
+            access_policy: AccessPolicy::Public,
+            created_at: time_after(base, 30_i64.saturating_add(i64::try_from(index).unwrap())),
+        });
+        let metadata = MemoryMetadata {
+            memory_id: memory.id,
+            scope_key: Some(primary_key),
+            summary: None,
+            agent_label: None,
+            created_by_principal: Some(OWNER.into()),
+            quality_flags: Vec::new(),
+            schema_version: 1,
+        };
+        let audit = AuditDraft {
+            action: AuditAction::Store,
+            caller_agent: Some(OWNER.into()),
+            timestamp: memory.created_at,
+            details: None,
+        };
+        let context_audit = ContextAuditDraft {
+            actor_principal: OWNER.into(),
+            action: "conformance_memberships_initialized".into(),
+            context_id: None,
+            memory_id: Some(memory.id),
+            details: None,
+        };
+        let id = store
+            .store_with_metadata_contexts_audited(&memory, Some(&applicability_embedding), None, &metadata, &context_ids, &audit, &context_audit)
+            .await
+            .unwrap();
+        applicability_ids.push(id);
+    }
+    assert!(store.get(&applicability_ids[1], Some(VIEWER)).await.unwrap().is_some());
+    assert!(
+        store.get_memory_contexts(&applicability_ids[1], VIEWER).await.unwrap().is_empty(),
+        "a readable public memory must not disclose private context metadata"
+    );
+    let applicability_filter = MemoryFilter {
+        tags: Some(vec![applicability_tag]),
+        context_ids: Some(vec![project_x, architecture]),
+        limit: Some(20),
+        ..MemoryFilter::default()
+    };
+    let applicable = store
+        .list(applicability_filter.clone(), owner_ctx.clone())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|memory| memory.id)
+        .collect::<BTreeSet<_>>();
+    let expected = [applicability_ids[0], applicability_ids[2], applicability_ids[4]].into_iter().collect::<BTreeSet<_>>();
+    assert_eq!(applicable, expected);
+    let text_applicable = store
+        .search_by_text("applicability", 20, &applicability_filter, &owner_ctx)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|result| result.memory.id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(text_applicable, expected);
+    if store.fts_available() {
+        let fts_applicable = store
+            .search_by_fts("applicability", 20, &applicability_filter, &owner_ctx, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|result| result.memory.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(fts_applicable, expected);
+    }
+    let vector_applicable = store
+        .search_by_embedding(&applicability_embedding, 20, &applicability_filter, &owner_ctx, Some(0.001_f64))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|result| result.memory.id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(vector_applicable, expected);
+
+    store
+        .set_context_lifecycle(
+            &operations,
+            ContextLifecycle::Archived,
+            OWNER,
+            &context_audit("conformance_operations_archived", Some(operations)),
+        )
+        .await
+        .unwrap();
+    let archived_selection = MemoryFilter {
+        context_ids: Some(vec![operations]),
+        limit: Some(20),
+        ..applicability_filter.clone()
+    };
+    assert!(
+        store.list(archived_selection, owner_ctx.clone()).await.unwrap().is_empty(),
+        "an archived selected context must not satisfy retrieval"
+    );
+    let active_project_with_archived_companion = MemoryFilter {
+        context_ids: Some(vec![project_x, operations]),
+        limit: Some(20),
+        ..applicability_filter
+    };
+    let active_results = store
+        .list(active_project_with_archived_companion, owner_ctx)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|memory| memory.id)
+        .collect::<BTreeSet<_>>();
+    let active_expected = [applicability_ids[0], applicability_ids[5]].into_iter().collect::<BTreeSet<_>>();
+    assert_eq!(
+        active_results, active_expected,
+        "archived companion memberships must not add an active applicability constraint"
+    );
 }
 
 struct WritePolicyCase {

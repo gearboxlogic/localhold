@@ -303,8 +303,9 @@ hold backup ./localhold-2026-07-14.db --json
 `hold backup` may run while LocalHold is serving requests. It uses SQLite's
 online backup transaction to include committed WAL data, validates
 `integrity_check`, the complete managed schema, foreign keys, vector mappings,
-the on-disk schema version, and the stored embedding profile, then publishes a
-self-contained file without overwriting an existing path. New Unix backup files
+governed context definitions, memberships, grants, policies, relations, and
+context audit, plus the on-disk schema version and stored embedding profile,
+then publishes a self-contained file without overwriting an existing path. New Unix backup files
 use mode `0600`; Windows files inherit the destination directory's ACL. The
 destination directory must already exist.
 
@@ -316,8 +317,9 @@ Startup holds the SQLite writer lock from before that backup through legacy
 validation and migration, preventing another writer from changing the captured
 schema or data between those steps. If backup creation, permissions, or
 `quick_check` verification fails, startup stops before changing the legacy
-table. Keep this recovery copy until representative reads, scopes, audit
-entries, tombstones, metadata, and embedding checks pass.
+table. Keep this recovery copy until representative reads, governed contexts,
+compatibility scopes, audit entries, tombstones, metadata, and embedding checks
+pass.
 
 Always validate a restore first:
 
@@ -364,6 +366,26 @@ Reports include the validated database schema version, embedding profile,
 memory and embedding counts, byte size, replacement state, and recovery path.
 These commands intentionally reject `database.backend = "postgres"`; use the
 PostgreSQL-native workflow below for that backend.
+
+## Context Governance Operations
+
+Use `hold ui` as the operator surface for context definitions, custom kinds,
+fingerprinted identities, aliases, hierarchy, grants, archive/reactivation,
+principal policy, operator ceilings/defaults, and anchor overrides. Agent tools
+can resolve contexts and create only what effective policy allows; they cannot
+create new kinds, change policy, modify grants, or reactivate archived
+identities.
+
+New contexts are private to their owner. Granting a context lets another
+principal select it but does not grant access to memories. When several active
+anchors apply, allowed sets intersect, denies win, and conflicting scalar
+defaults return an ambiguity instead of choosing arbitrarily.
+
+Before archiving or changing context policy, use the TUI to inspect direct
+memberships and active grants. Archive is reversible and retains keys and
+identity fingerprints. Back up before large hierarchy or policy changes and
+verify `hold doctor`, a broad catalog, representative multi-context recalls,
+and context audit afterward.
 
 ## PostgreSQL Backend
 

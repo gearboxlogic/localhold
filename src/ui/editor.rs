@@ -3,12 +3,16 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::types::{Importance, Memory, MemoryMetadata, MemoryUpdate, MetadataPatch};
+use crate::{
+    context::{ContextDescriptor, ContextId},
+    types::{Importance, Memory, MemoryMetadata, MemoryUpdate, MetadataPatch},
+};
 
 /// Editable fields in focus order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EditField {
     Content,
+    Contexts,
     Tags,
     Importance,
     Expiry,
@@ -16,11 +20,12 @@ pub(crate) enum EditField {
 }
 
 impl EditField {
-    pub(crate) const ALL: [Self; 5] = [Self::Content, Self::Tags, Self::Importance, Self::Expiry, Self::Metadata];
+    pub(crate) const ALL: [Self; 6] = [Self::Content, Self::Contexts, Self::Tags, Self::Importance, Self::Expiry, Self::Metadata];
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Content => "CONTENT",
+            Self::Contexts => "CONTEXT IDS JSON \u{b7} FIRST IS PRIMARY",
             Self::Tags => "TAGS JSON",
             Self::Importance => "IMPORTANCE",
             Self::Expiry => "EXPIRY",
@@ -40,7 +45,7 @@ impl EditField {
     }
 
     pub(crate) const fn multiline(self) -> bool {
-        matches!(self, Self::Content | Self::Metadata)
+        matches!(self, Self::Content | Self::Contexts | Self::Metadata)
     }
 }
 
@@ -53,7 +58,7 @@ pub(crate) struct TextInput {
 
 #[expect(clippy::string_slice, reason = "cursor offsets are maintained at UTF-8 character boundaries")]
 impl TextInput {
-    const fn new(value: String) -> Self {
+    pub(crate) const fn new(value: String) -> Self {
         let cursor = value.len();
         Self { value, cursor }
     }
@@ -141,6 +146,7 @@ pub(crate) struct EditDraft {
     /// Vertical document scroll for long edit forms.
     pub scroll: u16,
     pub content: TextInput,
+    pub contexts: TextInput,
     pub tags: TextInput,
     pub importance: TextInput,
     pub expiry: TextInput,
@@ -152,6 +158,7 @@ pub(crate) struct EditDraft {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DraftValues {
     content: String,
+    contexts: String,
     tags: String,
     importance: String,
     expiry: String,
@@ -159,9 +166,10 @@ struct DraftValues {
 }
 
 impl EditDraft {
-    pub(crate) fn new(memory: &Memory, metadata: Option<&MemoryMetadata>) -> Self {
+    pub(crate) fn new(memory: &Memory, metadata: Option<&MemoryMetadata>, contexts: &[ContextDescriptor]) -> Self {
         let values = DraftValues {
             content: memory.content.clone(),
+            contexts: serde_json::to_string_pretty(&contexts.iter().map(|context| context.id).collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into()),
             tags: serde_json::to_string(&memory.tags).unwrap_or_else(|_| "[]".into()),
             importance: format!("{:.2}", memory.importance.value()),
             expiry: memory.expires_at.map_or_else(String::new, |value| value.to_rfc3339()),
@@ -171,6 +179,7 @@ impl EditDraft {
             field: EditField::Content,
             scroll: 0_u16,
             content: TextInput::new(values.content.clone()),
+            contexts: TextInput::new(values.contexts.clone()),
             tags: TextInput::new(values.tags.clone()),
             importance: TextInput::new(values.importance.clone()),
             expiry: TextInput::new(values.expiry.clone()),
@@ -183,6 +192,7 @@ impl EditDraft {
     pub(crate) const fn active(&self) -> &TextInput {
         match self.field {
             EditField::Content => &self.content,
+            EditField::Contexts => &self.contexts,
             EditField::Tags => &self.tags,
             EditField::Importance => &self.importance,
             EditField::Expiry => &self.expiry,
@@ -193,6 +203,7 @@ impl EditDraft {
     pub(crate) const fn active_mut(&mut self) -> &mut TextInput {
         match self.field {
             EditField::Content => &mut self.content,
+            EditField::Contexts => &mut self.contexts,
             EditField::Tags => &mut self.tags,
             EditField::Importance => &mut self.importance,
             EditField::Expiry => &mut self.expiry,
@@ -216,6 +227,7 @@ impl EditDraft {
     pub(crate) fn cursor_document_line(&self) -> usize {
         let fields = [
             (EditField::Content, &self.content),
+            (EditField::Contexts, &self.contexts),
             (EditField::Tags, &self.tags),
             (EditField::Importance, &self.importance),
             (EditField::Expiry, &self.expiry),
@@ -238,6 +250,17 @@ impl EditDraft {
 
     pub(crate) fn parse(&self) -> Result<ParsedEdit, DraftError> {
         let content = (self.content.value != self.original.content).then(|| self.content.value.clone());
+        let context_ids = if self.contexts.value == self.original.contexts {
+            None
+        } else {
+            let ids = serde_json::from_str::<Vec<ContextId>>(&self.contexts.value)
+                .map_err(|_error| DraftError::new(EditField::Contexts, "contexts must be a JSON array of context IDs"))?;
+            let unique = ids.iter().copied().collect::<std::collections::HashSet<_>>();
+            if unique.len() != ids.len() {
+                return Err(DraftError::new(EditField::Contexts, "context IDs must be unique"));
+            }
+            Some(ids)
+        };
         let tags = if self.tags.value == self.original.tags {
             None
         } else {
@@ -294,12 +317,14 @@ impl EditDraft {
                 entities: None,
             },
             metadata_patch,
+            context_ids,
         })
     }
 
     fn current_values(&self) -> DraftValues {
         DraftValues {
             content: self.content.value.clone(),
+            contexts: self.contexts.value.clone(),
             tags: self.tags.value.clone(),
             importance: self.importance.value.clone(),
             expiry: self.expiry.value.clone(),
@@ -313,11 +338,17 @@ impl EditDraft {
 pub(crate) struct ParsedEdit {
     pub update: MemoryUpdate,
     pub metadata_patch: Option<MetadataPatch>,
+    pub context_ids: Option<Vec<ContextId>>,
 }
 
 impl ParsedEdit {
     pub(crate) const fn is_empty(&self) -> bool {
-        self.update.content.is_none() && self.update.tags.is_none() && self.update.importance.is_none() && self.update.expires_at.is_none() && self.metadata_patch.is_none()
+        self.update.content.is_none()
+            && self.update.tags.is_none()
+            && self.update.importance.is_none()
+            && self.update.expires_at.is_none()
+            && self.metadata_patch.is_none()
+            && self.context_ids.is_none()
     }
 }
 
@@ -423,7 +454,7 @@ mod tests {
             quality_flags: Vec::new(),
             schema_version: 1,
         };
-        let mut draft = EditDraft::new(&memory, Some(&metadata));
+        let mut draft = EditDraft::new(&memory, Some(&metadata), &[]);
         draft.tags.value = r#"["alpha","beta"]"#.into();
         draft.expiry.value = "2026-08-01T12:00:00Z".into();
         draft.metadata.value = r#"{"summary": null, "agent_label": "new"}"#.into();
@@ -440,7 +471,7 @@ mod tests {
     fn tags_json_preserves_commas_inside_tags() {
         let mut memory = memory();
         memory.tags = vec!["client,west".into()];
-        let mut draft = EditDraft::new(&memory, None);
+        let mut draft = EditDraft::new(&memory, None, &[]);
         assert_eq!(draft.tags.value, r#"["client,west"]"#);
 
         draft.tags.value = r#"["client,west","urgent"]"#.into();
@@ -452,7 +483,7 @@ mod tests {
     #[test]
     fn tags_reject_ambiguous_non_json_input() {
         let memory = memory();
-        let mut draft = EditDraft::new(&memory, None);
+        let mut draft = EditDraft::new(&memory, None, &[]);
         draft.tags.value = "alpha, beta".into();
 
         let error = draft.parse().unwrap_err();
@@ -504,7 +535,7 @@ mod tests {
     #[test]
     fn metadata_rejects_unknown_fields() {
         let memory = memory();
-        let mut draft = EditDraft::new(&memory, None);
+        let mut draft = EditDraft::new(&memory, None, &[]);
         draft.metadata.value = r#"{"scope":"forbidden"}"#.into();
         let error = draft.parse().unwrap_err();
         assert_eq!(error.field, EditField::Metadata);

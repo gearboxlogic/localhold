@@ -572,7 +572,21 @@ fn sqlite_check(config: &Config, path: &Path) -> DiagnosticCheck {
         .is_ok()
         && table_readable(&connection, "memory_metadata")
         && table_readable(&connection, "memory_tombstones")
-        && table_readable(&connection, "scope_registry")
+        && [
+            "context_kinds",
+            "contexts",
+            "context_aliases",
+            "context_identities",
+            "context_resolver_hints",
+            "context_grants",
+            "context_relations",
+            "memory_contexts",
+            "context_kind_policies",
+            "context_anchor_overrides",
+            "context_audit_events",
+        ]
+        .iter()
+        .all(|table| table_readable(&connection, table))
         && table_readable(&connection, "memory_audit_log")
         && table_readable(&connection, "memory_entities")
         && table_readable(&connection, "memory_embedding_map")
@@ -796,7 +810,16 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
         }
     }
     let required_tables: Result<i64, _> = query_scalar(
-        "SELECT COUNT(*) FROM (VALUES ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'), ('memory_audit_log'), ('memory_entities'), ('memory_metadata'), ('memory_tombstones'), ('scope_registry')) AS required(name) WHERE ($1 OR required.name <> 'localhold_migrations') AND to_regclass(CASE WHEN $2 THEN format('%I.%I', current_schema(), required.name) ELSE required.name END) IS NOT NULL",
+        "SELECT COUNT(*) FROM (VALUES
+            ('memories'), ('localhold_migrations'), ('memory_embeddings'), ('embedding_profile'),
+            ('memory_audit_log'), ('memory_entities'), ('memory_metadata'), ('memory_tombstones'),
+            ('context_kinds'), ('contexts'), ('context_aliases'), ('context_identities'),
+            ('context_resolver_hints'), ('context_grants'), ('context_relations'),
+            ('memory_contexts'), ('context_kind_policies'), ('context_anchor_overrides'),
+            ('context_audit_events')
+         ) AS required(name)
+         WHERE ($1 OR required.name <> 'localhold_migrations')
+           AND to_regclass(CASE WHEN $2 THEN format('%I.%I', current_schema(), required.name) ELSE required.name END) IS NOT NULL",
     )
     .bind(config.database.postgres.auto_migrate)
     .bind(config.database.postgres.auto_migrate)
@@ -911,7 +934,7 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
             }
         }
     }
-    let required_table_count = if config.database.postgres.auto_migrate { 9_i64 } else { 8_i64 };
+    let required_table_count = if config.database.postgres.auto_migrate { 19_i64 } else { 18_i64 };
     if schema_table_count > 0_i64 && schema_table_count < required_table_count {
         let present_indexes_compatible = postgres_indexes_compatible(&pool, true).await;
         let present_constraints_compatible: Result<bool, _> = query_scalar(
@@ -1026,10 +1049,21 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
             AND has_table_privilege('memory_embeddings', 'SELECT') AND has_table_privilege('memory_embeddings', 'INSERT') AND has_table_privilege('memory_embeddings', 'UPDATE') AND has_table_privilege('memory_embeddings', 'DELETE')
             AND has_table_privilege('memory_audit_log', 'SELECT') AND has_table_privilege('memory_audit_log', 'INSERT')
             AND has_table_privilege('memory_tombstones', 'SELECT') AND has_table_privilege('memory_tombstones', 'INSERT') AND has_table_privilege('memory_tombstones', 'UPDATE')
-            AND has_table_privilege('scope_registry', 'SELECT') AND has_table_privilege('scope_registry', 'INSERT') AND has_table_privilege('scope_registry', 'UPDATE')
             AND has_table_privilege('memory_metadata', 'SELECT') AND has_table_privilege('memory_metadata', 'INSERT') AND has_table_privilege('memory_metadata', 'UPDATE') AND has_table_privilege('memory_metadata', 'DELETE')
             AND has_table_privilege('embedding_profile', 'SELECT') AND has_table_privilege('embedding_profile', 'INSERT') AND has_table_privilege('embedding_profile', 'UPDATE')
-            AND has_sequence_privilege(pg_get_serial_sequence('memory_audit_log', 'id'), 'USAGE')",
+            AND has_table_privilege('context_kinds', 'SELECT') AND has_table_privilege('context_kinds', 'INSERT') AND has_table_privilege('context_kinds', 'UPDATE')
+            AND has_table_privilege('contexts', 'SELECT') AND has_table_privilege('contexts', 'INSERT') AND has_table_privilege('contexts', 'UPDATE')
+            AND has_table_privilege('context_aliases', 'SELECT') AND has_table_privilege('context_aliases', 'INSERT') AND has_table_privilege('context_aliases', 'UPDATE') AND has_table_privilege('context_aliases', 'DELETE')
+            AND has_table_privilege('context_identities', 'SELECT') AND has_table_privilege('context_identities', 'INSERT') AND has_table_privilege('context_identities', 'DELETE')
+            AND has_table_privilege('context_resolver_hints', 'SELECT') AND has_table_privilege('context_resolver_hints', 'INSERT') AND has_table_privilege('context_resolver_hints', 'UPDATE') AND has_table_privilege('context_resolver_hints', 'DELETE')
+            AND has_table_privilege('context_grants', 'SELECT') AND has_table_privilege('context_grants', 'INSERT') AND has_table_privilege('context_grants', 'UPDATE') AND has_table_privilege('context_grants', 'DELETE')
+            AND has_table_privilege('context_relations', 'SELECT') AND has_table_privilege('context_relations', 'INSERT') AND has_table_privilege('context_relations', 'DELETE')
+            AND has_table_privilege('memory_contexts', 'SELECT') AND has_table_privilege('memory_contexts', 'INSERT') AND has_table_privilege('memory_contexts', 'UPDATE') AND has_table_privilege('memory_contexts', 'DELETE')
+            AND has_table_privilege('context_kind_policies', 'SELECT') AND has_table_privilege('context_kind_policies', 'INSERT') AND has_table_privilege('context_kind_policies', 'UPDATE') AND has_table_privilege('context_kind_policies', 'DELETE')
+            AND has_table_privilege('context_anchor_overrides', 'SELECT') AND has_table_privilege('context_anchor_overrides', 'INSERT') AND has_table_privilege('context_anchor_overrides', 'UPDATE') AND has_table_privilege('context_anchor_overrides', 'DELETE')
+            AND has_table_privilege('context_audit_events', 'SELECT') AND has_table_privilege('context_audit_events', 'INSERT')
+            AND has_sequence_privilege(pg_get_serial_sequence('memory_audit_log', 'id'), 'USAGE')
+            AND has_sequence_privilege(pg_get_serial_sequence('context_audit_events', 'id'), 'USAGE')",
     )
     .fetch_one(&pool)
     .await;
@@ -1075,7 +1109,17 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
     .await;
     let indexes_current = crate::store::migration::postgres_runtime_indexes_compatible(&pool, config.database.postgres.auto_migrate, false).await;
     let owns_managed_tables: Result<bool, _> = query_scalar(
-        "SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), FALSE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_metadata', 'memory_tombstones', 'scope_registry')",
+        "SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), FALSE)
+         FROM pg_tables
+         WHERE schemaname = current_schema()
+           AND tablename IN (
+               'memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile',
+               'memory_audit_log', 'memory_entities', 'memory_metadata', 'memory_tombstones',
+               'context_kinds', 'contexts', 'context_aliases', 'context_identities',
+               'context_resolver_hints', 'context_grants', 'context_relations',
+               'memory_contexts', 'context_kind_policies', 'context_anchor_overrides',
+               'context_audit_events'
+           )",
     )
     .fetch_one(&pool)
     .await;

@@ -24,6 +24,24 @@ expression: schema
       "description": "How the scope was resolved.",
       "$ref": "#/$defs/ScopeResolution"
     },
+    "context_resolution": {
+      "description": "Governed context resolution.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContextResolution"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "contexts": {
+      "description": "Direct governed memberships.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContextDescriptor"
+      }
+    },
     "warnings": {
       "description": "Quality warnings.",
       "type": "array",
@@ -59,6 +77,7 @@ expression: schema
     "scope",
     "unresolved_scope",
     "scope_resolution",
+    "contexts",
     "warnings",
     "duplicate_candidates",
     "next_action"
@@ -102,7 +121,7 @@ expression: schema
       ]
     },
     "ScopeResolvedBy": {
-      "description": "Mechanism used to resolve a scope.",
+      "description": "Compatibility mechanism used to derive a legacy scope.",
       "oneOf": [
         {
           "description": "Explicit scope key or raw explicit scope value.",
@@ -110,12 +129,12 @@ expression: schema
           "const": "explicit"
         },
         {
-          "description": "Scope registry alias matched.",
+          "description": "A context alias matched.",
           "type": "string",
           "const": "alias"
         },
         {
-          "description": "Scope registry matcher matched an explicit scope or context hint.",
+          "description": "A context resolver hint matched an explicit scope or legacy context hint.",
           "type": "string",
           "const": "matcher"
         },
@@ -123,6 +142,213 @@ expression: schema
           "description": "No scope could be resolved.",
           "type": "string",
           "const": "unresolved"
+        }
+      ]
+    },
+    "ContextResolution": {
+      "description": "Agent-facing governed context resolution.",
+      "type": "object",
+      "properties": {
+        "direct": {
+          "description": "Directly selected contexts in caller order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextDescriptor"
+          }
+        },
+        "effective": {
+          "description": "Direct selections plus ancestors and optional descendants.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextDescriptor"
+          }
+        },
+        "candidates": {
+          "description": "Authorized ambiguous or fuzzy candidates.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextCandidate"
+          }
+        },
+        "policy_guidance": {
+          "description": "Effective policy guidance.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "broad_search": {
+          "description": "Whether omission intentionally selected a broad authorized search.",
+          "type": "boolean"
+        },
+        "unresolved": {
+          "description": "Whether resolution remains intentionally deferred.",
+          "type": "boolean"
+        },
+        "recommended_actions": {
+          "description": "Reusable recommended actions.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RecommendedAction"
+          }
+        }
+      },
+      "required": [
+        "direct",
+        "effective",
+        "candidates",
+        "policy_guidance",
+        "broad_search",
+        "unresolved",
+        "recommended_actions"
+      ]
+    },
+    "ContextDescriptor": {
+      "description": "Safe context descriptor returned on memory cards and resolution results.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Stable opaque ID.",
+          "$ref": "#/$defs/ContextId"
+        },
+        "kind": {
+          "description": "Context kind.",
+          "$ref": "#/$defs/ContextKind"
+        },
+        "key": {
+          "description": "Immutable context key.",
+          "type": "string"
+        },
+        "display_name": {
+          "description": "Human-readable display name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "key",
+        "display_name"
+      ]
+    },
+    "ContextId": {
+      "description": "A ULID-formatted opaque context identifier",
+      "type": "string"
+    },
+    "ContextKind": {
+      "description": "Stable context kind. Built-in kinds and operator-defined kinds use the same\nrepresentation so adding a kind does not require a wire-protocol change.",
+      "type": "string"
+    },
+    "ContextCandidate": {
+      "description": "Fuzzy or ambiguous authorized context candidate.",
+      "type": "object",
+      "properties": {
+        "context": {
+          "description": "Safe context descriptor.",
+          "$ref": "#/$defs/ContextDescriptor"
+        },
+        "score": {
+          "description": "Similarity score from 0.0 to 1.0.",
+          "type": "number",
+          "format": "double"
+        },
+        "matched_by": {
+          "description": "Matching surfaces, such as key, display name, alias, identity, or hint.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "context",
+        "score",
+        "matched_by"
+      ]
+    },
+    "RecommendedAction": {
+      "description": "Deterministic next action recommended by `brief`.",
+      "type": "object",
+      "properties": {
+        "tool": {
+          "description": "Tool to call next.",
+          "$ref": "#/$defs/RecommendedActionTool"
+        },
+        "priority": {
+          "description": "Action priority.",
+          "$ref": "#/$defs/RecommendedActionPriority"
+        },
+        "reason": {
+          "description": "Why this action is recommended.",
+          "type": "string"
+        },
+        "arguments": {
+          "description": "Complete tool arguments when the server can construct a valid call."
+        }
+      },
+      "required": [
+        "tool",
+        "priority",
+        "reason"
+      ]
+    },
+    "RecommendedActionTool": {
+      "description": "Tool name for a deterministic next action recommended by `brief`.",
+      "oneOf": [
+        {
+          "description": "Read one full memory by ID.",
+          "type": "string",
+          "const": "read"
+        },
+        {
+          "description": "Read multiple full memories by ID.",
+          "type": "string",
+          "const": "read_many"
+        },
+        {
+          "description": "Run a focused recall search.",
+          "type": "string",
+          "const": "recall"
+        },
+        {
+          "description": "Store a new durable memory.",
+          "type": "string",
+          "const": "remember"
+        },
+        {
+          "description": "Resolve or browse governed contexts.",
+          "type": "string",
+          "const": "context_resolve"
+        },
+        {
+          "description": "Create a governed context.",
+          "type": "string",
+          "const": "context_create"
+        },
+        {
+          "description": "Register a missing scope definition.",
+          "type": "string",
+          "const": "admin_scope_register"
+        }
+      ]
+    },
+    "RecommendedActionPriority": {
+      "description": "Priority for a deterministic next action recommended by `brief`.",
+      "oneOf": [
+        {
+          "description": "Do this first.",
+          "type": "string",
+          "const": "high"
+        },
+        {
+          "description": "Useful but not urgent.",
+          "type": "string",
+          "const": "normal"
+        },
+        {
+          "description": "Optional follow-up for weak or stale context.",
+          "type": "string",
+          "const": "low"
         }
       ]
     },

@@ -69,7 +69,8 @@ SQLite and PostgreSQL store the following logical data:
 
 - memory content, tags, type, confidence, importance, timestamps, and expiry;
 - provenance, source and creator principals, access policies, and allowlists;
-- summaries, scopes, aliases, matchers, quality flags, and entity names/types;
+- summaries, compatibility scopes, context keys, aliases, resolver hints,
+  identity fingerprints/redacted labels, quality flags, and entity names/types;
 - supersession links, impression counts, activity values, and embedding work
   claims;
 - derived full-text indexes and embedding vectors;
@@ -91,7 +92,7 @@ can therefore disclose candidate text to the provider even though LocalHold
 does not persist it.
 
 Embeddings are derived from content and may reveal information about it. Treat
-vectors, full-text indexes, audit rows, scope metadata, and entity names as
+vectors, full-text indexes, audit rows, governed context metadata, and entity names as
 sensitive even when they do not contain the original sentence verbatim.
 
 ### Plaintext at rest
@@ -274,11 +275,15 @@ multi-user isolation boundary.
 
 ### Search authorization and noninterference
 
-LocalHold applies access policy and field redaction before returning candidate
-records or sending them to the optional reranker. SQLite and PostgreSQL
-nevertheless generate and preliminarily rank full-text and ANN candidates
-against shared store indexes before application policy filtering. Duplicate
-detection and consolidation also use shared ANN candidate structures.
+LocalHold applies governed context applicability in SQLite or PostgreSQL before
+text, full-text, vector-distance, duplicate, consolidation, and reranking work.
+Contexts are relevance constraints only and never grant memory access. Access
+policy and field redaction are then applied before returning candidate records
+or sending them to the optional reranker.
+
+Rows that share an applicable context can still enter shared index work before
+application access-policy filtering. Context partitioning is therefore not an
+authorization or tenant-isolation mechanism.
 
 Inaccessible rows can therefore affect query work, timing, preliminary ranks,
 pagination, and hard scan or candidate ceilings. Over-fetching and retrying
@@ -297,8 +302,9 @@ agents cannot reach. Capabilities have different authorization scopes:
 | --- | --- | --- |
 | Policy-filtered reads | `admin_list`, `admin_history` | Return only memories or history visible to the server-resolved principal. Redacted history omits principal and details. |
 | Mixed-scope statistics | `admin_count` | Memory breakdowns are policy-filtered, but expired-row count and physical database size are store-wide diagnostics. |
-| Global scope registry | `admin_scope_list`, `admin_scope_register` | Listing returns every registered scope to a read-allowed caller. Registration requires a write-capable principal but can replace any scope definition; scopes have no per-scope owner policy. |
-| Policy-checked memory changes | `admin_bulk_update`, `admin_bulk_delete`, `admin_reassign_scope`, `admin_consolidate`, `admin_reembed`, default `admin_cleanup_expired` | Require a write-capable principal and check write access for affected memories. Bulk re-embedding applies authorization before its limit, leaves inaccessible rows unclaimed, and does not report their count. Authorized expiry cleanup likewise neither deletes nor counts inaccessible rows. Shared ANN candidate work can still be influenced by other rows. |
+| Governed context resolution/creation | `context_resolve`, `context_create` | Resolution returns only owned or explicitly granted contexts. New contexts are private. Exact archived identities remain reserved and agent creation cannot reactivate them. Context grants permit selection only and do not grant memory access. |
+| Legacy scope adapters | `admin_scope_list`, `admin_scope_register`, `admin_reassign_scope` | Registration and reassignment create principal-owned private custom contexts; migrated frozen contexts remain read-only and there is no independent global scope registry. Run them only as migration aids. |
+| Policy-checked memory changes | `admin_bulk_update`, `admin_bulk_delete`, `admin_reassign_scope`, `admin_consolidate`, `admin_reembed`, default `admin_cleanup_expired` | Require a write-capable principal and check write access for affected memories. Bulk re-embedding applies authorization before its limit, leaves inaccessible rows unclaimed, and does not report their count. Authorized expiry cleanup likewise neither deletes nor counts inaccessible rows. |
 | Whole-store expiry cleanup | `admin_cleanup_expired` with `mode = "all"` | Restricted to an authenticated local stdio context. Records the maintenance principal in each tombstone and the principal plus cleanup mode in a transactional delete audit row for every removed memory. |
 | Whole-store metadata maintenance | `admin_migration_report`, `admin_migrate_metadata` | Restricted to a local, authenticated stdio context. Reporting exposes whole-store state; migration can add metadata across the store. |
 
@@ -398,7 +404,7 @@ responsibility to protect the surrounding network and storage.
 | Threat | Current mitigation | Residual risk / operator action |
 | --- | --- | --- |
 | Another MCP caller reads or changes private data | Server-resolved principals; restricted/redacted policy; candidate records are filtered and redacted before return or reranking; transactional mutation authorization | Shared stdio or fixed HTTP principals are shared authority. Direct database access and locally asserted TUI principals bypass identity guarantees. Separate trust domains. |
-| Search side channel or candidate interference | Policy checks prevent inaccessible rows and fields from appearing in responses or reranker input; candidate pools are over-fetched and retried | Shared ANN and full-text indexes generate and rank candidates before policy filtering. Other rows can affect timing, preliminary ranks, pagination, and candidate ceilings. Separate mutually hostile tenants. |
+| Search side channel or candidate interference | Governed context applicability is applied in SQL before retrieval work; policy checks prevent inaccessible rows and fields from appearing in responses or reranker input | Inaccessible rows within the same effective context set can still affect timing and candidate work before application access filtering. Separate mutually hostile tenants. |
 | Forged trusted-proxy identity | Trusted-proxy mode requires the endpoint token and a nonempty principal header | LocalHold does not authenticate proxy origin or sign headers. Block direct access, overwrite the header at the proxy, and protect both network hops. |
 | Credential or content interception | HTTPS required for non-loopback embedding endpoints; redirects disabled | The HTTP server is plaintext, and the current PostgreSQL build has no TLS implementation. Protect both HTTP hops and use an encrypted database tunnel when PostgreSQL traffic crosses an untrusted boundary. |
 | Cloud provider retains sensitive data | Provider is opt-in; default `noop` sends nothing | LocalHold cannot enforce provider retention. Review contracts and avoid cloud embeddings for content that cannot leave the host. |
@@ -412,7 +418,7 @@ responsibility to protect the surrounding network and storage.
 | Compromised release artifact or checksum manifest | Release downloads include a checksum manifest | Archives and checksums share one GitHub publication boundary and are not independently signed or attested. Pin reviewed source and use a trusted build pipeline when provenance requirements exceed that boundary. |
 | Duplicate or stale embedding work | Durable claims and revision-checked vector writes | Expired claims can produce duplicate disclosure/cost. Coordinate process counts and provider limits. |
 | Overprivileged PostgreSQL runtime credential | `auto_migrate = false` supports a current schema under runtime-only table and sequence grants | The default `auto_migrate = true` uses the runtime URL for DDL and requires table ownership. Separate migration and runtime credentials operationally and disable runtime auto-migration. |
-| Destructive admin misuse | Admin routes are disabled by default; memory mutations, including bulk re-embedding and default expiry cleanup, apply per-memory authorization; destructive writes use transactional audit behavior where defined; whole-store expiry cleanup requires local authenticated stdio | There is no separate admin role. Scope registry, statistics, metadata migration, and explicitly selected local maintenance still have global or mixed reach. Isolate maintenance instances and back up first. |
+| Destructive admin misuse | Admin routes are disabled by default; memory mutations, including bulk re-embedding and default expiry cleanup, apply per-memory authorization; destructive writes use transactional audit behavior where defined; whole-store expiry cleanup requires local authenticated stdio | There is no separate admin role. Context administration, statistics, metadata migration, and explicitly selected local maintenance still have global or mixed reach. Isolate maintenance instances and back up first. |
 
 ## Secure Deployment Checklist
 

@@ -11,8 +11,8 @@ use localhold::{
 use serde_json::json;
 
 use super::helpers::{
-    assert_invalid_params_contains, await_embeddings, call_tool, call_tool_error, setup_embedding_server, setup_noop_server, setup_noop_server_with_clock,
-    setup_noop_server_with_limits, setup_server_with,
+    assert_invalid_params_contains, attach_legacy_test_contexts, await_embeddings, call_tool, call_tool_error, setup_embedding_server, setup_noop_server,
+    setup_noop_server_with_clock, setup_noop_server_with_limits, setup_server_with,
 };
 
 // ===========================================================================
@@ -52,7 +52,7 @@ async fn remember_many_preserves_agent_facing_metadata() {
 }
 
 #[tokio::test]
-async fn remember_many_defaults_to_unresolved_inbox_without_scope() {
+async fn remember_many_explicitly_defers_to_unresolved_inbox() {
     let client = setup_noop_server().await;
 
     let resp: RememberManyResponse = call_tool(
@@ -60,7 +60,8 @@ async fn remember_many_defaults_to_unresolved_inbox_without_scope() {
         "remember_many",
         json!({
             "memories": [{
-                "content": "origin default test"
+                "content": "origin default test",
+                "context": {"allow_unresolved": true}
             }]
         }),
     )
@@ -288,7 +289,8 @@ async fn admin_count_reports_superseded_rows_when_requested() {
     let original = Memory::new_for_test("original memory".into(), vec![], provenance.clone(), AccessPolicy::Public);
     let original_id = server.store().store(&original, None).await.unwrap();
     let replacement = Memory::new_for_test("updated memory".into(), vec![], provenance, AccessPolicy::Public);
-    let _replacement_id = server.store().store_with_supersession(&replacement, None, &original_id).await.unwrap();
+    let replacement_id = server.store().store_with_supersession(&replacement, None, &original_id).await.unwrap();
+    attach_legacy_test_contexts(server.store(), &[original_id, replacement_id], "agent", "stdio", "supersede-scope").await;
 
     let default_count: CountResponse = call_tool(&client, "admin_count", json!({})).await;
     assert_eq!(default_count.total, 1, "default count should hide superseded rows");

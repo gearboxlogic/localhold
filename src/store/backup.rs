@@ -1030,7 +1030,17 @@ mod tests {
             "memory_fts",
             "memory_audit_log",
             "memory_tombstones",
-            "scope_registry",
+            "context_kinds",
+            "contexts",
+            "context_aliases",
+            "context_identities",
+            "context_resolver_hints",
+            "context_grants",
+            "context_relations",
+            "memory_contexts",
+            "context_kind_policies",
+            "context_anchor_overrides",
+            "context_audit_events",
             "memory_metadata",
             "embedding_profile",
         ]
@@ -1094,7 +1104,7 @@ mod tests {
                 .confirmed(false),
         )
         .await;
-        assert_eq!(dry_run.status, "validated");
+        assert_eq!(dry_run.status, "validated", "{dry_run:?}");
         assert!(!dry_run.database_replaced);
         assert!(memory_contents(&target).iter().any(|content| content.contains("target")));
 
@@ -1176,7 +1186,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_upgrades_a_valid_v1_backup_on_the_private_stage() {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the restore migration test validates staged upgrade, replacement, backup preservation, and governed schema state"
+    )]
+    async fn restore_upgrades_a_valid_v2_backup_on_the_private_stage() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source.db");
         let backup_path = directory.path().join("snapshot-v1.db");
@@ -1191,20 +1205,44 @@ mod tests {
         let connection = Connection::open(&backup_path).unwrap();
         connection
             .execute_batch(
-                "DROP TRIGGER trg_memory_clear_superseded_by;
-             ALTER TABLE memories DROP COLUMN record_revision;
-             CREATE TRIGGER trg_memory_clear_superseded_by
-             AFTER DELETE ON memories
-             BEGIN
-                 UPDATE memories SET superseded_by = NULL WHERE superseded_by = OLD.id;
-             END;",
+                "PRAGMA foreign_keys = OFF;
+                 DROP TABLE context_anchor_overrides;
+                 DROP TABLE context_kind_policies;
+                 DROP TABLE memory_contexts;
+                 DROP TABLE context_relations;
+                 DROP TABLE context_grants;
+                 DROP TABLE context_resolver_hints;
+                 DROP TABLE context_identities;
+                 DROP TABLE context_aliases;
+                 DROP TABLE context_audit_events;
+                 DROP TABLE contexts;
+                 DROP TABLE context_kinds;
+                 CREATE TABLE scope_registry (
+                     scope_key    TEXT PRIMARY KEY,
+                     display_name TEXT NOT NULL,
+                     description  TEXT,
+                     aliases      TEXT NOT NULL DEFAULT '[]',
+                     matchers     TEXT NOT NULL DEFAULT '[]',
+                     parent       TEXT,
+                     related      TEXT NOT NULL DEFAULT '[]',
+                     updated_at   TEXT NOT NULL
+                 );
+                 INSERT INTO scope_registry (
+                     scope_key, display_name, description, aliases, matchers,
+                     parent, related, updated_at
+                 ) VALUES (
+                     'scope/test', 'Test scope', 'backup fixture',
+                     '[\"fixture\"]', '[\"/tmp/fixture\"]', NULL, '[]',
+                     '2026-07-14T12:00:00Z'
+                 );
+                 PRAGMA foreign_keys = ON;",
             )
             .unwrap();
         connection.pragma_update(None, "user_version", SQLITE_V1_SCHEMA_VERSION).unwrap();
         drop(connection);
 
         let dry_run = restore(RestoreOptions::new(target.clone(), backup_path.clone(), DIMENSIONS, Some(expected.clone())).dry_run(true)).await;
-        assert_eq!(dry_run.status, "validated");
+        assert_eq!(dry_run.status, "validated", "{dry_run:?}");
         assert_eq!(dry_run.database_schema_version, Some(SQLITE_SCHEMA_VERSION));
         let untouched_backup = Connection::open_with_flags(&backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let backup_version: u32 = untouched_backup.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
@@ -1217,12 +1255,20 @@ mod tests {
         let restored_connection = Connection::open_with_flags(&target, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let restored_version: u32 = restored_connection.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
         assert_eq!(restored_version, SQLITE_SCHEMA_VERSION);
-        let revision_column: bool = restored_connection
-            .query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('memories') WHERE name = 'record_revision')", [], |row| {
+        let contexts_present: bool = restored_connection
+            .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'contexts')", [], |row| {
                 row.get(0)
             })
             .unwrap();
-        assert!(revision_column);
+        assert!(contexts_present);
+        let scope_registry_absent: bool = restored_connection
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scope_registry')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(scope_registry_absent);
         let trigger_sql: String = restored_connection
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_memory_clear_superseded_by'",

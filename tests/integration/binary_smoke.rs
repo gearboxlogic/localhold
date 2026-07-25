@@ -224,7 +224,7 @@ async fn backup_restore_cli_round_trips_and_emits_stable_json() {
     assert_eq!(backup_report["schema_version"], 1_i32);
     assert_eq!(backup_report["operation"], "backup");
     assert_eq!(backup_report["status"], "ok");
-    assert_eq!(backup_report["database_schema_version"], 2_i32);
+    assert_eq!(backup_report["database_schema_version"], 3_i32);
     assert_eq!(backup_report["memories"], 1_i32);
     assert!(backup_path.exists());
     drop(store);
@@ -655,6 +655,17 @@ fn drop_postgres_smoke_schema(url: &str) {
         let _result = query(
             "
             DROP TABLE IF EXISTS
+                context_audit_events,
+                context_anchor_overrides,
+                context_kind_policies,
+                memory_contexts,
+                context_relations,
+                context_grants,
+                context_resolver_hints,
+                context_identities,
+                context_aliases,
+                contexts,
+                context_kinds,
                 memory_audit_log,
                 memory_tombstones,
                 memory_metadata,

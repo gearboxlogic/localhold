@@ -46,8 +46,8 @@ use crate::{
     error::EngineError,
     store::{MemoryStore, RecordUseOutcome},
     types::{
-        AccessLevel, LARGE_CONTENT_WARNING_THRESHOLD_BYTES, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryUpdate, MetadataPatch, QueryContext, RedactableField,
-        ScopeDefinition, WriteOutcome, normalize_context_key,
+        ANONYMOUS_PRINCIPAL, AccessLevel, LARGE_CONTENT_WARNING_THRESHOLD_BYTES, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryUpdate, MetadataPatch, QueryContext,
+        RedactableField, ScopeDefinition, WriteOutcome, normalize_context_key,
     },
     validation::{normalize_non_empty, normalize_optional_non_empty, normalize_optional_string_array, validate_batch_len, validate_optional_non_empty},
 };
@@ -56,7 +56,6 @@ const UNRESOLVED_SCOPE: &str = "inbox/unresolved";
 const REDACTED_SCOPE: &str = "[redacted]";
 const SERVER_PRINCIPAL: &str = "stdio";
 const HTTP_PRINCIPAL: &str = "http";
-const ANONYMOUS_PRINCIPAL: &str = "anonymous";
 const READ_EVENT_WEIGHT: f64 = 1.0;
 
 const ADMIN_TOOLS: &[&str] = &[
@@ -117,6 +116,7 @@ struct PreparedRemember {
     direct_context_ids: Vec<ContextId>,
     duplicate_candidates: Vec<DuplicateCandidateCard>,
     warnings: Vec<QualityWarning>,
+    created_legacy_context: Option<ContextId>,
 }
 
 enum PrepareRememberError {
@@ -150,6 +150,7 @@ struct ResolvedContextSelection {
     resolution: ContextResolution,
     direct_ids: Vec<ContextId>,
     effective_ids: Vec<ContextId>,
+    created_legacy_context: Option<ContextId>,
 }
 
 #[derive(Debug)]
@@ -499,44 +500,58 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
     }
 
     async fn memory_view(&self, memory: Memory, principal: Option<&str>) -> Result<MemoryView, EngineError> {
-        let metadata = self.engine.get_metadata(&memory.id).await?;
-        let memberships = if memory.was_redacted {
-            Vec::new()
-        } else {
-            self.engine.store().get_memory_contexts(&memory.id, principal.unwrap_or(ANONYMOUS_PRINCIPAL)).await?
-        };
-        let contexts = memberships.iter().map(|membership| ContextDescriptor::from(&membership.context)).collect();
-        Ok(MemoryView::new(memory, metadata, contexts))
+        self.memory_views(vec![memory], principal)
+            .await?
+            .pop()
+            .ok_or_else(|| EngineError::Store(crate::error::StoreError::Conflict("memory view batch unexpectedly returned no row".into())))
     }
 
-    async fn recall_card(&self, result: crate::types::SearchResult, reranker_blend_weight: f64, principal: Option<&str>) -> Result<RecallCard, EngineError> {
-        let r#match = match_assessment(&result, reranker_blend_weight);
+    async fn memory_views(&self, memories: Vec<Memory>, principal: Option<&str>) -> Result<Vec<MemoryView>, EngineError> {
+        let memory_ids = memories.iter().map(|memory| memory.id).collect::<Vec<_>>();
+        let (metadata, memberships) = tokio::try_join!(
+            self.engine.store().get_metadata_batch(&memory_ids),
+            self.engine.store().get_memory_contexts_batch(&memory_ids, principal.unwrap_or(ANONYMOUS_PRINCIPAL)),
+        )?;
+        Ok(memories
+            .into_iter()
+            .map(|memory| {
+                let contexts = if memory.was_redacted {
+                    Vec::new()
+                } else {
+                    memberships
+                        .get(&memory.id)
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|membership| ContextDescriptor::from(&membership.context))
+                        .collect()
+                };
+                let memory_metadata = metadata.get(&memory.id).cloned();
+                MemoryView::new(memory, memory_metadata, contexts)
+            })
+            .collect())
+    }
+
+    fn recall_card_from_memory_view(result: &crate::types::SearchResult, view: MemoryView, reranker_blend_weight: f64) -> RecallCard {
+        let r#match = match_assessment(result, reranker_blend_weight);
         let diagnostics = if result.memory.was_redacted {
             MatchDiagnostics::default()
         } else {
-            match_diagnostics(&result, reranker_blend_weight)
+            match_diagnostics(result, reranker_blend_weight)
         };
-        let view = self.memory_view(result.memory, principal).await?;
-        Ok(recall_card_from_view(view, r#match, diagnostics))
+        recall_card_from_view(view, r#match, diagnostics)
     }
 
-    async fn duplicate_card(&self, result: crate::types::SearchResult, reranker_blend_weight: f64, principal: Option<&str>) -> Result<DuplicateCandidateCard, EngineError> {
-        let r#match = match_assessment(&result, reranker_blend_weight);
-        let view = self.memory_view(result.memory, principal).await?;
-        Ok(DuplicateCandidateCard {
+    fn duplicate_card_from_memory_view(result: &crate::types::SearchResult, view: &MemoryView, reranker_blend_weight: f64) -> DuplicateCandidateCard {
+        let r#match = match_assessment(result, reranker_blend_weight);
+        DuplicateCandidateCard {
             id: view.memory.id,
             summary_or_excerpt: view.summary_or_excerpt(),
             r#match,
-        })
+        }
     }
 
-    async fn inventory_card(&self, memory: Memory, now: chrono::DateTime<chrono::Utc>, principal: Option<&str>) -> Result<InventoryCard, EngineError> {
-        let view = self.memory_view(memory, principal).await?;
-        Ok(inventory_card_from_view(view, now))
-    }
-
-    async fn full_read_item(&self, id: MemoryId, mem: Memory, activity_recorded: bool, principal: Option<&str>) -> Result<ReadManyItemResponse, EngineError> {
-        let view = self.memory_view(mem, principal).await?;
+    fn full_read_item_from_memory_view(id: MemoryId, view: MemoryView, activity_recorded: bool) -> ReadManyItemResponse {
         let summary = view.summary();
         let scope = view.scope();
         let agent_label = view.agent_label();
@@ -544,7 +559,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let quality_flags = view.quality_flags();
         let unresolved_scope = view.unresolved_scope();
         let contexts = view.contexts.clone();
-        Ok(ReadManyItemResponse {
+        ReadManyItemResponse {
             id,
             status: ReadManyStatus::Found,
             memory: Some(MemoryEntry::from(view.memory.sanitize_for_wire())),
@@ -556,7 +571,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             quality_flags,
             unresolved_scope,
             activity_recorded,
-        })
+        }
     }
 
     #[expect(clippy::too_many_lines, reason = "scope-resolution diagnostics are clearer when the ordered resolution branches stay together")]
@@ -878,6 +893,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 },
                 direct_ids: Vec::new(),
                 effective_ids: Vec::new(),
+                created_legacy_context: None,
             });
         }
 
@@ -1062,6 +1078,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     },
                     direct_ids,
                     effective_ids: Vec::new(),
+                    created_legacy_context: None,
                 });
             }
             let policies = policy_state
@@ -1141,6 +1158,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     },
                     direct_ids,
                     effective_ids: Vec::new(),
+                    created_legacy_context: None,
                 });
             }
             if direct_ids.is_empty() {
@@ -1165,6 +1183,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     },
                     direct_ids,
                     effective_ids: Vec::new(),
+                    created_legacy_context: None,
                 });
             }
         }
@@ -1274,6 +1293,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             },
             direct_ids,
             effective_ids,
+            created_legacy_context: None,
         })
     }
 
@@ -1327,6 +1347,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     true,
                 )
             })?;
+        let mut created_legacy_context = None;
         let id = match matches.as_slice() {
             [record] => record.context.id,
             [_, _, ..] => {
@@ -1372,34 +1393,17 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                         false,
                     ));
                 }
-                let records = self.authorized_context_records(principal).await.map_err(|error| {
-                    tool_error(
-                        ToolErrorCode::Internal,
-                        Some("scope"),
-                        error.to_string(),
-                        Some("Retry after checking backend health."),
-                        true,
-                    )
-                })?;
-                let kind = ContextKind::from_legacy_scope(&scope_resolution.scope);
                 let id = ContextId::new();
                 let draft = ContextCreateDraft {
                     id,
-                    kind,
+                    kind: ContextKind::custom(),
                     key: scope_resolution.scope.clone(),
                     normalized_key: normalized.clone(),
                     display_name: legacy_scope_display_name(&scope_resolution.scope),
                     description: Some("Private compatibility context created from a legacy scope input.".to_owned()),
                     owner_principal: principal.to_owned(),
                     guidance: Some("Migrate callers from scope to the shared context envelope.".to_owned()),
-                    parent_id: records
-                        .iter()
-                        .filter(|record| {
-                            let candidate = normalize_context_key(&record.context.key);
-                            normalized.starts_with(&format!("{candidate}/"))
-                        })
-                        .max_by_key(|record| record.context.key.len())
-                        .map(|record| record.context.id),
+                    parent_id: None,
                     aliases: Vec::new(),
                     identities: Vec::new(),
                     resolver_hints: Vec::new(),
@@ -1415,7 +1419,10 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     details: Some(serde_json::json!({ "scope_key": scope_resolution.scope })),
                 };
                 match self.engine.store().create_context(&draft, &audit).await {
-                    Ok(_created) => id,
+                    Ok(_created) => {
+                        created_legacy_context = Some(id);
+                        id
+                    }
                     Err(error) => {
                         let exact = self
                             .engine
@@ -1460,11 +1467,106 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             }],
             ..ContextEnvelope::default()
         };
-        self.resolve_context_selection(principal, Some(&envelope), None, governed_write).await
+        let mut selection = match self.resolve_context_selection(principal, Some(&envelope), None, governed_write).await {
+            Ok(selection) => selection,
+            Err(error) => {
+                if let Err(cleanup_error) = self.rollback_created_legacy_context(created_legacy_context, principal).await {
+                    return Err(tool_error(
+                        ToolErrorCode::Internal,
+                        Some("scope"),
+                        cleanup_error.to_string(),
+                        Some("Retry after checking backend health; the compatibility context may require operator cleanup."),
+                        true,
+                    ));
+                }
+                return Err(error);
+            }
+        };
+        selection.created_legacy_context = created_legacy_context;
+        Ok(selection)
     }
 
-    #[expect(clippy::excessive_nesting, reason = "admin filter adaptation expands each legacy scope through governed resolution")]
-    async fn common_filter_from_admin(&self, fields: AdminFilterFields, principal: Option<&str>) -> Result<params::CommonFilterFields, EngineError> {
+    async fn resolve_admin_context_id(&self, principal: &str, context_id: ContextId, ineligible_message: &'static str) -> Result<ResolvedContextSelection, EngineError> {
+        let envelope = ContextEnvelope {
+            refs: vec![ContextReference {
+                id: Some(context_id),
+                ..ContextReference::default()
+            }],
+            ..ContextEnvelope::default()
+        };
+        self.resolve_context_selection(principal, Some(&envelope), None, false)
+            .await
+            .map_err(|_error| crate::error::ValidationError::new("scope", ineligible_message).into())
+    }
+
+    async fn resolve_direct_admin_legacy_context(&self, principal: &str, value: String) -> Result<ResolvedContextSelection, EngineError> {
+        let exact_matches = self
+            .engine
+            .store()
+            .find_context_records(principal, false, &ContextExactLookup::Key {
+                kind: None,
+                normalized_key: normalize_context_key(&value),
+            })
+            .await?;
+        match exact_matches.as_slice() {
+            [exact] => {
+                self.resolve_admin_context_id(principal, exact.context.id, "legacy scope has no unique governed context")
+                    .await
+            }
+            [] => {
+                let resolution = self.resolve_scope(principal, Some(value), &[]).await?;
+                self.resolve_legacy_context_selection(principal, &resolution, false)
+                    .await
+                    .map_err(|_error| crate::error::ValidationError::new("scope", "legacy scope has no unique governed context").into())
+            }
+            _ => Err(crate::error::ValidationError::new("scope", "legacy scope resolves to multiple governed contexts").into()),
+        }
+    }
+
+    async fn resolve_generated_admin_ancestor(&self, principal: &str, value: &str) -> Result<Option<ResolvedContextSelection>, EngineError> {
+        let generated_matches = self
+            .engine
+            .store()
+            .find_context_records(principal, false, &ContextExactLookup::Key {
+                kind: None,
+                normalized_key: normalize_context_key(value),
+            })
+            .await?;
+        match generated_matches.as_slice() {
+            [generated] => self
+                .resolve_admin_context_id(principal, generated.context.id, "generated ancestor is not an eligible governed context")
+                .await
+                .map(Some),
+            [] => Ok(None),
+            _ => Err(crate::error::ValidationError::new("scope", "generated ancestor resolves to multiple governed contexts").into()),
+        }
+    }
+
+    async fn resolve_admin_legacy_context_ids(&self, principal: &str, mut values: Vec<String>, expand_legacy_scopes: bool) -> Result<Vec<ContextId>, EngineError> {
+        let directly_requested = values.iter().map(|value| normalize_context_key(value)).collect::<HashSet<_>>();
+        if expand_legacy_scopes {
+            values = expand_scope_keys(&values)?;
+        }
+        let mut ids = Vec::new();
+        let mut seen_ids = HashSet::new();
+        for value in values {
+            let selection = if directly_requested.contains(&normalize_context_key(&value)) {
+                Some(self.resolve_direct_admin_legacy_context(principal, value).await?)
+            } else {
+                self.resolve_generated_admin_ancestor(principal, &value).await?
+            };
+            let Some(selection) = selection else {
+                continue;
+            };
+            ids.extend(selection.effective_ids.into_iter().filter(|id| seen_ids.insert(*id)));
+        }
+        if ids.is_empty() {
+            return Err(crate::error::ValidationError::new("scope", "legacy scope filter resolved to no governed contexts").into());
+        }
+        Ok(ids)
+    }
+
+    async fn common_filter_from_admin(&self, fields: AdminFilterFields, principal: Option<&str>, expand_legacy_scopes: bool) -> Result<params::CommonFilterFields, EngineError> {
         reject_removed_admin_field(fields.deprecated_source_agent.is_some(), "source_agent", "agent_label")?;
         reject_removed_admin_field(fields.deprecated_source_conversation.is_some(), "source_conversation", "scope")?;
         reject_removed_admin_field(fields.deprecated_origin_conversation.is_some(), "origin_conversation", "origin_scope")?;
@@ -1484,20 +1586,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         } else if normalized_scope.is_some() || !normalized_scopes.is_empty() {
             let mut values = normalized_scope.into_iter().collect::<Vec<_>>();
             values.extend(normalized_scopes);
-            let mut ids = Vec::new();
-            for value in values {
-                let resolution = self.resolve_scope(resolution_principal, Some(value), &[]).await?;
-                let selection = self
-                    .resolve_legacy_context_selection(resolution_principal, &resolution, false)
-                    .await
-                    .map_err(|_error| crate::error::ValidationError::new("scope", "legacy scope has no unique governed context"))?;
-                for id in selection.effective_ids {
-                    if !ids.contains(&id) {
-                        ids.push(id);
-                    }
-                }
-            }
-            ids
+            self.resolve_admin_legacy_context_ids(resolution_principal, values, expand_legacy_scopes).await?
         } else {
             Vec::new()
         };
@@ -1537,11 +1626,11 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 context: None,
             })
             .await?;
+        let views = self.memory_views(outcome.results.iter().map(|result| result.memory.clone()).collect(), principal).await?;
         let mut cards = Vec::with_capacity(outcome.results.len());
         let reranker_blend_weight = self.engine.search_config().reranker.blend_weight;
-        for result in outcome.results {
-            let card = self.duplicate_card(result, reranker_blend_weight, principal).await?;
-            cards.push(card);
+        for (result, view) in outcome.results.iter().zip(views) {
+            cards.push(Self::duplicate_card_from_memory_view(result, &view, reranker_blend_weight));
         }
         Ok(cards)
     }
@@ -1674,7 +1763,23 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             direct_context_ids: context_selection.direct_ids,
             duplicate_candidates,
             warnings,
+            created_legacy_context: context_selection.created_legacy_context,
         })
+    }
+
+    async fn rollback_created_legacy_contexts(&self, context_ids: &mut Vec<ContextId>, principal: &str) -> Result<(), EngineError> {
+        let mut seen = HashSet::new();
+        while let Some(context_id) = context_ids.pop() {
+            if seen.insert(context_id) {
+                let _removed = self.engine.store().rollback_unreferenced_legacy_context(&context_id, principal).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn rollback_created_legacy_context(&self, context_id: Option<ContextId>, principal: &str) -> Result<(), EngineError> {
+        let mut context_ids = context_id.into_iter().collect::<Vec<_>>();
+        self.rollback_created_legacy_contexts(&mut context_ids, principal).await
     }
 
     #[expect(clippy::result_large_err, reason = "prevalidation preserves the shared structured tool error without losing retry details")]
@@ -2248,14 +2353,35 @@ fn expand_scope_hierarchy(scope: &str) -> Vec<String> {
     result
 }
 
+const MAX_LEGACY_SCOPE_DEPTH: usize = 32;
+const MAX_EXPANDED_LEGACY_SCOPES: usize = 256;
+
 /// Expand all scope keys in a list to include their ancestor scopes, deduplicating.
-fn expand_scope_keys(scope_keys: &[String]) -> Vec<String> {
+fn expand_scope_keys(scope_keys: &[String]) -> Result<Vec<String>, crate::error::ValidationError> {
     let mut seen = HashSet::new();
-    scope_keys
-        .iter()
-        .flat_map(|key| expand_scope_hierarchy(key))
-        .filter(|ancestor| seen.insert(ancestor.clone()))
-        .collect()
+    let mut expanded = Vec::new();
+    for key in scope_keys {
+        let depth = key.split('/').count();
+        if depth > MAX_LEGACY_SCOPE_DEPTH {
+            return Err(crate::error::ValidationError::new(
+                "scope",
+                format!("legacy scope hierarchy depth must be at most {MAX_LEGACY_SCOPE_DEPTH}"),
+            ));
+        }
+        for ancestor in expand_scope_hierarchy(key) {
+            if !seen.insert(ancestor.clone()) {
+                continue;
+            }
+            if expanded.len() >= MAX_EXPANDED_LEGACY_SCOPES {
+                return Err(crate::error::ValidationError::new(
+                    "scope",
+                    format!("expanded legacy scope selection must contain at most {MAX_EXPANDED_LEGACY_SCOPES} unique values"),
+                ));
+            }
+            expanded.push(ancestor);
+        }
+    }
+    Ok(expanded)
 }
 
 /// Optionally expand scope hierarchy on a filter's `scopes_any`.
@@ -2263,13 +2389,14 @@ fn expand_scope_keys(scope_keys: &[String]) -> Vec<String> {
 /// When `expand` is `true`, each scope key is expanded to include all ancestor
 /// scopes (e.g. `"a/b/c"` also matches `"a/b"` and `"a"`). The filter is
 /// mutated in place only when expansion actually adds new keys.
-fn maybe_expand_scope_hierarchy(filter: &mut MemoryFilter, expand: bool) {
+fn maybe_expand_scope_hierarchy(filter: &mut MemoryFilter, expand: bool) -> Result<(), crate::error::ValidationError> {
     if expand && let Some(scope_keys) = &filter.scopes_any {
-        let expanded = expand_scope_keys(scope_keys);
+        let expanded = expand_scope_keys(scope_keys)?;
         if expanded.len() != scope_keys.len() {
             filter.scopes_any = Some(expanded);
         }
     }
+    Ok(())
 }
 
 /// Validated filter and context extracted from internal admin filter fields.
@@ -2397,7 +2524,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let principal = request_principal.as_deref().unwrap_or(ANONYMOUS_PRINCIPAL);
         let query = params.query.as_deref().map(str::trim).filter(|query| !query.is_empty());
         if query.is_none() && params.context.refs.is_empty() && params.context.hints.is_empty() {
-            let limit = params.limit.unwrap_or(20).min(500);
+            let limit = params.limit.unwrap_or(20).clamp(1, 500);
             let records = self
                 .engine
                 .store()
@@ -2818,7 +2945,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let Some(principal) = self.write_principal_for(request_principal.as_deref()) else {
             return Ok(Self::anonymous_write_denied());
         };
-        let prepared = match self.prepare_remember(params, principal, self.engine.now()).await {
+        let prepared = match self.prepare_remember(params, principal.clone(), self.engine.now()).await {
             Ok(prepared) => prepared,
             Err(error) => return error.into_tool_result(None),
         };
@@ -2831,13 +2958,23 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             direct_context_ids,
             duplicate_candidates,
             warnings,
+            created_legacy_context,
         } = prepared;
         let scope = scope_resolution.scope.clone();
         let unresolved_scope = scope_resolution.unresolved_scope;
-        let id = self
+        let id = match self
             .engine
             .store_memory_with_metadata_contexts(memory, supersedes.as_ref(), &metadata, &direct_context_ids)
-            .await?;
+            .await
+        {
+            Ok(id) => id,
+            Err(error) => {
+                if let Some(context_id) = created_legacy_context {
+                    self.rollback_created_legacy_contexts(&mut vec![context_id], &principal).await?;
+                }
+                return Err(error.into());
+            }
+        };
         let next_action = next_action_for_warnings(&warnings);
         success_json(&RememberResponse {
             operation: operation_summary(OperationStatus::Applied, 1, warnings.clone(), next_action),
@@ -2883,11 +3020,15 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let mut direct_context_ids = Vec::with_capacity(item_count);
         let mut item_responses = Vec::with_capacity(item_count);
         let mut all_warnings = Vec::new();
+        let mut created_legacy_contexts = Vec::new();
 
         for (index, params) in params.into_iter().enumerate() {
             let prepared = match self.prepare_remember(params, principal.clone(), now).await {
                 Ok(prepared) => prepared,
-                Err(error) => return error.into_tool_result(Some(index)),
+                Err(error) => {
+                    self.rollback_created_legacy_contexts(&mut created_legacy_contexts, &principal).await?;
+                    return error.into_tool_result(Some(index));
+                }
             };
             let PreparedRemember {
                 memory,
@@ -2898,7 +3039,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 direct_context_ids: direct_ids,
                 duplicate_candidates,
                 warnings,
+                created_legacy_context,
             } = prepared;
+            created_legacy_contexts.extend(created_legacy_context);
             let scope = scope_resolution.scope.clone();
             let unresolved_scope = scope_resolution.unresolved_scope;
             memories.push(memory);
@@ -2918,10 +3061,17 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             });
         }
 
-        let ids = self
+        let ids = match self
             .engine
             .batch_store_with_metadata_contexts(memories, supersedes_list, metadata, direct_context_ids)
-            .await?;
+            .await
+        {
+            Ok(ids) => ids,
+            Err(error) => {
+                self.rollback_created_legacy_contexts(&mut created_legacy_contexts, &principal).await?;
+                return Err(error.into());
+            }
+        };
         for (id, response) in ids.iter().copied().zip(item_responses.iter_mut()) {
             response.id = id;
         }
@@ -3015,8 +3165,11 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let mut weak_result_count = 0_usize;
         let mut results = Vec::new();
         let reranker_blend_weight = self.engine.search_config().reranker.blend_weight;
-        for result in outcome.results {
-            let card = self.recall_card(result, reranker_blend_weight, request_principal.as_deref()).await?;
+        let views = self
+            .memory_views(outcome.results.iter().map(|result| result.memory.clone()).collect(), request_principal.as_deref())
+            .await?;
+        for (result, view) in outcome.results.iter().zip(views) {
+            let card = Self::recall_card_from_memory_view(result, view, reranker_blend_weight);
             if card.r#match.quality == MatchQuality::Weak && !params.include_weak {
                 weak_result_count = weak_result_count.saturating_add(1);
             } else {
@@ -3034,7 +3187,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         })
     }
 
-    #[tool(description = "Read one full memory by id. Trusted principals record a meaningful read activity event; anonymous public reads do not.")]
+    #[tool(
+        description = "Read one full memory by id. Trusted principals record a meaningful read activity event only for full-access reads; redacted and anonymous public reads do not."
+    )]
     async fn read(&self, context: RequestContext<RoleServer>, Parameters(params): Parameters<ReadParams>) -> Result<CallToolResult, rmcp::ErrorData> {
         let request_principal = self.principal_for_context(&context);
         if !self.read_allowed_for(request_principal.as_deref()) {
@@ -3056,7 +3211,8 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         } else {
             RecordUseOutcome::default()
         };
-        let item = self.full_read_item(id, mem, use_outcome.recorded > 0, request_principal.as_deref()).await?;
+        let view = self.memory_view(mem, request_principal.as_deref()).await?;
+        let item = Self::full_read_item_from_memory_view(id, view, use_outcome.recorded > 0);
         let Some(memory) = item.memory else {
             return Err(rmcp::ErrorData::internal_error("found read item omitted memory".to_owned(), None));
         };
@@ -3075,7 +3231,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
     }
 
     #[tool(
-        description = "Read multiple full memories by id. Preserves input order, returns per-item not_found for missing/unreadable IDs, caps at max_batch_size, and records one read activity event for found IDs only for trusted principals."
+        description = "Read multiple full memories by id. Preserves input order, returns per-item not_found for missing/unreadable IDs, caps at max_batch_size, and records one read activity event only for full-access items read by trusted principals."
     )]
     async fn read_many(&self, context: RequestContext<RoleServer>, Parameters(params): Parameters<ReadManyParams>) -> Result<CallToolResult, rmcp::ErrorData> {
         let request_principal = self.principal_for_context(&context);
@@ -3091,10 +3247,12 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             return Ok(error);
         }
 
+        let requested_ids = params.ids;
+        let found_by_id = self.engine.get_memories(&requested_ids, request_principal.as_deref()).await?;
         let mut found = Vec::new();
-        let mut items = Vec::with_capacity(params.ids.len());
-        for (index, id) in params.ids.into_iter().enumerate() {
-            match self.engine.get_memory(&id, request_principal.as_deref()).await? {
+        let mut items = Vec::with_capacity(requested_ids.len());
+        for (index, id) in requested_ids.into_iter().enumerate() {
+            match found_by_id.get(&id).cloned() {
                 Some(mem) => {
                     found.push((index, id, mem));
                 }
@@ -3115,18 +3273,23 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         }
 
         let found_ids = found.iter().map(|(_index, id, _mem)| *id).collect::<Vec<_>>();
-        let activity_recorded = if let Some(principal) = request_principal.as_deref() {
+        let activity_recorded_ids = if let Some(principal) = request_principal.as_deref() {
             self.engine
                 .record_memory_use(found_ids.clone(), principal, READ_EVENT_WEIGHT)
                 .await
                 .unwrap_or_default()
-                .recorded
-                > 0
+                .recorded_ids
+                .into_iter()
+                .collect::<HashSet<_>>()
         } else {
-            false
+            HashSet::new()
         };
-        for (index, id, mem) in found {
-            items.push((index, self.full_read_item(id, mem, activity_recorded, request_principal.as_deref()).await?));
+        let views = self
+            .memory_views(found.iter().map(|(_index, _id, memory)| memory.clone()).collect(), request_principal.as_deref())
+            .await?;
+        for ((index, id, _memory), view) in found.into_iter().zip(views) {
+            let activity_recorded = activity_recorded_ids.contains(&id);
+            items.push((index, Self::full_read_item_from_memory_view(id, view, activity_recorded)));
         }
         items.sort_by_key(|(index, _item)| *index);
         let results = items.into_iter().map(|(_index, item)| item).collect();
@@ -3148,6 +3311,8 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let summary = trim_optional_text(params.summary);
         let agent_label = trim_optional_text(params.agent_label);
         let context_hints = normalize_legacy_context_hints(params.context_hints).map_err(EngineError::from)?;
+        let tags = normalize_optional_string_array("tags", params.tags).map_err(EngineError::from)?;
+        let entities = normalize_optional_entity_inputs(params.entities).map_err(EngineError::from)?;
         if params.context.is_some() && (params.scope.is_some() || !context_hints.is_empty()) {
             return Ok(tool_error(
                 ToolErrorCode::InvalidParams,
@@ -3160,6 +3325,8 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let mut scope_resolution = None;
         let mut context_resolution = None;
         let mut replacement_context_ids = None;
+        let mut created_legacy_context = None;
+        let mut legacy_expected_revision = None;
         let mut operation_warnings = Vec::new();
         let scope_update = if let Some(envelope) = params.context.as_ref() {
             let selection = match self.resolve_context_selection(&principal, Some(envelope), None, true).await {
@@ -3180,7 +3347,16 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 Ok(selection) => selection,
                 Err(error) => return Ok(error),
             };
-            let Some(memory) = self.engine.get_memory(&id, Some(&principal)).await? else {
+            created_legacy_context = selection.created_legacy_context;
+            let memory = match self.engine.get_memory(&id, Some(&principal)).await {
+                Ok(memory) => memory,
+                Err(error) => {
+                    self.rollback_created_legacy_context(created_legacy_context, &principal).await?;
+                    return Err(error.into());
+                }
+            };
+            let Some(memory) = memory else {
+                self.rollback_created_legacy_context(created_legacy_context, &principal).await?;
                 return Ok(tool_error(
                     ToolErrorCode::NotFound,
                     Some("id"),
@@ -3189,9 +3365,45 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     false,
                 ));
             };
-            drop(memory);
-            let existing = self.engine.store().get_memory_contexts(&id, &principal).await.map_err(EngineError::from)?;
-            let selected_id = selection.direct_ids[0];
+            let Some(expected_revision) = memory.optimistic_revision() else {
+                self.rollback_created_legacy_context(created_legacy_context, &principal).await?;
+                return Err(EngineError::from(crate::error::StoreError::Conflict(format!("memory {id} has no optimistic revision"))).into());
+            };
+            legacy_expected_revision = Some(expected_revision);
+            let existing = match self.engine.store().get_memory_contexts(&id, &principal).await {
+                Ok(existing) => existing,
+                Err(error) => {
+                    self.rollback_created_legacy_context(created_legacy_context, &principal).await?;
+                    return Err(EngineError::from(error).into());
+                }
+            };
+            let stored_membership_count = match self.engine.store().count_memory_contexts_for_write(&id, &principal).await {
+                Ok(count) => count,
+                Err(error) => {
+                    self.rollback_created_legacy_context(created_legacy_context, &principal).await?;
+                    return Err(EngineError::from(error).into());
+                }
+            };
+            if stored_membership_count != Some(existing.len()) {
+                self.rollback_created_legacy_context(created_legacy_context, &principal).await?;
+                return Ok(tool_error(
+                    ToolErrorCode::Conflict,
+                    Some("scope"),
+                    "legacy scope cannot safely preserve every existing context membership",
+                    Some("Restore visibility to every attached context, or use an explicit context envelope after confirming the complete replacement set."),
+                    false,
+                ));
+            }
+            let Some(selected_id) = selection.direct_ids.first().copied() else {
+                self.rollback_created_legacy_context(created_legacy_context, &principal).await?;
+                return Ok(tool_error(
+                    ToolErrorCode::ContextRequired,
+                    Some("scope"),
+                    "legacy scope did not resolve to a direct context",
+                    Some("Use context_resolve, then retry revise with an explicit context reference."),
+                    false,
+                ));
+            };
             let mut contexts = vec![selected_id];
             contexts.extend(existing.into_iter().map(|membership| membership.context.id).filter(|context_id| *context_id != selected_id));
             replacement_context_ids = Some(contexts);
@@ -3206,7 +3418,6 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         } else {
             None
         };
-        let tags = normalize_optional_string_array("tags", params.tags).map_err(EngineError::from)?;
         let metadata_patch = MetadataPatch {
             scope_key: scope_update.clone(),
             summary,
@@ -3223,12 +3434,27 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             expires_at: None,
             confidence: params.confidence.map(crate::types::Confidence::new),
             source_conversation: scope_update.clone(),
-            entities: normalize_optional_entity_inputs(params.entities).map_err(EngineError::from)?,
+            entities,
         };
-        let update_outcome = self
-            .engine
-            .update_memory_with_metadata_contexts(id, update, metadata_patch, replacement_context_ids, &principal)
-            .await?;
+        let update_result = if let Some(expected_revision) = legacy_expected_revision {
+            self.engine
+                .update_memory_if_unmodified_with_metadata_contexts(id, expected_revision, update, metadata_patch, replacement_context_ids, &principal)
+                .await
+        } else {
+            self.engine
+                .update_memory_with_metadata_contexts(id, update, metadata_patch, replacement_context_ids, &principal)
+                .await
+        };
+        let update_outcome = match update_result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.rollback_created_legacy_context(created_legacy_context, &principal).await?;
+                return Err(error.into());
+            }
+        };
+        if update_outcome.outcome != WriteOutcome::Applied {
+            self.rollback_created_legacy_context(created_legacy_context, &principal).await?;
+        }
         match update_outcome.outcome {
             WriteOutcome::NotFound => Ok(tool_error(
                 ToolErrorCode::NotFound,
@@ -3378,8 +3604,11 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let mut lessons = Vec::new();
         let mut stale_candidates = Vec::new();
         let reranker_blend_weight = self.engine.search_config().reranker.blend_weight;
-        for result in outcome.results {
-            let card = self.recall_card(result, reranker_blend_weight, request_principal.as_deref()).await?;
+        let views = self
+            .memory_views(outcome.results.iter().map(|result| result.memory.clone()).collect(), request_principal.as_deref())
+            .await?;
+        for (result, view) in outcome.results.iter().zip(views) {
+            let card = Self::recall_card_from_memory_view(result, view, reranker_blend_weight);
             if card.r#match.quality == MatchQuality::Weak {
                 stale_candidates.push(card);
                 continue;
@@ -3450,6 +3679,8 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let mut prepared = Vec::with_capacity(params.candidates.len());
         let mut all_warnings = Vec::new();
         let mut committed_count = 0_u64;
+        let cleanup_principal = write_principal.as_deref().or(request_principal.as_deref()).unwrap_or(ANONYMOUS_PRINCIPAL);
+        let mut created_legacy_contexts = Vec::new();
         for candidate in params.candidates.into_iter().map(HandoffCandidate::from) {
             let HandoffCandidate {
                 content,
@@ -3462,8 +3693,15 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 memory_type,
             } = candidate;
             let metadata_summary = trim_optional_text(summary.clone());
-            let context_hints = normalize_legacy_context_hints(context_hints).map_err(EngineError::from)?;
+            let context_hints = match normalize_legacy_context_hints(context_hints) {
+                Ok(hints) => hints,
+                Err(error) => {
+                    self.rollback_created_legacy_contexts(&mut created_legacy_contexts, cleanup_principal).await?;
+                    return Err(EngineError::from(error).into());
+                }
+            };
             if context_envelope.is_some() && (scope.is_some() || !context_hints.is_empty()) {
+                self.rollback_created_legacy_contexts(&mut created_legacy_contexts, cleanup_principal).await?;
                 return Ok(tool_error(
                     ToolErrorCode::InvalidParams,
                     Some("context"),
@@ -3490,9 +3728,22 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     entities,
                 };
                 let now = self.engine.now();
-                let input = StoreMemoryInput::try_from(memory_input).map_err(EngineError::from)?;
+                let input = match StoreMemoryInput::try_from(memory_input) {
+                    Ok(input) => input,
+                    Err(error) => {
+                        self.rollback_created_legacy_contexts(&mut created_legacy_contexts, cleanup_principal).await?;
+                        return Err(EngineError::from(error).into());
+                    }
+                };
                 let supersedes = input.supersedes;
-                Some((self.engine.build_memory(input, now)?, supersedes))
+                let memory = match self.engine.build_memory(input, now) {
+                    Ok(memory) => memory,
+                    Err(error) => {
+                        self.rollback_created_legacy_contexts(&mut created_legacy_contexts, cleanup_principal).await?;
+                        return Err(error.into());
+                    }
+                };
+                Some((memory, supersedes))
             } else {
                 None
             };
@@ -3500,7 +3751,10 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             let (context_selection, scope_resolution, used_legacy_adapter) = if let Some(envelope) = context_envelope.as_ref() {
                 let selection = match self.resolve_context_selection(resolution_principal, Some(envelope), None, commit).await {
                     Ok(selection) => selection,
-                    Err(error) => return Ok(error),
+                    Err(error) => {
+                        self.rollback_created_legacy_contexts(&mut created_legacy_contexts, cleanup_principal).await?;
+                        return Ok(error);
+                    }
                 };
                 let resolved_scope = selection
                     .resolution
@@ -3519,16 +3773,28 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     false,
                 )
             } else if scope.is_some() || !context_hints.is_empty() {
-                let scope_resolution = self.resolve_scope(resolution_principal, scope.clone(), &context_hints).await?;
+                let scope_resolution = match self.resolve_scope(resolution_principal, scope.clone(), &context_hints).await {
+                    Ok(resolution) => resolution,
+                    Err(error) => {
+                        self.rollback_created_legacy_contexts(&mut created_legacy_contexts, cleanup_principal).await?;
+                        return Err(error.into());
+                    }
+                };
                 let selection = match self.resolve_legacy_context_selection(resolution_principal, &scope_resolution, commit).await {
                     Ok(selection) => selection,
-                    Err(error) => return Ok(error),
+                    Err(error) => {
+                        self.rollback_created_legacy_contexts(&mut created_legacy_contexts, cleanup_principal).await?;
+                        return Ok(error);
+                    }
                 };
                 (selection, scope_resolution, true)
             } else {
                 let selection = match self.resolve_context_selection(resolution_principal, None, None, commit).await {
                     Ok(selection) => selection,
-                    Err(error) => return Ok(error),
+                    Err(error) => {
+                        self.rollback_created_legacy_contexts(&mut created_legacy_contexts, cleanup_principal).await?;
+                        return Ok(error);
+                    }
                 };
                 let scope = selection
                     .resolution
@@ -3548,6 +3814,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     false,
                 )
             };
+            created_legacy_contexts.extend(context_selection.created_legacy_context);
             let resolved_scope = scope_resolution.scope.clone();
             let unresolved_scope = scope_resolution.unresolved_scope;
             if let Some((memory, _supersedes)) = commit_payload.as_mut() {
@@ -3623,7 +3890,13 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 }
             }
 
-            let ids = self.engine.batch_store_with_metadata_contexts(memories, supersedes, metadata, context_ids).await?;
+            let ids = match self.engine.batch_store_with_metadata_contexts(memories, supersedes, metadata, context_ids).await {
+                Ok(ids) => ids,
+                Err(error) => {
+                    self.rollback_created_legacy_contexts(&mut created_legacy_contexts, cleanup_principal).await?;
+                    return Err(error.into());
+                }
+            };
             if ids.len() != suggestion_indexes.len() {
                 return Err(rmcp::ErrorData::internal_error("handoff batch store returned an unexpected ID count".to_owned(), None));
             }
@@ -3713,19 +3986,20 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         if !self.read_allowed_for(request_principal.as_deref()) {
             return Ok(Self::anonymous_read_denied());
         }
-        let common = self.common_filter_from_admin(params.filter, request_principal.as_deref()).await?;
+        let expand_scopes = params.expand_scopes.unwrap_or(true);
+        let common = self.common_filter_from_admin(params.filter, request_principal.as_deref(), expand_scopes).await?;
         let (mut filter, ctx) = validate_and_normalize_filter(&common)?;
         filter.text_search = normalize_text_search(params.text_search)?;
         filter.has_embedding = params.has_embedding;
         filter.limit = params.limit;
-        maybe_expand_scope_hierarchy(&mut filter, params.expand_scopes.unwrap_or(true));
+        maybe_expand_scope_hierarchy(&mut filter, expand_scopes).map_err(EngineError::from)?;
 
         let now = self.engine.now();
         let memories = self.engine.list_memories(filter, ctx).await?;
-        let mut cards = Vec::with_capacity(memories.len());
-        for memory in memories {
-            let card = self.inventory_card(memory, now, request_principal.as_deref()).await?;
-            cards.push(card);
+        let views = self.memory_views(memories, request_principal.as_deref()).await?;
+        let mut cards = Vec::with_capacity(views.len());
+        for view in views {
+            cards.push(inventory_card_from_view(view, now));
         }
         success_json(&AdminListResponse {
             count: cards.len(),
@@ -3834,9 +4108,10 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         if !self.read_allowed_for(request_principal.as_deref()) {
             return Ok(Self::anonymous_read_denied());
         }
-        let common = self.common_filter_from_admin(params.filter, request_principal.as_deref()).await?;
+        let expand_scopes = params.expand_scopes.unwrap_or(true);
+        let common = self.common_filter_from_admin(params.filter, request_principal.as_deref(), expand_scopes).await?;
         let (mut filter, ctx) = validate_and_normalize_filter(&common)?;
-        maybe_expand_scope_hierarchy(&mut filter, params.expand_scopes.unwrap_or(true));
+        maybe_expand_scope_hierarchy(&mut filter, expand_scopes).map_err(EngineError::from)?;
         let stats = self.engine.count_memories(filter, ctx, params.top_tags_limit).await?;
 
         let response = CountResponse {
@@ -3869,11 +4144,12 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let Some(principal) = self.write_principal_for(request_principal.as_deref()) else {
             return Ok(Self::anonymous_write_denied());
         };
-        let common = self.common_filter_from_admin(params.filter, Some(&principal)).await?;
+        let expand_scopes = params.expand_scopes.unwrap_or(true);
+        let common = self.common_filter_from_admin(params.filter, Some(&principal), expand_scopes).await?;
         let (mut filter, mut ctx) = validate_and_normalize_filter(&common)?;
         ctx.principal = Some(principal.clone());
         filter.text_search = normalize_text_search(params.text_search)?;
-        maybe_expand_scope_hierarchy(&mut filter, params.expand_scopes.unwrap_or(true));
+        maybe_expand_scope_hierarchy(&mut filter, expand_scopes).map_err(EngineError::from)?;
 
         let result = self.engine.bulk_delete(&principal, filter, ctx).await?;
         let mut operation = operation_summary(OperationStatus::Applied, result.deleted, Vec::new(), NextAction::None);
@@ -3895,11 +4171,12 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         let Some(principal) = self.write_principal_for(request_principal.as_deref()) else {
             return Ok(Self::anonymous_write_denied());
         };
-        let common = self.common_filter_from_admin(params.filter, Some(&principal)).await?;
+        let expand_scopes = params.expand_scopes.unwrap_or(true);
+        let common = self.common_filter_from_admin(params.filter, Some(&principal), expand_scopes).await?;
         let (mut filter, mut ctx) = validate_and_normalize_filter(&common)?;
         ctx.principal = Some(principal.clone());
         filter.text_search = normalize_text_search(params.text_search)?;
-        maybe_expand_scope_hierarchy(&mut filter, params.expand_scopes.unwrap_or(true));
+        maybe_expand_scope_hierarchy(&mut filter, expand_scopes).map_err(EngineError::from)?;
 
         let set_tags = normalize_optional_string_array("set_tags", params.set_tags).map_err(EngineError::from)?;
         let fields = BulkUpdateFields {
@@ -3922,7 +4199,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         })
     }
 
-    #[tool(description = "Write/admin: find near-duplicate memories using the server-resolved principal. dry_run=true previews; dry_run=false merges by superseding duplicates.")]
+    #[tool(
+        description = "Write/admin: find near-duplicate memories using the server-resolved principal. dry_run=true previews; dry_run=false merges by superseding duplicates. Reports when the configured candidate work limit makes the run partial."
+    )]
     async fn admin_consolidate(&self, context: RequestContext<RoleServer>, Parameters(params): Parameters<AdminConsolidateParams>) -> Result<CallToolResult, rmcp::ErrorData> {
         let request_principal = self.principal_for_context(&context);
         let Some(principal) = self.write_principal_for(request_principal.as_deref()) else {
@@ -3967,16 +4246,18 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
 
         let result = self
             .engine
-            .consolidate_memories(&principal, Some(&context_ids), params.similarity_threshold, params.limit, params.dry_run)
+            .consolidate_memories(&principal, Some(context_ids.as_slice()), params.similarity_threshold, params.limit, params.dry_run)
             .await?;
 
+        let mut operation = operation_summary(
+            if params.dry_run { OperationStatus::Preview } else { OperationStatus::Applied },
+            u64::from(!params.dry_run && result.merged),
+            Vec::new(),
+            if params.dry_run { NextAction::Continue } else { NextAction::None },
+        );
+        operation.capped = result.capped;
         let response = ConsolidateResponse {
-            operation: operation_summary(
-                if params.dry_run { OperationStatus::Preview } else { OperationStatus::Applied },
-                u64::from(!params.dry_run && result.merged),
-                Vec::new(),
-                if params.dry_run { NextAction::Continue } else { NextAction::None },
-            ),
+            operation,
             groups: result
                 .groups
                 .into_iter()
@@ -3988,6 +4269,8 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 })
                 .collect(),
             merged: result.merged,
+            candidate_count: result.candidate_count,
+            capped: result.capped,
         };
         success_json(&response)
     }

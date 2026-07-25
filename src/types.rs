@@ -9,6 +9,9 @@ use ulid::Ulid;
 
 use crate::error::ParseEnumError;
 
+/// Stable principal used when anonymous writes are explicitly enabled.
+pub const ANONYMOUS_PRINCIPAL: &str = "anonymous";
+
 /// Normalize an exact-match context key while retaining its human-readable
 /// spelling separately in the context definition.
 #[must_use]

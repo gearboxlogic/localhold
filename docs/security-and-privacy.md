@@ -291,6 +291,14 @@ reduce crowding but do not provide constant-time behavior or policy
 noninterference. Do not treat search result shape or timing as an authorization
 boundary, and place mutually hostile tenants in separate stores and processes.
 
+### Agent context tools
+
+`context_resolve` and `context_create` are normal agent-facing tools and do not
+depend on `server.admin_tools_enabled`. Resolution returns only owned or
+explicitly granted contexts. New contexts are private. Exact archived
+identities remain reserved and agent creation cannot reactivate them. Context
+grants permit selection only and do not grant memory access.
+
 ### Admin tools
 
 Admin routes are absent from discovery and dispatch unless
@@ -302,9 +310,8 @@ agents cannot reach. Capabilities have different authorization scopes:
 | --- | --- | --- |
 | Policy-filtered reads | `admin_list`, `admin_history` | Return only memories or history visible to the server-resolved principal. Redacted history omits principal and details. |
 | Mixed-scope statistics | `admin_count` | Memory breakdowns are policy-filtered, but expired-row count and physical database size are store-wide diagnostics. |
-| Governed context resolution/creation | `context_resolve`, `context_create` | Resolution returns only owned or explicitly granted contexts. New contexts are private. Exact archived identities remain reserved and agent creation cannot reactivate them. Context grants permit selection only and do not grant memory access. |
 | Legacy scope adapters | `admin_scope_list`, `admin_scope_register`, `admin_reassign_scope` | Registration and reassignment create principal-owned private custom contexts; migrated frozen contexts remain read-only and there is no independent global scope registry. Run them only as migration aids. |
-| Policy-checked memory changes | `admin_bulk_update`, `admin_bulk_delete`, `admin_reassign_scope`, `admin_consolidate`, `admin_reembed`, default `admin_cleanup_expired` | Require a write-capable principal and check write access for affected memories. Bulk re-embedding applies authorization before its limit, leaves inaccessible rows unclaimed, and does not report their count. Authorized expiry cleanup likewise neither deletes nor counts inaccessible rows. |
+| Policy-checked memory changes | `admin_bulk_update`, `admin_bulk_delete`, `admin_reassign_scope`, `admin_consolidate`, `admin_reembed`, default `admin_cleanup_expired` | Require a write-capable principal and check write access for affected memories. Consolidation and bulk re-embedding apply authorization before their limits. Consolidation reports capped partial runs; bulk re-embedding leaves inaccessible rows unclaimed and does not report their count. Authorized expiry cleanup likewise neither deletes nor counts inaccessible rows. |
 | Whole-store expiry cleanup | `admin_cleanup_expired` with `mode = "all"` | Restricted to an authenticated local stdio context. Records the maintenance principal in each tombstone and the principal plus cleanup mode in a transactional delete audit row for every removed memory. |
 | Whole-store metadata maintenance | `admin_migration_report`, `admin_migrate_metadata` | Restricted to a local, authenticated stdio context. Reporting exposes whole-store state; migration can add metadata across the store. |
 

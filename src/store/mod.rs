@@ -40,6 +40,11 @@ use crate::{
     },
 };
 
+/// Ordered direct context memberships keyed by their memory.
+pub type MemoryContextMap = HashMap<MemoryId, Vec<MemoryContext>>;
+/// Authorized memories keyed by ID for batch reads.
+pub type MemoryMap = HashMap<MemoryId, Memory>;
+
 /// Read governed context definitions, memberships, and audit history.
 pub trait ContextReader: Send + Sync {
     /// Fetch one context when the principal owns it or has an explicit use
@@ -68,6 +73,14 @@ pub trait ContextReader: Send + Sync {
 
     /// Return ordered direct context memberships for an authorized memory.
     fn get_memory_contexts(&self, memory_id: &MemoryId, principal: &str) -> impl Future<Output = Result<Vec<MemoryContext>, StoreError>> + Send;
+
+    /// Return ordered direct context memberships for a batch of authorized
+    /// memories without issuing one query per memory.
+    fn get_memory_contexts_batch(&self, memory_ids: &[MemoryId], principal: &str) -> impl Future<Output = Result<MemoryContextMap, StoreError>> + Send;
+
+    /// Count all memberships on a memory the principal may write, including
+    /// memberships whose context definition is not currently visible.
+    fn count_memory_contexts_for_write(&self, memory_id: &MemoryId, principal: &str) -> impl Future<Output = Result<Option<usize>, StoreError>> + Send;
 
     /// Return recent context audit events visible to the principal.
     fn query_context_audit(&self, context_id: &ContextId, principal: &str, limit: usize) -> impl Future<Output = Result<Vec<ContextAuditEvent>, StoreError>> + Send;
@@ -151,6 +164,15 @@ pub trait ContextWriter: Send + Sync {
 
     /// Replace one principal anchor override.
     fn upsert_context_anchor_policy(&self, draft: &ContextAnchorPolicyDraft, principal: &str, audit: &ContextAuditDraft) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Roll back a just-created, otherwise untouched legacy compatibility
+    /// context after an enclosing batch write fails.
+    ///
+    /// Returns `false` when the context was not created by the matching
+    /// principal or acquired any membership, hierarchy, grant, policy, or
+    /// definition state. This is an internal transaction-compensation path,
+    /// not a public context deletion operation.
+    fn rollback_unreferenced_legacy_context(&self, context_id: &ContextId, principal: &str) -> impl Future<Output = Result<bool, StoreError>> + Send;
 
     /// Replace the complete ordered direct membership set for a memory and
     /// synchronize legacy scope caches in the same transaction.
@@ -343,9 +365,11 @@ pub struct ReassignScopeOutcome {
 }
 
 /// Outcome of recording true-use activity for one or more memories.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RecordUseOutcome {
+    /// IDs whose activity signal was updated, in first-requested order.
+    pub recorded_ids: Vec<MemoryId>,
     /// Number of memories whose activity signal was updated.
     pub recorded: u64,
     /// Number of memories denied due to read access or expiry.
@@ -363,6 +387,10 @@ pub trait MemoryReader: Send + Sync {
     /// Retrieve a single memory by ID, or `None` if it does not exist.
     /// When `principal` is provided, access policy is enforced; otherwise only public memories are returned.
     fn get(&self, id: &MemoryId, principal: Option<&str>) -> impl Future<Output = Result<Option<Memory>, StoreError>> + Send;
+
+    /// Retrieve authorized memories for a batch of IDs in a bounded number of
+    /// backend queries. Missing, expired, and unreadable IDs are omitted.
+    fn get_batch(&self, ids: &[MemoryId], principal: Option<&str>) -> impl Future<Output = Result<MemoryMap, StoreError>> + Send;
 
     /// Find memories whose embeddings are nearest to the query vector, applying optional filters.
     /// When `max_distance` is set, results with L2 distance exceeding the threshold are excluded.
@@ -422,10 +450,11 @@ pub trait MemoryReader: Send + Sync {
 
     /// Fetch memories with their embedding vectors for consolidation.
     ///
-    /// Applies canonical governed-context applicability, returns up to `limit`
-    /// memories that have embeddings.
+    /// Applies write authorization and canonical governed-context
+    /// applicability in storage, then returns up to `limit` memories that
+    /// have embeddings.
     /// Each result includes the memory and its embedding vector.
-    fn list_with_embeddings(&self, context_ids: Option<&[ContextId]>, limit: usize) -> impl Future<Output = Result<Vec<MemoryWithEmbedding>, StoreError>> + Send;
+    fn list_with_embeddings(&self, context_ids: Option<&[ContextId]>, principal: &str, limit: usize) -> impl Future<Output = Result<Vec<MemoryWithEmbedding>, StoreError>> + Send;
 
     /// Query the audit log for a specific memory ID.
     fn query_audit_log(&self, memory_id: &MemoryId, limit: usize) -> impl Future<Output = Result<Vec<AuditEntry>, StoreError>> + Send;
@@ -835,6 +864,10 @@ pub trait MemoryAdmin: Send + Sync {
 
     /// Fetch non-destructive metadata for a memory.
     fn get_metadata(&self, memory_id: &MemoryId) -> impl Future<Output = Result<Option<MemoryMetadata>, StoreError>> + Send;
+
+    /// Fetch non-destructive metadata for a batch without issuing one query
+    /// per memory.
+    fn get_metadata_batch(&self, memory_ids: &[MemoryId]) -> impl Future<Output = Result<HashMap<MemoryId, MemoryMetadata>, StoreError>> + Send;
 
     /// Return conservative migration/reporting counts for metadata.
     fn metadata_migration_report(&self) -> impl Future<Output = Result<MetadataMigrationReport, StoreError>> + Send;

@@ -7,7 +7,7 @@ use std::{
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _};
 use serde::Serialize;
-use sqlx_core::query_scalar::query_scalar;
+use sqlx_core::{query_scalar::query_scalar, sql_str::AssertSqlSafe};
 use sqlx_postgres::{PgPool, PgPoolOptions};
 
 #[cfg(test)]
@@ -35,6 +35,16 @@ pub const EXIT_HEALTHY: i32 = 0;
 pub const EXIT_DEGRADED: i32 = 2;
 /// Exit code used when configuration or a required runtime dependency failed.
 pub const EXIT_FAILED: i32 = 1;
+
+const POSTGRES_MANAGED_TABLE_NAMES: &str = "
+    'memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile',
+    'memory_audit_log', 'memory_entities', 'memory_v2_metadata', 'memory_metadata',
+    'memory_tombstones', 'scope_registry',
+    'context_kinds', 'contexts', 'context_aliases', 'context_identities',
+    'context_resolver_hints', 'context_grants', 'context_relations',
+    'memory_contexts', 'context_kind_policies', 'context_anchor_overrides',
+    'context_audit_events'
+";
 
 /// Doctor command options.
 #[derive(Debug, Clone, Copy, Default)]
@@ -839,7 +849,10 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
             JOIN pg_depend AS default_dependency ON default_dependency.classid = 'pg_attrdef'::regclass AND default_dependency.objid = definition.oid AND default_dependency.refclassid = 'pg_class'::regclass
             JOIN pg_class AS sequence ON sequence.oid = default_dependency.refobjid AND sequence.relkind = 'S'
             JOIN pg_depend AS ownership ON ownership.classid = 'pg_class'::regclass AND ownership.objid = sequence.oid AND ownership.refclassid = 'pg_class'::regclass AND ownership.refobjid = attribute.attrelid AND ownership.refobjsubid = attribute.attnum AND ownership.deptype IN ('a', 'i')
-            WHERE attribute.attrelid = to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_audit_log') ELSE 'memory_audit_log' END)
+            WHERE attribute.attrelid IN (
+                    to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_audit_log') ELSE 'memory_audit_log' END),
+                    to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'context_audit_events') ELSE 'context_audit_events' END)
+                  )
               AND attribute.attname = 'id'
               AND NOT attribute.attisdropped",
     )
@@ -847,7 +860,10 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
     .fetch_one(&pool)
     .await;
     let can_inspect_audit_rows: Result<bool, _> = query_scalar(
-        "SELECT COALESCE(has_table_privilege(to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), 'memory_audit_log') ELSE 'memory_audit_log' END), 'SELECT'), TRUE)",
+        "SELECT COALESCE(bool_and(has_table_privilege(relation.oid, 'SELECT')), TRUE)
+         FROM (VALUES ('memory_audit_log'), ('context_audit_events')) AS audit_table(name)
+         JOIN pg_class AS relation
+           ON relation.oid = to_regclass(CASE WHEN $1 THEN format('%I.%I', current_schema(), audit_table.name) ELSE audit_table.name END)",
     )
     .bind(config.database.postgres.auto_migrate)
     .fetch_one(&pool)
@@ -946,19 +962,29 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
         )
         .fetch_one(&pool)
         .await;
-        let can_repair: Result<bool, _> = if vector_installed {
-            query_scalar(
-                "SELECT has_schema_privilege(current_schema(), 'CREATE') AND (SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), TRUE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_v2_metadata', 'memory_metadata', 'memory_tombstones', 'scope_registry'))",
+        let can_repair_sql = if vector_installed {
+            format!(
+                "SELECT has_schema_privilege(current_schema(), 'CREATE')
+                    AND (
+                        SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), TRUE)
+                        FROM pg_tables
+                        WHERE schemaname = current_schema()
+                          AND tablename IN ({POSTGRES_MANAGED_TABLE_NAMES})
+                    )"
             )
-            .fetch_one(&pool)
-            .await
         } else {
-            query_scalar(
-                "SELECT has_schema_privilege(current_schema(), 'CREATE') AND has_database_privilege(current_database(), 'CREATE') AND (SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), TRUE) FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ('memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile', 'memory_audit_log', 'memory_entities', 'memory_v2_metadata', 'memory_metadata', 'memory_tombstones', 'scope_registry'))",
+            format!(
+                "SELECT has_schema_privilege(current_schema(), 'CREATE')
+                    AND has_database_privilege(current_database(), 'CREATE')
+                    AND (
+                        SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), TRUE)
+                        FROM pg_tables
+                        WHERE schemaname = current_schema()
+                          AND tablename IN ({POSTGRES_MANAGED_TABLE_NAMES})
+                    )"
             )
-            .fetch_one(&pool)
-            .await
         };
+        let can_repair: Result<bool, _> = query_scalar(AssertSqlSafe(can_repair_sql.as_str())).fetch_one(&pool).await;
         pool.close().await;
         if config.database.postgres.auto_migrate
             && matches!(present_indexes_compatible, Ok(true))
@@ -1052,7 +1078,7 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
             AND has_table_privilege('memory_metadata', 'SELECT') AND has_table_privilege('memory_metadata', 'INSERT') AND has_table_privilege('memory_metadata', 'UPDATE') AND has_table_privilege('memory_metadata', 'DELETE')
             AND has_table_privilege('embedding_profile', 'SELECT') AND has_table_privilege('embedding_profile', 'INSERT') AND has_table_privilege('embedding_profile', 'UPDATE')
             AND has_table_privilege('context_kinds', 'SELECT') AND has_table_privilege('context_kinds', 'INSERT') AND has_table_privilege('context_kinds', 'UPDATE')
-            AND has_table_privilege('contexts', 'SELECT') AND has_table_privilege('contexts', 'INSERT') AND has_table_privilege('contexts', 'UPDATE')
+            AND has_table_privilege('contexts', 'SELECT') AND has_table_privilege('contexts', 'INSERT') AND has_table_privilege('contexts', 'UPDATE') AND has_table_privilege('contexts', 'DELETE')
             AND has_table_privilege('context_aliases', 'SELECT') AND has_table_privilege('context_aliases', 'INSERT') AND has_table_privilege('context_aliases', 'UPDATE') AND has_table_privilege('context_aliases', 'DELETE')
             AND has_table_privilege('context_identities', 'SELECT') AND has_table_privilege('context_identities', 'INSERT') AND has_table_privilege('context_identities', 'DELETE')
             AND has_table_privilege('context_resolver_hints', 'SELECT') AND has_table_privilege('context_resolver_hints', 'INSERT') AND has_table_privilege('context_resolver_hints', 'UPDATE') AND has_table_privilege('context_resolver_hints', 'DELETE')
@@ -1061,9 +1087,11 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
             AND has_table_privilege('memory_contexts', 'SELECT') AND has_table_privilege('memory_contexts', 'INSERT') AND has_table_privilege('memory_contexts', 'UPDATE') AND has_table_privilege('memory_contexts', 'DELETE')
             AND has_table_privilege('context_kind_policies', 'SELECT') AND has_table_privilege('context_kind_policies', 'INSERT') AND has_table_privilege('context_kind_policies', 'UPDATE') AND has_table_privilege('context_kind_policies', 'DELETE')
             AND has_table_privilege('context_anchor_overrides', 'SELECT') AND has_table_privilege('context_anchor_overrides', 'INSERT') AND has_table_privilege('context_anchor_overrides', 'UPDATE') AND has_table_privilege('context_anchor_overrides', 'DELETE')
-            AND has_table_privilege('context_audit_events', 'SELECT') AND has_table_privilege('context_audit_events', 'INSERT')
+            AND has_table_privilege('context_audit_events', 'SELECT') AND has_table_privilege('context_audit_events', 'INSERT') AND has_table_privilege('context_audit_events', 'DELETE')
             AND has_sequence_privilege(pg_get_serial_sequence('memory_audit_log', 'id'), 'USAGE')
-            AND has_sequence_privilege(pg_get_serial_sequence('context_audit_events', 'id'), 'USAGE')",
+            AND has_sequence_privilege(pg_get_serial_sequence('memory_audit_log', 'id'), 'SELECT')
+            AND has_sequence_privilege(pg_get_serial_sequence('context_audit_events', 'id'), 'USAGE')
+            AND has_sequence_privilege(pg_get_serial_sequence('context_audit_events', 'id'), 'SELECT')",
     )
     .fetch_one(&pool)
     .await;
@@ -1108,21 +1136,13 @@ async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> Dia
     .fetch_one(&pool)
     .await;
     let indexes_current = crate::store::migration::postgres_runtime_indexes_compatible(&pool, config.database.postgres.auto_migrate, false).await;
-    let owns_managed_tables: Result<bool, _> = query_scalar(
+    let owns_managed_tables_sql = format!(
         "SELECT COALESCE(bool_and(pg_has_role(current_user, tableowner, 'MEMBER')), FALSE)
          FROM pg_tables
          WHERE schemaname = current_schema()
-           AND tablename IN (
-               'memories', 'localhold_migrations', 'memory_embeddings', 'embedding_profile',
-               'memory_audit_log', 'memory_entities', 'memory_metadata', 'memory_tombstones',
-               'context_kinds', 'contexts', 'context_aliases', 'context_identities',
-               'context_resolver_hints', 'context_grants', 'context_relations',
-               'memory_contexts', 'context_kind_policies', 'context_anchor_overrides',
-               'context_audit_events'
-           )",
-    )
-    .fetch_one(&pool)
-    .await;
+           AND tablename IN ({POSTGRES_MANAGED_TABLE_NAMES})"
+    );
+    let owns_managed_tables: Result<bool, _> = query_scalar(AssertSqlSafe(owns_managed_tables_sql.as_str())).fetch_one(&pool).await;
     let vector_type: Result<Option<String>, _> = query_scalar(
         "SELECT format_type(attribute.atttypid, attribute.atttypmod) FROM pg_attribute AS attribute WHERE attribute.attrelid = to_regclass('memory_embeddings') AND attribute.attname = 'embedding' AND NOT attribute.attisdropped",
     )
@@ -1393,6 +1413,25 @@ mod tests {
     }
 
     #[test]
+    fn postgres_repair_ownership_check_covers_governed_context_tables() {
+        for table in [
+            "context_kinds",
+            "contexts",
+            "context_aliases",
+            "context_identities",
+            "context_resolver_hints",
+            "context_grants",
+            "context_relations",
+            "memory_contexts",
+            "context_kind_policies",
+            "context_anchor_overrides",
+            "context_audit_events",
+        ] {
+            assert!(POSTGRES_MANAGED_TABLE_NAMES.contains(&format!("'{table}'")), "missing ownership check for {table}");
+        }
+    }
+
+    #[test]
     fn json_contract_has_stable_schema_and_no_ansi() {
         let report = finalize(build_info(), None, None, vec![check("build", DiagnosticStatus::Healthy, "ok")]);
         let json = report.to_json().unwrap();
@@ -1556,7 +1595,7 @@ mod tests {
         let url = std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
         let schema = format!("localhold_doctor_published_{}", crate::types::MemoryId::new().to_string().to_lowercase());
         let admin = PgPoolOptions::new().max_connections(1).connect(&url).await.unwrap();
-        let _created = query(sqlx_core::sql_str::AssertSqlSafe(format!("CREATE SCHEMA {schema}"))).execute(&admin).await.unwrap();
+        let _created = query(AssertSqlSafe(format!("CREATE SCHEMA {schema}"))).execute(&admin).await.unwrap();
         let separator = if url.contains('?') { '&' } else { '?' };
         let postgres = crate::config::PostgresDatabaseConfig {
             url: format!("{url}{separator}options=-csearch_path%3D{schema}%2Cpublic"),
@@ -1565,7 +1604,7 @@ mod tests {
             auto_migrate: true,
         };
         let scoped = PgPoolOptions::new().max_connections(1).connect(&postgres.url).await.unwrap();
-        let fixture = sqlx_core::sql_str::AssertSqlSafe(include_str!("../tests/fixtures/database-upgrades/v0.1.0-beta.2-beta.3.postgres.sql").to_owned());
+        let fixture = AssertSqlSafe(include_str!("../tests/fixtures/database-upgrades/v0.1.0-beta.2-beta.3.postgres.sql").to_owned());
         let _built = sqlx_core::raw_sql::raw_sql(fixture).execute(&scoped).await.unwrap();
         let present_schema = crate::store::migration::validate_present_postgres_schema_for_published_upgrade(&scoped, 3, true, true).await;
         assert!(present_schema.is_ok(), "{present_schema:?}");
@@ -1613,7 +1652,7 @@ mod tests {
         assert_eq!(invalid_record_revision.status, DiagnosticStatus::Failed);
         let _restored = query("ALTER TABLE memories DROP COLUMN record_revision").execute(&scoped).await.unwrap();
 
-        let _corrupted = sqlx_core::raw_sql::raw_sql(sqlx_core::sql_str::AssertSqlSafe(
+        let _corrupted = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(
             "ALTER TABLE memories ALTER COLUMN importance DROP DEFAULT;
              ALTER TABLE memories ALTER COLUMN importance TYPE TEXT USING importance::text"
                 .to_owned(),
@@ -1624,7 +1663,7 @@ mod tests {
         let invalid_managed_schema = postgres_check(&config, &clock).await;
         assert_eq!(invalid_managed_schema.status, DiagnosticStatus::Failed);
 
-        let _restored = sqlx_core::raw_sql::raw_sql(sqlx_core::sql_str::AssertSqlSafe(
+        let _restored = sqlx_core::raw_sql::raw_sql(AssertSqlSafe(
             "ALTER TABLE memories ALTER COLUMN importance TYPE DOUBLE PRECISION USING importance::double precision;
              ALTER TABLE memories ALTER COLUMN importance SET DEFAULT 0.5"
                 .to_owned(),
@@ -1638,10 +1677,7 @@ mod tests {
         assert!(invalid.summary.contains("incompatible"), "{}", invalid.summary);
 
         scoped.close().await;
-        let _dropped = query(sqlx_core::sql_str::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
-            .execute(&admin)
-            .await
-            .unwrap();
+        let _dropped = query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE"))).execute(&admin).await.unwrap();
         admin.close().await;
     }
 
@@ -1651,7 +1687,7 @@ mod tests {
         let url = std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
         let schema = format!("localhold_doctor_{}", crate::types::MemoryId::new().to_string().to_lowercase());
         let admin = PgPoolOptions::new().max_connections(1).connect(&url).await.unwrap();
-        let _created = query(sqlx_core::sql_str::AssertSqlSafe(format!("CREATE SCHEMA {schema}"))).execute(&admin).await.unwrap();
+        let _created = query(AssertSqlSafe(format!("CREATE SCHEMA {schema}"))).execute(&admin).await.unwrap();
         let separator = if url.contains('?') { '&' } else { '?' };
         let postgres = crate::config::PostgresDatabaseConfig {
             url: format!("{url}{separator}options=-csearch_path%3D{schema}%2Cpublic"),
@@ -1696,10 +1732,7 @@ mod tests {
         let unique_index_startup_rejected = PostgresStore::open(&postgres, 3_usize).await.is_err();
 
         scoped.close().await;
-        let _dropped = query(sqlx_core::sql_str::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
-            .execute(&admin)
-            .await
-            .unwrap();
+        let _dropped = query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE"))).execute(&admin).await.unwrap();
         admin.close().await;
 
         assert_eq!(legacy_fk_status, DiagnosticStatus::Degraded);
@@ -1716,7 +1749,7 @@ mod tests {
         let url = std::env::var("LOCALHOLD_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhold:localhold@localhost:55432/localhold".into());
         let schema = format!("localhold_doctor_ledger_{}", crate::types::MemoryId::new().to_string().to_lowercase());
         let admin = PgPoolOptions::new().max_connections(1).connect(&url).await.unwrap();
-        let _created = query(sqlx_core::sql_str::AssertSqlSafe(format!("CREATE SCHEMA {schema}"))).execute(&admin).await.unwrap();
+        let _created = query(AssertSqlSafe(format!("CREATE SCHEMA {schema}"))).execute(&admin).await.unwrap();
         let separator = if url.contains('?') { '&' } else { '?' };
         let postgres = crate::config::PostgresDatabaseConfig {
             url: format!("{url}{separator}options=-csearch_path%3D{schema}%2Cpublic"),
@@ -1767,10 +1800,7 @@ mod tests {
         let runtime_without_ledger = postgres_check(&config, &clock).await;
 
         scoped.close().await;
-        let _dropped = query(sqlx_core::sql_str::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
-            .execute(&admin)
-            .await
-            .unwrap();
+        let _dropped = query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE"))).execute(&admin).await.unwrap();
         admin.close().await;
 
         assert_eq!(missing.status, DiagnosticStatus::Degraded);

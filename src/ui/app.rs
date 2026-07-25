@@ -11,7 +11,7 @@ use crate::{
     context::{
         ContextAnchorPolicy, ContextAnchorPolicyDraft, ContextAnchorPolicyRecord, ContextAuditDraft, ContextAuditEvent, ContextDefinitionPatch, ContextDescriptor, ContextGrant,
         ContextId, ContextIdentity, ContextIdentityInput, ContextKind, ContextKindDefinition, ContextKindDraft, ContextKindPolicy, ContextKindPolicyDraft, ContextKindPolicyRecord,
-        ContextLifecycle, ContextPolicyLayer, ContextRecord, normalize_context_identity,
+        ContextLifecycle, ContextPolicyLayer, ContextRecord, OPERATOR_PRINCIPAL, normalize_context_identity,
     },
     engine::{LocalHoldEngine, SearchRequest},
     store::MemoryStore,
@@ -528,10 +528,16 @@ where
                     Ok(records) => (records, None),
                     Err(error) => (Vec::new(), Some(format!("context catalog unavailable: {error}"))),
                 };
-                self.apply_context_catalog(records, stats.total, warning);
+                self.apply_context_catalog(records, Some(stats.total), warning);
             }
             Err(error) => {
-                self.context_notice = Some(format!("governed memory count unavailable: {error}"));
+                let warning = format!("governed memory count unavailable: {error}");
+                match records {
+                    Ok(records) => self.apply_context_catalog(records, None, Some(warning)),
+                    Err(catalog_error) => {
+                        self.context_notice = Some(format!("{warning}; context catalog unavailable: {catalog_error}"));
+                    }
+                }
             }
         }
         self.refresh();
@@ -679,10 +685,10 @@ where
         });
     }
 
-    fn apply_context_catalog(&mut self, records: Vec<ContextRecord>, total: u64, warning: Option<String>) {
+    fn apply_context_catalog(&mut self, records: Vec<ContextRecord>, total: Option<u64>, warning: Option<String>) {
         let cursor_id = self.cursor_context().map(|item| item.record.context.id);
         self.contexts = records.into_iter().map(|record| ContextItem { record }).collect();
-        self.context_total = Some(total);
+        self.context_total = total;
         self.context_notice = warning;
         let available = self
             .contexts
@@ -828,7 +834,7 @@ where
                 warning,
                 generation,
             } if generation == self.context_generation => {
-                self.apply_context_catalog(records, total, warning);
+                self.apply_context_catalog(records, Some(total), warning);
             }
             DataMsg::ContextCatalogFailed { message, generation } if generation == self.context_generation => {
                 self.context_notice = Some(message);
@@ -1176,8 +1182,12 @@ where
     }
 
     fn begin_context_manager_edit(&mut self) {
-        if self.principal.is_none() {
+        let Some(principal) = self.principal.as_deref() else {
             self.status = Status::NotHeld("context editing requires a configured principal".into());
+            return;
+        };
+        if self.context_manager.as_ref().is_some_and(|manager| manager.pane == ContextManagerPane::OperatorPolicy) && principal != OPERATOR_PRINCIPAL {
+            self.status = Status::NotHeld(format!("operator defaults require --principal {OPERATOR_PRINCIPAL}"));
             return;
         }
         let Some(manager) = self.context_manager.as_mut() else { return };
@@ -2616,6 +2626,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bootstrap_keeps_context_catalog_when_broad_count_fails() {
+        let store = SqliteStore::in_memory().unwrap();
+        let context_id = create_test_context(&store, "project/catalog-survives", "Catalog survives").await;
+        store
+            .with_conn(|connection| {
+                connection.pragma_update(None, "foreign_keys", false)?;
+                let _dropped = connection.execute("DROP TABLE memories", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(engine, Theme::detect(), Some("operator".into()), tx);
+
+        app.bootstrap().await;
+
+        assert_eq!(app.contexts.len(), 1_usize);
+        assert_eq!(app.contexts[0].record.context.id, context_id);
+        assert!(app.context_total.is_none());
+        assert!(app.context_notice.as_deref().is_some_and(|notice| notice.contains("count unavailable")));
+    }
+
+    #[tokio::test]
     async fn context_sidebar_supports_multi_selection_and_broad_search() {
         let store = SqliteStore::in_memory().unwrap();
         let alpha = create_test_context(&store, "project/alpha", "Alpha").await;
@@ -2699,6 +2733,12 @@ mod tests {
         assert!(rendered.contains("RECENT CONTEXT AUDIT"));
 
         app.on_event(press(KeyCode::Char('e'))).await;
+        app.context_manager.as_mut().unwrap().edit.as_mut().unwrap().input = TextInput::new((0_u32..30_u32).map(|line| format!("line-{line}")).collect::<Vec<_>>().join("\n"));
+        let mut edit_terminal = Terminal::new(TestBackend::new(60_u16, 10_u16)).unwrap();
+        let _completed = edit_terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        let rendered_edit = rendered_text(edit_terminal.backend().buffer());
+        assert!(rendered_edit.contains("line-29"));
+        assert!(rendered_edit.contains('\u{2588}'));
         app.context_manager.as_mut().unwrap().edit.as_mut().unwrap().input.insert(' ');
         app.on_event(press(KeyCode::Esc)).await;
         assert_eq!(app.mode, Mode::ConfirmContextDiscard);
@@ -2708,6 +2748,32 @@ mod tests {
         app.on_event(press(KeyCode::Char('y'))).await;
         assert_eq!(app.mode, Mode::ContextManager);
         assert!(app.context_manager.as_ref().unwrap().edit.is_none());
+    }
+
+    #[tokio::test]
+    async fn context_manager_rejects_operator_policy_edit_for_non_operator_principal() {
+        let store = SqliteStore::in_memory().unwrap();
+        let id = ContextId::new();
+        let _created = store
+            .create_context(
+                &ContextCreateDraft::private(id, ContextKind::new(ContextKind::PROJECT).unwrap(), "project/alice", "Alice", "alice"),
+                &ContextAuditDraft::new("alice", "test_alice_context_created").with_context(id),
+            )
+            .await
+            .unwrap();
+        let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(engine, Theme::detect(), Some("alice".into()), tx);
+        app.bootstrap().await;
+        app.focus = Focus::Contexts;
+        app.context_cursor = 1;
+        app.on_event(press(KeyCode::Char('c'))).await;
+        app.context_manager.as_mut().unwrap().pane = ContextManagerPane::OperatorPolicy;
+
+        app.on_event(press(KeyCode::Char('e'))).await;
+
+        assert_eq!(app.mode, Mode::ContextManager);
+        assert!(matches!(&app.status, Status::NotHeld(message) if message.contains("principal operator")));
     }
 
     #[tokio::test]

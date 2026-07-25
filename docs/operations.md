@@ -376,6 +376,11 @@ can resolve contexts and create only what effective policy allows; they cannot
 create new kinds, change policy, modify grants, or reactivate archived
 identities.
 
+Operator ceiling/default edits require `hold ui --principal operator`.
+LocalHold treats that principal name as a local capability assertion; it is not
+a multi-user authentication boundary. Restrict database credentials and access
+to the operator process accordingly.
+
 New contexts are private to their owner. Granting a context lets another
 principal select it but does not grant access to memories. When several active
 anchors apply, allowed sets intersect, denies win, and conflicting scalar
@@ -445,7 +450,10 @@ For a reduced-privilege runtime:
 3. Grant a separate runtime role `USAGE` on the resolved schema and only the
    current LocalHold runtime table and sequence privileges. It needs the
    application DML privileges checked by `hold doctor`, including sequence
-   `USAGE` for audit IDs; it does not need schema `CREATE` or managed-table
+   `USAGE` for audit inserts, sequence `SELECT` for startup integrity
+   inspection, and `DELETE` on `contexts` and
+   `context_audit_events` so failed legacy compatibility writes can be
+   compensated safely; it does not need schema `CREATE` or managed-table
    ownership when migrations are disabled.
 4. Configure the service with the runtime credential and
    `auto_migrate = false`, then run `hold doctor` before serving traffic.

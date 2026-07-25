@@ -40,6 +40,12 @@ defaults, and anchor overrides. Press `e` to edit the active pane as JSON and
 `Ctrl+S` to apply an audited mutation. `Esc` protects dirty drafts with an
 explicit discard confirmation.
 
+Editing operator defaults requires launching the TUI with
+`--principal operator`. That principal name is a local capability assertion,
+not authentication: protect the process and database with operating-system and
+database controls. Other configured principals can inspect effective operator
+defaults but cannot mutate them.
+
 Raw typed identity values entered in the identity pane are normalized and
 fingerprinted before persistence. The UI subsequently shows only safe redacted
 labels and fingerprints. Archived contexts and identities remain reserved and

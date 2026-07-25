@@ -2,6 +2,7 @@
 //! and `MemoryReader`/`MemoryWriter`/`MemoryAdmin` trait implementations (delegating to submodules).
 
 use std::{
+    collections::HashMap,
     ffi::OsString,
     fs::OpenOptions,
     io::ErrorKind,
@@ -700,6 +701,10 @@ impl MemoryReader for SqliteStore {
         self.get_impl(id, principal).await
     }
 
+    async fn get_batch(&self, ids: &[MemoryId], principal: Option<&str>) -> Result<super::MemoryMap, StoreError> {
+        self.get_batch_impl(ids, principal).await
+    }
+
     async fn search_by_embedding(
         &self,
         embedding: &[f32],
@@ -735,8 +740,8 @@ impl MemoryReader for SqliteStore {
         self.get_for_reembed_impl(id, principal).await
     }
 
-    async fn list_with_embeddings(&self, context_ids: Option<&[crate::context::ContextId]>, limit: usize) -> Result<Vec<MemoryWithEmbedding>, StoreError> {
-        self.list_with_embeddings_impl(context_ids, limit).await
+    async fn list_with_embeddings(&self, context_ids: Option<&[crate::context::ContextId]>, principal: &str, limit: usize) -> Result<Vec<MemoryWithEmbedding>, StoreError> {
+        self.list_with_embeddings_impl(context_ids, principal, limit).await
     }
 
     async fn query_audit_log(&self, memory_id: &MemoryId, limit: usize) -> Result<Vec<AuditEntry>, StoreError> {
@@ -1073,6 +1078,10 @@ impl MemoryAdmin for SqliteStore {
         self.get_metadata_impl(memory_id).await
     }
 
+    async fn get_metadata_batch(&self, memory_ids: &[MemoryId]) -> Result<HashMap<MemoryId, MemoryMetadata>, StoreError> {
+        self.get_metadata_batch_impl(memory_ids).await
+    }
+
     async fn metadata_migration_report(&self) -> Result<MetadataMigrationReport, StoreError> {
         self.metadata_migration_report_impl().await
     }
@@ -1101,7 +1110,9 @@ mod tests {
     use super::*;
     use crate::{
         clock::MockClock,
-        context::{ContextAuditDraft, ContextCreateDraft, ContextId, ContextKind, ContextLifecycle, MAX_CONTEXT_DISPLAY_NAME_LEN, UNRESOLVED_CONTEXT_KEY},
+        context::{
+            ContextAuditDraft, ContextCreateDraft, ContextId, ContextKind, ContextLifecycle, MAX_CONTEXT_DESCRIPTION_LEN, MAX_CONTEXT_DISPLAY_NAME_LEN, UNRESOLVED_CONTEXT_KEY,
+        },
         store::{
             ContextWriter as _,
             schema::{
@@ -1344,19 +1355,76 @@ mod tests {
     }
 
     #[test]
-    fn oversized_legacy_scope_rolls_back_v3_context_migration() {
+    fn legacy_scope_migration_does_not_apply_new_request_time_caps() {
         let mut connection = Connection::open_in_memory().unwrap();
         let scope_key = format!("project/{}", "x".repeat(MAX_CONTEXT_DISPLAY_NAME_LEN + 1));
         create_minimal_v2_context_fixture(&connection, "project/registered");
+        let display_name = "D".repeat(MAX_CONTEXT_DISPLAY_NAME_LEN + 1);
+        let description = "d".repeat(MAX_CONTEXT_DESCRIPTION_LEN + 1);
+        let mut aliases = (0_u32..80_u32).map(|index| format!("legacy-alias-{index}")).collect::<Vec<_>>();
+        aliases[0] = "a".repeat(MAX_CONTEXT_DISPLAY_NAME_LEN.saturating_mul(3));
+        connection
+            .execute(
+                "UPDATE scope_registry
+                 SET display_name = ?1, description = ?2, aliases = ?3
+                 WHERE scope_key = 'project/registered'",
+                rusqlite::params![display_name, description, serde_json::to_string(&aliases).unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO scope_registry (
+                    scope_key, display_name, description, aliases, matchers, parent, related, updated_at
+                 ) VALUES (
+                    'custom/empty-description', 'Empty description', '', '[]', '[]', NULL, '[]', '2026-07-25T00:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
         let provenance = serde_json::json!({"source_conversation": scope_key}).to_string();
         connection
             .execute("INSERT INTO memories (id, provenance) VALUES ('oversized-raw-scope', ?1)", [provenance])
             .unwrap();
 
+        migrate_contexts_v3(&mut connection, 2_u32, base_time()).unwrap();
+
+        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(version, crate::store::schema::SQLITE_SCHEMA_VERSION);
+        assert!(!sqlite_table_exists(&connection, "scope_registry").unwrap());
+        let migrated_aliases: i64 = connection.query_row("SELECT COUNT(*) FROM context_aliases", [], |row| row.get(0)).unwrap();
+        assert_eq!(migrated_aliases, 80_i64);
+        let preserved: (String, Option<String>, String) = connection
+            .query_row(
+                "SELECT context_row.display_name, context_row.description, alias_row.alias
+                 FROM contexts AS context_row
+                 JOIN context_aliases AS alias_row ON alias_row.context_id = context_row.id
+                 WHERE context_row.context_key = 'project/registered'
+                 ORDER BY length(alias_row.alias) DESC
+                 LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(preserved, (display_name, Some(description), aliases[0].clone()));
+        let empty_description: Option<String> = connection
+            .query_row("SELECT description FROM contexts WHERE context_key = 'custom/empty-description'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(empty_description.as_deref(), Some(""));
+        let raw_memberships: i64 = connection
+            .query_row("SELECT COUNT(*) FROM memory_contexts WHERE memory_id = 'oversized-raw-scope'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(raw_memberships, 1_i64);
+    }
+
+    #[test]
+    fn invalid_legacy_registry_timestamp_rolls_back_context_migration() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_minimal_v2_context_fixture(&connection, "project/invalid-timestamp");
+        connection.execute("UPDATE scope_registry SET updated_at = 'not-rfc3339'", []).unwrap();
+
         let error = migrate_contexts_v3(&mut connection, 2_u32, base_time()).unwrap_err();
 
-        assert!(error.to_string().contains("cannot be migrated"), "{error}");
-        assert!(error.to_string().contains("display name"), "{error}");
+        assert!(error.to_string().contains("RFC3339"), "{error}");
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
         assert_eq!(version, 2_u32);
         assert!(sqlite_table_exists(&connection, "scope_registry").unwrap());

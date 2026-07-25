@@ -312,8 +312,10 @@ where
     }
     lines.push(tabs);
     lines.push(Line::default());
-    if editing {
-        let value = manager.edit.as_ref().map_or("", |edit| edit.input().value.as_str());
+    let active_edit = editing.then_some(manager.edit.as_ref()).flatten();
+    if let Some(edit) = active_edit {
+        let mut value = edit.input().value.clone();
+        value.insert(edit.input().cursor, '\u{2588}');
         lines.extend(value.lines().map(|line| Line::from(escape_terminal_text(line))));
     } else {
         lines.extend(context_manager_edit_value(manager).lines().map(|line| Line::from(escape_terminal_text(line))));
@@ -330,8 +332,31 @@ where
             }
         }
     }
-    let scroll = if editing { 0 } else { manager.scroll };
+    let scroll = active_edit.map_or_else(|| manager.scroll, |edit| context_manager_edit_render_scroll(&lines, edit, area));
     frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }).scroll((scroll, 0)), area);
+}
+
+#[expect(
+    clippy::string_slice,
+    clippy::arithmetic_side_effects,
+    clippy::integer_division,
+    clippy::integer_division_remainder_used,
+    reason = "input cursors are UTF-8 boundaries and terminal row calculation intentionally uses integer cell widths"
+)]
+fn context_manager_edit_render_scroll(lines: &[Line<'_>], edit: &crate::ui::app::ContextManagerEdit, area: Rect) -> u16 {
+    let width = usize::from(area.width.saturating_sub(2_u16)).max(1_usize);
+    let height = usize::from(area.height.saturating_sub(2_u16)).max(1_usize);
+    let header_lines = 5_usize;
+    let cursor_line = header_lines.saturating_add(edit.input().value[..edit.input().cursor].chars().filter(|character| *character == '\n').count());
+    let cursor_line = cursor_line.min(lines.len().saturating_sub(1_usize));
+    let rows_before_cursor = lines[..cursor_line].iter().map(|line| line.width().max(1_usize).div_ceil(width)).sum::<usize>();
+    let prefix = edit.input().value[..edit.input().cursor]
+        .rsplit_once('\n')
+        .map_or_else(|| &edit.input().value[..edit.input().cursor], |(_, suffix)| suffix);
+    let cursor_column = Line::from(escape_terminal_text(prefix)).width();
+    let cursor_row = rows_before_cursor.saturating_add(cursor_column / width);
+    let target = cursor_row.saturating_sub(height.saturating_sub(1_usize));
+    u16::try_from(target).unwrap_or(u16::MAX)
 }
 
 fn draw_detail<S>(frame: &mut Frame<'_>, app: &App<S>, detail: &Detail, main: Rect)

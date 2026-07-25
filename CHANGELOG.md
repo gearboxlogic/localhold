@@ -8,6 +8,13 @@ requirements explicitly.
 
 ## [Unreleased]
 
+- Replaced scopes as the canonical relevance model with governed multi-context
+  membership, including private owned contexts, typed identities, hierarchy,
+  grants, lifecycle and policy controls, agent resolution and creation tools,
+  multi-context retrieval, and legacy scope compatibility adapters.
+- Added automatic SQLite v2-to-v3 and PostgreSQL v4-to-v5 migrations that
+  backfill existing scopes into canonical context memberships and retire the
+  legacy scope registry while preserving compatibility metadata.
 - Changed bulk `admin_reembed` to apply per-memory write authorization before
   its limit, leaving inaccessible rows unclaimed and undisclosed while
   preserving process-owned whole-store startup/provider recovery. Authorized

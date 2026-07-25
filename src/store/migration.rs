@@ -1849,19 +1849,20 @@ fn validate_sqlite_context_foreign_keys(conn: &Connection) -> Result<(), StoreEr
 
 fn validate_sqlite_context_integrity(conn: &Connection) -> Result<(), StoreError> {
     let has_cycle: bool = conn.query_row(
-        "WITH RECURSIVE walk(id, parent_id, path, cycle) AS (
-             SELECT id, parent_id, ',' || id || ',', 0
+        "WITH RECURSIVE rooted(id) AS (
+             SELECT id
              FROM contexts
+             WHERE parent_id IS NULL
              UNION ALL
-             SELECT parent.id,
-                    parent.parent_id,
-                    walk.path || parent.id || ',',
-                    instr(walk.path, ',' || parent.id || ',') > 0
-             FROM walk
-             JOIN contexts AS parent ON parent.id = walk.parent_id
-             WHERE walk.cycle = 0
+             SELECT child.id
+             FROM rooted AS parent
+             JOIN contexts AS child ON child.parent_id = parent.id
          )
-         SELECT EXISTS(SELECT 1 FROM walk WHERE cycle = 1)",
+         SELECT EXISTS(
+             SELECT 1
+             FROM contexts
+             WHERE id NOT IN (SELECT id FROM rooted)
+         )",
         [],
         |row| row.get(0),
     )?;
@@ -3184,19 +3185,20 @@ pub(crate) async fn validate_ready_postgres_schema(
 
 async fn validate_postgres_context_integrity(pool: &PgPool) -> Result<(), StoreError> {
     let has_cycle: bool = query_scalar(
-        "WITH RECURSIVE walk(id, parent_id, path, cycle) AS (
-             SELECT id, parent_id, ARRAY[id], FALSE
+        "WITH RECURSIVE rooted(id) AS (
+             SELECT id
              FROM contexts
+             WHERE parent_id IS NULL
              UNION ALL
-             SELECT parent.id,
-                    parent.parent_id,
-                    walk.path || parent.id,
-                    parent.id = ANY(walk.path)
-             FROM walk
-             JOIN contexts AS parent ON parent.id = walk.parent_id
-             WHERE NOT walk.cycle
+             SELECT child.id
+             FROM rooted AS parent
+             JOIN contexts AS child ON child.parent_id = parent.id
          )
-         SELECT EXISTS(SELECT 1 FROM walk WHERE cycle)",
+         SELECT EXISTS(
+             SELECT 1
+             FROM contexts
+             WHERE id NOT IN (SELECT id FROM rooted)
+         )",
     )
     .fetch_one(pool)
     .await?;
@@ -3747,7 +3749,7 @@ async fn validate_postgres_table_contracts_inner_connection(
     if table == "memories" {
         validate_postgres_embedding_revision_default_connection(connection, current_schema_only).await?;
     }
-    if table == "memory_audit_log" {
+    if matches!(table, "memory_audit_log" | "context_audit_events") {
         validate_postgres_serial_default_connection(connection, table, "id", current_schema_only).await?;
     }
     validate_postgres_check_constraints_connection(connection, table, current_schema_only).await?;
@@ -4951,6 +4953,47 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_context_integrity_handles_long_acyclic_parent_chain() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE memories (id TEXT PRIMARY KEY);
+                 CREATE TABLE memory_metadata (
+                    memory_id TEXT PRIMARY KEY,
+                    scope_key TEXT
+                 );",
+            )
+            .unwrap();
+        connection.execute_batch(crate::store::schema::CONTEXT_DDL).unwrap();
+        let _inserted_kind = connection
+            .execute(
+                "INSERT INTO context_kinds (
+                    kind, display_name, builtin, enabled, created_at, updated_at
+                 ) VALUES ('custom', 'Custom', 1, 1, ?1, ?1)",
+                ["2026-07-25T00:00:00Z"],
+            )
+            .unwrap();
+        let mut parent_id = None::<String>;
+        for index in 0_u32..1_500_u32 {
+            let id = ContextId::new().to_string();
+            let _inserted_context = connection
+                .execute(
+                    "INSERT INTO contexts (
+                        id, kind, context_key, normalized_key, display_name,
+                        owner_principal, parent_id, lifecycle, frozen,
+                        created_at, updated_at
+                     ) VALUES (?1, 'custom', ?2, ?2, ?2, 'owner', ?3,
+                               'active', 0, ?4, ?4)",
+                    rusqlite::params![id, format!("chain/{index}"), parent_id, "2026-07-25T00:00:00Z"],
+                )
+                .unwrap();
+            parent_id = Some(id);
+        }
+
+        validate_sqlite_context_integrity(&connection).unwrap();
+    }
+
+    #[test]
     fn sqlite_fts_contract_accepts_comment_between_module_and_arguments() {
         validate_sqlite_fts_external_content("CREATE VIRTUAL TABLE memory_fts USING fts5/* gap */(content, content=memories, content_rowid=rowid)").unwrap();
     }
@@ -5884,6 +5927,80 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Docker or local PostgreSQL with pgvector; destructive cleanup requires LOCALHOLD_ALLOW_DESTRUCTIVE_PG_SMOKE=1"]
+    async fn present_postgres_schema_accepts_long_acyclic_context_hierarchy() {
+        reset_postgres_migration_database().await;
+        let pool = open_postgres_pool(&postgres_smoke_url()).await.unwrap();
+        let _inserted = query(
+            "
+            INSERT INTO contexts (
+                id, kind, context_key, normalized_key, display_name,
+                owner_principal, parent_id, created_at, updated_at
+            )
+            SELECT
+                'long-chain-' || node,
+                'custom',
+                'custom/long-chain-' || node,
+                'custom/long-chain-' || node,
+                'Long chain ' || node,
+                'chain-owner',
+                CASE WHEN node = 1 THEN NULL ELSE 'long-chain-' || (node - 1) END,
+                NOW(),
+                NOW()
+            FROM generate_series(1, 1500) AS node
+            ORDER BY node
+            ",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        validate_ready_postgres_schema(&pool, TEST_EMBEDDING_DIMENSIONS, true, true).await.unwrap();
+
+        pool.close().await;
+        drop_postgres_migration_schema().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; destructive cleanup requires LOCALHOLD_ALLOW_DESTRUCTIVE_PG_SMOKE=1"]
+    async fn present_postgres_schema_rejects_context_parent_cycle() {
+        reset_postgres_migration_database().await;
+        let pool = open_postgres_pool(&postgres_smoke_url()).await.unwrap();
+        let _inserted = query(
+            "
+            INSERT INTO contexts (
+                id, kind, context_key, normalized_key, display_name,
+                owner_principal, created_at, updated_at
+            ) VALUES
+                ('cycle-a', 'custom', 'custom/cycle-a', 'custom/cycle-a', 'Cycle A', 'cycle-owner', NOW(), NOW()),
+                ('cycle-b', 'custom', 'custom/cycle-b', 'custom/cycle-b', 'Cycle B', 'cycle-owner', NOW(), NOW())
+            ",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let _cycled = query(
+            "
+            UPDATE contexts
+            SET parent_id = CASE id
+                WHEN 'cycle-a' THEN 'cycle-b'
+                WHEN 'cycle-b' THEN 'cycle-a'
+            END
+            WHERE id IN ('cycle-a', 'cycle-b')
+            ",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let error = validate_ready_postgres_schema(&pool, TEST_EMBEDDING_DIMENSIONS, true, true).await.unwrap_err();
+
+        assert!(error.to_string().contains("parent cycle"), "{error}");
+        pool.close().await;
+        drop_postgres_migration_schema().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; destructive cleanup requires LOCALHOLD_ALLOW_DESTRUCTIVE_PG_SMOKE=1"]
     async fn present_postgres_schema_rejects_non_sequence_audit_id_default() {
         reset_postgres_migration_database().await;
         let pool = open_postgres_pool(&postgres_smoke_url()).await.unwrap();
@@ -5892,6 +6009,20 @@ mod tests {
         let err = validate_present_postgres_schema(&pool, TEST_EMBEDDING_DIMENSIONS, true, true).await.unwrap_err();
 
         assert!(err.to_string().contains("memory_audit_log.id"), "{err}");
+        pool.close().await;
+        drop_postgres_migration_schema().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker or local PostgreSQL with pgvector; destructive cleanup requires LOCALHOLD_ALLOW_DESTRUCTIVE_PG_SMOKE=1"]
+    async fn present_postgres_schema_rejects_non_sequence_context_audit_id_default() {
+        reset_postgres_migration_database().await;
+        let pool = open_postgres_pool(&postgres_smoke_url()).await.unwrap();
+        let _altered = query("ALTER TABLE context_audit_events ALTER COLUMN id SET DEFAULT 1").execute(&pool).await.unwrap();
+
+        let err = validate_present_postgres_schema(&pool, TEST_EMBEDDING_DIMENSIONS, true, true).await.unwrap_err();
+
+        assert!(err.to_string().contains("context_audit_events.id"), "{err}");
         pool.close().await;
         drop_postgres_migration_schema().await;
     }

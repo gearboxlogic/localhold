@@ -31,6 +31,12 @@ pub const LEGACY_SYSTEM_PRINCIPAL: &str = "@localhold/legacy-system";
 /// definitions were globally selectable.
 pub const LEGACY_ALL_PRINCIPALS_GRANT: &str = "*";
 
+/// Trusted local principal permitted to mutate operator-layer context policy.
+///
+/// The TUI principal is a local assertion rather than remote authentication,
+/// so operators must still protect database access at the OS/database boundary.
+pub const OPERATOR_PRINCIPAL: &str = "operator";
+
 /// Compatibility value returned for memories with no governed memberships.
 pub const UNRESOLVED_CONTEXT_KEY: &str = "inbox/unresolved";
 
@@ -889,6 +895,9 @@ pub fn evaluate_context_policy(
     if !operator_allowed {
         allowed = false;
     }
+    if operator.and_then(|policy| policy.required) == Some(true) {
+        required = true;
+    }
     if operator_identity_required {
         require_identity = true;
     }
@@ -1399,6 +1408,23 @@ mod tests {
         assert_eq!(effective.allowed_identity_schemes, vec!["uri"]);
         assert_eq!(effective.allowed_companion_kinds, Some(vec![ContextKind::new("project").unwrap()]));
         assert_eq!(effective.guidance, vec!["operator guidance", "principal guidance"]);
+    }
+
+    #[test]
+    fn anchor_cannot_relax_operator_required_context_kind() {
+        let kind = ContextKind::new("domain").unwrap();
+        let operator = ContextKindPolicy {
+            required: Some(true),
+            ..ContextKindPolicy::default()
+        };
+        let anchor = ContextKindPolicy {
+            required: Some(false),
+            ..ContextKindPolicy::default()
+        };
+
+        let effective = evaluate_context_policy(&kind, Some(&operator), None, &[&anchor]);
+
+        assert!(effective.required);
     }
 
     #[test]

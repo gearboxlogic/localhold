@@ -1,6 +1,6 @@
 //! Administrative operations — eviction, scope reassignment, embedding management, and statistics.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 
@@ -189,6 +189,42 @@ impl SqliteStore {
     pub(crate) async fn get_metadata_impl(&self, memory_id: &MemoryId) -> Result<Option<MemoryMetadata>, StoreError> {
         let memory_id_value = *memory_id;
         self.with_conn(move |conn| get_metadata_conn(conn, &memory_id_value)).await
+    }
+
+    pub(crate) async fn get_metadata_batch_impl(&self, memory_ids: &[MemoryId]) -> Result<HashMap<MemoryId, MemoryMetadata>, StoreError> {
+        if memory_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let ids_json = serde_json::to_string(&memory_ids.iter().map(ToString::to_string).collect::<Vec<_>>())?;
+        self.with_conn(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT memory_id, scope_key, summary, agent_label,
+                        created_by_principal, quality_flags, schema_version
+                 FROM memory_metadata
+                 WHERE memory_id IN (SELECT value FROM json_each(?1))",
+            )?;
+            let rows = statement.query_map([ids_json], |row| {
+                let id_str: String = row.get(0)?;
+                let quality_flags_json: String = row.get(5)?;
+                let memory_id = id_str
+                    .parse()
+                    .map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?;
+                let quality_flags =
+                    serde_json::from_str(&quality_flags_json).map_err(|error| rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(error)))?;
+                Ok(MemoryMetadata {
+                    memory_id,
+                    scope_key: row.get(1)?,
+                    summary: row.get(2)?,
+                    agent_label: row.get(3)?,
+                    created_by_principal: row.get(4)?,
+                    quality_flags,
+                    schema_version: row.get(6)?,
+                })
+            })?;
+            let metadata = rows.collect::<Result<Vec<_>, _>>()?;
+            Ok(metadata.into_iter().map(|record| (record.memory_id, record)).collect())
+        })
+        .await
     }
 
     pub(crate) async fn metadata_migration_report_impl(&self) -> Result<MetadataMigrationReport, StoreError> {
@@ -847,6 +883,7 @@ struct ReassignScopeApply<'a> {
 fn apply_reassign_scope(conn: &mut Connection, params: ReassignScopeApply<'_>) -> Result<ReassignScopeOutcome, StoreError> {
     let tx = sqlite_write_tx(conn)?;
     let target_context_id = resolve_or_create_private_legacy_context(&tx, params.to_scope, params.principal, params.now)?;
+    let target_scope_key: String = tx.query_row("SELECT context_key FROM contexts WHERE id = ?1", [&target_context_id], |row| row.get(0))?;
 
     let mut select_sql = "SELECT id FROM memories WHERE json_extract(provenance, '$.source_conversation') = ?1".to_owned();
     let mut select_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(params.from_scope.to_owned())];
@@ -901,7 +938,7 @@ fn apply_reassign_scope(conn: &mut Connection, params: ReassignScopeApply<'_>) -
         );
         let id_strings: Vec<String> = chunk.iter().map(ToString::to_string).collect();
         let mut memory_params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(chunk.len().saturating_add(1));
-        memory_params.push(&params.to_scope);
+        memory_params.push(&target_scope_key);
         for id in &id_strings {
             memory_params.push(id);
         }
@@ -922,7 +959,7 @@ fn apply_reassign_scope(conn: &mut Connection, params: ReassignScopeApply<'_>) -
             metadata_placeholders.join(", ")
         );
         let mut metadata_params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(chunk.len().saturating_add(2));
-        metadata_params.push(&params.to_scope);
+        metadata_params.push(&target_scope_key);
         metadata_params.push(&params.now);
         for id in &id_strings {
             metadata_params.push(id);
@@ -961,7 +998,7 @@ fn apply_reassign_scope(conn: &mut Connection, params: ReassignScopeApply<'_>) -
                     params.now,
                     serde_json::json!({
                         "from_scope": params.from_scope,
-                        "to_scope": params.to_scope,
+                        "to_scope": target_scope_key,
                         "preserved_companion_contexts": context_ids.len().saturating_sub(1),
                     })
                     .to_string(),

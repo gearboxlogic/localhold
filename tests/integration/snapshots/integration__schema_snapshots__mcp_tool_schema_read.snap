@@ -4,7 +4,7 @@ expression: tool
 ---
 {
   "name": "read",
-  "description": "Read one full memory by id. Trusted principals record a meaningful read activity event; anonymous public reads do not.",
+  "description": "Read one full memory by id. Trusted principals record a meaningful read activity event only for full-access reads; redacted and anonymous public reads do not.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$defs": {

@@ -4,9 +4,12 @@
 //! configurable failures into the store and embedding layers, allowing
 //! tests to verify resilience under adverse conditions.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use localhold::{
@@ -175,6 +178,13 @@ impl<S: MemoryReader + Send + Sync> MemoryReader for ChaosStore<S> {
         self.inner.get(id, principal).await
     }
 
+    async fn get_batch(&self, ids: &[MemoryId], principal: Option<&str>) -> Result<localhold::store::MemoryMap, StoreError> {
+        if let Some(err) = self.get_plan.should_fail() {
+            return Err(err);
+        }
+        self.inner.get_batch(ids, principal).await
+    }
+
     async fn search_by_embedding(
         &self,
         embedding: &[f32],
@@ -219,8 +229,8 @@ impl<S: MemoryReader + Send + Sync> MemoryReader for ChaosStore<S> {
         self.inner.get_for_reembed(id, principal).await
     }
 
-    async fn list_with_embeddings(&self, context_ids: Option<&[ContextId]>, limit: usize) -> Result<Vec<MemoryWithEmbedding>, StoreError> {
-        self.inner.list_with_embeddings(context_ids, limit).await
+    async fn list_with_embeddings(&self, context_ids: Option<&[ContextId]>, principal: &str, limit: usize) -> Result<Vec<MemoryWithEmbedding>, StoreError> {
+        self.inner.list_with_embeddings(context_ids, principal, limit).await
     }
 
     async fn query_audit_log(&self, memory_id: &MemoryId, limit: usize) -> Result<Vec<localhold::types::AuditEntry>, StoreError> {
@@ -231,7 +241,7 @@ impl<S: MemoryReader + Send + Sync> MemoryReader for ChaosStore<S> {
         self.inner.get_tombstone(memory_id).await
     }
 
-    async fn fetch_embeddings_for_ids(&self, ids: &[MemoryId]) -> Result<std::collections::HashMap<MemoryId, Vec<f32>>, StoreError> {
+    async fn fetch_embeddings_for_ids(&self, ids: &[MemoryId]) -> Result<HashMap<MemoryId, Vec<f32>>, StoreError> {
         self.inner.fetch_embeddings_for_ids(ids).await
     }
 
@@ -615,6 +625,10 @@ impl<S: MemoryAdmin + Send + Sync> MemoryAdmin for ChaosStore<S> {
         self.inner.get_metadata(memory_id).await
     }
 
+    async fn get_metadata_batch(&self, memory_ids: &[MemoryId]) -> Result<HashMap<MemoryId, MemoryMetadata>, StoreError> {
+        self.inner.get_metadata_batch(memory_ids).await
+    }
+
     async fn metadata_migration_report(&self) -> Result<MetadataMigrationReport, StoreError> {
         self.inner.metadata_migration_report().await
     }
@@ -630,92 +644,176 @@ impl<S: MemoryAdmin + Send + Sync> MemoryAdmin for ChaosStore<S> {
 
 impl<S: ContextReader + Send + Sync> ContextReader for ChaosStore<S> {
     async fn get_context(&self, id: &ContextId, principal: &str) -> Result<Option<ContextDefinition>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.get_context(id, principal).await
     }
 
     async fn list_contexts(&self, principal: &str, include_archived: bool, offset: usize, limit: usize) -> Result<Vec<ContextDefinition>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.list_contexts(principal, include_archived, offset, limit).await
     }
 
     async fn list_context_records(&self, principal: &str, include_archived: bool, offset: usize, limit: usize) -> Result<Vec<ContextRecord>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.list_context_records(principal, include_archived, offset, limit).await
     }
 
     async fn find_context_records(&self, principal: &str, include_archived: bool, lookup: &ContextExactLookup) -> Result<Vec<ContextRecord>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.find_context_records(principal, include_archived, lookup).await
     }
 
     async fn expand_context_selection(&self, context_ids: &[ContextId], principal: &str, include_descendants: bool) -> Result<Vec<ContextDefinition>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.expand_context_selection(context_ids, principal, include_descendants).await
     }
 
     async fn get_memory_contexts(&self, memory_id: &MemoryId, principal: &str) -> Result<Vec<MemoryContext>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.get_memory_contexts(memory_id, principal).await
     }
 
+    async fn get_memory_contexts_batch(&self, memory_ids: &[MemoryId], principal: &str) -> Result<HashMap<MemoryId, Vec<MemoryContext>>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.get_memory_contexts_batch(memory_ids, principal).await
+    }
+
+    async fn count_memory_contexts_for_write(&self, memory_id: &MemoryId, principal: &str) -> Result<Option<usize>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.count_memory_contexts_for_write(memory_id, principal).await
+    }
+
     async fn query_context_audit(&self, context_id: &ContextId, principal: &str, limit: usize) -> Result<Vec<ContextAuditEvent>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.query_context_audit(context_id, principal, limit).await
     }
 
     async fn list_context_kinds(&self) -> Result<Vec<ContextKindDefinition>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.list_context_kinds().await
     }
 
     async fn list_context_kind_policies(&self, principal: &str) -> Result<Vec<ContextKindPolicyRecord>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.list_context_kind_policies(principal).await
     }
 
     async fn list_context_anchor_policies(&self, principal: &str) -> Result<Vec<ContextAnchorPolicyRecord>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.list_context_anchor_policies(principal).await
     }
 
     async fn list_context_grants(&self, context_id: &ContextId, principal: &str) -> Result<Vec<ContextGrant>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.list_context_grants(context_id, principal).await
     }
 }
 
 impl<S: ContextWriter + Send + Sync> ContextWriter for ChaosStore<S> {
     async fn create_context(&self, draft: &ContextCreateDraft, audit: &ContextAuditDraft) -> Result<ContextDefinition, StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.create_context(draft, audit).await
     }
 
     async fn set_context_parent(&self, context_id: &ContextId, parent_id: Option<&ContextId>, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.set_context_parent(context_id, parent_id, principal, audit).await
     }
 
     async fn set_context_lifecycle(&self, context_id: &ContextId, lifecycle: ContextLifecycle, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.set_context_lifecycle(context_id, lifecycle, principal, audit).await
     }
 
     async fn grant_context_use(&self, context_id: &ContextId, grantee_principal: &str, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.grant_context_use(context_id, grantee_principal, principal, audit).await
     }
 
     async fn revoke_context_use(&self, context_id: &ContextId, grantee_principal: &str, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.revoke_context_use(context_id, grantee_principal, principal, audit).await
     }
 
     async fn replace_context_grants(&self, context_id: &ContextId, grantee_principals: &[String], principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.replace_context_grants(context_id, grantee_principals, principal, audit).await
     }
 
     async fn update_context_definition(&self, context_id: &ContextId, patch: &ContextDefinitionPatch, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.update_context_definition(context_id, patch, principal, audit).await
     }
 
     async fn upsert_context_kind(&self, draft: &ContextKindDraft, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.upsert_context_kind(draft, principal, audit).await
     }
 
     async fn upsert_context_kind_policy(&self, draft: &ContextKindPolicyDraft, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.upsert_context_kind_policy(draft, principal, audit).await
     }
 
     async fn upsert_context_anchor_policy(&self, draft: &ContextAnchorPolicyDraft, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.upsert_context_anchor_policy(draft, principal, audit).await
     }
 
+    async fn rollback_unreferenced_legacy_context(&self, context_id: &ContextId, principal: &str) -> Result<bool, StoreError> {
+        self.inner.rollback_unreferenced_legacy_context(context_id, principal).await
+    }
+
     async fn replace_memory_contexts(&self, memory_id: &MemoryId, context_ids: &[ContextId], principal: &str, audit: &ContextAuditDraft) -> Result<WriteOutcome, StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
         self.inner.replace_memory_contexts(memory_id, context_ids, principal, audit).await
     }
 }

@@ -6,12 +6,9 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 
 use crate::{
-    context::{
-        ContextId, ContextKind, LEGACY_ALL_PRINCIPALS_GRANT, LEGACY_SYSTEM_PRINCIPAL, UNRESOLVED_CONTEXT_KEY, validate_implicit_legacy_context_key,
-        validate_legacy_scope_definition,
-    },
+    context::{ContextId, ContextKind, LEGACY_ALL_PRINCIPALS_GRANT, LEGACY_SYSTEM_PRINCIPAL, UNRESOLVED_CONTEXT_KEY},
     error::StoreError,
-    types::{ScopeDefinition, normalize_context_key},
+    types::normalize_context_key,
 };
 
 /// Current on-disk SQLite schema contract.
@@ -767,6 +764,15 @@ fn validate_legacy_scope_registry(tx: &Transaction<'_>) -> Result<(), StoreError
     if invalid_rows != 0 {
         return Err(StoreError::Conflict("legacy scope_registry contains blank keys/names or malformed JSON arrays".into()));
     }
+    let mut timestamps = tx.prepare("SELECT updated_at FROM scope_registry")?;
+    let invalid_timestamp = timestamps
+        .query_map([], |row| row.get::<_, String>(0))?
+        .any(|timestamp| timestamp.map_or(true, |value| DateTime::parse_from_rfc3339(&value).is_err()));
+    if invalid_timestamp {
+        return Err(StoreError::Conflict(
+            "legacy scope_registry contains an updated_at value that is not an RFC3339 timestamp".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -1002,25 +1008,27 @@ fn migrate_legacy_scopes(tx: &Transaction<'_>, now: &str) -> Result<(), StoreErr
 }
 
 fn insert_raw_legacy_scope(scopes: &mut BTreeMap<String, LegacyScope>, key: String) -> Result<(), StoreError> {
-    validate_implicit_legacy_context_key(&key).map_err(|message| StoreError::Conflict(format!("legacy scope cannot be migrated: {message}")))?;
+    if key.trim().is_empty() {
+        return Err(StoreError::Conflict("legacy scope cannot be migrated because its key is blank".into()));
+    }
     let normalized = normalize_context_key(&key);
-    if !normalized.is_empty() && normalized != "inbox/unresolved" {
+    if !normalized.is_empty() && normalized != UNRESOLVED_CONTEXT_KEY {
         let _entry = scopes.entry(normalized).or_insert_with(|| LegacyScope::raw(key));
     }
     Ok(())
 }
 
 fn validate_sqlite_legacy_migration_scope(scope: &LegacyScope) -> Result<(), StoreError> {
-    validate_legacy_scope_definition(&ScopeDefinition {
-        scope_key: scope.key.clone(),
-        display_name: scope.display_name.clone(),
-        description: scope.description.clone(),
-        aliases: scope.aliases.clone(),
-        matchers: scope.hints.clone(),
-        parent: scope.parent.clone(),
-        related: scope.related.clone(),
-    })
-    .map_err(|message| StoreError::Conflict(format!("legacy scope {:?} cannot be migrated: {message}", scope.key)))
+    let invalid = scope.key.trim().is_empty()
+        || scope.display_name.trim().is_empty()
+        || scope.parent.as_deref().is_some_and(|value| value.trim().is_empty())
+        || scope.aliases.iter().chain(&scope.hints).chain(&scope.related).any(|value| value.trim().is_empty());
+    if invalid {
+        return Err(StoreError::Conflict(
+            "legacy scope registry contains a blank key, name, parent, alias, matcher, or relation".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_legacy_parent_graph(scopes: &BTreeMap<String, LegacyScope>) -> Result<(), StoreError> {

@@ -4,7 +4,7 @@ expression: tool
 ---
 {
   "name": "admin_consolidate",
-  "description": "Write/admin: find near-duplicate memories using the server-resolved principal. dry_run=true previews; dry_run=false merges by superseding duplicates.",
+  "description": "Write/admin: find near-duplicate memories using the server-resolved principal. dry_run=true previews; dry_run=false merges by superseding duplicates. Reports when the configured candidate work limit makes the run partial.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$defs": {

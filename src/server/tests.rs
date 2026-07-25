@@ -53,7 +53,7 @@ fn expand_scope_hierarchy_empty_string() {
 #[test]
 fn expand_scope_keys_deduplicates() {
     // Two scopes sharing ancestors should not produce duplicates
-    let result = expand_scope_keys(&["org/project/conv-1".into(), "org/project/conv-2".into()]);
+    let result = expand_scope_keys(&["org/project/conv-1".into(), "org/project/conv-2".into()]).unwrap();
     // Should contain: org/project/conv-1, org/project, org, org/project/conv-2
     // org/project and org appear only once
     assert_eq!(result.len(), 4);
@@ -61,6 +61,15 @@ fn expand_scope_keys_deduplicates() {
     assert_eq!(result[1], "org/project");
     assert_eq!(result[2], "org");
     assert_eq!(result[3], "org/project/conv-2");
+}
+
+#[test]
+fn expand_scope_keys_rejects_excessive_depth_and_cardinality() {
+    let too_deep = std::iter::repeat_n("segment", MAX_LEGACY_SCOPE_DEPTH.saturating_add(1)).collect::<Vec<_>>().join("/");
+    let _depth_error = expand_scope_keys(&[too_deep]).unwrap_err();
+
+    let too_many = (0..=MAX_EXPANDED_LEGACY_SCOPES).map(|index| format!("project/{index}")).collect::<Vec<_>>();
+    let _cardinality_error = expand_scope_keys(&too_many).unwrap_err();
 }
 
 fn search_result_for_match_score(retrieval_score: Option<f64>, reranker_score: Option<f64>, query_relevance: Option<f64>) -> crate::types::SearchResult {

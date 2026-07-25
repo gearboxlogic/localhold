@@ -93,10 +93,10 @@ Returns one full memory by ID plus visible metadata (`summary`, `scope`,
 `agent_label`, `created_by_principal`, `quality_flags`, and
 `unresolved_scope`). Redacted callers receive only fields allowed by the memory
 policy: hidden content suppresses summary, hidden provenance suppresses scope
-and agent label, and creator/quality metadata is full-access only. When a
-trusted principal is available, it records a meaningful read activity event;
-anonymous public reads return
-`activity_recorded: false`.
+and agent label, and creator/quality metadata is full-access only. A trusted
+principal records a meaningful read activity event only for a full-access
+view; redacted views and anonymous public reads return `activity_recorded:
+false`.
 
 Input:
 
@@ -112,16 +112,18 @@ Input:
 
 - `ids`: one or more memory IDs, capped by `limits.max_batch_size`
 
-When a trusted principal is available, the server records one read activity
-event for all found IDs. Anonymous public reads return `activity_recorded:
-false`.
+For a trusted principal, the server records one read activity event for each
+found memory available with full access. Redacted views and anonymous public
+reads return `activity_recorded: false`.
 
 ### `remember`
 
 Stores a memory without rewriting the supplied content. Content-quality
 warnings are advisory. Missing governed context is a validation failure unless
 effective policy supplies a unique default or the caller explicitly sets
-`context.allow_unresolved`.
+`context.allow_unresolved`. Explicit references must all resolve; setting
+`allow_unresolved` never suppresses an invalid, missing, archived, or ambiguous
+explicit reference.
 
 Inputs:
 
@@ -347,7 +349,8 @@ intentional broad authorized search over memories that have at least one
 membership. Contextless memories are excluded. Omitted governed writes fail
 with `context_required` unless policy supplies a unique safe default.
 `{"context":{"allow_unresolved":true}}` is an explicit deferral: it stores no
-memberships and adds the unresolved warning.
+memberships and adds the unresolved warning only when no explicit reference
+failed. It does not turn a failed explicit locator into an unresolved write.
 
 On `revise`, a supplied context envelope replaces the complete ordered
 membership set; omission preserves it. Cards return direct `contexts`. The
@@ -422,6 +425,11 @@ defaults to per-memory write authorization, while its explicit whole-store mode
 is restricted to authenticated local stdio. See the
 [admin capability matrix](security-and-privacy.md#admin-tools) before enabling
 them.
+
+`admin_consolidate` applies write authorization before its configured candidate
+limit. Its response reports `candidate_count` and `capped`; when `capped` is
+true, the preview or merge covers only the newest authorized candidates in that
+run and must not be interpreted as a complete scan.
 
 Bulk `admin_reembed` applies the same per-memory write policy as single-ID
 re-embedding before filling its limit. Inaccessible rows remain unclaimed and

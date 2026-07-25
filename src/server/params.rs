@@ -1982,6 +1982,11 @@ pub struct ConsolidateResponse {
     pub groups: Vec<DuplicateGroupEntry>,
     /// Whether merging was performed.
     pub merged: bool,
+    /// Number of authorized candidates included in this run.
+    pub candidate_count: usize,
+    /// Whether additional authorized candidates were omitted by the
+    /// configured consolidation work limit.
+    pub capped: bool,
 }
 
 /// A group of near-duplicate memories in the consolidation response.

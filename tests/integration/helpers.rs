@@ -418,7 +418,7 @@ pub(crate) async fn setup_noop_server_with_legacy_memories(seeds: Vec<LegacySeed
 /// governance layer, so retrieval tests must make membership explicit.
 pub(crate) async fn attach_legacy_test_contexts(store: &SqliteStore, memory_ids: &[MemoryId], principal: &str, visible_to: &str, scope: &str) {
     let existing = store
-        .list_context_records(principal, true, 1_000, 0)
+        .list_context_records(principal, true, 0, 1_000)
         .await
         .unwrap()
         .into_iter()

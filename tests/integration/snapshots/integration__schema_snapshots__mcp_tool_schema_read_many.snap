@@ -4,7 +4,7 @@ expression: tool
 ---
 {
   "name": "read_many",
-  "description": "Read multiple full memories by id. Preserves input order, returns per-item not_found for missing/unreadable IDs, caps at max_batch_size, and records one read activity event for found IDs only for trusted principals.",
+  "description": "Read multiple full memories by id. Preserves input order, returns per-item not_found for missing/unreadable IDs, caps at max_batch_size, and records one read activity event only for full-access items read by trusted principals.",
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$defs": {

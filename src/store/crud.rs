@@ -6,7 +6,7 @@ use super::{
     EmbeddingProfile, MemoryAuthorizationRef, ReembedClaim, ReembedClaimScope, SqliteStore,
     context_store::{insert_initial_memory_contexts_sqlite, replace_memory_contexts_sqlite_tx},
     merge_metadata_patch,
-    query::{MEMORY_COLUMN_COUNT, MEMORY_COLUMNS, row_to_memory, usize_to_i64},
+    query::{MEMORY_COLUMN_COUNT, MEMORY_COLUMNS, hydrate_entities_for_memories, row_to_memory, usize_to_i64},
     sqlite::ensure_embedding_profile_matches,
     sqlite_write_tx, update_audit_draft_for_locked_memory,
     vector::{SqliteVecIndex, VectorIndex, validate_embedding_vector},
@@ -454,6 +454,26 @@ fn get_by_id(conn: &Connection, id_str: &str, caller: Option<&str>, now: chrono:
     Ok(mem.apply_access_policy(caller))
 }
 
+fn get_batch_by_ids(conn: &Connection, ids: &[MemoryId], caller: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> Result<super::MemoryMap, StoreError> {
+    if ids.is_empty() {
+        return Ok(super::MemoryMap::new());
+    }
+    let id_strings = ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let ids_json = serde_json::to_string(&id_strings)?;
+    let mut stmt = conn.prepare(&format!("SELECT {MEMORY_COLUMNS} FROM memories WHERE id IN (SELECT value FROM json_each(?1))"))?;
+    let mut memories = stmt
+        .query_map([ids_json], |row| {
+            row_to_memory(row).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    memories.retain(|memory| memory.expires_at.is_none_or(|expires_at| now < expires_at));
+    hydrate_entities_for_memories(conn, &mut memories)?;
+    Ok(memories
+        .into_iter()
+        .filter_map(|memory| memory.apply_access_policy(caller).map(|visible| (visible.id, visible)))
+        .collect())
+}
+
 /// Fetch a single memory by its string ID.
 pub(crate) fn fetch_memory_by_id(conn: &Connection, id_str: &str) -> Result<Option<Memory>, StoreError> {
     let mut stmt = conn.prepare(&format!("SELECT {MEMORY_COLUMNS} FROM memories WHERE id = ?1"))?;
@@ -713,25 +733,23 @@ fn apply_authorized_update_if_unmodified_with_metadata(
     if let Some(context_ids) = context_ids {
         let context_audit = context_audit.ok_or_else(|| StoreError::Conflict("optimistic membership replacement requires a context audit".into()))?;
         let compatibility_scope = if let Some(primary) = context_ids.first() {
-            tx.query_row("SELECT context_key FROM contexts WHERE id = ?1", [primary.to_string()], |row| row.get::<_, String>(0))?
+            tx.query_row("SELECT context_key FROM contexts WHERE id = ?1", [primary.to_string()], |row| row.get::<_, String>(0))
+                .optional()?
+                .ok_or_else(|| StoreError::Conflict(format!("primary context {primary} does not exist")))?
         } else {
             UNRESOLVED_CONTEXT_KEY.into()
         };
-        if get_metadata_conn(&tx, id)?.is_none() {
-            upsert_metadata_conn(
-                &tx,
-                &MemoryMetadata {
-                    memory_id: *id,
-                    scope_key: Some(compatibility_scope.clone()),
-                    summary: None,
-                    agent_label: None,
-                    created_by_principal: Some(principal.into()),
-                    quality_flags: Vec::new(),
-                    schema_version: 1,
-                },
-                &revision_at_text,
-            )?;
-        }
+        let mut metadata = get_metadata_conn(&tx, id)?.unwrap_or_else(|| MemoryMetadata {
+            memory_id: *id,
+            scope_key: None,
+            summary: None,
+            agent_label: None,
+            created_by_principal: Some(principal.into()),
+            quality_flags: Vec::new(),
+            schema_version: 1,
+        });
+        metadata.scope_key = Some(compatibility_scope.clone());
+        upsert_metadata_conn(&tx, &metadata, &revision_at_text)?;
         replace_memory_contexts_sqlite_tx(&tx, id, context_ids, principal, &compatibility_scope, context_audit, &revision_at_text)?;
     }
     let audit = update_audit_draft_for_locked_memory(audit, update, &existing);
@@ -1159,10 +1177,15 @@ fn claim_for_reembed_conn(conn: &mut Connection, params: &ReembedClaimParams<'_>
 /// Returns `MemoryWithEmbedding` pairs with the embedding vector loaded from
 /// the vec0 table. Results are capped at `limit` and ordered by creation time
 /// descending.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the governed applicability query keeps its indexed broad and selected-context branches together"
+)]
 fn list_memories_with_embeddings(
     conn: &Connection,
     vector_index: &SqliteVecIndex,
     context_ids: Option<&[ContextId]>,
+    principal: &str,
     limit: usize,
 ) -> Result<Vec<super::MemoryWithEmbedding>, StoreError> {
     use std::fmt::Write as _;
@@ -1172,16 +1195,36 @@ fn list_memories_with_embeddings(
     let mut sql = format!(
         "SELECT {MEMORY_COLUMNS} \
          FROM memories m \
-         WHERE m.has_embedding = 1 AND m.superseded_by IS NULL"
+         WHERE m.has_embedding = 1
+           AND m.superseded_by IS NULL
+           AND (
+               json_extract(m.provenance, '$.source_agent') = ?1
+               OR (
+                   json_extract(m.access_policy, '$.type') = 'public'
+                   AND json_extract(m.provenance, '$.source_agent') IS NULL
+               )
+               OR (
+                   json_extract(m.access_policy, '$.type') = 'restricted'
+                   AND EXISTS (
+                       SELECT 1
+                       FROM json_each(m.access_policy, '$.allowed')
+                       WHERE value = ?1
+                   )
+               )
+           )"
     );
-    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-    let mut next_idx = 1_usize;
+    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(principal.to_owned())];
+    let mut next_idx = 2_usize;
 
     if let Some(context_ids) = context_ids {
         sql.push_str(
             " AND EXISTS (
-                SELECT 1 FROM memory_contexts AS governed_membership
+                SELECT 1
+                FROM memory_contexts AS governed_membership
+                JOIN contexts AS governed_context
+                  ON governed_context.id = governed_membership.context_id
                 WHERE governed_membership.memory_id = m.id
+                  AND governed_context.lifecycle = 'active'
             )",
         );
         if !context_ids.is_empty() {
@@ -1196,6 +1239,7 @@ fn list_memories_with_embeddings(
                     JOIN contexts AS attached_context
                       ON attached_context.id = attached_membership.context_id
                     WHERE attached_membership.memory_id = m.id
+                      AND attached_context.lifecycle = 'active'
                       AND NOT EXISTS (
                           SELECT 1
                           FROM memory_contexts AS compatible_membership
@@ -1203,6 +1247,7 @@ fn list_memories_with_embeddings(
                             ON compatible_context.id = compatible_membership.context_id
                           WHERE compatible_membership.memory_id = m.id
                             AND compatible_context.kind = attached_context.kind
+                            AND compatible_context.lifecycle = 'active'
                             AND compatible_membership.context_id IN ({})
                       )
                 )",
@@ -1373,10 +1418,22 @@ pub(crate) fn content_hash(content: &str) -> String {
     format!("{:016x}", fnv1a_hash(content.as_bytes()))
 }
 
+#[derive(Clone, Copy)]
 enum RecordUseStatus {
     Recorded,
     Denied,
     NotFound,
+}
+
+fn accumulate_record_use_outcome(outcome: &mut super::RecordUseOutcome, id: MemoryId, status: RecordUseStatus) {
+    match status {
+        RecordUseStatus::Recorded => {
+            outcome.recorded_ids.push(id);
+            outcome.recorded = outcome.recorded.saturating_add(1);
+        }
+        RecordUseStatus::Denied => outcome.denied = outcome.denied.saturating_add(1),
+        RecordUseStatus::NotFound => outcome.not_found = outcome.not_found.saturating_add(1),
+    }
 }
 
 /// Process a single memory-use update inside a transaction: read current state,
@@ -1536,6 +1593,7 @@ impl SqliteStore {
             .provenance
             .source_agent
             .as_deref()
+            .filter(|principal| !principal.trim().is_empty())
             .ok_or_else(|| StoreError::Conflict("governed memory writes require a source principal".into()))?;
         let prepared = PreparedMemoryRow::from_memory(memory, embedding)?;
         let supersedes_id = supersedes_id.map(ToString::to_string);
@@ -1564,6 +1622,13 @@ impl SqliteStore {
         let caller = principal.map(String::from);
         let now = self.clock_now();
         self.with_conn(move |conn| get_by_id(conn, &id_str, caller.as_deref(), now)).await
+    }
+
+    pub(crate) async fn get_batch_impl(&self, ids: &[MemoryId], principal: Option<&str>) -> Result<super::MemoryMap, StoreError> {
+        let ids = ids.to_vec();
+        let caller = principal.map(str::to_owned);
+        let now = self.clock_now();
+        self.with_conn(move |conn| get_batch_by_ids(conn, &ids, caller.as_deref(), now)).await
     }
 
     pub(crate) async fn update_impl(&self, id: &MemoryId, update: &MemoryUpdate) -> Result<bool, StoreError> {
@@ -1723,7 +1788,13 @@ impl SqliteStore {
             if memory_with_embedding.memory.provenance.source_conversation.as_deref() != Some(compatibility_scope) {
                 return Err(StoreError::Conflict("memory provenance and metadata compatibility scope must match".into()));
             }
-            if memory_with_embedding.memory.provenance.source_agent.as_deref().is_none_or(str::is_empty) {
+            if memory_with_embedding
+                .memory
+                .provenance
+                .source_agent
+                .as_deref()
+                .is_none_or(|principal| principal.trim().is_empty())
+            {
                 return Err(StoreError::Conflict("governed memory writes require a source principal".into()));
             }
         }
@@ -1739,6 +1810,7 @@ impl SqliteStore {
                     .provenance
                     .source_agent
                     .clone()
+                    .filter(|principal| !principal.trim().is_empty())
                     .ok_or_else(|| StoreError::Conflict("governed memory writes require a source principal".into()))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -2138,17 +2210,14 @@ impl SqliteStore {
         // Deduplicate IDs to prevent a single request from inflating
         // activity_mass by repeating the same memory ID.
         let mut seen = std::collections::HashSet::new();
-        let id_strs: Vec<String> = ids.iter().filter(|id| seen.insert(**id)).map(ToString::to_string).collect();
+        let id_pairs: Vec<(MemoryId, String)> = ids.iter().filter(|id| seen.insert(**id)).map(|id| (*id, id.to_string())).collect();
         let principal = principal.to_owned();
         let now_str = now.to_rfc3339();
         self.with_conn(move |conn| {
             let tx = sqlite_write_tx(conn)?;
-            let outcome = id_strs.iter().try_fold(super::RecordUseOutcome::default(), |mut acc, id_str| {
-                match update_single_memory_use(&tx, id_str, &principal, &now_str, now, event_weight, activity_half_life_hours)? {
-                    RecordUseStatus::Recorded => acc.recorded = acc.recorded.saturating_add(1),
-                    RecordUseStatus::Denied => acc.denied = acc.denied.saturating_add(1),
-                    RecordUseStatus::NotFound => acc.not_found = acc.not_found.saturating_add(1),
-                }
+            let outcome = id_pairs.iter().try_fold(super::RecordUseOutcome::default(), |mut acc, (id, id_str)| {
+                let status = update_single_memory_use(&tx, id_str, &principal, &now_str, now, event_weight, activity_half_life_hours)?;
+                accumulate_record_use_outcome(&mut acc, *id, status);
                 Ok::<_, StoreError>(acc)
             })?;
             tx.commit()?;
@@ -2194,10 +2263,11 @@ impl SqliteStore {
         self.with_conn(move |conn| vector_index.fetch_many(conn, &ids)).await
     }
 
-    pub(crate) async fn list_with_embeddings_impl(&self, context_ids: Option<&[ContextId]>, limit: usize) -> Result<Vec<super::MemoryWithEmbedding>, StoreError> {
+    pub(crate) async fn list_with_embeddings_impl(&self, context_ids: Option<&[ContextId]>, principal: &str, limit: usize) -> Result<Vec<super::MemoryWithEmbedding>, StoreError> {
         let context_ids = context_ids.map(<[ContextId]>::to_vec);
+        let principal = principal.to_owned();
         let vector_index = self.vector_index();
-        self.with_conn(move |conn| list_memories_with_embeddings(conn, &vector_index, context_ids.as_deref(), limit))
+        self.with_conn(move |conn| list_memories_with_embeddings(conn, &vector_index, context_ids.as_deref(), &principal, limit))
             .await
     }
 

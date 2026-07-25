@@ -17,7 +17,7 @@ use crate::{
         ContextDefinitionPatch, ContextExactLookup, ContextGrant, ContextId, ContextIdentity, ContextKind, ContextKindDefinition, ContextKindDraft, ContextKindPolicy,
         ContextKindPolicyDraft, ContextKindPolicyRecord, ContextLifecycle, ContextPolicyLayer, ContextRecord, ContextSimilarityQuery, LEGACY_ALL_PRINCIPALS_GRANT,
         LEGACY_SYSTEM_PRINCIPAL, MAX_CONTEXT_CONFIRMATIONS, MAX_CONTEXT_DESCRIPTION_LEN, MAX_CONTEXT_DISPLAY_NAME_LEN, MAX_CONTEXT_HINTS, MAX_CONTEXT_REFS,
-        MAX_CONTEXT_SURFACE_LEN, MemoryContext,
+        MAX_CONTEXT_SURFACE_LEN, MemoryContext, OPERATOR_PRINCIPAL,
     },
     error::StoreError,
     types::{AccessLevel, AccessPolicy, MemoryId, Provenance, WriteOutcome, normalize_context_key, write_access_allowed},
@@ -136,6 +136,27 @@ fn parse_context_row(row: ContextRow) -> Result<ContextDefinition, StoreError> {
         created_at: parse_timestamp(&row.created_at, "contexts.created_at")?,
         updated_at: parse_timestamp(&row.updated_at, "contexts.updated_at")?,
     })
+}
+
+fn parse_sqlite_memory_context_batch_row(row: &Row<'_>, principal: &str) -> Result<Option<MemoryContext>, StoreError> {
+    let provenance: Provenance = serde_json::from_str(&row.get::<_, String>(14)?)?;
+    let access_policy: AccessPolicy = serde_json::from_str(&row.get::<_, String>(15)?)?;
+    if !memory_read_allowed(&provenance, &access_policy, principal) {
+        return Ok(None);
+    }
+    let memory_id = MemoryId::from_str(&row.get::<_, String>(13)?).map_err(|error| StoreError::Serialization(Box::new(error)))?;
+    let ordinal: i64 = row.get(12)?;
+    Ok(Some(MemoryContext {
+        memory_id,
+        context: parse_context_row(read_context_row(row)?)?,
+        ordinal: u32::try_from(ordinal).map_err(|error| StoreError::Serialization(Box::new(error)))?,
+    }))
+}
+
+fn append_memory_context(memberships: &mut HashMap<MemoryId, Vec<MemoryContext>>, membership: Option<MemoryContext>) {
+    if let Some(membership) = membership {
+        memberships.entry(membership.memory_id).or_default().push(membership);
+    }
 }
 
 fn sqlite_usize(value: usize, field: &str) -> Result<i64, StoreError> {
@@ -329,6 +350,9 @@ fn require_mutable_owned_context(tx: &Transaction<'_>, context_id: &ContextId, p
 }
 
 fn validate_audit_actor(audit: &ContextAuditDraft, principal: &str) -> Result<(), StoreError> {
+    if principal.trim().is_empty() || audit.actor_principal.trim().is_empty() {
+        return Err(StoreError::Conflict("context audit actor and authorized principal cannot be blank".into()));
+    }
     if audit.actor_principal != principal {
         return Err(StoreError::Conflict("context audit actor must match the authorized principal".into()));
     }
@@ -1036,6 +1060,52 @@ impl ContextReader for SqliteStore {
         .await
     }
 
+    async fn get_memory_contexts_batch(&self, memory_ids: &[MemoryId], principal: &str) -> Result<HashMap<MemoryId, Vec<MemoryContext>>, StoreError> {
+        if memory_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let ids_json = serde_json::to_string(&memory_ids.iter().map(ToString::to_string).collect::<Vec<_>>())?;
+        let principal = principal.to_owned();
+        self.with_conn(move |conn| {
+            let sql = format!(
+                "SELECT {CONTEXT_COLUMNS}, membership.ordinal, membership.memory_id,
+                        memory_row.provenance, memory_row.access_policy
+                 FROM memory_contexts AS membership
+                 JOIN memories AS memory_row ON memory_row.id = membership.memory_id
+                 JOIN contexts AS context_row ON context_row.id = membership.context_id
+                 WHERE membership.memory_id IN (SELECT value FROM json_each(?2))
+                   AND {}
+                 ORDER BY membership.memory_id, membership.ordinal",
+                context_visible_sql("context_row")
+            );
+            let mut statement = conn.prepare(&sql)?;
+            let mut rows = statement.query(params![principal, ids_json])?;
+            let mut memberships = HashMap::<MemoryId, Vec<MemoryContext>>::new();
+            while let Some(row) = rows.next()? {
+                append_memory_context(&mut memberships, parse_sqlite_memory_context_batch_row(row, &principal)?);
+            }
+            Ok(memberships)
+        })
+        .await
+    }
+
+    async fn count_memory_contexts_for_write(&self, memory_id: &MemoryId, principal: &str) -> Result<Option<usize>, StoreError> {
+        let owned_memory_id = *memory_id;
+        let principal = principal.to_owned();
+        self.with_conn(move |conn| {
+            let Some(memory) = fetch_memory_by_id(conn, &owned_memory_id.to_string())? else {
+                return Ok(None);
+            };
+            if !write_access_allowed(&memory.provenance, &memory.access_policy, &principal) {
+                return Ok(None);
+            }
+            let count: i64 = conn.query_row("SELECT COUNT(*) FROM memory_contexts WHERE memory_id = ?1", [owned_memory_id.to_string()], |row| row.get(0))?;
+            let count = usize::try_from(count).map_err(|error| StoreError::Serialization(Box::new(error)))?;
+            Ok(Some(count))
+        })
+        .await
+    }
+
     async fn query_context_audit(&self, context_id: &ContextId, principal: &str, limit: usize) -> Result<Vec<ContextAuditEvent>, StoreError> {
         let owned_context_id = *context_id;
         let principal = principal.to_owned();
@@ -1502,6 +1572,9 @@ impl ContextWriter for SqliteStore {
                     if !draft.principal.is_empty() {
                         return Err(StoreError::Conflict("operator policy principal must be empty".into()));
                     }
+                    if principal != OPERATOR_PRINCIPAL {
+                        return Err(StoreError::Conflict(format!("operator policy mutation requires principal {OPERATOR_PRINCIPAL:?}")));
+                    }
                     ""
                 }
                 ContextPolicyLayer::Principal => {
@@ -1562,6 +1635,71 @@ impl ContextWriter for SqliteStore {
             insert_context_audit(&tx, &audit, Some(&draft.anchor_context_id), None, &now)?;
             tx.commit()?;
             Ok(())
+        })
+        .await
+    }
+
+    async fn rollback_unreferenced_legacy_context(&self, context_id: &ContextId, principal: &str) -> Result<bool, StoreError> {
+        let context_id = context_id.to_string();
+        let principal = principal.to_owned();
+        self.with_conn(move |conn| {
+            let tx = sqlite_write_tx(conn)?;
+            let removed = tx.execute(
+                "DELETE FROM contexts
+                 WHERE id = ?1
+                   AND owner_principal = ?2
+                   AND kind = 'custom'
+                   AND frozen = 0
+                   AND NOT EXISTS (SELECT 1 FROM memory_contexts WHERE context_id = ?1)
+                   AND NOT EXISTS (SELECT 1 FROM contexts WHERE parent_id = ?1)
+                   AND NOT EXISTS (SELECT 1 FROM context_grants WHERE context_id = ?1)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM context_relations
+                       WHERE from_context_id = ?1 OR to_context_id = ?1
+                   )
+                   AND NOT EXISTS (SELECT 1 FROM context_aliases WHERE context_id = ?1)
+                   AND NOT EXISTS (SELECT 1 FROM context_identities WHERE context_id = ?1)
+                   AND NOT EXISTS (SELECT 1 FROM context_resolver_hints WHERE context_id = ?1)
+                   AND NOT EXISTS (SELECT 1 FROM context_anchor_overrides WHERE anchor_context_id = ?1)
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM context_kind_policies AS policy,
+                            json_tree(policy.policy_json) AS field
+                       WHERE field.key = 'default_context_id'
+                         AND field.value = ?1
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM context_anchor_overrides AS policy,
+                            json_tree(policy.policy_json) AS field
+                       WHERE field.key = 'default_context_id'
+                         AND field.value = ?1
+                   )
+                   AND (
+                       SELECT COUNT(*) FROM context_audit_events
+                       WHERE context_id = ?1
+                   ) = 1
+                   AND EXISTS (
+                       SELECT 1 FROM context_audit_events
+                       WHERE context_id = ?1
+                         AND actor_principal = ?2
+                         AND action = 'legacy_scope_context_created'
+                         AND memory_id IS NULL
+                   )",
+                params![context_id, principal],
+            )?;
+            if removed == 1 {
+                let _removed_audit = tx.execute(
+                    "DELETE FROM context_audit_events
+                     WHERE context_id = ?1
+                       AND actor_principal = ?2
+                       AND action = 'legacy_scope_context_created'
+                       AND memory_id IS NULL",
+                    params![context_id, principal],
+                )?;
+            }
+            tx.commit()?;
+            Ok(removed == 1)
         })
         .await
     }
@@ -1700,7 +1838,7 @@ async fn validate_policy_default_postgres(
     let Some(default_id) = policy.default_context_id else {
         return Ok(());
     };
-    let default_kind: Option<String> = query_scalar("SELECT kind FROM contexts WHERE id = $1 AND lifecycle = 'active'")
+    let default_kind: Option<String> = query_scalar("SELECT kind FROM contexts WHERE id = $1 AND lifecycle = 'active' FOR KEY SHARE")
         .bind(default_id.to_string())
         .fetch_optional(&mut **tx)
         .await?;
@@ -2164,6 +2302,75 @@ impl ContextReader for PostgresStore {
                 })
             })
             .collect()
+    }
+
+    async fn get_memory_contexts_batch(&self, memory_ids: &[MemoryId], principal: &str) -> Result<HashMap<MemoryId, Vec<MemoryContext>>, StoreError> {
+        if memory_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let ids = memory_ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let rows = query(
+            "SELECT context_row.id, context_row.kind, context_row.context_key,
+                    context_row.display_name, context_row.description,
+                    context_row.owner_principal, context_row.guidance,
+                    context_row.parent_id, context_row.lifecycle, context_row.frozen,
+                    context_row.created_at, context_row.updated_at,
+                    membership.ordinal, membership.memory_id,
+                    memory_row.provenance, memory_row.access_policy
+             FROM memory_contexts AS membership
+             JOIN memories AS memory_row ON memory_row.id = membership.memory_id
+             JOIN contexts AS context_row ON context_row.id = membership.context_id
+             WHERE membership.memory_id = ANY($2)
+               AND (
+                   context_row.owner_principal = $1 OR EXISTS (
+                       SELECT 1 FROM context_grants AS grant_row
+                       WHERE grant_row.context_id = context_row.id
+                         AND grant_row.grantee_principal IN ($1, '*')
+                   )
+               )
+             ORDER BY membership.memory_id, membership.ordinal",
+        )
+        .bind(principal)
+        .bind(ids)
+        .fetch_all(self.pool())
+        .await?;
+        let mut memberships = HashMap::<MemoryId, Vec<MemoryContext>>::new();
+        for row in &rows {
+            let Json(provenance): Json<Provenance> = row.try_get("provenance")?;
+            let Json(access_policy): Json<AccessPolicy> = row.try_get("access_policy")?;
+            if !memory_read_allowed(&provenance, &access_policy, principal) {
+                continue;
+            }
+            let memory_id = MemoryId::from_str(&row.try_get::<String, _>("memory_id")?).map_err(|error| StoreError::Serialization(Box::new(error)))?;
+            let ordinal: i64 = row.try_get("ordinal")?;
+            memberships.entry(memory_id).or_default().push(MemoryContext {
+                memory_id,
+                context: parse_postgres_context_row(row)?,
+                ordinal: u32::try_from(ordinal).map_err(|error| StoreError::Serialization(Box::new(error)))?,
+            });
+        }
+        Ok(memberships)
+    }
+
+    async fn count_memory_contexts_for_write(&self, memory_id: &MemoryId, principal: &str) -> Result<Option<usize>, StoreError> {
+        let authorization = query("SELECT provenance, access_policy FROM memories WHERE id = $1")
+            .bind(memory_id.to_string())
+            .fetch_optional(self.pool())
+            .await?;
+        let Some(authorization) = authorization else {
+            return Ok(None);
+        };
+        let Json(provenance): Json<Provenance> = authorization.try_get("provenance")?;
+        let Json(access_policy): Json<AccessPolicy> = authorization.try_get("access_policy")?;
+        if !write_access_allowed(&provenance, &access_policy, principal) {
+            return Ok(None);
+        }
+        let count: i64 = query_scalar("SELECT COUNT(*) FROM memory_contexts WHERE memory_id = $1")
+            .bind(memory_id.to_string())
+            .fetch_one(self.pool())
+            .await?;
+        let count = usize::try_from(count).map_err(|error| StoreError::Serialization(Box::new(error)))?;
+        Ok(Some(count))
     }
 
     async fn query_context_audit(&self, context_id: &ContextId, principal: &str, limit: usize) -> Result<Vec<ContextAuditEvent>, StoreError> {
@@ -2772,6 +2979,9 @@ impl ContextWriter for PostgresStore {
                 if !draft.principal.is_empty() {
                     return Err(StoreError::Conflict("operator policy principal must be empty".into()));
                 }
+                if principal != OPERATOR_PRINCIPAL {
+                    return Err(StoreError::Conflict(format!("operator policy mutation requires principal {OPERATOR_PRINCIPAL:?}")));
+                }
                 ""
             }
             ContextPolicyLayer::Principal => {
@@ -2836,6 +3046,89 @@ impl ContextWriter for PostgresStore {
         insert_postgres_context_audit(&mut tx, audit, Some(&draft.anchor_context_id), None, now).await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "PostgreSQL compensation checks every relational and JSON policy reference before its atomic delete"
+    )]
+    async fn rollback_unreferenced_legacy_context(&self, context_id: &ContextId, principal: &str) -> Result<bool, StoreError> {
+        let mut tx = self.pool().begin().await?;
+        let locked: Option<String> = query_scalar("SELECT id FROM contexts WHERE id = $1 FOR UPDATE")
+            .bind(context_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await?;
+        if locked.is_none() {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        let removed = query(
+            "DELETE FROM contexts
+             WHERE id = $1
+               AND owner_principal = $2
+               AND kind = 'custom'
+               AND frozen = FALSE
+               AND NOT EXISTS (SELECT 1 FROM memory_contexts WHERE context_id = $1)
+               AND NOT EXISTS (SELECT 1 FROM contexts WHERE parent_id = $1)
+               AND NOT EXISTS (SELECT 1 FROM context_grants WHERE context_id = $1)
+               AND NOT EXISTS (
+                   SELECT 1 FROM context_relations
+                   WHERE from_context_id = $1 OR to_context_id = $1
+               )
+               AND NOT EXISTS (SELECT 1 FROM context_aliases WHERE context_id = $1)
+               AND NOT EXISTS (SELECT 1 FROM context_identities WHERE context_id = $1)
+               AND NOT EXISTS (SELECT 1 FROM context_resolver_hints WHERE context_id = $1)
+               AND NOT EXISTS (SELECT 1 FROM context_anchor_overrides WHERE anchor_context_id = $1)
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM context_kind_policies AS policy
+                   CROSS JOIN LATERAL jsonb_path_query(
+                       policy.policy_json,
+                       'strict $.**.default_context_id'
+                   ) AS default_id
+                   WHERE default_id = to_jsonb($1::text)
+               )
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM context_anchor_overrides AS policy
+                   CROSS JOIN LATERAL jsonb_path_query(
+                       policy.policy_json,
+                       'strict $.**.default_context_id'
+                   ) AS default_id
+                   WHERE default_id = to_jsonb($1::text)
+               )
+               AND (
+                   SELECT COUNT(*) FROM context_audit_events
+                   WHERE context_id = $1
+               ) = 1
+               AND EXISTS (
+                   SELECT 1 FROM context_audit_events
+                   WHERE context_id = $1
+                     AND actor_principal = $2
+                     AND action = 'legacy_scope_context_created'
+                     AND memory_id IS NULL
+               )",
+        )
+        .bind(context_id.to_string())
+        .bind(principal)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if removed == 1 {
+            let _removed_audit = query(
+                "DELETE FROM context_audit_events
+                 WHERE context_id = $1
+                   AND actor_principal = $2
+                   AND action = 'legacy_scope_context_created'
+                   AND memory_id IS NULL",
+            )
+            .bind(context_id.to_string())
+            .bind(principal)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(removed == 1)
     }
 
     async fn replace_memory_contexts(&self, memory_id: &MemoryId, context_ids: &[ContextId], principal: &str, audit: &ContextAuditDraft) -> Result<WriteOutcome, StoreError> {

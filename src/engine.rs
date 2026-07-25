@@ -17,7 +17,7 @@ pub(crate) use crate::consolidation::{ConsolidateResult, DuplicateGroup};
 use crate::{
     background_tasks::{BackgroundTaskKind, BackgroundTasks},
     clock::{Clock, SystemClock},
-    config::{LimitsConfig, SearchConfig},
+    config::{LimitsConfig, MAX_CONSOLIDATION_CANDIDATE_LIMIT_CEILING, MAX_CONSOLIDATION_NEIGHBOR_LIMIT_CEILING, SearchConfig},
     consolidation::{NeighborPair, cosine_to_l2_threshold, find_duplicate_groups_from_pairs, l2_to_cosine},
     context::{ContextAuditDraft, ContextId},
     embedding::{EmbeddingProvider, limited::ConcurrencyLimitedEmbedding, orchestrator::EmbeddingOrchestrator},
@@ -25,9 +25,9 @@ use crate::{
     scoring::{apply_composite_scoring, seed_retrieval_scores},
     store::{MemoryStore, RecordUseOutcome},
     types::{
-        AccessPolicy, AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Confidence, Entity, Importance, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats,
-        MemoryTombstone, MemoryType, MemoryUpdate, MetadataMigrationOutcome, MetadataMigrationReport, MetadataPatch, Provenance, QueryContext, RedactableField, ScopeDefinition,
-        SearchMode, SearchResult, WriteOutcome,
+        ANONYMOUS_PRINCIPAL, AccessPolicy, AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Confidence, Entity, Importance, Memory, MemoryFilter, MemoryId,
+        MemoryMetadata, MemoryStats, MemoryTombstone, MemoryType, MemoryUpdate, MetadataMigrationOutcome, MetadataMigrationReport, MetadataPatch, Provenance, QueryContext,
+        RedactableField, ScopeDefinition, SearchMode, SearchResult, WriteOutcome,
     },
     validation::{
         normalize_entities, normalize_optional_non_empty, ttl_seconds_to_expiry, validate_batch_len, validate_content_length, validate_max_distance, validate_non_blank,
@@ -250,8 +250,6 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> std::fmt::Debug for Loc
 
 #[expect(clippy::multiple_inherent_impl, reason = "separate constructors/accessors from the large operation impl for readability")]
 impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
-    const MAX_CONSOLIDATION_FETCH: usize = 1_000_000;
-
     // -- constructors -------------------------------------------------------
 
     /// Create a new engine with the given store, embedding provider, and operational limits.
@@ -430,7 +428,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
     /// Returns `EngineError::Store` if the persistence layer rejects the write
     /// or if the superseded memory does not exist.
     pub async fn store_memory(&self, memory: Memory, supersedes: Option<&MemoryId>) -> Result<MemoryId, EngineError> {
-        let principal = memory.provenance.source_agent.clone();
+        let principal = memory.provenance.source_agent.clone().filter(|principal| !principal.trim().is_empty());
         let embed_admission = self.orchestrator.begin_embed_admission()?;
         let details = supersedes.map(|s| serde_json::json!({"supersedes": s.to_string()}));
         let audit = self.audit_draft(AuditAction::Store, principal, details);
@@ -473,7 +471,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         context_ids: &[ContextId],
     ) -> Result<MemoryId, EngineError> {
         let principal = memory.provenance.source_agent.clone();
-        let actor = principal.clone().unwrap_or_default();
+        let actor = principal.clone().unwrap_or_else(|| ANONYMOUS_PRINCIPAL.to_owned());
         let embed_admission = self.orchestrator.begin_embed_admission()?;
         let audit = self.audit_draft(AuditAction::Store, principal, supersedes.map(|id| serde_json::json!({ "supersedes": id.to_string() })));
         let context_audit = ContextAuditDraft {
@@ -834,6 +832,15 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
     /// Returns `EngineError::Store` on persistence-layer failure.
     pub async fn get_memory(&self, id: &MemoryId, caller: Option<&str>) -> Result<Option<Memory>, EngineError> {
         Ok(self.orchestrator.store().get(id, caller).await?)
+    }
+
+    /// Retrieve authorized memories for a batch of IDs.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Store` on persistence-layer failure.
+    pub async fn get_memories(&self, ids: &[MemoryId], caller: Option<&str>) -> Result<crate::store::MemoryMap, EngineError> {
+        Ok(self.orchestrator.store().get_batch(ids, caller).await?)
     }
 
     /// Update a memory with authorization check, spawning a re-embed task when content changes.
@@ -1315,7 +1322,12 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
             .iter()
             .zip(&context_ids)
             .map(|(memory, ids)| ContextAuditDraft {
-                actor_principal: memory.provenance.source_agent.clone().unwrap_or_default(),
+                actor_principal: memory
+                    .provenance
+                    .source_agent
+                    .clone()
+                    .filter(|principal| !principal.trim().is_empty())
+                    .unwrap_or_else(|| ANONYMOUS_PRINCIPAL.to_owned()),
                 action: "memory_contexts_initialized".to_owned(),
                 context_id: None,
                 memory_id: Some(memory.id),
@@ -1438,6 +1450,18 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
 
     // -- Wave 4: consolidation + audit -------------------------------------------
 
+    /// Return the effective per-run candidate limit, including the hard
+    /// ceiling for library callers that bypass configuration-file validation.
+    fn consolidation_candidate_limit(&self) -> usize {
+        self.limits.consolidation_candidate_limit.min(MAX_CONSOLIDATION_CANDIDATE_LIMIT_CEILING)
+    }
+
+    /// Return the effective per-candidate ANN limit, including the hard
+    /// ceiling for library callers that bypass configuration-file validation.
+    fn consolidation_neighbor_limit(&self) -> usize {
+        self.limits.consolidation_neighbor_limit.min(MAX_CONSOLIDATION_NEIGHBOR_LIMIT_CEILING)
+    }
+
     /// Find groups of near-duplicate memories based on embedding similarity.
     ///
     /// When `dry_run` is `false`, supersedes duplicate members in each group,
@@ -1465,19 +1489,20 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
 
         let store = self.orchestrator.store();
 
-        // Fetch all non-superseded memories with embeddings. BFS is O(n log n),
-        // so we use a very high limit instead of the old quadratic-constrained cap.
-        let memories: Vec<_> = store
-            .list_with_embeddings(context_ids, Self::MAX_CONSOLIDATION_FETCH)
-            .await?
-            .into_iter()
-            .filter(|memory| memory.memory.has_write_access(principal))
-            .collect();
+        // Authorization and context applicability are applied before LIMIT so
+        // inaccessible rows never consume the bounded candidate budget.
+        let candidate_limit = self.consolidation_candidate_limit();
+        let mut memories = store.list_with_embeddings(context_ids, principal, candidate_limit.saturating_add(1)).await?;
+        let capped = memories.len() > candidate_limit;
+        memories.truncate(candidate_limit);
+        let candidate_count = memories.len();
 
         if memories.len() < 2 {
             return Ok(ConsolidateResult {
                 groups: Vec::new(),
                 merged: false,
+                candidate_count,
+                capped,
             });
         }
 
@@ -1487,7 +1512,12 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         let groups = find_duplicate_groups_from_pairs(&memories, &pairs, limit);
 
         if groups.is_empty() || dry_run {
-            return Ok(ConsolidateResult { groups, merged: false });
+            return Ok(ConsolidateResult {
+                groups,
+                merged: false,
+                candidate_count,
+                capped,
+            });
         }
 
         // Merge: supersede non-representative members.
@@ -1495,7 +1525,12 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
             self.merge_consolidation_group(store, group, principal).await?;
         }
 
-        Ok(ConsolidateResult { groups, merged: true })
+        Ok(ConsolidateResult {
+            groups,
+            merged: true,
+            candidate_count,
+            capped,
+        })
     }
 
     /// BFS frontier expansion over the ANN similarity graph.
@@ -1510,12 +1545,13 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
         use std::collections::{HashMap, HashSet, VecDeque};
 
         let max_l2 = cosine_to_l2_threshold(similarity_threshold);
-        let neighbor_limit = self.limits.consolidation_neighbor_limit;
+        let neighbor_limit = self.consolidation_neighbor_limit();
 
         // Build ID → index lookup.
         let id_to_idx: HashMap<MemoryId, usize> = memories.iter().enumerate().map(|(i, m)| (m.memory.id, i)).collect();
 
         let mut clustered: HashSet<usize> = HashSet::new();
+        let mut queried: HashSet<usize> = HashSet::with_capacity(memories.len());
         let mut pairs: Vec<NeighborPair> = Vec::new();
 
         for (start_idx, mem) in memories.iter().enumerate() {
@@ -1534,6 +1570,13 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
                 reason = "BFS loop with let-else guard is inherently nested — extracting would obscure control flow"
             )]
             while let Some(current_idx) = frontier.pop_front() {
+                // A truncated k-NN graph can be asymmetric, so a later
+                // component may link back to a node already expanded from an
+                // earlier root. Keep the connecting edge, but never repeat
+                // that node's ANN query.
+                if !queried.insert(current_idx) {
+                    continue;
+                }
                 let Some(current_emb) = memories[current_idx].embedding.as_deref() else {
                     continue;
                 };
@@ -1544,6 +1587,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
                     &id_to_idx,
                     similarity_threshold,
                     current_idx,
+                    &queried,
                     &mut cluster_members,
                     &mut frontier,
                     &mut pairs,
@@ -1604,7 +1648,8 @@ const fn concrete_zero_limit_search_mode(search_mode: SearchMode) -> SearchMode 
 ///
 /// Filters out neighbors that are not in the candidate set, already in the
 /// current cluster, or below the similarity threshold. Newly discovered
-/// neighbors are added to the cluster and frontier for further expansion.
+/// neighbors are added to the cluster. Neighbors not already expanded by an
+/// earlier component are also added to the frontier.
 #[expect(
     clippy::too_many_arguments,
     reason = "BFS state requires all these parameters — cluster, frontier, pairs, index, and threshold"
@@ -1615,6 +1660,7 @@ fn collect_bfs_neighbors(
     id_to_idx: &std::collections::HashMap<MemoryId, usize>,
     similarity_threshold: f64,
     current_idx: usize,
+    queried: &std::collections::HashSet<usize>,
     cluster_members: &mut std::collections::HashSet<usize>,
     frontier: &mut std::collections::VecDeque<usize>,
     pairs: &mut Vec<NeighborPair>,
@@ -1636,7 +1682,9 @@ fn collect_bfs_neighbors(
             similarity: cosine,
         });
         let _: bool = cluster_members.insert(neighbor_idx);
-        frontier.push_back(neighbor_idx);
+        if !queried.contains(&neighbor_idx) {
+            frontier.push_back(neighbor_idx);
+        }
     }
 }
 
@@ -3169,6 +3217,65 @@ mod tests {
         assert!(caller_after.superseded_by.is_none());
         let hidden_after = store.get(&hidden_id, Some("other")).await.unwrap().unwrap();
         assert!(hidden_after.superseded_by.is_none());
+    }
+
+    #[tokio::test]
+    async fn consolidate_reports_when_candidate_work_is_capped() {
+        let store = SqliteStore::in_memory().unwrap();
+        let limits = LimitsConfig {
+            consolidation_candidate_limit: 1,
+            ..LimitsConfig::default()
+        };
+        let engine = LocalHoldEngine::new(store.clone(), Arc::new(NoopEmbedding::new()), limits, SearchConfig::default());
+        let mut embedding = vec![0.0_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS];
+        embedding[0] = 1.0_f32;
+        for content in ["first candidate", "second candidate"] {
+            let mut memory = engine.build_memory(test_input(content), engine.now()).unwrap();
+            memory.provenance.source_agent = Some("caller".into());
+            let _id = store.store(&memory, Some(&embedding)).await.unwrap();
+        }
+
+        let result = engine.consolidate_memories("caller", None, 0.9_f64, 10, true).await.unwrap();
+
+        assert_eq!(result.candidate_count, 1);
+        assert!(result.capped);
+        assert!(result.groups.is_empty());
+    }
+
+    #[test]
+    fn consolidation_clamps_unvalidated_library_limits_at_consumption() {
+        let engine = make_engine_with_limits(LimitsConfig {
+            consolidation_candidate_limit: usize::MAX,
+            consolidation_neighbor_limit: usize::MAX,
+            ..LimitsConfig::default()
+        });
+
+        assert_eq!(engine.consolidation_candidate_limit(), MAX_CONSOLIDATION_CANDIDATE_LIMIT_CEILING);
+        assert_eq!(engine.consolidation_neighbor_limit(), MAX_CONSOLIDATION_NEIGHBOR_LIMIT_CEILING);
+    }
+
+    #[test]
+    fn consolidation_keeps_cross_component_edge_without_requerying_expanded_neighbor() {
+        let engine = make_engine();
+        let memories = ["new root", "already expanded"]
+            .into_iter()
+            .map(|content| crate::store::MemoryWithEmbedding {
+                memory: engine.build_memory(test_input(content), engine.now()).unwrap(),
+                embedding: Some(vec![1.0_f32, 0.0_f32]),
+            })
+            .collect::<Vec<_>>();
+        let id_to_idx = memories.iter().enumerate().map(|(index, memory)| (memory.memory.id, index)).collect();
+        let queried = std::collections::HashSet::from([1]);
+        let mut cluster_members = std::collections::HashSet::from([0]);
+        let mut frontier = std::collections::VecDeque::new();
+        let mut pairs = Vec::new();
+        let neighbors = [(memories[1].memory.id, 0.0_f64)];
+
+        collect_bfs_neighbors(&neighbors, &memories, &id_to_idx, 0.9_f64, 0, &queried, &mut cluster_members, &mut frontier, &mut pairs);
+
+        assert_eq!(pairs.len(), 1, "the edge must still connect the components");
+        assert!(cluster_members.contains(&1));
+        assert!(frontier.is_empty(), "a globally queried node must not trigger another ANN lookup");
     }
 
     // -- Fix regression: tags are trimmed on storage (#4) ---------------------

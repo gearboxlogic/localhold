@@ -100,7 +100,7 @@ mod query_plan_tests {
     fn archived_lineage_does_not_consume_the_effective_context_ceiling() {
         let now = DateTime::<Utc>::UNIX_EPOCH;
         let active_id = ContextId::new();
-        let archived_ids = (0..MAX_EFFECTIVE_CONTEXTS.saturating_add(1)).map(|_| ContextId::new()).collect::<Vec<_>>();
+        let archived_ids = std::iter::repeat_with(ContextId::new).take(MAX_EFFECTIVE_CONTEXTS.saturating_add(1)).collect::<Vec<_>>();
         let mut definitions = vec![ContextDefinition {
             id: active_id,
             kind: ContextKind::new(ContextKind::PROJECT).unwrap(),

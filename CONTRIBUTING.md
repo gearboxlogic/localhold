@@ -48,6 +48,9 @@ required for full local CI parity, not for building or running LocalHold.
 Additional tools are workflow-specific:
 
 - ShellCheck is optional for manually linting changes to shell scripts.
+- Claude Code is optional for local adversarial review. When used, invoke it
+  through `./script/claude-review.sh <opus|fable>` so MCP servers and other
+  customizations stay disabled and per-review scratch data is cleaned up.
 - Docker and PostgreSQL client tools are required only for
   `just test-postgres-smoke`.
 - NVIDIA/CUDA dependencies are required only when validating the CUDA reranker

@@ -41,8 +41,22 @@ change crosses transport, storage, authorization, embedding, or reranking
 boundaries. Windows is validated by GitHub Actions and is currently preview
 support. State any validation that could not be run.
 
-When using Claude Opus for local adversarial review, invoke the Claude CLI with
-`--effort high`. Do not use `--effort max`.
+## Local Adversarial Review
+
+- Invoke Claude reviewers only through `./script/claude-review.sh <opus|fable>`.
+  Do not invoke the Claude CLI directly for repository reviews.
+- The wrapper fixes review effort at `high`; never use `max`. It also disables
+  MCP servers, plugins, hooks, background work, and session persistence. If the
+  installed CLI cannot honor those controls, stop instead of weakening them.
+- Run reviewers in the foreground. The wrapper gives each process a private
+  scratch directory under the ignored `.cache/claude-reviews/` tree and removes
+  it on normal, failed, or signaled exit.
+- Keep prompts and captured review output under the ignored repository
+  `.cache/` tree, not `/tmp`, and remove them after the findings are resolved.
+- Apply the same lifecycle rule to other spawned local reviewers or subagents:
+  use workspace-backed scratch space, wait for the process to finish, and
+  remove owned temporary artifacts. Never delete another repository's or an
+  unknown process's temporary files.
 
 ## Documentation
 

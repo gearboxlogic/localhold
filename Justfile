@@ -68,6 +68,7 @@ audit:
 # Reject internal artifacts, private paths, and legacy product identity
 hygiene:
     ./script/check-publication-hygiene.sh
+    ./script/tests/test_claude_review.sh
 
 # Prevent production timing logic from bypassing the injectable clock
 time-abstraction:

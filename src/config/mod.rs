@@ -1123,6 +1123,9 @@ pub(crate) fn validate_server_config(config: &ServerConfig) -> Result<(), Engine
     {
         return Err(EngineError::config("server.http_auth_token must contain only visible ASCII characters"));
     }
+    if config.transport == Transport::Stdio && config.principal.as_deref().is_some_and(crate::http_auth::is_reserved_principal) {
+        return Err(EngineError::config("server.principal must not use a reserved LocalHold principal"));
+    }
     if config.http_principal_mode == HttpPrincipalMode::Fixed {
         if config.http_principal.is_empty() {
             return Err(EngineError::config("server.http_principal must not be empty in fixed mode"));

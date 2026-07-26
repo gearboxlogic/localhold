@@ -3678,8 +3678,25 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     .map(|membership| membership.context.id)
                     .filter(|context_id| *context_id != selected_id),
             );
-            replacement_context_ids = Some(contexts);
-            context_resolution = Some(selection.resolution);
+            let complete_envelope = ContextEnvelope {
+                refs: contexts
+                    .into_iter()
+                    .map(|context_id| ContextReference {
+                        id: Some(context_id),
+                        ..ContextReference::default()
+                    })
+                    .collect(),
+                ..ContextEnvelope::default()
+            };
+            let complete_selection = match self.resolve_context_selection(&principal, Some(&complete_envelope), None, true).await {
+                Ok(complete_selection) => complete_selection,
+                Err(error) => {
+                    self.rollback_created_legacy_context(created_legacy_context, &principal).await?;
+                    return Ok(error);
+                }
+            };
+            replacement_context_ids = Some(complete_selection.direct_ids);
+            context_resolution = Some(complete_selection.resolution);
             operation_warnings.push(quality_warning(
                 "legacy_scope_adapter",
                 "legacy scope replaced only the compatibility-primary context; other memberships were preserved",

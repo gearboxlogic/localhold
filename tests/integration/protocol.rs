@@ -2570,6 +2570,91 @@ async fn legacy_revise_replaces_only_primary_and_preserves_visible_companions() 
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression covers policy setup, rejected revise, and transactional membership preservation"
+)]
+async fn legacy_revise_revalidates_preserved_companions_against_policy() {
+    let (client, server) = setup_server_with(Arc::new(NoopEmbedding::new())).await;
+    let primary_id = ContextId::new();
+    let companion_id = ContextId::new();
+    for (id, kind, key, display_name) in [
+        (
+            primary_id,
+            ContextKind::new(ContextKind::CUSTOM).unwrap(),
+            "legacy/revise-policy-old-primary",
+            "Old primary",
+        ),
+        (
+            companion_id,
+            ContextKind::new(ContextKind::DOMAIN).unwrap(),
+            "domain/revise-policy-companion",
+            "Policy companion",
+        ),
+    ] {
+        let _created = server
+            .store()
+            .create_context(
+                &ContextCreateDraft::private(id, kind, key, display_name, "stdio"),
+                &ContextAuditDraft::new("stdio", "test_legacy_revise_policy_context_created").with_context(id),
+            )
+            .await
+            .unwrap();
+    }
+    let remembered: RememberResponse = call_tool(
+        &client,
+        "remember",
+        json!({
+            "content": "legacy revise policy validation semantics",
+            "context": {"refs": [{"id": primary_id}, {"id": companion_id}]}
+        }),
+    )
+    .await;
+    let _registered: serde_json::Value = call_tool(
+        &client,
+        "admin_scope_register",
+        json!({
+            "scope_key": "legacy/revise-policy-new-primary",
+            "display_name": "New primary"
+        }),
+    )
+    .await;
+    let mut custom_policy = ContextKindPolicy::default();
+    custom_policy.allowed_companion_kinds = Some(vec![ContextKind::new(ContextKind::PROJECT).unwrap()]);
+    server
+        .store()
+        .upsert_context_kind_policy(
+            &ContextKindPolicyDraft::new(ContextPolicyLayer::Principal, "stdio", ContextKind::new(ContextKind::CUSTOM).unwrap(), custom_policy),
+            "stdio",
+            &ContextAuditDraft::new("stdio", "test_legacy_revise_companion_policy"),
+        )
+        .await
+        .unwrap();
+
+    let error = call_tool_error(
+        &client,
+        "revise",
+        json!({
+            "id": remembered.id,
+            "scope": "legacy/revise-policy-new-primary"
+        }),
+    )
+    .await;
+    assert_eq!(parse_tool_error(&error).error.code, ToolErrorCode::Conflict);
+    assert_eq!(
+        server
+            .store()
+            .get_memory_contexts(&remembered.id, "stdio")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|membership| membership.context.id)
+            .collect::<Vec<_>>(),
+        vec![primary_id, companion_id]
+    );
+}
+
+#[tokio::test]
 async fn fuzzy_creation_retry_never_echoes_raw_identity_or_parent_values() {
     let client = setup_noop_server().await;
     let secret_identity = "identity-secret-must-not-return";

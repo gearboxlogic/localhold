@@ -34,6 +34,9 @@ a canonical working directory whose physical ancestor chain is checked before
 every invocation. Cargo config files are refused, and source/registry override
 environment variables are removed from Cargo subprocesses, so source
 replacement cannot make the resolved graph differ from the scanned bytes.
+Crates.io is explicitly pinned to Cargo's sparse protocol. Every duplicate
+archive is checksum-verified, but only the unique cache paired with a sparse
+index is copied into the isolated Cargo home.
 Temporary registry and vendor data lives under the ignored
 `.cache/dependency-unsafe/` directory, which is intentionally outside CI's
 persisted Cargo/build cache paths.

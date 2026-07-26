@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
+const CRATES_IO_PROTOCOL: &str = "sparse";
 
 #[derive(Debug, Deserialize)]
 struct Lockfile {
@@ -74,7 +75,6 @@ impl CargoEnvironment {
         let cwd_path = fs::canonicalize(cwd.path()).context("resolve isolated Cargo working directory")?;
         reject_cargo_config(&cwd_path, &home_path)?;
         let (cargo, rustc) = toolchain_executables()?;
-        let source_cache = source_home.join("registry/cache");
         let destination_cache = home_path.join("registry/cache");
         let mut index_directories = BTreeSet::new();
         for package in lockfile.package {
@@ -91,14 +91,13 @@ impl CargoEnvironment {
                 .filter(|value| valid_checksum(value))
                 .with_context(|| format!("registry package {} {} has no normalized Cargo.lock checksum", package.name, package.version))?;
             let archive_name = format!("{}-{}.crate", package.name, package.version);
-            for RegistryArchive { path: source_archive, index_name } in find_archives(&source_cache, &archive_name, &checksum)? {
-                let destination_directory = destination_cache.join(&index_name);
-                fs::create_dir_all(&destination_directory).with_context(|| format!("create isolated registry cache {}", destination_directory.display()))?;
-                let destination_archive = destination_directory.join(&archive_name);
-                fs::copy(&source_archive, &destination_archive).with_context(|| format!("copy verified registry archive {}", source_archive.display()))?;
-                verify_digest(&destination_archive, &checksum)?;
-                index_directories.insert(index_name);
-            }
+            let RegistryArchive { path: source_archive, index_name } = find_sparse_archive(source_home, &archive_name, &checksum)?;
+            let destination_directory = destination_cache.join(&index_name);
+            fs::create_dir_all(&destination_directory).with_context(|| format!("create isolated registry cache {}", destination_directory.display()))?;
+            let destination_archive = destination_directory.join(&archive_name);
+            fs::copy(&source_archive, &destination_archive).with_context(|| format!("copy verified registry archive {}", source_archive.display()))?;
+            verify_digest(&destination_archive, &checksum)?;
+            index_directories.insert(index_name);
         }
         for index_name in index_directories {
             let source_index = source_home.join("registry/index").join(&index_name);
@@ -132,6 +131,7 @@ impl CargoEnvironment {
                 command.env_remove(name);
             }
         }
+        command.env("CARGO_REGISTRIES_CRATES_IO_PROTOCOL", CRATES_IO_PROTOCOL);
         Ok(command)
     }
 
@@ -233,12 +233,13 @@ fn valid_checksum(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn find_archives(cache_root: &Path, archive_name: &str, checksum: &str) -> Result<Vec<RegistryArchive>> {
-    let metadata = fs::symlink_metadata(cache_root).with_context(|| format!("inspect Cargo registry cache {}", cache_root.display()))?;
+fn find_sparse_archive(source_home: &Path, archive_name: &str, checksum: &str) -> Result<RegistryArchive> {
+    let cache_root = source_home.join("registry/cache");
+    let metadata = fs::symlink_metadata(&cache_root).with_context(|| format!("inspect Cargo registry cache {}", cache_root.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         bail!("Cargo registry cache is not a regular directory: {}", cache_root.display());
     }
-    let mut entries: Vec<_> = fs::read_dir(cache_root)
+    let mut entries: Vec<_> = fs::read_dir(&cache_root)
         .with_context(|| format!("read Cargo registry cache {}", cache_root.display()))?
         .collect::<std::io::Result<_>>()?;
     entries.sort_by_key(std::fs::DirEntry::file_name);
@@ -267,7 +268,39 @@ fn find_archives(cache_root: &Path, archive_name: &str, checksum: &str) -> Resul
     for archive in &matches {
         verify_digest(&archive.path, checksum)?;
     }
-    Ok(matches)
+    let index_root = source_home.join("registry/index");
+    let mut sparse_matches = matches
+        .into_iter()
+        .filter_map(|archive| match sparse_index(&index_root.join(&archive.index_name)) {
+            Ok(true) => Some(Ok(archive)),
+            Ok(false) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if sparse_matches.len() != 1 {
+        bail!(
+            "Cargo registry cache has {} sparse-protocol candidates for {archive_name:?}; \
+             run `cargo fetch --locked` with the default crates.io protocol",
+            sparse_matches.len()
+        );
+    }
+    Ok(sparse_matches.remove(0))
+}
+
+fn sparse_index(index: &Path) -> Result<bool> {
+    let metadata = fs::symlink_metadata(index).with_context(|| format!("inspect Cargo registry index {}", index.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("Cargo registry index is not a regular directory: {}", index.display());
+    }
+    let marker = index.join(".cache");
+    match fs::symlink_metadata(&marker) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            bail!("Cargo sparse registry marker is not a regular directory: {}", marker.display());
+        }
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("inspect Cargo sparse registry marker {}", marker.display())),
+    }
 }
 
 fn verify_digest(path: &Path, expected: &str) -> Result<()> {

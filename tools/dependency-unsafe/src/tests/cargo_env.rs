@@ -20,6 +20,7 @@ fn fixture_home(archive: &[u8]) -> tempfile::TempDir {
     let index = home.path().join("registry/index/index-key");
     fs::create_dir_all(&cache).expect("create registry cache");
     fs::create_dir_all(&index).expect("create registry index");
+    fs::create_dir(index.join(".cache")).expect("create sparse registry marker");
     fs::write(cache.join("fixture-1.2.3.crate"), archive).expect("write registry archive");
     fs::write(index.join("config.json"), "{}").expect("write registry index");
     home
@@ -44,6 +45,11 @@ fn isolated_home_copies_only_digest_verified_archives() {
         .output()
         .expect("run pinned Cargo outside the workspace");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let command = environment.cargo_command().expect("inspect pinned Cargo command");
+    let protocol = command
+        .get_envs()
+        .find_map(|(name, value)| (name == OsStr::new("CARGO_REGISTRIES_CRATES_IO_PROTOCOL")).then_some(value).flatten());
+    assert_eq!(protocol, Some(OsStr::new("sparse")));
 }
 
 #[test]
@@ -67,10 +73,13 @@ fn altered_missing_and_conflicting_duplicate_archives_are_rejected() {
     fs::write(second_index.join("config.json"), "{}").expect("write second index");
     let environment = CargoEnvironment::prepare_from(&lockfile("fixture", "1.2.3", &checksum, SOURCE), source_home.path(), workspace.path())
         .expect("identical verified cache entries are equivalent");
-    for index_name in ["github.com-legacy", "index-key"] {
-        assert!(environment.home_path.join("registry/cache").join(index_name).join("fixture-1.2.3.crate").is_file());
-        assert!(environment.home_path.join("registry/index").join(index_name).join("config.json").is_file());
-    }
+    assert!(environment.home_path.join("registry/cache/index-key/fixture-1.2.3.crate").is_file());
+    assert!(environment.home_path.join("registry/index/index-key/config.json").is_file());
+    assert!(!environment.home_path.join("registry/cache/github.com-legacy").exists());
+    assert!(!environment.home_path.join("registry/index/github.com-legacy").exists());
+
+    fs::create_dir(second_index.join(".cache")).expect("make second index sparse");
+    assert!(CargoEnvironment::prepare_from(&lockfile("fixture", "1.2.3", &checksum, SOURCE), source_home.path(), workspace.path()).is_err());
 
     fs::write(second.join("fixture-1.2.3.crate"), b"tampered duplicate").expect("tamper duplicate archive");
     assert!(CargoEnvironment::prepare_from(&lockfile("fixture", "1.2.3", &checksum, SOURCE), source_home.path(), workspace.path()).is_err());

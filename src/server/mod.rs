@@ -187,6 +187,23 @@ struct ResolvedContextSelection {
     created_legacy_context: Option<ContextId>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyContextResolutionMode {
+    Read,
+    Write,
+    PreviewWrite,
+}
+
+impl LegacyContextResolutionMode {
+    const fn governed_write(self) -> bool {
+        matches!(self, Self::Write | Self::PreviewWrite)
+    }
+
+    const fn persists_creation(self) -> bool {
+        matches!(self, Self::Write)
+    }
+}
+
 #[derive(Debug)]
 struct ContextPolicyState {
     kinds: Vec<ContextKindDefinition>,
@@ -1245,7 +1262,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             .await
             .map_err(|error| Self::context_expansion_error("context", error))?;
         let initial_effective_ids = initial_effective.iter().map(|context| context.id).collect::<Vec<_>>();
-        let policy_records = initial_effective
+        let initial_policy_records = initial_effective
             .iter()
             .cloned()
             .map(|context| ContextRecord {
@@ -1260,10 +1277,37 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             .filter_map(|id| resolved_records.get(id))
             .map(|record| record.context.kind.clone())
             .collect::<HashSet<_>>();
+        let initial_policies = policy_state
+            .kinds
+            .iter()
+            .map(|definition| Self::effective_policy_for(&policy_state, &initial_policy_records, &definition.kind, &initial_effective_ids))
+            .collect::<Vec<_>>();
+        let include_descendants = envelope.include_descendants || initial_policies.iter().any(|policy| direct_kinds.contains(&policy.kind) && policy.include_descendants);
+        let effective = if include_descendants {
+            self.engine
+                .store()
+                .expand_context_selection(&direct_ids, principal, true)
+                .await
+                .map_err(|error| Self::context_expansion_error("context", error))?
+        } else {
+            initial_effective
+        };
+        let effective_ids = effective.iter().map(|context| context.id).collect::<Vec<_>>();
+        let effective_kinds = effective.iter().map(|context| context.kind.clone()).collect::<HashSet<_>>();
+        let policy_records = effective
+            .iter()
+            .cloned()
+            .map(|context| ContextRecord {
+                context,
+                aliases: Vec::new(),
+                identities: Vec::new(),
+                hints: Vec::new(),
+            })
+            .collect::<Vec<_>>();
         let policies = policy_state
             .kinds
             .iter()
-            .map(|definition| Self::effective_policy_for(&policy_state, &policy_records, &definition.kind, &initial_effective_ids))
+            .map(|definition| Self::effective_policy_for(&policy_state, &policy_records, &definition.kind, &effective_ids))
             .collect::<Vec<_>>();
         let policy_guidance = Self::policy_guidance_for(policies.clone());
         if let Some(policy) = policies.iter().find(|policy| !policy.ambiguities.is_empty()) {
@@ -1275,7 +1319,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 policy_guidance,
             ));
         }
-        if let Some(policy) = policies.iter().find(|policy| direct_kinds.contains(&policy.kind) && !policy.allowed) {
+        if let Some(policy) = policies.iter().find(|policy| effective_kinds.contains(&policy.kind) && !policy.allowed) {
             return Err(Self::context_resolution_error_with_guidance(
                 ToolErrorCode::AccessDenied,
                 "context",
@@ -1293,9 +1337,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 policy_guidance,
             ));
         }
-        for policy in policies.iter().filter(|policy| direct_kinds.contains(&policy.kind)) {
+        for policy in policies.iter().filter(|policy| effective_kinds.contains(&policy.kind)) {
             if let Some(allowed_companions) = &policy.allowed_companion_kinds
-                && let Some(disallowed) = direct_kinds
+                && let Some(disallowed) = effective_kinds
                     .iter()
                     .find(|candidate_kind| *candidate_kind != &policy.kind && !allowed_companions.contains(candidate_kind))
             {
@@ -1308,22 +1352,11 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 ));
             }
         }
-        let include_descendants = envelope.include_descendants || policies.iter().any(|policy| direct_kinds.contains(&policy.kind) && policy.include_descendants);
-        let effective = if include_descendants {
-            self.engine
-                .store()
-                .expand_context_selection(&direct_ids, principal, true)
-                .await
-                .map_err(|error| Self::context_expansion_error("context", error))?
-        } else {
-            initial_effective
-        };
         let direct = direct_ids
             .iter()
             .filter_map(|id| resolved_records.get(id))
             .map(|record| ContextDescriptor::from(&record.context))
             .collect();
-        let effective_ids = effective.iter().map(|context| context.id).collect();
         Ok(ResolvedContextSelection {
             resolution: ContextResolution {
                 direct,
@@ -1349,8 +1382,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         &self,
         principal: &str,
         scope_resolution: &ScopeResolution,
-        governed_write: bool,
+        mode: LegacyContextResolutionMode,
     ) -> Result<ResolvedContextSelection, CallToolResult> {
+        let governed_write = mode.governed_write();
         let normalized = normalize_context_key(&scope_resolution.scope);
         if normalized == normalize_context_key(UNRESOLVED_SCOPE) && scope_resolution.resolved_by == ScopeResolvedBy::Explicit {
             let message = if governed_write {
@@ -1471,6 +1505,34 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                         Vec::new(),
                     ));
                 }
+                if mode == LegacyContextResolutionMode::PreviewWrite {
+                    let archived_exact = self
+                        .engine
+                        .store()
+                        .find_context_records(principal, true, &ContextExactLookup::Key {
+                            kind: Some(custom_kind.clone()),
+                            normalized_key: normalized.clone(),
+                        })
+                        .await
+                        .map_err(|error| {
+                            tool_error(
+                                ToolErrorCode::Internal,
+                                Some("scope"),
+                                error.to_string(),
+                                Some("Retry after checking backend health."),
+                                true,
+                            )
+                        })?;
+                    if !archived_exact.is_empty() {
+                        return Err(tool_error(
+                            ToolErrorCode::Conflict,
+                            Some("scope"),
+                            "legacy scope key or alias is reserved by an archived compatibility context",
+                            Some("Reactivate the archived context in the TUI before retrying the write."),
+                            false,
+                        ));
+                    }
+                }
                 let id = ContextId::new();
                 let draft = ContextCreateDraft {
                     id,
@@ -1496,6 +1558,74 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                     memory_id: None,
                     details: Some(serde_json::json!({ "scope_key": scope_resolution.scope })),
                 };
+                if !mode.persists_creation() {
+                    let direct = ContextDescriptor {
+                        id,
+                        kind: draft.kind,
+                        key: draft.key,
+                        display_name: draft.display_name,
+                    };
+                    let direct_kinds = HashSet::from([direct.kind.clone()]);
+                    let policies = policy_state
+                        .kinds
+                        .iter()
+                        .map(|definition| Self::effective_policy_for(&policy_state, &[], &definition.kind, &[]))
+                        .collect::<Vec<_>>();
+                    let policy_guidance = Self::policy_guidance_for(policies.clone());
+                    if let Some(policy) = policies.iter().find(|policy| !policy.ambiguities.is_empty()) {
+                        return Err(Self::context_resolution_error_with_guidance(
+                            ToolErrorCode::ContextAmbiguous,
+                            "scope",
+                            format!("effective policy for {} has conflicting active-anchor defaults", policy.kind),
+                            Vec::new(),
+                            policy_guidance,
+                        ));
+                    }
+                    if let Some(policy) = policies.iter().find(|policy| direct_kinds.contains(&policy.kind) && !policy.allowed) {
+                        return Err(Self::context_resolution_error_with_guidance(
+                            ToolErrorCode::AccessDenied,
+                            "scope",
+                            format!("effective policy denies context kind {}", policy.kind),
+                            Vec::new(),
+                            policy_guidance,
+                        ));
+                    }
+                    if let Some(policy) = policies.iter().find(|policy| policy.required && !direct_kinds.contains(&policy.kind)) {
+                        return Err(Self::context_resolution_error_with_guidance(
+                            ToolErrorCode::ContextRequired,
+                            "scope",
+                            format!("effective policy requires a {} context", policy.kind),
+                            Vec::new(),
+                            policy_guidance,
+                        ));
+                    }
+                    for policy in policies.iter().filter(|policy| direct_kinds.contains(&policy.kind)) {
+                        if let Some(allowed_companions) = &policy.allowed_companion_kinds
+                            && let Some(disallowed) = direct_kinds
+                                .iter()
+                                .find(|candidate_kind| *candidate_kind != &policy.kind && !allowed_companions.contains(candidate_kind))
+                        {
+                            return Err(Self::context_resolution_error_with_guidance(
+                                ToolErrorCode::Conflict,
+                                "scope",
+                                format!("effective {} policy does not allow companion kind {disallowed}", policy.kind),
+                                Vec::new(),
+                                policy_guidance,
+                            ));
+                        }
+                    }
+                    return Ok(ResolvedContextSelection {
+                        resolution: ContextResolution {
+                            direct: vec![direct.clone()],
+                            effective: vec![direct],
+                            policy_guidance,
+                            ..ContextResolution::default()
+                        },
+                        direct_ids: vec![id],
+                        effective_ids: vec![id],
+                        created_legacy_context: None,
+                    });
+                }
                 match self.engine.store().create_context(&draft, &audit).await {
                     Ok(_created) => {
                         created_legacy_context = Some(id);
@@ -1591,7 +1721,9 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             [exact] => self.resolve_admin_context_id(principal, exact.context.id).await,
             [] => {
                 let resolution = self.resolve_scope(principal, Some(value), &[]).await.map_err(AdminFilterError::Engine)?;
-                self.resolve_legacy_context_selection(principal, &resolution, false).await.map_err(AdminFilterError::Tool)
+                self.resolve_legacy_context_selection(principal, &resolution, LegacyContextResolutionMode::Read)
+                    .await
+                    .map_err(AdminFilterError::Tool)
             }
             _ => Err(AdminFilterError::Tool(Self::context_resolution_error(
                 ToolErrorCode::ContextAmbiguous,
@@ -1817,7 +1949,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
         } else if params.scope.is_some() || !context_hints.is_empty() {
             let scope_resolution = self.resolve_scope(&principal, params.scope, &context_hints).await.map_err(PrepareRememberError::Engine)?;
             let selection = self
-                .resolve_legacy_context_selection(&principal, &scope_resolution, true)
+                .resolve_legacy_context_selection(&principal, &scope_resolution, LegacyContextResolutionMode::Write)
                 .await
                 .map_err(PrepareRememberError::Tool)?;
             let scope_resolution = canonicalize_legacy_scope_resolution(scope_resolution, &selection);
@@ -3248,7 +3380,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 .resolve_scope(request_principal.as_deref().unwrap_or(ANONYMOUS_PRINCIPAL), params.scope, &context_hints)
                 .await?;
             let selection = match self
-                .resolve_legacy_context_selection(request_principal.as_deref().unwrap_or(ANONYMOUS_PRINCIPAL), &resolution, false)
+                .resolve_legacy_context_selection(request_principal.as_deref().unwrap_or(ANONYMOUS_PRINCIPAL), &resolution, LegacyContextResolutionMode::Read)
                 .await
             {
                 Ok(selection) => selection,
@@ -3476,7 +3608,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
             Some(scope)
         } else if params.scope.is_some() || !context_hints.is_empty() {
             let resolution = self.resolve_scope(&principal, params.scope, &context_hints).await?;
-            let selection = match self.resolve_legacy_context_selection(&principal, &resolution, true).await {
+            let selection = match self.resolve_legacy_context_selection(&principal, &resolution, LegacyContextResolutionMode::Write).await {
                 Ok(selection) => selection,
                 Err(error) => return Ok(error),
             };
@@ -3700,7 +3832,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                 .resolve_scope(request_principal.as_deref().unwrap_or(ANONYMOUS_PRINCIPAL), params.scope, &context_hints)
                 .await?;
             let selection = match self
-                .resolve_legacy_context_selection(request_principal.as_deref().unwrap_or(ANONYMOUS_PRINCIPAL), &resolution, false)
+                .resolve_legacy_context_selection(request_principal.as_deref().unwrap_or(ANONYMOUS_PRINCIPAL), &resolution, LegacyContextResolutionMode::Read)
                 .await
             {
                 Ok(selection) => selection,
@@ -3916,7 +4048,12 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldServer<S> {
                         return Err(error.into());
                     }
                 };
-                let selection = match self.resolve_legacy_context_selection(resolution_principal, &scope_resolution, commit).await {
+                let mode = if commit {
+                    LegacyContextResolutionMode::Write
+                } else {
+                    LegacyContextResolutionMode::PreviewWrite
+                };
+                let selection = match self.resolve_legacy_context_selection(resolution_principal, &scope_resolution, mode).await {
                     Ok(selection) => selection,
                     Err(error) => {
                         self.rollback_created_legacy_contexts(&mut created_legacy_contexts, cleanup_principal).await?;

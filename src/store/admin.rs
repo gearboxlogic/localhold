@@ -390,8 +390,14 @@ fn ensure_private_legacy_scope_context(
              LEFT JOIN context_grants AS grant_row
                ON grant_row.context_id = context_row.id
               AND grant_row.grantee_principal IN (?1, ?3)
-             WHERE context_row.normalized_key = ?2
-               AND context_row.lifecycle = 'active'
+             WHERE (
+                       context_row.normalized_key = ?2 OR EXISTS (
+                           SELECT 1
+                           FROM context_aliases AS alias_row
+                           WHERE alias_row.context_id = context_row.id
+                             AND alias_row.normalized_alias = ?2
+                       )
+                   )
                AND (context_row.owner_principal = ?1 OR grant_row.context_id IS NOT NULL)
          )",
         params![principal, normalized, LEGACY_ALL_PRINCIPALS_GRANT],
@@ -399,7 +405,7 @@ fn ensure_private_legacy_scope_context(
     )?;
     if visible_foreign {
         return Err(StoreError::Conflict(
-            "legacy scope key already belongs to another visible governed context and cannot be overridden".into(),
+            "legacy scope key already belongs to another visible governed context key or alias and cannot be overridden".into(),
         ));
     }
     let id = ContextId::new().to_string();

@@ -18,7 +18,7 @@ use crate::{
     background_tasks::{BackgroundTaskKind, BackgroundTasks},
     clock::{Clock, SystemClock},
     config::{LimitsConfig, MAX_CONSOLIDATION_CANDIDATE_LIMIT_CEILING, MAX_CONSOLIDATION_NEIGHBOR_LIMIT_CEILING, SearchConfig},
-    consolidation::{NeighborPair, cosine_to_l2_threshold, find_duplicate_groups_from_pairs, l2_to_cosine},
+    consolidation::{NeighborPair, find_duplicate_groups_from_pairs},
     context::{ContextAuditDraft, ContextId},
     embedding::{EmbeddingProvider, limited::ConcurrencyLimitedEmbedding, orchestrator::EmbeddingOrchestrator},
     error::{EngineError, ValidationError},
@@ -1555,7 +1555,6 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
     async fn bfs_discover_pairs(&self, store: &S, memories: &[crate::store::MemoryWithEmbedding], similarity_threshold: f64) -> Result<(Vec<NeighborPair>, bool), EngineError> {
         use std::collections::{HashMap, HashSet, VecDeque};
 
-        let max_l2 = cosine_to_l2_threshold(similarity_threshold);
         let neighbor_limit = self.consolidation_neighbor_limit();
         let distance_work_budget = memories.len().saturating_mul(neighbor_limit);
         let mut estimated_distance_work = 0_usize;
@@ -1608,7 +1607,7 @@ impl<S: MemoryStore + Clone + std::fmt::Debug + 'static> LocalHoldEngine<S> {
                 }
                 estimated_distance_work = next_work;
                 let neighbors = store
-                    .find_embedding_neighbors(&memories[current_idx].memory.id, candidate_ids, current_emb, max_l2, neighbor_limit)
+                    .find_embedding_neighbors(&memories[current_idx].memory.id, candidate_ids, current_emb, similarity_threshold, neighbor_limit)
                     .await?;
                 collect_bfs_neighbors(
                     &neighbors,
@@ -1724,7 +1723,7 @@ fn collect_bfs_neighbors(
     frontier: &mut std::collections::VecDeque<usize>,
     pairs: &mut Vec<NeighborPair>,
 ) {
-    for &(neighbor_id, l2_distance) in neighbors {
+    for &(neighbor_id, cosine_similarity) in neighbors {
         let Some(&neighbor_idx) = id_to_idx.get(&neighbor_id) else {
             continue;
         };
@@ -1738,14 +1737,13 @@ fn collect_bfs_neighbors(
         if cluster_members.contains(&neighbor_idx) {
             continue;
         }
-        let cosine = l2_to_cosine(l2_distance);
-        if cosine < similarity_threshold {
+        if cosine_similarity < similarity_threshold {
             continue;
         }
         pairs.push(NeighborPair {
             id_a: memories[current_idx].memory.id,
             id_b: neighbor_id,
-            similarity: cosine,
+            similarity: cosine_similarity,
         });
         let _: bool = cluster_members.insert(neighbor_idx);
         if !queried.contains(&neighbor_idx) {
@@ -1993,6 +1991,14 @@ mod tests {
         let mut audit = ContextAuditDraft::new(actor, "consolidation_test_membership").with_context(context_id);
         audit.memory_id = Some(memory_id);
         let _outcome = store.replace_memory_contexts(&memory_id, &[context_id], actor, &audit).await.unwrap();
+    }
+
+    async fn store_consolidation_memory(store: &SqliteStore, engine: &LocalHoldEngine<SqliteStore>, context_id: ContextId, content: &str, embedding: &[f32]) -> MemoryId {
+        let mut memory = engine.build_memory(test_input(content), engine.now()).unwrap();
+        memory.provenance.source_agent = Some("caller".into());
+        let memory_id = store.store(&memory, Some(embedding)).await.unwrap();
+        attach_consolidation_context(store, memory_id, context_id, "caller").await;
+        memory_id
     }
 
     fn fixed_id(value: &str) -> MemoryId {
@@ -3352,6 +3358,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn consolidation_rejects_orthogonal_low_magnitude_vectors() {
+        let store = SqliteStore::in_memory().unwrap();
+        let engine = make_engine_with_store(store.clone(), Arc::new(NoopEmbedding::new()));
+        let context_id = create_consolidation_context(&store, "caller", "project/consolidation-cosine-orthogonal").await;
+        let mut horizontal = vec![0.0_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS];
+        horizontal[0] = 0.01_f32;
+        let mut vertical = vec![0.0_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS];
+        vertical[1] = 0.01_f32;
+        let _horizontal_id = store_consolidation_memory(&store, &engine, context_id, "low magnitude horizontal", &horizontal).await;
+        let _vertical_id = store_consolidation_memory(&store, &engine, context_id, "low magnitude vertical", &vertical).await;
+
+        let result = engine.consolidate_memories("caller", &[context_id], None, 0.9_f64, 10, true).await.unwrap();
+
+        assert!(
+            result.groups.is_empty(),
+            "orthogonal vectors must not be grouped merely because their raw L2 distance is small"
+        );
+    }
+
+    #[tokio::test]
+    async fn consolidation_accepts_parallel_vectors_with_different_magnitudes() {
+        let store = SqliteStore::in_memory().unwrap();
+        let engine = make_engine_with_store(store.clone(), Arc::new(NoopEmbedding::new()));
+        let context_id = create_consolidation_context(&store, "caller", "project/consolidation-cosine-parallel").await;
+        let mut unit = vec![0.0_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS];
+        unit[0] = 1.0_f32;
+        let mut scaled = vec![0.0_f32; SqliteStore::DEFAULT_TEST_DIMENSIONS];
+        scaled[0] = 0.1_f32;
+        let unit_id = store_consolidation_memory(&store, &engine, context_id, "unit magnitude", &unit).await;
+        let scaled_id = store_consolidation_memory(&store, &engine, context_id, "scaled magnitude", &scaled).await;
+
+        let result = engine.consolidate_memories("caller", &[context_id], None, 0.99_f64, 10, true).await.unwrap();
+
+        assert!(
+            result
+                .groups
+                .iter()
+                .any(|group| group.member_ids.contains(&unit_id) && group.member_ids.contains(&scaled_id)),
+            "parallel vectors must remain cosine-equivalent regardless of magnitude"
+        );
+    }
+
+    #[tokio::test]
     async fn consolidate_reports_when_candidate_work_is_capped() {
         let store = SqliteStore::in_memory().unwrap();
         let limits = LimitsConfig {
@@ -3460,7 +3509,7 @@ mod tests {
         let mut cluster_members = std::collections::HashSet::from([0]);
         let mut frontier = std::collections::VecDeque::new();
         let mut pairs = Vec::new();
-        let neighbors = [(memories[1].memory.id, 0.0_f64)];
+        let neighbors = [(memories[1].memory.id, 1.0_f64)];
 
         collect_bfs_neighbors(&neighbors, &memories, &id_to_idx, 0.9_f64, 0, &queried, &mut cluster_members, &mut frontier, &mut pairs);
 
@@ -3487,7 +3536,7 @@ mod tests {
         let mut cluster_members = std::collections::HashSet::from([0]);
         let mut frontier = std::collections::VecDeque::new();
         let mut pairs = Vec::new();
-        let neighbors = [(memories[1].memory.id, 0.0_f64)];
+        let neighbors = [(memories[1].memory.id, 1.0_f64)];
 
         collect_bfs_neighbors(&neighbors, &memories, &id_to_idx, 0.9_f64, 0, &queried, &mut cluster_members, &mut frontier, &mut pairs);
 

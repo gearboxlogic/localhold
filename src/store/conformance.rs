@@ -136,7 +136,7 @@ where
     });
     primary.memory_type = MemoryType::Procedural;
     primary.entities = vec![Entity::new(entity_name.clone(), "project").unwrap()];
-    let primary_embedding = embedding(embedding_dimensions, 0.0_f32);
+    let primary_embedding = embedding(embedding_dimensions, 1.0_f32);
     let primary_id = store.store(&primary, Some(&primary_embedding)).await.unwrap();
     assert_eq!(primary_id, primary.id);
     let context_audit = ContextAuditDraft {
@@ -272,7 +272,7 @@ where
     assert_eq!(search_ids(&semantic_results), vec![primary_id]);
     let fetched_embeddings = store.fetch_embeddings_for_ids(&[primary_id]).await.unwrap();
     assert_eq!(fetched_embeddings.get(&primary_id).map(Vec::len), Some(embedding_dimensions));
-    assert_eq!(fetched_embeddings.get(&primary_id).and_then(|v| v.first()).copied(), Some(0.0_f32));
+    assert_eq!(fetched_embeddings.get(&primary_id).and_then(|v| v.first()).copied(), Some(1.0_f32));
 
     let scoped_embeddings = store.list_with_embeddings(Some(std::slice::from_ref(&context_id)), None, OWNER, 10).await.unwrap();
     assert!(
@@ -469,10 +469,10 @@ where
     let _distractor_id = store.store(&distractor, Some(&embedding(embedding_dimensions, 0.01_f32))).await.unwrap();
     let neighbor_candidates = [primary_id, neighbor_id, superseded_neighbor_id];
     let neighbors = store
-        .find_embedding_neighbors(&primary_id, &neighbor_candidates, &primary_embedding, 0.2_f64, 1)
+        .find_embedding_neighbors(&primary_id, &neighbor_candidates, &primary_embedding, 0.9_f64, 1)
         .await
         .unwrap();
-    assert!(neighbors.iter().any(|(id, distance)| *id == neighbor_id && *distance <= 0.2_f64));
+    assert!(neighbors.iter().any(|(id, similarity)| *id == neighbor_id && *similarity >= 0.9_f64));
     assert!(!neighbors.iter().any(|(id, _)| *id == superseded_neighbor_id));
 
     let batch_a = memory(MemorySpec {
@@ -1234,6 +1234,45 @@ where
         )
         .await
         .unwrap();
+    let legacy_alias_collision = format!("legacy/alias-collision/{case}");
+    let alias_owner_id = ContextId::new();
+    let mut alias_owner = ContextCreateDraft::private(
+        alias_owner_id,
+        ContextKind::new(ContextKind::PROJECT).unwrap(),
+        format!("project/legacy-alias-owner/{case}"),
+        "Legacy alias owner",
+        OWNER,
+    );
+    alias_owner.aliases = vec![(legacy_alias_collision.clone(), crate::types::normalize_context_key(&legacy_alias_collision))];
+    let _alias_owner = store
+        .create_context(
+            &alias_owner,
+            &ContextAuditDraft::new(OWNER, "conformance_legacy_alias_owner_created").with_context(alias_owner_id),
+        )
+        .await
+        .unwrap();
+    let colliding_legacy_scope = || ScopeDefinition {
+        scope_key: legacy_alias_collision.clone(),
+        display_name: "Must not shadow governed alias".into(),
+        description: None,
+        aliases: Vec::new(),
+        matchers: Vec::new(),
+        parent: None,
+        related: Vec::new(),
+    };
+    let active_alias_collision = store.register_scope_for_principal(colliding_legacy_scope(), OWNER).await.unwrap_err();
+    assert!(active_alias_collision.to_string().contains("key or alias"), "{active_alias_collision}");
+    store
+        .set_context_lifecycle(
+            &alias_owner_id,
+            ContextLifecycle::Archived,
+            OWNER,
+            &ContextAuditDraft::new(OWNER, "conformance_legacy_alias_owner_archived").with_context(alias_owner_id),
+        )
+        .await
+        .unwrap();
+    let archived_alias_collision = store.register_scope_for_principal(colliding_legacy_scope(), OWNER).await.unwrap_err();
+    assert!(archived_alias_collision.to_string().contains("key or alias"), "{archived_alias_collision}");
     let same_key = format!("shared-key-across-kinds/{case}");
     store
         .register_scope_for_principal(

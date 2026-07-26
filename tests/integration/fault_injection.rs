@@ -256,11 +256,11 @@ impl<S: MemoryReader + Send + Sync> MemoryReader for ChaosStore<S> {
         source_memory_id: &MemoryId,
         candidate_ids: &[MemoryId],
         embedding: &[f32],
-        max_l2_distance: f64,
+        min_cosine_similarity: f64,
         limit: usize,
     ) -> Result<Vec<(MemoryId, f64)>, StoreError> {
         self.inner
-            .find_embedding_neighbors(source_memory_id, candidate_ids, embedding, max_l2_distance, limit)
+            .find_embedding_neighbors(source_memory_id, candidate_ids, embedding, min_cosine_similarity, limit)
             .await
     }
 }

@@ -137,6 +137,13 @@ pub(crate) struct ContextManager {
     pub edit: Option<ContextManagerEdit>,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct ContextPolicySnapshot {
+    kinds: Vec<ContextKindDefinition>,
+    kind_policies: Vec<ContextKindPolicyRecord>,
+    anchor_policies: Vec<ContextAnchorPolicyRecord>,
+}
+
 /// A JSON replacement draft for the active manager pane.
 #[derive(Debug)]
 pub(crate) struct ContextManagerEdit {
@@ -256,6 +263,8 @@ pub(crate) enum DataMsg {
     ContextCatalog {
         /// Contexts visible to the TUI principal, including archived lineage.
         records: Vec<ContextRecord>,
+        /// Policy inputs used to reproduce server-side descendant defaults.
+        policy: ContextPolicySnapshot,
         /// Total number of governed visible memories in broad-search mode.
         total: u64,
         /// Nonfatal catalog-loading warning.
@@ -404,6 +413,8 @@ where
     /// Complete authorized catalog, including archived lineage nodes hidden
     /// from the default sidebar.
     pub context_records: Vec<ContextRecord>,
+    /// Policy inputs paired with the current authorized context catalog.
+    pub context_policy: ContextPolicySnapshot,
     /// Whether the context catalog includes archived records for management.
     pub show_archived_contexts: bool,
     /// Total number of governed memories represented by broad search.
@@ -485,6 +496,7 @@ where
             now,
             contexts: Vec::new(),
             context_records: Vec::new(),
+            context_policy: ContextPolicySnapshot::default(),
             show_archived_contexts: false,
             context_total: None,
             context_notice: None,
@@ -522,22 +534,19 @@ where
             context_ids: Some(Vec::new()),
             ..MemoryFilter::default()
         };
-        let (records, stats) = tokio::join!(
-            load_context_records(&self.engine, principal, true),
-            self.engine.count_memories(broad_filter, self.ctx(), 0_usize),
-        );
+        let (catalog, stats) = tokio::join!(load_context_catalog(&self.engine, principal), self.engine.count_memories(broad_filter, self.ctx(), 0_usize),);
         match stats {
             Ok(stats) => {
-                let (records, warning) = match records {
-                    Ok(records) => (records, None),
-                    Err(error) => (Vec::new(), Some(format!("context catalog unavailable: {error}"))),
+                let (records, policy, warning) = match catalog {
+                    Ok((records, policy)) => (records, policy, None),
+                    Err(error) => (Vec::new(), ContextPolicySnapshot::default(), Some(format!("context catalog unavailable: {error}"))),
                 };
-                self.apply_context_catalog(records, Some(stats.total), warning);
+                self.apply_context_catalog(records, policy, Some(stats.total), warning);
             }
             Err(error) => {
                 let warning = format!("governed memory count unavailable: {error}");
-                match records {
-                    Ok(records) => self.apply_context_catalog(records, None, Some(warning)),
+                match catalog {
+                    Ok((records, policy)) => self.apply_context_catalog(records, policy, None, Some(warning)),
                     Err(catalog_error) => {
                         self.context_notice = Some(format!("{warning}; context catalog unavailable: {catalog_error}"));
                     }
@@ -569,7 +578,22 @@ where
             let cursor = self.context_parent_id(*selected);
             self.append_context_ancestors(cursor, &mut included, &mut effective)?;
         }
-        if self.include_descendants {
+        let policy_includes_descendants = self.context_policy.kinds.iter().any(|definition| {
+            let policy = evaluate_effective_context_policy(
+                &definition.kind,
+                &self.context_policy.kinds,
+                &self.context_policy.kind_policies,
+                &self.context_policy.anchor_policies,
+                &self.context_records,
+                &effective,
+            );
+            self.selected_context_ids
+                .iter()
+                .filter_map(|id| self.context_records.iter().find(|record| record.context.id == *id))
+                .any(|record| record.context.kind == policy.kind)
+                && policy.include_descendants
+        });
+        if self.include_descendants || policy_includes_descendants {
             self.append_context_descendants(&mut included, &mut effective)?;
         }
         Ok(effective)
@@ -634,8 +658,11 @@ where
     }
 
     fn filter(&self, limit: Option<usize>) -> Result<MemoryFilter, String> {
+        let context_ids = self.effective_selected_context_ids()?;
+        let explicit_context_filter = !context_ids.is_empty();
         Ok(MemoryFilter {
-            context_ids: Some(self.effective_selected_context_ids()?),
+            context_ids: Some(context_ids),
+            explicit_context_filter,
             limit,
             ..Default::default()
         })
@@ -667,15 +694,16 @@ where
                 context_ids: Some(Vec::new()),
                 ..MemoryFilter::default()
             };
-            let (records, stats) = tokio::join!(load_context_records(&engine, &principal, true), engine.count_memories(broad_filter, ctx, 0_usize),);
+            let (catalog, stats) = tokio::join!(load_context_catalog(&engine, &principal), engine.count_memories(broad_filter, ctx, 0_usize),);
             let msg = match stats {
                 Ok(stats) => {
-                    let (records, warning) = match records {
-                        Ok(records) => (records, None),
-                        Err(error) => (Vec::new(), Some(format!("context catalog unavailable: {error}"))),
+                    let (records, policy, warning) = match catalog {
+                        Ok((records, policy)) => (records, policy, None),
+                        Err(error) => (Vec::new(), ContextPolicySnapshot::default(), Some(format!("context catalog unavailable: {error}"))),
                     };
                     DataMsg::ContextCatalog {
                         records,
+                        policy,
                         total: stats.total,
                         warning,
                         generation,
@@ -690,9 +718,10 @@ where
         });
     }
 
-    fn apply_context_catalog(&mut self, records: Vec<ContextRecord>, total: Option<u64>, warning: Option<String>) {
+    fn apply_context_catalog(&mut self, records: Vec<ContextRecord>, policy: ContextPolicySnapshot, total: Option<u64>, warning: Option<String>) {
         let cursor_id = self.cursor_context().map(|item| item.record.context.id);
         self.context_records = records;
+        self.context_policy = policy;
         self.contexts = self
             .context_records
             .iter()
@@ -855,11 +884,16 @@ where
         match msg {
             DataMsg::ContextCatalog {
                 records,
+                policy,
                 total,
                 warning,
                 generation,
             } if generation == self.context_generation => {
-                self.apply_context_catalog(records, Some(total), warning);
+                let previous_effective = self.effective_selected_context_ids().ok();
+                self.apply_context_catalog(records, policy, Some(total), warning);
+                if previous_effective != self.effective_selected_context_ids().ok() {
+                    self.refresh();
+                }
             }
             DataMsg::ContextCatalogFailed { message, generation } if generation == self.context_generation => {
                 self.context_notice = Some(message);
@@ -983,9 +1017,7 @@ where
                 self.refresh();
             }
             KeyCode::Char('D') if self.focus == Focus::Contexts => {
-                self.include_descendants = !self.include_descendants;
-                self.row_selected = 0;
-                self.refresh();
+                self.toggle_context_descendants().await;
             }
             KeyCode::Char('a') if self.focus == Focus::Contexts => {
                 self.show_archived_contexts = !self.show_archived_contexts;
@@ -1503,7 +1535,7 @@ where
         } else {
             let mut proposed = self.selected_context_ids.clone();
             proposed.push(context_id);
-            match self.context_selection_denial(&proposed).await {
+            match self.context_selection_denial(&proposed, self.include_descendants).await {
                 Ok(Some(message)) => {
                     self.status = Status::NotHeld(message);
                     return;
@@ -1520,21 +1552,53 @@ where
         self.refresh();
     }
 
-    async fn context_selection_denial(&self, direct_ids: &[ContextId]) -> Result<Option<String>, crate::error::EngineError> {
+    async fn toggle_context_descendants(&mut self) {
+        let proposed = !self.include_descendants;
+        if !self.selected_context_ids.is_empty() {
+            match self.context_selection_denial(&self.selected_context_ids, proposed).await {
+                Ok(Some(message)) => {
+                    self.status = Status::NotHeld(message);
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.status = Status::NotHeld(format!("context policy evaluation failed: {error}"));
+                    return;
+                }
+            }
+        }
+        self.include_descendants = proposed;
+        self.row_selected = 0;
+        self.refresh();
+    }
+
+    async fn context_selection_denial(&self, direct_ids: &[ContextId], requested_descendants: bool) -> Result<Option<String>, crate::error::EngineError> {
         let principal = self.principal.as_deref().unwrap_or("anonymous");
         let store = self.engine.store();
-        let (effective, kinds, kind_policies, anchor_policies) = tokio::try_join!(
+        let (initial_effective, kinds, kind_policies, anchor_policies) = tokio::try_join!(
             store.expand_context_selection(direct_ids, principal, false),
             store.list_context_kinds(),
             store.list_context_kind_policies(principal),
             store.list_context_anchor_policies(principal),
         )?;
-        let effective_ids = effective.iter().map(|context| context.id).collect::<Vec<_>>();
         let direct_kinds = direct_ids
             .iter()
             .filter_map(|id| self.context_records.iter().find(|record| record.context.id == *id))
             .map(|record| record.context.kind.clone())
             .collect::<HashSet<_>>();
+        let initial_effective_ids = initial_effective.iter().map(|context| context.id).collect::<Vec<_>>();
+        let initial_policies = kinds
+            .iter()
+            .map(|definition| evaluate_effective_context_policy(&definition.kind, &kinds, &kind_policies, &anchor_policies, &self.context_records, &initial_effective_ids))
+            .collect::<Vec<_>>();
+        let include_descendants = requested_descendants || initial_policies.iter().any(|policy| direct_kinds.contains(&policy.kind) && policy.include_descendants);
+        let effective = if include_descendants {
+            store.expand_context_selection(direct_ids, principal, true).await?
+        } else {
+            initial_effective
+        };
+        let effective_ids = effective.iter().map(|context| context.id).collect::<Vec<_>>();
+        let effective_kinds = effective.iter().map(|context| context.kind.clone()).collect::<HashSet<_>>();
         let policies = kinds
             .iter()
             .map(|definition| evaluate_effective_context_policy(&definition.kind, &kinds, &kind_policies, &anchor_policies, &self.context_records, &effective_ids))
@@ -1542,12 +1606,12 @@ where
         if let Some(policy) = policies.iter().find(|policy| !policy.ambiguities.is_empty()) {
             return Ok(Some(format!("effective policy for {} is ambiguous", policy.kind)));
         }
-        if let Some(policy) = policies.iter().find(|policy| direct_kinds.contains(&policy.kind) && !policy.allowed) {
+        if let Some(policy) = policies.iter().find(|policy| effective_kinds.contains(&policy.kind) && !policy.allowed) {
             return Ok(Some(format!("effective policy denies context kind {}", policy.kind)));
         }
-        for policy in policies.iter().filter(|policy| direct_kinds.contains(&policy.kind)) {
+        for policy in policies.iter().filter(|policy| effective_kinds.contains(&policy.kind)) {
             if let Some(allowed_companions) = &policy.allowed_companion_kinds
-                && let Some(disallowed) = direct_kinds
+                && let Some(disallowed) = effective_kinds
                     .iter()
                     .find(|candidate_kind| *candidate_kind != &policy.kind && !allowed_companions.contains(candidate_kind))
             {
@@ -1626,6 +1690,24 @@ where
         }
     }
     Ok(records)
+}
+
+async fn load_context_catalog<S>(engine: &LocalHoldEngine<S>, principal: &str) -> Result<(Vec<ContextRecord>, ContextPolicySnapshot), crate::error::EngineError>
+where
+    S: MemoryStore + Clone + fmt::Debug + 'static,
+{
+    let store = engine.store();
+    let (records, kinds, kind_policies, anchor_policies) = tokio::try_join!(
+        load_context_records(engine, principal, true),
+        async { store.list_context_kinds().await.map_err(crate::error::EngineError::from) },
+        async { store.list_context_kind_policies(principal).await.map_err(crate::error::EngineError::from) },
+        async { store.list_context_anchor_policies(principal).await.map_err(crate::error::EngineError::from) },
+    )?;
+    Ok((records, ContextPolicySnapshot {
+        kinds,
+        kind_policies,
+        anchor_policies,
+    }))
 }
 
 async fn load_context_manager<S>(store: &S, context_id: ContextId, principal: &str, pane: ContextManagerPane) -> Result<ContextManager, String>
@@ -2001,7 +2083,7 @@ mod tests {
     };
     use tokio::sync::mpsc;
 
-    use super::{App, ContextManagerPane, DataMsg, Focus, MAX_EFFECTIVE_CONTEXTS, Mode, MutationEngineFactory, Row, Status, append_effective_context};
+    use super::{App, ContextManagerPane, ContextPolicySnapshot, DataMsg, Focus, MAX_EFFECTIVE_CONTEXTS, Mode, MutationEngineFactory, Row, Status, append_effective_context};
     use crate::{
         config::{LimitsConfig, SearchConfig},
         context::{ContextAuditDraft, ContextCreateDraft, ContextId, ContextKind, ContextKindPolicy, ContextKindPolicyDraft, ContextLifecycle, ContextPolicyLayer},
@@ -2722,6 +2804,7 @@ mod tests {
         app.context_generation = 2_u64;
         app.on_data(DataMsg::ContextCatalog {
             records: Vec::new(),
+            policy: ContextPolicySnapshot::default(),
             total: 9_u64,
             warning: None,
             generation: 1_u64,
@@ -2796,6 +2879,7 @@ mod tests {
         app.on_event(press(KeyCode::Char(' '))).await;
         app.on_data(rx.recv().await.unwrap());
         assert_eq!(app.selected_context_ids, vec![alpha]);
+        assert!(app.filter(None).unwrap().explicit_context_filter);
         assert_eq!(app.rows.len(), 1_usize);
         assert_eq!(app.rows[0].memory.content, "alpha memory");
 
@@ -2870,6 +2954,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn context_sidebar_applies_policy_default_descendant_expansion() {
+        let store = SqliteStore::in_memory().unwrap();
+        let parent_id = create_test_context(&store, "project/policy-descendant-parent", "Policy descendant parent").await;
+        let child_id = ContextId::new();
+        let mut child = ContextCreateDraft::private(
+            child_id,
+            ContextKind::new(ContextKind::PROJECT).unwrap(),
+            "project/policy-descendant-child",
+            "Policy descendant child",
+            "operator",
+        );
+        child.parent_id = Some(parent_id);
+        let _child = store
+            .create_context(&child, &ContextAuditDraft::new("operator", "test_policy_descendant_child_created").with_context(child_id))
+            .await
+            .unwrap();
+        store
+            .upsert_context_kind_policy(
+                &ContextKindPolicyDraft::new(
+                    ContextPolicyLayer::Principal,
+                    "operator",
+                    ContextKind::new(ContextKind::PROJECT).unwrap(),
+                    ContextKindPolicy {
+                        include_descendants: Some(true),
+                        ..ContextKindPolicy::default()
+                    },
+                ),
+                "operator",
+                &ContextAuditDraft::new("operator", "test_policy_descendant_default"),
+            )
+            .await
+            .unwrap();
+        let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(engine, Theme::detect(), Some("operator".into()), tx);
+
+        app.bootstrap().await;
+        app.focus = Focus::Contexts;
+        app.context_cursor = app.contexts.iter().position(|item| item.record.context.id == parent_id).unwrap().saturating_add(1);
+        app.on_event(press(KeyCode::Char(' '))).await;
+        let effective = app.effective_selected_context_ids().unwrap();
+
+        assert!(!app.include_descendants, "the manual descendant toggle remains independent of the policy default");
+        assert!(effective.contains(&parent_id));
+        assert!(effective.contains(&child_id), "policy-default descendants must match MCP selection semantics");
+    }
+
+    #[tokio::test]
     async fn context_sidebar_rejects_effectively_denied_kind() {
         let store = SqliteStore::in_memory().unwrap();
         let context_id = create_test_context(&store, "project/policy-denied", "Policy denied").await;
@@ -2895,6 +3027,50 @@ mod tests {
 
         assert!(app.selected_context_ids.is_empty());
         assert!(matches!(&app.status, Status::NotHeld(message) if message.contains("denies context kind project")));
+    }
+
+    #[tokio::test]
+    async fn context_sidebar_rejects_denied_descendant_expansion() {
+        let store = SqliteStore::in_memory().unwrap();
+        let project_id = create_test_context(&store, "project/descendant-policy", "Descendant policy parent").await;
+        let domain_id = ContextId::new();
+        let mut domain = ContextCreateDraft::private(
+            domain_id,
+            ContextKind::new(ContextKind::DOMAIN).unwrap(),
+            "domain/descendant-policy",
+            "Descendant policy child",
+            "operator",
+        );
+        domain.parent_id = Some(project_id);
+        let _domain = store
+            .create_context(&domain, &ContextAuditDraft::new("operator", "test_descendant_policy_child_created").with_context(domain_id))
+            .await
+            .unwrap();
+        store
+            .upsert_context_kind_policy(
+                &ContextKindPolicyDraft::new(ContextPolicyLayer::Operator, "", ContextKind::new(ContextKind::DOMAIN).unwrap(), ContextKindPolicy {
+                    allowed: Some(false),
+                    ..ContextKindPolicy::default()
+                }),
+                "operator",
+                &ContextAuditDraft::new("operator", "test_descendant_policy_denied"),
+            )
+            .await
+            .unwrap();
+        let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(engine, Theme::detect(), Some("operator".into()), tx);
+
+        app.bootstrap().await;
+        app.focus = Focus::Contexts;
+        app.context_cursor = app.contexts.iter().position(|item| item.record.context.id == project_id).unwrap().saturating_add(1);
+        app.on_event(press(KeyCode::Char(' '))).await;
+        assert_eq!(app.selected_context_ids, vec![project_id]);
+
+        app.on_event(press(KeyCode::Char('D'))).await;
+
+        assert!(!app.include_descendants);
+        assert!(matches!(&app.status, Status::NotHeld(message) if message.contains("denies context kind domain")));
     }
 
     #[tokio::test]

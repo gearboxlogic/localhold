@@ -48,7 +48,7 @@ pub(crate) struct ConsolidateResult {
 /// Returns 0.0 if either vector has zero magnitude.
 ///
 /// Uses f32 accumulators throughout for auto-vectorization on 768-dim
-/// embeddings. The inputs are L2-normalized, so f32 precision is sufficient.
+/// embeddings and computes both norms explicitly; callers need not normalize.
 #[expect(clippy::float_arithmetic, reason = "cosine similarity requires floating-point arithmetic")]
 pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
@@ -128,22 +128,6 @@ pub(crate) struct NeighborPair {
     pub id_a: MemoryId,
     pub id_b: MemoryId,
     pub similarity: f64,
-}
-
-/// Convert a cosine similarity threshold to the equivalent L2 distance threshold
-/// for L2-normalized embeddings.
-///
-/// Relationship: `L2 = sqrt(2 - 2 * cosine)` for unit-length vectors.
-pub(crate) fn cosine_to_l2_threshold(cosine_threshold: f64) -> f64 {
-    // Clamp to valid cosine range to avoid NaN from sqrt of negative.
-    let clamped = cosine_threshold.clamp(0.0_f64, 1.0_f64);
-    clamped.mul_add(-2.0_f64, 2.0_f64).sqrt()
-}
-
-/// Convert an L2 distance to cosine similarity for L2-normalized embeddings.
-#[expect(clippy::float_arithmetic, reason = "clamp on result of mul_add is required for numerical safety")]
-pub(crate) fn l2_to_cosine(l2_distance: f64) -> f64 {
-    (l2_distance * l2_distance).mul_add(-0.5_f64, 1.0_f64).clamp(0.0_f64, 1.0_f64)
 }
 
 /// Find groups of near-duplicate memories from pre-computed neighbor pairs.

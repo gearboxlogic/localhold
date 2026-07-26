@@ -1514,7 +1514,7 @@ impl PostgresStore {
         source_memory_id: &MemoryId,
         candidate_ids: &[MemoryId],
         embedding: &[f32],
-        max_l2_distance: f64,
+        min_cosine_similarity: f64,
         limit: usize,
     ) -> Result<Vec<EmbeddingNeighbor>, StoreError> {
         if limit == 0 || candidate_ids.is_empty() {
@@ -1535,20 +1535,21 @@ impl PostgresStore {
                   AND m.superseded_by IS NULL
             ),
             ranked_candidates AS MATERIALIZED (
-                SELECT memory_id, (embedding <-> $1::vector)::double precision AS distance
+                SELECT memory_id, (1.0 - (embedding <=> $1::vector))::double precision AS similarity
                 FROM candidates
             )
-            SELECT memory_id, distance
+            SELECT memory_id, similarity AS distance
             FROM ranked_candidates
-            WHERE distance <= $4
-            ORDER BY distance, memory_id
+            WHERE similarity >= $4
+              AND similarity <= 1.0
+            ORDER BY similarity DESC, memory_id
             LIMIT $5
             ",
         )
         .bind(vector)
         .bind(candidate_ids)
         .bind(source_memory_id.to_string())
-        .bind(max_l2_distance)
+        .bind(min_cosine_similarity)
         .bind(limit)
         .fetch_all(self.pool())
         .await?;
@@ -2647,10 +2648,11 @@ impl MemoryReader for PostgresStore {
         source_memory_id: &MemoryId,
         candidate_ids: &[MemoryId],
         embedding: &[f32],
-        max_l2_distance: f64,
+        min_cosine_similarity: f64,
         limit: usize,
     ) -> Result<Vec<EmbeddingNeighbor>, StoreError> {
-        self.find_embedding_neighbors_impl(source_memory_id, candidate_ids, embedding, max_l2_distance, limit).await
+        self.find_embedding_neighbors_impl(source_memory_id, candidate_ids, embedding, min_cosine_similarity, limit)
+            .await
     }
 }
 
@@ -5079,8 +5081,14 @@ async fn ensure_private_postgres_admin_scope_context(
              LEFT JOIN context_grants AS grant_row
                ON grant_row.context_id = context_row.id
               AND grant_row.grantee_principal IN ($1, $3)
-             WHERE context_row.normalized_key = $2
-               AND context_row.lifecycle = 'active'
+             WHERE (
+                       context_row.normalized_key = $2 OR EXISTS (
+                           SELECT 1
+                           FROM context_aliases AS alias_row
+                           WHERE alias_row.context_id = context_row.id
+                             AND alias_row.normalized_alias = $2
+                       )
+                   )
                AND (context_row.owner_principal = $1 OR grant_row.context_id IS NOT NULL)
          )",
     )
@@ -5091,7 +5099,7 @@ async fn ensure_private_postgres_admin_scope_context(
     .await?;
     if visible_foreign {
         return Err(StoreError::Conflict(
-            "legacy scope key already belongs to another visible governed context and cannot be overridden".into(),
+            "legacy scope key already belongs to another visible governed context key or alias and cannot be overridden".into(),
         ));
     }
     let id = ContextId::new().to_string();
@@ -8176,7 +8184,7 @@ mod tests {
             .id;
         let mut base = test_memory_with_content("postgres neighbor base");
         base.provenance.source_conversation = Some(scope.clone());
-        let base_id = store.store_impl(&base, Some(&[0.0_f32, 0.0_f32, 0.0_f32])).await.unwrap();
+        let base_id = store.store_impl(&base, Some(&[1.0_f32, 0.0_f32, 0.0_f32])).await.unwrap();
         let mut neighbor = test_memory_with_content("postgres neighbor nearby");
         neighbor.provenance.source_conversation = Some(scope.clone());
         let neighbor_id = store.store_impl(&neighbor, Some(&[0.1_f32, 0.0_f32, 0.0_f32])).await.unwrap();
@@ -8199,7 +8207,7 @@ mod tests {
         assert!(store.mark_superseded_by_impl(&superseded_id, &base_id).await.unwrap());
 
         let embeddings = store.fetch_embeddings_for_ids_impl(&[base_id, neighbor_id, no_embedding_id]).await.unwrap();
-        assert_eq!(embeddings.get(&base_id), Some(&vec![0.0_f32, 0.0_f32, 0.0_f32]));
+        assert_eq!(embeddings.get(&base_id), Some(&vec![1.0_f32, 0.0_f32, 0.0_f32]));
         assert_eq!(embeddings.get(&neighbor_id), Some(&vec![0.1_f32, 0.0_f32, 0.0_f32]));
         assert!(!embeddings.contains_key(&no_embedding_id));
 
@@ -8215,14 +8223,14 @@ mod tests {
 
         let candidate_ids = [base_id, neighbor_id, superseded_id];
         let neighbors = store
-            .find_embedding_neighbors_impl(&base_id, &candidate_ids, &[0.0_f32, 0.0_f32, 0.0_f32], 0.2_f64, 10_usize)
+            .find_embedding_neighbors_impl(&base_id, &candidate_ids, &[1.0_f32, 0.0_f32, 0.0_f32], 0.9_f64, 10_usize)
             .await
             .unwrap();
-        assert!(neighbors.iter().any(|(id, distance)| *id == neighbor_id && *distance <= 0.2_f64));
+        assert!(neighbors.iter().any(|(id, similarity)| *id == neighbor_id && *similarity >= 0.9_f64));
         assert!(!neighbors.iter().any(|(id, _)| *id == superseded_id));
         assert!(
             store
-                .find_embedding_neighbors_impl(&base_id, &candidate_ids, &[0.0_f32, 0.0_f32, 0.0_f32], 0.2_f64, 0_usize)
+                .find_embedding_neighbors_impl(&base_id, &candidate_ids, &[1.0_f32, 0.0_f32, 0.0_f32], 0.9_f64, 0_usize)
                 .await
                 .unwrap()
                 .is_empty()

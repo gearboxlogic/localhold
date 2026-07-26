@@ -95,6 +95,46 @@ mod query_plan_tests {
         let error = expand_context_definitions(&definitions, &[definitions[0].id], true).unwrap_err();
         assert!(matches!(error, crate::error::StoreError::Conflict(message) if message.contains("maximum")));
     }
+
+    #[test]
+    fn archived_lineage_does_not_consume_the_effective_context_ceiling() {
+        let now = DateTime::<Utc>::UNIX_EPOCH;
+        let active_id = ContextId::new();
+        let archived_ids = (0..MAX_EFFECTIVE_CONTEXTS.saturating_add(1)).map(|_| ContextId::new()).collect::<Vec<_>>();
+        let mut definitions = vec![ContextDefinition {
+            id: active_id,
+            kind: ContextKind::new(ContextKind::PROJECT).unwrap(),
+            key: "project/effective-limit-active".into(),
+            display_name: "Effective limit active".into(),
+            description: None,
+            owner_principal: "owner".into(),
+            guidance: None,
+            parent_id: archived_ids.first().copied(),
+            lifecycle: ContextLifecycle::Active,
+            frozen: false,
+            created_at: now,
+            updated_at: now,
+        }];
+        definitions.extend(archived_ids.iter().enumerate().map(|(index, id)| ContextDefinition {
+            id: *id,
+            kind: ContextKind::new(ContextKind::PROJECT).unwrap(),
+            key: format!("project/effective-limit-archived/{index}"),
+            display_name: format!("Effective limit archived {index}"),
+            description: None,
+            owner_principal: "owner".into(),
+            guidance: None,
+            parent_id: archived_ids.get(index.saturating_add(1)).copied(),
+            lifecycle: ContextLifecycle::Archived,
+            frozen: false,
+            created_at: now,
+            updated_at: now,
+        }));
+
+        let effective = expand_context_definitions(&definitions, &[active_id], true).unwrap();
+
+        assert_eq!(effective.len(), 1);
+        assert_eq!(effective[0].id, active_id);
+    }
 }
 
 const CONTEXT_COLUMNS: &str = "
@@ -1201,15 +1241,29 @@ impl ContextReader for SqliteStore {
                      JOIN effective AS effective_child ON effective_child.id = child.id
                      WHERE {}
                  ),
-                 capped(id) AS (
-                     SELECT id FROM effective LIMIT ?4
+                 active_capped(id) AS (
+                     SELECT effective.id
+                     FROM effective
+                     JOIN contexts AS active_context ON active_context.id = effective.id
+                     WHERE active_context.lifecycle = 'active'
+                     LIMIT ?4
+                 ),
+                 selected_effective(id) AS (
+                     SELECT id FROM active_capped
+                     UNION
+                     SELECT parent.id
+                     FROM contexts AS parent
+                     JOIN contexts AS child ON child.parent_id = parent.id
+                     JOIN selected_effective AS selected_child ON selected_child.id = child.id
+                     WHERE {}
                  )
                  SELECT {CONTEXT_COLUMNS}
                  FROM contexts AS context_row
-                 JOIN capped AS selected_context ON selected_context.id = context_row.id
+                 JOIN selected_effective AS selected_context ON selected_context.id = context_row.id
                  ORDER BY context_row.kind, context_row.normalized_key, context_row.id",
                 context_visible_sql("child"),
-                context_visible_sql("parent")
+                context_visible_sql("parent"),
+                context_visible_sql("parent"),
             );
             let mut statement = conn.prepare(&sql)?;
             let expansion_limit = sqlite_usize(MAX_EFFECTIVE_CONTEXTS.saturating_add(1), "effective context limit")?;
@@ -1499,7 +1553,7 @@ impl ContextReader for SqliteStore {
     reason = "hierarchy expansion performs cycle checks while walking ancestors and optional descendants"
 )]
 fn expand_context_definitions(definitions: &[ContextDefinition], direct_ids: &[ContextId], include_descendants: bool) -> Result<Vec<ContextDefinition>, StoreError> {
-    if definitions.len() > MAX_EFFECTIVE_CONTEXTS {
+    if definitions.iter().filter(|context| context.lifecycle == ContextLifecycle::Active).count() > MAX_EFFECTIVE_CONTEXTS {
         return Err(StoreError::Conflict(format!(
             "context selection expands beyond the maximum of {MAX_EFFECTIVE_CONTEXTS} effective contexts"
         )));
@@ -2492,6 +2546,10 @@ impl ContextReader for PostgresStore {
         Ok(records)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "PostgreSQL hierarchy expansion keeps traversal, active-result capping, archived lineage recovery, and bindings in one auditable query"
+    )]
     async fn expand_context_selection(&self, context_ids: &[ContextId], principal: &str, include_descendants: bool) -> Result<Vec<ContextDefinition>, StoreError> {
         for context_id in context_ids {
             let context = self
@@ -2537,14 +2595,33 @@ impl ContextReader for PostgresStore {
                        )
                    )
              ),
-             capped(id) AS (
-                 SELECT id FROM effective LIMIT $4
+             active_capped(id) AS (
+                 SELECT effective.id
+                 FROM effective
+                 JOIN contexts AS active_context ON active_context.id = effective.id
+                 WHERE active_context.lifecycle = 'active'
+                 LIMIT $4
+             ),
+             selected_effective(id) AS (
+                 SELECT id FROM active_capped
+                 UNION
+                 SELECT parent.id
+                 FROM contexts AS parent
+                 JOIN contexts AS child ON child.parent_id = parent.id
+                 JOIN selected_effective AS selected_child ON selected_child.id = child.id
+                 WHERE (
+                       parent.owner_principal = $1 OR EXISTS (
+                           SELECT 1 FROM context_grants AS grant_row
+                           WHERE grant_row.context_id = parent.id
+                             AND grant_row.grantee_principal IN ($1, '*')
+                       )
+                   )
              )
              SELECT context_row.id, context_row.kind, context_row.context_key,
                     context_row.display_name, context_row.description, context_row.owner_principal,
                     guidance, parent_id, lifecycle, frozen, created_at, updated_at
              FROM contexts AS context_row
-             JOIN capped AS selected_context ON selected_context.id = context_row.id
+             JOIN selected_effective AS selected_context ON selected_context.id = context_row.id
              ORDER BY context_row.kind, context_row.normalized_key, context_row.id",
         )
         .bind(principal)

@@ -939,10 +939,11 @@ impl MemoryReader for SqliteStore {
         source_memory_id: &MemoryId,
         candidate_ids: &[MemoryId],
         embedding: &[f32],
-        max_l2_distance: f64,
+        min_cosine_similarity: f64,
         limit: usize,
     ) -> Result<Vec<super::EmbeddingNeighbor>, StoreError> {
-        self.find_embedding_neighbors_impl(source_memory_id, candidate_ids, embedding, max_l2_distance, limit).await
+        self.find_embedding_neighbors_impl(source_memory_id, candidate_ids, embedding, min_cosine_similarity, limit)
+            .await
     }
 }
 

@@ -2838,6 +2838,125 @@ async fn explicit_legacy_creation_policy_applies_without_breaking_default_compat
 }
 
 #[tokio::test]
+async fn descendant_expansion_rejects_effectively_denied_kinds() {
+    let (client, server) = setup_server_with(Arc::new(NoopEmbedding::new())).await;
+    let project_id = ContextId::new();
+    let _project = server
+        .store()
+        .create_context(
+            &ContextCreateDraft::private(
+                project_id,
+                ContextKind::new(ContextKind::PROJECT).unwrap(),
+                "project/descendant-policy-parent",
+                "Descendant policy parent",
+                "stdio",
+            ),
+            &ContextAuditDraft::new("stdio", "test_descendant_policy_parent_created").with_context(project_id),
+        )
+        .await
+        .unwrap();
+    let domain_id = ContextId::new();
+    let mut domain = ContextCreateDraft::private(
+        domain_id,
+        ContextKind::new(ContextKind::DOMAIN).unwrap(),
+        "domain/descendant-policy-child",
+        "Descendant policy child",
+        "stdio",
+    );
+    domain.parent_id = Some(project_id);
+    let _domain = server
+        .store()
+        .create_context(&domain, &ContextAuditDraft::new("stdio", "test_descendant_policy_child_created").with_context(domain_id))
+        .await
+        .unwrap();
+    let mut denied_domain_policy = ContextKindPolicy::default();
+    denied_domain_policy.allowed = Some(false);
+    server
+        .store()
+        .upsert_context_kind_policy(
+            &ContextKindPolicyDraft::new(ContextPolicyLayer::Principal, "stdio", ContextKind::new(ContextKind::DOMAIN).unwrap(), denied_domain_policy),
+            "stdio",
+            &ContextAuditDraft::new("stdio", "test_descendant_domain_denied"),
+        )
+        .await
+        .unwrap();
+
+    let denied = call_tool_error(
+        &client,
+        "context_resolve",
+        json!({
+            "context": {
+                "refs": [{"id": project_id}],
+                "include_descendants": true
+            }
+        }),
+    )
+    .await;
+    let structured = parse_tool_error(&denied);
+    assert_eq!(structured.error.code, ToolErrorCode::AccessDenied);
+    assert!(structured.error.message.contains("domain"));
+}
+
+#[tokio::test]
+async fn ancestor_expansion_rejects_effectively_denied_kinds() {
+    let (client, server) = setup_server_with(Arc::new(NoopEmbedding::new())).await;
+    let domain_id = ContextId::new();
+    let _domain = server
+        .store()
+        .create_context(
+            &ContextCreateDraft::private(
+                domain_id,
+                ContextKind::new(ContextKind::DOMAIN).unwrap(),
+                "domain/ancestor-policy-parent",
+                "Ancestor policy parent",
+                "stdio",
+            ),
+            &ContextAuditDraft::new("stdio", "test_ancestor_policy_parent_created").with_context(domain_id),
+        )
+        .await
+        .unwrap();
+    let project_id = ContextId::new();
+    let mut project = ContextCreateDraft::private(
+        project_id,
+        ContextKind::new(ContextKind::PROJECT).unwrap(),
+        "project/ancestor-policy-child",
+        "Ancestor policy child",
+        "stdio",
+    );
+    project.parent_id = Some(domain_id);
+    let _project = server
+        .store()
+        .create_context(&project, &ContextAuditDraft::new("stdio", "test_ancestor_policy_child_created").with_context(project_id))
+        .await
+        .unwrap();
+    let mut denied_domain_policy = ContextKindPolicy::default();
+    denied_domain_policy.allowed = Some(false);
+    server
+        .store()
+        .upsert_context_kind_policy(
+            &ContextKindPolicyDraft::new(ContextPolicyLayer::Principal, "stdio", ContextKind::new(ContextKind::DOMAIN).unwrap(), denied_domain_policy),
+            "stdio",
+            &ContextAuditDraft::new("stdio", "test_ancestor_domain_denied"),
+        )
+        .await
+        .unwrap();
+
+    let denied = call_tool_error(
+        &client,
+        "context_resolve",
+        json!({
+            "context": {
+                "refs": [{"id": project_id}]
+            }
+        }),
+    )
+    .await;
+    let structured = parse_tool_error(&denied);
+    assert_eq!(structured.error.code, ToolErrorCode::AccessDenied);
+    assert!(structured.error.message.contains("domain"));
+}
+
+#[tokio::test]
 async fn duplicate_detection_does_not_disclose_redacted_memory_membership() {
     let (client, server) = setup_server_with_auth(Arc::new(NoopEmbedding::new()), Some("viewer"), AnonymousPolicy::DenyAll).await;
     let context_id = ContextId::new();
@@ -3838,6 +3957,69 @@ async fn handoff_previews_without_commit() {
 
     let brief: BriefResponse = call_tool(&client, "brief", json!({"scope": "gearboxlogic/localhold"})).await;
     assert!(brief.relevant.is_empty(), "preview-only handoff must not persist candidates");
+}
+
+#[tokio::test]
+async fn handoff_preview_simulates_implicit_legacy_context_creation_without_persisting_it() {
+    let (client, server) = setup_server_with(Arc::new(NoopEmbedding::new())).await;
+    let scope = "legacy/handoff-preview-simulation";
+
+    let preview: HandoffResponse = call_tool(
+        &client,
+        "handoff",
+        json!({
+            "candidates": [
+                {"content": "handoff preview simulates a governed legacy write", "scope": scope}
+            ]
+        }),
+    )
+    .await;
+
+    assert!(!preview.committed);
+    assert_eq!(preview.suggested_writes[0].scope, scope);
+    assert_eq!(preview.suggested_writes[0].contexts[0].key, scope);
+    let preview_catalog: ContextResolveResponse = call_tool(&client, "context_resolve", json!({"limit": 500_usize})).await;
+    assert!(preview_catalog.catalog.iter().all(|context| context.key != scope));
+
+    let committed: HandoffResponse = call_tool(
+        &client,
+        "handoff",
+        json!({
+            "commit": true,
+            "candidates": [
+                {"content": "handoff commit accepts the previewed governed legacy write", "scope": scope}
+            ]
+        }),
+    )
+    .await;
+
+    assert!(committed.committed);
+    assert!(committed.suggested_writes[0].id.is_some());
+    let committed_catalog: ContextResolveResponse = call_tool(&client, "context_resolve", json!({"limit": 500_usize})).await;
+    assert!(committed_catalog.catalog.iter().any(|context| context.key == scope));
+
+    let context_id = committed.suggested_writes[0].contexts[0].id;
+    server
+        .store()
+        .set_context_lifecycle(
+            &context_id,
+            ContextLifecycle::Archived,
+            "stdio",
+            &ContextAuditDraft::new("stdio", "test_handoff_preview_context_archived").with_context(context_id),
+        )
+        .await
+        .unwrap();
+    let archived_preview = call_tool_error(
+        &client,
+        "handoff",
+        json!({
+            "candidates": [
+                {"content": "handoff preview must not shadow an archived context", "scope": scope}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(parse_tool_error(&archived_preview).error.code, ToolErrorCode::Conflict);
 }
 
 #[tokio::test]

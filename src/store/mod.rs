@@ -206,7 +206,7 @@ impl<T: ContextReader + ContextWriter> ContextStore for T {}
 /// to return embedding vectors keyed by their owning memory.
 pub(crate) type EmbeddingMap = HashMap<MemoryId, Vec<f32>>;
 
-/// An ANN neighbor result: `(memory_id, l2_distance)`.
+/// Candidate memory paired with its cosine similarity to the source vector.
 pub(crate) type EmbeddingNeighbor = (MemoryId, f64);
 
 /// Secret-free identity for the vector space produced by an embedding provider.
@@ -512,9 +512,9 @@ pub trait MemoryReader: Send + Sync {
     /// embeddings are silently omitted from the result.
     fn fetch_embeddings_for_ids(&self, ids: &[MemoryId]) -> impl Future<Output = Result<EmbeddingMap, StoreError>> + Send;
 
-    /// Find nearest neighbors for an embedding within an L2 distance threshold.
+    /// Find nearest neighbors for an embedding above a cosine-similarity threshold.
     ///
-    /// Returns `(neighbor_memory_id, l2_distance)` pairs from the supplied
+    /// Returns `(neighbor_memory_id, cosine_similarity)` pairs from the supplied
     /// canonical consolidation candidate set. Self-matches and superseded
     /// memories are excluded before the bounded nearest-neighbor limit.
     #[expect(
@@ -526,7 +526,7 @@ pub trait MemoryReader: Send + Sync {
         source_memory_id: &MemoryId,
         candidate_ids: &[MemoryId],
         embedding: &[f32],
-        max_l2_distance: f64,
+        min_cosine_similarity: f64,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<EmbeddingNeighbor>, StoreError>> + Send;
 }

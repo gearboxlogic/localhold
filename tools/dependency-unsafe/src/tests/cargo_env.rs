@@ -4,7 +4,9 @@ use std::fs;
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
-use super::{CargoEnvironment, reject_cargo_config, source_configuration_variable, temporary_root};
+#[cfg(unix)]
+use super::temporary_root;
+use super::{CargoEnvironment, reject_cargo_config, source_configuration_variable};
 
 const SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 

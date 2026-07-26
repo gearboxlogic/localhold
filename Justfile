@@ -45,14 +45,17 @@ clippy:
 # Format all code (requires nightly: `rustup toolchain install nightly -c rustfmt`)
 fmt:
     rustup run nightly cargo-fmt --all
+    cargo fmt --manifest-path tools/dependency-unsafe/Cargo.toml
 
 # Check formatting (requires nightly)
 fmt-check:
     rustup run nightly cargo-fmt --all -- --check
+    cargo fmt --manifest-path tools/dependency-unsafe/Cargo.toml -- --check
 
 # Run cargo-deny supply chain audit
 deny:
     cargo deny check
+    cargo deny --manifest-path tools/dependency-unsafe/Cargo.toml --locked check --config tools/dependency-unsafe/deny.toml
 
 # Check direct workspace dependencies for newer available versions
 outdated:
@@ -65,19 +68,44 @@ audit:
 # Reject internal artifacts, private paths, and legacy product identity
 hygiene:
     ./script/check-publication-hygiene.sh
+    ./script/tests/test_claude_review.sh
 
 # Prevent production timing logic from bypassing the injectable clock
 time-abstraction:
     ./script/check-time-abstraction.sh
 
-# CI-style gate: fmt + clippy + deny + tests
-check:
+# Audit the target-specific dependency source exposure against reviewed baselines
+dependency-unsafe:
+    cargo fetch --locked
+    cargo fetch --manifest-path tools/dependency-unsafe/Cargo.toml --locked
+    cargo fmt --manifest-path tools/dependency-unsafe/Cargo.toml -- --check
+    cargo test --manifest-path tools/dependency-unsafe/Cargo.toml --locked
+    cargo clippy --manifest-path tools/dependency-unsafe/Cargo.toml --all-targets --locked -- -D warnings
+    cargo run --manifest-path tools/dependency-unsafe/Cargo.toml --locked -- check
+
+# Regenerate one native dependency exposure baseline after approved review
+dependency-unsafe-generate PLATFORM:
+    cargo fetch --locked
+    cargo fetch --manifest-path tools/dependency-unsafe/Cargo.toml --locked
+    cargo run --manifest-path tools/dependency-unsafe/Cargo.toml --locked -- generate --platform {{ PLATFORM }}
+
+# Permanent maintainability safety rails; additional Phase 0 gates join here
+maintainability:
+    just dependency-unsafe
+
+# Product and repository quality checks that do not include evidence baselines
+check-quality:
     just hygiene
     just time-abstraction
     just fmt-check
     just clippy
     just deny
     just test
+
+# Full local gate; keep evidence comparison last so other quality signal remains visible
+check:
+    just check-quality
+    just maintainability
 
 # Bootstrap local development environment (toolchains + deps)
 setup:

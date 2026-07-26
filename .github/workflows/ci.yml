@@ -70,7 +70,7 @@ jobs:
         run: rustup toolchain install nightly -c rustfmt
 
       - name: Run CI gate
-        run: just check
+        run: just check-quality
 
       - name: Stage CPU installation
         run: ./script/install.sh --profile cpu --prefix "$RUNNER_TEMP/localhold"
@@ -101,6 +101,45 @@ jobs:
 
       - name: Build CUDA preview artifact
         run: just build-release-reranker-cuda
+
+  dependency-unsafe-linux:
+    name: Dependency Unsafe (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Cache Cargo registry and audit tool
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .cache/localhold/cargo/registry
+            .cache/localhold/cargo/git
+            tools/dependency-unsafe/target
+          key: ${{ runner.os }}-dependency-unsafe-${{ hashFiles('Cargo.lock', 'tools/dependency-unsafe/Cargo.lock', 'mise.lock') }}
+          restore-keys: ${{ runner.os }}-dependency-unsafe-
+
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          version: 2026.7.5
+
+      - name: Clear cached dependency audit evidence
+        run: rm -rf target/dependency-unsafe/actual-linux
+
+      - name: Run dependency unsafe gate
+        id: audit
+        run: just maintainability
+
+      - name: Upload dependency audit evidence on failure
+        if: failure() && steps.audit.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependency-unsafe-linux-${{ github.sha }}
+          path: target/dependency-unsafe/actual-linux
+          if-no-files-found: warn
+          retention-days: 7
 
   postgres-smoke:
     name: PostgreSQL + pgvector Smoke
@@ -133,6 +172,7 @@ jobs:
   check-windows:
     name: Clippy + Test (Windows)
     runs-on: windows-latest
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -186,3 +226,62 @@ jobs:
           $binary = "$env:RUNNER_TEMP/extracted/$archiveRoot/bin/hold.exe"
           & $binary --version
           & $binary --help | Out-Null
+
+  dependency-unsafe-windows:
+    name: Dependency Unsafe (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Preserve LF line endings
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Cache Cargo registry and audit tool
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .cache/localhold/cargo/registry
+            .cache/localhold/cargo/git
+            tools/dependency-unsafe/target
+          key: ${{ runner.os }}-dependency-unsafe-${{ hashFiles('Cargo.lock', 'tools/dependency-unsafe/Cargo.lock', 'mise.lock') }}
+          restore-keys: ${{ runner.os }}-dependency-unsafe-
+
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          version: 2026.7.5
+
+      - name: Clear cached dependency audit evidence
+        run: rm -rf target/dependency-unsafe/actual-windows
+
+      - name: Run dependency unsafe gate
+        id: audit
+        run: |
+          diagnostic_log="$RUNNER_TEMP/dependency-unsafe.log"
+          trap 'rm -f -- "$diagnostic_log"' EXIT
+          set +e
+          just maintainability 2>&1 | tee "$diagnostic_log"
+          status=${PIPESTATUS[0]}
+          set -e
+          if (( status != 0 )); then
+            diagnostic=$(tail -n 40 "$diagnostic_log")
+            diagnostic=${diagnostic//'%'/'%25'}
+            diagnostic=${diagnostic//$'\r'/'%0D'}
+            diagnostic=${diagnostic//$'\n'/'%0A'}
+            printf '::error title=Dependency unsafe gate failed::%s\n' "$diagnostic"
+            exit "$status"
+          fi
+
+      - name: Upload dependency audit evidence on failure
+        if: failure() && steps.audit.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependency-unsafe-windows-${{ github.sha }}
+          path: target/dependency-unsafe/actual-windows
+          if-no-files-found: warn
+          retention-days: 7

@@ -186,6 +186,20 @@ These paths are not contacted by a default running `hold` process:
 
 - Cargo, rustup, mise, GitHub Actions, and dependency automation contact their
   normal registries and GitHub during development or CI.
+- The maintainability gate fetches locked Cargo packages, verifies every cached
+  crates.io archive against `Cargo.lock`, and copies verified archives and
+  registry metadata into an isolated Cargo home. It vendors the locked archives,
+  then resolves through Cargo's controlled directory source backed by the
+  checksum-verified vendor tree. Commands run from a checked configuration-free
+  working directory using the absolute Cargo executable that built the scanner.
+  Cargo config files in its physical ancestor chain are refused, and
+  source/registry override variables and inherited Rust flags are removed from
+  Cargo subprocesses. The gate verifies the vendored file set and hashes, then
+  audits target-specific dependency source exposure.
+  Its reviewed Linux and Windows evidence records Rust unsafe syntax separately
+  from native, prebuilt, generated-source, build-script, and proc-macro signals.
+  This conservative inventory is not proof that every recorded boundary is
+  compiled in a profile or that any unsafe use is sound.
 - PostgreSQL CI can pull the digest-pinned `pgvector` image from Docker Hub when
   it is not already available on the runner.
 - CUDA release preparation downloads checksum-pinned public packages from

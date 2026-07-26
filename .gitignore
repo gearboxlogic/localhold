@@ -1,4 +1,5 @@
 /target
+/tools/dependency-unsafe/target
 /.cache
 /.cargo
 /.rustup

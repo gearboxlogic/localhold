@@ -58,11 +58,19 @@ fn altered_missing_and_conflicting_duplicate_archives_are_rejected() {
     assert!(CargoEnvironment::prepare_from(&lockfile("fixture", "1.2.3", &checksum, SOURCE), source_home.path(), workspace.path()).is_err());
 
     let source_home = fixture_home(archive);
-    let second = source_home.path().join("registry/cache/other-index");
+    let second_name = "github.com-legacy";
+    let second = source_home.path().join("registry/cache").join(second_name);
     fs::create_dir(&second).expect("create second cache");
     fs::write(second.join("fixture-1.2.3.crate"), archive).expect("write identical duplicate archive");
-    CargoEnvironment::prepare_from(&lockfile("fixture", "1.2.3", &checksum, SOURCE), source_home.path(), workspace.path())
+    let second_index = source_home.path().join("registry/index").join(second_name);
+    fs::create_dir(&second_index).expect("create second index");
+    fs::write(second_index.join("config.json"), "{}").expect("write second index");
+    let environment = CargoEnvironment::prepare_from(&lockfile("fixture", "1.2.3", &checksum, SOURCE), source_home.path(), workspace.path())
         .expect("identical verified cache entries are equivalent");
+    for index_name in ["github.com-legacy", "index-key"] {
+        assert!(environment.home_path.join("registry/cache").join(index_name).join("fixture-1.2.3.crate").is_file());
+        assert!(environment.home_path.join("registry/index").join(index_name).join("config.json").is_file());
+    }
 
     fs::write(second.join("fixture-1.2.3.crate"), b"tampered duplicate").expect("tamper duplicate archive");
     assert!(CargoEnvironment::prepare_from(&lockfile("fixture", "1.2.3", &checksum, SOURCE), source_home.path(), workspace.path()).is_err());

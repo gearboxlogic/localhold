@@ -27,6 +27,11 @@ struct LockedPackage {
     checksum: Option<String>,
 }
 
+struct RegistryArchive {
+    path: PathBuf,
+    index_name: PathBuf,
+}
+
 pub struct CargoEnvironment {
     _home: TempDir,
     _cwd: TempDir,
@@ -86,13 +91,14 @@ impl CargoEnvironment {
                 .filter(|value| valid_checksum(value))
                 .with_context(|| format!("registry package {} {} has no normalized Cargo.lock checksum", package.name, package.version))?;
             let archive_name = format!("{}-{}.crate", package.name, package.version);
-            let (source_archive, index_name) = find_archive(&source_cache, &archive_name, &checksum)?;
-            let destination_directory = destination_cache.join(&index_name);
-            fs::create_dir_all(&destination_directory).with_context(|| format!("create isolated registry cache {}", destination_directory.display()))?;
-            let destination_archive = destination_directory.join(&archive_name);
-            fs::copy(&source_archive, &destination_archive).with_context(|| format!("copy verified registry archive {}", source_archive.display()))?;
-            verify_digest(&destination_archive, &checksum)?;
-            index_directories.insert(index_name);
+            for RegistryArchive { path: source_archive, index_name } in find_archives(&source_cache, &archive_name, &checksum)? {
+                let destination_directory = destination_cache.join(&index_name);
+                fs::create_dir_all(&destination_directory).with_context(|| format!("create isolated registry cache {}", destination_directory.display()))?;
+                let destination_archive = destination_directory.join(&archive_name);
+                fs::copy(&source_archive, &destination_archive).with_context(|| format!("copy verified registry archive {}", source_archive.display()))?;
+                verify_digest(&destination_archive, &checksum)?;
+                index_directories.insert(index_name);
+            }
         }
         for index_name in index_directories {
             let source_index = source_home.join("registry/index").join(&index_name);
@@ -227,7 +233,7 @@ fn valid_checksum(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn find_archive(cache_root: &Path, archive_name: &str, checksum: &str) -> Result<(PathBuf, PathBuf)> {
+fn find_archives(cache_root: &Path, archive_name: &str, checksum: &str) -> Result<Vec<RegistryArchive>> {
     let metadata = fs::symlink_metadata(cache_root).with_context(|| format!("inspect Cargo registry cache {}", cache_root.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         bail!("Cargo registry cache is not a regular directory: {}", cache_root.display());
@@ -247,7 +253,10 @@ fn find_archive(cache_root: &Path, archive_name: &str, checksum: &str) -> Result
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
                 bail!("registry archive is not a regular file: {}", candidate.display());
             }
-            Ok(_) => matches.push((candidate, PathBuf::from(entry.file_name()))),
+            Ok(_) => matches.push(RegistryArchive {
+                path: candidate,
+                index_name: PathBuf::from(entry.file_name()),
+            }),
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(error).with_context(|| format!("inspect registry archive {}", candidate.display())),
         }
@@ -255,10 +264,10 @@ fn find_archive(cache_root: &Path, archive_name: &str, checksum: &str) -> Result
     if matches.is_empty() {
         bail!("Cargo registry cache has no candidate for {archive_name:?}; run `cargo fetch --locked`");
     }
-    for (path, _) in &matches {
-        verify_digest(path, checksum)?;
+    for archive in &matches {
+        verify_digest(&archive.path, checksum)?;
     }
-    Ok(matches.remove(0))
+    Ok(matches)
 }
 
 fn verify_digest(path: &Path, expected: &str) -> Result<()> {

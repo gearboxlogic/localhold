@@ -2,14 +2,16 @@
 set -euo pipefail
 
 if [[ $(basename -- "$0") == claude ]]; then
-    capture=${LOCALHOLD_CLAUDE_TEST_CAPTURE:?}
+    fake_root=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
+    capture="$fake_root/capture"
     mkdir -p -- "$capture"
     printf '%s\n' "$@" > "$capture/args"
     printf '%s\n' "$TMPDIR" "$TMP" "$TEMP" > "$capture/temp-environment"
+    env | LC_ALL=C sort > "$capture/environment"
     pwd -P > "$capture/cwd"
     mkdir -p -- "$TMPDIR/nested"
     printf 'temporary review data\n' > "$TMPDIR/nested/payload"
-    if [[ ${LOCALHOLD_CLAUDE_TEST_WAIT:-0} == 1 ]]; then
+    if [[ " $* " == *" Wait for a termination signal. "* ]]; then
         trap 'printf "TERM\n" > "$capture/signal"; exit 0' TERM
         printf '%s\n' "$BASHPID" > "$capture/child-pid"
         : > "$capture/ready"
@@ -18,7 +20,10 @@ if [[ $(basename -- "$0") == claude ]]; then
         done
     fi
     printf 'fake review output\n'
-    exit "${LOCALHOLD_CLAUDE_TEST_EXIT:-0}"
+    if [[ " $* " == *" Fail this fake review. "* ]]; then
+        exit 23
+    fi
+    exit 0
 fi
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -64,7 +69,10 @@ mkdir -- "$test_root/bin" "$test_root/capture"
 ln -s -- "$script_dir/test_claude_review.sh" "$test_root/bin/claude"
 
 PATH="$test_root/bin:$PATH" \
-LOCALHOLD_CLAUDE_TEST_CAPTURE="$test_root/capture" \
+LOCALHOLD_SECRET="must not reach Claude" \
+ANTHROPIC_API_KEY="must not reach Claude" \
+GH_TOKEN="must not reach Claude" \
+AWS_SECRET_ACCESS_KEY="must not reach Claude" \
 "$repository_root/script/claude-review.sh" opus "Review the LocalHold diff." > "$test_root/output"
 
 args="$test_root/capture/args"
@@ -128,13 +136,15 @@ if [[ $(< "$test_root/capture/cwd") != "$repository_root" ]]; then
     printf 'Claude reviewer did not run from the repository root\n' >&2
     exit 1
 fi
+if grep -Eq '^(LOCALHOLD_|ANTHROPIC_API_KEY=|GH_TOKEN=|AWS_SECRET_ACCESS_KEY=)' "$test_root/capture/environment"; then
+    printf 'Claude reviewer inherited a sensitive environment variable\n' >&2
+    exit 1
+fi
 
 rm -rf -- "$test_root/capture"
 mkdir -- "$test_root/capture"
 set +e
 PATH="$test_root/bin:$PATH" \
-LOCALHOLD_CLAUDE_TEST_CAPTURE="$test_root/capture" \
-LOCALHOLD_CLAUDE_TEST_EXIT=23 \
 "$repository_root/script/claude-review.sh" fable "Fail this fake review." > "$test_root/failure-output"
 status=$?
 set -e
@@ -151,8 +161,6 @@ fi
 rm -rf -- "$test_root/capture"
 mkdir -- "$test_root/capture"
 PATH="$test_root/bin:$PATH" \
-LOCALHOLD_CLAUDE_TEST_CAPTURE="$test_root/capture" \
-LOCALHOLD_CLAUDE_TEST_WAIT=1 \
 "$repository_root/script/claude-review.sh" opus "Wait for a termination signal." > "$test_root/signal-output" &
 wrapper_pid=$!
 for _ in {1..200}; do

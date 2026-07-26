@@ -125,13 +125,35 @@ impl CargoEnvironment {
             .env_remove("RUSTC_WRAPPER")
             .env_remove("RUSTC_WORKSPACE_WRAPPER")
             .env_remove("CARGO_BUILD_RUSTC_WRAPPER")
-            .env_remove("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER");
+            .env_remove("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER")
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("CARGO_BUILD_RUSTFLAGS");
         for (name, _) in env::vars_os() {
-            if source_configuration_variable(&name) {
+            if source_configuration_variable(&name) || rust_flag_variable(&name) {
                 command.env_remove(name);
             }
         }
         command.env("CARGO_REGISTRIES_CRATES_IO_PROTOCOL", CRATES_IO_PROTOCOL);
+        Ok(command)
+    }
+
+    pub fn cargo_command_from_vendor(&self, vendor: &Path) -> Result<Command> {
+        let vendor = fs::canonicalize(vendor).with_context(|| format!("resolve verified vendor directory {}", vendor.display()))?;
+        let expected_parent = self.home_path.parent().context("isolated Cargo home has no temporary root")?;
+        if vendor.parent() != Some(expected_parent) || !vendor.file_name().and_then(OsStr::to_str).is_some_and(|name| name.starts_with("vendor-")) {
+            bail!("verified vendor directory escaped the dependency audit temporary root: {}", vendor.display());
+        }
+        let metadata = fs::symlink_metadata(&vendor).with_context(|| format!("inspect verified vendor directory {}", vendor.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            bail!("verified vendor path is not a regular directory: {}", vendor.display());
+        }
+        let vendor = vendor.to_str().context("verified vendor directory is not UTF-8")?;
+        let directory_value = toml::Value::String(vendor.to_owned()).to_string();
+        let mut command = self.cargo_command()?;
+        command
+            .args(["--config", "source.crates-io.replace-with=\"verified-vendor\""])
+            .args(["--config", &format!("source.verified-vendor.directory={directory_value}")]);
         Ok(command)
     }
 
@@ -220,6 +242,12 @@ fn source_configuration_variable(name: &OsStr) -> bool {
     name.to_str()
         .map(str::to_ascii_uppercase)
         .is_some_and(|name| name.starts_with("CARGO_SOURCE_") || name.starts_with("CARGO_REGISTRIES_CRATES_IO_"))
+}
+
+fn rust_flag_variable(name: &OsStr) -> bool {
+    name.to_str().map(str::to_ascii_uppercase).is_some_and(|name| {
+        matches!(name.as_str(), "RUSTFLAGS" | "CARGO_ENCODED_RUSTFLAGS" | "CARGO_BUILD_RUSTFLAGS") || name.starts_with("CARGO_TARGET_") && name.ends_with("_RUSTFLAGS")
+    })
 }
 
 fn validate_cache_component(value: &str, label: &str) -> Result<()> {

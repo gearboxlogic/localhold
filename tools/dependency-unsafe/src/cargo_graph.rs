@@ -134,15 +134,15 @@ fn parse_host_target(verbose_version: &str) -> Result<&str> {
         .context("rustc verbose version output omitted the host target")
 }
 
-pub fn resolve(workspace: &Path, cargo: &CargoEnvironment, platform: &PlatformConfig, configuration: &GraphConfig) -> Result<ResolvedGraph> {
+pub fn resolve(workspace: &Path, cargo: &CargoEnvironment, vendor: &Path, platform: &PlatformConfig, configuration: &GraphConfig) -> Result<ResolvedGraph> {
     validate_target(&platform.target)?;
     let metadata_args = metadata_arguments(platform, configuration);
-    let metadata_output = run_cargo(workspace, cargo, &metadata_args, "cargo metadata")?;
+    let metadata_output = run_cargo(workspace, cargo, vendor, &metadata_args, "cargo metadata")?;
     let metadata: Metadata = serde_json::from_slice(&metadata_output.stdout).context("parse cargo metadata JSON")?;
     let lockfile = load_lockfile(workspace)?;
 
     let tree_args = tree_arguments(platform, configuration);
-    let tree_output = run_cargo(workspace, cargo, &tree_args, "cargo tree")?;
+    let tree_output = run_cargo(workspace, cargo, vendor, &tree_args, "cargo tree")?;
     graph_from_tree(metadata, &lockfile, configuration, &tree_output.stdout)
 }
 
@@ -403,9 +403,9 @@ fn verify_version(command: &mut Command, program: &str, arguments: &[&str], expe
     Ok(())
 }
 
-fn run_cargo(workspace: &Path, cargo: &CargoEnvironment, arguments: &[String], purpose: &str) -> Result<Output> {
+fn run_cargo(workspace: &Path, cargo: &CargoEnvironment, vendor: &Path, arguments: &[String], purpose: &str) -> Result<Output> {
     let output = cargo
-        .cargo_command()?
+        .cargo_command_from_vendor(vendor)?
         .args(arguments)
         .args(["--manifest-path".as_ref(), workspace.join("Cargo.toml").as_os_str()])
         .output()

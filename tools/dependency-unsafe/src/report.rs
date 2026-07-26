@@ -108,8 +108,8 @@ pub struct GenerateRequest<'a> {
 }
 
 pub fn generate(request: &GenerateRequest<'_>) -> Result<GeneratedArtifacts> {
-    let (graphs, packages) = resolve_configurations(request, request.cargo)?;
     let vendor = scan::vendor(request.workspace, request.cargo)?;
+    let (graphs, packages) = resolve_configurations(request, request.cargo, vendor.path())?;
     let source_rows = source_rows(request, vendor.path(), &packages)?;
     build_artifacts(request, &graphs, &source_rows)
 }
@@ -145,11 +145,12 @@ fn validate_coverage_sets(classified: &BTreeSet<String>, observed: &BTreeSet<Str
 
 type ResolvedConfigurations = (Vec<ResolvedGraph>, BTreeMap<String, DependencyPackage>);
 
-fn resolve_configurations(request: &GenerateRequest<'_>, cargo: &CargoEnvironment) -> Result<ResolvedConfigurations> {
+fn resolve_configurations(request: &GenerateRequest<'_>, cargo: &CargoEnvironment, vendor: &Path) -> Result<ResolvedConfigurations> {
     let mut graphs = Vec::new();
     let mut packages = BTreeMap::<String, DependencyPackage>::new();
     for configuration in &request.platform.configurations {
-        let graph = cargo_graph::resolve(request.workspace, cargo, request.platform, configuration).with_context(|| format!("resolve configuration {}", configuration.id))?;
+        let graph =
+            cargo_graph::resolve(request.workspace, cargo, vendor, request.platform, configuration).with_context(|| format!("resolve configuration {}", configuration.id))?;
         for package in graph.packages.values() {
             match packages.get(&package.source_id) {
                 Some(existing) if existing.name != package.name || existing.version != package.version || existing.checksum != package.checksum => {
@@ -349,8 +350,9 @@ fn canonical_paths(graph: &ResolvedGraph) -> Result<DependencyPaths> {
 fn hash_tool_source(workspace: &Path) -> Result<String> {
     let root = workspace.join("tools/dependency-unsafe");
     let mut files = vec![root.join("Cargo.toml")];
+    collect_top_level_rust_sources(&root, &mut files)?;
     let source = root.join("src");
-    collect_rust_sources(&source, &mut files)?;
+    collect_source_inputs(&source, &mut files)?;
     files.sort();
     let mut hasher = Sha256::new();
     for path in files {
@@ -363,7 +365,22 @@ fn hash_tool_source(workspace: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn collect_rust_sources(directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+fn collect_top_level_rust_sources(directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(directory).with_context(|| format!("read {}", directory.display()))? {
+        let entry = entry?;
+        let file_type = entry.file_type().with_context(|| format!("inspect {}", entry.path().display()))?;
+        let is_rust_source = entry.path().extension().and_then(|extension| extension.to_str()) == Some("rs");
+        if file_type.is_symlink() && is_rust_source {
+            bail!("audit tool root contains symlink {}", entry.path().display());
+        }
+        if file_type.is_file() && is_rust_source {
+            files.push(entry.path());
+        }
+    }
+    Ok(())
+}
+
+fn collect_source_inputs(directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(directory).with_context(|| format!("read {}", directory.display()))? {
         let entry = entry?;
         let file_type = entry.file_type().with_context(|| format!("inspect {}", entry.path().display()))?;
@@ -374,9 +391,11 @@ fn collect_rust_sources(directory: &Path, files: &mut Vec<PathBuf>) -> Result<()
             if entry.file_name() == "tests" {
                 continue;
             }
-            collect_rust_sources(&entry.path(), files)?;
-        } else if file_type.is_file() && entry.path().extension().and_then(|extension| extension.to_str()) == Some("rs") {
+            collect_source_inputs(&entry.path(), files)?;
+        } else if file_type.is_file() {
             files.push(entry.path());
+        } else {
+            bail!("audit tool source contains unsupported entry {}", entry.path().display());
         }
     }
     Ok(())

@@ -48,9 +48,13 @@ support. State any validation that could not be run.
 - The wrapper fixes review effort at `high`; never use `max`. It also disables
   MCP servers, plugins, hooks, background work, and session persistence. If the
   installed CLI cannot honor those controls, stop instead of weakening them.
-- Run reviewers in the foreground. The wrapper gives each process a private
-  scratch directory under the ignored `.cache/claude-reviews/` tree and removes
-  it on normal, failed, or signaled exit.
+- Invoke reviewer wrappers synchronously and never detach them. The Claude
+  wrapper internally monitors its child as a background shell job so it can
+  forward termination signals, but immediately waits and remains synchronous
+  to its caller. It passes only a small non-secret environment allowlist, gives
+  each process a private scratch directory under the ignored
+  `.cache/claude-reviews/` tree, and removes it on normal, failed, or signaled
+  exit.
 - Keep prompts and captured review output under the ignored repository
   `.cache/` tree, not `/tmp`, and remove them after the findings are resolved.
 - Apply the same lifecycle rule to other spawned local reviewers or subagents:

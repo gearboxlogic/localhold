@@ -50,7 +50,9 @@ Additional tools are workflow-specific:
 - ShellCheck is optional for manually linting changes to shell scripts.
 - Claude Code is optional for local adversarial review. When used, invoke it
   through `./script/claude-review.sh <opus|fable>` so MCP servers and other
-  customizations stay disabled and per-review scratch data is cleaned up.
+  customizations stay disabled, sensitive runtime environment variables are
+  not inherited, and per-review scratch data is cleaned up. Authenticate the
+  CLI through its normal user configuration rather than environment tokens.
 - Docker and PostgreSQL client tools are required only for
   `just test-postgres-smoke`.
 - NVIDIA/CUDA dependencies are required only when validating the CUDA reranker
@@ -68,12 +70,14 @@ checks on macOS, but it does not satisfy the complete merge gate.
 `just maintainability` includes a fail-closed audit of the dependency graphs
 and packaged sources selected for the native Linux or Windows target. The audit
 uses Cargo's target/feature graph, verifies every cached crates.io archive
-against `Cargo.lock`, resolves and vendors from an isolated Cargo home, then
-verifies the vendored file set and file hashes before scanning. It tokenizes all
-packaged Rust source and records native, prebuilt, generated-source, build
-script, and proc-macro signals. It is deliberately conservative: a recorded
-signal means code exists in the selected package distribution, not that the
-code is compiled in every profile or that an unsafe boundary is unsound.
+against `Cargo.lock`, vendors from an isolated Cargo home, then resolves the
+graph through Cargo's controlled directory source backed by those vendored
+manifests. It verifies the vendored file set and file hashes before scanning the
+same tree. It tokenizes all packaged Rust source and records native, prebuilt,
+generated-source, build script, and proc-macro signals. It is deliberately
+conservative: a recorded signal means code exists in the selected package
+distribution, not that the code is compiled in every profile or that an unsafe
+boundary is unsound.
 
 Every exposed package has an exact version-and-checksum classification under
 `policy/dependency-unsafe/classifications/`. The Linux and Windows evidence is
@@ -108,8 +112,10 @@ dependency changes.
 The scanner invokes the exact absolute Cargo and rustc executables that built
 it. It refuses Cargo configuration files in the isolated working directory's
 physical ancestor chain. Source/registry override environment variables are
-removed from Cargo subprocesses. Move or remove inherited Cargo configuration
-before running the audit; source replacement is not a supported audit input.
+removed from Cargo subprocesses, as are inherited Rust flags that could change
+`cfg` resolution. Move or remove inherited Cargo configuration before running
+the audit; only the scanner's internally generated verified-vendor replacement
+is supported.
 
 ## Pull Requests
 

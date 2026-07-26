@@ -96,6 +96,21 @@ if [[ -z "$claude_binary" ]]; then
     printf 'Claude CLI is not installed or is not on PATH\n' >&2
     exit 1
 fi
+if [[ -z ${HOME:-} || -z ${PATH:-} ]]; then
+    printf 'Claude review requires HOME and PATH\n' >&2
+    exit 1
+fi
+
+review_environment=(
+    env -i
+    "HOME=$HOME"
+    "PATH=$PATH"
+)
+for name in USER LOGNAME SHELL TERM LANG LC_ALL LC_CTYPE NO_COLOR; do
+    if [[ -v $name ]]; then
+        review_environment+=("$name=${!name}")
+    fi
+done
 
 prompt=()
 if (( $# == 1 )); then
@@ -104,9 +119,10 @@ fi
 
 cd -- "$repository_root"
 set +e
-TMPDIR="$scratch_directory" \
-TMP="$scratch_directory" \
-TEMP="$scratch_directory" \
+"${review_environment[@]}" \
+    TMPDIR="$scratch_directory" \
+    TMP="$scratch_directory" \
+    TEMP="$scratch_directory" \
 "$claude_binary" \
     --safe-mode \
     --mcp-config '{"mcpServers":{}}' \
@@ -121,6 +137,8 @@ TEMP="$scratch_directory" \
     --print \
     --output-format text \
     "${prompt[@]}" &
+# The child is a monitored shell job so this wrapper can forward termination
+# signals. The wrapper remains synchronous to its caller and immediately waits.
 claude_pid=$!
 wait "$claude_pid"
 status=$?

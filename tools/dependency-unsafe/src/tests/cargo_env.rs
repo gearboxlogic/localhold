@@ -6,7 +6,7 @@ use tempfile::tempdir;
 
 #[cfg(unix)]
 use super::temporary_root;
-use super::{CargoEnvironment, reject_cargo_config, source_configuration_variable};
+use super::{CargoEnvironment, reject_cargo_config, rust_flag_variable, source_configuration_variable};
 
 const SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
@@ -50,6 +50,17 @@ fn isolated_home_copies_only_digest_verified_archives() {
         .get_envs()
         .find_map(|(name, value)| (name == OsStr::new("CARGO_REGISTRIES_CRATES_IO_PROTOCOL")).then_some(value).flatten());
     assert_eq!(protocol, Some(OsStr::new("sparse")));
+
+    let vendor = environment.home_path.parent().expect("temporary root").join("vendor-fixture");
+    fs::create_dir(&vendor).expect("create verified vendor fixture");
+    let command = environment.cargo_command_from_vendor(&vendor).expect("build vendor-bound Cargo command");
+    let arguments: Vec<_> = command.get_args().map(OsStr::to_string_lossy).collect();
+    assert!(arguments.iter().any(|argument| argument == "source.crates-io.replace-with=\"verified-vendor\""));
+    assert!(
+        arguments
+            .iter()
+            .any(|argument| argument.starts_with("source.verified-vendor.directory=") && argument.contains("vendor-fixture"))
+    );
 }
 
 #[test]
@@ -144,6 +155,15 @@ fn source_configuration_environment_names_are_removed_case_insensitively() {
     assert!(source_configuration_variable(OsStr::new("CARGO_SOURCE_CRATES_IO_REPLACE_WITH")));
     assert!(source_configuration_variable(OsStr::new("cargo_registries_crates_io_index")));
     assert!(!source_configuration_variable(OsStr::new("CARGO_TERM_COLOR")));
+}
+
+#[test]
+fn inherited_rust_flag_environment_names_are_removed_case_insensitively() {
+    assert!(rust_flag_variable(OsStr::new("RUSTFLAGS")));
+    assert!(rust_flag_variable(OsStr::new("cargo_encoded_rustflags")));
+    assert!(rust_flag_variable(OsStr::new("CARGO_BUILD_RUSTFLAGS")));
+    assert!(rust_flag_variable(OsStr::new("CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS")));
+    assert!(!rust_flag_variable(OsStr::new("CARGO_TARGET_DIR")));
 }
 
 #[test]

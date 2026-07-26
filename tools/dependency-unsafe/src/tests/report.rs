@@ -1,8 +1,10 @@
-use super::{build_source_row, canonical_paths, reported_signals, validate_coverage_sets};
+use super::{build_source_row, canonical_paths, hash_tool_source, reported_signals, validate_coverage_sets};
 use crate::cargo_graph::{DependencyPackage, ResolvedGraph};
 use crate::config::Classification;
 use crate::scan::SourceAssessment;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use tempfile::tempdir;
 
 fn package(id: &str) -> DependencyPackage {
     DependencyPackage {
@@ -106,4 +108,26 @@ fn classification_coverage_requires_exact_native_baseline_union() {
     validate_coverage_sets(&ids, &ids).expect("exact coverage");
     assert!(validate_coverage_sets(&ids, &BTreeSet::from(["a".to_owned()])).is_err());
     assert!(validate_coverage_sets(&ids, &BTreeSet::from(["a".to_owned(), "b".to_owned(), "c".to_owned()])).is_err());
+}
+
+#[test]
+fn tool_source_hash_includes_build_scripts_and_non_test_inputs() {
+    let workspace = tempdir().expect("temporary workspace");
+    let tool = workspace.path().join("tools/dependency-unsafe");
+    fs::create_dir_all(tool.join("src/tests")).expect("create audit tool source");
+    fs::write(tool.join("Cargo.toml"), "[package]\nname = \"fixture\"\n").expect("write manifest");
+    fs::write(tool.join("src/main.rs"), "fn main() {}\n").expect("write source");
+    fs::write(tool.join("src/schema.bin"), b"schema").expect("write compiled input");
+    fs::write(tool.join("src/tests/unit.rs"), "#[test]\nfn test() {}\n").expect("write test-only source");
+
+    let initial = hash_tool_source(workspace.path()).expect("hash initial source");
+    fs::write(tool.join("src/tests/unit.rs"), "#[test]\nfn changed_test() {}\n").expect("change test-only source");
+    assert_eq!(hash_tool_source(workspace.path()).expect("hash after test change"), initial);
+
+    fs::write(tool.join("build.rs"), "fn main() {}\n").expect("write build script");
+    let with_build_script = hash_tool_source(workspace.path()).expect("hash build script");
+    assert_ne!(with_build_script, initial);
+
+    fs::write(tool.join("src/schema.bin"), b"changed schema").expect("change compiled input");
+    assert_ne!(hash_tool_source(workspace.path()).expect("hash compiled input"), with_build_script);
 }

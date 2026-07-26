@@ -42,9 +42,9 @@ use crate::{
     error::{ParseEnumError, StoreError},
     scoring::decay_mass,
     types::{
-        AccessLevel, AccessPolicy, AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Entity, LARGE_CONTENT_WARNING_THRESHOLD_BYTES, Memory, MemoryFilter, MemoryId,
-        MemoryMetadata, MemoryStats, MemoryTombstone, MemoryType, MemoryUpdate, MetadataMigrationOutcome, MetadataMigrationReport, MetadataPatch, Provenance, QueryContext,
-        ScopeDefinition, SearchResult, WriteOutcome, normalize_context_key,
+        ANONYMOUS_PRINCIPAL, AccessLevel, AccessPolicy, AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Entity, LARGE_CONTENT_WARNING_THRESHOLD_BYTES, Memory,
+        MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MemoryTombstone, MemoryType, MemoryUpdate, MetadataMigrationOutcome, MetadataMigrationReport, MetadataPatch,
+        Provenance, QueryContext, ScopeDefinition, SearchResult, WriteOutcome, normalize_context_key,
     },
 };
 
@@ -4866,7 +4866,7 @@ async fn grant_migrated_raw_contexts_postgres(tx: &mut Transaction<'_, Postgres>
            ON audit.context_id = membership.context_id
           AND audit.action = 'migrate_raw_scope'
          WHERE BTRIM(COALESCE(memory.provenance->>'source_agent', '')) <> ''
-           AND memory.provenance->>'source_agent' <> $3
+           AND memory.provenance->>'source_agent' NOT IN ($3, $4, $5, $6)
            AND NOT EXISTS (
                SELECT 1 FROM context_grants AS grant_row
                WHERE grant_row.context_id = membership.context_id
@@ -4877,6 +4877,9 @@ async fn grant_migrated_raw_contexts_postgres(tx: &mut Transaction<'_, Postgres>
     .bind(LEGACY_SYSTEM_PRINCIPAL)
     .bind(now)
     .bind(LEGACY_ALL_PRINCIPALS_GRANT)
+    .bind(OPERATOR_PRINCIPAL)
+    .bind(LEGACY_SYSTEM_PRINCIPAL)
+    .bind(ANONYMOUS_PRINCIPAL)
     .execute(&mut **tx)
     .await
     .map_err(postgres_schema_lock_error)?;
@@ -4895,7 +4898,7 @@ async fn grant_migrated_raw_contexts_postgres(tx: &mut Transaction<'_, Postgres>
          ) AS allowed(principal)
          WHERE memory.access_policy->>'type' = 'restricted'
            AND BTRIM(allowed.principal) <> ''
-           AND allowed.principal <> $3
+           AND allowed.principal NOT IN ($3, $4, $5, $6)
            AND NOT EXISTS (
                SELECT 1 FROM context_grants AS grant_row
                WHERE grant_row.context_id = membership.context_id
@@ -4906,6 +4909,9 @@ async fn grant_migrated_raw_contexts_postgres(tx: &mut Transaction<'_, Postgres>
     .bind(LEGACY_SYSTEM_PRINCIPAL)
     .bind(now)
     .bind(LEGACY_ALL_PRINCIPALS_GRANT)
+    .bind(OPERATOR_PRINCIPAL)
+    .bind(LEGACY_SYSTEM_PRINCIPAL)
+    .bind(ANONYMOUS_PRINCIPAL)
     .execute(&mut **tx)
     .await
     .map_err(postgres_schema_lock_error)?;
@@ -5156,6 +5162,14 @@ async fn resolve_or_create_private_postgres_legacy_context(tx: &mut Transaction<
     let normalized = normalize_context_key(key);
     if normalized.is_empty() || normalized == UNRESOLVED_CONTEXT_KEY {
         return Err(StoreError::Conflict("legacy scope key cannot be blank or inbox/unresolved".into()));
+    }
+    let custom_enabled = sqlx::query_scalar::<_, bool>("SELECT enabled FROM context_kinds WHERE kind = $1")
+        .bind(ContextKind::CUSTOM)
+        .fetch_optional(&mut **tx)
+        .await?
+        .unwrap_or(false);
+    if !custom_enabled {
+        return Err(StoreError::Conflict("context kind \"custom\" is disabled".into()));
     }
     let owned = sqlx::query(
         "SELECT id, lifecycle
@@ -6885,7 +6899,13 @@ mod tests {
             private_memory.provenance.source_agent = Some("raw-owner".into());
             private_memory.provenance.source_conversation = Some(" PRIVATE/RAW ".into());
             private_memory.access_policy = AccessPolicy::Restricted {
-                allowed: vec!["raw-collaborator".into(), LEGACY_ALL_PRINCIPALS_GRANT.into()],
+                allowed: vec![
+                    "raw-collaborator".into(),
+                    LEGACY_ALL_PRINCIPALS_GRANT.into(),
+                    OPERATOR_PRINCIPAL.into(),
+                    LEGACY_SYSTEM_PRINCIPAL.into(),
+                    ANONYMOUS_PRINCIPAL.into(),
+                ],
             };
             let private_metadata = MemoryMetadata {
                 memory_id: private_memory.id,
@@ -6902,6 +6922,11 @@ mod tests {
             sentinel_owner_memory.provenance.source_conversation = Some("sentinel/raw".into());
             sentinel_owner_memory.access_policy = AccessPolicy::Restricted { allowed: Vec::new() };
             let sentinel_owner_memory_id = store.store_impl(&sentinel_owner_memory, None).await.unwrap();
+            let mut anonymous_sentinel_owner_memory = test_memory_with_content("postgres raw anonymous-sentinel-owner context migration");
+            anonymous_sentinel_owner_memory.provenance.source_agent = Some(ANONYMOUS_PRINCIPAL.into());
+            anonymous_sentinel_owner_memory.provenance.source_conversation = Some("sentinel/raw".into());
+            anonymous_sentinel_owner_memory.access_policy = AccessPolicy::Restricted { allowed: Vec::new() };
+            let _anonymous_sentinel_owner_memory_id = store.store_impl(&anonymous_sentinel_owner_memory, None).await.unwrap();
             let mut unresolved_memory = test_memory_with_content("postgres unresolved context migration");
             unresolved_memory.provenance.source_conversation = Some(" Inbox/Unresolved ".into());
             let unresolved_metadata = MemoryMetadata {

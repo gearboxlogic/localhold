@@ -516,13 +516,18 @@ const SQLITE_REQUIRED_TRIGGERS: &[&str] = &[
     "trg_memory_fts_delete",
 ];
 pub(crate) const SQLITE_V2_SCHEMA_VERSION: u32 = 2;
+pub(crate) const SQLITE_V1_SCHEMA_VERSION: u32 = 1;
 const _: () = assert!(
     super::schema::SQLITE_SCHEMA_VERSION == SQLITE_V2_SCHEMA_VERSION + 1,
     "the previous-version restore upgrade contract must be revised when SQLite schema version changes"
 );
+const _: () = assert!(
+    SQLITE_V2_SCHEMA_VERSION == SQLITE_V1_SCHEMA_VERSION + 1,
+    "the v1 restore upgrade contract must be revised when SQLite schema version changes"
+);
 const SQLITE_CURRENT_CLEAR_SUPERSEDED_TRIGGER: &str =
     "after delete on memories begin update memories set superseded_by = null, record_revision = record_revision + 1 where superseded_by = old.id; end";
-const SQLITE_V2_CLEAR_SUPERSEDED_TRIGGER: &str = "after delete on memories begin update memories set superseded_by = null where superseded_by = old.id; end";
+const SQLITE_LEGACY_CLEAR_SUPERSEDED_TRIGGER: &str = "after delete on memories begin update memories set superseded_by = null where superseded_by = old.id; end";
 
 struct PostgresColumnExpectation {
     table: &'static str,
@@ -1261,6 +1266,36 @@ pub(crate) fn validate_sqlite_v2_source_schema_for_upgrade(conn: &Connection, em
     Ok(())
 }
 
+/// Validate a schema-v1 backup before chaining its private staged upgrade
+/// through schema v2 and the current governed-context contract.
+pub(crate) fn validate_sqlite_v1_source_schema_for_upgrade(conn: &Connection, embedding_dimensions: usize) -> Result<(), StoreError> {
+    let schema_version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if schema_version != SQLITE_V1_SCHEMA_VERSION {
+        return Err(sqlite_source_schema_error(format!(
+            "schema version is {schema_version}, expected supported upgrade source {SQLITE_V1_SCHEMA_VERSION}"
+        )));
+    }
+    reject_retired_sqlite_schema(conn)?;
+    for table in SQLITE_V2_REQUIRED_TABLES {
+        let allowed_missing = if table.name == "memories" { &["record_revision"][..] } else { &[] };
+        validate_sqlite_table_allowing_missing(conn, table, allowed_missing)?;
+    }
+    for key in SQLITE_V2_REQUIRED_KEYS {
+        validate_sqlite_primary_key(conn, key)?;
+    }
+    for index in SQLITE_V2_REQUIRED_INDEXES {
+        validate_sqlite_schema_object_exists(conn, "index", index)?;
+    }
+    for trigger in SQLITE_REQUIRED_TRIGGERS {
+        validate_sqlite_schema_object_exists(conn, "trigger", trigger)?;
+    }
+    validate_sqlite_managed_object_definitions(conn, false, false, SQLITE_LEGACY_CLEAR_SUPERSEDED_TRIGGER)?;
+    super::schema::check_dimension_mismatch(conn, embedding_dimensions)?;
+    validate_sqlite_foreign_key_integrity(conn)?;
+    validate_embedding_map_integrity(conn)?;
+    Ok(())
+}
+
 #[expect(clippy::too_many_lines, reason = "managed SQLite object definitions are validated from one auditable manifest")]
 #[expect(clippy::excessive_nesting, reason = "optional migration-time objects require nested absent/conflict handling")]
 fn validate_sqlite_managed_object_definitions(conn: &Connection, allow_missing: bool, include_contexts: bool, clear_superseded_definition: &'static str) -> Result<(), StoreError> {
@@ -1487,7 +1522,7 @@ fn validate_present_sqlite_schema_inner(conn: &Connection, allow_published_metad
         }
     }
     let clear_superseded_trigger = if allow_published_metadata {
-        SQLITE_V2_CLEAR_SUPERSEDED_TRIGGER
+        SQLITE_LEGACY_CLEAR_SUPERSEDED_TRIGGER
     } else {
         SQLITE_CURRENT_CLEAR_SUPERSEDED_TRIGGER
     };

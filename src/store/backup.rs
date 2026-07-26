@@ -18,7 +18,10 @@ use serde::Serialize;
 
 use super::{
     EmbeddingProfile, SqliteStore, existing_embedding_dimensions,
-    migration::{SQLITE_V2_SCHEMA_VERSION, validate_sqlite_source_schema, validate_sqlite_v2_source_schema_for_upgrade},
+    migration::{
+        SQLITE_V1_SCHEMA_VERSION, SQLITE_V2_SCHEMA_VERSION, validate_sqlite_source_schema, validate_sqlite_v1_source_schema_for_upgrade,
+        validate_sqlite_v2_source_schema_for_upgrade,
+    },
     schema::SQLITE_SCHEMA_VERSION,
     sqlite::read_embedding_profile,
     sqlite_lease::{ExclusiveLeaseError, SqliteDatabaseLease},
@@ -652,10 +655,17 @@ fn prepare_restore_stage(path: &Path, embedding_dimensions: usize) -> Result<(),
     if schema_version == SQLITE_SCHEMA_VERSION {
         return Ok(());
     }
-    if schema_version != SQLITE_V2_SCHEMA_VERSION {
-        return validate_sqlite_source_schema(&connection, embedding_dimensions).map_err(|error| MaintenanceFailure::invalid(error.to_string()));
+    match schema_version {
+        SQLITE_V2_SCHEMA_VERSION => {
+            validate_sqlite_v2_source_schema_for_upgrade(&connection, embedding_dimensions).map_err(|error| MaintenanceFailure::invalid(error.to_string()))?;
+        }
+        SQLITE_V1_SCHEMA_VERSION => {
+            validate_sqlite_v1_source_schema_for_upgrade(&connection, embedding_dimensions).map_err(|error| MaintenanceFailure::invalid(error.to_string()))?;
+        }
+        _ => {
+            return validate_sqlite_source_schema(&connection, embedding_dimensions).map_err(|error| MaintenanceFailure::invalid(error.to_string()));
+        }
     }
-    validate_sqlite_v2_source_schema_for_upgrade(&connection, embedding_dimensions).map_err(|error| MaintenanceFailure::invalid(error.to_string()))?;
     drop(connection);
 
     SqliteStore::migrate_restore_stage(path, embedding_dimensions).map_err(|error| store_failure(&error))?;
@@ -1083,6 +1093,62 @@ mod tests {
         statement.query_map([], |row| row.get(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
     }
 
+    fn downgrade_backup_to_v2(path: &Path) {
+        let connection = Connection::open(path).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 DROP TABLE context_anchor_overrides;
+                 DROP TABLE context_kind_policies;
+                 DROP TABLE memory_contexts;
+                 DROP TABLE context_relations;
+                 DROP TABLE context_grants;
+                 DROP TABLE context_resolver_hints;
+                 DROP TABLE context_identities;
+                 DROP TABLE context_aliases;
+                 DROP TABLE context_audit_events;
+                 DROP TABLE contexts;
+                 DROP TABLE context_kinds;
+                 CREATE TABLE scope_registry (
+                     scope_key    TEXT PRIMARY KEY,
+                     display_name TEXT NOT NULL,
+                     description  TEXT,
+                     aliases      TEXT NOT NULL DEFAULT '[]',
+                     matchers     TEXT NOT NULL DEFAULT '[]',
+                     parent       TEXT,
+                     related      TEXT NOT NULL DEFAULT '[]',
+                     updated_at   TEXT NOT NULL
+                 );
+                 INSERT INTO scope_registry (
+                     scope_key, display_name, description, aliases, matchers,
+                     parent, related, updated_at
+                 ) VALUES (
+                     'scope/test', 'Test scope', 'backup fixture',
+                     '[\"fixture\"]', '[\"/tmp/fixture\"]', NULL, '[]',
+                     '2026-07-14T12:00:00Z'
+                 );
+                 PRAGMA foreign_keys = ON;",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", SQLITE_V2_SCHEMA_VERSION).unwrap();
+    }
+
+    fn downgrade_v2_backup_to_v1(path: &Path) {
+        let connection = Connection::open(path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER trg_memory_clear_superseded_by;
+                 ALTER TABLE memories DROP COLUMN record_revision;
+                 CREATE TRIGGER trg_memory_clear_superseded_by
+                 AFTER DELETE ON memories
+                 BEGIN
+                     UPDATE memories SET superseded_by = NULL WHERE superseded_by = OLD.id;
+                 END;",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", SQLITE_V1_SCHEMA_VERSION).unwrap();
+    }
+
     async fn add_large_fixture_rows(store: &SqliteStore, id_prefix: &'static str, count: usize, payload: String) {
         store
             .with_conn(move |connection| {
@@ -1211,10 +1277,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the restore migration test validates staged upgrade, replacement, backup preservation, and governed schema state"
-    )]
     async fn restore_upgrades_a_valid_v2_backup_on_the_private_stage() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source.db");
@@ -1227,44 +1289,7 @@ mod tests {
         let target_store = seed_database(&target, "target", &expected).await;
         drop(target_store);
 
-        let connection = Connection::open(&backup_path).unwrap();
-        connection
-            .execute_batch(
-                "PRAGMA foreign_keys = OFF;
-                 DROP TABLE context_anchor_overrides;
-                 DROP TABLE context_kind_policies;
-                 DROP TABLE memory_contexts;
-                 DROP TABLE context_relations;
-                 DROP TABLE context_grants;
-                 DROP TABLE context_resolver_hints;
-                 DROP TABLE context_identities;
-                 DROP TABLE context_aliases;
-                 DROP TABLE context_audit_events;
-                 DROP TABLE contexts;
-                 DROP TABLE context_kinds;
-                 CREATE TABLE scope_registry (
-                     scope_key    TEXT PRIMARY KEY,
-                     display_name TEXT NOT NULL,
-                     description  TEXT,
-                     aliases      TEXT NOT NULL DEFAULT '[]',
-                     matchers     TEXT NOT NULL DEFAULT '[]',
-                     parent       TEXT,
-                     related      TEXT NOT NULL DEFAULT '[]',
-                     updated_at   TEXT NOT NULL
-                 );
-                 INSERT INTO scope_registry (
-                     scope_key, display_name, description, aliases, matchers,
-                     parent, related, updated_at
-                 ) VALUES (
-                     'scope/test', 'Test scope', 'backup fixture',
-                     '[\"fixture\"]', '[\"/tmp/fixture\"]', NULL, '[]',
-                     '2026-07-14T12:00:00Z'
-                 );
-                 PRAGMA foreign_keys = ON;",
-            )
-            .unwrap();
-        connection.pragma_update(None, "user_version", SQLITE_V2_SCHEMA_VERSION).unwrap();
-        drop(connection);
+        downgrade_backup_to_v2(&backup_path);
 
         let dry_run = restore(RestoreOptions::new(target.clone(), backup_path.clone(), DIMENSIONS, Some(expected.clone())).dry_run(true)).await;
         assert_eq!(dry_run.status, "validated", "{dry_run:?}");
@@ -1294,6 +1319,57 @@ mod tests {
             )
             .unwrap();
         assert!(scope_registry_absent);
+        let trigger_sql: String = restored_connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_memory_clear_superseded_by'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(trigger_sql.contains("record_revision = record_revision + 1"));
+    }
+
+    #[tokio::test]
+    async fn restore_upgrades_a_valid_v1_backup_on_the_private_stage() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.db");
+        let backup_path = directory.path().join("snapshot-v1.db");
+        let target = directory.path().join("target.db");
+        let expected = profile("model-a");
+        let source_store = seed_database(&source, "source", &expected).await;
+        assert_eq!(backup(BackupOptions::new(source, backup_path.clone())).await.status, "ok");
+        drop(source_store);
+        let target_store = seed_database(&target, "target", &expected).await;
+        drop(target_store);
+        downgrade_backup_to_v2(&backup_path);
+        downgrade_v2_backup_to_v1(&backup_path);
+
+        let dry_run = restore(RestoreOptions::new(target.clone(), backup_path.clone(), DIMENSIONS, Some(expected.clone())).dry_run(true)).await;
+        assert_eq!(dry_run.status, "validated", "{dry_run:?}");
+        assert_eq!(dry_run.database_schema_version, Some(SQLITE_SCHEMA_VERSION));
+        let untouched_backup = Connection::open_with_flags(&backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let backup_version: u32 = untouched_backup.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(backup_version, SQLITE_V1_SCHEMA_VERSION, "restore must migrate only its private stage");
+        drop(untouched_backup);
+
+        let restored = restore(RestoreOptions::new(target.clone(), backup_path, DIMENSIONS, Some(expected)).confirmed(true)).await;
+        assert_eq!(restored.status, "ok");
+        assert!(memory_contents(&target).iter().any(|content| content.contains("source")));
+        let restored_connection = Connection::open_with_flags(&target, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let restored_version: u32 = restored_connection.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(restored_version, SQLITE_SCHEMA_VERSION);
+        let revision_column: bool = restored_connection
+            .query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('memories') WHERE name = 'record_revision')", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(revision_column);
+        let contexts_present: bool = restored_connection
+            .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'contexts')", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(contexts_present);
         let trigger_sql: String = restored_connection
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_memory_clear_superseded_by'",

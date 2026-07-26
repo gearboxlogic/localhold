@@ -30,11 +30,11 @@ use crate::{
     config::is_default_sqlite_path,
     error::StoreError,
     store::schema::{
-        MAIN_DDL, TRIGGER_DDL, check_dimension_mismatch, existing_embedding_dimensions, migrate_contexts_v3_validated, migrate_create_audit_log, migrate_create_fts_index,
-        migrate_create_memory_entities, migrate_create_metadata, migrate_memories_add_activity_tracking, migrate_memories_add_confidence, migrate_memories_add_embedding_claims,
-        migrate_memories_add_embedding_revision, migrate_memories_add_importance, migrate_memories_add_memory_type, migrate_memories_add_record_revision,
-        migrate_memories_add_superseded_by, migrate_memories_add_updated_at, migrate_memories_align_impression_tracking, migrate_memories_backfill_origin_conversation,
-        migrate_memory_embedding_map_fk, migrate_published_v2_metadata, validate_published_v2_metadata,
+        MAIN_DDL, TRIGGER_DDL, check_dimension_mismatch, existing_embedding_dimensions, migrate_contexts_v3_validated_in_transaction, migrate_create_audit_log,
+        migrate_create_fts_index, migrate_create_memory_entities, migrate_create_metadata, migrate_memories_add_activity_tracking, migrate_memories_add_confidence,
+        migrate_memories_add_embedding_claims, migrate_memories_add_embedding_revision, migrate_memories_add_importance, migrate_memories_add_memory_type,
+        migrate_memories_add_record_revision, migrate_memories_add_superseded_by, migrate_memories_add_updated_at, migrate_memories_align_impression_tracking,
+        migrate_memories_backfill_origin_conversation, migrate_memory_embedding_map_fk, migrate_published_v2_metadata, validate_published_v2_metadata,
     },
     types::{
         AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MemoryTombstone, MemoryUpdate,
@@ -550,14 +550,13 @@ impl SqliteStore {
             .map_err(|msg| StoreError::Database(format!("sqlite-vec registration failed: {msg}").into()))
     }
 
-    fn prepare_pre_v3_upgrade(&self, conn: &mut Connection, database_path: Option<&Path>, schema_version: u32) -> Result<(), StoreError> {
-        let published_tx = sqlite_write_tx(conn)?;
-        let has_published_metadata: bool = published_tx.query_row(
+    fn prepare_pre_v3_upgrade(&self, tx: &Transaction<'_>, database_path: Option<&Path>, schema_version: u32) -> Result<(), StoreError> {
+        let has_published_metadata: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_v2_metadata')",
             [],
             |row| row.get(0),
         )?;
-        let source_table = published_tx
+        let source_table = tx
             .query_row(
                 "SELECT name
                  FROM sqlite_master
@@ -576,15 +575,14 @@ impl SqliteStore {
             .optional()?;
         let needs_backup = schema_version < crate::store::schema::SQLITE_SCHEMA_VERSION && (schema_version != 0_u32 || source_table.is_some());
         if needs_backup {
-            retain_pre_upgrade_backup_while_locked(&published_tx, database_path, self.inner.clock.as_ref(), schema_version, source_table.as_deref())?;
+            retain_pre_upgrade_backup_while_locked(tx, database_path, self.inner.clock.as_ref(), schema_version, source_table.as_deref())?;
         }
         if has_published_metadata {
-            let _published_metadata = validate_published_v2_metadata(&published_tx)?;
-            validate_present_sqlite_schema_for_published_upgrade(&published_tx)?;
-            check_dimension_mismatch(&published_tx, self.inner.vector_index.dimensions())?;
-            migrate_published_v2_metadata(&published_tx)?;
+            let _published_metadata = validate_published_v2_metadata(tx)?;
+            validate_present_sqlite_schema_for_published_upgrade(tx)?;
+            check_dimension_mismatch(tx, self.inner.vector_index.dimensions())?;
+            migrate_published_v2_metadata(tx)?;
         }
-        published_tx.commit()?;
         Ok(())
     }
 
@@ -597,58 +595,67 @@ impl SqliteStore {
                 crate::store::schema::SQLITE_SCHEMA_VERSION
             )));
         }
-        self.prepare_pre_v3_upgrade(&mut conn, database_path, schema_version)?;
-        reject_retired_sqlite_schema(&conn)?;
+        let tx = sqlite_write_tx(&mut conn)?;
+        let schema_version: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if schema_version > crate::store::schema::SQLITE_SCHEMA_VERSION {
+            return Err(StoreError::Conflict(format!(
+                "SQLite schema version {schema_version} is newer than this binary supports ({})",
+                crate::store::schema::SQLITE_SCHEMA_VERSION
+            )));
+        }
+        self.prepare_pre_v3_upgrade(&tx, database_path, schema_version)?;
+        reject_retired_sqlite_schema(&tx)?;
 
         // First pass: create tables and indexes for fresh databases. For legacy
         // databases some indexes may reference migration-added columns and fail
         // — that is expected. We re-run MAIN_DDL after migrations to pick them up.
-        let first_pass_failed = match conn.execute_batch(MAIN_DDL) {
+        let first_pass_failed = match tx.execute_batch(MAIN_DDL) {
             Ok(()) => false,
             Err(e) => {
                 tracing::debug!("first-pass MAIN_DDL failed (expected for legacy databases): {e}");
                 true
             }
         };
-        self.inner.vector_index.init_schema(&conn)?;
-        run_migration_step("add_embedding_revision", migrate_memories_add_embedding_revision(&conn))?;
-        run_migration_step("add_record_revision", migrate_memories_add_record_revision(&conn))?;
-        run_migration_step("add_embedding_claims", migrate_memories_add_embedding_claims(&conn))?;
-        run_migration_step("backfill_origin_conversation", migrate_memories_backfill_origin_conversation(&conn))?;
-        run_migration_step("memory_embedding_map_fk", migrate_memory_embedding_map_fk(&conn))?;
+        self.inner.vector_index.init_schema(&tx)?;
+        run_migration_step("add_embedding_revision", migrate_memories_add_embedding_revision(&tx))?;
+        run_migration_step("add_record_revision", migrate_memories_add_record_revision(&tx))?;
+        run_migration_step("add_embedding_claims", migrate_memories_add_embedding_claims(&tx))?;
+        run_migration_step("backfill_origin_conversation", migrate_memories_backfill_origin_conversation(&tx))?;
+        run_migration_step("memory_embedding_map_fk", migrate_memory_embedding_map_fk(&tx))?;
         // Wave 1 migrations
-        run_migration_step("add_memory_type", migrate_memories_add_memory_type(&conn))?;
-        run_migration_step("add_importance", migrate_memories_add_importance(&conn))?;
-        run_migration_step("align_impression_tracking", migrate_memories_align_impression_tracking(&conn))?;
+        run_migration_step("add_memory_type", migrate_memories_add_memory_type(&tx))?;
+        run_migration_step("add_importance", migrate_memories_add_importance(&tx))?;
+        run_migration_step("align_impression_tracking", migrate_memories_align_impression_tracking(&tx))?;
         // Wave 2 migrations
-        run_migration_step("add_superseded_by", migrate_memories_add_superseded_by(&conn))?;
+        run_migration_step("add_superseded_by", migrate_memories_add_superseded_by(&tx))?;
         // Wave 3 migrations
-        run_migration_step("create_memory_entities", migrate_create_memory_entities(&conn))?;
+        run_migration_step("create_memory_entities", migrate_create_memory_entities(&tx))?;
         // Second pass: re-run MAIN_DDL after migrations so indexes on
         // migration-added columns (e.g. `memory_type`) are created for legacy
         // databases. All statements use IF NOT EXISTS, so this is idempotent.
         if first_pass_failed {
-            run_migration_step("main_ddl_retry", conn.execute_batch(MAIN_DDL))?;
+            run_migration_step("main_ddl_retry", tx.execute_batch(MAIN_DDL))?;
         }
-        run_migration_step("refresh_superseded_trigger", conn.execute_batch("DROP TRIGGER IF EXISTS trg_memory_clear_superseded_by"))?;
-        run_migration_step("trigger_ddl", conn.execute_batch(TRIGGER_DDL))?;
+        run_migration_step("refresh_superseded_trigger", tx.execute_batch("DROP TRIGGER IF EXISTS trg_memory_clear_superseded_by"))?;
+        run_migration_step("trigger_ddl", tx.execute_batch(TRIGGER_DDL))?;
 
-        let fts_available = run_migration_step("create_fts_index", migrate_create_fts_index(&conn))?;
-        self.inner.fts_available.store(fts_available, Ordering::Release);
+        let fts_available = run_migration_step("create_fts_index", migrate_create_fts_index(&tx))?;
         // Wave 4 migrations
-        run_migration_step("create_audit_log", migrate_create_audit_log(&conn))?;
+        run_migration_step("create_audit_log", migrate_create_audit_log(&tx))?;
         // Wave 5 migrations (ranking overhaul)
-        run_migration_step("add_activity_tracking", migrate_memories_add_activity_tracking(&conn))?;
-        run_migration_step("add_updated_at", migrate_memories_add_updated_at(&conn))?;
-        run_migration_step("add_confidence", migrate_memories_add_confidence(&conn))?;
+        run_migration_step("add_activity_tracking", migrate_memories_add_activity_tracking(&tx))?;
+        run_migration_step("add_updated_at", migrate_memories_add_updated_at(&tx))?;
+        run_migration_step("add_confidence", migrate_memories_add_confidence(&tx))?;
         // Governed-context migration. Metadata must exist before the v2 scope
         // backfill so compatibility scope keys can become direct memberships.
-        run_migration_step("create_metadata", migrate_create_metadata(&conn))?;
+        run_migration_step("create_metadata", migrate_create_metadata(&tx))?;
         let migration_now = self.inner.clock.now();
         run_migration_step(
             "contexts_v3",
-            migrate_contexts_v3_validated(&mut conn, schema_version, migration_now, self.inner.vector_index.dimensions()),
+            migrate_contexts_v3_validated_in_transaction(&tx, schema_version, migration_now, self.inner.vector_index.dimensions()),
         )?;
+        tx.commit()?;
+        self.inner.fts_available.store(fts_available, Ordering::Release);
 
         drop(conn);
         Ok(())
@@ -1792,6 +1799,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the migration regression covers owner, allow-list, and reserved-principal grant derivation together"
+    )]
     fn raw_legacy_context_visibility_follows_memory_access() {
         let mut connection = Connection::open_in_memory().unwrap();
         create_minimal_v2_context_fixture(&connection, "project/registered");
@@ -1801,7 +1812,7 @@ mod tests {
                  VALUES (
                     'private-memory',
                     '{\"source_agent\":\"owner\",\"source_conversation\":\"private/raw\"}',
-                    '{\"type\":\"restricted\",\"allowed\":[\"collaborator\",\"*\"]}'
+                    '{\"type\":\"restricted\",\"allowed\":[\"collaborator\",\"*\",\"operator\",\"@localhold/legacy-system\",\"anonymous\"]}'
                  );
                  INSERT INTO memory_metadata (memory_id, scope_key, updated_at)
                  VALUES ('private-memory', 'private/raw', '2026-07-25T00:00:00Z');
@@ -1809,6 +1820,12 @@ mod tests {
                  VALUES (
                     'sentinel-owner-memory',
                     '{\"source_agent\":\"*\",\"source_conversation\":\"sentinel/raw\"}',
+                    '{\"type\":\"restricted\",\"allowed\":[]}'
+                 );
+                 INSERT INTO memories (id, provenance, access_policy)
+                 VALUES (
+                    'anonymous-sentinel-owner-memory',
+                    '{\"source_agent\":\"anonymous\",\"source_conversation\":\"sentinel/raw\"}',
                     '{\"type\":\"restricted\",\"allowed\":[]}'
                  );
                  INSERT INTO memories (id, provenance, access_policy)
@@ -2594,6 +2611,59 @@ mod tests {
             .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "bak"))
             .count();
         assert_eq!(backup_count, 1_usize);
+    }
+
+    #[test]
+    fn published_metadata_upgrade_rolls_back_when_context_migration_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("context-failure-rollback.db");
+        build_sqlite_release_fixture(&path, BETA_FIXTURE);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO memories (
+                     id, content, tags, provenance, access_policy, created_at, updated_at
+                 ) VALUES (
+                     '01J00000000000000000000010',
+                     'lower raw scope',
+                     '[]',
+                     '{\"source_agent\":\"lower-owner\",\"source_conversation\":\"zeta/raw\"}',
+                     '{\"type\":\"restricted\",\"allowed\":[]}',
+                     '2026-07-10T00:02:00Z',
+                     '2026-07-10T00:02:00Z'
+                 );
+                 INSERT INTO memories (
+                     id, content, tags, provenance, access_policy, created_at, updated_at
+                 ) VALUES (
+                     '01J00000000000000000000011',
+                     'upper raw scope',
+                     '[]',
+                     '{\"source_agent\":\"upper-owner\",\"source_conversation\":\"ZETA/RAW\"}',
+                     '{\"type\":\"restricted\",\"allowed\":[]}',
+                     '2026-07-10T00:03:00Z',
+                     '2026-07-10T00:03:00Z'
+                 );",
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = SqliteStore::open(&path, 3_usize).unwrap_err();
+        assert!(error_chain_contains(&error, "legacy raw scope keys"), "{error}");
+
+        let source = Connection::open(&path).unwrap();
+        let state: (u32, bool, bool, bool, i64) = source
+            .query_row(
+                "SELECT
+                     (SELECT user_version FROM pragma_user_version),
+                     EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_v2_metadata'),
+                     EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_metadata'),
+                     EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'contexts'),
+                     (SELECT COUNT(*) FROM memories)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (0_u32, true, false, false, 4_i64));
     }
 
     #[test]

@@ -6,9 +6,9 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 
 use crate::{
-    context::{ContextId, ContextKind, LEGACY_ALL_PRINCIPALS_GRANT, LEGACY_SYSTEM_PRINCIPAL, UNRESOLVED_CONTEXT_KEY, effective_legacy_scope_key},
+    context::{ContextId, ContextKind, LEGACY_ALL_PRINCIPALS_GRANT, LEGACY_SYSTEM_PRINCIPAL, OPERATOR_PRINCIPAL, UNRESOLVED_CONTEXT_KEY, effective_legacy_scope_key},
     error::StoreError,
-    types::{AccessPolicy, Provenance, normalize_context_key},
+    types::{ANONYMOUS_PRINCIPAL, AccessPolicy, Provenance, normalize_context_key},
 };
 
 /// Current on-disk SQLite schema contract.
@@ -257,6 +257,18 @@ pub(crate) fn migrate_memories_backfill_origin_conversation(conn: &Connection) -
 
 /// Recreate `memory_embedding_map` with a proper foreign key, dropping orphaned rows.
 pub(crate) fn migrate_memory_embedding_map_fk(conn: &Connection) -> Result<(), StoreError> {
+    const MIGRATION: &str = "
+        ALTER TABLE memory_embedding_map RENAME TO memory_embedding_map_old;
+        CREATE TABLE memory_embedding_map (
+            memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+            vec_rowid INTEGER NOT NULL UNIQUE
+        );
+        INSERT INTO memory_embedding_map(memory_id, vec_rowid)
+        SELECT old.memory_id, old.vec_rowid
+        FROM memory_embedding_map_old AS old
+        JOIN memories ON memories.id = old.memory_id;
+        DROP TABLE memory_embedding_map_old;
+    ";
     let mut stmt = conn.prepare("PRAGMA foreign_key_list(memory_embedding_map)")?;
     let mut rows = stmt.query([])?;
     let mut has_fk = false;
@@ -272,22 +284,16 @@ pub(crate) fn migrate_memory_embedding_map_fk(conn: &Connection) -> Result<(), S
         return Ok(());
     }
 
-    conn.execute_batch(
-        "
-        BEGIN;
-        ALTER TABLE memory_embedding_map RENAME TO memory_embedding_map_old;
-        CREATE TABLE memory_embedding_map (
-            memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
-            vec_rowid INTEGER NOT NULL UNIQUE
-        );
-        INSERT INTO memory_embedding_map(memory_id, vec_rowid)
-        SELECT old.memory_id, old.vec_rowid
-        FROM memory_embedding_map_old AS old
-        JOIN memories ON memories.id = old.memory_id;
-        DROP TABLE memory_embedding_map_old;
-        COMMIT;
-        ",
-    )?;
+    if conn.is_autocommit() {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        if let Err(error) = conn.execute_batch(MIGRATION) {
+            let _rollback = conn.execute_batch("ROLLBACK");
+            return Err(error.into());
+        }
+        conn.execute_batch("COMMIT")?;
+    } else {
+        conn.execute_batch(MIGRATION)?;
+    }
     Ok(())
 }
 
@@ -666,21 +672,41 @@ pub(crate) fn migrate_contexts_v3(conn: &mut Connection, source_version: u32, no
     migrate_contexts_v3_inner(conn, source_version, now, None)
 }
 
-/// Migrate SQLite v2 contexts and validate the complete resulting v3 contract
-/// before the destructive registry drop and version bump are committed.
-pub(crate) fn migrate_contexts_v3_validated(conn: &mut Connection, source_version: u32, now: DateTime<Utc>, embedding_dimensions: usize) -> Result<(), StoreError> {
-    migrate_contexts_v3_inner(conn, source_version, now, Some(embedding_dimensions))
+/// Migrate and validate governed contexts inside a caller-owned SQLite upgrade
+/// transaction.
+///
+/// This keeps published metadata rewrites and the context migration in one
+/// atomic commit.
+pub(crate) fn migrate_contexts_v3_validated_in_transaction(tx: &Transaction<'_>, source_version: u32, now: DateTime<Utc>, embedding_dimensions: usize) -> Result<(), StoreError> {
+    migrate_contexts_v3_transaction(tx, source_version, now, Some(embedding_dimensions))
 }
 
-fn migrate_contexts_v3_inner(conn: &mut Connection, _source_version: u32, now: DateTime<Utc>, embedding_dimensions: Option<usize>) -> Result<(), StoreError> {
+#[cfg(test)]
+fn migrate_contexts_v3_inner(conn: &mut Connection, source_version: u32, now: DateTime<Utc>, embedding_dimensions: Option<usize>) -> Result<(), StoreError> {
     let current_version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if current_version > SQLITE_SCHEMA_VERSION {
         return Err(StoreError::Conflict(format!(
             "SQLite schema version {current_version} is newer than this binary supports ({SQLITE_SCHEMA_VERSION})"
         )));
     }
-    if current_version == SQLITE_SCHEMA_VERSION {
-        let tx = conn.transaction()?;
+    let tx = if current_version == SQLITE_SCHEMA_VERSION {
+        conn.transaction()?
+    } else {
+        super::sqlite::sqlite_write_tx(conn)?
+    };
+    migrate_contexts_v3_transaction(&tx, source_version, now, embedding_dimensions)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_contexts_v3_transaction(tx: &Transaction<'_>, _source_version: u32, now: DateTime<Utc>, embedding_dimensions: Option<usize>) -> Result<(), StoreError> {
+    let locked_version: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if locked_version > SQLITE_SCHEMA_VERSION {
+        return Err(StoreError::Conflict(format!(
+            "SQLite schema version {locked_version} is newer than this binary supports ({SQLITE_SCHEMA_VERSION})"
+        )));
+    }
+    if locked_version == SQLITE_SCHEMA_VERSION {
         let registry_exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scope_registry')", [], |row| {
             row.get(0)
         })?;
@@ -690,46 +716,26 @@ fn migrate_contexts_v3_inner(conn: &mut Connection, _source_version: u32, now: D
             ));
         }
         if let Some(embedding_dimensions) = embedding_dimensions {
-            crate::store::migration::validate_sqlite_source_schema(&tx, embedding_dimensions)?;
+            crate::store::migration::validate_sqlite_source_schema(tx, embedding_dimensions)?;
         }
-        tx.commit()?;
         return Ok(());
-    }
-    let tx = super::sqlite::sqlite_write_tx(conn)?;
-    let locked_version: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if locked_version > SQLITE_SCHEMA_VERSION {
-        return Err(StoreError::Conflict(format!(
-            "SQLite schema version {locked_version} is newer than this binary supports ({SQLITE_SCHEMA_VERSION})"
-        )));
     }
     let registry_exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scope_registry')", [], |row| {
         row.get(0)
     })?;
-    if locked_version == SQLITE_SCHEMA_VERSION {
-        if registry_exists {
-            return Err(StoreError::Conflict(
-                "SQLite v3 contains retired scope_registry; remove the stray table or restore a valid current backup".into(),
-            ));
-        }
-        if let Some(embedding_dimensions) = embedding_dimensions {
-            crate::store::migration::validate_sqlite_source_schema(&tx, embedding_dimensions)?;
-        }
-        tx.commit()?;
-        return Ok(());
-    }
     if locked_version == 2 && !registry_exists {
         return Err(StoreError::Conflict(
             "SQLite v2 database is missing scope_registry; restore from backup or repair the schema before retrying".into(),
         ));
     }
     if registry_exists {
-        validate_legacy_scope_registry(&tx)?;
+        validate_legacy_scope_registry(tx)?;
     }
 
     tx.execute_batch(CONTEXT_DDL)?;
-    insert_builtin_context_kinds(&tx, &now.to_rfc3339())?;
+    insert_builtin_context_kinds(tx, &now.to_rfc3339())?;
 
-    migrate_legacy_scopes(&tx, &now.to_rfc3339(), registry_exists)?;
+    migrate_legacy_scopes(tx, &now.to_rfc3339(), registry_exists)?;
     if registry_exists {
         let _dropped = tx.execute("DROP TABLE scope_registry", [])?;
     }
@@ -737,9 +743,8 @@ fn migrate_contexts_v3_inner(conn: &mut Connection, _source_version: u32, now: D
     tx.execute_batch(TOMBSTONE_DDL)?;
     tx.pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)?;
     if let Some(embedding_dimensions) = embedding_dimensions {
-        crate::store::migration::validate_sqlite_source_schema(&tx, embedding_dimensions)?;
+        crate::store::migration::validate_sqlite_source_schema(tx, embedding_dimensions)?;
     }
-    tx.commit()?;
     Ok(())
 }
 
@@ -1069,6 +1074,7 @@ fn validate_legacy_memory_json_sqlite(tx: &Transaction<'_>) -> Result<(), StoreE
     Ok(())
 }
 
+#[expect(clippy::too_many_lines, reason = "the three access-policy grant derivations remain adjacent for migration review")]
 fn grant_migrated_raw_contexts_sqlite(tx: &Transaction<'_>, now: &str) -> Result<(), StoreError> {
     let _broad_grants = tx.execute(
         "INSERT OR IGNORE INTO context_grants (
@@ -1105,13 +1111,20 @@ fn grant_migrated_raw_contexts_sqlite(tx: &Transaction<'_>, now: &str) -> Result
            ON audit.context_id = membership.context_id
           AND audit.action = 'migrate_raw_scope'
          WHERE trim(COALESCE(json_extract(memory.provenance, '$.source_agent'), '')) <> ''
-           AND json_extract(memory.provenance, '$.source_agent') <> ?3
+           AND json_extract(memory.provenance, '$.source_agent') NOT IN (?3, ?4, ?5, ?6)
            AND NOT EXISTS (
                SELECT 1 FROM context_grants AS grant_row
                WHERE grant_row.context_id = membership.context_id
                  AND grant_row.grantee_principal = ?3
            )",
-        params![LEGACY_SYSTEM_PRINCIPAL, now, LEGACY_ALL_PRINCIPALS_GRANT],
+        params![
+            LEGACY_SYSTEM_PRINCIPAL,
+            now,
+            LEGACY_ALL_PRINCIPALS_GRANT,
+            OPERATOR_PRINCIPAL,
+            LEGACY_SYSTEM_PRINCIPAL,
+            ANONYMOUS_PRINCIPAL,
+        ],
     )?;
     let _restricted_grants = tx.execute(
         "INSERT OR IGNORE INTO context_grants (
@@ -1127,13 +1140,20 @@ fn grant_migrated_raw_contexts_sqlite(tx: &Transaction<'_>, now: &str) -> Result
          WHERE json_extract(memory.access_policy, '$.type') = 'restricted'
            AND allowed.type = 'text'
            AND trim(allowed.value) <> ''
-           AND allowed.value <> ?3
+           AND allowed.value NOT IN (?3, ?4, ?5, ?6)
            AND NOT EXISTS (
                SELECT 1 FROM context_grants AS grant_row
                WHERE grant_row.context_id = membership.context_id
                  AND grant_row.grantee_principal = ?3
            )",
-        params![LEGACY_SYSTEM_PRINCIPAL, now, LEGACY_ALL_PRINCIPALS_GRANT],
+        params![
+            LEGACY_SYSTEM_PRINCIPAL,
+            now,
+            LEGACY_ALL_PRINCIPALS_GRANT,
+            OPERATOR_PRINCIPAL,
+            LEGACY_SYSTEM_PRINCIPAL,
+            ANONYMOUS_PRINCIPAL,
+        ],
     )?;
     Ok(())
 }

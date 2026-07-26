@@ -436,11 +436,22 @@ fn ensure_private_legacy_scope_context(
     Ok(id)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "legacy scope resolution, disabled-kind enforcement, and private compatibility creation remain transactionally adjacent"
+)]
 fn resolve_or_create_private_legacy_context(tx: &Transaction<'_>, key: &str, principal: &str, now: &str) -> Result<String, StoreError> {
     validate_implicit_legacy_context_key(key).map_err(StoreError::Conflict)?;
     let normalized = normalize_context_key(key);
     if normalized.is_empty() || normalized == UNRESOLVED_SCOPE {
         return Err(StoreError::Conflict("legacy scope key cannot be blank or inbox/unresolved".into()));
+    }
+    let custom_enabled = tx
+        .query_row("SELECT enabled FROM context_kinds WHERE kind = ?1", [ContextKind::CUSTOM], |row| row.get::<_, bool>(0))
+        .optional()?
+        .unwrap_or(false);
+    if !custom_enabled {
+        return Err(StoreError::Conflict("context kind \"custom\" is disabled".into()));
     }
     let owned = tx
         .query_row(

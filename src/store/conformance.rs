@@ -1724,6 +1724,65 @@ where
     assert!(store.get_memory_contexts(&disabled_replacement_id, OWNER).await.unwrap().is_empty());
     assert!(store.delete(&disabled_replacement_id).await.unwrap());
 
+    let disabled_custom_source = format!("legacy/disabled-custom-source/{case}");
+    let disabled_custom_target = format!("legacy/disabled-custom-target/{case}");
+    let disabled_custom_memory = memory(MemorySpec {
+        content: format!("disabled custom reassignment {case}"),
+        tags: vec![format!("contract-{case}"), "disabled-custom-reassignment".into()],
+        source_agent: OWNER,
+        scope: disabled_custom_source.clone(),
+        origin: format!("contract/origin/{case}"),
+        access_policy: AccessPolicy::Public,
+        created_at: base,
+    });
+    let disabled_custom_memory_id = store.store(&disabled_custom_memory, None).await.unwrap();
+    store
+        .upsert_context_kind(
+            &ContextKindDraft {
+                kind: ContextKind::custom(),
+                display_name: "Custom".into(),
+                enabled: false,
+            },
+            OPERATOR_PRINCIPAL,
+            &ContextAuditDraft::new(OPERATOR_PRINCIPAL, "conformance_custom_kind_disabled"),
+        )
+        .await
+        .unwrap();
+    let disabled_custom_error = store.reassign_scope(&disabled_custom_source, &disabled_custom_target, None, OWNER).await.unwrap_err();
+    assert!(disabled_custom_error.to_string().contains("disabled"));
+    assert_eq!(
+        store
+            .get(&disabled_custom_memory_id, Some(OWNER))
+            .await
+            .unwrap()
+            .unwrap()
+            .provenance
+            .source_conversation
+            .as_deref(),
+        Some(disabled_custom_source.as_str())
+    );
+    assert!(
+        store
+            .list_context_records(OWNER, true, 0, 500)
+            .await
+            .unwrap()
+            .iter()
+            .all(|record| record.context.key != disabled_custom_target)
+    );
+    store
+        .upsert_context_kind(
+            &ContextKindDraft {
+                kind: ContextKind::custom(),
+                display_name: "Custom".into(),
+                enabled: true,
+            },
+            OPERATOR_PRINCIPAL,
+            &ContextAuditDraft::new(OPERATOR_PRINCIPAL, "conformance_custom_kind_reenabled"),
+        )
+        .await
+        .unwrap();
+    assert!(store.delete(&disabled_custom_memory_id).await.unwrap());
+
     let policy_guarded_legacy_id = ContextId::new();
     let _policy_guarded_context = store
         .create_context(

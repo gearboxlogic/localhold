@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "generator": {
+    "name": "localhold-dependency-unsafe",
+    "version": "1",
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)"
+  },
+  "platform": {
+    "name": "windows",
+    "target": "x86_64-pc-windows-msvc"
+  },
+  "inputs": {
+    "audit_tool_lock_sha256": "0a6c907727a82c8f98d7a9aeceac54d2f88bd93b2c590f3dd0ca28429c74531a",
+    "audit_tool_source_sha256": "47ffdd7a58b92485c982cf5a47d95db417f768519085dd17374fd69e68083e66"
+  },
+  "source_records": 254,
+  "configurations": [
+    "windows-default",
+    "windows-all-features-ci",
+    "windows-release-reranker"
+  ]
+}

@@ -7,6 +7,8 @@ small, reviewable, and grounded in the current repository.
 
 - Read the relevant code and tests before editing.
 - Follow existing patterns before adding dependencies or abstractions.
+- Respect the active maintainability recovery feature freeze. Do not add product
+  features or expand public APIs unless an approved, tracked exception applies.
 - Keep behavior changes separate from unrelated cleanup.
 - Do not revert changes you did not make.
 - Never commit credentials, local configuration, databases, model files, build

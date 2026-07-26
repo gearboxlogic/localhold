@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "owner": "LocalHold maintainers",
+  "review_triggers": [
+    "version-or-checksum-change",
+    "enabled-feature-change",
+    "new-dependency-route",
+    "exposure-signal-change"
+  ],
+  "packages": {}
+}

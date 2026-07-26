@@ -1,0 +1,210 @@
+{
+  "schema_version": 1,
+  "packages": {
+    "crates.io:ulid@1.2.1#470dbf6591da1b39d43c14523b2b469c86879a53e8b758c8e090a470fe7b1fbe": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:unarray@0.1.4#eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:unicode-bidi@0.3.18#5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:unicode-ident@1.0.24#e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:unicode-normalization-alignments@0.1.12#43f613e4fa046e69818dd287fdc4bc78175ff20331479dab6e1b0f98d57062de": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:unicode-normalization@0.1.25#5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:url@2.5.8#ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:utf8-zero@0.8.1#b8c0a043c9540bae7c578c88f91dda8bd82e59ae27c21baca69c8b191aaf5a6e": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:utf8_iter@1.0.4#b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:uuid@1.23.2#d258b83ceec21034727ecee8c382cfa6c3e133699b0742c64571814fb420c9f7": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:vcpkg@0.2.15#accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426": {
+      "classification": "other",
+      "rationale": "The packaged source has mixed native, prebuilt, generated, or Rust unsafe exposure and is conservatively ungrouped pending package-family review. This category is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:wait-timeout@0.2.1#09ac3b126d3914f9849036f826e054cbabdc8519970b8998ddaf3b5bd3c65f11": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:walkdir@2.5.0#29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b": {
+      "classification": "other",
+      "rationale": "The packaged source has mixed native, prebuilt, generated, or Rust unsafe exposure and is conservatively ungrouped pending package-family review. This category is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:whoami@2.1.2#998767ef88740d1f5b0682a9c53c24431453923962269c2db68ee43788c5a40d": {
+      "classification": "other",
+      "rationale": "The packaged source has mixed native, prebuilt, generated, or Rust unsafe exposure and is conservatively ungrouped pending package-family review. This category is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:winapi-util@0.1.11#c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:winapi@0.3.9#5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:windows-collections@0.3.2#23b2d95af1a8a14a3c7367e1ed4fc9c20e0a26e79551b1454d72583c97cc6610": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:windows-core@0.62.2#b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:windows-future@0.3.2#e1d6f90251fe18a279739e78025bd6ddc52a7e22f921070ccdc67dde84c605cb": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:windows-implement@0.60.2#053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:windows-interface@0.59.3#3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:windows-link@0.2.1#f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5": {
+      "classification": "other",
+      "rationale": "The packaged source has mixed native, prebuilt, generated, or Rust unsafe exposure and is conservatively ungrouped pending package-family review. This category is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:windows-numerics@0.3.1#6e2e40844ac143cdb44aead537bbf727de9b044e107a0f1220392177d15b0f26": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:windows-result@0.4.1#7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:windows-strings@0.5.1#7837d08f69c77cf6b07689544538e017c1bfcf57e34b4c0ff58e6c2cd3b37091": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:windows-sys@0.61.2#ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:windows-threading@0.2.1#3949bd5b99cafdf1c7ca86b43ca564028dfe27d66958f2470940f73d86d75b37": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:windows@0.62.2#527fadee13e0c05939a6a05d5bd6eec6cd2e3dbd648b9f8e447c6518133d8580": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:winnow@1.0.3#0592e1c9d151f854e6fd382574c3a0855250e1d9b2f99d9281c6e6391af352f1": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:writeable@0.6.3#1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:xattr@1.6.1#32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:yoke-derive@0.8.2#de844c262c8848816172cef550288e7dc6c7b7814b4ee56b3e1553f275f1858e": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:yoke@0.8.2#abe8c5fda708d9ca3df187cae8bfb9ceda00dd96231bed36e445a1a48e66f9ca": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:zerocopy-derive@0.8.54#e2e817b7b52d0c7358d3246da9d69935ebb18116b2b102b4230dac079b4862f5": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:zerocopy@0.8.54#b7cbbc0a705a0fd05cc3676525980d2bf5a9bc4adac6d6475209a7887cf59d19": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:zerofrom-derive@0.1.7#11532158c46691caf0f2593ea8358fed6bbf68a0315e80aae9bd41fbade684a1": {
+      "classification": "other",
+      "rationale": "The packaged crate defines a build-script or procedural-macro target without another recorded source-exposure signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:zeroize@1.8.2#b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:zerotrie@0.2.4#0f9152d31db0792fa83f70fb2f83148effb5c1f5b8c7686c3459e361d9bc20bf": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:zerovec-derive@0.11.3#625dc425cab0dca6dc3c3319506e6593dcb08a9f387ea3b284dbd52a92c40555": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:zerovec@0.11.6#90f911cbc359ab6af17377d242225f4d75119aec87ea711a880987b18cd7b239": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    },
+    "crates.io:zmij@1.0.21#b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa": {
+      "classification": "pure-rust-unchecked",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "review_issue": 124
+    }
+  }
+}

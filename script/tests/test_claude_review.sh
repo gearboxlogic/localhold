@@ -40,10 +40,25 @@ scratch_root="$cache_root/claude-reviews"
 scratch_root_created=false
 wrapper_pid=
 watchdog_pid=
+child_pid=
 if [[ ! -d "$scratch_root" ]]; then
     mkdir -- "$scratch_root"
     scratch_root_created=true
 fi
+
+terminate_fake_reviewer() {
+    if [[ -z "$child_pid" ]] || ! kill -0 "$child_pid" 2>/dev/null; then
+        return
+    fi
+    kill -TERM "$child_pid" 2>/dev/null || true
+    for _ in {1..100}; do
+        if ! kill -0 "$child_pid" 2>/dev/null; then
+            return
+        fi
+        sleep 0.01
+    done
+    kill -KILL "$child_pid" 2>/dev/null || true
+}
 
 cleanup() {
     local status=$?
@@ -52,6 +67,7 @@ cleanup() {
         kill -TERM "$watchdog_pid" 2>/dev/null || true
         wait "$watchdog_pid" 2>/dev/null || true
     fi
+    terminate_fake_reviewer
     if [[ -n "$wrapper_pid" ]] && kill -0 "$wrapper_pid" 2>/dev/null; then
         kill -TERM "$wrapper_pid" 2>/dev/null || true
         wait "$wrapper_pid" 2>/dev/null || true
@@ -141,18 +157,20 @@ if [[ $(< "$test_root/capture/cwd") != "$repository_root" ]]; then
     printf 'Claude reviewer did not run from the repository root\n' >&2
     exit 1
 fi
-if grep -Eq '^(LOCALHOLD_|ANTHROPIC_API_KEY=|GH_TOKEN=|AWS_SECRET_ACCESS_KEY=)' "$test_root/capture/environment"; then
+if grep -Eq '^(LOCALHOLD_|ANTHROPIC_API_KEY=|GH_TOKEN=|AWS_SECRET_ACCESS_KEY=)|must not reach Claude' "$test_root/capture/environment"; then
     printf 'Claude reviewer inherited a sensitive environment variable\n' >&2
     exit 1
 fi
 
 rm -rf -- "$test_root/capture"
 mkdir -- "$test_root/capture"
-set +e
-PATH="$test_root/bin:$PATH" \
-"$repository_root/script/claude-review.sh" fable "Fail this fake review." > "$test_root/failure-output"
-status=$?
-set -e
+if PATH="$test_root/bin:$PATH" \
+    "$repository_root/script/claude-review.sh" fable "Fail this fake review." > "$test_root/failure-output"
+then
+    status=0
+else
+    status=$?
+fi
 if (( status != 23 )); then
     printf 'Claude review wrapper did not preserve reviewer exit status: %d\n' "$status" >&2
     exit 1
@@ -185,16 +203,18 @@ timeout_marker="$test_root/wrapper-timeout"
     sleep 10
     if kill -0 "$wrapper_pid" 2>/dev/null; then
         : > "$timeout_marker"
+        terminate_fake_reviewer
         kill -KILL "$wrapper_pid" 2>/dev/null || true
     fi
 ) &
 watchdog_pid=$!
-set +e
-wait "$wrapper_pid"
-status=$?
-kill -TERM "$watchdog_pid" 2>/dev/null
-wait "$watchdog_pid" 2>/dev/null
-set -e
+if wait "$wrapper_pid"; then
+    status=0
+else
+    status=$?
+fi
+kill -TERM "$watchdog_pid" 2>/dev/null || true
+wait "$watchdog_pid" 2>/dev/null || true
 wrapper_pid=
 watchdog_pid=
 if [[ -e "$timeout_marker" ]]; then
@@ -218,6 +238,7 @@ if kill -0 "$child_pid" 2>/dev/null; then
     printf 'Claude reviewer survived wrapper termination: %s\n' "$child_pid" >&2
     exit 1
 fi
+child_pid=
 signal_scratch=$(sed -n '1p' "$test_root/capture/temp-environment")
 if [[ -e "$signal_scratch" ]]; then
     printf 'Claude review scratch survived wrapper termination: %s\n' "$signal_scratch" >&2

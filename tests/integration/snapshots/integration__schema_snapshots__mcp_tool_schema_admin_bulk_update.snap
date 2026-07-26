@@ -8,6 +8,117 @@ expression: tool
   "inputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$defs": {
+      "ContextEnvelope": {
+        "description": "Context-selection envelope shared by context-aware tools.",
+        "type": "object",
+        "properties": {
+          "refs": {
+            "description": "Exact context references.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ContextReference"
+            },
+            "default": []
+          },
+          "hints": {
+            "description": "Weak resolver hints. Local paths belong here, never in identities.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "include_descendants": {
+            "description": "Include descendants of explicitly selected contexts.",
+            "type": "boolean",
+            "default": false
+          },
+          "allow_unresolved": {
+            "description": "Permit a governed write to remain contextless.",
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "ContextReference": {
+        "description": "One context locator in a shared context envelope.\n\nExactly one locator form is valid: `id`, `kind` + `key`, or `kind` +\n`identity`.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "Stable opaque context ID.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "description": "Context kind for key or identity locators.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "key": {
+            "description": "Immutable human-readable context key.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "identity": {
+            "description": "Typed durable identity.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextIdentityInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ContextId": {
+        "description": "A ULID-formatted opaque context identifier",
+        "type": "string"
+      },
+      "ContextKind": {
+        "description": "Stable context kind. Built-in kinds and operator-defined kinds use the same\nrepresentation so adding a kind does not require a wire-protocol change.",
+        "type": "string"
+      },
+      "ContextIdentityInput": {
+        "description": "Typed durable identity supplied by an agent.\n\nThe raw value exists only while the request is normalized. Persistence and\nresponses use [`ContextIdentity`], which contains a fingerprint and a\nredacted label instead.",
+        "type": "object",
+        "properties": {
+          "scheme": {
+            "description": "Identity scheme: `git_remote`, `uri`, or `namespaced_id`.",
+            "type": "string"
+          },
+          "value": {
+            "description": "Raw identity value. This is never persisted.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "Required only for `namespaced_id`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "scheme",
+          "value"
+        ]
+      },
       "MemoryType": {
         "description": "Classifies the kind of knowledge a memory captures.",
         "oneOf": [
@@ -127,6 +238,10 @@ expression: tool
       "agent_label": {
         "description": "Filter to memories with this agent provenance label.",
         "type": "string"
+      },
+      "context": {
+        "description": "Governed multi-context selection. Cannot be combined with legacy\n`scope` or `scopes`.",
+        "$ref": "#/$defs/ContextEnvelope"
       },
       "scope": {
         "description": "Filter by scope key, alias, or value containing a registered matcher.",

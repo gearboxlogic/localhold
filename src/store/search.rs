@@ -10,13 +10,13 @@
 
 use std::sync::LazyLock;
 
-use rusqlite::params;
+use zerocopy::IntoBytes as _;
 
 use super::{
     SqliteStore,
     crud::hydrate_entities_batch,
     query::{
-        MAX_SCAN_ROWS, MAX_VEC_CANDIDATES, MEMORY_COLUMN_COUNT, OVERFETCH_FACTOR, ScanConfig, apply_access_policy_for_filter, escape_like, needs_entity_hydration,
+        MAX_SCAN_ROWS, MAX_VEC_CANDIDATES, MEMORY_COLUMN_COUNT, OVERFETCH_FACTOR, ScanConfig, WhereClause, apply_access_policy_for_filter, escape_like, needs_entity_hydration,
         normalize_filter, row_to_memory, sort_by_distance, usize_to_i64,
     },
     vector::{SqliteVecIndex, VectorHit, VectorIndex as _},
@@ -52,6 +52,7 @@ impl SqliteStore {
         let now = self.clock_now();
         let vector_index = self.vector_index();
         self.with_conn(move |conn| {
+            super::vector::validate_embedding_vector(&emb, vector_index.dimensions())?;
             let caller = principal.as_deref();
             let pf_ctx = PostFilterContext {
                 filter: &filter,
@@ -59,24 +60,74 @@ impl SqliteStore {
                 now,
                 max_distance,
             };
-            embedding_search_loop(conn, &vector_index, &emb, limit, &pf_ctx)
+            if filter.context_ids.is_some() || filter.legacy_context_ids_any.as_ref().is_some_and(|context_ids| !context_ids.is_empty()) {
+                filtered_embedding_search_loop(conn, &emb, limit, &pf_ctx)
+            } else {
+                embedding_search_loop(conn, &vector_index, &emb, limit, &pf_ctx)
+            }
         })
         .await
     }
 
-    /// Find nearest ANN neighbors for an embedding within an L2 distance threshold.
+    /// Find nearest neighbors within the canonical consolidation candidate set.
     ///
-    /// Returns `(memory_id, l2_distance)` pairs, excluding superseded memories.
-    pub(crate) async fn find_embedding_neighbors_impl(&self, embedding: &[f32], max_l2_distance: f64, limit: usize) -> Result<Vec<super::EmbeddingNeighbor>, StoreError> {
-        if limit == 0 {
+    /// Context and authorization filtering happens while constructing
+    /// `candidate_ids`; constraining the SQL before ordering and limiting keeps
+    /// unrelated vectors from consuming the bounded neighbor budget.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "candidate-bounded neighbor lookup needs source, candidates, vector, threshold, and limit"
+    )]
+    pub(crate) async fn find_embedding_neighbors_impl(
+        &self,
+        source_memory_id: &MemoryId,
+        candidate_ids: &[MemoryId],
+        embedding: &[f32],
+        min_cosine_similarity: f64,
+        limit: usize,
+    ) -> Result<Vec<super::EmbeddingNeighbor>, StoreError> {
+        if limit == 0 || candidate_ids.is_empty() {
             return Ok(Vec::new());
         }
         let emb = embedding.to_vec();
+        let source_memory_id = source_memory_id.to_string();
+        let candidate_ids = serde_json::to_string(&candidate_ids.iter().map(ToString::to_string).collect::<Vec<_>>())?;
         let vector_index = self.vector_index();
         self.with_conn(move |conn| {
-            vector_index
-                .neighbors(conn, &emb, max_l2_distance, limit)
-                .map(|hits| hits.into_iter().map(|hit| (hit.memory_id, hit.distance)).collect())
+            super::vector::validate_embedding_vector(&emb, vector_index.dimensions())?;
+            let emb_bytes: &[u8] = emb.as_bytes();
+            let mut statement = conn.prepare(
+                "WITH ranked_candidates AS MATERIALIZED (
+                    SELECT embedding_map.memory_id,
+                           1.0 - vec_distance_cosine(vector_row.embedding, ?1) AS similarity
+                    FROM memory_embeddings AS vector_row
+                    JOIN memory_embedding_map AS embedding_map
+                      ON embedding_map.vec_rowid = vector_row.rowid
+                    JOIN memories AS memory_row
+                      ON memory_row.id = embedding_map.memory_id
+                    WHERE embedding_map.memory_id IN (
+                              SELECT CAST(value AS TEXT) FROM json_each(?2)
+                          )
+                      AND embedding_map.memory_id <> ?3
+                      AND memory_row.superseded_by IS NULL
+                 )
+                 SELECT memory_id, similarity
+                 FROM ranked_candidates
+                 WHERE similarity >= ?4
+                   AND similarity <= 1.0
+                 ORDER BY similarity DESC, memory_id
+                 LIMIT ?5",
+            )?;
+            let rows = statement
+                .query_map(
+                    rusqlite::params![emb_bytes, candidate_ids, source_memory_id, min_cosine_similarity, usize_to_i64(limit, "neighbor limit")?,],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows
+                .into_iter()
+                .filter_map(|(id, similarity)| id.parse().ok().map(|memory_id| (memory_id, similarity)))
+                .collect())
         })
         .await
     }
@@ -150,6 +201,85 @@ fn embedding_search_loop(
     sort_by_distance(&mut results);
     results.truncate(limit);
     Ok(results)
+}
+
+/// Vector-index ranking over the SQL-prefiltered governed candidate set.
+///
+/// sqlite-vec accepts a `rowid IN (...)` constraint alongside its KNN query.
+/// The subquery applies authorization and normalized many-to-many context
+/// applicability before vector work, while the virtual table ranks every
+/// eligible embedded row before returning the bounded nearest-neighbor prefix.
+fn filtered_embedding_search_loop(conn: &rusqlite::Connection, emb: &[f32], limit: usize, pf_ctx: &PostFilterContext<'_>) -> Result<Vec<SearchResult>, StoreError> {
+    let wc = WhereClause::from_filter(pf_ctx.filter, pf_ctx.caller, 2, pf_ctx.now);
+    let where_sql = wc.to_where_sql();
+    let limit_index = wc.next_index();
+    let sql = filtered_embedding_search_sql(&where_sql, limit_index);
+    let emb_bytes: &[u8] = emb.as_bytes();
+    let mut results: Vec<SearchResult> = Vec::new();
+    let mut seen_ids = std::collections::HashSet::with_capacity(limit.saturating_mul(OVERFETCH_FACTOR));
+    let mut fetch_size = limit.saturating_mul(OVERFETCH_FACTOR);
+    loop {
+        let candidate_limit = fetch_size.min(MAX_VEC_CANDIDATES);
+        let candidate_limit_i64 = usize_to_i64(candidate_limit, "governed vector candidate limit")?;
+        let mut bindings: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(wc.params().len().saturating_add(2));
+        bindings.push(&emb_bytes);
+        for value in wc.params() {
+            bindings.push(value);
+        }
+        bindings.push(&candidate_limit_i64);
+        let mut statement = conn.prepare(&sql)?;
+        let rows = statement
+            .query_map(&*bindings, |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let returned = rows.len();
+        let hits = rows
+            .into_iter()
+            .filter_map(|(id, distance)| id.parse().ok().map(|memory_id| VectorHit { memory_id, distance }))
+            .filter(|hit| seen_ids.insert(hit.memory_id))
+            .collect::<Vec<_>>();
+        if !hits.is_empty() {
+            let hydrated = hydrate_candidates(conn, &hits)?;
+            post_filter_results(conn, &mut results, hydrated, &hits, pf_ctx)?;
+        }
+        if results.len() >= limit || returned < candidate_limit {
+            break;
+        }
+        if fetch_size >= MAX_VEC_CANDIDATES {
+            tracing::info!(
+                max = MAX_VEC_CANDIDATES,
+                collected = results.len(),
+                requested = limit,
+                "governed vector search exiting: reached MAX_VEC_CANDIDATES ceiling"
+            );
+            break;
+        }
+        fetch_size = fetch_size.saturating_mul(2);
+    }
+    sort_by_distance(&mut results);
+    results.truncate(limit);
+    Ok(results)
+}
+
+fn filtered_embedding_search_sql(where_sql: &str, limit_index: usize) -> String {
+    format!(
+        "SELECT embedding_map.memory_id, knn.distance
+         FROM (
+             SELECT rowid, distance
+             FROM memory_embeddings
+             WHERE embedding MATCH ?1
+               AND rowid IN (
+                   SELECT candidate_embedding_map.vec_rowid
+                   FROM memories
+                   JOIN memory_embedding_map AS candidate_embedding_map
+                     ON candidate_embedding_map.memory_id = memories.id{where_sql}
+               )
+             ORDER BY distance
+             LIMIT ?{limit_index}
+         ) AS knn
+         JOIN memory_embedding_map AS embedding_map
+           ON embedding_map.vec_rowid = knn.rowid
+         ORDER BY knn.distance, embedding_map.memory_id"
+    )
 }
 
 /// Execute a text search with paged scanning.
@@ -327,15 +457,20 @@ fn fts_search_scan(
     let page_size = limit.saturating_mul(OVERFETCH_FACTOR).max(1);
     let filter_needs_entities = needs_entity_hydration(filter);
 
-    // FTS5 external-content: join back to memories for full rows.
-    // `rank` is the BM25 score (negative, more negative = more relevant).
+    // FTS5 external-content: join back to memories for full rows. The
+    // membership subquery applies every filter before BM25 candidate ranking.
+    let wc = WhereClause::from_filter(filter, caller, 2, now);
+    let where_sql = wc.to_where_sql();
+    let limit_index = wc.next_index();
+    let offset_index = limit_index.saturating_add(1);
     let sql = format!(
         "SELECT {}, fts.rank \
          FROM memory_fts fts \
          JOIN memories m ON m.rowid = fts.rowid \
-         WHERE memory_fts MATCH ?1 \
+         WHERE memory_fts MATCH ?1
+           AND m.id IN (SELECT memories.id FROM memories{where_sql}) \
          ORDER BY fts.rank, m.created_at DESC, m.id DESC \
-         LIMIT ?2 OFFSET ?3",
+         LIMIT ?{limit_index} OFFSET ?{offset_index}",
         *PREFIXED_COLUMNS
     );
 
@@ -354,7 +489,9 @@ fn fts_search_scan(
     let mut offset = 0_usize;
     loop {
         let offset_i64 = usize_to_i64(offset, "FTS offset")?;
-        let rows = match stmt.query_map(params![fts_query, limit_i64, offset_i64], |row| {
+        let fts_params = vec![fts_query.to_owned()];
+        let bindings = wc.bind_params(&fts_params, &limit_i64, &offset_i64);
+        let rows = match stmt.query_map(&*bindings, |row| {
             let memory = row_to_memory(row).map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
             let rank: f64 = row.get(MEMORY_COLUMN_COUNT)?;
             Ok((memory, rank))
@@ -522,6 +659,61 @@ fn hydrate_entities_for_hydrated_rows(conn: &rusqlite::Connection, hydrated: &mu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn governed_vector_sql_filters_inside_knn_before_ranking() {
+        let sql = filtered_embedding_search_sql(" WHERE governed = ?2", 3);
+        let rowid_filter_position = sql.find("rowid IN").unwrap();
+        let governed_filter_position = sql.find("WHERE governed = ?2").unwrap();
+        let distance_order_position = sql.find("ORDER BY distance").unwrap();
+        let limit_position = sql.find("LIMIT ?3").unwrap();
+
+        assert!(rowid_filter_position < governed_filter_position);
+        assert!(governed_filter_position < distance_order_position);
+        assert!(
+            distance_order_position < limit_position,
+            "eligible vectors must be ranked before the result prefix is limited"
+        );
+        assert!(!sql.contains("created_at"), "recency must not decide semantic eligibility");
+    }
+
+    #[test]
+    fn governed_vector_knn_keeps_older_exact_match_beyond_result_ceiling() {
+        SqliteStore::register_extension().unwrap();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                 id TEXT PRIMARY KEY,
+                 governed INTEGER NOT NULL
+             );
+             CREATE TABLE memory_embedding_map (
+                 memory_id TEXT PRIMARY KEY,
+                 vec_rowid INTEGER NOT NULL UNIQUE
+             );",
+        )
+        .unwrap();
+        let index = SqliteVecIndex::new(2);
+        index.init_schema(&conn).unwrap();
+        let _inserted = conn.execute("INSERT INTO memories (id, governed) VALUES ('older-exact', 1)", []).unwrap();
+        index.upsert(&conn, "older-exact", &[1.0_f32, 0.0_f32]).unwrap();
+        for candidate in 0..MAX_VEC_CANDIDATES {
+            let id = format!("newer-distractor-{candidate:04}");
+            let _inserted = conn.execute("INSERT INTO memories (id, governed) VALUES (?1, 1)", [&id]).unwrap();
+            index.upsert(&conn, &id, &[0.0_f32, 1.0_f32]).unwrap();
+        }
+
+        let sql = filtered_embedding_search_sql(" WHERE governed = ?2", 3);
+        let query = [1.0_f32, 0.0_f32];
+        let query_bytes: &[u8] = query.as_bytes();
+        let (memory_id, distance) = conn
+            .query_row(&sql, rusqlite::params![query_bytes, 1_i64, 1_i64], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })
+            .unwrap();
+
+        assert_eq!(memory_id, "older-exact");
+        assert!(distance.abs() <= f64::EPSILON);
+    }
 
     #[test]
     fn sanitize_fts_query_quotes_tokens() {

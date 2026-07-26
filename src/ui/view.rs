@@ -16,7 +16,7 @@ use crate::{
     store::MemoryStore,
     types::{AuditEntry, Memory},
     ui::{
-        app::{App, Detail, Focus, Mode, Status},
+        app::{App, ContextManager, Detail, Focus, Mode, Status, context_manager_edit_value},
         editor::{EditDraft, EditField, TextInput},
     },
 };
@@ -24,9 +24,9 @@ use crate::{
 /// One battlement unit: eight merlons, four gaps.
 const BATTLEMENT_UNIT: &str = "\u{2580}\u{2580}\u{2580}\u{2580}\u{2580}\u{2580}\u{2580}\u{2580}    ";
 
-/// Scope rows reserve two border cells and one selection-marker cell.
-const SCOPE_LIST_CHROME_WIDTH: u16 = 3_u16;
-const SCOPE_HIGHLIGHT_SYMBOL: &str = "\u{258c}";
+/// Context rows reserve two border cells and one selection-marker cell.
+const CONTEXT_LIST_CHROME_WIDTH: u16 = 3_u16;
+const CONTEXT_HIGHLIGHT_SYMBOL: &str = "\u{258c}";
 
 /// Render one frame.
 pub(crate) fn draw<S>(frame: &mut Frame<'_>, app: &App<S>)
@@ -35,8 +35,8 @@ where
 {
     let [header, main, rule, status] = Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1), Constraint::Length(1)]).areas(frame.area());
     draw_header(frame, app, header);
-    let [scopes, memories] = Layout::horizontal([Constraint::Length(26), Constraint::Min(30)]).areas(main);
-    draw_scopes(frame, app, scopes);
+    let [contexts, memories] = Layout::horizontal([Constraint::Length(30), Constraint::Min(30)]).areas(main);
+    draw_contexts(frame, app, contexts);
     draw_memories(frame, app, memories);
     draw_rule(frame, app, rule);
     draw_status(frame, app, status);
@@ -49,10 +49,15 @@ where
             draw_detail(frame, app, detail, main);
         }
     }
+    if let Some(manager) = &app.context_manager {
+        draw_context_manager(frame, app, manager, main);
+    }
     if app.mode == Mode::ConfirmDelete {
         draw_confirmation(frame, app, main, "Forget this memory permanently?  y yes  n no");
     } else if app.mode == Mode::ConfirmDiscard {
         draw_confirmation(frame, app, main, "Discard unsaved changes?  y yes  n no");
+    } else if app.mode == Mode::ConfirmContextDiscard {
+        draw_confirmation(frame, app, main, "Discard unsaved context changes?  y yes  n no");
     }
 }
 
@@ -93,29 +98,55 @@ fn pane_block(title: &str, focused: bool, app_ident: Style, label: Style) -> Blo
     Block::bordered().border_style(border).title(Span::styled(title, label))
 }
 
-fn draw_scopes<S>(frame: &mut Frame<'_>, app: &App<S>, area: Rect)
+fn draw_contexts<S>(frame: &mut Frame<'_>, app: &App<S>, area: Rect)
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
     let selected_style = Style::default().bold();
-    let marker_style = if app.focus == Focus::Scopes { selected_style } else { app.theme.label() };
-    let width = usize::from(area.width.saturating_sub(SCOPE_LIST_CHROME_WIDTH));
-    let mut items = vec![scope_list_line("All memories", app.scope_total, width, Style::default())];
-    if app.scopes.is_empty() {
-        items.push(Line::from(Span::styled("  no scoped memories", app.theme.label())));
+    let marker_style = if app.focus == Focus::Contexts { selected_style } else { app.theme.label() };
+    let width = usize::from(area.width.saturating_sub(CONTEXT_LIST_CHROME_WIDTH));
+    let descendants = if app.include_descendants { " \u{b7} descendants" } else { "" };
+    let mut items = vec![context_list_line(&format!("Broad search{descendants}"), app.context_total, width, Style::default())];
+    let mut selected_row = 0;
+    let mut previous_kind = None;
+    if app.contexts.is_empty() {
+        items.push(Line::from(Span::styled("  no authorized contexts", app.theme.label())));
     } else {
-        items.extend(app.scopes.iter().map(|scope| scope_list_line(&scope.label, Some(scope.count), width, app.theme.ident())));
+        for (index, item) in app.contexts.iter().enumerate() {
+            let kind = item.record.context.kind.as_str();
+            if previous_kind != Some(kind) {
+                items.push(Line::from(Span::styled(kind.to_ascii_uppercase(), app.theme.label())));
+                previous_kind = Some(kind);
+            }
+            if app.context_cursor == index.saturating_add(1) {
+                selected_row = items.len();
+            }
+            let checked = if item.record.context.lifecycle == crate::context::ContextLifecycle::Archived {
+                "[-]"
+            } else if app.selected_context_ids.contains(&item.record.context.id) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let archived = if item.record.context.lifecycle == crate::context::ContextLifecycle::Archived {
+                " \u{b7} archived"
+            } else {
+                ""
+            };
+            let label = format!("{checked} {}{archived}", item.record.context.display_name);
+            items.push(context_list_line(&label, None, width, app.theme.ident()));
+        }
     }
     let list = List::new(items)
-        .block(pane_block(" SCOPES ", app.focus == Focus::Scopes, app.theme.ident(), app.theme.label()))
+        .block(pane_block(" CONTEXTS ", app.focus == Focus::Contexts, app.theme.ident(), app.theme.label()))
         .highlight_style(selected_style)
-        .highlight_symbol(Line::styled(SCOPE_HIGHLIGHT_SYMBOL, marker_style))
+        .highlight_symbol(Line::styled(CONTEXT_HIGHLIGHT_SYMBOL, marker_style))
         .highlight_spacing(HighlightSpacing::Always);
-    let mut state = ListState::default().with_selected(Some(app.scope_selected));
+    let mut state = ListState::default().with_selected(Some(selected_row));
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn scope_list_line(label: &str, count: Option<u64>, width: usize, style: Style) -> Line<'static> {
+fn context_list_line(label: &str, count: Option<u64>, width: usize, style: Style) -> Line<'static> {
     let label = escape_terminal_text(label);
     let Some(count) = count else {
         return Line::styled(label, style);
@@ -227,20 +258,105 @@ where
     if let Some(notice) = &app.notice {
         line.push_span(Span::styled(format!("  ! {}", escape_terminal_text(notice)), app.theme.not_held()));
     }
-    if let Some(notice) = &app.scope_notice {
+    if let Some(notice) = &app.context_notice {
         line.push_span(Span::styled(format!("  ! {}", escape_terminal_text(notice)), app.theme.not_held()));
     }
     frame.render_widget(Paragraph::new(line), area);
     let hint = match (app.mode, app.focus) {
-        (Mode::Browse, Focus::Scopes) => "j/k filter  enter results  tab/\u{2192} memories  / search  q quit ",
-        (Mode::Browse, Focus::Memories) => "j/k move  enter open  tab/\u{2190} scopes  / search  q quit ",
+        (Mode::Browse, Focus::Contexts) => "j/k move  space select  c manage  a archives  x broad  D descendants  enter results  q quit ",
+        (Mode::Browse, Focus::Memories) => "j/k move  enter open  tab/\u{2190} contexts  / search  q quit ",
         (Mode::Search, _) => "type query  enter apply  esc browse ",
         (Mode::Detail, _) => "e edit  d delete  j/k scroll  esc close ",
         (Mode::Edit, _) => "tab field  arrows edit  ctrl+s save  esc cancel ",
         (Mode::ConfirmDelete | Mode::ConfirmDiscard, _) => "y confirm  n cancel ",
+        (Mode::ContextManager, _) => "tab/h/l pane  e edit  j/k scroll  r refresh  esc close ",
+        (Mode::ContextManagerEdit, _) => "edit JSON  ctrl+s save  esc cancel ",
+        (Mode::ConfirmContextDiscard, _) => "y discard  n keep editing ",
     };
     let hints = Line::from(Span::styled(hint, app.theme.label()));
     frame.render_widget(Paragraph::new(hints).alignment(Alignment::Right), area);
+}
+
+fn draw_context_manager<S>(frame: &mut Frame<'_>, app: &App<S>, manager: &ContextManager, area: Rect)
+where
+    S: MemoryStore + Clone + fmt::Debug + 'static,
+{
+    frame.render_widget(Clear, area);
+    let editing = matches!(app.mode, Mode::ContextManagerEdit | Mode::ConfirmContextDiscard);
+    let title = if editing { " CONTEXT MANAGER \u{b7} JSON EDIT " } else { " CONTEXT MANAGER " };
+    let block = Block::bordered().border_style(app.theme.label()).title(Span::styled(title, app.theme.label()));
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("context    ", app.theme.label()),
+            Span::styled(escape_terminal_text(&manager.record.context.key), app.theme.ident()),
+            Span::styled(format!(" \u{b7} {}", manager.record.context.id), app.theme.label()),
+        ]),
+        Line::from(vec![
+            Span::styled("owner      ", app.theme.label()),
+            Span::raw(escape_terminal_text(&manager.record.context.owner_principal)),
+            Span::styled(
+                format!(
+                    " \u{b7} {}{}",
+                    manager.record.context.lifecycle,
+                    if manager.record.context.frozen { " \u{b7} frozen" } else { "" }
+                ),
+                app.theme.label(),
+            ),
+        ]),
+        Line::default(),
+    ];
+    let mut tabs = Line::default();
+    for pane in crate::ui::app::ContextManagerPane::ALL {
+        let style = if pane == manager.pane { app.theme.ident().bold() } else { app.theme.label() };
+        tabs.push_span(Span::styled(format!(" {} ", pane.label()), style));
+    }
+    lines.push(tabs);
+    lines.push(Line::default());
+    let active_edit = editing.then_some(manager.edit.as_ref()).flatten();
+    if let Some(edit) = active_edit {
+        let mut value = edit.input().value.clone();
+        value.insert(edit.input().cursor, '\u{2588}');
+        lines.extend(value.lines().map(|line| Line::from(escape_terminal_text(line))));
+    } else {
+        lines.extend(context_manager_edit_value(manager).lines().map(|line| Line::from(escape_terminal_text(line))));
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled("RECENT CONTEXT AUDIT", app.theme.label())));
+        if manager.audit.is_empty() {
+            lines.push(Line::from(Span::styled("  no events", app.theme.label())));
+        } else {
+            for event in manager.audit.iter().take(12) {
+                lines.push(Line::from(vec![
+                    Span::styled(event.timestamp.format("%Y-%m-%d %H:%M").to_string(), app.theme.label()),
+                    Span::raw(format!("  {}  {}", escape_terminal_text(&event.actor_principal), escape_terminal_text(&event.action))),
+                ]));
+            }
+        }
+    }
+    let scroll = active_edit.map_or_else(|| manager.scroll, |edit| context_manager_edit_render_scroll(&lines, edit, area));
+    frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }).scroll((scroll, 0)), area);
+}
+
+#[expect(
+    clippy::string_slice,
+    clippy::arithmetic_side_effects,
+    clippy::integer_division,
+    clippy::integer_division_remainder_used,
+    reason = "input cursors are UTF-8 boundaries and terminal row calculation intentionally uses integer cell widths"
+)]
+fn context_manager_edit_render_scroll(lines: &[Line<'_>], edit: &crate::ui::app::ContextManagerEdit, area: Rect) -> u16 {
+    let width = usize::from(area.width.saturating_sub(2_u16)).max(1_usize);
+    let height = usize::from(area.height.saturating_sub(2_u16)).max(1_usize);
+    let header_lines = 5_usize;
+    let cursor_line = header_lines.saturating_add(edit.input().value[..edit.input().cursor].chars().filter(|character| *character == '\n').count());
+    let cursor_line = cursor_line.min(lines.len().saturating_sub(1_usize));
+    let rows_before_cursor = lines[..cursor_line].iter().map(|line| line.width().max(1_usize).div_ceil(width)).sum::<usize>();
+    let prefix = edit.input().value[..edit.input().cursor]
+        .rsplit_once('\n')
+        .map_or_else(|| &edit.input().value[..edit.input().cursor], |(_, suffix)| suffix);
+    let cursor_column = Line::from(escape_terminal_text(prefix)).width();
+    let cursor_row = rows_before_cursor.saturating_add(cursor_column / width);
+    let target = cursor_row.saturating_sub(height.saturating_sub(1_usize));
+    u16::try_from(target).unwrap_or(u16::MAX)
 }
 
 fn draw_detail<S>(frame: &mut Frame<'_>, app: &App<S>, detail: &Detail, main: Rect)
@@ -260,6 +376,19 @@ where
             Span::styled("label      ", app.theme.label()),
             Span::raw(metadata.agent_label.as_deref().map_or_else(|| "\u{2014}".to_owned(), escape_terminal_text)),
         ]));
+    }
+    lines.push(Line::from(Span::styled("CONTEXTS", app.theme.label())));
+    if detail.contexts.is_empty() {
+        lines.push(Line::from(Span::styled("  unresolved \u{b7} no direct memberships", app.theme.not_held())));
+    } else {
+        for (ordinal, context) in detail.contexts.iter().enumerate() {
+            let primary = if ordinal == 0 { "primary" } else { "companion" };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {primary:<9} "), app.theme.label()),
+                Span::styled(format!("{} \u{b7} {}", context.kind, escape_terminal_text(&context.key)), app.theme.ident()),
+                Span::styled(format!(" \u{b7} {}", context.id), app.theme.label()),
+            ]));
+        }
     }
     lines.push(Line::default());
     lines.extend(detail.memory.content.lines().map(|line| Line::from(escape_terminal_text(line))));
@@ -290,7 +419,7 @@ where
         Line::from(vec![
             Span::styled("agent      ", app.theme.label()),
             Span::raw(memory.provenance.source_agent.as_deref().map_or_else(|| "\u{2014}".to_owned(), escape_terminal_text)),
-            Span::styled("   scope ", app.theme.label()),
+            Span::styled("   compatibility scope ", app.theme.label()),
             Span::styled(
                 memory.provenance.source_conversation.as_deref().map_or_else(|| "\u{2014}".to_owned(), escape_terminal_text),
                 app.theme.ident(),
@@ -322,20 +451,13 @@ where
             Span::styled(detail.memory.id.to_string(), app.theme.ident()),
         ]),
         Line::from(vec![
-            Span::styled("scope      ", app.theme.label()),
-            Span::raw(
-                detail
-                    .memory
-                    .provenance
-                    .source_conversation
-                    .as_deref()
-                    .map_or_else(|| "\u{2014}".to_owned(), escape_terminal_text),
-            ),
-            Span::styled("  (read-only)", app.theme.label()),
+            Span::styled("contexts   ", app.theme.label()),
+            Span::raw(format!("{} direct \u{b7} first is compatibility primary", detail.contexts.len())),
         ]),
         Line::default(),
     ];
     append_edit_field(&mut lines, app, edit, EditField::Content, &edit.content);
+    append_edit_field(&mut lines, app, edit, EditField::Contexts, &edit.contexts);
     append_edit_field(&mut lines, app, edit, EditField::Tags, &edit.tags);
     append_edit_field(&mut lines, app, edit, EditField::Importance, &edit.importance);
     append_edit_field(&mut lines, app, edit, EditField::Expiry, &edit.expiry);
@@ -446,7 +568,7 @@ mod tests {
         widgets::{HighlightSpacing, List, ListState, StatefulWidget as _},
     };
 
-    use super::{SCOPE_HIGHLIGHT_SYMBOL, escape_terminal_text, scope_list_line};
+    use super::{CONTEXT_HIGHLIGHT_SYMBOL, context_list_line, escape_terminal_text};
 
     fn line_text(line: &ratatui::text::Line<'_>) -> String {
         line.spans.iter().map(|span| span.content.as_ref()).collect()
@@ -455,22 +577,22 @@ mod tests {
     #[test]
     fn scope_count_line_stays_within_available_width() {
         let style = Style::default();
-        assert_eq!(line_text(&scope_list_line("scope", Some(u64::MAX), 0_usize, style)), "");
-        assert_eq!(line_text(&scope_list_line("scope", Some(u64::MAX), 3_usize, style)), "  \u{2026}");
-        assert_eq!(line_text(&scope_list_line("scope", Some(u64::MAX), 20_usize, style)), u64::MAX.to_string());
-        assert_eq!(line_text(&scope_list_line("alpha", Some(42_u64), 8_usize, style)), "alpha 42");
+        assert_eq!(line_text(&context_list_line("context", Some(u64::MAX), 0_usize, style)), "");
+        assert_eq!(line_text(&context_list_line("context", Some(u64::MAX), 3_usize, style)), "  \u{2026}");
+        assert_eq!(line_text(&context_list_line("context", Some(u64::MAX), 20_usize, style)), u64::MAX.to_string());
+        assert_eq!(line_text(&context_list_line("alpha", Some(42_u64), 8_usize, style)), "alpha 42");
     }
 
     #[test]
     fn scope_count_line_preserves_identifier_style() {
-        let line = scope_list_line("project:localhold", Some(7_u64), 24_usize, Style::default().fg(Color::Blue));
+        let line = context_list_line("project:localhold", Some(7_u64), 24_usize, Style::default().fg(Color::Blue));
         assert_eq!(line.style.fg, Some(Color::Blue));
     }
 
     #[test]
     fn selected_scope_keeps_overflow_ellipsis_visible() {
-        let list = List::new([scope_list_line("scope", Some(u64::MAX), 3_usize, Style::default())])
-            .highlight_symbol(SCOPE_HIGHLIGHT_SYMBOL)
+        let list = List::new([context_list_line("context", Some(u64::MAX), 3_usize, Style::default())])
+            .highlight_symbol(CONTEXT_HIGHLIGHT_SYMBOL)
             .highlight_spacing(HighlightSpacing::Always);
         let mut state = ListState::default().with_selected(Some(0_usize));
         let mut buffer = Buffer::empty(Rect::new(0_u16, 0_u16, 4_u16, 1_u16));

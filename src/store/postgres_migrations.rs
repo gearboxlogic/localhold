@@ -42,6 +42,10 @@ pub(crate) const MIGRATIONS: &[MigrationIdentity] = &[
         version: 4,
         name: "published_v2_metadata",
     },
+    MigrationIdentity {
+        version: 5,
+        name: "governed_contexts",
+    },
 ];
 
 /// Latest `PostgreSQL` schema version recognized by this binary.

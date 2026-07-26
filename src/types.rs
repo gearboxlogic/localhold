@@ -9,6 +9,16 @@ use ulid::Ulid;
 
 use crate::error::ParseEnumError;
 
+/// Stable principal used when anonymous writes are explicitly enabled.
+pub const ANONYMOUS_PRINCIPAL: &str = "anonymous";
+
+/// Normalize an exact-match context key while retaining its human-readable
+/// spelling separately in the context definition.
+#[must_use]
+pub fn normalize_context_key(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
 // ---------------------------------------------------------------------------
 // Memory type classification
 // ---------------------------------------------------------------------------
@@ -840,6 +850,22 @@ pub struct ScopeDefinition {
     pub related: Vec<String>,
 }
 
+impl ScopeDefinition {
+    /// Construct a minimal legacy compatibility scope definition.
+    #[must_use]
+    pub fn new<S: Into<String>, D: Into<String>>(scope_key: S, display_name: D) -> Self {
+        Self {
+            scope_key: scope_key.into(),
+            display_name: display_name.into(),
+            description: None,
+            aliases: Vec::new(),
+            matchers: Vec::new(),
+            parent: None,
+            related: Vec::new(),
+        }
+    }
+}
+
 /// Non-destructive metadata attached to an existing memory row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
@@ -1174,6 +1200,24 @@ pub struct QueryContext {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct MemoryFilter {
+    /// Governed context applicability filter.
+    ///
+    /// `Some([])` is an intentionally broad governed search that still
+    /// excludes contextless memories. A non-empty set applies the cross-kind
+    /// AND / same-kind OR membership rule. `None` includes contextless rows
+    /// for internal authorized maintenance paths.
+    #[serde(skip)]
+    pub context_ids: Option<Vec<crate::context::ContextId>>,
+    /// Canonical context memberships accepted with any-match semantics for
+    /// the legacy `scopes` compatibility adapter.
+    #[serde(skip)]
+    pub legacy_context_ids_any: Option<Vec<crate::context::ContextId>>,
+    /// Whether context selection was explicitly supplied by the caller.
+    ///
+    /// This is an internal redaction-oracle guard: explicit context filters
+    /// cannot confirm membership for a redacted view whose contexts are hidden.
+    #[serde(skip)]
+    pub explicit_context_filter: bool,
     /// Only include memories matching all of these tags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,

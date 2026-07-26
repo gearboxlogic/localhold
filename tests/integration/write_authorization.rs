@@ -14,7 +14,7 @@ use localhold::{
 use rmcp::{ServiceExt as _, service::RunningService};
 use serde_json::json;
 
-use super::helpers::{call_tool, call_tool_error, setup_noop_server_with_auth};
+use super::helpers::{attach_legacy_test_contexts, call_tool, call_tool_error, setup_noop_server_with_auth};
 
 fn policy(policy: &str) -> AccessPolicy {
     match policy {
@@ -35,6 +35,7 @@ async fn setup_seeded_server(principal: &str, access_policy: AccessPolicy, conte
     let provenance = Provenance::new_for_test(Some("owner".to_owned()), None, None);
     let memory = Memory::new_for_test(content, Vec::new(), provenance, access_policy);
     let id = store.store(&memory, None).await.unwrap();
+    attach_legacy_test_contexts(&store, &[id], "owner", principal, "test/write-authorization").await;
 
     let engine = LocalHoldEngine::new(store.clone(), Arc::new(NoopEmbedding::new()), LimitsConfig::default(), SearchConfig::default());
     let server = LocalHoldServer::from_engine_with_auth(engine, Some(principal.to_owned()), AnonymousPolicy::PublicReadOnly).with_admin_tools();

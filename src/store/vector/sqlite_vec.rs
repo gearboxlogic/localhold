@@ -106,36 +106,6 @@ impl VectorIndex<Connection> for SqliteVecIndex {
         Ok(VectorBatch { hits, returned_count })
     }
 
-    fn neighbors(&self, db: &Connection, embedding: &[f32], max_l2_distance: f64, limit: usize) -> Result<Vec<VectorHit>, StoreError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        self.validate_dimensions(embedding)?;
-        let emb_bytes: &[u8] = embedding.as_bytes();
-        let fetch_limit = limit.saturating_mul(2).min(crate::store::query::MAX_VEC_CANDIDATES);
-        let mut stmt = db.prepare(
-            "SELECT em.memory_id, knn.distance \
-             FROM ( \
-               SELECT rowid, distance \
-               FROM memory_embeddings \
-               WHERE embedding MATCH ?1 AND k = ?2 \
-             ) knn \
-             JOIN memory_embedding_map em ON em.vec_rowid = knn.rowid \
-             JOIN memories m ON m.id = em.memory_id \
-             WHERE m.superseded_by IS NULL \
-             ORDER BY knn.distance",
-        )?;
-        let rows: Vec<(String, f64)> = stmt
-            .query_map(params![emb_bytes, usize_to_i64(fetch_limit, "neighbor limit")?], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows
-            .into_iter()
-            .filter(|(_, distance)| *distance <= max_l2_distance)
-            .filter_map(parse_vector_hit)
-            .take(limit)
-            .collect())
-    }
-
     fn fetch_many(&self, db: &Connection, ids: &[MemoryId]) -> Result<EmbeddingMap, StoreError> {
         if ids.is_empty() {
             return Ok(HashMap::new());

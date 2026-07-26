@@ -46,6 +46,16 @@ expression: schema
         "retryable": {
           "description": "Whether retrying the same request may succeed later.",
           "type": "boolean"
+        },
+        "details": {
+          "description": "Secret-free structured diagnostics such as context candidates, policy\nguidance, and complete retry arguments."
+        },
+        "recommended_actions": {
+          "description": "Reusable next actions.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RecommendedAction"
+          }
         }
       },
       "required": [
@@ -93,9 +103,105 @@ expression: schema
           "const": "conflict"
         },
         {
+          "description": "A governed write needs an explicit context or explicit unresolved\ndeferral.",
+          "type": "string",
+          "const": "context_required"
+        },
+        {
+          "description": "A context locator or fuzzy query matched multiple authorized contexts.",
+          "type": "string",
+          "const": "context_ambiguous"
+        },
+        {
           "description": "Unexpected internal failure.",
           "type": "string",
           "const": "internal"
+        }
+      ]
+    },
+    "RecommendedAction": {
+      "description": "Deterministic next action recommended by `brief`.",
+      "type": "object",
+      "properties": {
+        "tool": {
+          "description": "Tool to call next.",
+          "$ref": "#/$defs/RecommendedActionTool"
+        },
+        "priority": {
+          "description": "Action priority.",
+          "$ref": "#/$defs/RecommendedActionPriority"
+        },
+        "reason": {
+          "description": "Why this action is recommended.",
+          "type": "string"
+        },
+        "arguments": {
+          "description": "Complete tool arguments when the server can construct a valid call."
+        }
+      },
+      "required": [
+        "tool",
+        "priority",
+        "reason"
+      ]
+    },
+    "RecommendedActionTool": {
+      "description": "Tool name for a deterministic next action recommended by `brief`.",
+      "oneOf": [
+        {
+          "description": "Read one full memory by ID.",
+          "type": "string",
+          "const": "read"
+        },
+        {
+          "description": "Read multiple full memories by ID.",
+          "type": "string",
+          "const": "read_many"
+        },
+        {
+          "description": "Run a focused recall search.",
+          "type": "string",
+          "const": "recall"
+        },
+        {
+          "description": "Store a new durable memory.",
+          "type": "string",
+          "const": "remember"
+        },
+        {
+          "description": "Resolve or browse governed contexts.",
+          "type": "string",
+          "const": "context_resolve"
+        },
+        {
+          "description": "Create a governed context.",
+          "type": "string",
+          "const": "context_create"
+        },
+        {
+          "description": "Register a missing scope definition.",
+          "type": "string",
+          "const": "admin_scope_register"
+        }
+      ]
+    },
+    "RecommendedActionPriority": {
+      "description": "Priority for a deterministic next action recommended by `brief`.",
+      "oneOf": [
+        {
+          "description": "Do this first.",
+          "type": "string",
+          "const": "high"
+        },
+        {
+          "description": "Useful but not urgent.",
+          "type": "string",
+          "const": "normal"
+        },
+        {
+          "description": "Optional follow-up for weak or stale context.",
+          "type": "string",
+          "const": "low"
         }
       ]
     }

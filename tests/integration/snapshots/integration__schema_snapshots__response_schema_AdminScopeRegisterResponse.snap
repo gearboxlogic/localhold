@@ -1,0 +1,77 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AdminScopeRegisterResponse",
+  "description": "Response from admin scope register.",
+  "type": "object",
+  "properties": {
+    "scope": {
+      "description": "Registered scope.",
+      "$ref": "#/$defs/ScopeEntry"
+    }
+  },
+  "required": [
+    "scope"
+  ],
+  "$defs": {
+    "ScopeEntry": {
+      "description": "Legacy scope-administration view over one compatibility context.",
+      "type": "object",
+      "properties": {
+        "scope_key": {
+          "description": "Stable scope key.",
+          "type": "string"
+        },
+        "display_name": {
+          "description": "Display name.",
+          "type": "string"
+        },
+        "description": {
+          "description": "Optional description.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "aliases": {
+          "description": "Aliases.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "matchers": {
+          "description": "Matchers.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "parent": {
+          "description": "Optional parent scope.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "related": {
+          "description": "Related scopes.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "scope_key",
+        "display_name",
+        "aliases",
+        "matchers",
+        "related"
+      ]
+    }
+  }
+}

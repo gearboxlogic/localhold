@@ -4,6 +4,7 @@ mod admin;
 pub mod backup;
 #[cfg(test)]
 pub(crate) mod conformance;
+mod context_store;
 pub(crate) mod crud;
 pub mod migration;
 mod postgres;
@@ -15,7 +16,10 @@ mod sqlite;
 mod sqlite_lease;
 pub(crate) mod vector;
 
-use std::{collections::HashMap, future::Future};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+};
 
 pub use postgres::PostgresStore;
 pub(crate) use postgres::validate_published_v2_metadata_upgrade;
@@ -27,6 +31,11 @@ pub(crate) use sqlite::sqlite_write_tx;
 pub(crate) use sqlite_lease::database_identity as sqlite_database_identity;
 
 use crate::{
+    context::{
+        ContextAnchorPolicyDraft, ContextAnchorPolicyRecord, ContextAuditDraft, ContextAuditEvent, ContextCreateDraft, ContextDefinition, ContextDefinitionPatch,
+        ContextExactLookup, ContextGrant, ContextId, ContextKindDefinition, ContextKindDraft, ContextKindPolicyDraft, ContextKindPolicyRecord, ContextLifecycle, ContextRecord,
+        MemoryContext,
+    },
     error::StoreError,
     types::{
         AccessPolicy, AuditAction, AuditDraft, AuditEntry, AuthorizedUpdateOutcome, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MemoryTombstone, MemoryUpdate,
@@ -34,13 +43,170 @@ use crate::{
     },
 };
 
+/// Ordered direct context memberships keyed by their memory.
+pub type MemoryContextMap = HashMap<MemoryId, Vec<MemoryContext>>;
+/// Authorized memory IDs that have at least one direct context membership,
+/// regardless of whether the context definition is visible to the caller.
+pub type MemoryContextPresence = HashSet<MemoryId>;
+/// Authorized memories keyed by ID for batch reads.
+pub type MemoryMap = HashMap<MemoryId, Memory>;
+
+/// Read governed context definitions, memberships, and audit history.
+pub trait ContextReader: Send + Sync {
+    /// Fetch one context when the principal owns it or has an explicit use
+    /// grant. Archived definitions remain visible to authorized callers.
+    fn get_context(&self, id: &ContextId, principal: &str) -> impl Future<Output = Result<Option<ContextDefinition>, StoreError>> + Send;
+
+    /// Return a page of contexts the principal may use.
+    fn list_contexts(&self, principal: &str, include_archived: bool, offset: usize, limit: usize) -> impl Future<Output = Result<Vec<ContextDefinition>, StoreError>> + Send;
+
+    /// Return a page of authorized context definitions with their safe
+    /// aliases, fingerprinted identities, and weak hints.
+    fn list_context_records(&self, principal: &str, include_archived: bool, offset: usize, limit: usize) -> impl Future<Output = Result<Vec<ContextRecord>, StoreError>> + Send;
+
+    /// Resolve an indexed exact ID, normalized key/alias, or fingerprinted
+    /// identity within the caller's authorized context catalog.
+    fn find_context_records(&self, principal: &str, include_archived: bool, lookup: &ContextExactLookup) -> impl Future<Output = Result<Vec<ContextRecord>, StoreError>> + Send;
+
+    /// Expand direct selections through ancestors and, when requested,
+    /// descendants. Direct selections retain caller order.
+    fn expand_context_selection(
+        &self,
+        context_ids: &[ContextId],
+        principal: &str,
+        include_descendants: bool,
+    ) -> impl Future<Output = Result<Vec<ContextDefinition>, StoreError>> + Send;
+
+    /// Return ordered direct context memberships for an authorized, unexpired memory.
+    fn get_memory_contexts(&self, memory_id: &MemoryId, principal: &str) -> impl Future<Output = Result<Vec<MemoryContext>, StoreError>> + Send;
+
+    /// Return ordered direct context memberships for a batch of authorized,
+    /// unexpired memories without issuing one query per memory.
+    fn get_memory_contexts_batch(&self, memory_ids: &[MemoryId], principal: &str) -> impl Future<Output = Result<MemoryContextMap, StoreError>> + Send;
+
+    /// Return authorized, unexpired memories that have at least one direct
+    /// membership, without exposing hidden context definitions.
+    fn get_memory_context_presence_batch(&self, memory_ids: &[MemoryId], principal: &str) -> impl Future<Output = Result<MemoryContextPresence, StoreError>> + Send;
+
+    /// Count all memberships on a memory the principal may write, including
+    /// memberships whose context definition is not currently visible.
+    fn count_memory_contexts_for_write(&self, memory_id: &MemoryId, principal: &str) -> impl Future<Output = Result<Option<usize>, StoreError>> + Send;
+
+    /// Return recent context audit events visible to the principal.
+    fn query_context_audit(&self, context_id: &ContextId, principal: &str, limit: usize) -> impl Future<Output = Result<Vec<ContextAuditEvent>, StoreError>> + Send;
+
+    /// Return every configured context kind for the operator TUI.
+    fn list_context_kinds(&self) -> impl Future<Output = Result<Vec<ContextKindDefinition>, StoreError>> + Send;
+
+    /// Return operator policies and the selected principal's policy overrides.
+    fn list_context_kind_policies(&self, principal: &str) -> impl Future<Output = Result<Vec<ContextKindPolicyRecord>, StoreError>> + Send;
+
+    /// Return the selected principal's anchor overrides.
+    fn list_context_anchor_policies(&self, principal: &str) -> impl Future<Output = Result<Vec<ContextAnchorPolicyRecord>, StoreError>> + Send;
+
+    /// Return grants for a context visible to the caller. Grantee names are
+    /// exposed only to the owner.
+    fn list_context_grants(&self, context_id: &ContextId, principal: &str) -> impl Future<Output = Result<Vec<ContextGrant>, StoreError>> + Send;
+}
+
+/// Transactional governed context mutations.
+pub trait ContextWriter: Send + Sync {
+    /// Create a private context with aliases, identities, hints, parent, and
+    /// audit event in one transaction.
+    fn create_context(&self, draft: &ContextCreateDraft, audit: &ContextAuditDraft) -> impl Future<Output = Result<ContextDefinition, StoreError>> + Send;
+
+    /// Replace a context's parent after transactional cycle validation.
+    fn set_context_parent(
+        &self,
+        context_id: &ContextId,
+        parent_id: Option<&ContextId>,
+        principal: &str,
+        audit: &ContextAuditDraft,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Archive or reactivate an owned context. Frozen compatibility contexts
+    /// cannot be changed through this operation.
+    fn set_context_lifecycle(
+        &self,
+        context_id: &ContextId,
+        lifecycle: ContextLifecycle,
+        principal: &str,
+        audit: &ContextAuditDraft,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Add or replace an explicit context use grant.
+    fn grant_context_use(&self, context_id: &ContextId, grantee_principal: &str, principal: &str, audit: &ContextAuditDraft)
+    -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Revoke an explicit use grant from an owned context.
+    fn revoke_context_use(
+        &self,
+        context_id: &ContextId,
+        grantee_principal: &str,
+        principal: &str,
+        audit: &ContextAuditDraft,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Replace the complete explicit grant set in one audited transaction.
+    fn replace_context_grants(
+        &self,
+        context_id: &ContextId,
+        grantee_principals: &[String],
+        principal: &str,
+        audit: &ContextAuditDraft,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Replace mutable definition fields, aliases, identities, and resolver
+    /// hints in one audited transaction.
+    fn update_context_definition(
+        &self,
+        context_id: &ContextId,
+        patch: &ContextDefinitionPatch,
+        principal: &str,
+        audit: &ContextAuditDraft,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Add or update a TUI-managed context kind.
+    fn upsert_context_kind(&self, draft: &ContextKindDraft, principal: &str, audit: &ContextAuditDraft) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Replace one operator or principal kind policy.
+    fn upsert_context_kind_policy(&self, draft: &ContextKindPolicyDraft, principal: &str, audit: &ContextAuditDraft) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Replace one principal anchor override.
+    fn upsert_context_anchor_policy(&self, draft: &ContextAnchorPolicyDraft, principal: &str, audit: &ContextAuditDraft) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Roll back a just-created, otherwise untouched legacy compatibility
+    /// context after an enclosing batch write fails.
+    ///
+    /// Returns `false` when the context was not created by the matching
+    /// principal or acquired any membership, hierarchy, grant, policy, or
+    /// definition state. This is an internal transaction-compensation path,
+    /// not a public context deletion operation.
+    fn rollback_unreferenced_legacy_context(&self, context_id: &ContextId, principal: &str) -> impl Future<Output = Result<bool, StoreError>> + Send;
+
+    /// Replace the complete ordered direct membership set for a memory and
+    /// synchronize legacy scope caches in the same transaction.
+    fn replace_memory_contexts(
+        &self,
+        memory_id: &MemoryId,
+        context_ids: &[ContextId],
+        principal: &str,
+        audit: &ContextAuditDraft,
+    ) -> impl Future<Output = Result<WriteOutcome, StoreError>> + Send;
+}
+
+/// Full governed-context persistence contract.
+pub trait ContextStore: ContextReader + ContextWriter {}
+
+impl<T: ContextReader + ContextWriter> ContextStore for T {}
+
 /// Map from memory ID to its embedding vector.
 ///
 /// Used by [`MemoryReader::fetch_embeddings_for_ids`] and related functions
 /// to return embedding vectors keyed by their owning memory.
 pub(crate) type EmbeddingMap = HashMap<MemoryId, Vec<f32>>;
 
-/// An ANN neighbor result: `(memory_id, l2_distance)`.
+/// Candidate memory paired with its cosine similarity to the source vector.
 pub(crate) type EmbeddingNeighbor = (MemoryId, f64);
 
 /// Secret-free identity for the vector space produced by an embedding provider.
@@ -185,6 +351,34 @@ pub struct MemoryWithEmbedding {
     pub memory: Memory,
     /// Pre-computed embedding vector, if available.
     pub embedding: Option<Vec<f32>>,
+    /// Active direct governed-context memberships, in primary order. The
+    /// ordering is semantically significant for consolidation because ordinal
+    /// zero is the compatibility-primary context.
+    ///
+    /// Populated by consolidation reads. Batch-write callers leave this empty.
+    pub context_ids: Vec<ContextId>,
+}
+
+/// Optimistic state captured for one consolidation candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ConsolidationSnapshot {
+    /// Candidate memory ID.
+    pub memory_id: MemoryId,
+    /// User-visible record revision observed during candidate discovery.
+    pub record_revision: i64,
+    /// Complete ordered direct context profile observed during discovery.
+    pub context_ids: Vec<ContextId>,
+}
+
+impl From<&MemoryWithEmbedding> for ConsolidationSnapshot {
+    fn from(candidate: &MemoryWithEmbedding) -> Self {
+        Self {
+            memory_id: candidate.memory.id,
+            record_revision: candidate.memory.record_revision,
+            context_ids: candidate.context_ids.clone(),
+        }
+    }
 }
 
 /// Outcome of a bulk write operation with per-item authorization.
@@ -209,9 +403,11 @@ pub struct ReassignScopeOutcome {
 }
 
 /// Outcome of recording true-use activity for one or more memories.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RecordUseOutcome {
+    /// IDs whose activity signal was updated, in first-requested order.
+    pub recorded_ids: Vec<MemoryId>,
     /// Number of memories whose activity signal was updated.
     pub recorded: u64,
     /// Number of memories denied due to read access or expiry.
@@ -229,6 +425,10 @@ pub trait MemoryReader: Send + Sync {
     /// Retrieve a single memory by ID, or `None` if it does not exist.
     /// When `principal` is provided, access policy is enforced; otherwise only public memories are returned.
     fn get(&self, id: &MemoryId, principal: Option<&str>) -> impl Future<Output = Result<Option<Memory>, StoreError>> + Send;
+
+    /// Retrieve authorized memories for a batch of IDs in a bounded number of
+    /// backend queries. Missing, expired, and unreadable IDs are omitted.
+    fn get_batch(&self, ids: &[MemoryId], principal: Option<&str>) -> impl Future<Output = Result<MemoryMap, StoreError>> + Send;
 
     /// Find memories whose embeddings are nearest to the query vector, applying optional filters.
     /// When `max_distance` is set, results with L2 distance exceeding the threshold are excluded.
@@ -288,9 +488,17 @@ pub trait MemoryReader: Send + Sync {
 
     /// Fetch memories with their embedding vectors for consolidation.
     ///
-    /// Applies optional scope filter, returns up to `limit` memories that have embeddings.
+    /// Applies write authorization and canonical governed-context
+    /// applicability in storage, then returns up to `limit` memories that
+    /// have embeddings.
     /// Each result includes the memory and its embedding vector.
-    fn list_with_embeddings(&self, scopes_any: Option<&[String]>, limit: usize) -> impl Future<Output = Result<Vec<MemoryWithEmbedding>, StoreError>> + Send;
+    fn list_with_embeddings(
+        &self,
+        context_ids: Option<&[ContextId]>,
+        legacy_context_ids_any: Option<&[ContextId]>,
+        principal: &str,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<MemoryWithEmbedding>, StoreError>> + Send;
 
     /// Query the audit log for a specific memory ID.
     fn query_audit_log(&self, memory_id: &MemoryId, limit: usize) -> impl Future<Output = Result<Vec<AuditEntry>, StoreError>> + Send;
@@ -304,11 +512,23 @@ pub trait MemoryReader: Send + Sync {
     /// embeddings are silently omitted from the result.
     fn fetch_embeddings_for_ids(&self, ids: &[MemoryId]) -> impl Future<Output = Result<EmbeddingMap, StoreError>> + Send;
 
-    /// Find nearest neighbors for an embedding within an L2 distance threshold.
+    /// Find nearest neighbors for an embedding above a cosine-similarity threshold.
     ///
-    /// Returns `(neighbor_memory_id, l2_distance)` pairs. Self-matches and
-    /// superseded memories are excluded.
-    fn find_embedding_neighbors(&self, embedding: &[f32], max_l2_distance: f64, limit: usize) -> impl Future<Output = Result<Vec<EmbeddingNeighbor>, StoreError>> + Send;
+    /// Returns `(neighbor_memory_id, cosine_similarity)` pairs from the supplied
+    /// canonical consolidation candidate set. Self-matches and superseded
+    /// memories are excluded before the bounded nearest-neighbor limit.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "candidate-bounded neighbor lookup needs source, candidates, vector, threshold, and limit"
+    )]
+    fn find_embedding_neighbors(
+        &self,
+        source_memory_id: &MemoryId,
+        candidate_ids: &[MemoryId],
+        embedding: &[f32],
+        min_cosine_similarity: f64,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<EmbeddingNeighbor>, StoreError>> + Send;
 }
 
 /// Write operations: store, update, delete, batch store, set embedding,
@@ -358,6 +578,23 @@ pub trait MemoryWriter: Send + Sync {
         audit: &AuditDraft,
     ) -> impl Future<Output = Result<MemoryId, StoreError>> + Send;
 
+    /// Store a memory, required metadata, governed memberships, and both audit
+    /// rows in one transaction.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "governed audited store carries memory, embedding, supersession, metadata, memberships, and audits"
+    )]
+    fn store_with_metadata_contexts_audited(
+        &self,
+        memory: &Memory,
+        embedding: Option<&[f32]>,
+        supersedes_id: Option<&MemoryId>,
+        metadata: &MemoryMetadata,
+        context_ids: &[ContextId],
+        audit: &AuditDraft,
+        context_audit: &ContextAuditDraft,
+    ) -> impl Future<Output = Result<MemoryId, StoreError>> + Send;
+
     /// Store multiple memories atomically in a single transaction.
     /// Returns the list of assigned IDs in the same order as the input.
     fn store_batch(&self, memories: &[MemoryWithEmbedding]) -> impl Future<Output = Result<Vec<MemoryId>, StoreError>> + Send;
@@ -398,6 +635,19 @@ pub trait MemoryWriter: Send + Sync {
         supersedes: &[Option<MemoryId>],
         metadata: &[MemoryMetadata],
         audits: &[AuditDraft],
+    ) -> impl Future<Output = Result<Vec<MemoryId>, StoreError>> + Send;
+
+    /// Store a batch with required metadata, governed memberships, and audits
+    /// in one transaction.
+    #[expect(clippy::too_many_arguments, reason = "governed batch store carries memories, supersession, metadata, memberships, and audits")]
+    fn store_batch_with_metadata_contexts_audited(
+        &self,
+        memories: &[MemoryWithEmbedding],
+        supersedes: &[Option<MemoryId>],
+        metadata: &[MemoryMetadata],
+        context_ids: &[Vec<ContextId>],
+        audits: &[AuditDraft],
+        context_audits: &[ContextAuditDraft],
     ) -> impl Future<Output = Result<Vec<MemoryId>, StoreError>> + Send;
 
     /// Update fields of an existing memory. Returns `false` if the memory doesn't exist.
@@ -458,6 +708,20 @@ pub trait MemoryWriter: Send + Sync {
         audit: &AuditDraft,
     ) -> impl Future<Output = Result<AuthorizedUpdateOutcome, StoreError>> + Send;
 
+    /// Authorization-aware update with optional metadata and complete governed
+    /// membership replacement in one transaction.
+    #[expect(clippy::too_many_arguments, reason = "governed revise carries update, metadata, memberships, principal, and both audits")]
+    fn update_authorized_with_metadata_contexts_audited(
+        &self,
+        id: &MemoryId,
+        update: &MemoryUpdate,
+        metadata_patch: Option<&MetadataPatch>,
+        context_ids: Option<&[ContextId]>,
+        principal: &str,
+        audit: &AuditDraft,
+        context_audit: Option<&ContextAuditDraft>,
+    ) -> impl Future<Output = Result<AuthorizedUpdateOutcome, StoreError>> + Send;
+
     /// Authorization-aware, optimistic-concurrency update with optional
     /// metadata and replacement embedding in one transaction. Replacement
     /// content without a vector is committed as needing re-embedding. Obtain
@@ -472,6 +736,25 @@ pub trait MemoryWriter: Send + Sync {
         embedding: Option<&[f32]>,
         principal: &str,
         audit: &AuditDraft,
+    ) -> impl Future<Output = Result<AuthorizedUpdateOutcome, StoreError>> + Send;
+
+    /// Optimistic TUI update with optional complete governed membership
+    /// replacement in the same transaction.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "atomic governed TUI revise carries revision, fields, metadata, memberships, embedding, principal, and audits"
+    )]
+    fn update_authorized_if_unmodified_with_metadata_contexts_audited(
+        &self,
+        id: &MemoryId,
+        expected_revision: i64,
+        update: &MemoryUpdate,
+        metadata_patch: Option<&MetadataPatch>,
+        context_ids: Option<&[ContextId]>,
+        embedding: Option<&[f32]>,
+        principal: &str,
+        audit: &AuditDraft,
+        context_audit: Option<&ContextAuditDraft>,
     ) -> impl Future<Output = Result<AuthorizedUpdateOutcome, StoreError>> + Send;
 
     /// Authorization-aware delete. Checks write access before removing the memory.
@@ -574,6 +857,16 @@ pub trait MemoryWriter: Send + Sync {
         principal: &str,
         audit: &AuditDraft,
     ) -> impl Future<Output = Result<WriteOutcome, StoreError>> + Send;
+
+    /// Consolidation supersession guarded by both candidates' captured
+    /// revisions and complete ordered context profiles.
+    fn mark_superseded_by_authorized_audited_if_unchanged(
+        &self,
+        member: &ConsolidationSnapshot,
+        representative: &ConsolidationSnapshot,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> impl Future<Output = Result<WriteOutcome, StoreError>> + Send;
 }
 
 /// Administrative operations: eviction, scope reassignment.
@@ -616,11 +909,18 @@ pub trait MemoryAdmin: Send + Sync {
         audit: &AuditDraft,
     ) -> impl Future<Output = Result<ReassignScopeOutcome, StoreError>> + Send;
 
-    /// Register or replace a scope definition.
+    /// Register or replace an operator-owned private compatibility definition.
     fn register_scope(&self, scope: ScopeDefinition) -> impl Future<Output = Result<(), StoreError>> + Send;
 
-    /// List all registered scope definitions ordered by key.
+    /// List operator-owned and migrated frozen compatibility definitions.
     fn list_scopes(&self) -> impl Future<Output = Result<Vec<ScopeDefinition>, StoreError>> + Send;
+
+    /// Register or replace a principal-owned private custom context through
+    /// the legacy scope compatibility surface.
+    fn register_scope_for_principal(&self, scope: ScopeDefinition, principal: &str) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// List legacy compatibility definitions visible to one principal.
+    fn list_scopes_for_principal(&self, principal: &str) -> impl Future<Output = Result<Vec<ScopeDefinition>, StoreError>> + Send;
 
     /// Upsert non-destructive metadata for a memory.
     fn upsert_metadata(&self, metadata: MemoryMetadata) -> impl Future<Output = Result<(), StoreError>> + Send;
@@ -631,19 +931,18 @@ pub trait MemoryAdmin: Send + Sync {
     /// Fetch non-destructive metadata for a memory.
     fn get_metadata(&self, memory_id: &MemoryId) -> impl Future<Output = Result<Option<MemoryMetadata>, StoreError>> + Send;
 
+    /// Fetch non-destructive metadata for a batch without issuing one query
+    /// per memory.
+    fn get_metadata_batch(&self, memory_ids: &[MemoryId]) -> impl Future<Output = Result<HashMap<MemoryId, MemoryMetadata>, StoreError>> + Send;
+
     /// Return conservative migration/reporting counts for metadata.
     fn metadata_migration_report(&self) -> impl Future<Output = Result<MetadataMigrationReport, StoreError>> + Send;
 
     /// Add metadata rows for existing memories without rewriting original content.
-    fn migrate_metadata(&self, registered_scope_keys: &[String], dry_run: bool) -> impl Future<Output = Result<MetadataMigrationOutcome, StoreError>> + Send;
+    fn migrate_metadata(&self, dry_run: bool) -> impl Future<Output = Result<MetadataMigrationOutcome, StoreError>> + Send;
 
     /// Add metadata rows and audit each inserted row in one transaction.
-    fn migrate_metadata_audited(
-        &self,
-        registered_scope_keys: &[String],
-        dry_run: bool,
-        audit: &AuditDraft,
-    ) -> impl Future<Output = Result<MetadataMigrationOutcome, StoreError>> + Send;
+    fn migrate_metadata_audited(&self, dry_run: bool, audit: &AuditDraft) -> impl Future<Output = Result<MetadataMigrationOutcome, StoreError>> + Send;
 }
 
 /// Combined trait for full memory store access: read, write, and admin.
@@ -651,18 +950,27 @@ pub trait MemoryAdmin: Send + Sync {
 /// Implementations must populate and advance [`Memory::record_revision`] for
 /// every user-visible record mutation so optimistic writes remain sound.
 /// Automatically implemented for any type that implements all three sub-traits.
-pub trait MemoryStore: MemoryReader + MemoryWriter + MemoryAdmin {}
+pub trait MemoryStore: MemoryReader + MemoryWriter + MemoryAdmin + ContextStore {}
 
-impl<T: MemoryReader + MemoryWriter + MemoryAdmin> MemoryStore for T {}
+impl<T: MemoryReader + MemoryWriter + MemoryAdmin + ContextStore> MemoryStore for T {}
 
 pub(crate) fn merge_metadata_patch(memory_id: MemoryId, patch: &MetadataPatch, existing: Option<&MemoryMetadata>, fallback_scope: Option<&str>, principal: &str) -> MemoryMetadata {
+    let scope_key = patch
+        .scope_key
+        .clone()
+        .or_else(|| existing.and_then(|metadata| metadata.scope_key.clone()))
+        .or_else(|| fallback_scope.map(ToOwned::to_owned));
+    let mut quality_flags = existing.map_or_else(Vec::new, |metadata| metadata.quality_flags.clone());
+    quality_flags.retain(|flag| flag != "missing_scope");
+    if scope_key
+        .as_deref()
+        .is_none_or(|key| crate::types::normalize_context_key(key) == crate::context::UNRESOLVED_CONTEXT_KEY)
+    {
+        quality_flags.push("missing_scope".into());
+    }
     MemoryMetadata {
         memory_id,
-        scope_key: patch
-            .scope_key
-            .clone()
-            .or_else(|| existing.and_then(|metadata| metadata.scope_key.clone()))
-            .or_else(|| fallback_scope.map(ToOwned::to_owned)),
+        scope_key,
         summary: if patch.clear_summary {
             None
         } else {
@@ -674,7 +982,7 @@ pub(crate) fn merge_metadata_patch(memory_id: MemoryId, patch: &MetadataPatch, e
             patch.agent_label.clone().or_else(|| existing.and_then(|metadata| metadata.agent_label.clone()))
         },
         created_by_principal: existing.and_then(|metadata| metadata.created_by_principal.clone()).or_else(|| Some(principal.to_owned())),
-        quality_flags: existing.map_or_else(Vec::new, |metadata| metadata.quality_flags.clone()),
+        quality_flags,
         schema_version: 1,
     }
 }
@@ -700,5 +1008,43 @@ fn audit_details_with_old_content_hash(details: Option<serde_json::Value>, old_c
             "details": value,
         }),
         None => serde_json::json!({"old_content_hash": old_content_hash}),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metadata(memory_id: MemoryId, scope_key: Option<&str>, quality_flags: &[&str]) -> MemoryMetadata {
+        MemoryMetadata {
+            memory_id,
+            scope_key: scope_key.map(ToOwned::to_owned),
+            summary: None,
+            agent_label: None,
+            created_by_principal: Some("owner".into()),
+            quality_flags: quality_flags.iter().map(ToString::to_string).collect(),
+            schema_version: 1,
+        }
+    }
+
+    #[test]
+    fn merge_metadata_patch_recomputes_missing_scope_from_the_effective_scope() {
+        let memory_id = MemoryId::new();
+        let existing = metadata(memory_id, Some("project/localhold"), &["missing_scope", "manual"]);
+
+        let merged = merge_metadata_patch(memory_id, &MetadataPatch::default(), Some(&existing), Some("inbox/unresolved"), "owner");
+
+        assert_eq!(merged.scope_key.as_deref(), Some("project/localhold"));
+        assert_eq!(merged.quality_flags, vec!["manual"]);
+    }
+
+    #[test]
+    fn merge_metadata_patch_marks_a_contextless_effective_scope_unresolved() {
+        let memory_id = MemoryId::new();
+
+        let merged = merge_metadata_patch(memory_id, &MetadataPatch::default(), None, None, "owner");
+
+        assert_eq!(merged.scope_key, None);
+        assert_eq!(merged.quality_flags, vec!["missing_scope"]);
     }
 }

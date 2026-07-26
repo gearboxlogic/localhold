@@ -41,6 +41,10 @@ pub const DEFAULT_HTTP_MAX_SESSIONS: usize = 128;
 pub const DEFAULT_HTTP_SESSION_IDLE_TIMEOUT_SECS: u64 = 900;
 /// Maximum candidate-pool size supported by all current search backends.
 pub const MAX_CANDIDATE_POOL_SIZE_CEILING: usize = 1000;
+/// Hard ceiling for ANN neighbors inspected per consolidation candidate.
+pub const MAX_CONSOLIDATION_NEIGHBOR_LIMIT_CEILING: usize = 100;
+/// Hard ceiling for per-request consolidation candidate work.
+pub const MAX_CONSOLIDATION_CANDIDATE_LIMIT_CEILING: usize = 10_000;
 /// Default wait budget for `PostgreSQL` schema migration locks.
 pub(crate) const DEFAULT_POSTGRES_MIGRATION_LOCK_TIMEOUT_SECS: u32 = 5;
 /// Largest `PostgreSQL` lock timeout representable in whole seconds.
@@ -641,8 +645,13 @@ pub struct LimitsConfig {
     /// Maximum ANN neighbors to check per memory during consolidation.
     /// Controls BFS frontier expansion breadth. Higher values find more
     /// transitive duplicates but increase query count per memory.
-    /// Default: 20.
+    /// Default: 20. Hard ceiling: 100.
     pub consolidation_neighbor_limit: usize,
+    /// Maximum authorized memories considered by one consolidation request.
+    /// Each candidate can trigger an ANN lookup, so this bounds both memory
+    /// use and backend work independently of the requested result count.
+    /// Default: 1,000.
+    pub consolidation_candidate_limit: usize,
     /// Maximum number of entities per memory.
     /// Default: 50 (parity with `max_tags_per_memory`).
     pub max_entities_per_memory: usize,
@@ -672,6 +681,7 @@ impl Default for LimitsConfig {
             max_top_tags_limit: 100,
             max_history_limit: 500,
             consolidation_neighbor_limit: 20,
+            consolidation_candidate_limit: 1_000,
             max_entities_per_memory: 50,
             max_entity_field_length: 256,
         }
@@ -973,6 +983,7 @@ impl Config {
         apply_parsed_env(env, "LOCALHOLD_MAX_TOP_TAGS_LIMIT", &mut self.limits.max_top_tags_limit)?;
         apply_parsed_env(env, "LOCALHOLD_MAX_HISTORY_LIMIT", &mut self.limits.max_history_limit)?;
         apply_parsed_env(env, "LOCALHOLD_CONSOLIDATION_NEIGHBOR_LIMIT", &mut self.limits.consolidation_neighbor_limit)?;
+        apply_parsed_env(env, "LOCALHOLD_CONSOLIDATION_CANDIDATE_LIMIT", &mut self.limits.consolidation_candidate_limit)?;
         apply_parsed_env(env, "LOCALHOLD_MAX_ENTITIES_PER_MEMORY", &mut self.limits.max_entities_per_memory)?;
         apply_parsed_env(env, "LOCALHOLD_MAX_ENTITY_FIELD_LENGTH", &mut self.limits.max_entity_field_length)?;
         apply_parsed_env(env, "LOCALHOLD_RRF_K", &mut self.search.rrf_k)?;
@@ -1112,8 +1123,16 @@ pub(crate) fn validate_server_config(config: &ServerConfig) -> Result<(), Engine
     {
         return Err(EngineError::config("server.http_auth_token must contain only visible ASCII characters"));
     }
-    if config.http_principal_mode == HttpPrincipalMode::Fixed && config.http_principal.is_empty() {
-        return Err(EngineError::config("server.http_principal must not be empty in fixed mode"));
+    if config.transport == Transport::Stdio && config.principal.as_deref().is_some_and(crate::http_auth::is_reserved_principal) {
+        return Err(EngineError::config("server.principal must not use a reserved LocalHold principal"));
+    }
+    if config.http_principal_mode == HttpPrincipalMode::Fixed {
+        if config.http_principal.is_empty() {
+            return Err(EngineError::config("server.http_principal must not be empty in fixed mode"));
+        }
+        if crate::http_auth::is_reserved_principal(&config.http_principal) {
+            return Err(EngineError::config("server.http_principal must not use a reserved LocalHold principal"));
+        }
     }
     if config.transport == Transport::Http && config.http_principal_mode == HttpPrincipalMode::TrustedProxy && config.http_auth_token.is_none() {
         return Err(EngineError::config(
@@ -1163,6 +1182,8 @@ fn validate_limits_config(config: &LimitsConfig) -> Result<(), EngineError> {
         ("limits.shutdown_timeout_secs", usize::try_from(config.shutdown_timeout_secs).unwrap_or(usize::MAX)),
         ("limits.max_top_tags_limit", config.max_top_tags_limit),
         ("limits.max_history_limit", config.max_history_limit),
+        ("limits.consolidation_neighbor_limit", config.consolidation_neighbor_limit),
+        ("limits.consolidation_candidate_limit", config.consolidation_candidate_limit),
         ("limits.max_entities_per_memory", config.max_entities_per_memory),
         ("limits.max_entity_field_length", config.max_entity_field_length),
     ] {
@@ -1175,6 +1196,16 @@ fn validate_limits_config(config: &LimitsConfig) -> Result<(), EngineError> {
     }
     if config.max_candidate_pool_size < config.max_search_limit {
         return Err(EngineError::config("limits.max_candidate_pool_size must be >= limits.max_search_limit"));
+    }
+    if config.consolidation_candidate_limit > MAX_CONSOLIDATION_CANDIDATE_LIMIT_CEILING {
+        return Err(EngineError::config(format!(
+            "limits.consolidation_candidate_limit must be <= {MAX_CONSOLIDATION_CANDIDATE_LIMIT_CEILING}"
+        )));
+    }
+    if config.consolidation_neighbor_limit > MAX_CONSOLIDATION_NEIGHBOR_LIMIT_CEILING {
+        return Err(EngineError::config(format!(
+            "limits.consolidation_neighbor_limit must be <= {MAX_CONSOLIDATION_NEIGHBOR_LIMIT_CEILING}"
+        )));
     }
     if config.embedding_max_retries > 10 {
         return Err(EngineError::config("limits.embedding_max_retries must be <= 10"));
@@ -1409,6 +1440,7 @@ fn collect_localhold_env_vars() -> Result<HashMap<String, String>, EngineError> 
         "LOCALHOLD_MAX_TOP_TAGS_LIMIT",
         "LOCALHOLD_MAX_HISTORY_LIMIT",
         "LOCALHOLD_CONSOLIDATION_NEIGHBOR_LIMIT",
+        "LOCALHOLD_CONSOLIDATION_CANDIDATE_LIMIT",
         "LOCALHOLD_MAX_ENTITIES_PER_MEMORY",
         "LOCALHOLD_MAX_ENTITY_FIELD_LENGTH",
         "LOCALHOLD_RRF_K",

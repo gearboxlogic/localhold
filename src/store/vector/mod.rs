@@ -62,9 +62,6 @@ pub(crate) trait VectorIndex<Db: ?Sized>: Send + Sync {
     /// Return nearest vector candidates, capped by `limit`.
     fn search_batch(&self, db: &Db, embedding: &[f32], limit: usize) -> Result<VectorBatch, StoreError>;
 
-    /// Return nearest neighbors within `max_l2_distance`.
-    fn neighbors(&self, db: &Db, embedding: &[f32], max_l2_distance: f64, limit: usize) -> Result<Vec<VectorHit>, StoreError>;
-
     /// Fetch stored embeddings for known memory IDs.
     fn fetch_many(&self, db: &Db, ids: &[MemoryId]) -> Result<EmbeddingMap, StoreError>;
 }

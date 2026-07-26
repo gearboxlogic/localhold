@@ -1,9 +1,15 @@
 //! Query building, paging helpers, and row deserialization for the memories table.
 
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr as _,
+};
+
 use rusqlite::params;
 
 use super::crud::hydrate_entities_batch;
 use crate::{
+    context::UNRESOLVED_CONTEXT_KEY,
     error::StoreError,
     ordering,
     types::{AccessLevel, AccessPolicy, Memory, MemoryFilter, MemoryId, MemoryStats, MemoryType, Provenance, SearchResult},
@@ -103,6 +109,10 @@ pub(crate) fn escape_like(s: &str) -> String {
         }
     }
     result
+}
+
+pub(crate) fn context_ids_json(context_ids: &[crate::context::ContextId]) -> String {
+    serde_json::Value::Array(context_ids.iter().map(|id| serde_json::Value::String(id.to_string())).collect()).to_string()
 }
 
 /// Allocation-free case-insensitive ASCII substring search.
@@ -381,11 +391,21 @@ pub(crate) fn apply_access_policy_for_filter(memory: Memory, filter: &MemoryFilt
     if !matches_lifecycle_filter(&memory, filter, now) {
         return None;
     }
+    let is_superseded = memory.superseded_by.is_some();
     let visible = match memory.check_access_level(caller) {
         AccessLevel::Full => memory,
         AccessLevel::Redacted => memory.redacted(),
         AccessLevel::Denied => return None,
     };
+    // Supersession is not a caller-visible field in a redacted view. Always
+    // hide those historical rows so include_superseded cannot become an
+    // existence oracle.
+    if visible.was_redacted && is_superseded {
+        return None;
+    }
+    if visible.was_redacted && filter.explicit_context_filter {
+        return None;
+    }
     if !matches_non_access_filter(&visible, filter, now) {
         return None;
     }
@@ -400,7 +420,7 @@ pub(crate) fn apply_access_policy_for_filter(memory: Memory, filter: &MemoryFilt
 ///
 /// All parameter values are stored as `String` so they can be re-borrowed across
 /// paging iterations without cloning boxed trait objects.
-struct WhereClause {
+pub(crate) struct WhereClause {
     conditions: Vec<String>,
     params: Vec<String>,
     next_idx: usize,
@@ -413,7 +433,7 @@ impl WhereClause {
     /// results to public-only memories.
     #[expect(clippy::arithmetic_side_effects, reason = "SQL parameter index arithmetic — param count is always small")]
     #[expect(clippy::too_many_lines, reason = "linear filter-to-SQL translation reads clearly top-to-bottom")]
-    fn from_filter(filter: &MemoryFilter, caller: Option<&str>, start: usize, now: chrono::DateTime<chrono::Utc>) -> Self {
+    pub(crate) fn from_filter(filter: &MemoryFilter, caller: Option<&str>, start: usize, now: chrono::DateTime<chrono::Utc>) -> Self {
         let mut wc = Self {
             conditions: Vec::new(),
             params: Vec::new(),
@@ -468,6 +488,67 @@ impl WhereClause {
                 wc.params.push(scope_key.clone());
             }
             wc.next_idx += scopes_any.len();
+        }
+
+        if let Some(context_ids) = &filter.context_ids {
+            wc.conditions.push(
+                "EXISTS (
+                    SELECT 1
+                    FROM memory_contexts AS governed_membership
+                    JOIN contexts AS governed_context
+                      ON governed_context.id = governed_membership.context_id
+                    WHERE governed_membership.memory_id = memories.id
+                      AND governed_context.lifecycle = 'active'
+                )"
+                .into(),
+            );
+            if !context_ids.is_empty() {
+                let idx = wc.next_idx;
+                wc.conditions.push(format!(
+                    "NOT EXISTS (
+                        SELECT 1
+                        FROM memory_contexts AS attached_membership
+                        JOIN contexts AS attached_context
+                          ON attached_context.id = attached_membership.context_id
+                        WHERE attached_membership.memory_id = memories.id
+                          AND attached_context.lifecycle = 'active'
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM memory_contexts AS compatible_membership
+                              JOIN contexts AS compatible_context
+                                ON compatible_context.id = compatible_membership.context_id
+                              WHERE compatible_membership.memory_id = memories.id
+                                AND compatible_context.kind = attached_context.kind
+                                AND compatible_context.lifecycle = 'active'
+                                AND compatible_membership.context_id IN (
+                                    SELECT CAST(value AS TEXT) FROM json_each(?{idx})
+                                )
+                          )
+                    )"
+                ));
+                wc.params.push(context_ids_json(context_ids));
+                wc.next_idx += 1;
+            }
+        }
+
+        if let Some(context_ids) = &filter.legacy_context_ids_any
+            && !context_ids.is_empty()
+        {
+            let idx = wc.next_idx;
+            wc.conditions.push(format!(
+                "memories.id IN (
+                    SELECT legacy_membership.memory_id
+                    FROM memory_contexts AS legacy_membership INDEXED BY idx_memory_contexts_context
+                    JOIN contexts AS legacy_context
+                      ON legacy_context.id = legacy_membership.context_id
+                    WHERE legacy_membership.context_id IN (
+                        SELECT CAST(value AS TEXT) FROM json_each(?{idx})
+                    )
+                      AND legacy_context.lifecycle = 'active'
+                )"
+            ));
+            wc.params.push(context_ids_json(context_ids));
+            wc.next_idx += 1;
         }
 
         // text_search (LIKE with escaped wildcards)
@@ -556,7 +637,7 @@ impl WhereClause {
     }
 
     /// Produce the ` WHERE ...` SQL fragment (including leading space), or empty string if no conditions.
-    fn to_where_sql(&self) -> String {
+    pub(crate) fn to_where_sql(&self) -> String {
         if self.conditions.is_empty() {
             String::new()
         } else {
@@ -577,13 +658,18 @@ impl WhereClause {
     }
 
     /// The parameter index that would be assigned to the next appended parameter.
-    const fn next_index(&self) -> usize {
+    pub(crate) const fn next_index(&self) -> usize {
         self.next_idx
+    }
+
+    /// Bound filter values in placeholder order.
+    pub(crate) fn params(&self) -> &[String] {
+        &self.params
     }
 
     /// Build a `&dyn ToSql` reference slice for binding, combining extra params, filter params,
     /// and paging values (limit/offset).
-    fn bind_params<'a>(&'a self, extra_params: &'a [String], limit: &'a i64, offset: &'a i64) -> Vec<&'a dyn rusqlite::types::ToSql> {
+    pub(crate) fn bind_params<'a>(&'a self, extra_params: &'a [String], limit: &'a i64, offset: &'a i64) -> Vec<&'a dyn rusqlite::types::ToSql> {
         let mut refs: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(extra_params.len().saturating_add(self.params.len()).saturating_add(2));
         for ep in extra_params {
             refs.push(ep);
@@ -601,6 +687,7 @@ impl WhereClause {
 ///
 /// Receives owned `Memory` values so callers avoid cloning when they need ownership.
 type Accumulator<'a> = &'a mut dyn FnMut(Memory) -> bool;
+type PageAccumulator<'a> = &'a mut dyn FnMut(Vec<Memory>) -> Result<bool, StoreError>;
 
 /// Generic paged scan configuration for memory queries.
 ///
@@ -632,25 +719,27 @@ impl<'a> ScanConfig<'a> {
         }
     }
 
-    /// Execute the paged scan, calling `accumulate` for each post-filtered row.
-    ///
-    /// Returns `true` from the closure to continue scanning, `false` to stop.
-    pub(crate) fn run(self, mut accumulate: impl FnMut(Memory) -> bool) -> Result<(), StoreError> {
-        paged_scan_loop(&self, None, &[], false, &mut accumulate)
-    }
-
     /// Execute the paged scan, hydrating entities before calling `accumulate`.
     ///
     /// Used by list/search flows that rely on `apply_access_policy` to decide
     /// whether entities remain visible.
     pub(crate) fn run_hydrated(self, mut accumulate: impl FnMut(Memory) -> bool) -> Result<(), StoreError> {
-        paged_scan_loop(&self, None, &[], true, &mut accumulate)
+        paged_scan_loop(&self, None, &[], true, &mut |memories| Ok(accumulate_memory_page(memories, &mut accumulate)))
+    }
+
+    /// Execute the scan with one callback per post-filtered page.
+    pub(crate) fn run_pages(self, mut accumulate: impl FnMut(Vec<Memory>) -> Result<bool, StoreError>) -> Result<(), StoreError> {
+        paged_scan_loop(&self, None, &[], false, &mut accumulate)
     }
 
     /// Execute a paged scan with extra WHERE conditions and page-level entity hydration.
     pub(crate) fn run_with_extra_hydrated(self, extra_where: Option<&str>, extra_params: &[String], accumulate: Accumulator<'_>) -> Result<(), StoreError> {
-        paged_scan_loop(&self, extra_where, extra_params, true, accumulate)
+        paged_scan_loop(&self, extra_where, extra_params, true, &mut |memories| Ok(accumulate_memory_page(memories, accumulate)))
     }
+}
+
+fn accumulate_memory_page(memories: Vec<Memory>, accumulate: &mut dyn FnMut(Memory) -> bool) -> bool {
+    memories.into_iter().all(accumulate)
 }
 
 /// Core paging loop shared by all scan operations.
@@ -661,7 +750,7 @@ impl<'a> ScanConfig<'a> {
 ///
 /// The loop terminates when the accumulator returns `false`, the page is not
 /// full, or `MAX_SCAN_ROWS` is reached.
-fn paged_scan_loop(cfg: &ScanConfig<'_>, extra_where: Option<&str>, extra_params: &[String], hydrate_entities: bool, accumulate: Accumulator<'_>) -> Result<(), StoreError> {
+fn paged_scan_loop(cfg: &ScanConfig<'_>, extra_where: Option<&str>, extra_params: &[String], hydrate_entities: bool, accumulate: PageAccumulator<'_>) -> Result<(), StoreError> {
     let param_start = extra_params.len().saturating_add(1);
     let mut offset_val = 0_usize;
     let should_hydrate_entities = hydrate_entities || needs_entity_hydration(cfg.filter);
@@ -693,13 +782,12 @@ fn paged_scan_loop(cfg: &ScanConfig<'_>, extra_where: Option<&str>, extra_params
 
         let row_count = rows.len();
 
-        for memory in rows {
-            let Some(memory) = apply_access_policy_for_filter(memory, cfg.filter, cfg.caller, cfg.now) else {
-                continue;
-            };
-            if !accumulate(memory) {
-                return Ok(());
-            }
+        let visible = rows
+            .into_iter()
+            .filter_map(|memory| apply_access_policy_for_filter(memory, cfg.filter, cfg.caller, cfg.now))
+            .collect::<Vec<_>>();
+        if !visible.is_empty() && !accumulate(visible)? {
+            return Ok(());
         }
 
         if row_count < cfg.page_size {
@@ -740,7 +828,19 @@ fn fetch_page(conn: &rusqlite::Connection, sql: &str, params: &[&dyn rusqlite::t
     .map_err(StoreError::from)
 }
 
+pub(crate) fn compatibility_scope_label(memory_id: &MemoryId, visible_primary_contexts: &HashMap<MemoryId, String>, membership_presence: &HashSet<MemoryId>) -> String {
+    if let Some(scope) = visible_primary_contexts.get(memory_id) {
+        return scope.clone();
+    }
+    if membership_presence.contains(memory_id) {
+        "[redacted]".to_owned()
+    } else {
+        UNRESOLVED_CONTEXT_KEY.to_owned()
+    }
+}
+
 /// Count memories with access-policy post-filtering in Rust, accumulating tag/agent breakdowns.
+#[expect(clippy::too_many_lines, reason = "the single paged pass accumulates every public memory-stat dimension together")]
 pub(crate) fn count_with_access_filter(
     conn: &rusqlite::Connection,
     filter: &MemoryFilter,
@@ -758,38 +858,40 @@ pub(crate) fn count_with_access_filter(
     let mut scope_counts: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
     let mut superseded_count = 0_u64;
 
-    ScanConfig::new(conn, filter, caller, now, COUNT_PAGE_SIZE).run(|memory| {
-        let Some(memory) = memory.apply_access_policy(caller) else {
-            return true; // skip but continue
-        };
-        total = total.saturating_add(1);
-        if memory.has_embedding {
-            with_embedding = with_embedding.saturating_add(1);
+    ScanConfig::new(conn, filter, caller, now, COUNT_PAGE_SIZE).run_pages(|memories| {
+        let memory_ids = memories.iter().map(|memory| memory.id).collect::<Vec<_>>();
+        let visible_primary_contexts = visible_primary_context_keys(conn, caller, &memory_ids)?;
+        let membership_presence = memory_context_membership_presence(conn, &memory_ids)?;
+        for memory in memories {
+            total = total.saturating_add(1);
+            if memory.has_embedding {
+                with_embedding = with_embedding.saturating_add(1);
+            }
+            #[expect(clippy::arithmetic_side_effects, reason = "tag/agent count overflow is unreachable with u64")]
+            for tag in &memory.tags {
+                *tag_counts.entry(tag.clone()).or_insert(0) += 1;
+            }
+            #[expect(clippy::arithmetic_side_effects, reason = "agent count overflow is unreachable")]
+            if let Some(agent) = &memory.provenance.source_agent {
+                *agent_counts.entry(agent.clone()).or_insert(0) += 1;
+            }
+            #[expect(clippy::arithmetic_side_effects, reason = "memory_type count overflow is unreachable with u64")]
+            {
+                *memory_type_counts.entry(memory.memory_type).or_insert(0) += 1;
+            }
+            let ts = memory.created_at;
+            oldest = Some(oldest.map_or(ts, |o| o.min(ts)));
+            newest = Some(newest.map_or(ts, |n| n.max(ts)));
+            if !memory.was_redacted {
+                let scope = compatibility_scope_label(&memory.id, &visible_primary_contexts, &membership_presence);
+                let count = scope_counts.entry(scope).or_insert(0);
+                *count = count.saturating_add(1);
+            }
+            if !memory.was_redacted && memory.superseded_by.is_some() {
+                superseded_count = superseded_count.saturating_add(1);
+            }
         }
-        #[expect(clippy::arithmetic_side_effects, reason = "tag/agent count overflow is unreachable with u64")]
-        for tag in &memory.tags {
-            *tag_counts.entry(tag.clone()).or_insert(0) += 1;
-        }
-        #[expect(clippy::arithmetic_side_effects, reason = "agent count overflow is unreachable")]
-        if let Some(agent) = &memory.provenance.source_agent {
-            *agent_counts.entry(agent.clone()).or_insert(0) += 1;
-        }
-        #[expect(clippy::arithmetic_side_effects, reason = "memory_type count overflow is unreachable with u64")]
-        {
-            *memory_type_counts.entry(memory.memory_type).or_insert(0) += 1;
-        }
-        let ts = memory.created_at;
-        oldest = Some(oldest.map_or(ts, |o| o.min(ts)));
-        newest = Some(newest.map_or(ts, |n| n.max(ts)));
-        if let Some(scope) = &memory.provenance.source_conversation {
-            let count = scope_counts.entry(scope.clone()).or_insert(0);
-            *count = count.saturating_add(1);
-        }
-        // Track superseded within the visible matching set.
-        if memory.superseded_by.is_some() {
-            superseded_count = superseded_count.saturating_add(1);
-        }
-        true // continue
+        Ok(true)
     })?;
 
     // Expired count (global diagnostic)
@@ -832,6 +934,59 @@ pub(crate) fn count_with_access_filter(
     })
 }
 
+fn visible_primary_context_keys(conn: &rusqlite::Connection, caller: Option<&str>, memory_ids: &[MemoryId]) -> Result<HashMap<MemoryId, String>, StoreError> {
+    if memory_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let memory_ids = serde_json::to_string(memory_ids)?;
+    let mut statement = conn.prepare(
+        "SELECT membership.memory_id, context_row.context_key
+         FROM memory_contexts AS membership INDEXED BY idx_memory_contexts_memory
+         JOIN contexts AS context_row ON context_row.id = membership.context_id
+         WHERE membership.ordinal = 0
+           AND membership.memory_id IN (SELECT value FROM json_each(?2))
+           AND (
+               context_row.owner_principal = ?1 OR EXISTS (
+                   SELECT 1 FROM context_grants AS grant_row
+                   WHERE grant_row.context_id = context_row.id
+                     AND grant_row.grantee_principal IN (?1, '*')
+               )
+           )",
+    )?;
+    let rows = statement.query_map(params![caller.unwrap_or_default(), memory_ids], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    rows.map(|row| {
+        let (memory_id, scope) = row?;
+        let memory_id = memory_id
+            .parse()
+            .map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?;
+        Ok::<_, rusqlite::Error>((memory_id, scope))
+    })
+    .collect::<Result<HashMap<_, _>, _>>()
+    .map_err(StoreError::from)
+}
+
+fn memory_context_membership_presence(conn: &rusqlite::Connection, memory_ids: &[MemoryId]) -> Result<HashSet<MemoryId>, StoreError> {
+    if memory_ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let memory_ids = serde_json::to_string(memory_ids)?;
+    let mut statement = conn.prepare(
+        "SELECT DISTINCT memory_id
+         FROM memory_contexts
+         WHERE memory_id IN (SELECT value FROM json_each(?1))",
+    )?;
+    statement
+        .query_map([memory_ids], |row| row.get::<_, String>(0))?
+        .map(|row| {
+            let id = row?;
+            MemoryId::from_str(&id).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))
+        })
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(StoreError::from)
+}
+
 fn sqlite_storage_bytes(conn: &rusqlite::Connection) -> Result<Option<u64>, StoreError> {
     let page_count = conn.query_row("SELECT * FROM pragma_page_count()", [], sqlite_u64)?;
     let page_size = conn.query_row("SELECT * FROM pragma_page_size()", [], sqlite_u64)?;
@@ -845,6 +1000,78 @@ fn sqlite_storage_bytes(conn: &rusqlite::Connection) -> Result<Option<u64>, Stor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_governed_context_sets_use_one_json_bind() {
+        let context_ids = std::iter::repeat_with(crate::context::ContextId::new).take(40_000_usize).collect::<Vec<_>>();
+        let baseline = WhereClause::from_filter(&MemoryFilter::default(), Some("owner"), 1, now());
+        let governed = WhereClause::from_filter(
+            &MemoryFilter {
+                context_ids: Some(context_ids),
+                ..MemoryFilter::default()
+            },
+            Some("owner"),
+            1,
+            now(),
+        );
+
+        assert_eq!(governed.params().len(), baseline.params().len() + 1);
+        assert!(governed.to_where_sql().contains("json_each"));
+        let encoded = serde_json::from_str::<Vec<String>>(governed.params().last().unwrap()).unwrap();
+        assert_eq!(encoded.len(), 40_000);
+    }
+
+    #[test]
+    fn page_primary_context_lookup_uses_memory_membership_index() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE contexts (
+                     id TEXT PRIMARY KEY,
+                     context_key TEXT NOT NULL,
+                     owner_principal TEXT NOT NULL,
+                     lifecycle TEXT NOT NULL
+                 );
+                 CREATE TABLE context_grants (
+                     context_id TEXT NOT NULL,
+                     grantee_principal TEXT NOT NULL
+                 );
+                 CREATE TABLE memory_contexts (
+                     memory_id TEXT NOT NULL,
+                     context_id TEXT NOT NULL,
+                     ordinal INTEGER NOT NULL
+                 );
+                 CREATE INDEX idx_memory_contexts_memory
+                     ON memory_contexts(memory_id, ordinal, context_id);",
+            )
+            .unwrap();
+        let details = connection
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT membership.memory_id, context_row.context_key
+                 FROM memory_contexts AS membership INDEXED BY idx_memory_contexts_memory
+                 JOIN contexts AS context_row ON context_row.id = membership.context_id
+                 WHERE membership.ordinal = 0
+                   AND membership.memory_id IN (SELECT value FROM json_each(?2))
+                   AND (
+                       context_row.owner_principal = ?1 OR EXISTS (
+                           SELECT 1 FROM context_grants AS grant_row
+                           WHERE grant_row.context_id = context_row.id
+                             AND grant_row.grantee_principal IN (?1, '*')
+                       )
+                   )",
+            )
+            .unwrap()
+            .query_map(params!["owner", "[\"01TEST\"]"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(
+            details.iter().any(|detail| detail.contains("idx_memory_contexts_memory")),
+            "unexpected membership lookup plan: {details:?}"
+        );
+    }
 
     // -- RR-045: escape_like -------------------------------------------------
 
@@ -971,6 +1198,23 @@ mod tests {
 
         assert_eq!(visible.content, "hello hidden content");
         assert_eq!(visible.tags, vec!["tag1", "tag2"]);
+    }
+
+    #[test]
+    fn explicit_context_filter_does_not_disclose_hidden_membership() {
+        let explicit = MemoryFilter {
+            context_ids: Some(vec![crate::context::ContextId::new()]),
+            explicit_context_filter: true,
+            ..MemoryFilter::default()
+        };
+        let memory = redacted_memory(vec![RedactableField::Content, RedactableField::Provenance]);
+        assert!(apply_access_policy_for_filter(memory, &explicit, Some("other"), now()).is_none());
+
+        let mut broad = explicit;
+        broad.context_ids = Some(Vec::new());
+        broad.explicit_context_filter = false;
+        let memory = redacted_memory(vec![RedactableField::Content]);
+        assert!(apply_access_policy_for_filter(memory, &broad, Some("other"), now()).is_some());
     }
 
     #[test]

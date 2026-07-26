@@ -4,15 +4,23 @@
 //! configurable failures into the store and embedding layers, allowing
 //! tests to verify resilience under adverse conditions.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use localhold::{
+    context::{
+        ContextAnchorPolicyDraft, ContextAnchorPolicyRecord, ContextAuditDraft, ContextAuditEvent, ContextCreateDraft, ContextDefinition, ContextDefinitionPatch,
+        ContextExactLookup, ContextGrant, ContextId, ContextKindDefinition, ContextKindDraft, ContextKindPolicyDraft, ContextKindPolicyRecord, ContextLifecycle, ContextRecord,
+        MemoryContext,
+    },
     embedding::{BoxFuture, EmbeddingProvider},
     error::{EmbeddingError, StoreError},
-    store::{MemoryAdmin, MemoryReader, MemoryWithEmbedding, MemoryWriter, ReassignScopeOutcome},
+    store::{ConsolidationSnapshot, ContextReader, ContextWriter, MemoryAdmin, MemoryContextPresence, MemoryReader, MemoryWithEmbedding, MemoryWriter, ReassignScopeOutcome},
     types::{
         AuditDraft, AuthorizedUpdateOutcome, Memory, MemoryFilter, MemoryId, MemoryMetadata, MemoryStats, MemoryUpdate, MetadataMigrationOutcome, MetadataMigrationReport,
         QueryContext, ScopeDefinition, SearchResult, WriteOutcome,
@@ -170,6 +178,13 @@ impl<S: MemoryReader + Send + Sync> MemoryReader for ChaosStore<S> {
         self.inner.get(id, principal).await
     }
 
+    async fn get_batch(&self, ids: &[MemoryId], principal: Option<&str>) -> Result<localhold::store::MemoryMap, StoreError> {
+        if let Some(err) = self.get_plan.should_fail() {
+            return Err(err);
+        }
+        self.inner.get_batch(ids, principal).await
+    }
+
     async fn search_by_embedding(
         &self,
         embedding: &[f32],
@@ -214,8 +229,14 @@ impl<S: MemoryReader + Send + Sync> MemoryReader for ChaosStore<S> {
         self.inner.get_for_reembed(id, principal).await
     }
 
-    async fn list_with_embeddings(&self, scopes_any: Option<&[String]>, limit: usize) -> Result<Vec<MemoryWithEmbedding>, StoreError> {
-        self.inner.list_with_embeddings(scopes_any, limit).await
+    async fn list_with_embeddings(
+        &self,
+        context_ids: Option<&[ContextId]>,
+        legacy_context_ids_any: Option<&[ContextId]>,
+        principal: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryWithEmbedding>, StoreError> {
+        self.inner.list_with_embeddings(context_ids, legacy_context_ids_any, principal, limit).await
     }
 
     async fn query_audit_log(&self, memory_id: &MemoryId, limit: usize) -> Result<Vec<localhold::types::AuditEntry>, StoreError> {
@@ -226,12 +247,21 @@ impl<S: MemoryReader + Send + Sync> MemoryReader for ChaosStore<S> {
         self.inner.get_tombstone(memory_id).await
     }
 
-    async fn fetch_embeddings_for_ids(&self, ids: &[MemoryId]) -> Result<std::collections::HashMap<MemoryId, Vec<f32>>, StoreError> {
+    async fn fetch_embeddings_for_ids(&self, ids: &[MemoryId]) -> Result<HashMap<MemoryId, Vec<f32>>, StoreError> {
         self.inner.fetch_embeddings_for_ids(ids).await
     }
 
-    async fn find_embedding_neighbors(&self, embedding: &[f32], max_l2_distance: f64, limit: usize) -> Result<Vec<(MemoryId, f64)>, StoreError> {
-        self.inner.find_embedding_neighbors(embedding, max_l2_distance, limit).await
+    async fn find_embedding_neighbors(
+        &self,
+        source_memory_id: &MemoryId,
+        candidate_ids: &[MemoryId],
+        embedding: &[f32],
+        min_cosine_similarity: f64,
+        limit: usize,
+    ) -> Result<Vec<(MemoryId, f64)>, StoreError> {
+        self.inner
+            .find_embedding_neighbors(source_memory_id, candidate_ids, embedding, min_cosine_similarity, limit)
+            .await
     }
 }
 
@@ -283,6 +313,24 @@ impl<S: MemoryWriter + Send + Sync> MemoryWriter for ChaosStore<S> {
             return Err(err);
         }
         self.inner.store_with_metadata_audited(memory, embedding, supersedes_id, metadata, audit).await
+    }
+
+    async fn store_with_metadata_contexts_audited(
+        &self,
+        memory: &Memory,
+        embedding: Option<&[f32]>,
+        supersedes_id: Option<&MemoryId>,
+        metadata: &MemoryMetadata,
+        context_ids: &[ContextId],
+        audit: &AuditDraft,
+        context_audit: &ContextAuditDraft,
+    ) -> Result<MemoryId, StoreError> {
+        if let Some(err) = self.store_plan.should_fail() {
+            return Err(err);
+        }
+        self.inner
+            .store_with_metadata_contexts_audited(memory, embedding, supersedes_id, metadata, context_ids, audit, context_audit)
+            .await
     }
 
     async fn store_batch(&self, memories: &[MemoryWithEmbedding]) -> Result<Vec<MemoryId>, StoreError> {
@@ -338,6 +386,23 @@ impl<S: MemoryWriter + Send + Sync> MemoryWriter for ChaosStore<S> {
         self.inner.store_batch_with_metadata_audited(memories, supersedes, metadata, audits).await
     }
 
+    async fn store_batch_with_metadata_contexts_audited(
+        &self,
+        memories: &[MemoryWithEmbedding],
+        supersedes: &[Option<MemoryId>],
+        metadata: &[MemoryMetadata],
+        context_ids: &[Vec<ContextId>],
+        audits: &[AuditDraft],
+        context_audits: &[ContextAuditDraft],
+    ) -> Result<Vec<MemoryId>, StoreError> {
+        if let Some(err) = self.batch_store_plan.should_fail() {
+            return Err(err);
+        }
+        self.inner
+            .store_batch_with_metadata_contexts_audited(memories, supersedes, metadata, context_ids, audits, context_audits)
+            .await
+    }
+
     async fn update(&self, id: &MemoryId, update: &MemoryUpdate) -> Result<bool, StoreError> {
         self.inner.update(id, update).await
     }
@@ -384,6 +449,24 @@ impl<S: MemoryWriter + Send + Sync> MemoryWriter for ChaosStore<S> {
         self.inner.update_authorized_with_metadata_audited(id, update, metadata_patch, principal, audit).await
     }
 
+    async fn update_authorized_with_metadata_contexts_audited(
+        &self,
+        id: &MemoryId,
+        update: &MemoryUpdate,
+        metadata_patch: Option<&localhold::types::MetadataPatch>,
+        context_ids: Option<&[ContextId]>,
+        principal: &str,
+        audit: &AuditDraft,
+        context_audit: Option<&ContextAuditDraft>,
+    ) -> Result<AuthorizedUpdateOutcome, StoreError> {
+        if let Some(err) = self.store_plan.should_fail() {
+            return Err(err);
+        }
+        self.inner
+            .update_authorized_with_metadata_contexts_audited(id, update, metadata_patch, context_ids, principal, audit, context_audit)
+            .await
+    }
+
     async fn update_authorized_if_unmodified_with_metadata_audited(
         &self,
         id: &MemoryId,
@@ -399,6 +482,26 @@ impl<S: MemoryWriter + Send + Sync> MemoryWriter for ChaosStore<S> {
         }
         self.inner
             .update_authorized_if_unmodified_with_metadata_audited(id, expected_revision, update, metadata_patch, embedding, principal, audit)
+            .await
+    }
+
+    async fn update_authorized_if_unmodified_with_metadata_contexts_audited(
+        &self,
+        id: &MemoryId,
+        expected_revision: i64,
+        update: &MemoryUpdate,
+        metadata_patch: Option<&localhold::types::MetadataPatch>,
+        context_ids: Option<&[ContextId]>,
+        embedding: Option<&[f32]>,
+        principal: &str,
+        audit: &AuditDraft,
+        context_audit: Option<&ContextAuditDraft>,
+    ) -> Result<AuthorizedUpdateOutcome, StoreError> {
+        if let Some(err) = self.store_plan.should_fail() {
+            return Err(err);
+        }
+        self.inner
+            .update_authorized_if_unmodified_with_metadata_contexts_audited(id, expected_revision, update, metadata_patch, context_ids, embedding, principal, audit, context_audit)
             .await
     }
 
@@ -489,6 +592,18 @@ impl<S: MemoryWriter + Send + Sync> MemoryWriter for ChaosStore<S> {
     async fn mark_superseded_by_authorized_audited(&self, id: &MemoryId, superseded_by: &MemoryId, principal: &str, audit: &AuditDraft) -> Result<WriteOutcome, StoreError> {
         self.inner.mark_superseded_by_authorized_audited(id, superseded_by, principal, audit).await
     }
+
+    async fn mark_superseded_by_authorized_audited_if_unchanged(
+        &self,
+        member: &ConsolidationSnapshot,
+        representative: &ConsolidationSnapshot,
+        principal: &str,
+        audit: &AuditDraft,
+    ) -> Result<WriteOutcome, StoreError> {
+        self.inner
+            .mark_superseded_by_authorized_audited_if_unchanged(member, representative, principal, audit)
+            .await
+    }
 }
 
 impl<S: MemoryAdmin + Send + Sync> MemoryAdmin for ChaosStore<S> {
@@ -523,6 +638,14 @@ impl<S: MemoryAdmin + Send + Sync> MemoryAdmin for ChaosStore<S> {
         self.inner.list_scopes().await
     }
 
+    async fn register_scope_for_principal(&self, scope: ScopeDefinition, principal: &str) -> Result<(), StoreError> {
+        self.inner.register_scope_for_principal(scope, principal).await
+    }
+
+    async fn list_scopes_for_principal(&self, principal: &str) -> Result<Vec<ScopeDefinition>, StoreError> {
+        self.inner.list_scopes_for_principal(principal).await
+    }
+
     async fn upsert_metadata(&self, metadata: MemoryMetadata) -> Result<(), StoreError> {
         self.inner.upsert_metadata(metadata).await
     }
@@ -535,16 +658,203 @@ impl<S: MemoryAdmin + Send + Sync> MemoryAdmin for ChaosStore<S> {
         self.inner.get_metadata(memory_id).await
     }
 
+    async fn get_metadata_batch(&self, memory_ids: &[MemoryId]) -> Result<HashMap<MemoryId, MemoryMetadata>, StoreError> {
+        self.inner.get_metadata_batch(memory_ids).await
+    }
+
     async fn metadata_migration_report(&self) -> Result<MetadataMigrationReport, StoreError> {
         self.inner.metadata_migration_report().await
     }
 
-    async fn migrate_metadata(&self, registered_scope_keys: &[String], dry_run: bool) -> Result<MetadataMigrationOutcome, StoreError> {
-        self.inner.migrate_metadata(registered_scope_keys, dry_run).await
+    async fn migrate_metadata(&self, dry_run: bool) -> Result<MetadataMigrationOutcome, StoreError> {
+        self.inner.migrate_metadata(dry_run).await
     }
 
-    async fn migrate_metadata_audited(&self, registered_scope_keys: &[String], dry_run: bool, audit: &AuditDraft) -> Result<MetadataMigrationOutcome, StoreError> {
-        self.inner.migrate_metadata_audited(registered_scope_keys, dry_run, audit).await
+    async fn migrate_metadata_audited(&self, dry_run: bool, audit: &AuditDraft) -> Result<MetadataMigrationOutcome, StoreError> {
+        self.inner.migrate_metadata_audited(dry_run, audit).await
+    }
+}
+
+impl<S: ContextReader + Send + Sync> ContextReader for ChaosStore<S> {
+    async fn get_context(&self, id: &ContextId, principal: &str) -> Result<Option<ContextDefinition>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.get_context(id, principal).await
+    }
+
+    async fn list_contexts(&self, principal: &str, include_archived: bool, offset: usize, limit: usize) -> Result<Vec<ContextDefinition>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.list_contexts(principal, include_archived, offset, limit).await
+    }
+
+    async fn list_context_records(&self, principal: &str, include_archived: bool, offset: usize, limit: usize) -> Result<Vec<ContextRecord>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.list_context_records(principal, include_archived, offset, limit).await
+    }
+
+    async fn find_context_records(&self, principal: &str, include_archived: bool, lookup: &ContextExactLookup) -> Result<Vec<ContextRecord>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.find_context_records(principal, include_archived, lookup).await
+    }
+
+    async fn expand_context_selection(&self, context_ids: &[ContextId], principal: &str, include_descendants: bool) -> Result<Vec<ContextDefinition>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.expand_context_selection(context_ids, principal, include_descendants).await
+    }
+
+    async fn get_memory_contexts(&self, memory_id: &MemoryId, principal: &str) -> Result<Vec<MemoryContext>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.get_memory_contexts(memory_id, principal).await
+    }
+
+    async fn get_memory_contexts_batch(&self, memory_ids: &[MemoryId], principal: &str) -> Result<HashMap<MemoryId, Vec<MemoryContext>>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.get_memory_contexts_batch(memory_ids, principal).await
+    }
+
+    async fn get_memory_context_presence_batch(&self, memory_ids: &[MemoryId], principal: &str) -> Result<MemoryContextPresence, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.get_memory_context_presence_batch(memory_ids, principal).await
+    }
+
+    async fn count_memory_contexts_for_write(&self, memory_id: &MemoryId, principal: &str) -> Result<Option<usize>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.count_memory_contexts_for_write(memory_id, principal).await
+    }
+
+    async fn query_context_audit(&self, context_id: &ContextId, principal: &str, limit: usize) -> Result<Vec<ContextAuditEvent>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.query_context_audit(context_id, principal, limit).await
+    }
+
+    async fn list_context_kinds(&self) -> Result<Vec<ContextKindDefinition>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.list_context_kinds().await
+    }
+
+    async fn list_context_kind_policies(&self, principal: &str) -> Result<Vec<ContextKindPolicyRecord>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.list_context_kind_policies(principal).await
+    }
+
+    async fn list_context_anchor_policies(&self, principal: &str) -> Result<Vec<ContextAnchorPolicyRecord>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.list_context_anchor_policies(principal).await
+    }
+
+    async fn list_context_grants(&self, context_id: &ContextId, principal: &str) -> Result<Vec<ContextGrant>, StoreError> {
+        if let Some(error) = self.get_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.list_context_grants(context_id, principal).await
+    }
+}
+
+impl<S: ContextWriter + Send + Sync> ContextWriter for ChaosStore<S> {
+    async fn create_context(&self, draft: &ContextCreateDraft, audit: &ContextAuditDraft) -> Result<ContextDefinition, StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.create_context(draft, audit).await
+    }
+
+    async fn set_context_parent(&self, context_id: &ContextId, parent_id: Option<&ContextId>, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.set_context_parent(context_id, parent_id, principal, audit).await
+    }
+
+    async fn set_context_lifecycle(&self, context_id: &ContextId, lifecycle: ContextLifecycle, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.set_context_lifecycle(context_id, lifecycle, principal, audit).await
+    }
+
+    async fn grant_context_use(&self, context_id: &ContextId, grantee_principal: &str, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.grant_context_use(context_id, grantee_principal, principal, audit).await
+    }
+
+    async fn revoke_context_use(&self, context_id: &ContextId, grantee_principal: &str, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.revoke_context_use(context_id, grantee_principal, principal, audit).await
+    }
+
+    async fn replace_context_grants(&self, context_id: &ContextId, grantee_principals: &[String], principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.replace_context_grants(context_id, grantee_principals, principal, audit).await
+    }
+
+    async fn update_context_definition(&self, context_id: &ContextId, patch: &ContextDefinitionPatch, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.update_context_definition(context_id, patch, principal, audit).await
+    }
+
+    async fn upsert_context_kind(&self, draft: &ContextKindDraft, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.upsert_context_kind(draft, principal, audit).await
+    }
+
+    async fn upsert_context_kind_policy(&self, draft: &ContextKindPolicyDraft, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.upsert_context_kind_policy(draft, principal, audit).await
+    }
+
+    async fn upsert_context_anchor_policy(&self, draft: &ContextAnchorPolicyDraft, principal: &str, audit: &ContextAuditDraft) -> Result<(), StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.upsert_context_anchor_policy(draft, principal, audit).await
+    }
+
+    async fn rollback_unreferenced_legacy_context(&self, context_id: &ContextId, principal: &str) -> Result<bool, StoreError> {
+        self.inner.rollback_unreferenced_legacy_context(context_id, principal).await
+    }
+
+    async fn replace_memory_contexts(&self, memory_id: &MemoryId, context_ids: &[ContextId], principal: &str, audit: &ContextAuditDraft) -> Result<WriteOutcome, StoreError> {
+        if let Some(error) = self.store_plan.should_fail() {
+            return Err(error);
+        }
+        self.inner.replace_memory_contexts(memory_id, context_ids, principal, audit).await
     }
 }
 

@@ -1,0 +1,132 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: tool
+---
+{
+  "name": "context_create",
+  "description": "Create a private governed context when effective policy permits it. Exact key, alias, or identity matches are always reused; fuzzy duplicate candidates require confirm_distinct_from.",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$defs": {
+      "ContextKind": {
+        "description": "Stable context kind. Built-in kinds and operator-defined kinds use the same\nrepresentation so adding a kind does not require a wire-protocol change.",
+        "type": "string"
+      },
+      "ContextIdentityInput": {
+        "description": "Typed durable identity supplied by an agent.\n\nThe raw value exists only while the request is normalized. Persistence and\nresponses use [`ContextIdentity`], which contains a fingerprint and a\nredacted label instead.",
+        "type": "object",
+        "properties": {
+          "scheme": {
+            "description": "Identity scheme: `git_remote`, `uri`, or `namespaced_id`.",
+            "type": "string"
+          },
+          "value": {
+            "description": "Raw identity value. This is never persisted.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "Required only for `namespaced_id`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "scheme",
+          "value"
+        ]
+      },
+      "ContextReference": {
+        "description": "One context locator in a shared context envelope.\n\nExactly one locator form is valid: `id`, `kind` + `key`, or `kind` +\n`identity`.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "Stable opaque context ID.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "description": "Context kind for key or identity locators.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "key": {
+            "description": "Immutable human-readable context key.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "identity": {
+            "description": "Typed durable identity.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextIdentityInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ContextId": {
+        "description": "A ULID-formatted opaque context identifier",
+        "type": "string"
+      }
+    },
+    "required": [
+      "kind",
+      "key",
+      "display_name"
+    ],
+    "type": "object",
+    "properties": {
+      "kind": {
+        "description": "Context kind.",
+        "$ref": "#/$defs/ContextKind"
+      },
+      "key": {
+        "description": "Immutable human-readable key.",
+        "type": "string"
+      },
+      "display_name": {
+        "description": "Human display name.",
+        "type": "string"
+      },
+      "description": {
+        "description": "Optional description.",
+        "type": "string"
+      },
+      "identity": {
+        "description": "Durable typed identity. Default agent policy requires this for project\ncontext creation.",
+        "$ref": "#/$defs/ContextIdentityInput"
+      },
+      "parent": {
+        "description": "Optional parent locator.",
+        "$ref": "#/$defs/ContextReference"
+      },
+      "confirm_distinct_from": {
+        "description": "Candidate IDs explicitly confirmed as distinct after fuzzy duplicate\ndetection.",
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/ContextId"
+        },
+        "default": []
+      }
+    }
+  }
+}

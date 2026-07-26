@@ -1,5 +1,10 @@
 use axum::http::{HeaderMap, header::AUTHORIZATION};
 
+use crate::{
+    context::{LEGACY_ALL_PRINCIPALS_GRANT, LEGACY_SYSTEM_PRINCIPAL, OPERATOR_PRINCIPAL},
+    types::ANONYMOUS_PRINCIPAL,
+};
+
 pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get(AUTHORIZATION)?.to_str().ok()?;
     let mut fields = value.split_ascii_whitespace();
@@ -21,7 +26,11 @@ pub(crate) fn bearer_matches(headers: &HeaderMap, expected: &str) -> bool {
 /// clients from reaching the endpoint directly or supplying this header.
 pub(crate) fn trusted_proxy_principal<'a>(headers: &'a HeaderMap, header_name: &str) -> Option<&'a str> {
     let principal = headers.get(header_name)?.to_str().ok()?.trim();
-    (!principal.is_empty()).then_some(principal)
+    (!principal.is_empty() && !is_reserved_principal(principal)).then_some(principal)
+}
+
+pub(crate) fn is_reserved_principal(principal: &str) -> bool {
+    matches!(principal, OPERATOR_PRINCIPAL | LEGACY_SYSTEM_PRINCIPAL | LEGACY_ALL_PRINCIPALS_GRANT | ANONYMOUS_PRINCIPAL)
 }
 
 #[cfg(test)]
@@ -57,5 +66,14 @@ mod tests {
         let _previous = headers.insert("x-localhold-principal", HeaderValue::from_static("  "));
         assert_eq!(trusted_proxy_principal(&headers, "x-localhold-principal"), None);
         assert_eq!(trusted_proxy_principal(&headers, "x-other-principal"), None);
+    }
+
+    #[test]
+    fn rejects_reserved_trusted_proxy_principals() {
+        for principal in ["operator", "@localhold/legacy-system", "*", "anonymous"] {
+            let mut headers = HeaderMap::new();
+            let _previous = headers.insert("x-localhold-principal", HeaderValue::from_str(principal).unwrap());
+            assert_eq!(trusted_proxy_principal(&headers, "x-localhold-principal"), None);
+        }
     }
 }

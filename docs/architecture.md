@@ -63,7 +63,9 @@ If the embedding endpoint is unavailable, LocalHold degrades to keyword/text-onl
 - `crud.rs` for writes, entities, and audit-entry helpers
 - `query.rs` for shared SQL column lists and filter construction
 - `search.rs` for ANN, FTS5, and text fallback search
-- `admin.rs` for eviction and scope reassignment
+- `admin.rs` for eviction and legacy scope adaptation
+- `context_store.rs` for governed contexts, memberships, policy, grants, and
+  context audit
 - `sqlite.rs` for the concrete store implementation
 - `postgres.rs` for the opt-in PostgreSQL store implementation
 - `vector/` for shared vector result types used by backend-specific vector indexes
@@ -77,9 +79,15 @@ The main persisted objects are:
 - `memory_entities` for typed entity attachment and expansion
 - `memory_fts` for SQLite FTS5 keyword search; PostgreSQL uses a `to_tsvector('simple', content)` index
 - `memory_audit_log` for append-only write history
-- `scope_registry` for tool-managed scope definitions, aliases, and matchers
+- `contexts`, `context_aliases`, `context_identities`, and
+  `context_resolver_hints` for context definitions and safe resolver metadata
+- `memory_contexts` for ordered direct memberships; ordinal zero is the
+  compatibility-primary context
+- `context_grants`, `context_kind_policies`, `context_anchor_overrides`,
+  `context_relations`, and `context_audit_events` for governance
 - `memory_metadata` for non-destructive card metadata, scope keys,
-  quality flags, migration markers, and principal provenance
+  quality flags, migration markers, and principal provenance. Its scope key is
+  a synchronized compatibility cache, not a relevance index.
 
 See `src/types.rs` for the domain model, `src/store/schema.rs` for the SQLite schema, and `src/store/postgres.rs` for the PostgreSQL schema bootstrap.
 
@@ -119,8 +127,15 @@ time—must drive their successful path.
   instances or explicit trusted-proxy HTTP mode behind an authenticating proxy
 - bearer-authenticated HTTP uses one fixed principal by default and ignores
   caller-supplied identity headers
-- scope is retrieval/write context and is resolved from explicit scope values,
-  registered aliases, or context matchers
+- contexts are relevance metadata while principals remain the authorization
+  identity. A memory may have ordered memberships in several context kinds.
+- retrieval applies context membership in SQL before text, FTS, vector, or
+  reranking work. Memberships of one kind are OR alternatives; different
+  attached kinds are AND constraints.
+- selecting a child expands through its ancestors. Descendants are included
+  only when requested or enabled by effective policy.
+- legacy `scope` values are adapted to a compatibility-primary context;
+  `origin_scope` remains provenance lineage.
 - mutating memory writes commit audit rows transactionally with the associated
   mutation, required metadata, and tombstone or supersession state; search
   impressions and other analytics remain best-effort operational metadata

@@ -93,10 +93,10 @@ Returns one full memory by ID plus visible metadata (`summary`, `scope`,
 `agent_label`, `created_by_principal`, `quality_flags`, and
 `unresolved_scope`). Redacted callers receive only fields allowed by the memory
 policy: hidden content suppresses summary, hidden provenance suppresses scope
-and agent label, and creator/quality metadata is full-access only. When a
-trusted principal is available, it records a meaningful read activity event;
-anonymous public reads return
-`activity_recorded: false`.
+and agent label, and creator/quality metadata is full-access only. A trusted
+principal records a meaningful read activity event only for a full-access
+view; redacted views and anonymous public reads return `activity_recorded:
+false`.
 
 Input:
 
@@ -112,20 +112,26 @@ Input:
 
 - `ids`: one or more memory IDs, capped by `limits.max_batch_size`
 
-When a trusted principal is available, the server records one read activity
-event for all found IDs. Anonymous public reads return `activity_recorded:
-false`.
+For a trusted principal, the server records one read activity event for each
+found memory available with full access. Redacted views and anonymous public
+reads return `activity_recorded: false`.
 
 ### `remember`
 
-Stores a memory without rewriting the supplied content. Warnings are advisory:
-the write can still succeed when scope is unresolved, content is large,
-code-like, missing a summary, missing tags/entities, or resembles an existing
-memory.
+Stores a memory without rewriting the supplied content. Content-quality
+warnings are advisory. Missing governed context is a validation failure unless
+effective policy supplies a unique default or the caller explicitly sets
+`context.allow_unresolved`. Explicit references must all resolve; setting
+`allow_unresolved` never suppresses an invalid, missing, archived, or ambiguous
+explicit reference and never overrides a required context kind from effective
+policy. A required kind's unique authorized default is applied before
+deferral; otherwise the write returns `context_required`.
 
 Inputs:
 
 - `content`: required durable memory text
+- `context`: optional governed envelope; required in practice when policy has
+  no unique default
 - `summary`: optional compact card summary
 - `scope`: optional explicit scope key or alias
 - `context_hints`: optional hints for scope resolution
@@ -143,8 +149,9 @@ Redacted memories whose `visible_fields` omit `content` are removed from
 caller-visible semantic, keyword, text, duplicate-candidate, and consolidation
 results and from reranker input. Hidden tags, provenance/scope, and entities
 also do not satisfy application filters for callers whose redacted view hides
-those fields. Shared full-text and ANN indexes still generate and rank
-candidates before application policy filtering; see
+those fields. Governed context predicates run in the backend query before
+full-text, vector, or reranking work. Access-policy redaction remains a
+separate application filter; see
 [Search authorization and noninterference](security-and-privacy.md#search-authorization-and-noninterference).
 Use `restricted` when a private allowlist should retain full content search, or
 include fields in `visible_fields` only when the redacted view should remain
@@ -174,7 +181,9 @@ Responses include an `operation` envelope and per-memory `id`, resolved `scope`,
 Validates agent-supplied candidate memory bullets. It previews suggested writes
 by default and persists normalized candidates only when `commit` is `true`;
 warnings are advisory. Preview is a read operation governed by the caller's
-read authorization; committing requires write authorization.
+read authorization, but it validates the same candidate and governed-context
+contract as commit without creating contexts or persisting memories. Committing
+requires write authorization.
 
 Inputs:
 
@@ -274,48 +283,119 @@ text:
 }
 ```
 
-Error codes are `invalid_params`, `not_found`, `access_denied`,
-`anonymous_read_denied`, `anonymous_write_denied`, `unavailable`, `conflict`,
-and `internal`. Low-level JSON deserialization failures can still be protocol
-errors before a handler runs.
+Error codes include `invalid_params`, `context_required`, `context_ambiguous`,
+`not_found`, `access_denied`, `anonymous_read_denied`,
+`anonymous_write_denied`, `unavailable`, `conflict`, and `internal`.
+Context errors may include safe candidates, policy guidance, retry fragments,
+and reusable recommended actions. They never echo memory content. Low-level
+JSON deserialization failures can still be protocol errors before a handler
+runs.
 
 Warnings keep stable `code` values and now include `severity`, optional `field`,
 `message`, and optional `suggested_fix`. `quality_flags` stores warning codes
 only.
 
-## Scopes
+## Governed Contexts
 
-Scopes are retrieval and write context, separate from identity. Register scopes
-with `admin_scope_register`; list them with `admin_scope_list`.
+Contexts are the canonical relevance model and are separate from principal
+identity. A memory can have several ordered direct memberships, such as
+`project/localhold` plus `domain/software-architecture`. Contexts never grant
+access to a memory and never change relevance scores.
 
-A scope definition contains:
+Context-aware tools accept:
 
-- `scope_key`
-- `display_name`
-- optional `description`
-- `aliases`
-- `matchers`
-- optional `parent`
-- `related`
+```json
+{
+  "context": {
+    "refs": [
+      {"id": "01..."},
+      {"kind": "project", "key": "project/localhold"},
+      {
+        "kind": "project",
+        "identity": {
+          "scheme": "git_remote",
+          "value": "https://example.com/org/repo.git"
+        }
+      }
+    ],
+    "hints": [],
+    "include_descendants": false,
+    "allow_unresolved": false
+  }
+}
+```
 
-Write scope resolution:
+Each ref uses exactly one locator: `id`, `kind` plus `key`, or `kind` plus a
+typed identity. Local paths are weak `hints`, never durable identities.
+Supported identities are normalized `git_remote`, policy-approved absolute
+`uri`, and `namespaced_id`. The store retains only a fingerprint and safe
+redacted label. Agent responses expose the safe label, never the stored
+fingerprint.
 
-1. explicit `scope`, resolved as a registered key, alias, matcher-containing value,
-   or raw scope key
-2. registered matchers from `context_hints`
-3. `inbox/unresolved`
+`context_resolve` resolves exact references, aliases, identities, queries, and
+hints. An empty request returns a paginated authorized catalog. Its response
+always identifies direct and effective contexts, candidate ambiguity, policy
+guidance, broad-search state, and recommended actions.
 
-Unresolved writes are accepted with warnings so agents can classify them later
-with `revise`.
+`context_create` creates a private context when effective policy permits.
+Exact key, alias, or identity matches reuse the existing context. Fuzzy candidates at
+or above the duplicate threshold require a second call whose
+`confirm_distinct_from` contains every current candidate ID. By default agents
+may create only project contexts backed by a durable typed identity; other
+kinds and policies are enabled in the TUI.
 
-`recall` and `brief` use an explicit scope or resolved context when supplied.
-When neither is supplied, they search all visible memories and cards include
-scope labels. If context hints are supplied but do not match a registered scope,
-the response warns and still searches all visible memories.
+Selecting a child includes its ancestors. Selecting a parent does not include
+descendants unless `include_descendants` is true or effective policy enables
+it. One selection may resolve to at most 512 effective contexts; larger
+descendant trees return a structured conflict with guidance to narrow the
+selection or disable descendant expansion. Retrieval uses OR among values of
+the same kind and AND across different kinds attached to a memory.
 
-Responses that resolve scope include `scope_resolution` with the resolved
-`scope`, `unresolved_scope`, `resolved_by` (`explicit`, `alias`, `matcher`, or
-`unresolved`), and optional `matched_hint`/`matched_value` fields.
+Archiving preserves memberships and reserves aliases and identities, but an
+archived context no longer contributes an active retrieval membership. A
+memory whose only memberships are archived therefore leaves governed broad and
+filtered searches until an operator reactivates a context. Direct reads retain
+the ordered membership profile so reactivation and compatibility-primary
+lineage remain inspectable.
+
+Omitting context on `recall`, `brief`, and context-aware admin reads means an
+intentional broad authorized search over memories that have at least one
+membership. An empty envelope (`"context": {}`) has the same broad read
+semantics. Contextless memories are excluded. Omitted governed writes fail
+with `context_required` unless policy supplies a unique safe default.
+`{"context":{"allow_unresolved":true}}` is an explicit deferral: it stores no
+memberships and adds the unresolved warning only when no explicit reference
+failed. It does not turn a failed explicit locator into an unresolved write.
+
+Unfiltered `admin_bulk_update` and `admin_bulk_delete` are whole-authorized-set
+maintenance operations and also consider memories with no active context,
+including explicitly deferred contextless and archived-only memories. Their
+operation summaries return
+`contextless_maintenance_scope`; supply an explicit context filter when those
+rows must be excluded. An empty context envelope is broad, so it has the same
+maintenance reach and warning as omission. Consequently, an unfiltered `admin_list` or
+`admin_count` is not a destructive-operation preview because those reads omit
+memories with no active context.
+
+On `revise`, a supplied context envelope replaces the complete ordered
+membership set; omission preserves it. Cards return direct `contexts`. The
+legacy `scope` card field remains and is derived from the first membership;
+contextless cards use `inbox/unresolved`.
+
+## Legacy Scope Compatibility
+
+`scope`, `scopes`, and `context_hints` remain compatibility adapters. They
+cannot be combined with `context`. A legacy raw write scope creates a private
+principal-owned `custom` compatibility context and returns a migration warning.
+Legacy `admin_scope_register` creates or updates principal-owned private
+`custom` contexts, and `admin_scope_list` returns those definitions plus
+visible frozen migration contexts. Neither tool restores a second registry;
+frozen system-owned contexts remain read-only.
+
+Legacy `scope` on `revise` replaces only the compatibility-primary membership
+and preserves companion contexts. `origin_scope` remains provenance lineage
+and is not converted into relevance membership. `scope_resolution` remains in
+responses for old clients.
 
 ## Redaction Security Behavior
 
@@ -371,6 +451,16 @@ is restricted to authenticated local stdio. See the
 [admin capability matrix](security-and-privacy.md#admin-tools) before enabling
 them.
 
+`admin_consolidate` applies write authorization before its configured candidate
+limit. Its response reports `candidate_count` and `capped`; when `capped` is
+true, the preview or merge covers only the newest authorized candidates in that
+run and must not be interpreted as a complete scan. Broad consolidation still
+requires at least one active membership, constrains neighbor work to the
+authorized applicable candidate set before its per-candidate limit, and merges
+only memories with identical ordered direct membership profiles, including
+archived memberships and compatibility-primary order. Contextless memories
+never participate.
+
 Bulk `admin_reembed` applies the same per-memory write policy as single-ID
 re-embedding before filling its limit. Inaccessible rows remain unclaimed and
 their count is not returned. Automatic startup and provider-recovery
@@ -387,6 +477,7 @@ Admin inventory filters use the same agent-facing vocabulary as core tools:
 
 - `agent_label`: creator provenance label, useful for diagnostics but not
   authorization
+- `context`: governed multi-context applicability filter
 - `scope`: one explicit scope key, alias, or matcher-containing value
 - `scopes`: any-match list of scope keys, aliases, or matcher-containing values
 - `origin_scope`: optional historical origin scope filter for migrated or
@@ -426,5 +517,6 @@ Use `admin_migration_report` first. It reports:
 Then run `admin_migrate_metadata` with `dry_run: true` to preview a
 non-destructive pass. A real pass inserts missing metadata rows only.
 
-Legacy scopes are backfilled only when they exactly match a registered
-`scope_key`. Other legacy rows are classified as `inbox/unresolved`.
+Metadata scope caches are derived only from a memory's primary governed
+membership. Contextless legacy rows are classified as `inbox/unresolved`;
+registering a similarly named context does not invent membership.

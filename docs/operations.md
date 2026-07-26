@@ -303,21 +303,28 @@ hold backup ./localhold-2026-07-14.db --json
 `hold backup` may run while LocalHold is serving requests. It uses SQLite's
 online backup transaction to include committed WAL data, validates
 `integrity_check`, the complete managed schema, foreign keys, vector mappings,
-the on-disk schema version, and the stored embedding profile, then publishes a
-self-contained file without overwriting an existing path. New Unix backup files
+governed context definitions, memberships, grants, policies, relations, and
+context audit, plus the on-disk schema version and stored embedding profile,
+then publishes a self-contained file without overwriting an existing path. New Unix backup files
 use mode `0600`; Windows files inherit the destination directory's ACL. The
 destination directory must already exist.
 
-When startup encounters the `memory_v2_metadata` table written by the published
-beta releases, it first creates and verifies a self-contained
+When startup encounters a pre-v3 SQLite database, including the
+`memory_v2_metadata` table written by published beta releases, it first creates
+and verifies a self-contained
 `localhold.db.pre-upgrade-*.bak` beside the database. The backup includes
 committed WAL content and is retained whether migration succeeds or fails.
 Startup holds the SQLite writer lock from before that backup through legacy
 validation and migration, preventing another writer from changing the captured
 schema or data between those steps. If backup creation, permissions, or
 `quick_check` verification fails, startup stops before changing the legacy
-table. Keep this recovery copy until representative reads, scopes, audit
-entries, tombstones, metadata, and embedding checks pass.
+table. Keep this recovery copy until representative reads, governed contexts,
+compatibility scopes, audit entries, tombstones, metadata, and embedding checks
+pass. Repeated failed starts reuse the newest verified backup for the same
+source schema only while neither the database nor its WAL is newer than that
+copy; otherwise startup creates a fresh recovery copy. After validating a
+successful upgrade, operators may prune older `pre-upgrade` copies according to
+their normal backup-retention policy.
 
 Always validate a restore first:
 
@@ -364,6 +371,31 @@ Reports include the validated database schema version, embedding profile,
 memory and embedding counts, byte size, replacement state, and recovery path.
 These commands intentionally reject `database.backend = "postgres"`; use the
 PostgreSQL-native workflow below for that backend.
+
+## Context Governance Operations
+
+Use `hold ui` as the operator surface for context definitions, custom kinds,
+fingerprinted identities, aliases, hierarchy, grants, archive/reactivation,
+principal policy, operator ceilings/defaults, and anchor overrides. Agent tools
+can resolve contexts and create only what effective policy allows; they cannot
+create new kinds, change policy, modify grants, or reactivate archived
+identities.
+
+Operator ceiling/default edits require `hold ui --principal operator`.
+LocalHold treats that principal name as a local capability assertion; it is not
+a multi-user authentication boundary. Restrict database credentials and access
+to the operator process accordingly.
+
+New contexts are private to their owner. Granting a context lets another
+principal select it but does not grant access to memories. When several active
+anchors apply, allowed sets intersect, denies win, and conflicting scalar
+defaults return an ambiguity instead of choosing arbitrarily.
+
+Before archiving or changing context policy, use the TUI to inspect direct
+memberships and active grants. Archive is reversible and retains keys and
+identity fingerprints. Back up before large hierarchy or policy changes and
+verify `hold doctor`, a broad catalog, representative multi-context recalls,
+and context audit afterward.
 
 ## PostgreSQL Backend
 
@@ -423,7 +455,10 @@ For a reduced-privilege runtime:
 3. Grant a separate runtime role `USAGE` on the resolved schema and only the
    current LocalHold runtime table and sequence privileges. It needs the
    application DML privileges checked by `hold doctor`, including sequence
-   `USAGE` for audit IDs; it does not need schema `CREATE` or managed-table
+   `USAGE` for audit inserts, sequence `SELECT` for startup integrity
+   inspection, and `DELETE` on `contexts` and
+   `context_audit_events` so failed legacy compatibility writes can be
+   compensated safely; it does not need schema `CREATE` or managed-table
    ownership when migrations are disabled.
 4. Configure the service with the runtime credential and
    `auto_migrate = false`, then run `hold doctor` before serving traffic.

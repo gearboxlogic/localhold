@@ -1,17 +1,23 @@
 //! Application state and update logic for `hold ui`.
 
-use std::{collections::HashMap, fmt, future::Future, pin::Pin, sync::Arc};
+use std::{collections::HashSet, fmt, future::Future, pin::Pin, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use serde::Deserialize;
 use tokio::sync::{OnceCell, mpsc::UnboundedSender};
 
 use crate::{
+    context::{
+        ContextAnchorPolicy, ContextAnchorPolicyDraft, ContextAnchorPolicyRecord, ContextAuditDraft, ContextAuditEvent, ContextDefinitionPatch, ContextDescriptor, ContextGrant,
+        ContextId, ContextIdentity, ContextIdentityInput, ContextKind, ContextKindDefinition, ContextKindDraft, ContextKindPolicy, ContextKindPolicyDraft, ContextKindPolicyRecord,
+        ContextLifecycle, ContextPolicyLayer, ContextRecord, MAX_EFFECTIVE_CONTEXTS, OPERATOR_PRINCIPAL, evaluate_effective_context_policy, normalize_context_identity,
+    },
     engine::{LocalHoldEngine, SearchRequest},
     store::MemoryStore,
-    types::{AuditEntry, Memory, MemoryFilter, MemoryId, MemoryMetadata, QueryContext, ScopeDefinition, SearchMode, WriteOutcome},
+    types::{AuditEntry, Memory, MemoryFilter, MemoryId, MemoryMetadata, QueryContext, SearchMode, WriteOutcome},
     ui::{
-        editor::{EditDraft, ParsedEdit},
+        editor::{EditDraft, ParsedEdit, TextInput},
         theme::Theme,
     },
 };
@@ -19,8 +25,8 @@ use crate::{
 /// Which pane owns keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Focus {
-    /// The scope list on the left.
-    Scopes,
+    /// The context list on the left.
+    Contexts,
     /// The memory table on the right.
     Memories,
 }
@@ -40,6 +46,163 @@ pub(crate) enum Mode {
     ConfirmDelete,
     /// A dirty edit is awaiting discard confirmation.
     ConfirmDiscard,
+    /// Governed context administration is open.
+    ContextManager,
+    /// One Context Manager pane is being edited as JSON.
+    ContextManagerEdit,
+    /// A dirty Context Manager edit is awaiting discard confirmation.
+    ConfirmContextDiscard,
+}
+
+/// Context Manager panes. Definition facets remain separate so each edit has a
+/// small, reviewable replacement contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContextManagerPane {
+    Kinds,
+    Definition,
+    Identities,
+    Aliases,
+    Hierarchy,
+    Grants,
+    Lifecycle,
+    PrincipalPolicy,
+    OperatorPolicy,
+    AnchorOverride,
+}
+
+impl ContextManagerPane {
+    pub(crate) const ALL: [Self; 10] = [
+        Self::Kinds,
+        Self::Definition,
+        Self::Identities,
+        Self::Aliases,
+        Self::Hierarchy,
+        Self::Grants,
+        Self::Lifecycle,
+        Self::PrincipalPolicy,
+        Self::OperatorPolicy,
+        Self::AnchorOverride,
+    ];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Kinds => "KINDS",
+            Self::Definition => "DEFINITION",
+            Self::Identities => "IDENTITIES",
+            Self::Aliases => "ALIASES",
+            Self::Hierarchy => "HIERARCHY",
+            Self::Grants => "GRANTS",
+            Self::Lifecycle => "ARCHIVE / REACTIVATE",
+            Self::PrincipalPolicy => "PRINCIPAL POLICY",
+            Self::OperatorPolicy => "OPERATOR DEFAULTS",
+            Self::AnchorOverride => "ANCHOR OVERRIDE",
+        }
+    }
+
+    const fn next(self, backwards: bool) -> Self {
+        let index: usize = match self {
+            Self::Kinds => 0,
+            Self::Definition => 1,
+            Self::Identities => 2,
+            Self::Aliases => 3,
+            Self::Hierarchy => 4,
+            Self::Grants => 5,
+            Self::Lifecycle => 6,
+            Self::PrincipalPolicy => 7,
+            Self::OperatorPolicy => 8,
+            Self::AnchorOverride => 9,
+        };
+        let next = if backwards {
+            if index == 0 { Self::ALL.len().saturating_sub(1) } else { index.saturating_sub(1) }
+        } else if index.saturating_add(1) == Self::ALL.len() {
+            0
+        } else {
+            index.saturating_add(1)
+        };
+        Self::ALL[next]
+    }
+}
+
+/// Loaded state for one governed context.
+#[derive(Debug)]
+pub(crate) struct ContextManager {
+    pub record: ContextRecord,
+    pub kinds: Vec<ContextKindDefinition>,
+    pub grants: Vec<ContextGrant>,
+    pub policies: Vec<ContextKindPolicyRecord>,
+    pub anchor_policies: Vec<ContextAnchorPolicyRecord>,
+    pub audit: Vec<ContextAuditEvent>,
+    pub pane: ContextManagerPane,
+    pub scroll: u16,
+    pub edit: Option<ContextManagerEdit>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ContextPolicySnapshot {
+    kinds: Vec<ContextKindDefinition>,
+    kind_policies: Vec<ContextKindPolicyRecord>,
+    anchor_policies: Vec<ContextAnchorPolicyRecord>,
+}
+
+/// A JSON replacement draft for the active manager pane.
+#[derive(Debug)]
+pub(crate) struct ContextManagerEdit {
+    input: TextInput,
+    original: String,
+}
+
+impl ContextManagerEdit {
+    fn new(value: String) -> Self {
+        Self {
+            input: TextInput::new(value.clone()),
+            original: value,
+        }
+    }
+
+    pub(crate) fn dirty(&self) -> bool {
+        self.input.value != self.original
+    }
+
+    pub(crate) const fn input(&self) -> &TextInput {
+        &self.input
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContextKindEdit {
+    kind: ContextKind,
+    display_name: String,
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContextDefinitionEdit {
+    display_name: String,
+    description: Option<String>,
+    guidance: Option<String>,
+    resolver_hints: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContextIdentityEdit {
+    retain_fingerprints: Vec<String>,
+    #[serde(default)]
+    add: Vec<ContextIdentityInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContextHierarchyEdit {
+    parent_id: Option<ContextId>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContextLifecycleEdit {
+    lifecycle: ContextLifecycle,
 }
 
 /// Status line verb + message, in the CLI voice from `assets/brand/cli.md`.
@@ -62,15 +225,11 @@ pub(crate) struct Row {
     pub score: Option<f64>,
 }
 
-/// One visible, non-empty scope in the sidebar.
+/// One authorized governed context in the sidebar.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ScopeItem {
-    /// Exact persisted key used for filtering.
-    pub scope_key: String,
-    /// Compact human-readable label.
-    pub label: String,
-    /// Number of visible memories assigned to this exact scope.
-    pub count: u64,
+pub(crate) struct ContextItem {
+    /// Definition and safe resolver metadata.
+    pub record: ContextRecord,
 }
 
 /// State for the detail overlay.
@@ -82,6 +241,8 @@ pub(crate) struct Detail {
     pub metadata: Option<MemoryMetadata>,
     /// Its audit trail, newest first.
     pub audit: Vec<AuditEntry>,
+    /// Ordered direct governed memberships.
+    pub contexts: Vec<ContextDescriptor>,
     /// Vertical scroll offset for long content.
     pub scroll: u16,
 }
@@ -98,24 +259,24 @@ pub(crate) enum DataMsg {
         /// Generation stamp; stale responses are dropped.
         generation: u64,
     },
-    /// Authorized scope facets and optional registry definitions.
-    ScopeFacets {
-        /// Registered definitions used only to enrich labels.
-        definitions: Vec<ScopeDefinition>,
-        /// Visible counts by exact persisted scope key.
-        by_scope: Vec<(String, u64)>,
-        /// Total number of visible memories, including memories without a scope.
+    /// Authorized governed context catalog.
+    ContextCatalog {
+        /// Contexts visible to the TUI principal, including archived lineage.
+        records: Vec<ContextRecord>,
+        /// Policy inputs used to reproduce server-side descendant defaults.
+        policy: ContextPolicySnapshot,
+        /// Total number of governed visible memories in broad-search mode.
         total: u64,
-        /// Nonfatal registry-loading warning.
-        registry_warning: Option<String>,
-        /// Facet generation; stale responses are dropped.
+        /// Nonfatal catalog-loading warning.
+        warning: Option<String>,
+        /// Catalog generation; stale responses are dropped.
         generation: u64,
     },
-    /// Scope facet aggregation failed while row browsing remains available.
-    ScopeFacetsFailed {
+    /// Context catalog loading failed while row browsing remains available.
+    ContextCatalogFailed {
         /// Human-readable failure.
         message: String,
-        /// Facet generation; stale responses are dropped.
+        /// Catalog generation; stale responses are dropped.
         generation: u64,
     },
     /// An edit completed and the refreshed detail is available.
@@ -126,6 +287,8 @@ pub(crate) enum DataMsg {
         metadata: Option<MemoryMetadata>,
         /// Refreshed audit trail.
         audit: Vec<AuditEntry>,
+        /// Refreshed direct governed memberships.
+        contexts: Vec<ContextDescriptor>,
         /// Warning when the mutation committed but a detail refresh failed.
         refresh_warning: Option<String>,
         /// Mutation generation; stale responses are dropped.
@@ -224,6 +387,7 @@ where
 
 /// TUI application state. Rendering reads it; `on_event`/`on_data` mutate it.
 #[derive(Debug)]
+#[expect(clippy::struct_excessive_bools, reason = "independent TUI state flags represent selection, mutation, loading, and quit state")]
 pub(crate) struct App<S>
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
@@ -238,20 +402,31 @@ where
     pub principal: Option<String>,
     /// Stamp for in-flight data tasks; stale responses are dropped.
     pub generation: u64,
-    /// Stamp for in-flight scope facet tasks.
-    pub facet_generation: u64,
+    /// Stamp for in-flight context catalog tasks.
+    pub context_generation: u64,
     /// Resolved tincture palette.
     pub theme: Theme,
     /// Clock snapshot used for relative ages, refreshed with the data.
     pub now: DateTime<Utc>,
-    /// Visible, non-empty scopes; index 0 in the UI is the synthetic all entry.
-    pub scopes: Vec<ScopeItem>,
-    /// Total number of memories represented by the all entry, when available.
-    pub scope_total: Option<u64>,
-    /// Nonfatal scope-loading notice.
-    pub scope_notice: Option<String>,
-    /// Selected index into the scope pane (0 = all scopes).
-    pub scope_selected: usize,
+    /// Authorized contexts currently shown in the sidebar.
+    pub contexts: Vec<ContextItem>,
+    /// Complete authorized catalog, including archived lineage nodes hidden
+    /// from the default sidebar.
+    pub context_records: Vec<ContextRecord>,
+    /// Policy inputs paired with the current authorized context catalog.
+    pub context_policy: ContextPolicySnapshot,
+    /// Whether the context catalog includes archived records for management.
+    pub show_archived_contexts: bool,
+    /// Total number of governed memories represented by broad search.
+    pub context_total: Option<u64>,
+    /// Nonfatal context-loading notice.
+    pub context_notice: Option<String>,
+    /// Cursor index into the context pane (0 = broad authorized search).
+    pub context_cursor: usize,
+    /// Direct selected contexts in primary order.
+    pub selected_context_ids: Vec<ContextId>,
+    /// Whether selected parents include descendants.
+    pub include_descendants: bool,
     /// Rows currently shown in the memory table.
     pub rows: Vec<Row>,
     /// Selected index into `rows`.
@@ -270,6 +445,8 @@ where
     pub detail: Option<Detail>,
     /// Edit draft, while editing or confirming discard.
     pub edit: Option<EditDraft>,
+    /// Context Manager state, while administering a hovered context.
+    pub context_manager: Option<ContextManager>,
     /// Stamp for in-flight mutations; stale responses are dropped.
     pub operation_generation: u64,
     /// True while an edit or delete is in flight.
@@ -314,13 +491,18 @@ where
             data_tx,
             principal,
             generation: 0_u64,
-            facet_generation: 0_u64,
+            context_generation: 0_u64,
             theme,
             now,
-            scopes: Vec::new(),
-            scope_total: None,
-            scope_notice: None,
-            scope_selected: 0_usize,
+            contexts: Vec::new(),
+            context_records: Vec::new(),
+            context_policy: ContextPolicySnapshot::default(),
+            show_archived_contexts: false,
+            context_total: None,
+            context_notice: None,
+            context_cursor: 0_usize,
+            selected_context_ids: Vec::new(),
+            include_descendants: false,
             rows: Vec::new(),
             row_selected: 0_usize,
             focus: Focus::Memories,
@@ -330,6 +512,7 @@ where
             executed_mode: None,
             detail: None,
             edit: None,
+            context_manager: None,
             operation_generation: 0_u64,
             pending: false,
             notice: None,
@@ -344,19 +527,30 @@ where
         self.mutation_engine.shutdown().await;
     }
 
-    /// Kick off the first authorized scope facet and bounded memory listing.
+    /// Kick off the first authorized context catalog and bounded listing.
     pub(crate) async fn bootstrap(&mut self) {
-        let (definitions, stats) = tokio::join!(self.engine.list_scopes(), self.engine.count_memories(MemoryFilter::default(), self.ctx(), 0_usize),);
+        let principal = self.principal.as_deref().unwrap_or("anonymous");
+        let broad_filter = MemoryFilter {
+            context_ids: Some(Vec::new()),
+            ..MemoryFilter::default()
+        };
+        let (catalog, stats) = tokio::join!(load_context_catalog(&self.engine, principal), self.engine.count_memories(broad_filter, self.ctx(), 0_usize),);
         match stats {
             Ok(stats) => {
-                let (definitions, registry_warning) = match definitions {
-                    Ok(definitions) => (definitions, None),
-                    Err(error) => (Vec::new(), Some(format!("scope names unavailable; showing keys: {error}"))),
+                let (records, policy, warning) = match catalog {
+                    Ok((records, policy)) => (records, policy, None),
+                    Err(error) => (Vec::new(), ContextPolicySnapshot::default(), Some(format!("context catalog unavailable: {error}"))),
                 };
-                self.apply_scope_facets(definitions, stats.by_scope, stats.total, registry_warning);
+                self.apply_context_catalog(records, policy, Some(stats.total), warning);
             }
             Err(error) => {
-                self.scope_notice = Some(format!("scope counts unavailable: {error}"));
+                let warning = format!("governed memory count unavailable: {error}");
+                match catalog {
+                    Ok((records, policy)) => self.apply_context_catalog(records, policy, None, Some(warning)),
+                    Err(catalog_error) => {
+                        self.context_notice = Some(format!("{warning}; context catalog unavailable: {catalog_error}"));
+                    }
+                }
             }
         }
         self.refresh();
@@ -368,20 +562,110 @@ where
         }
     }
 
-    /// The scope key currently filtering the view, if any.
-    pub(crate) fn selected_scope(&self) -> Option<String> {
-        self.scope_selected
-            .checked_sub(1_usize)
-            .and_then(|index| self.scopes.get(index))
-            .map(|scope| scope.scope_key.clone())
+    /// The context currently under the sidebar cursor.
+    pub(crate) fn cursor_context(&self) -> Option<&ContextItem> {
+        self.context_cursor.checked_sub(1_usize).and_then(|index| self.contexts.get(index))
     }
 
-    fn filter(&self, limit: Option<usize>) -> MemoryFilter {
-        MemoryFilter {
-            scopes_any: self.selected_scope().map(|key| vec![key]),
+    /// Expand direct selections through ancestors and optional descendants.
+    pub(crate) fn effective_selected_context_ids(&self) -> Result<Vec<ContextId>, String> {
+        if self.selected_context_ids.len() > MAX_EFFECTIVE_CONTEXTS {
+            return Err(effective_context_limit_message());
+        }
+        let mut effective = self.selected_context_ids.clone();
+        let mut included = effective.iter().copied().collect::<HashSet<_>>();
+        for selected in &self.selected_context_ids {
+            let cursor = self.context_parent_id(*selected);
+            self.append_context_ancestors(cursor, &mut included, &mut effective)?;
+        }
+        let policy_includes_descendants = self.context_policy.kinds.iter().any(|definition| {
+            let policy = evaluate_effective_context_policy(
+                &definition.kind,
+                &self.context_policy.kinds,
+                &self.context_policy.kind_policies,
+                &self.context_policy.anchor_policies,
+                &self.context_records,
+                &effective,
+            );
+            self.selected_context_ids
+                .iter()
+                .filter_map(|id| self.context_records.iter().find(|record| record.context.id == *id))
+                .any(|record| record.context.kind == policy.kind)
+                && policy.include_descendants
+        });
+        if self.include_descendants || policy_includes_descendants {
+            self.append_context_descendants(&mut included, &mut effective)?;
+        }
+        Ok(effective)
+    }
+
+    fn context_parent_id(&self, context_id: ContextId) -> Option<ContextId> {
+        self.context_records
+            .iter()
+            .find(|record| record.context.id == context_id)
+            .and_then(|record| record.context.parent_id)
+    }
+
+    fn context_is_active(&self, context_id: ContextId) -> bool {
+        self.context_records
+            .iter()
+            .find(|record| record.context.id == context_id)
+            .is_some_and(|record| record.context.lifecycle == ContextLifecycle::Active)
+    }
+
+    fn append_context_ancestors(&self, mut cursor: Option<ContextId>, included: &mut HashSet<ContextId>, effective: &mut Vec<ContextId>) -> Result<(), String> {
+        let mut visited = HashSet::new();
+        while let Some(parent_id) = cursor {
+            if !visited.insert(parent_id) {
+                break;
+            }
+            if self.context_is_active(parent_id) && !included.contains(&parent_id) {
+                append_effective_context(parent_id, included, effective)?;
+            }
+            cursor = self.context_parent_id(parent_id);
+        }
+        Ok(())
+    }
+
+    fn has_selected_context_ancestor(&self, mut cursor: Option<ContextId>) -> bool {
+        let mut visited = HashSet::new();
+        while let Some(parent_id) = cursor {
+            if !visited.insert(parent_id) {
+                return false;
+            }
+            if self.selected_context_ids.contains(&parent_id) {
+                return true;
+            }
+            cursor = self.context_parent_id(parent_id);
+        }
+        false
+    }
+
+    fn append_context_descendants(&self, included: &mut HashSet<ContextId>, effective: &mut Vec<ContextId>) -> Result<(), String> {
+        for record in &self.context_records {
+            let context_id = record.context.id;
+            if record.context.lifecycle == ContextLifecycle::Active && !included.contains(&context_id) && self.has_selected_context_ancestor(record.context.parent_id) {
+                append_effective_context(context_id, included, effective)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn discard_context_manager_edit(&mut self) {
+        if let Some(manager) = self.context_manager.as_mut() {
+            manager.edit = None;
+        }
+    }
+
+    fn filter(&self, limit: Option<usize>) -> Result<MemoryFilter, String> {
+        let context_ids = self.effective_selected_context_ids()?;
+        let explicit_context_filter = !context_ids.is_empty();
+        Ok(MemoryFilter {
+            context_ids: Some(context_ids),
+            explicit_context_filter,
             limit,
             ..Default::default()
-        }
+        })
     }
 
     /// Re-run the visible listing or search under the current filter.
@@ -393,35 +677,40 @@ where
     }
 
     fn refresh_all(&mut self) {
-        self.refresh_scope_facets();
+        self.refresh_context_catalog();
         self.refresh();
     }
 
-    fn refresh_scope_facets(&mut self) {
-        self.facet_generation = self.facet_generation.saturating_add(1_u64);
-        let generation = self.facet_generation;
+    fn refresh_context_catalog(&mut self) {
+        self.context_generation = self.context_generation.saturating_add(1_u64);
+        let generation = self.context_generation;
         let engine = self.engine.clone();
         let tx = self.data_tx.clone();
         let ctx = self.ctx();
+        let principal = self.principal.clone().unwrap_or_else(|| "anonymous".into());
         #[expect(unused_results, reason = "JoinHandle intentionally dropped — the result arrives via the data channel")]
         tokio::spawn(async move {
-            let (definitions, stats) = tokio::join!(engine.list_scopes(), engine.count_memories(MemoryFilter::default(), ctx, 0_usize),);
+            let broad_filter = MemoryFilter {
+                context_ids: Some(Vec::new()),
+                ..MemoryFilter::default()
+            };
+            let (catalog, stats) = tokio::join!(load_context_catalog(&engine, &principal), engine.count_memories(broad_filter, ctx, 0_usize),);
             let msg = match stats {
                 Ok(stats) => {
-                    let (definitions, registry_warning) = match definitions {
-                        Ok(definitions) => (definitions, None),
-                        Err(error) => (Vec::new(), Some(format!("scope names unavailable; showing keys: {error}"))),
+                    let (records, policy, warning) = match catalog {
+                        Ok((records, policy)) => (records, policy, None),
+                        Err(error) => (Vec::new(), ContextPolicySnapshot::default(), Some(format!("context catalog unavailable: {error}"))),
                     };
-                    DataMsg::ScopeFacets {
-                        definitions,
-                        by_scope: stats.by_scope,
+                    DataMsg::ContextCatalog {
+                        records,
+                        policy,
                         total: stats.total,
-                        registry_warning,
+                        warning,
                         generation,
                     }
                 }
-                Err(error) => DataMsg::ScopeFacetsFailed {
-                    message: format!("scope counts unavailable: {error}"),
+                Err(error) => DataMsg::ContextCatalogFailed {
+                    message: format!("governed memory count unavailable: {error}"),
                     generation,
                 },
             };
@@ -429,26 +718,42 @@ where
         });
     }
 
-    fn apply_scope_facets(&mut self, definitions: Vec<ScopeDefinition>, by_scope: Vec<(String, u64)>, total: u64, registry_warning: Option<String>) {
-        let selected = self.selected_scope();
-        self.scopes = build_scope_items(definitions, by_scope);
-        self.scope_total = Some(total);
-        self.scope_notice = registry_warning;
-        self.scope_selected = selected
-            .as_ref()
-            .and_then(|key| self.scopes.iter().position(|scope| &scope.scope_key == key))
-            .map_or(0_usize, |index| index.saturating_add(1_usize));
-        if selected.is_some() && self.scope_selected == 0_usize {
-            self.row_selected = 0_usize;
-            self.refresh();
-        }
+    fn apply_context_catalog(&mut self, records: Vec<ContextRecord>, policy: ContextPolicySnapshot, total: Option<u64>, warning: Option<String>) {
+        let cursor_id = self.cursor_context().map(|item| item.record.context.id);
+        self.context_records = records;
+        self.context_policy = policy;
+        self.contexts = self
+            .context_records
+            .iter()
+            .filter(|record| self.show_archived_contexts || record.context.lifecycle == ContextLifecycle::Active)
+            .cloned()
+            .map(|record| ContextItem { record })
+            .collect();
+        self.context_total = total;
+        self.context_notice = warning;
+        let available = self
+            .contexts
+            .iter()
+            .filter(|item| item.record.context.lifecycle == ContextLifecycle::Active)
+            .map(|item| item.record.context.id)
+            .collect::<HashSet<_>>();
+        self.selected_context_ids.retain(|id| available.contains(id));
+        self.context_cursor = cursor_id
+            .and_then(|id| self.contexts.iter().position(|item| item.record.context.id == id))
+            .map_or(0, |index| index.saturating_add(1));
     }
 
     fn spawn_list(&self) {
         let engine = self.engine.clone();
         let tx = self.data_tx.clone();
         let generation = self.generation;
-        let filter = self.filter(Some(200_usize));
+        let filter = match self.filter(Some(200_usize)) {
+            Ok(filter) => filter,
+            Err(message) => {
+                drop(tx.send(DataMsg::Failed { message, generation }));
+                return;
+            }
+        };
         let ctx = self.ctx();
         #[expect(unused_results, reason = "JoinHandle intentionally dropped — the result arrives via the data channel")]
         tokio::spawn(async move {
@@ -471,10 +776,17 @@ where
         let engine = self.engine.clone();
         let tx = self.data_tx.clone();
         let generation = self.generation;
+        let filter = match self.filter(None) {
+            Ok(filter) => filter,
+            Err(message) => {
+                drop(tx.send(DataMsg::Failed { message, generation }));
+                return;
+            }
+        };
         let request = SearchRequest {
             query: self.query.clone(),
             limit: 50_usize,
-            filter: self.filter(None),
+            filter,
             ctx: self.ctx(),
             max_distance: None,
             keywords: None,
@@ -513,7 +825,18 @@ where
         self.status = self.results_status();
     }
 
-    fn apply_updated_memory(&mut self, memory: Memory, metadata: Option<MemoryMetadata>, mut audit: Vec<AuditEntry>, refresh_warning: Option<String>) {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a completed memory refresh supplies the memory, metadata, audit, contexts, and any warning as one state transition"
+    )]
+    fn apply_updated_memory(
+        &mut self,
+        memory: Memory,
+        metadata: Option<MemoryMetadata>,
+        mut audit: Vec<AuditEntry>,
+        contexts: Vec<ContextDescriptor>,
+        refresh_warning: Option<String>,
+    ) {
         self.pending = false;
         let refresh_results = !self.query.is_empty();
         let memory = memory.sanitize_for_wire();
@@ -529,6 +852,7 @@ where
             memory,
             metadata,
             audit,
+            contexts,
             scroll: 0_u16,
         });
         self.edit = None;
@@ -542,7 +866,7 @@ where
         }
     }
 
-    fn remove_memory_from_view(&mut self, id: MemoryId, status: Status, refresh_scope_facets: bool) {
+    fn remove_memory_from_view(&mut self, id: MemoryId, status: Status, refresh_context_catalog: bool) {
         self.pending = false;
         self.rows.retain(|row| row.memory.id != id);
         self.row_selected = self.row_selected.min(self.rows.len().saturating_sub(1_usize));
@@ -550,25 +874,29 @@ where
         self.edit = None;
         self.mode = Mode::Browse;
         self.status = status;
-        if refresh_scope_facets {
-            self.refresh_scope_facets();
+        if refresh_context_catalog {
+            self.refresh_context_catalog();
         }
     }
 
     /// Fold a completed data or mutation task into the state.
     pub(crate) fn on_data(&mut self, msg: DataMsg) {
         match msg {
-            DataMsg::ScopeFacets {
-                definitions,
-                by_scope,
+            DataMsg::ContextCatalog {
+                records,
+                policy,
                 total,
-                registry_warning,
+                warning,
                 generation,
-            } if generation == self.facet_generation => {
-                self.apply_scope_facets(definitions, by_scope, total, registry_warning);
+            } if generation == self.context_generation => {
+                let previous_effective = self.effective_selected_context_ids().ok();
+                self.apply_context_catalog(records, policy, Some(total), warning);
+                if previous_effective != self.effective_selected_context_ids().ok() {
+                    self.refresh();
+                }
             }
-            DataMsg::ScopeFacetsFailed { message, generation } if generation == self.facet_generation => {
-                self.scope_notice = Some(message);
+            DataMsg::ContextCatalogFailed { message, generation } if generation == self.context_generation => {
+                self.context_notice = Some(message);
             }
             DataMsg::Rows { rows, mode, generation } if generation == self.generation => {
                 self.apply_rows(rows, mode);
@@ -582,10 +910,11 @@ where
                 memory,
                 metadata,
                 audit,
+                contexts,
                 refresh_warning,
                 generation,
             } if generation == self.operation_generation => {
-                self.apply_updated_memory(*memory, metadata, audit, refresh_warning);
+                self.apply_updated_memory(*memory, metadata, audit, contexts, refresh_warning);
             }
             DataMsg::UpdatedInvisible { id, generation } if generation == self.operation_generation => {
                 self.remove_memory_from_view(id, Status::Held("memory revised and is no longer visible".into()), true);
@@ -606,8 +935,8 @@ where
                     self.mode = Mode::Detail;
                 }
             }
-            DataMsg::ScopeFacets { .. }
-            | DataMsg::ScopeFacetsFailed { .. }
+            DataMsg::ContextCatalog { .. }
+            | DataMsg::ContextCatalogFailed { .. }
             | DataMsg::Rows { .. }
             | DataMsg::Failed { .. }
             | DataMsg::Updated { .. }
@@ -621,15 +950,19 @@ where
 
     fn results_status(&self) -> Status {
         let count = self.rows.len();
-        let scope = self.selected_scope().map_or_else(String::new, |key| format!(" · scope {key}"));
+        let context = if self.selected_context_ids.is_empty() {
+            " \u{b7} broad authorized search".to_owned()
+        } else {
+            format!(" \u{b7} {} direct contexts", self.selected_context_ids.len())
+        };
         if self.query.is_empty() {
-            return browse_results_status(count, &scope);
+            return browse_results_status(count, &context);
         }
         let mode = self.executed_mode.map_or_else(String::new, |mode| format!(" ({mode})"));
         if count == 0_usize {
-            return Status::Note(format!("nothing found{mode}{scope}"));
+            return Status::Note(format!("nothing found{mode}{context}"));
         }
-        Status::Held(format!("{count} results{mode}{scope}"))
+        Status::Held(format!("{count} results{mode}{context}"))
     }
 
     fn request_quit(&mut self) {
@@ -656,6 +989,9 @@ where
                 Mode::Edit => self.key_edit(key),
                 Mode::ConfirmDelete => self.key_confirm_delete(key),
                 Mode::ConfirmDiscard => self.key_confirm_discard(key),
+                Mode::ContextManager => self.key_context_manager(key).await,
+                Mode::ContextManagerEdit => self.key_context_manager_edit(key).await,
+                Mode::ConfirmContextDiscard => self.key_confirm_context_discard(key),
             }
         }
     }
@@ -664,8 +1000,8 @@ where
     async fn key_browse(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') => self.request_quit(),
-            KeyCode::Tab | KeyCode::BackTab => self.focus = if self.focus == Focus::Scopes { Focus::Memories } else { Focus::Scopes },
-            KeyCode::Char('h') | KeyCode::Left => self.focus = Focus::Scopes,
+            KeyCode::Tab | KeyCode::BackTab => self.focus = if self.focus == Focus::Contexts { Focus::Memories } else { Focus::Contexts },
+            KeyCode::Char('h') | KeyCode::Left => self.focus = Focus::Contexts,
             KeyCode::Char('l') | KeyCode::Right => self.focus = Focus::Memories,
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(true),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(false),
@@ -674,6 +1010,20 @@ where
             KeyCode::Char('/') => self.mode = Mode::Search,
             KeyCode::Char('m') => self.cycle_mode(),
             KeyCode::Char('r') => self.refresh_all(),
+            KeyCode::Char(' ') if self.focus == Focus::Contexts => self.toggle_cursor_context().await,
+            KeyCode::Char('x') if self.focus == Focus::Contexts => {
+                self.selected_context_ids.clear();
+                self.row_selected = 0;
+                self.refresh();
+            }
+            KeyCode::Char('D') if self.focus == Focus::Contexts => {
+                self.toggle_context_descendants().await;
+            }
+            KeyCode::Char('a') if self.focus == Focus::Contexts => {
+                self.show_archived_contexts = !self.show_archived_contexts;
+                self.refresh_context_catalog();
+            }
+            KeyCode::Char('c') if self.focus == Focus::Contexts => self.open_context_manager().await,
             KeyCode::Esc => {
                 if !self.query.is_empty() {
                     self.query.clear();
@@ -789,9 +1139,185 @@ where
         }
     }
 
+    #[expect(clippy::wildcard_enum_match_arm, reason = "KeyCode is non-exhaustive upstream; unmapped keys are intentionally ignored")]
+    async fn key_context_manager(&mut self, key: KeyEvent) {
+        let Some(manager) = self.context_manager.as_mut() else {
+            self.mode = Mode::Browse;
+            return;
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.context_manager = None;
+                self.mode = Mode::Browse;
+            }
+            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+                manager.pane = manager.pane.next(false);
+                manager.scroll = 0;
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+                manager.pane = manager.pane.next(true);
+                manager.scroll = 0;
+            }
+            KeyCode::Char('j') | KeyCode::Down => manager.scroll = manager.scroll.saturating_add(1),
+            KeyCode::Char('k') | KeyCode::Up => manager.scroll = manager.scroll.saturating_sub(1),
+            KeyCode::Char('e') => self.begin_context_manager_edit(),
+            KeyCode::Char('r') => self.reload_context_manager().await,
+            _other => {}
+        }
+    }
+
+    #[expect(clippy::wildcard_enum_match_arm, reason = "KeyCode is non-exhaustive upstream; unmapped keys are intentionally ignored")]
+    async fn key_context_manager_edit(&mut self, key: KeyEvent) {
+        if self.pending {
+            return;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+            self.save_context_manager_edit().await;
+            return;
+        }
+        if key.code == KeyCode::Esc {
+            let dirty = self
+                .context_manager
+                .as_ref()
+                .and_then(|manager| manager.edit.as_ref())
+                .is_some_and(ContextManagerEdit::dirty);
+            if dirty {
+                self.mode = Mode::ConfirmContextDiscard;
+            } else {
+                self.discard_context_manager_edit();
+                self.mode = Mode::ContextManager;
+            }
+            return;
+        }
+        let Some(edit) = self.context_manager.as_mut().and_then(|manager| manager.edit.as_mut()) else {
+            self.mode = Mode::ContextManager;
+            return;
+        };
+        match key.code {
+            KeyCode::Enter => edit.input.insert('\n'),
+            KeyCode::Backspace => edit.input.backspace(),
+            KeyCode::Delete => edit.input.delete(),
+            KeyCode::Left => edit.input.left(),
+            KeyCode::Right => edit.input.right(),
+            KeyCode::Home => edit.input.home(),
+            KeyCode::End => edit.input.end(),
+            KeyCode::Up => edit.input.up(),
+            KeyCode::Down => edit.input.down(),
+            KeyCode::Char(ch) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => edit.input.insert(ch),
+            _other => {}
+        }
+    }
+
+    #[expect(clippy::wildcard_enum_match_arm, reason = "KeyCode is non-exhaustive upstream; unmapped keys are intentionally ignored")]
+    fn key_confirm_context_discard(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('y') => {
+                if let Some(manager) = self.context_manager.as_mut() {
+                    manager.edit = None;
+                }
+                self.mode = Mode::ContextManager;
+            }
+            KeyCode::Char('n') | KeyCode::Esc => self.mode = Mode::ContextManagerEdit,
+            _other => {}
+        }
+    }
+
+    async fn open_context_manager(&mut self) {
+        let Some(item) = self.cursor_context() else {
+            self.status = Status::Note("choose a context before opening its manager".into());
+            return;
+        };
+        let id = item.record.context.id;
+        let principal = self.principal.clone().unwrap_or_else(|| "anonymous".into());
+        match load_context_manager(self.engine.store(), id, &principal, ContextManagerPane::Definition).await {
+            Ok(manager) => {
+                self.context_manager = Some(manager);
+                self.mode = Mode::ContextManager;
+            }
+            Err(error) => self.status = Status::NotHeld(format!("context manager unavailable: {error}")),
+        }
+    }
+
+    fn begin_context_manager_edit(&mut self) {
+        let Some(principal) = self.principal.as_deref() else {
+            self.status = Status::NotHeld("context editing requires a configured principal".into());
+            return;
+        };
+        if self
+            .context_manager
+            .as_ref()
+            .is_some_and(|manager| matches!(manager.pane, ContextManagerPane::Kinds | ContextManagerPane::OperatorPolicy))
+            && principal != OPERATOR_PRINCIPAL
+        {
+            self.status = Status::NotHeld(format!("operator context controls require --principal {OPERATOR_PRINCIPAL}"));
+            return;
+        }
+        let Some(manager) = self.context_manager.as_mut() else { return };
+        let value = context_manager_edit_value(manager);
+        manager.edit = Some(ContextManagerEdit::new(value));
+        self.mode = Mode::ContextManagerEdit;
+    }
+
+    async fn reload_context_manager(&mut self) {
+        let Some(manager) = self.context_manager.as_ref() else { return };
+        let id = manager.record.context.id;
+        let pane = manager.pane;
+        let principal = self.principal.clone().unwrap_or_else(|| "anonymous".into());
+        match load_context_manager(self.engine.store(), id, &principal, pane).await {
+            Ok(manager) => {
+                self.context_manager = Some(manager);
+                self.status = Status::Held("context manager refreshed".into());
+            }
+            Err(error) => self.status = Status::NotHeld(format!("context manager refresh failed: {error}")),
+        }
+    }
+
+    async fn save_context_manager_edit(&mut self) {
+        let Some(principal) = self.principal.clone() else {
+            self.status = Status::NotHeld("context editing requires a configured principal".into());
+            self.mode = Mode::ContextManager;
+            return;
+        };
+        let Some(manager) = self.context_manager.as_ref() else { return };
+        let Some(edit) = manager.edit.as_ref() else { return };
+        let context_id = manager.record.context.id;
+        let pane = manager.pane;
+        let value = edit.input.value.clone();
+        self.pending = true;
+        let result = match self.mutation_engine.get().await {
+            Ok(engine) => apply_context_manager_edit(engine.store(), manager, pane, &value, &principal).await,
+            Err(error) => Err(error),
+        };
+        self.pending = false;
+        match result {
+            Ok(()) => {
+                let previous_pane = pane;
+                match load_context_manager(self.engine.store(), context_id, &principal, previous_pane).await {
+                    Ok(manager) => {
+                        let remains_selectable = manager.record.context.lifecycle == ContextLifecycle::Active;
+                        self.selected_context_ids.retain(|selected| remains_selectable || *selected != context_id);
+                        self.context_manager = Some(manager);
+                        self.mode = Mode::ContextManager;
+                        self.status = Status::Held(format!("{} updated", previous_pane.label().to_ascii_lowercase()));
+                        self.refresh_all();
+                    }
+                    Err(error) => {
+                        self.context_manager = None;
+                        self.mode = Mode::Browse;
+                        self.status = Status::NotHeld(format!("context updated, but refresh failed: {error}"));
+                        self.refresh_all();
+                    }
+                }
+            }
+            Err(error) => {
+                self.status = Status::NotHeld(error);
+            }
+        }
+    }
+
     async fn open_or_focus(&mut self) {
         match self.focus {
-            Focus::Scopes => self.focus = Focus::Memories,
+            Focus::Contexts => self.focus = Focus::Memories,
             Focus::Memories => self.open_detail().await,
         }
     }
@@ -813,10 +1339,12 @@ where
                     redact_audit(&mut audit);
                 }
                 let metadata = if memory.was_redacted { None } else { self.load_detail_metadata(&id).await };
+                let contexts = if memory.was_redacted { Vec::new() } else { self.load_detail_contexts(&id).await };
                 self.detail = Some(Detail {
                     memory,
                     metadata,
                     audit,
+                    contexts,
                     scroll: 0_u16,
                 });
                 self.mode = Mode::Detail;
@@ -836,6 +1364,17 @@ where
         }
     }
 
+    async fn load_detail_contexts(&mut self, id: &MemoryId) -> Vec<ContextDescriptor> {
+        let principal = self.principal.as_deref().unwrap_or("anonymous");
+        match self.engine.store().get_memory_contexts(id, principal).await {
+            Ok(contexts) => contexts.iter().map(|membership| ContextDescriptor::from(&membership.context)).collect(),
+            Err(error) => {
+                self.status = Status::NotHeld(format!("contexts unavailable: {error}"));
+                Vec::new()
+            }
+        }
+    }
+
     fn begin_edit(&mut self) {
         if self.pending {
             return;
@@ -849,7 +1388,7 @@ where
             self.status = Status::NotHeld("this principal cannot modify the selected memory".into());
             return;
         }
-        self.edit = Some(EditDraft::new(&detail.memory, detail.metadata.as_ref()));
+        self.edit = Some(EditDraft::new(&detail.memory, detail.metadata.as_ref(), &detail.contexts));
         self.mode = Mode::Edit;
         self.status = Status::Note("editing memory".into());
     }
@@ -880,7 +1419,11 @@ where
         };
         let Some(detail) = self.detail.as_ref() else { return };
         let Some(edit) = self.edit.as_mut() else { return };
-        let ParsedEdit { update, metadata_patch } = match edit.parse() {
+        let ParsedEdit {
+            update,
+            metadata_patch,
+            context_ids,
+        } = match edit.parse() {
             Ok(parsed) => parsed,
             Err(error) => {
                 edit.field = error.field;
@@ -888,7 +1431,11 @@ where
                 return;
             }
         };
-        let parsed = ParsedEdit { update, metadata_patch };
+        let parsed = ParsedEdit {
+            update,
+            metadata_patch,
+            context_ids,
+        };
         if parsed.is_empty() {
             self.edit = None;
             self.mode = Mode::Detail;
@@ -910,7 +1457,7 @@ where
         tokio::spawn(async move {
             let msg = match mutation_engine.get().await {
                 Ok(engine) => match engine
-                    .update_memory_if_unmodified_with_metadata(id, expected_revision, parsed.update, parsed.metadata_patch, &principal)
+                    .update_memory_if_unmodified_with_metadata_contexts(id, expected_revision, parsed.update, parsed.metadata_patch, parsed.context_ids, &principal)
                     .await
                 {
                     Ok(outcome) => match outcome.outcome {
@@ -972,6 +1519,108 @@ where
         });
     }
 
+    async fn toggle_cursor_context(&mut self) {
+        let Some(context_id) = self.cursor_context().map(|item| item.record.context.id) else {
+            self.selected_context_ids.clear();
+            self.row_selected = 0;
+            self.refresh();
+            return;
+        };
+        if self.cursor_context().is_some_and(|item| item.record.context.lifecycle == ContextLifecycle::Archived) {
+            self.status = Status::Note("archived contexts can be managed or reactivated, but not selected".into());
+            return;
+        }
+        if let Some(index) = self.selected_context_ids.iter().position(|selected| *selected == context_id) {
+            let _removed = self.selected_context_ids.remove(index);
+        } else {
+            let mut proposed = self.selected_context_ids.clone();
+            proposed.push(context_id);
+            match self.context_selection_denial(&proposed, self.include_descendants).await {
+                Ok(Some(message)) => {
+                    self.status = Status::NotHeld(message);
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.status = Status::NotHeld(format!("context policy evaluation failed: {error}"));
+                    return;
+                }
+            }
+            self.selected_context_ids.push(context_id);
+        }
+        self.row_selected = 0;
+        self.refresh();
+    }
+
+    async fn toggle_context_descendants(&mut self) {
+        let proposed = !self.include_descendants;
+        if !self.selected_context_ids.is_empty() {
+            match self.context_selection_denial(&self.selected_context_ids, proposed).await {
+                Ok(Some(message)) => {
+                    self.status = Status::NotHeld(message);
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.status = Status::NotHeld(format!("context policy evaluation failed: {error}"));
+                    return;
+                }
+            }
+        }
+        self.include_descendants = proposed;
+        self.row_selected = 0;
+        self.refresh();
+    }
+
+    async fn context_selection_denial(&self, direct_ids: &[ContextId], requested_descendants: bool) -> Result<Option<String>, crate::error::EngineError> {
+        let principal = self.principal.as_deref().unwrap_or("anonymous");
+        let store = self.engine.store();
+        let (initial_effective, kinds, kind_policies, anchor_policies) = tokio::try_join!(
+            store.expand_context_selection(direct_ids, principal, false),
+            store.list_context_kinds(),
+            store.list_context_kind_policies(principal),
+            store.list_context_anchor_policies(principal),
+        )?;
+        let direct_kinds = direct_ids
+            .iter()
+            .filter_map(|id| self.context_records.iter().find(|record| record.context.id == *id))
+            .map(|record| record.context.kind.clone())
+            .collect::<HashSet<_>>();
+        let initial_effective_ids = initial_effective.iter().map(|context| context.id).collect::<Vec<_>>();
+        let initial_policies = kinds
+            .iter()
+            .map(|definition| evaluate_effective_context_policy(&definition.kind, &kinds, &kind_policies, &anchor_policies, &self.context_records, &initial_effective_ids))
+            .collect::<Vec<_>>();
+        let include_descendants = requested_descendants || initial_policies.iter().any(|policy| direct_kinds.contains(&policy.kind) && policy.include_descendants);
+        let effective = if include_descendants {
+            store.expand_context_selection(direct_ids, principal, true).await?
+        } else {
+            initial_effective
+        };
+        let effective_ids = effective.iter().map(|context| context.id).collect::<Vec<_>>();
+        let effective_kinds = effective.iter().map(|context| context.kind.clone()).collect::<HashSet<_>>();
+        let policies = kinds
+            .iter()
+            .map(|definition| evaluate_effective_context_policy(&definition.kind, &kinds, &kind_policies, &anchor_policies, &self.context_records, &effective_ids))
+            .collect::<Vec<_>>();
+        if let Some(policy) = policies.iter().find(|policy| !policy.ambiguities.is_empty()) {
+            return Ok(Some(format!("effective policy for {} is ambiguous", policy.kind)));
+        }
+        if let Some(policy) = policies.iter().find(|policy| effective_kinds.contains(&policy.kind) && !policy.allowed) {
+            return Ok(Some(format!("effective policy denies context kind {}", policy.kind)));
+        }
+        for policy in policies.iter().filter(|policy| effective_kinds.contains(&policy.kind)) {
+            if let Some(allowed_companions) = &policy.allowed_companion_kinds
+                && let Some(disallowed) = effective_kinds
+                    .iter()
+                    .find(|candidate_kind| *candidate_kind != &policy.kind && !allowed_companions.contains(candidate_kind))
+            {
+                return Ok(Some(format!("effective {} policy does not allow companion kind {disallowed}", policy.kind)));
+            }
+        }
+        Ok(None)
+    }
+
     fn move_selection(&mut self, down: bool) {
         match self.focus {
             Focus::Memories => {
@@ -982,35 +1631,24 @@ where
                     self.row_selected.saturating_sub(1_usize)
                 };
             }
-            Focus::Scopes => {
-                let last = self.scopes.len();
+            Focus::Contexts => {
+                let last = self.contexts.len();
                 let next = if down {
-                    self.scope_selected.saturating_add(1_usize).min(last)
+                    self.context_cursor.saturating_add(1_usize).min(last)
                 } else {
-                    self.scope_selected.saturating_sub(1_usize)
+                    self.context_cursor.saturating_sub(1_usize)
                 };
-                if next != self.scope_selected {
-                    self.scope_selected = next;
-                    self.row_selected = 0_usize;
-                    self.refresh();
-                }
+                self.context_cursor = next;
             }
         }
     }
 
-    fn jump_selection(&mut self, top: bool) {
+    const fn jump_selection(&mut self, top: bool) {
         match self.focus {
             Focus::Memories => {
                 self.row_selected = if top { 0_usize } else { self.rows.len().saturating_sub(1_usize) };
             }
-            Focus::Scopes => {
-                let next = if top { 0_usize } else { self.scopes.len() };
-                if next != self.scope_selected {
-                    self.scope_selected = next;
-                    self.row_selected = 0_usize;
-                    self.refresh();
-                }
-            }
+            Focus::Contexts => self.context_cursor = if top { 0_usize } else { self.contexts.len() },
         }
     }
 
@@ -1038,63 +1676,329 @@ fn browse_results_status(count: usize, scope: &str) -> Status {
     Status::Note(format!("nothing held{scope}"))
 }
 
-fn build_scope_items(definitions: Vec<ScopeDefinition>, by_scope: Vec<(String, u64)>) -> Vec<ScopeItem> {
-    let display_names = definitions
-        .into_iter()
-        .filter_map(|definition| {
-            let display_name = definition.display_name.trim();
-            (!display_name.is_empty()).then(|| (definition.scope_key, display_name.to_owned()))
-        })
-        .collect::<HashMap<_, _>>();
-    let keys = by_scope.iter().filter(|(_, count)| *count > 0_u64).map(|(scope, _)| scope.clone()).collect::<Vec<_>>();
-    let raw_keys = keys.iter().filter(|scope| !display_names.contains_key(*scope)).map(String::as_str).collect::<Vec<_>>();
-
-    let mut items = by_scope
-        .into_iter()
-        .filter(|(_, count)| *count > 0_u64)
-        .map(|(scope_key, count)| {
-            let label = display_names.get(&scope_key).cloned().unwrap_or_else(|| shortest_unique_scope_label(&scope_key, &raw_keys));
-            ScopeItem { scope_key, label, count }
-        })
-        .collect::<Vec<_>>();
-
-    let mut label_counts = HashMap::new();
-    for item in &items {
-        let count = label_counts.entry(item.label.to_lowercase()).or_insert(0_usize);
-        *count = count.saturating_add(1_usize);
-    }
-    let all_keys = keys.iter().map(String::as_str).collect::<Vec<_>>();
-    for item in &mut items {
-        if label_counts.get(&item.label.to_lowercase()).copied().unwrap_or_default() > 1_usize {
-            let suffix = shortest_unique_scope_label(&item.scope_key, &all_keys);
-            item.label = format!("{} · {suffix}", item.label);
+async fn load_context_records<S>(engine: &LocalHoldEngine<S>, principal: &str, include_archived: bool) -> Result<Vec<ContextRecord>, crate::error::EngineError>
+where
+    S: MemoryStore + Clone + fmt::Debug + 'static,
+{
+    let mut records = Vec::new();
+    loop {
+        let page = engine.store().list_context_records(principal, include_archived, records.len(), 500).await?;
+        let page_len = page.len();
+        records.extend(page);
+        if page_len < 500 {
+            break;
         }
     }
-    items.sort_by(|left, right| {
-        left.label
-            .to_lowercase()
-            .cmp(&right.label.to_lowercase())
-            .then_with(|| left.scope_key.cmp(&right.scope_key))
-    });
-    items
+    Ok(records)
 }
 
-fn shortest_unique_scope_label(scope: &str, peers: &[&str]) -> String {
-    let segments = scope.split(['/', '\\']).filter(|segment| !segment.is_empty()).collect::<Vec<_>>();
-    for depth in 1_usize..=segments.len() {
-        let candidate = segments[segments.len().saturating_sub(depth)..].join("/");
-        let matches = peers
-            .iter()
-            .filter(|peer| {
-                let peer_segments = peer.split(['/', '\\']).filter(|segment| !segment.is_empty()).collect::<Vec<_>>();
-                peer_segments.len() >= depth && peer_segments[peer_segments.len().saturating_sub(depth)..].join("/").eq_ignore_ascii_case(&candidate)
-            })
-            .count();
-        if matches == 1_usize {
-            return candidate;
+async fn load_context_catalog<S>(engine: &LocalHoldEngine<S>, principal: &str) -> Result<(Vec<ContextRecord>, ContextPolicySnapshot), crate::error::EngineError>
+where
+    S: MemoryStore + Clone + fmt::Debug + 'static,
+{
+    let store = engine.store();
+    let (records, kinds, kind_policies, anchor_policies) = tokio::try_join!(
+        load_context_records(engine, principal, true),
+        async { store.list_context_kinds().await.map_err(crate::error::EngineError::from) },
+        async { store.list_context_kind_policies(principal).await.map_err(crate::error::EngineError::from) },
+        async { store.list_context_anchor_policies(principal).await.map_err(crate::error::EngineError::from) },
+    )?;
+    Ok((records, ContextPolicySnapshot {
+        kinds,
+        kind_policies,
+        anchor_policies,
+    }))
+}
+
+async fn load_context_manager<S>(store: &S, context_id: ContextId, principal: &str, pane: ContextManagerPane) -> Result<ContextManager, String>
+where
+    S: MemoryStore + Clone + fmt::Debug + 'static,
+{
+    let mut records = Vec::new();
+    loop {
+        let batch = store.list_context_records(principal, true, records.len(), 500).await.map_err(|error| error.to_string())?;
+        let page_len = batch.len();
+        records.extend(batch);
+        if page_len < 500 {
+            break;
         }
     }
-    scope.to_owned()
+    let record = records
+        .into_iter()
+        .find(|record| record.context.id == context_id)
+        .ok_or_else(|| format!("context {context_id} is no longer visible"))?;
+    let (kinds, grants, policies, anchor_policies, audit) = tokio::try_join!(
+        store.list_context_kinds(),
+        store.list_context_grants(&context_id, principal),
+        store.list_context_kind_policies(principal),
+        store.list_context_anchor_policies(principal),
+        store.query_context_audit(&context_id, principal, 50),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(ContextManager {
+        record,
+        kinds,
+        grants,
+        policies,
+        anchor_policies,
+        audit,
+        pane,
+        scroll: 0,
+        edit: None,
+    })
+}
+
+pub(crate) fn context_manager_edit_value(manager: &ContextManager) -> String {
+    let context = &manager.record.context;
+    let value = match manager.pane {
+        ContextManagerPane::Kinds => {
+            let definition = manager.kinds.iter().find(|definition| definition.kind == context.kind);
+            serde_json::json!({
+                "kind": context.kind,
+                "display_name": definition.map_or(context.kind.as_str(), |definition| definition.display_name.as_str()),
+                "enabled": definition.is_none_or(|definition| definition.enabled),
+            })
+        }
+        ContextManagerPane::Definition => serde_json::json!({
+            "display_name": context.display_name,
+            "description": context.description,
+            "guidance": context.guidance,
+            "resolver_hints": manager.record.hints,
+        }),
+        ContextManagerPane::Identities => serde_json::json!({
+            "retain_fingerprints": manager.record.identities.iter().map(|identity| identity.fingerprint.as_str()).collect::<Vec<_>>(),
+            "add": Vec::<ContextIdentityInput>::new(),
+        }),
+        ContextManagerPane::Aliases => serde_json::json!(manager.record.aliases),
+        ContextManagerPane::Hierarchy => serde_json::json!({ "parent_id": context.parent_id }),
+        ContextManagerPane::Grants => {
+            serde_json::json!(manager.grants.iter().map(|grant| grant.grantee_principal.as_str()).collect::<Vec<_>>())
+        }
+        ContextManagerPane::Lifecycle => serde_json::json!({ "lifecycle": context.lifecycle }),
+        ContextManagerPane::PrincipalPolicy => serde_json::to_value(
+            manager
+                .policies
+                .iter()
+                .find(|record| record.layer == ContextPolicyLayer::Principal && record.kind == context.kind)
+                .map_or_else(ContextKindPolicy::default, |record| record.policy.clone()),
+        )
+        .unwrap_or_else(|_| serde_json::json!({})),
+        ContextManagerPane::OperatorPolicy => serde_json::to_value(
+            manager
+                .policies
+                .iter()
+                .find(|record| record.layer == ContextPolicyLayer::Operator && record.kind == context.kind)
+                .map_or_else(ContextKindPolicy::default, |record| record.policy.clone()),
+        )
+        .unwrap_or_else(|_| serde_json::json!({})),
+        ContextManagerPane::AnchorOverride => serde_json::to_value(
+            manager
+                .anchor_policies
+                .iter()
+                .find(|record| record.anchor_context_id == context.id)
+                .map_or_else(ContextAnchorPolicy::default, |record| record.policy.clone()),
+        )
+        .unwrap_or_else(|_| serde_json::json!({ "kinds": {} })),
+    };
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())
+}
+
+fn context_definition_patch(
+    manager: &ContextManager,
+    definition: Option<ContextDefinitionEdit>,
+    aliases: Option<Vec<String>>,
+    identities: Option<Vec<ContextIdentity>>,
+) -> ContextDefinitionPatch {
+    let context = &manager.record.context;
+    let definition = definition.unwrap_or_else(|| ContextDefinitionEdit {
+        display_name: context.display_name.clone(),
+        description: context.description.clone(),
+        guidance: context.guidance.clone(),
+        resolver_hints: manager.record.hints.clone(),
+    });
+    ContextDefinitionPatch {
+        display_name: definition.display_name,
+        description: definition.description,
+        guidance: definition.guidance,
+        aliases: aliases.unwrap_or_else(|| manager.record.aliases.clone()),
+        identities: identities.unwrap_or_else(|| manager.record.identities.clone()),
+        resolver_hints: definition.resolver_hints,
+    }
+}
+
+fn context_manager_audit(principal: &str, context_id: ContextId, action: &str) -> ContextAuditDraft {
+    ContextAuditDraft {
+        actor_principal: principal.into(),
+        action: action.into(),
+        context_id: Some(context_id),
+        memory_id: None,
+        details: None,
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the Context Manager dispatches ten typed JSON panes through their corresponding atomic store operations"
+)]
+async fn apply_context_manager_edit<S>(store: &S, manager: &ContextManager, pane: ContextManagerPane, value: &str, principal: &str) -> Result<(), String>
+where
+    S: MemoryStore + Clone + fmt::Debug + 'static,
+{
+    let context = &manager.record.context;
+    let parse_error = |error: serde_json::Error| format!("invalid {} JSON: {error}", pane.label().to_ascii_lowercase());
+    match pane {
+        ContextManagerPane::Kinds => {
+            let edit: ContextKindEdit = serde_json::from_str(value).map_err(parse_error)?;
+            store
+                .upsert_context_kind(
+                    &ContextKindDraft {
+                        kind: edit.kind,
+                        display_name: edit.display_name,
+                        enabled: edit.enabled,
+                    },
+                    principal,
+                    &context_manager_audit(principal, context.id, "tui_context_kind_upserted"),
+                )
+                .await
+        }
+        ContextManagerPane::Definition => {
+            let edit: ContextDefinitionEdit = serde_json::from_str(value).map_err(parse_error)?;
+            store
+                .update_context_definition(
+                    &context.id,
+                    &context_definition_patch(manager, Some(edit), None, None),
+                    principal,
+                    &context_manager_audit(principal, context.id, "tui_context_definition_updated"),
+                )
+                .await
+        }
+        ContextManagerPane::Identities => {
+            let edit: ContextIdentityEdit = serde_json::from_str(value).map_err(parse_error)?;
+            let requested = edit.retain_fingerprints.into_iter().collect::<HashSet<_>>();
+            if requested.len() > manager.record.identities.len() {
+                return Err("retained identity fingerprints must be unique".into());
+            }
+            let mut identities = manager
+                .record
+                .identities
+                .iter()
+                .filter(|identity| requested.contains(&identity.fingerprint))
+                .cloned()
+                .collect::<Vec<_>>();
+            if identities.len() != requested.len() {
+                return Err("every retained identity fingerprint must reference an existing canonical identity".into());
+            }
+            for input in edit.add {
+                identities.push(normalize_context_identity(&input).map_err(|error| format!("invalid identity: {error}"))?);
+            }
+            let mut seen = HashSet::new();
+            if identities
+                .iter()
+                .any(|identity| !seen.insert((identity.scheme.clone(), identity.namespace.clone(), identity.fingerprint.clone())))
+            {
+                return Err("identity entries must be unique".into());
+            }
+            store
+                .update_context_definition(
+                    &context.id,
+                    &context_definition_patch(manager, None, None, Some(identities)),
+                    principal,
+                    &context_manager_audit(principal, context.id, "tui_context_identities_updated"),
+                )
+                .await
+        }
+        ContextManagerPane::Aliases => {
+            let aliases: Vec<String> = serde_json::from_str(value).map_err(parse_error)?;
+            store
+                .update_context_definition(
+                    &context.id,
+                    &context_definition_patch(manager, None, Some(aliases), None),
+                    principal,
+                    &context_manager_audit(principal, context.id, "tui_context_aliases_updated"),
+                )
+                .await
+        }
+        ContextManagerPane::Hierarchy => {
+            let edit: ContextHierarchyEdit = serde_json::from_str(value).map_err(parse_error)?;
+            store
+                .set_context_parent(
+                    &context.id,
+                    edit.parent_id.as_ref(),
+                    principal,
+                    &context_manager_audit(principal, context.id, "tui_context_parent_updated"),
+                )
+                .await
+        }
+        ContextManagerPane::Grants => {
+            let grantees: Vec<String> = serde_json::from_str(value).map_err(parse_error)?;
+            store
+                .replace_context_grants(
+                    &context.id,
+                    &grantees,
+                    principal,
+                    &context_manager_audit(principal, context.id, "tui_context_grants_replaced"),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+        ContextManagerPane::Lifecycle => {
+            let edit: ContextLifecycleEdit = serde_json::from_str(value).map_err(parse_error)?;
+            store
+                .set_context_lifecycle(
+                    &context.id,
+                    edit.lifecycle,
+                    principal,
+                    &context_manager_audit(principal, context.id, "tui_context_lifecycle_updated"),
+                )
+                .await
+        }
+        ContextManagerPane::PrincipalPolicy => {
+            let policy: ContextKindPolicy = serde_json::from_str(value).map_err(parse_error)?;
+            store
+                .upsert_context_kind_policy(
+                    &ContextKindPolicyDraft {
+                        layer: ContextPolicyLayer::Principal,
+                        principal: principal.into(),
+                        kind: context.kind.clone(),
+                        policy,
+                    },
+                    principal,
+                    &context_manager_audit(principal, context.id, "tui_principal_context_policy_updated"),
+                )
+                .await
+        }
+        ContextManagerPane::OperatorPolicy => {
+            let policy: ContextKindPolicy = serde_json::from_str(value).map_err(parse_error)?;
+            store
+                .upsert_context_kind_policy(
+                    &ContextKindPolicyDraft {
+                        layer: ContextPolicyLayer::Operator,
+                        principal: String::new(),
+                        kind: context.kind.clone(),
+                        policy,
+                    },
+                    principal,
+                    &context_manager_audit(principal, context.id, "tui_operator_context_policy_updated"),
+                )
+                .await
+        }
+        ContextManagerPane::AnchorOverride => {
+            let policy: ContextAnchorPolicy = serde_json::from_str(value).map_err(parse_error)?;
+            store
+                .upsert_context_anchor_policy(
+                    &ContextAnchorPolicyDraft {
+                        anchor_context_id: context.id,
+                        principal: principal.into(),
+                        policy,
+                    },
+                    principal,
+                    &context_manager_audit(principal, context.id, "tui_context_anchor_policy_updated"),
+                )
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())
 }
 
 async fn refresh_updated_detail<S>(engine: &LocalHoldEngine<S>, id: MemoryId, principal: &str, generation: u64) -> DataMsg
@@ -1111,11 +2015,16 @@ where
                 Ok(audit) => (audit, None),
                 Err(error) => (Vec::new(), Some(format!("history refresh failed: {error}"))),
             };
-            let refresh_warning = [metadata_warning, audit_warning].into_iter().flatten().collect::<Vec<_>>().join("; ");
+            let (contexts, context_warning) = match engine.store().get_memory_contexts(&id, principal).await {
+                Ok(contexts) => (contexts.iter().map(|membership| ContextDescriptor::from(&membership.context)).collect(), None),
+                Err(error) => (Vec::new(), Some(format!("context refresh failed: {error}"))),
+            };
+            let refresh_warning = [metadata_warning, audit_warning, context_warning].into_iter().flatten().collect::<Vec<_>>().join("; ");
             DataMsg::Updated {
                 memory: Box::new(memory),
                 metadata,
                 audit,
+                contexts,
                 refresh_warning: (!refresh_warning.is_empty()).then_some(refresh_warning),
                 generation,
             }
@@ -1142,11 +2051,27 @@ fn redact_audit(audit: &mut [AuditEntry]) {
     }
 }
 
+fn append_effective_context(context_id: ContextId, included: &mut HashSet<ContextId>, effective: &mut Vec<ContextId>) -> Result<(), String> {
+    if effective.len() >= MAX_EFFECTIVE_CONTEXTS {
+        return Err(effective_context_limit_message());
+    }
+    let _inserted = included.insert(context_id);
+    effective.push(context_id);
+    Ok(())
+}
+
+fn effective_context_limit_message() -> String {
+    format!("context selection expands beyond the maximum of {MAX_EFFECTIVE_CONTEXTS} effective contexts; narrow the selection or disable descendants")
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        collections::HashSet,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use ratatui::{
@@ -1158,18 +2083,28 @@ mod tests {
     };
     use tokio::sync::mpsc;
 
-    use super::{App, DataMsg, Focus, Mode, MutationEngineFactory, Row, Status, build_scope_items};
+    use super::{App, ContextManagerPane, ContextPolicySnapshot, DataMsg, Focus, MAX_EFFECTIVE_CONTEXTS, Mode, MutationEngineFactory, Row, Status, append_effective_context};
     use crate::{
         config::{LimitsConfig, SearchConfig},
+        context::{ContextAuditDraft, ContextCreateDraft, ContextId, ContextKind, ContextKindPolicy, ContextKindPolicyDraft, ContextLifecycle, ContextPolicyLayer},
         embedding::{BoxFuture, EmbeddingProvider},
         engine::LocalHoldEngine,
         error::EmbeddingError,
-        store::{MemoryReader as _, MemoryWriter as _, SqliteStore},
-        types::{AccessPolicy, Memory, MemoryUpdate, Provenance, RedactableField, ScopeDefinition, WriteOutcome},
-        ui::{theme::Theme, view},
+        store::{ContextReader as _, ContextWriter as _, MemoryReader as _, MemoryWriter as _, SqliteStore},
+        types::{AccessPolicy, Memory, MemoryId, MemoryUpdate, Provenance, RedactableField, WriteOutcome, normalize_context_key},
+        ui::{editor::TextInput, theme::Theme, view},
     };
 
     struct FixedEmbedding;
+
+    #[test]
+    fn local_context_expansion_stops_at_the_effective_ceiling() {
+        let mut effective = std::iter::repeat_with(ContextId::new).take(MAX_EFFECTIVE_CONTEXTS).collect::<Vec<_>>();
+        let mut included = effective.iter().copied().collect::<HashSet<_>>();
+        let error = append_effective_context(ContextId::new(), &mut included, &mut effective).unwrap_err();
+        assert!(error.contains("maximum"));
+        assert_eq!(effective.len(), MAX_EFFECTIVE_CONTEXTS);
+    }
 
     impl EmbeddingProvider for FixedEmbedding {
         fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, EmbeddingError>> {
@@ -1210,13 +2145,45 @@ mod tests {
 
     async fn app_with_memories(contents: &[&str]) -> (App<SqliteStore>, mpsc::UnboundedReceiver<DataMsg>) {
         let store = SqliteStore::in_memory().unwrap();
+        let context_id = create_test_context(&store, "project/test", "Test project").await;
         for content in contents {
-            let memory = Memory::new_for_test((*content).to_owned(), Vec::new(), Provenance::default(), AccessPolicy::Public);
-            let _id = store.store(&memory, None).await.unwrap();
+            let memory = Memory::new_for_test(
+                (*content).to_owned(),
+                Vec::new(),
+                Provenance::new_for_test(Some("operator".into()), Some("project/test".into()), None),
+                AccessPolicy::Public,
+            );
+            let id = store.store(&memory, None).await.unwrap();
+            let _outcome = store
+                .replace_memory_contexts(&id, &[context_id], "operator", &ContextAuditDraft {
+                    actor_principal: "operator".into(),
+                    action: "test_membership".into(),
+                    context_id: None,
+                    memory_id: Some(id),
+                    details: None,
+                })
+                .await
+                .unwrap();
         }
         let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
         let (tx, rx) = mpsc::unbounded_channel();
-        (App::new(engine, Theme::detect(), None, tx), rx)
+        (App::new(engine, Theme::detect(), Some("operator".into()), tx), rx)
+    }
+
+    async fn store_governed_test_memory(store: &SqliteStore, memory: &Memory) -> MemoryId {
+        let context_id = create_test_context(store, "project/test", "Test project").await;
+        let id = store.store(memory, None).await.unwrap();
+        let _outcome = store
+            .replace_memory_contexts(&id, &[context_id], "operator", &ContextAuditDraft {
+                actor_principal: "operator".into(),
+                action: "test_membership".into(),
+                context_id: None,
+                memory_id: Some(id),
+                details: None,
+            })
+            .await
+            .unwrap();
+        id
     }
 
     fn press(code: KeyCode) -> Event {
@@ -1323,6 +2290,7 @@ mod tests {
             memory: Box::new(memory),
             metadata: None,
             audit: Vec::new(),
+            contexts: Vec::new(),
             refresh_warning: Some("metadata refresh failed: test fault".into()),
             generation: app.operation_generation,
         });
@@ -1385,7 +2353,7 @@ mod tests {
         memory.provenance.source_agent = Some("owner".into());
         memory.updated_at += chrono::Duration::days(7_i64);
         memory.confidence = crate::types::Confidence::new(0.2_f64);
-        memory.superseded_by = Some(crate::types::MemoryId::new());
+        memory.superseded_by = Some(MemoryId::new());
         memory.access_policy = AccessPolicy::Redacted {
             visible_fields: vec![RedactableField::Content],
         };
@@ -1502,7 +2470,7 @@ mod tests {
         let fresh = app.rows.len();
         app.loading = true;
         app.requested_mode = Some(crate::types::SearchMode::Text);
-        let mut terminal = Terminal::new(TestBackend::new(100_u16, 24_u16)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(140_u16, 24_u16)).unwrap();
         let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
         assert!(rendered_text(terminal.backend().buffer()).contains("mode text"));
 
@@ -1612,7 +2580,7 @@ mod tests {
     async fn browsing_does_not_initialize_the_mutation_engine() {
         let store = SqliteStore::in_memory().unwrap();
         let memory = Memory::new_for_test("lazy writer".into(), Vec::new(), Provenance::default(), AccessPolicy::Public);
-        let _id = store.store(&memory, None).await.unwrap();
+        let _id = store_governed_test_memory(&store, &memory).await;
         let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
         let writer_engine = engine.clone();
         let opens = Arc::new(AtomicUsize::new(0_usize));
@@ -1642,7 +2610,7 @@ mod tests {
     async fn embedding_failure_saves_content_without_a_stale_vector() {
         let store = SqliteStore::in_memory().unwrap();
         let memory = Memory::new_for_test("original".into(), Vec::new(), Provenance::default(), AccessPolicy::Public);
-        let id = store.store(&memory, None).await.unwrap();
+        let id = store_governed_test_memory(&store, &memory).await;
         let engine = LocalHoldEngine::new(store, Arc::new(FailingEmbedding), LimitsConfig::default(), SearchConfig::default());
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut app = App::new(engine, Theme::detect(), Some("operator".into()), tx);
@@ -1689,7 +2657,7 @@ mod tests {
     async fn metadata_only_edit_does_not_initialize_embedding() {
         let store = SqliteStore::in_memory().unwrap();
         let memory = Memory::new_for_test("unchanged".into(), Vec::new(), Provenance::default(), AccessPolicy::Public);
-        let id = store.store(&memory, None).await.unwrap();
+        let id = store_governed_test_memory(&store, &memory).await;
         let calls = Arc::new(AtomicUsize::new(0_usize));
         let engine = LocalHoldEngine::new(
             store,
@@ -1765,7 +2733,7 @@ mod tests {
     async fn stale_content_is_not_sent_to_embedding_provider() {
         let store = SqliteStore::in_memory().unwrap();
         let memory = Memory::new_for_test("original".into(), Vec::new(), Provenance::default(), AccessPolicy::Public);
-        let id = store.store(&memory, None).await.unwrap();
+        let id = store_governed_test_memory(&store, &memory).await;
         let calls = Arc::new(AtomicUsize::new(0_usize));
         let engine = LocalHoldEngine::new(
             store,
@@ -1796,112 +2764,486 @@ mod tests {
         assert!(app.edit.as_ref().unwrap().dirty());
     }
 
-    #[test]
-    fn scope_items_use_registry_names_unique_suffixes_and_nonzero_counts() {
-        let definitions = vec![ScopeDefinition {
-            scope_key: "org/registered".into(),
-            display_name: "Registered Project".into(),
-            description: None,
-            aliases: Vec::new(),
-            matchers: Vec::new(),
-            parent: None,
-            related: Vec::new(),
-        }];
-        let items = build_scope_items(definitions, vec![
-            ("/worktrees/alpha/project".into(), 2_u64),
-            ("/worktrees/beta/project".into(), 1_u64),
-            ("org/registered".into(), 3_u64),
-            ("unused".into(), 0_u64),
-        ]);
-
-        assert_eq!(items.iter().map(|item| (item.label.as_str(), item.count)).collect::<Vec<_>>(), vec![
-            ("alpha/project", 2_u64),
-            ("beta/project", 1_u64),
-            ("Registered Project", 3_u64)
-        ]);
+    async fn create_test_context(store: &SqliteStore, key: &str, display_name: &str) -> ContextId {
+        let id = ContextId::new();
+        let _created = store
+            .create_context(
+                &ContextCreateDraft {
+                    id,
+                    kind: ContextKind::new(ContextKind::PROJECT).unwrap(),
+                    key: key.into(),
+                    normalized_key: normalize_context_key(key),
+                    display_name: display_name.into(),
+                    description: None,
+                    owner_principal: "operator".into(),
+                    guidance: None,
+                    parent_id: None,
+                    aliases: Vec::new(),
+                    identities: Vec::new(),
+                    resolver_hints: Vec::new(),
+                    confirm_distinct_from: Vec::new(),
+                    enforce_fuzzy_confirmation: false,
+                    frozen: false,
+                },
+                &ContextAuditDraft {
+                    actor_principal: "operator".into(),
+                    action: "test_context_created".into(),
+                    context_id: Some(id),
+                    memory_id: None,
+                    details: None,
+                },
+            )
+            .await
+            .unwrap();
+        id
     }
 
     #[tokio::test]
-    async fn stale_facets_are_dropped_and_missing_selection_falls_back_to_all() {
-        let (mut app, mut rx) = app_with_memories(&["visible"]).await;
-        app.facet_generation = 2_u64;
-        app.on_data(DataMsg::ScopeFacets {
-            definitions: Vec::new(),
-            by_scope: vec![("stale".into(), 9_u64)],
+    async fn stale_context_catalog_is_dropped() {
+        let (mut app, _rx) = app_with_memories(&["visible"]).await;
+        app.context_generation = 2_u64;
+        app.on_data(DataMsg::ContextCatalog {
+            records: Vec::new(),
+            policy: ContextPolicySnapshot::default(),
             total: 9_u64,
-            registry_warning: None,
+            warning: None,
             generation: 1_u64,
         });
-        assert!(app.scopes.is_empty());
-        assert!(app.scope_total.is_none());
-
-        app.scopes = build_scope_items(Vec::new(), vec![("gone".into(), 1_u64)]);
-        app.scope_selected = 1_usize;
-        app.on_data(DataMsg::ScopeFacets {
-            definitions: Vec::new(),
-            by_scope: vec![("replacement".into(), 1_u64)],
-            total: 1_u64,
-            registry_warning: None,
-            generation: 2_u64,
-        });
-
-        assert_eq!(app.scope_selected, 0_usize);
-        assert!(app.loading);
-        assert!(matches!(rx.recv().await, Some(DataMsg::Rows { .. })));
+        assert!(app.contexts.is_empty());
+        assert!(app.context_total.is_none());
     }
 
     #[tokio::test]
-    async fn scope_sidebar_lists_unregistered_scopes_and_filters_live() {
+    async fn bootstrap_keeps_context_catalog_when_broad_count_fails() {
         let store = SqliteStore::in_memory().unwrap();
-        for (content, scope) in [("alpha memory", "/worktrees/alpha/project"), ("beta memory", "/worktrees/beta/project")] {
-            let memory = Memory::new_for_test(content.into(), Vec::new(), Provenance::new_for_test(None, Some(scope.into()), None), AccessPolicy::Public);
-            let _id = store.store(&memory, None).await.unwrap();
+        let context_id = create_test_context(&store, "project/catalog-survives", "Catalog survives").await;
+        store
+            .with_conn(|connection| {
+                connection.pragma_update(None, "foreign_keys", false)?;
+                let _dropped = connection.execute("DROP TABLE memories", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(engine, Theme::detect(), Some("operator".into()), tx);
+
+        app.bootstrap().await;
+
+        assert_eq!(app.contexts.len(), 1_usize);
+        assert_eq!(app.contexts[0].record.context.id, context_id);
+        assert!(app.context_total.is_none());
+        assert!(app.context_notice.as_deref().is_some_and(|notice| notice.contains("count unavailable")));
+    }
+
+    #[tokio::test]
+    async fn context_sidebar_supports_multi_selection_and_broad_search() {
+        let store = SqliteStore::in_memory().unwrap();
+        let alpha = create_test_context(&store, "project/alpha", "Alpha").await;
+        let beta = create_test_context(&store, "project/beta", "Beta").await;
+        for (content, key, context_id) in [("alpha memory", "project/alpha", alpha), ("beta memory", "project/beta", beta)] {
+            let memory = Memory::new_for_test(
+                content.into(),
+                Vec::new(),
+                Provenance::new_for_test(Some("operator".into()), Some(key.into()), None),
+                AccessPolicy::Public,
+            );
+            let id = store.store(&memory, None).await.unwrap();
+            let _outcome = store
+                .replace_memory_contexts(&id, &[context_id], "operator", &ContextAuditDraft {
+                    actor_principal: "operator".into(),
+                    action: "test_membership".into(),
+                    context_id: None,
+                    memory_id: Some(id),
+                    details: None,
+                })
+                .await
+                .unwrap();
         }
         let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut app = App::new(engine, Theme::detect(), None, tx);
+        let mut app = App::new(engine, Theme::detect(), Some("operator".into()), tx);
 
         app.bootstrap().await;
-        assert_eq!(app.scope_total, Some(2_u64));
-        assert_eq!(app.scopes.iter().map(|scope| scope.label.as_str()).collect::<Vec<_>>(), vec![
-            "alpha/project",
-            "beta/project"
+        assert_eq!(app.context_total, Some(2_u64));
+        assert_eq!(app.contexts.iter().map(|item| item.record.context.display_name.as_str()).collect::<Vec<_>>(), vec![
+            "Alpha", "Beta"
         ]);
         app.on_data(rx.recv().await.unwrap());
         assert_eq!(app.rows.len(), 2_usize);
 
         app.on_event(press(KeyCode::Left)).await;
-        assert_eq!(app.focus, Focus::Scopes);
+        assert_eq!(app.focus, Focus::Contexts);
         app.on_event(press(KeyCode::Down)).await;
+        app.on_event(press(KeyCode::Char(' '))).await;
         app.on_data(rx.recv().await.unwrap());
-
-        assert_eq!(app.selected_scope().as_deref(), Some("/worktrees/alpha/project"));
+        assert_eq!(app.selected_context_ids, vec![alpha]);
+        assert!(app.filter(None).unwrap().explicit_context_filter);
         assert_eq!(app.rows.len(), 1_usize);
         assert_eq!(app.rows[0].memory.content, "alpha memory");
+
+        app.on_event(press(KeyCode::End)).await;
+        app.on_event(press(KeyCode::Char(' '))).await;
+        app.on_data(rx.recv().await.unwrap());
+        assert_eq!(app.selected_context_ids, vec![alpha, beta]);
+        assert_eq!(app.rows.len(), 2_usize);
 
         let mut terminal = Terminal::new(TestBackend::new(100_u16, 24_u16)).unwrap();
         let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
         let buffer = terminal.backend().buffer();
         let rendered = rendered_text(buffer);
-        assert!(rendered.contains("alpha/project"));
-        assert!(rendered.contains("j/k filter"));
-        assert_text_color(buffer, "alpha/project", app.theme.azure);
-        app.on_event(press(KeyCode::End)).await;
-        app.on_data(rx.recv().await.unwrap());
-        assert_eq!(app.selected_scope().as_deref(), Some("/worktrees/beta/project"));
-        assert_eq!(app.rows[0].memory.content, "beta memory");
+        assert!(rendered.contains("CONTEXTS"));
+        assert!(rendered.contains("[x] Alpha"));
+        assert!(rendered.contains("[x] Beta"));
 
-        app.on_event(press(KeyCode::BackTab)).await;
-        assert_eq!(app.focus, Focus::Memories);
-        app.on_event(press(KeyCode::Char('/'))).await;
-        for ch in "beta".chars() {
-            app.on_event(press(KeyCode::Char(ch))).await;
-        }
-        app.on_event(press(KeyCode::Enter)).await;
+        app.on_event(press(KeyCode::Char('x'))).await;
         app.on_data(rx.recv().await.unwrap());
-        assert_eq!(app.selected_scope().as_deref(), Some("/worktrees/beta/project"));
-        assert_eq!(app.rows.len(), 1_usize);
-        assert_eq!(app.rows[0].memory.content, "beta memory");
+        assert!(app.selected_context_ids.is_empty());
+        assert_eq!(app.rows.len(), 2_usize);
+    }
+
+    #[tokio::test]
+    async fn context_sidebar_traverses_archived_lineage_without_selecting_archived_nodes() {
+        let store = SqliteStore::in_memory().unwrap();
+        let grandparent = create_test_context(&store, "project/lineage-grandparent", "Lineage grandparent").await;
+        let archived_parent = create_test_context(&store, "project/lineage-parent", "Lineage parent").await;
+        let child = create_test_context(&store, "project/lineage-child", "Lineage child").await;
+        store
+            .set_context_parent(
+                &archived_parent,
+                Some(&grandparent),
+                "operator",
+                &ContextAuditDraft::new("operator", "test_lineage_parent_set").with_context(archived_parent),
+            )
+            .await
+            .unwrap();
+        store
+            .set_context_parent(
+                &child,
+                Some(&archived_parent),
+                "operator",
+                &ContextAuditDraft::new("operator", "test_lineage_child_set").with_context(child),
+            )
+            .await
+            .unwrap();
+        store
+            .set_context_lifecycle(
+                &archived_parent,
+                ContextLifecycle::Archived,
+                "operator",
+                &ContextAuditDraft::new("operator", "test_lineage_parent_archived").with_context(archived_parent),
+            )
+            .await
+            .unwrap();
+        let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(engine, Theme::detect(), Some("operator".into()), tx);
+
+        app.bootstrap().await;
+        assert!(app.contexts.iter().all(|item| item.record.context.id != archived_parent));
+        app.focus = Focus::Contexts;
+        app.context_cursor = app.contexts.iter().position(|item| item.record.context.id == child).unwrap().saturating_add(1);
+        app.on_event(press(KeyCode::Char(' '))).await;
+
+        assert_eq!(app.selected_context_ids, vec![child]);
+        let effective = app.effective_selected_context_ids().unwrap().into_iter().collect::<HashSet<_>>();
+        assert!(effective.contains(&child));
+        assert!(effective.contains(&grandparent));
+        assert!(!effective.contains(&archived_parent));
+    }
+
+    #[tokio::test]
+    async fn context_sidebar_applies_policy_default_descendant_expansion() {
+        let store = SqliteStore::in_memory().unwrap();
+        let parent_id = create_test_context(&store, "project/policy-descendant-parent", "Policy descendant parent").await;
+        let child_id = ContextId::new();
+        let mut child = ContextCreateDraft::private(
+            child_id,
+            ContextKind::new(ContextKind::PROJECT).unwrap(),
+            "project/policy-descendant-child",
+            "Policy descendant child",
+            "operator",
+        );
+        child.parent_id = Some(parent_id);
+        let _child = store
+            .create_context(&child, &ContextAuditDraft::new("operator", "test_policy_descendant_child_created").with_context(child_id))
+            .await
+            .unwrap();
+        store
+            .upsert_context_kind_policy(
+                &ContextKindPolicyDraft::new(
+                    ContextPolicyLayer::Principal,
+                    "operator",
+                    ContextKind::new(ContextKind::PROJECT).unwrap(),
+                    ContextKindPolicy {
+                        include_descendants: Some(true),
+                        ..ContextKindPolicy::default()
+                    },
+                ),
+                "operator",
+                &ContextAuditDraft::new("operator", "test_policy_descendant_default"),
+            )
+            .await
+            .unwrap();
+        let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(engine, Theme::detect(), Some("operator".into()), tx);
+
+        app.bootstrap().await;
+        app.focus = Focus::Contexts;
+        app.context_cursor = app.contexts.iter().position(|item| item.record.context.id == parent_id).unwrap().saturating_add(1);
+        app.on_event(press(KeyCode::Char(' '))).await;
+        let effective = app.effective_selected_context_ids().unwrap();
+
+        assert!(!app.include_descendants, "the manual descendant toggle remains independent of the policy default");
+        assert!(effective.contains(&parent_id));
+        assert!(effective.contains(&child_id), "policy-default descendants must match MCP selection semantics");
+    }
+
+    #[tokio::test]
+    async fn context_sidebar_rejects_effectively_denied_kind() {
+        let store = SqliteStore::in_memory().unwrap();
+        let context_id = create_test_context(&store, "project/policy-denied", "Policy denied").await;
+        store
+            .upsert_context_kind_policy(
+                &ContextKindPolicyDraft::new(ContextPolicyLayer::Operator, "", ContextKind::new(ContextKind::PROJECT).unwrap(), ContextKindPolicy {
+                    allowed: Some(false),
+                    ..ContextKindPolicy::default()
+                }),
+                "operator",
+                &ContextAuditDraft::new("operator", "test_project_selection_denied"),
+            )
+            .await
+            .unwrap();
+        let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(engine, Theme::detect(), Some("operator".into()), tx);
+
+        app.bootstrap().await;
+        app.focus = Focus::Contexts;
+        app.context_cursor = app.contexts.iter().position(|item| item.record.context.id == context_id).unwrap().saturating_add(1);
+        app.on_event(press(KeyCode::Char(' '))).await;
+
+        assert!(app.selected_context_ids.is_empty());
+        assert!(matches!(&app.status, Status::NotHeld(message) if message.contains("denies context kind project")));
+    }
+
+    #[tokio::test]
+    async fn context_sidebar_rejects_denied_descendant_expansion() {
+        let store = SqliteStore::in_memory().unwrap();
+        let project_id = create_test_context(&store, "project/descendant-policy", "Descendant policy parent").await;
+        let domain_id = ContextId::new();
+        let mut domain = ContextCreateDraft::private(
+            domain_id,
+            ContextKind::new(ContextKind::DOMAIN).unwrap(),
+            "domain/descendant-policy",
+            "Descendant policy child",
+            "operator",
+        );
+        domain.parent_id = Some(project_id);
+        let _domain = store
+            .create_context(&domain, &ContextAuditDraft::new("operator", "test_descendant_policy_child_created").with_context(domain_id))
+            .await
+            .unwrap();
+        store
+            .upsert_context_kind_policy(
+                &ContextKindPolicyDraft::new(ContextPolicyLayer::Operator, "", ContextKind::new(ContextKind::DOMAIN).unwrap(), ContextKindPolicy {
+                    allowed: Some(false),
+                    ..ContextKindPolicy::default()
+                }),
+                "operator",
+                &ContextAuditDraft::new("operator", "test_descendant_policy_denied"),
+            )
+            .await
+            .unwrap();
+        let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(engine, Theme::detect(), Some("operator".into()), tx);
+
+        app.bootstrap().await;
+        app.focus = Focus::Contexts;
+        app.context_cursor = app.contexts.iter().position(|item| item.record.context.id == project_id).unwrap().saturating_add(1);
+        app.on_event(press(KeyCode::Char(' '))).await;
+        assert_eq!(app.selected_context_ids, vec![project_id]);
+
+        app.on_event(press(KeyCode::Char('D'))).await;
+
+        assert!(!app.include_descendants);
+        assert!(matches!(&app.status, Status::NotHeld(message) if message.contains("denies context kind domain")));
+    }
+
+    #[tokio::test]
+    async fn context_manager_renders_panes_and_protects_unsaved_changes() {
+        let (mut app, _rx) = app_with_memories(&["managed"]).await;
+        app.bootstrap().await;
+        app.focus = Focus::Contexts;
+        app.context_cursor = 1;
+        app.on_event(press(KeyCode::Char('c'))).await;
+        assert_eq!(app.mode, Mode::ContextManager);
+
+        let mut terminal = Terminal::new(TestBackend::new(180_u16, 28_u16)).unwrap();
+        let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        let rendered = rendered_text(terminal.backend().buffer());
+        assert!(rendered.contains("CONTEXT MANAGER"));
+        assert!(rendered.contains("DEFINITION"));
+        assert!(rendered.contains("IDENTITIES"));
+        assert!(rendered.contains("OPERATOR DEFAULTS"));
+        assert!(rendered.contains("RECENT CONTEXT AUDIT"));
+
+        app.on_event(press(KeyCode::Char('e'))).await;
+        app.context_manager.as_mut().unwrap().edit.as_mut().unwrap().input = TextInput::new((0_u32..30_u32).map(|line| format!("line-{line}")).collect::<Vec<_>>().join("\n"));
+        let mut edit_terminal = Terminal::new(TestBackend::new(60_u16, 10_u16)).unwrap();
+        let _completed = edit_terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+        let rendered_edit = rendered_text(edit_terminal.backend().buffer());
+        assert!(rendered_edit.contains("line-29"));
+        assert!(rendered_edit.contains('\u{2588}'));
+        app.context_manager.as_mut().unwrap().edit.as_mut().unwrap().input.insert(' ');
+        app.on_event(press(KeyCode::Esc)).await;
+        assert_eq!(app.mode, Mode::ConfirmContextDiscard);
+        app.on_event(press(KeyCode::Char('n'))).await;
+        assert_eq!(app.mode, Mode::ContextManagerEdit);
+        app.on_event(press(KeyCode::Esc)).await;
+        app.on_event(press(KeyCode::Char('y'))).await;
+        assert_eq!(app.mode, Mode::ContextManager);
+        assert!(app.context_manager.as_ref().unwrap().edit.is_none());
+    }
+
+    #[tokio::test]
+    async fn context_manager_rejects_operator_controls_for_non_operator_principal() {
+        let store = SqliteStore::in_memory().unwrap();
+        let id = ContextId::new();
+        let _created = store
+            .create_context(
+                &ContextCreateDraft::private(id, ContextKind::new(ContextKind::PROJECT).unwrap(), "project/alice", "Alice", "alice"),
+                &ContextAuditDraft::new("alice", "test_alice_context_created").with_context(id),
+            )
+            .await
+            .unwrap();
+        let engine = LocalHoldEngine::new(store, Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(engine, Theme::detect(), Some("alice".into()), tx);
+        app.bootstrap().await;
+        app.focus = Focus::Contexts;
+        app.context_cursor = 1;
+        app.on_event(press(KeyCode::Char('c'))).await;
+        for pane in [ContextManagerPane::OperatorPolicy, ContextManagerPane::Kinds] {
+            app.context_manager.as_mut().unwrap().pane = pane;
+            app.on_event(press(KeyCode::Char('e'))).await;
+            assert_eq!(app.mode, Mode::ContextManager);
+            assert!(matches!(&app.status, Status::NotHeld(message) if message.contains("principal operator")));
+        }
+    }
+
+    #[tokio::test]
+    async fn context_manager_archives_and_reactivates_contexts() {
+        let (mut app, _rx) = app_with_memories(&["managed"]).await;
+        app.bootstrap().await;
+        app.focus = Focus::Contexts;
+        app.context_cursor = 1;
+        app.on_event(press(KeyCode::Char('c'))).await;
+        let context_id = app.context_manager.as_ref().unwrap().record.context.id;
+        app.selected_context_ids.push(context_id);
+        app.context_manager.as_mut().unwrap().pane = ContextManagerPane::Lifecycle;
+        app.on_event(press(KeyCode::Char('e'))).await;
+        app.context_manager.as_mut().unwrap().edit.as_mut().unwrap().input = TextInput::new("{\"lifecycle\":\"archived\"}".into());
+        app.on_event(press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
+        assert_eq!(
+            app.engine.store().get_context(&context_id, "operator").await.unwrap().unwrap().lifecycle,
+            ContextLifecycle::Archived
+        );
+        assert!(app.selected_context_ids.is_empty(), "archiving must immediately remove a cached retrieval selection");
+
+        app.on_event(press(KeyCode::Char('e'))).await;
+        app.context_manager.as_mut().unwrap().edit.as_mut().unwrap().input = TextInput::new("{\"lifecycle\":\"active\"}".into());
+        app.on_event(press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
+        assert_eq!(
+            app.engine.store().get_context(&context_id, "operator").await.unwrap().unwrap().lifecycle,
+            ContextLifecycle::Active
+        );
+    }
+
+    #[tokio::test]
+    async fn archived_context_can_be_reactivated_from_a_fresh_app_catalog() {
+        let store = SqliteStore::in_memory().unwrap();
+        let context_id = create_test_context(&store, "project/archived", "Archived project").await;
+        store
+            .set_context_lifecycle(
+                &context_id,
+                ContextLifecycle::Archived,
+                "operator",
+                &ContextAuditDraft::new("operator", "test_context_archived").with_context(context_id),
+            )
+            .await
+            .unwrap();
+        let engine = LocalHoldEngine::new(store.clone(), Arc::new(FixedEmbedding), LimitsConfig::default(), SearchConfig::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new(engine, Theme::detect(), Some("operator".into()), tx);
+
+        app.bootstrap().await;
+        assert!(app.contexts.is_empty(), "active catalog must omit archived contexts");
+        app.focus = Focus::Contexts;
+        app.on_event(press(KeyCode::Char('a'))).await;
+        while app.contexts.is_empty() {
+            app.on_data(rx.recv().await.unwrap());
+        }
+        assert!(app.show_archived_contexts);
+        assert_eq!(app.contexts[0].record.context.id, context_id);
+        assert_eq!(app.contexts[0].record.context.lifecycle, ContextLifecycle::Archived);
+
+        app.context_cursor = 1;
+        app.on_event(press(KeyCode::Char(' '))).await;
+        assert!(app.selected_context_ids.is_empty(), "archived contexts cannot become retrieval filters");
+        app.on_event(press(KeyCode::Char('c'))).await;
+        assert_eq!(app.mode, Mode::ContextManager);
+        app.context_manager.as_mut().unwrap().pane = ContextManagerPane::Lifecycle;
+        app.on_event(press(KeyCode::Char('e'))).await;
+        app.context_manager.as_mut().unwrap().edit.as_mut().unwrap().input = TextInput::new("{\"lifecycle\":\"active\"}".into());
+        app.on_event(press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
+
+        assert_eq!(store.get_context(&context_id, "operator").await.unwrap().unwrap().lifecycle, ContextLifecycle::Active);
+    }
+
+    #[tokio::test]
+    async fn context_manager_updates_grants_policies_anchor_overrides_and_kinds() {
+        let (mut app, _rx) = app_with_memories(&["managed"]).await;
+        app.bootstrap().await;
+        app.focus = Focus::Contexts;
+        app.context_cursor = 1;
+        app.on_event(press(KeyCode::Char('c'))).await;
+        let context_id = app.context_manager.as_ref().unwrap().record.context.id;
+
+        for (pane, json) in [
+            (ContextManagerPane::Grants, "[\"hermes\"]"),
+            (ContextManagerPane::PrincipalPolicy, "{\"guidance\":\"principal guidance\"}"),
+            (ContextManagerPane::OperatorPolicy, "{\"agent_creation\":true}"),
+            (ContextManagerPane::AnchorOverride, "{\"kinds\":{\"project\":{\"include_descendants\":true}}}"),
+            (ContextManagerPane::Kinds, "{\"kind\":\"workstream\",\"display_name\":\"Workstream\",\"enabled\":true}"),
+        ] {
+            app.context_manager.as_mut().unwrap().pane = pane;
+            app.on_event(press(KeyCode::Char('e'))).await;
+            app.context_manager.as_mut().unwrap().edit.as_mut().unwrap().input = TextInput::new(json.into());
+            app.on_event(press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
+            assert_eq!(app.mode, Mode::ContextManager);
+        }
+
+        let grants = app.engine.store().list_context_grants(&context_id, "operator").await.unwrap();
+        assert!(grants.iter().any(|grant| grant.grantee_principal == "hermes"));
+        let policies = app.engine.store().list_context_kind_policies("operator").await.unwrap();
+        assert!(
+            policies
+                .iter()
+                .any(|record| { record.layer == ContextPolicyLayer::Principal && record.policy.guidance.as_deref() == Some("principal guidance") })
+        );
+        assert!(
+            policies
+                .iter()
+                .any(|record| record.layer == ContextPolicyLayer::Operator && record.policy.agent_creation == Some(true))
+        );
+        let anchors = app.engine.store().list_context_anchor_policies("operator").await.unwrap();
+        assert!(anchors.iter().any(|record| record.anchor_context_id == context_id));
+        let kinds = app.engine.store().list_context_kinds().await.unwrap();
+        assert!(kinds.iter().any(|definition| definition.kind.as_str() == "workstream"));
     }
 
     #[tokio::test]
@@ -1910,7 +3252,7 @@ mod tests {
         app.bootstrap().await;
         app.on_data(rx.recv().await.unwrap());
         app.notice = Some("reranker off: artifacts are not cached".into());
-        let mut terminal = Terminal::new(TestBackend::new(100_u16, 24_u16)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(140_u16, 24_u16)).unwrap();
         let _completed = terminal.draw(|frame| view::draw(frame, &app)).unwrap();
         let buffer = terminal.backend().buffer();
         let rendered = rendered_text(buffer);
@@ -1919,7 +3261,7 @@ mod tests {
             rendered.contains("mode auto"),
             "the header should name the configured automatic mode before a search executes"
         );
-        assert!(rendered.contains("SCOPES"), "scope pane should be titled");
+        assert!(rendered.contains("CONTEXTS"), "context pane should be titled");
         assert!(rendered.contains("MEMORIES"), "memory pane should be titled");
         assert!(rendered.contains('\u{2580}'), "the battlement rule should be drawn");
         assert!(rendered.contains("held"), "the status line should speak the brand verb");

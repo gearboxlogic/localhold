@@ -62,6 +62,7 @@ fn default_config_has_sane_values() {
     assert_eq!(config.limits.max_top_tags_limit, 100);
     assert_eq!(config.limits.max_history_limit, 500);
     assert_eq!(config.limits.consolidation_neighbor_limit, 20);
+    assert_eq!(config.limits.consolidation_candidate_limit, 1_000);
     assert!(!config.search.reranker.enabled);
     assert_eq!(config.search.reranker.execution_provider, RerankerExecutionProvider::Auto);
     assert_eq!(config.search.reranker.precision, RerankerPrecision::Fp32);
@@ -135,10 +136,11 @@ fn debug_redacts_http_auth_token_but_keeps_server_settings() {
 
 #[test]
 fn limits_config_loadable_from_toml() {
-    let toml_str = "[limits]\nmax_search_limit = 42\nmax_candidate_pool_size = 500\nembedding_timeout_secs = 60\nmax_concurrent_embedding_requests = 4\nembedding_batch_size = 16\nembedding_max_retries = 5\nembedding_retry_initial_backoff_ms = 750\nembedding_retry_max_backoff_ms = 45000\n";
+    let toml_str = "[limits]\nmax_search_limit = 42\nmax_candidate_pool_size = 500\nconsolidation_candidate_limit = 250\nembedding_timeout_secs = 60\nmax_concurrent_embedding_requests = 4\nembedding_batch_size = 16\nembedding_max_retries = 5\nembedding_retry_initial_backoff_ms = 750\nembedding_retry_max_backoff_ms = 45000\n";
     let config: Config = toml::from_str(toml_str).unwrap();
     assert_eq!(config.limits.max_search_limit, 42);
     assert_eq!(config.limits.max_candidate_pool_size, 500);
+    assert_eq!(config.limits.consolidation_candidate_limit, 250);
     assert_eq!(config.limits.embedding_timeout_secs, 60);
     assert_eq!(config.limits.max_concurrent_embedding_requests, 4);
     assert_eq!(config.limits.embedding_batch_size, 16);
@@ -310,6 +312,8 @@ fn env_overrides_apply_limits() {
         ("LOCALHOLD_SHUTDOWN_TIMEOUT", "15"),
         ("LOCALHOLD_MAX_TOP_TAGS_LIMIT", "50"),
         ("LOCALHOLD_MAX_HISTORY_LIMIT", "250"),
+        ("LOCALHOLD_CONSOLIDATION_NEIGHBOR_LIMIT", "12"),
+        ("LOCALHOLD_CONSOLIDATION_CANDIDATE_LIMIT", "300"),
     ]);
 
     let mut config = Config::default();
@@ -332,6 +336,8 @@ fn env_overrides_apply_limits() {
     assert_eq!(config.limits.shutdown_timeout_secs, 15);
     assert_eq!(config.limits.max_top_tags_limit, 50);
     assert_eq!(config.limits.max_history_limit, 250);
+    assert_eq!(config.limits.consolidation_neighbor_limit, 12);
+    assert_eq!(config.limits.consolidation_candidate_limit, 300);
 }
 
 #[test]
@@ -653,6 +659,8 @@ fn validate_limits_config_rejects_zero_operational_limits() {
     assert_zero_limit_rejected("shutdown_timeout_secs", |limits| limits.shutdown_timeout_secs = 0);
     assert_zero_limit_rejected("max_top_tags_limit", |limits| limits.max_top_tags_limit = 0);
     assert_zero_limit_rejected("max_history_limit", |limits| limits.max_history_limit = 0);
+    assert_zero_limit_rejected("consolidation_neighbor_limit", |limits| limits.consolidation_neighbor_limit = 0);
+    assert_zero_limit_rejected("consolidation_candidate_limit", |limits| limits.consolidation_candidate_limit = 0);
     assert_zero_limit_rejected("max_entities_per_memory", |limits| limits.max_entities_per_memory = 0);
     assert_zero_limit_rejected("max_entity_field_length", |limits| limits.max_entity_field_length = 0);
 }
@@ -757,6 +765,30 @@ fn validate_server_config_rejects_empty_fixed_http_principal() {
 }
 
 #[test]
+fn validate_server_config_rejects_reserved_fixed_http_principals() {
+    for principal in ["operator", "@localhold/legacy-system", "*", "anonymous"] {
+        let config = ServerConfig {
+            http_principal: principal.into(),
+            ..ServerConfig::default()
+        };
+        let error = validate_server_config(&config).unwrap_err();
+        assert!(error.to_string().contains("reserved"), "{principal}: {error}");
+    }
+}
+
+#[test]
+fn validate_server_config_rejects_reserved_stdio_principals() {
+    for principal in ["operator", "@localhold/legacy-system", "*", "anonymous"] {
+        let config = ServerConfig {
+            principal: Some(principal.into()),
+            ..ServerConfig::default()
+        };
+        let error = validate_server_config(&config).unwrap_err();
+        assert!(error.to_string().contains("reserved"), "{principal}: {error}");
+    }
+}
+
+#[test]
 fn validate_server_config_requires_auth_for_http_trusted_proxy_mode() {
     let config = ServerConfig {
         transport: Transport::Http,
@@ -788,6 +820,26 @@ fn validate_limits_config_rejects_candidate_pool_below_search_limit() {
     let err = validate_limits_config(&limits).unwrap_err();
     assert!(err.to_string().contains("max_candidate_pool_size"));
     assert!(err.to_string().contains("max_search_limit"));
+}
+
+#[test]
+fn validate_limits_config_rejects_consolidation_candidates_above_ceiling() {
+    let limits = LimitsConfig {
+        consolidation_candidate_limit: MAX_CONSOLIDATION_CANDIDATE_LIMIT_CEILING.saturating_add(1),
+        ..LimitsConfig::default()
+    };
+    let err = validate_limits_config(&limits).unwrap_err();
+    assert!(err.to_string().contains("consolidation_candidate_limit"));
+}
+
+#[test]
+fn validate_limits_config_rejects_consolidation_neighbors_above_ceiling() {
+    let limits = LimitsConfig {
+        consolidation_neighbor_limit: MAX_CONSOLIDATION_NEIGHBOR_LIMIT_CEILING.saturating_add(1),
+        ..LimitsConfig::default()
+    };
+    let err = validate_limits_config(&limits).unwrap_err();
+    assert!(err.to_string().contains("consolidation_neighbor_limit"));
 }
 
 #[test]

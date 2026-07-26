@@ -191,7 +191,7 @@ transport_test!(noop, remember_many_validation_is_all_or_nothing, |h| async move
     )
     .await;
 
-    let listed: AdminListResponse = call_tool(client, "admin_list", json!({"scope": "matrix/all-or-nothing"})).await;
+    let listed: AdminListResponse = call_tool(client, "admin_list", json!({"text_search": "valid matrix batch item"})).await;
     assert_eq!(listed.count, 0);
 
     h.shutdown().await;

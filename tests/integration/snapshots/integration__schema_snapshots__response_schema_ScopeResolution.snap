@@ -42,7 +42,7 @@ expression: schema
   ],
   "$defs": {
     "ScopeResolvedBy": {
-      "description": "Mechanism used to resolve a scope.",
+      "description": "Compatibility mechanism used to derive a legacy scope.",
       "oneOf": [
         {
           "description": "Explicit scope key or raw explicit scope value.",
@@ -50,12 +50,12 @@ expression: schema
           "const": "explicit"
         },
         {
-          "description": "Scope registry alias matched.",
+          "description": "A context alias matched.",
           "type": "string",
           "const": "alias"
         },
         {
-          "description": "Scope registry matcher matched an explicit scope or context hint.",
+          "description": "A context resolver hint matched an explicit scope or legacy context hint.",
           "type": "string",
           "const": "matcher"
         },

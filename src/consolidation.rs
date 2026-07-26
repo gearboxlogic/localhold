@@ -13,9 +13,6 @@ fn cmp_duplicate_representative(a: &crate::types::Memory, b: &crate::types::Memo
     a_effective.cmp(&b_effective).then_with(|| a.updated_at.cmp(&b.updated_at)).then_with(|| a.id.cmp(&b.id))
 }
 
-/// A pairwise similarity entry: `(index_a, index_b, cosine_similarity)`.
-type PairSimilarity = (usize, usize, f64);
-
 /// A group of near-duplicate memories.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
@@ -36,8 +33,13 @@ pub(crate) struct DuplicateGroup {
 pub(crate) struct ConsolidateResult {
     /// Groups of near-duplicate memories found.
     pub groups: Vec<DuplicateGroup>,
-    /// Whether merging was performed (`false` when `dry_run` is `true`).
+    /// Whether at least one duplicate member was superseded.
     pub merged: bool,
+    /// Number of authorized candidates included in this run.
+    pub candidate_count: usize,
+    /// Whether additional authorized candidates existed beyond the configured
+    /// per-request work limit.
+    pub capped: bool,
 }
 
 /// Compute cosine similarity between two vectors.
@@ -46,7 +48,7 @@ pub(crate) struct ConsolidateResult {
 /// Returns 0.0 if either vector has zero magnitude.
 ///
 /// Uses f32 accumulators throughout for auto-vectorization on 768-dim
-/// embeddings. The inputs are L2-normalized, so f32 precision is sufficient.
+/// embeddings and computes both norms explicitly; callers need not normalize.
 #[expect(clippy::float_arithmetic, reason = "cosine similarity requires floating-point arithmetic")]
 pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
@@ -99,10 +101,7 @@ fn uf_union(parent: &mut [usize], rank: &mut [usize], a: usize, b: usize) {
 }
 
 /// Build a `DuplicateGroup` from a set of member indices.
-#[expect(clippy::float_arithmetic, reason = "average similarity computation requires floating-point arithmetic")]
-#[expect(clippy::as_conversions, reason = "usize index used for union-find — always small")]
-#[expect(clippy::cast_precision_loss, reason = "count -> f64: group sizes are always small")]
-fn build_duplicate_group(memories: &[MemoryWithEmbedding], members: &[usize], pair_similarities: &[PairSimilarity], parent: &mut [usize]) -> DuplicateGroup {
+fn build_duplicate_group(memories: &[MemoryWithEmbedding], members: &[usize], average_similarity: f64) -> DuplicateGroup {
     // Representative: most recently used/updated memory.
     #[expect(clippy::expect_used, reason = "members is guaranteed non-empty by the filter(|_, members| members.len() >= 2) above")]
     let representative_idx = members
@@ -115,22 +114,10 @@ fn build_duplicate_group(memories: &[MemoryWithEmbedding], members: &[usize], pa
     member_ids.sort();
     let representative_id = memories[representative_idx].memory.id;
 
-    // Re-derive average similarity for this group from stored pairs.
-    let group_root = uf_find(parent, members[0]);
-    let mut sim_sum = 0.0_f64;
-    let mut sim_count = 0_usize;
-    for &(pi, pj, sim) in pair_similarities {
-        if uf_find(parent, pi) == group_root && uf_find(parent, pj) == group_root {
-            sim_sum += sim;
-            sim_count = sim_count.saturating_add(1);
-        }
-    }
-    let avg_sim = if sim_count > 0 { sim_sum / sim_count as f64 } else { 0.0_f64 };
-
     DuplicateGroup {
         representative_id,
         member_ids,
-        similarity: avg_sim,
+        similarity: average_similarity,
         member_count: members.len(),
     }
 }
@@ -143,22 +130,6 @@ pub(crate) struct NeighborPair {
     pub similarity: f64,
 }
 
-/// Convert a cosine similarity threshold to the equivalent L2 distance threshold
-/// for L2-normalized embeddings.
-///
-/// Relationship: `L2 = sqrt(2 - 2 * cosine)` for unit-length vectors.
-pub(crate) fn cosine_to_l2_threshold(cosine_threshold: f64) -> f64 {
-    // Clamp to valid cosine range to avoid NaN from sqrt of negative.
-    let clamped = cosine_threshold.clamp(0.0_f64, 1.0_f64);
-    clamped.mul_add(-2.0_f64, 2.0_f64).sqrt()
-}
-
-/// Convert an L2 distance to cosine similarity for L2-normalized embeddings.
-#[expect(clippy::float_arithmetic, reason = "clamp on result of mul_add is required for numerical safety")]
-pub(crate) fn l2_to_cosine(l2_distance: f64) -> f64 {
-    (l2_distance * l2_distance).mul_add(-0.5_f64, 1.0_f64).clamp(0.0_f64, 1.0_f64)
-}
-
 /// Find groups of near-duplicate memories from pre-computed neighbor pairs.
 ///
 /// This is the ANN-accelerated variant: instead of O(n²) brute-force pairwise
@@ -167,6 +138,9 @@ pub(crate) fn l2_to_cosine(l2_distance: f64) -> f64 {
 ///
 /// The `memories` slice provides metadata for representative selection and group
 /// construction. The `pairs` provide the edge list for union-find clustering.
+#[expect(clippy::float_arithmetic, reason = "average similarity computation requires floating-point arithmetic")]
+#[expect(clippy::as_conversions, reason = "edge count is bounded by consolidation candidate and neighbor limits")]
+#[expect(clippy::cast_precision_loss, reason = "edge count is bounded far below f64's exact integer range")]
 pub(crate) fn find_duplicate_groups_from_pairs(memories: &[MemoryWithEmbedding], pairs: &[NeighborPair], max_groups: usize) -> Vec<DuplicateGroup> {
     let n = memories.len();
     if n < 2 || pairs.is_empty() {
@@ -178,7 +152,7 @@ pub(crate) fn find_duplicate_groups_from_pairs(memories: &[MemoryWithEmbedding],
 
     let mut parent: Vec<usize> = (0..n).collect();
     let mut rank: Vec<usize> = vec![0; n];
-    let mut pair_similarities: Vec<PairSimilarity> = Vec::new();
+    let mut pair_similarities = Vec::new();
 
     for pair in pairs {
         let Some(&i) = id_to_idx.get(&pair.id_a) else { continue };
@@ -198,10 +172,23 @@ pub(crate) fn find_duplicate_groups_from_pairs(memories: &[MemoryWithEmbedding],
         group_members.entry(root).or_default().push(i);
     }
 
+    // Aggregate every edge exactly once after the final roots are known.
+    let mut group_similarities: HashMap<usize, (f64, usize)> = HashMap::new();
+    for (i, _j, similarity) in pair_similarities {
+        let root = uf_find(&mut parent, i);
+        let (sum, count) = group_similarities.entry(root).or_default();
+        *sum += similarity;
+        *count = count.saturating_add(1);
+    }
+
     let mut groups: Vec<DuplicateGroup> = group_members
         .into_iter()
         .filter(|(_, members)| members.len() >= 2)
-        .map(|(_, members)| build_duplicate_group(memories, &members, &pair_similarities, &mut parent))
+        .map(|(root, members)| {
+            let (sum, count) = group_similarities.get(&root).copied().unwrap_or_default();
+            let average_similarity = if count > 0 { sum / count as f64 } else { 0.0_f64 };
+            build_duplicate_group(memories, &members, average_similarity)
+        })
         .collect();
 
     groups.sort_by(|a, b| {
@@ -251,6 +238,7 @@ mod tests {
                 was_redacted: false,
             },
             embedding,
+            context_ids: Vec::new(),
         }
     }
 

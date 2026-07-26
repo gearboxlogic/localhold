@@ -1,0 +1,85 @@
+---
+source: tests/integration/schema_snapshots.rs
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AdminMigrationReportResponse",
+  "description": "Response from admin migration report.",
+  "type": "object",
+  "properties": {
+    "report": {
+      "description": "Conservative migration/reporting counts.",
+      "$ref": "#/$defs/MetadataMigrationReport"
+    }
+  },
+  "required": [
+    "report"
+  ],
+  "$defs": {
+    "MetadataMigrationReport": {
+      "description": "Conservative report for the metadata migration surface.",
+      "type": "object",
+      "properties": {
+        "total_memories": {
+          "description": "Total memories in the store.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "metadata_rows": {
+          "description": "Memories that already have a metadata row.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "missing_metadata": {
+          "description": "Memories missing a metadata row.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "missing_summary": {
+          "description": "Memories without a caller-supplied summary.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "unresolved_scope": {
+          "description": "Memories whose scope is missing or explicitly unresolved.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "duplicate_candidates": {
+          "description": "Duplicate candidates based on identical original content.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "oversized": {
+          "description": "Memories larger than the large-content warning threshold.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "code_derived": {
+          "description": "Memories that look like code dumps or code-derived content.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "total_memories",
+        "metadata_rows",
+        "missing_metadata",
+        "missing_summary",
+        "unresolved_scope",
+        "duplicate_candidates",
+        "oversized",
+        "code_derived"
+      ]
+    }
+  }
+}

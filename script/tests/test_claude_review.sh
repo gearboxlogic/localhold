@@ -39,6 +39,7 @@ test_root=$(mktemp -d "$cache_root/claude-review-test.XXXXXXXXXX")
 scratch_root="$cache_root/claude-reviews"
 scratch_root_created=false
 wrapper_pid=
+watchdog_pid=
 if [[ ! -d "$scratch_root" ]]; then
     mkdir -- "$scratch_root"
     scratch_root_created=true
@@ -47,6 +48,10 @@ fi
 cleanup() {
     local status=$?
     trap - EXIT
+    if [[ -n "$watchdog_pid" ]] && kill -0 "$watchdog_pid" 2>/dev/null; then
+        kill -TERM "$watchdog_pid" 2>/dev/null || true
+        wait "$watchdog_pid" 2>/dev/null || true
+    fi
     if [[ -n "$wrapper_pid" ]] && kill -0 "$wrapper_pid" 2>/dev/null; then
         kill -TERM "$wrapper_pid" 2>/dev/null || true
         wait "$wrapper_pid" 2>/dev/null || true
@@ -175,11 +180,32 @@ if [[ ! -e "$test_root/capture/ready" ]]; then
 fi
 child_pid=$(< "$test_root/capture/child-pid")
 kill -TERM "$wrapper_pid"
+timeout_marker="$test_root/wrapper-timeout"
+(
+    sleep 10
+    if kill -0 "$wrapper_pid" 2>/dev/null; then
+        : > "$timeout_marker"
+        kill -KILL "$wrapper_pid" 2>/dev/null || true
+    fi
+) &
+watchdog_pid=$!
 set +e
 wait "$wrapper_pid"
 status=$?
+kill -TERM "$watchdog_pid" 2>/dev/null
+wait "$watchdog_pid" 2>/dev/null
 set -e
 wrapper_pid=
+watchdog_pid=
+if [[ -e "$timeout_marker" ]]; then
+    signal_scratch=$(sed -n '1p' "$test_root/capture/temp-environment")
+    case "$signal_scratch" in
+        "$scratch_root"/session.*) rm -rf -- "$signal_scratch" ;;
+        *) printf 'refusing to remove unexpected timed-out scratch path: %s\n' "$signal_scratch" >&2 ;;
+    esac
+    printf 'Claude review wrapper did not exit within 10 seconds after SIGTERM\n' >&2
+    exit 1
+fi
 if (( status != 143 )); then
     printf 'Claude review wrapper did not preserve the termination status: %d\n' "$status" >&2
     exit 1

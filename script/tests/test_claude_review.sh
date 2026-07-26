@@ -9,6 +9,14 @@ if [[ $(basename -- "$0") == claude ]]; then
     pwd -P > "$capture/cwd"
     mkdir -p -- "$TMPDIR/nested"
     printf 'temporary review data\n' > "$TMPDIR/nested/payload"
+    if [[ ${LOCALHOLD_CLAUDE_TEST_WAIT:-0} == 1 ]]; then
+        trap 'printf "TERM\n" > "$capture/signal"; exit 0' TERM
+        printf '%s\n' "$BASHPID" > "$capture/child-pid"
+        : > "$capture/ready"
+        while :; do
+            sleep 0.1
+        done
+    fi
     printf 'fake review output\n'
     exit "${LOCALHOLD_CLAUDE_TEST_EXIT:-0}"
 fi
@@ -23,10 +31,21 @@ if [[ -L "$cache_root" || ( -e "$cache_root" && ! -d "$cache_root" ) ]]; then
 fi
 mkdir -p -- "$cache_root"
 test_root=$(mktemp -d "$cache_root/claude-review-test.XXXXXXXXXX")
+scratch_root="$cache_root/claude-reviews"
+scratch_root_created=false
+wrapper_pid=
+if [[ ! -d "$scratch_root" ]]; then
+    mkdir -- "$scratch_root"
+    scratch_root_created=true
+fi
 
 cleanup() {
     local status=$?
     trap - EXIT
+    if [[ -n "$wrapper_pid" ]] && kill -0 "$wrapper_pid" 2>/dev/null; then
+        kill -TERM "$wrapper_pid" 2>/dev/null || true
+        wait "$wrapper_pid" 2>/dev/null || true
+    fi
     case "$test_root" in
         "$cache_root"/claude-review-test.*) rm -rf -- "$test_root" ;;
         *)
@@ -34,6 +53,9 @@ cleanup() {
             status=1
             ;;
     esac
+    if [[ "$scratch_root_created" == true ]]; then
+        rmdir -- "$scratch_root" 2>/dev/null || true
+    fi
     exit "$status"
 }
 trap cleanup EXIT
@@ -98,6 +120,10 @@ if [[ -e ${temp_environment[0]} ]]; then
     printf 'Claude review scratch survived successful completion: %s\n' "${temp_environment[0]}" >&2
     exit 1
 fi
+if [[ ! -d "$scratch_root" ]]; then
+    printf 'Claude review wrapper removed the pre-existing scratch root\n' >&2
+    exit 1
+fi
 if [[ $(< "$test_root/capture/cwd") != "$repository_root" ]]; then
     printf 'Claude reviewer did not run from the repository root\n' >&2
     exit 1
@@ -119,6 +145,48 @@ fi
 failure_scratch=$(sed -n '1p' "$test_root/capture/temp-environment")
 if [[ -e "$failure_scratch" ]]; then
     printf 'Claude review scratch survived failed completion: %s\n' "$failure_scratch" >&2
+    exit 1
+fi
+
+rm -rf -- "$test_root/capture"
+mkdir -- "$test_root/capture"
+PATH="$test_root/bin:$PATH" \
+LOCALHOLD_CLAUDE_TEST_CAPTURE="$test_root/capture" \
+LOCALHOLD_CLAUDE_TEST_WAIT=1 \
+"$repository_root/script/claude-review.sh" opus "Wait for a termination signal." > "$test_root/signal-output" &
+wrapper_pid=$!
+for _ in {1..200}; do
+    if [[ -e "$test_root/capture/ready" ]]; then
+        break
+    fi
+    sleep 0.01
+done
+if [[ ! -e "$test_root/capture/ready" ]]; then
+    printf 'fake Claude reviewer did not become ready for the signal test\n' >&2
+    exit 1
+fi
+child_pid=$(< "$test_root/capture/child-pid")
+kill -TERM "$wrapper_pid"
+set +e
+wait "$wrapper_pid"
+status=$?
+set -e
+wrapper_pid=
+if (( status != 143 )); then
+    printf 'Claude review wrapper did not preserve the termination status: %d\n' "$status" >&2
+    exit 1
+fi
+if [[ $(< "$test_root/capture/signal") != TERM ]]; then
+    printf 'Claude review wrapper did not forward SIGTERM to the reviewer\n' >&2
+    exit 1
+fi
+if kill -0 "$child_pid" 2>/dev/null; then
+    printf 'Claude reviewer survived wrapper termination: %s\n' "$child_pid" >&2
+    exit 1
+fi
+signal_scratch=$(sed -n '1p' "$test_root/capture/temp-environment")
+if [[ -e "$signal_scratch" ]]; then
+    printf 'Claude review scratch survived wrapper termination: %s\n' "$signal_scratch" >&2
     exit 1
 fi
 

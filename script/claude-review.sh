@@ -30,6 +30,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 repository_root=$(cd -- "$script_dir/.." && pwd -P)
 cache_root="$repository_root/.cache"
 scratch_root="$cache_root/claude-reviews"
+claude_pid=
 
 ensure_private_directory() {
     local path=$1
@@ -50,6 +51,10 @@ scratch_directory=$(mktemp -d "$scratch_root/session.XXXXXXXXXX")
 cleanup() {
     local status=$?
     trap - EXIT HUP INT TERM
+    if [[ -n "$claude_pid" ]] && kill -0 "$claude_pid" 2>/dev/null; then
+        kill -TERM "$claude_pid" 2>/dev/null || true
+        wait "$claude_pid" 2>/dev/null || true
+    fi
     case "$scratch_directory" in
         "$scratch_root"/session.*)
             if ! rm -rf -- "$scratch_directory"; then
@@ -66,14 +71,25 @@ cleanup() {
             fi
             ;;
     esac
-    rmdir -- "$scratch_root" 2>/dev/null || true
+    exit "$status"
+}
+
+forward_signal() {
+    local signal=$1
+    local status=$2
+    trap - "$signal"
+    if [[ -n "$claude_pid" ]] && kill -0 "$claude_pid" 2>/dev/null; then
+        kill -s "$signal" "$claude_pid" 2>/dev/null || true
+        wait "$claude_pid" 2>/dev/null || true
+    fi
+    claude_pid=
     exit "$status"
 }
 
 trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'forward_signal HUP 129' HUP
+trap 'forward_signal INT 130' INT
+trap 'forward_signal TERM 143' TERM
 
 claude_binary=$(command -v claude || true)
 if [[ -z "$claude_binary" ]]; then
@@ -87,6 +103,7 @@ if (( $# == 1 )); then
 fi
 
 cd -- "$repository_root"
+set +e
 TMPDIR="$scratch_directory" \
 TMP="$scratch_directory" \
 TEMP="$scratch_directory" \
@@ -103,4 +120,10 @@ TEMP="$scratch_directory" \
     --tools Read,Grep,Glob,Bash \
     --print \
     --output-format text \
-    "${prompt[@]}"
+    "${prompt[@]}" &
+claude_pid=$!
+wait "$claude_pid"
+status=$?
+claude_pid=
+set -e
+exit "$status"

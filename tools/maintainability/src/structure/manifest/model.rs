@@ -1,14 +1,20 @@
 use serde::Deserialize;
 
-pub(super) const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub(super) const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub(super) const EVOLUTION_SCHEMA_VERSION: u32 = 2;
 pub(super) const LEGACY_SCHEMA_VERSION: u32 = 1;
 pub(super) const PRODUCTION_FILE_LIMIT: usize = 800;
 pub(super) const TEST_FILE_LIMIT: usize = 1_000;
+pub(super) const PRODUCTION_EXCEPTION_LIMIT: usize = 1_000;
+pub(super) const TEST_EXCEPTION_LIMIT: usize = 1_200;
+pub(super) const FIXTURE_MATRIX_EXCEPTION_LIMIT: usize = 1_500;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct StructureManifest {
     pub(super) schema_version: u32,
+    #[serde(default)]
+    pub(super) program_phase: u32,
     pub baseline_commit: String,
     pub tracked_roots: Vec<String>,
     pub(super) limits: Limits,
@@ -19,6 +25,8 @@ pub struct StructureManifest {
     pub(super) path_evolutions: Vec<PathEvolution>,
     #[serde(default)]
     pub(super) component_transfers: Vec<ComponentTransfer>,
+    #[serde(default)]
+    pub(super) file_exceptions: Vec<FileException>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -112,4 +120,36 @@ pub(super) struct ComponentTransfer {
     pub(super) issue: String,
     pub(super) pull_request: String,
     pub(super) rationale: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum FileExceptionKind {
+    ProductionCohesive,
+    TestCohesive,
+    HistoricalFixtureMatrix,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum FileExceptionStatus {
+    Active,
+    Resolved,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct FileException {
+    pub(super) id: String,
+    pub(super) path: String,
+    pub(super) kind: FileExceptionKind,
+    pub(super) status: FileExceptionStatus,
+    pub(super) approved_physical_ceiling: usize,
+    pub(super) current_physical_ceiling: usize,
+    pub(super) owner: String,
+    pub(super) issue: String,
+    pub(super) pull_request: String,
+    pub(super) rationale: String,
+    pub(super) fixture_name: Option<String>,
+    pub(super) removal_phase: Option<u32>,
 }

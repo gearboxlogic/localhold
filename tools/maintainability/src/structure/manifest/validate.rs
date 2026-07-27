@@ -5,8 +5,8 @@ use anyhow::{Context, Result, bail};
 
 use super::measure::component_path_map;
 use super::model::{
-    CURRENT_SCHEMA_VERSION, ComponentTransfer, Hotspot, HotspotStatus, LEGACY_SCHEMA_VERSION, PRODUCTION_FILE_LIMIT, PathEvolution, PathEvolutionKind, PreGateAdjustment,
-    StructureManifest, TEST_FILE_LIMIT,
+    CURRENT_SCHEMA_VERSION, ComponentTransfer, EVOLUTION_SCHEMA_VERSION, Hotspot, HotspotStatus, LEGACY_SCHEMA_VERSION, PRODUCTION_FILE_LIMIT, PathEvolution, PathEvolutionKind,
+    PreGateAdjustment, StructureManifest, TEST_FILE_LIMIT,
 };
 use crate::structure::TRACKED_ROOTS;
 
@@ -19,11 +19,14 @@ impl StructureManifest {
     }
 
     pub(super) fn validate_previous(&self) -> Result<()> {
-        if !matches!(self.schema_version, LEGACY_SCHEMA_VERSION | CURRENT_SCHEMA_VERSION) {
+        if !matches!(self.schema_version, LEGACY_SCHEMA_VERSION | EVOLUTION_SCHEMA_VERSION | CURRENT_SCHEMA_VERSION) {
             bail!("unsupported previous structure manifest schema {}", self.schema_version);
         }
         if self.schema_version == LEGACY_SCHEMA_VERSION && (!self.path_evolutions.is_empty() || !self.component_transfers.is_empty()) {
             bail!("legacy structure manifest cannot contain evolution ledgers");
+        }
+        if self.schema_version < CURRENT_SCHEMA_VERSION && (self.program_phase != 0 || !self.file_exceptions.is_empty()) {
+            bail!("structure manifest schemas before version 3 cannot contain phase or file-exception policy");
         }
         self.validate_common()
     }
@@ -41,7 +44,8 @@ impl StructureManifest {
         self.validate_hotspots()?;
         self.validate_adjustments()?;
         self.validate_path_evolutions()?;
-        self.validate_component_transfers()
+        self.validate_component_transfers()?;
+        self.validate_file_exceptions()
     }
 
     fn validate_components(&self) -> Result<()> {
@@ -272,7 +276,7 @@ fn require_evolution_evidence(evolution: &PathEvolution) -> Result<()> {
     require_text(&evolution.id, "path evolution", "rationale", &evolution.rationale)
 }
 
-fn require_text(id: &str, kind: &str, label: &str, value: &str) -> Result<()> {
+pub(super) fn require_text(id: &str, kind: &str, label: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         bail!("{kind} {id:?} {label} must not be empty");
     }

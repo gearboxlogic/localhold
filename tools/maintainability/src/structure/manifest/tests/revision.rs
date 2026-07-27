@@ -2,7 +2,8 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use super::support::{inventory, ordinary_manifest};
+use super::support::{file_exception, inventory, ordinary_manifest};
+use crate::structure::manifest::model::FileExceptionKind;
 
 #[test]
 fn previous_revision_selection_handles_absent_null_and_initial_policy_inputs() {
@@ -43,10 +44,15 @@ fn previous_revision_selection_handles_absent_null_and_initial_policy_inputs() {
 }
 
 #[test]
-fn current_schema_cannot_downgrade_but_previous_v1_is_accepted() {
+fn current_schema_cannot_downgrade_but_previous_schema_generations_are_readable() {
+    let mut evolution_schema = ordinary_manifest("src/lib.rs", 10, 10);
+    evolution_schema.schema_version = 2;
+    evolution_schema.validate_previous().expect("immediate previous schema is readable");
+    assert!(evolution_schema.validate_current().is_err());
+
     let mut legacy = ordinary_manifest("src/lib.rs", 10, 10);
     legacy.schema_version = 1;
-    legacy.validate_previous().expect("immediate previous schema is readable");
+    legacy.validate_previous().expect("original structure schema remains readable");
     assert!(legacy.validate_current().is_err());
 
     legacy.path_evolutions.push(super::support::evolution(
@@ -56,6 +62,11 @@ fn current_schema_cannot_downgrade_but_previous_v1_is_accepted() {
         &["src/new.rs"],
     ));
     assert!(legacy.validate_previous().unwrap_err().to_string().contains("cannot contain evolution ledgers"));
+
+    evolution_schema
+        .file_exceptions
+        .push(file_exception("history.invalid", "src/lib.rs", FileExceptionKind::ProductionCohesive, 900));
+    assert!(evolution_schema.validate_previous().unwrap_err().to_string().contains("before version 3"));
 }
 
 fn git(repository: &Path, arguments: &[&str]) {

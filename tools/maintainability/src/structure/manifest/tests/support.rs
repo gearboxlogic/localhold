@@ -1,6 +1,7 @@
 use crate::structure::classify::{FileMeasurement, Inventory};
 use crate::structure::manifest::model::{
-    ComponentTransfer, Hotspot, HotspotKind, HotspotStatus, Limits, LogicalComponent, PathEvolution, PathEvolutionKind, PreGateAdjustment, StructureManifest,
+    ComponentTransfer, FileException, FileExceptionKind, FileExceptionStatus, Hotspot, HotspotKind, HotspotStatus, Limits, LogicalComponent, PathEvolution, PathEvolutionKind,
+    PreGateAdjustment, StructureManifest,
 };
 
 pub(super) fn file(path: &str, physical: usize, production: usize) -> FileMeasurement {
@@ -60,7 +61,8 @@ pub(super) fn hotspot_manifest(kind: HotspotKind, status: HotspotStatus, success
 
 fn base_manifest() -> StructureManifest {
     StructureManifest {
-        schema_version: 2,
+        schema_version: 3,
+        program_phase: 0,
         baseline_commit: "a".repeat(40),
         tracked_roots: vec!["src".to_owned(), "tests".to_owned(), "benches".to_owned()],
         limits: Limits {
@@ -72,6 +74,29 @@ fn base_manifest() -> StructureManifest {
         hotspots: Vec::new(),
         path_evolutions: Vec::new(),
         component_transfers: Vec::new(),
+        file_exceptions: Vec::new(),
+    }
+}
+
+pub(super) fn file_exception(id: &str, path: &str, kind: FileExceptionKind, ceiling: usize) -> FileException {
+    let (fixture_name, removal_phase) = if kind == FileExceptionKind::HistoricalFixtureMatrix {
+        (Some("published database upgrade matrix".to_owned()), Some(1))
+    } else {
+        (None, None)
+    };
+    FileException {
+        id: id.to_owned(),
+        path: path.to_owned(),
+        kind,
+        status: FileExceptionStatus::Active,
+        approved_physical_ceiling: ceiling,
+        current_physical_ceiling: ceiling,
+        owner: "maintainers".to_owned(),
+        issue: "https://example.invalid/issues/1".to_owned(),
+        pull_request: "https://example.invalid/pulls/1".to_owned(),
+        rationale: "reviewed cohesive file boundary".to_owned(),
+        fixture_name,
+        removal_phase,
     }
 }
 

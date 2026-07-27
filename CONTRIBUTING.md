@@ -201,6 +201,10 @@ During the feature freeze:
 
 - ordinary production files may not exceed 800 physical lines;
 - ordinary test files may not exceed 1,000 physical lines;
+- an issue-linked cohesive production module may carry a reviewed ceiling of
+  at most 1,000 lines, and a cohesive test module at most 1,200 lines;
+- a named historical fixture matrix may carry a temporary reviewed ceiling of
+  at most 1,500 lines with an owner and future removal phase;
 - every existing larger file has a stable hotspot ID, verified baseline counts,
   and a successor set;
 - hotspot physical and production ceilings, plus component production
@@ -219,6 +223,9 @@ During the feature freeze:
   that amount, and transfer cycles are rejected;
 - a hotspot is marked resolved when its current successor falls under the
   applicable file limit, while its closed lineage and ratcheted evidence remain;
+- reviewed file exceptions use an append-only ledger. Approval evidence and the
+  initial ceiling are immutable, the current ceiling must equal the measured
+  file and only ratchet downward, and resolution cannot be reversed;
 - component growth, unmapped file proliferation, ceiling inflation, hotspot
   reactivation, and silent policy resets are rejected.
 
@@ -251,6 +258,22 @@ a transfer record naming the source and destination component, exact
 `production_lines`, transferred paths, and the new path-evolution ID. Test-only
 cross-component paths carry lineage but no production transfer, so a
 test-only ownership move must also rename its path to preserve cycle evidence.
+
+For a cohesive file exception, append a stable ID, exact measured approved and
+current physical ceilings, owner, issue, pull request, and a concrete cohesion
+rationale. Select the production or test kind that matches syntax
+classification. Historical fixture matrices additionally require a
+human-readable matrix name and `removal_phase`; those fixture-only fields are
+not accepted on cohesive exceptions. A historical matrix approval cannot be
+renewed under a new ID or transferred to another path. Lower
+`current_physical_ceiling` whenever the file shrinks. Once the file reaches its
+ordinary limit, mark the exception `resolved` and record that final count.
+Resolved evidence remains in the ledger.
+
+`program_phase` is the machine-readable recovery phase. It cannot move
+backward or skip a phase, and a historical fixture exception must be resolved
+before its removal phase opens. Advancing the phase never changes a canonical
+component or hotspot ceiling.
 
 The checker reads and classifies both the pull request base and working tree.
 Changing only the JSON cannot manufacture a transfer or reset debt: ledger

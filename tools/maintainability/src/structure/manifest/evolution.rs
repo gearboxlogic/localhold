@@ -14,6 +14,7 @@ impl StructureManifest {
 
         let previous_files = inventory_index(previous_inventory)?;
         let current_files = inventory_index(current_inventory)?;
+        self.compare_file_exception_policy(previous, &current_files)?;
         self.compare_path_evolution(previous, &previous_files, &current_files, new_evolutions)?;
         self.compare_transfer_evidence(previous, &current_files, new_evolutions, new_transfers)?;
         self.compare_component_policy(previous, &previous_files, &current_files, new_transfers)?;

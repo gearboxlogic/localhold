@@ -100,6 +100,8 @@ fn strip_markdown_container_prefixes(mut content: &str) -> &str {
             content = rest.strip_prefix(' ').unwrap_or(rest);
         } else if let Some(rest) = strip_list_marker(candidate) {
             content = rest;
+        } else if let Some(rest) = strip_footnote_definition(candidate) {
+            content = rest;
         } else {
             return content;
         }
@@ -119,6 +121,12 @@ fn strip_list_marker(content: &str) -> Option<&str> {
         }
     };
     Some(content[marker_length..].trim_start())
+}
+
+fn strip_footnote_definition(content: &str) -> Option<&str> {
+    let rest = content.strip_prefix("[^")?;
+    let (label, content) = rest.split_once("]:")?;
+    (!label.is_empty() && !label.contains('[') && !label.contains(']')).then(|| content.trim_start())
 }
 
 fn fence_delimiter(content: &str) -> Option<(Fence, &str)> {

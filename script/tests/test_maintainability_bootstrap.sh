@@ -7,9 +7,16 @@ fixture=$(mktemp -d)
 trap 'rm -rf -- "$fixture"' EXIT
 test_repository="$fixture/parent/repository"
 mkdir -p "$test_repository/tools/maintainability"
+source_tool="$repository_root/tools/maintainability"
+test_tool="$test_repository/tools/maintainability"
 
 write_manifest() {
-    printf '%s\n' "$1" >"$test_repository/tools/maintainability/Cargo.toml"
+    printf '%s\n' "$1" >"$test_tool/Cargo.toml"
+}
+
+restore_reviewed_graph() {
+    cp "$source_tool/Cargo.toml" "$test_tool/Cargo.toml"
+    cp "$source_tool/Cargo.lock" "$test_tool/Cargo.lock"
 }
 
 run_check() {
@@ -23,12 +30,24 @@ expect_failure() {
     fi
 }
 
-write_manifest $'[package]\nname = "checker"\nbuild = false'
+expect_failure_before_command() {
+    local marker="$fixture/command-ran"
+    if run_check -- touch "$marker" >/dev/null 2>&1; then
+        printf 'maintainability bootstrap fixture unexpectedly passed\n' >&2
+        exit 1
+    fi
+    if [[ -e "$marker" ]]; then
+        printf 'maintainability bootstrap executed a command for an unreviewed dependency graph\n' >&2
+        exit 1
+    fi
+}
+
+restore_reviewed_graph
 run_check >/dev/null
 
-touch "$test_repository/tools/maintainability/build.rs"
+touch "$test_tool/build.rs"
 expect_failure
-rm "$test_repository/tools/maintainability/build.rs"
+rm "$test_tool/build.rs"
 
 write_manifest $'[package]\nname = "checker"'
 expect_failure
@@ -36,7 +55,21 @@ expect_failure
 write_manifest $'[package]\nname = "checker"\nbuild = true'
 expect_failure
 
-write_manifest $'[package]\nname = "checker"\nbuild = false'
+restore_reviewed_graph
+rm "$test_tool/Cargo.lock"
+expect_failure
+
+restore_reviewed_graph
+printf '\n[dependencies.untrusted]\npath = "../untrusted"\n' >>"$test_tool/Cargo.toml"
+mkdir -p "$test_repository/tools/untrusted"
+touch "$test_repository/tools/untrusted/build.rs"
+expect_failure_before_command
+
+restore_reviewed_graph
+printf '\n# unreviewed lock graph\n' >>"$test_tool/Cargo.lock"
+expect_failure
+
+restore_reviewed_graph
 mkdir -p "$test_repository/.cargo"
 touch "$test_repository/.cargo/config.toml"
 expect_failure

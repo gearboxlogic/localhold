@@ -460,6 +460,7 @@ fn rejects_runnable_rust_doctests_but_allows_ignored_examples() {
         "/// - ```rust\n///   #![allow(unsafe_code)]\n///   unsafe { hidden(); }\nfn sample() {}",
         "/// 1. ```rust\n///    fn ordered_list_runnable() {}\nfn sample() {}",
         "/// > - ```rust\n/// >   fn quoted_list_runnable() {}\nfn sample() {}",
+        "/// [^safety]: ```rust\n///   #![allow(unsafe_code)]\n///   unsafe { hidden(); }\nfn sample() {}",
         "/**\n * ```rust\n * fn block_doc() {}\n * ```\n */\nfn sample() {}",
         "/*!\n * ```rust\n * fn inner_block_doc() {}\n * ```\n */\nfn sample() {}",
     ] {

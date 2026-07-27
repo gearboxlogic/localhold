@@ -24,9 +24,16 @@ fi
 
 tool_root="$repository_root/tools/maintainability"
 manifest="$tool_root/Cargo.toml"
+lockfile="$tool_root/Cargo.lock"
+readonly reviewed_manifest_sha256=1a90e4ee4291d0eb6c9a58df5e89e69e756f08c030a969aad0681af243f5aea4
+readonly reviewed_lockfile_sha256=825c6448351761aa5c4c6e1ce6b3696c927c4f46c5d43642846380d24f10467c
 
 if [[ ! -f "$manifest" ]]; then
     printf 'maintainability bootstrap manifest is missing: %s\n' "$manifest" >&2
+    exit 1
+fi
+if [[ ! -f "$lockfile" ]]; then
+    printf 'maintainability bootstrap lockfile is missing: %s\n' "$lockfile" >&2
     exit 1
 fi
 
@@ -88,6 +95,32 @@ build_setting=$(
 
 if [[ "$build_setting" != false ]]; then
     printf 'maintainability checker Cargo.toml must set [package] build = false\n' >&2
+    exit 1
+fi
+
+sha256_file() {
+    local path=$1
+    local output
+    if command -v sha256sum >/dev/null 2>&1; then
+        output=$(sha256sum -- "$path")
+    elif command -v shasum >/dev/null 2>&1; then
+        output=$(shasum -a 256 -- "$path")
+    else
+        printf 'maintainability bootstrap requires sha256sum or shasum\n' >&2
+        exit 1
+    fi
+    printf '%s\n' "${output%%[[:space:]]*}"
+}
+
+actual_manifest_sha256=$(sha256_file "$manifest")
+if [[ $actual_manifest_sha256 != "$reviewed_manifest_sha256" ]]; then
+    printf 'maintainability checker Cargo.toml does not match the reviewed dependency graph\n' >&2
+    exit 1
+fi
+
+actual_lockfile_sha256=$(sha256_file "$lockfile")
+if [[ $actual_lockfile_sha256 != "$reviewed_lockfile_sha256" ]]; then
+    printf 'maintainability checker Cargo.lock does not match the reviewed dependency graph\n' >&2
     exit 1
 fi
 

@@ -1868,7 +1868,6 @@ dependencies = [
  "localhold",
  "ort",
  "parking_lot",
- "pastey",
  "proptest",
  "rand 0.10.2",
  "ratatui",

@@ -1,9 +1,7 @@
 //! Error type hierarchy — engine, store, and embedding error variants.
 
-use thiserror::Error;
-
 /// Top-level error type for the `LocalHold` engine.
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum EngineError {
     /// A configuration error.
@@ -43,7 +41,7 @@ impl EngineError {
 }
 
 /// Errors originating from the persistence layer.
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum StoreError {
     /// An underlying database operation failed.
@@ -96,7 +94,7 @@ impl From<serde_json::Error> for StoreError {
 /// Created by validation helpers when input fails a constraint (empty field,
 /// too-long content, etc.).  Converted to protocol-specific error types
 /// (e.g. `rmcp::ErrorData`) at the handler boundary.
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 #[error("{field}: {message}")]
 #[non_exhaustive]
 pub struct ValidationError {
@@ -117,7 +115,7 @@ impl ValidationError {
 }
 
 /// Error returned when parsing a string into a domain enum fails.
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 #[non_exhaustive]
 pub struct ParseEnumError(pub String);
@@ -129,7 +127,7 @@ impl From<String> for ParseEnumError {
 }
 
 /// Errors from the embedding subsystem.
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum EmbeddingError {
     /// A transient error (timeout, network blip) — worth retrying.

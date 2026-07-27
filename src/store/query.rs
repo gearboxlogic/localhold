@@ -31,16 +31,14 @@ macro_rules! concat_with_sep {
 /// Update `row_to_memory` when adding columns.
 macro_rules! define_memory_columns {
     ($($col:literal),+ $(,)?) => {
-        /// Canonical ordered column names for the `memories` table.
+        // Canonical ordered column names for the `memories` table.
         pub(crate) const COLUMNS: &[&str] = &[$($col),+];
 
-        /// Number of columns in [`COLUMNS`].
-        ///
-        /// Use this to index extra columns appended after the base set (e.g.
-        /// `vec_rowid`, `rank`) instead of hard-coding magic numbers.
+        // Number of columns in COLUMNS. Use this to index extra columns
+        // appended after the base set instead of hard-coding magic numbers.
         pub(crate) const MEMORY_COLUMN_COUNT: usize = COLUMNS.len();
 
-        /// Comma-separated column list for `SELECT` queries, built from [`COLUMNS`].
+        // Comma-separated column list for SELECT queries, built from COLUMNS.
         pub(crate) const MEMORY_COLUMNS: &str = concat_with_sep!($($col),+);
     };
 }

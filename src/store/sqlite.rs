@@ -15,7 +15,11 @@ use std::{
 };
 
 use parking_lot::{Mutex, RwLock};
-use rusqlite::{Connection, OpenFlags, OptionalExtension as _, Transaction, TransactionBehavior, ffi::sqlite3_auto_extension, types::ValueRef};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension as _, Transaction, TransactionBehavior,
+    auto_extension::{RawAutoExtension, register_auto_extension},
+    types::ValueRef,
+};
 use sha2::{Digest as _, Sha256};
 use sqlite_vec::sqlite3_vec_init;
 
@@ -356,10 +360,11 @@ impl SqliteStore {
     ///
     /// The `sqlite-vec` crate exports `sqlite3_vec_init` with an erased signature
     /// (`unsafe extern "C" fn()`). The actual SQLite extension init signature
-    /// (`fn(sqlite3*, *mut *const c_char, *const sqlite3_api_routines) -> c_int`)
+    /// (`fn(sqlite3*, *mut *mut c_char, *const sqlite3_api_routines) -> c_int`)
     /// cannot be checked in Rust because the crate does not export the typed form.
-    /// This const verifies the function exists and has the correct calling convention;
-    /// the parameter-level contract is enforced at the C ABI level by SQLite itself.
+    /// This const verifies only that the erased function exists and uses the C
+    /// calling convention. It does not prove parameter or return-type compatibility.
+    /// The temporary proof debt is recorded in the first-party unsafe manifest.
     const _FFI_SIG_CHECK: unsafe extern "C" fn() = sqlite3_vec_init;
 
     /// Create a missing SQLite parent directory without changing permissions on
@@ -516,33 +521,31 @@ impl SqliteStore {
     /// Register the sqlite-vec extension as an auto-extension so it is loaded
     /// for every new connection. Returns an error on first call if registration fails.
     /// Subsequent calls are no-ops.
-    #[expect(
-        clippy::missing_transmute_annotations,
-        reason = "sqlite3 extension fn ptr requires transmute; type is inferred by sqlite3_auto_extension signature"
-    )]
     pub(crate) fn register_extension() -> Result<(), StoreError> {
         use std::sync::OnceLock;
         static REGISTER: OnceLock<Result<(), String>> = OnceLock::new();
         let result = REGISTER.get_or_init(|| {
-            // SAFETY: sqlite3_vec_init is an extern "C" function with the correct
-            // signature for sqlite3_auto_extension. The transmute converts the
-            // concrete fn pointer to the Option<unsafe extern "C" fn()> expected
-            // by the SQLite API.
-            //
-            // RR-095: The sqlite-vec crate exports sqlite3_vec_init with an erased
-            // signature (unsafe extern "C" fn()). The actual SQLite extension init
-            // signature is (sqlite3*, *mut *const c_char, *const sqlite3_api_routines) -> c_int.
-            // If the crate ever exports the typed form, update the const _FFI_SIG_CHECK
-            // and this transmute to use it directly.
-            #[expect(unsafe_code, reason = "required by sqlite3_auto_extension FFI")]
-            #[expect(clippy::as_conversions, reason = "FFI function pointer cast required by sqlite3_auto_extension signature")]
-            #[expect(clippy::multiple_unsafe_ops_per_block, reason = "transmute + FFI call are a single logical operation")]
-            let rc = unsafe { sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ()))) };
-            if rc != 0_i32 {
-                Err(format!("sqlite3_auto_extension returned error code {rc}"))
-            } else {
-                Ok(())
-            }
+            // SAFETY [sqlite-vec-auto-extension-v1]: sqlite-vec 0.1.9's bundled
+            // C header declares this symbol with SQLite's RawAutoExtension ABI.
+            // Its Rust binding erases that signature. The dependency pins,
+            // supported targets, and remaining proof debt are ratcheted in
+            // policy/maintainability/unsafe.json.
+            #[expect(unsafe_code, reason = "sqlite-vec exposes its typed SQLite initializer as an erased C function pointer")]
+            let extension = {
+                // SAFETY: See sqlite-vec-auto-extension-v1 immediately above.
+                unsafe { std::mem::transmute::<unsafe extern "C" fn(), RawAutoExtension>(sqlite3_vec_init) }
+            };
+
+            // SAFETY [sqlite-vec-auto-extension-v1]: the pinned initializer uses
+            // the supplied database without closing it, does not open another
+            // database, and does not mutate the auto-extension list. OnceLock
+            // makes registration process-wide and idempotent.
+            #[expect(unsafe_code, reason = "rusqlite requires callers to uphold the registered initializer's behavior")]
+            let registration = {
+                // SAFETY: See sqlite-vec-auto-extension-v1 immediately above.
+                unsafe { register_auto_extension(extension) }
+            };
+            registration.map_err(|error| error.to_string())
         });
         result
             .as_ref()

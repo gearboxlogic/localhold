@@ -79,7 +79,6 @@ reranker-cuda = ["reranker", "ort/cuda", "ort/load-dynamic"]
 [dev-dependencies]
 rmcp = { version = "2.2", features = ["client", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest"] }
 localhold = { path = ".", features = ["testing"] }
-pastey = "0.2"
 proptest = "1"
 insta = { version = "1", features = ["json"] }
 rand = "0.10"
@@ -87,7 +86,7 @@ criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 tempfile = "3"
 
 [lints.rust]
-unsafe_code = "deny"
+unsafe_code = { level = "deny", priority = 1 }
 missing_docs = "warn"
 
 # Compiler lints — language-level strictness
@@ -102,7 +101,7 @@ noop_method_call = "warn"
 single_use_lifetimes = "warn"
 trivial_casts = "warn"
 trivial_numeric_casts = "warn"
-unsafe_op_in_unsafe_fn = "warn"
+unsafe_op_in_unsafe_fn = { level = "deny", priority = 1 }
 unreachable_pub = "warn"
 unused_extern_crates = "warn"
 unused_import_braces = "warn"
@@ -145,7 +144,7 @@ unwrap_used = "allow"                  # too broad for blanket denial; expect_us
 print_stdout = "deny"
 print_stderr = "deny"
 dbg_macro = "deny"
-undocumented_unsafe_blocks = "deny"
+undocumented_unsafe_blocks = { level = "deny", priority = 1 }
 allow_attributes_without_reason = "deny"
 allow_attributes = "deny"
 

@@ -1,0 +1,204 @@
+{
+  "schema_version": 2,
+  "baseline_commit": "028d40239b4ca352d20af0029518270503c3e9f6",
+  "tracked_roots": [
+    "src",
+    "tests",
+    "benches"
+  ],
+  "required_lints": [
+    {
+      "table": "rust",
+      "name": "unsafe_code",
+      "level": "deny",
+      "priority": 1
+    },
+    {
+      "table": "rust",
+      "name": "unsafe_op_in_unsafe_fn",
+      "level": "deny",
+      "priority": 1
+    },
+    {
+      "table": "clippy",
+      "name": "undocumented_unsafe_blocks",
+      "level": "deny",
+      "priority": 1
+    }
+  ],
+  "contracts": [
+    {
+      "id": "sqlite-vec-auto-extension-v1",
+      "owner": "LocalHold maintainers",
+      "status": "temporary-debt",
+      "necessity": "LocalHold's sqlite-vec indexes require the extension on every SQLite connection. sqlite-vec 0.1.9 exposes its linked initializer only as an erased C function pointer, while SQLite registration requires the typed initializer ABI.",
+      "safe_alternatives_tried": [
+        "rusqlite::auto_extension::register_auto_extension is used for registration and error handling, but it still requires a typed RawAutoExtension supplied by the caller.",
+        "sqlite-vec 0.1.9 has no safe Rust registration helper and does not export its initializer with the typed SQLite signature.",
+        "Runtime loadable-extension APIs are also unsafe, change deployment and trust boundaries, and do not remove the need to validate the native entrypoint."
+      ],
+      "invariants": {
+        "validity": "sqlite3_vec_init is a non-null function pointer to the statically linked symbol from the pinned sqlite-vec package.",
+        "lifetime": "The linked sqlite3_vec_init symbol has process lifetime; SQLite may retain the registered pointer for all later connection opens.",
+        "aliasing": "The Rust operations do not dereference or retain SQLite pointers. When invoked, the native initializer must use SQLite's supplied database, error-message, and API pointers only under SQLite's extension-init contract and must not retain invalid aliases.",
+        "abi": "sqlite-vec 0.1.9's bundled sqlite-vec.h declares sqlite3_vec_init(sqlite3*, char**, const sqlite3_api_routines*) -> int, matching rusqlite 0.40.1 RawAutoExtension and libsqlite3-sys 0.38.1. The Rust sqlite-vec declaration erases that signature, so the exact dependency pins and proof debt are part of this invariant.",
+        "threading": "LocalHold serializes registration with OnceLock and never cancels or resets the auto-extension. The native initializer must remain valid when SQLite invokes it during concurrent connection opens and must not open another database or mutate the auto-extension list.",
+        "supported_targets": "The C declaration, compiled symbol, and rusqlite RawAutoExtension ABI must match on each supported LocalHold target. A new target, SQLite build route, sqlite-vec feature route, or calling-convention change requires renewed review."
+      },
+      "caller_preconditions": [
+        "Only SqliteStore::register_extension registers the initializer, before each constructor opens its connection.",
+        "Registration is never called from an SQLite auto-extension callback.",
+        "The pinned sqlite-vec, rusqlite, and libsqlite3-sys versions and their build routes have not changed.",
+        "No code cancels, resets, replaces, unloads, or dynamically shortens the lifetime of the registered initializer."
+      ],
+      "safe_wrapper_boundary": "SqliteStore::register_extension is safe because OnceLock performs at most one registration attempt, owns no borrowed data, retains the linked function for process lifetime, caches failure, and exposes only Result<(), StoreError>.",
+      "focused_tests": [
+        {
+          "reference": "tests/sqlite_extension.rs::sqlite_vec_auto_extension_loads_on_subsequent_connections",
+          "fingerprint": "e9a1fc73093ab3e1b74945846f73a1545e65fc58dd2884b1718b094210f8e3db"
+        }
+      ],
+      "dependency_packages": [
+        {
+          "name": "libsqlite3-sys",
+          "version": "0.38.1",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "checksum": "f6c19a05435c21ac299d71b6a9c13db3e3f47c520517d58990a462a1397a61db",
+          "resolved_features": [
+            "bundled",
+            "bundled_bindings",
+            "cc",
+            "default",
+            "min_sqlite_version_3_34_1",
+            "pkg-config",
+            "vcpkg"
+          ],
+          "incoming_routes": [
+            "rusqlite"
+          ]
+        },
+        {
+          "name": "rusqlite",
+          "version": "0.40.1",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "checksum": "11438310b19e3109b6446c33d1ed5e889428cf2e278407bc7896bc4aaea43323",
+          "resolved_features": [
+            "backup",
+            "bundled",
+            "cache",
+            "default",
+            "ffi-sqlite-wasm-rs",
+            "hashlink",
+            "modern_sqlite"
+          ],
+          "incoming_routes": [
+            "root"
+          ]
+        },
+        {
+          "name": "sqlite-vec",
+          "version": "0.1.9",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "checksum": "d0ba424237a9a5db2f6071f193319e2b6a32f7f3961debb2fbbfe67067abce3f",
+          "resolved_features": [],
+          "incoming_routes": [
+            "root"
+          ]
+        }
+      ],
+      "root_dependency_specs": {
+        "rusqlite": {
+          "version": "0.40",
+          "default_features": true,
+          "features": [
+            "backup",
+            "bundled"
+          ]
+        },
+        "sqlite-vec": {
+          "version": "0.1",
+          "default_features": true,
+          "features": []
+        }
+      },
+      "build_route": "The root enables rusqlite's bundled SQLite route through libsqlite3-sys. The checksum-pinned sqlite-vec build script compiles its bundled sqlite-vec native source and exposes the linked sqlite3_vec_init symbol.",
+      "review_invalidation_triggers": [
+        "Any pinned dependency version, source, checksum, root dependency specification, enabled feature, native build route, or supported target changes.",
+        "Any unsafe site locator, fingerprint, exception reason, operation list, invariant, precondition, or wrapper boundary changes.",
+        "Any code begins cancelling or resetting SQLite auto-extensions, unloading the linked library, or invoking registration from an extension callback."
+      ],
+      "upstream_removal_trigger": "Remove the transmute when sqlite-vec exports a correctly typed initializer or a reviewed safe registration API. Reassess whether auto-extension registration remains necessary whenever sqlite-vec or rusqlite changes this API.",
+      "recovery_issue": "https://github.com/gearboxlogic/localhold/issues/123",
+      "review_phase": "Phase 1 unsafe-boundary proof and isolation",
+      "proof_debt": [
+        "Rust type checking proves only sqlite-vec's erased extern C declaration, not its parameter or return types.",
+        "The bundled header is evidence for the intended ABI, but this gate does not independently prove that the linked native symbol was built from that declaration.",
+        "The focused runtime test proves successful registration and invocation on the tested build; it cannot by itself prove absence of ABI undefined behavior on every target."
+      ],
+      "operations": [
+        {
+          "id": "sqlite-vec.retype-initializer",
+          "kind": "function-pointer-transmute",
+          "description": "Retype sqlite-vec's erased unsafe extern C function pointer as rusqlite::auto_extension::RawAutoExtension.",
+          "safety_argument": "Function pointer validity and lifetime are unchanged. The operation is sound only while the pinned native sqlite3_vec_init symbol has the exact ABI declared by sqlite-vec.h and RawAutoExtension."
+        },
+        {
+          "id": "sqlite-vec.register-initializer",
+          "kind": "unsafe-library-call",
+          "description": "Register the typed initializer with rusqlite's process-wide SQLite auto-extension wrapper.",
+          "safety_argument": "The initializer follows rusqlite's callback restrictions, remains valid for process lifetime, and registration is serialized and never manipulated from inside the callback."
+        }
+      ]
+    }
+  ],
+  "sites": [
+    {
+      "id": "sqlite-vec.retype-exception",
+      "contract_id": "sqlite-vec-auto-extension-v1",
+      "path": "src/store/sqlite.rs",
+      "item": "SqliteStore::register_extension",
+      "kind": "safety-lint-exception",
+      "occurrence": 0,
+      "fingerprint": "17691c4d201c4b73e39bbef2f4ea9e83892b97761ea12a6db9d0f9a683ec6de7",
+      "boundary_fingerprint": "1903021c99d18f0e5268f7a8468ecfcd1e8d5229b1154c7cec6c1c35e0f03144",
+      "operation_ids": []
+    },
+    {
+      "id": "sqlite-vec.retype-operation",
+      "contract_id": "sqlite-vec-auto-extension-v1",
+      "path": "src/store/sqlite.rs",
+      "item": "SqliteStore::register_extension",
+      "kind": "unsafe-block",
+      "occurrence": 0,
+      "fingerprint": "b0f3a60294d50510735f960d221ebd8d23e807e6e768ab377e96e7d0df9697fe",
+      "boundary_fingerprint": "1903021c99d18f0e5268f7a8468ecfcd1e8d5229b1154c7cec6c1c35e0f03144",
+      "operation_ids": [
+        "sqlite-vec.retype-initializer"
+      ]
+    },
+    {
+      "id": "sqlite-vec.register-exception",
+      "contract_id": "sqlite-vec-auto-extension-v1",
+      "path": "src/store/sqlite.rs",
+      "item": "SqliteStore::register_extension",
+      "kind": "safety-lint-exception",
+      "occurrence": 1,
+      "fingerprint": "f873e2266070e4d88ee728327f87f2fd6344dd059eacf7f991460372b6e57b1f",
+      "boundary_fingerprint": "1903021c99d18f0e5268f7a8468ecfcd1e8d5229b1154c7cec6c1c35e0f03144",
+      "operation_ids": []
+    },
+    {
+      "id": "sqlite-vec.register-operation",
+      "contract_id": "sqlite-vec-auto-extension-v1",
+      "path": "src/store/sqlite.rs",
+      "item": "SqliteStore::register_extension",
+      "kind": "unsafe-block",
+      "occurrence": 1,
+      "fingerprint": "39f1aa3ec8eba38d9940b527e20552fc89423ed3bdda6b29877c7322234c6584",
+      "boundary_fingerprint": "1903021c99d18f0e5268f7a8468ecfcd1e8d5229b1154c7cec6c1c35e0f03144",
+      "operation_ids": [
+        "sqlite-vec.register-initializer"
+      ]
+    }
+  ]
+}

@@ -45,7 +45,7 @@ async fn setup_seeded_server(principal: Option<&str>, access_policy: AccessPolic
 proptest! {
     #![proptest_config(fidelity_config())]
 
-    /// P3a: Public memories return full content for any trusted principal or anonymous public reader.
+    // P3a: Public memories return full content for any trusted principal or anonymous public reader.
     #[test]
     fn public_memories_visible_to_all(caller in prop::option::of(arb_agent_name())) {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -57,7 +57,7 @@ proptest! {
         });
     }
 
-    /// P3b: Owner always has full access on restricted memories.
+    // P3b: Owner always has full access on restricted memories.
     #[test]
     fn restricted_owner_always_has_access(allowed in arb_allowed_list()) {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -79,7 +79,7 @@ proptest! {
         });
     }
 
-    /// P3c: Non-allowed principals are denied restricted memories.
+    // P3c: Non-allowed principals are denied restricted memories.
     #[test]
     fn restricted_non_allowed_denied(
         allowed in arb_allowed_list(),

@@ -905,92 +905,64 @@ impl TestHarness {
     }
 }
 
-/// Generate a pair of `#[tokio::test]` functions — one for stdio and one for
-/// HTTP — from a single async test body that receives a [`TestHarness`].
+/// Generate `stdio` and `http` tests inside the caller's explicitly declared
+/// module from a single async test body that receives a [`TestHarness`].
 ///
 /// # Variants
 ///
 /// ```ignore
-/// transport_test!(noop, test_name, |harness| async move { ... });
-/// transport_test!(embedding, test_name, |harness| async move { ... });
-/// transport_test!(noop_clock, test_name, |harness, clock| async move { ... });
-/// ```
-///
-/// Outer attributes (e.g. `#[expect(...)]`) can be placed before the
-/// `transport_test!` call by passing them as the first argument:
-///
-/// ```ignore
-/// transport_test!(#[expect(clippy::too_many_lines, reason = "...")], noop, name, |h| async move { ... });
+/// transport_test!(noop, |harness| async move { ... });
+/// transport_test!(embedding, |harness| async move { ... });
+/// transport_test!(noop_clock, |harness, clock| async move { ... });
 /// ```
 ///
 /// The first token selects the constructor pair on `TestHarness`.
 macro_rules! transport_test {
     // -- noop (no clock) ---------------------------------------------------
-    ($(#[$attr:meta]),* , noop, $name:ident, |$h:ident| async move $body:block) => {
-        pastey::paste! {
-            $(#[$attr])*
-            #[tokio::test]
-            async fn [< stdio_ $name >]() {
-                let $h = super::helpers::TestHarness::stdio_noop().await;
-                $body
-            }
-
-            $(#[$attr])*
-            #[tokio::test]
-            async fn [< http_ $name >]() {
-                let $h = super::helpers::TestHarness::http_noop().await;
-                $body
-            }
+    (noop, |$h:ident| async move $body:block) => {
+        #[tokio::test]
+        async fn stdio() {
+            let $h = super::super::helpers::TestHarness::stdio_noop().await;
+            $body
         }
-    };
-    (noop, $name:ident, |$h:ident| async move $body:block) => {
-        super::helpers::transport_test!(, noop, $name, |$h| async move $body);
+
+        #[tokio::test]
+        async fn http() {
+            let $h = super::super::helpers::TestHarness::http_noop().await;
+            $body
+        }
     };
 
     // -- embedding (no clock) -----------------------------------------------
-    ($(#[$attr:meta]),* , embedding, $name:ident, |$h:ident| async move $body:block) => {
-        pastey::paste! {
-            $(#[$attr])*
-            #[tokio::test]
-            async fn [< stdio_ $name >]() {
-                let $h = super::helpers::TestHarness::stdio_embedding().await;
-                $body
-            }
-
-            $(#[$attr])*
-            #[tokio::test]
-            async fn [< http_ $name >]() {
-                let $h = super::helpers::TestHarness::http_embedding().await;
-                $body
-            }
+    (embedding, |$h:ident| async move $body:block) => {
+        #[tokio::test]
+        async fn stdio() {
+            let $h = super::super::helpers::TestHarness::stdio_embedding().await;
+            $body
         }
-    };
-    (embedding, $name:ident, |$h:ident| async move $body:block) => {
-        super::helpers::transport_test!(, embedding, $name, |$h| async move $body);
+
+        #[tokio::test]
+        async fn http() {
+            let $h = super::super::helpers::TestHarness::http_embedding().await;
+            $body
+        }
     };
 
     // -- noop + clock -------------------------------------------------------
-    ($(#[$attr:meta]),* , noop_clock, $name:ident, |$h:ident, $clock:ident| async move $body:block) => {
-        pastey::paste! {
-            $(#[$attr])*
-            #[tokio::test]
-            async fn [< stdio_ $name >]() {
-                let $clock = std::sync::Arc::new(localhold::clock::MockClock::new());
-                let $h = super::helpers::TestHarness::stdio_noop_clock(std::sync::Arc::clone(&$clock)).await;
-                $body
-            }
-
-            $(#[$attr])*
-            #[tokio::test]
-            async fn [< http_ $name >]() {
-                let $clock = std::sync::Arc::new(localhold::clock::MockClock::new());
-                let $h = super::helpers::TestHarness::http_noop_clock(std::sync::Arc::clone(&$clock)).await;
-                $body
-            }
+    (noop_clock, |$h:ident, $clock:ident| async move $body:block) => {
+        #[tokio::test]
+        async fn stdio() {
+            let $clock = std::sync::Arc::new(localhold::clock::MockClock::new());
+            let $h = super::super::helpers::TestHarness::stdio_noop_clock(std::sync::Arc::clone(&$clock)).await;
+            $body
         }
-    };
-    (noop_clock, $name:ident, |$h:ident, $clock:ident| async move $body:block) => {
-        super::helpers::transport_test!(, noop_clock, $name, |$h, $clock| async move $body);
+
+        #[tokio::test]
+        async fn http() {
+            let $clock = std::sync::Arc::new(localhold::clock::MockClock::new());
+            let $h = super::super::helpers::TestHarness::http_noop_clock(std::sync::Arc::clone(&$clock)).await;
+            $body
+        }
     };
 }
 

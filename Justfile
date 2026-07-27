@@ -46,16 +46,19 @@ clippy:
 fmt:
     rustup run nightly cargo-fmt --all
     cargo fmt --manifest-path tools/dependency-unsafe/Cargo.toml
+    cargo fmt --manifest-path tools/maintainability/Cargo.toml
 
 # Check formatting (requires nightly)
 fmt-check:
     rustup run nightly cargo-fmt --all -- --check
     cargo fmt --manifest-path tools/dependency-unsafe/Cargo.toml -- --check
+    cargo fmt --manifest-path tools/maintainability/Cargo.toml -- --check
 
 # Run cargo-deny supply chain audit
 deny:
     cargo deny check
     cargo deny --manifest-path tools/dependency-unsafe/Cargo.toml --locked check --config tools/dependency-unsafe/deny.toml
+    cargo deny --manifest-path tools/maintainability/Cargo.toml --locked check --config tools/maintainability/deny.toml
 
 # Check direct workspace dependencies for newer available versions
 outdated:
@@ -89,8 +92,14 @@ dependency-unsafe-generate PLATFORM:
     cargo fetch --manifest-path tools/dependency-unsafe/Cargo.toml --locked
     cargo run --manifest-path tools/dependency-unsafe/Cargo.toml --locked -- generate --platform {{ PLATFORM }}
 
+# Reject unreviewed first-party unsafe code and changes to reviewed boundaries
+source-safety:
+    ./script/tests/test_maintainability_bootstrap.sh
+    ./script/check-maintainability-bootstrap.sh -- ./script/run-source-safety.sh
+
 # Permanent maintainability safety rails; additional Phase 0 gates join here
 maintainability:
+    just source-safety
     just dependency-unsafe
 
 # Product and repository quality checks that do not include evidence baselines

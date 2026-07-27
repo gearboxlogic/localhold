@@ -1,0 +1,623 @@
+use proc_macro2::{Delimiter, TokenStream, TokenTree};
+use quote::ToTokens;
+use syn::Meta;
+use syn::ext::IdentExt as _;
+use syn::parse::Parser as _;
+use syn::punctuated::Punctuated;
+use syn::{Attribute, ItemUse, Macro, Path, Token, UseTree};
+
+use super::{RESERVED_LOCAL_MACROS, REVIEWED_EXPANSION_PACKAGES};
+
+const ASSEMBLY_MACROS: [&str; 4] = ["asm", "global_asm", "llvm_asm", "naked_asm"];
+const STANDALONE_ASSEMBLY_MACROS: [&str; 2] = ["core::arch::global_asm", "core::arch::naked_asm"];
+const BUILTIN_MACROS: [&str; 19] = [
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "cfg",
+    "concat",
+    "debug_assert",
+    "debug_assert_eq",
+    "env",
+    "format",
+    "format_args",
+    "include_str",
+    "macro_rules",
+    "matches",
+    "panic",
+    "println",
+    "stringify",
+    "vec",
+    "write",
+    "writeln",
+];
+const BUILTIN_DERIVES: [&str; 9] = ["Clone", "Copy", "Debug", "Default", "Eq", "Hash", "Ord", "PartialEq", "PartialOrd"];
+const PROTECTED_ATTRIBUTES: [&str; 34] = [
+    "allow",
+    "cfg",
+    "cfg_attr",
+    "cold",
+    "default",
+    "deny",
+    "deprecated",
+    "derive",
+    "doc",
+    "error",
+    "expect",
+    "forbid",
+    "from",
+    "ignore",
+    "inline",
+    "link",
+    "link_name",
+    "link_ordinal",
+    "macro_export",
+    "must_use",
+    "non_exhaustive",
+    "proptest_config",
+    "repr",
+    "schemars",
+    "serde",
+    "should_panic",
+    "source",
+    "test",
+    "thread_local",
+    "track_caller",
+    "unsafe",
+    "used",
+    "warn",
+    "windows_subsystem",
+];
+pub(super) fn macro_name(macro_invocation: &Macro) -> Option<String> {
+    macro_invocation.path.segments.last().map(|segment| segment.ident.unraw().to_string())
+}
+
+pub(super) fn is_trusted_local_macro_name(name: &str) -> bool {
+    RESERVED_LOCAL_MACROS.contains(&name)
+}
+
+pub(super) fn is_trusted_macro(macro_invocation: &Macro) -> bool {
+    is_trusted_macro_path(&normalized_path(&macro_invocation.path))
+}
+
+fn is_trusted_macro_path(path: &str) -> bool {
+    matches!(
+        path,
+        "assert"
+            | "assert_eq"
+            | "assert_ne"
+            | "cfg"
+            | "concat"
+            | "concat_placeholders"
+            | "concat_with_sep"
+            | "criterion_group"
+            | "criterion_main"
+            | "debug_assert"
+            | "debug_assert_eq"
+            | "define_memory_columns"
+            | "env"
+            | "format"
+            | "format_args"
+            | "futures::poll"
+            | "include_str"
+            | "info"
+            | "insta::assert_json_snapshot"
+            | "json"
+            | "json_schema"
+            | "macro_rules"
+            | "matches"
+            | "numbered_placeholders"
+            | "ort::inputs"
+            | "panic"
+            | "params"
+            | "println"
+            | "prop_oneof"
+            | "proptest"
+            | "rusqlite::params"
+            | "schemars::json_schema"
+            | "schemars::schema_for"
+            | "serde_json::json"
+            | "stringify"
+            | "tokio::join"
+            | "tokio::pin"
+            | "tokio::select"
+            | "tokio::try_join"
+            | "tracing::debug"
+            | "tracing::error"
+            | "tracing::info"
+            | "tracing::warn"
+            | "transport_test"
+            | "vec"
+            | "warn"
+            | "write"
+            | "writeln"
+    )
+}
+
+pub(super) fn untrusted_nested_macro(tokens: &TokenStream) -> Option<String> {
+    let tokens: Vec<_> = tokens.clone().into_iter().collect();
+    for (index, token) in tokens.iter().enumerate() {
+        if !matches!(token, TokenTree::Punct(punctuation) if punctuation.as_char() == '!') {
+            continue;
+        }
+        let Some((path, start)) = macro_path_before(&tokens, index) else {
+            continue;
+        };
+        let dollar_root = start > 0 && matches!(&tokens[start - 1], TokenTree::Punct(punctuation) if punctuation.as_char() == '$');
+        let hygienic_local = dollar_root
+            && path
+                .strip_prefix("crate::")
+                .is_some_and(|name| !name.contains("::") && RESERVED_LOCAL_MACROS.contains(&name));
+        if matches!(tokens.get(index + 1), Some(TokenTree::Group(_))) && !(is_trusted_macro_path(&path) || hygienic_local) {
+            return Some(if dollar_root { format!("${path}") } else { path });
+        }
+        if path == "macro_rules" && matches!(tokens.get(index + 1), Some(TokenTree::Ident(_))) && matches!(tokens.get(index + 2), Some(TokenTree::Group(_))) {
+            return Some("macro_rules definition".to_owned());
+        }
+    }
+    tokens.into_iter().find_map(|token| match token {
+        TokenTree::Group(group) => untrusted_nested_macro(&group.stream()),
+        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => None,
+    })
+}
+
+fn macro_path_before(tokens: &[TokenTree], bang_index: usize) -> Option<(String, usize)> {
+    let TokenTree::Ident(last) = tokens.get(bang_index.checked_sub(1)?)? else {
+        return None;
+    };
+    let mut parts = vec![last.unraw().to_string()];
+    let mut start = bang_index - 1;
+    while start >= 3 {
+        let (TokenTree::Ident(segment), TokenTree::Punct(first_colon), TokenTree::Punct(second_colon)) = (&tokens[start - 3], &tokens[start - 2], &tokens[start - 1]) else {
+            break;
+        };
+        if first_colon.as_char() != ':' || second_colon.as_char() != ':' {
+            break;
+        }
+        parts.push(segment.unraw().to_string());
+        start -= 3;
+    }
+    parts.reverse();
+    Some((parts.join("::"), start))
+}
+
+pub(super) fn untrusted_generated_attribute(tokens: &TokenStream) -> Option<String> {
+    let tokens: Vec<_> = tokens.clone().into_iter().collect();
+    for (index, token) in tokens.iter().enumerate() {
+        if !matches!(token, TokenTree::Punct(punctuation) if punctuation.as_char() == '#') {
+            continue;
+        }
+        let Some(group) = bracket_attribute_after(&tokens, index) else {
+            return Some("malformed or dynamic attribute".to_owned());
+        };
+        let Ok(meta) = syn::parse2::<Meta>(group.stream()) else {
+            return Some("malformed or dynamic attribute".to_owned());
+        };
+        if !meta_contains_doc_attribute(&meta) && !is_trusted_meta(&meta) {
+            return Some(normalized_path(meta.path()));
+        }
+    }
+    tokens.into_iter().find_map(|token| match token {
+        TokenTree::Group(group) => untrusted_generated_attribute(&group.stream()),
+        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => None,
+    })
+}
+
+pub(super) fn generated_name_binding(tokens: &TokenStream) -> Option<&'static str> {
+    let tokens: Vec<_> = tokens.clone().into_iter().collect();
+    for (index, token) in tokens.iter().enumerate() {
+        let TokenTree::Ident(identifier) = token else {
+            continue;
+        };
+        match identifier.unraw().to_string().as_str() {
+            "use" => return Some("use import"),
+            "mod" => return Some("module declaration"),
+            "extern"
+                if matches!(
+                    tokens.get(index + 1),
+                    Some(TokenTree::Ident(next)) if next.unraw() == "crate"
+                ) =>
+            {
+                return Some("extern crate declaration");
+            }
+            _ => {}
+        }
+    }
+    tokens.into_iter().find_map(|token| match token {
+        TokenTree::Group(group) => generated_name_binding(&group.stream()),
+        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => None,
+    })
+}
+
+pub(super) fn is_trusted_attribute(attribute: &Attribute) -> bool {
+    is_trusted_meta(&attribute.meta)
+}
+
+pub(super) fn is_reserved_expansion_root(name: &str) -> bool {
+    REVIEWED_EXPANSION_PACKAGES.contains(&name)
+}
+
+pub(super) fn untrusted_import(item: &ItemUse) -> Option<String> {
+    let mut imports = Vec::new();
+    collect_imports(&item.tree, &mut Vec::new(), &mut imports);
+    imports.into_iter().find_map(|import| match import {
+        Import::Named { source, binding } => untrusted_named_import(&source, &binding),
+        Import::Glob(source) => {
+            let path = source.join("::");
+            let local = source.first().is_some_and(|root| matches!(root.as_str(), "crate" | "self" | "super"));
+            (path != "proptest::prelude" && path != "rand::prelude" && !local).then(|| format!("glob import {path} can introduce an unreviewed expansion name"))
+        }
+    })
+}
+
+fn untrusted_named_import(source: &[String], binding: &str) -> Option<String> {
+    let root = source.first().map(String::as_str).unwrap_or_default();
+    let preserves_name = source.last().is_some_and(|name| name == binding);
+    if is_reserved_expansion_root(binding) && (source.len() != 1 || root != binding) {
+        return Some(format!("import {} as {binding} can shadow reviewed expansion package {binding}", source.join("::")));
+    }
+    let local = matches!(root, "crate" | "self" | "super" | "localhold");
+    if RESERVED_LOCAL_MACROS.contains(&binding) {
+        let direct_local = source.len() == 1 && root == binding;
+        return (!(local && preserves_name || direct_local)).then(|| format!("import {} as {binding} impersonates a reviewed local macro", source.join("::")));
+    }
+    let expected = match binding {
+        "criterion_group" | "criterion_main" => Some("criterion"),
+        "poll" => Some("futures"),
+        "assert_json_snapshot" => Some("insta"),
+        "inputs" => Some("ort"),
+        "prop_oneof" | "proptest" => Some("proptest"),
+        "tool" | "tool_router" => Some("rmcp"),
+        "params" => Some("rusqlite"),
+        "JsonSchema" | "json_schema" => Some("schemars"),
+        "Deserialize" | "Serialize" => Some("serde"),
+        "json" => Some("serde_json"),
+        "debug" | "error" | "info" | "warn" => Some("tracing"),
+        name if BUILTIN_MACROS.contains(&name) => Some(""),
+        name if BUILTIN_DERIVES.contains(&name) => Some(""),
+        name if PROTECTED_ATTRIBUTES.contains(&name) => Some(""),
+        _ => None,
+    };
+    expected.and_then(|expected| {
+        (root != expected && !(local && preserves_name)).then(|| format!("import {} as {binding} does not come from reviewed expansion package {expected}", source.join("::")))
+    })
+}
+
+enum Import {
+    Named { source: Vec<String>, binding: String },
+    Glob(Vec<String>),
+}
+
+fn collect_imports(tree: &UseTree, prefix: &mut Vec<String>, imports: &mut Vec<Import>) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.unraw().to_string());
+            collect_imports(&path.tree, prefix, imports);
+            prefix.pop();
+        }
+        UseTree::Name(name) => {
+            let binding = name.ident.unraw().to_string();
+            let mut source = prefix.clone();
+            source.push(binding.clone());
+            imports.push(Import::Named { source, binding });
+        }
+        UseTree::Rename(rename) => {
+            let mut source = prefix.clone();
+            source.push(rename.ident.unraw().to_string());
+            imports.push(Import::Named {
+                source,
+                binding: rename.rename.unraw().to_string(),
+            });
+        }
+        UseTree::Glob(_) => imports.push(Import::Glob(prefix.clone())),
+        UseTree::Group(group) => {
+            for tree in &group.items {
+                collect_imports(tree, prefix, imports);
+            }
+        }
+    }
+}
+
+fn is_trusted_meta(meta: &Meta) -> bool {
+    let path = meta.path();
+    let name = normalized_path(path);
+    match name.as_str() {
+        "cfg_attr" => trusted_cfg_attr(meta),
+        "derive" => trusted_derive(meta),
+        _ => matches!(
+            name.as_str(),
+            "allow"
+                | "cfg"
+                | "cold"
+                | "default"
+                | "deny"
+                | "deprecated"
+                | "doc"
+                | "error"
+                | "expect"
+                | "forbid"
+                | "from"
+                | "ignore"
+                | "inline"
+                | "link"
+                | "link_name"
+                | "link_ordinal"
+                | "macro_export"
+                | "must_use"
+                | "non_exhaustive"
+                | "proptest_config"
+                | "repr"
+                | "schemars"
+                | "serde"
+                | "should_panic"
+                | "source"
+                | "test"
+                | "thread_local"
+                | "tokio::main"
+                | "tokio::test"
+                | "tool"
+                | "tool_router"
+                | "track_caller"
+                | "unsafe"
+                | "used"
+                | "warn"
+        ),
+    }
+}
+
+fn trusted_cfg_attr(meta: &Meta) -> bool {
+    let Meta::List(list) = meta else {
+        return false;
+    };
+    let Ok(items) = Punctuated::<Meta, Token![,]>::parse_terminated.parse2(list.tokens.clone()) else {
+        return false;
+    };
+    items.len() >= 2 && items.iter().skip(1).all(|nested| normalized_path(nested.path()) != "doc" && is_trusted_meta(nested))
+}
+
+fn trusted_derive(meta: &Meta) -> bool {
+    let Meta::List(list) = meta else {
+        return false;
+    };
+    Punctuated::<Path, Token![,]>::parse_terminated.parse2(list.tokens.clone()).is_ok_and(|paths| {
+        paths.iter().all(|path| {
+            matches!(
+                normalized_path(path).as_str(),
+                "Clone"
+                    | "Copy"
+                    | "Debug"
+                    | "Default"
+                    | "Deserialize"
+                    | "Eq"
+                    | "Hash"
+                    | "JsonSchema"
+                    | "Ord"
+                    | "PartialEq"
+                    | "PartialOrd"
+                    | "Serialize"
+                    | "schemars::JsonSchema"
+                    | "serde::Deserialize"
+                    | "serde::Serialize"
+                    | "thiserror::Error"
+            )
+        })
+    })
+}
+
+fn normalized_path(path: &Path) -> String {
+    path.segments.iter().map(|segment| segment.ident.unraw().to_string()).collect::<Vec<_>>().join("::")
+}
+
+pub(super) fn is_standalone_assembly_macro(macro_invocation: &Macro) -> bool {
+    STANDALONE_ASSEMBLY_MACROS.contains(&normalized_path(&macro_invocation.path).as_str())
+}
+
+pub(super) fn contains_assembly_macro(tokens: &TokenStream) -> bool {
+    contains_macro_invocation(tokens, &ASSEMBLY_MACROS)
+}
+
+pub(super) fn contains_include_macro(tokens: &TokenStream) -> bool {
+    contains_macro_invocation(tokens, &["include"])
+}
+
+fn contains_macro_invocation(tokens: &TokenStream, names: &[&str]) -> bool {
+    let tokens: Vec<_> = tokens.clone().into_iter().collect();
+    tokens.iter().enumerate().any(|(index, token)| {
+        matches!(token, TokenTree::Punct(punctuation) if punctuation.as_char() == '!')
+            && macro_path_before(&tokens, index).is_some_and(|(path, _)| path.rsplit("::").next().is_some_and(|name| names.contains(&name)))
+            && matches!(tokens.get(index + 1), Some(TokenTree::Group(_)))
+    }) || tokens.into_iter().any(|token| match token {
+        TokenTree::Group(group) => contains_macro_invocation(&group.stream(), names),
+        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
+}
+
+pub(super) fn is_safety_lint_exception(attribute: &Attribute) -> bool {
+    meta_is_safety_lint_exception(&attribute.meta)
+}
+
+pub(super) fn is_unsafe_attribute(attribute: &Attribute) -> bool {
+    let path = attribute.path().segments.last().map(|segment| segment.ident.unraw().to_string());
+    path.as_deref() == Some("unsafe") || (path.as_deref() == Some("cfg_attr") && contains_structural_ident(attribute.meta.to_token_stream(), "unsafe"))
+}
+
+pub(super) fn is_path_override(attribute: &Attribute) -> bool {
+    let path = attribute.path().segments.last().map(|segment| segment.ident.unraw().to_string());
+    path.as_deref() == Some("path") || (path.as_deref() == Some("cfg_attr") && contains_structural_ident(attribute.meta.to_token_stream(), "path"))
+}
+
+pub(super) fn contains_unaudited_macro_syntax(tokens: &TokenStream) -> bool {
+    contains_plain_ident(tokens.clone(), "unsafe")
+        || contains_structural_ident(tokens.clone(), "static")
+        || contains_macro_safety_lint_exception(tokens.clone())
+        || contains_assembly_macro(tokens)
+}
+
+pub(super) fn contains_token_paste_syntax(tokens: &TokenStream) -> bool {
+    tokens.clone().into_iter().any(|token| match token {
+        TokenTree::Group(group) => {
+            let children: Vec<_> = group.stream().into_iter().collect();
+            group.delimiter() == Delimiter::Bracket
+                && matches!(children.first(), Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == '<')
+                && matches!(children.last(), Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == '>')
+                || contains_token_paste_syntax(&group.stream())
+        }
+        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
+}
+
+pub(super) fn contains_structural_ident(tokens: TokenStream, expected: &str) -> bool {
+    tokens.into_iter().any(|token| match token {
+        TokenTree::Group(group) => contains_structural_ident(group.stream(), expected),
+        TokenTree::Ident(identifier) => identifier.unraw() == expected,
+        TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
+}
+
+pub(super) fn contains_opaque_attribute(tokens: TokenStream) -> bool {
+    let tokens: Vec<_> = tokens.into_iter().collect();
+    tokens.iter().enumerate().any(|(index, token)| {
+        if !matches!(token, TokenTree::Punct(punctuation) if punctuation.as_char() == '#') {
+            return false;
+        }
+        bracket_attribute_after(&tokens, index).is_none_or(|group| contains_punctuation(group.stream(), '$'))
+    }) || tokens.into_iter().any(|token| match token {
+        TokenTree::Group(group) => contains_opaque_attribute(group.stream()),
+        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
+}
+
+pub(super) fn contains_path_attribute(tokens: TokenStream) -> bool {
+    let tokens: Vec<_> = tokens.into_iter().collect();
+    tokens.iter().enumerate().any(|(index, token)| {
+        matches!(token, TokenTree::Punct(punctuation) if punctuation.as_char() == '#')
+            && bracket_attribute_after(&tokens, index).is_some_and(|group| {
+                let attribute = group.stream();
+                first_ident_is(attribute.clone(), "path") || (first_ident_is(attribute.clone(), "cfg_attr") && contains_structural_ident(attribute, "path"))
+            })
+    }) || tokens.into_iter().any(|token| match token {
+        TokenTree::Group(group) => contains_path_attribute(group.stream()),
+        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
+}
+
+pub(super) fn contains_doc_attribute(tokens: TokenStream) -> bool {
+    let tokens: Vec<_> = tokens.into_iter().collect();
+    tokens.iter().enumerate().any(|(index, token)| {
+        matches!(token, TokenTree::Punct(punctuation) if punctuation.as_char() == '#')
+            && bracket_attribute_after(&tokens, index)
+                .and_then(|group| syn::parse2::<Meta>(group.stream()).ok())
+                .is_some_and(|meta| meta_contains_doc_attribute(&meta))
+    }) || tokens.into_iter().any(|token| match token {
+        TokenTree::Group(group) => contains_doc_attribute(group.stream()),
+        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
+}
+
+fn meta_contains_doc_attribute(meta: &Meta) -> bool {
+    let name = normalized_path(meta.path());
+    if name == "doc" {
+        return true;
+    }
+    let Meta::List(list) = meta else {
+        return false;
+    };
+    if name != "cfg_attr" {
+        return false;
+    }
+    Punctuated::<Meta, Token![,]>::parse_terminated
+        .parse2(list.tokens.clone())
+        .is_ok_and(|items| items.iter().skip(1).any(meta_contains_doc_attribute))
+}
+
+fn contains_macro_safety_lint_exception(tokens: TokenStream) -> bool {
+    let tokens: Vec<_> = tokens.into_iter().collect();
+    tokens.iter().enumerate().any(|(index, token)| {
+        if !matches!(token, TokenTree::Punct(punctuation) if punctuation.as_char() == '#') {
+            return false;
+        }
+        bracket_attribute_after(&tokens, index).is_some_and(|group| is_safety_lint_meta(&group.stream()))
+    }) || tokens.into_iter().any(|token| match token {
+        TokenTree::Group(group) => contains_macro_safety_lint_exception(group.stream()),
+        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
+}
+
+fn bracket_attribute_after(tokens: &[TokenTree], hash_index: usize) -> Option<&proc_macro2::Group> {
+    let mut group_index = hash_index + 1;
+    if matches!(
+        tokens.get(group_index),
+        Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == '!'
+    ) {
+        group_index += 1;
+    }
+    let Some(TokenTree::Group(group)) = tokens.get(group_index) else {
+        return None;
+    };
+    (group.delimiter() == Delimiter::Bracket).then_some(group)
+}
+
+fn is_safety_lint_meta(tokens: &TokenStream) -> bool {
+    syn::parse2::<Meta>(tokens.clone()).is_ok_and(|meta| meta_is_safety_lint_exception(&meta))
+}
+
+fn meta_is_safety_lint_exception(meta: &Meta) -> bool {
+    let name = meta.path().segments.last().map(|segment| segment.ident.unraw().to_string());
+    match name.as_deref() {
+        Some("allow" | "expect" | "warn") => {
+            let Meta::List(list) = meta else {
+                return false;
+            };
+            contains_safety_lint_name(&list.tokens)
+        }
+        Some("cfg_attr") => {
+            let Meta::List(list) = meta else {
+                return false;
+            };
+            Punctuated::<Meta, Token![,]>::parse_terminated
+                .parse2(list.tokens.clone())
+                .is_ok_and(|items| items.iter().skip(1).any(meta_is_safety_lint_exception))
+        }
+        _ => false,
+    }
+}
+
+fn contains_safety_lint_name(tokens: &TokenStream) -> bool {
+    Punctuated::<Meta, Token![,]>::parse_terminated.parse2(tokens.clone()).is_ok_and(|items| {
+        items.iter().any(|item| {
+            let Meta::Path(path) = item else {
+                return false;
+            };
+            matches!(
+                normalized_path(path).as_str(),
+                "unsafe_code"
+                    | "unsafe_op_in_unsafe_fn"
+                    | "future_incompatible"
+                    | "rust_2024_compatibility"
+                    | "warnings"
+                    | "clippy::undocumented_unsafe_blocks"
+                    | "clippy::restriction"
+            )
+        })
+    })
+}
+
+fn contains_plain_ident(tokens: TokenStream, expected: &str) -> bool {
+    tokens.into_iter().any(|token| match token {
+        TokenTree::Group(group) => contains_plain_ident(group.stream(), expected),
+        TokenTree::Ident(identifier) => identifier == expected,
+        TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
+}
+
+fn contains_punctuation(tokens: TokenStream, expected: char) -> bool {
+    tokens.into_iter().any(|token| match token {
+        TokenTree::Group(group) => contains_punctuation(group.stream(), expected),
+        TokenTree::Punct(punctuation) => punctuation.as_char() == expected,
+        TokenTree::Ident(_) | TokenTree::Literal(_) => false,
+    })
+}
+
+fn first_ident_is(tokens: TokenStream, expected: &str) -> bool {
+    matches!(tokens.into_iter().next(), Some(TokenTree::Ident(identifier)) if identifier.unraw() == expected)
+}

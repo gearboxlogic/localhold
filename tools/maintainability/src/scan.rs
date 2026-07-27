@@ -18,9 +18,9 @@ use syn::{
 use self::documentation::{is_doc_comment, unsupported_runnable_doctest};
 use self::files::{collect_optional as collect_optional_rust_files, collect_required as collect_rust_files};
 use self::policy::{
-    contains_assembly_macro, contains_opaque_attribute, contains_path_attribute, contains_structural_ident, contains_unaudited_macro_syntax, generated_name_binding,
-    is_path_override, is_reserved_expansion_root, is_safety_lint_exception, is_standalone_assembly_macro, is_trusted_attribute, is_trusted_local_macro_name, is_trusted_macro,
-    is_unsafe_attribute, macro_name, untrusted_generated_attribute, untrusted_import, untrusted_nested_macro,
+    contains_assembly_macro, contains_include_macro, contains_opaque_attribute, contains_path_attribute, contains_structural_ident, contains_unaudited_macro_syntax,
+    generated_name_binding, is_path_override, is_reserved_expansion_root, is_safety_lint_exception, is_standalone_assembly_macro, is_trusted_attribute,
+    is_trusted_local_macro_name, is_trusted_macro, is_unsafe_attribute, macro_name, untrusted_generated_attribute, untrusted_import, untrusted_nested_macro,
 };
 
 pub const REVIEWED_EXPANSION_PACKAGES: [&str; 14] = [
@@ -198,7 +198,7 @@ impl SourceScanner {
         self.sites.push(PendingSite {
             item: self.item(),
             kind,
-            boundary_fingerprint: self.boundaries.last().cloned().unwrap_or_else(|| site_fingerprint.clone()),
+            boundary_fingerprint: combined_boundary_fingerprint(&self.boundaries).unwrap_or_else(|| site_fingerprint.clone()),
             fingerprint: site_fingerprint,
             source_range: SourceRange::from_span(span),
         });
@@ -211,7 +211,11 @@ impl SourceScanner {
     }
 
     fn visit_boundary<T: ToTokens>(&mut self, scope: String, node: &T, visit: impl FnOnce(&mut Self, &T)) {
-        self.boundaries.push(syntax_fingerprint(node));
+        self.visit_boundary_with_fingerprint(scope, syntax_fingerprint(node), node, visit);
+    }
+
+    fn visit_boundary_with_fingerprint<T>(&mut self, scope: String, fingerprint: String, node: &T, visit: impl FnOnce(&mut Self, &T)) {
+        self.boundaries.push(fingerprint);
         self.visit_scoped(scope, node, visit);
         self.boundaries.pop();
     }
@@ -262,7 +266,7 @@ impl<'ast> Visit<'ast> for SourceScanner {
         if policy::contains_token_paste_syntax(&macro_invocation.tokens) {
             self.violations.push(format!("{} uses opaque token-pasting macro input", self.item()));
         }
-        if name.as_deref() == Some("include") || contains_structural_ident(macro_invocation.tokens.clone(), "include") {
+        if name.as_deref() == Some("include") || contains_include_macro(&macro_invocation.tokens) {
             self.violations.push(format!("{} uses include! code expansion", self.item()));
         }
         if contains_path_attribute(macro_invocation.tokens.clone()) {
@@ -388,7 +392,7 @@ impl<'ast> Visit<'ast> for SourceScanner {
             None => type_name,
         };
         let scope = self.child_scope(&scope);
-        self.visit_boundary(scope, implementation, |scanner, implementation| {
+        self.visit_boundary_with_fingerprint(scope, impl_header_fingerprint(implementation), implementation, |scanner, implementation| {
             if let Some(unsafety) = &implementation.unsafety {
                 scanner.push_site(SiteKind::Impl, implementation, unsafety.span);
                 scanner.with_unsafe_context(|scanner| visit::visit_item_impl(scanner, implementation));
@@ -422,7 +426,7 @@ impl<'ast> Visit<'ast> for SourceScanner {
 
     fn visit_item_trait(&mut self, item: &'ast ItemTrait) {
         let scope = self.child_scope(&item.ident.to_string());
-        self.visit_boundary(scope, item, |scanner, item| {
+        self.visit_boundary_with_fingerprint(scope, trait_header_fingerprint(item), item, |scanner, item| {
             if let Some(unsafety) = &item.unsafety {
                 scanner.push_site(SiteKind::Trait, item, unsafety.span);
                 scanner.with_unsafe_context(|scanner| visit::visit_item_trait(scanner, item));
@@ -461,7 +465,7 @@ impl<'ast> Visit<'ast> for SourceScanner {
 
     fn visit_item_foreign_mod(&mut self, item: &'ast ItemForeignMod) {
         let scope = self.child_scope("<extern>");
-        self.visit_boundary(scope, item, |scanner, item| {
+        self.visit_boundary_with_fingerprint(scope, foreign_mod_header_fingerprint(item), item, |scanner, item| {
             if let Some(unsafety) = &item.unsafety {
                 scanner.push_site(SiteKind::ExternBlock, item, unsafety.span);
                 scanner.with_unsafe_context(|scanner| visit::visit_item_foreign_mod(scanner, item));
@@ -500,6 +504,39 @@ impl<'ast> Visit<'ast> for SourceScanner {
             visit::visit_foreign_item_static(scanner, item);
         });
     }
+}
+
+fn combined_boundary_fingerprint(boundaries: &[String]) -> Option<String> {
+    match boundaries {
+        [] => None,
+        [boundary] => Some(boundary.clone()),
+        _ => {
+            let mut digest = Sha256::new();
+            for boundary in boundaries {
+                digest.update(boundary.len().to_le_bytes());
+                digest.update(boundary.as_bytes());
+            }
+            Some(format!("{:x}", digest.finalize()))
+        }
+    }
+}
+
+fn impl_header_fingerprint(implementation: &ItemImpl) -> String {
+    let mut header = implementation.clone();
+    header.items.clear();
+    syntax_fingerprint(&header)
+}
+
+fn trait_header_fingerprint(item: &ItemTrait) -> String {
+    let mut header = item.clone();
+    header.items.clear();
+    syntax_fingerprint(&header)
+}
+
+fn foreign_mod_header_fingerprint(item: &ItemForeignMod) -> String {
+    let mut header = item.clone();
+    header.items.clear();
+    syntax_fingerprint(&header)
 }
 
 fn normalized_tokens(tokens: &impl ToTokens) -> String {

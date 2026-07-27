@@ -160,7 +160,7 @@
       "kind": "safety-lint-exception",
       "occurrence": 0,
       "fingerprint": "17691c4d201c4b73e39bbef2f4ea9e83892b97761ea12a6db9d0f9a683ec6de7",
-      "boundary_fingerprint": "37c638eb9bdb83812a468c86bfeeea847dc50b8b85ac25cba245c8f6929f586b",
+      "boundary_fingerprint": "1903021c99d18f0e5268f7a8468ecfcd1e8d5229b1154c7cec6c1c35e0f03144",
       "operation_ids": []
     },
     {
@@ -171,7 +171,7 @@
       "kind": "unsafe-block",
       "occurrence": 0,
       "fingerprint": "b0f3a60294d50510735f960d221ebd8d23e807e6e768ab377e96e7d0df9697fe",
-      "boundary_fingerprint": "37c638eb9bdb83812a468c86bfeeea847dc50b8b85ac25cba245c8f6929f586b",
+      "boundary_fingerprint": "1903021c99d18f0e5268f7a8468ecfcd1e8d5229b1154c7cec6c1c35e0f03144",
       "operation_ids": [
         "sqlite-vec.retype-initializer"
       ]
@@ -184,7 +184,7 @@
       "kind": "safety-lint-exception",
       "occurrence": 1,
       "fingerprint": "f873e2266070e4d88ee728327f87f2fd6344dd059eacf7f991460372b6e57b1f",
-      "boundary_fingerprint": "37c638eb9bdb83812a468c86bfeeea847dc50b8b85ac25cba245c8f6929f586b",
+      "boundary_fingerprint": "1903021c99d18f0e5268f7a8468ecfcd1e8d5229b1154c7cec6c1c35e0f03144",
       "operation_ids": []
     },
     {
@@ -195,7 +195,7 @@
       "kind": "unsafe-block",
       "occurrence": 1,
       "fingerprint": "39f1aa3ec8eba38d9940b527e20552fc89423ed3bdda6b29877c7322234c6584",
-      "boundary_fingerprint": "37c638eb9bdb83812a468c86bfeeea847dc50b8b85ac25cba245c8f6929f586b",
+      "boundary_fingerprint": "1903021c99d18f0e5268f7a8468ecfcd1e8d5229b1154c7cec6c1c35e0f03144",
       "operation_ids": [
         "sqlite-vec.register-initializer"
       ]

@@ -97,7 +97,9 @@ aliases), and `#[path]` source overrides are rejected so code cannot escape the
 audited roots or hide an exception from the inventory. Explicit Cargo target
 paths must remain under those roots. All enabled package build scripts are
 rejected until the gate can audit their complete inputs and outputs; a physical
-root `build.rs` is rejected even when disabled.
+root `build.rs` is rejected even when disabled. The maintainability checker
+itself sets `build = false`, and an independent bootstrap check runs before
+Cargo to reject a physical checker `build.rs` or removal of that setting.
 Runnable Rust doctests are likewise rejected, including rustdoc-only modifiers,
 target-specific ignores, fences inside blockquotes or list items, and class-only
 fences that remain Rust unless marked `custom`; `custom` takes precedence over
@@ -129,18 +131,17 @@ Cargo-scheduled integration-test target using the standard test harness without
 opt-in target features. Its complete normalized test-function syntax is
 fingerprinted in the contract, so weakening or replacing the test requires
 explicit safety review. Operations and lint exceptions are counted separately.
-Site
-locators plus site and enclosing-boundary syntax fingerprints, including named
-type/data and associated-item boundaries that can contain const expressions,
-make additions, moves, removals, operation mutations, and safe-wrapper
-mutations fail closed.
+Site locators plus site and enclosing-boundary syntax fingerprints, including
+enclosing impl, trait, and extern headers plus named type/data and
+associated-item boundaries that can contain const expressions, make additions,
+moves, removals, operation mutations, and safe-wrapper mutations fail closed.
 The gate also reserves a higher Cargo priority for required compiler and Clippy
 lints so overlapping lint groups cannot override them, while unrelated lints
 may use their own priorities. It sanitizes compiler override environment
 variables and inherited build-target selection, and rejects `.cargo/config*`
 files in the repository, its ancestors, or Cargo home that could redirect or
-override compiler audits. Contract
-dependencies must use exactly their reviewed routes: alternate direct
+override compiler audits. Contract dependencies must use exactly their reviewed
+routes: alternate direct
 dependencies, aliases, workspace inheritance, build/dev/target declarations,
 and root-feature forwarding are rejected. Locked versions, sources, checksums,
 direct feature specifications, fully resolved feature sets, and incoming

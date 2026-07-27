@@ -94,6 +94,8 @@ dependency-unsafe-generate PLATFORM:
 
 # Reject unreviewed first-party unsafe code and changes to reviewed boundaries
 source-safety:
+    ./script/check-maintainability-bootstrap.sh
+    ./script/tests/test_maintainability_bootstrap.sh
     cargo fetch --manifest-path tools/maintainability/Cargo.toml --locked
     cargo fmt --manifest-path tools/maintainability/Cargo.toml -- --check
     cargo test --manifest-path tools/maintainability/Cargo.toml --locked

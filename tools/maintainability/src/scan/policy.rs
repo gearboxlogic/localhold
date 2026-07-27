@@ -416,6 +416,18 @@ pub(super) fn contains_assembly_macro(tokens: &TokenStream) -> bool {
     ASSEMBLY_MACROS.into_iter().any(|name| contains_structural_ident(tokens.clone(), name))
 }
 
+pub(super) fn contains_include_macro(tokens: &TokenStream) -> bool {
+    let tokens: Vec<_> = tokens.clone().into_iter().collect();
+    tokens.iter().enumerate().any(|(index, token)| {
+        matches!(token, TokenTree::Punct(punctuation) if punctuation.as_char() == '!')
+            && macro_path_before(&tokens, index).is_some_and(|(path, _)| path.rsplit("::").next() == Some("include"))
+            && matches!(tokens.get(index + 1), Some(TokenTree::Group(_)))
+    }) || tokens.into_iter().any(|token| match token {
+        TokenTree::Group(group) => contains_include_macro(&group.stream()),
+        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
+}
+
 pub(super) fn is_safety_lint_exception(attribute: &Attribute) -> bool {
     meta_is_safety_lint_exception(&attribute.meta)
 }
@@ -567,9 +579,23 @@ fn meta_is_safety_lint_exception(meta: &Meta) -> bool {
 }
 
 fn contains_safety_lint_name(tokens: &TokenStream) -> bool {
-    let names = ["unsafe_code", "unsafe_op_in_unsafe_fn", "undocumented_unsafe_blocks"];
-    let groups = ["all", "future_incompatible", "restriction", "rust_2024_compatibility", "warnings"];
-    names.into_iter().chain(groups).any(|name| contains_structural_ident(tokens.clone(), name))
+    Punctuated::<Meta, Token![,]>::parse_terminated.parse2(tokens.clone()).is_ok_and(|items| {
+        items.iter().any(|item| {
+            let Meta::Path(path) = item else {
+                return false;
+            };
+            matches!(
+                normalized_path(path).as_str(),
+                "unsafe_code"
+                    | "unsafe_op_in_unsafe_fn"
+                    | "future_incompatible"
+                    | "rust_2024_compatibility"
+                    | "warnings"
+                    | "clippy::undocumented_unsafe_blocks"
+                    | "clippy::restriction"
+            )
+        })
+    })
 }
 
 fn contains_plain_ident(tokens: TokenStream, expected: &str) -> bool {

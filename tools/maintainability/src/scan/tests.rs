@@ -123,7 +123,7 @@ fn detects_executable_forms_and_exceptions() {
         "#,
     );
     let kinds: Vec<_> = sites.iter().map(|site| site.kind).collect();
-    assert_eq!(kinds.iter().filter(|kind| **kind == SiteKind::LintException).count(), 7);
+    assert_eq!(kinds.iter().filter(|kind| **kind == SiteKind::LintException).count(), 6);
     assert_eq!(kinds.iter().filter(|kind| **kind == SiteKind::Function).count(), 2);
     assert!(kinds.contains(&SiteKind::Block));
     assert!(kinds.contains(&SiteKind::Trait));
@@ -132,6 +132,19 @@ fn detects_executable_forms_and_exceptions() {
     assert_eq!(kinds.iter().filter(|kind| **kind == SiteKind::MacroInput).count(), 1);
     assert!(kinds.contains(&SiteKind::Attribute));
     assert!(kinds.contains(&SiteKind::MutableStatic));
+}
+
+#[test]
+fn unrelated_clippy_groups_are_not_safety_exceptions() {
+    let sites = scan(
+        r"
+        #[allow(clippy::all)]
+        #[expect(clippy::pedantic)]
+        #[warn(clippy::nursery)]
+        fn sample() {}
+        ",
+    );
+    assert!(sites.is_empty(), "unexpected sites: {sites:?}");
 }
 
 #[test]
@@ -184,6 +197,27 @@ fn boundary_fingerprint_covers_safe_setup_around_an_operation() {
     let second = scan("fn boundary() { let pointer = second; unsafe { call(pointer) } }");
     assert_eq!(first[0].fingerprint, second[0].fingerprint);
     assert_ne!(first[0].boundary_fingerprint, second[0].boundary_fingerprint);
+}
+
+#[test]
+fn associated_item_boundary_includes_enclosing_container_headers() {
+    for (first_source, changed_header_source) in [
+        (
+            "impl<T: Pod> Buffer<T> { fn read() { unsafe { operation() } } }",
+            "impl<T> Buffer<T> { fn read() { unsafe { operation() } } }",
+        ),
+        ("trait Buffer<T: Pod> { unsafe fn read(); }", "trait Buffer<T> { unsafe fn read(); }"),
+        ("extern \"C\" { unsafe fn read(); }", "extern \"system\" { unsafe fn read(); }"),
+    ] {
+        let first = scan(first_source);
+        let changed_header = scan(changed_header_source);
+        assert_eq!(first[0].fingerprint, changed_header[0].fingerprint);
+        assert_ne!(first[0].boundary_fingerprint, changed_header[0].boundary_fingerprint);
+    }
+
+    let first = scan("impl<T: Pod> Buffer<T> { fn read() { unsafe { operation() } } }");
+    let changed_sibling = scan("impl<T: Pod> Buffer<T> { const CAPACITY: usize = 1; fn read() { unsafe { operation() } } }");
+    assert_eq!(first[0].boundary_fingerprint, changed_sibling[0].boundary_fingerprint);
 }
 
 #[test]
@@ -269,6 +303,11 @@ fn rejects_source_expansion_outside_audited_files() {
     assert_source_expansion_rejected(r#"macro_rules! expand { ($a:tt) => { # $a mod outside; } } expand!([path = "../outside.rs"]);"#);
     assert_source_expansion_rejected(r"macro_rules! expand { ($a:tt) => { #! $a } } expand!([allow(unsafe_code)]);");
     assert_source_expansion_rejected(r#"use std::include as source; source!("../outside.rs");"#);
+}
+
+#[test]
+fn trusted_macro_arguments_can_use_an_include_field() {
+    assert!(scan_result("fn sample(options: Options) { assert!(options.include); }").is_ok());
 }
 
 #[test]

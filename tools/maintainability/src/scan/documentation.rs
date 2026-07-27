@@ -84,23 +84,41 @@ impl DocCommentScanner {
 
     fn scan_content(&mut self, content: &str) -> bool {
         let content = content.strip_prefix(' ').unwrap_or(content);
-        let content = strip_blockquote_prefixes(content);
+        let content = strip_markdown_container_prefixes(content);
         let trimmed = content.trim_start();
         match fence_delimiter(trimmed) {
             Some((delimiter, rest)) => update_fence(&mut self.fence, delimiter, rest),
-            None => self.fence.is_none() && content.starts_with("    ") && !content.trim().is_empty(),
+            None => false,
         }
     }
 }
 
-fn strip_blockquote_prefixes(mut content: &str) -> &str {
+fn strip_markdown_container_prefixes(mut content: &str) -> &str {
     loop {
         let candidate = content.trim_start();
-        let Some(rest) = candidate.strip_prefix('>') else {
+        if let Some(rest) = candidate.strip_prefix('>') {
+            content = rest.strip_prefix(' ').unwrap_or(rest);
+        } else if let Some(rest) = strip_list_marker(candidate) {
+            content = rest;
+        } else {
             return content;
-        };
-        content = rest.strip_prefix(' ').unwrap_or(rest);
+        }
     }
+}
+
+fn strip_list_marker(content: &str) -> Option<&str> {
+    let bytes = content.as_bytes();
+    let marker_length = match bytes {
+        [b'-' | b'+' | b'*', whitespace, ..] if whitespace.is_ascii_whitespace() => 1,
+        _ => {
+            let digits = bytes.iter().take(9).take_while(|byte| byte.is_ascii_digit()).count();
+            if digits == 0 || !matches!(bytes.get(digits), Some(b'.' | b')')) || !bytes.get(digits + 1).is_some_and(u8::is_ascii_whitespace) {
+                return None;
+            }
+            digits + 1
+        }
+    };
+    Some(content[marker_length..].trim_start())
 }
 
 fn fence_delimiter(content: &str) -> Option<(Fence, &str)> {

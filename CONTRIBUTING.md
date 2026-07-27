@@ -99,14 +99,15 @@ paths must remain under those roots. All enabled package build scripts are
 rejected until the gate can audit their complete inputs and outputs; a physical
 root `build.rs` is rejected even when disabled.
 Runnable Rust doctests are likewise rejected, including rustdoc-only modifiers,
-target-specific ignores, blockquoted fences, and class-only fences that remain
-Rust unless marked `custom`; `custom` takes precedence over all other fence
-tokens. Closing fences must match the opening marker and meet its delimiter
-length, so shorter Markdown examples embedded in non-Rust fences remain
-documentation. Use maintained integration tests for executable examples.
-Globally ignored and explicitly non-Rust language blocks remain supported. The
-gate also runs Clippy with forced `unsafe_code`, `unsafe_op_in_unsafe_fn`, and
-undocumented-block diagnostics.
+target-specific ignores, fences inside blockquotes or list items, and class-only
+fences that remain Rust unless marked `custom`; `custom` takes precedence over
+all other fence tokens. Closing fences must match the opening marker and meet
+its delimiter length, so shorter Markdown examples embedded in non-Rust fences
+remain documentation. Ordinary indented Markdown code blocks remain supported
+because Rustdoc does not schedule them as doctests. Use maintained integration
+tests for executable examples. Globally ignored and explicitly non-Rust
+language blocks remain supported. The gate also runs Clippy with forced
+`unsafe_code`, `unsafe_op_in_unsafe_fn`, and undocumented-block diagnostics.
 Each emitted `unsafe_code` diagnostic must map to exactly one inventoried source
 keyword; the other two diagnostics are always errors. Cargo dep-info for every
 root target is checked and rejects recorded compiler inputs outside the audited
@@ -144,10 +145,11 @@ dependencies, aliases, workspace inheritance, build/dev/target declarations,
 and root-feature forwarding are rejected. Locked versions, sources, checksums,
 direct feature specifications, fully resolved feature sets, and incoming
 dependency-graph routes remain pinned under the all-features graph. First-party
-Rust must remain in the audited root package: root workspaces and local path
-dependencies are rejected, except for the exact reviewed self dev-dependency
-used by integration tests. The broader dependency-exposure gate still reviews
-target-specific effective Cargo graphs.
+Rust must remain in the audited root package: root workspaces, package-level
+external workspace inheritance, and local path dependencies are rejected,
+except for the exact reviewed self dev-dependency used by integration tests.
+The broader dependency-exposure gate still reviews target-specific effective
+Cargo graphs.
 
 Inspect the parser's current site inventory with:
 

@@ -413,7 +413,9 @@ fn rejects_runnable_rust_doctests_but_allows_ignored_examples() {
         "/// ```ignore,ignore-x86_64\n/// fn target_ignore_overrides_global_ignore() {}\n/// ```\nfn sample() {}",
         "/// > ```rust\n/// > fn quoted_runnable() {}\n/// > ```\nfn sample() {}",
         "/// > > ```rust\n/// > > fn nested_quoted_runnable() {}\n/// > > ```\nfn sample() {}",
-        "///     fn indented() {}\nfn sample() {}",
+        "/// - ```rust\n///   #![allow(unsafe_code)]\n///   unsafe { hidden(); }\nfn sample() {}",
+        "/// 1. ```rust\n///    fn ordered_list_runnable() {}\nfn sample() {}",
+        "/// > - ```rust\n/// >   fn quoted_list_runnable() {}\nfn sample() {}",
         "/**\n * ```rust\n * fn block_doc() {}\n * ```\n */\nfn sample() {}",
         "/*!\n * ```rust\n * fn inner_block_doc() {}\n * ```\n */\nfn sample() {}",
     ] {
@@ -429,6 +431,8 @@ fn rejects_runnable_rust_doctests_but_allows_ignored_examples() {
     assert!(scan_result("/// ```custom,rust\n/// fn custom_rust() {}\n/// ```\nfn sample() {}").is_ok());
     assert!(scan_result("/// ```custom,no_run\n/// fn custom_no_run() {}\n/// ```\nfn sample() {}").is_ok());
     assert!(scan_result("/// ```text\n///     indented prose\n/// ```\nfn sample() {}").is_ok());
+    assert!(scan_result("///     let x = 1;\nfn sample() {}").is_ok());
+    assert!(scan_result("/// - output\n///       continued output\nfn sample() {}").is_ok());
     assert!(scan_result("/// ````text\n/// embedded Markdown:\n/// ```rust\n/// fn not_a_doctest() {}\n/// ```\n/// ````\nfn sample() {}").is_ok());
     assert!(
         scan_result(

@@ -199,16 +199,18 @@ These paths are not contacted by a default running `hold` process:
   Cargo target paths must stay under audited roots. Compiler-audit lanes are
   derived from locked Cargo metadata, including explicit targets outside
   conventional directories and test-enabled examples; the benchmark lane
-  audits every target kind Cargo selects with `bench = true`. Root workspaces
-  and local path dependencies are
+  audits every target kind Cargo selects with `bench = true`. Root workspaces,
+  package-level external workspace inheritance, and local path dependencies are
   rejected except for the reviewed self dev-dependency. All enabled package
   build scripts are rejected, and a physical root `build.rs` is rejected even
   when disabled. Runnable rustdoc modifiers, target-specific ignores, and
   class-only Rust fences are rejected unless the block is globally ignored or
-  explicitly marked as a non-Rust language or `custom`; blockquoted fences are
-  recognized, closing delimiters must be at least as long as their opener, and
-  `custom` takes precedence over every other fence token. The gate also verifies
-  the required lint levels, evaluates each nested `cfg_attr` lint independently,
+  explicitly marked as a non-Rust language or `custom`; fences inside
+  blockquotes and list items are recognized, closing delimiters must be at least
+  as long as their opener, and `custom` takes precedence over every other fence
+  token. Ordinary indented Markdown code remains supported because Rustdoc does
+  not schedule it as a doctest. The gate also verifies the required lint levels,
+  evaluates each nested `cfg_attr` lint independently,
   protects required lints from overlapping higher-priority lint groups, removes
   inherited compiler overrides and build-target selection from metadata and
   compiler-audit commands, and pins locked dependency

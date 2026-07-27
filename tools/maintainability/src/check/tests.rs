@@ -5,8 +5,9 @@ use crate::manifest::DependencyPin;
 use tempfile::tempdir;
 
 use super::{
-    LockedPackage, compare_dependency_packages, lint_setting, parse_root_dependency, verify_audited_target_path, verify_cargo_target_paths, verify_dependency_routes,
-    verify_expansion_dependency_routes, verify_first_party_package_routes, verify_lint, verify_lint_precedence, verify_no_cargo_config, verify_no_cargo_config_with_home,
+    LockedPackage, compare_dependency_packages, lint_setting, parse_root_dependency, verify_audited_target_path, verify_cargo_metadata_workspace, verify_cargo_target_paths,
+    verify_dependency_routes, verify_expansion_dependency_routes, verify_first_party_package_routes, verify_lint, verify_lint_precedence, verify_no_cargo_config,
+    verify_no_cargo_config_with_home,
 };
 
 fn cargo(source: &str) -> toml::Value {
@@ -364,6 +365,7 @@ fn first_party_rust_stays_in_the_audited_root_package() {
 
     for rejected in [
         "[package]\nname = 'localhold'\n[workspace]\nmembers = ['crates/helper']",
+        "[package]\nname = 'localhold'\nworkspace = '..'",
         "[package]\nname = 'localhold'\n[dependencies]\nhelper = { path = 'crates/helper' }",
         "[package]\nname = 'localhold'\n[build-dependencies]\nhelper = { path = 'crates/helper' }",
         "[package]\nname = 'localhold'\n[dev-dependencies]\nhelper = { path = 'crates/helper' }",
@@ -375,4 +377,14 @@ fn first_party_rust_stays_in_the_audited_root_package() {
             "local package route must be rejected: {rejected}"
         );
     }
+}
+
+#[test]
+fn cargo_metadata_cannot_resolve_an_external_workspace_root() {
+    let workspace = tempdir().expect("audited workspace");
+    let external = tempdir().expect("external workspace");
+    let metadata = |workspace_root: &std::path::Path| serde_json::to_vec(&serde_json::json!({ "workspace_root": workspace_root })).expect("Cargo metadata");
+
+    assert!(verify_cargo_metadata_workspace(workspace.path(), &metadata(workspace.path())).is_ok());
+    assert!(verify_cargo_metadata_workspace(workspace.path(), &metadata(external.path())).is_err());
 }

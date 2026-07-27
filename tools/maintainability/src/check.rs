@@ -28,6 +28,11 @@ struct LockedPackage {
     checksum: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CargoWorkspace {
+    workspace_root: PathBuf,
+}
+
 pub fn run(workspace: &Path, manifest: &UnsafeManifest) -> Result<()> {
     let actual = scan::scan_workspace(workspace, manifest.roots())?;
     manifest.compare_sites(&actual)?;
@@ -66,6 +71,7 @@ fn verify_cargo_contract(workspace: &Path, manifest: &UnsafeManifest) -> Result<
     verify_expansion_dependency_routes(&cargo)?;
     verify_cargo_target_paths(&cargo)?;
     let metadata = load_cargo_metadata(workspace)?;
+    verify_cargo_metadata_workspace(workspace, &metadata)?;
     dependency_graph::verify(&metadata, &dependency_packages)?;
     manifest.validate_focused_test_targets(workspace, &cargo, &metadata)?;
     Ok(metadata)
@@ -82,15 +88,29 @@ fn load_cargo_metadata(workspace: &Path) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
+fn verify_cargo_metadata_workspace(workspace: &Path, metadata: &[u8]) -> Result<()> {
+    let metadata: CargoWorkspace = serde_json::from_slice(metadata).context("parse Cargo metadata workspace identity")?;
+    let expected = fs::canonicalize(workspace).with_context(|| format!("resolve audited workspace {}", workspace.display()))?;
+    let actual = fs::canonicalize(&metadata.workspace_root).with_context(|| format!("resolve Cargo metadata workspace root {}", metadata.workspace_root.display()))?;
+    if actual != expected {
+        bail!(
+            "Cargo metadata workspace root {} is outside the audited root package {}; external workspace inheritance is unsupported",
+            actual.display(),
+            expected.display()
+        );
+    }
+    Ok(())
+}
+
 fn verify_first_party_package_routes(cargo: &toml::Value) -> Result<()> {
     if cargo.get("workspace").is_some() {
         bail!("Cargo.toml workspace packages are unsupported because first-party Rust must remain under the audited root package");
     }
-    let root_package = cargo
-        .get("package")
-        .and_then(|package| package.get("name"))
-        .and_then(toml::Value::as_str)
-        .context("Cargo.toml package.name must be a string")?;
+    let package = cargo.get("package").and_then(toml::Value::as_table).context("Cargo.toml package must be a table")?;
+    if package.contains_key("workspace") {
+        bail!("Cargo.toml package.workspace is unsupported because the audited package cannot inherit an external workspace");
+    }
+    let root_package = package.get("name").and_then(toml::Value::as_str).context("Cargo.toml package.name must be a string")?;
     verify_local_dependency_table(cargo.get("dependencies"), "dependencies", root_package)?;
     for section in ["build-dependencies", "dev-dependencies"] {
         verify_local_dependency_table(cargo.get(section), section, root_package)?;

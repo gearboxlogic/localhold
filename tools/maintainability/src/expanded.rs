@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{BufRead as _, BufReader};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -151,17 +151,7 @@ fn run_audit_lane(workspace: &Path, manifest: &Path, lane: &AuditLane<'_>) -> Re
         .take()
         .with_context(|| format!("compiler-expanded {} audit stdout was not piped", lane.label))?;
     let mut audit = AuditOutput::default();
-    let parse_result = (|| -> Result<()> {
-        for json_line in BufReader::new(stdout).lines() {
-            let json_line = json_line.with_context(|| format!("read compiler-expanded {} audit output", lane.label))?;
-            if json_line.is_empty() {
-                continue;
-            }
-            let message: Value = serde_json::from_str(&json_line).with_context(|| format!("parse Cargo JSON from compiler-expanded {} audit", lane.label))?;
-            handle_cargo_message(workspace, manifest, lane.target_kinds, &message, &mut audit)?;
-        }
-        Ok(())
-    })();
+    let parse_result = parse_cargo_output(BufReader::new(stdout), workspace, manifest, lane, &mut audit);
     let wait_result = child.wait().with_context(|| format!("wait for compiler-expanded {} audit", lane.label));
     parse_result?;
     let status = wait_result?;
@@ -175,6 +165,29 @@ fn run_audit_lane(workspace: &Path, manifest: &Path, lane: &AuditLane<'_>) -> Re
         bail!("compiler-expanded {} audit found no selected root-package dep-info files", lane.label);
     }
     Ok(audit)
+}
+
+fn parse_cargo_output<R: BufRead>(reader: R, workspace: &Path, manifest: &Path, lane: &AuditLane<'_>, audit: &mut AuditOutput) -> Result<()> {
+    let mut parse_result = Ok(());
+    for json_line in reader.lines() {
+        let json_line = match json_line {
+            Ok(json_line) => json_line,
+            Err(error) => {
+                if parse_result.is_ok() {
+                    parse_result = Err(error).with_context(|| format!("read compiler-expanded {} audit output", lane.label));
+                }
+                break;
+            }
+        };
+        if parse_result.is_err() || json_line.is_empty() {
+            continue;
+        }
+        parse_result = (|| {
+            let message: Value = serde_json::from_str(&json_line).with_context(|| format!("parse Cargo JSON from compiler-expanded {} audit", lane.label))?;
+            handle_cargo_message(workspace, manifest, lane.target_kinds, &message, audit)
+        })();
+    }
+    parse_result
 }
 
 fn handle_cargo_message(workspace: &Path, manifest: &Path, target_kinds: &[&str], message: &Value, audit: &mut AuditOutput) -> Result<()> {

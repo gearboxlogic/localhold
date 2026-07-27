@@ -1,4 +1,6 @@
 use std::fs;
+use std::io::Cursor;
+use std::path::Path;
 use std::process::Command;
 
 use tempfile::{TempDir, tempdir};
@@ -6,7 +8,7 @@ use tempfile::{TempDir, tempdir};
 use crate::scan::{SiteKind, SourceRange, UnsafeSite, scan_workspace};
 
 use super::dep_info::{is_audited_compiler_input, parse as parse_dep_info, parse_make_words};
-use super::{Diagnostic, audit_environment_override, compare_diagnostics, is_root_manifest, subtract_diagnostics, verify};
+use super::{AuditLane, AuditOutput, Diagnostic, audit_environment_override, compare_diagnostics, is_root_manifest, parse_cargo_output, subtract_diagnostics, verify};
 
 fn site(range: SourceRange) -> UnsafeSite {
     UnsafeSite {
@@ -94,6 +96,28 @@ fn cargo_manifest_identity_uses_canonical_paths_and_fails_closed() {
     assert!(!is_root_manifest(&expected, &serde_json::json!({ "manifest_path": other })).expect("foreign manifest"));
     assert!(!is_root_manifest(&expected, &serde_json::json!({})).expect("message without manifest"));
     assert!(is_root_manifest(&expected, &serde_json::json!({ "manifest_path": fixture.path().join("missing.toml") })).is_err());
+}
+
+#[test]
+fn cargo_output_is_drained_after_the_first_parse_error() {
+    let output = format!("not JSON\n{}\n", "x".repeat(128 * 1024));
+    let mut reader = Cursor::new(output.as_bytes());
+    let mut audit = AuditOutput::default();
+    let error = parse_cargo_output(
+        &mut reader,
+        Path::new("."),
+        Path::new("Cargo.toml"),
+        &AuditLane {
+            label: "fixture",
+            cargo_args: &[],
+            target_kinds: &["lib"],
+        },
+        &mut audit,
+    )
+    .expect_err("malformed Cargo output must fail");
+
+    assert!(error.to_string().contains("parse Cargo JSON"), "unexpected error: {error:#}");
+    assert_eq!(reader.position(), output.len() as u64);
 }
 
 #[test]

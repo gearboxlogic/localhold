@@ -33,15 +33,36 @@ impl StructureManifest {
                 .baseline_production_lines
                 .checked_add(self.component_production_adjustment(&component.id)?)
                 .context("component adjusted production baseline overflow")?;
-            if component.production_ceiling > adjusted_baseline {
+            let transfer_adjusted_baseline = self.transfer_adjusted_baseline(&component.id, adjusted_baseline)?;
+            if component.production_ceiling > transfer_adjusted_baseline {
                 bail!(
-                    "component {:?} production ceiling {} exceeds its verified adjusted baseline {adjusted_baseline}",
+                    "component {:?} production ceiling {} exceeds its verified transfer-adjusted baseline {transfer_adjusted_baseline}",
                     component.id,
                     component.production_ceiling
                 );
             }
         }
         self.compare_baseline_hotspots(&observed)
+    }
+
+    fn transfer_adjusted_baseline(&self, component: &str, adjusted_baseline: usize) -> Result<usize> {
+        let outgoing = transfer_total(
+            self.component_transfers
+                .iter()
+                .filter(|transfer| transfer.source_component == component)
+                .map(|transfer| transfer.production_lines),
+        )?;
+        let incoming = transfer_total(
+            self.component_transfers
+                .iter()
+                .filter(|transfer| transfer.destination_component == component)
+                .map(|transfer| transfer.production_lines),
+        )?;
+        adjusted_baseline
+            .checked_sub(outgoing)
+            .with_context(|| format!("component {component:?} transfers exceed its adjusted baseline"))?
+            .checked_add(incoming)
+            .context("component transfer-adjusted baseline overflow")
     }
 
     fn compare_component_counts(&self, observed: &ObservedFiles<'_>) -> Result<()> {
@@ -119,6 +140,10 @@ impl StructureManifest {
         }
         Ok(())
     }
+}
+
+fn transfer_total(mut amounts: impl Iterator<Item = usize>) -> Result<usize> {
+    amounts.try_fold(0usize, |total, amount| total.checked_add(amount).context("component transfer total overflow"))
 }
 
 fn compare_current_hotspot(hotspot: &Hotspot, observed: &ObservedFiles<'_>) -> Result<()> {

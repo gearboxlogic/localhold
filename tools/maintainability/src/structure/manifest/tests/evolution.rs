@@ -185,6 +185,7 @@ fn cross_component_transfer_is_exact_zero_sum_and_follows_hotspot_lineage() {
 fn same_path_component_reassignment_uses_exact_transfer_lineage() {
     let mut previous = ordinary_manifest("src/shared.rs", 100, 100);
     previous.components[0].id = "source".to_owned();
+    previous.components[0].baseline_paths = strings(&["src/source.rs", "src/shared.rs"]);
     previous.components[0].paths = strings(&["src/source.rs", "src/shared.rs"]);
     previous.components.push(component("destination", "src/destination.rs", "src/destination.rs", 10));
     let previous_files = inventory(&[("src/source.rs", 60, 60), ("src/shared.rs", 40, 40), ("src/destination.rs", 10, 10)]);
@@ -354,6 +355,7 @@ fn compare(current: &StructureManifest, previous: &StructureManifest, previous_f
     previous.validate_previous()?;
     current.validate_current()?;
     previous.compare_current(previous_files)?;
+    current.compare_baseline(previous_files)?;
     current.compare_current(current_files)?;
     current.compare_policy(previous, previous_files, current_files)
 }

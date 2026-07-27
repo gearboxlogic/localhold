@@ -207,11 +207,13 @@ fn compare_evolution_record(
 
 fn reject_untraceable_same_path_move(evolution: &PathEvolution, evidence: &PathEvidence, current_files: &ObservedFiles<'_>) -> Result<()> {
     let source = &evolution.sources[0];
-    if evolution.kind == PathEvolutionKind::Rename
-        && evolution.successors[0] == *source
-        && evidence.previous_paths.get(source) != evidence.current_paths.get(source)
-        && current_files[source.as_str()].production_lines == 0
-    {
+    let is_same_path_move =
+        evolution.kind == PathEvolutionKind::Rename && evolution.successors[0] == *source && evidence.previous_paths.get(source) != evidence.current_paths.get(source);
+    if !is_same_path_move {
+        return Ok(());
+    }
+    let source_file = current_files.get(source.as_str()).context("same-path evolution source is missing from current inventory")?;
+    if source_file.production_lines == 0 {
         bail!(
             "same-path test-only reassignment {:?} must rename the path so component lineage cannot round-trip",
             evolution.id
@@ -295,7 +297,7 @@ fn compare_evolution_counts(evolution: &PathEvolution, previous: &ObservedFiles<
             }
         }
         PathEvolutionKind::Split => {
-            if source.production > 0 && adds_test_only_successor(evolution, previous, current) {
+            if source.production > 0 && adds_test_only_successor(evolution, previous, current)? {
                 bail!("split path evolution {:?} adds a test-only successor and must be declared as test-extraction", evolution.id);
             }
             if successor.physical > source.physical || successor.production > source.production {
@@ -309,7 +311,7 @@ fn compare_evolution_counts(evolution: &PathEvolution, previous: &ObservedFiles<
             if successor.physical > source.physical || successor.production != source.production {
                 bail!("test extraction {:?} must preserve production and cannot increase physical lines", evolution.id);
             }
-            if !adds_test_only_successor(evolution, previous, current) {
+            if !adds_test_only_successor(evolution, previous, current)? {
                 bail!("test extraction {:?} must add at least one test-only successor", evolution.id);
             }
         }
@@ -317,11 +319,14 @@ fn compare_evolution_counts(evolution: &PathEvolution, previous: &ObservedFiles<
     Ok(())
 }
 
-fn adds_test_only_successor(evolution: &PathEvolution, previous: &ObservedFiles<'_>, current: &ObservedFiles<'_>) -> bool {
-    evolution
-        .successors
-        .iter()
-        .any(|path| !previous.contains_key(path.as_str()) && current[path.as_str()].production_lines == 0)
+fn adds_test_only_successor(evolution: &PathEvolution, previous: &ObservedFiles<'_>, current: &ObservedFiles<'_>) -> Result<bool> {
+    for path in &evolution.successors {
+        let file = current.get(path.as_str()).with_context(|| format!("path evolution successor {path:?} is missing"))?;
+        if !previous.contains_key(path.as_str()) && file.production_lines == 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn measure_transfer(
@@ -353,7 +358,10 @@ fn validate_transfer_path(
     if current_paths.get(path) != Some(&transfer.destination_component.as_str()) {
         bail!("component transfer {:?} path {path:?} is not owned by its destination", transfer.id);
     }
-    let production = current_files[path].production_lines;
+    let production = current_files
+        .get(path)
+        .with_context(|| format!("component transfer path {path:?} is missing"))?
+        .production_lines;
     if production == 0 {
         bail!("component transfer {:?} path {path:?} carries no production lines", transfer.id);
     }
@@ -378,7 +386,10 @@ fn required_transfer_paths(
         let source_component = evolution_source_component(evolution, |source| previous_paths.get(source).copied())?;
         for successor in &evolution.successors {
             let owner = current_paths.get(successor.as_str()).context("path evolution successor has no current owner")?;
-            if *owner != source_component && current_files[successor.as_str()].production_lines > 0 {
+            let file = current_files
+                .get(successor.as_str())
+                .with_context(|| format!("component transfer successor {successor:?} is missing"))?;
+            if *owner != source_component && file.production_lines > 0 {
                 required.insert(successor.clone());
             }
         }

@@ -206,7 +206,7 @@ During the feature freeze:
 - hotspot physical and production ceilings, plus component production
   ceilings, must match the current lower count and can never increase;
 - path changes require an append-only `path_evolutions` record. A `rename`
-  preserves physical and production counts exactly, a `split` may only reduce
+  preserves physical and production counts exactly, a `split` may not increase
   their aggregate, and a `test-extraction` must preserve production exactly
   while adding a test-only successor. Sources must be active in the pull
   request base, every measured path change must be covered exactly once, and

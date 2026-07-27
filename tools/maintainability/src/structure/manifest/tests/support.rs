@@ -4,11 +4,12 @@ use crate::structure::manifest::model::{
 };
 
 pub(super) fn file(path: &str, physical: usize, production: usize) -> FileMeasurement {
+    let test_lines = physical.checked_sub(production).expect("fixture production lines must not exceed physical lines");
     FileMeasurement {
         path: path.to_owned(),
         physical_lines: physical,
         production_lines: production,
-        test_lines: physical - production,
+        test_lines,
     }
 }
 
@@ -21,30 +22,43 @@ pub(super) fn inventory(files: &[FileSpec<'_>]) -> Inventory {
 }
 
 pub(super) fn ordinary_manifest(path: &str, baseline_production: usize, current_production: usize) -> StructureManifest {
-    StructureManifest {
-        schema_version: 2,
-        baseline_commit: "a".repeat(40),
-        tracked_roots: vec!["src".to_owned(), "tests".to_owned(), "benches".to_owned()],
-        limits: Limits {
-            production_file_physical_lines: 800,
-            test_file_physical_lines: 1_000,
-        },
-        pre_gate_adjustments: Vec::new(),
-        components: vec![LogicalComponent {
-            id: "component".to_owned(),
-            baseline_paths: vec![path.to_owned()],
-            paths: vec![path.to_owned()],
-            baseline_production_lines: baseline_production,
-            production_ceiling: current_production,
-        }],
-        hotspots: Vec::new(),
-        path_evolutions: Vec::new(),
-        component_transfers: Vec::new(),
-    }
+    let mut manifest = base_manifest();
+    manifest.components.push(LogicalComponent {
+        id: "component".to_owned(),
+        baseline_paths: vec![path.to_owned()],
+        paths: vec![path.to_owned()],
+        baseline_production_lines: baseline_production,
+        production_ceiling: current_production,
+    });
+    manifest
 }
 
 pub(super) fn hotspot_manifest(kind: HotspotKind, status: HotspotStatus, successors: &[&str], physical: usize, production: usize) -> StructureManifest {
     let paths = successors.iter().map(|path| (*path).to_owned()).collect();
+    let mut manifest = base_manifest();
+    manifest.components.push(LogicalComponent {
+        id: "component".to_owned(),
+        baseline_paths: vec!["src/hot.rs".to_owned()],
+        paths,
+        baseline_production_lines: production,
+        production_ceiling: production,
+    });
+    manifest.hotspots.push(Hotspot {
+        id: "component.hot".to_owned(),
+        component: "component".to_owned(),
+        kind,
+        status,
+        baseline_path: "src/hot.rs".to_owned(),
+        baseline_physical_lines: physical,
+        baseline_production_lines: production,
+        successors: successors.iter().map(|path| (*path).to_owned()).collect(),
+        physical_ceiling: physical,
+        production_ceiling: production,
+    });
+    manifest
+}
+
+fn base_manifest() -> StructureManifest {
     StructureManifest {
         schema_version: 2,
         baseline_commit: "a".repeat(40),
@@ -54,25 +68,8 @@ pub(super) fn hotspot_manifest(kind: HotspotKind, status: HotspotStatus, success
             test_file_physical_lines: 1_000,
         },
         pre_gate_adjustments: Vec::new(),
-        components: vec![LogicalComponent {
-            id: "component".to_owned(),
-            baseline_paths: vec!["src/hot.rs".to_owned()],
-            paths,
-            baseline_production_lines: production,
-            production_ceiling: production,
-        }],
-        hotspots: vec![Hotspot {
-            id: "component.hot".to_owned(),
-            component: "component".to_owned(),
-            kind,
-            status,
-            baseline_path: "src/hot.rs".to_owned(),
-            baseline_physical_lines: physical,
-            baseline_production_lines: production,
-            successors: successors.iter().map(|path| (*path).to_owned()).collect(),
-            physical_ceiling: physical,
-            production_ceiling: production,
-        }],
+        components: Vec::new(),
+        hotspots: Vec::new(),
         path_evolutions: Vec::new(),
         component_transfers: Vec::new(),
     }

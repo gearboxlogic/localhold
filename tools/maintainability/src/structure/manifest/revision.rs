@@ -6,10 +6,10 @@ use anyhow::{Context, Result, bail};
 
 use super::model::StructureManifest;
 use super::validate::validate_revision;
+use crate::structure::MANIFEST_PATH;
 use crate::structure::classify::{self, Inventory};
 
 const BASE_REVISION_ENV: &str = "LOCALHOLD_MAINTAINABILITY_BASE_REV";
-const POLICY_PATH: &str = "policy/maintainability/structure.json";
 
 impl StructureManifest {
     pub fn compare_previous_revision(&self, workspace: &Path, current_inventory: &Inventory) -> Result<()> {
@@ -24,7 +24,7 @@ impl StructureManifest {
             return Ok(());
         }
         validate_revision(revision).context("validate maintainability base revision")?;
-        let object = format!("{revision}:{POLICY_PATH}");
+        let object = format!("{revision}:{MANIFEST_PATH}");
         let output = Command::new("git")
             .current_dir(workspace)
             .args(["show", "--no-ext-diff", &object])

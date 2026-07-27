@@ -236,11 +236,7 @@ fn validate_path_evolution<'a>(evolution: &'a PathEvolution, ids: &mut BTreeSet<
     validate_local_paths(&evolution.sources, "path evolution source")?;
     validate_local_paths(&evolution.successors, "path evolution successor")?;
     match evolution.kind {
-        PathEvolutionKind::Rename if evolution.sources.len() == 1 && evolution.successors.len() == 1 => {
-            if evolution.sources == evolution.successors {
-                bail!("rename path evolution {:?} must change its path", evolution.id);
-            }
-        }
+        PathEvolutionKind::Rename if evolution.sources.len() == 1 && evolution.successors.len() == 1 => {}
         PathEvolutionKind::Split | PathEvolutionKind::TestExtraction if evolution.sources.len() == 1 && evolution.successors.len() >= 2 => {}
         _ => bail!("path evolution {:?} has invalid source/successor cardinality for {:?}", evolution.id, evolution.kind),
     }

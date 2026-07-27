@@ -242,13 +242,15 @@ ratchets cannot be reversed by editing policy.
 
 For a rename, split, or test extraction, append a stable lowercase record ID,
 the old `sources`, current `successors`, and nonempty issue, pull-request, and
-rationale evidence. Never edit or reorder an existing record. Update the
+rationale evidence. Use `rename` for either a path rename or an exact one-to-one
+ownership reassignment. Never edit or reorder an existing record. Update the
 affected component `paths`; if a hotspot source changed, replace its
 `successors` with the complete direct successor set without changing the
 canonical ceilings. A cross-component production successor additionally needs
 a transfer record naming the source and destination component, exact
 `production_lines`, transferred paths, and the new path-evolution ID. Test-only
-cross-component paths carry lineage but no production transfer.
+cross-component paths carry lineage but no production transfer, so a
+test-only ownership move must also rename its path to preserve cycle evidence.
 
 The checker reads and classifies both the pull request base and working tree.
 Changing only the JSON cannot manufacture a transfer or reset debt: ledger

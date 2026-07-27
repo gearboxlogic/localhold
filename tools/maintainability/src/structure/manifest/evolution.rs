@@ -201,7 +201,23 @@ fn compare_evolution_record(
     if !changed {
         bail!("path evolution {:?} does not account for any measured path change", evolution.id);
     }
+    reject_untraceable_same_path_move(evolution, evidence, current_files)?;
     compare_evolution_counts(evolution, previous_files, current_files)
+}
+
+fn reject_untraceable_same_path_move(evolution: &PathEvolution, evidence: &PathEvidence, current_files: &ObservedFiles<'_>) -> Result<()> {
+    let source = &evolution.sources[0];
+    if evolution.kind == PathEvolutionKind::Rename
+        && evolution.successors[0] == *source
+        && evidence.previous_paths.get(source) != evidence.current_paths.get(source)
+        && current_files[source.as_str()].production_lines == 0
+    {
+        bail!(
+            "same-path test-only reassignment {:?} must rename the path so component lineage cannot round-trip",
+            evolution.id
+        );
+    }
+    Ok(())
 }
 
 fn compare_evolution_source(evolution: &PathEvolution, source: &str, evidence: &PathEvidence, coverage: &mut PathCoverage) -> Result<bool> {

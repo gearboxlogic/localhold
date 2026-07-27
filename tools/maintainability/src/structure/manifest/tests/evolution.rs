@@ -182,6 +182,45 @@ fn cross_component_transfer_is_exact_zero_sum_and_follows_hotspot_lineage() {
 }
 
 #[test]
+fn same_path_component_reassignment_uses_exact_transfer_lineage() {
+    let mut previous = ordinary_manifest("src/shared.rs", 100, 100);
+    previous.components[0].id = "source".to_owned();
+    previous.components[0].paths = strings(&["src/source.rs", "src/shared.rs"]);
+    previous.components.push(component("destination", "src/destination.rs", "src/destination.rs", 10));
+    let previous_files = inventory(&[("src/source.rs", 60, 60), ("src/shared.rs", 40, 40), ("src/destination.rs", 10, 10)]);
+
+    let mut current = previous.clone();
+    current.components[0].paths = vec!["src/source.rs".to_owned()];
+    current.components[0].production_ceiling = 60;
+    current.components[1].paths = strings(&["src/destination.rs", "src/shared.rs"]);
+    current.components[1].production_ceiling = 50;
+    current
+        .path_evolutions
+        .push(evolution("move.shared-ownership", PathEvolutionKind::Rename, &["src/shared.rs"], &["src/shared.rs"]));
+    current.component_transfers.push(transfer(
+        "transfer.shared-ownership",
+        ("source", "destination"),
+        40,
+        &["src/shared.rs"],
+        "move.shared-ownership",
+    ));
+    let current_files = previous_files.clone();
+
+    compare(&current, &previous, &previous_files, &current_files).expect("same-path responsibility move is governed by exact transfer evidence");
+
+    let mut test_only = current;
+    test_only.component_transfers.clear();
+    let test_files = inventory(&[("src/source.rs", 60, 60), ("src/shared.rs", 40, 0), ("src/destination.rs", 10, 10)]);
+    assert!(
+        test_only
+            .compare_policy(&previous, &previous_files, &test_files)
+            .unwrap_err()
+            .to_string()
+            .contains("must rename the path")
+    );
+}
+
+#[test]
 fn cross_component_transfer_rejects_missing_duplicate_and_net_growth() {
     let (previous, previous_files, mut current, current_files) = transfer_fixture();
     current.component_transfers.clear();

@@ -11,8 +11,8 @@ use syn::ext::IdentExt as _;
 use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, ExprUnsafe, ForeignItemFn, ForeignItemStatic, ImplItemFn, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemTrait, ItemUse,
-    Macro, StaticMutability, TraitItemFn,
+    Attribute, ExprUnsafe, ForeignItemFn, ForeignItemStatic, ImplItemFn, ItemConst, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemTrait,
+    ItemUse, Macro, StaticMutability, TraitItemFn,
 };
 
 use self::documentation::{is_doc_comment, unsupported_runnable_doctest};
@@ -354,6 +354,11 @@ impl<'ast> Visit<'ast> for SourceScanner {
                 visit::visit_item_fn(scanner, function);
             }
         });
+    }
+
+    fn visit_item_const(&mut self, item: &'ast ItemConst) {
+        let scope = self.child_scope(&item.ident.to_string());
+        self.visit_boundary(scope, item, |scanner, item| visit::visit_item_const(scanner, item));
     }
 
     fn visit_item_impl(&mut self, implementation: &'ast ItemImpl) {

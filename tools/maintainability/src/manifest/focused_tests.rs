@@ -32,10 +32,13 @@ pub(super) fn validate(workspace: &Path, contract_id: &str, reference: &str) -> 
 
     let source_text = fs::read_to_string(&canonical).with_context(|| format!("read unsafe contract {contract_id:?} focused test source {}", canonical.display()))?;
     let syntax = syn::parse_file(&source_text).with_context(|| format!("parse unsafe contract {contract_id:?} focused test source {}", canonical.display()))?;
-    let mut collector = TestCollector::default();
+    let mut collector = TestCollector {
+        excluded_context_depth: usize::from(TestCollector::execution_is_conditional_or_disabled(&syntax.attrs)),
+        ..TestCollector::default()
+    };
     collector.visit_file(&syntax);
     if !collector.tests.contains(test_name) {
-        bail!("unsafe contract {contract_id:?} focused test {reference:?} does not name an explicit test function");
+        bail!("unsafe contract {contract_id:?} focused test {reference:?} does not name an unconditional, non-ignored explicit test function");
     }
     Ok(())
 }
@@ -51,12 +54,22 @@ fn validate_test_name(test_name: &str) -> Result<()> {
 #[derive(Default)]
 struct TestCollector {
     modules: Vec<String>,
+    excluded_context_depth: usize,
     tests: BTreeSet<String>,
 }
 
 impl TestCollector {
     fn is_test(attribute: &Attribute) -> bool {
         attribute.path().segments.last().is_some_and(|segment| segment.ident.unraw() == "test")
+    }
+
+    fn execution_is_conditional_or_disabled(attributes: &[Attribute]) -> bool {
+        attributes.iter().any(|attribute| {
+            attribute.path().segments.last().is_some_and(|segment| {
+                let name = segment.ident.unraw();
+                name == "cfg" || name == "cfg_attr" || name == "ignore"
+            })
+        })
     }
 }
 
@@ -65,13 +78,16 @@ impl<'ast> Visit<'ast> for TestCollector {
         if item.content.is_none() {
             return;
         }
+        let excluded = Self::execution_is_conditional_or_disabled(&item.attrs);
+        self.excluded_context_depth += usize::from(excluded);
         self.modules.push(item.ident.unraw().to_string());
         visit::visit_item_mod(self, item);
         self.modules.pop();
+        self.excluded_context_depth -= usize::from(excluded);
     }
 
     fn visit_item_fn(&mut self, function: &'ast ItemFn) {
-        if function.attrs.iter().any(Self::is_test) {
+        if self.excluded_context_depth == 0 && !Self::execution_is_conditional_or_disabled(&function.attrs) && function.attrs.iter().any(Self::is_test) {
             let mut path = self.modules.clone();
             path.push(function.sig.ident.unraw().to_string());
             self.tests.insert(path.join("::"));
@@ -98,6 +114,24 @@ mod tests {
             mod nested {
                 #[test]
                 fn contract_case() {}
+
+                #[test]
+                #[ignore]
+                fn ignored_case() {}
+
+                #[cfg(any())]
+                #[test]
+                fn conditionally_excluded_case() {}
+
+                #[cfg_attr(any(), ignore)]
+                #[test]
+                fn conditionally_configured_case() {}
+            }
+
+            #[cfg(any())]
+            mod excluded_module {
+                #[test]
+                fn nested_case() {}
             }
             ",
         )
@@ -108,10 +142,25 @@ mod tests {
             "tests/missing.rs::contract_case",
             "tests/focused.rs::missing",
             "tests/focused.rs::helper_is_not_a_test",
+            "tests/focused.rs::nested::ignored_case",
+            "tests/focused.rs::nested::conditionally_excluded_case",
+            "tests/focused.rs::nested::conditionally_configured_case",
+            "tests/focused.rs::excluded_module::nested_case",
             "../outside.rs::contract_case",
             "tests/focused.rs",
         ] {
             assert!(validate(workspace.path(), "contract.one", reference).is_err(), "reference must fail closed: {reference}");
         }
+
+        fs::write(
+            workspace.path().join("tests/excluded.rs"),
+            "
+            #![cfg(any())]
+            #[test]
+            fn excluded_file_case() {}
+            ",
+        )
+        .expect("excluded focused test source");
+        assert!(validate(workspace.path(), "contract.one", "tests/excluded.rs::excluded_file_case").is_err());
     }
 }

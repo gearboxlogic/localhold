@@ -111,9 +111,9 @@ Every exception requires a narrow safety contract with a stable owner,
 necessity, attempted safe alternatives, validity/lifetime/aliasing/ABI/thread
 and target invariants, caller preconditions, safe wrapper boundary, focused
 tests, dependency pins, invalidation and removal triggers, proof debt, and a
-recovery issue. Each focused-test reference must resolve to an existing explicit
-test function under an audited source root. Operations and lint exceptions are
-counted separately. Site
+recovery issue. Each focused-test reference must resolve to an existing,
+unconditional, non-ignored explicit test function under an audited source root.
+Operations and lint exceptions are counted separately. Site
 locators plus site and enclosing-boundary syntax fingerprints make additions,
 moves, removals, operation mutations, and safe-wrapper mutations fail closed.
 The gate also reserves a higher Cargo priority for required compiler and Clippy

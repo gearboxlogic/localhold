@@ -170,6 +170,15 @@ fn boundary_fingerprint_covers_safe_setup_around_an_operation() {
 }
 
 #[test]
+fn const_boundary_fingerprint_covers_safe_setup_around_an_operation() {
+    let first = scan("const VALUE: usize = { let pointer = first; unsafe { call(pointer) } };");
+    let second = scan("const VALUE: usize = { let pointer = second; unsafe { call(pointer) } };");
+    assert_eq!(first[0].item, "VALUE");
+    assert_eq!(first[0].fingerprint, second[0].fingerprint);
+    assert_ne!(first[0].boundary_fingerprint, second[0].boundary_fingerprint);
+}
+
+#[test]
 fn rejects_source_expansion_outside_audited_files() {
     assert_source_expansion_rejected(r#"#[path = "../outside.rs"] mod outside;"#);
     assert_source_expansion_rejected(r#"#[r#path = "../outside.rs"] mod outside;"#);

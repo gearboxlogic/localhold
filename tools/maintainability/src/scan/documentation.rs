@@ -3,6 +3,8 @@ use syn::ext::IdentExt as _;
 use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 
+const NON_RUST_FENCE_LANGUAGES: &[&str] = &["text"];
+
 pub(super) fn unsupported_runnable_doctest(syntax: &syn::File) -> Option<&'static str> {
     let mut collector = DocCommentCollector::default();
     collector.visit_file(syntax);
@@ -136,15 +138,20 @@ fn rustdoc_compiles(info: &str) -> bool {
     let tokens: Vec<_> = info
         .split(|character: char| character == ',' || character.is_whitespace())
         .filter(|token| !token.is_empty())
-        .map(|token| {
-            let token = token.trim_matches(['{', '}']);
-            token.strip_prefix('.').unwrap_or(token)
-        })
+        .map(|token| token.trim_matches(['{', '}']))
         .collect();
+    let is_class = |token: &&str| token.starts_with('.') || token.starts_with("class=");
+    if tokens.contains(&"custom") {
+        return tokens
+            .iter()
+            .any(|token| *token != "custom" && !is_class(token) && !NON_RUST_FENCE_LANGUAGES.contains(token));
+    }
+    if tokens.iter().any(|token| token.starts_with("ignore-")) {
+        return true;
+    }
     if tokens.contains(&"ignore") {
         return false;
     }
-    tokens
-        .iter()
-        .any(|token| matches!(*token, "rust" | "no_run" | "should_panic" | "compile_fail") || token.starts_with("edition"))
+    let languages: Vec<_> = tokens.iter().filter(|token| !is_class(token)).collect();
+    languages.len() != 1 || !NON_RUST_FENCE_LANGUAGES.contains(languages[0])
 }

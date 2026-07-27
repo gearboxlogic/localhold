@@ -7,13 +7,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::scan::{SiteKind, UnsafeSite};
 
 use self::dep_info::{collect as collect_dep_info, verify as verify_dep_info};
 
-const UNIT_TEST_TARGET_KINDS: &[&str] = &["lib", "bin"];
+const AUDITED_TARGET_KINDS: &[&str] = &["lib", "bin", "test", "bench", "example"];
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct Diagnostic {
@@ -40,10 +41,11 @@ struct AuditLane<'a> {
     target_kinds: &'a [&'a str],
 }
 
-pub fn verify(workspace: &Path, sites: &[UnsafeSite]) -> Result<()> {
+pub fn verify(workspace: &Path, sites: &[UnsafeSite], cargo_metadata: &[u8]) -> Result<()> {
     let workspace = fs::canonicalize(workspace).with_context(|| format!("resolve workspace {}", workspace.display()))?;
     let manifest_path = workspace.join("Cargo.toml");
     let manifest = fs::canonicalize(&manifest_path).with_context(|| format!("resolve workspace manifest {}", manifest_path.display()))?;
+    let target_kinds = root_target_kinds(&manifest, cargo_metadata)?;
     let mut dep_info = BTreeSet::new();
     let mut root_artifacts = 0;
     let mut normal_diagnostics = Vec::new();
@@ -56,7 +58,7 @@ pub fn verify(workspace: &Path, sites: &[UnsafeSite]) -> Result<()> {
         AuditLane {
             label: "unit-test",
             cargo_args: &["--lib", "--tests"],
-            target_kinds: UNIT_TEST_TARGET_KINDS,
+            target_kinds: AUDITED_TARGET_KINDS,
         },
         AuditLane {
             label: "integration-test",
@@ -69,13 +71,13 @@ pub fn verify(workspace: &Path, sites: &[UnsafeSite]) -> Result<()> {
             target_kinds: &["bench"],
         },
     ] {
-        let optional_root = match lane.label {
-            "integration-test" => Some("tests"),
-            "benchmark" => Some("benches"),
+        let optional_kind = match lane.label {
+            "integration-test" => Some("test"),
+            "benchmark" => Some("bench"),
             _ => None,
         };
-        if let Some(root) = optional_root
-            && !contains_rust_file(&workspace.join(root))?
+        if let Some(kind) = optional_kind
+            && !target_kinds.contains(kind)
         {
             continue;
         }
@@ -92,7 +94,7 @@ pub fn verify(workspace: &Path, sites: &[UnsafeSite]) -> Result<()> {
         dep_info.extend(audit.dep_info);
         root_artifacts += audit.root_artifacts;
     }
-    if contains_rust_file(&workspace.join("examples"))? {
+    if target_kinds.contains("example") {
         let audit = run_audit_lane(
             &workspace,
             &manifest,
@@ -115,20 +117,42 @@ pub fn verify(workspace: &Path, sites: &[UnsafeSite]) -> Result<()> {
     verify_dep_info(&workspace, &dep_info)
 }
 
-fn contains_rust_file(root: &Path) -> Result<bool> {
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error).with_context(|| format!("inspect optional compiler source root {}", root.display())),
-    };
-    for entry in entries {
-        let entry = entry.with_context(|| format!("read optional compiler source root {}", root.display()))?;
-        let path = entry.path();
-        if path.is_dir() && contains_rust_file(&path)? || path.is_file() && path.extension().and_then(OsStr::to_str) == Some("rs") {
-            return Ok(true);
+fn root_target_kinds(manifest: &Path, cargo_metadata: &[u8]) -> Result<BTreeSet<String>> {
+    let metadata: CargoMetadata = serde_json::from_slice(cargo_metadata).context("parse Cargo metadata for compiler-audit targets")?;
+    let mut root_packages = Vec::new();
+    for package in &metadata.packages {
+        let package_manifest = fs::canonicalize(&package.manifest_path).with_context(|| format!("resolve Cargo metadata manifest {}", package.manifest_path.display()))?;
+        if package_manifest == manifest {
+            root_packages.push(package);
         }
     }
-    Ok(false)
+    let [root_package] = root_packages.as_slice() else {
+        bail!(
+            "Cargo metadata must contain exactly one root package for compiler-audit targets, found {}",
+            root_packages.len()
+        );
+    };
+    let target_kinds: BTreeSet<_> = root_package.targets.iter().flat_map(|target| target.kind.iter().cloned()).collect();
+    if let Some(kind) = target_kinds.iter().find(|kind| !AUDITED_TARGET_KINDS.contains(&kind.as_str())) {
+        bail!("Cargo metadata contains unsupported root target kind {kind:?}");
+    }
+    Ok(target_kinds)
+}
+
+#[derive(Deserialize)]
+struct CargoMetadata {
+    packages: Vec<CargoPackage>,
+}
+
+#[derive(Deserialize)]
+struct CargoPackage {
+    manifest_path: PathBuf,
+    targets: Vec<CargoTarget>,
+}
+
+#[derive(Deserialize)]
+struct CargoTarget {
+    kind: Vec<String>,
 }
 
 fn run_audit_lane(workspace: &Path, manifest: &Path, lane: &AuditLane<'_>) -> Result<AuditOutput> {

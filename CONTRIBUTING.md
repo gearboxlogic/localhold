@@ -96,16 +96,21 @@ audited roots or hide an exception from the inventory. Explicit Cargo target
 paths must remain under those roots. All enabled package build scripts are
 rejected until the gate can audit their complete inputs and outputs; a physical
 root `build.rs` is rejected even when disabled.
-Runnable Rust doctests are likewise rejected; use maintained integration tests
-for executable examples, while explicitly ignored and non-Rust documentation
-blocks remain supported. The gate also runs Clippy with forced `unsafe_code`,
-`unsafe_op_in_unsafe_fn`, and undocumented-block diagnostics. Each emitted
-`unsafe_code` diagnostic must map to exactly one inventoried source keyword;
-the other two diagnostics are always errors. Cargo dep-info for every root
-target is checked and rejects recorded compiler inputs outside the audited
-roots, including generated `include!` inputs. Compiler diagnostics from library,
-binary, integration-test, benchmark, and example targets are audited in their
-applicable normal and test configurations.
+Runnable Rust doctests are likewise rejected, including rustdoc-only modifiers,
+target-specific ignores, and class-only fences that remain Rust unless marked
+`custom`; use maintained integration tests for executable examples. Globally
+ignored, `text`, and `custom` non-Rust documentation blocks remain supported;
+unknown fence labels fail closed. The gate also runs Clippy with forced
+`unsafe_code`, `unsafe_op_in_unsafe_fn`, and undocumented-block diagnostics.
+Each emitted `unsafe_code` diagnostic must map to exactly one inventoried source
+keyword; the other two diagnostics are always errors. Cargo dep-info for every
+root target is checked and rejects recorded compiler inputs outside the audited
+roots, including generated `include!` inputs. Compiler diagnostics from
+library, binary, integration-test, benchmark, and example targets are audited
+in their applicable normal and test configurations. Audit lanes are scheduled
+from locked Cargo metadata rather than conventional directory presence, so
+explicit targets under other audited roots and test-enabled examples remain
+covered.
 
 Every exception requires a narrow safety contract with a stable owner,
 necessity, attempted safe alternatives, validity/lifetime/aliasing/ABI/thread

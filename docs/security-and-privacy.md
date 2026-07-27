@@ -196,10 +196,15 @@ These paths are not contacted by a default running `hold` process:
   and mutable statics remain inventoried. Reviewed macros cannot emit name
   bindings that redirect expansion paths, and macros inside any unsafe context,
   including unsafe extern blocks, are rejected. Cargo target paths must stay
-  under audited roots. Root workspaces and local path dependencies are rejected
-  except for the reviewed self dev-dependency. All enabled package build scripts
-  are rejected, and a physical root `build.rs` is rejected even when disabled.
-  The gate also verifies the required lint levels, locked dependency
+  under audited roots. Compiler-audit lanes are derived from locked Cargo
+  metadata, including explicit targets outside conventional directories and
+  test-enabled examples. Root workspaces and local path dependencies are
+  rejected except for the reviewed self dev-dependency. All enabled package
+  build scripts are rejected, and a physical root `build.rs` is rejected even
+  when disabled. Runnable rustdoc modifiers, target-specific ignores, and
+  class-only Rust fences are rejected unless the block is globally ignored or
+  explicitly marked as `text` or `custom`; unknown labels fail closed. The gate
+  also verifies the required lint levels, locked dependency
   versions/sources/checksums, reviewed direct feature specifications, compiler
   diagnostics for normal and test targets (including binary test harnesses),
   and that focused-test references name existing, unconditional, non-ignored

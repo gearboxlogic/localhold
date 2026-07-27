@@ -146,11 +146,11 @@ fn compiler_and_dep_info_audits_fail_closed_on_unmatched_inputs() {
     let error = scan_fixture(&fixture).expect_err("unreviewed safe macro must still require explicit review");
     assert!(error.to_string().contains("unreviewed macro path"), "unexpected error: {error:#}");
     write_root_source(&fixture, "tokio::safe!();");
-    verify(fixture.path(), &[]).expect("safe procedural macro emits no unsafe diagnostics");
+    verify_fixture(&fixture, &[]).expect("safe procedural macro emits no unsafe diagnostics");
 
     write_root_source(&fixture, "tokio::join!();");
     assert!(scan_fixture(&fixture).expect("lexically reviewed macro path").is_empty());
-    verify(fixture.path(), &[]).expect("rustc suppresses safety lints for fully synthetic external procedural-macro tokens");
+    verify_fixture(&fixture, &[]).expect("rustc suppresses safety lints for fully synthetic external procedural-macro tokens");
 
     write_root_source(
         &fixture,
@@ -158,13 +158,13 @@ fn compiler_and_dep_info_audits_fail_closed_on_unmatched_inputs() {
     );
     let sites = scan_fixture(&fixture).expect("direct unsafe inventory");
     assert_eq!(sites.len(), 2);
-    verify(fixture.path(), &sites).expect("compiler diagnostics map to direct unsafe sites");
-    let error = verify(fixture.path(), &[]).expect_err("unmatched compiler diagnostic must fail closed");
+    verify_fixture(&fixture, &sites).expect("compiler diagnostics map to direct unsafe sites");
+    let error = verify_fixture(&fixture, &[]).expect_err("unmatched compiler diagnostic must fail closed");
     assert!(error.to_string().contains("compiler-expanded unsafe is absent"), "unexpected error: {error:#}");
 
     write_root_source(&fixture, "unsafe fn generated(pointer: *const u8) -> u8 { *pointer }");
     let sites = scan_fixture(&fixture).expect("unsafe operation fixture inventory");
-    let error = verify(fixture.path(), &sites).expect_err("unsafe operation in unsafe function must fail closed");
+    let error = verify_fixture(&fixture, &sites).expect_err("unsafe operation in unsafe function must fail closed");
     assert!(error.to_string().contains("unsafe_op_in_unsafe_fn"), "unexpected error: {error:#}");
 
     for source in ["opaque::unsafe_generated!();", "#[opaque::inject_allowed] fn seed() {}"] {
@@ -175,7 +175,7 @@ fn compiler_and_dep_info_audits_fail_closed_on_unmatched_inputs() {
 
     fs::write(fixture.path().join("outside.rs"), "pub fn outside() {}\n").expect("outside source");
     write_root_source(&fixture, "tokio::include_outside!();");
-    let error = verify(fixture.path(), &[]).expect_err("generated external include must fail closed");
+    let error = verify_fixture(&fixture, &[]).expect_err("generated external include must fail closed");
     assert!(error.to_string().contains("unaudited input outside.rs"), "unexpected error: {error:#}");
 }
 
@@ -199,8 +199,84 @@ fn binary_unit_test_diagnostics_are_audited() {
     )
     .expect("binary source");
 
-    let error = verify(fixture.path(), &[]).expect_err("binary test-only unsafe must be audited");
+    let error = verify_fixture(&fixture, &[]).expect_err("binary test-only unsafe must be audited");
     assert!(error.to_string().contains("compiler-expanded unsafe is absent"), "unexpected error: {error:#}");
+}
+
+#[test]
+fn test_enabled_example_diagnostics_are_audited() {
+    let fixture = procedural_macro_fixture();
+    write_root_source(&fixture, "tokio::safe!();");
+    fs::create_dir(fixture.path().join("examples")).expect("examples root");
+    fs::write(
+        fixture.path().join("examples/test_enabled.rs"),
+        "
+        fn main() {}
+        #[cfg(test)]
+        #[test]
+        fn test_only_unsafe() {
+            // SAFETY: the empty fixture operation has no preconditions.
+            unsafe {}
+        }
+        ",
+    )
+    .expect("test-enabled example source");
+    append_root_manifest(
+        &fixture,
+        "
+        [[example]]
+        name = \"test-enabled\"
+        path = \"examples/test_enabled.rs\"
+        test = true
+        ",
+    );
+
+    let error = verify_fixture(&fixture, &[]).expect_err("test-enabled example unsafe must be audited");
+    assert!(error.to_string().contains("compiler-expanded unsafe is absent"), "unexpected error: {error:#}");
+}
+
+#[test]
+fn explicit_examples_outside_the_examples_directory_are_audited() {
+    let fixture = procedural_macro_fixture();
+    write_root_source(&fixture, "tokio::safe!();");
+    fs::write(
+        fixture.path().join("src/audited_example.rs"),
+        "
+        fn main() {
+            // SAFETY: the empty fixture operation has no preconditions.
+            unsafe {}
+        }
+        ",
+    )
+    .expect("explicit example source");
+    append_root_manifest(
+        &fixture,
+        "
+        [[example]]
+        name = \"audited-example\"
+        path = \"src/audited_example.rs\"
+        ",
+    );
+
+    let error = verify_fixture(&fixture, &[]).expect_err("explicit example unsafe must be audited");
+    assert!(error.to_string().contains("compiler-expanded unsafe is absent"), "unexpected error: {error:#}");
+}
+
+fn verify_fixture(fixture: &TempDir, sites: &[UnsafeSite]) -> anyhow::Result<()> {
+    let output = Command::new(env!("CARGO"))
+        .current_dir(fixture.path())
+        .args(["metadata", "--format-version=1", "--no-deps", "--locked"])
+        .output()
+        .expect("fixture Cargo metadata");
+    assert!(output.status.success(), "fixture Cargo metadata failed: {}", String::from_utf8_lossy(&output.stderr));
+    verify(fixture.path(), sites, &output.stdout)
+}
+
+fn append_root_manifest(fixture: &TempDir, source: &str) {
+    let path = fixture.path().join("Cargo.toml");
+    let mut manifest = fs::read_to_string(&path).expect("read fixture manifest");
+    manifest.push_str(source);
+    fs::write(path, manifest).expect("extend fixture manifest");
 }
 
 fn scan_fixture(fixture: &TempDir) -> anyhow::Result<Vec<UnsafeSite>> {

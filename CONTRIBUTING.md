@@ -121,13 +121,16 @@ unconditional, non-ignored explicit test function that is the source of a
 Cargo-scheduled integration-test target using the standard test harness without
 opt-in target features. Operations and lint exceptions are counted separately.
 Site
-locators plus site and enclosing-boundary syntax fingerprints make additions,
-moves, removals, operation mutations, and safe-wrapper mutations fail closed.
+locators plus site and enclosing-boundary syntax fingerprints, including named
+type/data and associated-item boundaries that can contain const expressions,
+make additions, moves, removals, operation mutations, and safe-wrapper
+mutations fail closed.
 The gate also reserves a higher Cargo priority for required compiler and Clippy
 lints so overlapping lint groups cannot override them, while unrelated lints
 may use their own priorities. It sanitizes compiler override environment
-variables and rejects `.cargo/config*` files in the repository, its ancestors,
-or Cargo home that could inject overriding compiler flags. Contract
+variables and inherited build-target selection, and rejects `.cargo/config*`
+files in the repository, its ancestors, or Cargo home that could redirect or
+override compiler audits. Contract
 dependencies must use exactly their reviewed routes: alternate direct
 dependencies, aliases, workspace inheritance, build/dev/target declarations,
 and root-feature forwarding are rejected. Locked versions, sources, checksums,

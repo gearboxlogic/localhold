@@ -72,11 +72,10 @@ fn verify_cargo_contract(workspace: &Path, manifest: &UnsafeManifest) -> Result<
 }
 
 fn load_cargo_metadata(workspace: &Path) -> Result<Vec<u8>> {
-    let output = Command::new(env!("CARGO"))
-        .current_dir(workspace)
-        .args(["metadata", "--format-version=1", "--locked", "--all-features"])
-        .output()
-        .context("run locked Cargo metadata for source-safety targets")?;
+    let mut command = Command::new(env!("CARGO"));
+    command.current_dir(workspace).args(["metadata", "--format-version=1", "--locked", "--all-features"]);
+    expanded::sanitize_compiler_environment(&mut command);
+    let output = command.output().context("run locked Cargo metadata for source-safety targets")?;
     if !output.status.success() {
         bail!("locked Cargo metadata for source-safety targets failed with {}", output.status);
     }

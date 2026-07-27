@@ -11,8 +11,8 @@ use syn::ext::IdentExt as _;
 use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, ExprUnsafe, ForeignItemFn, ForeignItemStatic, ImplItemFn, ItemConst, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemTrait,
-    ItemUse, Macro, StaticMutability, TraitItemFn,
+    Attribute, ExprUnsafe, ForeignItemFn, ForeignItemStatic, ImplItemConst, ImplItemFn, ImplItemType, ItemConst, ItemEnum, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl,
+    ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemTraitAlias, ItemType, ItemUnion, ItemUse, Macro, StaticMutability, TraitItemConst, TraitItemFn, TraitItemType,
 };
 
 use self::documentation::{is_doc_comment, unsupported_runnable_doctest};
@@ -361,6 +361,26 @@ impl<'ast> Visit<'ast> for SourceScanner {
         self.visit_boundary(scope, item, |scanner, item| visit::visit_item_const(scanner, item));
     }
 
+    fn visit_item_enum(&mut self, item: &'ast ItemEnum) {
+        let scope = self.child_scope(&item.ident.to_string());
+        self.visit_boundary(scope, item, |scanner, item| visit::visit_item_enum(scanner, item));
+    }
+
+    fn visit_item_struct(&mut self, item: &'ast ItemStruct) {
+        let scope = self.child_scope(&item.ident.to_string());
+        self.visit_boundary(scope, item, |scanner, item| visit::visit_item_struct(scanner, item));
+    }
+
+    fn visit_item_type(&mut self, item: &'ast ItemType) {
+        let scope = self.child_scope(&item.ident.to_string());
+        self.visit_boundary(scope, item, |scanner, item| visit::visit_item_type(scanner, item));
+    }
+
+    fn visit_item_union(&mut self, item: &'ast ItemUnion) {
+        let scope = self.child_scope(&item.ident.to_string());
+        self.visit_boundary(scope, item, |scanner, item| visit::visit_item_union(scanner, item));
+    }
+
     fn visit_item_impl(&mut self, implementation: &'ast ItemImpl) {
         let type_name = normalized_tokens(&implementation.self_ty);
         let scope = match &implementation.trait_ {
@@ -376,6 +396,11 @@ impl<'ast> Visit<'ast> for SourceScanner {
         });
     }
 
+    fn visit_impl_item_const(&mut self, item: &'ast ImplItemConst) {
+        let scope = self.child_scope(&item.ident.to_string());
+        self.visit_boundary(scope, item, |scanner, item| visit::visit_impl_item_const(scanner, item));
+    }
+
     fn visit_impl_item_fn(&mut self, function: &'ast ImplItemFn) {
         let scope = self.child_scope(&function.sig.ident.to_string());
         self.visit_boundary(scope, function, |scanner, function| {
@@ -388,6 +413,11 @@ impl<'ast> Visit<'ast> for SourceScanner {
         });
     }
 
+    fn visit_impl_item_type(&mut self, item: &'ast ImplItemType) {
+        let scope = self.child_scope(&item.ident.to_string());
+        self.visit_boundary(scope, item, |scanner, item| visit::visit_impl_item_type(scanner, item));
+    }
+
     fn visit_item_trait(&mut self, item: &'ast ItemTrait) {
         let scope = self.child_scope(&item.ident.to_string());
         self.visit_boundary(scope, item, |scanner, item| {
@@ -396,6 +426,16 @@ impl<'ast> Visit<'ast> for SourceScanner {
             }
             visit::visit_item_trait(scanner, item);
         });
+    }
+
+    fn visit_item_trait_alias(&mut self, item: &'ast ItemTraitAlias) {
+        let scope = self.child_scope(&item.ident.to_string());
+        self.visit_boundary(scope, item, |scanner, item| visit::visit_item_trait_alias(scanner, item));
+    }
+
+    fn visit_trait_item_const(&mut self, item: &'ast TraitItemConst) {
+        let scope = self.child_scope(&item.ident.to_string());
+        self.visit_boundary(scope, item, |scanner, item| visit::visit_trait_item_const(scanner, item));
     }
 
     fn visit_trait_item_fn(&mut self, function: &'ast TraitItemFn) {
@@ -408,6 +448,11 @@ impl<'ast> Visit<'ast> for SourceScanner {
                 visit::visit_trait_item_fn(scanner, function);
             }
         });
+    }
+
+    fn visit_trait_item_type(&mut self, item: &'ast TraitItemType) {
+        let scope = self.child_scope(&item.ident.to_string());
+        self.visit_boundary(scope, item, |scanner, item| visit::visit_trait_item_type(scanner, item));
     }
 
     fn visit_item_foreign_mod(&mut self, item: &'ast ItemForeignMod) {

@@ -248,7 +248,7 @@ fn is_root_manifest(manifest: &Path, message: &Value) -> Result<bool> {
     Ok(reported == manifest)
 }
 
-fn sanitize_compiler_environment(command: &mut Command) {
+pub fn sanitize_compiler_environment(command: &mut Command) {
     for (name, _) in env::vars_os() {
         if audit_environment_override(&name) {
             command.env_remove(name);
@@ -262,6 +262,7 @@ fn audit_environment_override(name: &OsStr) -> bool {
             name.as_str(),
             "RUSTFLAGS"
                 | "CARGO_ENCODED_RUSTFLAGS"
+                | "CARGO_BUILD_TARGET"
                 | "CLIPPY_ARGS"
                 | "RUSTC"
                 | "RUSTC_WRAPPER"

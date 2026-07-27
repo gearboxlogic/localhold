@@ -179,6 +179,63 @@ fn const_boundary_fingerprint_covers_safe_setup_around_an_operation() {
 }
 
 #[test]
+fn const_expression_item_boundaries_cover_safe_setup_around_an_operation() {
+    for (first, second, item) in [
+        (
+            "type Value = [u8; { let pointer = first; unsafe { call(pointer) } }];",
+            "type Value = [u8; { let pointer = second; unsafe { call(pointer) } }];",
+            "Value",
+        ),
+        (
+            "enum Value { Entry = { let pointer = first; unsafe { call(pointer) } } }",
+            "enum Value { Entry = { let pointer = second; unsafe { call(pointer) } } }",
+            "Value",
+        ),
+        (
+            "struct Value { bytes: [u8; { let pointer = first; unsafe { call(pointer) } }] }",
+            "struct Value { bytes: [u8; { let pointer = second; unsafe { call(pointer) } }] }",
+            "Value",
+        ),
+        (
+            "union Value { bytes: [u8; { let pointer = first; unsafe { call(pointer) } }] }",
+            "union Value { bytes: [u8; { let pointer = second; unsafe { call(pointer) } }] }",
+            "Value",
+        ),
+        (
+            "impl Store { const VALUE: usize = { let pointer = first; unsafe { call(pointer) } }; }",
+            "impl Store { const VALUE: usize = { let pointer = second; unsafe { call(pointer) } }; }",
+            "Store::VALUE",
+        ),
+        (
+            "impl Store { type Value = [u8; { let pointer = first; unsafe { call(pointer) } }]; }",
+            "impl Store { type Value = [u8; { let pointer = second; unsafe { call(pointer) } }]; }",
+            "Store::Value",
+        ),
+        (
+            "trait Store { const VALUE: usize = { let pointer = first; unsafe { call(pointer) } }; }",
+            "trait Store { const VALUE: usize = { let pointer = second; unsafe { call(pointer) } }; }",
+            "Store::VALUE",
+        ),
+        (
+            "trait Store { type Value = [u8; { let pointer = first; unsafe { call(pointer) } }]; }",
+            "trait Store { type Value = [u8; { let pointer = second; unsafe { call(pointer) } }]; }",
+            "Store::Value",
+        ),
+        (
+            "trait Value = Store<{ let pointer = first; unsafe { call(pointer) } }>;",
+            "trait Value = Store<{ let pointer = second; unsafe { call(pointer) } }>;",
+            "Value",
+        ),
+    ] {
+        let first = scan(first);
+        let second = scan(second);
+        assert_eq!(first[0].item, item);
+        assert_eq!(first[0].fingerprint, second[0].fingerprint);
+        assert_ne!(first[0].boundary_fingerprint, second[0].boundary_fingerprint);
+    }
+}
+
+#[test]
 fn rejects_source_expansion_outside_audited_files() {
     assert_source_expansion_rejected(r#"#[path = "../outside.rs"] mod outside;"#);
     assert_source_expansion_rejected(r#"#[r#path = "../outside.rs"] mod outside;"#);

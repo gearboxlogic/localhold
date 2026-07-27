@@ -205,11 +205,14 @@ These paths are not contacted by a default running `hold` process:
   class-only Rust fences are rejected unless the block is globally ignored or
   explicitly marked as a non-Rust language or `custom`. The gate also verifies
   the required lint levels, protects them from overlapping higher-priority lint
-  groups, and pins locked dependency
+  groups, removes inherited compiler overrides and build-target selection from
+  metadata and compiler-audit commands, and pins locked dependency
   versions/sources/checksums, reviewed direct feature specifications, compiler
   diagnostics for normal and test targets (including binary test harnesses),
   and that focused-test references name existing, unconditional, non-ignored
   explicit tests scheduled as standard, ungated Cargo integration-test targets.
+  Named type/data and associated items that can contain const expressions are
+  included in enclosing-boundary fingerprints.
   The all-features resolved graph must also retain each contract dependency's
   exact unified feature set and incoming parent routes.
   The manifest states safety invariants and known proof debt; passing the gate

@@ -290,6 +290,36 @@ fn append_only_ledgers_and_component_graph_block_rewrite_and_round_trip() {
 }
 
 #[test]
+fn cumulative_transfer_baseline_credits_prior_incoming_budget_before_forwarding() {
+    let (_, _, mut current, _) = transfer_fixture();
+    current.components.push(component("sink", "src/sink.rs", "src/sink.rs", 5));
+    current.components[1].paths = strings(&["src/destination.rs", "src/retained.rs"]);
+    current.components[1].production_ceiling = 20;
+    current.components[2].paths = strings(&["src/sink.rs", "src/forwarded.rs"]);
+    current.components[2].production_ceiling = 35;
+    current.hotspots[0].successors = strings(&["src/source.rs", "src/retained.rs", "src/forwarded.rs"]);
+    current.path_evolutions.push(evolution(
+        "split.forward-received-code",
+        PathEvolutionKind::Split,
+        &["src/moved.rs"],
+        &["src/retained.rs", "src/forwarded.rs"],
+    ));
+    current.component_transfers.push(transfer(
+        "transfer.destination-to-sink",
+        ("destination", "sink"),
+        30,
+        &["src/forwarded.rs"],
+        "split.forward-received-code",
+    ));
+    let baseline_files = inventory(&[("src/whole.rs", 900, 100), ("src/destination.rs", 10, 10), ("src/sink.rs", 5, 5)]);
+
+    current.validate_current().expect("acyclic cumulative transfer manifest is valid");
+    current
+        .compare_baseline(&baseline_files)
+        .expect("historical incoming budget is available to a later outgoing transfer");
+}
+
+#[test]
 fn immutable_identity_status_and_undeclared_path_changes_still_fail() {
     let previous = hotspot_manifest(HotspotKind::Production, HotspotStatus::Resolved, &["src/hot.rs"], 900, 800);
     let files = inventory(&[("src/hot.rs", 900, 800)]);

@@ -59,10 +59,10 @@ impl StructureManifest {
                 .map(|transfer| transfer.production_lines),
         )?;
         adjusted_baseline
-            .checked_sub(outgoing)
-            .with_context(|| format!("component {component:?} transfers exceed its adjusted baseline"))?
             .checked_add(incoming)
-            .context("component transfer-adjusted baseline overflow")
+            .context("component transfer-adjusted baseline overflow")?
+            .checked_sub(outgoing)
+            .with_context(|| format!("component {component:?} transfers exceed its incoming-adjusted baseline"))
     }
 
     fn compare_component_counts(&self, observed: &ObservedFiles<'_>) -> Result<()> {

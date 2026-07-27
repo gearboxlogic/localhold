@@ -905,8 +905,8 @@ impl TestHarness {
     }
 }
 
-/// Generate a pair of `#[tokio::test]` functions — one for stdio and one for
-/// HTTP — from a single async test body that receives a [`TestHarness`].
+/// Generate a module containing `stdio` and `http` tests from a single async
+/// test body that receives a [`TestHarness`].
 ///
 /// # Variants
 ///
@@ -920,16 +920,18 @@ impl TestHarness {
 macro_rules! transport_test {
     // -- noop (no clock) ---------------------------------------------------
     (noop, $name:ident, |$h:ident| async move $body:block) => {
-        pastey::paste! {
+        mod $name {
+            use super::*;
+
             #[tokio::test]
-            async fn [< stdio_ $name >]() {
-                let $h = super::helpers::TestHarness::stdio_noop().await;
+            async fn stdio() {
+                let $h = super::super::helpers::TestHarness::stdio_noop().await;
                 $body
             }
 
             #[tokio::test]
-            async fn [< http_ $name >]() {
-                let $h = super::helpers::TestHarness::http_noop().await;
+            async fn http() {
+                let $h = super::super::helpers::TestHarness::http_noop().await;
                 $body
             }
         }
@@ -937,16 +939,18 @@ macro_rules! transport_test {
 
     // -- embedding (no clock) -----------------------------------------------
     (embedding, $name:ident, |$h:ident| async move $body:block) => {
-        pastey::paste! {
+        mod $name {
+            use super::*;
+
             #[tokio::test]
-            async fn [< stdio_ $name >]() {
-                let $h = super::helpers::TestHarness::stdio_embedding().await;
+            async fn stdio() {
+                let $h = super::super::helpers::TestHarness::stdio_embedding().await;
                 $body
             }
 
             #[tokio::test]
-            async fn [< http_ $name >]() {
-                let $h = super::helpers::TestHarness::http_embedding().await;
+            async fn http() {
+                let $h = super::super::helpers::TestHarness::http_embedding().await;
                 $body
             }
         }
@@ -954,18 +958,20 @@ macro_rules! transport_test {
 
     // -- noop + clock -------------------------------------------------------
     (noop_clock, $name:ident, |$h:ident, $clock:ident| async move $body:block) => {
-        pastey::paste! {
+        mod $name {
+            use super::*;
+
             #[tokio::test]
-            async fn [< stdio_ $name >]() {
+            async fn stdio() {
                 let $clock = std::sync::Arc::new(localhold::clock::MockClock::new());
-                let $h = super::helpers::TestHarness::stdio_noop_clock(std::sync::Arc::clone(&$clock)).await;
+                let $h = super::super::helpers::TestHarness::stdio_noop_clock(std::sync::Arc::clone(&$clock)).await;
                 $body
             }
 
             #[tokio::test]
-            async fn [< http_ $name >]() {
+            async fn http() {
                 let $clock = std::sync::Arc::new(localhold::clock::MockClock::new());
-                let $h = super::helpers::TestHarness::http_noop_clock(std::sync::Arc::clone(&$clock)).await;
+                let $h = super::super::helpers::TestHarness::http_noop_clock(std::sync::Arc::clone(&$clock)).await;
                 $body
             }
         }

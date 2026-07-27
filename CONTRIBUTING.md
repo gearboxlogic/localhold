@@ -78,6 +78,10 @@ mistaken for executable operations. Macro-generated unsafe syntax, assembly,
 mutable statics, and safety-lint exceptions are rejected because a definition
 fingerprint cannot account for caller-supplied expansions. Standalone assembly
 macros must use explicit qualified paths so every invocation is fingerprinted.
+Opaque `[< ... >]` token-pasting input is rejected independently of the macro's
+name or import path, including inside attribute input. Function-like macro and
+attribute paths, plus derive macros, use closed reviewed sets; a new expansion
+path requires an explicit safety-gate review before first use.
 Macro invocations inside unsafe blocks and unsafe functions are also rejected
 because changing the macro definition could change the reviewed operation
 without changing the unsafe-context syntax.
@@ -87,6 +91,14 @@ expansion (including imported aliases), and `#[path]` source overrides are
 rejected so code cannot escape the audited roots or hide an exception from the
 inventory. Explicit Cargo target paths must remain under those roots. A root
 `build.rs` is rejected until the gate can audit its complete module graph.
+Runnable Rust doctests are likewise rejected; use maintained integration tests
+for executable examples, while explicitly ignored and non-Rust documentation
+blocks remain supported. The gate also runs Clippy with forced `unsafe_code`,
+`unsafe_op_in_unsafe_fn`, and undocumented-block diagnostics. Each emitted
+`unsafe_code` diagnostic must map to exactly one inventoried source keyword;
+the other two diagnostics are always errors. Cargo dep-info for every root
+target is checked and rejects recorded compiler inputs outside the audited
+roots, including generated `include!` inputs.
 
 Every exception requires a narrow safety contract with a stable owner,
 necessity, attempted safe alternatives, validity/lifetime/aliasing/ABI/thread
@@ -96,13 +108,14 @@ recovery issue. Operations and lint exceptions are counted separately. Site
 locators plus site and enclosing-boundary syntax fingerprints make additions,
 moves, removals, operation mutations, and safe-wrapper mutations fail closed.
 The gate also reserves a higher Cargo priority for required compiler and Clippy
-lints so groups cannot override them, and rejects repository `.cargo/config*`
-files that could inject overriding compiler flags. Contract dependencies must
-use exactly their reviewed routes: alternate direct dependencies, aliases,
-workspace inheritance, build/dev/target declarations, and root-feature
-forwarding are rejected. Locked versions, sources, checksums, and direct
-feature specifications remain pinned. The broader dependency-exposure gate
-still reviews target-specific effective Cargo graphs.
+lints so groups cannot override them, sanitizes compiler override environment
+variables, and rejects `.cargo/config*` files in the repository, its ancestors,
+or Cargo home that could inject overriding compiler flags. Contract
+dependencies must use exactly their reviewed routes: alternate direct
+dependencies, aliases, workspace inheritance, build/dev/target declarations,
+and root-feature forwarding are rejected. Locked versions, sources, checksums,
+and direct feature specifications remain pinned. The broader
+dependency-exposure gate still reviews target-specific effective Cargo graphs.
 
 Inspect the parser's current site inventory with:
 
@@ -167,13 +180,21 @@ native baselines, even when a refactor appears output-neutral. This forces the
 scanner implementation used for evidence to receive the same native review as
 dependency changes.
 
-The scanner invokes the exact absolute Cargo and rustc executables that built
-it. It refuses Cargo configuration files in the isolated working directory's
-physical ancestor chain. Source/registry override environment variables are
-removed from Cargo subprocesses, as are inherited Rust flags that could change
-`cfg` resolution. Move or remove inherited Cargo configuration before running
-the audit; only the scanner's internally generated verified-vendor replacement
-is supported.
+The first-party expanded-source audit invokes the Cargo executable that built
+the maintainability tool. It refuses Cargo configuration files in the working
+directory's physical ancestor chain and in Cargo home, and removes inherited
+Cargo aliases, compiler wrappers, and Rust flags that could weaken or redirect
+its forced safety lints. Move or remove inherited Cargo configuration before
+running the audit.
+
+Rustc suppresses safety-lint diagnostics for tokens synthesized entirely by an
+external procedural macro. The lexical gate therefore permits only reviewed
+macro and attribute paths, rejects aliases and local modules that can
+impersonate their package roots, and requires those roots to map to unrenamed
+Cargo dependencies. Cargo.lock and dependency-unsafe review pin the
+implementation behind each permitted path. The expanded-source audit is a
+second control for every safety diagnostic rustc does emit; it is not the
+identity boundary for procedural macros.
 
 ## Pull Requests
 

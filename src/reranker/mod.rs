@@ -33,8 +33,6 @@ mod download;
 
 use std::{future::Future, pin::Pin};
 
-use thiserror::Error;
-
 /// Boxed future alias used by [`RerankerProvider`] trait methods.
 ///
 /// Keeps the trait `dyn`-compatible (`Arc<dyn RerankerProvider>`) without
@@ -61,7 +59,7 @@ impl RerankerScore {
 }
 
 /// Errors from the reranker subsystem.
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RerankerError {
     /// A transient error (model loading hiccup, resource contention) — worth retrying.

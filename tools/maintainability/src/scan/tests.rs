@@ -154,6 +154,14 @@ fn tracks_nested_item_and_occurrence() {
 }
 
 #[test]
+fn records_the_executable_keyword_location() {
+    let sites = scan("fn boundary() { unsafe { operation() } }");
+    assert_eq!(sites.len(), 1);
+    assert!(sites[0].source_range.contains(1, 17));
+    assert!(!sites[0].source_range.contains(1, 16));
+}
+
+#[test]
 fn boundary_fingerprint_covers_safe_setup_around_an_operation() {
     let first = scan("fn boundary() { let pointer = first; unsafe { call(pointer) } }");
     let second = scan("fn boundary() { let pointer = second; unsafe { call(pointer) } }");
@@ -185,6 +193,10 @@ fn standalone_assembly_invocations_are_fingerprinted() {
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].kind, SiteKind::MacroInput);
     assert_ne!(first[0].fingerprint, second[0].fingerprint);
+    for source in [r#"opaque::global_asm!("");"#, r#"global_asm!("");"#, r#"core::arch::llvm_asm!("");"#] {
+        let error = scan_result(source).expect_err("only reviewed full assembly macro paths may be inventoried");
+        assert!(error.to_string().contains("unreviewed macro path"), "unexpected error: {error:#}");
+    }
 }
 
 #[test]
@@ -235,6 +247,84 @@ fn rejects_macro_generated_unsafe_constructs() {
     ] {
         assert_unsafe_macro_rejected(source);
     }
+}
+
+#[test]
+fn rejects_opaque_token_pasting_independent_of_macro_name() {
+    for source in [r"pastey::paste! { fn [< un safe >]() {} }", r"aliased::builder! { nested! { [< un safe _ code >] } }"] {
+        let error = scan_result(source).expect_err("token pasting must fail closed");
+        assert!(error.to_string().contains("opaque token-pasting macro input"), "unexpected error: {error:#}");
+    }
+}
+
+#[test]
+fn rejects_unreviewed_macro_and_attribute_paths() {
+    for source in [
+        "fn sample() { opaque::expand!(); }",
+        "#[opaque::expand] fn sample() {}",
+        "#[cfg_attr(all(), opaque::expand)] fn sample() {}",
+        "#[derive(UnknownDerive)] struct Sample;",
+    ] {
+        let error = scan_result(source).expect_err("unreviewed expansion path must fail closed");
+        assert!(error.to_string().contains("unreviewed"), "unexpected error: {error:#}");
+    }
+    assert!(scan_result("#[tokio::test] fn sample() { serde_json::json!({}); }").is_ok());
+}
+
+#[test]
+fn rejects_aliases_and_modules_that_impersonate_reviewed_expansions() {
+    for source in [
+        "use evil::info; fn sample() { info!(\"hidden\"); }",
+        "use evil::safe as info; fn sample() { info!(\"hidden\"); }",
+        "use evil as tokio; #[tokio::test] async fn sample() {}",
+        "mod tokio { pub use evil::test; } #[tokio::test] async fn sample() {}",
+        "mod r#tokio { pub use opaque::join; } r#tokio::join!();",
+        "use evil::*; fn sample() { info!(\"hidden\"); }",
+        "extern crate evil as tokio; #[tokio::test] async fn sample() {}",
+        "use opaque::transport_test; transport_test!(noop, sample, |harness| async move {});",
+        "use opaque::write; fn sample() { write!(buffer, \"hidden\"); }",
+        "use opaque::Clone; #[derive(Clone)] struct Sample;",
+        "use opaque::Error; #[derive(Error)] struct Sample;",
+        "macro_rules! write { ($($token:tt)*) => {} } fn sample() { write!(buffer); }",
+    ] {
+        let error = scan_result(source).expect_err("expansion identity impersonation must fail closed");
+        assert!(
+            error.to_string().contains("shadow")
+                || error.to_string().contains("reviewed expansion")
+                || error.to_string().contains("glob import")
+                || error.to_string().contains("extern crate")
+                || error.to_string().contains("impersonates")
+                || error.to_string().contains("unreviewed"),
+            "unexpected error: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn rejects_token_pasting_in_attribute_input() {
+    let error = scan_result("#[builder([< un safe >])] fn sample() {}").expect_err("attribute token pasting must fail closed");
+    assert!(error.to_string().contains("opaque token-pasting attribute input"), "unexpected error: {error:#}");
+}
+
+#[test]
+fn rejects_runnable_rust_doctests_but_allows_ignored_examples() {
+    for source in [
+        "/// ```\n/// fn runnable() {}\n/// ```\nfn sample() {}",
+        "/// ```rust,no_run\n/// fn compiled() {}\n/// ```\nfn sample() {}",
+        "///     fn indented() {}\nfn sample() {}",
+        "/**\n * ```rust\n * fn block_doc() {}\n * ```\n */\nfn sample() {}",
+    ] {
+        let error = scan_result(source).expect_err("runnable doctest must fail closed");
+        assert!(error.to_string().contains("runnable Rust doctests"), "unexpected error: {error:#}");
+    }
+    assert!(scan_result("/// ```ignore\n/// fn ignored() {}\n/// ```\nfn sample() {}").is_ok());
+    assert!(scan_result("/// ```text\n/// unsafe is prose here\n/// ```\nfn sample() {}").is_ok());
+    let error = scan_result("#[doc = \"```\\nfn hidden() {}\\n```\"] fn sample() {}").expect_err("explicit doc attribute must fail closed");
+    assert!(error.to_string().contains("explicit #[doc] attribute"), "unexpected error: {error:#}");
+    let error = scan_result("#[r#doc = \"```\\nfn hidden() {}\\n```\"] fn sample() {}").expect_err("raw explicit doc attribute must fail closed");
+    assert!(error.to_string().contains("explicit #[doc] attribute"), "unexpected error: {error:#}");
+    let error = scan_result("#[cfg_attr(all(), doc = \"```\\nfn hidden() {}\\n```\")] fn sample() {}").expect_err("nested explicit doc attribute must fail closed");
+    assert!(error.to_string().contains("unreviewed attribute path"), "unexpected error: {error:#}");
 }
 
 #[test]

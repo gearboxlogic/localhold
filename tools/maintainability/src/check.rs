@@ -1,12 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::manifest::{DependencyPin, RootDependencySpec, UnsafeManifest};
-use crate::scan;
+use crate::scan::{RESERVED_LOCAL_MACROS, REVIEWED_EXPANSION_PACKAGES};
+use crate::{expanded, scan};
 
 type RequiredLint<'a> = (&'a str, &'a str, &'a str, i64);
 
@@ -27,11 +29,12 @@ pub fn run(workspace: &Path, manifest: &UnsafeManifest) -> Result<()> {
     let actual = scan::scan_workspace(workspace, manifest.roots())?;
     manifest.compare_sites(&actual)?;
     verify_cargo_contract(workspace, manifest)?;
+    expanded::verify(workspace, &actual)?;
     verify_dependency_packages(workspace, manifest)
 }
 
 fn verify_cargo_contract(workspace: &Path, manifest: &UnsafeManifest) -> Result<()> {
-    verify_no_workspace_cargo_config(workspace)?;
+    verify_no_cargo_config(workspace)?;
     let path = workspace.join("Cargo.toml");
     let source = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     let cargo: toml::Value = toml::from_str(&source).with_context(|| format!("parse {}", path.display()))?;
@@ -55,17 +58,97 @@ fn verify_cargo_contract(workspace: &Path, manifest: &UnsafeManifest) -> Result<
     let reviewed_root_dependencies = root_dependency_specs.keys().copied().collect();
     let protected_dependencies = manifest.dependency_packages()?.keys().copied().collect();
     verify_dependency_routes(&cargo, &protected_dependencies, &reviewed_root_dependencies)?;
+    verify_expansion_dependency_routes(&cargo)?;
     verify_cargo_target_paths(&cargo)?;
     Ok(())
 }
 
-fn verify_no_workspace_cargo_config(workspace: &Path) -> Result<()> {
-    for relative in [".cargo/config.toml", ".cargo/config"] {
-        let path = workspace.join(relative);
-        match fs::symlink_metadata(&path) {
-            Ok(_) => bail!("{relative} is not supported because repository Cargo configuration can override safety lint flags"),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
+fn verify_expansion_dependency_routes(cargo: &toml::Value) -> Result<()> {
+    for replacement in ["patch", "replace"] {
+        if cargo.get(replacement).is_some() {
+            bail!("Cargo.toml [{replacement}] dependency replacement is not supported by the reviewed expansion-path contract");
+        }
+    }
+    verify_expansion_dependency_table(cargo.get("dependencies"), "dependencies")?;
+    for section in ["build-dependencies", "dev-dependencies"] {
+        verify_expansion_dependency_table(cargo.get(section), section)?;
+    }
+    if let Some(targets) = cargo.get("target") {
+        for (selector, target) in targets.as_table().context("Cargo.toml target must be a table")? {
+            let target = target.as_table().with_context(|| format!("Cargo.toml target {selector:?} must be a table"))?;
+            for section in ["dependencies", "build-dependencies", "dev-dependencies"] {
+                verify_expansion_dependency_table(target.get(section), &format!("target.{selector:?}.{section}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_expansion_dependency_table(value: Option<&toml::Value>, label: &str) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    for (key, declaration) in value.as_table().with_context(|| format!("Cargo.toml {label} must be a table"))? {
+        let package = dependency_package_name(key, declaration).with_context(|| format!("parse Cargo.toml {label}.{key}"))?;
+        let crate_name = cargo_rust_crate_name(key);
+        let package_crate_name = cargo_rust_crate_name(package);
+        if RESERVED_LOCAL_MACROS.contains(&crate_name.as_str()) || RESERVED_LOCAL_MACROS.contains(&package_crate_name.as_str()) {
+            bail!("Cargo.toml {label}.{key} collides with reserved local macro name {package}");
+        }
+        let reviewed_crate = REVIEWED_EXPANSION_PACKAGES.contains(&crate_name.as_str());
+        let reviewed_package = REVIEWED_EXPANSION_PACKAGES.contains(&package_crate_name.as_str());
+        if reviewed_crate && package != crate_name || reviewed_package && key != package {
+            bail!("Cargo.toml {label}.{key} renames expansion dependency {package}; reviewed macro and attribute paths require an unrenamed package identity");
+        }
+        if reviewed_crate {
+            verify_registry_expansion_dependency(declaration).with_context(|| format!("Cargo.toml {label}.{key} must remain a registry-backed reviewed expansion dependency"))?;
+        }
+    }
+    Ok(())
+}
+
+fn cargo_rust_crate_name(package_or_key: &str) -> String {
+    package_or_key.replace('-', "_")
+}
+
+fn verify_registry_expansion_dependency(declaration: &toml::Value) -> Result<()> {
+    if declaration.is_str() {
+        return Ok(());
+    }
+    let table = declaration.as_table().context("expansion dependency declaration must be a version string or table")?;
+    let allowed = BTreeSet::from(["default-features", "features", "optional", "version"]);
+    let keys: BTreeSet<_> = table.keys().map(String::as_str).collect();
+    if !keys.is_subset(&allowed) || !table.get("version").is_some_and(toml::Value::is_str) {
+        bail!("expansion dependency must use a crates.io version without path, git, registry, package rename, workspace inheritance, or another source override");
+    }
+    Ok(())
+}
+
+fn verify_no_cargo_config(workspace: &Path) -> Result<()> {
+    let cargo_home = env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")).map(|home| PathBuf::from(home).join(".cargo")));
+    verify_no_cargo_config_with_home(workspace, cargo_home.as_deref())
+}
+
+fn verify_no_cargo_config_with_home(workspace: &Path, cargo_home: Option<&Path>) -> Result<()> {
+    let mut directories: BTreeSet<PathBuf> = workspace.ancestors().map(|ancestor| ancestor.join(".cargo")).collect();
+    if let Some(cargo_home) = cargo_home {
+        let cargo_home = if cargo_home.is_absolute() {
+            cargo_home.to_path_buf()
+        } else {
+            workspace.join(cargo_home)
+        };
+        directories.insert(cargo_home);
+    }
+    for directory in directories {
+        for name in ["config.toml", "config"] {
+            let path = directory.join(name);
+            match fs::symlink_metadata(&path) {
+                Ok(_) => bail!("{} is not supported because Cargo configuration can override safety lint flags", path.display()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
+            }
         }
     }
     Ok(())

@@ -5,8 +5,8 @@ use crate::manifest::DependencyPin;
 use tempfile::tempdir;
 
 use super::{
-    LockedPackage, compare_dependency_packages, lint_setting, parse_root_dependency, verify_audited_target_path, verify_dependency_routes, verify_lint, verify_lint_precedence,
-    verify_no_workspace_cargo_config,
+    LockedPackage, compare_dependency_packages, lint_setting, parse_root_dependency, verify_audited_target_path, verify_dependency_routes, verify_expansion_dependency_routes,
+    verify_lint, verify_lint_precedence, verify_no_cargo_config, verify_no_cargo_config_with_home,
 };
 
 fn cargo(source: &str) -> toml::Value {
@@ -95,10 +95,18 @@ fn clippy_groups_cannot_override_documentation_requirement() {
 #[test]
 fn workspace_cargo_config_cannot_override_safety_flags() {
     let workspace = tempdir().expect("temporary workspace");
-    assert!(verify_no_workspace_cargo_config(workspace.path()).is_ok());
+    let project = workspace.path().join("project");
+    fs::create_dir(&project).expect("nested project");
+    assert!(verify_no_cargo_config(&project).is_ok());
     fs::create_dir(workspace.path().join(".cargo")).expect("Cargo config directory");
     fs::write(workspace.path().join(".cargo/config.toml"), "[build]\nrustflags = ['--cap-lints=allow']\n").expect("Cargo config");
-    assert!(verify_no_workspace_cargo_config(workspace.path()).is_err());
+    assert!(verify_no_cargo_config(&project).is_err());
+
+    let isolated = tempdir().expect("isolated workspace");
+    let cargo_home = isolated.path().join("cargo-home");
+    fs::create_dir(&cargo_home).expect("Cargo home");
+    fs::write(cargo_home.join("config"), "[build]\nrustflags = ['--cap-lints=allow']\n").expect("Cargo home config");
+    assert!(verify_no_cargo_config_with_home(isolated.path(), Some(&cargo_home)).is_err());
 }
 
 #[test]
@@ -227,6 +235,79 @@ fn alternate_dependency_routes_fail_closed() {
         assert!(
             verify_dependency_routes(&cargo(rejected), &protected, &reviewed_root).is_err(),
             "route must be rejected: {rejected}"
+        );
+    }
+}
+
+#[test]
+fn expansion_dependencies_cannot_be_renamed_or_impersonated() {
+    let accepted = cargo(
+        "
+        [dependencies]
+        tokio = '1'
+        tracing = '0.1'
+
+        [dev-dependencies]
+        proptest = '1'
+        ",
+    );
+    assert!(verify_expansion_dependency_routes(&accepted).is_ok());
+
+    for rejected in [
+        "
+        [dependencies]
+        tokio = { package = 'opaque-macro', path = '../opaque' }
+        ",
+        "
+        [dependencies]
+        runtime = { package = 'tokio', version = '1' }
+        ",
+        "
+        [target.'cfg(unix)'.dev-dependencies]
+        tracing = { package = 'opaque-macro', path = '../opaque' }
+        ",
+        "
+        [dependencies]
+        tokio = { path = '../crafted-tokio' }
+        ",
+        "
+        [dependencies]
+        tracing = { git = 'https://example.invalid/tracing', version = '0.1' }
+        ",
+        "
+        [dependencies]
+        serde = { workspace = true }
+        ",
+        "
+        [dependencies]
+        transport_test = { path = '../opaque-macro' }
+        ",
+        "
+        [dependencies]
+        serde-json = { package = 'opaque-macro', path = '../opaque-macro' }
+        ",
+        "
+        [dependencies]
+        transport-test = { package = 'opaque-macro', path = '../opaque-macro' }
+        ",
+        "
+        [dependencies]
+        tokio = '1'
+
+        [patch.crates-io]
+        tokio = { path = '../crafted-tokio' }
+        ",
+        "
+        [dependencies]
+        tokio = '1'
+
+        [replace]
+        'tokio:1.0.0' = { path = '../crafted-tokio' }
+        ",
+    ] {
+        assert!(
+            verify_expansion_dependency_routes(&cargo(rejected)).is_err(),
+            "renamed expansion dependency must be rejected: {rejected}"
         );
     }
 }

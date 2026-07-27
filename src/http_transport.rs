@@ -27,7 +27,6 @@ use rmcp::{
         },
     },
 };
-use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
@@ -250,7 +249,7 @@ impl<S> Drop for ActivityStream<S> {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 enum CappedSessionManagerError {
     #[error("HTTP MCP session limit reached ({0})")]
     Capacity(usize),

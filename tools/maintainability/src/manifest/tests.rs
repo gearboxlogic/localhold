@@ -1,4 +1,4 @@
-use crate::scan::{SiteKind, UnsafeSite};
+use crate::scan::{SiteKind, SourceRange, UnsafeSite};
 
 use super::{ExpectedSite, UnsafeManifest, validate_site_operation_cardinality};
 
@@ -35,6 +35,7 @@ fn site(fingerprint: &str) -> UnsafeSite {
         occurrence: 0,
         fingerprint: fingerprint.to_owned(),
         boundary_fingerprint: fingerprint.to_owned(),
+        source_range: SourceRange::default(),
     }
 }
 

@@ -1,7 +1,7 @@
 //! Transport-agnostic tests that run against both stdio and HTTP.
 //!
-//! Each [`transport_test!`] invocation generates two `#[tokio::test]`
-//! functions: `stdio_<name>` and `http_<name>`.
+//! Each [`transport_test!`] invocation generates a named module containing
+//! `stdio` and `http` `#[tokio::test]` functions.
 
 use std::time::Duration;
 

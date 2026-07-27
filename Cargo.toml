@@ -79,7 +79,6 @@ reranker-cuda = ["reranker", "ort/cuda", "ort/load-dynamic"]
 [dev-dependencies]
 rmcp = { version = "2.2", features = ["client", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest"] }
 localhold = { path = ".", features = ["testing"] }
-pastey = "0.2"
 proptest = "1"
 insta = { version = "1", features = ["json"] }
 rand = "0.10"

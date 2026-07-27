@@ -1,4 +1,5 @@
 mod check;
+mod expanded;
 mod manifest;
 mod scan;
 

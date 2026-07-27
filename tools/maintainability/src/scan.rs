@@ -1,21 +1,45 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use proc_macro2::Span;
 use quote::ToTokens;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use syn::ext::IdentExt as _;
+use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, ExprUnsafe, ForeignItemFn, ForeignItemStatic, ImplItemFn, ItemFn, ItemForeignMod, ItemImpl, ItemMod, ItemStatic, ItemTrait, ItemUse, Macro, StaticMutability,
-    TraitItemFn,
+    Attribute, ExprUnsafe, ForeignItemFn, ForeignItemStatic, ImplItemFn, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemTrait, ItemUse,
+    Macro, StaticMutability, TraitItemFn,
 };
 
+use self::documentation::unsupported_runnable_doctest;
+use self::files::{collect_optional as collect_optional_rust_files, collect_required as collect_rust_files};
 use self::policy::{
     contains_assembly_macro, contains_opaque_attribute, contains_path_attribute, contains_structural_ident, contains_unaudited_macro_syntax, is_path_override,
-    is_safety_lint_exception, is_standalone_assembly_macro, is_unsafe_attribute, macro_name,
+    is_reserved_expansion_root, is_safety_lint_exception, is_standalone_assembly_macro, is_trusted_attribute, is_trusted_local_macro_name, is_trusted_macro, is_unsafe_attribute,
+    macro_name, untrusted_import,
 };
+
+pub const REVIEWED_EXPANSION_PACKAGES: [&str; 14] = [
+    "criterion",
+    "futures",
+    "insta",
+    "ort",
+    "proptest",
+    "rand",
+    "rmcp",
+    "rusqlite",
+    "schemars",
+    "serde",
+    "serde_json",
+    "thiserror",
+    "tokio",
+    "tracing",
+];
+pub const RESERVED_LOCAL_MACROS: [&str; 5] = ["concat_placeholders", "concat_with_sep", "define_memory_columns", "numbered_placeholders", "transport_test"];
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum SiteKind {
@@ -47,11 +71,52 @@ pub struct UnsafeSite {
     pub occurrence: u32,
     pub fingerprint: String,
     pub boundary_fingerprint: String,
+    #[serde(skip_serializing)]
+    pub source_range: SourceRange,
 }
 
 impl UnsafeSite {
     pub fn locator(&self) -> (&str, &str, SiteKind, u32) {
         (&self.path, &self.item, self.kind, self.occurrence)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SourceRange {
+    pub start_line: usize,
+    pub start_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+}
+
+impl SourceRange {
+    fn from_span(span: Span) -> Self {
+        let start = span.start();
+        let end = span.end();
+        Self {
+            start_line: start.line,
+            start_column: start.column + 1,
+            end_line: end.line,
+            end_column: end.column + 1,
+        }
+    }
+
+    pub fn contains(self, line: usize, column: usize) -> bool {
+        let point = (line, column);
+        let start = (self.start_line, self.start_column);
+        let end = (self.end_line, self.end_column);
+        point >= start && (point < end || start == end && point == start)
+    }
+
+    pub const fn width(self) -> (usize, usize) {
+        (
+            self.end_line.saturating_sub(self.start_line),
+            if self.start_line == self.end_line {
+                self.end_column.saturating_sub(self.start_column)
+            } else {
+                self.end_column
+            },
+        )
     }
 }
 
@@ -61,6 +126,7 @@ struct PendingSite {
     kind: SiteKind,
     fingerprint: String,
     boundary_fingerprint: String,
+    source_range: SourceRange,
 }
 
 pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Vec<UnsafeSite>> {
@@ -81,6 +147,10 @@ pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Vec<UnsafeSi
         let relative = path.strip_prefix(workspace).context("source path escaped workspace")?;
         let relative = relative.to_str().context("source path is not UTF-8")?.replace('\\', "/");
         let source = fs::read_to_string(&path).with_context(|| format!("read Rust source {}", path.display()))?;
+        if let Some(reason) = unsupported_runnable_doctest(&source) {
+            violations.push(format!("{relative}: {reason}"));
+            continue;
+        }
         let syntax = syn::parse_file(&source).with_context(|| format!("parse Rust source {}", path.display()))?;
         let mut scanner = SourceScanner::default();
         scanner.visit_file(&syntax);
@@ -98,6 +168,7 @@ pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Vec<UnsafeSi
                 occurrence: *occurrence,
                 fingerprint: pending.fingerprint,
                 boundary_fingerprint: pending.boundary_fingerprint,
+                source_range: pending.source_range,
             });
             *occurrence += 1;
         }
@@ -106,41 +177,6 @@ pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Vec<UnsafeSi
         bail!("unsupported or unaudited Rust source construct:\n{}", violations.join("\n"));
     }
     Ok(sites)
-}
-
-fn collect_optional_rust_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    match fs::symlink_metadata(root) {
-        Ok(_) => collect_rust_files(root, files),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("inspect optional source root {}", root.display())),
-    }
-}
-
-fn collect_rust_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    let metadata = fs::symlink_metadata(root).with_context(|| format!("inspect tracked source root {}", root.display()))?;
-    if metadata.file_type().is_symlink() {
-        bail!("tracked source root cannot be a symlink: {}", root.display());
-    }
-    if !metadata.is_dir() {
-        bail!("tracked source root is not a directory: {}", root.display());
-    }
-    let mut entries = fs::read_dir(root)
-        .with_context(|| format!("read tracked source directory {}", root.display()))?
-        .collect::<std::io::Result<Vec<_>>>()?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-    for entry in entries {
-        let path = entry.path();
-        let file_type = entry.file_type().with_context(|| format!("inspect tracked source entry {}", path.display()))?;
-        if file_type.is_symlink() {
-            bail!("tracked Rust source tree cannot contain symlinks: {}", path.display());
-        }
-        if file_type.is_dir() {
-            collect_rust_files(&path, files)?;
-        } else if file_type.is_file() && path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
-            files.push(path);
-        }
-    }
-    Ok(())
 }
 
 #[derive(Default)]
@@ -157,13 +193,14 @@ impl SourceScanner {
         self.scopes.last().cloned().unwrap_or_else(|| "<module>".to_owned())
     }
 
-    fn push_site(&mut self, kind: SiteKind, tokens: &impl ToTokens) {
+    fn push_site(&mut self, kind: SiteKind, tokens: &impl ToTokens, span: Span) {
         let site_fingerprint = fingerprint(tokens);
         self.sites.push(PendingSite {
             item: self.item(),
             kind,
             boundary_fingerprint: self.boundaries.last().cloned().unwrap_or_else(|| site_fingerprint.clone()),
             fingerprint: site_fingerprint,
+            source_range: SourceRange::from_span(span),
         });
     }
 
@@ -192,11 +229,28 @@ impl SourceScanner {
 
 impl<'ast> Visit<'ast> for SourceScanner {
     fn visit_attribute(&mut self, attribute: &'ast Attribute) {
+        if attribute.path().segments.len() == 1
+            && attribute.path().segments[0].ident.unraw() == "doc"
+            && !attribute.span().source_text().is_some_and(|source| {
+                let source = source.trim_start();
+                source.starts_with("///") || source.starts_with("//!") || source.starts_with("/**") || source.starts_with("/*!")
+            })
+        {
+            self.violations
+                .push(format!("{} uses an explicit #[doc] attribute, whose doctest content is not audited", self.item()));
+        }
+        if policy::contains_token_paste_syntax(&attribute.meta.to_token_stream()) {
+            self.violations.push(format!("{} uses opaque token-pasting attribute input", self.item()));
+        }
+        if !is_trusted_attribute(attribute) {
+            self.violations
+                .push(format!("{} uses an unreviewed attribute path {}", self.item(), attribute.path().to_token_stream()));
+        }
         if is_safety_lint_exception(attribute) {
-            self.push_site(SiteKind::LintException, attribute);
+            self.push_site(SiteKind::LintException, attribute, attribute.span());
         }
         if is_unsafe_attribute(attribute) {
-            self.push_site(SiteKind::Attribute, attribute);
+            self.push_site(SiteKind::Attribute, attribute, attribute.span());
         }
         if is_path_override(attribute) {
             self.violations.push(format!("{} uses #[path] or cfg_attr(..., path = ...)", self.item()));
@@ -205,12 +259,15 @@ impl<'ast> Visit<'ast> for SourceScanner {
     }
 
     fn visit_expr_unsafe(&mut self, expression: &'ast ExprUnsafe) {
-        self.push_site(SiteKind::Block, expression);
+        self.push_site(SiteKind::Block, expression, expression.unsafe_token.span);
         self.with_unsafe_context(|scanner| visit::visit_expr_unsafe(scanner, expression));
     }
 
     fn visit_macro(&mut self, macro_invocation: &'ast Macro) {
         let name = macro_name(macro_invocation);
+        if policy::contains_token_paste_syntax(&macro_invocation.tokens) {
+            self.violations.push(format!("{} uses opaque token-pasting macro input", self.item()));
+        }
         if name.as_deref() == Some("include") || contains_structural_ident(macro_invocation.tokens.clone(), "include") {
             self.violations.push(format!("{} uses include! code expansion", self.item()));
         }
@@ -224,8 +281,11 @@ impl<'ast> Visit<'ast> for SourceScanner {
         if self.unsafe_context_depth > 0 {
             self.violations
                 .push(format!("{} invokes a macro inside an unsafe context, whose expansion cannot be audited", self.item()));
-        } else if is_standalone_assembly_macro(name.as_deref()) {
-            self.push_site(SiteKind::MacroInput, macro_invocation);
+        } else if is_standalone_assembly_macro(macro_invocation) {
+            self.push_site(SiteKind::MacroInput, macro_invocation, macro_invocation.span());
+        } else if !is_trusted_macro(macro_invocation) {
+            self.violations
+                .push(format!("{} invokes an unreviewed macro path {}", self.item(), macro_invocation.path.to_token_stream()));
         } else if contains_unaudited_macro_syntax(&macro_invocation.tokens) {
             self.violations
                 .push(format!("{} uses macro-generated unsafe, assembly, mutable-static, or safety-lint syntax", self.item()));
@@ -233,8 +293,18 @@ impl<'ast> Visit<'ast> for SourceScanner {
         visit::visit_macro(self, macro_invocation);
     }
 
+    fn visit_item_macro(&mut self, item: &'ast ItemMacro) {
+        if macro_name(&item.mac).as_deref() == Some("macro_rules") && !item.ident.as_ref().is_some_and(|name| is_trusted_local_macro_name(&name.to_string())) {
+            self.violations.push(format!("{} defines an unreviewed local macro", self.item()));
+        }
+        visit::visit_item_macro(self, item);
+    }
+
     fn visit_item_use(&mut self, item: &'ast ItemUse) {
         let tokens = item.to_token_stream();
+        if let Some(reason) = untrusted_import(item) {
+            self.violations.push(format!("{} uses {reason}", self.item()));
+        }
         if contains_structural_ident(tokens.clone(), "include") {
             self.violations
                 .push(format!("{} imports include!, which can hide source expansion behind an alias", self.item()));
@@ -246,7 +316,20 @@ impl<'ast> Visit<'ast> for SourceScanner {
         visit::visit_item_use(self, item);
     }
 
+    fn visit_item_extern_crate(&mut self, item: &'ast ItemExternCrate) {
+        self.violations.push(format!(
+            "{} uses extern crate {}, whose alias and macro import semantics are not supported",
+            self.item(),
+            item.ident
+        ));
+        visit::visit_item_extern_crate(self, item);
+    }
+
     fn visit_item_mod(&mut self, item: &'ast ItemMod) {
+        if is_reserved_expansion_root(&item.ident.unraw().to_string()) {
+            self.violations
+                .push(format!("{} declares module {}, which shadows a reviewed expansion package", self.item(), item.ident));
+        }
         let scope = self.child_scope(&item.ident.to_string());
         self.visit_scoped(scope, item, |scanner, item| visit::visit_item_mod(scanner, item));
     }
@@ -254,9 +337,8 @@ impl<'ast> Visit<'ast> for SourceScanner {
     fn visit_item_fn(&mut self, function: &'ast ItemFn) {
         let scope = self.child_scope(&function.sig.ident.to_string());
         self.visit_boundary(scope, function, |scanner, function| {
-            let is_unsafe = function.sig.unsafety.is_some();
-            if is_unsafe {
-                scanner.push_site(SiteKind::Function, &function.sig);
+            if let Some(unsafety) = &function.sig.unsafety {
+                scanner.push_site(SiteKind::Function, &function.sig, unsafety.span);
                 scanner.with_unsafe_context(|scanner| visit::visit_item_fn(scanner, function));
             } else {
                 visit::visit_item_fn(scanner, function);
@@ -272,8 +354,8 @@ impl<'ast> Visit<'ast> for SourceScanner {
         };
         let scope = self.child_scope(&scope);
         self.visit_boundary(scope, implementation, |scanner, implementation| {
-            if implementation.unsafety.is_some() {
-                scanner.push_site(SiteKind::Impl, implementation);
+            if let Some(unsafety) = &implementation.unsafety {
+                scanner.push_site(SiteKind::Impl, implementation, unsafety.span);
             }
             visit::visit_item_impl(scanner, implementation);
         });
@@ -282,9 +364,8 @@ impl<'ast> Visit<'ast> for SourceScanner {
     fn visit_impl_item_fn(&mut self, function: &'ast ImplItemFn) {
         let scope = self.child_scope(&function.sig.ident.to_string());
         self.visit_boundary(scope, function, |scanner, function| {
-            let is_unsafe = function.sig.unsafety.is_some();
-            if is_unsafe {
-                scanner.push_site(SiteKind::Function, &function.sig);
+            if let Some(unsafety) = &function.sig.unsafety {
+                scanner.push_site(SiteKind::Function, &function.sig, unsafety.span);
                 scanner.with_unsafe_context(|scanner| visit::visit_impl_item_fn(scanner, function));
             } else {
                 visit::visit_impl_item_fn(scanner, function);
@@ -295,8 +376,8 @@ impl<'ast> Visit<'ast> for SourceScanner {
     fn visit_item_trait(&mut self, item: &'ast ItemTrait) {
         let scope = self.child_scope(&item.ident.to_string());
         self.visit_boundary(scope, item, |scanner, item| {
-            if item.unsafety.is_some() {
-                scanner.push_site(SiteKind::Trait, item);
+            if let Some(unsafety) = &item.unsafety {
+                scanner.push_site(SiteKind::Trait, item, unsafety.span);
             }
             visit::visit_item_trait(scanner, item);
         });
@@ -305,9 +386,8 @@ impl<'ast> Visit<'ast> for SourceScanner {
     fn visit_trait_item_fn(&mut self, function: &'ast TraitItemFn) {
         let scope = self.child_scope(&function.sig.ident.to_string());
         self.visit_boundary(scope, function, |scanner, function| {
-            let is_unsafe = function.sig.unsafety.is_some();
-            if is_unsafe {
-                scanner.push_site(SiteKind::Function, &function.sig);
+            if let Some(unsafety) = &function.sig.unsafety {
+                scanner.push_site(SiteKind::Function, &function.sig, unsafety.span);
                 scanner.with_unsafe_context(|scanner| visit::visit_trait_item_fn(scanner, function));
             } else {
                 visit::visit_trait_item_fn(scanner, function);
@@ -318,8 +398,8 @@ impl<'ast> Visit<'ast> for SourceScanner {
     fn visit_item_foreign_mod(&mut self, item: &'ast ItemForeignMod) {
         let scope = self.child_scope("<extern>");
         self.visit_boundary(scope, item, |scanner, item| {
-            if item.unsafety.is_some() {
-                scanner.push_site(SiteKind::ExternBlock, item);
+            if let Some(unsafety) = &item.unsafety {
+                scanner.push_site(SiteKind::ExternBlock, item, unsafety.span);
             }
             visit::visit_item_foreign_mod(scanner, item);
         });
@@ -329,7 +409,7 @@ impl<'ast> Visit<'ast> for SourceScanner {
         let scope = self.child_scope(&item.ident.to_string());
         self.visit_boundary(scope, item, |scanner, item| {
             if matches!(item.mutability, StaticMutability::Mut(_)) {
-                scanner.push_site(SiteKind::MutableStatic, item);
+                scanner.push_site(SiteKind::MutableStatic, item, item.span());
             }
             visit::visit_item_static(scanner, item);
         });
@@ -338,8 +418,8 @@ impl<'ast> Visit<'ast> for SourceScanner {
     fn visit_foreign_item_fn(&mut self, function: &'ast ForeignItemFn) {
         let scope = self.child_scope(&function.sig.ident.to_string());
         self.visit_boundary(scope, function, |scanner, function| {
-            if function.sig.unsafety.is_some() {
-                scanner.push_site(SiteKind::Function, &function.sig);
+            if let Some(unsafety) = &function.sig.unsafety {
+                scanner.push_site(SiteKind::Function, &function.sig, unsafety.span);
             }
             visit::visit_foreign_item_fn(scanner, function);
         });
@@ -349,7 +429,7 @@ impl<'ast> Visit<'ast> for SourceScanner {
         let scope = self.child_scope(&item.ident.to_string());
         self.visit_boundary(scope, item, |scanner, item| {
             if matches!(item.mutability, StaticMutability::Mut(_)) {
-                scanner.push_site(SiteKind::MutableStatic, item);
+                scanner.push_site(SiteKind::MutableStatic, item, item.span());
             }
             visit::visit_foreign_item_static(scanner, item);
         });
@@ -364,6 +444,8 @@ fn fingerprint(tokens: &impl ToTokens) -> String {
     format!("{:x}", Sha256::digest(normalized_tokens(tokens).as_bytes()))
 }
 
+mod documentation;
+mod files;
 mod policy;
 #[cfg(test)]
 mod tests;

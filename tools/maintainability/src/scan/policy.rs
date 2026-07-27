@@ -413,17 +413,21 @@ pub(super) fn is_standalone_assembly_macro(macro_invocation: &Macro) -> bool {
 }
 
 pub(super) fn contains_assembly_macro(tokens: &TokenStream) -> bool {
-    ASSEMBLY_MACROS.into_iter().any(|name| contains_structural_ident(tokens.clone(), name))
+    contains_macro_invocation(tokens, &ASSEMBLY_MACROS)
 }
 
 pub(super) fn contains_include_macro(tokens: &TokenStream) -> bool {
+    contains_macro_invocation(tokens, &["include"])
+}
+
+fn contains_macro_invocation(tokens: &TokenStream, names: &[&str]) -> bool {
     let tokens: Vec<_> = tokens.clone().into_iter().collect();
     tokens.iter().enumerate().any(|(index, token)| {
         matches!(token, TokenTree::Punct(punctuation) if punctuation.as_char() == '!')
-            && macro_path_before(&tokens, index).is_some_and(|(path, _)| path.rsplit("::").next() == Some("include"))
+            && macro_path_before(&tokens, index).is_some_and(|(path, _)| path.rsplit("::").next().is_some_and(|name| names.contains(&name)))
             && matches!(tokens.get(index + 1), Some(TokenTree::Group(_)))
     }) || tokens.into_iter().any(|token| match token {
-        TokenTree::Group(group) => contains_include_macro(&group.stream()),
+        TokenTree::Group(group) => contains_macro_invocation(&group.stream(), names),
         TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => false,
     })
 }

@@ -99,7 +99,10 @@ paths must remain under those roots. All enabled package build scripts are
 rejected until the gate can audit their complete inputs and outputs; a physical
 root `build.rs` is rejected even when disabled. The maintainability checker
 itself sets `build = false`, and an independent bootstrap check runs before
-Cargo to reject a physical checker `build.rs` or removal of that setting.
+Cargo to reject a physical checker `build.rs`, removal of that setting, and
+repository, ancestor, or Cargo-home configuration. The bootstrap also removes
+compiler, wrapper, linker, and runner override environment variables from the
+Cargo process.
 Runnable Rust doctests are likewise rejected, including rustdoc-only modifiers,
 target-specific ignores, fences inside blockquotes or list items, and class-only
 fences that remain Rust unless marked `custom`; `custom` takes precedence over

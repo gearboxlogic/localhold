@@ -268,7 +268,7 @@ fn audit_environment_override(name: &OsStr) -> bool {
                 | "CARGO_BUILD_RUSTC_WRAPPER"
                 | "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"
         ) || name.starts_with("CARGO_ALIAS_")
-            || name.starts_with("CARGO_TARGET_") && name.ends_with("_RUSTFLAGS")
+            || name.starts_with("CARGO_TARGET_") && (name.ends_with("_RUSTFLAGS") || name.ends_with("_LINKER") || name.ends_with("_RUNNER"))
     })
 }
 

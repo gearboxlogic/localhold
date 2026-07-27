@@ -311,6 +311,11 @@ fn trusted_macro_arguments_can_use_an_include_field() {
 }
 
 #[test]
+fn ordinary_assembly_named_identifiers_are_not_macro_invocations() {
+    assert!(scan_result("use options::asm; fn sample(options: Options) { assert!(options.asm); let _ = asm; }").is_ok());
+}
+
+#[test]
 fn standalone_assembly_invocations_are_fingerprinted() {
     let first = scan(r#"core::arch::global_asm!(".byte 0");"#);
     let second = scan(r#"core::arch::global_asm!(".byte 1");"#);
@@ -329,10 +334,10 @@ fn rejects_imported_or_aliased_assembly_macros() {
         r#"use std::arch::global_asm; global_asm!("");"#,
         r#"use std::arch::global_asm as assembly; assembly!("");"#,
         r#"pub use std::arch::{r#global_asm as assembly}; assembly!("");"#,
-        r#"use std::arch::asm as assembly; fn sample() { unsafe { assembly!(""); } }"#,
+        r#"use std::arch::asm as assembly; fn sample() { assembly!(""); }"#,
     ] {
         let error = scan_result(source).expect_err("assembly imports must fail closed");
-        assert!(error.to_string().contains("imports an assembly macro"), "unexpected error: {error:#}");
+        assert!(error.to_string().contains("unreviewed macro path"), "unexpected error: {error:#}");
     }
 }
 

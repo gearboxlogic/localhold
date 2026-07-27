@@ -94,13 +94,8 @@ dependency-unsafe-generate PLATFORM:
 
 # Reject unreviewed first-party unsafe code and changes to reviewed boundaries
 source-safety:
-    ./script/check-maintainability-bootstrap.sh
     ./script/tests/test_maintainability_bootstrap.sh
-    cargo fetch --manifest-path tools/maintainability/Cargo.toml --locked
-    cargo fmt --manifest-path tools/maintainability/Cargo.toml -- --check
-    cargo test --manifest-path tools/maintainability/Cargo.toml --locked
-    cargo clippy --manifest-path tools/maintainability/Cargo.toml --all-targets --locked -- -D warnings
-    cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- check
+    ./script/check-maintainability-bootstrap.sh -- ./script/run-source-safety.sh
 
 # Permanent maintainability safety rails; additional Phase 0 gates join here
 maintainability:

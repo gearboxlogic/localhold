@@ -73,6 +73,8 @@ fn compiler_environment_rejects_cargo_aliases_and_override_channels() {
         "CARGO_BUILD_TARGET",
         "RUSTC_WRAPPER",
         "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
+        "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
+        "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER",
     ] {
         assert!(audit_environment_override(rejected.as_ref()), "{rejected}");
     }

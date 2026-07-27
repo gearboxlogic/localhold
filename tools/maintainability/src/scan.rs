@@ -18,9 +18,9 @@ use syn::{
 use self::documentation::{is_doc_comment, unsupported_runnable_doctest};
 use self::files::{collect_optional as collect_optional_rust_files, collect_required as collect_rust_files};
 use self::policy::{
-    contains_assembly_macro, contains_include_macro, contains_opaque_attribute, contains_path_attribute, contains_structural_ident, contains_unaudited_macro_syntax,
-    generated_name_binding, is_path_override, is_reserved_expansion_root, is_safety_lint_exception, is_standalone_assembly_macro, is_trusted_attribute,
-    is_trusted_local_macro_name, is_trusted_macro, is_unsafe_attribute, macro_name, untrusted_generated_attribute, untrusted_import, untrusted_nested_macro,
+    contains_include_macro, contains_opaque_attribute, contains_path_attribute, contains_structural_ident, contains_unaudited_macro_syntax, generated_name_binding,
+    is_path_override, is_reserved_expansion_root, is_safety_lint_exception, is_standalone_assembly_macro, is_trusted_attribute, is_trusted_local_macro_name, is_trusted_macro,
+    is_unsafe_attribute, macro_name, untrusted_generated_attribute, untrusted_import, untrusted_nested_macro,
 };
 
 pub const REVIEWED_EXPANSION_PACKAGES: [&str; 14] = [
@@ -319,13 +319,9 @@ impl<'ast> Visit<'ast> for SourceScanner {
         if let Some(reason) = untrusted_import(item) {
             self.violations.push(format!("{} uses {reason}", self.item()));
         }
-        if contains_structural_ident(tokens.clone(), "include") {
+        if contains_structural_ident(tokens, "include") {
             self.violations
                 .push(format!("{} imports include!, which can hide source expansion behind an alias", self.item()));
-        }
-        if contains_assembly_macro(&tokens) {
-            self.violations
-                .push(format!("{} imports an assembly macro; invoke it through its explicit qualified path", self.item()));
         }
         visit::visit_item_use(self, item);
     }

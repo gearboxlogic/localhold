@@ -205,14 +205,17 @@ These paths are not contacted by a default running `hold` process:
   build scripts are rejected, and a physical root `build.rs` is rejected even
   when disabled. The maintainability checker sets `build = false`; an
   independent pre-Cargo bootstrap check rejects a physical checker `build.rs`
-  or removal of that setting. Runnable rustdoc modifiers, target-specific
-  ignores, and class-only Rust fences are rejected unless the block is globally
-  ignored or explicitly marked as a non-Rust language or `custom`; fences
-  inside blockquotes and list items are recognized, closing delimiters must be
-  at least as long as their opener, and `custom` takes precedence over every
-  other fence token. Ordinary indented Markdown code remains supported because
-  Rustdoc does not schedule it as a doctest. The gate also verifies the required
-  lint levels, evaluates each nested `cfg_attr` lint independently,
+  or removal of that setting. It also rejects repository, ancestor, and
+  Cargo-home configuration and removes compiler, wrapper, linker, and runner
+  override environment variables before executing Cargo. Runnable rustdoc
+  modifiers, target-specific ignores, and class-only Rust fences are rejected
+  unless the block is globally ignored or explicitly marked as a non-Rust
+  language or `custom`; fences inside blockquotes and list items are recognized,
+  closing delimiters must be at least as long as their opener, and `custom`
+  takes precedence over every other fence token. Ordinary indented Markdown
+  code remains supported because Rustdoc does not schedule it as a doctest. The
+  gate also verifies the required lint levels, evaluates each nested `cfg_attr`
+  lint independently,
   protects required lints from overlapping higher-priority lint groups, removes
   inherited compiler overrides and build-target selection from metadata and
   compiler-audit commands, and pins locked dependency

@@ -65,6 +65,54 @@ macOS source builds are best-effort and are not release-gated; the complete
 evidence is platform-specific. `just check-quality` runs the non-evidence
 checks on macOS, but it does not satisfy the complete merge gate.
 
+### First-party unsafe boundaries
+
+LocalHold denies unsafe Rust by default. `just source-safety`, included in
+`just maintainability`, checks executable unsafe syntax, mutable statics,
+Rust 2024 unsafe attributes, unsafe global-assembly macros, and direct or
+group-level exceptions to required safety lints under `src/`, `tests/`, and
+`benches/`, plus `examples/` when present, against
+`policy/maintainability/unsafe.json`. The gate parses Rust syntax rather than
+searching text, so comments, strings, and unsafe function-pointer types are not
+mistaken for executable operations. Unsafe tokens passed to macros remain
+conservatively reviewable sites, as do macro-generated safety-lint exceptions
+and mutable statics. `allow`, `expect`, and `warn` all count as exceptions when
+they weaken a required deny-level lint. Opaque macro-generated attributes,
+`include!` code expansion (including imported aliases), and `#[path]` source
+overrides are rejected so code cannot escape the audited roots or hide an
+exception from the inventory. Explicit Cargo target paths must remain under
+those roots. A root `build.rs` is rejected until the gate can audit its complete
+module graph.
+
+Every exception requires a narrow safety contract with a stable owner,
+necessity, attempted safe alternatives, validity/lifetime/aliasing/ABI/thread
+and target invariants, caller preconditions, safe wrapper boundary, focused
+tests, dependency pins, invalidation and removal triggers, proof debt, and a
+recovery issue. Operations and lint exceptions are counted separately. Site
+locators plus site and enclosing-boundary syntax fingerprints make additions,
+moves, removals, operation mutations, and safe-wrapper mutations fail closed.
+The gate also prevents weakening the required compiler and Clippy lint levels
+or silently changing the locked version, source, checksum, or reviewed direct
+feature specification of a dependency on which a contract relies. The broader
+dependency-exposure gate still reviews target-specific effective Cargo graphs.
+
+Inspect the parser's current site inventory with:
+
+```sh
+cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- inventory
+```
+
+The command writes nothing. Do not copy inventory fingerprints into policy
+merely to make the gate pass. First remove the unsafe code when a safe design
+exists. If unsafe remains necessary, keep each block to one operation, update
+the complete contract and focused tests, and request an explicit safety review.
+
+The current sqlite-vec registration contract is temporary proof debt:
+sqlite-vec exposes an erased Rust function signature while its bundled C header
+declares the typed SQLite initializer. The manifest records exactly what is and
+is not proven. A typed or safe upstream registration API triggers removal of
+the transmute.
+
 ### Dependency unsafe exposure
 
 `just maintainability` includes a fail-closed audit of the dependency graphs

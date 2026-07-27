@@ -118,7 +118,8 @@ jobs:
             .cache/localhold/cargo/registry
             .cache/localhold/cargo/git
             tools/dependency-unsafe/target
-          key: ${{ runner.os }}-dependency-unsafe-${{ hashFiles('Cargo.lock', 'tools/dependency-unsafe/Cargo.lock', 'mise.lock') }}
+            tools/maintainability/target
+          key: ${{ runner.os }}-dependency-unsafe-${{ hashFiles('Cargo.lock', 'tools/dependency-unsafe/Cargo.lock', 'tools/maintainability/Cargo.lock', 'mise.lock') }}
           restore-keys: ${{ runner.os }}-dependency-unsafe-
 
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
@@ -249,7 +250,8 @@ jobs:
             .cache/localhold/cargo/registry
             .cache/localhold/cargo/git
             tools/dependency-unsafe/target
-          key: ${{ runner.os }}-dependency-unsafe-${{ hashFiles('Cargo.lock', 'tools/dependency-unsafe/Cargo.lock', 'mise.lock') }}
+            tools/maintainability/target
+          key: ${{ runner.os }}-dependency-unsafe-${{ hashFiles('Cargo.lock', 'tools/dependency-unsafe/Cargo.lock', 'tools/maintainability/Cargo.lock', 'mise.lock') }}
           restore-keys: ${{ runner.os }}-dependency-unsafe-
 
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0

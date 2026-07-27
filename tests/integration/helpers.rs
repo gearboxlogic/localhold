@@ -916,26 +916,17 @@ impl TestHarness {
 /// transport_test!(noop_clock, test_name, |harness, clock| async move { ... });
 /// ```
 ///
-/// Outer attributes (e.g. `#[expect(...)]`) can be placed before the
-/// `transport_test!` call by passing them as the first argument:
-///
-/// ```ignore
-/// transport_test!(#[expect(clippy::too_many_lines, reason = "...")], noop, name, |h| async move { ... });
-/// ```
-///
 /// The first token selects the constructor pair on `TestHarness`.
 macro_rules! transport_test {
     // -- noop (no clock) ---------------------------------------------------
-    ($(#[$attr:meta]),* , noop, $name:ident, |$h:ident| async move $body:block) => {
+    (noop, $name:ident, |$h:ident| async move $body:block) => {
         pastey::paste! {
-            $(#[$attr])*
             #[tokio::test]
             async fn [< stdio_ $name >]() {
                 let $h = super::helpers::TestHarness::stdio_noop().await;
                 $body
             }
 
-            $(#[$attr])*
             #[tokio::test]
             async fn [< http_ $name >]() {
                 let $h = super::helpers::TestHarness::http_noop().await;
@@ -943,21 +934,16 @@ macro_rules! transport_test {
             }
         }
     };
-    (noop, $name:ident, |$h:ident| async move $body:block) => {
-        super::helpers::transport_test!(, noop, $name, |$h| async move $body);
-    };
 
     // -- embedding (no clock) -----------------------------------------------
-    ($(#[$attr:meta]),* , embedding, $name:ident, |$h:ident| async move $body:block) => {
+    (embedding, $name:ident, |$h:ident| async move $body:block) => {
         pastey::paste! {
-            $(#[$attr])*
             #[tokio::test]
             async fn [< stdio_ $name >]() {
                 let $h = super::helpers::TestHarness::stdio_embedding().await;
                 $body
             }
 
-            $(#[$attr])*
             #[tokio::test]
             async fn [< http_ $name >]() {
                 let $h = super::helpers::TestHarness::http_embedding().await;
@@ -965,14 +951,10 @@ macro_rules! transport_test {
             }
         }
     };
-    (embedding, $name:ident, |$h:ident| async move $body:block) => {
-        super::helpers::transport_test!(, embedding, $name, |$h| async move $body);
-    };
 
     // -- noop + clock -------------------------------------------------------
-    ($(#[$attr:meta]),* , noop_clock, $name:ident, |$h:ident, $clock:ident| async move $body:block) => {
+    (noop_clock, $name:ident, |$h:ident, $clock:ident| async move $body:block) => {
         pastey::paste! {
-            $(#[$attr])*
             #[tokio::test]
             async fn [< stdio_ $name >]() {
                 let $clock = std::sync::Arc::new(localhold::clock::MockClock::new());
@@ -980,7 +962,6 @@ macro_rules! transport_test {
                 $body
             }
 
-            $(#[$attr])*
             #[tokio::test]
             async fn [< http_ $name >]() {
                 let $clock = std::sync::Arc::new(localhold::clock::MockClock::new());
@@ -988,9 +969,6 @@ macro_rules! transport_test {
                 $body
             }
         }
-    };
-    (noop_clock, $name:ident, |$h:ident, $clock:ident| async move $body:block) => {
-        super::helpers::transport_test!(, noop_clock, $name, |$h, $clock| async move $body);
     };
 }
 

@@ -205,9 +205,18 @@ During the feature freeze:
   and a successor set;
 - hotspot physical and production ceilings, plus component production
   ceilings, must match the current lower count and can never increase;
-- successor lineages and file ownership are closed by the initial baseline
-  gate. A later governed Phase 0 slice must install exact split/transfer
-  accounting before a path can be added, removed, renamed, or reassigned;
+- path changes require an append-only `path_evolutions` record. A `rename`
+  preserves physical and production counts exactly, a `split` may not increase
+  their aggregate, and a `test-extraction` must preserve production exactly
+  while adding a test-only successor. Sources must be active in the pull
+  request base, every measured path change must be covered exactly once, and
+  existing or retired paths cannot be used to hide a merge, replay, or
+  resurrection;
+- production moved between logical components also requires an append-only
+  `component_transfers` record tied to the path evolution. Its amount must
+  equal the syntax-classified production lines in its destination paths.
+  Source ceilings lose exactly that amount, destination ceilings gain at most
+  that amount, and transfer cycles are rejected;
 - a hotspot is marked resolved when its current successor falls under the
   applicable file limit, while its closed lineage and ratcheted evidence remain;
 - component growth, unmapped file proliferation, ceiling inflation, hotspot
@@ -230,6 +239,23 @@ When a change legitimately reduces a component or hotspot, lower the matching
 ceiling in the same pull request. Do not raise or copy a ceiling merely to make
 the gate pass. CI compares the manifest with the pull request base revision so
 ratchets cannot be reversed by editing policy.
+
+For a rename, split, or test extraction, append a stable lowercase record ID,
+the old `sources`, current `successors`, and nonempty issue, pull-request, and
+rationale evidence. Use `rename` for either a path rename or an exact one-to-one
+ownership reassignment. Never edit or reorder an existing record. Update the
+affected component `paths`; if a hotspot source changed, replace its
+`successors` with the complete direct successor set without changing the
+canonical ceilings. A cross-component production successor additionally needs
+a transfer record naming the source and destination component, exact
+`production_lines`, transferred paths, and the new path-evolution ID. Test-only
+cross-component paths carry lineage but no production transfer, so a
+test-only ownership move must also rename its path to preserve cycle evidence.
+
+The checker reads and classifies both the pull request base and working tree.
+Changing only the JSON cannot manufacture a transfer or reset debt: ledger
+entries, path ownership, file counts, component ceilings, and hotspot
+successors must all reconcile with those two inventories.
 
 ### Dependency unsafe exposure
 

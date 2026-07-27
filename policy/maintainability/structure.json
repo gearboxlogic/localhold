@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "baseline_commit": "b05f7a43345b39d40b456fb9ed46d479c4bf26e0",
   "tracked_roots": [
     "src",
@@ -779,5 +779,7 @@
       "physical_ceiling": 3376,
       "production_ceiling": 2056
     }
-  ]
+  ],
+  "path_evolutions": [],
+  "component_transfers": []
 }

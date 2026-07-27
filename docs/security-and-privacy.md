@@ -203,9 +203,10 @@ These paths are not contacted by a default running `hold` process:
   versions/sources/checksums, reviewed direct feature specifications, compiler
   diagnostics for normal and test targets (including binary test harnesses),
   and that focused-test references name existing, unconditional, non-ignored
-  explicit tests. The manifest states safety invariants and known proof debt;
-  passing the gate means that the reviewed boundary did not change, not that a
-  compiler or runtime test has independently proved a native ABI.
+  explicit tests scheduled as standard, ungated Cargo integration-test targets.
+  The manifest states safety invariants and known proof debt; passing the gate
+  means that the reviewed boundary did not change, not that a compiler or
+  runtime test has independently proved a native ABI.
 - The maintainability gate fetches locked Cargo packages, verifies every cached
   crates.io archive against `Cargo.lock`, and copies verified archives and
   registry metadata into an isolated Cargo home. It vendors the locked archives,

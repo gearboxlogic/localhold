@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -61,7 +62,20 @@ fn verify_cargo_contract(workspace: &Path, manifest: &UnsafeManifest) -> Result<
     verify_dependency_routes(&cargo, &protected_dependencies, &reviewed_root_dependencies)?;
     verify_expansion_dependency_routes(&cargo)?;
     verify_cargo_target_paths(&cargo)?;
+    verify_focused_test_targets(workspace, manifest, &cargo)?;
     Ok(())
+}
+
+fn verify_focused_test_targets(workspace: &Path, manifest: &UnsafeManifest, cargo: &toml::Value) -> Result<()> {
+    let output = Command::new(env!("CARGO"))
+        .current_dir(workspace)
+        .args(["metadata", "--format-version=1", "--no-deps", "--locked"])
+        .output()
+        .context("run Cargo metadata for focused-test targets")?;
+    if !output.status.success() {
+        bail!("Cargo metadata for focused-test targets failed with {}", output.status);
+    }
+    manifest.validate_focused_test_targets(workspace, cargo, &output.stdout)
 }
 
 fn verify_first_party_package_routes(cargo: &toml::Value) -> Result<()> {

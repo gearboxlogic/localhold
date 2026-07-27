@@ -131,6 +131,10 @@ impl UnsafeManifest {
         Ok(manifest)
     }
 
+    pub fn validate_focused_test_targets(&self, workspace: &Path, cargo: &toml::Value, metadata: &[u8]) -> Result<()> {
+        focused_tests::validate_cargo_metadata(workspace, cargo, metadata, &self.contracts)
+    }
+
     pub fn required_roots() -> Vec<String> {
         REQUIRED_ROOTS.into_iter().map(str::to_owned).collect()
     }

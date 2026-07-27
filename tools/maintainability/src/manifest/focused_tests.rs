@@ -1,13 +1,14 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 use syn::ext::IdentExt as _;
 use syn::visit::{self, Visit};
 use syn::{Attribute, ItemFn, ItemMod};
 
-use super::{REQUIRED_ROOTS, validate_relative_rust_path};
+use super::{REQUIRED_ROOTS, UnsafeContract, validate_relative_rust_path};
 
 pub(super) fn validate(workspace: &Path, contract_id: &str, reference: &str) -> Result<()> {
     let (source_path, test_name) = reference
@@ -43,12 +44,97 @@ pub(super) fn validate(workspace: &Path, contract_id: &str, reference: &str) -> 
     Ok(())
 }
 
+pub(super) fn validate_cargo_metadata(workspace: &Path, cargo: &toml::Value, metadata: &[u8], contracts: &[UnsafeContract]) -> Result<()> {
+    let workspace = fs::canonicalize(workspace).with_context(|| format!("resolve focused-test workspace {}", workspace.display()))?;
+    let root_manifest = fs::canonicalize(workspace.join("Cargo.toml")).context("resolve root Cargo.toml for focused-test targets")?;
+    let metadata: CargoMetadata = serde_json::from_slice(metadata).context("parse Cargo metadata for focused-test targets")?;
+    let mut root_packages = Vec::new();
+    for package in &metadata.packages {
+        let manifest = fs::canonicalize(&package.manifest_path).with_context(|| format!("resolve Cargo metadata manifest {}", package.manifest_path.display()))?;
+        if manifest == root_manifest {
+            root_packages.push(package);
+        }
+    }
+    let [root_package] = root_packages.as_slice() else {
+        bail!(
+            "Cargo metadata must contain exactly one root package for focused-test targets, found {}",
+            root_packages.len()
+        );
+    };
+
+    for contract in contracts {
+        for reference in &contract.focused_tests {
+            validate_scheduled_reference(&workspace, cargo, root_package, &contract.id, reference)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_scheduled_reference(workspace: &Path, cargo: &toml::Value, root_package: &CargoPackage, contract_id: &str, reference: &str) -> Result<()> {
+    let (source_path, _) = reference.split_once("::").context("validated focused-test reference lost its source separator")?;
+    let source = fs::canonicalize(workspace.join(source_path)).with_context(|| format!("resolve unsafe contract {contract_id:?} focused test target source {source_path:?}"))?;
+    let mut scheduled = Vec::new();
+    for target in &root_package.targets {
+        if !target.test || !target.kind.iter().any(|kind| kind == "test") {
+            continue;
+        }
+        let target_source = fs::canonicalize(&target.src_path).with_context(|| format!("resolve Cargo metadata target source {}", target.src_path.display()))?;
+        if target_source == source {
+            scheduled.push(target);
+        }
+    }
+    let [target] = scheduled.as_slice() else {
+        bail!(
+            "unsafe contract {contract_id:?} focused test {reference:?} must be the source of exactly one Cargo-scheduled integration-test target, found {}",
+            scheduled.len()
+        );
+    };
+    if !target.required_features.is_empty() {
+        bail!("unsafe contract {contract_id:?} focused test {reference:?} cannot require opt-in Cargo features");
+    }
+    reject_custom_harness(cargo, contract_id, reference, &target.name)
+}
+
+fn reject_custom_harness(cargo: &toml::Value, contract_id: &str, reference: &str, target_name: &str) -> Result<()> {
+    let Some(declarations) = cargo.get("test") else {
+        return Ok(());
+    };
+    for declaration in declarations.as_array().context("Cargo.toml [[test]] declarations must be an array")? {
+        let declaration = declaration.as_table().context("Cargo.toml [[test]] declaration must be a table")?;
+        if declaration.get("name").and_then(toml::Value::as_str) == Some(target_name) && declaration.get("harness").and_then(toml::Value::as_bool) == Some(false) {
+            bail!("unsafe contract {contract_id:?} focused test {reference:?} must use Cargo's standard test harness");
+        }
+    }
+    Ok(())
+}
+
 fn validate_test_name(test_name: &str) -> Result<()> {
     let path: syn::Path = syn::parse_str(test_name).context("test name must be a Rust path")?;
     if path.leading_colon.is_some() || path.segments.is_empty() || path.segments.iter().any(|segment| !matches!(segment.arguments, syn::PathArguments::None)) {
         bail!("test name must be a normalized relative Rust path");
     }
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct CargoMetadata {
+    packages: Vec<CargoPackage>,
+}
+
+#[derive(Deserialize)]
+struct CargoPackage {
+    manifest_path: PathBuf,
+    targets: Vec<CargoTarget>,
+}
+
+#[derive(Clone, Deserialize)]
+struct CargoTarget {
+    name: String,
+    kind: Vec<String>,
+    src_path: PathBuf,
+    test: bool,
+    #[serde(default, rename = "required-features")]
+    required_features: Vec<String>,
 }
 
 #[derive(Default)]
@@ -101,7 +187,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::validate;
+    use super::{CargoPackage, CargoTarget, validate, validate_scheduled_reference};
 
     #[test]
     fn focused_test_reference_requires_an_existing_explicit_test() {
@@ -162,5 +248,60 @@ mod tests {
         )
         .expect("excluded focused test source");
         assert!(validate(workspace.path(), "contract.one", "tests/excluded.rs::excluded_file_case").is_err());
+    }
+
+    #[test]
+    fn focused_test_reference_requires_a_standard_scheduled_cargo_target() {
+        let workspace = tempdir().expect("temporary workspace");
+        fs::create_dir(workspace.path().join("tests")).expect("tests root");
+        let source = workspace.path().join("tests/focused.rs");
+        fs::write(&source, "#[test]\nfn contract_case() {}\n").expect("focused test source");
+        let cargo: toml::Value = toml::from_str("").expect("empty Cargo document");
+        let target = CargoTarget {
+            name: "focused".to_owned(),
+            kind: vec!["test".to_owned()],
+            src_path: source,
+            test: true,
+            required_features: Vec::new(),
+        };
+        let package = CargoPackage {
+            manifest_path: workspace.path().join("Cargo.toml"),
+            targets: vec![target],
+        };
+        let reference = "tests/focused.rs::contract_case";
+
+        validate_scheduled_reference(workspace.path(), &cargo, &package, "contract.one", reference).expect("scheduled standard test target");
+
+        let missing = CargoPackage {
+            manifest_path: package.manifest_path.clone(),
+            targets: Vec::new(),
+        };
+        assert!(validate_scheduled_reference(workspace.path(), &cargo, &missing, "contract.one", reference).is_err());
+
+        let mut disabled = package.targets[0].clone();
+        disabled.test = false;
+        let disabled = CargoPackage {
+            manifest_path: package.manifest_path.clone(),
+            targets: vec![disabled],
+        };
+        assert!(validate_scheduled_reference(workspace.path(), &cargo, &disabled, "contract.one", reference).is_err());
+
+        let mut feature_gated = package.targets[0].clone();
+        feature_gated.required_features.push("opt-in".to_owned());
+        let feature_gated = CargoPackage {
+            manifest_path: package.manifest_path.clone(),
+            targets: vec![feature_gated],
+        };
+        assert!(validate_scheduled_reference(workspace.path(), &cargo, &feature_gated, "contract.one", reference).is_err());
+
+        let custom_harness: toml::Value = toml::from_str(
+            "
+            [[test]]
+            name = 'focused'
+            harness = false
+            ",
+        )
+        .expect("custom test target");
+        assert!(validate_scheduled_reference(workspace.path(), &custom_harness, &package, "contract.one", reference).is_err());
     }
 }

@@ -330,6 +330,7 @@ fn rejects_runnable_rust_doctests_but_allows_ignored_examples() {
         "/// ```\n/// fn runnable() {}\n/// ```\nfn sample() {}",
         "//! ```\n//! fn inner_runnable() {}\n//! ```\nfn sample() {}",
         "/// ```rust,no_run\n/// fn compiled() {}\n/// ```\nfn sample() {}",
+        "/// ```{.rust}\n/// fn class_style_runnable() {}\n/// ```\nfn sample() {}",
         "///     fn indented() {}\nfn sample() {}",
         "/**\n * ```rust\n * fn block_doc() {}\n * ```\n */\nfn sample() {}",
         "/*!\n * ```rust\n * fn inner_block_doc() {}\n * ```\n */\nfn sample() {}",
@@ -338,7 +339,9 @@ fn rejects_runnable_rust_doctests_but_allows_ignored_examples() {
         assert!(error.to_string().contains("runnable Rust doctests"), "unexpected error: {error:#}");
     }
     assert!(scan_result("/// ```ignore\n/// fn ignored() {}\n/// ```\nfn sample() {}").is_ok());
+    assert!(scan_result("/// ```{.rust .ignore}\n/// fn ignored() {}\n/// ```\nfn sample() {}").is_ok());
     assert!(scan_result("/// ```text\n/// unsafe is prose here\n/// ```\nfn sample() {}").is_ok());
+    assert!(scan_result("/// ```{.text}\n/// unsafe is prose here\n/// ```\nfn sample() {}").is_ok());
     assert!(scan_result("/// ```text\n///     indented prose\n/// ```\nfn sample() {}").is_ok());
     assert!(
         scan_result(

@@ -136,6 +136,10 @@ fn rustdoc_compiles(info: &str) -> bool {
     let tokens: Vec<_> = info
         .split(|character: char| character == ',' || character.is_whitespace())
         .filter(|token| !token.is_empty())
+        .map(|token| {
+            let token = token.trim_matches(['{', '}']);
+            token.strip_prefix('.').unwrap_or(token)
+        })
         .collect();
     if tokens.contains(&"ignore") {
         return false;

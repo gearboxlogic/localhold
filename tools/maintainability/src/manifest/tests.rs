@@ -4,7 +4,7 @@ use super::{ExpectedSite, UnsafeManifest, validate_site_operation_cardinality};
 
 fn manifest(fingerprint: &str) -> UnsafeManifest {
     UnsafeManifest {
-        schema_version: 1,
+        schema_version: 2,
         baseline_commit: "0".repeat(40),
         tracked_roots: UnsafeManifest::required_roots(),
         required_lints: Vec::new(),

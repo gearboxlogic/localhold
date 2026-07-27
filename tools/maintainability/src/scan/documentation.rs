@@ -60,7 +60,13 @@ fn doc_comment_source(attribute: &Attribute) -> Option<String> {
 #[derive(Default)]
 struct DocCommentScanner {
     block_doc: bool,
-    fence: Option<char>,
+    fence: Option<Fence>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct Fence {
+    marker: char,
+    length: usize,
 }
 
 impl DocCommentScanner {
@@ -78,34 +84,43 @@ impl DocCommentScanner {
 
     fn scan_content(&mut self, content: &str) -> bool {
         let content = content.strip_prefix(' ').unwrap_or(content);
+        let content = strip_blockquote_prefixes(content);
         let trimmed = content.trim_start();
-        match fence_marker(trimmed) {
-            Some(marker) => update_fence(&mut self.fence, marker, trimmed),
+        match fence_delimiter(trimmed) {
+            Some((delimiter, rest)) => update_fence(&mut self.fence, delimiter, rest),
             None => self.fence.is_none() && content.starts_with("    ") && !content.trim().is_empty(),
         }
     }
 }
 
-fn fence_marker(content: &str) -> Option<char> {
-    if content.starts_with("```") {
-        Some('`')
-    } else if content.starts_with("~~~") {
-        Some('~')
-    } else {
-        None
+fn strip_blockquote_prefixes(mut content: &str) -> &str {
+    loop {
+        let candidate = content.trim_start();
+        let Some(rest) = candidate.strip_prefix('>') else {
+            return content;
+        };
+        content = rest.strip_prefix(' ').unwrap_or(rest);
     }
 }
 
-fn update_fence(fence: &mut Option<char>, marker: char, content: &str) -> bool {
-    if *fence == Some(marker) {
+fn fence_delimiter(content: &str) -> Option<(Fence, &str)> {
+    let Some(marker @ ('`' | '~')) = content.chars().next() else {
+        return None;
+    };
+    let length = content.chars().take_while(|character| *character == marker).count();
+    (length >= 3).then(|| (Fence { marker, length }, &content[length..]))
+}
+
+fn update_fence(fence: &mut Option<Fence>, delimiter: Fence, rest: &str) -> bool {
+    if fence.is_some_and(|opening| delimiter.marker == opening.marker && delimiter.length >= opening.length && rest.trim().is_empty()) {
         *fence = None;
         return false;
     }
     if fence.is_some() {
         return false;
     }
-    *fence = Some(marker);
-    rustdoc_compiles(content.trim_start_matches(marker).trim())
+    *fence = Some(delimiter);
+    rustdoc_compiles(rest.trim())
 }
 
 fn doc_content(line: &str, block_doc: &mut bool) -> Option<String> {

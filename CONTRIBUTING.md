@@ -89,7 +89,9 @@ because changing the macro definition could change the reviewed operation
 without changing the unsafe-context syntax; unsafe extern blocks are treated as
 unsafe contexts too, as are unsafe trait and impl bodies.
 `allow`, `expect`, and `warn` all count as exceptions when they weaken a
-required deny-level lint. Opaque macro-generated attributes, including
+required deny-level lint. Each nested `cfg_attr` lint attribute is evaluated
+independently so an unrelated weak lint level cannot be combined with a
+safety-strengthening lint. Opaque macro-generated attributes, including
 documentation attributes, `include!` code expansion (including imported
 aliases), and `#[path]` source overrides are rejected so code cannot escape the
 audited roots or hide an exception from the inventory. Explicit Cargo target
@@ -97,11 +99,14 @@ paths must remain under those roots. All enabled package build scripts are
 rejected until the gate can audit their complete inputs and outputs; a physical
 root `build.rs` is rejected even when disabled.
 Runnable Rust doctests are likewise rejected, including rustdoc-only modifiers,
-target-specific ignores, and class-only fences that remain Rust unless marked
-`custom`; `custom` takes precedence over all other fence tokens. Use maintained
-integration tests for executable examples. Globally ignored and explicitly
-non-Rust language blocks remain supported. The gate also runs Clippy with forced
-`unsafe_code`, `unsafe_op_in_unsafe_fn`, and undocumented-block diagnostics.
+target-specific ignores, blockquoted fences, and class-only fences that remain
+Rust unless marked `custom`; `custom` takes precedence over all other fence
+tokens. Closing fences must match the opening marker and meet its delimiter
+length, so shorter Markdown examples embedded in non-Rust fences remain
+documentation. Use maintained integration tests for executable examples.
+Globally ignored and explicitly non-Rust language blocks remain supported. The
+gate also runs Clippy with forced `unsafe_code`, `unsafe_op_in_unsafe_fn`, and
+undocumented-block diagnostics.
 Each emitted `unsafe_code` diagnostic must map to exactly one inventoried source
 keyword; the other two diagnostics are always errors. Cargo dep-info for every
 root target is checked and rejects recorded compiler inputs outside the audited
@@ -120,7 +125,9 @@ tests, dependency pins, invalidation and removal triggers, proof debt, and a
 recovery issue. Each focused-test reference must resolve to an existing,
 unconditional, non-ignored explicit test function that is the source of a
 Cargo-scheduled integration-test target using the standard test harness without
-opt-in target features. Operations and lint exceptions are counted separately.
+opt-in target features. Its complete normalized test-function syntax is
+fingerprinted in the contract, so weakening or replacing the test requires
+explicit safety review. Operations and lint exceptions are counted separately.
 Site
 locators plus site and enclosing-boundary syntax fingerprints, including named
 type/data and associated-item boundaries that can contain const expressions,

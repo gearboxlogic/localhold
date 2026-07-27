@@ -135,6 +135,23 @@ fn detects_executable_forms_and_exceptions() {
 }
 
 #[test]
+fn cfg_attr_lint_exceptions_require_one_weakening_nested_attribute() {
+    let sites = scan(
+        r#"
+        #[cfg_attr(windows, warn(dead_code), deny(unsafe_code))]
+        fn unrelated_warning() {}
+
+        #[cfg_attr(windows, deny(dead_code), warn(unsafe_code))]
+        fn direct_exception() {}
+
+        #[cfg_attr(windows, cfg_attr(target_arch = "x86_64", expect(clippy::undocumented_unsafe_blocks)))]
+        fn nested_exception() {}
+        "#,
+    );
+    assert_eq!(sites.iter().filter(|site| site.kind == SiteKind::LintException).count(), 2);
+}
+
+#[test]
 fn tracks_nested_item_and_occurrence() {
     let sites = scan(
         r"
@@ -394,6 +411,8 @@ fn rejects_runnable_rust_doctests_but_allows_ignored_examples() {
         "/// ```test_harness\n/// fn harness_runnable() {}\n/// ```\nfn sample() {}",
         "/// ```ignore-x86_64\n/// fn runnable_on_other_targets() {}\n/// ```\nfn sample() {}",
         "/// ```ignore,ignore-x86_64\n/// fn target_ignore_overrides_global_ignore() {}\n/// ```\nfn sample() {}",
+        "/// > ```rust\n/// > fn quoted_runnable() {}\n/// > ```\nfn sample() {}",
+        "/// > > ```rust\n/// > > fn nested_quoted_runnable() {}\n/// > > ```\nfn sample() {}",
         "///     fn indented() {}\nfn sample() {}",
         "/**\n * ```rust\n * fn block_doc() {}\n * ```\n */\nfn sample() {}",
         "/*!\n * ```rust\n * fn inner_block_doc() {}\n * ```\n */\nfn sample() {}",
@@ -410,6 +429,7 @@ fn rejects_runnable_rust_doctests_but_allows_ignored_examples() {
     assert!(scan_result("/// ```custom,rust\n/// fn custom_rust() {}\n/// ```\nfn sample() {}").is_ok());
     assert!(scan_result("/// ```custom,no_run\n/// fn custom_no_run() {}\n/// ```\nfn sample() {}").is_ok());
     assert!(scan_result("/// ```text\n///     indented prose\n/// ```\nfn sample() {}").is_ok());
+    assert!(scan_result("/// ````text\n/// embedded Markdown:\n/// ```rust\n/// fn not_a_doctest() {}\n/// ```\n/// ````\nfn sample() {}").is_ok());
     assert!(
         scan_result(
             r####"

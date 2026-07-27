@@ -48,7 +48,7 @@ struct UnsafeContract {
     invariants: SafetyInvariants,
     caller_preconditions: Vec<String>,
     safe_wrapper_boundary: String,
-    focused_tests: Vec<String>,
+    focused_tests: Vec<FocusedTest>,
     dependency_packages: Vec<DependencyPin>,
     root_dependency_specs: BTreeMap<String, RootDependencySpec>,
     build_route: String,
@@ -58,6 +58,13 @@ struct UnsafeContract {
     review_phase: String,
     proof_debt: Vec<String>,
     operations: Vec<UnsafeOperation>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FocusedTest {
+    reference: String,
+    fingerprint: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -126,8 +133,8 @@ impl UnsafeManifest {
         let manifest: Self = serde_json::from_slice(&bytes).with_context(|| format!("parse unsafe manifest {}", path.display()))?;
         manifest.validate()?;
         for contract in &manifest.contracts {
-            for reference in &contract.focused_tests {
-                focused_tests::validate(workspace, &contract.id, reference)?;
+            for test in &contract.focused_tests {
+                focused_tests::validate(workspace, &contract.id, test)?;
             }
         }
         Ok(manifest)
@@ -198,7 +205,7 @@ impl UnsafeManifest {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.schema_version != 1 {
+        if self.schema_version != 2 {
             bail!("unsupported unsafe manifest schema {}", self.schema_version);
         }
         if self.baseline_commit.len() != 40 || !self.baseline_commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -309,7 +316,19 @@ fn validate_contract(contract: &UnsafeContract) -> Result<()> {
         require_text(value, name)?;
     }
     require_entries(&contract.caller_preconditions, "caller preconditions")?;
-    require_entries(&contract.focused_tests, "focused tests")?;
+    if contract.focused_tests.is_empty() {
+        bail!("focused tests must not be empty");
+    }
+    let mut focused_tests = BTreeSet::new();
+    for test in &contract.focused_tests {
+        require_text(&test.reference, "focused test reference")?;
+        if test.fingerprint.len() != 64 || !test.fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("unsafe contract {:?} focused test {:?} has an invalid SHA-256 fingerprint", contract.id, test.reference);
+        }
+        if !focused_tests.insert(test.reference.as_str()) {
+            bail!("unsafe contract {:?} repeats focused test {:?}", contract.id, test.reference);
+        }
+    }
     require_entries(&contract.review_invalidation_triggers, "review invalidation triggers")?;
     if contract.operations.is_empty() {
         bail!("unsafe contract {:?} must enumerate its operations", contract.id);

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -8,9 +8,12 @@ use syn::ext::IdentExt as _;
 use syn::visit::{self, Visit};
 use syn::{Attribute, ItemFn, ItemMod};
 
-use super::{REQUIRED_ROOTS, UnsafeContract, validate_relative_rust_path};
+use crate::scan::syntax_fingerprint;
 
-pub(super) fn validate(workspace: &Path, contract_id: &str, reference: &str) -> Result<()> {
+use super::{FocusedTest, REQUIRED_ROOTS, UnsafeContract, validate_relative_rust_path};
+
+pub(super) fn validate(workspace: &Path, contract_id: &str, test: &FocusedTest) -> Result<()> {
+    let reference = &test.reference;
     let (source_path, test_name) = reference
         .split_once("::")
         .with_context(|| format!("unsafe contract {contract_id:?} focused test {reference:?} must use path.rs::test_name"))?;
@@ -38,8 +41,15 @@ pub(super) fn validate(workspace: &Path, contract_id: &str, reference: &str) -> 
         ..TestCollector::default()
     };
     collector.visit_file(&syntax);
-    if !collector.tests.contains(test_name) {
-        bail!("unsafe contract {contract_id:?} focused test {reference:?} does not name an unconditional, non-ignored explicit test function");
+    let actual_fingerprint = collector
+        .tests
+        .get(test_name)
+        .with_context(|| format!("unsafe contract {contract_id:?} focused test {reference:?} does not name an unconditional, non-ignored explicit test function"))?;
+    if actual_fingerprint != &test.fingerprint {
+        bail!(
+            "unsafe contract {contract_id:?} focused test {reference:?} syntax changed: expected fingerprint {}, found {actual_fingerprint}",
+            test.fingerprint
+        );
     }
     Ok(())
 }
@@ -63,8 +73,8 @@ pub(super) fn validate_cargo_metadata(workspace: &Path, cargo: &toml::Value, met
     };
 
     for contract in contracts {
-        for reference in &contract.focused_tests {
-            validate_scheduled_reference(&workspace, cargo, root_package, &contract.id, reference)?;
+        for test in &contract.focused_tests {
+            validate_scheduled_reference(&workspace, cargo, root_package, &contract.id, &test.reference)?;
         }
     }
     Ok(())
@@ -141,7 +151,7 @@ struct CargoTarget {
 struct TestCollector {
     modules: Vec<String>,
     excluded_context_depth: usize,
-    tests: BTreeSet<String>,
+    tests: BTreeMap<String, String>,
 }
 
 impl TestCollector {
@@ -176,7 +186,7 @@ impl<'ast> Visit<'ast> for TestCollector {
         if self.excluded_context_depth == 0 && !Self::execution_is_conditional_or_disabled(&function.attrs) && function.attrs.iter().any(Self::is_test) {
             let mut path = self.modules.clone();
             path.push(function.sig.ident.unraw().to_string());
-            self.tests.insert(path.join("::"));
+            self.tests.insert(path.join("::"), syntax_fingerprint(function));
         }
     }
 }
@@ -187,7 +197,15 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{CargoPackage, CargoTarget, validate, validate_scheduled_reference};
+    use super::{CargoPackage, CargoTarget, FocusedTest, syntax_fingerprint, validate, validate_scheduled_reference};
+
+    fn focused_test(reference: &str, source: &str) -> FocusedTest {
+        let function: syn::ItemFn = syn::parse_str(source).expect("focused test function");
+        FocusedTest {
+            reference: reference.to_owned(),
+            fingerprint: syntax_fingerprint(&function),
+        }
+    }
 
     #[test]
     fn focused_test_reference_requires_an_existing_explicit_test() {
@@ -223,7 +241,8 @@ mod tests {
         )
         .expect("focused test source");
 
-        validate(workspace.path(), "contract.one", "tests/focused.rs::nested::contract_case").expect("existing test");
+        let existing = focused_test("tests/focused.rs::nested::contract_case", "#[test] fn contract_case() {}");
+        validate(workspace.path(), "contract.one", &existing).expect("existing test");
         for reference in [
             "tests/missing.rs::contract_case",
             "tests/focused.rs::missing",
@@ -235,7 +254,11 @@ mod tests {
             "../outside.rs::contract_case",
             "tests/focused.rs",
         ] {
-            assert!(validate(workspace.path(), "contract.one", reference).is_err(), "reference must fail closed: {reference}");
+            let missing = FocusedTest {
+                reference: reference.to_owned(),
+                fingerprint: "a".repeat(64),
+            };
+            assert!(validate(workspace.path(), "contract.one", &missing).is_err(), "reference must fail closed: {reference}");
         }
 
         fs::write(
@@ -247,7 +270,26 @@ mod tests {
             ",
         )
         .expect("excluded focused test source");
-        assert!(validate(workspace.path(), "contract.one", "tests/excluded.rs::excluded_file_case").is_err());
+        let excluded = focused_test("tests/excluded.rs::excluded_file_case", "#[test] fn excluded_file_case() {}");
+        assert!(validate(workspace.path(), "contract.one", &excluded).is_err());
+    }
+
+    #[test]
+    fn focused_test_reference_ratchets_the_complete_test_syntax() {
+        let workspace = tempdir().expect("temporary workspace");
+        fs::create_dir(workspace.path().join("tests")).expect("tests root");
+        let source = workspace.path().join("tests/focused.rs");
+        let implementation = "#[test] fn contract_case() { assert_eq!(2 + 2, 4); }";
+        fs::write(&source, implementation).expect("focused test source");
+        let test = focused_test("tests/focused.rs::contract_case", implementation);
+
+        validate(workspace.path(), "contract.one", &test).expect("reviewed test syntax");
+        fs::write(&source, "#[test]\nfn contract_case(){assert_eq!(2+2,4);}\n").expect("reformatted focused test");
+        validate(workspace.path(), "contract.one", &test).expect("equivalent token syntax");
+
+        fs::write(&source, "#[test]\nfn contract_case() {}\n").expect("weakened focused test");
+        let error = validate(workspace.path(), "contract.one", &test).expect_err("changed focused test syntax must fail closed");
+        assert!(error.to_string().contains("syntax changed"), "unexpected error: {error:#}");
     }
 
     #[test]

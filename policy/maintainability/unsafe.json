@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "baseline_commit": "028d40239b4ca352d20af0029518270503c3e9f6",
   "tracked_roots": [
     "src",
@@ -53,7 +53,10 @@
       ],
       "safe_wrapper_boundary": "SqliteStore::register_extension is safe because OnceLock performs at most one registration attempt, owns no borrowed data, retains the linked function for process lifetime, caches failure, and exposes only Result<(), StoreError>.",
       "focused_tests": [
-        "tests/sqlite_extension.rs::sqlite_vec_auto_extension_loads_on_subsequent_connections"
+        {
+          "reference": "tests/sqlite_extension.rs::sqlite_vec_auto_extension_loads_on_subsequent_connections",
+          "fingerprint": "e9a1fc73093ab3e1b74945846f73a1545e65fc58dd2884b1718b094210f8e3db"
+        }
       ],
       "dependency_packages": [
         {

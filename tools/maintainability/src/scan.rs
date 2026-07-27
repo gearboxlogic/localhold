@@ -194,7 +194,7 @@ impl SourceScanner {
     }
 
     fn push_site(&mut self, kind: SiteKind, tokens: &impl ToTokens, span: Span) {
-        let site_fingerprint = fingerprint(tokens);
+        let site_fingerprint = syntax_fingerprint(tokens);
         self.sites.push(PendingSite {
             item: self.item(),
             kind,
@@ -211,7 +211,7 @@ impl SourceScanner {
     }
 
     fn visit_boundary<T: ToTokens>(&mut self, scope: String, node: &T, visit: impl FnOnce(&mut Self, &T)) {
-        self.boundaries.push(fingerprint(node));
+        self.boundaries.push(syntax_fingerprint(node));
         self.visit_scoped(scope, node, visit);
         self.boundaries.pop();
     }
@@ -506,7 +506,7 @@ fn normalized_tokens(tokens: &impl ToTokens) -> String {
     tokens.to_token_stream().to_string()
 }
 
-fn fingerprint(tokens: &impl ToTokens) -> String {
+pub fn syntax_fingerprint(tokens: &impl ToTokens) -> String {
     format!("{:x}", Sha256::digest(normalized_tokens(tokens).as_bytes()))
 }
 

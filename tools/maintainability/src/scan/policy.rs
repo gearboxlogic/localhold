@@ -417,13 +417,7 @@ pub(super) fn contains_assembly_macro(tokens: &TokenStream) -> bool {
 }
 
 pub(super) fn is_safety_lint_exception(attribute: &Attribute) -> bool {
-    let path = attribute.path().segments.last().map(|segment| segment.ident.unraw().to_string());
-    let tokens = attribute.meta.to_token_stream();
-    match path.as_deref() {
-        Some("allow" | "expect" | "warn") => contains_safety_lint_name(&tokens),
-        Some("cfg_attr") => contains_safety_lint_name(&tokens) && ["allow", "expect", "warn"].into_iter().any(|level| contains_structural_ident(tokens.clone(), level)),
-        _ => false,
-    }
+    meta_is_safety_lint_exception(&attribute.meta)
 }
 
 pub(super) fn is_unsafe_attribute(attribute: &Attribute) -> bool {
@@ -548,12 +542,28 @@ fn bracket_attribute_after(tokens: &[TokenTree], hash_index: usize) -> Option<&p
 }
 
 fn is_safety_lint_meta(tokens: &TokenStream) -> bool {
-    if ["allow", "expect", "warn"].into_iter().any(|level| first_ident_is(tokens.clone(), level)) {
-        return contains_safety_lint_name(tokens);
+    syn::parse2::<Meta>(tokens.clone()).is_ok_and(|meta| meta_is_safety_lint_exception(&meta))
+}
+
+fn meta_is_safety_lint_exception(meta: &Meta) -> bool {
+    let name = meta.path().segments.last().map(|segment| segment.ident.unraw().to_string());
+    match name.as_deref() {
+        Some("allow" | "expect" | "warn") => {
+            let Meta::List(list) = meta else {
+                return false;
+            };
+            contains_safety_lint_name(&list.tokens)
+        }
+        Some("cfg_attr") => {
+            let Meta::List(list) = meta else {
+                return false;
+            };
+            Punctuated::<Meta, Token![,]>::parse_terminated
+                .parse2(list.tokens.clone())
+                .is_ok_and(|items| items.iter().skip(1).any(meta_is_safety_lint_exception))
+        }
+        _ => false,
     }
-    first_ident_is(tokens.clone(), "cfg_attr")
-        && contains_safety_lint_name(tokens)
-        && ["allow", "expect", "warn"].into_iter().any(|level| contains_structural_ident(tokens.clone(), level))
 }
 
 fn contains_safety_lint_name(tokens: &TokenStream) -> bool {

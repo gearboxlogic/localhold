@@ -174,6 +174,63 @@ declares the typed SQLite initializer. The manifest records exactly what is and
 is not proven. A typed or safe upstream registration API triggers removal of
 the transmute.
 
+### Source structure budgets
+
+The same checked-in source audit enforces the structural baseline in
+`policy/maintainability/structure.json`. Every Rust file under `src/`, `tests/`,
+and `benches/` belongs to exactly one logical component. An unlisted file, a
+deleted path left in the map, or an existing path reassigned to another
+component fails closed.
+
+The checker parses Rust syntax and classifies `#[cfg(test)]` and
+`cfg(feature = "testing")` items as test lines. Files reachable only through
+those modules, plus integration tests and benchmarks, are entirely test-only.
+Explicit Cargo test and benchmark targets are also test-only even when their
+audited path is under `src/`; explicit examples remain production roots.
+This keeps extracting inline tests from pretending that production code was
+removed. LF and CRLF checkouts produce the same physical-line count.
+Production library and binary targets must remain under `src/`. Explicit or
+conditional module path overrides and Rust-source `include!` calls are rejected
+because they make source ownership and production reachability ambiguous.
+No package feature may enable the test-only `testing` feature; it must remain
+available only through an explicit test invocation.
+Rust examples and explicitly declared Cargo targets outside the tracked roots
+are also rejected while the initial path map is closed.
+
+During the feature freeze:
+
+- ordinary production files may not exceed 800 physical lines;
+- ordinary test files may not exceed 1,000 physical lines;
+- every existing larger file has a stable hotspot ID, verified baseline counts,
+  and a successor set;
+- hotspot physical and production ceilings, plus component production
+  ceilings, must match the current lower count and can never increase;
+- successor lineages and file ownership are closed by the initial baseline
+  gate. A later governed Phase 0 slice must install exact split/transfer
+  accounting before a path can be added, removed, renamed, or reassigned;
+- a hotspot is marked resolved when its current successor falls under the
+  applicable file limit, while its closed lineage and ratcheted evidence remain;
+- component growth, unmapped file proliferation, ceiling inflation, hotspot
+  reactivation, and silent policy resets are rejected.
+
+The baseline remains fixed at the recovery commit recorded in the manifest.
+The one closed pre-gate adjustment records the three lines added by the
+reviewed SQLite unsafe-boundary isolation before structural enforcement
+existed; it is immutable and does not reset the original evidence.
+
+Inspect current or baseline classification without writing files:
+
+```sh
+cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- structure-inventory
+cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- \
+  structure-inventory b05f7a43345b39d40b456fb9ed46d479c4bf26e0
+```
+
+When a change legitimately reduces a component or hotspot, lower the matching
+ceiling in the same pull request. Do not raise or copy a ceiling merely to make
+the gate pass. CI compares the manifest with the pull request base revision so
+ratchets cannot be reversed by editing policy.
+
 ### Dependency unsafe exposure
 
 `just maintainability` includes a fail-closed audit of the dependency graphs

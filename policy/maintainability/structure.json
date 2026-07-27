@@ -1,0 +1,783 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "b05f7a43345b39d40b456fb9ed46d479c4bf26e0",
+  "tracked_roots": [
+    "src",
+    "tests",
+    "benches"
+  ],
+  "limits": {
+    "production_file_physical_lines": 800,
+    "test_file_physical_lines": 1000
+  },
+  "pre_gate_adjustments": [
+    {
+      "id": "phase0.sqlite-unsafe-isolation",
+      "component": "sqlite-store",
+      "hotspot": "sqlite-store.main",
+      "physical_lines": 3,
+      "production_lines": 3,
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "pull_request": "https://github.com/gearboxlogic/localhold/pull/126",
+      "rationale": "The reviewed Phase 0 unsafe-boundary isolation added three lines before the structural gate existed; the original baseline remains explicit and this closed adjustment cannot grow."
+    }
+  ],
+  "components": [
+    {
+      "id": "benchmarks",
+      "baseline_paths": [
+        "benches/common/mod.rs",
+        "benches/common/seeder.rs",
+        "benches/embed_throughput.rs",
+        "benches/memory_footprint.rs",
+        "benches/search_latency.rs",
+        "benches/store_batch.rs"
+      ],
+      "paths": [
+        "benches/common/mod.rs",
+        "benches/common/seeder.rs",
+        "benches/embed_throughput.rs",
+        "benches/memory_footprint.rs",
+        "benches/search_latency.rs",
+        "benches/store_batch.rs"
+      ],
+      "baseline_production_lines": 0,
+      "production_ceiling": 0
+    },
+    {
+      "id": "composition",
+      "baseline_paths": [
+        "src/lib.rs",
+        "src/main.rs"
+      ],
+      "paths": [
+        "src/lib.rs",
+        "src/main.rs"
+      ],
+      "baseline_production_lines": 914,
+      "production_ceiling": 914
+    },
+    {
+      "id": "config",
+      "baseline_paths": [
+        "src/config/embedding.rs",
+        "src/config/mod.rs",
+        "src/config/operator.rs",
+        "src/config/tests.rs"
+      ],
+      "paths": [
+        "src/config/embedding.rs",
+        "src/config/mod.rs",
+        "src/config/operator.rs",
+        "src/config/tests.rs"
+      ],
+      "baseline_production_lines": 2066,
+      "production_ceiling": 2066
+    },
+    {
+      "id": "context-governance",
+      "baseline_paths": [
+        "src/context.rs",
+        "src/store/context_store.rs"
+      ],
+      "paths": [
+        "src/context.rs",
+        "src/store/context_store.rs"
+      ],
+      "baseline_production_lines": 4951,
+      "production_ceiling": 4951
+    },
+    {
+      "id": "doctor",
+      "baseline_paths": [
+        "src/doctor.rs"
+      ],
+      "paths": [
+        "src/doctor.rs"
+      ],
+      "baseline_production_lines": 1391,
+      "production_ceiling": 1391
+    },
+    {
+      "id": "domain-types",
+      "baseline_paths": [
+        "src/error.rs",
+        "src/types.rs"
+      ],
+      "paths": [
+        "src/error.rs",
+        "src/types.rs"
+      ],
+      "baseline_production_lines": 1629,
+      "production_ceiling": 1627
+    },
+    {
+      "id": "embedding",
+      "baseline_paths": [
+        "src/embedding/batch.rs",
+        "src/embedding/factory.rs",
+        "src/embedding/limited.rs",
+        "src/embedding/mod.rs",
+        "src/embedding/noop.rs",
+        "src/embedding/openai.rs",
+        "src/embedding/orchestrator/batch.rs",
+        "src/embedding/orchestrator/mod.rs",
+        "src/embedding/resilient.rs",
+        "src/embedding/retry.rs",
+        "src/embedding/status.rs"
+      ],
+      "paths": [
+        "src/embedding/batch.rs",
+        "src/embedding/factory.rs",
+        "src/embedding/limited.rs",
+        "src/embedding/mod.rs",
+        "src/embedding/noop.rs",
+        "src/embedding/openai.rs",
+        "src/embedding/orchestrator/batch.rs",
+        "src/embedding/orchestrator/mod.rs",
+        "src/embedding/resilient.rs",
+        "src/embedding/retry.rs",
+        "src/embedding/status.rs"
+      ],
+      "baseline_production_lines": 2432,
+      "production_ceiling": 2432
+    },
+    {
+      "id": "engine-application",
+      "baseline_paths": [
+        "src/background_tasks.rs",
+        "src/clock.rs",
+        "src/consolidation.rs",
+        "src/engine.rs",
+        "src/fusion.rs",
+        "src/ordering.rs",
+        "src/scoring.rs",
+        "src/validation.rs"
+      ],
+      "paths": [
+        "src/background_tasks.rs",
+        "src/clock.rs",
+        "src/consolidation.rs",
+        "src/engine.rs",
+        "src/fusion.rs",
+        "src/ordering.rs",
+        "src/scoring.rs",
+        "src/validation.rs"
+      ],
+      "baseline_production_lines": 2892,
+      "production_ceiling": 2892
+    },
+    {
+      "id": "integration-tests",
+      "baseline_paths": [
+        "tests/black_box.rs",
+        "tests/integration/access.rs",
+        "tests/integration/batch_and_count.rs",
+        "tests/integration/binary_smoke.rs",
+        "tests/integration/chaos_extended.rs",
+        "tests/integration/chaos_quick.rs",
+        "tests/integration/chaos_standard.rs",
+        "tests/integration/concurrency_stress/batch_atomicity.rs",
+        "tests/integration/concurrency_stress/has_embedding_consistency.rs",
+        "tests/integration/concurrency_stress/mod.rs",
+        "tests/integration/concurrency_stress/orchestrator_saturation.rs",
+        "tests/integration/concurrency_stress/readers_writers.rs",
+        "tests/integration/concurrency_stress/scope_reassign.rs",
+        "tests/integration/concurrency_stress/update_embed_race.rs",
+        "tests/integration/concurrency_stress/workload.rs",
+        "tests/integration/edge_cases.rs",
+        "tests/integration/embedding_batch_hardening.rs",
+        "tests/integration/embedding_races.rs",
+        "tests/integration/fault_injection.rs",
+        "tests/integration/helpers.rs",
+        "tests/integration/http_transport.rs",
+        "tests/integration/main.rs",
+        "tests/integration/property/access_policy.rs",
+        "tests/integration/property/lifecycle.rs",
+        "tests/integration/property/mod.rs",
+        "tests/integration/property/roundtrip.rs",
+        "tests/integration/property/strategies.rs",
+        "tests/integration/property/validation.rs",
+        "tests/integration/protocol.rs",
+        "tests/integration/reembed.rs",
+        "tests/integration/schema_snapshots.rs",
+        "tests/integration/soak.rs",
+        "tests/integration/transport_matrix.rs",
+        "tests/integration/write_authorization.rs",
+        "tests/reranker_smoke.rs"
+      ],
+      "paths": [
+        "tests/black_box.rs",
+        "tests/integration/access.rs",
+        "tests/integration/batch_and_count.rs",
+        "tests/integration/binary_smoke.rs",
+        "tests/integration/chaos_extended.rs",
+        "tests/integration/chaos_quick.rs",
+        "tests/integration/chaos_standard.rs",
+        "tests/integration/concurrency_stress/batch_atomicity.rs",
+        "tests/integration/concurrency_stress/has_embedding_consistency.rs",
+        "tests/integration/concurrency_stress/mod.rs",
+        "tests/integration/concurrency_stress/orchestrator_saturation.rs",
+        "tests/integration/concurrency_stress/readers_writers.rs",
+        "tests/integration/concurrency_stress/scope_reassign.rs",
+        "tests/integration/concurrency_stress/update_embed_race.rs",
+        "tests/integration/concurrency_stress/workload.rs",
+        "tests/integration/edge_cases.rs",
+        "tests/integration/embedding_batch_hardening.rs",
+        "tests/integration/embedding_races.rs",
+        "tests/integration/fault_injection.rs",
+        "tests/integration/helpers.rs",
+        "tests/integration/http_transport.rs",
+        "tests/integration/main.rs",
+        "tests/integration/property/access_policy.rs",
+        "tests/integration/property/lifecycle.rs",
+        "tests/integration/property/mod.rs",
+        "tests/integration/property/roundtrip.rs",
+        "tests/integration/property/strategies.rs",
+        "tests/integration/property/validation.rs",
+        "tests/integration/protocol.rs",
+        "tests/integration/reembed.rs",
+        "tests/integration/schema_snapshots.rs",
+        "tests/integration/soak.rs",
+        "tests/integration/transport_matrix.rs",
+        "tests/integration/write_authorization.rs",
+        "tests/reranker_smoke.rs",
+        "tests/sqlite_extension.rs"
+      ],
+      "baseline_production_lines": 0,
+      "production_ceiling": 0
+    },
+    {
+      "id": "migration-schema",
+      "baseline_paths": [
+        "src/store/migration.rs",
+        "src/store/postgres_migrations.rs",
+        "src/store/schema.rs"
+      ],
+      "paths": [
+        "src/store/migration.rs",
+        "src/store/postgres_migrations.rs",
+        "src/store/schema.rs"
+      ],
+      "baseline_production_lines": 6428,
+      "production_ceiling": 6428
+    },
+    {
+      "id": "persistence-core",
+      "baseline_paths": [
+        "src/store/admin.rs",
+        "src/store/backup.rs",
+        "src/store/conformance.rs",
+        "src/store/crud.rs",
+        "src/store/mod.rs",
+        "src/store/query.rs",
+        "src/store/search.rs"
+      ],
+      "paths": [
+        "src/store/admin.rs",
+        "src/store/backup.rs",
+        "src/store/conformance.rs",
+        "src/store/crud.rs",
+        "src/store/mod.rs",
+        "src/store/query.rs",
+        "src/store/search.rs"
+      ],
+      "baseline_production_lines": 7152,
+      "production_ceiling": 7150
+    },
+    {
+      "id": "postgres-store",
+      "baseline_paths": [
+        "src/store/postgres.rs"
+      ],
+      "paths": [
+        "src/store/postgres.rs"
+      ],
+      "baseline_production_lines": 5912,
+      "production_ceiling": 5912
+    },
+    {
+      "id": "protocol",
+      "baseline_paths": [
+        "src/server/mod.rs",
+        "src/server/params.rs",
+        "src/server/tests.rs"
+      ],
+      "paths": [
+        "src/server/mod.rs",
+        "src/server/params.rs",
+        "src/server/tests.rs"
+      ],
+      "baseline_production_lines": 6789,
+      "production_ceiling": 6789
+    },
+    {
+      "id": "reranker",
+      "baseline_paths": [
+        "src/reranker/download.rs",
+        "src/reranker/gate.rs",
+        "src/reranker/mod.rs",
+        "src/reranker/onnx.rs",
+        "src/reranker/operator.rs",
+        "src/reranker/policy.rs",
+        "src/reranker/resilient.rs",
+        "src/reranker/runtime.rs"
+      ],
+      "paths": [
+        "src/reranker/download.rs",
+        "src/reranker/gate.rs",
+        "src/reranker/mod.rs",
+        "src/reranker/onnx.rs",
+        "src/reranker/operator.rs",
+        "src/reranker/policy.rs",
+        "src/reranker/resilient.rs",
+        "src/reranker/runtime.rs"
+      ],
+      "baseline_production_lines": 2609,
+      "production_ceiling": 2607
+    },
+    {
+      "id": "sqlite-store",
+      "baseline_paths": [
+        "src/store/sqlite.rs",
+        "src/store/sqlite_lease.rs",
+        "src/store/vector/mod.rs",
+        "src/store/vector/sqlite_vec.rs"
+      ],
+      "paths": [
+        "src/store/sqlite.rs",
+        "src/store/sqlite_lease.rs",
+        "src/store/vector/mod.rs",
+        "src/store/vector/sqlite_vec.rs"
+      ],
+      "baseline_production_lines": 1635,
+      "production_ceiling": 1638
+    },
+    {
+      "id": "transport",
+      "baseline_paths": [
+        "src/http_auth.rs",
+        "src/http_transport.rs"
+      ],
+      "paths": [
+        "src/http_auth.rs",
+        "src/http_transport.rs"
+      ],
+      "baseline_production_lines": 390,
+      "production_ceiling": 389
+    },
+    {
+      "id": "ui",
+      "baseline_paths": [
+        "src/ui/app.rs",
+        "src/ui/editor.rs",
+        "src/ui/mod.rs",
+        "src/ui/theme.rs",
+        "src/ui/view.rs"
+      ],
+      "paths": [
+        "src/ui/app.rs",
+        "src/ui/editor.rs",
+        "src/ui/mod.rs",
+        "src/ui/theme.rs",
+        "src/ui/view.rs"
+      ],
+      "baseline_production_lines": 3350,
+      "production_ceiling": 3350
+    }
+  ],
+  "hotspots": [
+    {
+      "id": "composition.main",
+      "component": "composition",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/main.rs",
+      "baseline_physical_lines": 994,
+      "baseline_production_lines": 892,
+      "successors": [
+        "src/main.rs"
+      ],
+      "physical_ceiling": 994,
+      "production_ceiling": 892
+    },
+    {
+      "id": "config.main",
+      "component": "config",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/config/mod.rs",
+      "baseline_physical_lines": 1497,
+      "baseline_production_lines": 1489,
+      "successors": [
+        "src/config/mod.rs"
+      ],
+      "physical_ceiling": 1497,
+      "production_ceiling": 1489
+    },
+    {
+      "id": "config.tests",
+      "component": "config",
+      "kind": "test",
+      "status": "active",
+      "baseline_path": "src/config/tests.rs",
+      "baseline_physical_lines": 1226,
+      "baseline_production_lines": 0,
+      "successors": [
+        "src/config/tests.rs"
+      ],
+      "physical_ceiling": 1226,
+      "production_ceiling": 0
+    },
+    {
+      "id": "context-governance.definition",
+      "component": "context-governance",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/context.rs",
+      "baseline_physical_lines": 1578,
+      "baseline_production_lines": 1363,
+      "successors": [
+        "src/context.rs"
+      ],
+      "physical_ceiling": 1578,
+      "production_ceiling": 1363
+    },
+    {
+      "id": "context-governance.store",
+      "component": "context-governance",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/store/context_store.rs",
+      "baseline_physical_lines": 3698,
+      "baseline_production_lines": 3588,
+      "successors": [
+        "src/store/context_store.rs"
+      ],
+      "physical_ceiling": 3698,
+      "production_ceiling": 3588
+    },
+    {
+      "id": "doctor.main",
+      "component": "doctor",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/doctor.rs",
+      "baseline_physical_lines": 1812,
+      "baseline_production_lines": 1391,
+      "successors": [
+        "src/doctor.rs"
+      ],
+      "physical_ceiling": 1812,
+      "production_ceiling": 1391
+    },
+    {
+      "id": "domain-types.main",
+      "component": "domain-types",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/types.rs",
+      "baseline_physical_lines": 1938,
+      "baseline_production_lines": 1456,
+      "successors": [
+        "src/types.rs"
+      ],
+      "physical_ceiling": 1938,
+      "production_ceiling": 1456
+    },
+    {
+      "id": "embedding.openai",
+      "component": "embedding",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/embedding/openai.rs",
+      "baseline_physical_lines": 852,
+      "baseline_production_lines": 339,
+      "successors": [
+        "src/embedding/openai.rs"
+      ],
+      "physical_ceiling": 852,
+      "production_ceiling": 339
+    },
+    {
+      "id": "embedding.orchestrator",
+      "component": "embedding",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/embedding/orchestrator/mod.rs",
+      "baseline_physical_lines": 814,
+      "baseline_production_lines": 575,
+      "successors": [
+        "src/embedding/orchestrator/mod.rs"
+      ],
+      "physical_ceiling": 814,
+      "production_ceiling": 575
+    },
+    {
+      "id": "engine-application.engine",
+      "component": "engine-application",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/engine.rs",
+      "baseline_physical_lines": 3614,
+      "baseline_production_lines": 1746,
+      "successors": [
+        "src/engine.rs"
+      ],
+      "physical_ceiling": 3614,
+      "production_ceiling": 1746
+    },
+    {
+      "id": "integration-tests.binary-smoke",
+      "component": "integration-tests",
+      "kind": "test",
+      "status": "active",
+      "baseline_path": "tests/integration/binary_smoke.rs",
+      "baseline_physical_lines": 2345,
+      "baseline_production_lines": 0,
+      "successors": [
+        "tests/integration/binary_smoke.rs"
+      ],
+      "physical_ceiling": 2345,
+      "production_ceiling": 0
+    },
+    {
+      "id": "integration-tests.fault-injection",
+      "component": "integration-tests",
+      "kind": "test",
+      "status": "active",
+      "baseline_path": "tests/integration/fault_injection.rs",
+      "baseline_physical_lines": 1031,
+      "baseline_production_lines": 0,
+      "successors": [
+        "tests/integration/fault_injection.rs"
+      ],
+      "physical_ceiling": 1031,
+      "production_ceiling": 0
+    },
+    {
+      "id": "integration-tests.protocol",
+      "component": "integration-tests",
+      "kind": "test",
+      "status": "active",
+      "baseline_path": "tests/integration/protocol.rs",
+      "baseline_physical_lines": 4461,
+      "baseline_production_lines": 0,
+      "successors": [
+        "tests/integration/protocol.rs"
+      ],
+      "physical_ceiling": 4461,
+      "production_ceiling": 0
+    },
+    {
+      "id": "migration-schema.migration",
+      "component": "migration-schema",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/store/migration.rs",
+      "baseline_physical_lines": 6753,
+      "baseline_production_lines": 4873,
+      "successors": [
+        "src/store/migration.rs"
+      ],
+      "physical_ceiling": 6753,
+      "production_ceiling": 4873
+    },
+    {
+      "id": "migration-schema.schema",
+      "component": "migration-schema",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/store/schema.rs",
+      "baseline_physical_lines": 1476,
+      "baseline_production_lines": 1450,
+      "successors": [
+        "src/store/schema.rs"
+      ],
+      "physical_ceiling": 1476,
+      "production_ceiling": 1450
+    },
+    {
+      "id": "persistence-core.admin",
+      "component": "persistence-core",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/store/admin.rs",
+      "baseline_physical_lines": 1117,
+      "baseline_production_lines": 1051,
+      "successors": [
+        "src/store/admin.rs"
+      ],
+      "physical_ceiling": 1117,
+      "production_ceiling": 1051
+    },
+    {
+      "id": "persistence-core.backup",
+      "component": "persistence-core",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/store/backup.rs",
+      "baseline_physical_lines": 1677,
+      "baseline_production_lines": 935,
+      "successors": [
+        "src/store/backup.rs"
+      ],
+      "physical_ceiling": 1677,
+      "production_ceiling": 935
+    },
+    {
+      "id": "persistence-core.conformance",
+      "component": "persistence-core",
+      "kind": "test",
+      "status": "active",
+      "baseline_path": "src/store/conformance.rs",
+      "baseline_physical_lines": 2552,
+      "baseline_production_lines": 0,
+      "successors": [
+        "src/store/conformance.rs"
+      ],
+      "physical_ceiling": 2552,
+      "production_ceiling": 0
+    },
+    {
+      "id": "persistence-core.crud",
+      "component": "persistence-core",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/store/crud.rs",
+      "baseline_physical_lines": 2763,
+      "baseline_production_lines": 2510,
+      "successors": [
+        "src/store/crud.rs"
+      ],
+      "physical_ceiling": 2763,
+      "production_ceiling": 2510
+    },
+    {
+      "id": "persistence-core.mod",
+      "component": "persistence-core",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/store/mod.rs",
+      "baseline_physical_lines": 1050,
+      "baseline_production_lines": 1011,
+      "successors": [
+        "src/store/mod.rs"
+      ],
+      "physical_ceiling": 1050,
+      "production_ceiling": 1011
+    },
+    {
+      "id": "persistence-core.query",
+      "component": "persistence-core",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/store/query.rs",
+      "baseline_physical_lines": 1622,
+      "baseline_production_lines": 999,
+      "successors": [
+        "src/store/query.rs"
+      ],
+      "physical_ceiling": 1620,
+      "production_ceiling": 997
+    },
+    {
+      "id": "postgres-store.main",
+      "component": "postgres-store",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/store/postgres.rs",
+      "baseline_physical_lines": 8981,
+      "baseline_production_lines": 5912,
+      "successors": [
+        "src/store/postgres.rs"
+      ],
+      "physical_ceiling": 8981,
+      "production_ceiling": 5912
+    },
+    {
+      "id": "protocol.handlers",
+      "component": "protocol",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/server/mod.rs",
+      "baseline_physical_lines": 4749,
+      "baseline_production_lines": 4724,
+      "successors": [
+        "src/server/mod.rs"
+      ],
+      "physical_ceiling": 4749,
+      "production_ceiling": 4724
+    },
+    {
+      "id": "protocol.params",
+      "component": "protocol",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/server/params.rs",
+      "baseline_physical_lines": 2077,
+      "baseline_production_lines": 2065,
+      "successors": [
+        "src/server/params.rs"
+      ],
+      "physical_ceiling": 2077,
+      "production_ceiling": 2065
+    },
+    {
+      "id": "reranker.download",
+      "component": "reranker",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/reranker/download.rs",
+      "baseline_physical_lines": 855,
+      "baseline_production_lines": 507,
+      "successors": [
+        "src/reranker/download.rs"
+      ],
+      "physical_ceiling": 855,
+      "production_ceiling": 507
+    },
+    {
+      "id": "reranker.gate",
+      "component": "reranker",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/reranker/gate.rs",
+      "baseline_physical_lines": 814,
+      "baseline_production_lines": 687,
+      "successors": [
+        "src/reranker/gate.rs"
+      ],
+      "physical_ceiling": 814,
+      "production_ceiling": 687
+    },
+    {
+      "id": "sqlite-store.main",
+      "component": "sqlite-store",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/store/sqlite.rs",
+      "baseline_physical_lines": 5852,
+      "baseline_production_lines": 1259,
+      "successors": [
+        "src/store/sqlite.rs"
+      ],
+      "physical_ceiling": 5855,
+      "production_ceiling": 1262
+    },
+    {
+      "id": "ui.app",
+      "component": "ui",
+      "kind": "production",
+      "status": "active",
+      "baseline_path": "src/ui/app.rs",
+      "baseline_physical_lines": 3376,
+      "baseline_production_lines": 2056,
+      "successors": [
+        "src/ui/app.rs"
+      ],
+      "physical_ceiling": 3376,
+      "production_ceiling": 2056
+    }
+  ]
+}

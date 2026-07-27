@@ -131,6 +131,65 @@ fn declared_test_and_bench_targets_under_src_are_test_only() {
 }
 
 #[test]
+fn declared_examples_are_production_roots() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src", "tests", "benches"] {
+        fs::create_dir(repository.path().join(root)).expect("source root");
+    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+         \n[[example]]\nname = \"demo\"\npath = \"tests/demo.rs\"\n",
+    )
+    .expect("package manifest");
+    fs::write(repository.path().join("src/lib.rs"), "fn root() {}\n").expect("root source");
+    fs::write(repository.path().join("tests/demo.rs"), "fn main() {}\n").expect("example target");
+
+    let inventory = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).expect("workspace inventory");
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_path["tests/demo.rs"].production_lines, 1);
+}
+
+#[test]
+fn custom_production_roots_resolve_modules_from_their_parent() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src", "tests", "benches"] {
+        fs::create_dir(repository.path().join(root)).expect("source root");
+    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+         \n[[bin]]\nname = \"cli\"\npath = \"src/cli.rs\"\n",
+    )
+    .expect("package manifest");
+    fs::write(repository.path().join("src/lib.rs"), "#[cfg(test)]\nmod shared;\n").expect("library root");
+    fs::write(repository.path().join("src/cli.rs"), "mod shared;\nfn main() {}\n").expect("custom binary root");
+    fs::write(repository.path().join("src/shared.rs"), "fn production_helper() {}\n").expect("shared module");
+
+    let inventory = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).expect("workspace inventory");
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_path["src/shared.rs"].production_lines, 1);
+}
+
+#[test]
+fn no_package_feature_may_enable_testing() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src", "tests", "benches"] {
+        fs::create_dir(repository.path().join(root)).expect("source root");
+    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+         \n[features]\ntesting = []\nrelease-hooks = [\"testing\"]\n",
+    )
+    .expect("package manifest");
+    fs::write(repository.path().join("src/lib.rs"), "fn root() {}\n").expect("root source");
+
+    let error = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).unwrap_err();
+    assert!(error.to_string().contains("must not enable the test-only"));
+}
+
+#[test]
 fn revision_scan_honors_declared_test_targets_under_src() {
     let repository = tempfile::tempdir().expect("temporary repository");
     fs::create_dir(repository.path().join("src")).expect("source root");

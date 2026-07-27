@@ -233,6 +233,12 @@ fn discover_test_only_files(parsed: &BTreeMap<String, ParsedSource>, production_
     for (path, source) in parsed {
         let module_dir = module_directory(path)?;
         graph.collect(path, &source.syntax.items, &module_dir, false)?;
+        if production_roots.contains(path) || explicit_test_roots.contains(path) {
+            let crate_root_dir = Path::new(path).parent().context("Cargo target root has no parent directory")?;
+            if crate_root_dir != module_dir {
+                graph.collect(path, &source.syntax.items, crate_root_dir, false)?;
+            }
+        }
     }
     let edges = graph.edges;
     let incoming: BTreeSet<_> = edges.iter().map(|edge| edge.target.as_str()).collect();
@@ -297,6 +303,7 @@ fn workspace_target_roots<'a>(workspace: &Path, known: impl Iterator<Item = &'a 
 fn target_roots<'a>(manifest: &str, known: impl Iterator<Item = &'a String>) -> Result<TargetRoots> {
     let known = known.cloned().collect::<BTreeSet<_>>();
     let manifest: toml::Value = toml::from_str(manifest).context("parse package manifest")?;
+    validate_testing_feature_is_isolated(&manifest)?;
     let mut roots = conventional_production_roots(known.iter());
     if let Some(library) = manifest.get("lib") {
         add_declared_target_root(library, "library", &known, &mut roots)?;
@@ -307,12 +314,29 @@ fn target_roots<'a>(manifest: &str, known: impl Iterator<Item = &'a String>) -> 
             add_declared_target_root(binary, "binary", &known, &mut roots)?;
         }
     }
-    validate_auxiliary_target_roots(&manifest, "example", &known)?;
+    roots.extend(validate_auxiliary_target_roots(&manifest, "example", &known)?);
     let mut test = BTreeSet::new();
     for kind in ["test", "bench"] {
         test.extend(validate_auxiliary_target_roots(&manifest, kind, &known)?);
     }
     Ok(TargetRoots { production: roots, test })
+}
+
+fn validate_testing_feature_is_isolated(manifest: &toml::Value) -> Result<()> {
+    let Some(features) = manifest.get("features") else {
+        return Ok(());
+    };
+    let features = features.as_table().context("package features must be a table")?;
+    for (feature, members) in features {
+        let members = members.as_array().with_context(|| format!("package feature {feature:?} must be an array"))?;
+        for member in members {
+            let member = member.as_str().with_context(|| format!("package feature {feature:?} member must be a string"))?;
+            if feature != "testing" && member == "testing" {
+                bail!("package feature {feature:?} must not enable the test-only \"testing\" feature");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn conventional_production_roots<'a>(known: impl Iterator<Item = &'a String>) -> BTreeSet<String> {

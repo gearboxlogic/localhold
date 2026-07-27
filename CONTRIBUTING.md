@@ -186,12 +186,14 @@ The checker parses Rust syntax and classifies `#[cfg(test)]` and
 `cfg(feature = "testing")` items as test lines. Files reachable only through
 those modules, plus integration tests and benchmarks, are entirely test-only.
 Explicit Cargo test and benchmark targets are also test-only even when their
-audited path is under `src/`.
+audited path is under `src/`; explicit examples remain production roots.
 This keeps extracting inline tests from pretending that production code was
 removed. LF and CRLF checkouts produce the same physical-line count.
 Production library and binary targets must remain under `src/`. Explicit or
 conditional module path overrides and Rust-source `include!` calls are rejected
 because they make source ownership and production reachability ambiguous.
+No package feature may enable the test-only `testing` feature; it must remain
+available only through an explicit test invocation.
 Rust examples and explicitly declared Cargo targets outside the tracked roots
 are also rejected while the initial path map is closed.
 

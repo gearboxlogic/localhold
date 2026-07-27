@@ -15,12 +15,12 @@ use syn::{
     Macro, StaticMutability, TraitItemFn,
 };
 
-use self::documentation::unsupported_runnable_doctest;
+use self::documentation::{is_doc_comment, unsupported_runnable_doctest};
 use self::files::{collect_optional as collect_optional_rust_files, collect_required as collect_rust_files};
 use self::policy::{
     contains_assembly_macro, contains_opaque_attribute, contains_path_attribute, contains_structural_ident, contains_unaudited_macro_syntax, is_path_override,
     is_reserved_expansion_root, is_safety_lint_exception, is_standalone_assembly_macro, is_trusted_attribute, is_trusted_local_macro_name, is_trusted_macro, is_unsafe_attribute,
-    macro_name, untrusted_import,
+    macro_name, untrusted_generated_attribute, untrusted_import, untrusted_nested_macro,
 };
 
 pub const REVIEWED_EXPANSION_PACKAGES: [&str; 14] = [
@@ -147,11 +147,11 @@ pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Vec<UnsafeSi
         let relative = path.strip_prefix(workspace).context("source path escaped workspace")?;
         let relative = relative.to_str().context("source path is not UTF-8")?.replace('\\', "/");
         let source = fs::read_to_string(&path).with_context(|| format!("read Rust source {}", path.display()))?;
-        if let Some(reason) = unsupported_runnable_doctest(&source) {
+        let syntax = syn::parse_file(&source).with_context(|| format!("parse Rust source {}", path.display()))?;
+        if let Some(reason) = unsupported_runnable_doctest(&syntax) {
             violations.push(format!("{relative}: {reason}"));
             continue;
         }
-        let syntax = syn::parse_file(&source).with_context(|| format!("parse Rust source {}", path.display()))?;
         let mut scanner = SourceScanner::default();
         scanner.visit_file(&syntax);
         if !scanner.violations.is_empty() {
@@ -229,13 +229,7 @@ impl SourceScanner {
 
 impl<'ast> Visit<'ast> for SourceScanner {
     fn visit_attribute(&mut self, attribute: &'ast Attribute) {
-        if attribute.path().segments.len() == 1
-            && attribute.path().segments[0].ident.unraw() == "doc"
-            && !attribute.span().source_text().is_some_and(|source| {
-                let source = source.trim_start();
-                source.starts_with("///") || source.starts_with("//!") || source.starts_with("/**") || source.starts_with("/*!")
-            })
-        {
+        if attribute.path().segments.len() == 1 && attribute.path().segments[0].ident.unraw() == "doc" && !is_doc_comment(attribute) {
             self.violations
                 .push(format!("{} uses an explicit #[doc] attribute, whose doctest content is not audited", self.item()));
         }
@@ -273,6 +267,16 @@ impl<'ast> Visit<'ast> for SourceScanner {
         }
         if contains_path_attribute(macro_invocation.tokens.clone()) {
             self.violations.push(format!("{} generates a #[path] source override", self.item()));
+        }
+        if policy::contains_doc_attribute(macro_invocation.tokens.clone()) {
+            self.violations
+                .push(format!("{} generates a #[doc] attribute, whose doctest content is not audited", self.item()));
+        }
+        if let Some(path) = untrusted_nested_macro(&macro_invocation.tokens) {
+            self.violations.push(format!("{} delegates expansion to unreviewed nested macro {path}", self.item()));
+        }
+        if let Some(path) = untrusted_generated_attribute(&macro_invocation.tokens) {
+            self.violations.push(format!("{} generates an unreviewed attribute path {path}", self.item()));
         }
         if contains_opaque_attribute(macro_invocation.tokens.clone()) {
             self.violations

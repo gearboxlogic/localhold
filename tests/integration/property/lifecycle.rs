@@ -8,8 +8,8 @@ use crate::helpers::{assert_invalid_params_contains, call_tool, call_tool_error,
 proptest! {
     #![proptest_config(fidelity_config())]
 
-    /// P5: Forgetting a memory twice does not crash. The first delete succeeds,
-    /// and the second delete returns a not-found error.
+    // P5: Forgetting a memory twice does not crash. The first delete succeeds,
+    // and the second delete returns a not-found error.
     #[test]
     fn forget_idempotency(content in "[a-zA-Z0-9][a-zA-Z0-9 ]{0,99}") {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -44,7 +44,7 @@ proptest! {
         });
     }
 
-    /// P6: Explicitly deferred writes remain contextless and are labeled for later classification.
+    // P6: Explicitly deferred writes remain contextless and are labeled for later classification.
     #[test]
     fn explicit_deferral_writes_to_unresolved_inbox(content in "[a-zA-Z0-9][a-zA-Z0-9 ]{0,99}") {
         let rt = tokio::runtime::Runtime::new().unwrap();

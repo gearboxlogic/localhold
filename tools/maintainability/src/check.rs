@@ -207,12 +207,10 @@ fn verify_lint_precedence(cargo: &toml::Value, required: &[RequiredLint<'_>]) ->
 }
 
 fn verify_cargo_target_paths(cargo: &toml::Value) -> Result<()> {
-    if let Some(build) = cargo.get("package").and_then(|package| package.get("build")) {
-        match build {
-            toml::Value::Boolean(false) => {}
-            toml::Value::String(path) => verify_audited_target_path("package.build", path)?,
-            _ => bail!("Cargo.toml package.build must be false or an audited Rust path"),
-        }
+    if let Some(build) = cargo.get("package").and_then(|package| package.get("build"))
+        && build != &toml::Value::Boolean(false)
+    {
+        bail!("Cargo.toml package.build must be false or omitted; enabled build scripts are unsupported by the source-safety gate");
     }
     if let Some(library) = cargo.get("lib")
         && let Some(path) = library.get("path")

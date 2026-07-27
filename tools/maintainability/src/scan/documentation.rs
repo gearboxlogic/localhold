@@ -1,28 +1,99 @@
-pub(super) fn unsupported_runnable_doctest(source: &str) -> Option<&'static str> {
-    let mut block_doc = false;
-    let mut fence = None;
-    for line in source.lines() {
-        let Some(content) = doc_content(line, &mut block_doc) else {
-            continue;
-        };
-        let content = content.strip_prefix(' ').unwrap_or(&content);
-        let trimmed = content.trim_start();
-        let marker = if trimmed.starts_with("```") {
-            Some('`')
-        } else if trimmed.starts_with("~~~") {
-            Some('~')
-        } else {
-            None
-        };
-        if let Some(marker) = marker {
-            if update_fence(&mut fence, marker, trimmed) {
-                return Some("runnable Rust doctests are unsupported by the source-safety gate");
-            }
-        } else if fence.is_none() && content.starts_with("    ") && !content.trim().is_empty() {
-            return Some("indented runnable Rust doctests are unsupported by the source-safety gate");
+use syn::Attribute;
+use syn::ext::IdentExt as _;
+use syn::spanned::Spanned as _;
+use syn::visit::{self, Visit};
+
+pub(super) fn unsupported_runnable_doctest(syntax: &syn::File) -> Option<&'static str> {
+    let mut collector = DocCommentCollector::default();
+    collector.visit_file(syntax);
+
+    let mut scanner = DocCommentScanner::default();
+    let mut previous_end = None;
+    for comment in collector.comments {
+        if previous_end.is_some_and(|end| comment.start_line > end + 1) {
+            scanner = DocCommentScanner::default();
         }
+        if scanner.scan(&comment.source) {
+            return Some("runnable Rust doctests are unsupported by the source-safety gate");
+        }
+        previous_end = Some(comment.end_line);
     }
     None
+}
+
+pub(super) fn is_doc_comment(attribute: &Attribute) -> bool {
+    doc_comment_source(attribute).is_some()
+}
+
+#[derive(Default)]
+struct DocCommentCollector {
+    comments: Vec<DocComment>,
+}
+
+impl<'ast> Visit<'ast> for DocCommentCollector {
+    fn visit_attribute(&mut self, attribute: &'ast Attribute) {
+        if let Some(source) = doc_comment_source(attribute) {
+            let span = attribute.span();
+            self.comments.push(DocComment {
+                source,
+                start_line: span.start().line,
+                end_line: span.end().line,
+            });
+        }
+        visit::visit_attribute(self, attribute);
+    }
+}
+
+struct DocComment {
+    source: String,
+    start_line: usize,
+    end_line: usize,
+}
+
+fn doc_comment_source(attribute: &Attribute) -> Option<String> {
+    let is_doc = attribute.path().segments.len() == 1 && attribute.path().segments[0].ident.unraw() == "doc";
+    let source = is_doc.then(|| attribute.span().source_text()).flatten()?;
+    let trimmed = source.trim_start();
+    (trimmed.starts_with("///") || trimmed.starts_with("//!") || trimmed.starts_with("/**") || trimmed.starts_with("/*!")).then_some(source)
+}
+
+#[derive(Default)]
+struct DocCommentScanner {
+    block_doc: bool,
+    fence: Option<char>,
+}
+
+impl DocCommentScanner {
+    fn scan(&mut self, source: &str) -> bool {
+        for line in source.lines() {
+            let Some(content) = doc_content(line, &mut self.block_doc) else {
+                continue;
+            };
+            if self.scan_content(&content) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn scan_content(&mut self, content: &str) -> bool {
+        let content = content.strip_prefix(' ').unwrap_or(content);
+        let trimmed = content.trim_start();
+        match fence_marker(trimmed) {
+            Some(marker) => update_fence(&mut self.fence, marker, trimmed),
+            None => self.fence.is_none() && content.starts_with("    ") && !content.trim().is_empty(),
+        }
+    }
+}
+
+fn fence_marker(content: &str) -> Option<char> {
+    if content.starts_with("```") {
+        Some('`')
+    } else if content.starts_with("~~~") {
+        Some('~')
+    } else {
+        None
+    }
 }
 
 fn update_fence(fence: &mut Option<char>, marker: char, content: &str) -> bool {

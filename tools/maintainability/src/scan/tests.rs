@@ -278,6 +278,12 @@ fn rejects_aliases_and_modules_that_impersonate_reviewed_expansions() {
     for source in [
         "use evil::info; fn sample() { info!(\"hidden\"); }",
         "use evil::safe as info; fn sample() { info!(\"hidden\"); }",
+        "pub mod bridge { pub use evil::expand as harmless; } use crate::bridge::harmless as json; json!();",
+        "mod bridge { pub use evil::expand as harmless; use self::harmless as json; json!(); }",
+        "mod bridge { pub use evil::expand as harmless; mod nested { use super::harmless as json; json!(); } }",
+        "pub mod bridge { pub use evil::expand as harmless; } use crate::bridge::{harmless as transport_test}; transport_test!();",
+        "pub mod bridge { pub use evil::expand as harmless; } use crate::bridge::harmless as Deserialize;",
+        "pub mod bridge { pub use evil::expand as harmless; } use crate::bridge::harmless as test;",
         "use evil as tokio; #[tokio::test] async fn sample() {}",
         "mod tokio { pub use evil::test; } #[tokio::test] async fn sample() {}",
         "mod r#tokio { pub use opaque::join; } r#tokio::join!();",
@@ -300,6 +306,7 @@ fn rejects_aliases_and_modules_that_impersonate_reviewed_expansions() {
             "unexpected error: {error:#}"
         );
     }
+    assert!(scan_result("use super::helpers::transport_test; transport_test!();").is_ok());
 }
 
 #[test]
@@ -312,21 +319,94 @@ fn rejects_token_pasting_in_attribute_input() {
 fn rejects_runnable_rust_doctests_but_allows_ignored_examples() {
     for source in [
         "/// ```\n/// fn runnable() {}\n/// ```\nfn sample() {}",
+        "//! ```\n//! fn inner_runnable() {}\n//! ```\nfn sample() {}",
         "/// ```rust,no_run\n/// fn compiled() {}\n/// ```\nfn sample() {}",
         "///     fn indented() {}\nfn sample() {}",
         "/**\n * ```rust\n * fn block_doc() {}\n * ```\n */\nfn sample() {}",
+        "/*!\n * ```rust\n * fn inner_block_doc() {}\n * ```\n */\nfn sample() {}",
     ] {
         let error = scan_result(source).expect_err("runnable doctest must fail closed");
         assert!(error.to_string().contains("runnable Rust doctests"), "unexpected error: {error:#}");
     }
     assert!(scan_result("/// ```ignore\n/// fn ignored() {}\n/// ```\nfn sample() {}").is_ok());
     assert!(scan_result("/// ```text\n/// unsafe is prose here\n/// ```\nfn sample() {}").is_ok());
+    assert!(scan_result("/// ```text\n///     indented prose\n/// ```\nfn sample() {}").is_ok());
+    assert!(
+        scan_result(
+            r####"
+            const COOKED: &str = "fixture
+            /// ```
+            /// fn not_a_doctest() {}
+            /// ```";
+            const RAW: &str = r###"fixture
+            /// ```
+            /// fn also_not_a_doctest() {}
+            /// ```"###;
+            "####,
+        )
+        .is_ok()
+    );
     let error = scan_result("#[doc = \"```\\nfn hidden() {}\\n```\"] fn sample() {}").expect_err("explicit doc attribute must fail closed");
     assert!(error.to_string().contains("explicit #[doc] attribute"), "unexpected error: {error:#}");
     let error = scan_result("#[r#doc = \"```\\nfn hidden() {}\\n```\"] fn sample() {}").expect_err("raw explicit doc attribute must fail closed");
     assert!(error.to_string().contains("explicit #[doc] attribute"), "unexpected error: {error:#}");
     let error = scan_result("#[cfg_attr(all(), doc = \"```\\nfn hidden() {}\\n```\")] fn sample() {}").expect_err("nested explicit doc attribute must fail closed");
     assert!(error.to_string().contains("unreviewed attribute path"), "unexpected error: {error:#}");
+}
+
+#[test]
+fn rejects_doc_attributes_generated_by_macros() {
+    for source in [
+        r#"macro_rules! transport_test { () => { #[doc = "```\nunsafe { hidden() }\n```"] fn generated() {} } }"#,
+        r#"macro_rules! transport_test { () => { #![doc = "```\nunsafe { hidden() }\n```"] } }"#,
+        r#"macro_rules! transport_test { () => { #[r#doc = "```\nunsafe { hidden() }\n```"] fn generated() {} } }"#,
+        r#"macro_rules! transport_test { () => { #![cfg_attr(any(), doc = "```\nunsafe { hidden() }\n```")] } }"#,
+        r#"macro_rules! transport_test { () => { #[cfg_attr(doc, doc = "```\nunsafe { hidden() }\n```")] fn generated() {} } }"#,
+        r#"macro_rules! transport_test { () => { #[cfg_attr(any(), cfg_attr(doc, r#doc = "```\nunsafe { hidden() }\n```"))] fn generated() {} } }"#,
+    ] {
+        let error = scan_result(source).expect_err("macro-generated documentation must fail closed");
+        assert!(error.to_string().contains("generates a #[doc] attribute"), "unexpected error: {error:#}");
+    }
+    assert!(scan_result("macro_rules! transport_test { () => { #[cfg_attr(doc, inline)] fn generated() {} } }").is_ok());
+}
+
+#[test]
+fn rejects_unreviewed_nested_macro_delegation() {
+    for source in [
+        "use evil::emit_docs; macro_rules! transport_test { () => { emit_docs!() }; } transport_test!();",
+        "use evil::emit_docs; macro_rules! transport_test { ($body:block) => { fn generated() $body }; } transport_test!({ emit_docs!(); });",
+        "macro_rules! transport_test { ($emit:ident) => { $emit!() }; } transport_test!(emit_docs);",
+        "macro_rules! transport_test { () => { macro_rules! hidden { () => {} } }; } transport_test!();",
+    ] {
+        let error = scan_result(source).expect_err("nested macro delegation must fail closed");
+        assert!(error.to_string().contains("unreviewed nested macro"), "unexpected error: {error:#}");
+    }
+    for source in [
+        "macro_rules! numbered_placeholders { () => { concat!(stringify!(1), stringify!(2)) }; } numbered_placeholders!();",
+        "macro_rules! numbered_placeholders { () => { $crate::concat_placeholders!(1) }; } numbered_placeholders!();",
+    ] {
+        assert!(scan_result(source).is_ok());
+    }
+    for source in [
+        "macro_rules! numbered_placeholders { () => { $crate::unreviewed!() }; } numbered_placeholders!();",
+        "macro_rules! numbered_placeholders { ($emit:ident) => { $emit!() }; } numbered_placeholders!(emit_docs);",
+    ] {
+        let error = scan_result(source).expect_err("dynamic or unreviewed hygienic macro path must fail closed");
+        assert!(error.to_string().contains("unreviewed nested macro"), "unexpected error: {error:#}");
+    }
+}
+
+#[test]
+fn rejects_unreviewed_attributes_generated_by_macros() {
+    for source in [
+        "macro_rules! transport_test { () => { #[evil::emit_docs] fn generated() {} }; } transport_test!();",
+        "macro_rules! transport_test { () => { #[derive(evil::Docs)] struct Generated; }; } transport_test!();",
+        "macro_rules! transport_test { () => { #[cfg_attr(any(), evil::emit_docs)] fn generated() {} }; } transport_test!();",
+    ] {
+        let error = scan_result(source).expect_err("generated attribute paths must use the closed reviewed set");
+        assert!(error.to_string().contains("generates an unreviewed attribute path"), "unexpected error: {error:#}");
+    }
+    assert!(scan_result("macro_rules! transport_test { () => { #[tokio::test] async fn generated() {} }; } transport_test!();").is_ok());
 }
 
 #[test]

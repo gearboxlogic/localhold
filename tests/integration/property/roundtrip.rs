@@ -7,7 +7,7 @@ use crate::helpers::{call_tool, setup_noop_server};
 proptest! {
     #![proptest_config(fidelity_config())]
 
-    /// P2: Remember-then-read roundtrip preserves full content and tags.
+    // P2: Remember-then-read roundtrip preserves full content and tags.
     #[test]
     fn remember_read_roundtrip(input in arb_remember_input()) {
         let rt = tokio::runtime::Runtime::new().unwrap();

@@ -86,11 +86,13 @@ Macro invocations inside unsafe blocks and unsafe functions are also rejected
 because changing the macro definition could change the reviewed operation
 without changing the unsafe-context syntax.
 `allow`, `expect`, and `warn` all count as exceptions when they weaken a
-required deny-level lint. Opaque macro-generated attributes, `include!` code
-expansion (including imported aliases), and `#[path]` source overrides are
-rejected so code cannot escape the audited roots or hide an exception from the
-inventory. Explicit Cargo target paths must remain under those roots. A root
-`build.rs` is rejected until the gate can audit its complete module graph.
+required deny-level lint. Opaque macro-generated attributes, including
+documentation attributes, `include!` code expansion (including imported
+aliases), and `#[path]` source overrides are rejected so code cannot escape the
+audited roots or hide an exception from the inventory. Explicit Cargo target
+paths must remain under those roots. All enabled package build scripts are
+rejected until the gate can audit their complete inputs and outputs; a physical
+root `build.rs` is rejected even when disabled.
 Runnable Rust doctests are likewise rejected; use maintained integration tests
 for executable examples, while explicitly ignored and non-Rust documentation
 blocks remain supported. The gate also runs Clippy with forced `unsafe_code`,

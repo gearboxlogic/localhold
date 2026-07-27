@@ -77,8 +77,12 @@ pub(super) fn is_trusted_local_macro_name(name: &str) -> bool {
 }
 
 pub(super) fn is_trusted_macro(macro_invocation: &Macro) -> bool {
+    is_trusted_macro_path(&normalized_path(&macro_invocation.path))
+}
+
+fn is_trusted_macro_path(path: &str) -> bool {
     matches!(
-        normalized_path(&macro_invocation.path).as_str(),
+        path,
         "assert"
             | "assert_eq"
             | "assert_ne"
@@ -130,6 +134,75 @@ pub(super) fn is_trusted_macro(macro_invocation: &Macro) -> bool {
     )
 }
 
+pub(super) fn untrusted_nested_macro(tokens: &TokenStream) -> Option<String> {
+    let tokens: Vec<_> = tokens.clone().into_iter().collect();
+    for (index, token) in tokens.iter().enumerate() {
+        if !matches!(token, TokenTree::Punct(punctuation) if punctuation.as_char() == '!') {
+            continue;
+        }
+        let Some((path, start)) = macro_path_before(&tokens, index) else {
+            continue;
+        };
+        let dollar_root = start > 0 && matches!(&tokens[start - 1], TokenTree::Punct(punctuation) if punctuation.as_char() == '$');
+        let hygienic_local = dollar_root
+            && path
+                .strip_prefix("crate::")
+                .is_some_and(|name| !name.contains("::") && RESERVED_LOCAL_MACROS.contains(&name));
+        if matches!(tokens.get(index + 1), Some(TokenTree::Group(_))) && !(is_trusted_macro_path(&path) || hygienic_local) {
+            return Some(if dollar_root { format!("${path}") } else { path });
+        }
+        if path == "macro_rules" && matches!(tokens.get(index + 1), Some(TokenTree::Ident(_))) && matches!(tokens.get(index + 2), Some(TokenTree::Group(_))) {
+            return Some("macro_rules definition".to_owned());
+        }
+    }
+    tokens.into_iter().find_map(|token| match token {
+        TokenTree::Group(group) => untrusted_nested_macro(&group.stream()),
+        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => None,
+    })
+}
+
+fn macro_path_before(tokens: &[TokenTree], bang_index: usize) -> Option<(String, usize)> {
+    let TokenTree::Ident(last) = tokens.get(bang_index.checked_sub(1)?)? else {
+        return None;
+    };
+    let mut parts = vec![last.unraw().to_string()];
+    let mut start = bang_index - 1;
+    while start >= 3 {
+        let (TokenTree::Ident(segment), TokenTree::Punct(first_colon), TokenTree::Punct(second_colon)) = (&tokens[start - 3], &tokens[start - 2], &tokens[start - 1]) else {
+            break;
+        };
+        if first_colon.as_char() != ':' || second_colon.as_char() != ':' {
+            break;
+        }
+        parts.push(segment.unraw().to_string());
+        start -= 3;
+    }
+    parts.reverse();
+    Some((parts.join("::"), start))
+}
+
+pub(super) fn untrusted_generated_attribute(tokens: &TokenStream) -> Option<String> {
+    let tokens: Vec<_> = tokens.clone().into_iter().collect();
+    for (index, token) in tokens.iter().enumerate() {
+        if !matches!(token, TokenTree::Punct(punctuation) if punctuation.as_char() == '#') {
+            continue;
+        }
+        let Some(group) = bracket_attribute_after(&tokens, index) else {
+            return Some("malformed or dynamic attribute".to_owned());
+        };
+        let Ok(meta) = syn::parse2::<Meta>(group.stream()) else {
+            return Some("malformed or dynamic attribute".to_owned());
+        };
+        if !meta_contains_doc_attribute(&meta) && !is_trusted_meta(&meta) {
+            return Some(normalized_path(meta.path()));
+        }
+    }
+    tokens.into_iter().find_map(|token| match token {
+        TokenTree::Group(group) => untrusted_generated_attribute(&group.stream()),
+        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => None,
+    })
+}
+
 pub(super) fn is_trusted_attribute(attribute: &Attribute) -> bool {
     is_trusted_meta(&attribute.meta)
 }
@@ -153,13 +226,14 @@ pub(super) fn untrusted_import(item: &ItemUse) -> Option<String> {
 
 fn untrusted_named_import(source: &[String], binding: &str) -> Option<String> {
     let root = source.first().map(String::as_str).unwrap_or_default();
+    let preserves_name = source.last().is_some_and(|name| name == binding);
     if is_reserved_expansion_root(binding) && (source.len() != 1 || root != binding) {
         return Some(format!("import {} as {binding} can shadow reviewed expansion package {binding}", source.join("::")));
     }
     let local = matches!(root, "crate" | "self" | "super" | "localhold");
     if RESERVED_LOCAL_MACROS.contains(&binding) {
         let direct_local = source.len() == 1 && root == binding;
-        return (!local && !direct_local).then(|| format!("import {} as {binding} impersonates a reviewed local macro", source.join("::")));
+        return (!(local && preserves_name || direct_local)).then(|| format!("import {} as {binding} impersonates a reviewed local macro", source.join("::")));
     }
     let expected = match binding {
         "criterion_group" | "criterion_main" => Some("criterion"),
@@ -178,8 +252,9 @@ fn untrusted_named_import(source: &[String], binding: &str) -> Option<String> {
         name if PROTECTED_ATTRIBUTES.contains(&name) => Some(""),
         _ => None,
     };
-    expected
-        .and_then(|expected| (root != expected && !local).then(|| format!("import {} as {binding} does not come from reviewed expansion package {expected}", source.join("::"))))
+    expected.and_then(|expected| {
+        (root != expected && !(local && preserves_name)).then(|| format!("import {} as {binding} does not come from reviewed expansion package {expected}", source.join("::")))
+    })
 }
 
 enum Import {
@@ -388,6 +463,35 @@ pub(super) fn contains_path_attribute(tokens: TokenStream) -> bool {
         TokenTree::Group(group) => contains_path_attribute(group.stream()),
         TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => false,
     })
+}
+
+pub(super) fn contains_doc_attribute(tokens: TokenStream) -> bool {
+    let tokens: Vec<_> = tokens.into_iter().collect();
+    tokens.iter().enumerate().any(|(index, token)| {
+        matches!(token, TokenTree::Punct(punctuation) if punctuation.as_char() == '#')
+            && bracket_attribute_after(&tokens, index)
+                .and_then(|group| syn::parse2::<Meta>(group.stream()).ok())
+                .is_some_and(|meta| meta_contains_doc_attribute(&meta))
+    }) || tokens.into_iter().any(|token| match token {
+        TokenTree::Group(group) => contains_doc_attribute(group.stream()),
+        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
+}
+
+fn meta_contains_doc_attribute(meta: &Meta) -> bool {
+    let name = normalized_path(meta.path());
+    if name == "doc" {
+        return true;
+    }
+    let Meta::List(list) = meta else {
+        return false;
+    };
+    if name != "cfg_attr" {
+        return false;
+    }
+    Punctuated::<Meta, Token![,]>::parse_terminated
+        .parse2(list.tokens.clone())
+        .is_ok_and(|items| items.iter().skip(1).any(meta_contains_doc_attribute))
 }
 
 fn contains_macro_safety_lint_exception(tokens: TokenStream) -> bool {

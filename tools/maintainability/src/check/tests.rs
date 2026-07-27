@@ -5,8 +5,8 @@ use crate::manifest::DependencyPin;
 use tempfile::tempdir;
 
 use super::{
-    LockedPackage, compare_dependency_packages, lint_setting, parse_root_dependency, verify_audited_target_path, verify_dependency_routes, verify_expansion_dependency_routes,
-    verify_lint, verify_lint_precedence, verify_no_cargo_config, verify_no_cargo_config_with_home,
+    LockedPackage, compare_dependency_packages, lint_setting, parse_root_dependency, verify_audited_target_path, verify_cargo_target_paths, verify_dependency_routes,
+    verify_expansion_dependency_routes, verify_lint, verify_lint_precedence, verify_no_cargo_config, verify_no_cargo_config_with_home,
 };
 
 fn cargo(source: &str) -> toml::Value {
@@ -319,5 +319,21 @@ fn cargo_target_paths_cannot_escape_audited_roots() {
     }
     for rejected in ["build.rs", "outside.rs", "src/../outside.rs", "/absolute.rs", "src/not-rust.txt"] {
         assert!(verify_audited_target_path("target.path", rejected).is_err());
+    }
+}
+
+#[test]
+fn package_build_scripts_are_disabled() {
+    for accepted in ["[package]\nname = 'fixture'", "[package]\nname = 'fixture'\nbuild = false"] {
+        assert!(verify_cargo_target_paths(&cargo(accepted)).is_ok(), "configuration must be accepted: {accepted}");
+    }
+    for rejected in [
+        "[package]\nbuild = 'build.rs'",
+        "[package]\nbuild = 'src/build.rs'",
+        "[package]\nbuild = true",
+        "[package]\nbuild = 1",
+        "[package]\nbuild = { workspace = true }",
+    ] {
+        assert!(verify_cargo_target_paths(&cargo(rejected)).is_err(), "build script must be rejected: {rejected}");
     }
 }

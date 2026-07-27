@@ -191,14 +191,16 @@ These paths are not contacted by a default running `hold` process:
   sites, mutable statics, unsafe attributes, unsafe global assembly, and direct
   or group-level safety-lint exceptions with the reviewed contracts in
   `policy/maintainability/unsafe.json`. Opaque macro-generated attributes,
-  source-path overrides, and `include!` code expansion or aliases are rejected;
-  macro-generated safety exceptions and mutable statics remain inventoried.
-  Cargo target paths must stay under audited roots, and a root build script is
-  not accepted. The gate also verifies the required lint levels, locked
-  dependency versions/sources/checksums, and reviewed direct feature
-  specifications. The manifest states safety invariants and known proof debt;
-  passing the gate means that the reviewed boundary did not change, not that a
-  compiler or runtime test has independently proved a native ABI.
+  including documentation attributes, source-path overrides, and `include!`
+  code expansion or aliases are rejected; macro-generated safety exceptions
+  and mutable statics remain inventoried. Cargo target paths must stay under
+  audited roots. All enabled package build scripts are rejected, and a physical
+  root `build.rs` is rejected even when disabled. The gate also verifies the
+  required lint levels, locked dependency versions/sources/checksums, and
+  reviewed direct feature specifications. The manifest states safety invariants
+  and known proof debt; passing the gate means that the reviewed boundary did
+  not change, not that a compiler or runtime test has independently proved a
+  native ABI.
 - The maintainability gate fetches locked Cargo packages, verifies every cached
   crates.io archive against `Cargo.lock`, and copies verified archives and
   registry metadata into an isolated Cargo home. It vendors the locked archives,

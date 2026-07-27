@@ -221,6 +221,17 @@ fn associated_item_boundary_includes_enclosing_container_headers() {
 }
 
 #[test]
+fn nested_item_boundary_includes_enclosing_module_headers() {
+    let private = scan("mod ffi { pub unsafe fn call() {} }");
+    let public = scan("pub mod ffi { pub unsafe fn call() {} }");
+    assert_eq!(private[0].fingerprint, public[0].fingerprint);
+    assert_ne!(private[0].boundary_fingerprint, public[0].boundary_fingerprint);
+
+    let changed_sibling = scan("mod ffi { const CAPACITY: usize = 1; pub unsafe fn call() {} }");
+    assert_eq!(private[0].boundary_fingerprint, changed_sibling[0].boundary_fingerprint);
+}
+
+#[test]
 fn const_boundary_fingerprint_covers_safe_setup_around_an_operation() {
     let first = scan("const VALUE: usize = { let pointer = first; unsafe { call(pointer) } };");
     let second = scan("const VALUE: usize = { let pointer = second; unsafe { call(pointer) } };");

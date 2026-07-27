@@ -341,7 +341,7 @@ impl<'ast> Visit<'ast> for SourceScanner {
                 .push(format!("{} declares module {}, which shadows a reviewed expansion package", self.item(), item.ident));
         }
         let scope = self.child_scope(&item.ident.to_string());
-        self.visit_scoped(scope, item, |scanner, item| visit::visit_item_mod(scanner, item));
+        self.visit_boundary_with_fingerprint(scope, module_header_fingerprint(item), item, |scanner, item| visit::visit_item_mod(scanner, item));
     }
 
     fn visit_item_fn(&mut self, function: &'ast ItemFn) {
@@ -532,6 +532,14 @@ fn trait_header_fingerprint(item: &ItemTrait) -> String {
 fn foreign_mod_header_fingerprint(item: &ItemForeignMod) -> String {
     let mut header = item.clone();
     header.items.clear();
+    syntax_fingerprint(&header)
+}
+
+fn module_header_fingerprint(item: &ItemMod) -> String {
+    let mut header = item.clone();
+    if let Some((_, items)) = &mut header.content {
+        items.clear();
+    }
     syntax_fingerprint(&header)
 }
 

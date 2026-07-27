@@ -59,16 +59,30 @@ fn required_lints_reserve_priority_over_other_settings() {
     );
     assert!(verify_lint_precedence(&unrelated, &requirements).is_ok());
 
-    for priority in [1, 2] {
-        let overridden = cargo(&format!(
+    for level in ["deny", "forbid"] {
+        for priority in [1, 2] {
+            let strengthened = cargo(&format!(
+                "
+                [lints.rust]
+                unsafe_code = {{ level = 'deny', priority = 1 }}
+                unsafe_op_in_unsafe_fn = {{ level = 'deny', priority = 1 }}
+                rust_2024_compatibility = {{ level = '{level}', priority = {priority} }}
+                "
+            ));
+            assert!(verify_lint_precedence(&strengthened, &requirements).is_ok());
+        }
+    }
+
+    for level in ["allow", "warn", "force-warn"] {
+        let weakened = cargo(&format!(
             "
             [lints.rust]
             unsafe_code = {{ level = 'deny', priority = 1 }}
             unsafe_op_in_unsafe_fn = {{ level = 'deny', priority = 1 }}
-            rust_2024_compatibility = {{ level = 'allow', priority = {priority} }}
+            rust_2024_compatibility = {{ level = '{level}', priority = 1 }}
             "
         ));
-        assert!(verify_lint_precedence(&overridden, &requirements).is_err());
+        assert!(verify_lint_precedence(&weakened, &requirements).is_err());
     }
 }
 
@@ -83,6 +97,17 @@ fn clippy_groups_cannot_override_documentation_requirement() {
         ",
     );
     assert!(verify_lint_precedence(&accepted, &requirements).is_ok());
+
+    for level in ["deny", "forbid"] {
+        let strengthened = cargo(&format!(
+            "
+            [lints.clippy]
+            undocumented_unsafe_blocks = {{ level = 'deny', priority = 1 }}
+            restriction = {{ level = '{level}', priority = 2 }}
+            "
+        ));
+        assert!(verify_lint_precedence(&strengthened, &requirements).is_ok());
+    }
 
     let overridden = cargo(
         "

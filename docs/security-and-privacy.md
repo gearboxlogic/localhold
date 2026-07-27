@@ -228,8 +228,8 @@ These paths are not contacted by a default running `hold` process:
   and that focused-test references name existing, unconditional, non-ignored
   explicit tests scheduled as standard, ungated Cargo integration-test targets.
   Each contract also fingerprints the complete normalized syntax of its focused
-  tests. Enclosing impl, trait, and extern headers plus named type/data and
-  associated items that can contain const expressions are included in
+  tests. Enclosing module, impl, trait, and extern headers plus named type/data
+  and associated items that can contain const expressions are included in
   enclosing-boundary fingerprints.
   The all-features resolved graph must also retain each contract dependency's
   exact unified feature set and incoming parent routes.

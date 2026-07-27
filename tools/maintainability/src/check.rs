@@ -14,6 +14,7 @@ use crate::{expanded, scan};
 mod dependency_graph;
 
 type RequiredLint<'a> = (&'a str, &'a str, &'a str, i64);
+type RequiredLintSettings<'a> = BTreeMap<&'a str, (&'a str, i64)>;
 
 #[derive(Debug, Deserialize)]
 struct Lockfile {
@@ -262,32 +263,49 @@ fn lint_setting(value: &toml::Value) -> Result<(&str, i64)> {
 fn verify_lint_precedence(cargo: &toml::Value, required: &[RequiredLint<'_>]) -> Result<()> {
     let tables: BTreeSet<_> = required.iter().map(|(table, _, _, _)| *table).collect();
     for table_name in tables {
-        let required_names: BTreeSet<_> = required.iter().filter_map(|(table, name, _, _)| (*table == table_name).then_some(*name)).collect();
-        let reserved_priority = required
+        let required_settings: RequiredLintSettings<'_> = required
             .iter()
-            .filter_map(|(table, _, _, priority)| (*table == table_name).then_some(*priority))
-            .min()
-            .context("required lint table has no reserved priority")?;
+            .filter_map(|(table, name, level, priority)| (*table == table_name).then_some((*name, (*level, *priority))))
+            .collect();
         let configured = cargo
             .get("lints")
             .and_then(|lints| lints.get(table_name))
             .and_then(toml::Value::as_table)
             .with_context(|| format!("Cargo.toml must configure [lints.{table_name}]"))?;
         for (name, value) in configured {
-            if required_names.contains(name.as_str()) {
+            if required_settings.contains_key(name.as_str()) {
                 continue;
             }
             let overlapping_members = safety_lint_group_members(table_name, name);
-            if !overlapping_members.iter().any(|member| required_names.contains(member)) {
-                continue;
-            }
-            let (_, priority) = lint_setting(value).with_context(|| format!("parse Cargo.toml lint {table_name}.{name}"))?;
-            if priority >= reserved_priority {
-                bail!("Cargo.toml lint {table_name}.{name} priority {priority} can override safety lints reserved at priority {reserved_priority}");
+            let (level, priority) = lint_setting(value).with_context(|| format!("parse Cargo.toml lint {table_name}.{name}"))?;
+            if lint_group_can_weaken_required(overlapping_members, &required_settings, level, priority) {
+                bail!("Cargo.toml lint {table_name}.{name} level {level:?} at priority {priority} can weaken required safety lints");
             }
         }
     }
     Ok(())
+}
+
+fn lint_group_can_weaken_required(overlapping_members: &[&'static str], required_settings: &RequiredLintSettings<'_>, level: &str, priority: i64) -> bool {
+    overlapping_members.iter().any(|member| {
+        required_settings
+            .get(member)
+            .is_some_and(|(required_level, required_priority)| priority >= *required_priority && lint_level_can_weaken(level, required_level))
+    })
+}
+
+fn lint_level_can_weaken(level: &str, required_level: &str) -> bool {
+    let strength = |level| match level {
+        "allow" => Some(0),
+        "warn" | "force-warn" => Some(1),
+        "deny" => Some(2),
+        "forbid" => Some(3),
+        _ => None,
+    };
+    match (strength(level), strength(required_level)) {
+        (Some(level), Some(required_level)) => level < required_level,
+        _ => true,
+    }
 }
 
 fn safety_lint_group_members(table: &str, name: &str) -> &'static [&'static str] {

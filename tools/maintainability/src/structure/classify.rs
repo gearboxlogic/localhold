@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use super::syntax::{TestLineCollector, item_is_test_only};
+use super::syntax::{TestLineCollector, item_is_test_only, reject_module_path_overrides};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct FileMeasurement {
@@ -44,7 +44,8 @@ pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Inventory> {
     for root in roots {
         collect_sources(workspace, &workspace.join(root), &mut sources)?;
     }
-    measure_sources(sources)
+    let production_roots = workspace_production_roots(workspace, sources.keys())?;
+    measure_sources_with_roots(sources, &production_roots)
 }
 
 pub fn scan_revision(workspace: &Path, revision: &str, roots: &[String]) -> Result<Inventory> {
@@ -172,8 +173,13 @@ fn collect_sources(workspace: &Path, root: &Path, sources: &mut BTreeMap<String,
 }
 
 fn measure_sources(sources: BTreeMap<String, String>) -> Result<Inventory> {
+    let production_roots = conventional_production_roots(sources.keys());
+    measure_sources_with_roots(sources, &production_roots)
+}
+
+fn measure_sources_with_roots(sources: BTreeMap<String, String>, production_roots: &BTreeSet<String>) -> Result<Inventory> {
     let parsed = parse_sources(sources)?;
-    let test_only_files = discover_test_only_files(&parsed)?;
+    let test_only_files = discover_test_only_files(&parsed, production_roots)?;
     let mut files = Vec::with_capacity(parsed.len());
     for (path, parsed) in parsed {
         let physical_lines = physical_line_count(&parsed.source);
@@ -204,30 +210,98 @@ fn parse_sources(sources: BTreeMap<String, String>) -> Result<BTreeMap<String, P
         .collect()
 }
 
-fn discover_test_only_files(parsed: &BTreeMap<String, ParsedSource>) -> Result<BTreeSet<String>> {
+fn discover_test_only_files(parsed: &BTreeMap<String, ParsedSource>, production_roots: &BTreeSet<String>) -> Result<BTreeSet<String>> {
     let known: BTreeSet<_> = parsed.keys().cloned().collect();
-    let mut test_only: BTreeSet<_> = known.iter().filter(|path| path.starts_with("tests/") || path.starts_with("benches/")).cloned().collect();
     let mut graph = ModuleGraph { known: &known, edges: Vec::new() };
     for (path, source) in parsed {
         let module_dir = module_directory(path)?;
         graph.collect(path, &source.syntax.items, &module_dir, false)?;
     }
     let edges = graph.edges;
+    let incoming: BTreeSet<_> = edges.iter().map(|edge| edge.target.as_str()).collect();
+    let mut production_reachable = production_roots.clone();
+    let mut test_reachable: BTreeSet<_> = known.iter().filter(|path| path.starts_with("tests/") || path.starts_with("benches/")).cloned().collect();
+    for path in known.iter().filter(|path| path.starts_with("src/") && !incoming.contains(path.as_str())) {
+        production_reachable.insert(path.clone());
+    }
 
-    let mut queue: VecDeque<_> = test_only.iter().cloned().collect();
-    for edge in edges.iter().filter(|edge| edge.test_only) {
-        if test_only.insert(edge.target.clone()) {
-            queue.push_back(edge.target.clone());
+    loop {
+        propagate_reachability(&edges, &mut production_reachable, &mut test_reachable);
+        let unknown = known
+            .iter()
+            .filter(|path| !production_reachable.contains(*path) && !test_reachable.contains(*path))
+            .cloned()
+            .collect::<Vec<_>>();
+        if unknown.is_empty() {
+            break;
+        }
+        for path in unknown {
+            production_reachable.insert(path);
         }
     }
-    while let Some(parent) = queue.pop_front() {
-        for edge in edges.iter().filter(|edge| edge.source == parent) {
-            if test_only.insert(edge.target.clone()) {
-                queue.push_back(edge.target.clone());
+    Ok(test_reachable.difference(&production_reachable).cloned().collect())
+}
+
+fn propagate_reachability(edges: &[ModuleEdge], production: &mut BTreeSet<String>, test: &mut BTreeSet<String>) {
+    loop {
+        let mut changed = false;
+        for edge in edges {
+            changed |= match (production.contains(&edge.source), edge.test_only) {
+                (true, true) => test.insert(edge.target.clone()),
+                (true, false) => production.insert(edge.target.clone()),
+                (false, _) => false,
+            };
+            let source_is_test = test.contains(&edge.source);
+            if source_is_test {
+                changed |= test.insert(edge.target.clone());
             }
         }
+        if !changed {
+            break;
+        }
     }
-    Ok(test_only)
+}
+
+fn workspace_production_roots<'a>(workspace: &Path, known: impl Iterator<Item = &'a String>) -> Result<BTreeSet<String>> {
+    let known = known.cloned().collect::<BTreeSet<_>>();
+    let manifest_path = workspace.join("Cargo.toml");
+    let manifest = fs::read_to_string(&manifest_path).with_context(|| format!("read package manifest {}", manifest_path.display()))?;
+    let manifest: toml::Value = toml::from_str(&manifest).with_context(|| format!("parse package manifest {}", manifest_path.display()))?;
+    let mut roots = conventional_production_roots(known.iter());
+    if let Some(library) = manifest.get("lib") {
+        add_declared_target_root(library, "library", &known, &mut roots)?;
+    }
+    if let Some(binaries) = manifest.get("bin") {
+        let binaries = binaries.as_array().context("package bin targets must be an array of tables")?;
+        for binary in binaries {
+            add_declared_target_root(binary, "binary", &known, &mut roots)?;
+        }
+    }
+    Ok(roots)
+}
+
+fn conventional_production_roots<'a>(known: impl Iterator<Item = &'a String>) -> BTreeSet<String> {
+    known
+        .filter(|path| matches!(path.as_str(), "src/lib.rs" | "src/main.rs") || path.starts_with("src/bin/"))
+        .cloned()
+        .collect()
+}
+
+fn add_declared_target_root(target: &toml::Value, kind: &str, known: &BTreeSet<String>, roots: &mut BTreeSet<String>) -> Result<()> {
+    let target = target.as_table().with_context(|| format!("package {kind} target must be a table"))?;
+    let Some(path) = target.get("path") else {
+        return Ok(());
+    };
+    let path = path.as_str().with_context(|| format!("package {kind} target path must be a string"))?;
+    validate_relative_rust_path(path)?;
+    if !path.starts_with("src/") {
+        bail!("package {kind} production target must remain under src/: {path}");
+    }
+    if !known.contains(path) {
+        bail!("package {kind} production target is missing from the structural source inventory: {path}");
+    }
+    roots.insert(path.to_owned());
+    Ok(())
 }
 
 struct ModuleGraph<'a> {
@@ -241,6 +315,7 @@ impl ModuleGraph<'_> {
             let syn::Item::Mod(module) = item else {
                 continue;
             };
+            reject_module_path_overrides(&module.attrs)?;
             let test_only = parent_test_only || item_is_test_only(item)?;
             if let Some((_, nested)) = &module.content {
                 self.collect(source_path, nested, &module_dir.join(module.ident.to_string()), test_only)?;

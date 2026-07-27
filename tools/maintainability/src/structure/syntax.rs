@@ -125,10 +125,56 @@ impl<'ast> Visit<'ast> for TestLineCollector {
             visit::visit_expr(self, node);
         }
     }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if node.path.is_ident("include") {
+            self.error = Some(anyhow::anyhow!("Rust source include! cannot be classified safely"));
+            return;
+        }
+        visit::visit_macro(self, node);
+    }
 }
 
 pub fn item_is_test_only(item: &Item) -> Result<bool> {
     attributes_disable_production(item_attributes(item)?)
+}
+
+pub fn reject_module_path_overrides(attributes: &[Attribute]) -> Result<()> {
+    for attribute in attributes {
+        if attribute.path().is_ident("path") {
+            anyhow::bail!("explicit Rust module paths cannot be classified safely");
+        }
+        if attribute.path().is_ident("cfg_attr") && cfg_attr_contains_path(attribute)? {
+            anyhow::bail!("conditional Rust module paths cannot be classified safely");
+        }
+    }
+    Ok(())
+}
+
+fn cfg_attr_contains_path(attribute: &Attribute) -> Result<bool> {
+    let Meta::List(list) = &attribute.meta else {
+        return Ok(false);
+    };
+    let arguments = Punctuated::<Meta, Token![,]>::parse_terminated
+        .parse2(list.tokens.clone())
+        .context("parse cfg_attr arguments for module path classification")?;
+    arguments.iter().skip(1).try_fold(false, |found, nested| Ok(found || meta_contains_path(nested)?))
+}
+
+fn meta_contains_path(meta: &Meta) -> Result<bool> {
+    if meta.path().is_ident("path") {
+        return Ok(true);
+    }
+    if !meta.path().is_ident("cfg_attr") {
+        return Ok(false);
+    }
+    let Meta::List(list) = meta else {
+        return Ok(false);
+    };
+    let arguments = Punctuated::<Meta, Token![,]>::parse_terminated
+        .parse2(list.tokens.clone())
+        .context("parse nested cfg_attr arguments for module path classification")?;
+    arguments.iter().skip(1).try_fold(false, |found, nested| Ok(found || meta_contains_path(nested)?))
 }
 
 fn attributes_disable_production(attributes: &[Attribute]) -> Result<bool> {

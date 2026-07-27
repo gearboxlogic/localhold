@@ -187,6 +187,9 @@ The checker parses Rust syntax and classifies `#[cfg(test)]` and
 those modules, plus integration tests and benchmarks, are entirely test-only.
 This keeps extracting inline tests from pretending that production code was
 removed. LF and CRLF checkouts produce the same physical-line count.
+Production library and binary targets must remain under `src/`. Explicit or
+conditional module path overrides and Rust-source `include!` calls are rejected
+because they make source ownership and production reachability ambiguous.
 
 During the feature freeze:
 

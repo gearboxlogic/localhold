@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use super::{measure_sources, physical_line_count, scan_revision};
+use super::{measure_sources, physical_line_count, scan_revision, scan_workspace};
 
 fn inventory(sources: &[(&str, &str)]) -> super::Inventory {
     let sources = sources.iter().map(|(path, source)| ((*path).to_owned(), (*source).to_owned())).collect::<BTreeMap<_, _>>();
@@ -71,9 +71,53 @@ fn external_modules_reachable_only_from_tests_are_wholly_test_only() {
 }
 
 #[test]
+fn any_production_module_edge_keeps_the_target_in_production() {
+    let inventory = inventory(&[
+        ("src/lib.rs", "#[cfg(not(test))]\nmod shared;\n#[cfg(test)]\nmod shared;\nfn production() {}\n"),
+        ("src/shared.rs", "fn shared() {}\n"),
+    ]);
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_path["src/shared.rs"].production_lines, 1);
+}
+
+#[test]
 fn integration_and_benchmark_roots_are_wholly_test_only() {
     let inventory = inventory(&[("benches/load.rs", "fn benchmark_helper() {}\n"), ("tests/contract.rs", "fn integration_helper() {}\n")]);
     assert!(inventory.files.iter().all(|file| file.production_lines == 0));
+}
+
+#[test]
+fn production_cargo_targets_outside_src_are_rejected() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src", "tests", "benches"] {
+        fs::create_dir(repository.path().join(root)).expect("source root");
+    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\n[[bin]]\nname = \"escape\"\npath = \"tests/escape.rs\"\n",
+    )
+    .expect("package manifest");
+    fs::write(repository.path().join("src/lib.rs"), "fn root() {}\n").expect("root source");
+    fs::write(repository.path().join("tests/escape.rs"), "fn main() {}\n").expect("escaped binary");
+
+    let error = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).unwrap_err();
+    assert!(error.to_string().contains("production target must remain under src/"));
+}
+
+#[test]
+fn explicit_and_conditional_module_paths_fail_closed() {
+    for declaration in [
+        "#[path = \"../tests/helper.rs\"]\nmod helper;\n",
+        "#[cfg_attr(unix, path = \"../tests/helper.rs\")]\nmod helper;\n",
+    ] {
+        let sources = [
+            ("src/lib.rs".to_owned(), declaration.to_owned()),
+            ("tests/helper.rs".to_owned(), "fn helper() {}\n".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        assert!(measure_sources(sources).unwrap_err().to_string().contains("module paths cannot be classified safely"));
+    }
 }
 
 #[test]

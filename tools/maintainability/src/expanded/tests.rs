@@ -101,6 +101,8 @@ fn dep_info_parser_handles_continuations_escapes_and_windows_paths() {
     let parsed = parse_dep_info("target: src/lib.rs tests/data\\ file.sql C\\:\\work\\src\\main.rs \\\n         clippy.toml\n").expect("dep-info");
     assert_eq!(parsed, ["src/lib.rs", "tests/data file.sql", r"C:\work\src\main.rs", "clippy.toml"]);
     assert_eq!(parse_make_words(r"one\\two escaped\#hash trailing\"), [r"one\two", "escaped#hash", r"trailing\"]);
+    assert_eq!(parse_make_words(r"\\?\C\:\work\src\main.rs"), [r"\\?\C:\work\src\main.rs"]);
+    assert_eq!(parse_make_words(r"\\?\UNC\server\share\main.rs"), [r"\\?\UNC\server\share\main.rs"]);
 }
 
 #[test]

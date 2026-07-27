@@ -75,7 +75,7 @@ pub(super) fn parse_make_words(source: &str) -> Vec<String> {
             escaped = true;
         } else if character.is_whitespace() {
             if !word.is_empty() {
-                words.push(std::mem::take(&mut word));
+                words.push(restore_windows_verbatim_prefix(std::mem::take(&mut word)));
             }
         } else {
             word.push(character);
@@ -85,9 +85,16 @@ pub(super) fn parse_make_words(source: &str) -> Vec<String> {
         word.push('\\');
     }
     if !word.is_empty() {
-        words.push(word);
+        words.push(restore_windows_verbatim_prefix(word));
     }
     words
+}
+
+fn restore_windows_verbatim_prefix(mut word: String) -> String {
+    if word.starts_with(r"\?\") {
+        word.insert(0, '\\');
+    }
+    word
 }
 
 pub(super) fn is_audited_compiler_input(path: &Path) -> bool {

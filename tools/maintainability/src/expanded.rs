@@ -68,21 +68,17 @@ pub fn verify(workspace: &Path, sites: &[UnsafeSite], cargo_metadata: &[u8]) -> 
         AuditLane {
             label: "benchmark",
             cargo_args: &["--benches"],
-            target_kinds: &["bench"],
+            target_kinds: AUDITED_TARGET_KINDS,
         },
     ] {
-        let optional_kind = match lane.label {
-            "integration-test" => Some("test"),
-            "benchmark" => Some("bench"),
-            _ => None,
-        };
+        let optional_kind = (lane.label == "integration-test").then_some("test");
         if let Some(kind) = optional_kind
             && !target_kinds.contains(kind)
         {
             continue;
         }
         let audit = run_audit_lane(&workspace, &manifest, &lane)?;
-        let diagnostics = if lane.label == "unit-test" {
+        let diagnostics = if matches!(lane.label, "unit-test" | "benchmark") {
             subtract_diagnostics(&audit.diagnostics, &normal_diagnostics)
         } else {
             audit.diagnostics.clone()
@@ -184,10 +180,10 @@ fn run_audit_lane(workspace: &Path, manifest: &Path, lane: &AuditLane<'_>) -> Re
     if !status.success() {
         bail!("compiler-expanded {} audit failed with {status}", lane.label);
     }
-    if audit.root_artifacts == 0 {
+    if audit.root_artifacts == 0 && lane.label != "benchmark" {
         bail!("compiler-expanded {} audit observed no selected root-package artifacts", lane.label);
     }
-    if audit.dep_info.is_empty() {
+    if audit.dep_info.is_empty() && lane.label != "benchmark" {
         bail!("compiler-expanded {} audit found no selected root-package dep-info files", lane.label);
     }
     Ok(audit)

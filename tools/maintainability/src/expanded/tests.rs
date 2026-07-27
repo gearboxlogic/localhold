@@ -54,7 +54,7 @@ fn compiler_diagnostics_require_one_exact_lexical_site() {
 }
 
 #[test]
-fn unit_test_diagnostics_subtract_one_normal_compilation_without_deduplication() {
+fn harness_diagnostics_subtract_one_normal_compilation_without_deduplication() {
     let repeated = diagnostic(4, 9, "normal and unit unsafe");
     let test_only = diagnostic(8, 5, "test-only unsafe");
     assert_eq!(
@@ -260,6 +260,37 @@ fn explicit_examples_outside_the_examples_directory_are_audited() {
     );
 
     let error = verify_fixture(&fixture, &[]).expect_err("explicit example unsafe must be audited");
+    assert!(error.to_string().contains("compiler-expanded unsafe is absent"), "unexpected error: {error:#}");
+}
+
+#[test]
+fn benchmark_enabled_non_bench_target_diagnostics_are_audited() {
+    let fixture = procedural_macro_fixture();
+    write_root_source(&fixture, "tokio::safe!();");
+    fs::write(
+        fixture.path().join("src/benchmark_only.rs"),
+        "
+        fn main() {}
+        #[cfg(test)]
+        fn benchmark_harness_unsafe() {
+            // SAFETY: the empty fixture operation has no preconditions.
+            unsafe {}
+        }
+        ",
+    )
+    .expect("benchmark-only binary source");
+    append_root_manifest(
+        &fixture,
+        "
+        [[bin]]
+        name = \"benchmark-only\"
+        path = \"src/benchmark_only.rs\"
+        test = false
+        bench = true
+        ",
+    );
+
+    let error = verify_fixture(&fixture, &[]).expect_err("benchmark-enabled binary unsafe must be audited");
     assert!(error.to_string().contains("compiler-expanded unsafe is absent"), "unexpected error: {error:#}");
 }
 

@@ -407,6 +407,8 @@ fn rejects_runnable_rust_doctests_but_allows_ignored_examples() {
     }
     assert!(scan_result("/// ```custom,language-c\n/// int main(void) { return 0; }\n/// ```\nfn sample() {}").is_ok());
     assert!(scan_result("/// ```custom,{.language-c}\n/// int main(void) { return 0; }\n/// ```\nfn sample() {}").is_ok());
+    assert!(scan_result("/// ```custom,rust\n/// fn custom_rust() {}\n/// ```\nfn sample() {}").is_ok());
+    assert!(scan_result("/// ```custom,no_run\n/// fn custom_no_run() {}\n/// ```\nfn sample() {}").is_ok());
     assert!(scan_result("/// ```text\n///     indented prose\n/// ```\nfn sample() {}").is_ok());
     assert!(
         scan_result(
@@ -527,4 +529,12 @@ fn rejects_macro_invocations_inside_unsafe_function_bodies() {
         unsafe fn read(pointer: *const u8) -> u8 { dereference!(pointer) }
         ",
     );
+}
+
+#[test]
+fn rejects_macro_invocations_inside_unsafe_traits_and_impls() {
+    for source in ["unsafe trait Boundary { transport_test!(); }", "unsafe impl Boundary for Value { transport_test!(); }"] {
+        let error = scan_result(source).expect_err("macro expansion inside unsafe trait or impl must fail closed");
+        assert!(error.to_string().contains("invokes a macro inside an unsafe context"), "unexpected error: {error:#}");
+    }
 }

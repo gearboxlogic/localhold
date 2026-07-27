@@ -391,8 +391,10 @@ impl<'ast> Visit<'ast> for SourceScanner {
         self.visit_boundary(scope, implementation, |scanner, implementation| {
             if let Some(unsafety) = &implementation.unsafety {
                 scanner.push_site(SiteKind::Impl, implementation, unsafety.span);
+                scanner.with_unsafe_context(|scanner| visit::visit_item_impl(scanner, implementation));
+            } else {
+                visit::visit_item_impl(scanner, implementation);
             }
-            visit::visit_item_impl(scanner, implementation);
         });
     }
 
@@ -423,8 +425,10 @@ impl<'ast> Visit<'ast> for SourceScanner {
         self.visit_boundary(scope, item, |scanner, item| {
             if let Some(unsafety) = &item.unsafety {
                 scanner.push_site(SiteKind::Trait, item, unsafety.span);
+                scanner.with_unsafe_context(|scanner| visit::visit_item_trait(scanner, item));
+            } else {
+                visit::visit_item_trait(scanner, item);
             }
-            visit::visit_item_trait(scanner, item);
         });
     }
 

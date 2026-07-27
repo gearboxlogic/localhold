@@ -140,7 +140,7 @@ fn rustdoc_compiles(info: &str) -> bool {
         .collect();
     let is_class = |token: &&str| token.starts_with('.') || token.starts_with("class=");
     if tokens.contains(&"custom") {
-        return tokens.iter().any(rustdoc_rust_modifier);
+        return false;
     }
     if tokens.iter().any(|token| token.starts_with("ignore-")) {
         return true;

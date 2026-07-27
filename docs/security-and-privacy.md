@@ -195,16 +195,19 @@ These paths are not contacted by a default running `hold` process:
   code expansion or aliases are rejected; macro-generated safety exceptions
   and mutable statics remain inventoried. Reviewed macros cannot emit name
   bindings that redirect expansion paths, and macros inside any unsafe context,
-  including unsafe extern blocks, are rejected. Cargo target paths must stay
-  under audited roots. Compiler-audit lanes are derived from locked Cargo
-  metadata, including explicit targets outside conventional directories and
-  test-enabled examples. Root workspaces and local path dependencies are
+  including unsafe extern blocks and unsafe trait/impl bodies, are rejected.
+  Cargo target paths must stay under audited roots. Compiler-audit lanes are
+  derived from locked Cargo metadata, including explicit targets outside
+  conventional directories and test-enabled examples; the benchmark lane
+  audits every target kind Cargo selects with `bench = true`. Root workspaces
+  and local path dependencies are
   rejected except for the reviewed self dev-dependency. All enabled package
   build scripts are rejected, and a physical root `build.rs` is rejected even
   when disabled. Runnable rustdoc modifiers, target-specific ignores, and
   class-only Rust fences are rejected unless the block is globally ignored or
-  explicitly marked as a non-Rust language or `custom`. The gate also verifies
-  the required lint levels, protects them from overlapping higher-priority lint
+  explicitly marked as a non-Rust language or `custom`; `custom` takes
+  precedence over every other fence token. The gate also verifies the required
+  lint levels, protects them from overlapping higher-priority lint
   groups, removes inherited compiler overrides and build-target selection from
   metadata and compiler-audit commands, and pins locked dependency
   versions/sources/checksums, reviewed direct feature specifications, compiler

@@ -369,18 +369,7 @@ pub(super) fn contains_opaque_attribute(tokens: TokenStream) -> bool {
         if !matches!(token, TokenTree::Punct(punctuation) if punctuation.as_char() == '#') {
             return false;
         }
-        let mut attribute_index = index + 1;
-        if matches!(
-            tokens.get(attribute_index),
-            Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == '!'
-        ) {
-            attribute_index += 1;
-        }
-        !matches!(
-            tokens.get(attribute_index),
-            Some(TokenTree::Group(group))
-                if group.delimiter() == Delimiter::Bracket && !contains_punctuation(group.stream(), '$')
-        )
+        bracket_attribute_after(&tokens, index).is_none_or(|group| contains_punctuation(group.stream(), '$'))
     }) || tokens.into_iter().any(|token| match token {
         TokenTree::Group(group) => contains_opaque_attribute(group.stream()),
         TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => false,
@@ -389,12 +378,11 @@ pub(super) fn contains_opaque_attribute(tokens: TokenStream) -> bool {
 
 pub(super) fn contains_path_attribute(tokens: TokenStream) -> bool {
     let tokens: Vec<_> = tokens.into_iter().collect();
-    tokens.windows(2).any(|pair| {
-        matches!(&pair[0], TokenTree::Punct(punctuation) if punctuation.as_char() == '#')
-            && matches!(&pair[1], TokenTree::Group(group) if {
+    tokens.iter().enumerate().any(|(index, token)| {
+        matches!(token, TokenTree::Punct(punctuation) if punctuation.as_char() == '#')
+            && bracket_attribute_after(&tokens, index).is_some_and(|group| {
                 let attribute = group.stream();
-                first_ident_is(attribute.clone(), "path")
-                    || (first_ident_is(attribute.clone(), "cfg_attr") && contains_structural_ident(attribute, "path"))
+                first_ident_is(attribute.clone(), "path") || (first_ident_is(attribute.clone(), "cfg_attr") && contains_structural_ident(attribute, "path"))
             })
     }) || tokens.into_iter().any(|token| match token {
         TokenTree::Group(group) => contains_path_attribute(group.stream()),
@@ -408,21 +396,25 @@ fn contains_macro_safety_lint_exception(tokens: TokenStream) -> bool {
         if !matches!(token, TokenTree::Punct(punctuation) if punctuation.as_char() == '#') {
             return false;
         }
-        let attribute_index = index
-            + usize::from(matches!(
-                tokens.get(index + 1),
-                Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == '!'
-            ))
-            + 1;
-        matches!(
-            tokens.get(attribute_index),
-            Some(TokenTree::Group(group))
-                if group.delimiter() == Delimiter::Bracket && is_safety_lint_meta(&group.stream())
-        )
+        bracket_attribute_after(&tokens, index).is_some_and(|group| is_safety_lint_meta(&group.stream()))
     }) || tokens.into_iter().any(|token| match token {
         TokenTree::Group(group) => contains_macro_safety_lint_exception(group.stream()),
         TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => false,
     })
+}
+
+fn bracket_attribute_after(tokens: &[TokenTree], hash_index: usize) -> Option<&proc_macro2::Group> {
+    let mut group_index = hash_index + 1;
+    if matches!(
+        tokens.get(group_index),
+        Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == '!'
+    ) {
+        group_index += 1;
+    }
+    let Some(TokenTree::Group(group)) = tokens.get(group_index) else {
+        return None;
+    };
+    (group.delimiter() == Delimiter::Bracket).then_some(group)
 }
 
 fn is_safety_lint_meta(tokens: &TokenStream) -> bool {

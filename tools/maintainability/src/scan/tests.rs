@@ -177,6 +177,8 @@ fn rejects_source_expansion_outside_audited_files() {
     assert_source_expansion_rejected(r#"r#include!("../outside.rs");"#);
     assert_source_expansion_rejected(r#"macro_rules! expand { () => { include!("../outside.rs"); } }"#);
     assert_source_expansion_rejected(r#"macro_rules! expand { () => { #[path = "../outside.rs"] mod outside; } }"#);
+    assert_source_expansion_rejected(r#"macro_rules! expand { () => { #![path = "../outside.rs"] mod outside; } }"#);
+    assert_source_expansion_rejected(r#"macro_rules! expand { () => { #![cfg_attr(any(), path = "../outside.rs")] mod outside; } }"#);
     assert_source_expansion_rejected(r#"macro_rules! expand { ($m:ident) => { $m!("../outside.rs") } } expand!(include);"#);
     assert_source_expansion_rejected(r#"macro_rules! expand { ($a:ident) => { #[$a = "../outside.rs"] mod outside; } } expand!(path);"#);
     assert_source_expansion_rejected(r#"macro_rules! expand { ($a:ident ;) => { #[$a = "../outside.rs"] mod outside; } } expand!(path;);"#);

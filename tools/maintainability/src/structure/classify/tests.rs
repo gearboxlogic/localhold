@@ -83,6 +83,7 @@ fn any_production_module_edge_keeps_the_target_in_production() {
 #[test]
 fn integration_and_benchmark_roots_are_wholly_test_only() {
     let inventory = inventory(&[("benches/load.rs", "fn benchmark_helper() {}\n"), ("tests/contract.rs", "fn integration_helper() {}\n")]);
+    assert_eq!(inventory.files.len(), 2);
     assert!(inventory.files.iter().all(|file| file.production_lines == 0));
 }
 
@@ -102,6 +103,30 @@ fn production_cargo_targets_outside_src_are_rejected() {
 
     let error = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).unwrap_err();
     assert!(error.to_string().contains("production target must remain under src/"));
+}
+
+#[test]
+fn rust_examples_and_auxiliary_targets_outside_the_inventory_are_rejected() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src", "tests", "benches", "examples", "fixtures"] {
+        fs::create_dir(repository.path().join(root)).expect("source root");
+    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\n[[test]]\nname = \"escape\"\npath = \"fixtures/escape.rs\"\n",
+    )
+    .expect("package manifest");
+    fs::write(repository.path().join("src/lib.rs"), "fn root() {}\n").expect("root source");
+    fs::write(repository.path().join("fixtures/escape.rs"), "fn escaped_test() {}\n").expect("escaped test target");
+    let roots = ["src".to_owned(), "tests".to_owned(), "benches".to_owned()];
+
+    let error = scan_workspace(repository.path(), &roots).unwrap_err();
+    assert!(error.to_string().contains("outside the structural source inventory"));
+
+    fs::write(repository.path().join("Cargo.toml"), "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n").expect("package manifest");
+    fs::write(repository.path().join("examples/demo.rs"), "fn main() {}\n").expect("example source");
+    let error = scan_workspace(repository.path(), &roots).unwrap_err();
+    assert!(error.to_string().contains("untracked examples/"));
 }
 
 #[test]

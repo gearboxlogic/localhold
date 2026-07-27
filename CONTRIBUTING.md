@@ -190,6 +190,8 @@ removed. LF and CRLF checkouts produce the same physical-line count.
 Production library and binary targets must remain under `src/`. Explicit or
 conditional module path overrides and Rust-source `include!` calls are rejected
 because they make source ownership and production reachability ambiguous.
+Rust examples and explicitly declared Cargo targets outside the tracked roots
+are also rejected while the initial path map is closed.
 
 During the feature freeze:
 

@@ -40,6 +40,7 @@ struct TreeEntry {
 }
 
 pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Inventory> {
+    reject_untracked_rust_sources(workspace, "examples")?;
     let mut sources = BTreeMap::new();
     for root in roots {
         collect_sources(workspace, &workspace.join(root), &mut sources)?;
@@ -277,6 +278,9 @@ fn workspace_production_roots<'a>(workspace: &Path, known: impl Iterator<Item = 
             add_declared_target_root(binary, "binary", &known, &mut roots)?;
         }
     }
+    for kind in ["example", "test", "bench"] {
+        validate_auxiliary_target_roots(&manifest, kind, &known)?;
+    }
     Ok(roots)
 }
 
@@ -301,6 +305,57 @@ fn add_declared_target_root(target: &toml::Value, kind: &str, known: &BTreeSet<S
         bail!("package {kind} production target is missing from the structural source inventory: {path}");
     }
     roots.insert(path.to_owned());
+    Ok(())
+}
+
+fn validate_auxiliary_target_roots(manifest: &toml::Value, kind: &str, known: &BTreeSet<String>) -> Result<()> {
+    let Some(targets) = manifest.get(kind) else {
+        return Ok(());
+    };
+    let targets = targets.as_array().with_context(|| format!("package {kind} targets must be an array of tables"))?;
+    for target in targets {
+        let target = target.as_table().with_context(|| format!("package {kind} target must be a table"))?;
+        let Some(path) = target.get("path") else {
+            continue;
+        };
+        let path = path.as_str().with_context(|| format!("package {kind} target path must be a string"))?;
+        validate_relative_rust_path(path)?;
+        if !known.contains(path) {
+            bail!("package {kind} target is outside the structural source inventory: {path}");
+        }
+    }
+    Ok(())
+}
+
+fn reject_untracked_rust_sources(workspace: &Path, root_name: &str) -> Result<()> {
+    let root = workspace.join(root_name);
+    match fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            bail!("untracked source root must be absent or a real directory: {}", root.display());
+        }
+        Ok(_) => reject_rust_sources_in_directory(&root, root_name),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("inspect untracked source root {}", root.display())),
+    }
+}
+
+fn reject_rust_sources_in_directory(directory: &Path, root_name: &str) -> Result<()> {
+    let mut entries = fs::read_dir(directory)
+        .with_context(|| format!("read untracked source directory {}", directory.display()))?
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry.file_type().with_context(|| format!("inspect untracked source entry {}", path.display()))?;
+        if file_type.is_symlink() {
+            bail!("untracked source roots cannot contain symlinks: {}", path.display());
+        }
+        if file_type.is_dir() {
+            reject_rust_sources_in_directory(&path, root_name)?;
+        } else if file_type.is_file() && path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+            bail!("Rust sources under untracked {root_name}/ are forbidden during the structural freeze: {}", path.display());
+        }
+    }
     Ok(())
 }
 

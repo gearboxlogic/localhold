@@ -3,15 +3,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use quote::ToTokens;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use syn::ext::IdentExt as _;
 use syn::visit::{self, Visit};
 use syn::{
     Attribute, ExprUnsafe, ForeignItemFn, ForeignItemStatic, ImplItemFn, ItemFn, ItemForeignMod, ItemImpl, ItemMod, ItemStatic, ItemTrait, ItemUse, Macro, StaticMutability,
     TraitItemFn,
+};
+
+use self::policy::{
+    contains_assembly_macro, contains_opaque_attribute, contains_path_attribute, contains_structural_ident, contains_unaudited_macro_syntax, is_path_override,
+    is_safety_lint_exception, is_standalone_assembly_macro, is_unsafe_attribute, macro_name,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -100,7 +103,7 @@ pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Vec<UnsafeSi
         }
     }
     if !violations.is_empty() {
-        bail!("unsupported Rust source inclusion:\n{}", violations.join("\n"));
+        bail!("unsupported or unaudited Rust source construct:\n{}", violations.join("\n"));
     }
     Ok(sites)
 }
@@ -144,6 +147,7 @@ fn collect_rust_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
 struct SourceScanner {
     scopes: Vec<String>,
     boundaries: Vec<String>,
+    unsafe_context_depth: usize,
     sites: Vec<PendingSite>,
     violations: Vec<String>,
 }
@@ -175,6 +179,12 @@ impl SourceScanner {
         self.boundaries.pop();
     }
 
+    fn with_unsafe_context(&mut self, visit: impl FnOnce(&mut Self)) {
+        self.unsafe_context_depth += 1;
+        visit(self);
+        self.unsafe_context_depth -= 1;
+    }
+
     fn child_scope(&self, name: &str) -> String {
         self.scopes.last().map_or_else(|| name.to_owned(), |parent| format!("{parent}::{name}"))
     }
@@ -196,12 +206,12 @@ impl<'ast> Visit<'ast> for SourceScanner {
 
     fn visit_expr_unsafe(&mut self, expression: &'ast ExprUnsafe) {
         self.push_site(SiteKind::Block, expression);
-        visit::visit_expr_unsafe(self, expression);
+        self.with_unsafe_context(|scanner| visit::visit_expr_unsafe(scanner, expression));
     }
 
     fn visit_macro(&mut self, macro_invocation: &'ast Macro) {
-        let macro_name = macro_invocation.path.segments.last().map(|segment| segment.ident.unraw().to_string());
-        if macro_name.as_deref() == Some("include") || contains_structural_ident(macro_invocation.tokens.clone(), "include") {
+        let name = macro_name(macro_invocation);
+        if name.as_deref() == Some("include") || contains_structural_ident(macro_invocation.tokens.clone(), "include") {
             self.violations.push(format!("{} uses include! code expansion", self.item()));
         }
         if contains_path_attribute(macro_invocation.tokens.clone()) {
@@ -211,14 +221,14 @@ impl<'ast> Visit<'ast> for SourceScanner {
             self.violations
                 .push(format!("{} uses opaque attribute construction that could bypass the safety inventory", self.item()));
         }
-        let unsafe_assembly = ["global_asm", "llvm_asm", "naked_asm"]
-            .into_iter()
-            .any(|name| macro_name.as_deref() == Some(name) || contains_structural_ident(macro_invocation.tokens.clone(), name));
-        if contains_macro_safety_lint_exception(macro_invocation.tokens.clone()) {
-            self.push_site(SiteKind::LintException, macro_invocation);
-        }
-        if contains_plain_ident(macro_invocation.tokens.clone(), "unsafe") || unsafe_assembly || contains_static_item_token(macro_invocation.tokens.clone()) {
+        if self.unsafe_context_depth > 0 {
+            self.violations
+                .push(format!("{} invokes a macro inside an unsafe context, whose expansion cannot be audited", self.item()));
+        } else if is_standalone_assembly_macro(name.as_deref()) {
             self.push_site(SiteKind::MacroInput, macro_invocation);
+        } else if contains_unaudited_macro_syntax(&macro_invocation.tokens) {
+            self.violations
+                .push(format!("{} uses macro-generated unsafe, assembly, mutable-static, or safety-lint syntax", self.item()));
         }
         visit::visit_macro(self, macro_invocation);
     }
@@ -229,11 +239,9 @@ impl<'ast> Visit<'ast> for SourceScanner {
             self.violations
                 .push(format!("{} imports include!, which can hide source expansion behind an alias", self.item()));
         }
-        if ["global_asm", "llvm_asm", "naked_asm"]
-            .into_iter()
-            .any(|name| contains_structural_ident(tokens.clone(), name))
-        {
-            self.push_site(SiteKind::MacroInput, item);
+        if contains_assembly_macro(&tokens) {
+            self.violations
+                .push(format!("{} imports an assembly macro; invoke it through its explicit qualified path", self.item()));
         }
         visit::visit_item_use(self, item);
     }
@@ -246,10 +254,13 @@ impl<'ast> Visit<'ast> for SourceScanner {
     fn visit_item_fn(&mut self, function: &'ast ItemFn) {
         let scope = self.child_scope(&function.sig.ident.to_string());
         self.visit_boundary(scope, function, |scanner, function| {
-            if function.sig.unsafety.is_some() {
+            let is_unsafe = function.sig.unsafety.is_some();
+            if is_unsafe {
                 scanner.push_site(SiteKind::Function, &function.sig);
+                scanner.with_unsafe_context(|scanner| visit::visit_item_fn(scanner, function));
+            } else {
+                visit::visit_item_fn(scanner, function);
             }
-            visit::visit_item_fn(scanner, function);
         });
     }
 
@@ -271,10 +282,13 @@ impl<'ast> Visit<'ast> for SourceScanner {
     fn visit_impl_item_fn(&mut self, function: &'ast ImplItemFn) {
         let scope = self.child_scope(&function.sig.ident.to_string());
         self.visit_boundary(scope, function, |scanner, function| {
-            if function.sig.unsafety.is_some() {
+            let is_unsafe = function.sig.unsafety.is_some();
+            if is_unsafe {
                 scanner.push_site(SiteKind::Function, &function.sig);
+                scanner.with_unsafe_context(|scanner| visit::visit_impl_item_fn(scanner, function));
+            } else {
+                visit::visit_impl_item_fn(scanner, function);
             }
-            visit::visit_impl_item_fn(scanner, function);
         });
     }
 
@@ -291,10 +305,13 @@ impl<'ast> Visit<'ast> for SourceScanner {
     fn visit_trait_item_fn(&mut self, function: &'ast TraitItemFn) {
         let scope = self.child_scope(&function.sig.ident.to_string());
         self.visit_boundary(scope, function, |scanner, function| {
-            if function.sig.unsafety.is_some() {
+            let is_unsafe = function.sig.unsafety.is_some();
+            if is_unsafe {
                 scanner.push_site(SiteKind::Function, &function.sig);
+                scanner.with_unsafe_context(|scanner| visit::visit_trait_item_fn(scanner, function));
+            } else {
+                visit::visit_trait_item_fn(scanner, function);
             }
-            visit::visit_trait_item_fn(scanner, function);
         });
     }
 
@@ -339,135 +356,6 @@ impl<'ast> Visit<'ast> for SourceScanner {
     }
 }
 
-fn is_safety_lint_exception(attribute: &Attribute) -> bool {
-    let path = attribute.path().segments.last().map(|segment| segment.ident.unraw().to_string());
-    let tokens = attribute.meta.to_token_stream();
-    match path.as_deref() {
-        Some("allow" | "expect" | "warn") => contains_safety_lint_name(&tokens),
-        Some("cfg_attr") => contains_safety_lint_name(&tokens) && ["allow", "expect", "warn"].into_iter().any(|level| contains_structural_ident(tokens.clone(), level)),
-        _ => false,
-    }
-}
-
-fn contains_macro_safety_lint_exception(tokens: TokenStream) -> bool {
-    let tokens: Vec<_> = tokens.into_iter().collect();
-    tokens.iter().enumerate().any(|(index, token)| {
-        if !matches!(token, TokenTree::Punct(punctuation) if punctuation.as_char() == '#') {
-            return false;
-        }
-        let attribute_index = index
-            + usize::from(matches!(
-                tokens.get(index + 1),
-                Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == '!'
-            ))
-            + 1;
-        matches!(
-            tokens.get(attribute_index),
-            Some(TokenTree::Group(group))
-                if group.delimiter() == Delimiter::Bracket && is_safety_lint_meta(&group.stream())
-        )
-    }) || tokens.into_iter().any(|token| match token {
-        TokenTree::Group(group) => contains_macro_safety_lint_exception(group.stream()),
-        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => false,
-    })
-}
-
-fn is_safety_lint_meta(tokens: &TokenStream) -> bool {
-    if ["allow", "expect", "warn"].into_iter().any(|level| first_ident_is(tokens.clone(), level)) {
-        return contains_safety_lint_name(tokens);
-    }
-    first_ident_is(tokens.clone(), "cfg_attr")
-        && contains_safety_lint_name(tokens)
-        && ["allow", "expect", "warn"].into_iter().any(|level| contains_structural_ident(tokens.clone(), level))
-}
-
-fn contains_safety_lint_name(tokens: &TokenStream) -> bool {
-    let names = ["unsafe_code", "unsafe_op_in_unsafe_fn", "undocumented_unsafe_blocks"];
-    let groups = ["all", "future_incompatible", "restriction", "rust_2024_compatibility", "warnings"];
-    names.into_iter().chain(groups).any(|name| contains_structural_ident(tokens.clone(), name))
-}
-
-fn contains_static_item_token(tokens: TokenStream) -> bool {
-    contains_structural_ident(tokens, "static")
-}
-
-fn is_unsafe_attribute(attribute: &Attribute) -> bool {
-    let path = attribute.path().segments.last().map(|segment| segment.ident.unraw().to_string());
-    path.as_deref() == Some("unsafe") || (path.as_deref() == Some("cfg_attr") && contains_structural_ident(attribute.meta.to_token_stream(), "unsafe"))
-}
-
-fn is_path_override(attribute: &Attribute) -> bool {
-    let path = attribute.path().segments.last().map(|segment| segment.ident.unraw().to_string());
-    path.as_deref() == Some("path") || (path.as_deref() == Some("cfg_attr") && contains_structural_ident(attribute.meta.to_token_stream(), "path"))
-}
-
-fn contains_plain_ident(tokens: TokenStream, expected: &str) -> bool {
-    tokens.into_iter().any(|token| match token {
-        TokenTree::Group(group) => contains_plain_ident(group.stream(), expected),
-        TokenTree::Ident(identifier) => identifier == expected,
-        TokenTree::Punct(_) | TokenTree::Literal(_) => false,
-    })
-}
-
-fn contains_structural_ident(tokens: TokenStream, expected: &str) -> bool {
-    tokens.into_iter().any(|token| match token {
-        TokenTree::Group(group) => contains_structural_ident(group.stream(), expected),
-        TokenTree::Ident(identifier) => identifier.unraw() == expected,
-        TokenTree::Punct(_) | TokenTree::Literal(_) => false,
-    })
-}
-
-fn contains_opaque_attribute(tokens: TokenStream) -> bool {
-    let tokens: Vec<_> = tokens.into_iter().collect();
-    tokens.iter().enumerate().any(|(index, token)| {
-        if !matches!(token, TokenTree::Punct(punctuation) if punctuation.as_char() == '#') {
-            return false;
-        }
-        let mut attribute_index = index + 1;
-        if matches!(
-            tokens.get(attribute_index),
-            Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == '!'
-        ) {
-            attribute_index += 1;
-        }
-        !matches!(
-            tokens.get(attribute_index),
-            Some(TokenTree::Group(group))
-                if group.delimiter() == Delimiter::Bracket && !contains_punctuation(group.stream(), '$')
-        )
-    }) || tokens.into_iter().any(|token| match token {
-        TokenTree::Group(group) => contains_opaque_attribute(group.stream()),
-        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => false,
-    })
-}
-
-fn contains_punctuation(tokens: TokenStream, expected: char) -> bool {
-    tokens.into_iter().any(|token| match token {
-        TokenTree::Group(group) => contains_punctuation(group.stream(), expected),
-        TokenTree::Punct(punctuation) => punctuation.as_char() == expected,
-        TokenTree::Ident(_) | TokenTree::Literal(_) => false,
-    })
-}
-
-fn contains_path_attribute(tokens: TokenStream) -> bool {
-    let tokens: Vec<_> = tokens.into_iter().collect();
-    tokens.windows(2).any(|pair| {
-        matches!(&pair[0], TokenTree::Punct(punctuation) if punctuation.as_char() == '#')
-            && matches!(&pair[1], TokenTree::Group(group) if {
-                let attribute = group.stream();
-                first_ident_is(attribute.clone(), "path")
-                    || (first_ident_is(attribute.clone(), "cfg_attr") && contains_structural_ident(attribute, "path"))
-            })
-    }) || tokens.into_iter().any(|token| match token {
-        TokenTree::Group(group) => contains_path_attribute(group.stream()),
-        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => false,
-    })
-}
-
-fn first_ident_is(tokens: TokenStream, expected: &str) -> bool {
-    matches!(tokens.into_iter().next(), Some(TokenTree::Ident(identifier)) if identifier.unraw() == expected)
-}
-
 fn normalized_tokens(tokens: &impl ToTokens) -> String {
     tokens.to_token_stream().to_string()
 }
@@ -476,5 +364,6 @@ fn fingerprint(tokens: &impl ToTokens) -> String {
     format!("{:x}", Sha256::digest(normalized_tokens(tokens).as_bytes()))
 }
 
+mod policy;
 #[cfg(test)]
 mod tests;

@@ -10,17 +10,20 @@
     {
       "table": "rust",
       "name": "unsafe_code",
-      "level": "deny"
+      "level": "deny",
+      "priority": 1
     },
     {
       "table": "rust",
       "name": "unsafe_op_in_unsafe_fn",
-      "level": "deny"
+      "level": "deny",
+      "priority": 1
     },
     {
       "table": "clippy",
       "name": "undocumented_unsafe_blocks",
-      "level": "deny"
+      "level": "deny",
+      "priority": 1
     }
   ],
   "contracts": [

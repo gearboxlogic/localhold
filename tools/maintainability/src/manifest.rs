@@ -8,11 +8,11 @@ use serde::Deserialize;
 use crate::scan::{SiteKind, UnsafeSite};
 
 const REQUIRED_ROOTS: [&str; 3] = ["src", "tests", "benches"];
-type LintSpec = (&'static str, &'static str, &'static str);
+type LintSpec = (&'static str, &'static str, &'static str, i64);
 const REQUIRED_LINTS: [LintSpec; 3] = [
-    ("rust", "unsafe_code", "deny"),
-    ("rust", "unsafe_op_in_unsafe_fn", "deny"),
-    ("clippy", "undocumented_unsafe_blocks", "deny"),
+    ("rust", "unsafe_code", "deny", 1),
+    ("rust", "unsafe_op_in_unsafe_fn", "deny", 1),
+    ("clippy", "undocumented_unsafe_blocks", "deny", 1),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -32,6 +32,7 @@ struct LintRequirement {
     table: String,
     name: String,
     level: String,
+    priority: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,8 +132,10 @@ impl UnsafeManifest {
         &self.tracked_roots
     }
 
-    pub fn required_lints(&self) -> impl Iterator<Item = (&str, &str, &str)> {
-        self.required_lints.iter().map(|lint| (lint.table.as_str(), lint.name.as_str(), lint.level.as_str()))
+    pub fn required_lints(&self) -> impl Iterator<Item = (&str, &str, &str, i64)> {
+        self.required_lints
+            .iter()
+            .map(|lint| (lint.table.as_str(), lint.name.as_str(), lint.level.as_str(), lint.priority))
     }
 
     pub fn dependency_packages(&self) -> Result<BTreeMap<&str, &DependencyPin>> {
@@ -223,12 +226,7 @@ impl UnsafeManifest {
                 bail!("duplicate unsafe site locator {:?}", site.locator());
             }
             referenced_contracts.insert(site.contract_id.as_str());
-            if site.kind == SiteKind::LintException && !site.operation_ids.is_empty() {
-                bail!("safety-lint exception site {:?} cannot own executable operations", site.id);
-            }
-            if site.kind != SiteKind::LintException && site.operation_ids.is_empty() {
-                bail!("executable unsafe site {:?} must identify its operations", site.id);
-            }
+            validate_site_operation_cardinality(site)?;
             validate_site_operations(site, &operations, &mut referenced_operations)?;
         }
         if referenced_contracts.len() != contract_ids.len() {
@@ -364,6 +362,17 @@ fn validate_site(site: &ExpectedSite, contract_ids: &BTreeSet<&str>) -> Result<(
     Ok(())
 }
 
+fn validate_site_operation_cardinality(site: &ExpectedSite) -> Result<()> {
+    if site.kind == SiteKind::LintException {
+        if !site.operation_ids.is_empty() {
+            bail!("safety-lint exception site {:?} cannot own executable operations", site.id);
+        }
+    } else if site.operation_ids.len() != 1 {
+        bail!("executable unsafe site {:?} must identify exactly one operation", site.id);
+    }
+    Ok(())
+}
+
 fn validate_site_operations<'a>(site: &'a ExpectedSite, operations: &BTreeMap<&'a str, &'a str>, referenced: &mut BTreeSet<&'a str>) -> Result<()> {
     let mut local = BTreeSet::new();
     for operation_id in &site.operation_ids {
@@ -419,56 +428,4 @@ fn require_text(value: &str, field: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{ExpectedSite, UnsafeManifest};
-    use crate::scan::{SiteKind, UnsafeSite};
-
-    fn manifest(fingerprint: &str) -> UnsafeManifest {
-        UnsafeManifest {
-            schema_version: 1,
-            baseline_commit: "0".repeat(40),
-            tracked_roots: UnsafeManifest::required_roots(),
-            required_lints: Vec::new(),
-            contracts: Vec::new(),
-            sites: vec![ExpectedSite {
-                id: "site.one".to_owned(),
-                contract_id: "contract.one".to_owned(),
-                path: "src/sample.rs".to_owned(),
-                item: "boundary".to_owned(),
-                kind: SiteKind::Block,
-                occurrence: 0,
-                fingerprint: fingerprint.to_owned(),
-                boundary_fingerprint: fingerprint.to_owned(),
-                operation_ids: vec!["operation.one".to_owned()],
-            }],
-        }
-    }
-
-    fn site(fingerprint: &str) -> UnsafeSite {
-        UnsafeSite {
-            path: "src/sample.rs".to_owned(),
-            item: "boundary".to_owned(),
-            kind: SiteKind::Block,
-            occurrence: 0,
-            fingerprint: fingerprint.to_owned(),
-            boundary_fingerprint: fingerprint.to_owned(),
-        }
-    }
-
-    #[test]
-    fn comparison_rejects_missing_unexpected_and_mutated_sites() {
-        let fingerprint = "a".repeat(64);
-        let policy = manifest(&fingerprint);
-        assert!(policy.compare_sites(&[site(&fingerprint)]).is_ok());
-        assert!(policy.compare_sites(&[]).is_err());
-        assert!(policy.compare_sites(&[site(&"b".repeat(64))]).is_err());
-
-        let mut changed_boundary = site(&fingerprint);
-        changed_boundary.boundary_fingerprint = "b".repeat(64);
-        assert!(policy.compare_sites(&[changed_boundary]).is_err());
-
-        let mut moved = site(&fingerprint);
-        moved.item = "other_boundary".to_owned();
-        assert!(policy.compare_sites(&[moved]).is_err());
-    }
-}
+mod tests;

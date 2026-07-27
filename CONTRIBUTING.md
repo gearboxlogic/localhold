@@ -74,15 +74,19 @@ group-level exceptions to required safety lints under `src/`, `tests/`, and
 `benches/`, plus `examples/` when present, against
 `policy/maintainability/unsafe.json`. The gate parses Rust syntax rather than
 searching text, so comments, strings, and unsafe function-pointer types are not
-mistaken for executable operations. Unsafe tokens passed to macros remain
-conservatively reviewable sites, as do macro-generated safety-lint exceptions
-and mutable statics. `allow`, `expect`, and `warn` all count as exceptions when
-they weaken a required deny-level lint. Opaque macro-generated attributes,
-`include!` code expansion (including imported aliases), and `#[path]` source
-overrides are rejected so code cannot escape the audited roots or hide an
-exception from the inventory. Explicit Cargo target paths must remain under
-those roots. A root `build.rs` is rejected until the gate can audit its complete
-module graph.
+mistaken for executable operations. Macro-generated unsafe syntax, assembly,
+mutable statics, and safety-lint exceptions are rejected because a definition
+fingerprint cannot account for caller-supplied expansions. Standalone assembly
+macros must use explicit qualified paths so every invocation is fingerprinted.
+Macro invocations inside unsafe blocks and unsafe functions are also rejected
+because changing the macro definition could change the reviewed operation
+without changing the unsafe-context syntax.
+`allow`, `expect`, and `warn` all count as exceptions when they weaken a
+required deny-level lint. Opaque macro-generated attributes, `include!` code
+expansion (including imported aliases), and `#[path]` source overrides are
+rejected so code cannot escape the audited roots or hide an exception from the
+inventory. Explicit Cargo target paths must remain under those roots. A root
+`build.rs` is rejected until the gate can audit its complete module graph.
 
 Every exception requires a narrow safety contract with a stable owner,
 necessity, attempted safe alternatives, validity/lifetime/aliasing/ABI/thread
@@ -91,10 +95,14 @@ tests, dependency pins, invalidation and removal triggers, proof debt, and a
 recovery issue. Operations and lint exceptions are counted separately. Site
 locators plus site and enclosing-boundary syntax fingerprints make additions,
 moves, removals, operation mutations, and safe-wrapper mutations fail closed.
-The gate also prevents weakening the required compiler and Clippy lint levels
-or silently changing the locked version, source, checksum, or reviewed direct
-feature specification of a dependency on which a contract relies. The broader
-dependency-exposure gate still reviews target-specific effective Cargo graphs.
+The gate also reserves a higher Cargo priority for required compiler and Clippy
+lints so groups cannot override them, and rejects repository `.cargo/config*`
+files that could inject overriding compiler flags. Contract dependencies must
+use exactly their reviewed routes: alternate direct dependencies, aliases,
+workspace inheritance, build/dev/target declarations, and root-feature
+forwarding are rejected. Locked versions, sources, checksums, and direct
+feature specifications remain pinned. The broader dependency-exposure gate
+still reviews target-specific effective Cargo graphs.
 
 Inspect the parser's current site inventory with:
 
@@ -105,9 +113,9 @@ cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- inventory
 The command prints the pretty-formatted site inventory to standard output for
 inspection, but writes no files. Do not copy inventory fingerprints into
 policy merely to make the gate pass. First remove the unsafe code when a safe
-design exists. If unsafe remains necessary, keep each block to one operation,
-update the complete contract and focused tests, and request an explicit safety
-review.
+design exists. If unsafe remains necessary, declare exactly one reviewed
+operation for each executable site, keep each block to that operation, update
+the complete contract and focused tests, and request an explicit safety review.
 
 The current sqlite-vec registration contract is temporary proof debt:
 sqlite-vec exposes an erased Rust function signature while its bundled C header

@@ -8,6 +8,8 @@ use serde::Deserialize;
 use crate::manifest::{DependencyPin, RootDependencySpec, UnsafeManifest};
 use crate::scan;
 
+type RequiredLint<'a> = (&'a str, &'a str, &'a str, i64);
+
 #[derive(Debug, Deserialize)]
 struct Lockfile {
     package: Vec<LockedPackage>,
@@ -29,41 +31,96 @@ pub fn run(workspace: &Path, manifest: &UnsafeManifest) -> Result<()> {
 }
 
 fn verify_cargo_contract(workspace: &Path, manifest: &UnsafeManifest) -> Result<()> {
+    verify_no_workspace_cargo_config(workspace)?;
     let path = workspace.join("Cargo.toml");
     let source = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     let cargo: toml::Value = toml::from_str(&source).with_context(|| format!("parse {}", path.display()))?;
-    for (table, name, required) in manifest.required_lints() {
-        verify_lint(&cargo, table, name, required)?;
+    let required_lints: Vec<_> = manifest.required_lints().collect();
+    for (table, name, level, priority) in &required_lints {
+        verify_lint(&cargo, table, name, level, *priority)?;
     }
-    for (name, required) in manifest.root_dependency_specs()? {
+    verify_lint_precedence(&cargo, &required_lints)?;
+
+    let root_dependency_specs = manifest.root_dependency_specs()?;
+    for (name, required) in &root_dependency_specs {
         let value = cargo
             .get("dependencies")
             .and_then(|dependencies| dependencies.get(name))
             .with_context(|| format!("Cargo.toml is missing unsafe-contract dependency {name}"))?;
         let configured = parse_root_dependency(value)?;
-        if &configured != required {
+        if &configured != *required {
             bail!("Cargo.toml dependency {name} changed: expected {required:?}, found {configured:?}");
         }
     }
+    let reviewed_root_dependencies = root_dependency_specs.keys().copied().collect();
+    let protected_dependencies = manifest.dependency_packages()?.keys().copied().collect();
+    verify_dependency_routes(&cargo, &protected_dependencies, &reviewed_root_dependencies)?;
     verify_cargo_target_paths(&cargo)?;
     Ok(())
 }
 
-fn verify_lint(cargo: &toml::Value, table: &str, name: &str, required: &str) -> Result<()> {
-    let configured = cargo
-        .get("lints")
-        .and_then(|lints| lints.get(table))
-        .and_then(|lints| lints.get(name))
-        .and_then(lint_level)
-        .with_context(|| format!("Cargo.toml must configure [lints.{table}] {name}"))?;
-    if configured != required {
-        bail!("Cargo.toml lint {table}.{name} must remain {required:?}, found {configured:?}");
+fn verify_no_workspace_cargo_config(workspace: &Path) -> Result<()> {
+    for relative in [".cargo/config.toml", ".cargo/config"] {
+        let path = workspace.join(relative);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => bail!("{relative} is not supported because repository Cargo configuration can override safety lint flags"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
+        }
     }
     Ok(())
 }
 
-fn lint_level(value: &toml::Value) -> Option<&str> {
-    value.as_str().or_else(|| value.get("level").and_then(toml::Value::as_str))
+fn verify_lint(cargo: &toml::Value, table: &str, name: &str, required_level: &str, required_priority: i64) -> Result<()> {
+    let value = cargo
+        .get("lints")
+        .and_then(|lints| lints.get(table))
+        .and_then(|lints| lints.get(name))
+        .with_context(|| format!("Cargo.toml must configure [lints.{table}] {name}"))?;
+    let (level, priority) = lint_setting(value).with_context(|| format!("parse Cargo.toml lint {table}.{name}"))?;
+    if level != required_level || priority != required_priority {
+        bail!("Cargo.toml lint {table}.{name} must remain level {required_level:?} at priority {required_priority}, found level {level:?} at priority {priority}");
+    }
+    Ok(())
+}
+
+fn lint_setting(value: &toml::Value) -> Result<(&str, i64)> {
+    if let Some(level) = value.as_str() {
+        return Ok((level, 0));
+    }
+    let table = value.as_table().context("lint setting must be a level string or table")?;
+    let level = table.get("level").and_then(toml::Value::as_str).context("lint setting table needs a string level")?;
+    let priority = table
+        .get("priority")
+        .map_or(Ok(0), |priority| priority.as_integer().context("lint priority must be an integer"))?;
+    Ok((level, priority))
+}
+
+fn verify_lint_precedence(cargo: &toml::Value, required: &[RequiredLint<'_>]) -> Result<()> {
+    let tables: BTreeSet<_> = required.iter().map(|(table, _, _, _)| *table).collect();
+    for table_name in tables {
+        let required_names: BTreeSet<_> = required.iter().filter_map(|(table, name, _, _)| (*table == table_name).then_some(*name)).collect();
+        let reserved_priority = required
+            .iter()
+            .filter_map(|(table, _, _, priority)| (*table == table_name).then_some(*priority))
+            .min()
+            .context("required lint table has no reserved priority")?;
+        let configured = cargo
+            .get("lints")
+            .and_then(|lints| lints.get(table_name))
+            .and_then(toml::Value::as_table)
+            .with_context(|| format!("Cargo.toml must configure [lints.{table_name}]"))?;
+        for (name, value) in configured {
+            if required_names.contains(name.as_str()) {
+                continue;
+            }
+            let (_, priority) = lint_setting(value).with_context(|| format!("parse Cargo.toml lint {table_name}.{name}"))?;
+            if priority >= reserved_priority {
+                bail!("Cargo.toml lint {table_name}.{name} priority {priority} can override safety lints reserved at priority {reserved_priority}");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn verify_cargo_target_paths(cargo: &toml::Value) -> Result<()> {
@@ -107,6 +164,72 @@ fn verify_audited_target_path(field: &str, value: &str) -> Result<()> {
         bail!("Cargo.toml {field} {value:?} must be a normalized Rust path under an audited source root");
     }
     Ok(())
+}
+
+fn verify_dependency_routes(cargo: &toml::Value, protected: &BTreeSet<&str>, reviewed_root: &BTreeSet<&str>) -> Result<()> {
+    verify_dependency_table(cargo.get("dependencies"), "dependencies", protected, Some(reviewed_root))?;
+    for section in ["build-dependencies", "dev-dependencies"] {
+        verify_dependency_table(cargo.get(section), section, protected, None)?;
+    }
+    if let Some(targets) = cargo.get("target") {
+        for (selector, target) in targets.as_table().context("Cargo.toml target must be a table")? {
+            let target = target.as_table().with_context(|| format!("Cargo.toml target {selector:?} must be a table"))?;
+            for section in ["dependencies", "build-dependencies", "dev-dependencies"] {
+                verify_dependency_table(target.get(section), &format!("target.{selector:?}.{section}"), protected, None)?;
+            }
+        }
+    }
+    verify_dependency_feature_routes(cargo, protected)
+}
+
+fn verify_dependency_table(value: Option<&toml::Value>, label: &str, protected: &BTreeSet<&str>, reviewed_root: Option<&BTreeSet<&str>>) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    for (key, declaration) in value.as_table().with_context(|| format!("Cargo.toml {label} must be a table"))? {
+        if declaration.get("workspace").and_then(toml::Value::as_bool) == Some(true) {
+            bail!("Cargo.toml {label}.{key} uses unsupported workspace dependency inheritance, which can hide package and feature routes");
+        }
+        let package = dependency_package_name(key, declaration).with_context(|| format!("parse Cargo.toml {label}.{key}"))?;
+        let is_reviewed_root = reviewed_root.is_some_and(|reviewed| key == package && reviewed.contains(package));
+        if protected.contains(package) && !is_reviewed_root {
+            bail!("Cargo.toml {label}.{key} adds an unreviewed route to unsafe-contract dependency {package}");
+        }
+    }
+    Ok(())
+}
+
+fn dependency_package_name<'a>(key: &'a str, declaration: &'a toml::Value) -> Result<&'a str> {
+    if declaration.is_str() {
+        return Ok(key);
+    }
+    let table = declaration.as_table().context("dependency declaration must be a version string or table")?;
+    table
+        .get("package")
+        .map_or(Ok(key), |package| package.as_str().context("dependency package rename must be a string"))
+}
+
+fn verify_dependency_feature_routes(cargo: &toml::Value, required: &BTreeSet<&str>) -> Result<()> {
+    let Some(features) = cargo.get("features") else {
+        return Ok(());
+    };
+    for (feature, members) in features.as_table().context("Cargo.toml features must be a table")? {
+        for member in members.as_array().with_context(|| format!("Cargo.toml feature {feature:?} must be an array"))? {
+            let member = member.as_str().with_context(|| format!("Cargo.toml feature {feature:?} entries must be strings"))?;
+            if dependency_feature_target(member).is_some_and(|dependency| required.contains(dependency)) {
+                bail!("Cargo.toml feature {feature:?} forwards unreviewed feature route {member:?} to an unsafe-contract dependency");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn dependency_feature_target(member: &str) -> Option<&str> {
+    if let Some(dependency) = member.strip_prefix("dep:") {
+        return Some(dependency);
+    }
+    let (dependency, _) = member.split_once('/')?;
+    Some(dependency.strip_suffix('?').unwrap_or(dependency))
 }
 
 fn parse_root_dependency(value: &toml::Value) -> Result<RootDependencySpec> {
@@ -175,107 +298,4 @@ fn compare_dependency_packages(observed: &BTreeMap<&str, Vec<&LockedPackage>>, r
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use crate::manifest::DependencyPin;
-
-    use super::{LockedPackage, compare_dependency_packages, lint_level, parse_root_dependency, verify_audited_target_path, verify_lint};
-
-    #[test]
-    fn lint_level_supports_cargo_string_and_table_forms() {
-        let string: toml::Value = toml::from_str::<toml::Value>("value = 'deny'").expect("TOML").get("value").expect("value").clone();
-        let table: toml::Value = toml::from_str::<toml::Value>("value = { level = 'deny', priority = -1 }")
-            .expect("TOML")
-            .get("value")
-            .expect("value")
-            .clone();
-        assert_eq!(lint_level(&string), Some("deny"));
-        assert_eq!(lint_level(&table), Some("deny"));
-    }
-
-    #[test]
-    fn required_lint_rejects_missing_or_weakened_configuration() {
-        let cargo: toml::Value = toml::from_str(
-            "
-            [lints.rust]
-            unsafe_code = 'warn'
-            ",
-        )
-        .expect("TOML");
-        assert!(verify_lint(&cargo, "rust", "unsafe_code", "deny").is_err());
-        assert!(verify_lint(&cargo, "rust", "unsafe_op_in_unsafe_fn", "deny").is_err());
-    }
-
-    #[test]
-    fn dependency_contract_rejects_source_checksum_version_and_multiplicity_drift() {
-        let pin = DependencyPin {
-            name: "sqlite-vec".to_owned(),
-            version: "0.1.9".to_owned(),
-            source: "registry".to_owned(),
-            checksum: "checksum".to_owned(),
-        };
-        let required = BTreeMap::from([("sqlite-vec", &pin)]);
-        let package = LockedPackage {
-            name: "sqlite-vec".to_owned(),
-            version: "0.1.9".to_owned(),
-            source: Some("registry".to_owned()),
-            checksum: Some("checksum".to_owned()),
-        };
-        assert!(compare_dependency_packages(&BTreeMap::new(), &required).is_err());
-        assert!(compare_dependency_packages(&BTreeMap::from([("sqlite-vec", vec![&package, &package])]), &required).is_err());
-        assert!(compare_dependency_packages(&BTreeMap::from([("sqlite-vec", vec![&package])]), &required).is_ok());
-
-        for drifted in [
-            LockedPackage {
-                version: "0.2.0".to_owned(),
-                ..package.clone()
-            },
-            LockedPackage {
-                source: Some("git".to_owned()),
-                ..package.clone()
-            },
-            LockedPackage {
-                checksum: Some("changed".to_owned()),
-                ..package
-            },
-        ] {
-            assert!(compare_dependency_packages(&BTreeMap::from([("sqlite-vec", vec![&drifted])]), &required).is_err());
-        }
-    }
-
-    #[test]
-    fn root_dependency_contract_rejects_feature_and_route_drift() {
-        let string: toml::Value = toml::from_str::<toml::Value>("value = '0.1'").expect("TOML").get("value").expect("value").clone();
-        let parsed = parse_root_dependency(&string).expect("string dependency");
-        assert_eq!(parsed.version, "0.1");
-        assert!(parsed.default_features);
-        assert!(parsed.features.is_empty());
-
-        let table: toml::Value = toml::from_str::<toml::Value>("value = { version = '0.40', default-features = false, features = ['backup', 'bundled'] }")
-            .expect("TOML")
-            .get("value")
-            .expect("value")
-            .clone();
-        let parsed = parse_root_dependency(&table).expect("table dependency");
-        assert!(!parsed.default_features);
-        assert_eq!(parsed.features, ["backup", "bundled"]);
-
-        let unsupported: toml::Value = toml::from_str::<toml::Value>("value = { version = '0.40', path = '../other' }")
-            .expect("TOML")
-            .get("value")
-            .expect("value")
-            .clone();
-        assert!(parse_root_dependency(&unsupported).is_err());
-    }
-
-    #[test]
-    fn cargo_target_paths_cannot_escape_audited_roots() {
-        for allowed in ["src/main.rs", "tests/contract.rs", "benches/latency.rs", "examples/client.rs"] {
-            assert!(verify_audited_target_path("target.path", allowed).is_ok());
-        }
-        for rejected in ["build.rs", "outside.rs", "src/../outside.rs", "/absolute.rs", "src/not-rust.txt"] {
-            assert!(verify_audited_target_path("target.path", rejected).is_err());
-        }
-    }
-}
+mod tests;

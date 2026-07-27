@@ -40,7 +40,8 @@ struct AuditLane<'a> {
 
 pub fn verify(workspace: &Path, sites: &[UnsafeSite]) -> Result<()> {
     let workspace = fs::canonicalize(workspace).with_context(|| format!("resolve workspace {}", workspace.display()))?;
-    let manifest = workspace.join("Cargo.toml");
+    let manifest_path = workspace.join("Cargo.toml");
+    let manifest = fs::canonicalize(&manifest_path).with_context(|| format!("resolve workspace manifest {}", manifest_path.display()))?;
     let mut dep_info = BTreeSet::new();
     let mut root_artifacts = 0;
     let mut normal_diagnostics = Vec::new();
@@ -177,7 +178,7 @@ fn run_audit_lane(workspace: &Path, manifest: &Path, lane: &AuditLane<'_>) -> Re
 }
 
 fn handle_cargo_message(workspace: &Path, manifest: &Path, target_kinds: &[&str], message: &Value, audit: &mut AuditOutput) -> Result<()> {
-    if message.get("manifest_path").and_then(Value::as_str).map(Path::new) != Some(manifest) {
+    if !is_root_manifest(manifest, message)? {
         return Ok(());
     }
     let kinds = message
@@ -198,6 +199,14 @@ fn handle_cargo_message(workspace: &Path, manifest: &Path, target_kinds: &[&str]
         _ => {}
     }
     Ok(())
+}
+
+fn is_root_manifest(manifest: &Path, message: &Value) -> Result<bool> {
+    let Some(reported) = message.get("manifest_path").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    let reported = fs::canonicalize(reported).with_context(|| format!("resolve Cargo message manifest {reported}"))?;
+    Ok(reported == manifest)
 }
 
 fn sanitize_compiler_environment(command: &mut Command) {

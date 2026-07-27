@@ -6,7 +6,7 @@ use tempfile::{TempDir, tempdir};
 use crate::scan::{SiteKind, SourceRange, UnsafeSite, scan_workspace};
 
 use super::dep_info::{is_audited_compiler_input, parse as parse_dep_info, parse_make_words};
-use super::{Diagnostic, audit_environment_override, compare_diagnostics, subtract_diagnostics, verify};
+use super::{Diagnostic, audit_environment_override, compare_diagnostics, is_root_manifest, subtract_diagnostics, verify};
 
 fn site(range: SourceRange) -> UnsafeSite {
     UnsafeSite {
@@ -76,6 +76,24 @@ fn compiler_environment_rejects_cargo_aliases_and_override_channels() {
     for accepted in ["CARGO_BUILD_JOBS", "CARGO_TERM_COLOR", "RUST_BACKTRACE"] {
         assert!(!audit_environment_override(accepted.as_ref()), "{accepted}");
     }
+}
+
+#[test]
+fn cargo_manifest_identity_uses_canonical_paths_and_fails_closed() {
+    let fixture = tempdir().expect("temporary manifest fixture");
+    let manifest = fixture.path().join("Cargo.toml");
+    let other = fixture.path().join("other/Cargo.toml");
+    fs::create_dir(fixture.path().join("nested")).expect("equivalent-path segment");
+    fs::create_dir(fixture.path().join("other")).expect("foreign manifest directory");
+    fs::write(&manifest, "").expect("root manifest");
+    fs::write(&other, "").expect("foreign manifest");
+    let expected = fs::canonicalize(&manifest).expect("canonical root manifest");
+
+    let equivalent = fixture.path().join("nested/../Cargo.toml");
+    assert!(is_root_manifest(&expected, &serde_json::json!({ "manifest_path": equivalent })).expect("equivalent manifest"));
+    assert!(!is_root_manifest(&expected, &serde_json::json!({ "manifest_path": other })).expect("foreign manifest"));
+    assert!(!is_root_manifest(&expected, &serde_json::json!({})).expect("message without manifest"));
+    assert!(is_root_manifest(&expected, &serde_json::json!({ "manifest_path": fixture.path().join("missing.toml") })).is_err());
 }
 
 #[test]

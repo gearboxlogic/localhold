@@ -18,7 +18,7 @@ pub fn check(workspace: &Path) -> Result<()> {
     manifest.compare_current(&current)?;
     let baseline = classify::scan_revision(workspace, &manifest.baseline_commit, &manifest.tracked_roots)?;
     manifest.compare_baseline(&baseline)?;
-    manifest.compare_previous_revision(workspace)
+    manifest.compare_previous_revision(workspace, &current)
 }
 
 pub fn scan_workspace(workspace: &Path) -> Result<Inventory> {

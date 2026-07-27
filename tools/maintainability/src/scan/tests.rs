@@ -1,16 +1,27 @@
 use std::fs;
 
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
 
 use super::{SiteKind, scan_workspace};
 
-fn scan_result(source: &str) -> anyhow::Result<Vec<super::UnsafeSite>> {
+const AUDITED_ROOTS: [&str; 3] = ["src", "tests", "benches"];
+
+fn test_workspace() -> TempDir {
     let workspace = tempdir().expect("temporary workspace");
-    for root in ["src", "tests", "benches"] {
+    for root in AUDITED_ROOTS {
         fs::create_dir(workspace.path().join(root)).expect("tracked root");
     }
+    workspace
+}
+
+fn scan_test_workspace(workspace: &TempDir) -> anyhow::Result<Vec<super::UnsafeSite>> {
+    scan_workspace(workspace.path(), &AUDITED_ROOTS.map(str::to_owned))
+}
+
+fn scan_result(source: &str) -> anyhow::Result<Vec<super::UnsafeSite>> {
+    let workspace = test_workspace();
     fs::write(workspace.path().join("src/sample.rs"), source).expect("sample source");
-    scan_workspace(workspace.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()])
+    scan_test_workspace(&workspace)
 }
 
 fn scan(source: &str) -> Vec<super::UnsafeSite> {
@@ -20,6 +31,57 @@ fn scan(source: &str) -> Vec<super::UnsafeSite> {
 fn assert_source_expansion_rejected(source: &str) {
     let error = scan_result(source).expect_err("source expansion must fail closed");
     assert!(error.to_string().contains("unsupported Rust source inclusion"), "unexpected error: {error:#}");
+}
+
+#[test]
+fn rejects_root_build_script() {
+    let workspace = test_workspace();
+    fs::write(workspace.path().join("build.rs"), "fn main() {}").expect("root build script");
+
+    let error = scan_test_workspace(&workspace).expect_err("root build script must fail closed");
+    assert!(error.to_string().contains("root build.rs is not supported"), "unexpected error: {error:#}");
+}
+
+#[test]
+fn scans_optional_examples_root() {
+    let workspace = test_workspace();
+    fs::create_dir(workspace.path().join("examples")).expect("examples root");
+    fs::write(workspace.path().join("examples/sample.rs"), "fn sample() { unsafe { work() } }").expect("example source");
+
+    let sites = scan_test_workspace(&workspace).expect("scan succeeds");
+    assert_eq!(sites.len(), 1);
+    assert_eq!(sites[0].path, "examples/sample.rs");
+    assert_eq!(sites[0].kind, SiteKind::Block);
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_symlinked_source_root() {
+    use std::os::unix::fs::symlink;
+
+    let workspace = test_workspace();
+    fs::remove_dir(workspace.path().join("src")).expect("remove tracked root");
+    fs::create_dir(workspace.path().join("real-src")).expect("symlink target");
+    symlink(workspace.path().join("real-src"), workspace.path().join("src")).expect("symlinked root");
+
+    let error = scan_test_workspace(&workspace).expect_err("symlinked root must fail closed");
+    assert!(error.to_string().contains("tracked source root cannot be a symlink"), "unexpected error: {error:#}");
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_symlinked_source_entry() {
+    use std::os::unix::fs::symlink;
+
+    let workspace = test_workspace();
+    fs::write(workspace.path().join("sample.rs"), "fn sample() {}").expect("symlink target");
+    symlink(workspace.path().join("sample.rs"), workspace.path().join("src/sample.rs")).expect("symlinked entry");
+
+    let error = scan_test_workspace(&workspace).expect_err("symlinked entry must fail closed");
+    assert!(
+        error.to_string().contains("tracked Rust source tree cannot contain symlinks"),
+        "unexpected error: {error:#}"
+    );
 }
 
 #[test]

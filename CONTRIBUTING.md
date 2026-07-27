@@ -102,10 +102,12 @@ Inspect the parser's current site inventory with:
 cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- inventory
 ```
 
-The command writes nothing. Do not copy inventory fingerprints into policy
-merely to make the gate pass. First remove the unsafe code when a safe design
-exists. If unsafe remains necessary, keep each block to one operation, update
-the complete contract and focused tests, and request an explicit safety review.
+The command prints the pretty-formatted site inventory to standard output for
+inspection, but writes no files. Do not copy inventory fingerprints into
+policy merely to make the gate pass. First remove the unsafe code when a safe
+design exists. If unsafe remains necessary, keep each block to one operation,
+update the complete contract and focused tests, and request an explicit safety
+review.
 
 The current sqlite-vec registration contract is temporary proof debt:
 sqlite-vec exposes an erased Rust function signature while its bundled C header

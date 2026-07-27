@@ -92,7 +92,7 @@ dependency-unsafe-generate PLATFORM:
     cargo fetch --manifest-path tools/dependency-unsafe/Cargo.toml --locked
     cargo run --manifest-path tools/dependency-unsafe/Cargo.toml --locked -- generate --platform {{ PLATFORM }}
 
-# Reject unreviewed first-party unsafe code and changes to reviewed boundaries
+# Reject unreviewed first-party unsafe code, structural growth, and boundary drift
 source-safety:
     ./script/tests/test_maintainability_bootstrap.sh
     ./script/check-maintainability-bootstrap.sh -- ./script/run-source-safety.sh

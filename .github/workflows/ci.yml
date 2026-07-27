@@ -109,6 +109,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Cache Cargo registry and audit tool
@@ -131,6 +132,8 @@ jobs:
 
       - name: Run dependency unsafe gate
         id: audit
+        env:
+          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: just maintainability
 
       - name: Upload dependency audit evidence on failure
@@ -241,6 +244,7 @@ jobs:
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Cache Cargo registry and audit tool
@@ -263,6 +267,8 @@ jobs:
 
       - name: Run dependency unsafe gate
         id: audit
+        env:
+          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           diagnostic_log="$RUNNER_TEMP/dependency-unsafe.log"
           trap 'rm -f -- "$diagnostic_log"' EXIT

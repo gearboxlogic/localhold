@@ -1,0 +1,74 @@
+use std::collections::BTreeMap;
+
+use super::{measure_sources, physical_line_count};
+
+fn inventory(sources: &[(&str, &str)]) -> super::Inventory {
+    let sources = sources.iter().map(|(path, source)| ((*path).to_owned(), (*source).to_owned())).collect::<BTreeMap<_, _>>();
+    measure_sources(sources).expect("fixture inventory")
+}
+
+#[test]
+fn physical_lines_are_lf_crlf_and_final_newline_stable() {
+    assert_eq!(physical_line_count(""), 0);
+    assert_eq!(physical_line_count("one"), 1);
+    assert_eq!(physical_line_count("one\n"), 1);
+    assert_eq!(physical_line_count("one\r\ntwo\r\n"), 2);
+}
+
+#[test]
+fn cfg_test_and_testing_feature_items_are_not_production() {
+    let inventory = inventory(&[(
+        "src/lib.rs",
+        "fn production() {}\n\
+         #[cfg(test)]\nfn test_only() {}\n\
+         #[cfg(any(test, feature = \"testing\"))]\nfn harness_only() {}\n\
+         #[cfg(all(unix, test))]\nfn unix_test_only() {}\n\
+         #[cfg(feature = \"other\")]\nfn optional_production() {}\n",
+    )]);
+    assert_eq!(inventory.files[0].physical_lines, 9);
+    assert_eq!(inventory.files[0].production_lines, 3);
+    assert_eq!(inventory.files[0].test_lines, 6);
+}
+
+#[test]
+fn cfg_attr_is_test_only_only_when_it_cannot_exist_in_production() {
+    let inventory = inventory(&[(
+        "src/lib.rs",
+        "#[cfg_attr(all(), cfg(test))]\nfn always_test() {}\n\
+         #[cfg_attr(feature = \"other\", cfg(test))]\nfn sometimes_production() {}\n",
+    )]);
+    assert_eq!(inventory.files[0].test_lines, 2);
+    assert_eq!(inventory.files[0].production_lines, 2);
+}
+
+#[test]
+fn cfg_test_on_nested_syntax_is_classified() {
+    let inventory = inventory(&[(
+        "src/lib.rs",
+        "enum Mode {\n    Live,\n    #[cfg(test)]\n    Test,\n}\n\
+         impl Mode {\n    #[cfg(test)]\n    fn fixture() {}\n}\n\
+         fn choose(value: Mode) {\n    match value {\n        Mode::Live => {}\n        #[cfg(test)]\n        Mode::Test => {}\n    }\n}\n",
+    )]);
+    let file = &inventory.files[0];
+    assert_eq!(file.physical_lines, file.production_lines + file.test_lines);
+    assert_eq!(file.test_lines, 6);
+}
+
+#[test]
+fn external_modules_reachable_only_from_tests_are_wholly_test_only() {
+    let inventory = inventory(&[
+        ("src/lib.rs", "#[cfg(test)]\nmod tests;\nfn production() {}\n"),
+        ("src/tests.rs", "mod nested;\nfn helper() {}\n"),
+        ("src/tests/nested.rs", "fn nested_helper() {}\n"),
+    ]);
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_path["src/lib.rs"].production_lines, 1);
+    assert_eq!(by_path["src/tests.rs"].production_lines, 0);
+    assert_eq!(by_path["src/tests/nested.rs"].production_lines, 0);
+}
+
+#[test]
+fn integration_and_benchmark_roots_are_wholly_test_only() {
+    let inventory = inventory(&[("benches/load.rs", "fn benchmark_helper() {}\n"), ("tests/contract.rs", "fn integration_helper() {}\n")]);
+    assert!(inventory.files.iter().all(|file| file.production_lines == 0));
+}

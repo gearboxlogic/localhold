@@ -132,13 +132,17 @@ impl StructureManifest {
     }
 
     pub fn compare_previous_revision(&self, workspace: &Path) -> Result<()> {
-        let Ok(revision) = env::var(BASE_REVISION_ENV) else {
+        self.compare_previous_revision_from(workspace, env::var(BASE_REVISION_ENV).ok().as_deref())
+    }
+
+    fn compare_previous_revision_from(&self, workspace: &Path, revision: Option<&str>) -> Result<()> {
+        let Some(revision) = revision else {
             return Ok(());
         };
-        if revision.is_empty() {
+        if revision.is_empty() || revision.len() == 40 && revision.bytes().all(|byte| byte == b'0') {
             return Ok(());
         }
-        validate_revision(&revision).context("validate maintainability base revision")?;
+        validate_revision(revision).context("validate maintainability base revision")?;
         let object = format!("{revision}:policy/maintainability/structure.json");
         let output = Command::new("git")
             .current_dir(workspace)
@@ -146,7 +150,7 @@ impl StructureManifest {
             .output()
             .context("read structure policy from maintainability base revision")?;
         if !output.status.success() {
-            return verify_initial_policy_revision(workspace, &revision, &object);
+            return verify_initial_policy_revision(workspace, revision, &object);
         }
         let previous: Self = serde_json::from_slice(&output.stdout).context("parse structure policy from maintainability base revision")?;
         previous.validate().context("validate structure policy from maintainability base revision")?;
@@ -244,7 +248,7 @@ impl StructureManifest {
             }
             if production < component.production_ceiling {
                 bail!(
-                    "component {:?} production ceiling must ratchet from {} to {production} in this change",
+                    "component {:?} production ceiling must be lowered from {} to {production} in this change",
                     component.id,
                     component.production_ceiling
                 );

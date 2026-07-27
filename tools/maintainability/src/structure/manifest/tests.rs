@@ -1,3 +1,7 @@
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+
 use super::{Hotspot, HotspotKind, HotspotStatus, Limits, LogicalComponent, PreGateAdjustment, StructureManifest};
 use crate::structure::classify::{FileMeasurement, Inventory};
 
@@ -77,7 +81,7 @@ fn exact_component_budget_passes_but_growth_and_stale_ceiling_fail() {
     assert!(growth.compare_current(&inventory).unwrap_err().to_string().contains("growth rejected"));
 
     let stale = ordinary_manifest("src/lib.rs", 11, 11);
-    assert!(stale.compare_current(&inventory).unwrap_err().to_string().contains("must ratchet"));
+    assert!(stale.compare_current(&inventory).unwrap_err().to_string().contains("must be lowered"));
 }
 
 #[test]
@@ -236,4 +240,52 @@ fn policy_comparison_rejects_existing_path_moves_between_components() {
         production_ceiling: 20,
     });
     assert!(current.compare_policy(&previous).unwrap_err().to_string().contains("path ownership"));
+}
+
+#[test]
+fn previous_revision_selection_handles_absent_null_and_initial_policy_inputs() {
+    let manifest = ordinary_manifest("src/lib.rs", 10, 10);
+    let repository = tempfile::tempdir().expect("temporary repository");
+    fs::write(repository.path().join("README.md"), "fixture\n").expect("fixture file");
+    git(repository.path(), &["init", "-q"]);
+    git(repository.path(), &["add", "."]);
+    git(
+        repository.path(),
+        &["-c", "user.name=LocalHold", "-c", "user.email=localhold@example.invalid", "commit", "-q", "-m", "fixture"],
+    );
+    let revision = String::from_utf8(git_output(repository.path(), &["rev-parse", "HEAD"]))
+        .expect("UTF-8 revision")
+        .trim()
+        .to_owned();
+
+    manifest
+        .compare_previous_revision_from(repository.path(), None)
+        .expect("unset revision is intentionally absent");
+    manifest
+        .compare_previous_revision_from(repository.path(), Some(""))
+        .expect("empty revision is intentionally absent");
+    manifest
+        .compare_previous_revision_from(repository.path(), Some("0000000000000000000000000000000000000000"))
+        .expect("null revision is intentionally absent");
+    manifest
+        .compare_previous_revision_from(repository.path(), Some(&revision))
+        .expect("existing commit without a policy is the initial policy revision");
+    assert!(
+        manifest
+            .compare_previous_revision_from(repository.path(), Some("ffffffffffffffffffffffffffffffffffffffff"))
+            .unwrap_err()
+            .to_string()
+            .contains("is not available")
+    );
+}
+
+fn git(repository: &Path, arguments: &[&str]) {
+    let status = Command::new("git").current_dir(repository).args(arguments).status().expect("run git fixture command");
+    assert!(status.success(), "git fixture command failed: {arguments:?}");
+}
+
+fn git_output(repository: &Path, arguments: &[&str]) -> Vec<u8> {
+    let output = Command::new("git").current_dir(repository).args(arguments).output().expect("run git fixture query");
+    assert!(output.status.success(), "git fixture query failed: {arguments:?}");
+    output.stdout
 }

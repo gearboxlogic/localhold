@@ -35,13 +35,13 @@ impl TestLineCollector {
         self.test_lines.iter().filter(|line| **line).count()
     }
 
-    fn classify<T: syn::spanned::Spanned>(&mut self, attributes: &[Attribute], node: &T) -> bool {
-        match attributes_disable_production(attributes) {
-            Ok(true) => {
+    fn classify<T: syn::spanned::Spanned>(&mut self, attributes: Result<&[Attribute]>, node: &T) -> bool {
+        match attributes.and_then(|attributes| attributes_disable_production(attributes).map(|test_only| (attributes, test_only))) {
+            Ok((attributes, true)) => {
                 self.mark(attributes, node.span());
                 true
             }
-            Ok(false) => false,
+            Ok((_, false)) => false,
             Err(error) => {
                 self.error = Some(error);
                 true
@@ -91,31 +91,31 @@ impl<'ast> Visit<'ast> for TestLineCollector {
     }
 
     fn visit_variant(&mut self, node: &'ast syn::Variant) {
-        if !self.classify(&node.attrs, node) {
+        if !self.classify(Ok(&node.attrs), node) {
             visit::visit_variant(self, node);
         }
     }
 
     fn visit_field(&mut self, node: &'ast syn::Field) {
-        if !self.classify(&node.attrs, node) {
+        if !self.classify(Ok(&node.attrs), node) {
             visit::visit_field(self, node);
         }
     }
 
     fn visit_arm(&mut self, node: &'ast syn::Arm) {
-        if !self.classify(&node.attrs, node) {
+        if !self.classify(Ok(&node.attrs), node) {
             visit::visit_arm(self, node);
         }
     }
 
     fn visit_local(&mut self, node: &'ast syn::Local) {
-        if !self.classify(&node.attrs, node) {
+        if !self.classify(Ok(&node.attrs), node) {
             visit::visit_local(self, node);
         }
     }
 
     fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
-        if !self.classify(&node.attrs, node) {
+        if !self.classify(Ok(&node.attrs), node) {
             visit::visit_stmt_macro(self, node);
         }
     }
@@ -128,7 +128,7 @@ impl<'ast> Visit<'ast> for TestLineCollector {
 }
 
 pub fn item_is_test_only(item: &Item) -> Result<bool> {
-    attributes_disable_production(item_attributes(item))
+    attributes_disable_production(item_attributes(item)?)
 }
 
 fn attributes_disable_production(attributes: &[Attribute]) -> Result<bool> {
@@ -248,8 +248,8 @@ const fn combine_any(left: Truth, right: Truth) -> Truth {
     }
 }
 
-fn item_attributes(item: &Item) -> &[Attribute] {
-    match item {
+fn item_attributes(item: &Item) -> Result<&[Attribute]> {
+    Ok(match item {
         Item::Const(item) => &item.attrs,
         Item::Enum(item) => &item.attrs,
         Item::ExternCrate(item) => &item.attrs,
@@ -265,42 +265,46 @@ fn item_attributes(item: &Item) -> &[Attribute] {
         Item::Type(item) => &item.attrs,
         Item::Union(item) => &item.attrs,
         Item::Use(item) => &item.attrs,
-        _ => &[],
-    }
+        Item::Verbatim(_) => anyhow::bail!("opaque item syntax cannot be classified"),
+        _ => anyhow::bail!("unsupported item syntax cannot be classified"),
+    })
 }
 
-fn impl_item_attributes(item: &ImplItem) -> &[Attribute] {
-    match item {
+fn impl_item_attributes(item: &ImplItem) -> Result<&[Attribute]> {
+    Ok(match item {
         ImplItem::Const(item) => &item.attrs,
         ImplItem::Fn(item) => &item.attrs,
         ImplItem::Macro(item) => &item.attrs,
         ImplItem::Type(item) => &item.attrs,
-        _ => &[],
-    }
+        ImplItem::Verbatim(_) => anyhow::bail!("opaque impl-item syntax cannot be classified"),
+        _ => anyhow::bail!("unsupported impl-item syntax cannot be classified"),
+    })
 }
 
-fn trait_item_attributes(item: &TraitItem) -> &[Attribute] {
-    match item {
+fn trait_item_attributes(item: &TraitItem) -> Result<&[Attribute]> {
+    Ok(match item {
         TraitItem::Const(item) => &item.attrs,
         TraitItem::Fn(item) => &item.attrs,
         TraitItem::Macro(item) => &item.attrs,
         TraitItem::Type(item) => &item.attrs,
-        _ => &[],
-    }
+        TraitItem::Verbatim(_) => anyhow::bail!("opaque trait-item syntax cannot be classified"),
+        _ => anyhow::bail!("unsupported trait-item syntax cannot be classified"),
+    })
 }
 
-fn foreign_item_attributes(item: &ForeignItem) -> &[Attribute] {
-    match item {
+fn foreign_item_attributes(item: &ForeignItem) -> Result<&[Attribute]> {
+    Ok(match item {
         ForeignItem::Fn(item) => &item.attrs,
         ForeignItem::Macro(item) => &item.attrs,
         ForeignItem::Static(item) => &item.attrs,
         ForeignItem::Type(item) => &item.attrs,
-        _ => &[],
-    }
+        ForeignItem::Verbatim(_) => anyhow::bail!("opaque foreign-item syntax cannot be classified"),
+        _ => anyhow::bail!("unsupported foreign-item syntax cannot be classified"),
+    })
 }
 
-fn expr_attributes(expression: &Expr) -> &[Attribute] {
-    match expression {
+fn expr_attributes(expression: &Expr) -> Result<&[Attribute]> {
+    Ok(match expression {
         Expr::Array(value) => &value.attrs,
         Expr::Assign(value) => &value.attrs,
         Expr::Async(value) => &value.attrs,
@@ -340,6 +344,7 @@ fn expr_attributes(expression: &Expr) -> &[Attribute] {
         Expr::Unsafe(value) => &value.attrs,
         Expr::While(value) => &value.attrs,
         Expr::Yield(value) => &value.attrs,
-        _ => &[],
-    }
+        Expr::Verbatim(_) => anyhow::bail!("opaque expression syntax cannot be classified"),
+        _ => anyhow::bail!("unsupported expression syntax cannot be classified"),
+    })
 }

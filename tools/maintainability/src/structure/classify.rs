@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
+use std::io::{BufRead, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -33,6 +34,11 @@ struct ModuleEdge {
     test_only: bool,
 }
 
+struct TreeEntry {
+    object_id: String,
+    path: String,
+}
+
 pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Inventory> {
     let mut sources = BTreeMap::new();
     for root in roots {
@@ -47,7 +53,7 @@ pub fn scan_revision(workspace: &Path, revision: &str, roots: &[String]) -> Resu
         .current_dir(workspace)
         .arg("ls-tree")
         .arg("-r")
-        .arg("--name-only")
+        .arg("-z")
         .arg(revision)
         .arg("--")
         .args(roots)
@@ -56,26 +62,87 @@ pub fn scan_revision(workspace: &Path, revision: &str, roots: &[String]) -> Resu
     if !output.status.success() {
         bail!("git ls-tree failed for structural baseline {revision}");
     }
-    let listing = String::from_utf8(output.stdout).context("baseline source listing is not UTF-8")?;
-    let mut sources = BTreeMap::new();
-    for path in listing
-        .lines()
-        .filter(|path| Path::new(path).extension().is_some_and(|extension| extension.eq_ignore_ascii_case("rs")))
-    {
-        validate_relative_rust_path(path)?;
-        let object = format!("{revision}:{path}");
-        let output = Command::new("git")
-            .current_dir(workspace)
-            .args(["show", "--no-ext-diff", &object])
-            .output()
-            .with_context(|| format!("read baseline Rust source {path}"))?;
-        if !output.status.success() {
-            bail!("git show failed for structural baseline source {object}");
-        }
-        let source = String::from_utf8(output.stdout).with_context(|| format!("baseline Rust source {path} is not UTF-8"))?;
-        sources.insert(path.to_owned(), source);
-    }
+    let entries = parse_tree_entries(&output.stdout)?;
+    let sources = read_tree_sources(workspace, &entries)?;
     measure_sources(sources)
+}
+
+fn parse_tree_entries(listing: &[u8]) -> Result<Vec<TreeEntry>> {
+    let mut entries = Vec::new();
+    for record in listing.split(|byte| *byte == b'\0').filter(|record| !record.is_empty()) {
+        let record = std::str::from_utf8(record).context("baseline source listing is not UTF-8")?;
+        let (metadata, path) = record.split_once('\t').context("baseline source listing record has no path separator")?;
+        let fields = metadata.split(' ').collect::<Vec<_>>();
+        if fields.len() != 3 || fields[1] != "blob" {
+            bail!("baseline source listing contains invalid object metadata");
+        }
+        let object_id = fields[2];
+        if !matches!(object_id.len(), 40 | 64) || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("baseline source listing contains an invalid object ID");
+        }
+        if Path::new(path).extension().and_then(|extension| extension.to_str()) != Some("rs") {
+            continue;
+        }
+        validate_relative_rust_path(path)?;
+        entries.push(TreeEntry {
+            object_id: object_id.to_owned(),
+            path: path.to_owned(),
+        });
+    }
+    Ok(entries)
+}
+
+fn read_tree_sources(workspace: &Path, entries: &[TreeEntry]) -> Result<BTreeMap<String, String>> {
+    let mut child = Command::new("git")
+        .current_dir(workspace)
+        .args(["cat-file", "--batch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("start baseline source reader")?;
+    {
+        let mut input = child.stdin.take().context("baseline source reader has no input")?;
+        for entry in entries {
+            writeln!(input, "{}", entry.object_id).context("request baseline source object")?;
+        }
+    }
+    let output = child.wait_with_output().context("wait for baseline source reader")?;
+    if !output.status.success() {
+        bail!("git cat-file failed while reading structural baseline sources");
+    }
+    parse_batch_sources(&output.stdout, entries)
+}
+
+fn parse_batch_sources(output: &[u8], entries: &[TreeEntry]) -> Result<BTreeMap<String, String>> {
+    let mut cursor = Cursor::new(output);
+    let mut sources = BTreeMap::new();
+    for entry in entries {
+        let mut header = String::new();
+        cursor.read_line(&mut header).with_context(|| format!("read baseline source header for {}", entry.path))?;
+        let fields = header.trim_end_matches('\n').split(' ').collect::<Vec<_>>();
+        if fields.len() != 3 || fields[0] != entry.object_id || fields[1] != "blob" {
+            bail!("unexpected baseline source header for {}", entry.path);
+        }
+        let size = fields[2].parse::<usize>().with_context(|| format!("parse baseline source size for {}", entry.path))?;
+        let mut bytes = vec![0; size];
+        cursor.read_exact(&mut bytes).with_context(|| format!("read baseline source {}", entry.path))?;
+        let mut terminator = [0];
+        cursor
+            .read_exact(&mut terminator)
+            .with_context(|| format!("read baseline source terminator for {}", entry.path))?;
+        if terminator != *b"\n" {
+            bail!("baseline source {} has an invalid batch terminator", entry.path);
+        }
+        let source = String::from_utf8(bytes).with_context(|| format!("baseline Rust source {} is not UTF-8", entry.path))?;
+        if sources.insert(entry.path.clone(), source).is_some() {
+            bail!("baseline source listing repeats {}", entry.path);
+        }
+    }
+    if cursor.position() != output.len() as u64 {
+        bail!("baseline source reader returned unexpected trailing data");
+    }
+    Ok(sources)
 }
 
 fn collect_sources(workspace: &Path, root: &Path, sources: &mut BTreeMap<String, String>) -> Result<()> {

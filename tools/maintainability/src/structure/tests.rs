@@ -8,3 +8,14 @@ fn inline_test_module_lines_are_classified_as_test() {
     collector.visit_file(&syntax).expect("classification succeeds");
     assert_eq!(collector.test_line_count(), 5);
 }
+
+#[test]
+fn opaque_syntax_fails_closed() {
+    let syntax = syn::File {
+        shebang: None,
+        attrs: Vec::new(),
+        items: vec![syn::Item::Verbatim(quote::quote!(opaque tokens))],
+    };
+    let mut collector = TestLineCollector::new(1);
+    assert!(collector.visit_file(&syntax).unwrap_err().to_string().contains("opaque item syntax"));
+}

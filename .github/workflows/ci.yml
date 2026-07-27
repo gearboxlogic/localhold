@@ -133,7 +133,7 @@ jobs:
       - name: Run dependency unsafe gate
         id: audit
         env:
-          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || github.event.before }}
+          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}
         run: just maintainability
 
       - name: Upload dependency audit evidence on failure
@@ -268,7 +268,7 @@ jobs:
       - name: Run dependency unsafe gate
         id: audit
         env:
-          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || github.event.before }}
+          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}
         run: |
           diagnostic_log="$RUNNER_TEMP/dependency-unsafe.log"
           trap 'rm -f -- "$diagnostic_log"' EXIT

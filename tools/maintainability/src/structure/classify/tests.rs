@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
 
-use super::{measure_sources, physical_line_count};
+use super::{measure_sources, physical_line_count, scan_revision};
 
 fn inventory(sources: &[(&str, &str)]) -> super::Inventory {
     let sources = sources.iter().map(|(path, source)| ((*path).to_owned(), (*source).to_owned())).collect::<BTreeMap<_, _>>();
@@ -71,4 +74,37 @@ fn external_modules_reachable_only_from_tests_are_wholly_test_only() {
 fn integration_and_benchmark_roots_are_wholly_test_only() {
     let inventory = inventory(&[("benches/load.rs", "fn benchmark_helper() {}\n"), ("tests/contract.rs", "fn integration_helper() {}\n")]);
     assert!(inventory.files.iter().all(|file| file.production_lines == 0));
+}
+
+#[test]
+fn revision_scan_preserves_special_paths_and_reads_blobs_in_one_batch() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    fs::create_dir(repository.path().join("src")).expect("source directory");
+    fs::write(repository.path().join("src/lib.rs"), "fn root() {}\n").expect("root source");
+    fs::write(repository.path().join("src/café space.rs"), "fn special() {}\n").expect("special source");
+    git(repository.path(), &["init", "-q"]);
+    git(repository.path(), &["add", "."]);
+    git(
+        repository.path(),
+        &["-c", "user.name=LocalHold", "-c", "user.email=localhold@example.invalid", "commit", "-q", "-m", "fixture"],
+    );
+    let revision = String::from_utf8(git_output(repository.path(), &["rev-parse", "HEAD"]))
+        .expect("UTF-8 revision")
+        .trim()
+        .to_owned();
+
+    let inventory = scan_revision(repository.path(), &revision, &["src".to_owned()]).expect("revision inventory");
+    let paths = inventory.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>();
+    assert_eq!(paths, ["src/café space.rs", "src/lib.rs"]);
+}
+
+fn git(repository: &Path, arguments: &[&str]) {
+    let status = Command::new("git").current_dir(repository).args(arguments).status().expect("run git fixture command");
+    assert!(status.success(), "git fixture command failed: {arguments:?}");
+}
+
+fn git_output(repository: &Path, arguments: &[&str]) -> Vec<u8> {
+    let output = Command::new("git").current_dir(repository).args(arguments).output().expect("run git fixture query");
+    assert!(output.status.success(), "git fixture query failed: {arguments:?}");
+    output.stdout
 }

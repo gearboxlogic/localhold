@@ -45,8 +45,8 @@ pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Inventory> {
     for root in roots {
         collect_sources(workspace, &workspace.join(root), &mut sources)?;
     }
-    let production_roots = workspace_production_roots(workspace, sources.keys())?;
-    measure_sources_with_roots(sources, &production_roots)
+    let target_roots = workspace_target_roots(workspace, sources.keys())?;
+    measure_sources_with_roots(sources, &target_roots.production, &target_roots.test)
 }
 
 pub fn scan_revision(workspace: &Path, revision: &str, roots: &[String]) -> Result<Inventory> {
@@ -66,7 +66,22 @@ pub fn scan_revision(workspace: &Path, revision: &str, roots: &[String]) -> Resu
     }
     let entries = parse_tree_entries(&output.stdout)?;
     let sources = read_tree_sources(workspace, &entries)?;
-    measure_sources(sources)
+    let manifest = read_revision_manifest(workspace, revision)?;
+    let target_roots = target_roots(&manifest, sources.keys())?;
+    measure_sources_with_roots(sources, &target_roots.production, &target_roots.test)
+}
+
+fn read_revision_manifest(workspace: &Path, revision: &str) -> Result<String> {
+    let object = format!("{revision}:Cargo.toml");
+    let output = Command::new("git")
+        .current_dir(workspace)
+        .args(["show", "--no-ext-diff", &object])
+        .output()
+        .context("read package manifest from structural revision")?;
+    if !output.status.success() {
+        bail!("structural revision {revision} has no readable Cargo.toml");
+    }
+    String::from_utf8(output.stdout).context("package manifest from structural revision is not UTF-8")
 }
 
 fn parse_tree_entries(listing: &[u8]) -> Result<Vec<TreeEntry>> {
@@ -173,14 +188,15 @@ fn collect_sources(workspace: &Path, root: &Path, sources: &mut BTreeMap<String,
     Ok(())
 }
 
+#[cfg(test)]
 fn measure_sources(sources: BTreeMap<String, String>) -> Result<Inventory> {
     let production_roots = conventional_production_roots(sources.keys());
-    measure_sources_with_roots(sources, &production_roots)
+    measure_sources_with_roots(sources, &production_roots, &BTreeSet::new())
 }
 
-fn measure_sources_with_roots(sources: BTreeMap<String, String>, production_roots: &BTreeSet<String>) -> Result<Inventory> {
+fn measure_sources_with_roots(sources: BTreeMap<String, String>, production_roots: &BTreeSet<String>, explicit_test_roots: &BTreeSet<String>) -> Result<Inventory> {
     let parsed = parse_sources(sources)?;
-    let test_only_files = discover_test_only_files(&parsed, production_roots)?;
+    let test_only_files = discover_test_only_files(&parsed, production_roots, explicit_test_roots)?;
     let mut files = Vec::with_capacity(parsed.len());
     for (path, parsed) in parsed {
         let physical_lines = physical_line_count(&parsed.source);
@@ -211,7 +227,7 @@ fn parse_sources(sources: BTreeMap<String, String>) -> Result<BTreeMap<String, P
         .collect()
 }
 
-fn discover_test_only_files(parsed: &BTreeMap<String, ParsedSource>, production_roots: &BTreeSet<String>) -> Result<BTreeSet<String>> {
+fn discover_test_only_files(parsed: &BTreeMap<String, ParsedSource>, production_roots: &BTreeSet<String>, explicit_test_roots: &BTreeSet<String>) -> Result<BTreeSet<String>> {
     let known: BTreeSet<_> = parsed.keys().cloned().collect();
     let mut graph = ModuleGraph { known: &known, edges: Vec::new() };
     for (path, source) in parsed {
@@ -222,7 +238,11 @@ fn discover_test_only_files(parsed: &BTreeMap<String, ParsedSource>, production_
     let incoming: BTreeSet<_> = edges.iter().map(|edge| edge.target.as_str()).collect();
     let mut production_reachable = production_roots.clone();
     let mut test_reachable: BTreeSet<_> = known.iter().filter(|path| path.starts_with("tests/") || path.starts_with("benches/")).cloned().collect();
-    for path in known.iter().filter(|path| path.starts_with("src/") && !incoming.contains(path.as_str())) {
+    test_reachable.extend(explicit_test_roots.iter().cloned());
+    for path in known
+        .iter()
+        .filter(|path| path.starts_with("src/") && !incoming.contains(path.as_str()) && !explicit_test_roots.contains(*path))
+    {
         production_reachable.insert(path.clone());
     }
 
@@ -263,11 +283,20 @@ fn propagate_reachability(edges: &[ModuleEdge], production: &mut BTreeSet<String
     }
 }
 
-fn workspace_production_roots<'a>(workspace: &Path, known: impl Iterator<Item = &'a String>) -> Result<BTreeSet<String>> {
-    let known = known.cloned().collect::<BTreeSet<_>>();
+struct TargetRoots {
+    production: BTreeSet<String>,
+    test: BTreeSet<String>,
+}
+
+fn workspace_target_roots<'a>(workspace: &Path, known: impl Iterator<Item = &'a String>) -> Result<TargetRoots> {
     let manifest_path = workspace.join("Cargo.toml");
     let manifest = fs::read_to_string(&manifest_path).with_context(|| format!("read package manifest {}", manifest_path.display()))?;
-    let manifest: toml::Value = toml::from_str(&manifest).with_context(|| format!("parse package manifest {}", manifest_path.display()))?;
+    target_roots(&manifest, known)
+}
+
+fn target_roots<'a>(manifest: &str, known: impl Iterator<Item = &'a String>) -> Result<TargetRoots> {
+    let known = known.cloned().collect::<BTreeSet<_>>();
+    let manifest: toml::Value = toml::from_str(manifest).context("parse package manifest")?;
     let mut roots = conventional_production_roots(known.iter());
     if let Some(library) = manifest.get("lib") {
         add_declared_target_root(library, "library", &known, &mut roots)?;
@@ -278,10 +307,12 @@ fn workspace_production_roots<'a>(workspace: &Path, known: impl Iterator<Item = 
             add_declared_target_root(binary, "binary", &known, &mut roots)?;
         }
     }
-    for kind in ["example", "test", "bench"] {
-        validate_auxiliary_target_roots(&manifest, kind, &known)?;
+    validate_auxiliary_target_roots(&manifest, "example", &known)?;
+    let mut test = BTreeSet::new();
+    for kind in ["test", "bench"] {
+        test.extend(validate_auxiliary_target_roots(&manifest, kind, &known)?);
     }
-    Ok(roots)
+    Ok(TargetRoots { production: roots, test })
 }
 
 fn conventional_production_roots<'a>(known: impl Iterator<Item = &'a String>) -> BTreeSet<String> {
@@ -308,11 +339,12 @@ fn add_declared_target_root(target: &toml::Value, kind: &str, known: &BTreeSet<S
     Ok(())
 }
 
-fn validate_auxiliary_target_roots(manifest: &toml::Value, kind: &str, known: &BTreeSet<String>) -> Result<()> {
+fn validate_auxiliary_target_roots(manifest: &toml::Value, kind: &str, known: &BTreeSet<String>) -> Result<BTreeSet<String>> {
     let Some(targets) = manifest.get(kind) else {
-        return Ok(());
+        return Ok(BTreeSet::new());
     };
     let targets = targets.as_array().with_context(|| format!("package {kind} targets must be an array of tables"))?;
+    let mut roots = BTreeSet::new();
     for target in targets {
         let target = target.as_table().with_context(|| format!("package {kind} target must be a table"))?;
         let Some(path) = target.get("path") else {
@@ -323,8 +355,9 @@ fn validate_auxiliary_target_roots(manifest: &toml::Value, kind: &str, known: &B
         if !known.contains(path) {
             bail!("package {kind} target is outside the structural source inventory: {path}");
         }
+        roots.insert(path.to_owned());
     }
-    Ok(())
+    Ok(roots)
 }
 
 fn reject_untracked_rust_sources(workspace: &Path, root_name: &str) -> Result<()> {

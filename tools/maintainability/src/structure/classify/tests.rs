@@ -106,6 +106,59 @@ fn production_cargo_targets_outside_src_are_rejected() {
 }
 
 #[test]
+fn declared_test_and_bench_targets_under_src_are_test_only() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src", "tests", "benches"] {
+        fs::create_dir(repository.path().join(root)).expect("source root");
+    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+         \n[[test]]\nname = \"custom-test\"\npath = \"src/custom_test.rs\"\n\
+         \n[[bench]]\nname = \"custom-bench\"\npath = \"src/custom_bench.rs\"\n",
+    )
+    .expect("package manifest");
+    fs::write(repository.path().join("src/lib.rs"), "fn root() {}\n").expect("root source");
+    fs::write(repository.path().join("src/custom_test.rs"), "fn test_target() {}\n").expect("test target");
+    fs::write(repository.path().join("src/custom_bench.rs"), "fn bench_target() {}\n").expect("bench target");
+    fs::write(repository.path().join("src/unreferenced.rs"), "fn production_fallback() {}\n").expect("unreferenced source");
+
+    let inventory = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).expect("workspace inventory");
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_path["src/custom_test.rs"].production_lines, 0);
+    assert_eq!(by_path["src/custom_bench.rs"].production_lines, 0);
+    assert_eq!(by_path["src/unreferenced.rs"].production_lines, 1);
+}
+
+#[test]
+fn revision_scan_honors_declared_test_targets_under_src() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    fs::create_dir(repository.path().join("src")).expect("source root");
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+         \n[[test]]\nname = \"custom-test\"\npath = \"src/custom_test.rs\"\n",
+    )
+    .expect("package manifest");
+    fs::write(repository.path().join("src/lib.rs"), "fn root() {}\n").expect("root source");
+    fs::write(repository.path().join("src/custom_test.rs"), "fn test_target() {}\n").expect("test target");
+    git(repository.path(), &["init", "-q"]);
+    git(repository.path(), &["add", "."]);
+    git(
+        repository.path(),
+        &["-c", "user.name=LocalHold", "-c", "user.email=localhold@example.invalid", "commit", "-q", "-m", "fixture"],
+    );
+    let revision = String::from_utf8(git_output(repository.path(), &["rev-parse", "HEAD"]))
+        .expect("UTF-8 revision")
+        .trim()
+        .to_owned();
+
+    let inventory = scan_revision(repository.path(), &revision, &["src".to_owned()]).expect("revision inventory");
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_path["src/custom_test.rs"].production_lines, 0);
+}
+
+#[test]
 fn rust_examples_and_auxiliary_targets_outside_the_inventory_are_rejected() {
     let repository = tempfile::tempdir().expect("temporary repository");
     for root in ["src", "tests", "benches", "examples", "fixtures"] {
@@ -149,6 +202,7 @@ fn explicit_and_conditional_module_paths_fail_closed() {
 fn revision_scan_preserves_special_paths_and_reads_blobs_in_one_batch() {
     let repository = tempfile::tempdir().expect("temporary repository");
     fs::create_dir(repository.path().join("src")).expect("source directory");
+    fs::write(repository.path().join("Cargo.toml"), "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n").expect("package manifest");
     fs::write(repository.path().join("src/lib.rs"), "fn root() {}\n").expect("root source");
     fs::write(repository.path().join("src/café space.rs"), "fn special() {}\n").expect("special source");
     git(repository.path(), &["init", "-q"]);

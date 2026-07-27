@@ -185,6 +185,8 @@ component fails closed.
 The checker parses Rust syntax and classifies `#[cfg(test)]` and
 `cfg(feature = "testing")` items as test lines. Files reachable only through
 those modules, plus integration tests and benchmarks, are entirely test-only.
+Explicit Cargo test and benchmark targets are also test-only even when their
+audited path is under `src/`.
 This keeps extracting inline tests from pretending that production code was
 removed. LF and CRLF checkouts produce the same physical-line count.
 Production library and binary targets must remain under `src/`. Explicit or

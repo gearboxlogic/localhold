@@ -57,9 +57,51 @@ fn verify_cargo_contract(workspace: &Path, manifest: &UnsafeManifest) -> Result<
     }
     let reviewed_root_dependencies = root_dependency_specs.keys().copied().collect();
     let protected_dependencies = manifest.dependency_packages()?.keys().copied().collect();
+    verify_first_party_package_routes(&cargo)?;
     verify_dependency_routes(&cargo, &protected_dependencies, &reviewed_root_dependencies)?;
     verify_expansion_dependency_routes(&cargo)?;
     verify_cargo_target_paths(&cargo)?;
+    Ok(())
+}
+
+fn verify_first_party_package_routes(cargo: &toml::Value) -> Result<()> {
+    if cargo.get("workspace").is_some() {
+        bail!("Cargo.toml workspace packages are unsupported because first-party Rust must remain under the audited root package");
+    }
+    let root_package = cargo
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(toml::Value::as_str)
+        .context("Cargo.toml package.name must be a string")?;
+    verify_local_dependency_table(cargo.get("dependencies"), "dependencies", root_package)?;
+    for section in ["build-dependencies", "dev-dependencies"] {
+        verify_local_dependency_table(cargo.get(section), section, root_package)?;
+    }
+    if let Some(targets) = cargo.get("target") {
+        for (selector, target) in targets.as_table().context("Cargo.toml target must be a table")? {
+            let target = target.as_table().with_context(|| format!("Cargo.toml target {selector:?} must be a table"))?;
+            for section in ["dependencies", "build-dependencies", "dev-dependencies"] {
+                verify_local_dependency_table(target.get(section), &format!("target.{selector:?}.{section}"), root_package)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_local_dependency_table(value: Option<&toml::Value>, label: &str, root_package: &str) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    for (key, declaration) in value.as_table().with_context(|| format!("Cargo.toml {label} must be a table"))? {
+        let Some(path) = declaration.get("path") else {
+            continue;
+        };
+        let package = dependency_package_name(key, declaration).with_context(|| format!("parse Cargo.toml {label}.{key}"))?;
+        let reviewed_self_route = label == "dev-dependencies" && key == root_package && package == root_package && path.as_str() == Some(".");
+        if !reviewed_self_route {
+            bail!("Cargo.toml {label}.{key} uses an unsupported local path dependency; first-party Rust must remain in the audited root package");
+        }
+    }
     Ok(())
 }
 

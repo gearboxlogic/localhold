@@ -203,6 +203,32 @@ pub(super) fn untrusted_generated_attribute(tokens: &TokenStream) -> Option<Stri
     })
 }
 
+pub(super) fn generated_name_binding(tokens: &TokenStream) -> Option<&'static str> {
+    let tokens: Vec<_> = tokens.clone().into_iter().collect();
+    for (index, token) in tokens.iter().enumerate() {
+        let TokenTree::Ident(identifier) = token else {
+            continue;
+        };
+        match identifier.unraw().to_string().as_str() {
+            "use" => return Some("use import"),
+            "mod" => return Some("module declaration"),
+            "extern"
+                if matches!(
+                    tokens.get(index + 1),
+                    Some(TokenTree::Ident(next)) if next.unraw() == "crate"
+                ) =>
+            {
+                return Some("extern crate declaration");
+            }
+            _ => {}
+        }
+    }
+    tokens.into_iter().find_map(|token| match token {
+        TokenTree::Group(group) => generated_name_binding(&group.stream()),
+        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => None,
+    })
+}
+
 pub(super) fn is_trusted_attribute(attribute: &Attribute) -> bool {
     is_trusted_meta(&attribute.meta)
 }

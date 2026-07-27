@@ -410,6 +410,22 @@ fn rejects_unreviewed_attributes_generated_by_macros() {
 }
 
 #[test]
+fn rejects_name_bindings_generated_by_macros() {
+    for source in [
+        "macro_rules! transport_test { () => { use evil::expand as Deserialize; }; } transport_test!();",
+        "macro_rules! transport_test { () => { mod serde { pub use evil::expand as Deserialize; } }; } transport_test!();",
+        "macro_rules! transport_test { () => { extern crate evil as serde; }; } transport_test!();",
+    ] {
+        let error = scan_result(source).expect_err("generated name bindings must fail closed");
+        assert!(
+            error.to_string().contains("effect on reviewed expansion names cannot be audited"),
+            "unexpected error: {error:#}"
+        );
+    }
+    assert!(scan_result("macro_rules! transport_test { () => { fn generated() {} }; } transport_test!();").is_ok());
+}
+
+#[test]
 fn rejects_macro_invocations_inside_unsafe_blocks() {
     assert_unsafe_macro_rejected(
         r"
@@ -417,6 +433,12 @@ fn rejects_macro_invocations_inside_unsafe_blocks() {
         fn sample(pointer: *const u8) { unsafe { dereference!(pointer); } }
         ",
     );
+}
+
+#[test]
+fn rejects_macro_invocations_inside_unsafe_extern_blocks() {
+    let error = scan_result("unsafe extern \"C\" { transport_test!(); }").expect_err("macro expansion inside unsafe extern must fail closed");
+    assert!(error.to_string().contains("invokes a macro inside an unsafe context"), "unexpected error: {error:#}");
 }
 
 #[test]

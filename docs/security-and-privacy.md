@@ -193,14 +193,19 @@ These paths are not contacted by a default running `hold` process:
   `policy/maintainability/unsafe.json`. Opaque macro-generated attributes,
   including documentation attributes, source-path overrides, and `include!`
   code expansion or aliases are rejected; macro-generated safety exceptions
-  and mutable statics remain inventoried. Cargo target paths must stay under
-  audited roots. All enabled package build scripts are rejected, and a physical
-  root `build.rs` is rejected even when disabled. The gate also verifies the
-  required lint levels, locked dependency versions/sources/checksums, and
-  reviewed direct feature specifications. The manifest states safety invariants
-  and known proof debt; passing the gate means that the reviewed boundary did
-  not change, not that a compiler or runtime test has independently proved a
-  native ABI.
+  and mutable statics remain inventoried. Reviewed macros cannot emit name
+  bindings that redirect expansion paths, and macros inside any unsafe context,
+  including unsafe extern blocks, are rejected. Cargo target paths must stay
+  under audited roots. Root workspaces and local path dependencies are rejected
+  except for the reviewed self dev-dependency. All enabled package build scripts
+  are rejected, and a physical root `build.rs` is rejected even when disabled.
+  The gate also verifies the required lint levels, locked dependency
+  versions/sources/checksums, reviewed direct feature specifications, compiler
+  diagnostics for normal and test targets (including binary test harnesses),
+  and that focused-test references name existing explicit tests. The manifest
+  states safety invariants and known proof debt; passing the gate means that the
+  reviewed boundary did not change, not that a compiler or runtime test has
+  independently proved a native ABI.
 - The maintainability gate fetches locked Cargo packages, verifies every cached
   crates.io archive against `Cargo.lock`, and copies verified archives and
   registry metadata into an isolated Cargo home. It vendors the locked archives,

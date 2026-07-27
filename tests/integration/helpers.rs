@@ -905,75 +905,63 @@ impl TestHarness {
     }
 }
 
-/// Generate a module containing `stdio` and `http` tests from a single async
-/// test body that receives a [`TestHarness`].
+/// Generate `stdio` and `http` tests inside the caller's explicitly declared
+/// module from a single async test body that receives a [`TestHarness`].
 ///
 /// # Variants
 ///
 /// ```ignore
-/// transport_test!(noop, test_name, |harness| async move { ... });
-/// transport_test!(embedding, test_name, |harness| async move { ... });
-/// transport_test!(noop_clock, test_name, |harness, clock| async move { ... });
+/// transport_test!(noop, |harness| async move { ... });
+/// transport_test!(embedding, |harness| async move { ... });
+/// transport_test!(noop_clock, |harness, clock| async move { ... });
 /// ```
 ///
 /// The first token selects the constructor pair on `TestHarness`.
 macro_rules! transport_test {
     // -- noop (no clock) ---------------------------------------------------
-    (noop, $name:ident, |$h:ident| async move $body:block) => {
-        mod $name {
-            use super::*;
+    (noop, |$h:ident| async move $body:block) => {
+        #[tokio::test]
+        async fn stdio() {
+            let $h = super::super::helpers::TestHarness::stdio_noop().await;
+            $body
+        }
 
-            #[tokio::test]
-            async fn stdio() {
-                let $h = super::super::helpers::TestHarness::stdio_noop().await;
-                $body
-            }
-
-            #[tokio::test]
-            async fn http() {
-                let $h = super::super::helpers::TestHarness::http_noop().await;
-                $body
-            }
+        #[tokio::test]
+        async fn http() {
+            let $h = super::super::helpers::TestHarness::http_noop().await;
+            $body
         }
     };
 
     // -- embedding (no clock) -----------------------------------------------
-    (embedding, $name:ident, |$h:ident| async move $body:block) => {
-        mod $name {
-            use super::*;
+    (embedding, |$h:ident| async move $body:block) => {
+        #[tokio::test]
+        async fn stdio() {
+            let $h = super::super::helpers::TestHarness::stdio_embedding().await;
+            $body
+        }
 
-            #[tokio::test]
-            async fn stdio() {
-                let $h = super::super::helpers::TestHarness::stdio_embedding().await;
-                $body
-            }
-
-            #[tokio::test]
-            async fn http() {
-                let $h = super::super::helpers::TestHarness::http_embedding().await;
-                $body
-            }
+        #[tokio::test]
+        async fn http() {
+            let $h = super::super::helpers::TestHarness::http_embedding().await;
+            $body
         }
     };
 
     // -- noop + clock -------------------------------------------------------
-    (noop_clock, $name:ident, |$h:ident, $clock:ident| async move $body:block) => {
-        mod $name {
-            use super::*;
+    (noop_clock, |$h:ident, $clock:ident| async move $body:block) => {
+        #[tokio::test]
+        async fn stdio() {
+            let $clock = std::sync::Arc::new(localhold::clock::MockClock::new());
+            let $h = super::super::helpers::TestHarness::stdio_noop_clock(std::sync::Arc::clone(&$clock)).await;
+            $body
+        }
 
-            #[tokio::test]
-            async fn stdio() {
-                let $clock = std::sync::Arc::new(localhold::clock::MockClock::new());
-                let $h = super::super::helpers::TestHarness::stdio_noop_clock(std::sync::Arc::clone(&$clock)).await;
-                $body
-            }
-
-            #[tokio::test]
-            async fn http() {
-                let $clock = std::sync::Arc::new(localhold::clock::MockClock::new());
-                let $h = super::super::helpers::TestHarness::http_noop_clock(std::sync::Arc::clone(&$clock)).await;
-                $body
-            }
+        #[tokio::test]
+        async fn http() {
+            let $clock = std::sync::Arc::new(localhold::clock::MockClock::new());
+            let $h = super::super::helpers::TestHarness::http_noop_clock(std::sync::Arc::clone(&$clock)).await;
+            $body
         }
     };
 }

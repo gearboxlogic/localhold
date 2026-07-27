@@ -18,9 +18,9 @@ use syn::{
 use self::documentation::{is_doc_comment, unsupported_runnable_doctest};
 use self::files::{collect_optional as collect_optional_rust_files, collect_required as collect_rust_files};
 use self::policy::{
-    contains_assembly_macro, contains_opaque_attribute, contains_path_attribute, contains_structural_ident, contains_unaudited_macro_syntax, is_path_override,
-    is_reserved_expansion_root, is_safety_lint_exception, is_standalone_assembly_macro, is_trusted_attribute, is_trusted_local_macro_name, is_trusted_macro, is_unsafe_attribute,
-    macro_name, untrusted_generated_attribute, untrusted_import, untrusted_nested_macro,
+    contains_assembly_macro, contains_opaque_attribute, contains_path_attribute, contains_structural_ident, contains_unaudited_macro_syntax, generated_name_binding,
+    is_path_override, is_reserved_expansion_root, is_safety_lint_exception, is_standalone_assembly_macro, is_trusted_attribute, is_trusted_local_macro_name, is_trusted_macro,
+    is_unsafe_attribute, macro_name, untrusted_generated_attribute, untrusted_import, untrusted_nested_macro,
 };
 
 pub const REVIEWED_EXPANSION_PACKAGES: [&str; 14] = [
@@ -278,6 +278,12 @@ impl<'ast> Visit<'ast> for SourceScanner {
         if let Some(path) = untrusted_generated_attribute(&macro_invocation.tokens) {
             self.violations.push(format!("{} generates an unreviewed attribute path {path}", self.item()));
         }
+        if let Some(declaration) = generated_name_binding(&macro_invocation.tokens) {
+            self.violations.push(format!(
+                "{} generates a {declaration}, whose effect on reviewed expansion names cannot be audited",
+                self.item()
+            ));
+        }
         if contains_opaque_attribute(macro_invocation.tokens.clone()) {
             self.violations
                 .push(format!("{} uses opaque attribute construction that could bypass the safety inventory", self.item()));
@@ -404,8 +410,10 @@ impl<'ast> Visit<'ast> for SourceScanner {
         self.visit_boundary(scope, item, |scanner, item| {
             if let Some(unsafety) = &item.unsafety {
                 scanner.push_site(SiteKind::ExternBlock, item, unsafety.span);
+                scanner.with_unsafe_context(|scanner| visit::visit_item_foreign_mod(scanner, item));
+            } else {
+                visit::visit_item_foreign_mod(scanner, item);
             }
-            visit::visit_item_foreign_mod(scanner, item);
         });
     }
 

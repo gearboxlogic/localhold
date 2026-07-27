@@ -179,6 +179,30 @@ fn compiler_and_dep_info_audits_fail_closed_on_unmatched_inputs() {
     assert!(error.to_string().contains("unaudited input outside.rs"), "unexpected error: {error:#}");
 }
 
+#[test]
+fn binary_unit_test_diagnostics_are_audited() {
+    let fixture = procedural_macro_fixture();
+    write_root_source(&fixture, "tokio::safe!();");
+    fs::write(
+        fixture.path().join("src/main.rs"),
+        "
+        fn main() {}
+        #[cfg(test)]
+        mod tests {
+            #[test]
+            fn test_only_unsafe() {
+                // SAFETY: the empty fixture operation has no preconditions.
+                unsafe {}
+            }
+        }
+        ",
+    )
+    .expect("binary source");
+
+    let error = verify(fixture.path(), &[]).expect_err("binary test-only unsafe must be audited");
+    assert!(error.to_string().contains("compiler-expanded unsafe is absent"), "unexpected error: {error:#}");
+}
+
 fn scan_fixture(fixture: &TempDir) -> anyhow::Result<Vec<UnsafeSite>> {
     scan_workspace(fixture.path(), &["src", "tests", "benches"].map(str::to_owned))
 }

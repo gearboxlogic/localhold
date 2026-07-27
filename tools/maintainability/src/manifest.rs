@@ -7,6 +7,8 @@ use serde::Deserialize;
 
 use crate::scan::{SiteKind, UnsafeSite};
 
+mod focused_tests;
+
 const REQUIRED_ROOTS: [&str; 3] = ["src", "tests", "benches"];
 type LintSpec = (&'static str, &'static str, &'static str, i64);
 const REQUIRED_LINTS: [LintSpec; 3] = [
@@ -117,10 +119,15 @@ struct ExpectedSite {
 }
 
 impl UnsafeManifest {
-    pub fn load(path: &Path) -> Result<Self> {
+    pub fn load(path: &Path, workspace: &Path) -> Result<Self> {
         let bytes = fs::read(path).with_context(|| format!("read unsafe manifest {}", path.display()))?;
         let manifest: Self = serde_json::from_slice(&bytes).with_context(|| format!("parse unsafe manifest {}", path.display()))?;
         manifest.validate()?;
+        for contract in &manifest.contracts {
+            for reference in &contract.focused_tests {
+                focused_tests::validate(workspace, &contract.id, reference)?;
+            }
+        }
         Ok(manifest)
     }
 

@@ -30,7 +30,7 @@ fn run() -> Result<()> {
     let manifest_path = workspace.join("policy/maintainability/unsafe.json");
     match command {
         Command::Check => {
-            let manifest = UnsafeManifest::load(&manifest_path)?;
+            let manifest = UnsafeManifest::load(&manifest_path, &workspace)?;
             check::run(&workspace, &manifest)?;
             println!("first-party unsafe safety contract check passed");
         }

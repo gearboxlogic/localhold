@@ -82,9 +82,12 @@ Opaque `[< ... >]` token-pasting input is rejected independently of the macro's
 name or import path, including inside attribute input. Function-like macro and
 attribute paths, plus derive macros, use closed reviewed sets; a new expansion
 path requires an explicit safety-gate review before first use.
+Reviewed macro definitions may not generate `use`, `mod`, or `extern crate`
+bindings, because those declarations could redirect a trusted expansion path.
 Macro invocations inside unsafe blocks and unsafe functions are also rejected
 because changing the macro definition could change the reviewed operation
-without changing the unsafe-context syntax.
+without changing the unsafe-context syntax; unsafe extern blocks are treated as
+unsafe contexts too.
 `allow`, `expect`, and `warn` all count as exceptions when they weaken a
 required deny-level lint. Opaque macro-generated attributes, including
 documentation attributes, `include!` code expansion (including imported
@@ -100,13 +103,17 @@ blocks remain supported. The gate also runs Clippy with forced `unsafe_code`,
 `unsafe_code` diagnostic must map to exactly one inventoried source keyword;
 the other two diagnostics are always errors. Cargo dep-info for every root
 target is checked and rejects recorded compiler inputs outside the audited
-roots, including generated `include!` inputs.
+roots, including generated `include!` inputs. Compiler diagnostics from library,
+binary, integration-test, benchmark, and example targets are audited in their
+applicable normal and test configurations.
 
 Every exception requires a narrow safety contract with a stable owner,
 necessity, attempted safe alternatives, validity/lifetime/aliasing/ABI/thread
 and target invariants, caller preconditions, safe wrapper boundary, focused
 tests, dependency pins, invalidation and removal triggers, proof debt, and a
-recovery issue. Operations and lint exceptions are counted separately. Site
+recovery issue. Each focused-test reference must resolve to an existing explicit
+test function under an audited source root. Operations and lint exceptions are
+counted separately. Site
 locators plus site and enclosing-boundary syntax fingerprints make additions,
 moves, removals, operation mutations, and safe-wrapper mutations fail closed.
 The gate also reserves a higher Cargo priority for required compiler and Clippy
@@ -116,7 +123,10 @@ or Cargo home that could inject overriding compiler flags. Contract
 dependencies must use exactly their reviewed routes: alternate direct
 dependencies, aliases, workspace inheritance, build/dev/target declarations,
 and root-feature forwarding are rejected. Locked versions, sources, checksums,
-and direct feature specifications remain pinned. The broader
+and direct feature specifications remain pinned. First-party Rust must remain in
+the audited root package: root workspaces and local path dependencies are
+rejected, except for the exact reviewed self dev-dependency used by integration
+tests. The broader
 dependency-exposure gate still reviews target-specific effective Cargo graphs.
 
 Inspect the parser's current site inventory with:

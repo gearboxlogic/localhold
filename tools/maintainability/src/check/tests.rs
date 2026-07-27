@@ -6,7 +6,7 @@ use tempfile::tempdir;
 
 use super::{
     LockedPackage, compare_dependency_packages, lint_setting, parse_root_dependency, verify_audited_target_path, verify_cargo_target_paths, verify_dependency_routes,
-    verify_expansion_dependency_routes, verify_lint, verify_lint_precedence, verify_no_cargo_config, verify_no_cargo_config_with_home,
+    verify_expansion_dependency_routes, verify_first_party_package_routes, verify_lint, verify_lint_precedence, verify_no_cargo_config, verify_no_cargo_config_with_home,
 };
 
 fn cargo(source: &str) -> toml::Value {
@@ -335,5 +335,32 @@ fn package_build_scripts_are_disabled() {
         "[package]\nbuild = { workspace = true }",
     ] {
         assert!(verify_cargo_target_paths(&cargo(rejected)).is_err(), "build script must be rejected: {rejected}");
+    }
+}
+
+#[test]
+fn first_party_rust_stays_in_the_audited_root_package() {
+    let reviewed_self_route = cargo(
+        "
+        [package]
+        name = 'localhold'
+        [dev-dependencies]
+        localhold = { path = '.', features = ['testing'] }
+        ",
+    );
+    assert!(verify_first_party_package_routes(&reviewed_self_route).is_ok());
+
+    for rejected in [
+        "[package]\nname = 'localhold'\n[workspace]\nmembers = ['crates/helper']",
+        "[package]\nname = 'localhold'\n[dependencies]\nhelper = { path = 'crates/helper' }",
+        "[package]\nname = 'localhold'\n[build-dependencies]\nhelper = { path = 'crates/helper' }",
+        "[package]\nname = 'localhold'\n[dev-dependencies]\nhelper = { path = 'crates/helper' }",
+        "[package]\nname = 'localhold'\n[dev-dependencies]\nalias = { package = 'localhold', path = '.' }",
+        "[package]\nname = 'localhold'\n[target.'cfg(unix)'.dependencies]\nhelper = { path = 'crates/helper' }",
+    ] {
+        assert!(
+            verify_first_party_package_routes(&cargo(rejected)).is_err(),
+            "local package route must be rejected: {rejected}"
+        );
     }
 }

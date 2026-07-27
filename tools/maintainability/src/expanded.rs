@@ -13,6 +13,8 @@ use crate::scan::{SiteKind, UnsafeSite};
 
 use self::dep_info::{collect as collect_dep_info, verify as verify_dep_info};
 
+const UNIT_TEST_TARGET_KINDS: &[&str] = &["lib", "bin"];
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct Diagnostic {
     target: String,
@@ -54,7 +56,7 @@ pub fn verify(workspace: &Path, sites: &[UnsafeSite]) -> Result<()> {
         AuditLane {
             label: "unit-test",
             cargo_args: &["--lib", "--tests"],
-            target_kinds: &["lib"],
+            target_kinds: UNIT_TEST_TARGET_KINDS,
         },
         AuditLane {
             label: "integration-test",

@@ -94,6 +94,8 @@ pub struct DependencyPin {
     pub version: String,
     pub source: String,
     pub checksum: String,
+    pub resolved_features: Vec<String>,
+    pub incoming_routes: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq)]
@@ -312,18 +314,7 @@ fn validate_contract(contract: &UnsafeContract) -> Result<()> {
     if contract.operations.is_empty() {
         bail!("unsafe contract {:?} must enumerate its operations", contract.id);
     }
-    let mut dependency_names = BTreeSet::new();
-    for package in &contract.dependency_packages {
-        require_text(&package.name, "dependency name")?;
-        require_text(&package.version, "dependency version")?;
-        require_text(&package.source, "dependency source")?;
-        if package.checksum.len() != 64 || !package.checksum.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            bail!("unsafe contract {:?} has an invalid checksum for {}", contract.id, package.name);
-        }
-        if !dependency_names.insert(package.name.as_str()) {
-            bail!("unsafe contract {:?} repeats dependency {}", contract.id, package.name);
-        }
-    }
+    validate_dependency_pins(contract)?;
     for (name, specification) in &contract.root_dependency_specs {
         require_text(name, "root dependency name")?;
         require_text(&specification.version, "root dependency version requirement")?;
@@ -343,6 +334,46 @@ fn validate_contract(contract: &UnsafeContract) -> Result<()> {
         require_text(&operation.safety_argument, "operation safety argument")?;
         if !operation_ids.insert(operation.id.as_str()) {
             bail!("unsafe contract {:?} repeats operation {:?}", contract.id, operation.id);
+        }
+    }
+    Ok(())
+}
+
+fn validate_dependency_pins(contract: &UnsafeContract) -> Result<()> {
+    let mut dependency_names = BTreeSet::new();
+    for package in &contract.dependency_packages {
+        require_text(&package.name, "dependency name")?;
+        require_text(&package.version, "dependency version")?;
+        require_text(&package.source, "dependency source")?;
+        if package.checksum.len() != 64 || !package.checksum.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("unsafe contract {:?} has an invalid checksum for {}", contract.id, package.name);
+        }
+        if !dependency_names.insert(package.name.as_str()) {
+            bail!("unsafe contract {:?} repeats dependency {}", contract.id, package.name);
+        }
+        let mut resolved_features = BTreeSet::new();
+        for feature in &package.resolved_features {
+            require_text(feature, "resolved dependency feature")?;
+            if !resolved_features.insert(feature) {
+                bail!("unsafe contract {:?} repeats resolved feature {feature:?} for {}", contract.id, package.name);
+            }
+        }
+        let mut incoming_routes = BTreeSet::new();
+        for route in &package.incoming_routes {
+            require_text(route, "dependency incoming route")?;
+            if !incoming_routes.insert(route) {
+                bail!("unsafe contract {:?} repeats incoming route {route:?} for {}", contract.id, package.name);
+            }
+        }
+        if incoming_routes.is_empty() {
+            bail!("unsafe contract {:?} must enumerate incoming routes for {}", contract.id, package.name);
+        }
+    }
+    for package in &contract.dependency_packages {
+        for route in &package.incoming_routes {
+            if route != "root" && !dependency_names.contains(route.as_str()) {
+                bail!("unsafe contract {:?} dependency {} has unknown incoming route {route:?}", contract.id, package.name);
+            }
         }
     }
     Ok(())

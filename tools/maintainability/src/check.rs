@@ -11,6 +11,8 @@ use crate::manifest::{DependencyPin, RootDependencySpec, UnsafeManifest};
 use crate::scan::{RESERVED_LOCAL_MACROS, REVIEWED_EXPANSION_PACKAGES};
 use crate::{expanded, scan};
 
+mod dependency_graph;
+
 type RequiredLint<'a> = (&'a str, &'a str, &'a str, i64);
 
 #[derive(Debug, Deserialize)]
@@ -57,12 +59,14 @@ fn verify_cargo_contract(workspace: &Path, manifest: &UnsafeManifest) -> Result<
         }
     }
     let reviewed_root_dependencies = root_dependency_specs.keys().copied().collect();
-    let protected_dependencies = manifest.dependency_packages()?.keys().copied().collect();
+    let dependency_packages = manifest.dependency_packages()?;
+    let protected_dependencies = dependency_packages.keys().copied().collect();
     verify_first_party_package_routes(&cargo)?;
     verify_dependency_routes(&cargo, &protected_dependencies, &reviewed_root_dependencies)?;
     verify_expansion_dependency_routes(&cargo)?;
     verify_cargo_target_paths(&cargo)?;
     let metadata = load_cargo_metadata(workspace)?;
+    dependency_graph::verify(&metadata, &dependency_packages)?;
     manifest.validate_focused_test_targets(workspace, &cargo, &metadata)?;
     Ok(metadata)
 }
@@ -70,7 +74,7 @@ fn verify_cargo_contract(workspace: &Path, manifest: &UnsafeManifest) -> Result<
 fn load_cargo_metadata(workspace: &Path) -> Result<Vec<u8>> {
     let output = Command::new(env!("CARGO"))
         .current_dir(workspace)
-        .args(["metadata", "--format-version=1", "--no-deps", "--locked"])
+        .args(["metadata", "--format-version=1", "--locked", "--all-features"])
         .output()
         .context("run locked Cargo metadata for source-safety targets")?;
     if !output.status.success() {
@@ -254,6 +258,10 @@ fn verify_lint_precedence(cargo: &toml::Value, required: &[RequiredLint<'_>]) ->
             if required_names.contains(name.as_str()) {
                 continue;
             }
+            let overlapping_members = safety_lint_group_members(table_name, name);
+            if !overlapping_members.iter().any(|member| required_names.contains(member)) {
+                continue;
+            }
             let (_, priority) = lint_setting(value).with_context(|| format!("parse Cargo.toml lint {table_name}.{name}"))?;
             if priority >= reserved_priority {
                 bail!("Cargo.toml lint {table_name}.{name} priority {priority} can override safety lints reserved at priority {reserved_priority}");
@@ -261,6 +269,14 @@ fn verify_lint_precedence(cargo: &toml::Value, required: &[RequiredLint<'_>]) ->
         }
     }
     Ok(())
+}
+
+fn safety_lint_group_members(table: &str, name: &str) -> &'static [&'static str] {
+    match (table, name) {
+        ("rust", "rust_2024_compatibility") => &["unsafe_op_in_unsafe_fn"],
+        ("clippy", "restriction") => &["undocumented_unsafe_blocks"],
+        _ => &[],
+    }
 }
 
 fn verify_cargo_target_paths(cargo: &toml::Value) -> Result<()> {

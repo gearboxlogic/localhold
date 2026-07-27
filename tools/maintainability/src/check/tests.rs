@@ -48,6 +48,16 @@ fn required_lints_reserve_priority_over_other_settings() {
     );
     assert!(verify_lint_precedence(&accepted, &requirements).is_ok());
 
+    let unrelated = cargo(
+        "
+        [lints.rust]
+        unsafe_code = { level = 'deny', priority = 1 }
+        unsafe_op_in_unsafe_fn = { level = 'deny', priority = 1 }
+        dead_code = { level = 'deny', priority = 2 }
+        ",
+    );
+    assert!(verify_lint_precedence(&unrelated, &requirements).is_ok());
+
     for priority in [1, 2] {
         let overridden = cargo(&format!(
             "
@@ -116,6 +126,8 @@ fn dependency_contract_rejects_source_checksum_version_and_multiplicity_drift() 
         version: "0.1.9".to_owned(),
         source: "registry".to_owned(),
         checksum: "checksum".to_owned(),
+        resolved_features: Vec::new(),
+        incoming_routes: vec!["root".to_owned()],
     };
     let required = BTreeMap::from([("sqlite-vec", &pin)]);
     let package = LockedPackage {

@@ -337,7 +337,6 @@ fn rejects_runnable_rust_doctests_but_allows_ignored_examples() {
         "/// ```test_harness\n/// fn harness_runnable() {}\n/// ```\nfn sample() {}",
         "/// ```ignore-x86_64\n/// fn runnable_on_other_targets() {}\n/// ```\nfn sample() {}",
         "/// ```ignore,ignore-x86_64\n/// fn target_ignore_overrides_global_ignore() {}\n/// ```\nfn sample() {}",
-        "/// ```future_rustdoc_modifier\n/// fn unknown_modifiers_fail_closed() {}\n/// ```\nfn sample() {}",
         "///     fn indented() {}\nfn sample() {}",
         "/**\n * ```rust\n * fn block_doc() {}\n * ```\n */\nfn sample() {}",
         "/*!\n * ```rust\n * fn inner_block_doc() {}\n * ```\n */\nfn sample() {}",
@@ -346,7 +345,10 @@ fn rejects_runnable_rust_doctests_but_allows_ignored_examples() {
         assert!(error.to_string().contains("runnable Rust doctests"), "unexpected error: {error:#}");
     }
     assert!(scan_result("/// ```ignore\n/// fn ignored() {}\n/// ```\nfn sample() {}").is_ok());
-    assert!(scan_result("/// ```text\n/// unsafe is prose here\n/// ```\nfn sample() {}").is_ok());
+    for language in ["text", "json", "sh", "toml"] {
+        assert!(scan_result(&format!("/// ```{language}\n/// unsafe is prose here\n/// ```\nfn sample() {{}}")).is_ok());
+    }
+    assert!(scan_result("/// ```custom,language-c\n/// int main(void) { return 0; }\n/// ```\nfn sample() {}").is_ok());
     assert!(scan_result("/// ```custom,{.language-c}\n/// int main(void) { return 0; }\n/// ```\nfn sample() {}").is_ok());
     assert!(scan_result("/// ```text\n///     indented prose\n/// ```\nfn sample() {}").is_ok());
     assert!(

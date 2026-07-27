@@ -203,12 +203,15 @@ These paths are not contacted by a default running `hold` process:
   build scripts are rejected, and a physical root `build.rs` is rejected even
   when disabled. Runnable rustdoc modifiers, target-specific ignores, and
   class-only Rust fences are rejected unless the block is globally ignored or
-  explicitly marked as `text` or `custom`; unknown labels fail closed. The gate
-  also verifies the required lint levels, locked dependency
+  explicitly marked as a non-Rust language or `custom`. The gate also verifies
+  the required lint levels, protects them from overlapping higher-priority lint
+  groups, and pins locked dependency
   versions/sources/checksums, reviewed direct feature specifications, compiler
   diagnostics for normal and test targets (including binary test harnesses),
   and that focused-test references name existing, unconditional, non-ignored
   explicit tests scheduled as standard, ungated Cargo integration-test targets.
+  The all-features resolved graph must also retain each contract dependency's
+  exact unified feature set and incoming parent routes.
   The manifest states safety invariants and known proof debt; passing the gate
   means that the reviewed boundary did not change, not that a compiler or
   runtime test has independently proved a native ABI.

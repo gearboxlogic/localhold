@@ -60,19 +60,47 @@
           "name": "libsqlite3-sys",
           "version": "0.38.1",
           "source": "registry+https://github.com/rust-lang/crates.io-index",
-          "checksum": "f6c19a05435c21ac299d71b6a9c13db3e3f47c520517d58990a462a1397a61db"
+          "checksum": "f6c19a05435c21ac299d71b6a9c13db3e3f47c520517d58990a462a1397a61db",
+          "resolved_features": [
+            "bundled",
+            "bundled_bindings",
+            "cc",
+            "default",
+            "min_sqlite_version_3_34_1",
+            "pkg-config",
+            "vcpkg"
+          ],
+          "incoming_routes": [
+            "rusqlite"
+          ]
         },
         {
           "name": "rusqlite",
           "version": "0.40.1",
           "source": "registry+https://github.com/rust-lang/crates.io-index",
-          "checksum": "11438310b19e3109b6446c33d1ed5e889428cf2e278407bc7896bc4aaea43323"
+          "checksum": "11438310b19e3109b6446c33d1ed5e889428cf2e278407bc7896bc4aaea43323",
+          "resolved_features": [
+            "backup",
+            "bundled",
+            "cache",
+            "default",
+            "ffi-sqlite-wasm-rs",
+            "hashlink",
+            "modern_sqlite"
+          ],
+          "incoming_routes": [
+            "root"
+          ]
         },
         {
           "name": "sqlite-vec",
           "version": "0.1.9",
           "source": "registry+https://github.com/rust-lang/crates.io-index",
-          "checksum": "d0ba424237a9a5db2f6071f193319e2b6a32f7f3961debb2fbbfe67067abce3f"
+          "checksum": "d0ba424237a9a5db2f6071f193319e2b6a32f7f3961debb2fbbfe67067abce3f",
+          "resolved_features": [],
+          "incoming_routes": [
+            "root"
+          ]
         }
       ],
       "root_dependency_specs": {

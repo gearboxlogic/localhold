@@ -24,7 +24,7 @@ mod reexports;
 mod resolution;
 mod tokens;
 pub use concrete::{ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites};
-use concrete::{ConcreteStoreInventory, context_fingerprint, is_concrete_store_name};
+use concrete::{ConcreteStoreInventory, context_fingerprint, is_concrete_store_name, production_generics};
 use macro_definitions::contains_production_concrete_store;
 use reexports::{PendingPublicReexport, UseResolution, resolve_public_reexport_aliases};
 use resolution::{StringScan, UsePath, flatten_use_tree, resolve_path, restricted_attribute_identifier, restricted_token_identifier, source_module};
@@ -376,6 +376,13 @@ impl ProductionSyntaxCollector {
     }
 
     fn record_declaration_generics(&mut self, kind: &str, visibility: &Visibility, generics: &Generics) {
+        let generics = match production_generics(generics, &self.cfg_context) {
+            Ok(generics) => generics,
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        };
         let mut tokens = generics.to_token_stream();
         if let Some(where_clause) = &generics.where_clause {
             tokens.extend(where_clause.to_token_stream());
@@ -393,13 +400,7 @@ impl ProductionSyntaxCollector {
         }
         production.inputs = inputs.into_iter().collect();
 
-        let mut parameters = Vec::new();
-        for parameter in &signature.generics.params {
-            if production_cfg_context(generic_param_attributes(parameter), &self.cfg_context)?.is_some() {
-                parameters.push(parameter.clone());
-            }
-        }
-        production.generics.params = parameters.into_iter().collect();
+        production.generics = production_generics(&signature.generics, &self.cfg_context)?;
 
         if let Some(variadic) = &signature.variadic
             && production_cfg_context(&variadic.attrs, &self.cfg_context)?.is_none()

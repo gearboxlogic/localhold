@@ -4,11 +4,11 @@ use quote::ToTokens;
 use serde::Serialize;
 use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
-use syn::{Attribute, Field, Fields, ItemStruct, Meta, Token};
+use syn::{Attribute, Field, Fields, Generics, ItemStruct, Meta, Token};
 
 use crate::scan::syntax_fingerprint;
 
-use super::super::{ProductionCfgContext, normalized_ident, production_cfg_attr_metas, production_cfg_context};
+use super::super::{ProductionCfgContext, generic_param_attributes, normalized_ident, production_cfg_attr_metas, production_cfg_context};
 use super::tokens::resolving_tokens;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
@@ -74,6 +74,7 @@ impl ConcreteStoreInventory {
         };
         let mut declaration = item.clone();
         declaration.attrs.retain(|attribute| !attribute.path().is_ident("doc"));
+        declaration.generics = production_generics(&declaration.generics, cfg)?;
         match &mut declaration.fields {
             Fields::Named(fields) => fields.named = production_fields(&fields.named, cfg)?,
             Fields::Unnamed(fields) => fields.unnamed = production_fields(&fields.unnamed, cfg)?,
@@ -300,6 +301,22 @@ impl ConcreteStoreInventory {
         };
         sites.push(syntax_fingerprint(&site_context));
     }
+}
+
+pub(super) fn production_generics(generics: &Generics, cfg: &ProductionCfgContext) -> Result<Generics> {
+    let mut production = generics.clone();
+    let mut parameters = Vec::new();
+    for parameter in &generics.params {
+        if production_cfg_context(generic_param_attributes(parameter), cfg)?.is_some() {
+            parameters.push(parameter.clone());
+        }
+    }
+    production.params = parameters.into_iter().collect();
+    if production.params.is_empty() {
+        production.lt_token = None;
+        production.gt_token = None;
+    }
+    Ok(production)
 }
 
 fn production_fields(fields: &Punctuated<Field, Token![,]>, cfg: &ProductionCfgContext) -> Result<Punctuated<Field, Token![,]>> {

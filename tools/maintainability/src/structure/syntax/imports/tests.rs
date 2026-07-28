@@ -561,7 +561,7 @@ fn canonical_declaration_fingerprints_ignore_outer_attributes_but_pin_shape() ->
          }",
     )?;
     let test_instrumented = concrete_facts(
-        "pub struct SqliteStore {\n\
+        "pub struct SqliteStore<#[cfg(test)] TestProbe = usize, #[cfg(feature = \"testing\")] HarnessProbe = usize> {\n\
              inner: Arc<SqliteInner>,\n\
              #[cfg(test)] test_probe: usize,\n\
              #[cfg(feature = \"testing\")] testing_probe: usize,\n\
@@ -1137,6 +1137,12 @@ fn signature_parameters_follow_production_cfg() -> Result<()> {
          pub struct Holder;\n\
          impl Holder { pub fn inspect(#[cfg(test)] _: SqliteStore) {} }\n\
          pub trait Reader { fn inspect(#[cfg(feature = \"testing\")] _: PostgresStore); }\n\
+         pub struct Wrapper<#[cfg(test)] T = SqliteStore, #[cfg(feature = \"testing\")] U = PostgresStore> {\n\
+             #[cfg(test)] sqlite: T,\n\
+             #[cfg(feature = \"testing\")] postgres: U,\n\
+         }\n\
+         pub enum Choice<#[cfg(test)] T = SqliteStore> { #[cfg(test)] Store(T) }\n\
+         pub union Either<#[cfg(feature = \"testing\")] T: Copy = PostgresStore> { #[cfg(feature = \"testing\")] store: T }\n\
          unsafe extern \"C\" { pub fn inspect(#[cfg(test)] value: SqliteStore); }\n",
     )?;
     assert!(facts.signature_concrete_store_sites.sqlite_store.is_empty());

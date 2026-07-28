@@ -428,6 +428,23 @@ fn shadowable_stringify_names_do_not_hide_store_tokens() -> Result<()> {
             postgres_store: 0,
         }
     );
+
+    for cfg_exclusive_shadow in [
+        "use ::core::stringify as text;\n\
+         #[cfg(feature = \"legacy\")]\n\
+         macro_rules! text { ($store:ty) => { <$store>::open() } }\n\
+         #[cfg(not(feature = \"legacy\"))]\n\
+         const STORE: &str = text!(SqliteStore);\n",
+        "fn open() {\n\
+             use ::core::stringify as text;\n\
+             #[cfg(feature = \"legacy\")]\n\
+             macro_rules! text { ($store:ty) => { <$store>::open() } }\n\
+             #[cfg(not(feature = \"legacy\"))]\n\
+             let _ = text!(PostgresStore);\n\
+         }\n",
+    ] {
+        assert_eq!(concrete_facts(cfg_exclusive_shadow)?.concrete_stores, ConcreteStoreCounts::default());
+    }
     Ok(())
 }
 
@@ -729,6 +746,26 @@ fn store_specialized_impl_headers_are_exposure_signatures() -> Result<()> {
 
     assert!(private.signature_concrete_store_sites.sqlite_store.is_empty());
     assert_eq!(exposed.signature_concrete_store_sites.sqlite_store.len(), 1);
+    assert_eq!(trait_impl.signature_concrete_store_sites.postgres_store.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn private_inherent_members_are_not_exposure_signatures() -> Result<()> {
+    let private = concrete_facts("impl Adapter { fn inspect(_: &SqliteStore) {} const STORE: Option<PostgresStore> = None; }\n")?;
+    let restricted = concrete_facts(
+        "impl Adapter {\n\
+             pub(crate) fn inspect(_: &SqliteStore) {}\n\
+             pub(crate) const STORE: Option<PostgresStore> = None;\n\
+         }\n",
+    )?;
+    let trait_impl = concrete_facts("impl Inspect for Adapter { fn inspect(_: &SqliteStore) {} const STORE: Option<PostgresStore> = None; }\n")?;
+
+    assert!(private.signature_concrete_store_sites.sqlite_store.is_empty());
+    assert!(private.signature_concrete_store_sites.postgres_store.is_empty());
+    assert_eq!(restricted.signature_concrete_store_sites.sqlite_store.len(), 1);
+    assert_eq!(restricted.signature_concrete_store_sites.postgres_store.len(), 1);
+    assert_eq!(trait_impl.signature_concrete_store_sites.sqlite_store.len(), 1);
     assert_eq!(trait_impl.signature_concrete_store_sites.postgres_store.len(), 1);
     Ok(())
 }

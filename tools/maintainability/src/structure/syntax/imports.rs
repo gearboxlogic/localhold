@@ -43,6 +43,12 @@ struct BlockBuiltinStringifyAlias {
     cfg: ProductionCfgContext,
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct MacroShadow {
+    name: String,
+    cfg: ProductionCfgContext,
+}
+
 type BuiltinStringifyAliases = BTreeSet<BuiltinStringifyAlias>;
 
 #[derive(Default)]
@@ -111,6 +117,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
         macro_shadow_scopes: vec![BTreeSet::new()],
         generic_default_depth: 0,
         impl_signature_headers: Vec::new(),
+        impl_trait_exposures: Vec::new(),
         declaration_ancestors: initial_context.declaration_ancestors,
         cfg_context: initial_context.cfg,
         error: None,
@@ -151,9 +158,10 @@ struct ProductionSyntaxCollector {
     concrete_stores: ConcreteStoreInventory,
     site_context: Option<String>,
     block_depth: usize,
-    macro_shadow_scopes: Vec<BTreeSet<String>>,
+    macro_shadow_scopes: Vec<BTreeSet<MacroShadow>>,
     generic_default_depth: usize,
     impl_signature_headers: Vec<TokenStream>,
+    impl_trait_exposures: Vec<bool>,
     declaration_ancestors: Vec<String>,
     cfg_context: ProductionCfgContext,
     error: Option<anyhow::Error>,
@@ -380,6 +388,10 @@ impl ProductionSyntaxCollector {
         identity.extend(visibility.to_token_stream());
         identity.extend(member.to_token_stream());
         self.record_concrete_stores_in_exposure_signature_with_identity(kind, &header, &identity);
+    }
+
+    fn impl_member_is_exposed(&self, visibility: &Visibility) -> bool {
+        !matches!(visibility, Visibility::Inherited) || self.impl_trait_exposures.last().copied().unwrap_or(false)
     }
 
     fn enter_site_context(&mut self, kind: &str, syntax: &impl ToTokens) -> Option<String> {
@@ -660,12 +672,15 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         };
         let context = format!("{binding}\0cfg:{}\0ancestors:{}", self.cfg_context.identity(), self.declaration_ancestors.join("\0"));
         self.concrete_stores.record_binding_tokens(&header.to_token_stream(), &context);
-        if item.trait_.is_some() {
+        let trait_exposure = item.trait_.is_some();
+        if trait_exposure {
             let tokens = header.to_token_stream();
             self.record_concrete_stores_in_exposure_signature_with_identity("trait-impl-header", &tokens, &tokens);
         }
         self.impl_signature_headers.push(header.to_token_stream());
+        self.impl_trait_exposures.push(trait_exposure);
         visit::visit_item_impl(self, item);
+        self.impl_trait_exposures.pop();
         self.impl_signature_headers.pop();
     }
 
@@ -678,7 +693,9 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
 
     fn visit_impl_item_fn(&mut self, item: &'ast ImplItemFn) {
         self.record_impl_header_for_visible_member("inherent-impl-method", &item.vis, &item.sig);
-        self.record_concrete_stores_in_visible_signature("method-signature", &item.vis, &item.sig);
+        if self.impl_member_is_exposed(&item.vis) {
+            self.record_concrete_stores_in_visible_signature("method-signature", &item.vis, &item.sig);
+        }
         visit::visit_impl_item_fn(self, item);
     }
 
@@ -704,7 +721,9 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
 
     fn visit_impl_item_const(&mut self, item: &'ast ImplItemConst) {
         self.record_impl_header_for_visible_member("inherent-impl-const", &item.vis, &item.ty);
-        self.record_concrete_stores_in_visible_signature("associated-const-type", &item.vis, &item.ty);
+        if self.impl_member_is_exposed(&item.vis) {
+            self.record_concrete_stores_in_visible_signature("associated-const-type", &item.vis, &item.ty);
+        }
         visit::visit_impl_item_const(self, item);
     }
 
@@ -885,7 +904,10 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             }
         }
         if let Some(scope) = self.macro_shadow_scopes.last_mut() {
-            scope.insert(normalized_ident(name));
+            scope.insert(MacroShadow {
+                name: normalized_ident(name),
+                cfg: self.cfg_context.clone(),
+            });
         }
     }
 
@@ -925,7 +947,12 @@ impl ProductionSyntaxCollector {
                 .iter()
                 .rev()
                 .any(|scope| scope.iter().any(|candidate| candidate.name == alias && candidate.cfg.conjoin(&self.cfg_context).is_some()));
-        imported && !self.macro_shadow_scopes.iter().rev().any(|scope| scope.contains(&alias))
+        imported
+            && !self
+                .macro_shadow_scopes
+                .iter()
+                .rev()
+                .any(|scope| scope.iter().any(|shadow| shadow.name == alias && shadow.cfg.conjoin(&self.cfg_context).is_some()))
     }
 }
 

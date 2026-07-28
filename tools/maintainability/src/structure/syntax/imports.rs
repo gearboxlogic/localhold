@@ -6,9 +6,9 @@ use quote::ToTokens;
 use serde::Serialize;
 use syn::visit::{self, Visit};
 use syn::{
-    Arm, Attribute, BareFnArg, BareVariadic, Expr, Field, FieldPat, FieldValue, File, FnArg, ForeignItem, ForeignItemFn, ForeignItemStatic, GenericParam, Generics, ImplItem,
-    ImplItemConst, ImplItemFn, ImplItemType, Item, ItemConst, ItemEnum, ItemExternCrate, ItemFn, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemType,
-    ItemUnion, ItemUse, Local, Pat, Path as SynPath, Stmt, StmtMacro, TraitItem, TraitItemConst, TraitItemFn, TraitItemType, Variadic, Variant, Visibility,
+    Arm, Attribute, BareFnArg, BareVariadic, Block, Expr, Field, FieldPat, FieldValue, File, FnArg, ForeignItem, ForeignItemFn, ForeignItemStatic, GenericParam, Generics,
+    ImplItem, ImplItemConst, ImplItemFn, ImplItemType, Item, ItemConst, ItemEnum, ItemExternCrate, ItemFn, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait,
+    ItemType, ItemUnion, ItemUse, Local, Pat, Path as SynPath, Stmt, StmtMacro, TraitItem, TraitItemConst, TraitItemFn, TraitItemType, Variadic, Variant, Visibility,
 };
 
 use crate::scan::{reviewed_attribute_expansion, reviewed_macro_expansion, syntax_fingerprint};
@@ -89,6 +89,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
         public_reexports: Vec::new(),
         concrete_stores: ConcreteStoreInventory::default(),
         site_context: None,
+        block_depth: 0,
         generic_default_depth: 0,
         impl_signature_headers: Vec::new(),
         declaration_ancestors: initial_context.declaration_ancestors,
@@ -129,6 +130,7 @@ struct ProductionSyntaxCollector {
     public_reexports: Vec<PublicReexportEvidence>,
     concrete_stores: ConcreteStoreInventory,
     site_context: Option<String>,
+    block_depth: usize,
     generic_default_depth: usize,
     impl_signature_headers: Vec<TokenStream>,
     declaration_ancestors: Vec<String>,
@@ -323,7 +325,8 @@ impl ProductionSyntaxCollector {
             self.cfg_context.identity(),
             self.declaration_ancestors.join("\0")
         );
-        self.concrete_stores.record_signature_tokens(tokens, &context, &self.module);
+        let item_path = self.signature_item_path();
+        self.concrete_stores.record_signature_tokens(tokens, &context, &item_path);
     }
 
     fn record_concrete_stores_in_exposure_signature_with_identity(&mut self, kind: &str, tokens: &TokenStream, identity: &TokenStream) {
@@ -333,7 +336,8 @@ impl ProductionSyntaxCollector {
             self.cfg_context.identity(),
             self.declaration_ancestors.join("\0")
         );
-        self.concrete_stores.record_exposure_signature_tokens(tokens, &context, &self.module);
+        let item_path = self.signature_item_path();
+        self.concrete_stores.record_exposure_signature_tokens(tokens, &context, &item_path);
     }
 
     fn record_impl_header_for_visible_member(&mut self, kind: &str, visibility: &Visibility, member: &impl ToTokens) {
@@ -362,6 +366,23 @@ impl ProductionSyntaxCollector {
         self.generic_default_depth += 1;
         visit(self);
         self.generic_default_depth -= 1;
+    }
+
+    fn signature_item_path(&self) -> Vec<String> {
+        if self.block_depth > 0 {
+            return Vec::new();
+        }
+        let Some(name) = self.declaration_ancestors.iter().rev().find_map(|ancestor| {
+            ["const:", "enum:", "fn:", "static:", "struct:", "trait:", "union:"]
+                .into_iter()
+                .find_map(|prefix| ancestor.strip_prefix(prefix))
+                .and_then(|suffix| suffix.split_once(':').map(|(name, _)| name))
+        }) else {
+            return Vec::new();
+        };
+        let mut path = self.module.clone();
+        path.push(name.to_owned());
+        path
     }
 }
 
@@ -421,6 +442,12 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         FieldValue,
         node => Ok(node.attrs.as_slice())
     );
+
+    fn visit_block(&mut self, node: &'ast Block) {
+        self.block_depth += 1;
+        visit::visit_block(self, node);
+        self.block_depth -= 1;
+    }
 
     fn visit_item(&mut self, node: &'ast Item) {
         let Some(cfg) = self.enter_production_node(item_attributes(node)) else {
@@ -532,10 +559,13 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
 
     fn visit_item_use(&mut self, item: &'ast ItemUse) {
         let previous = self.enter_site_context("use", item);
-        let result = self
-            .collect_use(item)
-            .and_then(|()| self.record_use_resolutions(item))
-            .and_then(|()| self.record_public_reexport(item));
+        let result = self.collect_use(item).and_then(|()| {
+            if self.block_depth == 0 {
+                self.record_use_resolutions(item)?;
+                self.record_public_reexport(item)?;
+            }
+            Ok(())
+        });
         if self.error.is_none()
             && let Err(error) = result
         {

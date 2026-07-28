@@ -505,7 +505,10 @@ fn canonical_binding_fingerprint(inventory: &Inventory, paths: PathAttribution<'
     Ok(syntax_fingerprint(&evidence.join("\0")))
 }
 
-fn public_reexport_evidence(inventory: &Inventory, paths: PathAttribution<'_>, target_module: &[String]) -> Vec<String> {
+fn public_reexport_evidence(inventory: &Inventory, paths: PathAttribution<'_>, target_item: &[String]) -> Vec<String> {
+    if target_item.is_empty() {
+        return Vec::new();
+    }
     let reexports = inventory
         .files
         .iter()
@@ -513,7 +516,7 @@ fn public_reexport_evidence(inventory: &Inventory, paths: PathAttribution<'_>, t
         .collect::<Vec<_>>();
     let mut evidence = reexports
         .iter()
-        .filter(|(_, reexport)| reexport_reaches_module(reexport, &reexports, target_module))
+        .filter(|(_, reexport)| reexport_reaches_item(reexport, &reexports, target_item))
         .map(|(file, reexport)| format!("{}:{}:{}", paths.site_path(&file.path).len(), paths.site_path(&file.path), reexport.fingerprint))
         .collect::<Vec<_>>();
     evidence.sort();
@@ -521,14 +524,14 @@ fn public_reexport_evidence(inventory: &Inventory, paths: PathAttribution<'_>, t
     evidence
 }
 
-fn reexport_reaches_module(candidate: &PublicReexportEvidence, reexports: &[(&FileMeasurement, &PublicReexportEvidence)], target_module: &[String]) -> bool {
+fn reexport_reaches_item(candidate: &PublicReexportEvidence, reexports: &[(&FileMeasurement, &PublicReexportEvidence)], target_item: &[String]) -> bool {
     let mut pending = vec![candidate.target_path.clone()];
     let mut visited = BTreeSet::new();
     while let Some(path) = pending.pop() {
         if !visited.insert(path.clone()) {
             continue;
         }
-        if reexport_applies_to_module(&path, target_module) {
+        if reexport_applies_to_item(&path, target_item) {
             return true;
         }
         pending.extend(reexports.iter().filter_map(|(_, reexport)| resolve_reexport_target(&path, reexport)));
@@ -548,14 +551,13 @@ fn resolve_reexport_target(path: &[String], reexport: &PublicReexportEvidence) -
     (resolved != path).then_some(resolved)
 }
 
-fn reexport_applies_to_module(target_path: &[String], module: &[String]) -> bool {
+fn reexport_applies_to_item(target_path: &[String], item: &[String]) -> bool {
     let target_without_glob = if target_path.last().is_some_and(|segment| segment == "*") {
         &target_path[..target_path.len() - 1]
     } else {
         target_path
     };
-    let parent = target_without_glob.split_last().map_or(&[][..], |(_, parent)| parent);
-    module == parent || !target_without_glob.is_empty() && module.starts_with(target_without_glob)
+    target_without_glob == item || !target_without_glob.is_empty() && item.starts_with(target_without_glob)
 }
 
 fn validate_declaration(declaration: &ConcreteStoreDeclaration, unrestricted: &BTreeSet<&str>, allow_missing_fingerprint: bool) -> Result<()> {
@@ -692,7 +694,7 @@ fn record_signature_site_fingerprint(
     store: ConcreteStoreName,
     signature: &ConcreteStoreSignatureSite,
 ) -> Result<()> {
-    let public_reexports = public_reexport_evidence(file_context.inventory, file_context.paths, &signature.module);
+    let public_reexports = public_reexport_evidence(file_context.inventory, file_context.paths, &signature.item_path);
     let context = SiteEvidenceContext {
         component: effective_component,
         path: file_context.site_path,

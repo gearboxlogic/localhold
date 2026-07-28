@@ -207,6 +207,7 @@ fn public_reexports_are_inventoried_beside_concrete_store_signatures() {
     assert_eq!(exposed_root.production_public_reexports[0].exported_path, ["open"]);
     assert_eq!(exposed_root.production_public_reexports[0].target_path, ["helper", "open"]);
     assert_eq!(exposed_helper.production_signature_store_sites.sqlite_store.len(), 1);
+    assert_eq!(exposed_helper.production_signature_store_sites.sqlite_store[0].item_path, ["helper", "open"]);
 }
 
 #[test]
@@ -258,6 +259,25 @@ fn public_reexports_resolve_private_import_aliases_regardless_of_item_order() {
         assert_eq!(ui.production_public_reexports.len(), 1);
         assert_eq!(ui.production_public_reexports[0].target_path, ["ui", "helper", "open"]);
     }
+}
+
+#[test]
+fn public_reexports_ignore_block_scoped_import_aliases() {
+    let measured = inventory(&[
+        ("src/lib.rs", "mod ui;\n"),
+        (
+            "src/ui/mod.rs",
+            "mod facade;\n\
+             mod helper;\n\
+             fn local() { use self::helper as facade; }\n\
+             pub(crate) use self::facade::open;\n",
+        ),
+        ("src/ui/facade.rs", "pub fn open() -> SqliteStore { loop {} }\n"),
+        ("src/ui/helper.rs", "pub fn open() -> PostgresStore { loop {} }\n"),
+    ]);
+    let ui = measured.files.iter().find(|file| file.path == "src/ui/mod.rs").expect("ui measurement");
+    assert_eq!(ui.production_public_reexports.len(), 1);
+    assert_eq!(ui.production_public_reexports[0].target_path, ["ui", "facade", "open"]);
 }
 
 #[test]

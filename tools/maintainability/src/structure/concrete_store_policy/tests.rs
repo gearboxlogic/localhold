@@ -166,7 +166,7 @@ fn public_reexports_are_additive_signature_evidence() {
     let components = components(&[("src/lib.rs", "composition"), ("src/store/sqlite.rs", "sqlite-store")]);
     let mut private_signature = inventory(&[("src/lib.rs", 0, 0), ("src/store/sqlite.rs", 1, 0)]);
     private_signature.files[1].production_module = vec!["store".to_owned(), "sqlite".to_owned()];
-    private_signature.files[1].production_signature_store_sites.sqlite_store = vec![signature("private-open", &["store", "sqlite"])];
+    private_signature.files[1].production_signature_store_sites.sqlite_store = vec![signature("private-open", &["store", "sqlite", "open"])];
     let mut reexported_signature = private_signature.clone();
     reexported_signature.files[0].production_public_reexports = vec![PublicReexportEvidence {
         exported_path: vec!["open".to_owned()],
@@ -184,12 +184,12 @@ fn public_reexports_are_additive_signature_evidence() {
 }
 
 #[test]
-fn inline_module_reexports_use_the_signature_module() {
+fn inline_module_reexports_match_the_concrete_bearing_item() {
     let policy = policy();
     let components = components(&[("src/ui/mod.rs", "sqlite-store")]);
     let mut baseline = inventory(&[("src/ui/mod.rs", 1, 0)]);
     baseline.files[0].production_module = vec!["ui".to_owned()];
-    baseline.files[0].production_signature_store_sites.sqlite_store = vec![signature("private-open", &["ui", "helper"])];
+    baseline.files[0].production_signature_store_sites.sqlite_store = vec![signature("private-open", &["ui", "helper", "open"])];
     let mut exposed = baseline.clone();
     exposed.files[0].production_public_reexports = vec![PublicReexportEvidence {
         exported_path: vec!["ui".to_owned(), "open".to_owned()],
@@ -207,7 +207,7 @@ fn unrelated_public_reexports_do_not_change_signature_evidence() {
     let components = components(&[("src/store/sqlite.rs", "sqlite-store"), ("src/metrics.rs", "persistence-core")]);
     let mut baseline = inventory(&[("src/store/sqlite.rs", 1, 0), ("src/metrics.rs", 0, 0)]);
     baseline.files[0].production_module = vec!["store".to_owned(), "sqlite".to_owned()];
-    baseline.files[0].production_signature_store_sites.sqlite_store = vec![signature("private-open", &["store", "sqlite"])];
+    baseline.files[0].production_signature_store_sites.sqlite_store = vec![signature("private-open", &["store", "sqlite", "open"])];
     baseline.files[1].production_module = vec!["metrics".to_owned()];
     let mut current = baseline.clone();
     current.files[1].production_public_reexports = vec![PublicReexportEvidence {
@@ -219,6 +219,15 @@ fn unrelated_public_reexports_do_not_change_signature_evidence() {
     policy
         .compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components))
         .expect("an unrelated module re-export does not affect store signatures");
+
+    current.files[1].production_public_reexports = vec![PublicReexportEvidence {
+        exported_path: vec!["unrelated".to_owned()],
+        target_path: vec!["store".to_owned(), "sqlite".to_owned(), "unrelated".to_owned()],
+        fingerprint: "public-use-same-module-unrelated".to_owned(),
+    }];
+    policy
+        .compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components))
+        .expect("an unrelated item re-export from the signature module does not affect store signatures");
 }
 
 #[test]
@@ -227,7 +236,7 @@ fn transitive_public_reexports_are_signature_evidence() {
     let components = components(&[("src/ui/mod.rs", "composition"), ("src/ui/facade.rs", "composition"), ("src/ui/helper.rs", "sqlite-store")]);
     let mut baseline = inventory(&[("src/ui/mod.rs", 0, 0), ("src/ui/facade.rs", 0, 0), ("src/ui/helper.rs", 1, 0)]);
     baseline.files[2].production_module = vec!["ui".to_owned(), "helper".to_owned()];
-    baseline.files[2].production_signature_store_sites.sqlite_store = vec![signature("private-open", &["ui", "helper"])];
+    baseline.files[2].production_signature_store_sites.sqlite_store = vec![signature("private-open", &["ui", "helper", "open"])];
     baseline.files[1].production_public_reexports = vec![PublicReexportEvidence {
         exported_path: vec!["ui".to_owned(), "facade".to_owned(), "open".to_owned()],
         target_path: vec!["ui".to_owned(), "helper".to_owned(), "open".to_owned()],
@@ -652,10 +661,10 @@ fn file(path: &str, sqlite_store: usize, postgres_store: usize) -> FileMeasureme
     }
 }
 
-fn signature(fingerprint: &str, module: &[&str]) -> ConcreteStoreSignatureSite {
+fn signature(fingerprint: &str, item_path: &[&str]) -> ConcreteStoreSignatureSite {
     ConcreteStoreSignatureSite {
         fingerprint: fingerprint.to_owned(),
-        module: module.iter().map(|segment| (*segment).to_owned()).collect(),
+        item_path: item_path.iter().map(|segment| (*segment).to_owned()).collect(),
     }
 }
 

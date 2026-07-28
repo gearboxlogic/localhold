@@ -26,7 +26,7 @@ pub struct ConcreteStoreSites {
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct ConcreteStoreSignatureSite {
     pub fingerprint: String,
-    pub module: Vec<String>,
+    pub item_path: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
@@ -107,21 +107,21 @@ impl ConcreteStoreInventory {
         }
     }
 
-    pub(super) fn record_signature_tokens(&mut self, tokens: &TokenStream, site_context: &str, module: &[String]) {
+    pub(super) fn record_signature_tokens(&mut self, tokens: &TokenStream, site_context: &str, item_path: &[String]) {
         for token in resolving_tokens(tokens) {
             match token {
-                TokenTree::Group(group) => self.record_signature_tokens(&group.stream(), site_context, module),
-                TokenTree::Ident(ident) => self.record_signature_name(&normalized_ident(&ident), site_context, module),
+                TokenTree::Group(group) => self.record_signature_tokens(&group.stream(), site_context, item_path),
+                TokenTree::Ident(ident) => self.record_signature_name(&normalized_ident(&ident), site_context, item_path),
                 TokenTree::Literal(_) | TokenTree::Punct(_) => {}
             }
         }
     }
 
-    pub(super) fn record_exposure_signature_tokens(&mut self, tokens: &TokenStream, site_context: &str, module: &[String]) {
+    pub(super) fn record_exposure_signature_tokens(&mut self, tokens: &TokenStream, site_context: &str, item_path: &[String]) {
         for token in resolving_tokens(tokens) {
             match token {
-                TokenTree::Group(group) => self.record_exposure_signature_tokens(&group.stream(), site_context, module),
-                TokenTree::Ident(ident) => self.record_exposure_signature_name(&normalized_ident(&ident), site_context, module),
+                TokenTree::Group(group) => self.record_exposure_signature_tokens(&group.stream(), site_context, item_path),
+                TokenTree::Ident(ident) => self.record_exposure_signature_name(&normalized_ident(&ident), site_context, item_path),
                 TokenTree::Literal(_) | TokenTree::Punct(_) => {}
             }
         }
@@ -264,12 +264,12 @@ impl ConcreteStoreInventory {
         sites.push(syntax_fingerprint(&site_context));
     }
 
-    fn record_signature_name(&mut self, name: &str, site_context: &str, module: &[String]) {
-        self.record_exposure_signature_name(name, site_context, module);
+    fn record_signature_name(&mut self, name: &str, site_context: &str, item_path: &[String]) {
+        self.record_exposure_signature_name(name, site_context, item_path);
         self.record_binding_name(name, site_context);
     }
 
-    fn record_exposure_signature_name(&mut self, name: &str, site_context: &str, module: &[String]) {
+    fn record_exposure_signature_name(&mut self, name: &str, site_context: &str, item_path: &[String]) {
         let sites = match name {
             "SqliteStore" => &mut self.signature_sites.sqlite_store,
             "PostgresStore" => &mut self.signature_sites.postgres_store,
@@ -277,7 +277,7 @@ impl ConcreteStoreInventory {
         };
         sites.push(ConcreteStoreSignatureSite {
             fingerprint: syntax_fingerprint(&site_context),
-            module: module.to_vec(),
+            item_path: item_path.to_vec(),
         });
     }
 

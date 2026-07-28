@@ -25,6 +25,13 @@ struct AliasResolver<'a> {
     targets: &'a mut ResolvedUseTargets,
 }
 
+struct UseRewrite {
+    target: Vec<String>,
+    fingerprint: String,
+    cfg: ProductionCfgContext,
+    is_glob: bool,
+}
+
 pub(super) fn resolve_public_reexport_aliases(reexports: Vec<PendingPublicReexport>, resolutions: &[UseResolution]) -> Vec<PublicReexportEvidence> {
     let mut resolved = Vec::new();
     for pending in reexports {
@@ -68,16 +75,22 @@ impl AliasResolver<'_> {
             .iter()
             .filter_map(|resolution| {
                 let compatible_cfg = cfg.conjoin(&resolution.cfg)?;
-                rewrite_use_target(&path, resolution).map(|target| (target, resolution.fingerprint.clone(), compatible_cfg))
+                rewrite_use_target(&path, resolution).map(|target| UseRewrite {
+                    target,
+                    fingerprint: resolution.fingerprint.clone(),
+                    cfg: compatible_cfg,
+                    is_glob: resolution.exported_path.last().is_some_and(|segment| segment == "*"),
+                })
             })
-            .filter(|(target, _, _)| target != &path)
+            .filter(|rewrite| rewrite.target != path)
             .collect::<Vec<_>>();
+        let has_explicit_resolution = rewritten.iter().any(|rewrite| !rewrite.is_glob);
         if rewritten.is_empty() {
             self.targets.push((path, alias_fingerprints.clone(), cfg.clone()));
         } else {
-            for (target, fingerprint, compatible_cfg) in rewritten {
-                alias_fingerprints.push(fingerprint);
-                self.resolve(target, &compatible_cfg, &mut visited.clone(), alias_fingerprints);
+            for rewrite in rewritten.into_iter().filter(|rewrite| !has_explicit_resolution || !rewrite.is_glob) {
+                alias_fingerprints.push(rewrite.fingerprint);
+                self.resolve(rewrite.target, &rewrite.cfg, &mut visited.clone(), alias_fingerprints);
                 alias_fingerprints.pop();
             }
         }

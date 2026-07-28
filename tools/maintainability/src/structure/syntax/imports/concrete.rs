@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use proc_macro2::{TokenStream, TokenTree};
+use proc_macro2::{Group, TokenStream, TokenTree};
 use quote::ToTokens;
 use serde::Serialize;
 use syn::parse::Parser as _;
@@ -297,11 +297,54 @@ impl ConcreteStoreInventory {
 }
 
 pub(super) fn context_fingerprint(parent: Option<&str>, kind: &str, syntax: &impl ToTokens) -> String {
-    let local = format!("{kind}:{}", syntax_fingerprint(syntax));
+    let local = format!("{kind}:{}", syntax_fingerprint(&without_documentation(&syntax.to_token_stream())));
     match parent {
         Some(parent) => syntax_fingerprint(&format!("{parent}\0{local}")),
         None => local,
     }
+}
+
+fn without_documentation(tokens: &TokenStream) -> TokenStream {
+    let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
+    let mut normalized = TokenStream::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if let Some((attribute_end, attribute)) = parsed_attribute(&tokens, index)
+            && attribute.path().is_ident("doc")
+        {
+            index = attribute_end + 1;
+            continue;
+        }
+        match &tokens[index] {
+            TokenTree::Group(group) => {
+                let mut replacement = Group::new(group.delimiter(), without_documentation(&group.stream()));
+                replacement.set_span(group.span());
+                normalized.extend([TokenTree::Group(replacement)]);
+            }
+            token => normalized.extend([token.clone()]),
+        }
+        index += 1;
+    }
+    normalized
+}
+
+fn parsed_attribute(tokens: &[TokenTree], index: usize) -> Option<(usize, Meta)> {
+    if !matches!(tokens.get(index), Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == '#') {
+        return None;
+    }
+    let group_index = if matches!(tokens.get(index + 1), Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == '!') {
+        index + 2
+    } else {
+        index + 1
+    };
+    let Some(TokenTree::Group(group)) = tokens.get(group_index) else {
+        return None;
+    };
+    if group.delimiter() != proc_macro2::Delimiter::Bracket {
+        return None;
+    }
+    let attribute = syn::parse2::<Meta>(group.stream()).ok()?;
+    Some((group_index, attribute))
 }
 
 pub(super) fn tokens_contain_concrete_store(tokens: &TokenStream) -> bool {

@@ -366,6 +366,32 @@ impl ProductionSyntaxCollector {
         self.record_concrete_stores_in_visible_signature(kind, visibility, &tokens);
     }
 
+    fn production_signature(&self, signature: &syn::Signature) -> Result<syn::Signature> {
+        let mut production = signature.clone();
+        let mut inputs = Vec::new();
+        for input in &signature.inputs {
+            if production_cfg_context(fn_arg_attributes(input), &self.cfg_context)?.is_some() {
+                inputs.push(input.clone());
+            }
+        }
+        production.inputs = inputs.into_iter().collect();
+
+        let mut parameters = Vec::new();
+        for parameter in &signature.generics.params {
+            if production_cfg_context(generic_param_attributes(parameter), &self.cfg_context)?.is_some() {
+                parameters.push(parameter.clone());
+            }
+        }
+        production.generics.params = parameters.into_iter().collect();
+
+        if let Some(variadic) = &signature.variadic
+            && production_cfg_context(&variadic.attrs, &self.cfg_context)?.is_none()
+        {
+            production.variadic = None;
+        }
+        Ok(production)
+    }
+
     fn record_concrete_stores_in_signature_with_identity(&mut self, kind: &str, tokens: &TokenStream, identity: &TokenStream) {
         let context = format!(
             "{kind}:{}\0cfg:{}\0ancestors:{}",
@@ -729,29 +755,54 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
 
     fn visit_item_fn(&mut self, item: &'ast ItemFn) {
         if visibility_is_exposed(&item.vis) {
-            self.record_concrete_stores_in_visible_signature("function-signature", &item.vis, &item.sig);
+            match self.production_signature(&item.sig) {
+                Ok(signature) => self.record_concrete_stores_in_visible_signature("function-signature", &item.vis, &signature),
+                Err(error) => {
+                    self.error = Some(error);
+                    return;
+                }
+            }
         }
         visit::visit_item_fn(self, item);
     }
 
     fn visit_impl_item_fn(&mut self, item: &'ast ImplItemFn) {
-        self.record_impl_header_for_visible_member("inherent-impl-method", &item.vis, &item.sig);
+        let signature = match self.production_signature(&item.sig) {
+            Ok(signature) => signature,
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        };
+        self.record_impl_header_for_visible_member("inherent-impl-method", &item.vis, &signature);
         if self.impl_member_is_exposed(&item.vis) {
-            self.record_concrete_stores_in_visible_signature("method-signature", &item.vis, &item.sig);
+            self.record_concrete_stores_in_visible_signature("method-signature", &item.vis, &signature);
         }
         visit::visit_impl_item_fn(self, item);
     }
 
     fn visit_trait_item_fn(&mut self, item: &'ast TraitItemFn) {
         if self.trait_member_is_exposed() {
-            self.record_concrete_stores_in_signature("trait-method-signature", &item.sig);
+            match self.production_signature(&item.sig) {
+                Ok(signature) => self.record_concrete_stores_in_signature("trait-method-signature", &signature),
+                Err(error) => {
+                    self.error = Some(error);
+                    return;
+                }
+            }
         }
         visit::visit_trait_item_fn(self, item);
     }
 
     fn visit_foreign_item_fn(&mut self, item: &'ast ForeignItemFn) {
         if visibility_is_exposed(&item.vis) {
-            self.record_concrete_stores_in_visible_signature("foreign-function-signature", &item.vis, &item.sig);
+            match self.production_signature(&item.sig) {
+                Ok(signature) => self.record_concrete_stores_in_visible_signature("foreign-function-signature", &item.vis, &signature),
+                Err(error) => {
+                    self.error = Some(error);
+                    return;
+                }
+            }
         }
         visit::visit_foreign_item_fn(self, item);
     }

@@ -113,6 +113,18 @@ fn public_reexport_aliases_use_only_cfg_compatible_bindings() -> Result<()> {
 }
 
 #[test]
+fn explicit_imports_take_precedence_over_compatible_globs() -> Result<()> {
+    let facts = concrete_facts(
+        "use crate::safe::facade;\n\
+         use crate::stores::*;\n\
+         pub(crate) use facade::open;\n",
+    )?;
+    assert_eq!(facts.public_reexports.len(), 1);
+    assert_eq!(facts.public_reexports[0].target_path, ["safe", "facade", "open"]);
+    Ok(())
+}
+
+#[test]
 fn builtin_stringify_aliases_use_only_cfg_compatible_bindings() {
     for source in [
         "#[cfg(feature = \"legacy\")]\n\
@@ -835,6 +847,26 @@ fn canonical_binding_identity_ignores_impl_and_method_documentation() -> Result<
 }
 
 #[test]
+fn ordinary_occurrence_identity_ignores_documentation() -> Result<()> {
+    let plain = concrete_facts(
+        "fn embedding_status() {\n\
+             let sqlite = SqliteStore::status();\n\
+             PostgresStore::record(sqlite);\n\
+         }\n",
+    )?;
+    let documented = concrete_facts(
+        "/// Reports the current embedding status.\n\
+         fn embedding_status() {\n\
+             /// The local backend status.\n\
+             let sqlite = SqliteStore::status();\n\
+             PostgresStore::record(sqlite);\n\
+         }\n",
+    )?;
+    assert_eq!(plain.concrete_store_sites, documented.concrete_store_sites);
+    Ok(())
+}
+
+#[test]
 fn canonical_binding_identity_tracks_cfg_and_ancestor_placement() -> Result<()> {
     let direct = concrete_facts("#[cfg(feature = \"legacy\")] impl MemoryReader for SqliteStore {}\n")?;
     let changed_cfg = concrete_facts("#[cfg(feature = \"current\")] impl MemoryReader for SqliteStore {}\n")?;
@@ -994,6 +1026,20 @@ fn private_traits_and_self_restricted_items_are_not_exposure_signatures() -> Res
     assert!(private.signature_concrete_store_sites.postgres_store.is_empty());
     assert_eq!(exposed.signature_concrete_store_sites.sqlite_store.len(), 3);
     assert_eq!(exposed.signature_concrete_store_sites.postgres_store.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn signature_parameters_follow_production_cfg() -> Result<()> {
+    let facts = concrete_facts(
+        "pub fn inspect(#[cfg(test)] _: SqliteStore, #[cfg(feature = \"testing\")] _: PostgresStore) {}\n\
+         pub struct Holder;\n\
+         impl Holder { pub fn inspect(#[cfg(test)] _: SqliteStore) {} }\n\
+         pub trait Reader { fn inspect(#[cfg(feature = \"testing\")] _: PostgresStore); }\n\
+         unsafe extern \"C\" { pub fn inspect(#[cfg(test)] value: SqliteStore); }\n",
+    )?;
+    assert!(facts.signature_concrete_store_sites.sqlite_store.is_empty());
+    assert!(facts.signature_concrete_store_sites.postgres_store.is_empty());
     Ok(())
 }
 

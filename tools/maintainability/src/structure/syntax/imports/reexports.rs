@@ -84,17 +84,24 @@ impl AliasResolver<'_> {
             })
             .filter(|rewrite| rewrite.target != path)
             .collect::<Vec<_>>();
-        let has_explicit_resolution = rewritten.iter().any(|rewrite| !rewrite.is_glob);
+        let explicit_cfgs = rewritten.iter().filter(|rewrite| !rewrite.is_glob).map(|rewrite| rewrite.cfg.clone()).collect::<Vec<_>>();
         if rewritten.is_empty() {
             self.targets.push((path, alias_fingerprints.clone(), cfg.clone()));
         } else {
-            for rewrite in rewritten.into_iter().filter(|rewrite| !has_explicit_resolution || !rewrite.is_glob) {
+            for rewrite in rewritten.into_iter().filter_map(|rewrite| apply_explicit_precedence(rewrite, &explicit_cfgs)) {
                 alias_fingerprints.push(rewrite.fingerprint);
                 self.resolve(rewrite.target, &rewrite.cfg, &mut visited.clone(), alias_fingerprints);
                 alias_fingerprints.pop();
             }
         }
     }
+}
+
+fn apply_explicit_precedence(mut rewrite: UseRewrite, explicit_cfgs: &[ProductionCfgContext]) -> Option<UseRewrite> {
+    if rewrite.is_glob {
+        rewrite.cfg = explicit_cfgs.iter().try_fold(rewrite.cfg, |remaining, explicit_cfg| remaining.excluding(explicit_cfg))?;
+    }
+    Some(rewrite)
 }
 
 fn rewrite_use_target(path: &[String], resolution: &UseResolution) -> Option<Vec<String>> {

@@ -49,6 +49,11 @@ struct MacroShadow {
     cfg: ProductionCfgContext,
 }
 
+struct BlockStringifyImports {
+    aliases: BTreeSet<BlockBuiltinStringifyAlias>,
+    shadows: BTreeSet<MacroShadow>,
+}
+
 #[derive(Clone, Copy)]
 enum FieldExposure {
     Struct(bool),
@@ -121,6 +126,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
         module,
         builtin_stringify_aliases,
         builtin_stringify_block_aliases: Vec::new(),
+        macro_import_shadow_scopes: Vec::new(),
         imports: Vec::new(),
         use_resolutions: Vec::new(),
         public_reexports: Vec::new(),
@@ -169,6 +175,7 @@ struct ProductionSyntaxCollector {
     module: Vec<String>,
     builtin_stringify_aliases: BuiltinStringifyAliases,
     builtin_stringify_block_aliases: Vec<BTreeSet<BlockBuiltinStringifyAlias>>,
+    macro_import_shadow_scopes: Vec<BTreeSet<MacroShadow>>,
     imports: Vec<String>,
     use_resolutions: Vec<UseResolution>,
     public_reexports: Vec<PendingPublicReexport>,
@@ -571,8 +578,8 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     );
 
     fn visit_block(&mut self, node: &'ast Block) {
-        let aliases = match builtin_stringify_aliases_in_block(node, &self.cfg_context) {
-            Ok(aliases) => aliases,
+        let imports = match stringify_imports_in_block(node, &self.cfg_context) {
+            Ok(imports) => imports,
             Err(error) => {
                 self.error = Some(error);
                 return;
@@ -580,8 +587,10 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         };
         self.block_depth += 1;
         self.macro_shadow_scopes.push(BTreeSet::new());
-        self.builtin_stringify_block_aliases.push(aliases);
+        self.builtin_stringify_block_aliases.push(imports.aliases);
+        self.macro_import_shadow_scopes.push(imports.shadows);
         visit::visit_block(self, node);
+        self.macro_import_shadow_scopes.pop();
         self.builtin_stringify_block_aliases.pop();
         self.macro_shadow_scopes.pop();
         self.block_depth -= 1;
@@ -1093,15 +1102,23 @@ impl ProductionSyntaxCollector {
             return false;
         }
         let alias = normalized_ident(&node.path.segments[0].ident);
-        let imported = self
-            .builtin_stringify_aliases
+        let block_binding = self
+            .builtin_stringify_block_aliases
             .iter()
-            .any(|candidate| candidate.module == self.module && candidate.name == alias && candidate.cfg.conjoin(&self.cfg_context).is_some())
-            || self
-                .builtin_stringify_block_aliases
+            .zip(&self.macro_import_shadow_scopes)
+            .rev()
+            .find_map(|(builtin_scope, shadow_scope)| {
+                let builtin = builtin_scope
+                    .iter()
+                    .any(|candidate| candidate.name == alias && candidate.cfg.conjoin(&self.cfg_context).is_some());
+                let shadowed = shadow_scope.iter().any(|shadow| shadow.name == alias && shadow.cfg.conjoin(&self.cfg_context).is_some());
+                (builtin || shadowed).then_some(builtin && !shadowed)
+            });
+        let imported = block_binding.unwrap_or_else(|| {
+            self.builtin_stringify_aliases
                 .iter()
-                .rev()
-                .any(|scope| scope.iter().any(|candidate| candidate.name == alias && candidate.cfg.conjoin(&self.cfg_context).is_some()));
+                .any(|candidate| candidate.module == self.module && candidate.name == alias && candidate.cfg.conjoin(&self.cfg_context).is_some())
+        });
         imported
             && !self
                 .macro_shadow_scopes
@@ -1111,8 +1128,9 @@ impl ProductionSyntaxCollector {
     }
 }
 
-fn builtin_stringify_aliases_in_block(block: &Block, inherited_cfg: &ProductionCfgContext) -> Result<BTreeSet<BlockBuiltinStringifyAlias>> {
+fn stringify_imports_in_block(block: &Block, inherited_cfg: &ProductionCfgContext) -> Result<BlockStringifyImports> {
     let mut aliases = BTreeSet::new();
+    let mut shadows = BTreeSet::new();
     for statement in &block.stmts {
         let Stmt::Item(Item::Use(item)) = statement else {
             continue;
@@ -1120,11 +1138,23 @@ fn builtin_stringify_aliases_in_block(block: &Block, inherited_cfg: &ProductionC
         let Some(cfg) = production_cfg_context(&item.attrs, inherited_cfg)? else {
             continue;
         };
-        let mut names = BTreeSet::new();
-        collect_builtin_stringify_alias_names_from_use(item, &mut names);
-        aliases.extend(names.into_iter().map(|name| BlockBuiltinStringifyAlias { name, cfg: cfg.clone() }));
+        let mut paths = Vec::new();
+        flatten_use_tree(&item.tree, &mut Vec::new(), &mut paths);
+        for path in paths.into_iter().filter(|path| path.segments.last().is_some_and(|segment| segment != "*")) {
+            let name = path.alias.clone().or_else(|| path.segments.last().cloned()).context("block import has no bound name")?;
+            let builtin = item.leading_colon.is_some()
+                && matches!(
+                    path.segments.as_slice(),
+                    [root, imported] if matches!(root.as_str(), "core" | "std") && imported == "stringify"
+                );
+            if builtin {
+                aliases.insert(BlockBuiltinStringifyAlias { name, cfg: cfg.clone() });
+            } else {
+                shadows.insert(MacroShadow { name, cfg: cfg.clone() });
+            }
+        }
     }
-    Ok(aliases)
+    Ok(BlockStringifyImports { aliases, shadows })
 }
 
 fn collect_builtin_stringify_aliases(file: &File, module: &[String], inherited_cfg: &ProductionCfgContext) -> Result<BuiltinStringifyAliases> {

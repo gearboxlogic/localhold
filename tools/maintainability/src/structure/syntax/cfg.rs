@@ -50,6 +50,13 @@ impl ProductionCfgContext {
         context_is_satisfiable(&context, None).then_some(context)
     }
 
+    pub(in crate::structure) fn excluding(&self, other: &Self) -> Option<Self> {
+        let mut constraints = self.constraints.clone();
+        constraints.push(Predicate::Not(Box::new(Predicate::All(other.constraints.clone()))));
+        let context = Self { constraints };
+        context_is_satisfiable(&context, None).then_some(context)
+    }
+
     pub(in crate::structure) fn disjunction(contexts: impl IntoIterator<Item = Self>) -> Option<Self> {
         let alternatives = contexts.into_iter().map(|context| Predicate::All(context.constraints)).collect::<Vec<_>>();
         match alternatives.as_slice() {

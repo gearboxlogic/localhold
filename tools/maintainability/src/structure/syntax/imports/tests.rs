@@ -133,6 +133,41 @@ fn explicit_imports_take_precedence_over_compatible_globs() -> Result<()> {
 }
 
 #[test]
+fn explicit_imports_take_precedence_over_globs_only_in_their_cfg_region() -> Result<()> {
+    let facts = concrete_facts(
+        "#[cfg(feature = \"legacy\")]\n\
+         use crate::safe::facade;\n\
+         use crate::stores::*;\n\
+         pub(crate) use facade::open;\n",
+    )?;
+    assert_eq!(facts.public_reexports.len(), 2);
+    assert_eq!(
+        facts.public_reexports.iter().map(|evidence| evidence.target_path.clone()).collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            vec!["safe".to_owned(), "facade".to_owned(), "open".to_owned()],
+            vec!["stores".to_owned(), "facade".to_owned(), "open".to_owned()],
+        ])
+    );
+    let legacy = production_cfg_context(&[syn::parse_quote!(#[cfg(feature = "legacy")])], &ProductionCfgContext::default())?.expect("legacy cfg");
+    let current = production_cfg_context(&[syn::parse_quote!(#[cfg(not(feature = "legacy"))])], &ProductionCfgContext::default())?.expect("current cfg");
+    let safe = facts
+        .public_reexports
+        .iter()
+        .find(|evidence| evidence.target_path.first().is_some_and(|segment| segment == "safe"))
+        .expect("explicit target");
+    let stores = facts
+        .public_reexports
+        .iter()
+        .find(|evidence| evidence.target_path.first().is_some_and(|segment| segment == "stores"))
+        .expect("glob target");
+    assert!(safe.cfg.conjoin(&legacy).is_some());
+    assert!(safe.cfg.conjoin(&current).is_none());
+    assert!(stores.cfg.conjoin(&legacy).is_none());
+    assert!(stores.cfg.conjoin(&current).is_some());
+    Ok(())
+}
+
+#[test]
 fn builtin_stringify_aliases_use_only_cfg_compatible_bindings() {
     for source in [
         "#[cfg(feature = \"legacy\")]\n\
@@ -433,6 +468,17 @@ fn shadowable_stringify_names_do_not_hide_store_tokens() -> Result<()> {
         panic!("a lexically shadowed unreviewed alias must fail closed");
     };
     assert!(imported_then_lexically_shadowed.to_string().contains("unreviewed macro expansion path text"));
+
+    let Err(imported_then_shadowed_by_nested_import) = concrete_facts(
+        "use ::core::stringify as text;\n\
+         fn open() {\n\
+             use crate::other as text;\n\
+             text!(SqliteStore);\n\
+         }\n",
+    ) else {
+        panic!("a nested macro import must shadow an outer stringify alias");
+    };
+    assert!(imported_then_shadowed_by_nested_import.to_string().contains("unreviewed macro expansion path text"));
 
     let shadowed_reviewed_name = concrete_facts(
         "use ::core::stringify;\n\

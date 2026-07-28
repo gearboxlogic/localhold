@@ -71,11 +71,11 @@ impl ImportCollector {
     }
 
     fn collect_path(&mut self, path: &UsePath) -> Result<()> {
-        self.collect_segments(&path.segments, path.renamed)
+        self.collect_segments(&path.segments, path.renamed, self.rust_2015_absolute_paths)
     }
 
-    fn collect_segments(&mut self, segments: &[String], renamed: bool) -> Result<()> {
-        let Some(resolved) = resolve_path(&self.module, segments)? else {
+    fn collect_segments(&mut self, segments: &[String], renamed: bool, rust_2015_use_path: bool) -> Result<()> {
+        let Some(resolved) = resolve_path(&self.module, segments, rust_2015_use_path)? else {
             return Ok(());
         };
         if resolved.is_empty() && renamed {
@@ -228,7 +228,7 @@ impl<'ast> Visit<'ast> for ImportCollector {
                 segments.insert(0, "crate".to_owned());
             }
             let is_qualified = segments.len() > 1 || matches!(segments.first().map(String::as_str), Some("crate" | "self" | "super"));
-            if is_qualified && let Err(error) = self.collect_segments(&segments, false) {
+            if is_qualified && let Err(error) = self.collect_segments(&segments, false, false) {
                 self.error = Some(error);
                 return;
             }
@@ -336,7 +336,7 @@ fn flatten_use_tree(tree: &UseTree, prefix: &mut Vec<String>, paths: &mut Vec<Us
     }
 }
 
-fn resolve_path(module: &[String], path: &[String]) -> Result<Option<Vec<String>>> {
+fn resolve_path(module: &[String], path: &[String], rust_2015_use_path: bool) -> Result<Option<Vec<String>>> {
     let Some(first) = path.first().map(String::as_str) else {
         bail!("production use path has no segments");
     };
@@ -358,7 +358,7 @@ fn resolve_path(module: &[String], path: &[String]) -> Result<Option<Vec<String>
         resolved.extend_from_slice(&path[consumed..]);
         return Ok(Some(resolved));
     }
-    Ok(module.is_empty().then(|| path.to_vec()))
+    Ok((rust_2015_use_path || module.is_empty()).then(|| path.to_vec()))
 }
 
 fn source_module(source_path: &str, crate_root: Option<&str>) -> Result<Vec<String>> {
@@ -463,7 +463,7 @@ fn restricted_string_path(literal: &proc_macro2::Literal, module: &[String], rus
     if path.leading_colon.is_some() {
         segments.insert(0, "crate".to_owned());
     }
-    let resolved = resolve_path(module, &segments).ok()??;
+    let resolved = resolve_path(module, &segments, false).ok()??;
     matches!(resolved.first().map(String::as_str), Some("server" | "ui")).then(|| resolved[0].clone())
 }
 
@@ -596,6 +596,16 @@ mod tests {
         assert_eq!(
             production_internal_imports(&syntax, "src/adapter.rs", Some("src/lib.rs"), true, true)?,
             ["crate::server::External", "crate::server::Qualified", "crate::ui::qualified"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rust_2015_nested_bare_use_paths_are_classified_from_the_crate_root() -> Result<()> {
+        let syntax = syn::parse_file("mod nested { use server::Service; }\n")?;
+        assert_eq!(
+            production_internal_imports(&syntax, "src/adapter.rs", Some("src/lib.rs"), true, true)?,
+            ["crate::server::Service"]
         );
         Ok(())
     }

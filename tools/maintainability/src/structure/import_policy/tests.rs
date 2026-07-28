@@ -20,21 +20,21 @@ fn exact_http_transport_exception_passes_but_a_second_import_fails() {
 }
 
 #[test]
-fn server_ui_and_binary_boundaries_are_exempt_but_other_library_modules_are_not() {
+fn classifier_exemptions_must_arrive_empty_and_policy_never_filters_by_path() {
     let policy = policy();
     let accepted = inventory(&[
         (HTTP_TRANSPORT_PATH, &["crate::server::LocalHoldServer"]),
-        ("src/server/mod.rs", &["crate::ui::UiOptions"]),
-        ("src/ui/mod.rs", &["crate::server::LocalHoldServer"]),
-        ("src/main.rs", &["crate::server::LocalHoldServer"]),
+        ("src/server/mod.rs", &[]),
+        ("src/ui/mod.rs", &[]),
+        ("src/main.rs", &[]),
     ]);
-    policy.compare_current(&accepted).expect("composition boundaries are exempt");
+    policy.compare_current(&accepted).expect("classifier exemptions produce no observed imports");
 
     let forbidden = inventory(&[
         (HTTP_TRANSPORT_PATH, &["crate::server::LocalHoldServer"]),
-        ("src/engine.rs", &["crate::server::LocalHoldServer"]),
+        ("src/bin/worker.rs", &["crate::server::LocalHoldServer"]),
     ]);
-    assert!(policy.compare_current(&forbidden).unwrap_err().to_string().contains("src/engine.rs"));
+    assert!(policy.compare_current(&forbidden).unwrap_err().to_string().contains("src/bin/worker.rs"));
 }
 
 #[test]

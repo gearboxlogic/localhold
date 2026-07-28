@@ -185,7 +185,6 @@ fn compare_inventory<'a>(label: &str, inventory: &Inventory, exceptions: impl It
     let mut observed = inventory
         .files
         .iter()
-        .filter(|file| !source_is_composition_boundary(&file.path))
         .flat_map(|file| file.production_internal_imports.iter().map(|target| (file.path.as_str(), target.as_str())))
         .collect::<Vec<_>>();
     observed.sort_unstable();
@@ -195,10 +194,6 @@ fn compare_inventory<'a>(label: &str, inventory: &Inventory, exceptions: impl It
         bail!("architecture {label} restricted import mismatch: expected={expected:?}, observed={observed:?}");
     }
     Ok(())
-}
-
-fn source_is_composition_boundary(path: &str) -> bool {
-    path == "src/main.rs" || path.starts_with("src/bin/") || path.starts_with("src/server/") || path.starts_with("src/ui/")
 }
 
 fn validate_target(target: &str) -> Result<()> {

@@ -302,6 +302,9 @@ fn classify_source_reachability(
     if let Some(source) = opaque_macro_sources.intersection(&library_reachable).next() {
         bail!("opaque production item macros cannot safely define module edges in library source {source}");
     }
+    if let Some(overlap) = explicit_test_roots.intersection(&library_reachable).next() {
+        bail!("test or benchmark target must not also be reachable from a library target: {overlap}");
+    }
     if let Some(overlap) = composition_roots.intersection(&library_reachable).next() {
         bail!("composition target must not also be reachable from a library target: {overlap}");
     }

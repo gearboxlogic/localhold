@@ -154,6 +154,26 @@ fn declared_test_and_bench_targets_under_src_are_test_only() {
 }
 
 #[test]
+fn auxiliary_targets_cannot_reuse_library_modules() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src/shared", "tests", "benches"] {
+        fs::create_dir_all(repository.path().join(root)).expect("source root");
+    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+         \n[[test]]\nname = \"shared\"\npath = \"src/shared.rs\"\n",
+    )
+    .expect("package manifest");
+    fs::write(repository.path().join("src/lib.rs"), "mod shared;\n").expect("library root");
+    fs::write(repository.path().join("src/shared.rs"), "mod nested;\n").expect("shared test target");
+    fs::write(repository.path().join("src/shared/nested.rs"), "use crate::server::Service;\n").expect("library child");
+
+    let error = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).unwrap_err();
+    assert!(error.to_string().contains("test or benchmark target must not also be reachable from a library target"));
+}
+
+#[test]
 fn declared_examples_are_production_roots() {
     let repository = tempfile::tempdir().expect("temporary repository");
     for root in ["src", "tests", "benches"] {

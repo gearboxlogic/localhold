@@ -289,11 +289,20 @@ fn site_fingerprints(
     generic_defaults: bool,
 ) -> Result<BTreeMap<SiteFingerprint, usize>> {
     let mut sites = BTreeMap::new();
+    let successor_counts = inventory.files.iter().fold(BTreeMap::<String, usize>::new(), |mut counts, file| {
+        *counts.entry(paths.canonical_path(&file.path).to_owned()).or_default() += 1;
+        counts
+    });
     for file in &inventory.files {
         let component = paths
             .component_for(&file.path)
             .with_context(|| format!("concrete-store syntax inventory path {:?} has no logical component", file.path))?;
         let canonical_path = paths.canonical_path(&file.path);
+        let site_path = if successor_counts.get(canonical_path).copied().unwrap_or_default() > 1 {
+            file.path.as_str()
+        } else {
+            canonical_path
+        };
         let source = if generic_defaults {
             &file.production_generic_default_store_sites
         } else {
@@ -310,7 +319,7 @@ fn site_fingerprints(
                 continue;
             }
             for fingerprint in fingerprints {
-                let key = (effective_component.to_owned(), canonical_path.to_owned(), store, fingerprint.clone());
+                let key = (effective_component.to_owned(), site_path.to_owned(), store, fingerprint.clone());
                 let count = sites.entry(key).or_insert(0_usize);
                 *count = count.checked_add(1).context("concrete-store syntax-site occurrence count overflow")?;
             }

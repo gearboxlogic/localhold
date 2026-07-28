@@ -277,6 +277,35 @@ fn renamed_debt_successors_keep_their_counts_and_sites_governed() {
     );
 }
 
+#[test]
+fn split_successors_cannot_exchange_reviewed_sites() {
+    let policy = policy();
+    let baseline_components = components(&[("src/server/mod.rs", "protocol"), ("src/embedding/status.rs", "embedding")]);
+    let current_components = components(&[
+        ("src/server/mod.rs", "protocol"),
+        ("src/embedding/first.rs", "embedding"),
+        ("src/embedding/second.rs", "embedding"),
+    ]);
+    let canonical_paths = BTreeMap::from([
+        ("src/embedding/first.rs".to_owned(), "src/embedding/status.rs".to_owned()),
+        ("src/embedding/second.rs".to_owned(), "src/embedding/status.rs".to_owned()),
+    ]);
+    let mut baseline = inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/status.rs", 2, 0)]);
+    baseline.files[1].production_concrete_store_sites.sqlite_store = vec!["embedding-import".to_owned(), "embedding-call".to_owned()];
+
+    let mut split = inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/first.rs", 0, 0), ("src/embedding/second.rs", 2, 0)]);
+    split.files[2].production_concrete_store_sites.sqlite_store = baseline.files[1].production_concrete_store_sites.sqlite_store.clone();
+    let error = policy
+        .compare_site_fingerprints(
+            &split,
+            &baseline,
+            PathAttribution::with_lineage(&current_components, &canonical_paths),
+            paths(&baseline_components),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("moved or changed"));
+}
+
 fn policy() -> ConcreteStorePolicy {
     ConcreteStorePolicy {
         schema_version: CURRENT_SCHEMA_VERSION,

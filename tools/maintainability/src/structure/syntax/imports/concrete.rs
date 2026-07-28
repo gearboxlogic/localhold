@@ -8,7 +8,7 @@ use syn::{Attribute, Meta, Token};
 
 use crate::scan::syntax_fingerprint;
 
-use super::super::{cfg_attr_tokens_disable_production, cfg_can_apply_in_production, normalized_ident};
+use super::super::{normalized_ident, production_cfg_attr_metas};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct ConcreteStoreCounts {
@@ -52,19 +52,18 @@ impl ConcreteStoreInventory {
         Ok(())
     }
 
-    pub(super) fn record_generic_default(&mut self, tokens: &impl ToTokens, site_context: &str) -> Result<()> {
-        self.record_generic_default_tokens(&tokens.to_token_stream(), site_context)
+    pub(super) fn record_generic_default_ident(&mut self, ident: &proc_macro2::Ident, site_context: &str) {
+        self.record_generic_default_name(&normalized_ident(ident), site_context);
     }
 
-    fn record_generic_default_tokens(&mut self, tokens: &TokenStream, site_context: &str) -> Result<()> {
+    pub(super) fn record_generic_default_tokens(&mut self, tokens: &TokenStream, site_context: &str) {
         for token in tokens.clone() {
             match token {
-                TokenTree::Group(group) => self.record_generic_default_tokens(&group.stream(), site_context)?,
+                TokenTree::Group(group) => self.record_generic_default_tokens(&group.stream(), site_context),
                 TokenTree::Ident(ident) => self.record_generic_default_name(&normalized_ident(&ident), site_context),
                 TokenTree::Literal(_) | TokenTree::Punct(_) => {}
             }
         }
-        Ok(())
     }
 
     pub(super) fn record_attribute(&mut self, attribute: &Attribute, site_context: &str) -> Result<()> {
@@ -78,36 +77,10 @@ impl ConcreteStoreInventory {
     }
 
     fn record_cfg_attr(&mut self, tokens: &TokenStream, site_context: &str) -> Result<()> {
-        let arguments = Punctuated::<Meta, Token![,]>::parse_terminated
-            .parse2(tokens.clone())
-            .context("parse cfg_attr arguments for production concrete-store classification")?;
-        let mut arguments = arguments.into_iter();
-        let Some(condition) = arguments.next() else {
-            return Ok(());
-        };
-        if !cfg_can_apply_in_production(&condition) {
-            return Ok(());
-        }
-        let nested = arguments.collect::<Vec<_>>();
-        for meta in &nested {
-            if cfg_meta_disables_production(meta)? {
-                return Ok(());
-            }
-        }
-        for nested in nested {
-            self.record_cfg_nested(&nested, site_context)?;
+        for meta in production_cfg_attr_metas(tokens)? {
+            self.record_meta(&meta, site_context)?;
         }
         Ok(())
-    }
-
-    fn record_cfg_nested(&mut self, nested: &Meta, site_context: &str) -> Result<()> {
-        if !nested.path().is_ident("cfg_attr") {
-            return self.record_meta(nested, site_context);
-        }
-        let Meta::List(list) = nested else {
-            return Ok(());
-        };
-        self.record_cfg_attr(&list.tokens, site_context)
     }
 
     fn record_meta(&mut self, meta: &Meta, site_context: &str) -> Result<()> {
@@ -255,23 +228,4 @@ fn is_rust_fragment_key(name: &str) -> bool {
             | "try_from"
             | "with"
     )
-}
-
-fn cfg_meta_disables_production(meta: &Meta) -> Result<bool> {
-    let Meta::List(list) = meta else {
-        return Ok(false);
-    };
-    if meta.path().is_ident("cfg_attr") {
-        return cfg_attr_tokens_disable_production(&list.tokens);
-    }
-    if !meta.path().is_ident("cfg") {
-        return Ok(false);
-    }
-    let predicates = Punctuated::<Meta, Token![,]>::parse_terminated
-        .parse2(list.tokens.clone())
-        .context("parse cfg_attr sibling cfg predicate for production concrete-store classification")?;
-    if predicates.len() != 1 {
-        anyhow::bail!("cfg_attr sibling cfg attribute must contain exactly one predicate");
-    }
-    Ok(!cfg_can_apply_in_production(predicates.first().context("cfg_attr sibling cfg predicate disappeared")?))
 }

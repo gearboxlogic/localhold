@@ -46,6 +46,7 @@ pub fn production_syntax_facts(file: &syn::File, source_path: &str, crate_root: 
         imports: Vec::new(),
         concrete_stores: ConcreteStoreInventory::default(),
         site_context: None,
+        generic_default_depth: 0,
         error: None,
         rust_2015_absolute_paths: options.rust_2015_absolute_paths,
         collect_internal_imports: options.collect_internal_imports,
@@ -71,6 +72,7 @@ struct ProductionSyntaxCollector {
     imports: Vec<String>,
     concrete_stores: ConcreteStoreInventory,
     site_context: Option<String>,
+    generic_default_depth: usize,
     error: Option<anyhow::Error>,
     rust_2015_absolute_paths: bool,
     collect_internal_imports: bool,
@@ -141,6 +143,9 @@ impl ProductionSyntaxCollector {
         if let Err(error) = self.concrete_stores.record_ident(ident, context) {
             self.error = Some(error);
         }
+        if self.generic_default_depth > 0 {
+            self.concrete_stores.record_generic_default_ident(ident, context);
+        }
     }
 
     fn reject_concrete_store_alias(&mut self, before: ConcreteStoreCounts) {
@@ -154,6 +159,9 @@ impl ProductionSyntaxCollector {
         if let Err(error) = self.concrete_stores.record_tokens(tokens, context) {
             self.error = Some(error);
         }
+        if self.generic_default_depth > 0 {
+            self.concrete_stores.record_generic_default_tokens(tokens, context);
+        }
     }
 
     fn enter_site_context(&mut self, kind: &str, syntax: &impl ToTokens) -> Option<String> {
@@ -165,19 +173,10 @@ impl ProductionSyntaxCollector {
         self.site_context = previous;
     }
 
-    fn record_generic_default(&mut self, parameter: &GenericParam) {
-        let default = match parameter {
-            GenericParam::Type(parameter) => parameter.default.as_ref().map(ToTokens::to_token_stream),
-            GenericParam::Const(parameter) => parameter.default.as_ref().map(ToTokens::to_token_stream),
-            GenericParam::Lifetime(_) => None,
-        };
-        let Some(default) = default else {
-            return;
-        };
-        let context = self.site_context.as_deref().unwrap_or("unscoped-generic-default");
-        if let Err(error) = self.concrete_stores.record_generic_default(&default, context) {
-            self.error = Some(error);
-        }
+    fn visit_generic_default(&mut self, visit: impl FnOnce(&mut Self)) {
+        self.generic_default_depth += 1;
+        visit(self);
+        self.generic_default_depth -= 1;
     }
 }
 
@@ -298,8 +297,31 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             return;
         }
         let previous = self.enter_site_context("generic-parameter", node);
-        self.record_generic_default(node);
-        visit::visit_generic_param(self, node);
+        match node {
+            GenericParam::Lifetime(parameter) => visit::visit_lifetime_param(self, parameter),
+            GenericParam::Type(parameter) => {
+                for attribute in &parameter.attrs {
+                    self.visit_attribute(attribute);
+                }
+                self.visit_ident(&parameter.ident);
+                for bound in &parameter.bounds {
+                    self.visit_type_param_bound(bound);
+                }
+                if let Some(default) = &parameter.default {
+                    self.visit_generic_default(|collector| collector.visit_type(default));
+                }
+            }
+            GenericParam::Const(parameter) => {
+                for attribute in &parameter.attrs {
+                    self.visit_attribute(attribute);
+                }
+                self.visit_ident(&parameter.ident);
+                self.visit_type(&parameter.ty);
+                if let Some(default) = &parameter.default {
+                    self.visit_generic_default(|collector| collector.visit_expr(default));
+                }
+            }
+        }
         self.leave_site_context(previous);
     }
 

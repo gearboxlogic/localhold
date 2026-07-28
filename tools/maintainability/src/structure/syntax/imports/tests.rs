@@ -346,6 +346,28 @@ fn cfg_attr_disabling_siblings_remove_store_tokens_from_production() -> Result<(
 }
 
 #[test]
+fn nested_cfg_attr_reuses_outer_condition_when_classifying_siblings() -> Result<()> {
+    let source = "#[cfg_attr(feature = \"other\", cfg_attr(feature = \"other\", cfg(test)), serde(default = \"SqliteStore::default\"))]\n\
+                  struct RepeatedCondition;\n";
+    assert_eq!(concrete_facts(source)?.concrete_stores, ConcreteStoreCounts::default());
+
+    let restricted = "#[cfg_attr(feature = \"other\", cfg_attr(feature = \"other\", cfg(test)), serde(default = \"crate::server::default\"))]\n\
+                      struct RepeatedCondition;\n";
+    assert!(imports("src/adapter.rs", restricted)?.is_empty());
+
+    let independent = "#[cfg_attr(feature = \"other\", cfg_attr(feature = \"optional\", cfg(test)), serde(default = \"SqliteStore::default\"))]\n\
+                       struct IndependentCondition;\n";
+    assert_eq!(
+        concrete_facts(independent)?.concrete_stores,
+        ConcreteStoreCounts {
+            sqlite_store: 1,
+            postgres_store: 0,
+        }
+    );
+    Ok(())
+}
+
+#[test]
 fn every_serde_callback_key_is_scanned_as_rust() -> Result<()> {
     let source = "#[serde(skip_serializing_if = \"SqliteStore::is_empty\")]\n\
                   struct Skip(usize);\n\
@@ -454,6 +476,21 @@ fn const_generic_defaults_are_inventoried() -> Result<()> {
     assert_eq!(facts.generic_default_concrete_store_sites, whitespace_only.generic_default_concrete_store_sites);
     assert_eq!(facts.generic_default_concrete_store_sites.sqlite_store.len(), 1);
     assert_eq!(facts.generic_default_concrete_store_sites.postgres_store.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn generic_defaults_use_cfg_aware_syntax_traversal() -> Result<()> {
+    let facts = concrete_facts(
+        "struct Version<const N: usize = {\n\
+             #[cfg(test)] let _test = core::mem::size_of::<SqliteStore>();\n\
+             #[cfg(feature = \"testing\")] let _instrumentation = PostgresStore::FORMAT_VERSION;\n\
+             #[cfg(not(test))] let production = 1;\n\
+             production\n\
+         }>;\n",
+    )?;
+    assert_eq!(facts.concrete_stores, ConcreteStoreCounts::default());
+    assert_eq!(facts.generic_default_concrete_store_sites, ConcreteStoreSites::default());
     Ok(())
 }
 

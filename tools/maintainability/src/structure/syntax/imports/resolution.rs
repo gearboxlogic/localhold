@@ -3,11 +3,9 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens as _;
-use syn::parse::Parser as _;
-use syn::punctuated::Punctuated;
-use syn::{Attribute, Meta, Path as SynPath, Token, UseTree};
+use syn::{Attribute, Meta, Path as SynPath, UseTree};
 
-use super::super::{cfg_can_apply_in_production, normalized_ident};
+use super::super::{normalized_ident, production_cfg_attr_metas};
 
 pub(super) struct UsePath {
     pub(super) segments: Vec<String>,
@@ -140,25 +138,8 @@ pub(super) fn restricted_attribute_identifier(attribute: &Attribute, module: &[S
 }
 
 fn restricted_cfg_attr_contents(tokens: &TokenStream, module: &[String], rust_2015_absolute_paths: bool) -> Result<Option<String>> {
-    let arguments = Punctuated::<Meta, Token![,]>::parse_terminated
-        .parse2(tokens.clone())
-        .context("parse cfg_attr arguments for production import classification")?;
-    let mut arguments = arguments.into_iter();
-    let Some(condition) = arguments.next() else {
-        return Ok(None);
-    };
-    if !cfg_can_apply_in_production(&condition) {
-        return Ok(None);
-    }
-    for nested in arguments {
-        let restricted = if nested.path().is_ident("cfg_attr") {
-            let Meta::List(list) = nested else {
-                continue;
-            };
-            restricted_cfg_attr_contents(&list.tokens, module, rust_2015_absolute_paths)?
-        } else {
-            restricted_meta_contents(&nested, module, rust_2015_absolute_paths)?
-        };
+    for nested in production_cfg_attr_metas(tokens)? {
+        let restricted = restricted_meta_contents(&nested, module, rust_2015_absolute_paths)?;
         if restricted.is_some() {
             return Ok(restricted);
         }

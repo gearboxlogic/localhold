@@ -1,6 +1,8 @@
 use super::*;
 use crate::structure::classify::{FileMeasurement, Inventory};
-use crate::structure::syntax::{ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites, PublicReexportEvidence};
+use crate::structure::syntax::{
+    ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionCfgContext, PublicReexportEvidence, production_cfg_context,
+};
 
 type CountFixture<'a> = (&'a str, usize, usize);
 
@@ -172,6 +174,7 @@ fn public_reexports_are_additive_signature_evidence() {
         exported_path: vec!["open".to_owned()],
         target_path: vec!["store".to_owned(), "sqlite".to_owned(), "open".to_owned()],
         fingerprint: "public-use-helper-open".to_owned(),
+        cfg: ProductionCfgContext::default(),
     }];
 
     let error = policy
@@ -181,6 +184,32 @@ fn public_reexports_are_additive_signature_evidence() {
     policy
         .compare_site_fingerprints(&private_signature, &reexported_signature, paths(&components), paths(&components))
         .expect("removing a public re-export reduces concrete-store exposure");
+}
+
+#[test]
+fn public_reexports_must_share_a_cfg_with_the_concrete_signature() {
+    let policy = policy();
+    let components = components(&[("src/lib.rs", "composition"), ("src/store/sqlite.rs", "sqlite-store")]);
+    let mut baseline = inventory(&[("src/lib.rs", 0, 0), ("src/store/sqlite.rs", 1, 0)]);
+    baseline.files[1].production_module = vec!["store".to_owned(), "sqlite".to_owned()];
+    let mut gated_signature = signature("private-open", &["store", "sqlite", "open"]);
+    gated_signature.cfg = cfg_context("feature = \"legacy\"");
+    baseline.files[1].production_signature_store_sites.sqlite_store = vec![gated_signature];
+    let mut current = baseline.clone();
+    current.files[0].production_public_reexports = vec![PublicReexportEvidence {
+        exported_path: vec!["open".to_owned()],
+        target_path: vec!["store".to_owned(), "sqlite".to_owned(), "open".to_owned()],
+        fingerprint: "public-use-helper-open".to_owned(),
+        cfg: cfg_context("not(feature = \"legacy\")"),
+    }];
+
+    policy
+        .compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components))
+        .expect("a mutually exclusive re-export cannot expose the concrete signature");
+
+    current.files[0].production_public_reexports[0].cfg = cfg_context("feature = \"legacy\"");
+    let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
+    assert!(error.to_string().contains("production signature"));
 }
 
 #[test]
@@ -195,6 +224,7 @@ fn inline_module_reexports_match_the_concrete_bearing_item() {
         exported_path: vec!["ui".to_owned(), "open".to_owned()],
         target_path: vec!["ui".to_owned(), "helper".to_owned(), "open".to_owned()],
         fingerprint: "public-use-helper-open".to_owned(),
+        cfg: ProductionCfgContext::default(),
     }];
 
     let error = policy.compare_site_fingerprints(&exposed, &baseline, paths(&components), paths(&components)).unwrap_err();
@@ -220,6 +250,7 @@ fn unrelated_public_reexports_do_not_change_signature_evidence() {
         exported_path: vec!["Counter".to_owned()],
         target_path: vec!["metrics".to_owned(), "Counter".to_owned()],
         fingerprint: "public-use-counter".to_owned(),
+        cfg: ProductionCfgContext::default(),
     }];
 
     policy
@@ -230,6 +261,7 @@ fn unrelated_public_reexports_do_not_change_signature_evidence() {
         exported_path: vec!["unrelated".to_owned()],
         target_path: vec!["store".to_owned(), "sqlite".to_owned(), "unrelated".to_owned()],
         fingerprint: "public-use-same-module-unrelated".to_owned(),
+        cfg: ProductionCfgContext::default(),
     }];
     policy
         .compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components))
@@ -247,12 +279,14 @@ fn transitive_public_reexports_are_signature_evidence() {
         exported_path: vec!["ui".to_owned(), "facade".to_owned(), "open".to_owned()],
         target_path: vec!["ui".to_owned(), "helper".to_owned(), "open".to_owned()],
         fingerprint: "facade-open".to_owned(),
+        cfg: ProductionCfgContext::default(),
     }];
     let mut current = baseline.clone();
     current.files[0].production_public_reexports = vec![PublicReexportEvidence {
         exported_path: vec!["ui".to_owned(), "open".to_owned()],
         target_path: vec!["ui".to_owned(), "facade".to_owned(), "open".to_owned()],
         fingerprint: "ui-open".to_owned(),
+        cfg: ProductionCfgContext::default(),
     }];
 
     let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
@@ -671,7 +705,15 @@ fn signature(fingerprint: &str, item_path: &[&str]) -> ConcreteStoreSignatureSit
     ConcreteStoreSignatureSite {
         fingerprint: fingerprint.to_owned(),
         item_path: item_path.iter().map(|segment| (*segment).to_owned()).collect(),
+        cfg: ProductionCfgContext::default(),
     }
+}
+
+fn cfg_context(predicate: &str) -> ProductionCfgContext {
+    let item = syn::parse_str::<syn::ItemFn>(&format!("#[cfg({predicate})] fn gated() {{}}")).expect("cfg fixture");
+    production_cfg_context(&item.attrs, &ProductionCfgContext::default())
+        .expect("valid cfg fixture")
+        .expect("production-compatible cfg fixture")
 }
 
 fn components(entries: &[(&'static str, &'static str)]) -> BTreeMap<&'static str, &'static str> {

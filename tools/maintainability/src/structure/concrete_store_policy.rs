@@ -505,7 +505,7 @@ fn canonical_binding_fingerprint(inventory: &Inventory, paths: PathAttribution<'
     Ok(syntax_fingerprint(&evidence.join("\0")))
 }
 
-fn public_reexport_evidence(inventory: &Inventory, paths: PathAttribution<'_>, target_item: &[String]) -> Vec<String> {
+fn public_reexport_evidence(inventory: &Inventory, paths: PathAttribution<'_>, target_item: &[String], target_cfg: &super::syntax::ProductionCfgContext) -> Vec<String> {
     if target_item.is_empty() {
         return Vec::new();
     }
@@ -516,7 +516,7 @@ fn public_reexport_evidence(inventory: &Inventory, paths: PathAttribution<'_>, t
         .collect::<Vec<_>>();
     let mut evidence = reexports
         .iter()
-        .filter(|(_, reexport)| reexport_reaches_item(reexport, &reexports, target_item))
+        .filter(|(_, reexport)| reexport_reaches_item(reexport, &reexports, target_item, target_cfg))
         .map(|(file, reexport)| format!("{}:{}:{}", paths.site_path(&file.path).len(), paths.site_path(&file.path), reexport.fingerprint))
         .collect::<Vec<_>>();
     evidence.sort();
@@ -524,17 +524,27 @@ fn public_reexport_evidence(inventory: &Inventory, paths: PathAttribution<'_>, t
     evidence
 }
 
-fn reexport_reaches_item(candidate: &PublicReexportEvidence, reexports: &[(&FileMeasurement, &PublicReexportEvidence)], target_item: &[String]) -> bool {
-    let mut pending = vec![candidate.target_path.clone()];
-    let mut visited = BTreeSet::new();
-    while let Some(path) = pending.pop() {
+fn reexport_reaches_item(
+    candidate: &PublicReexportEvidence,
+    reexports: &[(&FileMeasurement, &PublicReexportEvidence)],
+    target_item: &[String],
+    target_cfg: &super::syntax::ProductionCfgContext,
+) -> bool {
+    let Some(candidate_cfg) = candidate.cfg.conjoin(target_cfg) else {
+        return false;
+    };
+    let mut pending = vec![(candidate.target_path.clone(), candidate_cfg, BTreeSet::new())];
+    while let Some((path, cfg, mut visited)) = pending.pop() {
         if !visited.insert(path.clone()) {
             continue;
         }
         if reexport_applies_to_item(&path, target_item) {
             return true;
         }
-        pending.extend(reexports.iter().filter_map(|(_, reexport)| resolve_reexport_target(&path, reexport)));
+        pending.extend(reexports.iter().filter_map(|(_, reexport)| {
+            let compatible_cfg = cfg.conjoin(&reexport.cfg)?;
+            resolve_reexport_target(&path, reexport).map(|path| (path, compatible_cfg, visited.clone()))
+        }));
     }
     false
 }
@@ -696,7 +706,7 @@ fn record_signature_site_fingerprint(
     store: ConcreteStoreName,
     signature: &ConcreteStoreSignatureSite,
 ) -> Result<()> {
-    let public_reexports = public_reexport_evidence(file_context.inventory, file_context.paths, &signature.item_path);
+    let public_reexports = public_reexport_evidence(file_context.inventory, file_context.paths, &signature.item_path, &signature.cfg);
     let context = SiteEvidenceContext {
         component: effective_component,
         path: file_context.site_path,

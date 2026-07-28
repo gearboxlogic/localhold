@@ -113,6 +113,27 @@ fn public_reexport_aliases_use_only_cfg_compatible_bindings() -> Result<()> {
 }
 
 #[test]
+fn builtin_stringify_aliases_use_only_cfg_compatible_bindings() {
+    for source in [
+        "#[cfg(feature = \"legacy\")]\n\
+         use ::core::stringify as text;\n\
+         #[cfg(not(feature = \"legacy\"))]\n\
+         const STORE: &str = text!(SqliteStore);\n",
+        "fn open() {\n\
+             #[cfg(feature = \"legacy\")]\n\
+             use ::core::stringify as text;\n\
+             #[cfg(not(feature = \"legacy\"))]\n\
+             let _ = text!(PostgresStore);\n\
+         }\n",
+    ] {
+        let Err(error) = concrete_facts(source) else {
+            panic!("a mutually exclusive stringify import cannot classify the invocation");
+        };
+        assert!(error.to_string().contains("unreviewed macro expansion path text"), "{error:#}");
+    }
+}
+
+#[test]
 fn nested_custom_library_roots_define_relative_module_paths() -> Result<()> {
     let syntax = syn::parse_file("use super::server::Service;\n")?;
     assert_eq!(
@@ -194,11 +215,17 @@ fn test_only_and_production_items_on_one_line_are_distinguished() {
 }
 
 #[test]
-fn absolute_external_paths_are_not_classified_as_crate_relative() {
+fn absolute_external_paths_are_not_classified_as_crate_relative() -> Result<()> {
     let source = "use ::server::External;\n\
                   use ::ui::External as ExternalUi;\n\
                   fn build() -> ::server::Qualified { ::ui::qualified() }\n";
     assert!(imports("src/adapter.rs", source).expect("absolute external paths").is_empty());
+    let reexport = concrete_facts(
+        "mod url { pub struct Url; }\n\
+         pub use ::url::Url;\n",
+    )?;
+    assert!(reexport.public_reexports.is_empty());
+    Ok(())
 }
 
 #[test]
@@ -825,6 +852,28 @@ fn concrete_store_names_cannot_be_hidden_by_aliases() {
     ] {
         assert!(imports("src/store/alias.rs", source).is_ok(), "{source}");
     }
+}
+
+#[test]
+fn macro_definitions_honor_test_only_cfg_gates() -> Result<()> {
+    let facts = concrete_facts(
+        "macro_rules! test_store {\n\
+             () => {\n\
+                 #[cfg(test)]\n\
+                 type TestStore = $crate::SqliteStore;\n\
+                 #[cfg(feature = \"testing\")]\n\
+                 const VERSION: usize = PostgresStore::FORMAT_VERSION;\n\
+             };\n\
+         }\n",
+    )?;
+    assert_eq!(facts.concrete_stores, ConcreteStoreCounts::default());
+
+    let production = "macro_rules! production_store { () => { #[cfg(not(test))] type DefaultStore = SqliteStore; }; }\n";
+    let Err(error) = concrete_facts(production) else {
+        panic!("a production macro transcriber cannot inject a concrete store");
+    };
+    assert!(error.to_string().contains("macro definitions cannot inject concrete stores"));
+    Ok(())
 }
 
 #[test]

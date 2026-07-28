@@ -10,7 +10,7 @@ use super::normalized_ident;
 mod sat;
 use sat::is_satisfiable;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum Predicate {
     Constant(bool),
     Atom {
@@ -28,7 +28,7 @@ struct CfgAttr {
     nested: Vec<Meta>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub(in crate::structure) struct ProductionCfgContext {
     constraints: Vec<Predicate>,
 }

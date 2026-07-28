@@ -18,7 +18,7 @@ pub(super) struct UseResolution {
     pub(super) cfg: ProductionCfgContext,
 }
 
-type ResolvedUseTargets = Vec<(Vec<String>, Vec<String>)>;
+type ResolvedUseTargets = Vec<(Vec<String>, Vec<String>, ProductionCfgContext)>;
 
 struct AliasResolver<'a> {
     resolutions: &'a [UseResolution],
@@ -35,7 +35,7 @@ pub(super) fn resolve_public_reexport_aliases(reexports: Vec<PendingPublicReexpo
             targets: &mut targets,
         }
         .resolve(evidence.target_path.clone(), &pending.cfg, &mut BTreeSet::new(), &mut Vec::new());
-        for (target_path, alias_fingerprints) in targets {
+        for (target_path, alias_fingerprints, cfg) in targets {
             let fingerprint = if alias_fingerprints.is_empty() && target_path == evidence.target_path {
                 evidence.fingerprint.clone()
             } else {
@@ -50,6 +50,7 @@ pub(super) fn resolve_public_reexport_aliases(reexports: Vec<PendingPublicReexpo
                 exported_path: evidence.exported_path.clone(),
                 target_path,
                 fingerprint,
+                cfg,
             });
         }
     }
@@ -59,7 +60,7 @@ pub(super) fn resolve_public_reexport_aliases(reexports: Vec<PendingPublicReexpo
 impl AliasResolver<'_> {
     fn resolve(&mut self, path: Vec<String>, cfg: &ProductionCfgContext, visited: &mut BTreeSet<Vec<String>>, alias_fingerprints: &mut Vec<String>) {
         if !visited.insert(path.clone()) {
-            self.targets.push((path, alias_fingerprints.clone()));
+            self.targets.push((path, alias_fingerprints.clone(), cfg.clone()));
             return;
         }
         let rewritten = self
@@ -72,7 +73,7 @@ impl AliasResolver<'_> {
             .filter(|(target, _, _)| target != &path)
             .collect::<Vec<_>>();
         if rewritten.is_empty() {
-            self.targets.push((path, alias_fingerprints.clone()));
+            self.targets.push((path, alias_fingerprints.clone(), cfg.clone()));
         } else {
             for (target, fingerprint, compatible_cfg) in rewritten {
                 alias_fingerprints.push(fingerprint);

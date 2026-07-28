@@ -19,16 +19,31 @@ use super::{
 };
 
 mod concrete;
+mod macro_definitions;
 mod reexports;
 mod resolution;
 mod tokens;
 pub use concrete::{ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites};
-use concrete::{ConcreteStoreInventory, context_fingerprint, is_concrete_store_name, tokens_contain_concrete_store};
+use concrete::{ConcreteStoreInventory, context_fingerprint, is_concrete_store_name};
+use macro_definitions::contains_production_concrete_store;
 use reexports::{PendingPublicReexport, UseResolution, resolve_public_reexport_aliases};
 use resolution::{StringScan, UsePath, flatten_use_tree, resolve_path, restricted_attribute_identifier, restricted_token_identifier, source_module};
 use tokens::resolving_tokens;
 
-type BuiltinStringifyAliases = BTreeSet<(Vec<String>, String)>;
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct BuiltinStringifyAlias {
+    module: Vec<String>,
+    name: String,
+    cfg: ProductionCfgContext,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct BlockBuiltinStringifyAlias {
+    name: String,
+    cfg: ProductionCfgContext,
+}
+
+type BuiltinStringifyAliases = BTreeSet<BuiltinStringifyAlias>;
 
 #[derive(Default)]
 pub struct ProductionSyntaxFacts {
@@ -48,6 +63,8 @@ pub struct PublicReexportEvidence {
     pub exported_path: Vec<String>,
     pub target_path: Vec<String>,
     pub fingerprint: String,
+    #[serde(skip)]
+    pub(in crate::structure) cfg: ProductionCfgContext,
 }
 
 #[derive(Clone, Copy)]
@@ -127,7 +144,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
 struct ProductionSyntaxCollector {
     module: Vec<String>,
     builtin_stringify_aliases: BuiltinStringifyAliases,
-    builtin_stringify_block_aliases: Vec<BTreeSet<String>>,
+    builtin_stringify_block_aliases: Vec<BTreeSet<BlockBuiltinStringifyAlias>>,
     imports: Vec<String>,
     use_resolutions: Vec<UseResolution>,
     public_reexports: Vec<PendingPublicReexport>,
@@ -169,7 +186,7 @@ impl ProductionSyntaxCollector {
     }
 
     fn record_public_reexport(&mut self, item: &ItemUse) -> Result<()> {
-        if matches!(item.vis, Visibility::Inherited) {
+        if matches!(item.vis, Visibility::Inherited) || item.leading_colon.is_some() && !self.rust_2015_absolute_paths {
             return Ok(());
         }
         let mut paths = Vec::new();
@@ -201,6 +218,7 @@ impl ProductionSyntaxCollector {
                     exported_path,
                     target_path,
                     fingerprint: syntax_fingerprint(&identity),
+                    cfg: self.cfg_context.clone(),
                 },
                 cfg: self.cfg_context.clone(),
             });
@@ -209,6 +227,9 @@ impl ProductionSyntaxCollector {
     }
 
     fn record_use_resolutions(&mut self, item: &ItemUse) -> Result<()> {
+        if item.leading_colon.is_some() && !self.rust_2015_absolute_paths {
+            return Ok(());
+        }
         let mut paths = Vec::new();
         flatten_use_tree(&item.tree, &mut Vec::new(), &mut paths);
         for mut path in paths {
@@ -334,7 +355,7 @@ impl ProductionSyntaxCollector {
             self.declaration_ancestors.join("\0")
         );
         let item_path = self.signature_item_path();
-        self.concrete_stores.record_signature_tokens(tokens, &context, &item_path);
+        self.concrete_stores.record_signature_tokens(tokens, &context, &item_path, &self.cfg_context);
     }
 
     fn record_concrete_stores_in_exposure_signature_with_identity(&mut self, kind: &str, tokens: &TokenStream, identity: &TokenStream) {
@@ -345,7 +366,7 @@ impl ProductionSyntaxCollector {
             self.declaration_ancestors.join("\0")
         );
         let item_path = self.signature_item_path();
-        self.concrete_stores.record_exposure_signature_tokens(tokens, &context, &item_path);
+        self.concrete_stores.record_exposure_signature_tokens(tokens, &context, &item_path, &self.cfg_context);
     }
 
     fn record_impl_header_for_visible_member(&mut self, kind: &str, visibility: &Visibility, member: &impl ToTokens) {
@@ -830,16 +851,38 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_macro(&mut self, item: &'ast ItemMacro) {
-        if item.ident.is_some() && tokens_contain_concrete_store(&item.mac.tokens) {
+        let Some(name) = &item.ident else {
+            visit::visit_item_macro(self, item);
+            return;
+        };
+        for attribute in &item.attrs {
+            self.visit_attribute(attribute);
+        }
+        if self.error.is_some() {
+            return;
+        }
+        if contains_production_concrete_store(&item.mac.tokens, &self.cfg_context) {
             self.error = Some(anyhow::anyhow!("production macro definitions cannot inject concrete stores into call sites"));
             return;
         }
-        if let Some(name) = &item.ident
-            && let Some(scope) = self.macro_shadow_scopes.last_mut()
-        {
+        if self.collect_internal_imports {
+            match restricted_token_identifier(&item.mac.tokens, &self.module, self.rust_2015_absolute_paths, StringScan::RustFragment) {
+                Ok(Some(restricted)) => {
+                    self.error = Some(anyhow::anyhow!(
+                        "production macro token stream names restricted crate module {restricted:?} and cannot be classified safely"
+                    ));
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.error = Some(error);
+                    return;
+                }
+            }
+        }
+        if let Some(scope) = self.macro_shadow_scopes.last_mut() {
             scope.insert(normalized_ident(name));
         }
-        visit::visit_item_macro(self, item);
     }
 
     fn visit_item_mod(&mut self, item: &'ast ItemMod) {
@@ -869,21 +912,31 @@ impl ProductionSyntaxCollector {
             return false;
         }
         let alias = normalized_ident(&node.path.segments[0].ident);
-        let imported =
-            self.builtin_stringify_aliases.contains(&(self.module.clone(), alias.clone())) || self.builtin_stringify_block_aliases.iter().rev().any(|scope| scope.contains(&alias));
+        let imported = self
+            .builtin_stringify_aliases
+            .iter()
+            .any(|candidate| candidate.module == self.module && candidate.name == alias && candidate.cfg.conjoin(&self.cfg_context).is_some())
+            || self
+                .builtin_stringify_block_aliases
+                .iter()
+                .rev()
+                .any(|scope| scope.iter().any(|candidate| candidate.name == alias && candidate.cfg.conjoin(&self.cfg_context).is_some()));
         imported && !self.macro_shadow_scopes.iter().rev().any(|scope| scope.contains(&alias))
     }
 }
 
-fn builtin_stringify_aliases_in_block(block: &Block, inherited_cfg: &ProductionCfgContext) -> Result<BTreeSet<String>> {
+fn builtin_stringify_aliases_in_block(block: &Block, inherited_cfg: &ProductionCfgContext) -> Result<BTreeSet<BlockBuiltinStringifyAlias>> {
     let mut aliases = BTreeSet::new();
     for statement in &block.stmts {
         let Stmt::Item(Item::Use(item)) = statement else {
             continue;
         };
-        if production_cfg_context(&item.attrs, inherited_cfg)?.is_some() {
-            collect_builtin_stringify_alias_names_from_use(item, &mut aliases);
-        }
+        let Some(cfg) = production_cfg_context(&item.attrs, inherited_cfg)? else {
+            continue;
+        };
+        let mut names = BTreeSet::new();
+        collect_builtin_stringify_alias_names_from_use(item, &mut names);
+        aliases.extend(names.into_iter().map(|name| BlockBuiltinStringifyAlias { name, cfg: cfg.clone() }));
     }
     Ok(aliases)
 }
@@ -900,7 +953,7 @@ fn collect_builtin_stringify_aliases_in_items(items: &[Item], module: &[String],
             continue;
         };
         match item {
-            Item::Use(item) => collect_builtin_stringify_aliases_from_use(item, module, aliases),
+            Item::Use(item) => collect_builtin_stringify_aliases_from_use(item, module, &cfg, aliases),
             Item::Mod(item) => {
                 if let Some((_, nested)) = &item.content {
                     let mut nested_module = module.to_vec();
@@ -914,10 +967,14 @@ fn collect_builtin_stringify_aliases_in_items(items: &[Item], module: &[String],
     Ok(())
 }
 
-fn collect_builtin_stringify_aliases_from_use(item: &ItemUse, module: &[String], aliases: &mut BuiltinStringifyAliases) {
+fn collect_builtin_stringify_aliases_from_use(item: &ItemUse, module: &[String], cfg: &ProductionCfgContext, aliases: &mut BuiltinStringifyAliases) {
     let mut names = BTreeSet::new();
     collect_builtin_stringify_alias_names_from_use(item, &mut names);
-    aliases.extend(names.into_iter().map(|name| (module.to_vec(), name)));
+    aliases.extend(names.into_iter().map(|name| BuiltinStringifyAlias {
+        module: module.to_vec(),
+        name,
+        cfg: cfg.clone(),
+    }));
 }
 
 fn collect_builtin_stringify_alias_names_from_use(item: &ItemUse, aliases: &mut BTreeSet<String>) {

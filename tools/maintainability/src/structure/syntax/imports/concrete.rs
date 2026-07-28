@@ -4,11 +4,11 @@ use quote::ToTokens;
 use serde::Serialize;
 use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
-use syn::{Attribute, ItemStruct, Meta, Token};
+use syn::{Attribute, Field, Fields, ItemStruct, Meta, Token};
 
 use crate::scan::syntax_fingerprint;
 
-use super::super::{ProductionCfgContext, normalized_ident, production_cfg_attr_metas};
+use super::super::{ProductionCfgContext, normalized_ident, production_cfg_attr_metas, production_cfg_context};
 use super::tokens::resolving_tokens;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
@@ -65,15 +65,20 @@ impl ConcreteStoreInventory {
         self.record_name(&normalized_ident(ident), site_context)
     }
 
-    pub(super) fn record_public_struct_declaration(&mut self, item: &ItemStruct, item_path: &[String], cfg: &ProductionCfgContext, ancestors: &[String]) {
+    pub(super) fn record_public_struct_declaration(&mut self, item: &ItemStruct, item_path: &[String], cfg: &ProductionCfgContext, ancestors: &str) -> Result<()> {
         let name = normalized_ident(&item.ident);
         let sites = match name.as_str() {
             "SqliteStore" => &mut self.public_struct_declarations.sqlite_store,
             "PostgresStore" => &mut self.public_struct_declarations.postgres_store,
-            _ => return,
+            _ => return Ok(()),
         };
         let mut declaration = item.clone();
         declaration.attrs.retain(|attribute| !attribute.path().is_ident("doc"));
+        match &mut declaration.fields {
+            Fields::Named(fields) => fields.named = production_fields(&fields.named, cfg)?,
+            Fields::Unnamed(fields) => fields.unnamed = production_fields(&fields.unnamed, cfg)?,
+            Fields::Unit => {}
+        }
         for field in &mut declaration.fields {
             field.attrs.retain(|attribute| !attribute.path().is_ident("doc"));
         }
@@ -81,10 +86,11 @@ impl ConcreteStoreInventory {
         let declaration = if cfg.identity().is_empty() && ancestors.is_empty() {
             declaration
         } else {
-            syntax_fingerprint(&format!("declaration:{declaration}\0cfg:{}\0ancestors:{}", cfg.identity(), ancestors.join("\0")))
+            syntax_fingerprint(&format!("declaration:{declaration}\0cfg:{}\0ancestors:{ancestors}", cfg.identity()))
         };
         sites.push(declaration.clone());
         self.record_exposure_signature_name(&name, &format!("canonical-declaration:{declaration}"), item_path, cfg);
+        Ok(())
     }
 
     pub(super) fn record_tokens(&mut self, tokens: &TokenStream, site_context: &str) -> Result<()> {
@@ -294,6 +300,19 @@ impl ConcreteStoreInventory {
         };
         sites.push(syntax_fingerprint(&site_context));
     }
+}
+
+fn production_fields(fields: &Punctuated<Field, Token![,]>, cfg: &ProductionCfgContext) -> Result<Punctuated<Field, Token![,]>> {
+    let mut production = Punctuated::new();
+    for field in fields {
+        if production_cfg_context(&field.attrs, cfg)?.is_some() {
+            production.push(field.clone());
+        }
+    }
+    if !production.is_empty() && !production.trailing_punct() {
+        production.push_punct(syn::token::Comma::default());
+    }
+    Ok(production)
 }
 
 pub(super) fn context_fingerprint(parent: Option<&str>, kind: &str, syntax: &impl ToTokens) -> String {

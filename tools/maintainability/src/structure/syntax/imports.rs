@@ -87,10 +87,16 @@ pub struct ProductionSyntaxOptions {
     pub require_reviewed_expansions: bool,
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(in crate::structure) struct ProductionAncestorPath {
+    pub(in crate::structure) cfg: ProductionCfgContext,
+    pub(in crate::structure) ancestors: Vec<String>,
+}
+
 #[derive(Default)]
 pub(in crate::structure) struct ProductionSyntaxContext {
     pub(in crate::structure) cfg: ProductionCfgContext,
-    pub(in crate::structure) declaration_ancestors: Vec<String>,
+    pub(in crate::structure) declaration_ancestors: Vec<ProductionAncestorPath>,
 }
 
 #[cfg(test)]
@@ -127,7 +133,9 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
         impl_trait_exposures: Vec::new(),
         trait_exposures: Vec::new(),
         field_exposures: Vec::new(),
-        declaration_ancestors: initial_context.declaration_ancestors,
+        impl_item_paths: Vec::new(),
+        inherited_declaration_ancestors: initial_context.declaration_ancestors,
+        declaration_ancestors: Vec::new(),
         cfg_context: initial_context.cfg,
         error: None,
         rust_2015_absolute_paths: options.rust_2015_absolute_paths,
@@ -173,6 +181,8 @@ struct ProductionSyntaxCollector {
     impl_trait_exposures: Vec<bool>,
     trait_exposures: Vec<bool>,
     field_exposures: Vec<FieldExposure>,
+    impl_item_paths: Vec<Vec<String>>,
+    inherited_declaration_ancestors: Vec<ProductionAncestorPath>,
     declaration_ancestors: Vec<String>,
     cfg_context: ProductionCfgContext,
     error: Option<anyhow::Error>,
@@ -230,7 +240,7 @@ impl ProductionSyntaxCollector {
                 path.alias.as_deref().unwrap_or_default(),
                 syntax_fingerprint(&item.vis),
                 self.cfg_context.identity(),
-                self.declaration_ancestors.join("\0")
+                self.declaration_ancestor_identity()
             );
             self.public_reexports.push(PendingPublicReexport {
                 evidence: PublicReexportEvidence {
@@ -266,7 +276,7 @@ impl ProductionSyntaxCollector {
                 path.alias.as_deref().unwrap_or_default(),
                 syntax_fingerprint(&item.vis),
                 self.cfg_context.identity(),
-                self.declaration_ancestors.join("\0")
+                self.declaration_ancestor_identity()
             );
             self.use_resolutions.push(UseResolution {
                 exported_path,
@@ -397,7 +407,7 @@ impl ProductionSyntaxCollector {
             "{kind}:{}\0cfg:{}\0ancestors:{}",
             syntax_fingerprint(identity),
             self.cfg_context.identity(),
-            self.declaration_ancestors.join("\0")
+            self.declaration_ancestor_identity()
         );
         let item_path = self.signature_item_path();
         self.concrete_stores.record_signature_tokens(tokens, &context, &item_path, &self.cfg_context);
@@ -408,7 +418,7 @@ impl ProductionSyntaxCollector {
             "{kind}:{}\0cfg:{}\0ancestors:{}",
             syntax_fingerprint(identity),
             self.cfg_context.identity(),
-            self.declaration_ancestors.join("\0")
+            self.declaration_ancestor_identity()
         );
         let item_path = self.signature_item_path();
         self.concrete_stores.record_exposure_signature_tokens(tokens, &context, &item_path, &self.cfg_context);
@@ -462,6 +472,9 @@ impl ProductionSyntaxCollector {
         if self.block_depth > 0 {
             return Vec::new();
         }
+        if let Some(path) = self.impl_item_paths.last().filter(|path| !path.is_empty()) {
+            return path.clone();
+        }
         let Some(name) = self.declaration_ancestors.iter().rev().find_map(|ancestor| {
             ["const:", "enum:", "fn:", "static:", "struct:", "trait:", "union:"]
                 .into_iter()
@@ -473,6 +486,30 @@ impl ProductionSyntaxCollector {
         let mut path = self.module.clone();
         path.push(name.to_owned());
         path
+    }
+
+    fn implemented_type_path(&self, item: &ItemImpl) -> Result<Vec<String>> {
+        let syn::Type::Path(path) = item.self_ty.as_ref() else {
+            return Ok(Vec::new());
+        };
+        if path.qself.is_some() || path.path.leading_colon.is_some() && !self.rust_2015_absolute_paths {
+            return Ok(Vec::new());
+        }
+        let mut segments = path.path.segments.iter().map(|segment| normalized_ident(&segment.ident)).collect::<Vec<_>>();
+        if path.path.leading_colon.is_some() {
+            segments.insert(0, "crate".to_owned());
+        }
+        Ok(resolve_path(&self.module, &segments, false)?.unwrap_or_default())
+    }
+
+    fn declaration_ancestor_identity(&self) -> String {
+        self.inherited_declaration_ancestors
+            .iter()
+            .filter(|path| path.cfg.conjoin(&self.cfg_context).is_some())
+            .map(|path| format!("out-of-line-module-path:cfg:{}\0ancestors:{}", path.cfg.identity(), path.ancestors.join("\0")))
+            .chain(self.declaration_ancestors.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("\0")
     }
 }
 
@@ -688,8 +725,11 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         if matches!(item.vis, Visibility::Public(_)) {
             let mut item_path = self.module.clone();
             item_path.push(normalized_ident(&item.ident));
-            self.concrete_stores
-                .record_public_struct_declaration(item, &item_path, &self.cfg_context, &self.declaration_ancestors);
+            let ancestors = self.declaration_ancestor_identity();
+            if let Err(error) = self.concrete_stores.record_public_struct_declaration(item, &item_path, &self.cfg_context, &ancestors) {
+                self.error = Some(error);
+                return;
+            }
         }
         self.field_exposures.push(FieldExposure::Struct(exposed));
         visit::visit_item_struct(self, item);
@@ -730,6 +770,14 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_impl(&mut self, item: &'ast ItemImpl) {
+        let item_path = match self.implemented_type_path(item) {
+            Ok(path) => path,
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        };
+        self.impl_item_paths.push(item_path);
         let mut binding_item = item.clone();
         strip_impl_documentation(&mut binding_item);
         let mut header = binding_item.clone();
@@ -739,7 +787,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         } else {
             format!("impl-header:{}", syntax_fingerprint(&header))
         };
-        let context = format!("{binding}\0cfg:{}\0ancestors:{}", self.cfg_context.identity(), self.declaration_ancestors.join("\0"));
+        let context = format!("{binding}\0cfg:{}\0ancestors:{}", self.cfg_context.identity(), self.declaration_ancestor_identity());
         self.concrete_stores.record_binding_tokens(&header.to_token_stream(), &context);
         let trait_exposure = item.trait_.is_some();
         if trait_exposure {
@@ -751,6 +799,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         visit::visit_item_impl(self, item);
         self.impl_trait_exposures.pop();
         self.impl_signature_headers.pop();
+        self.impl_item_paths.pop();
     }
 
     fn visit_item_fn(&mut self, item: &'ast ItemFn) {

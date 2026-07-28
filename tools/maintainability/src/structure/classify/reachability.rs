@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 
-use super::ProductionCfgContext;
+use super::{ProductionAncestorPath, ProductionCfgContext};
 
 #[derive(Debug)]
 pub(super) struct ModuleEdge {
@@ -16,7 +16,7 @@ pub(super) struct ModuleEdge {
 #[derive(Clone)]
 pub(super) struct ProductionSourceContext {
     pub(super) cfg: ProductionCfgContext,
-    pub(super) declaration_ancestors: Vec<String>,
+    pub(super) declaration_ancestors: Vec<ProductionAncestorPath>,
 }
 
 #[derive(Clone)]
@@ -54,12 +54,9 @@ pub(super) fn production_contexts(edges: &[ModuleEdge], roots: &BTreeSet<String>
             let declaration_ancestors = contexts
                 .values()
                 .filter(|context| !context.declaration_ancestors.is_empty())
-                .map(|context| {
-                    format!(
-                        "out-of-line-module-path:cfg:{}\0ancestors:{}",
-                        context.cfg.identity(),
-                        context.declaration_ancestors.join("\0")
-                    )
+                .map(|context| ProductionAncestorPath {
+                    cfg: context.cfg.clone(),
+                    ancestors: context.declaration_ancestors.clone(),
                 })
                 .collect::<BTreeSet<_>>()
                 .into_iter()

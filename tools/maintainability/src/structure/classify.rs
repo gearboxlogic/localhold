@@ -10,8 +10,9 @@ use serde::Serialize;
 use crate::scan::syntax_fingerprint;
 
 use super::syntax::{
-    ConcreteStoreCounts, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionCfgContext, ProductionSyntaxContext, ProductionSyntaxFacts, ProductionSyntaxOptions,
-    PublicReexportEvidence, TestLineCollector, normalized_ident, production_cfg_context, production_syntax_facts_with_context, reject_module_path_overrides,
+    ConcreteStoreCounts, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionAncestorPath, ProductionCfgContext, ProductionSyntaxContext, ProductionSyntaxFacts,
+    ProductionSyntaxOptions, PublicReexportEvidence, TestLineCollector, normalized_ident, production_cfg_context, production_syntax_facts_with_context,
+    reject_module_path_overrides,
 };
 
 mod module_macro;

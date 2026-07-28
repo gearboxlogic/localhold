@@ -211,6 +211,34 @@ fn public_reexports_are_inventoried_beside_concrete_store_signatures() {
 }
 
 #[test]
+fn public_reexports_match_concrete_store_methods_to_their_impl_type() {
+    let measured = inventory(&[
+        (
+            "src/lib.rs",
+            "mod hidden;\n\
+             pub(crate) use hidden::Adapter;\n",
+        ),
+        (
+            "src/hidden.rs",
+            "pub(crate) struct Adapter;\n\
+             impl Adapter {\n\
+                 pub(crate) fn open() -> SqliteStore { loop {} }\n\
+             }\n",
+        ),
+    ]);
+    let root = measured.files.iter().find(|file| file.path == "src/lib.rs").expect("root measurement");
+    let hidden = measured.files.iter().find(|file| file.path == "src/hidden.rs").expect("hidden measurement");
+    assert_eq!(root.production_public_reexports[0].target_path, ["hidden", "Adapter"]);
+    assert!(
+        hidden
+            .production_signature_store_sites
+            .sqlite_store
+            .iter()
+            .any(|site| site.item_path == ["hidden", "Adapter"])
+    );
+}
+
+#[test]
 fn public_reexport_chains_normalize_exported_and_target_paths() {
     let measured = inventory(&[
         ("src/lib.rs", "mod ui;\n"),
@@ -302,6 +330,42 @@ fn multiple_module_paths_disjoin_their_inherited_cfg_constraints() {
             postgres_store: 1,
         }
     );
+}
+
+#[test]
+fn mutually_exclusive_module_ancestors_only_fingerprint_applicable_paths() {
+    let measurements = |legacy_visibility: &str, current_visibility: &str| {
+        inventory(&[
+            (
+                "src/lib.rs",
+                &format!(
+                    "#[cfg(feature = \"legacy\")]\n{legacy_visibility}mod shared;\n\
+                     #[cfg(not(feature = \"legacy\"))]\n{current_visibility}mod shared;\n"
+                ),
+            ),
+            (
+                "src/shared.rs",
+                "#[cfg(not(feature = \"legacy\"))]\n\
+                 pub(crate) fn open() -> SqliteStore { loop {} }\n",
+            ),
+        ])
+    };
+    let signature_sites = |inventory: &super::Inventory| {
+        inventory
+            .files
+            .iter()
+            .find(|file| file.path == "src/shared.rs")
+            .expect("shared module measurement")
+            .production_signature_store_sites
+            .sqlite_store
+            .clone()
+    };
+
+    let baseline = measurements("", "");
+    let inactive_path_changed = measurements("pub(crate) ", "");
+    let active_path_changed = measurements("", "pub(crate) ");
+    assert_eq!(signature_sites(&baseline), signature_sites(&inactive_path_changed));
+    assert_ne!(signature_sites(&baseline), signature_sites(&active_path_changed));
 }
 
 #[test]

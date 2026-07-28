@@ -498,6 +498,19 @@ fn canonical_declaration_fingerprints_ignore_outer_attributes_but_pin_shape() ->
              inner: Arc<SqliteInner>\n\
          }",
     )?;
+    let test_instrumented = concrete_facts(
+        "pub struct SqliteStore {\n\
+             inner: Arc<SqliteInner>,\n\
+             #[cfg(test)] test_probe: usize,\n\
+             #[cfg(feature = \"testing\")] testing_probe: usize,\n\
+         }",
+    )?;
+    let production_instrumented = concrete_facts(
+        "pub struct SqliteStore {\n\
+             inner: Arc<SqliteInner>,\n\
+             #[cfg(feature = \"legacy\")] legacy_probe: usize,\n\
+         }",
+    )?;
     let derived = concrete_facts("#[derive(Clone, Debug)]\npub struct SqliteStore { inner: Arc<SqliteInner> }")?;
     let replaced = concrete_facts("pub struct SqliteStore;")?;
     let feature_gated = concrete_facts(
@@ -523,6 +536,8 @@ fn canonical_declaration_fingerprints_ignore_outer_attributes_but_pin_shape() ->
 
     assert_eq!(plain.public_concrete_store_structs, documented.public_concrete_store_structs);
     assert_eq!(plain.public_concrete_store_structs, documented_field.public_concrete_store_structs);
+    assert_eq!(plain.public_concrete_store_structs, test_instrumented.public_concrete_store_structs);
+    assert_ne!(plain.public_concrete_store_structs, production_instrumented.public_concrete_store_structs);
     assert_ne!(plain.public_concrete_store_structs, derived.public_concrete_store_structs);
     assert_ne!(plain.public_concrete_store_structs, replaced.public_concrete_store_structs);
     assert_ne!(plain.public_concrete_store_structs, feature_gated.public_concrete_store_structs);

@@ -447,6 +447,14 @@ enum SiteSource {
     Signatures,
 }
 
+#[derive(Clone, Copy)]
+struct SiteEvidenceContext<'a> {
+    component: &'a str,
+    path: &'a str,
+    store: ConcreteStoreName,
+    public_reexports: &'a [String],
+}
+
 fn record_declaration_fingerprints(observed: &mut DeclarationInventory, context: DeclarationContext<'_>, fingerprints: &[String]) -> Result<()> {
     for fingerprint in fingerprints {
         let key = (
@@ -464,6 +472,7 @@ fn record_declaration_fingerprints(observed: &mut DeclarationInventory, context:
 
 fn canonical_binding_fingerprint(inventory: &Inventory, paths: PathAttribution<'_>, component: &str, store: ConcreteStoreName) -> Result<String> {
     let mut evidence = Vec::new();
+    let mut found_binding = false;
     for file in &inventory.files {
         if paths.component_for(&file.path) != Some(component) {
             continue;
@@ -473,14 +482,30 @@ fn canonical_binding_fingerprint(inventory: &Inventory, paths: PathAttribution<'
             ConcreteStoreName::PostgresStore => &file.production_store_binding_sites.postgres_store,
         };
         for fingerprint in fingerprints {
+            found_binding = true;
             evidence.push(format!("{}:{}:{fingerprint}", paths.site_path(&file.path).len(), paths.site_path(&file.path)));
         }
     }
-    if evidence.is_empty() {
+    if !found_binding {
         bail!("canonical {store:?} declaration in component {component:?} has no implementation or use evidence");
     }
     evidence.sort();
     Ok(syntax_fingerprint(&evidence.join("\0")))
+}
+
+fn public_reexport_evidence(inventory: &Inventory, paths: PathAttribution<'_>) -> Vec<String> {
+    let mut evidence = inventory
+        .files
+        .iter()
+        .flat_map(|file| {
+            file.production_public_reexports
+                .iter()
+                .map(move |fingerprint| format!("{}:{}:{fingerprint}", paths.site_path(&file.path).len(), paths.site_path(&file.path)))
+        })
+        .collect::<Vec<_>>();
+    evidence.sort();
+    evidence.dedup();
+    evidence
 }
 
 fn validate_declaration(declaration: &ConcreteStoreDeclaration, unrestricted: &BTreeSet<&str>, allow_missing_fingerprint: bool) -> Result<()> {
@@ -534,6 +559,9 @@ fn site_fingerprints(
     source: SiteSource,
 ) -> Result<BTreeMap<SiteFingerprint, usize>> {
     let mut sites = BTreeMap::new();
+    let public_reexports = matches!(source, SiteSource::Signatures)
+        .then(|| public_reexport_evidence(inventory, paths))
+        .unwrap_or_default();
     for file in &inventory.files {
         let component = paths
             .component_for(&file.path)
@@ -555,14 +583,33 @@ fn site_fingerprints(
             if excluded_components.is_some_and(|excluded| excluded.contains(effective_component)) {
                 continue;
             }
+            let context = SiteEvidenceContext {
+                component: effective_component,
+                path: site_path,
+                store,
+                public_reexports: &public_reexports,
+            };
             for fingerprint in fingerprints {
-                let key = (effective_component.to_owned(), site_path.to_owned(), store, fingerprint.clone());
-                let count = sites.entry(key).or_insert(0_usize);
-                *count = count.checked_add(1).context("concrete-store syntax-site occurrence count overflow")?;
+                record_site_evidence(&mut sites, context, fingerprint)?;
             }
         }
     }
     Ok(sites)
+}
+
+fn record_site_evidence(sites: &mut BTreeMap<SiteFingerprint, usize>, context: SiteEvidenceContext<'_>, signature: &str) -> Result<()> {
+    let evidence = std::iter::once(signature.to_owned()).chain(
+        context
+            .public_reexports
+            .iter()
+            .map(|reexport| syntax_fingerprint(&format!("signature:{signature}\0public-reexport:{reexport}"))),
+    );
+    for fingerprint in evidence {
+        let key = (context.component.to_owned(), context.path.to_owned(), context.store, fingerprint);
+        let count = sites.entry(key).or_insert(0_usize);
+        *count = count.checked_add(1).context("concrete-store syntax-site occurrence count overflow")?;
+    }
+    Ok(())
 }
 
 fn require_occurrence_subset(label: &str, reference_label: &str, current: &BTreeMap<SiteFingerprint, usize>, baseline: &BTreeMap<SiteFingerprint, usize>) -> Result<()> {

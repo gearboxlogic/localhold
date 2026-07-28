@@ -161,6 +161,24 @@ fn reviewed_site_fingerprints_prevent_same_count_moves_and_new_generic_defaults(
 }
 
 #[test]
+fn public_reexports_are_additive_signature_evidence() {
+    let policy = policy();
+    let components = components(&[("src/store/sqlite.rs", "sqlite-store")]);
+    let mut private_signature = inventory(&[("src/store/sqlite.rs", 1, 0)]);
+    private_signature.files[0].production_signature_store_sites.sqlite_store = vec!["private-open".to_owned()];
+    let mut reexported_signature = private_signature.clone();
+    reexported_signature.files[0].production_public_reexports = vec!["public-use-helper-open".to_owned()];
+
+    let error = policy
+        .compare_site_fingerprints(&reexported_signature, &private_signature, paths(&components), paths(&components))
+        .unwrap_err();
+    assert!(error.to_string().contains("production signature"));
+    policy
+        .compare_site_fingerprints(&private_signature, &reexported_signature, paths(&components), paths(&components))
+        .expect("removing a public re-export reduces concrete-store exposure");
+}
+
+#[test]
 fn previous_revision_sites_prevent_swapping_retired_baseline_occurrences() {
     let policy = policy();
     let components = components(&[("src/server/mod.rs", "protocol"), ("src/embedding/status.rs", "embedding")]);
@@ -557,6 +575,7 @@ fn file(path: &str, sqlite_store: usize, postgres_store: usize) -> FileMeasureme
         production_lines: 1,
         test_lines: 0,
         production_internal_imports: Vec::new(),
+        production_public_reexports: Vec::new(),
         production_concrete_stores: ConcreteStoreCounts { sqlite_store, postgres_store },
         production_public_concrete_store_structs: ConcreteStoreSites::default(),
         production_concrete_store_sites: ConcreteStoreSites::default(),

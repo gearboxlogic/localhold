@@ -163,6 +163,51 @@ fn out_of_line_store_signatures_inherit_module_visibility_identity() {
 }
 
 #[test]
+fn out_of_line_store_signatures_keep_cfg_visibility_pairs() {
+    let public_on_feature = inventory(&[
+        (
+            "src/lib.rs",
+            "#[cfg(feature = \"x\")]\npub mod helper;\n\
+             #[cfg(not(feature = \"x\"))]\nmod helper;\n",
+        ),
+        ("src/helper.rs", "pub fn open() -> SqliteStore { loop {} }\n"),
+    ]);
+    let public_without_feature = inventory(&[
+        (
+            "src/lib.rs",
+            "#[cfg(feature = \"x\")]\nmod helper;\n\
+             #[cfg(not(feature = \"x\"))]\npub mod helper;\n",
+        ),
+        ("src/helper.rs", "pub fn open() -> SqliteStore { loop {} }\n"),
+    ]);
+    let signature_sites = |inventory: &super::Inventory| {
+        inventory
+            .files
+            .iter()
+            .find(|file| file.path == "src/helper.rs")
+            .expect("helper measurement")
+            .production_signature_store_sites
+            .clone()
+    };
+    assert_ne!(signature_sites(&public_on_feature), signature_sites(&public_without_feature));
+}
+
+#[test]
+fn public_reexports_are_inventoried_beside_concrete_store_signatures() {
+    let private = inventory(&[("src/lib.rs", "mod helper;\n"), ("src/helper.rs", "pub fn open() -> SqliteStore { loop {} }\n")]);
+    let exposed = inventory(&[
+        ("src/lib.rs", "mod helper;\npub use helper::open;\n"),
+        ("src/helper.rs", "pub fn open() -> SqliteStore { loop {} }\n"),
+    ]);
+    let private_root = private.files.iter().find(|file| file.path == "src/lib.rs").expect("private root measurement");
+    let exposed_root = exposed.files.iter().find(|file| file.path == "src/lib.rs").expect("exposed root measurement");
+    let exposed_helper = exposed.files.iter().find(|file| file.path == "src/helper.rs").expect("helper measurement");
+    assert!(private_root.production_public_reexports.is_empty());
+    assert_eq!(exposed_root.production_public_reexports.len(), 1);
+    assert_eq!(exposed_helper.production_signature_store_sites.sqlite_store.len(), 1);
+}
+
+#[test]
 fn multiple_module_paths_disjoin_their_inherited_cfg_constraints() {
     let inventory = inventory(&[
         (

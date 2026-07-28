@@ -193,6 +193,7 @@ fn inventory(files: &[ImportFixture<'_>]) -> Inventory {
                 production_lines: 1,
                 test_lines: 0,
                 production_internal_imports: imports.iter().map(|target| (*target).to_owned()).collect(),
+                production_public_reexports: Vec::new(),
                 production_concrete_stores: ConcreteStoreCounts::default(),
                 production_public_concrete_store_structs: ConcreteStoreSites::default(),
                 production_concrete_store_sites: ConcreteStoreSites::default(),

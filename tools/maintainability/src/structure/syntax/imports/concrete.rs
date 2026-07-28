@@ -337,7 +337,6 @@ fn is_rust_fragment_key(name: &str) -> bool {
             | "default"
             | "deserialize_with"
             | "example"
-            | "extend"
             | "from"
             | "getter"
             | "into"

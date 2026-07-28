@@ -392,6 +392,24 @@ fn prose_and_descriptive_attribute_strings_do_not_count_concrete_stores() -> Res
 }
 
 #[test]
+fn schemars_extension_strings_remain_schema_data() -> Result<()> {
+    let facts = concrete_facts(
+        "#[schemars(extend(\"x-backend\" = \"SqliteStore\"))]\n\
+         struct Labeled;\n\
+         #[schemars(extend(\"x-backend\" = PostgresStore))]\n\
+         struct TokenBearing;\n",
+    )?;
+    assert_eq!(
+        facts.concrete_stores,
+        ConcreteStoreCounts {
+            sqlite_store: 0,
+            postgres_store: 1,
+        }
+    );
+    Ok(())
+}
+
+#[test]
 fn cfg_attr_store_tokens_are_counted_only_when_the_branch_can_apply_in_production() -> Result<()> {
     let facts = concrete_facts(
         "#[cfg_attr(test, serde(default = SqliteStore))]\n\
@@ -632,6 +650,7 @@ fn concrete_store_names_cannot_be_hidden_by_aliases() {
     for source in [
         "macro_rules! label { () => { \"SqliteStore\" } }\n",
         "macro_rules! diagnostic { () => { compile_error!(\"PostgresStore\") } }\n",
+        "macro_rules! schema_data { () => { #[schemars(extend(\"x-backend\" = \"SqliteStore\"))] struct Generated; } }\n",
     ] {
         assert!(imports("src/store/alias.rs", source).is_ok(), "{source}");
     }

@@ -26,6 +26,7 @@ use tokens::resolving_tokens;
 #[derive(Default)]
 pub struct ProductionSyntaxFacts {
     pub internal_imports: Vec<String>,
+    pub public_reexports: Vec<String>,
     pub concrete_stores: ConcreteStoreCounts,
     pub public_concrete_store_structs: ConcreteStoreSites,
     pub concrete_store_sites: ConcreteStoreSites,
@@ -67,6 +68,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
     let mut collector = ProductionSyntaxCollector {
         module,
         imports: Vec::new(),
+        public_reexports: Vec::new(),
         concrete_stores: ConcreteStoreInventory::default(),
         site_context: None,
         generic_default_depth: 0,
@@ -83,9 +85,12 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
     }
     collector.imports.sort();
     collector.imports.dedup();
+    collector.public_reexports.sort();
+    collector.public_reexports.dedup();
     collector.concrete_stores.finish();
     Ok(ProductionSyntaxFacts {
         internal_imports: collector.imports,
+        public_reexports: collector.public_reexports,
         concrete_stores: collector.concrete_stores.counts,
         public_concrete_store_structs: collector.concrete_stores.public_struct_declarations,
         concrete_store_sites: collector.concrete_stores.sites,
@@ -98,6 +103,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
 struct ProductionSyntaxCollector {
     module: Vec<String>,
     imports: Vec<String>,
+    public_reexports: Vec<String>,
     concrete_stores: ConcreteStoreInventory,
     site_context: Option<String>,
     generic_default_depth: usize,
@@ -130,6 +136,21 @@ impl ProductionSyntaxCollector {
             bail!("production restricted imports cannot be re-exported");
         }
         Ok(())
+    }
+
+    fn record_public_reexport(&mut self, item: &ItemUse) {
+        if matches!(item.vis, Visibility::Inherited) {
+            return;
+        }
+        let mut declaration = item.clone();
+        declaration.attrs.clear();
+        let identity = format!(
+            "public-reexport:{}\0cfg:{}\0ancestors:{}",
+            syntax_fingerprint(&declaration),
+            self.cfg_context.identity(),
+            self.declaration_ancestors.join("\0")
+        );
+        self.public_reexports.push(syntax_fingerprint(&identity));
     }
 
     fn collect_path(&mut self, path: &UsePath) -> Result<()> {
@@ -412,6 +433,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             self.leave_site_context(previous);
             return;
         }
+        self.record_public_reexport(item);
         visit::visit_item_use(self, item);
         self.leave_site_context(previous);
     }

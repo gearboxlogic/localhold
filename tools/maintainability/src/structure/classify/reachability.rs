@@ -54,7 +54,13 @@ pub(super) fn production_contexts(edges: &[ModuleEdge], roots: &BTreeSet<String>
             let declaration_ancestors = contexts
                 .values()
                 .filter(|context| !context.declaration_ancestors.is_empty())
-                .map(|context| format!("out-of-line-module-path:{}", context.declaration_ancestors.join("\0")))
+                .map(|context| {
+                    format!(
+                        "out-of-line-module-path:cfg:{}\0ancestors:{}",
+                        context.cfg.identity(),
+                        context.declaration_ancestors.join("\0")
+                    )
+                })
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();

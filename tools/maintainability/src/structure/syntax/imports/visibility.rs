@@ -4,6 +4,10 @@ use serde::Serialize;
 use syn::{Attribute, Meta, Visibility};
 
 use super::super::{ProductionCfgContext, normalized_ident, production_cfg_attr_metas};
+use super::tokens::resolving_tokens;
+
+mod macro_audit;
+pub(super) use macro_audit::VisibilityMacroAudit;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct VisibilityCounts {
@@ -23,10 +27,24 @@ impl VisibilityCounts {
     }
 
     pub(super) fn record_tokens(&mut self, tokens: &TokenStream) -> Result<()> {
+        self.record_resolving_tokens(&resolving_tokens(tokens))
+    }
+
+    pub(super) fn from_tokens(tokens: &TokenStream) -> Result<Self> {
+        let mut counts = Self::default();
+        counts.record_tokens(tokens)?;
+        Ok(counts)
+    }
+
+    pub(super) const fn is_empty(self) -> bool {
+        self.pub_crate == 0 && self.pub_super == 0
+    }
+
+    fn record_resolving_tokens(&mut self, tokens: &TokenStream) -> Result<()> {
         let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
         for token in &tokens {
             if let TokenTree::Group(group) = token {
-                self.record_tokens(&group.stream())?;
+                self.record_resolving_tokens(&group.stream())?;
             }
         }
         for index in 0..tokens.len() {

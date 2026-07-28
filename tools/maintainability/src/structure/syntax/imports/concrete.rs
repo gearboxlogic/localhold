@@ -528,26 +528,8 @@ fn attribute_meta_contains_concrete_store(meta: &Meta) -> bool {
     inventory.record_meta(meta, "macro-attribute").is_ok() && (inventory.counts.sqlite_store != 0 || inventory.counts.postgres_store != 0)
 }
 
-pub(super) fn tokens_may_hide_concrete_store(tokens: &TokenStream) -> bool {
-    let mut identifiers = Vec::new();
-    collect_token_identifiers(tokens, &mut identifiers);
-    identifiers.iter().any(|identifier| is_concrete_store_name(identifier))
-        && (identifiers.iter().any(|identifier| identifier == "type")
-            || identifiers.iter().any(|identifier| identifier == "use") && identifiers.iter().any(|identifier| identifier == "as"))
-}
-
 pub(super) fn is_concrete_store_name(name: &str) -> bool {
     matches!(name, "SqliteStore" | "PostgresStore")
-}
-
-fn collect_token_identifiers(tokens: &TokenStream, identifiers: &mut Vec<String>) {
-    for token in tokens.clone() {
-        match token {
-            TokenTree::Group(group) => collect_token_identifiers(&group.stream(), identifiers),
-            TokenTree::Ident(ident) => identifiers.push(normalized_ident(&ident)),
-            TokenTree::Literal(_) | TokenTree::Punct(_) => {}
-        }
-    }
 }
 
 fn is_rust_fragment_key(name: &str) -> bool {

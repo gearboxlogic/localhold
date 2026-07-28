@@ -264,6 +264,7 @@ fn file(path: &str, pub_crate: usize, pub_super: usize) -> FileMeasurement {
         test_lines: 0,
         production_internal_imports: Vec::new(),
         production_concrete_stores: ConcreteStoreCounts::default(),
+        production_public_concrete_store_structs: ConcreteStoreSites::default(),
         production_concrete_store_sites: ConcreteStoreSites::default(),
         production_generic_default_store_sites: ConcreteStoreSites::default(),
         production_signature_store_sites: ConcreteStoreSites::default(),

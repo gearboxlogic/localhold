@@ -49,6 +49,7 @@ use stringify::{
 };
 use tokens::resolving_tokens;
 pub use visibility::VisibilityCounts;
+use visibility::VisibilityMacroAudit;
 
 #[derive(Clone, Copy)]
 enum FieldExposure {
@@ -151,6 +152,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
     resolve_binding_aliases(&mut collector.concrete_stores.binding_sites, &collector.use_resolutions, &collector.type_declarations);
     collector.concrete_stores.finish();
     let binding_concrete_store_sites = collector.concrete_stores.binding_fingerprints();
+    collector.visibility_macros.finish()?;
     Ok(ProductionSyntaxFacts {
         module: collector.module,
         internal_imports: collector.imports,
@@ -185,6 +187,7 @@ fn collect_production_syntax(
         type_declarations: Vec::new(),
         concrete_stores: ConcreteStoreInventory::default(),
         visibilities: VisibilityCounts::default(),
+        visibility_macros: VisibilityMacroAudit::default(),
         site_context: None,
         block_depth: 0,
         block_type_scopes: Vec::new(),
@@ -199,6 +202,7 @@ fn collect_production_syntax(
         impl_item_paths: Vec::new(),
         inherited_declaration_ancestors: initial_context.declaration_ancestors,
         declaration_ancestors,
+        macro_context: MacroContext::Invocation,
         cfg_context: initial_context.cfg,
         module_exposure_cfg: initial_context.module_exposure_cfg,
         error: None,
@@ -225,6 +229,7 @@ struct ProductionSyntaxCollector {
     type_declarations: Vec<TypeDeclarationEvidence>,
     concrete_stores: ConcreteStoreInventory,
     visibilities: VisibilityCounts,
+    visibility_macros: VisibilityMacroAudit,
     site_context: Option<String>,
     block_depth: usize,
     block_type_scopes: Vec<BlockTypeBindings>,
@@ -239,6 +244,7 @@ struct ProductionSyntaxCollector {
     impl_item_paths: Vec<Vec<String>>,
     inherited_declaration_ancestors: Vec<ProductionAncestorPath>,
     declaration_ancestors: Vec<String>,
+    macro_context: MacroContext,
     cfg_context: ProductionCfgContext,
     module_exposure_cfg: Option<ProductionCfgContext>,
     error: Option<anyhow::Error>,
@@ -264,6 +270,13 @@ struct BlockTypeBindings {
 struct BlockTypeBinding {
     name: String,
     cfg: ProductionCfgContext,
+}
+
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum MacroContext {
+    #[default]
+    Invocation,
+    Definition,
 }
 
 impl ProductionSyntaxCollector {
@@ -1324,6 +1337,13 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             return;
         }
         let stringifies = is_explicit_builtin_stringify(node) || self.is_imported_builtin_stringify(node);
+        if self.macro_context == MacroContext::Invocation
+            && !stringifies
+            && let Err(error) = self.visibility_macros.record_invocation(&node.path, &node.tokens)
+        {
+            self.error = Some(error);
+            return;
+        }
         if !stringifies && tokens_may_hide_concrete_store(&node.tokens) {
             self.error = Some(anyhow::anyhow!(
                 "production concrete stores cannot be hidden behind macro-generated aliases or renamed imports"
@@ -1354,7 +1374,10 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         }
         self.visit_path(&node.path);
         if !stringifies {
-            self.visit_token_stream(&node.tokens);
+            self.record_concrete_stores_in_tokens(&node.tokens);
+            if self.macro_context == MacroContext::Definition {
+                self.record_visibilities_in_tokens(&node.tokens);
+            }
         }
         self.leave_site_context(previous);
     }
@@ -1419,6 +1442,10 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             self.error = Some(anyhow::anyhow!("production macro definitions cannot inject concrete stores into call sites"));
             return;
         }
+        if let Err(error) = self.visibility_macros.record_definition(name, &item.mac.tokens) {
+            self.error = Some(error);
+            return;
+        }
         let name = normalized_ident(name);
         if RESERVED_LOCAL_MACROS.contains(&name.as_str())
             && let Err(error) = self.collect_reviewed_macro_transcribers(&name, &item.mac.tokens)
@@ -1447,6 +1474,9 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
                 cfg: self.cfg_context.clone(),
             });
         }
+        self.macro_context = MacroContext::Definition;
+        self.record_visibilities_in_tokens(&item.mac.tokens);
+        self.macro_context = MacroContext::Invocation;
     }
 
     fn visit_item_mod(&mut self, item: &'ast ItemMod) {

@@ -84,13 +84,16 @@ fn qualified_paths_are_collected_without_double_counting_imports() {
 }
 
 #[test]
-fn bare_paths_resolve_only_at_the_crate_root() -> Result<()> {
+fn bare_paths_resolve_relative_to_their_rust_2018_module() -> Result<()> {
     let source = "mod nested { mod server {} use server::Type; fn call() { server::call(); } }\n\
                   use crate::server::Actual;\n";
     assert_eq!(imports("src/adapter.rs", source).expect("lexical bare paths"), ["crate::server::Actual"]);
 
     let syntax = syn::parse_file("use server::AtRoot;\n")?;
     assert_eq!(production_imports(&syntax, "src/core.rs", Some("src/core.rs"), false)?, ["crate::server::AtRoot"]);
+
+    let reexport = concrete_facts("mod ui { pub(crate) use helper::open; mod helper { pub fn open() {} } }\n")?;
+    assert_eq!(reexport.public_reexports[0].target_path, ["store_fixture", "ui", "helper", "open"]);
     Ok(())
 }
 
@@ -328,6 +331,7 @@ fn explicit_builtin_stringify_arguments_are_not_treated_as_resolved_syntax() -> 
         "use ::core::stringify as text;\nconst STORE: &str = text!(SqliteStore);\n",
         "const STORE: &str = text!(PostgresStore);\nuse ::std::stringify as text;\n",
         "mod nested { use ::core::stringify; const STORE: &str = stringify!(SqliteStore); }\n",
+        "fn open() { let _ = text!(SqliteStore); use ::core::stringify as text; }\n",
     ] {
         assert_eq!(concrete_facts(imported)?.concrete_stores, ConcreteStoreCounts::default());
     }
@@ -401,11 +405,8 @@ fn canonical_concrete_store_declarations_require_public_production_structs() -> 
 #[test]
 fn canonical_declaration_fingerprints_ignore_outer_attributes_but_pin_shape() -> Result<()> {
     let plain = concrete_facts("pub struct SqliteStore { inner: Arc<SqliteInner> }")?;
-    let documented = concrete_facts(
-        "/// SQLite backend.\n\
-         #[derive(Clone, Debug)]\n\
-         pub struct SqliteStore { inner: Arc<SqliteInner> }",
-    )?;
+    let documented = concrete_facts("/// SQLite backend.\npub struct SqliteStore { inner: Arc<SqliteInner> }")?;
+    let derived = concrete_facts("#[derive(Clone, Debug)]\npub struct SqliteStore { inner: Arc<SqliteInner> }")?;
     let replaced = concrete_facts("pub struct SqliteStore;")?;
     let feature_gated = concrete_facts(
         "#[cfg(feature = \"legacy\")]\n\
@@ -429,6 +430,7 @@ fn canonical_declaration_fingerprints_ignore_outer_attributes_but_pin_shape() ->
     )?;
 
     assert_eq!(plain.public_concrete_store_structs, documented.public_concrete_store_structs);
+    assert_ne!(plain.public_concrete_store_structs, derived.public_concrete_store_structs);
     assert_ne!(plain.public_concrete_store_structs, replaced.public_concrete_store_structs);
     assert_ne!(plain.public_concrete_store_structs, feature_gated.public_concrete_store_structs);
     assert_ne!(public_nested.public_concrete_store_structs, private_nested.public_concrete_store_structs);
@@ -641,6 +643,8 @@ fn target_os_values_imply_their_target_family() -> Result<()> {
     let facts = concrete_facts(
         "#[cfg(target_os = \"linux\")] #[cfg(windows)] struct ImpossibleLinux(SqliteStore);\n\
          #[cfg(target_os = \"windows\")] #[cfg(unix)] struct ImpossibleWindows(PostgresStore);\n\
+         #[cfg(target_os = \"emscripten\")] #[cfg(not(target_family = \"wasm\"))] struct ImpossibleEmscripten(SqliteStore);\n\
+         #[cfg(target_os = \"wasi\")] #[cfg(not(target_family = \"wasm\"))] struct ImpossibleWasi(SqliteStore);\n\
          #[cfg(target_os = \"emscripten\")] #[cfg(all(unix, target_family = \"wasm\"))] struct EmscriptenCanHaveTwoFamilies(PostgresStore);\n",
     )?;
     assert_eq!(

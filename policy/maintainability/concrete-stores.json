@@ -16,7 +16,7 @@
       "component": "sqlite-store",
       "path": "src/store/sqlite.rs",
       "store": "SqliteStore",
-      "fingerprint": "10e4d49128566765aff71ef559c43aded97d250f73b1ceee0d5810bb390aa3af",
+      "fingerprint": "cd2442e5b03bf38320db517b570842ce2cc4f37e2528e32f77e6ee6fb503a442",
       "baseline_binding_fingerprint": "cfa20845810b59e5a378e19112fb10c2069c54ddeac9cc825bafc078825ab6aa",
       "current_binding_fingerprint": "cfa20845810b59e5a378e19112fb10c2069c54ddeac9cc825bafc078825ab6aa"
     },
@@ -24,7 +24,7 @@
       "component": "postgres-store",
       "path": "src/store/postgres.rs",
       "store": "PostgresStore",
-      "fingerprint": "4f8b895e75851cae2241a2c33ea619515e513801cf2916e429159b69234d59ca",
+      "fingerprint": "82ac6580d834e4425f3b0290d499d3ef97ee5123595d7b418cd167903977441f",
       "baseline_binding_fingerprint": "c6008747e76cfaecf1137eac96114e93a891fdbdce1d2b0c92f78f95015d47dc",
       "current_binding_fingerprint": "c6008747e76cfaecf1137eac96114e93a891fdbdce1d2b0c92f78f95015d47dc"
     }

@@ -41,10 +41,10 @@ impl Encoder {
             Predicate::Atom {
                 identity,
                 exclusive_group,
-                required_target_family,
+                required_target_families,
             } => {
                 let variable = self.atom(identity, exclusive_group.as_deref());
-                if let Some(family) = required_target_family {
+                for family in required_target_families {
                     let required = self.atom(&super::target_family_identity(family), None);
                     self.clauses.push(vec![
                         Literal { variable, positive: false },
@@ -218,7 +218,7 @@ mod tests {
         let atom = |identity: String| Predicate::Atom {
             identity,
             exclusive_group: None,
-            required_target_family: None,
+            required_target_families: Vec::new(),
         };
         let mut predicates = (0..24).map(|index| atom(format!("feature-{index}"))).collect::<Vec<_>>();
         predicates.push(atom("contradiction".to_owned()));
@@ -232,7 +232,7 @@ mod tests {
             .map(|index| Predicate::Atom {
                 identity: format!("feature-{index}"),
                 exclusive_group: None,
-                required_target_family: None,
+                required_target_families: Vec::new(),
             })
             .collect::<Vec<_>>();
         assert!(is_satisfiable(&Predicate::Any(alternatives)));

@@ -85,7 +85,12 @@ pub(super) fn resolve_path(module: &[String], path: &[String], rust_2015_use_pat
         resolved.extend_from_slice(&path[consumed..]);
         return Ok(Some(resolved));
     }
-    Ok((rust_2015_use_path || module.is_empty()).then(|| path.to_vec()))
+    if rust_2015_use_path {
+        return Ok(Some(path.to_vec()));
+    }
+    let mut resolved = module.to_vec();
+    resolved.extend_from_slice(path);
+    Ok(Some(resolved))
 }
 
 pub(super) fn source_module(source_path: &str, crate_root: Option<&str>) -> Result<Vec<String>> {

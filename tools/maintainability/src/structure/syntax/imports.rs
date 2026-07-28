@@ -84,6 +84,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
     let mut collector = ProductionSyntaxCollector {
         module,
         builtin_stringify_aliases,
+        builtin_stringify_block_aliases: Vec::new(),
         imports: Vec::new(),
         use_resolutions: Vec::new(),
         public_reexports: Vec::new(),
@@ -126,6 +127,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
 struct ProductionSyntaxCollector {
     module: Vec<String>,
     builtin_stringify_aliases: BuiltinStringifyAliases,
+    builtin_stringify_block_aliases: Vec<BTreeSet<String>>,
     imports: Vec<String>,
     use_resolutions: Vec<UseResolution>,
     public_reexports: Vec<PublicReexportEvidence>,
@@ -446,9 +448,18 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     );
 
     fn visit_block(&mut self, node: &'ast Block) {
+        let aliases = match builtin_stringify_aliases_in_block(node, &self.cfg_context) {
+            Ok(aliases) => aliases,
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        };
         self.block_depth += 1;
         self.macro_shadow_scopes.push(BTreeSet::new());
+        self.builtin_stringify_block_aliases.push(aliases);
         visit::visit_block(self, node);
+        self.builtin_stringify_block_aliases.pop();
         self.macro_shadow_scopes.pop();
         self.block_depth -= 1;
     }
@@ -854,8 +865,23 @@ impl ProductionSyntaxCollector {
             return false;
         }
         let alias = normalized_ident(&node.path.segments[0].ident);
-        self.builtin_stringify_aliases.contains(&(self.module.clone(), alias.clone())) && !self.macro_shadow_scopes.iter().rev().any(|scope| scope.contains(&alias))
+        let imported =
+            self.builtin_stringify_aliases.contains(&(self.module.clone(), alias.clone())) || self.builtin_stringify_block_aliases.iter().rev().any(|scope| scope.contains(&alias));
+        imported && !self.macro_shadow_scopes.iter().rev().any(|scope| scope.contains(&alias))
     }
+}
+
+fn builtin_stringify_aliases_in_block(block: &Block, inherited_cfg: &ProductionCfgContext) -> Result<BTreeSet<String>> {
+    let mut aliases = BTreeSet::new();
+    for statement in &block.stmts {
+        let Stmt::Item(Item::Use(item)) = statement else {
+            continue;
+        };
+        if production_cfg_context(&item.attrs, inherited_cfg)?.is_some() {
+            collect_builtin_stringify_alias_names_from_use(item, &mut aliases);
+        }
+    }
+    Ok(aliases)
 }
 
 fn collect_builtin_stringify_aliases(file: &File, module: &[String], inherited_cfg: &ProductionCfgContext) -> Result<BuiltinStringifyAliases> {
@@ -885,6 +911,12 @@ fn collect_builtin_stringify_aliases_in_items(items: &[Item], module: &[String],
 }
 
 fn collect_builtin_stringify_aliases_from_use(item: &ItemUse, module: &[String], aliases: &mut BuiltinStringifyAliases) {
+    let mut names = BTreeSet::new();
+    collect_builtin_stringify_alias_names_from_use(item, &mut names);
+    aliases.extend(names.into_iter().map(|name| (module.to_vec(), name)));
+}
+
+fn collect_builtin_stringify_alias_names_from_use(item: &ItemUse, aliases: &mut BTreeSet<String>) {
     if item.leading_colon.is_none() {
         return;
     }
@@ -894,7 +926,7 @@ fn collect_builtin_stringify_aliases_from_use(item: &ItemUse, module: &[String],
         .into_iter()
         .filter(|path| path.segments == ["core", "stringify"] || path.segments == ["std", "stringify"])
     {
-        aliases.insert((module.to_vec(), path.alias.unwrap_or_else(|| "stringify".to_owned())));
+        aliases.insert(path.alias.unwrap_or_else(|| "stringify".to_owned()));
     }
 }
 

@@ -16,7 +16,7 @@ enum Predicate {
     Atom {
         identity: String,
         exclusive_group: Option<String>,
-        required_target_family: Option<String>,
+        required_target_families: Vec<String>,
     },
     All(Vec<Self>),
     Any(Vec<Self>),
@@ -222,7 +222,7 @@ fn predicate(meta: &Meta) -> Result<Predicate> {
                     .as_ref()
                     .map_or_else(|| normalized_atom_identity(&meta.to_token_stream()), |family| target_family_identity(family)),
                 exclusive_group: target_family.as_ref().map_or_else(|| exclusive_cfg_group(meta), |_| None),
-                required_target_family: target_os_family(meta).map(str::to_owned),
+                required_target_families: target_os_families(meta).iter().map(|family| (*family).to_owned()).collect(),
             })
         }
     }
@@ -249,24 +249,27 @@ fn target_family_value(meta: &Meta) -> Option<String> {
     }
 }
 
-fn target_os_family(meta: &Meta) -> Option<&'static str> {
+fn target_os_families(meta: &Meta) -> &'static [&'static str] {
     let Meta::NameValue(value) = meta else {
-        return None;
+        return &[];
     };
     if normalized_cfg_path(&value.path).as_deref() != Some("target_os") {
-        return None;
+        return &[];
     }
     let Expr::Lit(expression) = &value.value else {
-        return None;
+        return &[];
     };
     let syn::Lit::Str(os) = &expression.lit else {
-        return None;
+        return &[];
     };
     match os.value().as_str() {
-        "windows" => Some("windows"),
-        "aix" | "android" | "dragonfly" | "emscripten" | "freebsd" | "fuchsia" | "haiku" | "hurd" | "illumos" | "ios" | "linux" | "macos" | "netbsd" | "nto" | "openbsd"
-        | "redox" | "solaris" | "tvos" | "visionos" | "watchos" => Some("unix"),
-        _ => None,
+        "windows" => &["windows"],
+        "emscripten" => &["unix", "wasm"],
+        "wasi" => &["wasm"],
+        "aix" | "android" | "cygwin" | "dragonfly" | "espidf" | "freebsd" | "fuchsia" | "haiku" | "hurd" | "illumos" | "ios" | "l4re" | "linux" | "lynxos178" | "macos"
+        | "managarm" | "netbsd" | "nto" | "nuttx" | "openbsd" | "qnx" | "qurt" | "redox" | "rtems" | "solaris" | "trusty" | "tvos" | "visionos" | "vita" | "vxworks"
+        | "watchos" => &["unix"],
+        _ => &[],
     }
 }
 

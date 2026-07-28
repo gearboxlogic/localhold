@@ -82,15 +82,30 @@ rm -r "$fixture/parent/.cargo"
 
 fake_bin="$fixture/fake-bin"
 mkdir "$fake_bin"
+real_cygpath="$fake_bin/real-cygpath"
 printf '%s\n' \
     '#!/usr/bin/env bash' \
-    '[[ ${1:-} == -m && ${2:-} == "$FAKE_DRIVE_ROOT" ]] || exit 1' \
-    'printf "D:/\n"' >"$fake_bin/cygpath"
+    '[[ ${1:-} == -u && ${2:-} == "C:\cargo-home" ]] || exit 1' \
+    'printf "%s\n" "$FAKE_CARGO_HOME"' >"$real_cygpath"
+chmod +x "$real_cygpath"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'if [[ ${1:-} == -m && ${2:-} == "$FAKE_DRIVE_ROOT" ]]; then' \
+    '    printf "D:/\n"' \
+    '    exit' \
+    'fi' \
+    '[[ -n ${REAL_CYGPATH:-} ]] || exit 1' \
+    'exec "$REAL_CYGPATH" "$@"' >"$fake_bin/cygpath"
 chmod +x "$fake_bin/cygpath"
 mkdir -p "$fixture/parent/.cargo"
 touch "$fixture/parent/.cargo/config"
 fake_drive_root=$(cd -- "$test_repository" && pwd -P)
-FAKE_DRIVE_ROOT=$fake_drive_root PATH="$fake_bin:$PATH" run_check >/dev/null
+CARGO_HOME='C:\cargo-home' \
+    FAKE_CARGO_HOME=$fixture \
+    FAKE_DRIVE_ROOT=$fake_drive_root \
+    REAL_CYGPATH=$real_cygpath \
+    PATH="$fake_bin:$PATH" \
+    run_check >/dev/null
 rm -r "$fixture/parent/.cargo"
 
 cargo_home="$fixture/cargo-home"

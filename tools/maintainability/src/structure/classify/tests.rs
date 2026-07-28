@@ -676,6 +676,21 @@ fn reviewed_macros_in_wholly_test_only_sources_are_not_production_audited() {
 }
 
 #[test]
+fn reviewed_production_macros_cannot_splice_opaque_metavariables_into_paths() {
+    let sources = BTreeMap::from([(
+        "src/lib.rs".to_owned(),
+        "macro_rules! numbered_placeholders { ($part:ident) => { crate::$part::Service } }\n\
+         fn build() { let _ = numbered_placeholders!(server); }\n"
+            .to_owned(),
+    )]);
+
+    let error = measure_sources(sources).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("reviewed local macro"), "{message}");
+    assert!(message.contains("non-literal metavariables"), "{message}");
+}
+
+#[test]
 fn literal_only_local_macro_parameters_remain_classifiable() {
     let sources = BTreeMap::from([(
         "src/lib.rs".to_owned(),

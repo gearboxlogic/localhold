@@ -127,10 +127,15 @@ impl ReviewedMacroAudit {
         let Some(name) = item.ident.as_ref().map(normalized_ident) else {
             return;
         };
-        if RESERVED_LOCAL_MACROS.contains(&name.as_str())
-            && let Some(restricted) = token_stream_names_restricted_module(&item.mac.tokens)
-        {
+        if !RESERVED_LOCAL_MACROS.contains(&name.as_str()) {
+            return;
+        }
+        if let Some(restricted) = token_stream_names_restricted_module(&item.mac.tokens) {
             self.error = Some(anyhow::anyhow!("reviewed local macro {name:?} generates restricted crate module {restricted:?}"));
+        } else if token_stream_has_opaque_parameters(&item.mac.tokens) {
+            self.error = Some(anyhow::anyhow!(
+                "reviewed local macro {name:?} uses non-literal metavariables that can conceal a restricted crate path"
+            ));
         }
     }
 }

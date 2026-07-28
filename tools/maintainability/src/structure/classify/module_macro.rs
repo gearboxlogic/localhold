@@ -25,7 +25,7 @@ pub(super) fn safe_macro_definitions(items: &[syn::Item], parent_test_only: bool
     loop {
         let before = safe.len();
         for (name, tokens) in definitions.iter().filter_map(|(name, tokens)| tokens.map(|tokens| (name, tokens))) {
-            if !token_stream_names_module(tokens) && !token_stream_uses_unknown_macro(tokens, &safe) {
+            if !token_stream_names_module(tokens) && !token_stream_has_opaque_parameters(tokens) && !token_stream_uses_unknown_macro(tokens, &safe) {
                 safe.insert(name.clone());
             }
         }
@@ -67,6 +67,22 @@ fn token_stream_names_module(tokens: &TokenStream) -> bool {
         TokenTree::Group(group) => token_stream_names_module(&group.stream()),
         TokenTree::Ident(ident) => ident == "mod",
         TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
+}
+
+fn token_stream_has_opaque_parameters(tokens: &TokenStream) -> bool {
+    let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
+    for window in tokens.windows(4) {
+        let [TokenTree::Punct(dollar), TokenTree::Ident(_), TokenTree::Punct(colon), TokenTree::Ident(fragment)] = window else {
+            continue;
+        };
+        if dollar.as_char() == '$' && colon.as_char() == ':' && normalized_ident(fragment) != "literal" {
+            return true;
+        }
+    }
+    tokens.into_iter().any(|token| match token {
+        TokenTree::Group(group) => token_stream_has_opaque_parameters(&group.stream()),
+        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => false,
     })
 }
 

@@ -9,17 +9,20 @@ use syn::{
     Meta, Pat, Path as SynPath, StmtMacro, TraitItem, UseTree, Variadic, Variant, Visibility,
 };
 
+use crate::scan::{reviewed_attribute_expansion, reviewed_macro_expansion};
+
 use super::{
     attributes_disable_production, expr_attributes, fn_arg_attributes, foreign_item_attributes, generic_param_attributes, impl_item_attributes, item_is_test_only,
     normalized_ident, pat_attributes, trait_item_attributes,
 };
 
-pub fn production_internal_imports(file: &syn::File, source_path: &str, crate_root: Option<&str>) -> Result<Vec<String>> {
+pub fn production_internal_imports(file: &syn::File, source_path: &str, crate_root: Option<&str>, require_reviewed_expansions: bool) -> Result<Vec<String>> {
     let module = source_module(source_path, crate_root)?;
     let mut collector = ImportCollector {
         module,
         imports: Vec::new(),
         error: None,
+        require_reviewed_expansions,
     };
     collector.visit_file(file);
     if let Some(error) = collector.error {
@@ -34,6 +37,7 @@ struct ImportCollector {
     module: Vec<String>,
     imports: Vec<String>,
     error: Option<anyhow::Error>,
+    require_reviewed_expansions: bool,
 }
 
 impl ImportCollector {
@@ -226,6 +230,10 @@ impl<'ast> Visit<'ast> for ImportCollector {
             ));
             return;
         }
+        if self.require_reviewed_expansions && !reviewed_macro_expansion(node) {
+            self.error = Some(anyhow::anyhow!("production code invokes unreviewed macro expansion path {}", node.path.to_token_stream()));
+            return;
+        }
         self.visit_path(&node.path);
     }
 
@@ -244,6 +252,10 @@ impl<'ast> Visit<'ast> for ImportCollector {
             self.error = Some(anyhow::anyhow!(
                 "production attribute token stream names restricted crate module {restricted:?} and cannot be classified safely"
             ));
+            return;
+        }
+        if self.require_reviewed_expansions && !reviewed_attribute_expansion(attribute) {
+            self.error = Some(anyhow::anyhow!("production code uses unreviewed attribute expansion {}", attribute.meta.to_token_stream()));
             return;
         }
         visit::visit_attribute(self, attribute);
@@ -378,7 +390,7 @@ mod tests {
 
     fn imports(path: &str, source: &str) -> Result<Vec<String>> {
         let syntax = syn::parse_file(source)?;
-        production_internal_imports(&syntax, path, Some("src/lib.rs"))
+        production_internal_imports(&syntax, path, Some("src/lib.rs"), true)
     }
 
     #[test]
@@ -417,7 +429,7 @@ mod tests {
         assert_eq!(imports("src/adapter.rs", source).expect("lexical bare paths"), ["crate::server::Actual"]);
 
         let syntax = syn::parse_file("use server::AtRoot;\n")?;
-        assert_eq!(production_internal_imports(&syntax, "src/core.rs", Some("src/core.rs"))?, ["crate::server::AtRoot"]);
+        assert_eq!(production_internal_imports(&syntax, "src/core.rs", Some("src/core.rs"), true)?, ["crate::server::AtRoot"]);
         Ok(())
     }
 
@@ -425,7 +437,7 @@ mod tests {
     fn nested_custom_library_roots_define_relative_module_paths() -> Result<()> {
         let syntax = syn::parse_file("use super::server::Service;\n")?;
         assert_eq!(
-            production_internal_imports(&syntax, "src/core/worker.rs", Some("src/core/lib.rs"))?,
+            production_internal_imports(&syntax, "src/core/worker.rs", Some("src/core/lib.rs"), true)?,
             ["crate::server::Service"]
         );
         Ok(())
@@ -505,5 +517,23 @@ mod tests {
         let source = "fn call(#[cfg(test)] _: crate::server::TestOnly) {}\n\
                       fn generic<#[cfg(feature = \"testing\")] T: crate::ui::TestOnly>() {}\n";
         assert!(imports("src/adapter.rs", source).expect("test-only parameters").is_empty());
+    }
+
+    #[test]
+    fn unreviewed_production_expansions_fail_closed() {
+        assert!(
+            imports("src/adapter.rs", "fn call() { inject!(); }\n")
+                .unwrap_err()
+                .to_string()
+                .contains("unreviewed macro expansion")
+        );
+        assert!(
+            imports("src/adapter.rs", "#[inject]\nfn call() {}\n")
+                .unwrap_err()
+                .to_string()
+                .contains("unreviewed attribute expansion")
+        );
+        let test_only = "#[cfg(test)]\n#[inject]\nfn call() { inject!(); }\n";
+        assert!(imports("src/adapter.rs", test_only).expect("test-only opaque expansions").is_empty());
     }
 }

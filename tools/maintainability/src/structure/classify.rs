@@ -55,7 +55,7 @@ pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Inventory> {
         collect_sources(workspace, &workspace.join(root), &mut sources)?;
     }
     let target_roots = workspace_target_roots(workspace, sources.keys())?;
-    measure_sources_with_roots(sources, &target_roots.production, &target_roots.test, &target_roots.composition, &target_roots.libraries)
+    measure_sources_with_roots(sources, &target_roots, true)
 }
 
 pub fn scan_revision(workspace: &Path, revision: &str, roots: &[String]) -> Result<Inventory> {
@@ -77,7 +77,7 @@ pub fn scan_revision(workspace: &Path, revision: &str, roots: &[String]) -> Resu
     let sources = read_tree_sources(workspace, &entries)?;
     let manifest = read_revision_manifest(workspace, revision)?;
     let target_roots = target_roots(&manifest, sources.keys())?;
-    measure_sources_with_roots(sources, &target_roots.production, &target_roots.test, &target_roots.composition, &target_roots.libraries)
+    measure_sources_with_roots(sources, &target_roots, false)
 }
 
 fn read_revision_manifest(workspace: &Path, revision: &str) -> Result<String> {
@@ -202,16 +202,22 @@ fn measure_sources(sources: BTreeMap<String, String>) -> Result<Inventory> {
     let production_roots = conventional_production_roots(sources.keys());
     let composition_roots = conventional_composition_roots(production_roots.iter());
     let library_roots = conventional_library_roots(production_roots.iter());
-    measure_sources_with_roots(sources, &production_roots, &BTreeSet::new(), &composition_roots, &library_roots)
+    let target_roots = TargetRoots {
+        production: production_roots,
+        test: BTreeSet::new(),
+        composition: composition_roots,
+        libraries: library_roots,
+    };
+    measure_sources_with_roots(sources, &target_roots, true)
 }
 
-fn measure_sources_with_roots(
-    sources: BTreeMap<String, String>,
-    production_roots: &BTreeSet<String>,
-    explicit_test_roots: &BTreeSet<String>,
-    composition_roots: &BTreeSet<String>,
-    library_roots: &BTreeSet<String>,
-) -> Result<Inventory> {
+fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &TargetRoots, require_reviewed_expansions: bool) -> Result<Inventory> {
+    let TargetRoots {
+        production: production_roots,
+        test: explicit_test_roots,
+        composition: composition_roots,
+        libraries: library_roots,
+    } = target_roots;
     let parsed = parse_sources(sources)?;
     let reachability = classify_source_reachability(&parsed, production_roots, explicit_test_roots, composition_roots, library_roots)?;
     let mut files = Vec::with_capacity(parsed.len());
@@ -228,7 +234,8 @@ fn measure_sources_with_roots(
                 if !path.starts_with("src/") || reachability.composition_only.contains(&path) || path.starts_with("src/server/") || path.starts_with("src/ui/") {
                     Vec::new()
                 } else {
-                    production_internal_imports(&parsed.syntax, &path, library_root_for_source(&path, library_roots))?
+                    production_internal_imports(&parsed.syntax, &path, library_root_for_source(&path, library_roots), require_reviewed_expansions)
+                        .map_err(|error| anyhow::anyhow!("{error} in {path}"))?
                 },
             )
         };

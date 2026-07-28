@@ -348,8 +348,8 @@ fn production_item_macros_cannot_hide_composition_overlap() {
 fn local_item_macros_without_module_tokens_are_allowed() {
     let sources = BTreeMap::from([(
         "src/lib.rs".to_owned(),
-        "macro_rules! define_constant { () => { const VALUE: usize = 1; } }\n\
-         define_constant!();\n"
+        "macro_rules! numbered_placeholders { () => { const VALUE: usize = 1; } }\n\
+         numbered_placeholders!();\n"
             .to_owned(),
     )]);
 
@@ -373,6 +373,41 @@ fn local_item_macros_cannot_delegate_module_generation_to_unknown_macros() {
 
     let error = measure_sources(sources).unwrap_err();
     assert!(error.to_string().contains("production item macros cannot safely define module edges"));
+}
+
+#[test]
+fn local_item_macros_cannot_substitute_module_keywords() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src", "tests", "benches"] {
+        fs::create_dir(repository.path().join(root)).expect("source root");
+    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+         \n[[bin]]\nname = \"shared\"\npath = \"src/shared.rs\"\n",
+    )
+    .expect("package manifest");
+    fs::write(
+        repository.path().join("src/lib.rs"),
+        "macro_rules! emit { ($kind:ident) => { $kind shared; } }\nemit!(mod);\n",
+    )
+    .expect("library root");
+    fs::write(repository.path().join("src/shared.rs"), "use crate::server::LocalHoldServer;\nfn main() {}\n").expect("shared target");
+
+    let error = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).unwrap_err();
+    assert!(error.to_string().contains("production item macros cannot safely define module edges"));
+}
+
+#[test]
+fn literal_only_local_macro_parameters_remain_classifiable() {
+    let sources = BTreeMap::from([(
+        "src/lib.rs".to_owned(),
+        "macro_rules! numbered_placeholders { ($value:literal) => { const VALUE: usize = $value; } }\n\
+         numbered_placeholders!(1);\n"
+            .to_owned(),
+    )]);
+
+    measure_sources(sources).expect("literal substitutions cannot inject module syntax");
 }
 
 #[test]

@@ -289,7 +289,6 @@ fn classify_source_reachability(
         opaque_macro_sources: BTreeSet::new(),
     };
     for (path, source) in parsed {
-        audit_reviewed_macro_definitions(&source.syntax).with_context(|| format!("audit reviewed macro definitions in {path}"))?;
         let file_test_only = attributes_disable_production(&source.syntax.attrs).with_context(|| format!("classify crate attributes in {path}"))?;
         if production_roots.contains(path) || explicit_test_roots.contains(path) {
             let crate_root_dir = Path::new(path).parent().context("Cargo target root has no parent directory")?;
@@ -301,6 +300,10 @@ fn classify_source_reachability(
     let opaque_macro_sources = graph.opaque_macro_sources;
     let edges = graph.edges;
     let library_reachable = production_reachable_from(&edges, library_roots);
+    for path in &library_reachable {
+        let source = parsed.get(path).with_context(|| format!("library-reachable source {path:?} is absent"))?;
+        audit_reviewed_macro_definitions(&source.syntax).with_context(|| format!("audit reviewed macro definitions in {path}"))?;
+    }
     if let Some(source) = opaque_macro_sources.intersection(&library_reachable).next() {
         bail!("opaque production item macros cannot safely define module edges in library source {source}");
     }
@@ -395,6 +398,7 @@ fn target_roots<'a>(manifest: &str, known: impl Iterator<Item = &'a String>) -> 
     let known = known.cloned().collect::<BTreeSet<_>>();
     let manifest: toml::Value = toml::from_str(manifest).context("parse package manifest")?;
     validate_testing_feature_is_isolated(&manifest)?;
+    let package_name = package_name(&manifest)?;
     let auto_library = package_auto_target(&manifest, "autolib")?;
     let auto_binaries = package_auto_target(&manifest, "autobins")?;
     let rust_2015_absolute_paths = package_uses_rust_2015_paths(&manifest)?;
@@ -402,27 +406,20 @@ fn target_roots<'a>(manifest: &str, known: impl Iterator<Item = &'a String>) -> 
     let mut composition = conventional_composition_roots(roots.iter(), auto_binaries);
     let mut libraries = conventional_library_roots(roots.iter(), auto_library);
     if let Some(library) = manifest.get("lib") {
-        if !auto_library && library.get("path").is_none() {
-            bail!("declared library target must set path when package autolib is false");
+        let path = add_declared_target_root(library, "library", &["src/lib.rs".to_owned()], &known, &mut roots)?;
+        if path.starts_with("src/server/") || path.starts_with("src/ui/") {
+            bail!("package library target cannot use an exempt server/UI directory as its crate root: {path}");
         }
-        if let Some(path) = add_declared_target_root(library, "library", &known, &mut roots)? {
-            if path.starts_with("src/server/") || path.starts_with("src/ui/") {
-                bail!("package library target cannot use an exempt server/UI directory as its crate root: {path}");
-            }
-            roots.retain(|candidate| !libraries.contains(candidate) || candidate == &path);
-            libraries.clear();
-            libraries.insert(path);
-        }
+        roots.retain(|candidate| !libraries.contains(candidate) || candidate == &path);
+        libraries.clear();
+        libraries.insert(path);
     }
     if let Some(binaries) = manifest.get("bin") {
         let binaries = binaries.as_array().context("package bin targets must be an array of tables")?;
         for binary in binaries {
-            if !auto_binaries && binary.get("path").is_none() {
-                bail!("declared binary targets must set path when package autobins is false");
-            }
-            if let Some(path) = add_declared_target_root(binary, "binary", &known, &mut roots)? {
-                composition.insert(path);
-            }
+            let candidates = inferred_binary_paths(binary, package_name)?;
+            let path = add_declared_target_root(binary, "binary", &candidates, &known, &mut roots)?;
+            composition.insert(path);
         }
     }
     let examples = validate_auxiliary_target_roots(&manifest, "example", &known)?;
@@ -442,25 +439,47 @@ fn target_roots<'a>(manifest: &str, known: impl Iterator<Item = &'a String>) -> 
 }
 
 fn package_auto_target(manifest: &toml::Value, key: &str) -> Result<bool> {
-    let package = manifest.get("package").context("package manifest must define [package]")?;
-    let package = package.as_table().context("package manifest [package] must be a table")?;
+    let package = package_table(manifest)?;
     package
         .get(key)
         .map_or(Ok(true), |value| value.as_bool().with_context(|| format!("package {key} must be a boolean")))
 }
 
 fn package_uses_rust_2015_paths(manifest: &toml::Value) -> Result<bool> {
-    let package = manifest.get("package").context("package manifest must define [package]")?;
-    let package = package.as_table().context("package manifest [package] must be a table")?;
+    let package = package_table(manifest)?;
     let Some(edition) = package.get("edition") else {
         return Ok(true);
     };
-    let edition = edition.as_str().context("package edition must be a string")?;
+    let edition = match edition {
+        toml::Value::String(edition) => edition.as_str(),
+        toml::Value::Table(inheritance) if inheritance.len() == 1 && inheritance.get("workspace").and_then(toml::Value::as_bool) == Some(true) => manifest
+            .get("workspace")
+            .and_then(|workspace| workspace.get("package"))
+            .and_then(|package| package.get("edition"))
+            .and_then(toml::Value::as_str)
+            .context("workspace-inherited package edition requires [workspace.package].edition")?,
+        _ => bail!("package edition must be a string or workspace inheritance"),
+    };
     match edition {
         "2015" => Ok(true),
         "2018" | "2021" | "2024" => Ok(false),
         _ => bail!("unsupported package edition {edition:?} for production import classification"),
     }
+}
+
+fn package_table(manifest: &toml::Value) -> Result<&toml::map::Map<String, toml::Value>> {
+    manifest
+        .get("package")
+        .context("package manifest must define [package]")?
+        .as_table()
+        .context("package manifest [package] must be a table")
+}
+
+fn package_name(manifest: &toml::Value) -> Result<&str> {
+    package_table(manifest)?
+        .get("name")
+        .and_then(toml::Value::as_str)
+        .context("package manifest must define a string package name")
 }
 
 fn validate_testing_feature_is_isolated(manifest: &toml::Value) -> Result<()> {
@@ -472,7 +491,7 @@ fn validate_testing_feature_is_isolated(manifest: &toml::Value) -> Result<()> {
         let members = members.as_array().with_context(|| format!("package feature {feature:?} must be an array"))?;
         for member in members {
             let member = member.as_str().with_context(|| format!("package feature {feature:?} member must be a string"))?;
-            if feature != "testing" && (member == "testing" || member.starts_with("testing/")) {
+            if feature != "testing" && member == "testing" {
                 bail!("package feature {feature:?} must not enable the test-only \"testing\" feature");
             }
         }
@@ -510,21 +529,48 @@ fn is_conventional_binary_root(path: &str) -> bool {
     }
 }
 
-fn add_declared_target_root(target: &toml::Value, kind: &str, known: &BTreeSet<String>, roots: &mut BTreeSet<String>) -> Result<Option<String>> {
+fn inferred_binary_paths(target: &toml::Value, package_name: &str) -> Result<Vec<String>> {
+    let target = target.as_table().context("package binary target must be a table")?;
+    if target.get("path").is_some() {
+        return Ok(Vec::new());
+    }
+    let name = target
+        .get("name")
+        .and_then(toml::Value::as_str)
+        .context("package binary target without a path must define a string name")?;
+    let mut paths = Vec::new();
+    if name == package_name {
+        paths.push("src/main.rs".to_owned());
+    }
+    paths.push(format!("src/bin/{name}.rs"));
+    paths.push(format!("src/bin/{name}/main.rs"));
+    for path in &paths {
+        validate_relative_rust_path(path)?;
+    }
+    Ok(paths)
+}
+
+fn add_declared_target_root(target: &toml::Value, kind: &str, inferred_paths: &[String], known: &BTreeSet<String>, roots: &mut BTreeSet<String>) -> Result<String> {
     let target = target.as_table().with_context(|| format!("package {kind} target must be a table"))?;
-    let Some(path) = target.get("path") else {
-        return Ok(None);
+    let path = if let Some(path) = target.get("path") {
+        path.as_str().with_context(|| format!("package {kind} target path must be a string"))?.to_owned()
+    } else {
+        let matches = inferred_paths.iter().filter(|path| known.contains(*path)).cloned().collect::<Vec<_>>();
+        match matches.as_slice() {
+            [path] => path.clone(),
+            [] => bail!("package {kind} target has no source at any inferred path: {inferred_paths:?}"),
+            _ => bail!("package {kind} target matches multiple inferred paths: {matches:?}"),
+        }
     };
-    let path = path.as_str().with_context(|| format!("package {kind} target path must be a string"))?;
-    validate_relative_rust_path(path)?;
+    validate_relative_rust_path(&path)?;
     if !path.starts_with("src/") {
         bail!("package {kind} production target must remain under src/: {path}");
     }
-    if !known.contains(path) {
+    if !known.contains(&path) {
         bail!("package {kind} production target is missing from the structural source inventory: {path}");
     }
-    roots.insert(path.to_owned());
-    Ok(Some(path.to_owned()))
+    roots.insert(path.clone());
+    Ok(path)
 }
 
 fn validate_auxiliary_target_roots(manifest: &toml::Value, kind: &str, known: &BTreeSet<String>) -> Result<BTreeSet<String>> {

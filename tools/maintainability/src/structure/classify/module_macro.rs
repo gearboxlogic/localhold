@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use proc_macro2::{TokenStream, TokenTree};
 use syn::visit::{self, Visit};
 use syn::{Arm, Expr, GenericParam, ImplItem, Item, Local, TraitItem, Variant};
@@ -31,14 +31,6 @@ pub(super) fn safe_macro_definitions(items: &[syn::Item], parent_test_only: bool
         let name = normalized_ident(name);
         definitions.entry(name).and_modify(|definition| *definition = None).or_insert(Some(&item_macro.mac.tokens));
     }
-    for (name, tokens) in definitions.iter().filter_map(|(name, tokens)| tokens.map(|tokens| (name, tokens))) {
-        if RESERVED_LOCAL_MACROS.contains(&name.as_str())
-            && let Some(restricted) = token_stream_names_restricted_module(tokens)
-        {
-            bail!("reviewed local macro {name:?} generates restricted crate module {restricted:?}");
-        }
-    }
-
     let mut safe = inherited.clone();
     loop {
         let before = safe.len();

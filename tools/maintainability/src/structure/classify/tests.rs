@@ -314,6 +314,33 @@ fn disabled_automatic_binaries_leave_src_bin_modules_in_the_library_graph() {
 }
 
 #[test]
+fn declared_targets_infer_paths_when_automatic_discovery_is_disabled() {
+    for (binary_name, binary_path) in [("fixture", "src/main.rs"), ("worker", "src/bin/worker.rs"), ("worker", "src/bin/worker/main.rs")] {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        for root in ["src", "tests", "benches"] {
+            fs::create_dir_all(repository.path().join(root)).expect("source root");
+        }
+        fs::create_dir_all(repository.path().join(binary_path).parent().expect("binary parent")).expect("binary parent");
+        fs::write(
+            repository.path().join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\nautolib = false\nautobins = false\n\
+                 \n[lib]\n\
+                 \n[[bin]]\nname = \"{binary_name}\"\n"
+            ),
+        )
+        .expect("package manifest");
+        fs::write(repository.path().join("src/lib.rs"), "fn library() {}\n").expect("library root");
+        fs::write(repository.path().join(binary_path), "use crate::server::CompositionOnly;\nfn main() {}\n").expect("binary root");
+
+        let inventory = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).expect("inferred target roots");
+        let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+        assert_eq!(by_path["src/lib.rs"].production_lines, 1);
+        assert!(by_path[binary_path].production_internal_imports.is_empty());
+    }
+}
+
+#[test]
 fn default_rust_2015_manifest_classifies_absolute_crate_paths() {
     let repository = tempfile::tempdir().expect("temporary repository");
     for root in ["src", "tests", "benches"] {
@@ -326,6 +353,31 @@ fn default_rust_2015_manifest_classifies_absolute_crate_paths() {
     let inventory = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).expect("workspace inventory");
     let library = inventory.files.iter().find(|file| file.path == "src/lib.rs").expect("library measurement");
     assert_eq!(library.production_internal_imports, ["crate::server::Service"]);
+}
+
+#[test]
+fn package_edition_can_be_inherited_from_workspace_policy() {
+    for (edition, expected) in [("2015", vec!["crate::server::Service"]), ("2024", Vec::new())] {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        for root in ["src", "tests", "benches"] {
+            fs::create_dir(repository.path().join(root)).expect("source root");
+        }
+        fs::write(
+            repository.path().join("Cargo.toml"),
+            format!(
+                "[workspace]\n\
+                 \n[workspace.package]\nedition = \"{edition}\"\n\
+                 \n[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition.workspace = true\n"
+            ),
+        )
+        .expect("package manifest");
+        fs::write(repository.path().join("src/lib.rs"), "mod server;\nfn build() -> ::server::Service { loop {} }\n").expect("library root");
+        fs::write(repository.path().join("src/server.rs"), "pub struct Service;\n").expect("server module");
+
+        let inventory = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).expect("workspace-inherited edition");
+        let library = inventory.files.iter().find(|file| file.path == "src/lib.rs").expect("library measurement");
+        assert_eq!(library.production_internal_imports, expected);
+    }
 }
 
 #[test]
@@ -604,6 +656,26 @@ fn reviewed_exported_macros_are_audited_below_non_module_items() {
 }
 
 #[test]
+fn reviewed_macros_in_wholly_test_only_sources_are_not_production_audited() {
+    let sources = BTreeMap::from([
+        ("src/lib.rs".to_owned(), "#[cfg(test)]\nmod test_support;\n".to_owned()),
+        (
+            "src/test_support.rs".to_owned(),
+            "#[macro_export]\nmacro_rules! transport_test { () => { $crate::server::test_only() } }\n".to_owned(),
+        ),
+        (
+            "tests/contract.rs".to_owned(),
+            "#[macro_export]\nmacro_rules! transport_test { () => { $crate::ui::test_only() } }\n".to_owned(),
+        ),
+    ]);
+
+    let inventory = measure_sources(sources).expect("test-only macro definitions");
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_path["src/test_support.rs"].production_lines, 0);
+    assert_eq!(by_path["tests/contract.rs"].production_lines, 0);
+}
+
+#[test]
 fn literal_only_local_macro_parameters_remain_classifiable() {
     let sources = BTreeMap::from([(
         "src/lib.rs".to_owned(),
@@ -623,26 +695,24 @@ fn no_package_feature_may_enable_testing() {
     }
     fs::write(repository.path().join("src/lib.rs"), "fn root() {}\n").expect("root source");
 
-    for member in ["testing", "testing/fixtures"] {
-        fs::write(
-            repository.path().join("Cargo.toml"),
-            format!(
-                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
-                 \n[features]\ntesting = []\nrelease-hooks = [\"{member}\"]\n"
-            ),
-        )
-        .expect("package manifest");
-        let error = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).unwrap_err();
-        assert!(error.to_string().contains("must not enable the test-only"), "{member}");
-    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+         \n[features]\ntesting = []\nrelease-hooks = [\"testing\"]\n",
+    )
+    .expect("package manifest");
+    let error = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).unwrap_err();
+    assert!(error.to_string().contains("must not enable the test-only"));
 
     fs::write(
         repository.path().join("Cargo.toml"),
         "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
-         \n[features]\ntesting = []\nrelease-hooks = [\"testing?/fixtures\"]\n",
+         \n[dependencies]\ntesting = { version = \"1\", optional = true }\n\
+         \n[features]\ntesting = []\nrelease-hooks = [\"testing/fixtures\", \"testing?/optional-fixtures\"]\n",
     )
     .expect("package manifest");
-    scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).expect("weak dependency feature is non-activating");
+    scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()])
+        .expect("dependency feature syntax does not activate the local testing feature");
 }
 
 #[test]

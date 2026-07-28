@@ -185,6 +185,48 @@ fn custom_production_roots_resolve_modules_from_their_parent() {
 }
 
 #[test]
+fn custom_binary_child_modules_are_composition_only() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src/cli", "tests", "benches"] {
+        fs::create_dir_all(repository.path().join(root)).expect("source root");
+    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+         \n[[bin]]\nname = \"cli\"\npath = \"src/cli/main.rs\"\n",
+    )
+    .expect("package manifest");
+    fs::write(repository.path().join("src/lib.rs"), "fn library() {}\n").expect("library root");
+    fs::write(repository.path().join("src/cli/main.rs"), "mod worker;\nfn main() {}\n").expect("binary root");
+    fs::write(repository.path().join("src/cli/worker.rs"), "use crate::server::Service;\n").expect("binary child");
+
+    let inventory = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).expect("workspace inventory");
+    let worker = inventory.files.iter().find(|file| file.path == "src/cli/worker.rs").expect("worker measurement");
+    assert!(worker.production_internal_imports.is_empty());
+}
+
+#[test]
+fn modules_shared_with_the_library_are_not_composition_only() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src", "tests", "benches"] {
+        fs::create_dir_all(repository.path().join(root)).expect("source root");
+    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+         \n[[bin]]\nname = \"cli\"\npath = \"src/cli.rs\"\n",
+    )
+    .expect("package manifest");
+    fs::write(repository.path().join("src/lib.rs"), "mod shared;\n").expect("library root");
+    fs::write(repository.path().join("src/cli.rs"), "mod shared;\nfn main() {}\n").expect("binary root");
+    fs::write(repository.path().join("src/shared.rs"), "use crate::server::Service;\n").expect("shared module");
+
+    let inventory = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).expect("workspace inventory");
+    let shared = inventory.files.iter().find(|file| file.path == "src/shared.rs").expect("shared measurement");
+    assert_eq!(shared.production_internal_imports, ["crate::server::Service"]);
+}
+
+#[test]
 fn custom_library_targets_resolve_imports_from_the_crate_root() {
     let repository = tempfile::tempdir().expect("temporary repository");
     for root in ["src", "tests", "benches"] {
@@ -277,6 +319,60 @@ fn raw_module_identifiers_cannot_hide_composition_overlap() {
 
     let error = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).unwrap_err();
     assert!(error.to_string().contains("composition target must not also be reachable from a library target"));
+}
+
+#[test]
+fn production_item_macros_cannot_hide_composition_overlap() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src", "tests", "benches"] {
+        fs::create_dir(repository.path().join(root)).expect("source root");
+    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+         \n[[bin]]\nname = \"shared\"\npath = \"src/shared.rs\"\n",
+    )
+    .expect("package manifest");
+    fs::write(
+        repository.path().join("src/lib.rs"),
+        "macro_rules! include_shared { () => { mod shared; } }\ninclude_shared!();\n",
+    )
+    .expect("library root");
+    fs::write(repository.path().join("src/shared.rs"), "use crate::server::LocalHoldServer;\nfn main() {}\n").expect("shared target");
+
+    let error = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).unwrap_err();
+    assert!(error.to_string().contains("production item macros cannot safely define module edges"));
+}
+
+#[test]
+fn local_item_macros_without_module_tokens_are_allowed() {
+    let sources = BTreeMap::from([(
+        "src/lib.rs".to_owned(),
+        "macro_rules! define_constant { () => { const VALUE: usize = 1; } }\n\
+         define_constant!();\n"
+            .to_owned(),
+    )]);
+
+    measure_sources(sources).expect("known local macro cannot introduce module edges");
+}
+
+#[test]
+fn unknown_production_item_macro_invocations_fail_closed() {
+    let sources = BTreeMap::from([("src/lib.rs".to_owned(), "external_item_macro!();\n".to_owned())]);
+
+    let error = measure_sources(sources).unwrap_err();
+    assert!(error.to_string().contains("production item macros cannot safely define module edges"));
+}
+
+#[test]
+fn local_item_macros_cannot_delegate_module_generation_to_unknown_macros() {
+    let sources = BTreeMap::from([(
+        "src/lib.rs".to_owned(),
+        "macro_rules! delegate { () => { external_item_macro!(); } }\ndelegate!();\n".to_owned(),
+    )]);
+
+    let error = measure_sources(sources).unwrap_err();
+    assert!(error.to_string().contains("production item macros cannot safely define module edges"));
 }
 
 #[test]

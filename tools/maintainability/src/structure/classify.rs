@@ -9,6 +9,9 @@ use serde::Serialize;
 
 use super::syntax::{TestLineCollector, item_is_test_only, normalized_ident, production_internal_imports, reject_module_path_overrides};
 
+mod module_macro;
+use module_macro::{record_item_macro, safe_macro_definitions};
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct FileMeasurement {
     pub path: String,
@@ -38,6 +41,11 @@ struct ModuleEdge {
 struct TreeEntry {
     object_id: String,
     path: String,
+}
+
+struct SourceReachability {
+    test_only: BTreeSet<String>,
+    composition_only: BTreeSet<String>,
 }
 
 pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Inventory> {
@@ -205,11 +213,11 @@ fn measure_sources_with_roots(
     library_roots: &BTreeSet<String>,
 ) -> Result<Inventory> {
     let parsed = parse_sources(sources)?;
-    let test_only_files = discover_test_only_files(&parsed, production_roots, explicit_test_roots, composition_roots, library_roots)?;
+    let reachability = classify_source_reachability(&parsed, production_roots, explicit_test_roots, composition_roots, library_roots)?;
     let mut files = Vec::with_capacity(parsed.len());
     for (path, parsed) in parsed {
         let physical_lines = physical_line_count(&parsed.source);
-        let file_is_test_only = test_only_files.contains(&path);
+        let file_is_test_only = reachability.test_only.contains(&path);
         let mut collector = TestLineCollector::new(physical_lines);
         let (test_lines, production_internal_imports) = if file_is_test_only {
             (physical_lines, Vec::new())
@@ -217,7 +225,7 @@ fn measure_sources_with_roots(
             collector.visit_file(&parsed.syntax)?;
             (
                 collector.test_line_count(),
-                if !path.starts_with("src/") || composition_roots.contains(&path) || path.starts_with("src/server/") || path.starts_with("src/ui/") {
+                if !path.starts_with("src/") || reachability.composition_only.contains(&path) || path.starts_with("src/server/") || path.starts_with("src/ui/") {
                     Vec::new()
                 } else {
                     production_internal_imports(&parsed.syntax, &path, library_root_for_source(&path, library_roots))?
@@ -252,15 +260,19 @@ fn parse_sources(sources: BTreeMap<String, String>) -> Result<BTreeMap<String, P
         .collect()
 }
 
-fn discover_test_only_files(
+fn classify_source_reachability(
     parsed: &BTreeMap<String, ParsedSource>,
     production_roots: &BTreeSet<String>,
     explicit_test_roots: &BTreeSet<String>,
     composition_roots: &BTreeSet<String>,
     library_roots: &BTreeSet<String>,
-) -> Result<BTreeSet<String>> {
+) -> Result<SourceReachability> {
     let known: BTreeSet<_> = parsed.keys().cloned().collect();
-    let mut graph = ModuleGraph { known: &known, edges: Vec::new() };
+    let mut graph = ModuleGraph {
+        known: &known,
+        edges: Vec::new(),
+        opaque_macro_sources: BTreeSet::new(),
+    };
     for (path, source) in parsed {
         if production_roots.contains(path) || explicit_test_roots.contains(path) {
             let crate_root_dir = Path::new(path).parent().context("Cargo target root has no parent directory")?;
@@ -269,11 +281,16 @@ fn discover_test_only_files(
             graph.collect(path, &source.syntax.items, &module_directory(path)?, false)?;
         }
     }
+    let opaque_macro_sources = graph.opaque_macro_sources;
     let edges = graph.edges;
     let library_reachable = production_reachable_from(&edges, library_roots);
+    if let Some(source) = opaque_macro_sources.intersection(&library_reachable).next() {
+        bail!("opaque production item macros cannot safely define module edges in library source {source}");
+    }
     if let Some(overlap) = composition_roots.intersection(&library_reachable).next() {
         bail!("composition target must not also be reachable from a library target: {overlap}");
     }
+    let composition_reachable = production_reachable_from(&edges, composition_roots);
     let incoming: BTreeSet<_> = edges.iter().map(|edge| edge.target.as_str()).collect();
     let mut production_reachable = production_roots.clone();
     let mut test_reachable: BTreeSet<_> = known.iter().filter(|path| path.starts_with("tests/") || path.starts_with("benches/")).cloned().collect();
@@ -299,7 +316,10 @@ fn discover_test_only_files(
             production_reachable.insert(path);
         }
     }
-    Ok(test_reachable.difference(&production_reachable).cloned().collect())
+    Ok(SourceReachability {
+        test_only: test_reachable.difference(&production_reachable).cloned().collect(),
+        composition_only: composition_reachable.difference(&library_reachable).cloned().collect(),
+    })
 }
 
 fn production_reachable_from(edges: &[ModuleEdge], roots: &BTreeSet<String>) -> BTreeSet<String> {
@@ -492,25 +512,59 @@ fn reject_rust_sources_in_directory(directory: &Path, root_name: &str) -> Result
 struct ModuleGraph<'a> {
     known: &'a BTreeSet<String>,
     edges: Vec<ModuleEdge>,
+    opaque_macro_sources: BTreeSet<String>,
+}
+
+struct ModuleScope<'a> {
+    source_path: &'a str,
+    module_dir: &'a Path,
+    parent_test_only: bool,
+    inherited_macros: &'a BTreeSet<String>,
 }
 
 impl ModuleGraph<'_> {
     fn collect(&mut self, source_path: &str, items: &[syn::Item], module_dir: &Path, parent_test_only: bool) -> Result<()> {
+        self.collect_with_macros(
+            items,
+            &ModuleScope {
+                source_path,
+                module_dir,
+                parent_test_only,
+                inherited_macros: &BTreeSet::new(),
+            },
+        )
+    }
+
+    fn collect_with_macros(&mut self, items: &[syn::Item], scope: &ModuleScope<'_>) -> Result<()> {
+        let safe_macros = safe_macro_definitions(items, scope.parent_test_only, scope.inherited_macros)?;
         for item in items {
+            if record_item_macro(item, scope.parent_test_only, scope.source_path, &safe_macros, &mut self.opaque_macro_sources)? {
+                continue;
+            }
             let syn::Item::Mod(module) = item else {
                 continue;
             };
             reject_module_path_overrides(&module.attrs)?;
-            let test_only = parent_test_only || item_is_test_only(item)?;
+            let test_only = scope.parent_test_only || item_is_test_only(item)?;
             let module_name = normalized_ident(&module.ident);
             if let Some((_, nested)) = &module.content {
-                self.collect(source_path, nested, &module_dir.join(&module_name), test_only)?;
+                let nested_dir = scope.module_dir.join(&module_name);
+                self.collect_with_macros(
+                    nested,
+                    &ModuleScope {
+                        source_path: scope.source_path,
+                        module_dir: &nested_dir,
+                        parent_test_only: test_only,
+                        inherited_macros: &safe_macros,
+                    },
+                )?;
                 continue;
             }
-            let target = resolve_module(module_dir, &module_name, self.known).with_context(|| format!("resolve module {} declared by {source_path}", module.ident))?;
+            let target =
+                resolve_module(scope.module_dir, &module_name, self.known).with_context(|| format!("resolve module {} declared by {}", module.ident, scope.source_path))?;
             if let Some(target) = target {
                 self.edges.push(ModuleEdge {
-                    source: source_path.to_owned(),
+                    source: scope.source_path.to_owned(),
                     target,
                     test_only,
                 });

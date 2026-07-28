@@ -358,6 +358,44 @@ pub(super) fn foreign_item_attributes(item: &ForeignItem) -> Result<&[Attribute]
     })
 }
 
+pub(super) fn fn_arg_attributes(argument: &syn::FnArg) -> &[Attribute] {
+    match argument {
+        syn::FnArg::Receiver(argument) => &argument.attrs,
+        syn::FnArg::Typed(argument) => &argument.attrs,
+    }
+}
+
+pub(super) fn generic_param_attributes(parameter: &syn::GenericParam) -> &[Attribute] {
+    match parameter {
+        syn::GenericParam::Lifetime(parameter) => &parameter.attrs,
+        syn::GenericParam::Type(parameter) => &parameter.attrs,
+        syn::GenericParam::Const(parameter) => &parameter.attrs,
+    }
+}
+
+pub(super) fn pat_attributes(pattern: &syn::Pat) -> Result<&[Attribute]> {
+    Ok(match pattern {
+        syn::Pat::Const(pattern) => &pattern.attrs,
+        syn::Pat::Ident(pattern) => &pattern.attrs,
+        syn::Pat::Lit(pattern) => &pattern.attrs,
+        syn::Pat::Macro(pattern) => &pattern.attrs,
+        syn::Pat::Or(pattern) => &pattern.attrs,
+        syn::Pat::Paren(pattern) => &pattern.attrs,
+        syn::Pat::Path(pattern) => &pattern.attrs,
+        syn::Pat::Range(pattern) => &pattern.attrs,
+        syn::Pat::Reference(pattern) => &pattern.attrs,
+        syn::Pat::Rest(pattern) => &pattern.attrs,
+        syn::Pat::Slice(pattern) => &pattern.attrs,
+        syn::Pat::Struct(pattern) => &pattern.attrs,
+        syn::Pat::Tuple(pattern) => &pattern.attrs,
+        syn::Pat::TupleStruct(pattern) => &pattern.attrs,
+        syn::Pat::Type(pattern) => &pattern.attrs,
+        syn::Pat::Verbatim(_) => anyhow::bail!("opaque pattern syntax cannot be classified"),
+        syn::Pat::Wild(pattern) => &pattern.attrs,
+        _ => anyhow::bail!("unsupported pattern syntax cannot be classified"),
+    })
+}
+
 pub(super) fn expr_attributes(expression: &Expr) -> Result<&[Attribute]> {
     Ok(match expression {
         Expr::Array(value) => &value.attrs,

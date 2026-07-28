@@ -4,9 +4,15 @@ use anyhow::{Context, Result, bail};
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens as _;
 use syn::visit::{self, Visit};
-use syn::{Arm, Attribute, Expr, Field, ForeignItem, ImplItem, Item, ItemExternCrate, ItemMod, ItemUse, Local, Meta, Path as SynPath, StmtMacro, TraitItem, UseTree, Variant};
+use syn::{
+    Arm, Attribute, BareFnArg, BareVariadic, Expr, Field, FieldPat, FieldValue, File, FnArg, ForeignItem, GenericParam, ImplItem, Item, ItemExternCrate, ItemMod, ItemUse, Local,
+    Meta, Pat, Path as SynPath, StmtMacro, TraitItem, UseTree, Variadic, Variant, Visibility,
+};
 
-use super::{attributes_disable_production, expr_attributes, foreign_item_attributes, impl_item_attributes, item_is_test_only, normalized_ident, trait_item_attributes};
+use super::{
+    attributes_disable_production, expr_attributes, fn_arg_attributes, foreign_item_attributes, generic_param_attributes, impl_item_attributes, item_is_test_only,
+    normalized_ident, pat_attributes, trait_item_attributes,
+};
 
 pub fn production_internal_imports(file: &syn::File, source_path: &str, crate_root: Option<&str>) -> Result<Vec<String>> {
     let module = source_module(source_path, crate_root)?;
@@ -35,10 +41,14 @@ impl ImportCollector {
         if item.leading_colon.is_some() {
             return Ok(());
         }
+        let import_count = self.imports.len();
         let mut paths = Vec::new();
         flatten_use_tree(&item.tree, &mut Vec::new(), &mut paths);
         for path in paths {
             self.collect_path(&path)?;
+        }
+        if self.imports.len() != import_count && !matches!(item.vis, Visibility::Inherited) {
+            bail!("production restricted imports cannot be re-exported");
         }
         Ok(())
     }
@@ -77,70 +87,100 @@ impl ImportCollector {
     }
 }
 
+macro_rules! visit_production_node {
+    ($method:ident, $walk:ident, $node:ty, $binding:ident => $test_only:expr) => {
+        fn $method(&mut self, $binding: &'ast $node) {
+            let test_only: Result<bool> = $test_only;
+            if !self.skip_test_only(test_only) {
+                visit::$walk(self, $binding);
+            }
+        }
+    };
+}
+
 impl<'ast> Visit<'ast> for ImportCollector {
-    fn visit_item(&mut self, item: &'ast Item) {
-        if !self.skip_test_only(item_is_test_only(item)) {
-            visit::visit_item(self, item);
-        }
-    }
-
-    fn visit_impl_item(&mut self, item: &'ast ImplItem) {
-        let test_only = impl_item_attributes(item).and_then(attributes_disable_production);
-        if !self.skip_test_only(test_only) {
-            visit::visit_impl_item(self, item);
-        }
-    }
-
-    fn visit_trait_item(&mut self, item: &'ast TraitItem) {
-        let test_only = trait_item_attributes(item).and_then(attributes_disable_production);
-        if !self.skip_test_only(test_only) {
-            visit::visit_trait_item(self, item);
-        }
-    }
-
-    fn visit_foreign_item(&mut self, item: &'ast ForeignItem) {
-        let test_only = foreign_item_attributes(item).and_then(attributes_disable_production);
-        if !self.skip_test_only(test_only) {
-            visit::visit_foreign_item(self, item);
-        }
-    }
-
-    fn visit_variant(&mut self, variant: &'ast Variant) {
-        if !self.skip_test_only(attributes_disable_production(&variant.attrs)) {
-            visit::visit_variant(self, variant);
-        }
-    }
-
-    fn visit_field(&mut self, field: &'ast Field) {
-        if !self.skip_test_only(attributes_disable_production(&field.attrs)) {
-            visit::visit_field(self, field);
-        }
-    }
-
-    fn visit_arm(&mut self, arm: &'ast Arm) {
-        if !self.skip_test_only(attributes_disable_production(&arm.attrs)) {
-            visit::visit_arm(self, arm);
-        }
-    }
-
-    fn visit_local(&mut self, local: &'ast Local) {
-        if !self.skip_test_only(attributes_disable_production(&local.attrs)) {
-            visit::visit_local(self, local);
-        }
-    }
-
-    fn visit_stmt_macro(&mut self, statement: &'ast StmtMacro) {
-        if !self.skip_test_only(attributes_disable_production(&statement.attrs)) {
-            visit::visit_stmt_macro(self, statement);
-        }
-    }
-
-    fn visit_expr(&mut self, expression: &'ast Expr) {
-        let test_only = expr_attributes(expression).and_then(attributes_disable_production);
-        if !self.skip_test_only(test_only) {
-            visit::visit_expr(self, expression);
-        }
-    }
+    visit_production_node!(visit_file, visit_file, File, node => attributes_disable_production(&node.attrs));
+    visit_production_node!(visit_item, visit_item, Item, node => item_is_test_only(node));
+    visit_production_node!(
+        visit_impl_item,
+        visit_impl_item,
+        ImplItem,
+        node =>
+        impl_item_attributes(node).and_then(attributes_disable_production)
+    );
+    visit_production_node!(
+        visit_trait_item,
+        visit_trait_item,
+        TraitItem,
+        node =>
+        trait_item_attributes(node).and_then(attributes_disable_production)
+    );
+    visit_production_node!(
+        visit_foreign_item,
+        visit_foreign_item,
+        ForeignItem,
+        node =>
+        foreign_item_attributes(node).and_then(attributes_disable_production)
+    );
+    visit_production_node!(visit_variant, visit_variant, Variant, node => attributes_disable_production(&node.attrs));
+    visit_production_node!(visit_field, visit_field, Field, node => attributes_disable_production(&node.attrs));
+    visit_production_node!(visit_arm, visit_arm, Arm, node => attributes_disable_production(&node.attrs));
+    visit_production_node!(visit_local, visit_local, Local, node => attributes_disable_production(&node.attrs));
+    visit_production_node!(visit_stmt_macro, visit_stmt_macro, StmtMacro, node => attributes_disable_production(&node.attrs));
+    visit_production_node!(
+        visit_expr,
+        visit_expr,
+        Expr,
+        node => expr_attributes(node).and_then(attributes_disable_production)
+    );
+    visit_production_node!(
+        visit_fn_arg,
+        visit_fn_arg,
+        FnArg,
+        node => attributes_disable_production(fn_arg_attributes(node))
+    );
+    visit_production_node!(
+        visit_generic_param,
+        visit_generic_param,
+        GenericParam,
+        node => attributes_disable_production(generic_param_attributes(node))
+    );
+    visit_production_node!(
+        visit_pat,
+        visit_pat,
+        Pat,
+        node => pat_attributes(node).and_then(attributes_disable_production)
+    );
+    visit_production_node!(
+        visit_bare_fn_arg,
+        visit_bare_fn_arg,
+        BareFnArg,
+        node => attributes_disable_production(&node.attrs)
+    );
+    visit_production_node!(
+        visit_bare_variadic,
+        visit_bare_variadic,
+        BareVariadic,
+        node => attributes_disable_production(&node.attrs)
+    );
+    visit_production_node!(
+        visit_variadic,
+        visit_variadic,
+        Variadic,
+        node => attributes_disable_production(&node.attrs)
+    );
+    visit_production_node!(
+        visit_field_pat,
+        visit_field_pat,
+        FieldPat,
+        node => attributes_disable_production(&node.attrs)
+    );
+    visit_production_node!(
+        visit_field_value,
+        visit_field_value,
+        FieldValue,
+        node => attributes_disable_production(&node.attrs)
+    );
 
     fn visit_item_use(&mut self, item: &'ast ItemUse) {
         for attribute in &item.attrs {
@@ -442,5 +482,28 @@ mod tests {
                 .contains("extern aliases")
         );
         assert!(imports("src/lib.rs", "use crate::*;\n").unwrap_err().to_string().contains("crate-root glob imports"));
+    }
+
+    #[test]
+    fn restricted_imports_cannot_be_reexported() {
+        assert!(
+            imports("src/http_transport.rs", "pub use crate::server::LocalHoldServer;\n")
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be re-exported")
+        );
+        assert!(
+            imports("src/http_transport.rs", "pub(crate) use crate::server::LocalHoldServer;\n")
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be re-exported")
+        );
+    }
+
+    #[test]
+    fn cfg_gated_parameters_are_excluded_by_node() {
+        let source = "fn call(#[cfg(test)] _: crate::server::TestOnly) {}\n\
+                      fn generic<#[cfg(feature = \"testing\")] T: crate::ui::TestOnly>() {}\n";
+        assert!(imports("src/adapter.rs", source).expect("test-only parameters").is_empty());
     }
 }

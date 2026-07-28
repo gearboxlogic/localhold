@@ -41,6 +41,8 @@ struct ConcreteStoreDeclaration {
     component: String,
     path: String,
     store: ConcreteStoreName,
+    #[serde(default)]
+    fingerprint: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -65,6 +67,8 @@ enum ConcreteStoreName {
 }
 
 type ObservedStore = (String, String, ConcreteStoreName);
+type DeclarationSite = (String, String, ConcreteStoreName, String);
+type DeclarationInventory = BTreeMap<DeclarationSite, usize>;
 
 #[derive(Clone, Copy)]
 pub(super) struct PathAttribution<'a> {
@@ -135,18 +139,23 @@ impl ConcreteStorePolicy {
         let expected = self
             .canonical_declarations
             .iter()
-            .map(|declaration| ((declaration.component.clone(), declaration.path.clone(), declaration.store), 1_usize))
+            .map(|declaration| {
+                (
+                    (declaration.component.clone(), declaration.path.clone(), declaration.store, declaration.fingerprint.clone()),
+                    1_usize,
+                )
+            })
             .collect::<BTreeMap<_, _>>();
-        let mut observed = BTreeMap::new();
+        let mut observed = DeclarationInventory::new();
         for file in &inventory.files {
             let component = paths
                 .component_for(&file.path)
                 .with_context(|| format!("concrete-store {label} declaration path {:?} has no logical component", file.path))?;
-            for (store, count) in [
-                (ConcreteStoreName::SqliteStore, file.production_public_concrete_store_structs.sqlite_store),
-                (ConcreteStoreName::PostgresStore, file.production_public_concrete_store_structs.postgres_store),
+            for (store, fingerprints) in [
+                (ConcreteStoreName::SqliteStore, &file.production_public_concrete_store_structs.sqlite_store),
+                (ConcreteStoreName::PostgresStore, &file.production_public_concrete_store_structs.postgres_store),
             ] {
-                record_canonical_declaration(&mut observed, component, paths.canonical_path(&file.path), store, count)?;
+                record_declaration_fingerprints(&mut observed, component, paths.canonical_path(&file.path), store, fingerprints)?;
             }
         }
         if observed != expected {
@@ -321,11 +330,7 @@ impl ConcreteStorePolicy {
             bail!("duplicate canonical concrete-store declaration");
         }
         for declaration in &self.canonical_declarations {
-            validate_component(&declaration.component)?;
-            validate_relative_rust_path(&declaration.path)?;
-            if !unrestricted.contains(declaration.component.as_str()) {
-                bail!("canonical concrete-store declarations must remain inside an unrestricted component");
-            }
+            validate_declaration(declaration, &unrestricted, allow_missing_declarations)?;
         }
         if self.canonical_declarations.is_empty() && !allow_missing_declarations {
             bail!("canonical concrete-store declarations must not be empty");
@@ -364,8 +369,8 @@ impl ConcreteStorePolicy {
         if self.unrestricted_components != previous.unrestricted_components {
             bail!("concrete-store unrestricted components are immutable");
         }
-        if !previous.canonical_declarations.is_empty() && self.canonical_declarations != previous.canonical_declarations {
-            bail!("canonical concrete-store declarations are immutable");
+        if !previous.canonical_declarations.is_empty() {
+            compare_canonical_declarations(&self.canonical_declarations, &previous.canonical_declarations)?;
         }
         if self.debt.len() != previous.debt.len() {
             bail!("new concrete-store debt is prohibited and recovery debt evidence cannot be removed");
@@ -394,12 +399,42 @@ impl ConcreteStorePolicy {
 type SiteFingerprint = (String, String, ConcreteStoreName, String);
 type DebtComponents = BTreeMap<(String, ConcreteStoreName), String>;
 
-fn record_canonical_declaration(observed: &mut BTreeMap<ObservedStore, usize>, component: &str, path: &str, store: ConcreteStoreName, count: usize) -> Result<()> {
-    if count == 0 {
-        return Ok(());
+fn record_declaration_fingerprints(observed: &mut DeclarationInventory, component: &str, path: &str, store: ConcreteStoreName, fingerprints: &[String]) -> Result<()> {
+    for fingerprint in fingerprints {
+        let key = (component.to_owned(), path.to_owned(), store, fingerprint.clone());
+        let count = observed.entry(key).or_default();
+        *count = count.checked_add(1).context("canonical concrete-store declaration count overflow")?;
     }
-    let total = observed.entry((component.to_owned(), path.to_owned(), store)).or_insert(0_usize);
-    *total = total.checked_add(count).context("canonical concrete-store declaration count overflow")?;
+    Ok(())
+}
+
+fn validate_declaration(declaration: &ConcreteStoreDeclaration, unrestricted: &BTreeSet<&str>, allow_missing_fingerprint: bool) -> Result<()> {
+    validate_component(&declaration.component)?;
+    validate_relative_rust_path(&declaration.path)?;
+    match declaration.fingerprint.as_str() {
+        "" if !allow_missing_fingerprint => bail!("canonical concrete-store declaration fingerprints must not be empty"),
+        "" => {}
+        fingerprint => validate_fingerprint(fingerprint)?,
+    }
+    if !unrestricted.contains(declaration.component.as_str()) {
+        bail!("canonical concrete-store declarations must remain inside an unrestricted component");
+    }
+    Ok(())
+}
+
+fn compare_canonical_declarations(current: &[ConcreteStoreDeclaration], previous: &[ConcreteStoreDeclaration]) -> Result<()> {
+    if current.len() != previous.len() {
+        bail!("canonical concrete-store declarations are immutable");
+    }
+    for (current, previous) in current.iter().zip(previous) {
+        let mut expected = previous.clone();
+        if expected.fingerprint.is_empty() {
+            expected.fingerprint.clone_from(&current.fingerprint);
+        }
+        if *current != expected {
+            bail!("canonical concrete-store declarations are immutable");
+        }
+    }
     Ok(())
 }
 
@@ -459,6 +494,13 @@ fn validate_id(value: &str) -> Result<()> {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_'))
     {
         bail!("concrete-store debt ID must use lowercase ASCII letters, digits, '.', '-', or '_'");
+    }
+    Ok(())
+}
+
+fn validate_fingerprint(value: &str) -> Result<()> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')) {
+        bail!("canonical concrete-store declaration fingerprint must be a lowercase SHA-256 digest");
     }
     Ok(())
 }

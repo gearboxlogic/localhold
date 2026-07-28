@@ -4,7 +4,7 @@ use quote::ToTokens;
 use serde::Serialize;
 use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
-use syn::{Attribute, Meta, Token};
+use syn::{Attribute, ItemStruct, Meta, Token};
 
 use crate::scan::syntax_fingerprint;
 
@@ -25,13 +25,15 @@ pub struct ConcreteStoreSites {
 #[derive(Default)]
 pub(super) struct ConcreteStoreInventory {
     pub(super) counts: ConcreteStoreCounts,
-    pub(super) public_struct_declarations: ConcreteStoreCounts,
+    pub(super) public_struct_declarations: ConcreteStoreSites,
     pub(super) sites: ConcreteStoreSites,
     pub(super) generic_default_sites: ConcreteStoreSites,
 }
 
 impl ConcreteStoreInventory {
     pub(super) fn finish(&mut self) {
+        self.public_struct_declarations.sqlite_store.sort();
+        self.public_struct_declarations.postgres_store.sort();
         self.sites.sqlite_store.sort();
         self.sites.postgres_store.sort();
         self.generic_default_sites.sqlite_store.sort();
@@ -42,14 +44,15 @@ impl ConcreteStoreInventory {
         self.record_name(&normalized_ident(ident), site_context)
     }
 
-    pub(super) fn record_public_struct_declaration(&mut self, ident: &proc_macro2::Ident) -> Result<()> {
-        let count = match normalized_ident(ident).as_str() {
+    pub(super) fn record_public_struct_declaration(&mut self, item: &ItemStruct) {
+        let sites = match normalized_ident(&item.ident).as_str() {
             "SqliteStore" => &mut self.public_struct_declarations.sqlite_store,
             "PostgresStore" => &mut self.public_struct_declarations.postgres_store,
-            _ => return Ok(()),
+            _ => return,
         };
-        *count = count.checked_add(1).context("public concrete-store declaration count overflow")?;
-        Ok(())
+        let mut declaration = item.clone();
+        declaration.attrs.clear();
+        sites.push(syntax_fingerprint(&declaration));
     }
 
     pub(super) fn record_tokens(&mut self, tokens: &TokenStream, site_context: &str) -> Result<()> {
@@ -235,6 +238,7 @@ fn is_rust_fragment_key(name: &str) -> bool {
             | "crate"
             | "default"
             | "deserialize_with"
+            | "example"
             | "extend"
             | "from"
             | "getter"

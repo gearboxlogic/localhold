@@ -14,7 +14,7 @@ pub(super) fn file(path: &str, physical: usize, production: usize) -> FileMeasur
         test_lines,
         production_internal_imports: Vec::new(),
         production_concrete_stores: ConcreteStoreCounts::default(),
-        production_public_concrete_store_structs: ConcreteStoreCounts::default(),
+        production_public_concrete_store_structs: ConcreteStoreSites::default(),
         production_concrete_store_sites: ConcreteStoreSites::default(),
         production_generic_default_store_sites: ConcreteStoreSites::default(),
     }

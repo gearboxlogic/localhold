@@ -24,7 +24,7 @@ use resolution::{StringScan, UsePath, flatten_use_tree, resolve_path, restricted
 pub struct ProductionSyntaxFacts {
     pub internal_imports: Vec<String>,
     pub concrete_stores: ConcreteStoreCounts,
-    pub public_concrete_store_structs: ConcreteStoreCounts,
+    pub public_concrete_store_structs: ConcreteStoreSites,
     pub concrete_store_sites: ConcreteStoreSites,
     pub generic_default_concrete_store_sites: ConcreteStoreSites,
 }
@@ -352,11 +352,8 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_struct(&mut self, item: &'ast ItemStruct) {
-        if matches!(item.vis, Visibility::Public(_))
-            && let Err(error) = self.concrete_stores.record_public_struct_declaration(&item.ident)
-        {
-            self.error = Some(error);
-            return;
+        if matches!(item.vis, Visibility::Public(_)) {
+            self.concrete_stores.record_public_struct_declaration(item);
         }
         visit::visit_item_struct(self, item);
     }

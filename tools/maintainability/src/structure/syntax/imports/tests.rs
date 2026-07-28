@@ -294,11 +294,26 @@ fn canonical_concrete_store_declarations_require_public_production_structs() -> 
     )?;
     assert_eq!(
         facts.public_concrete_store_structs,
-        ConcreteStoreCounts {
-            sqlite_store: 1,
-            postgres_store: 0,
-        }
+        ConcreteStoreSites {
+            sqlite_store: vec![crate::scan::syntax_fingerprint(&syn::parse_str::<syn::ItemStruct>("pub struct SqliteStore;")?)],
+            postgres_store: Vec::new(),
+        },
     );
+    Ok(())
+}
+
+#[test]
+fn canonical_declaration_fingerprints_ignore_outer_attributes_but_pin_shape() -> Result<()> {
+    let plain = concrete_facts("pub struct SqliteStore { inner: Arc<SqliteInner> }")?;
+    let documented = concrete_facts(
+        "/// SQLite backend.\n\
+         #[derive(Clone, Debug)]\n\
+         pub struct SqliteStore { inner: Arc<SqliteInner> }",
+    )?;
+    let replaced = concrete_facts("pub struct SqliteStore;")?;
+
+    assert_eq!(plain.public_concrete_store_structs, documented.public_concrete_store_structs);
+    assert_ne!(plain.public_concrete_store_structs, replaced.public_concrete_store_structs);
     Ok(())
 }
 
@@ -309,13 +324,14 @@ fn path_valued_attribute_literals_count_concrete_stores() -> Result<()> {
                   #[schemars(bound = \"SqliteStore: MemoryReader\")]\nstruct Bound;\n\
                   #[serde(bound(deserialize = \"SqliteStore: MemoryReader\"))]\nstruct NestedBound;\n\
                   #[serde(deserialize_with = \"PostgresStore\")]\nstruct BarePath;\n\
+                  #[schemars(example = \"SqliteStore::example\")]\nstruct Example;\n\
                   #[cfg_attr(test, serde(serialize_with = \"crate::store::SqliteStore\"))]\nstruct TestOnly;\n\
                   #[cfg_attr(feature = \"other\", serde(serialize_with = \"crate::store::PostgresStore\"))]\nstruct Production;\n";
     let facts = concrete_facts(source)?;
     assert_eq!(
         facts.concrete_stores,
         ConcreteStoreCounts {
-            sqlite_store: 3,
+            sqlite_store: 4,
             postgres_store: 2,
         }
     );

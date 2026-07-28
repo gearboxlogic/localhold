@@ -15,12 +15,14 @@
     {
       "component": "sqlite-store",
       "path": "src/store/sqlite.rs",
-      "store": "SqliteStore"
+      "store": "SqliteStore",
+      "fingerprint": "b69cf79195f31bdea8778395d3dd5352051f248918775ffbd4f1698dbf0e4093"
     },
     {
       "component": "postgres-store",
       "path": "src/store/postgres.rs",
-      "store": "PostgresStore"
+      "store": "PostgresStore",
+      "fingerprint": "c6b74d1729752001f45ccf642313b01d688d16536868b52716eac3dfba3bd851"
     }
   ],
   "debt": [

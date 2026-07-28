@@ -25,13 +25,13 @@ fn canonical_backend_declarations_cannot_be_renamed_behind_compatibility_exports
     let policy = policy();
     let components = components(&[("src/store/sqlite.rs", "sqlite-store"), ("src/store/postgres.rs", "postgres-store")]);
     let mut exact = inventory(&[("src/store/sqlite.rs", 0, 0), ("src/store/postgres.rs", 0, 0)]);
-    exact.files[0].production_public_concrete_store_structs.sqlite_store = 1;
-    exact.files[1].production_public_concrete_store_structs.postgres_store = 1;
+    exact.files[0].production_public_concrete_store_structs.sqlite_store = vec![declaration_fingerprint(ConcreteStoreName::SqliteStore)];
+    exact.files[1].production_public_concrete_store_structs.postgres_store = vec![declaration_fingerprint(ConcreteStoreName::PostgresStore)];
     policy
         .compare_canonical_declarations("current", &exact, paths(&components))
         .expect("canonical public structs remain declared");
 
-    exact.files[0].production_public_concrete_store_structs.sqlite_store = 0;
+    exact.files[0].production_public_concrete_store_structs.sqlite_store = vec!["f".repeat(64)];
     let error = policy.compare_canonical_declarations("current", &exact, paths(&components)).unwrap_err();
     assert!(error.to_string().contains("canonical declaration mismatch"));
 }
@@ -245,6 +245,24 @@ fn policy_evolution_allows_only_downward_current_counts() {
         .debt
         .push(debt("phase0.new-debt", "engine-application", "src/engine.rs", ConcreteStoreName::SqliteStore, 1));
     assert!(added.compare_policy(&previous).unwrap_err().to_string().contains("new concrete-store debt is prohibited"));
+
+    let mut pre_fingerprint_policy = previous.clone();
+    for declaration in &mut pre_fingerprint_policy.canonical_declarations {
+        declaration.fingerprint.clear();
+    }
+    previous
+        .compare_policy(&pre_fingerprint_policy)
+        .expect("one-time canonical declaration fingerprint adoption");
+
+    let mut replaced_declaration = previous.clone();
+    replaced_declaration.canonical_declarations[0].fingerprint = "f".repeat(64);
+    assert!(
+        replaced_declaration
+            .compare_policy(&previous)
+            .unwrap_err()
+            .to_string()
+            .contains("canonical concrete-store declarations are immutable")
+    );
 }
 
 #[test]
@@ -268,6 +286,10 @@ fn policy_validation_closes_capability_and_evidence_escapes() {
     let mut growth = policy.clone();
     growth.debt[0].current_count = 2;
     assert!(growth.validate().unwrap_err().to_string().contains("exceeds its recovery baseline"));
+
+    let mut missing_fingerprint = policy.clone();
+    missing_fingerprint.canonical_declarations[0].fingerprint.clear();
+    assert!(missing_fingerprint.validate().unwrap_err().to_string().contains("fingerprints must not be empty"));
 
     let mut initial_reduction = policy;
     initial_reduction.debt[0].current_count = 0;
@@ -434,6 +456,14 @@ fn declaration(component: &str, path: &str, store: ConcreteStoreName) -> Concret
         component: component.to_owned(),
         path: path.to_owned(),
         store,
+        fingerprint: declaration_fingerprint(store),
+    }
+}
+
+fn declaration_fingerprint(store: ConcreteStoreName) -> String {
+    match store {
+        ConcreteStoreName::SqliteStore => "0".repeat(64),
+        ConcreteStoreName::PostgresStore => "1".repeat(64),
     }
 }
 
@@ -470,7 +500,7 @@ fn file(path: &str, sqlite_store: usize, postgres_store: usize) -> FileMeasureme
         test_lines: 0,
         production_internal_imports: Vec::new(),
         production_concrete_stores: ConcreteStoreCounts { sqlite_store, postgres_store },
-        production_public_concrete_store_structs: ConcreteStoreCounts::default(),
+        production_public_concrete_store_structs: ConcreteStoreSites::default(),
         production_concrete_store_sites: ConcreteStoreSites::default(),
         production_generic_default_store_sites: ConcreteStoreSites::default(),
     }

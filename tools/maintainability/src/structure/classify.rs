@@ -23,7 +23,7 @@ pub struct FileMeasurement {
     pub test_lines: usize,
     pub production_internal_imports: Vec<String>,
     pub production_concrete_stores: ConcreteStoreCounts,
-    pub production_public_concrete_store_structs: ConcreteStoreCounts,
+    pub production_public_concrete_store_structs: ConcreteStoreSites,
     pub production_concrete_store_sites: ConcreteStoreSites,
     pub production_generic_default_store_sites: ConcreteStoreSites,
 }

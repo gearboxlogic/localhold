@@ -209,7 +209,7 @@ fn cfg_attr_disables_production(attribute: &Attribute) -> Result<bool> {
     cfg_attr_tokens_disable_production(&list.tokens)
 }
 
-fn cfg_attr_tokens_disable_production(tokens: &proc_macro2::TokenStream) -> Result<bool> {
+pub(super) fn cfg_attr_tokens_disable_production(tokens: &proc_macro2::TokenStream) -> Result<bool> {
     let arguments = Punctuated::<Meta, Token![,]>::parse_terminated
         .parse2(tokens.clone())
         .context("parse cfg_attr arguments for line classification")?;

@@ -8,7 +8,7 @@ use syn::{Attribute, Meta, Token};
 
 use crate::scan::syntax_fingerprint;
 
-use super::super::{cfg_can_apply_in_production, normalized_ident};
+use super::super::{cfg_attr_tokens_disable_production, cfg_can_apply_in_production, normalized_ident};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct ConcreteStoreCounts {
@@ -88,7 +88,13 @@ impl ConcreteStoreInventory {
         if !cfg_can_apply_in_production(&condition) {
             return Ok(());
         }
-        for nested in arguments {
+        let nested = arguments.collect::<Vec<_>>();
+        for meta in &nested {
+            if cfg_meta_disables_production(meta)? {
+                return Ok(());
+            }
+        }
+        for nested in nested {
             self.record_cfg_nested(&nested, site_context)?;
         }
         Ok(())
@@ -233,6 +239,39 @@ pub(super) fn is_concrete_store_name(name: &str) -> bool {
 fn is_rust_fragment_key(name: &str) -> bool {
     matches!(
         name,
-        "bound" | "crate" | "deserialize_with" | "from" | "into" | "remote" | "schema_with" | "serialize_with" | "transform" | "try_from" | "with"
+        "bound"
+            | "crate"
+            | "default"
+            | "deserialize_with"
+            | "extend"
+            | "from"
+            | "getter"
+            | "into"
+            | "remote"
+            | "schema_with"
+            | "serialize_with"
+            | "skip_serializing_if"
+            | "transform"
+            | "try_from"
+            | "with"
     )
+}
+
+fn cfg_meta_disables_production(meta: &Meta) -> Result<bool> {
+    let Meta::List(list) = meta else {
+        return Ok(false);
+    };
+    if meta.path().is_ident("cfg_attr") {
+        return cfg_attr_tokens_disable_production(&list.tokens);
+    }
+    if !meta.path().is_ident("cfg") {
+        return Ok(false);
+    }
+    let predicates = Punctuated::<Meta, Token![,]>::parse_terminated
+        .parse2(list.tokens.clone())
+        .context("parse cfg_attr sibling cfg predicate for production concrete-store classification")?;
+    if predicates.len() != 1 {
+        anyhow::bail!("cfg_attr sibling cfg attribute must contain exactly one predicate");
+    }
+    Ok(!cfg_can_apply_in_production(predicates.first().context("cfg_attr sibling cfg predicate disappeared")?))
 }

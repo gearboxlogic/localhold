@@ -336,6 +336,34 @@ fn cfg_attr_store_tokens_are_counted_only_when_the_branch_can_apply_in_productio
 }
 
 #[test]
+fn cfg_attr_disabling_siblings_remove_store_tokens_from_production() -> Result<()> {
+    let source = "#[cfg_attr(feature = \"other\", cfg(test), serde(serialize_with = \"SqliteStore::serialize\"))]\n\
+                  struct Direct;\n\
+                  #[cfg_attr(feature = \"other\", cfg_attr(all(), cfg(feature = \"testing\")), serde(default = \"PostgresStore::default\"))]\n\
+                  struct Nested;\n";
+    assert_eq!(concrete_facts(source)?.concrete_stores, ConcreteStoreCounts::default());
+    Ok(())
+}
+
+#[test]
+fn every_serde_callback_key_is_scanned_as_rust() -> Result<()> {
+    let source = "#[serde(skip_serializing_if = \"SqliteStore::is_empty\")]\n\
+                  struct Skip(usize);\n\
+                  #[serde(default = \"PostgresStore::default\")]\n\
+                  struct Defaulted(usize);\n\
+                  #[serde(getter = \"SqliteStore::get\")]\n\
+                  struct Remote(usize);\n";
+    assert_eq!(
+        concrete_facts(source)?.concrete_stores,
+        ConcreteStoreCounts {
+            sqlite_store: 2,
+            postgres_store: 1,
+        }
+    );
+    Ok(())
+}
+
+#[test]
 fn concrete_store_names_cannot_be_hidden_by_aliases() {
     for source in [
         "type DefaultStore = SqliteStore;\n",

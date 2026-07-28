@@ -285,6 +285,24 @@ fn concrete_store_names_are_counted_only_in_production_syntax() -> Result<()> {
 }
 
 #[test]
+fn canonical_concrete_store_declarations_require_public_production_structs() -> Result<()> {
+    let facts = concrete_facts(
+        "pub struct SqliteStore;\n\
+         pub(crate) struct PostgresStore;\n\
+         #[cfg(test)] pub struct PostgresStore;\n\
+         pub enum PostgresBackend {}\n",
+    )?;
+    assert_eq!(
+        facts.public_concrete_store_structs,
+        ConcreteStoreCounts {
+            sqlite_store: 1,
+            postgres_store: 0,
+        }
+    );
+    Ok(())
+}
+
+#[test]
 fn path_valued_attribute_literals_count_concrete_stores() -> Result<()> {
     let source = "#[serde(serialize_with = \"crate::store::SqliteStore\")]\nstruct Record;\n\
                   #[serde(rename = \"PostgresStore\")]\nstruct Renamed;\n\

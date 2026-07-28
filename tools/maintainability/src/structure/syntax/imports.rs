@@ -4,7 +4,7 @@ use quote::ToTokens;
 use syn::visit::{self, Visit};
 use syn::{
     Arm, Attribute, BareFnArg, BareVariadic, Expr, Field, FieldPat, FieldValue, File, FnArg, ForeignItem, GenericParam, ImplItem, ImplItemType, Item, ItemExternCrate, ItemMacro,
-    ItemMod, ItemType, ItemUse, Local, Pat, Path as SynPath, Stmt, StmtMacro, TraitItem, TraitItemType, Variadic, Variant, Visibility,
+    ItemMod, ItemStruct, ItemType, ItemUse, Local, Pat, Path as SynPath, Stmt, StmtMacro, TraitItem, TraitItemType, Variadic, Variant, Visibility,
 };
 
 use crate::scan::{reviewed_attribute_expansion, reviewed_macro_expansion};
@@ -24,6 +24,7 @@ use resolution::{StringScan, UsePath, flatten_use_tree, resolve_path, restricted
 pub struct ProductionSyntaxFacts {
     pub internal_imports: Vec<String>,
     pub concrete_stores: ConcreteStoreCounts,
+    pub public_concrete_store_structs: ConcreteStoreCounts,
     pub concrete_store_sites: ConcreteStoreSites,
     pub generic_default_concrete_store_sites: ConcreteStoreSites,
 }
@@ -63,6 +64,7 @@ pub fn production_syntax_facts(file: &syn::File, source_path: &str, crate_root: 
     Ok(ProductionSyntaxFacts {
         internal_imports: collector.imports,
         concrete_stores: collector.concrete_stores.counts,
+        public_concrete_store_structs: collector.concrete_stores.public_struct_declarations,
         concrete_store_sites: collector.concrete_stores.sites,
         generic_default_concrete_store_sites: collector.concrete_stores.generic_default_sites,
     })
@@ -347,6 +349,16 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         }
         visit::visit_item_use(self, item);
         self.leave_site_context(previous);
+    }
+
+    fn visit_item_struct(&mut self, item: &'ast ItemStruct) {
+        if matches!(item.vis, Visibility::Public(_))
+            && let Err(error) = self.concrete_stores.record_public_struct_declaration(&item.ident)
+        {
+            self.error = Some(error);
+            return;
+        }
+        visit::visit_item_struct(self, item);
     }
 
     fn visit_item_type(&mut self, item: &'ast ItemType) {

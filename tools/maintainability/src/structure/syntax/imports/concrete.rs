@@ -25,6 +25,7 @@ pub struct ConcreteStoreSites {
 #[derive(Default)]
 pub(super) struct ConcreteStoreInventory {
     pub(super) counts: ConcreteStoreCounts,
+    pub(super) public_struct_declarations: ConcreteStoreCounts,
     pub(super) sites: ConcreteStoreSites,
     pub(super) generic_default_sites: ConcreteStoreSites,
 }
@@ -39,6 +40,16 @@ impl ConcreteStoreInventory {
 
     pub(super) fn record_ident(&mut self, ident: &proc_macro2::Ident, site_context: &str) -> Result<()> {
         self.record_name(&normalized_ident(ident), site_context)
+    }
+
+    pub(super) fn record_public_struct_declaration(&mut self, ident: &proc_macro2::Ident) -> Result<()> {
+        let count = match normalized_ident(ident).as_str() {
+            "SqliteStore" => &mut self.public_struct_declarations.sqlite_store,
+            "PostgresStore" => &mut self.public_struct_declarations.postgres_store,
+            _ => return Ok(()),
+        };
+        *count = count.checked_add(1).context("public concrete-store declaration count overflow")?;
+        Ok(())
     }
 
     pub(super) fn record_tokens(&mut self, tokens: &TokenStream, site_context: &str) -> Result<()> {

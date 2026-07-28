@@ -21,6 +21,22 @@ fn exact_recovery_debt_passes_but_new_production_names_fail() {
 }
 
 #[test]
+fn canonical_backend_declarations_cannot_be_renamed_behind_compatibility_exports() {
+    let policy = policy();
+    let components = components(&[("src/store/sqlite.rs", "sqlite-store"), ("src/store/postgres.rs", "postgres-store")]);
+    let mut exact = inventory(&[("src/store/sqlite.rs", 0, 0), ("src/store/postgres.rs", 0, 0)]);
+    exact.files[0].production_public_concrete_store_structs.sqlite_store = 1;
+    exact.files[1].production_public_concrete_store_structs.postgres_store = 1;
+    policy
+        .compare_canonical_declarations("current", &exact, paths(&components))
+        .expect("canonical public structs remain declared");
+
+    exact.files[0].production_public_concrete_store_structs.sqlite_store = 0;
+    let error = policy.compare_canonical_declarations("current", &exact, paths(&components)).unwrap_err();
+    assert!(error.to_string().contains("canonical declaration mismatch"));
+}
+
+#[test]
 fn baseline_and_current_counts_are_independent_ratchets() {
     let mut policy = policy();
     policy.debt[1].current_count = 1;
@@ -396,6 +412,10 @@ fn policy() -> ConcreteStorePolicy {
         schema_version: CURRENT_SCHEMA_VERSION,
         baseline_commit: "b05f7a43345b39d40b456fb9ed46d479c4bf26e0".to_owned(),
         unrestricted_components: UNRESTRICTED_COMPONENTS.into_iter().map(str::to_owned).collect(),
+        canonical_declarations: vec![
+            declaration("sqlite-store", "src/store/sqlite.rs", ConcreteStoreName::SqliteStore),
+            declaration("postgres-store", "src/store/postgres.rs", ConcreteStoreName::PostgresStore),
+        ],
         debt: vec![
             debt("phase0.protocol-default-sqlite-store", "protocol", "src/server/mod.rs", ConcreteStoreName::SqliteStore, 1),
             debt(
@@ -406,6 +426,14 @@ fn policy() -> ConcreteStorePolicy {
                 2,
             ),
         ],
+    }
+}
+
+fn declaration(component: &str, path: &str, store: ConcreteStoreName) -> ConcreteStoreDeclaration {
+    ConcreteStoreDeclaration {
+        component: component.to_owned(),
+        path: path.to_owned(),
+        store,
     }
 }
 
@@ -442,6 +470,7 @@ fn file(path: &str, sqlite_store: usize, postgres_store: usize) -> FileMeasureme
         test_lines: 0,
         production_internal_imports: Vec::new(),
         production_concrete_stores: ConcreteStoreCounts { sqlite_store, postgres_store },
+        production_public_concrete_store_structs: ConcreteStoreCounts::default(),
         production_concrete_store_sites: ConcreteStoreSites::default(),
         production_generic_default_store_sites: ConcreteStoreSites::default(),
     }

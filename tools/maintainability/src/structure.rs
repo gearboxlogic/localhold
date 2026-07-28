@@ -34,11 +34,17 @@ pub fn check(workspace: &Path) -> Result<()> {
         &current,
         PathAttribution::with_lineage(&current_component_paths, &canonical_current_paths, &current_site_paths),
     )?;
+    concrete_store_policy.compare_canonical_declarations(
+        "current",
+        &current,
+        PathAttribution::with_lineage(&current_component_paths, &canonical_current_paths, &current_site_paths),
+    )?;
     let baseline = classify::scan_revision(workspace, &manifest.baseline_commit, &manifest.tracked_roots)?;
     manifest.compare_baseline(&baseline)?;
     import_policy.compare_baseline(&baseline)?;
     let baseline_component_paths = manifest.baseline_component_paths()?;
     concrete_store_policy.compare_baseline(&baseline, &baseline_component_paths)?;
+    concrete_store_policy.compare_canonical_declarations("baseline", &baseline, PathAttribution::identity(&baseline_component_paths))?;
     concrete_store_policy.compare_site_fingerprints(
         &current,
         &baseline,

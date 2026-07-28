@@ -23,6 +23,7 @@ pub struct FileMeasurement {
     pub test_lines: usize,
     pub production_internal_imports: Vec<String>,
     pub production_concrete_stores: ConcreteStoreCounts,
+    pub production_public_concrete_store_structs: ConcreteStoreCounts,
     pub production_concrete_store_sites: ConcreteStoreSites,
     pub production_generic_default_store_sites: ConcreteStoreSites,
 }
@@ -261,6 +262,7 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
             test_lines,
             production_internal_imports: production_facts.internal_imports,
             production_concrete_stores: production_facts.concrete_stores,
+            production_public_concrete_store_structs: production_facts.public_concrete_store_structs,
             production_concrete_store_sites: production_facts.concrete_store_sites,
             production_generic_default_store_sites: production_facts.generic_default_concrete_store_sites,
         });

@@ -287,9 +287,9 @@ fn concrete_store_names_are_counted_only_in_production_syntax() -> Result<()> {
 }
 
 #[test]
-fn stringify_arguments_are_not_treated_as_resolved_syntax() -> Result<()> {
-    let source = "const SQLITE: &str = stringify!(SqliteStore);\n\
-                  const POSTGRES: &str = concat!(stringify!(PostgresStore));\n\
+fn explicit_builtin_stringify_arguments_are_not_treated_as_resolved_syntax() -> Result<()> {
+    let source = "const SQLITE: &str = ::core::stringify!(SqliteStore);\n\
+                  const POSTGRES: &str = concat!(::core::stringify!(PostgresStore));\n\
                   const CODE: usize = SqliteStore::FORMAT_VERSION;\n";
     assert_eq!(
         concrete_facts(source)?.concrete_stores,
@@ -299,11 +299,36 @@ fn stringify_arguments_are_not_treated_as_resolved_syntax() -> Result<()> {
         }
     );
 
-    let restricted = "const ROUTE: &str = concat!(stringify!(crate::server::Service));\n";
+    let restricted = "const ROUTE: &str = concat!(::core::stringify!(crate::server::Service));\n";
     assert!(imports("src/adapter.rs", restricted)?.is_empty());
 
-    let definition = "macro_rules! numbered_placeholders { () => { stringify!(SqliteStore) } }\nnumbered_placeholders!();\n";
+    let definition = "macro_rules! numbered_placeholders { () => { ::core::stringify!(SqliteStore) } }\nnumbered_placeholders!();\n";
     assert_eq!(concrete_facts(definition)?.concrete_stores, ConcreteStoreCounts::default());
+    Ok(())
+}
+
+#[test]
+fn shadowable_stringify_names_do_not_hide_store_tokens() -> Result<()> {
+    let ambiguous_builtin = concrete_facts("const STORE: &str = stringify!(PostgresStore);\n")?;
+    assert_eq!(
+        ambiguous_builtin.concrete_stores,
+        ConcreteStoreCounts {
+            sqlite_store: 0,
+            postgres_store: 1,
+        }
+    );
+
+    let locally_shadowed = concrete_facts(
+        "macro_rules! stringify { ($store:ty) => { <$store>::open() } }\n\
+         stringify!(SqliteStore);\n",
+    )?;
+    assert_eq!(
+        locally_shadowed.concrete_stores,
+        ConcreteStoreCounts {
+            sqlite_store: 1,
+            postgres_store: 0,
+        }
+    );
     Ok(())
 }
 
@@ -570,6 +595,20 @@ fn canonical_binding_identity_tracks_trait_implementation_bodies() -> Result<()>
     assert_ne!(first.binding_concrete_store_sites, second.binding_concrete_store_sites);
     assert_eq!(first.binding_concrete_store_sites.sqlite_store.len(), 1);
     assert_ne!(first.concrete_store_sites, second.concrete_store_sites);
+    Ok(())
+}
+
+#[test]
+fn canonical_binding_identity_ignores_impl_and_method_documentation() -> Result<()> {
+    let plain = concrete_facts("impl MemoryReader for SqliteStore { fn version(&self) -> u32 { 1 } }\n")?;
+    let documented = concrete_facts(
+        "/// Implementation documentation.\n\
+         impl MemoryReader for SqliteStore {\n\
+             /// Method documentation.\n\
+             fn version(&self) -> u32 { 1 }\n\
+         }\n",
+    )?;
+    assert_eq!(plain.binding_concrete_store_sites, documented.binding_concrete_store_sites);
     Ok(())
 }
 

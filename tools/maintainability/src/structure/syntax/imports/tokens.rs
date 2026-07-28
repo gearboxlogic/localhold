@@ -7,15 +7,12 @@ pub(super) fn resolving_tokens(tokens: &TokenStream) -> TokenStream {
     let mut resolving = TokenStream::new();
     let mut index = 0_usize;
     while index < tokens.len() {
-        if stringifying_group(&tokens, index).is_some() {
-            resolving.extend(tokens[index..index.saturating_add(2)].iter().cloned());
-            let TokenTree::Group(group) = &tokens[index + 2] else {
-                unreachable!("stringifying_group requires a group");
-            };
+        if let Some((group, group_offset)) = stringifying_group(&tokens, index) {
+            resolving.extend(tokens[index..index.saturating_add(group_offset)].iter().cloned());
             let mut empty = Group::new(group.delimiter(), TokenStream::new());
             empty.set_span(group.span());
             resolving.extend([TokenTree::Group(empty)]);
-            index = index.saturating_add(3);
+            index = index.saturating_add(group_offset).saturating_add(1);
             continue;
         }
         match &tokens[index] {
@@ -31,20 +28,31 @@ pub(super) fn resolving_tokens(tokens: &TokenStream) -> TokenStream {
     resolving
 }
 
-fn stringifying_group(tokens: &[TokenTree], index: usize) -> Option<&Group> {
-    let TokenTree::Ident(ident) = tokens.get(index)? else {
-        return None;
-    };
-    if normalized_ident(ident) != "stringify" {
-        return None;
-    }
-    if !matches!(tokens.get(index + 1), Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == '!') {
+fn stringifying_group(tokens: &[TokenTree], index: usize) -> Option<(&Group, usize)> {
+    if !matches!(tokens.get(index), Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == ':')
+        || !matches!(tokens.get(index + 1), Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == ':')
+    {
         return None;
     }
-    let Some(TokenTree::Group(group)) = tokens.get(index + 2) else {
+    let Some(TokenTree::Ident(root)) = tokens.get(index + 2) else {
         return None;
     };
-    Some(group)
+    if !matches!(normalized_ident(root).as_str(), "core" | "std")
+        || !matches!(tokens.get(index + 3), Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == ':')
+        || !matches!(tokens.get(index + 4), Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == ':')
+    {
+        return None;
+    }
+    let Some(TokenTree::Ident(macro_name)) = tokens.get(index + 5) else {
+        return None;
+    };
+    if normalized_ident(macro_name) != "stringify" || !matches!(tokens.get(index + 6), Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == '!') {
+        return None;
+    }
+    let Some(TokenTree::Group(group)) = tokens.get(index + 7) else {
+        return None;
+    };
+    Some((group, 7))
 }
 
 #[cfg(test)]
@@ -55,7 +63,10 @@ mod tests {
 
     #[test]
     fn nested_stringify_arguments_are_removed_but_code_tokens_remain() {
-        let tokens = quote!(SqliteStore, concat!(stringify!(PostgresStore), SqliteStore));
-        assert_eq!(resolving_tokens(&tokens).to_string(), quote!(SqliteStore, concat!(stringify!(), SqliteStore)).to_string());
+        let tokens = quote!(SqliteStore, concat!(::core::stringify!(PostgresStore), stringify!(PostgresStore), SqliteStore));
+        assert_eq!(
+            resolving_tokens(&tokens).to_string(),
+            quote!(SqliteStore, concat!(::core::stringify!(), stringify!(PostgresStore), SqliteStore)).to_string()
+        );
     }
 }

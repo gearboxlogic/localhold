@@ -447,10 +447,12 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_impl(&mut self, item: &'ast ItemImpl) {
-        let mut header = item.clone();
+        let mut binding_item = item.clone();
+        strip_impl_documentation(&mut binding_item);
+        let mut header = binding_item.clone();
         header.items.clear();
         let binding = if item.trait_.is_some() {
-            format!("trait-implementation:{}", syntax_fingerprint(item))
+            format!("trait-implementation:{}", syntax_fingerprint(&binding_item))
         } else {
             format!("impl-header:{}", syntax_fingerprint(&header))
         };
@@ -563,7 +565,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         if self.error.is_some() {
             return;
         }
-        let stringifies = node.path.segments.last().is_some_and(|segment| normalized_ident(&segment.ident) == "stringify");
+        let stringifies = is_explicit_builtin_stringify(node);
         if !stringifies && tokens_may_hide_concrete_store(&node.tokens) {
             self.error = Some(anyhow::anyhow!(
                 "production concrete stores cannot be hidden behind macro-generated aliases or renamed imports"
@@ -587,7 +589,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
                 }
             }
         }
-        if self.require_reviewed_expansions && !reviewed_macro_expansion(node) {
+        if self.require_reviewed_expansions && !stringifies && !reviewed_macro_expansion(node) {
             self.error = Some(anyhow::anyhow!("production code invokes unreviewed macro expansion path {}", node.path.to_token_stream()));
             self.leave_site_context(previous);
             return;
@@ -683,6 +685,27 @@ fn declaration_ancestor(item: &Item) -> Option<String> {
 
 fn named_ancestor(kind: &str, ident: &proc_macro2::Ident, visibility: &Visibility) -> String {
     format!("{kind}:{}:{}", normalized_ident(ident), syntax_fingerprint(visibility))
+}
+
+fn is_explicit_builtin_stringify(node: &syn::Macro) -> bool {
+    node.path.leading_colon.is_some()
+        && node.path.segments.len() == 2
+        && matches!(normalized_ident(&node.path.segments[0].ident).as_str(), "core" | "std")
+        && normalized_ident(&node.path.segments[1].ident) == "stringify"
+}
+
+fn strip_impl_documentation(item: &mut ItemImpl) {
+    item.attrs.retain(|attribute| !attribute.path().is_ident("doc"));
+    for member in &mut item.items {
+        let attributes = match member {
+            ImplItem::Const(item) => &mut item.attrs,
+            ImplItem::Fn(item) => &mut item.attrs,
+            ImplItem::Macro(item) => &mut item.attrs,
+            ImplItem::Type(item) => &mut item.attrs,
+            _ => continue,
+        };
+        attributes.retain(|attribute| !attribute.path().is_ident("doc"));
+    }
 }
 
 fn tokens_may_hide_concrete_store(tokens: &TokenStream) -> bool {

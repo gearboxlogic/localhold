@@ -1,5 +1,6 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
+  "program_phase": 0,
   "baseline_commit": "b05f7a43345b39d40b456fb9ed46d479c4bf26e0",
   "tracked_roots": [
     "src",
@@ -781,5 +782,6 @@
     }
   ],
   "path_evolutions": [],
-  "component_transfers": []
+  "component_transfers": [],
+  "file_exceptions": []
 }

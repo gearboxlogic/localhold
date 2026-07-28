@@ -7,6 +7,7 @@ pub use self::model::StructureManifest;
 
 mod comparison;
 mod evolution;
+mod exceptions;
 mod measure;
 mod model;
 mod revision;

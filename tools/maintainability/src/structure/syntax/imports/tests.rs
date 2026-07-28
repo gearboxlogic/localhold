@@ -297,3 +297,72 @@ fn path_valued_attribute_literals_count_concrete_stores() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn concrete_store_names_cannot_be_hidden_by_aliases() {
+    for source in [
+        "type DefaultStore = SqliteStore;\n",
+        "pub(crate) type DefaultStore = crate::store::PostgresStore;\n",
+        "trait Backend { type Store = SqliteStore; }\n",
+        "impl Backend for Adapter { type Store = PostgresStore; }\n",
+    ] {
+        assert!(
+            imports("src/store/alias.rs", source)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be hidden behind type aliases"),
+            "{source}"
+        );
+    }
+
+    for source in ["use crate::store::SqliteStore as DefaultStore;\n", "pub use crate::store::PostgresStore as DefaultStore;\n"] {
+        assert!(
+            imports("src/store/alias.rs", source)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be hidden behind renamed imports"),
+            "{source}"
+        );
+    }
+
+    for source in [
+        "macro_rules! alias { () => { type DefaultStore = SqliteStore; } }\n",
+        "macro_rules! reexport { () => { pub use PostgresStore as DefaultStore; } }\n",
+    ] {
+        assert!(
+            imports("src/store/alias.rs", source)
+                .unwrap_err()
+                .to_string()
+                .contains("macro-generated aliases or renamed imports"),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn canonical_store_names_and_test_only_aliases_remain_classifiable() -> Result<()> {
+    let source = "pub use crate::store::SqliteStore;\n\
+                  type MemoryMap = std::collections::HashMap<u64, String>;\n\
+                  #[cfg(test)] type TestStore = PostgresStore;\n\
+                  #[cfg(test)] use crate::store::SqliteStore as TestStoreAlias;\n\
+                  #[cfg(test)] macro_rules! alias { () => { type TestStore = SqliteStore; } }\n";
+    let syntax = syn::parse_file(source)?;
+    let facts = production_syntax_facts(
+        &syntax,
+        "src/store/mod.rs",
+        Some("src/lib.rs"),
+        ProductionSyntaxOptions {
+            collect_internal_imports: true,
+            rust_2015_absolute_paths: false,
+            require_reviewed_expansions: true,
+        },
+    )?;
+    assert_eq!(
+        facts.concrete_stores,
+        ConcreteStoreCounts {
+            sqlite_store: 1,
+            postgres_store: 0,
+        }
+    );
+    Ok(())
+}

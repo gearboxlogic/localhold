@@ -6,8 +6,8 @@ use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{
-    Arm, Attribute, BareFnArg, BareVariadic, Expr, Field, FieldPat, FieldValue, File, FnArg, ForeignItem, GenericParam, ImplItem, Item, ItemExternCrate, ItemMod, ItemType,
-    ItemUse, Local, Meta, Pat, Path as SynPath, StmtMacro, Token, TraitItem, Variadic, Variant, Visibility,
+    Arm, Attribute, BareFnArg, BareVariadic, Expr, Field, FieldPat, FieldValue, File, FnArg, ForeignItem, GenericParam, ImplItem, ImplItemType, Item, ItemExternCrate, ItemMod,
+    ItemType, ItemUse, Local, Meta, Pat, Path as SynPath, StmtMacro, Token, TraitItem, TraitItemType, Variadic, Variant, Visibility,
 };
 
 use crate::scan::{reviewed_attribute_expansion, reviewed_macro_expansion};
@@ -85,6 +85,9 @@ impl ProductionSyntaxCollector {
         let mut paths = Vec::new();
         flatten_use_tree(&item.tree, &mut Vec::new(), &mut paths);
         for mut path in paths {
+            if path.renamed && path.segments.iter().any(|segment| is_concrete_store_name(segment)) {
+                bail!("production concrete stores cannot be hidden behind renamed imports");
+            }
             if item.leading_colon.is_some() {
                 path.segments.insert(0, "crate".to_owned());
             }
@@ -143,6 +146,12 @@ impl ProductionSyntaxCollector {
             return;
         };
         *count = next;
+    }
+
+    fn reject_concrete_store_alias(&mut self, before: ConcreteStoreCounts) {
+        if self.error.is_none() && self.concrete_stores != before {
+            self.error = Some(anyhow::anyhow!("production concrete stores cannot be hidden behind type aliases"));
+        }
     }
 
     fn record_concrete_stores_in_tokens(&mut self, tokens: &TokenStream) {
@@ -337,10 +346,24 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
 
     fn visit_item_type(&mut self, item: &'ast ItemType) {
         let import_count = self.imports.len();
+        let concrete_before = self.concrete_stores;
         visit::visit_item_type(self, item);
         if self.error.is_none() && self.imports.len() != import_count && !matches!(item.vis, Visibility::Inherited) {
             self.error = Some(anyhow::anyhow!("production restricted imports cannot be exposed through public type aliases"));
         }
+        self.reject_concrete_store_alias(concrete_before);
+    }
+
+    fn visit_impl_item_type(&mut self, item: &'ast ImplItemType) {
+        let concrete_before = self.concrete_stores;
+        visit::visit_impl_item_type(self, item);
+        self.reject_concrete_store_alias(concrete_before);
+    }
+
+    fn visit_trait_item_type(&mut self, item: &'ast TraitItemType) {
+        let concrete_before = self.concrete_stores;
+        visit::visit_trait_item_type(self, item);
+        self.reject_concrete_store_alias(concrete_before);
     }
 
     fn visit_item_extern_crate(&mut self, item: &'ast ItemExternCrate) {
@@ -378,6 +401,12 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         if self.error.is_some() {
+            return;
+        }
+        if tokens_may_hide_concrete_store(&node.tokens) {
+            self.error = Some(anyhow::anyhow!(
+                "production concrete stores cannot be hidden behind macro-generated aliases or renamed imports"
+            ));
             return;
         }
         if self.collect_internal_imports {
@@ -449,6 +478,28 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             self.visit_item(nested);
         }
         self.module.pop();
+    }
+}
+
+fn is_concrete_store_name(name: &str) -> bool {
+    matches!(name, "SqliteStore" | "PostgresStore")
+}
+
+fn tokens_may_hide_concrete_store(tokens: &TokenStream) -> bool {
+    let mut identifiers = Vec::new();
+    collect_token_identifiers(tokens, &mut identifiers);
+    identifiers.iter().any(|identifier| is_concrete_store_name(identifier))
+        && (identifiers.iter().any(|identifier| identifier == "type")
+            || identifiers.iter().any(|identifier| identifier == "use") && identifiers.iter().any(|identifier| identifier == "as"))
+}
+
+fn collect_token_identifiers(tokens: &TokenStream, identifiers: &mut Vec<String>) {
+    for token in tokens.clone() {
+        match token {
+            TokenTree::Group(group) => collect_token_identifiers(&group.stream(), identifiers),
+            TokenTree::Ident(ident) => identifiers.push(normalized_ident(&ident)),
+            TokenTree::Literal(_) | TokenTree::Punct(_) => {}
+        }
     }
 }
 

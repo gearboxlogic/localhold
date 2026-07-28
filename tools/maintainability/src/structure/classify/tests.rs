@@ -92,10 +92,12 @@ fn restricted_imports_are_collected_only_from_library_sources() {
     let inventory = inventory(&[
         ("src/lib.rs", "use crate::server::LibraryDependency;\n"),
         ("src/main.rs", "use crate::server::CompositionDependency;\nfn main() {}\n"),
+        ("src/server/mod.rs", "macro_rules! local { () => { let server = 1; } }\n"),
     ]);
     let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
     assert_eq!(by_path["src/lib.rs"].production_internal_imports, ["crate::server::LibraryDependency"]);
     assert!(by_path["src/main.rs"].production_internal_imports.is_empty());
+    assert!(by_path["src/server/mod.rs"].production_internal_imports.is_empty());
 }
 
 #[test]
@@ -198,6 +200,26 @@ fn custom_library_targets_resolve_imports_from_the_crate_root() {
 
     let inventory = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).expect("workspace inventory");
     assert_eq!(inventory.files[0].production_internal_imports, ["crate::server::LocalHoldServer"]);
+}
+
+#[test]
+fn nested_custom_library_targets_resolve_child_imports_from_the_crate_root() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src/core", "tests", "benches"] {
+        fs::create_dir_all(repository.path().join(root)).expect("source root");
+    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+         \n[lib]\npath = \"src/core/lib.rs\"\n",
+    )
+    .expect("package manifest");
+    fs::write(repository.path().join("src/core/lib.rs"), "mod worker;\n").expect("custom library root");
+    fs::write(repository.path().join("src/core/worker.rs"), "use super::server::LocalHoldServer;\n").expect("custom library child");
+
+    let inventory = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).expect("workspace inventory");
+    let worker = inventory.files.iter().find(|file| file.path == "src/core/worker.rs").expect("worker measurement");
+    assert_eq!(worker.production_internal_imports, ["crate::server::LocalHoldServer"]);
 }
 
 #[test]

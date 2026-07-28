@@ -1,12 +1,15 @@
+use std::path::Path as FsPath;
+
 use anyhow::{Context, Result, bail};
+use proc_macro2::{TokenStream, TokenTree};
 use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
-use syn::{ItemExternCrate, ItemMod, ItemUse, Path, UseTree};
+use syn::{ItemExternCrate, ItemMod, ItemUse, Path as SynPath, UseTree};
 
 use super::TestLineCollector;
 
-pub fn production_internal_imports(file: &syn::File, source_path: &str, source_is_crate_root: bool, test_lines: &TestLineCollector) -> Result<Vec<String>> {
-    let module = if source_is_crate_root { Vec::new() } else { source_module(source_path)? };
+pub fn production_internal_imports(file: &syn::File, source_path: &str, crate_root: Option<&str>, test_lines: &TestLineCollector) -> Result<Vec<String>> {
+    let module = source_module(source_path, crate_root)?;
     let mut collector = ImportCollector {
         module,
         test_lines,
@@ -18,6 +21,7 @@ pub fn production_internal_imports(file: &syn::File, source_path: &str, source_i
         return Err(error);
     }
     collector.imports.sort();
+    collector.imports.dedup();
     Ok(collector.imports)
 }
 
@@ -46,7 +50,9 @@ impl ImportCollector<'_> {
     }
 
     fn collect_segments(&mut self, segments: &[String], renamed: bool) -> Result<()> {
-        let resolved = resolve_path(&self.module, segments)?;
+        let Some(resolved) = resolve_path(&self.module, segments)? else {
+            return Ok(());
+        };
         if resolved.is_empty() && renamed {
             bail!("production crate-root import aliases cannot be classified safely for dependency boundaries");
         }
@@ -77,7 +83,7 @@ impl<'ast> Visit<'ast> for ImportCollector<'_> {
         }
     }
 
-    fn visit_path(&mut self, path: &'ast Path) {
+    fn visit_path(&mut self, path: &'ast SynPath) {
         if self.error.is_none() && path.leading_colon.is_none() && !self.test_lines.line_is_test(path.span().start().line) {
             let segments = path.segments.iter().map(|segment| normalized_ident(&segment.ident)).collect::<Vec<_>>();
             let is_qualified = segments.len() > 1 || matches!(segments.first().map(String::as_str), Some("crate" | "self" | "super"));
@@ -87,6 +93,19 @@ impl<'ast> Visit<'ast> for ImportCollector<'_> {
             }
         }
         visit::visit_path(self, path);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if self.error.is_some() {
+            return;
+        }
+        if let Some(restricted) = restricted_macro_identifier(&node.tokens, self.test_lines) {
+            self.error = Some(anyhow::anyhow!(
+                "production macro token stream names restricted crate module {restricted:?} and cannot be classified safely"
+            ));
+            return;
+        }
+        self.visit_path(&node.path);
     }
 
     fn visit_item_mod(&mut self, item: &'ast ItemMod) {
@@ -142,17 +161,17 @@ fn flatten_use_tree(tree: &UseTree, prefix: &mut Vec<String>, paths: &mut Vec<Us
     }
 }
 
-fn resolve_path(module: &[String], path: &[String]) -> Result<Vec<String>> {
+fn resolve_path(module: &[String], path: &[String]) -> Result<Option<Vec<String>>> {
     let Some(first) = path.first().map(String::as_str) else {
         bail!("production use path has no segments");
     };
     if first == "crate" {
-        return Ok(path[1..].to_vec());
+        return Ok(Some(path[1..].to_vec()));
     }
     if first == "self" {
         let mut resolved = module.to_vec();
         resolved.extend_from_slice(&path[1..]);
-        return Ok(resolved);
+        return Ok(Some(resolved));
     }
     if first == "super" {
         let mut resolved = module.to_vec();
@@ -162,23 +181,51 @@ fn resolve_path(module: &[String], path: &[String]) -> Result<Vec<String>> {
             consumed += 1;
         }
         resolved.extend_from_slice(&path[consumed..]);
-        return Ok(resolved);
+        return Ok(Some(resolved));
     }
-    Ok(path.to_vec())
+    Ok(module.is_empty().then(|| path.to_vec()))
 }
 
-fn source_module(source_path: &str) -> Result<Vec<String>> {
-    let relative = source_path.strip_prefix("src/").context("production internal imports must originate under src/")?;
-    let mut parts = relative.split('/').map(str::to_owned).collect::<Vec<_>>();
-    let file = parts.pop().context("production Rust source has no filename")?;
+fn source_module(source_path: &str, crate_root: Option<&str>) -> Result<Vec<String>> {
+    if crate_root == Some(source_path) {
+        return Ok(Vec::new());
+    }
+    let root_directory = match crate_root {
+        Some(root) => FsPath::new(root).parent().context("Cargo library target has no parent directory")?,
+        None => FsPath::new("src"),
+    };
+    let relative = FsPath::new(source_path)
+        .strip_prefix(root_directory)
+        .context("production internal import source is outside its Cargo library root")?;
+    let mut parts = relative
+        .parent()
+        .into_iter()
+        .flat_map(FsPath::components)
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let file = relative
+        .file_name()
+        .and_then(|file| file.to_str())
+        .context("production Rust source has no UTF-8 filename")?;
     let stem = file.strip_suffix(".rs").context("production source path is not a Rust file")?;
-    if !matches!(stem, "lib" | "main" | "mod") {
+    if stem != "mod" {
         parts.push(stem.to_owned());
     }
     Ok(parts)
 }
 
-fn normalized_ident(ident: &syn::Ident) -> String {
+fn restricted_macro_identifier(tokens: &TokenStream, test_lines: &TestLineCollector) -> Option<String> {
+    tokens.clone().into_iter().find_map(|token| match token {
+        TokenTree::Group(group) => restricted_macro_identifier(&group.stream(), test_lines),
+        TokenTree::Ident(ident) if !test_lines.line_is_test(ident.span().start().line) => {
+            let normalized = normalized_ident(&ident);
+            matches!(normalized.as_str(), "server" | "ui").then_some(normalized)
+        }
+        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => None,
+    })
+}
+
+fn normalized_ident(ident: &proc_macro2::Ident) -> String {
     let value = ident.to_string();
     value.strip_prefix("r#").unwrap_or(&value).to_owned()
 }
@@ -191,7 +238,7 @@ mod tests {
         let syntax = syn::parse_file(source)?;
         let mut test_lines = TestLineCollector::new(source.lines().count());
         test_lines.visit_file(&syntax)?;
-        production_internal_imports(&syntax, path, false, &test_lines)
+        production_internal_imports(&syntax, path, Some("src/lib.rs"), &test_lines)
     }
 
     #[test]
@@ -216,11 +263,48 @@ mod tests {
     #[test]
     fn qualified_paths_are_collected_without_double_counting_imports() {
         let source = "use crate::server::Imported;\n\
-                      fn build() -> crate::server::Qualified { crate::ui::qualified() }\n";
+                      fn build() -> crate::server::Imported { crate::ui::qualified(); crate::ui::qualified() }\n";
         assert_eq!(
             imports("src/adapter.rs", source).expect("imports and qualified paths"),
-            ["crate::server::Imported", "crate::server::Qualified", "crate::ui::qualified"]
+            ["crate::server::Imported", "crate::ui::qualified"]
         );
+    }
+
+    #[test]
+    fn bare_paths_resolve_only_at_the_crate_root() -> Result<()> {
+        let source = "mod nested { mod server {} use server::Type; fn call() { server::call(); } }\n\
+                      use crate::server::Actual;\n";
+        assert_eq!(imports("src/adapter.rs", source).expect("lexical bare paths"), ["crate::server::Actual"]);
+
+        let syntax = syn::parse_file("use server::AtRoot;\n")?;
+        let mut test_lines = TestLineCollector::new(1);
+        test_lines.visit_file(&syntax)?;
+        assert_eq!(
+            production_internal_imports(&syntax, "src/core.rs", Some("src/core.rs"), &test_lines)?,
+            ["crate::server::AtRoot"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nested_custom_library_roots_define_relative_module_paths() -> Result<()> {
+        let syntax = syn::parse_file("use super::server::Service;\n")?;
+        let mut test_lines = TestLineCollector::new(1);
+        test_lines.visit_file(&syntax)?;
+        assert_eq!(
+            production_internal_imports(&syntax, "src/core/worker.rs", Some("src/core/lib.rs"), &test_lines)?,
+            ["crate::server::Service"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restricted_names_in_production_macro_tokens_fail_closed() {
+        let source = "macro_rules! dependency { () => { use crate::server::Service; } }\n";
+        assert!(imports("src/adapter.rs", source).unwrap_err().to_string().contains("production macro token stream"));
+
+        let test_only = "#[cfg(test)]\nmacro_rules! dependency { () => { use crate::ui::View; } }\n";
+        assert!(imports("src/adapter.rs", test_only).expect("test-only macro").is_empty());
     }
 
     #[test]

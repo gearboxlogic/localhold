@@ -217,10 +217,10 @@ fn measure_sources_with_roots(
             collector.visit_file(&parsed.syntax)?;
             (
                 collector.test_line_count(),
-                if !path.starts_with("src/") || composition_roots.contains(&path) {
+                if !path.starts_with("src/") || composition_roots.contains(&path) || path.starts_with("src/server/") || path.starts_with("src/ui/") {
                     Vec::new()
                 } else {
-                    production_internal_imports(&parsed.syntax, &path, library_roots.contains(&path), &collector)?
+                    production_internal_imports(&parsed.syntax, &path, library_root_for_source(&path, library_roots), &collector)?
                 },
             )
         };
@@ -233,6 +233,13 @@ fn measure_sources_with_roots(
         });
     }
     Ok(Inventory { files })
+}
+
+fn library_root_for_source<'a>(source: &str, library_roots: &'a BTreeSet<String>) -> Option<&'a str> {
+    library_roots
+        .iter()
+        .find(|root| Path::new(root.as_str()).parent().is_some_and(|parent| Path::new(source).starts_with(parent)))
+        .map(String::as_str)
 }
 
 fn parse_sources(sources: BTreeMap<String, String>) -> Result<BTreeMap<String, ParsedSource>> {

@@ -10,8 +10,8 @@ use crate::structure::syntax::normalized_ident;
 
 #[derive(Default)]
 pub struct VisibilityMacroAudit {
-    definitions: BTreeMap<String, MacroDefinition>,
-    direct_invocations: BTreeMap<String, usize>,
+    definitions: BTreeMap<MacroId, MacroDefinition>,
+    direct_invocations: Vec<MacroInvocation>,
 }
 
 struct MacroDefinition {
@@ -19,8 +19,20 @@ struct MacroDefinition {
     references: BTreeSet<String>,
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct MacroId {
+    module: Vec<String>,
+    name: String,
+}
+
+struct MacroInvocation {
+    module: Vec<String>,
+    leading_colon: bool,
+    segments: Vec<String>,
+}
+
 impl VisibilityMacroAudit {
-    pub fn record_definition(&mut self, name: &proc_macro2::Ident, tokens: &TokenStream) -> Result<()> {
+    pub fn record_definition(&mut self, module: &[String], name: &proc_macro2::Ident, tokens: &TokenStream) -> Result<()> {
         let name = normalized_ident(name);
         let tokens = resolving_tokens(tokens);
         let transcribers = macro_transcribers(&tokens);
@@ -47,45 +59,106 @@ impl VisibilityMacroAudit {
             has_restricted_visibility: !all_counts.is_empty(),
             references: macro_references(&tokens),
         };
-        if self.definitions.insert(name.clone(), definition).is_some() {
-            bail!("production macro name {name:?} is ambiguous for restricted-visibility accounting");
+        let id = MacroId {
+            module: module.to_vec(),
+            name: name.clone(),
+        };
+        if self.definitions.insert(id, definition).is_some() {
+            bail!("production macro name {name:?} is ambiguous within module {module:?} for restricted-visibility accounting");
         }
         Ok(())
     }
 
-    pub fn record_invocation(&mut self, path: &Path, tokens: &TokenStream) -> Result<()> {
+    pub fn record_invocation(&mut self, module: &[String], path: &Path, tokens: &TokenStream) -> Result<()> {
         let tokens = resolving_tokens(tokens);
         if invocation_may_supply_visibility(&tokens)? {
             bail!("production macro invocation arguments cannot supply or construct restricted visibility");
         }
-        let Some(segment) = path.segments.last() else {
+        if path.segments.is_empty() {
             return Ok(());
-        };
-        let name = normalized_ident(&segment.ident);
-        let count = self.direct_invocations.entry(name).or_default();
-        *count = count.checked_add(1).context("production macro invocation count overflow")?;
+        }
+        self.direct_invocations.push(MacroInvocation {
+            module: module.to_vec(),
+            leading_colon: path.leading_colon.is_some(),
+            segments: path.segments.iter().map(|segment| normalized_ident(&segment.ident)).collect(),
+        });
         Ok(())
     }
 
     pub fn finish(&self) -> Result<()> {
-        for (name, definition) in &self.definitions {
+        for (id, definition) in &self.definitions {
             if !definition.has_restricted_visibility {
                 continue;
             }
             let referenced_by = self
                 .definitions
                 .iter()
-                .find_map(|(container, candidate)| candidate.references.contains(name).then_some(container));
+                .find_map(|(container, candidate)| candidate.references.contains(&id.name).then_some(container));
             if let Some(container) = referenced_by {
-                bail!("production macro {name:?} with restricted visibility cannot be invoked indirectly by macro {container:?}");
+                bail!(
+                    "production macro {:?} in module {:?} with restricted visibility cannot be invoked indirectly by macro {:?} in module {:?}",
+                    id.name,
+                    id.module,
+                    container.name,
+                    container.module
+                );
             }
-            let invocations = self.direct_invocations.get(name).copied().unwrap_or_default();
+            let invocations = self
+                .direct_invocations
+                .iter()
+                .filter(|invocation| self.resolve_invocation(invocation).is_some_and(|resolved| resolved == id))
+                .count();
             if invocations != 1 {
-                bail!("production macro {name:?} with restricted visibility must have exactly one direct production invocation; observed {invocations}");
+                bail!(
+                    "production macro {:?} in module {:?} with restricted visibility must have exactly one direct production invocation; observed {invocations}",
+                    id.name,
+                    id.module
+                );
             }
         }
         Ok(())
     }
+
+    fn resolve_invocation(&self, invocation: &MacroInvocation) -> Option<&MacroId> {
+        let (first, rest) = invocation.segments.split_first()?;
+        if invocation.leading_colon {
+            return None;
+        }
+        let explicit = match first.as_str() {
+            "crate" => Some(rest.to_vec()),
+            "self" => {
+                let mut path = invocation.module.clone();
+                path.extend_from_slice(rest);
+                Some(path)
+            }
+            "super" => resolve_super_path(&invocation.module, &invocation.segments),
+            _ if !rest.is_empty() => {
+                let mut path = invocation.module.clone();
+                path.extend_from_slice(&invocation.segments);
+                Some(path)
+            }
+            _ => None,
+        };
+        if let Some(mut path) = explicit {
+            let name = path.pop()?;
+            return self.definitions.get_key_value(&MacroId { module: path, name }).map(|(id, _)| id);
+        }
+        self.definitions
+            .keys()
+            .filter(|id| id.name == *first && invocation.module.starts_with(&id.module))
+            .max_by_key(|id| id.module.len())
+    }
+}
+
+fn resolve_super_path(module: &[String], segments: &[String]) -> Option<Vec<String>> {
+    let mut path = module.to_vec();
+    let mut index = 0;
+    while segments.get(index).is_some_and(|segment| segment == "super") {
+        path.pop()?;
+        index += 1;
+    }
+    path.extend_from_slice(&segments[index..]);
+    Some(path)
 }
 
 impl VisibilityCounts {

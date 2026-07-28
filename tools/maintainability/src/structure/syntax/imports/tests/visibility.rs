@@ -37,6 +37,29 @@ fn restricted_visibility_macro_requires_one_direct_production_invocation() -> Re
 }
 
 #[test]
+fn visibility_macro_invocations_are_resolved_by_module_and_path() -> Result<()> {
+    let separate_modules = "mod one {\n\
+                                macro_rules! define_memory_columns { () => { pub(crate) struct Generated; } }\n\
+                                define_memory_columns!();\n\
+                            }\n\
+                            mod two {\n\
+                                macro_rules! define_memory_columns { () => { struct Private; } }\n\
+                                define_memory_columns!();\n\
+                            }\n";
+    assert_eq!(concrete_facts(separate_modules)?.visibilities, VisibilityCounts { pub_crate: 1, pub_super: 0 });
+
+    let external_collision = "mod local {\n\
+                                  macro_rules! poll { () => { pub(crate) struct Generated; } }\n\
+                              }\n\
+                              futures::poll!();\n";
+    let error = concrete_facts(external_collision)
+        .err()
+        .context("qualified external macro must not satisfy a local visibility macro invocation")?;
+    assert!(error.to_string().contains("observed 0"), "{error:#}");
+    Ok(())
+}
+
+#[test]
 fn restricted_visibility_cannot_be_repeated_or_vary_by_macro_arm() -> Result<()> {
     let repeated = "macro_rules! define_memory_columns { ($($name:ident),+) => { $(pub(crate) struct $name;)+ } }\n\
                     define_memory_columns!(One, Two);\n";
@@ -97,7 +120,7 @@ fn macro_transcribers_cannot_compose_restricted_visibility_from_one_argument() -
 
 #[test]
 fn stringify_arguments_do_not_create_visibility_macro_evidence() -> Result<()> {
-    let source = "macro_rules! define_memory_columns { () => { pub(crate) struct Generated; stringify!(pub(super) struct Text); } }\n\
+    let source = "macro_rules! define_memory_columns { () => { pub(crate) struct Generated; ::core::stringify!(pub(super) struct Text); } }\n\
                   define_memory_columns!();\n";
     assert_eq!(concrete_facts(source)?.visibilities, VisibilityCounts { pub_crate: 1, pub_super: 0 });
     Ok(())

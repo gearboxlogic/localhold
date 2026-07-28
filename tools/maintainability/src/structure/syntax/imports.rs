@@ -1339,7 +1339,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         let stringifies = is_explicit_builtin_stringify(node) || self.is_imported_builtin_stringify(node);
         if self.macro_context == MacroContext::Invocation
             && !stringifies
-            && let Err(error) = self.visibility_macros.record_invocation(&node.path, &node.tokens)
+            && let Err(error) = self.visibility_macros.record_invocation(&self.module, &node.path, &node.tokens)
         {
             self.error = Some(error);
             return;
@@ -1442,7 +1442,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             self.error = Some(anyhow::anyhow!("production macro definitions cannot inject concrete stores into call sites"));
             return;
         }
-        if let Err(error) = self.visibility_macros.record_definition(name, &item.mac.tokens) {
+        if let Err(error) = self.visibility_macros.record_definition(&self.module, name, &item.mac.tokens) {
             self.error = Some(error);
             return;
         }

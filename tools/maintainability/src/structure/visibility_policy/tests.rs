@@ -1,6 +1,6 @@
 use super::*;
 use crate::structure::classify::FileMeasurement;
-use crate::structure::syntax::{ConcreteStoreCounts, ConcreteStoreSites};
+use crate::structure::syntax::{ConcreteStoreCounts, ConcreteStoreSignatureSites, ConcreteStoreSites};
 
 #[test]
 fn exact_component_counts_pass_and_growth_fails() {
@@ -262,12 +262,14 @@ fn file(path: &str, pub_crate: usize, pub_super: usize) -> FileMeasurement {
         physical_lines: 1,
         production_lines: 1,
         test_lines: 0,
+        production_module: Vec::new(),
         production_internal_imports: Vec::new(),
+        production_public_reexports: Vec::new(),
         production_concrete_stores: ConcreteStoreCounts::default(),
         production_public_concrete_store_structs: ConcreteStoreSites::default(),
         production_concrete_store_sites: ConcreteStoreSites::default(),
         production_generic_default_store_sites: ConcreteStoreSites::default(),
-        production_signature_store_sites: ConcreteStoreSites::default(),
+        production_signature_store_sites: ConcreteStoreSignatureSites::default(),
         production_store_binding_sites: ConcreteStoreSites::default(),
         production_visibilities: VisibilityCounts { pub_crate, pub_super },
     }

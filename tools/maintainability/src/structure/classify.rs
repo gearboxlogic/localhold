@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use super::syntax::{TestLineCollector, item_is_test_only, normalized_ident, production_internal_imports, reject_module_path_overrides};
+use super::syntax::{TestLineCollector, attributes_disable_production, item_is_test_only, normalized_ident, production_internal_imports, reject_module_path_overrides};
 
 mod module_macro;
 use module_macro::{audit_reviewed_macro_definitions, record_item_macro, safe_macro_definitions};
@@ -290,11 +290,12 @@ fn classify_source_reachability(
     };
     for (path, source) in parsed {
         audit_reviewed_macro_definitions(&source.syntax).with_context(|| format!("audit reviewed macro definitions in {path}"))?;
+        let file_test_only = attributes_disable_production(&source.syntax.attrs).with_context(|| format!("classify crate attributes in {path}"))?;
         if production_roots.contains(path) || explicit_test_roots.contains(path) {
             let crate_root_dir = Path::new(path).parent().context("Cargo target root has no parent directory")?;
-            graph.collect(path, &source.syntax.items, crate_root_dir, false)?;
+            graph.collect(path, &source.syntax.items, crate_root_dir, file_test_only)?;
         } else {
-            graph.collect(path, &source.syntax.items, &module_directory(path)?, false)?;
+            graph.collect(path, &source.syntax.items, &module_directory(path)?, file_test_only)?;
         }
     }
     let opaque_macro_sources = graph.opaque_macro_sources;

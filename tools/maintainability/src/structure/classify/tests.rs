@@ -48,9 +48,10 @@ fn cfg_attr_is_test_only_only_when_it_cannot_exist_in_production() {
     let inventory = inventory(&[(
         "src/lib.rs",
         "#[cfg_attr(all(), cfg(test))]\nfn always_test() {}\n\
+         #[cfg_attr(all(), cfg_attr(all(), cfg(test)))]\nfn nested_always_test() {}\n\
          #[cfg_attr(feature = \"other\", cfg(test))]\nfn sometimes_production() {}\n",
     )]);
-    assert_eq!(inventory.files[0].test_lines, 2);
+    assert_eq!(inventory.files[0].test_lines, 4);
     assert_eq!(inventory.files[0].production_lines, 2);
 }
 
@@ -78,6 +79,19 @@ fn external_modules_reachable_only_from_tests_are_wholly_test_only() {
     assert_eq!(by_path["src/lib.rs"].production_lines, 1);
     assert_eq!(by_path["src/tests.rs"].production_lines, 0);
     assert_eq!(by_path["src/tests/nested.rs"].production_lines, 0);
+}
+
+#[test]
+fn inner_file_test_cfg_propagates_to_external_child_modules() {
+    let inventory = inventory(&[
+        ("src/lib.rs", "mod support;\n"),
+        ("src/support.rs", "#![cfg(test)]\nmod nested;\n"),
+        ("src/support/nested.rs", "use crate::server::TestOnly;\n"),
+    ]);
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_path["src/support.rs"].production_lines, 0);
+    assert_eq!(by_path["src/support/nested.rs"].production_lines, 0);
+    assert!(by_path["src/support/nested.rs"].production_internal_imports.is_empty());
 }
 
 #[test]

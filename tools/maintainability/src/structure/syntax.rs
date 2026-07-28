@@ -36,7 +36,9 @@ impl TestLineCollector {
     }
 
     pub fn visit_file(&mut self, file: &syn::File) -> Result<()> {
-        Visit::visit_file(self, file);
+        if !self.classify(Ok(&file.attrs), file) {
+            Visit::visit_file(self, file);
+        }
         self.error.take().map_or(Ok(()), Err)
     }
 
@@ -204,8 +206,12 @@ fn cfg_attr_disables_production(attribute: &Attribute) -> Result<bool> {
     let Meta::List(list) = &attribute.meta else {
         return Ok(false);
     };
+    cfg_attr_tokens_disable_production(&list.tokens)
+}
+
+fn cfg_attr_tokens_disable_production(tokens: &proc_macro2::TokenStream) -> Result<bool> {
     let arguments = Punctuated::<Meta, Token![,]>::parse_terminated
-        .parse2(list.tokens.clone())
+        .parse2(tokens.clone())
         .context("parse cfg_attr arguments for line classification")?;
     let mut arguments = arguments.into_iter();
     let Some(condition) = arguments.next() else {
@@ -217,14 +223,22 @@ fn cfg_attr_disables_production(attribute: &Attribute) -> Result<bool> {
     for nested in arguments {
         if nested.path().is_ident("cfg") {
             let Meta::List(list) = nested else {
-                continue;
+                anyhow::bail!("nested cfg predicate must use list syntax")
             };
             let predicate = Punctuated::<Meta, Token![,]>::parse_terminated
                 .parse2(list.tokens)
                 .context("parse nested cfg_attr cfg predicate")?;
-            if predicate.len() == 1 && evaluate(predicate.first().context("nested cfg predicate disappeared")?) == Truth::AlwaysFalse {
+            if predicate.len() != 1 {
+                anyhow::bail!("nested cfg attribute must contain exactly one predicate");
+            }
+            if evaluate(predicate.first().context("nested cfg predicate disappeared")?) == Truth::AlwaysFalse {
                 return Ok(true);
             }
+        } else if nested.path().is_ident("cfg_attr")
+            && let Meta::List(list) = nested
+            && cfg_attr_tokens_disable_production(&list.tokens)?
+        {
+            return Ok(true);
         }
     }
     Ok(false)

@@ -183,6 +183,42 @@ fn custom_production_roots_resolve_modules_from_their_parent() {
 }
 
 #[test]
+fn custom_library_targets_resolve_imports_from_the_crate_root() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src", "tests", "benches"] {
+        fs::create_dir(repository.path().join(root)).expect("source root");
+    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+         \n[lib]\npath = \"src/core.rs\"\n",
+    )
+    .expect("package manifest");
+    fs::write(repository.path().join("src/core.rs"), "use self::server::LocalHoldServer;\n").expect("custom library root");
+
+    let inventory = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).expect("workspace inventory");
+    assert_eq!(inventory.files[0].production_internal_imports, ["crate::server::LocalHoldServer"]);
+}
+
+#[test]
+fn composition_targets_cannot_overlap_library_sources() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src", "tests", "benches"] {
+        fs::create_dir(repository.path().join(root)).expect("source root");
+    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+         \n[[bin]]\nname = \"shared\"\npath = \"src/lib.rs\"\n",
+    )
+    .expect("package manifest");
+    fs::write(repository.path().join("src/lib.rs"), "use crate::server::LocalHoldServer;\nfn main() {}\n").expect("shared target");
+
+    let error = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).unwrap_err();
+    assert!(error.to_string().contains("composition target must not also be reachable from a library target"));
+}
+
+#[test]
 fn no_package_feature_may_enable_testing() {
     let repository = tempfile::tempdir().expect("temporary repository");
     for root in ["src", "tests", "benches"] {

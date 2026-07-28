@@ -1,12 +1,12 @@
 use anyhow::{Context, Result, bail};
 use syn::spanned::Spanned as _;
-use syn::visit::Visit;
-use syn::{ItemExternCrate, ItemMod, ItemUse, UseTree};
+use syn::visit::{self, Visit};
+use syn::{ItemExternCrate, ItemMod, ItemUse, Path, UseTree};
 
 use super::TestLineCollector;
 
-pub fn production_internal_imports(file: &syn::File, source_path: &str, test_lines: &TestLineCollector) -> Result<Vec<String>> {
-    let module = source_module(source_path)?;
+pub fn production_internal_imports(file: &syn::File, source_path: &str, source_is_crate_root: bool, test_lines: &TestLineCollector) -> Result<Vec<String>> {
+    let module = if source_is_crate_root { Vec::new() } else { source_module(source_path)? };
     let mut collector = ImportCollector {
         module,
         test_lines,
@@ -42,9 +42,16 @@ impl ImportCollector<'_> {
     }
 
     fn collect_path(&mut self, path: &UsePath) -> Result<()> {
-        let resolved = resolve_path(&self.module, &path.segments)?;
-        if resolved.is_empty() && path.renamed {
+        self.collect_segments(&path.segments, path.renamed)
+    }
+
+    fn collect_segments(&mut self, segments: &[String], renamed: bool) -> Result<()> {
+        let resolved = resolve_path(&self.module, segments)?;
+        if resolved.is_empty() && renamed {
             bail!("production crate-root import aliases cannot be classified safely for dependency boundaries");
+        }
+        if resolved.as_slice() == ["*"] {
+            bail!("production crate-root glob imports cannot be classified safely for dependency boundaries");
         }
         if matches!(resolved.first().map(String::as_str), Some("server" | "ui")) {
             self.imports.push(format!("crate::{}", resolved.join("::")));
@@ -68,6 +75,18 @@ impl<'ast> Visit<'ast> for ImportCollector<'_> {
                 "production crate-root extern aliases cannot be classified safely for dependency boundaries"
             ));
         }
+    }
+
+    fn visit_path(&mut self, path: &'ast Path) {
+        if self.error.is_none() && !self.test_lines.line_is_test(path.span().start().line) {
+            let segments = path.segments.iter().map(|segment| normalized_ident(&segment.ident)).collect::<Vec<_>>();
+            let is_qualified = segments.len() > 1 || matches!(segments.first().map(String::as_str), Some("crate" | "self" | "super"));
+            if is_qualified && let Err(error) = self.collect_segments(&segments, false) {
+                self.error = Some(error);
+                return;
+            }
+        }
+        visit::visit_path(self, path);
     }
 
     fn visit_item_mod(&mut self, item: &'ast ItemMod) {
@@ -172,7 +191,7 @@ mod tests {
         let syntax = syn::parse_file(source)?;
         let mut test_lines = TestLineCollector::new(source.lines().count());
         test_lines.visit_file(&syntax)?;
-        production_internal_imports(&syntax, path, &test_lines)
+        production_internal_imports(&syntax, path, false, &test_lines)
     }
 
     #[test]
@@ -189,8 +208,19 @@ mod tests {
     fn test_only_imports_are_excluded_at_item_and_parent_scope() {
         let source = "#[cfg(test)]\nuse crate::server::params;\n\
                       #[cfg(feature = \"testing\")]\nmod support { use crate::ui; }\n\
+                      #[cfg(test)]\nfn test_path() -> crate::server::TestOnly { unreachable!() }\n\
                       use crate::server::LocalHoldServer;\n";
         assert_eq!(imports("src/http_transport.rs", source).expect("imports"), ["crate::server::LocalHoldServer"]);
+    }
+
+    #[test]
+    fn qualified_paths_are_collected_without_double_counting_imports() {
+        let source = "use crate::server::Imported;\n\
+                      fn build() -> crate::server::Qualified { crate::ui::qualified() }\n";
+        assert_eq!(
+            imports("src/adapter.rs", source).expect("imports and qualified paths"),
+            ["crate::server::Imported", "crate::server::Qualified", "crate::ui::qualified"]
+        );
     }
 
     #[test]
@@ -211,5 +241,6 @@ mod tests {
                 .to_string()
                 .contains("extern aliases")
         );
+        assert!(imports("src/lib.rs", "use crate::*;\n").unwrap_err().to_string().contains("crate-root glob imports"));
     }
 }

@@ -198,9 +198,10 @@ Rust examples and explicitly declared Cargo targets outside the tracked roots
 are also rejected while the initial path map is closed.
 
 The audit also enforces production import direction. Library modules outside
-`src/server/`, `src/ui/`, and the binary composition roots may not import those
-two top-level modules. Grouped, renamed, glob, `self`, and `super` imports are
-normalized before comparison; imports under test-only syntax are excluded.
+`src/server/`, `src/ui/`, and the binary or declared-example composition roots
+may not import those two top-level modules. Grouped, renamed, glob, `self`, and
+`super` imports and qualified paths are normalized before comparison; imports
+under test-only syntax are excluded.
 Crate-root aliases are rejected because they could conceal a restricted
 dependency. The only recovery-baseline exception is
 `src/http_transport.rs` importing `crate::server::LocalHoldServer`.

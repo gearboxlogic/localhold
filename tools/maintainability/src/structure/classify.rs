@@ -47,7 +47,7 @@ pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Inventory> {
         collect_sources(workspace, &workspace.join(root), &mut sources)?;
     }
     let target_roots = workspace_target_roots(workspace, sources.keys())?;
-    measure_sources_with_roots(sources, &target_roots.production, &target_roots.test, &target_roots.composition)
+    measure_sources_with_roots(sources, &target_roots.production, &target_roots.test, &target_roots.composition, &target_roots.libraries)
 }
 
 pub fn scan_revision(workspace: &Path, revision: &str, roots: &[String]) -> Result<Inventory> {
@@ -69,7 +69,7 @@ pub fn scan_revision(workspace: &Path, revision: &str, roots: &[String]) -> Resu
     let sources = read_tree_sources(workspace, &entries)?;
     let manifest = read_revision_manifest(workspace, revision)?;
     let target_roots = target_roots(&manifest, sources.keys())?;
-    measure_sources_with_roots(sources, &target_roots.production, &target_roots.test, &target_roots.composition)
+    measure_sources_with_roots(sources, &target_roots.production, &target_roots.test, &target_roots.composition, &target_roots.libraries)
 }
 
 fn read_revision_manifest(workspace: &Path, revision: &str) -> Result<String> {
@@ -193,7 +193,8 @@ fn collect_sources(workspace: &Path, root: &Path, sources: &mut BTreeMap<String,
 fn measure_sources(sources: BTreeMap<String, String>) -> Result<Inventory> {
     let production_roots = conventional_production_roots(sources.keys());
     let composition_roots = conventional_composition_roots(production_roots.iter());
-    measure_sources_with_roots(sources, &production_roots, &BTreeSet::new(), &composition_roots)
+    let library_roots = conventional_library_roots(production_roots.iter());
+    measure_sources_with_roots(sources, &production_roots, &BTreeSet::new(), &composition_roots, &library_roots)
 }
 
 fn measure_sources_with_roots(
@@ -201,9 +202,10 @@ fn measure_sources_with_roots(
     production_roots: &BTreeSet<String>,
     explicit_test_roots: &BTreeSet<String>,
     composition_roots: &BTreeSet<String>,
+    library_roots: &BTreeSet<String>,
 ) -> Result<Inventory> {
     let parsed = parse_sources(sources)?;
-    let test_only_files = discover_test_only_files(&parsed, production_roots, explicit_test_roots)?;
+    let test_only_files = discover_test_only_files(&parsed, production_roots, explicit_test_roots, composition_roots, library_roots)?;
     let mut files = Vec::with_capacity(parsed.len());
     for (path, parsed) in parsed {
         let physical_lines = physical_line_count(&parsed.source);
@@ -218,7 +220,7 @@ fn measure_sources_with_roots(
                 if !path.starts_with("src/") || composition_roots.contains(&path) {
                     Vec::new()
                 } else {
-                    production_internal_imports(&parsed.syntax, &path, &collector)?
+                    production_internal_imports(&parsed.syntax, &path, library_roots.contains(&path), &collector)?
                 },
             )
         };
@@ -243,7 +245,13 @@ fn parse_sources(sources: BTreeMap<String, String>) -> Result<BTreeMap<String, P
         .collect()
 }
 
-fn discover_test_only_files(parsed: &BTreeMap<String, ParsedSource>, production_roots: &BTreeSet<String>, explicit_test_roots: &BTreeSet<String>) -> Result<BTreeSet<String>> {
+fn discover_test_only_files(
+    parsed: &BTreeMap<String, ParsedSource>,
+    production_roots: &BTreeSet<String>,
+    explicit_test_roots: &BTreeSet<String>,
+    composition_roots: &BTreeSet<String>,
+    library_roots: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
     let known: BTreeSet<_> = parsed.keys().cloned().collect();
     let mut graph = ModuleGraph { known: &known, edges: Vec::new() };
     for (path, source) in parsed {
@@ -257,6 +265,10 @@ fn discover_test_only_files(parsed: &BTreeMap<String, ParsedSource>, production_
         }
     }
     let edges = graph.edges;
+    let library_reachable = production_reachable_from(&edges, library_roots);
+    if let Some(overlap) = composition_roots.intersection(&library_reachable).next() {
+        bail!("composition target must not also be reachable from a library target: {overlap}");
+    }
     let incoming: BTreeSet<_> = edges.iter().map(|edge| edge.target.as_str()).collect();
     let mut production_reachable = production_roots.clone();
     let mut test_reachable: BTreeSet<_> = known.iter().filter(|path| path.starts_with("tests/") || path.starts_with("benches/")).cloned().collect();
@@ -285,6 +297,21 @@ fn discover_test_only_files(parsed: &BTreeMap<String, ParsedSource>, production_
     Ok(test_reachable.difference(&production_reachable).cloned().collect())
 }
 
+fn production_reachable_from(edges: &[ModuleEdge], roots: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut reachable = roots.clone();
+    loop {
+        let mut changed = false;
+        for edge in edges {
+            if !edge.test_only && reachable.contains(&edge.source) {
+                changed |= reachable.insert(edge.target.clone());
+            }
+        }
+        if !changed {
+            return reachable;
+        }
+    }
+}
+
 fn propagate_reachability(edges: &[ModuleEdge], production: &mut BTreeSet<String>, test: &mut BTreeSet<String>) {
     loop {
         let mut changed = false;
@@ -309,6 +336,7 @@ struct TargetRoots {
     production: BTreeSet<String>,
     test: BTreeSet<String>,
     composition: BTreeSet<String>,
+    libraries: BTreeSet<String>,
 }
 
 fn workspace_target_roots<'a>(workspace: &Path, known: impl Iterator<Item = &'a String>) -> Result<TargetRoots> {
@@ -323,8 +351,13 @@ fn target_roots<'a>(manifest: &str, known: impl Iterator<Item = &'a String>) -> 
     validate_testing_feature_is_isolated(&manifest)?;
     let mut roots = conventional_production_roots(known.iter());
     let mut composition = conventional_composition_roots(roots.iter());
-    if let Some(library) = manifest.get("lib") {
-        let _declared_library = add_declared_target_root(library, "library", &known, &mut roots)?;
+    let mut libraries = conventional_library_roots(roots.iter());
+    if let Some(library) = manifest.get("lib")
+        && let Some(path) = add_declared_target_root(library, "library", &known, &mut roots)?
+    {
+        roots.retain(|candidate| !libraries.contains(candidate) || candidate == &path);
+        libraries.clear();
+        libraries.insert(path);
     }
     if let Some(binaries) = manifest.get("bin") {
         let binaries = binaries.as_array().context("package bin targets must be an array of tables")?;
@@ -345,6 +378,7 @@ fn target_roots<'a>(manifest: &str, known: impl Iterator<Item = &'a String>) -> 
         production: roots,
         test,
         composition,
+        libraries,
     })
 }
 
@@ -374,6 +408,10 @@ fn conventional_production_roots<'a>(known: impl Iterator<Item = &'a String>) ->
 
 fn conventional_composition_roots<'a>(known: impl Iterator<Item = &'a String>) -> BTreeSet<String> {
     known.filter(|path| path.as_str() == "src/main.rs" || path.starts_with("src/bin/")).cloned().collect()
+}
+
+fn conventional_library_roots<'a>(known: impl Iterator<Item = &'a String>) -> BTreeSet<String> {
+    known.filter(|path| path.as_str() == "src/lib.rs").cloned().collect()
 }
 
 fn add_declared_target_root(target: &toml::Value, kind: &str, known: &BTreeSet<String>, roots: &mut BTreeSet<String>) -> Result<Option<String>> {

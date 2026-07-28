@@ -3,17 +3,15 @@ use std::path::Path as FsPath;
 use anyhow::{Context, Result, bail};
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens as _;
-use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
-use syn::{Attribute, ItemExternCrate, ItemMod, ItemUse, Meta, Path as SynPath, UseTree};
+use syn::{Arm, Attribute, Expr, Field, ForeignItem, ImplItem, Item, ItemExternCrate, ItemMod, ItemUse, Local, Meta, Path as SynPath, StmtMacro, TraitItem, UseTree, Variant};
 
-use super::{TestLineCollector, normalized_ident};
+use super::{attributes_disable_production, expr_attributes, foreign_item_attributes, impl_item_attributes, item_is_test_only, normalized_ident, trait_item_attributes};
 
-pub fn production_internal_imports(file: &syn::File, source_path: &str, crate_root: Option<&str>, test_lines: &TestLineCollector) -> Result<Vec<String>> {
+pub fn production_internal_imports(file: &syn::File, source_path: &str, crate_root: Option<&str>) -> Result<Vec<String>> {
     let module = source_module(source_path, crate_root)?;
     let mut collector = ImportCollector {
         module,
-        test_lines,
         imports: Vec::new(),
         error: None,
     };
@@ -26,16 +24,15 @@ pub fn production_internal_imports(file: &syn::File, source_path: &str, crate_ro
     Ok(collector.imports)
 }
 
-struct ImportCollector<'a> {
+struct ImportCollector {
     module: Vec<String>,
-    test_lines: &'a TestLineCollector,
     imports: Vec<String>,
     error: Option<anyhow::Error>,
 }
 
-impl ImportCollector<'_> {
+impl ImportCollector {
     fn collect_use(&mut self, item: &ItemUse) -> Result<()> {
-        if item.leading_colon.is_some() || self.test_lines.line_is_test(item.span().start().line) {
+        if item.leading_colon.is_some() {
             return Ok(());
         }
         let mut paths = Vec::new();
@@ -65,9 +62,86 @@ impl ImportCollector<'_> {
         }
         Ok(())
     }
+
+    fn skip_test_only(&mut self, test_only: Result<bool>) -> bool {
+        if self.error.is_some() {
+            return true;
+        }
+        match test_only {
+            Ok(test_only) => test_only,
+            Err(error) => {
+                self.error = Some(error);
+                true
+            }
+        }
+    }
 }
 
-impl<'ast> Visit<'ast> for ImportCollector<'_> {
+impl<'ast> Visit<'ast> for ImportCollector {
+    fn visit_item(&mut self, item: &'ast Item) {
+        if !self.skip_test_only(item_is_test_only(item)) {
+            visit::visit_item(self, item);
+        }
+    }
+
+    fn visit_impl_item(&mut self, item: &'ast ImplItem) {
+        let test_only = impl_item_attributes(item).and_then(attributes_disable_production);
+        if !self.skip_test_only(test_only) {
+            visit::visit_impl_item(self, item);
+        }
+    }
+
+    fn visit_trait_item(&mut self, item: &'ast TraitItem) {
+        let test_only = trait_item_attributes(item).and_then(attributes_disable_production);
+        if !self.skip_test_only(test_only) {
+            visit::visit_trait_item(self, item);
+        }
+    }
+
+    fn visit_foreign_item(&mut self, item: &'ast ForeignItem) {
+        let test_only = foreign_item_attributes(item).and_then(attributes_disable_production);
+        if !self.skip_test_only(test_only) {
+            visit::visit_foreign_item(self, item);
+        }
+    }
+
+    fn visit_variant(&mut self, variant: &'ast Variant) {
+        if !self.skip_test_only(attributes_disable_production(&variant.attrs)) {
+            visit::visit_variant(self, variant);
+        }
+    }
+
+    fn visit_field(&mut self, field: &'ast Field) {
+        if !self.skip_test_only(attributes_disable_production(&field.attrs)) {
+            visit::visit_field(self, field);
+        }
+    }
+
+    fn visit_arm(&mut self, arm: &'ast Arm) {
+        if !self.skip_test_only(attributes_disable_production(&arm.attrs)) {
+            visit::visit_arm(self, arm);
+        }
+    }
+
+    fn visit_local(&mut self, local: &'ast Local) {
+        if !self.skip_test_only(attributes_disable_production(&local.attrs)) {
+            visit::visit_local(self, local);
+        }
+    }
+
+    fn visit_stmt_macro(&mut self, statement: &'ast StmtMacro) {
+        if !self.skip_test_only(attributes_disable_production(&statement.attrs)) {
+            visit::visit_stmt_macro(self, statement);
+        }
+    }
+
+    fn visit_expr(&mut self, expression: &'ast Expr) {
+        let test_only = expr_attributes(expression).and_then(attributes_disable_production);
+        if !self.skip_test_only(test_only) {
+            visit::visit_expr(self, expression);
+        }
+    }
+
     fn visit_item_use(&mut self, item: &'ast ItemUse) {
         for attribute in &item.attrs {
             self.visit_attribute(attribute);
@@ -83,7 +157,7 @@ impl<'ast> Visit<'ast> for ImportCollector<'_> {
         for attribute in &item.attrs {
             self.visit_attribute(attribute);
         }
-        if self.error.is_none() && !self.test_lines.line_is_test(item.span().start().line) && item.ident == "self" && item.rename.is_some() {
+        if self.error.is_none() && item.ident == "self" && item.rename.is_some() {
             self.error = Some(anyhow::anyhow!(
                 "production crate-root extern aliases cannot be classified safely for dependency boundaries"
             ));
@@ -91,7 +165,7 @@ impl<'ast> Visit<'ast> for ImportCollector<'_> {
     }
 
     fn visit_path(&mut self, path: &'ast SynPath) {
-        if self.error.is_none() && path.leading_colon.is_none() && !self.test_lines.line_is_test(path.span().start().line) {
+        if self.error.is_none() && path.leading_colon.is_none() {
             let segments = path.segments.iter().map(|segment| normalized_ident(&segment.ident)).collect::<Vec<_>>();
             let is_qualified = segments.len() > 1 || matches!(segments.first().map(String::as_str), Some("crate" | "self" | "super"));
             if is_qualified && let Err(error) = self.collect_segments(&segments, false) {
@@ -106,7 +180,7 @@ impl<'ast> Visit<'ast> for ImportCollector<'_> {
         if self.error.is_some() {
             return;
         }
-        if let Some(restricted) = restricted_macro_identifier(&node.tokens, self.test_lines) {
+        if let Some(restricted) = restricted_macro_identifier(&node.tokens) {
             self.error = Some(anyhow::anyhow!(
                 "production macro token stream names restricted crate module {restricted:?} and cannot be classified safely"
             ));
@@ -116,7 +190,7 @@ impl<'ast> Visit<'ast> for ImportCollector<'_> {
     }
 
     fn visit_attribute(&mut self, attribute: &'ast Attribute) {
-        if self.error.is_some() || self.test_lines.line_is_test(attribute.span().start().line) {
+        if self.error.is_some() {
             return;
         }
         let tokens = match &attribute.meta {
@@ -125,7 +199,7 @@ impl<'ast> Visit<'ast> for ImportCollector<'_> {
             Meta::NameValue(value) => Some(value.value.to_token_stream()),
         };
         if let Some(tokens) = tokens
-            && let Some(restricted) = restricted_macro_identifier(&tokens, self.test_lines)
+            && let Some(restricted) = restricted_macro_identifier(&tokens)
         {
             self.error = Some(anyhow::anyhow!(
                 "production attribute token stream names restricted crate module {restricted:?} and cannot be classified safely"
@@ -247,14 +321,14 @@ fn source_module(source_path: &str, crate_root: Option<&str>) -> Result<Vec<Stri
     Ok(parts)
 }
 
-fn restricted_macro_identifier(tokens: &TokenStream, test_lines: &TestLineCollector) -> Option<String> {
+fn restricted_macro_identifier(tokens: &TokenStream) -> Option<String> {
     tokens.clone().into_iter().find_map(|token| match token {
-        TokenTree::Group(group) => restricted_macro_identifier(&group.stream(), test_lines),
-        TokenTree::Ident(ident) if !test_lines.line_is_test(ident.span().start().line) => {
+        TokenTree::Group(group) => restricted_macro_identifier(&group.stream()),
+        TokenTree::Ident(ident) => {
             let normalized = normalized_ident(&ident);
             matches!(normalized.as_str(), "server" | "ui").then_some(normalized)
         }
-        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => None,
+        TokenTree::Punct(_) | TokenTree::Literal(_) => None,
     })
 }
 
@@ -264,9 +338,7 @@ mod tests {
 
     fn imports(path: &str, source: &str) -> Result<Vec<String>> {
         let syntax = syn::parse_file(source)?;
-        let mut test_lines = TestLineCollector::new(source.lines().count());
-        test_lines.visit_file(&syntax)?;
-        production_internal_imports(&syntax, path, Some("src/lib.rs"), &test_lines)
+        production_internal_imports(&syntax, path, Some("src/lib.rs"))
     }
 
     #[test]
@@ -305,22 +377,15 @@ mod tests {
         assert_eq!(imports("src/adapter.rs", source).expect("lexical bare paths"), ["crate::server::Actual"]);
 
         let syntax = syn::parse_file("use server::AtRoot;\n")?;
-        let mut test_lines = TestLineCollector::new(1);
-        test_lines.visit_file(&syntax)?;
-        assert_eq!(
-            production_internal_imports(&syntax, "src/core.rs", Some("src/core.rs"), &test_lines)?,
-            ["crate::server::AtRoot"]
-        );
+        assert_eq!(production_internal_imports(&syntax, "src/core.rs", Some("src/core.rs"))?, ["crate::server::AtRoot"]);
         Ok(())
     }
 
     #[test]
     fn nested_custom_library_roots_define_relative_module_paths() -> Result<()> {
         let syntax = syn::parse_file("use super::server::Service;\n")?;
-        let mut test_lines = TestLineCollector::new(1);
-        test_lines.visit_file(&syntax)?;
         assert_eq!(
-            production_internal_imports(&syntax, "src/core/worker.rs", Some("src/core/lib.rs"), &test_lines)?,
+            production_internal_imports(&syntax, "src/core/worker.rs", Some("src/core/lib.rs"))?,
             ["crate::server::Service"]
         );
         Ok(())
@@ -342,6 +407,12 @@ mod tests {
 
         let test_only = "#[cfg(test)]\n#[adapter(crate::ui::View)]\nfn build() {}\n";
         assert!(imports("src/adapter.rs", test_only).expect("test-only attribute").is_empty());
+    }
+
+    #[test]
+    fn test_only_and_production_items_on_one_line_are_distinguished() {
+        let source = "#[cfg(test)] fn helper() { crate::ui::test_only(); } use crate::server::Service;\n";
+        assert_eq!(imports("src/adapter.rs", source).expect("same-line items"), ["crate::server::Service"]);
     }
 
     #[test]

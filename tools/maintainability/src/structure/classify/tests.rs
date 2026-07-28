@@ -223,6 +223,26 @@ fn nested_custom_library_targets_resolve_child_imports_from_the_crate_root() {
 }
 
 #[test]
+fn custom_library_roots_do_not_create_ordinary_module_edges() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src/core", "tests", "benches"] {
+        fs::create_dir_all(repository.path().join(root)).expect("source root");
+    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+         \n[lib]\npath = \"src/core.rs\"\n\
+         \n[[bin]]\nname = \"unrelated\"\npath = \"src/core/worker.rs\"\n",
+    )
+    .expect("package manifest");
+    fs::write(repository.path().join("src/core.rs"), "mod worker;\n").expect("custom library root");
+    fs::write(repository.path().join("src/worker.rs"), "fn library_worker() {}\n").expect("library worker");
+    fs::write(repository.path().join("src/core/worker.rs"), "fn main() {}\n").expect("unrelated binary");
+
+    scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).expect("valid disjoint targets");
+}
+
+#[test]
 fn composition_targets_cannot_overlap_library_sources() {
     let repository = tempfile::tempdir().expect("temporary repository");
     for root in ["src", "tests", "benches"] {

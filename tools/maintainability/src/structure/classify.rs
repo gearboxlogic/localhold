@@ -220,7 +220,7 @@ fn measure_sources_with_roots(
                 if !path.starts_with("src/") || composition_roots.contains(&path) || path.starts_with("src/server/") || path.starts_with("src/ui/") {
                     Vec::new()
                 } else {
-                    production_internal_imports(&parsed.syntax, &path, library_root_for_source(&path, library_roots), &collector)?
+                    production_internal_imports(&parsed.syntax, &path, library_root_for_source(&path, library_roots))?
                 },
             )
         };
@@ -262,13 +262,11 @@ fn discover_test_only_files(
     let known: BTreeSet<_> = parsed.keys().cloned().collect();
     let mut graph = ModuleGraph { known: &known, edges: Vec::new() };
     for (path, source) in parsed {
-        let module_dir = module_directory(path)?;
-        graph.collect(path, &source.syntax.items, &module_dir, false)?;
         if production_roots.contains(path) || explicit_test_roots.contains(path) {
             let crate_root_dir = Path::new(path).parent().context("Cargo target root has no parent directory")?;
-            if crate_root_dir != module_dir {
-                graph.collect(path, &source.syntax.items, crate_root_dir, false)?;
-            }
+            graph.collect(path, &source.syntax.items, crate_root_dir, false)?;
+        } else {
+            graph.collect(path, &source.syntax.items, &module_directory(path)?, false)?;
         }
     }
     let edges = graph.edges;

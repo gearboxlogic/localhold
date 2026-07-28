@@ -44,10 +44,6 @@ impl TestLineCollector {
         self.test_lines.iter().filter(|line| **line).count()
     }
 
-    fn line_is_test(&self, line: usize) -> bool {
-        line > 0 && self.test_lines.get(line - 1).copied().unwrap_or(false)
-    }
-
     fn classify<T: syn::spanned::Spanned>(&mut self, attributes: Result<&[Attribute]>, node: &T) -> bool {
         match attributes.and_then(|attributes| attributes_disable_production(attributes).map(|test_only| (attributes, test_only))) {
             Ok((attributes, true)) => {
@@ -190,7 +186,7 @@ fn meta_contains_path(meta: &Meta) -> Result<bool> {
     arguments.iter().skip(1).try_fold(false, |found, nested| Ok(found || meta_contains_path(nested)?))
 }
 
-fn attributes_disable_production(attributes: &[Attribute]) -> Result<bool> {
+pub(super) fn attributes_disable_production(attributes: &[Attribute]) -> Result<bool> {
     for attribute in attributes {
         if attribute.path().is_ident("cfg") {
             let predicate = parse_single_meta(attribute).context("parse cfg predicate for line classification")?;
@@ -307,7 +303,7 @@ const fn combine_any(left: Truth, right: Truth) -> Truth {
     }
 }
 
-fn item_attributes(item: &Item) -> Result<&[Attribute]> {
+pub(super) fn item_attributes(item: &Item) -> Result<&[Attribute]> {
     Ok(match item {
         Item::Const(item) => &item.attrs,
         Item::Enum(item) => &item.attrs,
@@ -329,7 +325,7 @@ fn item_attributes(item: &Item) -> Result<&[Attribute]> {
     })
 }
 
-fn impl_item_attributes(item: &ImplItem) -> Result<&[Attribute]> {
+pub(super) fn impl_item_attributes(item: &ImplItem) -> Result<&[Attribute]> {
     Ok(match item {
         ImplItem::Const(item) => &item.attrs,
         ImplItem::Fn(item) => &item.attrs,
@@ -340,7 +336,7 @@ fn impl_item_attributes(item: &ImplItem) -> Result<&[Attribute]> {
     })
 }
 
-fn trait_item_attributes(item: &TraitItem) -> Result<&[Attribute]> {
+pub(super) fn trait_item_attributes(item: &TraitItem) -> Result<&[Attribute]> {
     Ok(match item {
         TraitItem::Const(item) => &item.attrs,
         TraitItem::Fn(item) => &item.attrs,
@@ -351,7 +347,7 @@ fn trait_item_attributes(item: &TraitItem) -> Result<&[Attribute]> {
     })
 }
 
-fn foreign_item_attributes(item: &ForeignItem) -> Result<&[Attribute]> {
+pub(super) fn foreign_item_attributes(item: &ForeignItem) -> Result<&[Attribute]> {
     Ok(match item {
         ForeignItem::Fn(item) => &item.attrs,
         ForeignItem::Macro(item) => &item.attrs,
@@ -362,7 +358,7 @@ fn foreign_item_attributes(item: &ForeignItem) -> Result<&[Attribute]> {
     })
 }
 
-fn expr_attributes(expression: &Expr) -> Result<&[Attribute]> {
+pub(super) fn expr_attributes(expression: &Expr) -> Result<&[Attribute]> {
     Ok(match expression {
         Expr::Array(value) => &value.attrs,
         Expr::Assign(value) => &value.attrs,

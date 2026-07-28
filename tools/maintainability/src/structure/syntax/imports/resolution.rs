@@ -5,7 +5,7 @@ use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens as _;
 use syn::{Attribute, Meta, Path as SynPath, UseTree};
 
-use super::super::{normalized_ident, production_cfg_attr_metas};
+use super::super::{ProductionCfgContext, normalized_ident, production_cfg_attr_metas};
 
 pub(super) struct UsePath {
     pub(super) segments: Vec<String>,
@@ -127,18 +127,23 @@ pub(super) fn restricted_token_identifier(tokens: &TokenStream, module: &[String
     Ok(None)
 }
 
-pub(super) fn restricted_attribute_identifier(attribute: &Attribute, module: &[String], rust_2015_absolute_paths: bool) -> Result<Option<String>> {
+pub(super) fn restricted_attribute_identifier(
+    attribute: &Attribute,
+    module: &[String],
+    rust_2015_absolute_paths: bool,
+    cfg_context: &ProductionCfgContext,
+) -> Result<Option<String>> {
     if !attribute.path().is_ident("cfg_attr") {
         return restricted_meta_contents(&attribute.meta, module, rust_2015_absolute_paths);
     }
     let Meta::List(list) = &attribute.meta else {
         return Ok(None);
     };
-    restricted_cfg_attr_contents(&list.tokens, module, rust_2015_absolute_paths)
+    restricted_cfg_attr_contents(&list.tokens, module, rust_2015_absolute_paths, cfg_context)
 }
 
-fn restricted_cfg_attr_contents(tokens: &TokenStream, module: &[String], rust_2015_absolute_paths: bool) -> Result<Option<String>> {
-    for nested in production_cfg_attr_metas(tokens)? {
+fn restricted_cfg_attr_contents(tokens: &TokenStream, module: &[String], rust_2015_absolute_paths: bool, cfg_context: &ProductionCfgContext) -> Result<Option<String>> {
+    for nested in production_cfg_attr_metas(tokens, cfg_context)? {
         let restricted = restricted_meta_contents(&nested, module, rust_2015_absolute_paths)?;
         if restricted.is_some() {
             return Ok(restricted);

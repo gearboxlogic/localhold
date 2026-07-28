@@ -29,58 +29,59 @@ struct CfgAttr {
     nested: Vec<Meta>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(in crate::structure) struct ProductionCfgContext {
+    constraints: Vec<Predicate>,
+}
+
 pub(in crate::structure) fn attributes_disable_production(attributes: &[Attribute]) -> Result<bool> {
+    Ok(production_cfg_context(attributes, &ProductionCfgContext::default())?.is_none())
+}
+
+pub(in crate::structure) fn production_cfg_context(attributes: &[Attribute], inherited: &ProductionCfgContext) -> Result<Option<ProductionCfgContext>> {
+    let mut context = inherited.clone();
     for attribute in attributes {
         if attribute.path().is_ident("cfg") {
-            let predicate = parse_single_meta(attribute).context("parse cfg predicate for line classification")?;
-            if !predicates_are_satisfiable(&[], Some(&predicate))? {
-                return Ok(true);
-            }
-        } else if attribute.path().is_ident("cfg_attr") && cfg_attr_disables_production(attribute)? {
-            return Ok(true);
+            let meta = parse_single_meta(attribute).context("parse cfg predicate for line classification")?;
+            context.constraints.push(predicate(&meta)?);
+        } else if attribute.path().is_ident("cfg_attr")
+            && let Meta::List(list) = &attribute.meta
+        {
+            collect_cfg_attr_constraints(&list.tokens, Predicate::Constant(true), &mut context.constraints)?;
         }
     }
-    Ok(false)
+    Ok(context_is_satisfiable(&context, None).then_some(context))
 }
 
-fn cfg_attr_tokens_disable_production(tokens: &proc_macro2::TokenStream) -> Result<bool> {
-    let attribute = parse_cfg_attr(tokens, "line classification")?;
-    if !predicate_is_implied(&[], &attribute.condition)? {
-        return Ok(false);
-    }
-    let active = [attribute.condition];
-    attribute
-        .nested
-        .iter()
-        .try_fold(false, |disabled, meta| Ok(disabled || meta_disables_active_branch(meta, &active)?))
-}
-
-pub(in crate::structure) fn production_cfg_attr_metas(tokens: &proc_macro2::TokenStream) -> Result<Vec<Meta>> {
+pub(in crate::structure) fn production_cfg_attr_metas(tokens: &proc_macro2::TokenStream, context: &ProductionCfgContext) -> Result<Vec<Meta>> {
     let mut metas = Vec::new();
-    collect_production_cfg_attr_metas(tokens, &[], &mut metas)?;
+    collect_production_cfg_attr_metas(tokens, context, Predicate::Constant(true), &mut metas)?;
     Ok(metas)
 }
 
-fn cfg_attr_disables_production(attribute: &Attribute) -> Result<bool> {
-    let Meta::List(list) = &attribute.meta else {
-        return Ok(false);
-    };
-    cfg_attr_tokens_disable_production(&list.tokens)
+fn collect_cfg_attr_constraints(tokens: &proc_macro2::TokenStream, parent_activation: Predicate, output: &mut Vec<Predicate>) -> Result<()> {
+    let attribute = parse_cfg_attr(tokens, "production constraint classification")?;
+    let activation = Predicate::All(vec![parent_activation, predicate(&attribute.condition)?]);
+    for meta in attribute.nested {
+        if meta.path().is_ident("cfg") {
+            let required = predicate(&parse_cfg_meta(&meta)?)?;
+            output.push(Predicate::Any(vec![Predicate::Not(Box::new(activation.clone())), required]));
+        } else if meta.path().is_ident("cfg_attr")
+            && let Meta::List(list) = meta
+        {
+            collect_cfg_attr_constraints(&list.tokens, activation.clone(), output)?;
+        }
+    }
+    Ok(())
 }
 
-fn collect_production_cfg_attr_metas(tokens: &proc_macro2::TokenStream, assumptions: &[Meta], output: &mut Vec<Meta>) -> Result<()> {
+fn collect_production_cfg_attr_metas(tokens: &proc_macro2::TokenStream, context: &ProductionCfgContext, parent_activation: Predicate, output: &mut Vec<Meta>) -> Result<()> {
     let attribute = parse_cfg_attr(tokens, "production attribute classification")?;
-    if !predicates_are_satisfiable(assumptions, Some(&attribute.condition))? {
+    let activation = Predicate::All(vec![parent_activation, predicate(&attribute.condition)?]);
+    if !context_is_satisfiable(context, Some(activation.clone())) {
         return Ok(());
     }
 
-    let mut active = assumptions.to_vec();
-    active.push(attribute.condition);
-    for meta in &attribute.nested {
-        if meta_disables_active_branch(meta, &active)? {
-            return Ok(());
-        }
-    }
     for meta in attribute.nested {
         if meta.path().is_ident("cfg") {
             continue;
@@ -89,35 +90,12 @@ fn collect_production_cfg_attr_metas(tokens: &proc_macro2::TokenStream, assumpti
             let Meta::List(list) = meta else {
                 continue;
             };
-            collect_production_cfg_attr_metas(&list.tokens, &active, output)?;
+            collect_production_cfg_attr_metas(&list.tokens, context, activation.clone(), output)?;
         } else {
             output.push(meta);
         }
     }
     Ok(())
-}
-
-fn meta_disables_active_branch(meta: &Meta, assumptions: &[Meta]) -> Result<bool> {
-    if meta.path().is_ident("cfg") {
-        let predicate = parse_cfg_meta(meta)?;
-        return Ok(!predicates_are_satisfiable(assumptions, Some(&predicate))?);
-    }
-    if !meta.path().is_ident("cfg_attr") {
-        return Ok(false);
-    }
-    let Meta::List(list) = meta else {
-        return Ok(false);
-    };
-    let attribute = parse_cfg_attr(&list.tokens, "nested production attribute classification")?;
-    if !predicates_are_satisfiable(assumptions, Some(&attribute.condition))? || !predicate_is_implied(assumptions, &attribute.condition)? {
-        return Ok(false);
-    }
-    let mut active = assumptions.to_vec();
-    active.push(attribute.condition);
-    attribute
-        .nested
-        .iter()
-        .try_fold(false, |disabled, nested| Ok(disabled || meta_disables_active_branch(nested, &active)?))
 }
 
 fn parse_cfg_attr(tokens: &proc_macro2::TokenStream, label: &str) -> Result<CfgAttr> {
@@ -156,20 +134,10 @@ fn parse_single_meta(attribute: &Attribute) -> Result<Meta> {
     predicates.into_iter().next().context("cfg predicate disappeared")
 }
 
-fn predicates_are_satisfiable(assumptions: &[Meta], condition: Option<&Meta>) -> Result<bool> {
-    let mut predicates = assumptions.iter().map(predicate).collect::<Result<Vec<_>>>()?;
-    if let Some(condition) = condition {
-        predicates.push(predicate(condition)?);
-    }
-    let conjunction = Predicate::All(predicates);
-    Ok(any_assignment_satisfies(&conjunction))
-}
-
-fn predicate_is_implied(assumptions: &[Meta], condition: &Meta) -> Result<bool> {
-    let assumptions = Predicate::All(assumptions.iter().map(predicate).collect::<Result<Vec<_>>>()?);
-    let condition = predicate(condition)?;
-    let counterexample = Predicate::All(vec![assumptions, Predicate::Not(Box::new(condition))]);
-    Ok(!any_assignment_satisfies(&counterexample))
+fn context_is_satisfiable(context: &ProductionCfgContext, condition: Option<Predicate>) -> bool {
+    let mut constraints = context.constraints.clone();
+    constraints.extend(condition);
+    any_assignment_satisfies(&Predicate::All(constraints))
 }
 
 fn predicate(meta: &Meta) -> Result<Predicate> {

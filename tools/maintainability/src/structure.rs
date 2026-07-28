@@ -29,7 +29,11 @@ pub fn check(workspace: &Path) -> Result<()> {
     import_policy.compare_current(&current)?;
     let current_component_paths = manifest.current_component_paths()?;
     let canonical_current_paths = manifest.canonical_current_paths()?;
-    concrete_store_policy.compare_current(&current, PathAttribution::with_lineage(&current_component_paths, &canonical_current_paths))?;
+    let current_site_paths = manifest.current_site_paths()?;
+    concrete_store_policy.compare_current(
+        &current,
+        PathAttribution::with_lineage(&current_component_paths, &canonical_current_paths, &current_site_paths),
+    )?;
     let baseline = classify::scan_revision(workspace, &manifest.baseline_commit, &manifest.tracked_roots)?;
     manifest.compare_baseline(&baseline)?;
     import_policy.compare_baseline(&baseline)?;
@@ -38,12 +42,17 @@ pub fn check(workspace: &Path) -> Result<()> {
     concrete_store_policy.compare_site_fingerprints(
         &current,
         &baseline,
-        PathAttribution::with_lineage(&current_component_paths, &canonical_current_paths),
+        PathAttribution::with_lineage(&current_component_paths, &canonical_current_paths, &current_site_paths),
         PathAttribution::identity(&baseline_component_paths),
     )?;
-    manifest.compare_previous_revision(workspace, &current)?;
+    let previous = manifest.compare_previous_revision(workspace, &current)?;
     import_policy.compare_previous_revision(workspace)?;
-    concrete_store_policy.compare_previous_revision(workspace)
+    concrete_store_policy.compare_previous_revision(
+        workspace,
+        &current,
+        PathAttribution::with_lineage(&current_component_paths, &canonical_current_paths, &current_site_paths),
+        previous.as_ref(),
+    )
 }
 
 pub fn scan_workspace(workspace: &Path) -> Result<Inventory> {

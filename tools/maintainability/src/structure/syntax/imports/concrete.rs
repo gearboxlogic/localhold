@@ -8,7 +8,7 @@ use syn::{Attribute, Meta, Token};
 
 use crate::scan::syntax_fingerprint;
 
-use super::super::{normalized_ident, production_cfg_attr_metas};
+use super::super::{ProductionCfgContext, normalized_ident, production_cfg_attr_metas};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct ConcreteStoreCounts {
@@ -66,18 +66,26 @@ impl ConcreteStoreInventory {
         }
     }
 
-    pub(super) fn record_attribute(&mut self, attribute: &Attribute, site_context: &str) -> Result<()> {
+    pub(super) fn record_attribute(&mut self, attribute: &Attribute, site_context: &str, cfg_context: &ProductionCfgContext) -> Result<()> {
         if !attribute.path().is_ident("cfg_attr") {
             return self.record_meta(&attribute.meta, site_context);
         }
         let Meta::List(list) = &attribute.meta else {
             return Ok(());
         };
-        self.record_cfg_attr(&list.tokens, site_context)
+        self.record_cfg_attr(&list.tokens, site_context, cfg_context)
     }
 
-    fn record_cfg_attr(&mut self, tokens: &TokenStream, site_context: &str) -> Result<()> {
-        for meta in production_cfg_attr_metas(tokens)? {
+    pub(super) fn record_generic_default_attribute(&mut self, attribute: &Attribute, site_context: &str, cfg_context: &ProductionCfgContext) -> Result<()> {
+        let mut discovered = Self::default();
+        discovered.record_attribute(attribute, site_context, cfg_context)?;
+        self.generic_default_sites.sqlite_store.extend(discovered.sites.sqlite_store);
+        self.generic_default_sites.postgres_store.extend(discovered.sites.postgres_store);
+        Ok(())
+    }
+
+    fn record_cfg_attr(&mut self, tokens: &TokenStream, site_context: &str, cfg_context: &ProductionCfgContext) -> Result<()> {
+        for meta in production_cfg_attr_metas(tokens, cfg_context)? {
             self.record_meta(&meta, site_context)?;
         }
         Ok(())

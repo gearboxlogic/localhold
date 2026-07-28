@@ -368,6 +368,38 @@ fn nested_cfg_attr_reuses_outer_condition_when_classifying_siblings() -> Result<
 }
 
 #[test]
+fn sibling_cfg_predicates_are_conjoined_for_production_attributes() -> Result<()> {
+    let source = "#[cfg(feature = \"x\")]\n\
+                  #[cfg(not(feature = \"x\"))]\n\
+                  struct Contradictory(SqliteStore);\n\
+                  #[cfg(feature = \"x\")]\n\
+                  #[cfg_attr(feature = \"x\", cfg(feature = \"y\"))]\n\
+                  #[cfg_attr(feature = \"x\", cfg(not(feature = \"y\")))]\n\
+                  struct ContradictoryConditional(SqliteStore);\n\
+                  #[cfg(feature = \"x\")]\n\
+                  mod parent { #[cfg(not(feature = \"x\"))] struct ContradictoryChild(SqliteStore); }\n\
+                  #[cfg(feature = \"x\")]\n\
+                  #[cfg_attr(not(feature = \"x\"), serde(default = PostgresStore))]\n\
+                  struct InactiveAttribute;\n\
+                  #[cfg(feature = \"x\")]\n\
+                  #[cfg_attr(feature = \"x\", serde(default = PostgresStore))]\n\
+                  struct ActiveAttribute;\n";
+    assert_eq!(
+        concrete_facts(source)?.concrete_stores,
+        ConcreteStoreCounts {
+            sqlite_store: 0,
+            postgres_store: 1,
+        }
+    );
+
+    let restricted = "#[cfg(feature = \"x\")]\n\
+                      #[cfg_attr(not(feature = \"x\"), serde(default = \"crate::server::default\"))]\n\
+                      struct InactiveAttribute;\n";
+    assert!(imports("src/adapter.rs", restricted)?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn every_serde_callback_key_is_scanned_as_rust() -> Result<()> {
     let source = "#[serde(skip_serializing_if = \"SqliteStore::is_empty\")]\n\
                   struct Skip(usize);\n\
@@ -491,6 +523,21 @@ fn generic_defaults_use_cfg_aware_syntax_traversal() -> Result<()> {
     )?;
     assert_eq!(facts.concrete_stores, ConcreteStoreCounts::default());
     assert_eq!(facts.generic_default_concrete_store_sites, ConcreteStoreSites::default());
+    Ok(())
+}
+
+#[test]
+fn generic_default_attributes_are_inventoried() -> Result<()> {
+    let facts = concrete_facts(
+        "struct Version<const N: usize = {\n\
+             #[serde(bound = \"SqliteStore: Serialize\")]\n\
+             struct AttributeBound;\n\
+             1\n\
+         }>;\n",
+    )?;
+    assert_eq!(facts.concrete_stores.sqlite_store, 1);
+    assert_eq!(facts.generic_default_concrete_store_sites.sqlite_store.len(), 1);
+    assert_eq!(facts.concrete_store_sites.sqlite_store, facts.generic_default_concrete_store_sites.sqlite_store);
     Ok(())
 }
 

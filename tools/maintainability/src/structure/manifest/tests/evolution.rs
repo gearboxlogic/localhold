@@ -43,6 +43,29 @@ fn current_paths_retain_their_transitive_baseline_lineage() {
 }
 
 #[test]
+fn retained_rename_successor_keeps_site_identity_when_later_split() {
+    let mut manifest = ordinary_manifest("src/lib.rs", 10, 10);
+    manifest.components[0].paths = strings(&["src/renamed.rs", "src/extracted.rs"]);
+    manifest
+        .path_evolutions
+        .push(evolution("rename.first", PathEvolutionKind::Rename, &["src/lib.rs"], &["src/renamed.rs"]));
+    manifest.path_evolutions.push(evolution(
+        "split.later",
+        PathEvolutionKind::Split,
+        &["src/renamed.rs"],
+        &["src/renamed.rs", "src/extracted.rs"],
+    ));
+
+    assert_eq!(
+        manifest.current_site_paths().expect("transitive site identity"),
+        std::collections::BTreeMap::from([
+            ("src/extracted.rs".to_owned(), "src/extracted.rs".to_owned()),
+            ("src/renamed.rs".to_owned(), "src/lib.rs".to_owned()),
+        ])
+    );
+}
+
+#[test]
 fn current_production_paths_require_governed_baseline_lineage() {
     let mut manifest = ordinary_manifest("src/lib.rs", 10, 10);
     manifest.components[0].paths.push("src/unreviewed.rs".to_owned());

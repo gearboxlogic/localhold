@@ -10,8 +10,8 @@ use syn::{
 use crate::scan::{reviewed_attribute_expansion, reviewed_macro_expansion};
 
 use super::{
-    attributes_disable_production, expr_attributes, fn_arg_attributes, foreign_item_attributes, generic_param_attributes, impl_item_attributes, item_is_test_only,
-    normalized_ident, pat_attributes, trait_item_attributes,
+    ProductionCfgContext, expr_attributes, fn_arg_attributes, foreign_item_attributes, generic_param_attributes, impl_item_attributes, item_attributes, normalized_ident,
+    pat_attributes, production_cfg_context, trait_item_attributes,
 };
 
 mod concrete;
@@ -47,6 +47,7 @@ pub fn production_syntax_facts(file: &syn::File, source_path: &str, crate_root: 
         concrete_stores: ConcreteStoreInventory::default(),
         site_context: None,
         generic_default_depth: 0,
+        cfg_context: ProductionCfgContext::default(),
         error: None,
         rust_2015_absolute_paths: options.rust_2015_absolute_paths,
         collect_internal_imports: options.collect_internal_imports,
@@ -73,6 +74,7 @@ struct ProductionSyntaxCollector {
     concrete_stores: ConcreteStoreInventory,
     site_context: Option<String>,
     generic_default_depth: usize,
+    cfg_context: ProductionCfgContext,
     error: Option<anyhow::Error>,
     rust_2015_absolute_paths: bool,
     collect_internal_imports: bool,
@@ -125,17 +127,23 @@ impl ProductionSyntaxCollector {
         Ok(())
     }
 
-    fn skip_test_only(&mut self, test_only: Result<bool>) -> bool {
+    fn enter_production_node(&mut self, attributes: Result<&[Attribute]>) -> Option<ProductionCfgContext> {
         if self.error.is_some() {
-            return true;
+            return None;
         }
-        match test_only {
-            Ok(test_only) => test_only,
+        let active = match attributes.and_then(|attributes| production_cfg_context(attributes, &self.cfg_context)) {
+            Ok(Some(active)) => active,
+            Ok(None) => return None,
             Err(error) => {
                 self.error = Some(error);
-                true
+                return None;
             }
-        }
+        };
+        Some(std::mem::replace(&mut self.cfg_context, active))
+    }
+
+    fn leave_production_node(&mut self, previous: ProductionCfgContext) {
+        self.cfg_context = previous;
     }
 
     fn record_concrete_store(&mut self, ident: &proc_macro2::Ident) {
@@ -181,100 +189,101 @@ impl ProductionSyntaxCollector {
 }
 
 macro_rules! visit_production_node {
-    ($method:ident, $walk:ident, $node:ty, $binding:ident => $test_only:expr) => {
+    ($method:ident, $walk:ident, $node:ty, $binding:ident => $attributes:expr) => {
         fn $method(&mut self, $binding: &'ast $node) {
-            let test_only: Result<bool> = $test_only;
-            if !self.skip_test_only(test_only) {
-                visit::$walk(self, $binding);
-            }
+            let attributes: Result<&[Attribute]> = $attributes;
+            let Some(previous) = self.enter_production_node(attributes) else {
+                return;
+            };
+            visit::$walk(self, $binding);
+            self.leave_production_node(previous);
         }
     };
 }
 
 impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
-    visit_production_node!(visit_file, visit_file, File, node => attributes_disable_production(&node.attrs));
-    visit_production_node!(visit_expr, visit_expr, Expr, node => expr_attributes(node).and_then(attributes_disable_production));
-    visit_production_node!(visit_variant, visit_variant, Variant, node => attributes_disable_production(&node.attrs));
-    visit_production_node!(visit_arm, visit_arm, Arm, node => attributes_disable_production(&node.attrs));
-    visit_production_node!(visit_local, visit_local, Local, node => attributes_disable_production(&node.attrs));
-    visit_production_node!(visit_stmt_macro, visit_stmt_macro, StmtMacro, node => attributes_disable_production(&node.attrs));
+    visit_production_node!(visit_file, visit_file, File, node => Ok(node.attrs.as_slice()));
+    visit_production_node!(visit_expr, visit_expr, Expr, node => expr_attributes(node));
+    visit_production_node!(visit_variant, visit_variant, Variant, node => Ok(node.attrs.as_slice()));
+    visit_production_node!(visit_arm, visit_arm, Arm, node => Ok(node.attrs.as_slice()));
+    visit_production_node!(visit_local, visit_local, Local, node => Ok(node.attrs.as_slice()));
+    visit_production_node!(visit_stmt_macro, visit_stmt_macro, StmtMacro, node => Ok(node.attrs.as_slice()));
     visit_production_node!(
         visit_fn_arg,
         visit_fn_arg,
         FnArg,
-        node => attributes_disable_production(fn_arg_attributes(node))
+        node => Ok(fn_arg_attributes(node))
     );
-    visit_production_node!(
-        visit_pat,
-        visit_pat,
-        Pat,
-        node => pat_attributes(node).and_then(attributes_disable_production)
-    );
+    visit_production_node!(visit_pat, visit_pat, Pat, node => pat_attributes(node));
     visit_production_node!(
         visit_bare_fn_arg,
         visit_bare_fn_arg,
         BareFnArg,
-        node => attributes_disable_production(&node.attrs)
+        node => Ok(node.attrs.as_slice())
     );
     visit_production_node!(
         visit_bare_variadic,
         visit_bare_variadic,
         BareVariadic,
-        node => attributes_disable_production(&node.attrs)
+        node => Ok(node.attrs.as_slice())
     );
     visit_production_node!(
         visit_variadic,
         visit_variadic,
         Variadic,
-        node => attributes_disable_production(&node.attrs)
+        node => Ok(node.attrs.as_slice())
     );
     visit_production_node!(
         visit_field_pat,
         visit_field_pat,
         FieldPat,
-        node => attributes_disable_production(&node.attrs)
+        node => Ok(node.attrs.as_slice())
     );
     visit_production_node!(
         visit_field_value,
         visit_field_value,
         FieldValue,
-        node => attributes_disable_production(&node.attrs)
+        node => Ok(node.attrs.as_slice())
     );
 
     fn visit_item(&mut self, node: &'ast Item) {
-        if self.skip_test_only(item_is_test_only(node)) {
+        let Some(cfg) = self.enter_production_node(item_attributes(node)) else {
             return;
-        }
+        };
         let previous = self.enter_site_context("item", node);
         visit::visit_item(self, node);
         self.leave_site_context(previous);
+        self.leave_production_node(cfg);
     }
 
     fn visit_impl_item(&mut self, node: &'ast ImplItem) {
-        if self.skip_test_only(impl_item_attributes(node).and_then(attributes_disable_production)) {
+        let Some(cfg) = self.enter_production_node(impl_item_attributes(node)) else {
             return;
-        }
+        };
         let previous = self.enter_site_context("impl-item", node);
         visit::visit_impl_item(self, node);
         self.leave_site_context(previous);
+        self.leave_production_node(cfg);
     }
 
     fn visit_trait_item(&mut self, node: &'ast TraitItem) {
-        if self.skip_test_only(trait_item_attributes(node).and_then(attributes_disable_production)) {
+        let Some(cfg) = self.enter_production_node(trait_item_attributes(node)) else {
             return;
-        }
+        };
         let previous = self.enter_site_context("trait-item", node);
         visit::visit_trait_item(self, node);
         self.leave_site_context(previous);
+        self.leave_production_node(cfg);
     }
 
     fn visit_foreign_item(&mut self, node: &'ast ForeignItem) {
-        if self.skip_test_only(foreign_item_attributes(node).and_then(attributes_disable_production)) {
+        let Some(cfg) = self.enter_production_node(foreign_item_attributes(node)) else {
             return;
-        }
+        };
         let previous = self.enter_site_context("foreign-item", node);
         visit::visit_foreign_item(self, node);
         self.leave_site_context(previous);
+        self.leave_production_node(cfg);
     }
 
     fn visit_stmt(&mut self, node: &'ast Stmt) {
@@ -284,18 +293,19 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_field(&mut self, node: &'ast Field) {
-        if self.skip_test_only(attributes_disable_production(&node.attrs)) {
+        let Some(cfg) = self.enter_production_node(Ok(node.attrs.as_slice())) else {
             return;
-        }
+        };
         let previous = self.enter_site_context("field", node);
         visit::visit_field(self, node);
         self.leave_site_context(previous);
+        self.leave_production_node(cfg);
     }
 
     fn visit_generic_param(&mut self, node: &'ast GenericParam) {
-        if self.skip_test_only(attributes_disable_production(generic_param_attributes(node))) {
+        let Some(cfg) = self.enter_production_node(Ok(generic_param_attributes(node))) else {
             return;
-        }
+        };
         let previous = self.enter_site_context("generic-parameter", node);
         match node {
             GenericParam::Lifetime(parameter) => visit::visit_lifetime_param(self, parameter),
@@ -323,6 +333,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             }
         }
         self.leave_site_context(previous);
+        self.leave_production_node(cfg);
     }
 
     fn visit_item_use(&mut self, item: &'ast ItemUse) {
@@ -435,7 +446,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             return;
         }
         if self.collect_internal_imports {
-            match restricted_attribute_identifier(attribute, &self.module, self.rust_2015_absolute_paths) {
+            match restricted_attribute_identifier(attribute, &self.module, self.rust_2015_absolute_paths, &self.cfg_context) {
                 Ok(Some(restricted)) => {
                     self.error = Some(anyhow::anyhow!(
                         "production attribute token stream names restricted crate module {restricted:?} and cannot be classified safely"
@@ -454,9 +465,14 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             return;
         }
         let previous = self.enter_site_context("attribute", attribute);
-        if let Err(error) = self
-            .concrete_stores
-            .record_attribute(attribute, self.site_context.as_deref().expect("attribute site context"))
+        let site_context = self.site_context.as_deref().expect("attribute site context");
+        if let Err(error) = self.concrete_stores.record_attribute(attribute, site_context, &self.cfg_context) {
+            self.error = Some(error);
+            self.leave_site_context(previous);
+            return;
+        }
+        if self.generic_default_depth > 0
+            && let Err(error) = self.concrete_stores.record_generic_default_attribute(attribute, site_context, &self.cfg_context)
         {
             self.error = Some(error);
             self.leave_site_context(previous);

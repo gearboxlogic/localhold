@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use super::classify::{FileMeasurement, Inventory};
+use super::manifest::PreviousRevision;
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 const BASE_REVISION_ENV: &str = "LOCALHOLD_MAINTAINABILITY_BASE_REV";
@@ -57,31 +58,42 @@ type ObservedStore = (String, String, ConcreteStoreName);
 
 #[derive(Clone, Copy)]
 pub(super) struct PathAttribution<'a> {
-    component_paths: &'a BTreeMap<&'a str, &'a str>,
-    canonical_paths: Option<&'a BTreeMap<String, String>>,
+    components: &'a BTreeMap<&'a str, &'a str>,
+    canonical: Option<&'a BTreeMap<String, String>>,
+    sites: Option<&'a BTreeMap<String, String>>,
 }
 
 impl<'a> PathAttribution<'a> {
     pub(super) const fn identity(component_paths: &'a BTreeMap<&'a str, &'a str>) -> Self {
         Self {
-            component_paths,
-            canonical_paths: None,
+            components: component_paths,
+            canonical: None,
+            sites: None,
         }
     }
 
-    pub(super) const fn with_lineage(component_paths: &'a BTreeMap<&'a str, &'a str>, canonical_paths: &'a BTreeMap<String, String>) -> Self {
+    pub(super) const fn with_lineage(
+        component_paths: &'a BTreeMap<&'a str, &'a str>,
+        canonical_paths: &'a BTreeMap<String, String>,
+        site_paths: &'a BTreeMap<String, String>,
+    ) -> Self {
         Self {
-            component_paths,
-            canonical_paths: Some(canonical_paths),
+            components: component_paths,
+            canonical: Some(canonical_paths),
+            sites: Some(site_paths),
         }
     }
 
     fn component_for(&self, path: &str) -> Option<&str> {
-        self.component_paths.get(path).copied()
+        self.components.get(path).copied()
     }
 
     fn canonical_path<'path>(&'path self, path: &'path str) -> &'path str {
-        self.canonical_paths.and_then(|paths| paths.get(path)).map_or(path, String::as_str)
+        self.canonical.and_then(|paths| paths.get(path)).map_or(path, String::as_str)
+    }
+
+    fn site_path<'path>(&'path self, path: &'path str) -> &'path str {
+        self.sites.and_then(|paths| paths.get(path)).map_or(path, String::as_str)
     }
 }
 
@@ -89,6 +101,12 @@ impl<'a> PathAttribution<'a> {
 struct AttributedPath<'a> {
     assigned_component: &'a str,
     canonical_path: &'a str,
+}
+
+#[derive(Clone, Copy)]
+struct AttributedInventory<'a> {
+    inventory: &'a Inventory,
+    paths: PathAttribution<'a>,
 }
 
 impl ConcreteStorePolicy {
@@ -108,19 +126,33 @@ impl ConcreteStorePolicy {
     }
 
     pub fn compare_site_fingerprints(&self, current: &Inventory, baseline: &Inventory, current_paths: PathAttribution<'_>, baseline_paths: PathAttribution<'_>) -> Result<()> {
+        self.compare_site_fingerprints_against(
+            AttributedInventory {
+                inventory: current,
+                paths: current_paths,
+            },
+            AttributedInventory {
+                inventory: baseline,
+                paths: baseline_paths,
+            },
+            "recovery-baseline",
+        )
+    }
+
+    fn compare_site_fingerprints_against(&self, current: AttributedInventory<'_>, reference: AttributedInventory<'_>, reference_label: &str) -> Result<()> {
         let unrestricted = self.unrestricted_components.iter().map(String::as_str).collect::<BTreeSet<_>>();
         let debt_components = self
             .debt
             .iter()
             .map(|debt| ((debt.path.clone(), debt.store), debt.component.clone()))
             .collect::<BTreeMap<_, _>>();
-        let current_sites = site_fingerprints(current, current_paths, Some(&unrestricted), Some(&debt_components), false)?;
-        let baseline_sites = site_fingerprints(baseline, baseline_paths, Some(&unrestricted), Some(&debt_components), false)?;
-        require_occurrence_subset("restricted concrete-store syntax", &current_sites, &baseline_sites)?;
+        let current_sites = site_fingerprints(current.inventory, current.paths, Some(&unrestricted), Some(&debt_components), false)?;
+        let reference_sites = site_fingerprints(reference.inventory, reference.paths, Some(&unrestricted), Some(&debt_components), false)?;
+        require_occurrence_subset("restricted concrete-store syntax", reference_label, &current_sites, &reference_sites)?;
 
-        let current_defaults = site_fingerprints(current, current_paths, None, Some(&debt_components), true)?;
-        let baseline_defaults = site_fingerprints(baseline, baseline_paths, None, Some(&debt_components), true)?;
-        require_occurrence_subset("concrete-store generic default", &current_defaults, &baseline_defaults)
+        let current_defaults = site_fingerprints(current.inventory, current.paths, None, Some(&debt_components), true)?;
+        let reference_defaults = site_fingerprints(reference.inventory, reference.paths, None, Some(&debt_components), true)?;
+        require_occurrence_subset("concrete-store generic default", reference_label, &current_defaults, &reference_defaults)
     }
 
     pub fn require_baseline_commit(&self, expected: &str) -> Result<()> {
@@ -130,7 +162,13 @@ impl ConcreteStorePolicy {
         Ok(())
     }
 
-    pub fn compare_previous_revision(&self, workspace: &Path) -> Result<()> {
+    pub fn compare_previous_revision(
+        &self,
+        workspace: &Path,
+        current: &Inventory,
+        current_paths: PathAttribution<'_>,
+        previous_structure: Option<&PreviousRevision>,
+    ) -> Result<()> {
         let Ok(revision) = env::var(BASE_REVISION_ENV) else {
             return Ok(());
         };
@@ -150,7 +188,23 @@ impl ConcreteStorePolicy {
         }
         let previous: Self = serde_json::from_slice(&output.stdout).context("parse concrete-store policy from maintainability base revision")?;
         previous.validate()?;
-        self.compare_policy(&previous)
+        self.compare_policy(&previous)?;
+
+        let previous_structure = previous_structure.context("structure policy is unavailable for concrete-store previous-revision site comparison")?;
+        let previous_component_paths = previous_structure.manifest.current_component_paths()?;
+        let previous_canonical_paths = previous_structure.manifest.canonical_current_paths()?;
+        let previous_site_paths = previous_structure.manifest.current_site_paths()?;
+        self.compare_site_fingerprints_against(
+            AttributedInventory {
+                inventory: current,
+                paths: current_paths,
+            },
+            AttributedInventory {
+                inventory: &previous_structure.inventory,
+                paths: PathAttribution::with_lineage(&previous_component_paths, &previous_canonical_paths, &previous_site_paths),
+            },
+            "previous-revision",
+        )
     }
 
     fn compare_inventory(&self, label: &str, inventory: &Inventory, paths: PathAttribution<'_>, expected_count: impl Fn(&ConcreteStoreDebt) -> usize) -> Result<()> {
@@ -289,20 +343,12 @@ fn site_fingerprints(
     generic_defaults: bool,
 ) -> Result<BTreeMap<SiteFingerprint, usize>> {
     let mut sites = BTreeMap::new();
-    let successor_counts = inventory.files.iter().fold(BTreeMap::<String, usize>::new(), |mut counts, file| {
-        *counts.entry(paths.canonical_path(&file.path).to_owned()).or_default() += 1;
-        counts
-    });
     for file in &inventory.files {
         let component = paths
             .component_for(&file.path)
             .with_context(|| format!("concrete-store syntax inventory path {:?} has no logical component", file.path))?;
         let canonical_path = paths.canonical_path(&file.path);
-        let site_path = if successor_counts.get(canonical_path).copied().unwrap_or_default() > 1 {
-            file.path.as_str()
-        } else {
-            canonical_path
-        };
+        let site_path = paths.site_path(&file.path);
         let source = if generic_defaults {
             &file.production_generic_default_store_sites
         } else {
@@ -328,11 +374,11 @@ fn site_fingerprints(
     Ok(sites)
 }
 
-fn require_occurrence_subset(label: &str, current: &BTreeMap<SiteFingerprint, usize>, baseline: &BTreeMap<SiteFingerprint, usize>) -> Result<()> {
+fn require_occurrence_subset(label: &str, reference_label: &str, current: &BTreeMap<SiteFingerprint, usize>, baseline: &BTreeMap<SiteFingerprint, usize>) -> Result<()> {
     for (site, current_count) in current {
         let baseline_count = baseline.get(site).copied().unwrap_or_default();
         if *current_count > baseline_count {
-            bail!("{label} moved or changed outside its reviewed recovery-baseline site: site={site:?}");
+            bail!("{label} moved or changed outside its reviewed {reference_label} site: site={site:?}");
         }
     }
     Ok(())

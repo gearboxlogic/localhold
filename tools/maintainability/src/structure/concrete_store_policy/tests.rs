@@ -103,6 +103,39 @@ fn reviewed_site_fingerprints_prevent_same_count_moves_and_new_generic_defaults(
 }
 
 #[test]
+fn previous_revision_sites_prevent_swapping_retired_baseline_occurrences() {
+    let policy = policy();
+    let components = components(&[("src/server/mod.rs", "protocol"), ("src/embedding/status.rs", "embedding")]);
+    let mut baseline = inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/status.rs", 2, 0)]);
+    baseline.files[1].production_concrete_store_sites.sqlite_store = vec!["embedding-import".to_owned(), "embedding-call".to_owned()];
+    let mut previous = baseline.clone();
+    previous.files[1].production_concrete_store_sites.sqlite_store = vec!["embedding-import".to_owned()];
+    let mut current = baseline.clone();
+    current.files[1].production_concrete_store_sites.sqlite_store = vec!["embedding-call".to_owned()];
+
+    policy
+        .compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components))
+        .expect("each revision remains a subset of the fixed recovery baseline");
+    assert!(
+        policy
+            .compare_site_fingerprints_against(
+                AttributedInventory {
+                    inventory: &current,
+                    paths: paths(&components),
+                },
+                AttributedInventory {
+                    inventory: &previous,
+                    paths: paths(&components),
+                },
+                "previous-revision",
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("previous-revision")
+    );
+}
+
+#[test]
 fn active_debt_remains_governed_after_a_same_path_component_transfer() {
     let mut policy = policy();
     policy.debt[0].current_count = 0;
@@ -245,19 +278,20 @@ fn renamed_debt_successors_keep_their_counts_and_sites_governed() {
     let baseline_components = components(&[("src/server/mod.rs", "protocol"), ("src/embedding/status.rs", "embedding")]);
     let current_components = components(&[("src/server/mod.rs", "protocol"), ("src/embedding/renamed.rs", "sqlite-store")]);
     let canonical_paths = BTreeMap::from([("src/embedding/renamed.rs".to_owned(), "src/embedding/status.rs".to_owned())]);
+    let site_paths = canonical_paths.clone();
     let mut baseline = inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/status.rs", 2, 0)]);
     baseline.files[1].production_concrete_store_sites.sqlite_store = vec!["embedding-import".to_owned(), "embedding-call".to_owned()];
     let mut current = inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/renamed.rs", 2, 0)]);
     current.files[1].production_concrete_store_sites.sqlite_store = baseline.files[1].production_concrete_store_sites.sqlite_store.clone();
 
     policy
-        .compare_current(&current, PathAttribution::with_lineage(&current_components, &canonical_paths))
+        .compare_current(&current, PathAttribution::with_lineage(&current_components, &canonical_paths, &site_paths))
         .expect("renamed debt count remains attributed to its reviewed lineage");
     policy
         .compare_site_fingerprints(
             &current,
             &baseline,
-            PathAttribution::with_lineage(&current_components, &canonical_paths),
+            PathAttribution::with_lineage(&current_components, &canonical_paths, &site_paths),
             paths(&baseline_components),
         )
         .expect("renamed debt sites remain attributed to their reviewed lineage");
@@ -268,7 +302,7 @@ fn renamed_debt_successors_keep_their_counts_and_sites_governed() {
             .compare_site_fingerprints(
                 &current,
                 &baseline,
-                PathAttribution::with_lineage(&current_components, &canonical_paths),
+                PathAttribution::with_lineage(&current_components, &canonical_paths, &site_paths),
                 paths(&baseline_components),
             )
             .unwrap_err()
@@ -290,6 +324,10 @@ fn split_successors_cannot_exchange_reviewed_sites() {
         ("src/embedding/first.rs".to_owned(), "src/embedding/status.rs".to_owned()),
         ("src/embedding/second.rs".to_owned(), "src/embedding/status.rs".to_owned()),
     ]);
+    let site_paths = BTreeMap::from([
+        ("src/embedding/first.rs".to_owned(), "src/embedding/first.rs".to_owned()),
+        ("src/embedding/second.rs".to_owned(), "src/embedding/second.rs".to_owned()),
+    ]);
     let mut baseline = inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/status.rs", 2, 0)]);
     baseline.files[1].production_concrete_store_sites.sqlite_store = vec!["embedding-import".to_owned(), "embedding-call".to_owned()];
 
@@ -299,11 +337,58 @@ fn split_successors_cannot_exchange_reviewed_sites() {
         .compare_site_fingerprints(
             &split,
             &baseline,
-            PathAttribution::with_lineage(&current_components, &canonical_paths),
+            PathAttribution::with_lineage(&current_components, &canonical_paths, &site_paths),
             paths(&baseline_components),
         )
         .unwrap_err();
     assert!(error.to_string().contains("moved or changed"));
+}
+
+#[test]
+fn retained_renamed_successor_keeps_its_site_identity_through_a_later_split() {
+    let policy = policy();
+    let baseline_components = components(&[("src/server/mod.rs", "protocol"), ("src/embedding/status.rs", "embedding")]);
+    let current_components = components(&[
+        ("src/server/mod.rs", "protocol"),
+        ("src/embedding/renamed.rs", "embedding"),
+        ("src/embedding/extracted.rs", "embedding"),
+    ]);
+    let canonical_paths = BTreeMap::from([
+        ("src/embedding/renamed.rs".to_owned(), "src/embedding/status.rs".to_owned()),
+        ("src/embedding/extracted.rs".to_owned(), "src/embedding/status.rs".to_owned()),
+    ]);
+    let site_paths = BTreeMap::from([
+        ("src/embedding/renamed.rs".to_owned(), "src/embedding/status.rs".to_owned()),
+        ("src/embedding/extracted.rs".to_owned(), "src/embedding/extracted.rs".to_owned()),
+    ]);
+    let mut baseline = inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/status.rs", 2, 0)]);
+    baseline.files[1].production_concrete_store_sites.sqlite_store = vec!["embedding-import".to_owned(), "embedding-call".to_owned()];
+    let mut current = inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/renamed.rs", 2, 0), ("src/embedding/extracted.rs", 0, 0)]);
+    current.files[1].production_concrete_store_sites.sqlite_store = baseline.files[1].production_concrete_store_sites.sqlite_store.clone();
+
+    policy
+        .compare_site_fingerprints(
+            &current,
+            &baseline,
+            PathAttribution::with_lineage(&current_components, &canonical_paths, &site_paths),
+            paths(&baseline_components),
+        )
+        .expect("the retained renamed file keeps its original site identity");
+
+    current.files[1].production_concrete_store_sites.sqlite_store.clear();
+    current.files[2].production_concrete_store_sites.sqlite_store = baseline.files[1].production_concrete_store_sites.sqlite_store.clone();
+    assert!(
+        policy
+            .compare_site_fingerprints(
+                &current,
+                &baseline,
+                PathAttribution::with_lineage(&current_components, &canonical_paths, &site_paths),
+                paths(&baseline_components),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("moved or changed")
+    );
 }
 
 fn policy() -> ConcreteStorePolicy {

@@ -10,6 +10,11 @@ mod imports;
 
 pub use imports::production_internal_imports;
 
+pub(super) fn normalized_ident(ident: &proc_macro2::Ident) -> String {
+    let value = ident.to_string();
+    value.strip_prefix("r#").unwrap_or(&value).to_owned()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Truth {
     AlwaysFalse,

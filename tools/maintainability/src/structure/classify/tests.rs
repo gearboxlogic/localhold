@@ -241,6 +241,25 @@ fn composition_targets_cannot_overlap_library_sources() {
 }
 
 #[test]
+fn raw_module_identifiers_cannot_hide_composition_overlap() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src", "tests", "benches"] {
+        fs::create_dir(repository.path().join(root)).expect("source root");
+    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+         \n[[bin]]\nname = \"shared\"\npath = \"src/type.rs\"\n",
+    )
+    .expect("package manifest");
+    fs::write(repository.path().join("src/lib.rs"), "mod r#type;\n").expect("library root");
+    fs::write(repository.path().join("src/type.rs"), "use crate::server::LocalHoldServer;\nfn main() {}\n").expect("shared target");
+
+    let error = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).unwrap_err();
+    assert!(error.to_string().contains("composition target must not also be reachable from a library target"));
+}
+
+#[test]
 fn no_package_feature_may_enable_testing() {
     let repository = tempfile::tempdir().expect("temporary repository");
     for root in ["src", "tests", "benches"] {

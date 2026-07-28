@@ -2,11 +2,12 @@ use std::path::Path as FsPath;
 
 use anyhow::{Context, Result, bail};
 use proc_macro2::{TokenStream, TokenTree};
+use quote::ToTokens as _;
 use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
-use syn::{ItemExternCrate, ItemMod, ItemUse, Path as SynPath, UseTree};
+use syn::{Attribute, ItemExternCrate, ItemMod, ItemUse, Meta, Path as SynPath, UseTree};
 
-use super::TestLineCollector;
+use super::{TestLineCollector, normalized_ident};
 
 pub fn production_internal_imports(file: &syn::File, source_path: &str, crate_root: Option<&str>, test_lines: &TestLineCollector) -> Result<Vec<String>> {
     let module = source_module(source_path, crate_root)?;
@@ -68,6 +69,9 @@ impl ImportCollector<'_> {
 
 impl<'ast> Visit<'ast> for ImportCollector<'_> {
     fn visit_item_use(&mut self, item: &'ast ItemUse) {
+        for attribute in &item.attrs {
+            self.visit_attribute(attribute);
+        }
         if self.error.is_none()
             && let Err(error) = self.collect_use(item)
         {
@@ -76,6 +80,9 @@ impl<'ast> Visit<'ast> for ImportCollector<'_> {
     }
 
     fn visit_item_extern_crate(&mut self, item: &'ast ItemExternCrate) {
+        for attribute in &item.attrs {
+            self.visit_attribute(attribute);
+        }
         if self.error.is_none() && !self.test_lines.line_is_test(item.span().start().line) && item.ident == "self" && item.rename.is_some() {
             self.error = Some(anyhow::anyhow!(
                 "production crate-root extern aliases cannot be classified safely for dependency boundaries"
@@ -108,7 +115,33 @@ impl<'ast> Visit<'ast> for ImportCollector<'_> {
         self.visit_path(&node.path);
     }
 
+    fn visit_attribute(&mut self, attribute: &'ast Attribute) {
+        if self.error.is_some() || self.test_lines.line_is_test(attribute.span().start().line) {
+            return;
+        }
+        let tokens = match &attribute.meta {
+            Meta::Path(_) => None,
+            Meta::List(list) => Some(list.tokens.clone()),
+            Meta::NameValue(value) => Some(value.value.to_token_stream()),
+        };
+        if let Some(tokens) = tokens
+            && let Some(restricted) = restricted_macro_identifier(&tokens, self.test_lines)
+        {
+            self.error = Some(anyhow::anyhow!(
+                "production attribute token stream names restricted crate module {restricted:?} and cannot be classified safely"
+            ));
+            return;
+        }
+        visit::visit_attribute(self, attribute);
+    }
+
     fn visit_item_mod(&mut self, item: &'ast ItemMod) {
+        for attribute in &item.attrs {
+            self.visit_attribute(attribute);
+        }
+        if self.error.is_some() {
+            return;
+        }
         let Some((_, items)) = &item.content else {
             return;
         };
@@ -225,11 +258,6 @@ fn restricted_macro_identifier(tokens: &TokenStream, test_lines: &TestLineCollec
     })
 }
 
-fn normalized_ident(ident: &proc_macro2::Ident) -> String {
-    let value = ident.to_string();
-    value.strip_prefix("r#").unwrap_or(&value).to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,6 +333,15 @@ mod tests {
 
         let test_only = "#[cfg(test)]\nmacro_rules! dependency { () => { use crate::ui::View; } }\n";
         assert!(imports("src/adapter.rs", test_only).expect("test-only macro").is_empty());
+    }
+
+    #[test]
+    fn restricted_names_in_production_attribute_tokens_fail_closed() {
+        let source = "#[adapter(crate::server::Service)]\nfn build() {}\n";
+        assert!(imports("src/adapter.rs", source).unwrap_err().to_string().contains("production attribute token stream"));
+
+        let test_only = "#[cfg(test)]\n#[adapter(crate::ui::View)]\nfn build() {}\n";
+        assert!(imports("src/adapter.rs", test_only).expect("test-only attribute").is_empty());
     }
 
     #[test]

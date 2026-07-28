@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use super::syntax::{TestLineCollector, item_is_test_only, production_internal_imports, reject_module_path_overrides};
+use super::syntax::{TestLineCollector, item_is_test_only, normalized_ident, production_internal_imports, reject_module_path_overrides};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct FileMeasurement {
@@ -504,11 +504,12 @@ impl ModuleGraph<'_> {
             };
             reject_module_path_overrides(&module.attrs)?;
             let test_only = parent_test_only || item_is_test_only(item)?;
+            let module_name = normalized_ident(&module.ident);
             if let Some((_, nested)) = &module.content {
-                self.collect(source_path, nested, &module_dir.join(module.ident.to_string()), test_only)?;
+                self.collect(source_path, nested, &module_dir.join(&module_name), test_only)?;
                 continue;
             }
-            let target = resolve_module(module_dir, &module.ident.to_string(), self.known).with_context(|| format!("resolve module {} declared by {source_path}", module.ident))?;
+            let target = resolve_module(module_dir, &module_name, self.known).with_context(|| format!("resolve module {} declared by {source_path}", module.ident))?;
             if let Some(target) = target {
                 self.edges.push(ModuleEdge {
                     source: source_path.to_owned(),

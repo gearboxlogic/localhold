@@ -11,6 +11,7 @@ mod exceptions;
 mod measure;
 mod model;
 mod revision;
+mod split_allowances;
 mod validate;
 
 impl StructureManifest {

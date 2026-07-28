@@ -2,12 +2,21 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 
-use super::measure::{ObservedFiles, compare_key_sets, inventory_index, sum_counts, sum_production_lines};
+use super::measure::{LineCounts, ObservedFiles, compare_key_sets, inventory_index, sum_counts, sum_production_lines};
 use super::model::{ComponentTransfer, HotspotStatus, PathEvolution, PathEvolutionKind, StructureManifest};
+use super::split_allowances::SplitPolicyEvidence;
+#[cfg(test)]
+use super::split_allowances::changed_inventory_paths;
 use crate::structure::classify::Inventory;
 
 impl StructureManifest {
+    #[cfg(test)]
     pub(super) fn compare_policy(&self, previous: &Self, previous_inventory: &Inventory, current_inventory: &Inventory) -> Result<()> {
+        let touched = changed_inventory_paths(previous_inventory, current_inventory)?;
+        self.compare_policy_with_touched(previous, previous_inventory, current_inventory, &touched)
+    }
+
+    pub(super) fn compare_policy_with_touched(&self, previous: &Self, previous_inventory: &Inventory, current_inventory: &Inventory, touched: &BTreeSet<String>) -> Result<()> {
         self.compare_immutable_policy(previous)?;
         let new_evolutions = appended("path evolution", &previous.path_evolutions, &self.path_evolutions)?;
         let new_transfers = appended("component transfer", &previous.component_transfers, &self.component_transfers)?;
@@ -15,6 +24,15 @@ impl StructureManifest {
         let previous_files = inventory_index(previous_inventory)?;
         let current_files = inventory_index(current_inventory)?;
         self.compare_file_exception_policy(previous, &current_files)?;
+        self.compare_split_allowance_policy(
+            previous,
+            &SplitPolicyEvidence {
+                previous_files: &previous_files,
+                current_files: &current_files,
+                new_evolutions,
+                touched,
+            },
+        )?;
         self.compare_path_evolution(previous, &previous_files, &current_files, new_evolutions)?;
         self.compare_transfer_evidence(previous, &current_files, new_evolutions, new_transfers)?;
         self.compare_component_policy(previous, &previous_files, &current_files, new_transfers)?;
@@ -34,10 +52,15 @@ impl StructureManifest {
 
     fn compare_path_evolution(&self, previous: &Self, previous_files: &ObservedFiles<'_>, current_files: &ObservedFiles<'_>, evolutions: &[PathEvolution]) -> Result<()> {
         let evidence = PathEvidence::new(previous, self)?;
+        let files = EvolutionFiles {
+            previous: previous_files,
+            current: current_files,
+        };
         let mut coverage = PathCoverage::default();
 
         for evolution in evolutions {
-            compare_evolution_record(evolution, &evidence, &mut coverage, previous_files, current_files)?;
+            let allowance = self.new_split_allowance_counts(previous, &evolution.id);
+            compare_evolution_record(evolution, &evidence, &mut coverage, &files, allowance)?;
         }
 
         require_exact_coverage("path evolution sources", &evidence.expected_sources, &coverage.covered_sources)?;
@@ -70,12 +93,33 @@ impl StructureManifest {
                 bail!("component {id:?} production ceiling cannot exceed transfer-adjusted maximum {maximum}");
             }
             let previous_observed = sum_production_lines(&previous_component.paths, previous_files)?;
-            if previous_observed != previous_component.production_ceiling {
-                bail!("previous component {id:?} policy does not match its measured inventory");
+            let previous_allowance = previous.component_split_production_allowance(id)?;
+            let previous_maximum = previous_component
+                .production_ceiling
+                .checked_add(previous_allowance)
+                .context("previous component allowance ceiling overflow")?;
+            if previous_observed < previous_component.production_ceiling || previous_observed > previous_maximum {
+                bail!("previous component {id:?} policy does not reconcile with its measured inventory");
             }
             let current_observed = sum_production_lines(&component.paths, current_files)?;
-            if current_observed != component.production_ceiling {
-                bail!("current component {id:?} policy does not match its measured inventory");
+            let current_allowance = self.component_split_production_allowance(id)?;
+            let current_maximum = component
+                .production_ceiling
+                .checked_add(current_allowance)
+                .context("current component allowance ceiling overflow")?;
+            if current_observed < component.production_ceiling || current_observed > current_maximum {
+                bail!("current component {id:?} policy does not reconcile with its measured inventory");
+            }
+            let new_split_overhead = self.new_split_production_for_component(previous, id)?;
+            let maximum_observed = previous_observed
+                .checked_sub(outgoing.get(id).copied().unwrap_or(0))
+                .with_context(|| format!("component {id:?} transfer exceeds its observed production"))?
+                .checked_add(incoming.get(id).copied().unwrap_or(0))
+                .context("component observed transfer total overflow")?
+                .checked_add(new_split_overhead)
+                .context("component observed split allowance overflow")?;
+            if current_observed > maximum_observed {
+                bail!("component {id:?} observed production cannot increase beyond governed transfer and split overhead");
             }
         }
         Ok(())
@@ -184,12 +228,17 @@ struct PathCoverage {
     covered_successors: BTreeSet<String>,
 }
 
+struct EvolutionFiles<'a, 'previous, 'current> {
+    previous: &'a ObservedFiles<'previous>,
+    current: &'a ObservedFiles<'current>,
+}
+
 fn compare_evolution_record(
     evolution: &PathEvolution,
     evidence: &PathEvidence,
     coverage: &mut PathCoverage,
-    previous_files: &ObservedFiles<'_>,
-    current_files: &ObservedFiles<'_>,
+    files: &EvolutionFiles<'_, '_, '_>,
+    allowance: Option<LineCounts>,
 ) -> Result<()> {
     evolution_source_component(evolution, |source| evidence.previous_paths.get(source).map(String::as_str))?;
     let mut changed = false;
@@ -202,8 +251,8 @@ fn compare_evolution_record(
     if !changed {
         bail!("path evolution {:?} does not account for any measured path change", evolution.id);
     }
-    reject_untraceable_same_path_move(evolution, evidence, current_files)?;
-    compare_evolution_counts(evolution, previous_files, current_files)
+    reject_untraceable_same_path_move(evolution, evidence, files.current)?;
+    compare_evolution_counts(evolution, files.previous, files.current, allowance)
 }
 
 fn reject_untraceable_same_path_move(evolution: &PathEvolution, evidence: &PathEvidence, current_files: &ObservedFiles<'_>) -> Result<()> {
@@ -288,7 +337,7 @@ fn evolution_source_component<'a>(evolution: &PathEvolution, mut owner_for: impl
     Ok(owner)
 }
 
-fn compare_evolution_counts(evolution: &PathEvolution, previous: &ObservedFiles<'_>, current: &ObservedFiles<'_>) -> Result<()> {
+fn compare_evolution_counts(evolution: &PathEvolution, previous: &ObservedFiles<'_>, current: &ObservedFiles<'_>, allowance: Option<LineCounts>) -> Result<()> {
     let source = sum_counts(&evolution.sources, previous)?;
     let successor = sum_counts(&evolution.successors, current)?;
     match evolution.kind {
@@ -301,7 +350,16 @@ fn compare_evolution_counts(evolution: &PathEvolution, previous: &ObservedFiles<
             if source.production > 0 && adds_test_only_successor(evolution, previous, current)? {
                 bail!("split path evolution {:?} adds a test-only successor and must be declared as test-extraction", evolution.id);
             }
-            if successor.physical > source.physical || successor.production > source.production {
+            let has_allowance = allowance.is_some();
+            let allowance = allowance.unwrap_or(LineCounts { physical: 0, production: 0 });
+            let maximum = LineCounts {
+                physical: source.physical.checked_add(allowance.physical).context("split physical allowance overflow")?,
+                production: source.production.checked_add(allowance.production).context("split production allowance overflow")?,
+            };
+            if successor.physical > maximum.physical || successor.production > maximum.production {
+                if has_allowance {
+                    bail!("split path evolution {:?} exceeds its physical or production allowance", evolution.id);
+                }
                 bail!("split path evolution {:?} cannot increase physical or production counts", evolution.id);
             }
         }

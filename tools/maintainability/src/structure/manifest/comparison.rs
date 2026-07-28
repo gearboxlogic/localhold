@@ -70,11 +70,13 @@ impl StructureManifest {
     fn compare_component_counts(&self, observed: &ObservedFiles<'_>) -> Result<()> {
         for component in &self.components {
             let production = sum_production_lines(&component.paths, observed)?;
-            if production > component.production_ceiling {
+            let allowance = self.component_split_production_allowance(&component.id)?;
+            let maximum = component.production_ceiling.checked_add(allowance).context("component split allowance ceiling overflow")?;
+            if production > maximum {
                 bail!(
-                    "component {:?} production growth rejected: ceiling={}, observed={production}",
+                    "component {:?} production growth rejected: canonical ceiling={}, split allowance={allowance}, observed={production}",
                     component.id,
-                    component.production_ceiling
+                    component.production_ceiling,
                 );
             }
             if production < component.production_ceiling {
@@ -145,8 +147,9 @@ impl StructureManifest {
     fn compare_current_hotspot(&self, hotspot: &Hotspot, observed: &ObservedFiles<'_>) -> Result<()> {
         let physical = sum_physical_lines(&hotspot.successors, observed)?;
         let production = sum_production_lines(&hotspot.successors, observed)?;
-        compare_ratchet("physical", &hotspot.id, hotspot.physical_ceiling, physical)?;
-        compare_ratchet("production", &hotspot.id, hotspot.production_ceiling, production)?;
+        let allowance = self.split_allowance_counts(&hotspot.id);
+        compare_ratchet("physical", &hotspot.id, hotspot.physical_ceiling, allowance.physical, physical)?;
+        compare_ratchet("production", &hotspot.id, hotspot.production_ceiling, allowance.production, production)?;
         match hotspot.status {
             HotspotStatus::Active => {
                 validate_hotspot_kind(hotspot, production)?;
@@ -179,12 +182,16 @@ fn transfer_total(mut amounts: impl Iterator<Item = usize>) -> Result<usize> {
     amounts.try_fold(0usize, |total, amount| total.checked_add(amount).context("component transfer total overflow"))
 }
 
-fn compare_ratchet(kind: &str, id: &str, ceiling: usize, observed: usize) -> Result<()> {
-    if observed > ceiling {
-        bail!("hotspot {id:?} {kind} growth rejected: ceiling={ceiling}, observed={observed}");
+fn compare_ratchet(kind: &str, id: &str, ceiling: usize, allowance: usize, observed: usize) -> Result<()> {
+    let maximum = ceiling.checked_add(allowance).context("hotspot split allowance ceiling overflow")?;
+    if observed > maximum {
+        bail!("hotspot {id:?} {kind} growth rejected: canonical ceiling={ceiling}, split allowance={allowance}, observed={observed}");
     }
     if observed < ceiling {
         bail!("hotspot {id:?} {kind} ceiling must ratchet from {ceiling} to {observed} in this change");
+    }
+    if observed < maximum {
+        bail!("hotspot {id:?} {kind} split allowance must ratchet from {allowance} to {}", observed - ceiling);
     }
     Ok(())
 }

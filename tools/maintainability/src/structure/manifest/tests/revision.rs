@@ -2,8 +2,8 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use super::support::{file_exception, inventory, ordinary_manifest};
-use crate::structure::manifest::model::FileExceptionKind;
+use super::support::{file_exception, inventory, ordinary_manifest, split_allowance};
+use crate::structure::manifest::model::{FeatureFreezeStatus, FileExceptionKind};
 
 #[test]
 fn previous_revision_selection_handles_absent_null_and_initial_policy_inputs() {
@@ -45,6 +45,11 @@ fn previous_revision_selection_handles_absent_null_and_initial_policy_inputs() {
 
 #[test]
 fn current_schema_cannot_downgrade_but_previous_schema_generations_are_readable() {
+    let mut file_exception_schema = ordinary_manifest("src/lib.rs", 10, 10);
+    file_exception_schema.schema_version = 3;
+    file_exception_schema.validate_previous().expect("file-exception schema is readable");
+    assert!(file_exception_schema.validate_current().is_err());
+
     let mut evolution_schema = ordinary_manifest("src/lib.rs", 10, 10);
     evolution_schema.schema_version = 2;
     evolution_schema.validate_previous().expect("immediate previous schema is readable");
@@ -67,6 +72,20 @@ fn current_schema_cannot_downgrade_but_previous_schema_generations_are_readable(
         .file_exceptions
         .push(file_exception("history.invalid", "src/lib.rs", FileExceptionKind::ProductionCohesive, 900));
     assert!(evolution_schema.validate_previous().unwrap_err().to_string().contains("before version 3"));
+
+    file_exception_schema.split_allowances.push(split_allowance("component.hot", "split.hot", 1, 1));
+    assert!(file_exception_schema.validate_previous().unwrap_err().to_string().contains("before version 4"));
+
+    let mut exited_legacy_freeze = ordinary_manifest("src/lib.rs", 10, 10);
+    exited_legacy_freeze.schema_version = 3;
+    exited_legacy_freeze.feature_freeze = FeatureFreezeStatus::Exited;
+    assert!(
+        exited_legacy_freeze
+            .validate_previous()
+            .unwrap_err()
+            .to_string()
+            .contains("cannot record feature-freeze exit")
+    );
 }
 
 fn git(repository: &Path, arguments: &[&str]) {

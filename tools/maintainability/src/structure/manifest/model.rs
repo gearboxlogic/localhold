@@ -1,6 +1,7 @@
 use serde::Deserialize;
 
-pub(super) const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub(super) const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub(super) const FILE_EXCEPTION_SCHEMA_VERSION: u32 = 3;
 pub(super) const EVOLUTION_SCHEMA_VERSION: u32 = 2;
 pub(super) const LEGACY_SCHEMA_VERSION: u32 = 1;
 pub(super) const PRODUCTION_FILE_LIMIT: usize = 800;
@@ -15,6 +16,8 @@ pub struct StructureManifest {
     pub(super) schema_version: u32,
     #[serde(default)]
     pub(super) program_phase: u32,
+    #[serde(default)]
+    pub(super) feature_freeze: FeatureFreezeStatus,
     pub baseline_commit: String,
     pub tracked_roots: Vec<String>,
     pub(super) limits: Limits,
@@ -27,6 +30,16 @@ pub struct StructureManifest {
     pub(super) component_transfers: Vec<ComponentTransfer>,
     #[serde(default)]
     pub(super) file_exceptions: Vec<FileException>,
+    #[serde(default)]
+    pub(super) split_allowances: Vec<SplitAllowance>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum FeatureFreezeStatus {
+    #[default]
+    Active,
+    Exited,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -152,4 +165,29 @@ pub(super) struct FileException {
     pub(super) rationale: String,
     pub(super) fixture_name: Option<String>,
     pub(super) removal_phase: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum SplitAllowanceStatus {
+    Active,
+    Resolved,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SplitAllowance {
+    pub(super) id: String,
+    pub(super) hotspot: String,
+    pub(super) path_evolution: String,
+    pub(super) status: SplitAllowanceStatus,
+    pub(super) approved_physical_lines: usize,
+    pub(super) approved_production_lines: usize,
+    pub(super) current_physical_lines: usize,
+    pub(super) current_production_lines: usize,
+    pub(super) owner: String,
+    pub(super) recovery_issue: String,
+    pub(super) pull_request: String,
+    pub(super) rationale: String,
+    pub(super) due_phase: u32,
 }

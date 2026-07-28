@@ -89,7 +89,8 @@ printf '%s\n' \
 chmod +x "$fake_bin/cygpath"
 mkdir -p "$fixture/parent/.cargo"
 touch "$fixture/parent/.cargo/config"
-FAKE_DRIVE_ROOT=$test_repository PATH="$fake_bin:$PATH" run_check >/dev/null
+fake_drive_root=$(cd -- "$test_repository" && pwd -P)
+FAKE_DRIVE_ROOT=$fake_drive_root PATH="$fake_bin:$PATH" run_check >/dev/null
 rm -r "$fixture/parent/.cargo"
 
 cargo_home="$fixture/cargo-home"

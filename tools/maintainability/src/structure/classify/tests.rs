@@ -621,16 +621,28 @@ fn no_package_feature_may_enable_testing() {
     for root in ["src", "tests", "benches"] {
         fs::create_dir(repository.path().join(root)).expect("source root");
     }
+    fs::write(repository.path().join("src/lib.rs"), "fn root() {}\n").expect("root source");
+
+    for member in ["testing", "testing/fixtures"] {
+        fs::write(
+            repository.path().join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+                 \n[features]\ntesting = []\nrelease-hooks = [\"{member}\"]\n"
+            ),
+        )
+        .expect("package manifest");
+        let error = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).unwrap_err();
+        assert!(error.to_string().contains("must not enable the test-only"), "{member}");
+    }
+
     fs::write(
         repository.path().join("Cargo.toml"),
         "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
-         \n[features]\ntesting = []\nrelease-hooks = [\"testing\"]\n",
+         \n[features]\ntesting = []\nrelease-hooks = [\"testing?/fixtures\"]\n",
     )
     .expect("package manifest");
-    fs::write(repository.path().join("src/lib.rs"), "fn root() {}\n").expect("root source");
-
-    let error = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).unwrap_err();
-    assert!(error.to_string().contains("must not enable the test-only"));
+    scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).expect("weak dependency feature is non-activating");
 }
 
 #[test]

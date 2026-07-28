@@ -472,7 +472,7 @@ fn validate_testing_feature_is_isolated(manifest: &toml::Value) -> Result<()> {
         let members = members.as_array().with_context(|| format!("package feature {feature:?} must be an array"))?;
         for member in members {
             let member = member.as_str().with_context(|| format!("package feature {feature:?} member must be a string"))?;
-            if feature != "testing" && member == "testing" {
+            if feature != "testing" && (member == "testing" || member.starts_with("testing/")) {
                 bail!("package feature {feature:?} must not enable the test-only \"testing\" feature");
             }
         }

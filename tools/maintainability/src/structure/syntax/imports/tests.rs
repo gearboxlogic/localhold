@@ -500,6 +500,13 @@ fn raw_and_ordinary_cfg_identifiers_share_one_atom_identity() -> Result<()> {
 }
 
 #[test]
+fn raw_and_cooked_cfg_literals_share_one_atom_identity() -> Result<()> {
+    let facts = concrete_facts("#[cfg(feature = \"x\")] #[cfg(not(feature = r\"x\"))] fn disabled() { let _ = SqliteStore; }\n")?;
+    assert_eq!(facts.concrete_stores, ConcreteStoreCounts::default());
+    Ok(())
+}
+
+#[test]
 fn concrete_store_bearing_signatures_are_inventoried_separately_from_bodies() -> Result<()> {
     let facts = concrete_facts("pub(crate) fn open() -> SqliteStore { SqliteStore::open() }\n")?;
     assert_eq!(facts.signature_concrete_store_sites.sqlite_store.len(), 1);
@@ -508,10 +515,10 @@ fn concrete_store_bearing_signatures_are_inventoried_separately_from_bodies() ->
 }
 
 #[test]
-fn canonical_binding_identity_tracks_impl_headers_but_not_method_bodies() -> Result<()> {
+fn canonical_binding_identity_tracks_trait_implementation_bodies() -> Result<()> {
     let first = concrete_facts("impl MemoryReader for SqliteStore { fn version(&self) -> u32 { 1 } }\n")?;
     let second = concrete_facts("impl MemoryReader for SqliteStore { fn version(&self) -> u32 { 2 } }\n")?;
-    assert_eq!(first.binding_concrete_store_sites, second.binding_concrete_store_sites);
+    assert_ne!(first.binding_concrete_store_sites, second.binding_concrete_store_sites);
     assert_eq!(first.binding_concrete_store_sites.sqlite_store.len(), 1);
     assert_ne!(first.concrete_store_sites, second.concrete_store_sites);
     Ok(())
@@ -566,6 +573,8 @@ fn concrete_store_names_cannot_be_hidden_by_aliases() {
         "macro_rules! alias { () => { type DefaultStore = SqliteStore; } }\n",
         "macro_rules! reexport { () => { pub use PostgresStore as DefaultStore; } }\n",
         "macro_rules! constructor { () => { SqliteStore::in_memory() } }\n",
+        "macro_rules! bound { () => { #[serde(bound = \"crate::store::SqliteStore: Serialize\")] struct Generated; } }\n",
+        "macro_rules! callback { () => { #[serde(default = r#\"crate::store::PostgresStore::default\"#)] struct Generated; } }\n",
     ] {
         assert!(
             imports("src/store/alias.rs", source)

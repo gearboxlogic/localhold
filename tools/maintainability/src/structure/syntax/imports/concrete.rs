@@ -275,10 +275,18 @@ pub(super) fn tokens_contain_concrete_store(tokens: &TokenStream) -> bool {
         match token {
             TokenTree::Group(group) if tokens_contain_concrete_store(&group.stream()) => return true,
             TokenTree::Ident(ident) if is_concrete_store_name(&normalized_ident(&ident)) => return true,
+            TokenTree::Literal(literal) if literal_contains_concrete_store(&literal) => return true,
             TokenTree::Group(_) | TokenTree::Ident(_) | TokenTree::Literal(_) | TokenTree::Punct(_) => {}
         }
     }
     false
+}
+
+fn literal_contains_concrete_store(literal: &proc_macro2::Literal) -> bool {
+    let Ok(syn::Lit::Str(literal)) = syn::parse_str::<syn::Lit>(&literal.to_string()) else {
+        return false;
+    };
+    literal.value().parse::<TokenStream>().is_ok_and(|tokens| tokens_contain_concrete_store(&tokens))
 }
 
 pub(super) fn is_concrete_store_name(name: &str) -> bool {

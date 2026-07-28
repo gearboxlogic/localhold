@@ -231,7 +231,7 @@ fn write_normalized_tokens(tokens: &TokenStream, identity: &mut String) {
                 identity.push(')');
             }
             TokenTree::Ident(ident) => write_identity_part('i', &normalized_ident(&ident), identity),
-            TokenTree::Literal(literal) => write_identity_part('l', &literal.to_string(), identity),
+            TokenTree::Literal(literal) => write_normalized_literal(&literal, identity),
             TokenTree::Punct(punctuation) => {
                 identity.push('p');
                 identity.push(punctuation.as_char());
@@ -241,6 +241,15 @@ fn write_normalized_tokens(tokens: &TokenStream, identity: &mut String) {
                 });
             }
         }
+    }
+}
+
+fn write_normalized_literal(literal: &proc_macro2::Literal, identity: &mut String) {
+    let spelling = literal.to_string();
+    if let Ok(syn::Lit::Str(value)) = syn::parse_str::<syn::Lit>(&spelling) {
+        write_identity_part('s', &value.value(), identity);
+    } else {
+        write_identity_part('l', &spelling, identity);
     }
 }
 

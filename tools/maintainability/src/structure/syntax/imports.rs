@@ -400,7 +400,11 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     fn visit_item_impl(&mut self, item: &'ast ItemImpl) {
         let mut header = item.clone();
         header.items.clear();
-        let context = format!("impl-header:{}", syntax_fingerprint(&header));
+        let context = if item.trait_.is_some() {
+            format!("trait-implementation:{}", syntax_fingerprint(item))
+        } else {
+            format!("impl-header:{}", syntax_fingerprint(&header))
+        };
         self.concrete_stores.record_binding_tokens(&header.to_token_stream(), &context);
         visit::visit_item_impl(self, item);
     }

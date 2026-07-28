@@ -17,16 +17,16 @@
       "path": "src/store/sqlite.rs",
       "store": "SqliteStore",
       "fingerprint": "b69cf79195f31bdea8778395d3dd5352051f248918775ffbd4f1698dbf0e4093",
-      "baseline_binding_fingerprint": "0f450a18450a72bc5a0db510adbf4a8cda20a76456218b32535c41085a7ea3f9",
-      "current_binding_fingerprint": "0f450a18450a72bc5a0db510adbf4a8cda20a76456218b32535c41085a7ea3f9"
+      "baseline_binding_fingerprint": "464aeb14220817040a062aff7911cac1bc9db38d3241e3a9b1df46d25363da4b",
+      "current_binding_fingerprint": "464aeb14220817040a062aff7911cac1bc9db38d3241e3a9b1df46d25363da4b"
     },
     {
       "component": "postgres-store",
       "path": "src/store/postgres.rs",
       "store": "PostgresStore",
       "fingerprint": "c6b74d1729752001f45ccf642313b01d688d16536868b52716eac3dfba3bd851",
-      "baseline_binding_fingerprint": "29606bd14b4fa9eb9641c5c276a00e3b7b36ec24db7d13623dbcd57297d3a919",
-      "current_binding_fingerprint": "29606bd14b4fa9eb9641c5c276a00e3b7b36ec24db7d13623dbcd57297d3a919"
+      "baseline_binding_fingerprint": "a21517699b33f011a3c563e6ecde7de2040d8c2e353a47c501711a5d84ab527d",
+      "current_binding_fingerprint": "a21517699b33f011a3c563e6ecde7de2040d8c2e353a47c501711a5d84ab527d"
     }
   ],
   "debt": [

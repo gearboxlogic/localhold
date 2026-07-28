@@ -1,7 +1,7 @@
 use crate::structure::classify::Inventory;
-use crate::structure::manifest::model::{FileExceptionKind, FileExceptionStatus, HotspotKind, HotspotStatus, StructureManifest};
+use crate::structure::manifest::model::{FileExceptionKind, FileExceptionStatus, HotspotKind, HotspotStatus, PathEvolutionKind, StructureManifest};
 
-use super::support::{file_exception, hotspot_manifest, inventory, ordinary_manifest};
+use super::support::{evolution, file_exception, hotspot_manifest, inventory, ordinary_manifest};
 
 #[test]
 fn reviewed_file_exception_kinds_authorize_only_their_exact_classified_caps() {
@@ -58,6 +58,10 @@ fn each_exception_kind_enforces_its_own_hard_maximum() {
         ("tests/cohesive.rs", FileExceptionKind::TestCohesive, 1_200),
         ("tests/fixtures/history.rs", FileExceptionKind::HistoricalFixtureMatrix, 1_500),
     ] {
+        let mut at_maximum = ordinary_manifest(path, 0, 0);
+        at_maximum.file_exceptions.push(file_exception("reviewed.at-maximum", path, kind, maximum));
+        at_maximum.validate_current().expect("inclusive exception maximum is valid");
+
         let mut manifest = ordinary_manifest(path, 0, 0);
         manifest.file_exceptions.push(file_exception("reviewed.over-maximum", path, kind, maximum + 1));
         assert!(manifest.validate_current().unwrap_err().to_string().contains(&format!("at most {maximum}")));
@@ -244,6 +248,37 @@ fn historical_fixture_cannot_switch_to_a_cohesive_exception() {
     assert!(
         kind_switched
             .compare_policy(&previous, &previous_files, &kind_switched_files)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be renewed or transferred")
+    );
+}
+
+#[test]
+fn historical_fixture_exception_follows_renamed_path_lineage() {
+    let old_path = "tests/fixtures/history.rs";
+    let new_path = "tests/fixtures/renamed_history.rs";
+    let mut previous = ordinary_manifest(old_path, 0, 0);
+    previous
+        .file_exceptions
+        .push(file_exception("fixture.published-history", old_path, FileExceptionKind::HistoricalFixtureMatrix, 1_400));
+    let previous_files = inventory(&[(old_path, 1_400, 0)]);
+
+    let mut renamed = previous.clone();
+    renamed.components[0].paths = vec![new_path.to_owned()];
+    renamed
+        .path_evolutions
+        .push(evolution("fixture.rename", PathEvolutionKind::Rename, &[old_path], &[new_path]));
+    renamed.file_exceptions[0].status = FileExceptionStatus::Resolved;
+    let mut replacement = file_exception("fixture.renamed-history", new_path, FileExceptionKind::HistoricalFixtureMatrix, 1_400);
+    replacement.fixture_name = Some("renamed published upgrade history".to_owned());
+    replacement.removal_phase = Some(2);
+    renamed.file_exceptions.push(replacement);
+    let renamed_files = inventory(&[(new_path, 1_400, 0)]);
+
+    assert!(
+        renamed
+            .compare_policy(&previous, &previous_files, &renamed_files)
             .unwrap_err()
             .to_string()
             .contains("cannot be renewed or transferred")

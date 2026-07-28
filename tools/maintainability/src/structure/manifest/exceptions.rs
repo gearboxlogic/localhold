@@ -58,7 +58,7 @@ impl StructureManifest {
             compare_existing_exception(prior, current, current_files)?;
         }
         for exception in &self.file_exceptions[previous.file_exceptions.len()..] {
-            compare_new_exception(exception, previous, current_files)?;
+            compare_new_exception(exception, previous, self, current_files)?;
         }
         Ok(())
     }
@@ -202,11 +202,11 @@ fn compare_existing_exception(previous: &FileException, current: &FileException,
     Ok(())
 }
 
-fn compare_new_exception(exception: &FileException, previous: &StructureManifest, current_files: &ObservedFiles<'_>) -> Result<()> {
+fn compare_new_exception(exception: &FileException, previous: &StructureManifest, current: &StructureManifest, current_files: &ObservedFiles<'_>) -> Result<()> {
     if exception.status != FileExceptionStatus::Active {
         bail!("new file exception {:?} must start active", exception.id);
     }
-    if conflicts_with_historical_fixture_approval(exception, previous) {
+    if conflicts_with_historical_fixture_approval(exception, previous, current) {
         bail!("historical fixture matrix exception {:?} cannot be renewed or transferred", exception.id);
     }
     let file = current_files
@@ -222,11 +222,30 @@ fn compare_new_exception(exception: &FileException, previous: &StructureManifest
     Ok(())
 }
 
-fn conflicts_with_historical_fixture_approval(exception: &FileException, previous: &StructureManifest) -> bool {
-    previous.file_exceptions.iter().any(|prior| {
-        prior.kind == FileExceptionKind::HistoricalFixtureMatrix
-            && (prior.path == exception.path || exception.kind == FileExceptionKind::HistoricalFixtureMatrix && prior.fixture_name == exception.fixture_name)
-    })
+fn conflicts_with_historical_fixture_approval(exception: &FileException, previous: &StructureManifest, current: &StructureManifest) -> bool {
+    let historical = previous
+        .file_exceptions
+        .iter()
+        .filter(|prior| prior.kind == FileExceptionKind::HistoricalFixtureMatrix)
+        .collect::<Vec<_>>();
+    if historical
+        .iter()
+        .any(|prior| exception.kind == FileExceptionKind::HistoricalFixtureMatrix && prior.fixture_name == exception.fixture_name)
+    {
+        return true;
+    }
+    let mut paths = historical.iter().map(|prior| prior.path.as_str()).collect::<BTreeSet<_>>();
+    loop {
+        let before = paths.len();
+        for evolution in &current.path_evolutions {
+            if evolution.sources.iter().any(|source| paths.contains(source.as_str())) {
+                paths.extend(evolution.successors.iter().map(String::as_str));
+            }
+        }
+        if paths.len() == before {
+            return paths.contains(exception.path.as_str());
+        }
+    }
 }
 
 fn validate_exception_file_kind(exception: &FileException, file: &FileMeasurement) -> Result<()> {

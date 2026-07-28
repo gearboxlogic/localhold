@@ -13,10 +13,10 @@ fn exact_recovery_debt_passes_but_new_production_names_fail() {
         ("src/engine.rs", "engine-application"),
     ]);
     let exact = inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/status.rs", 2, 0), ("src/engine.rs", 0, 0)]);
-    policy.compare_current(&exact, &components).expect("exact recovery debt");
+    policy.compare_current(&exact, paths(&components)).expect("exact recovery debt");
 
     let growth = inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/status.rs", 2, 0), ("src/engine.rs", 1, 0)]);
-    let error = policy.compare_current(&growth, &components).unwrap_err();
+    let error = policy.compare_current(&growth, paths(&components)).unwrap_err();
     assert!(error.to_string().contains("src/engine.rs"));
 }
 
@@ -30,11 +30,11 @@ fn baseline_and_current_counts_are_independent_ratchets() {
         .compare_baseline(&inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/status.rs", 2, 0)]), &components)
         .expect("immutable baseline counts");
     policy
-        .compare_current(&inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/status.rs", 1, 0)]), &components)
+        .compare_current(&inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/status.rs", 1, 0)]), paths(&components))
         .expect("ratcheted current counts");
     assert!(
         policy
-            .compare_current(&inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/status.rs", 2, 0)]), &components)
+            .compare_current(&inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/status.rs", 2, 0)]), paths(&components))
             .unwrap_err()
             .to_string()
             .contains("production-name mismatch")
@@ -52,14 +52,14 @@ fn reviewed_site_fingerprints_prevent_same_count_moves_and_new_generic_defaults(
 
     let exact = baseline.clone();
     policy
-        .compare_site_fingerprints(&exact, &baseline, &restricted_components, &restricted_components)
+        .compare_site_fingerprints(&exact, &baseline, paths(&restricted_components), paths(&restricted_components))
         .expect("unchanged reviewed syntax sites");
 
     let mut moved = exact;
     moved.files[0].production_concrete_store_sites.sqlite_store = vec!["server-field".to_owned()];
     assert!(
         policy
-            .compare_site_fingerprints(&moved, &baseline, &restricted_components, &restricted_components)
+            .compare_site_fingerprints(&moved, &baseline, paths(&restricted_components), paths(&restricted_components))
             .unwrap_err()
             .to_string()
             .contains("moved or changed")
@@ -69,18 +69,21 @@ fn reviewed_site_fingerprints_prevent_same_count_moves_and_new_generic_defaults(
     duplicated.files[1].production_concrete_store_sites.sqlite_store.push("embedding-import".to_owned());
     assert!(
         policy
-            .compare_site_fingerprints(&duplicated, &baseline, &restricted_components, &restricted_components)
+            .compare_site_fingerprints(&duplicated, &baseline, paths(&restricted_components), paths(&restricted_components),)
             .unwrap_err()
             .to_string()
             .contains("moved or changed")
     );
 
     let transferred_components = components(&[("src/server/mod.rs", "sqlite-store"), ("src/embedding/status.rs", "embedding")]);
+    policy
+        .compare_site_fingerprints(&baseline, &baseline, paths(&transferred_components), paths(&restricted_components))
+        .expect("debt generic default retains its reviewed component attribution");
     let mut moved_after_transfer = baseline.clone();
     moved_after_transfer.files[0].production_concrete_store_sites.sqlite_store = vec!["server-field".to_owned()];
     assert!(
         policy
-            .compare_site_fingerprints(&moved_after_transfer, &baseline, &transferred_components, &restricted_components,)
+            .compare_site_fingerprints(&moved_after_transfer, &baseline, paths(&transferred_components), paths(&restricted_components),)
             .unwrap_err()
             .to_string()
             .contains("moved or changed")
@@ -92,7 +95,7 @@ fn reviewed_site_fingerprints_prevent_same_count_moves_and_new_generic_defaults(
     new_default.files[0].production_generic_default_store_sites.sqlite_store = vec!["hidden-default".to_owned()];
     assert!(
         policy
-            .compare_site_fingerprints(&new_default, &unrestricted_baseline, &unrestricted_components, &unrestricted_components,)
+            .compare_site_fingerprints(&new_default, &unrestricted_baseline, paths(&unrestricted_components), paths(&unrestricted_components),)
             .unwrap_err()
             .to_string()
             .contains("generic default")
@@ -107,7 +110,7 @@ fn active_debt_remains_governed_after_a_same_path_component_transfer() {
     let current = inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/status.rs", 2, 0)]);
     assert!(
         policy
-            .compare_current(&current, &transferred_components)
+            .compare_current(&current, paths(&transferred_components))
             .unwrap_err()
             .to_string()
             .contains("production-name mismatch")
@@ -141,7 +144,7 @@ fn persistence_ui_and_permanent_composition_components_are_unrestricted() {
         ("src/server/mod.rs", 1, 0),
         ("src/embedding/status.rs", 2, 0),
     ]);
-    policy.compare_current(&observed, &components).expect("reviewed composition boundaries");
+    policy.compare_current(&observed, paths(&components)).expect("reviewed composition boundaries");
 }
 
 #[test]
@@ -150,11 +153,11 @@ fn zero_debt_prevents_resurrection_and_test_only_files_contribute_zero() {
     policy.debt[0].current_count = 0;
     let current_components = components(&[("src/server/mod.rs", "protocol"), ("src/embedding/status.rs", "embedding")]);
     policy
-        .compare_current(&inventory(&[("src/server/mod.rs", 0, 0), ("src/embedding/status.rs", 2, 0)]), &current_components)
+        .compare_current(&inventory(&[("src/server/mod.rs", 0, 0), ("src/embedding/status.rs", 2, 0)]), paths(&current_components))
         .expect("retired site remains absent");
     assert!(
         policy
-            .compare_current(&inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/status.rs", 2, 0)]), &current_components,)
+            .compare_current(&inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/status.rs", 2, 0)]), paths(&current_components),)
             .unwrap_err()
             .to_string()
             .contains("production-name mismatch")
@@ -169,7 +172,7 @@ fn zero_debt_prevents_resurrection_and_test_only_files_contribute_zero() {
     let mut files = inventory(&[("src/server/mod.rs", 0, 0), ("src/embedding/status.rs", 2, 0)]).files;
     files.push(test_only);
     policy
-        .compare_current(&Inventory { files }, &test_components)
+        .compare_current(&Inventory { files }, paths(&test_components))
         .expect("test-only concrete-store names are absent from production counts");
 }
 
@@ -231,8 +234,47 @@ fn policy_validation_closes_capability_and_evidence_escapes() {
 #[test]
 fn every_observed_path_requires_a_logical_component() {
     let policy = policy();
-    let error = policy.compare_current(&inventory(&[("src/server/mod.rs", 1, 0)]), &BTreeMap::new()).unwrap_err();
+    let empty_components = BTreeMap::new();
+    let error = policy.compare_current(&inventory(&[("src/server/mod.rs", 1, 0)]), paths(&empty_components)).unwrap_err();
     assert!(error.to_string().contains("has no logical component"));
+}
+
+#[test]
+fn renamed_debt_successors_keep_their_counts_and_sites_governed() {
+    let policy = policy();
+    let baseline_components = components(&[("src/server/mod.rs", "protocol"), ("src/embedding/status.rs", "embedding")]);
+    let current_components = components(&[("src/server/mod.rs", "protocol"), ("src/embedding/renamed.rs", "sqlite-store")]);
+    let canonical_paths = BTreeMap::from([("src/embedding/renamed.rs".to_owned(), "src/embedding/status.rs".to_owned())]);
+    let mut baseline = inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/status.rs", 2, 0)]);
+    baseline.files[1].production_concrete_store_sites.sqlite_store = vec!["embedding-import".to_owned(), "embedding-call".to_owned()];
+    let mut current = inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/renamed.rs", 2, 0)]);
+    current.files[1].production_concrete_store_sites.sqlite_store = baseline.files[1].production_concrete_store_sites.sqlite_store.clone();
+
+    policy
+        .compare_current(&current, PathAttribution::with_lineage(&current_components, &canonical_paths))
+        .expect("renamed debt count remains attributed to its reviewed lineage");
+    policy
+        .compare_site_fingerprints(
+            &current,
+            &baseline,
+            PathAttribution::with_lineage(&current_components, &canonical_paths),
+            paths(&baseline_components),
+        )
+        .expect("renamed debt sites remain attributed to their reviewed lineage");
+
+    current.files[1].production_concrete_store_sites.sqlite_store[0] = "moved-import".to_owned();
+    assert!(
+        policy
+            .compare_site_fingerprints(
+                &current,
+                &baseline,
+                PathAttribution::with_lineage(&current_components, &canonical_paths),
+                paths(&baseline_components),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("moved or changed")
+    );
 }
 
 fn policy() -> ConcreteStorePolicy {
@@ -251,6 +293,10 @@ fn policy() -> ConcreteStorePolicy {
             ),
         ],
     }
+}
+
+fn paths<'a>(component_paths: &'a BTreeMap<&'a str, &'a str>) -> PathAttribution<'a> {
+    PathAttribution::identity(component_paths)
 }
 
 fn debt(id: &str, component: &str, path: &str, store: ConcreteStoreName, count: usize) -> ConcreteStoreDebt {

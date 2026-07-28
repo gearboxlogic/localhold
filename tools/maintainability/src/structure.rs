@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use self::classify::Inventory;
-use self::concrete_store_policy::ConcreteStorePolicy;
+use self::concrete_store_policy::{ConcreteStorePolicy, PathAttribution};
 use self::import_policy::ImportPolicy;
 use self::manifest::StructureManifest;
 
@@ -27,14 +27,20 @@ pub fn check(workspace: &Path) -> Result<()> {
     let current = classify::scan_workspace(workspace, &manifest.tracked_roots)?;
     manifest.compare_current(&current)?;
     import_policy.compare_current(&current)?;
-    concrete_store_policy.compare_current(&current, &manifest.current_component_paths()?)?;
+    let current_component_paths = manifest.current_component_paths()?;
+    let canonical_current_paths = manifest.canonical_current_paths()?;
+    concrete_store_policy.compare_current(&current, PathAttribution::with_lineage(&current_component_paths, &canonical_current_paths))?;
     let baseline = classify::scan_revision(workspace, &manifest.baseline_commit, &manifest.tracked_roots)?;
     manifest.compare_baseline(&baseline)?;
     import_policy.compare_baseline(&baseline)?;
-    let current_component_paths = manifest.current_component_paths()?;
     let baseline_component_paths = manifest.baseline_component_paths()?;
     concrete_store_policy.compare_baseline(&baseline, &baseline_component_paths)?;
-    concrete_store_policy.compare_site_fingerprints(&current, &baseline, &current_component_paths, &baseline_component_paths)?;
+    concrete_store_policy.compare_site_fingerprints(
+        &current,
+        &baseline,
+        PathAttribution::with_lineage(&current_component_paths, &canonical_current_paths),
+        PathAttribution::identity(&baseline_component_paths),
+    )?;
     manifest.compare_previous_revision(workspace, &current)?;
     import_policy.compare_previous_revision(workspace)?;
     concrete_store_policy.compare_previous_revision(workspace)

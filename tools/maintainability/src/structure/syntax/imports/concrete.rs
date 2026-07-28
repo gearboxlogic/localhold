@@ -173,13 +173,13 @@ impl ConcreteStoreInventory {
     }
 
     fn record_attribute_literal(&mut self, literal: &proc_macro2::Literal, rust_fragment: bool, site_context: &str) -> Result<()> {
+        if !rust_fragment {
+            return Ok(());
+        }
         let Ok(syn::Lit::Str(literal)) = syn::parse_str::<syn::Lit>(&literal.to_string()) else {
             return Ok(());
         };
         let value = literal.value();
-        if !rust_fragment && !value.contains("::") {
-            return Ok(());
-        }
         let Ok(tokens) = value.parse::<TokenStream>() else {
             return Ok(());
         };

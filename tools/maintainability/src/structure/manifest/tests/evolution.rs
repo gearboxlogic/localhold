@@ -26,6 +26,23 @@ fn rename_requires_exact_measured_counts() {
 }
 
 #[test]
+fn current_paths_retain_their_transitive_baseline_lineage() {
+    let mut manifest = ordinary_manifest("src/lib.rs", 10, 10);
+    manifest.components[0].paths = vec!["src/final.rs".to_owned()];
+    manifest
+        .path_evolutions
+        .push(evolution("rename.first", PathEvolutionKind::Rename, &["src/lib.rs"], &["src/intermediate.rs"]));
+    manifest
+        .path_evolutions
+        .push(evolution("rename.second", PathEvolutionKind::Rename, &["src/intermediate.rs"], &["src/final.rs"]));
+
+    assert_eq!(
+        manifest.canonical_current_paths().expect("transitive governed lineage"),
+        std::collections::BTreeMap::from([("src/final.rs".to_owned(), "src/lib.rs".to_owned())])
+    );
+}
+
+#[test]
 fn governed_split_preserves_component_and_hotspot_debt() {
     let previous = hotspot_manifest(HotspotKind::Production, HotspotStatus::Active, &["src/hot.rs"], 900, 700);
     let previous_files = inventory(&[("src/hot.rs", 900, 700)]);

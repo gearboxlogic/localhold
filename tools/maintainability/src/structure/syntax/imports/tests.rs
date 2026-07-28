@@ -305,6 +305,18 @@ fn path_valued_attribute_literals_count_concrete_stores() -> Result<()> {
 }
 
 #[test]
+fn prose_and_descriptive_attribute_strings_do_not_count_concrete_stores() -> Result<()> {
+    let source = "#[deprecated(note = \"use crate::store::SqliteStore instead\")]\n\
+                  /// The old crate::store::PostgresStore implementation.
+                  #[serde(rename = \"crate::store::SqliteStore\")]\n\
+                  #[schemars(description = \"crate::store::PostgresStore\")]\n\
+                  struct Described;\n";
+    let facts = concrete_facts(source)?;
+    assert_eq!(facts.concrete_stores, ConcreteStoreCounts::default());
+    Ok(())
+}
+
+#[test]
 fn cfg_attr_store_tokens_are_counted_only_when_the_branch_can_apply_in_production() -> Result<()> {
     let facts = concrete_facts(
         "#[cfg_attr(test, serde(default = SqliteStore))]\n\

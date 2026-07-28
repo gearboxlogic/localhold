@@ -493,19 +493,30 @@ fn canonical_binding_fingerprint(inventory: &Inventory, paths: PathAttribution<'
     Ok(syntax_fingerprint(&evidence.join("\0")))
 }
 
-fn public_reexport_evidence(inventory: &Inventory, paths: PathAttribution<'_>) -> Vec<String> {
+fn public_reexport_evidence(inventory: &Inventory, paths: PathAttribution<'_>, target_module: &[String]) -> Vec<String> {
     let mut evidence = inventory
         .files
         .iter()
         .flat_map(|file| {
             file.production_public_reexports
                 .iter()
-                .map(move |fingerprint| format!("{}:{}:{fingerprint}", paths.site_path(&file.path).len(), paths.site_path(&file.path)))
+                .filter(|reexport| reexport_applies_to_module(&reexport.target_path, target_module))
+                .map(move |reexport| format!("{}:{}:{}", paths.site_path(&file.path).len(), paths.site_path(&file.path), reexport.fingerprint))
         })
         .collect::<Vec<_>>();
     evidence.sort();
     evidence.dedup();
     evidence
+}
+
+fn reexport_applies_to_module(target_path: &[String], module: &[String]) -> bool {
+    let target_without_glob = if target_path.last().is_some_and(|segment| segment == "*") {
+        &target_path[..target_path.len() - 1]
+    } else {
+        target_path
+    };
+    let parent = target_without_glob.split_last().map_or(&[][..], |(_, parent)| parent);
+    module == parent || !target_without_glob.is_empty() && module.starts_with(target_without_glob)
 }
 
 fn validate_declaration(declaration: &ConcreteStoreDeclaration, unrestricted: &BTreeSet<&str>, allow_missing_fingerprint: bool) -> Result<()> {
@@ -559,9 +570,6 @@ fn site_fingerprints(
     source: SiteSource,
 ) -> Result<BTreeMap<SiteFingerprint, usize>> {
     let mut sites = BTreeMap::new();
-    let public_reexports = matches!(source, SiteSource::Signatures)
-        .then(|| public_reexport_evidence(inventory, paths))
-        .unwrap_or_default();
     for file in &inventory.files {
         let component = paths
             .component_for(&file.path)
@@ -573,6 +581,9 @@ fn site_fingerprints(
             SiteSource::GenericDefaults => &file.production_generic_default_store_sites,
             SiteSource::Signatures => &file.production_signature_store_sites,
         };
+        let public_reexports = matches!(source, SiteSource::Signatures)
+            .then(|| public_reexport_evidence(inventory, paths, &file.production_module))
+            .unwrap_or_default();
         for (store, fingerprints) in [
             (ConcreteStoreName::SqliteStore, &fingerprints.sqlite_store),
             (ConcreteStoreName::PostgresStore, &fingerprints.postgres_store),

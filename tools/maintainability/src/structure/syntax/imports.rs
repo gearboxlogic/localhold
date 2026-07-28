@@ -1,11 +1,12 @@
 use anyhow::{Result, bail};
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
+use serde::Serialize;
 use syn::visit::{self, Visit};
 use syn::{
-    Arm, Attribute, BareFnArg, BareVariadic, Expr, Field, FieldPat, FieldValue, File, FnArg, ForeignItem, ForeignItemFn, ForeignItemStatic, GenericParam, ImplItem, ImplItemConst,
-    ImplItemFn, ImplItemType, Item, ItemConst, ItemExternCrate, ItemFn, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemType, ItemUse, Local, Pat, Path as SynPath, Stmt,
-    StmtMacro, TraitItem, TraitItemConst, TraitItemFn, TraitItemType, Variadic, Variant, Visibility,
+    Arm, Attribute, BareFnArg, BareVariadic, Expr, Field, FieldPat, FieldValue, File, FnArg, ForeignItem, ForeignItemFn, ForeignItemStatic, GenericParam, Generics, ImplItem,
+    ImplItemConst, ImplItemFn, ImplItemType, Item, ItemConst, ItemEnum, ItemExternCrate, ItemFn, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemType,
+    ItemUnion, ItemUse, Local, Pat, Path as SynPath, Stmt, StmtMacro, TraitItem, TraitItemConst, TraitItemFn, TraitItemType, Variadic, Variant, Visibility,
 };
 
 use crate::scan::{reviewed_attribute_expansion, reviewed_macro_expansion, syntax_fingerprint};
@@ -25,14 +26,21 @@ use tokens::resolving_tokens;
 
 #[derive(Default)]
 pub struct ProductionSyntaxFacts {
+    pub module: Vec<String>,
     pub internal_imports: Vec<String>,
-    pub public_reexports: Vec<String>,
+    pub public_reexports: Vec<PublicReexportEvidence>,
     pub concrete_stores: ConcreteStoreCounts,
     pub public_concrete_store_structs: ConcreteStoreSites,
     pub concrete_store_sites: ConcreteStoreSites,
     pub generic_default_concrete_store_sites: ConcreteStoreSites,
     pub signature_concrete_store_sites: ConcreteStoreSites,
     pub binding_concrete_store_sites: ConcreteStoreSites,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct PublicReexportEvidence {
+    pub target_path: Vec<String>,
+    pub fingerprint: String,
 }
 
 #[derive(Clone, Copy)]
@@ -60,7 +68,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
     options: ProductionSyntaxOptions,
     initial_context: ProductionSyntaxContext,
 ) -> Result<ProductionSyntaxFacts> {
-    let module = if options.collect_internal_imports {
+    let module = if source_path.starts_with("src/") || crate_root.is_some() {
         source_module(source_path, crate_root)?
     } else {
         Vec::new()
@@ -89,6 +97,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
     collector.public_reexports.dedup();
     collector.concrete_stores.finish();
     Ok(ProductionSyntaxFacts {
+        module: collector.module,
         internal_imports: collector.imports,
         public_reexports: collector.public_reexports,
         concrete_stores: collector.concrete_stores.counts,
@@ -103,7 +112,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
 struct ProductionSyntaxCollector {
     module: Vec<String>,
     imports: Vec<String>,
-    public_reexports: Vec<String>,
+    public_reexports: Vec<PublicReexportEvidence>,
     concrete_stores: ConcreteStoreInventory,
     site_context: Option<String>,
     generic_default_depth: usize,
@@ -138,19 +147,33 @@ impl ProductionSyntaxCollector {
         Ok(())
     }
 
-    fn record_public_reexport(&mut self, item: &ItemUse) {
+    fn record_public_reexport(&mut self, item: &ItemUse) -> Result<()> {
         if matches!(item.vis, Visibility::Inherited) {
-            return;
+            return Ok(());
         }
-        let mut declaration = item.clone();
-        declaration.attrs.clear();
-        let identity = format!(
-            "public-reexport:{}\0cfg:{}\0ancestors:{}",
-            syntax_fingerprint(&declaration),
-            self.cfg_context.identity(),
-            self.declaration_ancestors.join("\0")
-        );
-        self.public_reexports.push(syntax_fingerprint(&identity));
+        let mut paths = Vec::new();
+        flatten_use_tree(&item.tree, &mut Vec::new(), &mut paths);
+        for mut path in paths {
+            if item.leading_colon.is_some() {
+                path.segments.insert(0, "crate".to_owned());
+            }
+            let Some(target_path) = resolve_path(&self.module, &path.segments, self.rust_2015_absolute_paths)? else {
+                continue;
+            };
+            let identity = format!(
+                "public-reexport:{}\0alias:{}\0visibility:{}\0cfg:{}\0ancestors:{}",
+                target_path.join("::"),
+                path.alias.as_deref().unwrap_or_default(),
+                syntax_fingerprint(&item.vis),
+                self.cfg_context.identity(),
+                self.declaration_ancestors.join("\0")
+            );
+            self.public_reexports.push(PublicReexportEvidence {
+                target_path,
+                fingerprint: syntax_fingerprint(&identity),
+            });
+        }
+        Ok(())
     }
 
     fn collect_path(&mut self, path: &UsePath) -> Result<()> {
@@ -231,6 +254,14 @@ impl ProductionSyntaxCollector {
         let mut identity = visibility.to_token_stream();
         identity.extend(tokens.clone());
         self.record_concrete_stores_in_signature_with_identity(kind, &tokens, &identity);
+    }
+
+    fn record_declaration_generics(&mut self, kind: &str, visibility: &Visibility, generics: &Generics) {
+        let mut tokens = generics.to_token_stream();
+        if let Some(where_clause) = &generics.where_clause {
+            tokens.extend(where_clause.to_token_stream());
+        }
+        self.record_concrete_stores_in_visible_signature(kind, visibility, &tokens);
     }
 
     fn record_concrete_stores_in_signature_with_identity(&mut self, kind: &str, tokens: &TokenStream, identity: &TokenStream) {
@@ -426,24 +457,45 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
 
     fn visit_item_use(&mut self, item: &'ast ItemUse) {
         let previous = self.enter_site_context("use", item);
+        let result = self.collect_use(item).and_then(|()| self.record_public_reexport(item));
         if self.error.is_none()
-            && let Err(error) = self.collect_use(item)
+            && let Err(error) = result
         {
             self.error = Some(error);
             self.leave_site_context(previous);
             return;
         }
-        self.record_public_reexport(item);
         visit::visit_item_use(self, item);
         self.leave_site_context(previous);
     }
 
     fn visit_item_struct(&mut self, item: &'ast ItemStruct) {
+        self.record_declaration_generics("struct-generics", &item.vis, &item.generics);
         if matches!(item.vis, Visibility::Public(_)) {
             self.concrete_stores
                 .record_public_struct_declaration(item, &self.cfg_context.identity(), &self.declaration_ancestors);
         }
         visit::visit_item_struct(self, item);
+    }
+
+    fn visit_item_enum(&mut self, item: &'ast ItemEnum) {
+        self.record_declaration_generics("enum-generics", &item.vis, &item.generics);
+        visit::visit_item_enum(self, item);
+    }
+
+    fn visit_item_union(&mut self, item: &'ast ItemUnion) {
+        self.record_declaration_generics("union-generics", &item.vis, &item.generics);
+        visit::visit_item_union(self, item);
+    }
+
+    fn visit_item_trait(&mut self, item: &'ast ItemTrait) {
+        if !matches!(item.vis, Visibility::Inherited) {
+            let mut header = item.clone();
+            header.attrs.clear();
+            header.items.clear();
+            self.record_concrete_stores_in_signature("trait-header", &header);
+        }
+        visit::visit_item_trait(self, item);
     }
 
     fn visit_item_impl(&mut self, item: &'ast ItemImpl) {

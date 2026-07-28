@@ -543,6 +543,17 @@ fn raw_and_ordinary_cfg_identifiers_share_one_atom_identity() -> Result<()> {
 }
 
 #[test]
+fn target_family_shorthands_share_their_explicit_cfg_identity() -> Result<()> {
+    let facts = concrete_facts(
+        "#[cfg(unix)] #[cfg(not(target_family = \"unix\"))] struct DeadUnix(SqliteStore);\n\
+         #[cfg(target_family = \"windows\")] #[cfg(not(windows))] struct DeadWindows(PostgresStore);\n\
+         #[cfg(unix)] #[cfg(windows)] struct ImpossibleFamily(SqliteStore);\n",
+    )?;
+    assert_eq!(facts.concrete_stores, ConcreteStoreCounts::default());
+    Ok(())
+}
+
+#[test]
 fn raw_and_cooked_cfg_literals_share_one_atom_identity() -> Result<()> {
     let facts = concrete_facts("#[cfg(feature = \"x\")] #[cfg(not(feature = r\"x\"))] fn disabled() { let _ = SqliteStore; }\n")?;
     assert_eq!(facts.concrete_stores, ConcreteStoreCounts::default());
@@ -577,6 +588,19 @@ fn concrete_store_bearing_signatures_are_inventoried_separately_from_bodies() ->
     let facts = concrete_facts("pub(crate) fn open() -> SqliteStore { SqliteStore::open() }\n")?;
     assert_eq!(facts.signature_concrete_store_sites.sqlite_store.len(), 1);
     assert_eq!(facts.concrete_stores.sqlite_store, 2);
+    Ok(())
+}
+
+#[test]
+fn type_and_trait_generic_bounds_are_signature_evidence() -> Result<()> {
+    let facts = concrete_facts(
+        "pub(crate) struct Adapter<T: Uses<SqliteStore>>(T);\n\
+         pub(crate) enum Backend<T> where T: Uses<PostgresStore> { Active(T) }\n\
+         pub(crate) union Slot<T: Copy + Uses<SqliteStore>> { value: T }\n\
+         pub(crate) trait Routed<T>: Uses<PostgresStore> where T: Uses<SqliteStore> {}\n",
+    )?;
+    assert_eq!(facts.signature_concrete_store_sites.sqlite_store.len(), 3);
+    assert_eq!(facts.signature_concrete_store_sites.postgres_store.len(), 2);
     Ok(())
 }
 

@@ -207,11 +207,38 @@ fn predicate(meta: &Meta) -> Result<Predicate> {
             }
             Ok(Predicate::Not(Box::new(predicates.remove(0))))
         }
-        Meta::Path(_) | Meta::NameValue(_) | Meta::List(_) => Ok(Predicate::Atom {
-            identity: normalized_atom_identity(&meta.to_token_stream()),
-            exclusive_group: exclusive_cfg_group(meta),
-        }),
+        Meta::Path(_) | Meta::NameValue(_) | Meta::List(_) => {
+            let target_family = target_family_value(meta);
+            Ok(Predicate::Atom {
+                identity: target_family.as_ref().map_or_else(
+                    || normalized_atom_identity(&meta.to_token_stream()),
+                    |family| format!("target-family:{}:{family}", family.len()),
+                ),
+                exclusive_group: target_family.map_or_else(|| exclusive_cfg_group(meta), |_| Some("target_family".to_owned())),
+            })
+        }
     }
+}
+
+fn target_family_value(meta: &Meta) -> Option<String> {
+    match meta {
+        Meta::Path(path) if normalized_cfg_path(path).as_deref() == Some("unix") => Some("unix".to_owned()),
+        Meta::Path(path) if normalized_cfg_path(path).as_deref() == Some("windows") => Some("windows".to_owned()),
+        Meta::NameValue(value) if normalized_cfg_path(&value.path).as_deref() == Some("target_family") => {
+            let Expr::Lit(expression) = &value.value else {
+                return None;
+            };
+            let syn::Lit::Str(family) = &expression.lit else {
+                return None;
+            };
+            Some(family.value())
+        }
+        Meta::Path(_) | Meta::NameValue(_) | Meta::List(_) => None,
+    }
+}
+
+fn normalized_cfg_path(path: &syn::Path) -> Option<String> {
+    (path.leading_colon.is_none() && path.segments.len() == 1).then(|| normalized_ident(&path.segments[0].ident))
 }
 
 fn exclusive_cfg_group(meta: &Meta) -> Option<String> {
@@ -221,7 +248,7 @@ fn exclusive_cfg_group(meta: &Meta) -> Option<String> {
     let key = value.path.get_ident().map(normalized_ident)?;
     matches!(
         key.as_str(),
-        "panic" | "target_abi" | "target_arch" | "target_endian" | "target_env" | "target_os" | "target_pointer_width" | "target_vendor"
+        "panic" | "target_abi" | "target_arch" | "target_endian" | "target_env" | "target_family" | "target_os" | "target_pointer_width" | "target_vendor"
     )
     .then_some(key)
 }

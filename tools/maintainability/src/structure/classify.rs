@@ -10,8 +10,8 @@ use serde::Serialize;
 use crate::scan::syntax_fingerprint;
 
 use super::syntax::{
-    ConcreteStoreCounts, ConcreteStoreSites, ProductionCfgContext, ProductionSyntaxContext, ProductionSyntaxFacts, ProductionSyntaxOptions, TestLineCollector, normalized_ident,
-    production_cfg_context, production_syntax_facts_with_context, reject_module_path_overrides,
+    ConcreteStoreCounts, ConcreteStoreSites, ProductionCfgContext, ProductionSyntaxContext, ProductionSyntaxFacts, ProductionSyntaxOptions, PublicReexportEvidence,
+    TestLineCollector, normalized_ident, production_cfg_context, production_syntax_facts_with_context, reject_module_path_overrides,
 };
 
 mod module_macro;
@@ -25,8 +25,9 @@ pub struct FileMeasurement {
     pub physical_lines: usize,
     pub production_lines: usize,
     pub test_lines: usize,
+    pub production_module: Vec<String>,
     pub production_internal_imports: Vec<String>,
-    pub production_public_reexports: Vec<String>,
+    pub production_public_reexports: Vec<PublicReexportEvidence>,
     pub production_concrete_stores: ConcreteStoreCounts,
     pub production_public_concrete_store_structs: ConcreteStoreSites,
     pub production_concrete_store_sites: ConcreteStoreSites,
@@ -273,6 +274,7 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
             physical_lines,
             production_lines: physical_lines.saturating_sub(test_lines),
             test_lines,
+            production_module: production_facts.module,
             production_internal_imports: production_facts.internal_imports,
             production_public_reexports: production_facts.public_reexports,
             production_concrete_stores: production_facts.concrete_stores,

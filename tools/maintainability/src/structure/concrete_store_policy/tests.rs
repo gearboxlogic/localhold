@@ -1,6 +1,6 @@
 use super::*;
 use crate::structure::classify::{FileMeasurement, Inventory};
-use crate::structure::syntax::{ConcreteStoreCounts, ConcreteStoreSites};
+use crate::structure::syntax::{ConcreteStoreCounts, ConcreteStoreSites, PublicReexportEvidence};
 
 type CountFixture<'a> = (&'a str, usize, usize);
 
@@ -163,11 +163,15 @@ fn reviewed_site_fingerprints_prevent_same_count_moves_and_new_generic_defaults(
 #[test]
 fn public_reexports_are_additive_signature_evidence() {
     let policy = policy();
-    let components = components(&[("src/store/sqlite.rs", "sqlite-store")]);
-    let mut private_signature = inventory(&[("src/store/sqlite.rs", 1, 0)]);
-    private_signature.files[0].production_signature_store_sites.sqlite_store = vec!["private-open".to_owned()];
+    let components = components(&[("src/lib.rs", "composition"), ("src/store/sqlite.rs", "sqlite-store")]);
+    let mut private_signature = inventory(&[("src/lib.rs", 0, 0), ("src/store/sqlite.rs", 1, 0)]);
+    private_signature.files[1].production_module = vec!["store".to_owned(), "sqlite".to_owned()];
+    private_signature.files[1].production_signature_store_sites.sqlite_store = vec!["private-open".to_owned()];
     let mut reexported_signature = private_signature.clone();
-    reexported_signature.files[0].production_public_reexports = vec!["public-use-helper-open".to_owned()];
+    reexported_signature.files[0].production_public_reexports = vec![PublicReexportEvidence {
+        target_path: vec!["store".to_owned(), "sqlite".to_owned(), "open".to_owned()],
+        fingerprint: "public-use-helper-open".to_owned(),
+    }];
 
     let error = policy
         .compare_site_fingerprints(&reexported_signature, &private_signature, paths(&components), paths(&components))
@@ -176,6 +180,25 @@ fn public_reexports_are_additive_signature_evidence() {
     policy
         .compare_site_fingerprints(&private_signature, &reexported_signature, paths(&components), paths(&components))
         .expect("removing a public re-export reduces concrete-store exposure");
+}
+
+#[test]
+fn unrelated_public_reexports_do_not_change_signature_evidence() {
+    let policy = policy();
+    let components = components(&[("src/store/sqlite.rs", "sqlite-store"), ("src/metrics.rs", "persistence-core")]);
+    let mut baseline = inventory(&[("src/store/sqlite.rs", 1, 0), ("src/metrics.rs", 0, 0)]);
+    baseline.files[0].production_module = vec!["store".to_owned(), "sqlite".to_owned()];
+    baseline.files[0].production_signature_store_sites.sqlite_store = vec!["private-open".to_owned()];
+    baseline.files[1].production_module = vec!["metrics".to_owned()];
+    let mut current = baseline.clone();
+    current.files[1].production_public_reexports = vec![PublicReexportEvidence {
+        target_path: vec!["metrics".to_owned(), "Counter".to_owned()],
+        fingerprint: "public-use-counter".to_owned(),
+    }];
+
+    policy
+        .compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components))
+        .expect("an unrelated module re-export does not affect store signatures");
 }
 
 #[test]
@@ -574,6 +597,7 @@ fn file(path: &str, sqlite_store: usize, postgres_store: usize) -> FileMeasureme
         physical_lines: 1,
         production_lines: 1,
         test_lines: 0,
+        production_module: Vec::new(),
         production_internal_imports: Vec::new(),
         production_public_reexports: Vec::new(),
         production_concrete_stores: ConcreteStoreCounts { sqlite_store, postgres_store },

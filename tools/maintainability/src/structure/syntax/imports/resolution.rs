@@ -8,9 +8,11 @@ use syn::{Attribute, Meta, Path as SynPath, UseTree};
 use super::super::{ProductionCfgContext, normalized_ident, production_cfg_attr_metas};
 use super::tokens::resolving_tokens;
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct UsePath {
     pub(super) segments: Vec<String>,
     pub(super) renamed: bool,
+    pub(super) alias: Option<String>,
 }
 
 pub(super) fn flatten_use_tree(tree: &UseTree, prefix: &mut Vec<String>, paths: &mut Vec<UsePath>) {
@@ -26,7 +28,11 @@ pub(super) fn flatten_use_tree(tree: &UseTree, prefix: &mut Vec<String>, paths: 
             if name != "self" {
                 segments.push(name);
             }
-            paths.push(UsePath { segments, renamed: false });
+            paths.push(UsePath {
+                segments,
+                renamed: false,
+                alias: None,
+            });
         }
         UseTree::Rename(rename) => {
             let name = normalized_ident(&rename.ident);
@@ -34,12 +40,20 @@ pub(super) fn flatten_use_tree(tree: &UseTree, prefix: &mut Vec<String>, paths: 
             if name != "self" {
                 segments.push(name);
             }
-            paths.push(UsePath { segments, renamed: true });
+            paths.push(UsePath {
+                segments,
+                renamed: true,
+                alias: Some(normalized_ident(&rename.rename)),
+            });
         }
         UseTree::Glob(_) => {
             let mut segments = prefix.clone();
             segments.push("*".to_owned());
-            paths.push(UsePath { segments, renamed: false });
+            paths.push(UsePath {
+                segments,
+                renamed: false,
+                alias: None,
+            });
         }
         UseTree::Group(group) => {
             for nested in &group.items {

@@ -204,6 +204,7 @@ fn public_reexports_are_inventoried_beside_concrete_store_signatures() {
     let exposed_helper = exposed.files.iter().find(|file| file.path == "src/helper.rs").expect("helper measurement");
     assert!(private_root.production_public_reexports.is_empty());
     assert_eq!(exposed_root.production_public_reexports.len(), 1);
+    assert_eq!(exposed_root.production_public_reexports[0].target_path, ["helper", "open"]);
     assert_eq!(exposed_helper.production_signature_store_sites.sqlite_store.len(), 1);
 }
 

@@ -125,6 +125,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
         generic_default_depth: 0,
         impl_signature_headers: Vec::new(),
         impl_trait_exposures: Vec::new(),
+        trait_exposures: Vec::new(),
         field_exposures: Vec::new(),
         declaration_ancestors: initial_context.declaration_ancestors,
         cfg_context: initial_context.cfg,
@@ -170,6 +171,7 @@ struct ProductionSyntaxCollector {
     generic_default_depth: usize,
     impl_signature_headers: Vec<TokenStream>,
     impl_trait_exposures: Vec<bool>,
+    trait_exposures: Vec<bool>,
     field_exposures: Vec<FieldExposure>,
     declaration_ancestors: Vec<String>,
     cfg_context: ProductionCfgContext,
@@ -401,6 +403,10 @@ impl ProductionSyntaxCollector {
 
     fn impl_member_is_exposed(&self, visibility: &Visibility) -> bool {
         visibility_is_exposed(visibility) || self.impl_trait_exposures.last().copied().unwrap_or(false)
+    }
+
+    fn trait_member_is_exposed(&self) -> bool {
+        self.trait_exposures.last().copied().unwrap_or(false)
     }
 
     fn field_is_exposed(&self, visibility: &Visibility) -> bool {
@@ -685,13 +691,16 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_trait(&mut self, item: &'ast ItemTrait) {
-        if !matches!(item.vis, Visibility::Inherited) {
+        let exposed = visibility_is_exposed(&item.vis);
+        if exposed {
             let mut header = item.clone();
             header.attrs.clear();
             header.items.clear();
             self.record_concrete_stores_in_signature("trait-header", &header);
         }
+        self.trait_exposures.push(exposed);
         visit::visit_item_trait(self, item);
+        self.trait_exposures.pop();
     }
 
     fn visit_item_impl(&mut self, item: &'ast ItemImpl) {
@@ -734,7 +743,9 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_trait_item_fn(&mut self, item: &'ast TraitItemFn) {
-        self.record_concrete_stores_in_signature("trait-method-signature", &item.sig);
+        if self.trait_member_is_exposed() {
+            self.record_concrete_stores_in_signature("trait-method-signature", &item.sig);
+        }
         visit::visit_trait_item_fn(self, item);
     }
 
@@ -768,7 +779,9 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_trait_item_const(&mut self, item: &'ast TraitItemConst) {
-        self.record_concrete_stores_in_signature("trait-const-type", &item.ty);
+        if self.trait_member_is_exposed() {
+            self.record_concrete_stores_in_signature("trait-const-type", &item.ty);
+        }
         visit::visit_trait_item_const(self, item);
     }
 
@@ -783,7 +796,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         let import_count = self.imports.len();
         let concrete_before = self.concrete_stores.counts;
         visit::visit_item_type(self, item);
-        if self.error.is_none() && self.imports.len() != import_count && !matches!(item.vis, Visibility::Inherited) {
+        if self.error.is_none() && self.imports.len() != import_count && visibility_is_exposed(&item.vis) {
             self.error = Some(anyhow::anyhow!("production restricted imports cannot be exposed through public type aliases"));
         }
         self.reject_concrete_store_alias(concrete_before);
@@ -1088,8 +1101,12 @@ fn named_ancestor(kind: &str, ident: &proc_macro2::Ident, visibility: &Visibilit
     format!("{kind}:{}:{}", normalized_ident(ident), syntax_fingerprint(visibility))
 }
 
-const fn visibility_is_exposed(visibility: &Visibility) -> bool {
-    !matches!(visibility, Visibility::Inherited)
+fn visibility_is_exposed(visibility: &Visibility) -> bool {
+    match visibility {
+        Visibility::Inherited => false,
+        Visibility::Restricted(restricted) => !restricted.path.is_ident("self"),
+        Visibility::Public(_) => true,
+    }
 }
 
 fn is_explicit_builtin_stringify(node: &syn::Macro) -> bool {

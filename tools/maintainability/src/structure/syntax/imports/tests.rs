@@ -973,6 +973,31 @@ fn private_containers_and_items_are_not_exposure_signatures() -> Result<()> {
 }
 
 #[test]
+fn private_traits_and_self_restricted_items_are_not_exposure_signatures() -> Result<()> {
+    let private = concrete_facts(
+        "trait Internal { fn inspect(_: SqliteStore); const STORE: PostgresStore; }\n\
+         pub(self) trait SelfOnly<T: Uses<SqliteStore>> { fn inspect(_: PostgresStore); }\n\
+         pub(self) fn inspect(_: SqliteStore) -> PostgresStore { loop {} }\n\
+         pub(self) struct Cache { pub(self) store: SqliteStore }\n\
+         struct Holder;\n\
+         impl Holder { pub(self) fn inspect(_: PostgresStore) {} }\n",
+    )?;
+    let exposed = concrete_facts(
+        "pub(crate) trait External<T: Uses<SqliteStore>> {\n\
+             fn inspect(_: SqliteStore);\n\
+             const STORE: PostgresStore;\n\
+         }\n\
+         pub(crate) fn inspect(_: SqliteStore) -> PostgresStore { loop {} }\n",
+    )?;
+
+    assert!(private.signature_concrete_store_sites.sqlite_store.is_empty());
+    assert!(private.signature_concrete_store_sites.postgres_store.is_empty());
+    assert_eq!(exposed.signature_concrete_store_sites.sqlite_store.len(), 3);
+    assert_eq!(exposed.signature_concrete_store_sites.postgres_store.len(), 2);
+    Ok(())
+}
+
+#[test]
 fn concrete_store_sites_pin_generic_defaults_and_enclosing_syntax() -> Result<()> {
     let original = concrete_facts(
         "pub struct Service<S: MemoryReader = SqliteStore>(S);\n\

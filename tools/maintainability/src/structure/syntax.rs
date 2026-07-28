@@ -6,6 +6,15 @@ use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 use syn::{Attribute, Expr, ForeignItem, ImplItem, Item, Meta, Token, TraitItem};
 
+mod imports;
+
+pub use imports::production_internal_imports;
+
+pub(super) fn normalized_ident(ident: &proc_macro2::Ident) -> String {
+    let value = ident.to_string();
+    value.strip_prefix("r#").unwrap_or(&value).to_owned()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Truth {
     AlwaysFalse,
@@ -27,7 +36,9 @@ impl TestLineCollector {
     }
 
     pub fn visit_file(&mut self, file: &syn::File) -> Result<()> {
-        Visit::visit_file(self, file);
+        if !self.classify(Ok(&file.attrs), file) {
+            Visit::visit_file(self, file);
+        }
         self.error.take().map_or(Ok(()), Err)
     }
 
@@ -177,7 +188,7 @@ fn meta_contains_path(meta: &Meta) -> Result<bool> {
     arguments.iter().skip(1).try_fold(false, |found, nested| Ok(found || meta_contains_path(nested)?))
 }
 
-fn attributes_disable_production(attributes: &[Attribute]) -> Result<bool> {
+pub(super) fn attributes_disable_production(attributes: &[Attribute]) -> Result<bool> {
     for attribute in attributes {
         if attribute.path().is_ident("cfg") {
             let predicate = parse_single_meta(attribute).context("parse cfg predicate for line classification")?;
@@ -195,8 +206,12 @@ fn cfg_attr_disables_production(attribute: &Attribute) -> Result<bool> {
     let Meta::List(list) = &attribute.meta else {
         return Ok(false);
     };
+    cfg_attr_tokens_disable_production(&list.tokens)
+}
+
+fn cfg_attr_tokens_disable_production(tokens: &proc_macro2::TokenStream) -> Result<bool> {
     let arguments = Punctuated::<Meta, Token![,]>::parse_terminated
-        .parse2(list.tokens.clone())
+        .parse2(tokens.clone())
         .context("parse cfg_attr arguments for line classification")?;
     let mut arguments = arguments.into_iter();
     let Some(condition) = arguments.next() else {
@@ -208,14 +223,22 @@ fn cfg_attr_disables_production(attribute: &Attribute) -> Result<bool> {
     for nested in arguments {
         if nested.path().is_ident("cfg") {
             let Meta::List(list) = nested else {
-                continue;
+                anyhow::bail!("nested cfg predicate must use list syntax")
             };
             let predicate = Punctuated::<Meta, Token![,]>::parse_terminated
                 .parse2(list.tokens)
                 .context("parse nested cfg_attr cfg predicate")?;
-            if predicate.len() == 1 && evaluate(predicate.first().context("nested cfg predicate disappeared")?) == Truth::AlwaysFalse {
+            if predicate.len() != 1 {
+                anyhow::bail!("nested cfg attribute must contain exactly one predicate");
+            }
+            if evaluate(predicate.first().context("nested cfg predicate disappeared")?) == Truth::AlwaysFalse {
                 return Ok(true);
             }
+        } else if nested.path().is_ident("cfg_attr")
+            && let Meta::List(list) = nested
+            && cfg_attr_tokens_disable_production(&list.tokens)?
+        {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -253,6 +276,10 @@ fn evaluate(meta: &Meta) -> Truth {
         }
         Meta::List(_) => Truth::Unknown,
     }
+}
+
+pub(super) fn cfg_can_apply_in_production(meta: &Meta) -> bool {
+    evaluate(meta) != Truth::AlwaysFalse
 }
 
 fn evaluate_leaf(meta: &Meta) -> Truth {
@@ -294,7 +321,7 @@ const fn combine_any(left: Truth, right: Truth) -> Truth {
     }
 }
 
-fn item_attributes(item: &Item) -> Result<&[Attribute]> {
+pub(super) fn item_attributes(item: &Item) -> Result<&[Attribute]> {
     Ok(match item {
         Item::Const(item) => &item.attrs,
         Item::Enum(item) => &item.attrs,
@@ -316,7 +343,7 @@ fn item_attributes(item: &Item) -> Result<&[Attribute]> {
     })
 }
 
-fn impl_item_attributes(item: &ImplItem) -> Result<&[Attribute]> {
+pub(super) fn impl_item_attributes(item: &ImplItem) -> Result<&[Attribute]> {
     Ok(match item {
         ImplItem::Const(item) => &item.attrs,
         ImplItem::Fn(item) => &item.attrs,
@@ -327,7 +354,7 @@ fn impl_item_attributes(item: &ImplItem) -> Result<&[Attribute]> {
     })
 }
 
-fn trait_item_attributes(item: &TraitItem) -> Result<&[Attribute]> {
+pub(super) fn trait_item_attributes(item: &TraitItem) -> Result<&[Attribute]> {
     Ok(match item {
         TraitItem::Const(item) => &item.attrs,
         TraitItem::Fn(item) => &item.attrs,
@@ -338,7 +365,7 @@ fn trait_item_attributes(item: &TraitItem) -> Result<&[Attribute]> {
     })
 }
 
-fn foreign_item_attributes(item: &ForeignItem) -> Result<&[Attribute]> {
+pub(super) fn foreign_item_attributes(item: &ForeignItem) -> Result<&[Attribute]> {
     Ok(match item {
         ForeignItem::Fn(item) => &item.attrs,
         ForeignItem::Macro(item) => &item.attrs,
@@ -349,7 +376,45 @@ fn foreign_item_attributes(item: &ForeignItem) -> Result<&[Attribute]> {
     })
 }
 
-fn expr_attributes(expression: &Expr) -> Result<&[Attribute]> {
+pub(super) fn fn_arg_attributes(argument: &syn::FnArg) -> &[Attribute] {
+    match argument {
+        syn::FnArg::Receiver(argument) => &argument.attrs,
+        syn::FnArg::Typed(argument) => &argument.attrs,
+    }
+}
+
+pub(super) fn generic_param_attributes(parameter: &syn::GenericParam) -> &[Attribute] {
+    match parameter {
+        syn::GenericParam::Lifetime(parameter) => &parameter.attrs,
+        syn::GenericParam::Type(parameter) => &parameter.attrs,
+        syn::GenericParam::Const(parameter) => &parameter.attrs,
+    }
+}
+
+pub(super) fn pat_attributes(pattern: &syn::Pat) -> Result<&[Attribute]> {
+    Ok(match pattern {
+        syn::Pat::Const(pattern) => &pattern.attrs,
+        syn::Pat::Ident(pattern) => &pattern.attrs,
+        syn::Pat::Lit(pattern) => &pattern.attrs,
+        syn::Pat::Macro(pattern) => &pattern.attrs,
+        syn::Pat::Or(pattern) => &pattern.attrs,
+        syn::Pat::Paren(pattern) => &pattern.attrs,
+        syn::Pat::Path(pattern) => &pattern.attrs,
+        syn::Pat::Range(pattern) => &pattern.attrs,
+        syn::Pat::Reference(pattern) => &pattern.attrs,
+        syn::Pat::Rest(pattern) => &pattern.attrs,
+        syn::Pat::Slice(pattern) => &pattern.attrs,
+        syn::Pat::Struct(pattern) => &pattern.attrs,
+        syn::Pat::Tuple(pattern) => &pattern.attrs,
+        syn::Pat::TupleStruct(pattern) => &pattern.attrs,
+        syn::Pat::Type(pattern) => &pattern.attrs,
+        syn::Pat::Verbatim(_) => anyhow::bail!("opaque pattern syntax cannot be classified"),
+        syn::Pat::Wild(pattern) => &pattern.attrs,
+        _ => anyhow::bail!("unsupported pattern syntax cannot be classified"),
+    })
+}
+
+pub(super) fn expr_attributes(expression: &Expr) -> Result<&[Attribute]> {
     Ok(match expression {
         Expr::Array(value) => &value.attrs,
         Expr::Assign(value) => &value.attrs,

@@ -553,6 +553,13 @@ fn canonical_declaration_fingerprints_ignore_outer_attributes_but_pin_shape() ->
              inner: Arc<SqliteInner>\n\
          }",
     )?;
+    let conditionally_documented = historical_concrete_facts(
+        "#[cfg_attr(docsrs, doc = \"SQLite backend.\")]\n\
+         pub struct SqliteStore {\n\
+             #[cfg_attr(docsrs, cfg_attr(all(), doc = \"Shared backend state.\"))]\n\
+             inner: Arc<SqliteInner>\n\
+         }",
+    )?;
     let test_instrumented = concrete_facts(
         "pub struct SqliteStore {\n\
              inner: Arc<SqliteInner>,\n\
@@ -591,6 +598,7 @@ fn canonical_declaration_fingerprints_ignore_outer_attributes_but_pin_shape() ->
 
     assert_eq!(plain.public_concrete_store_structs, documented.public_concrete_store_structs);
     assert_eq!(plain.public_concrete_store_structs, documented_field.public_concrete_store_structs);
+    assert_eq!(plain.public_concrete_store_structs, conditionally_documented.public_concrete_store_structs);
     assert_eq!(plain.public_concrete_store_structs, test_instrumented.public_concrete_store_structs);
     assert_ne!(plain.public_concrete_store_structs, production_instrumented.public_concrete_store_structs);
     assert_ne!(plain.public_concrete_store_structs, derived.public_concrete_store_structs);
@@ -1101,7 +1109,11 @@ fn private_traits_and_self_restricted_items_are_not_exposure_signatures() -> Res
          pub(self) fn inspect(_: SqliteStore) -> PostgresStore { loop {} }\n\
          pub(self) struct Cache { pub(self) store: SqliteStore }\n\
          struct Holder;\n\
-         impl Holder { pub(self) fn inspect(_: PostgresStore) {} }\n",
+         impl Holder { pub(self) fn inspect(_: PostgresStore) {} }\n\
+         impl SqliteStore {\n\
+             pub(self) fn inspect_self(&self) {}\n\
+             pub(in self) fn inspect_in_self(&self) {}\n\
+         }\n",
     )?;
     let exposed = concrete_facts(
         "pub(crate) trait External<T: Uses<SqliteStore>> {\n\

@@ -79,6 +79,8 @@ fn external_modules_reachable_only_from_tests_are_wholly_test_only() {
     assert_eq!(by_path["src/lib.rs"].production_lines, 1);
     assert_eq!(by_path["src/tests.rs"].production_lines, 0);
     assert_eq!(by_path["src/tests/nested.rs"].production_lines, 0);
+    assert!(by_path["src/tests.rs"].production_targets.is_empty());
+    assert!(by_path["src/tests/nested.rs"].production_targets.is_empty());
 }
 
 #[test]
@@ -102,6 +104,15 @@ fn any_production_module_edge_keeps_the_target_in_production() {
     ]);
     let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
     assert_eq!(by_path["src/shared.rs"].production_lines, 1);
+}
+
+#[test]
+fn production_sources_retain_their_originating_target_roots() {
+    let inventory = inventory(&[("src/lib.rs", "mod shared;\n"), ("src/main.rs", "mod shared;\n"), ("src/shared.rs", "fn shared() {}\n")]);
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_path["src/lib.rs"].production_targets, ["src/lib.rs"]);
+    assert_eq!(by_path["src/main.rs"].production_targets, ["src/main.rs"]);
+    assert_eq!(by_path["src/shared.rs"].production_targets, ["src/lib.rs", "src/main.rs"]);
 }
 
 #[test]

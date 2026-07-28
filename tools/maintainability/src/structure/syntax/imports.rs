@@ -432,7 +432,7 @@ impl ProductionSyntaxCollector {
     }
 
     fn record_impl_header_for_visible_member(&mut self, kind: &str, visibility: &Visibility, member: &impl ToTokens) {
-        if matches!(visibility, Visibility::Inherited) {
+        if !visibility_is_exposed(visibility) {
             return;
         }
         let Some(header) = self.impl_signature_headers.last().cloned() else {

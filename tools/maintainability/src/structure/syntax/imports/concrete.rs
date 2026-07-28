@@ -82,7 +82,7 @@ impl ConcreteStoreInventory {
         for field in &mut declaration.fields {
             field.attrs.retain(|attribute| !attribute.path().is_ident("doc"));
         }
-        let declaration = syntax_fingerprint(&declaration);
+        let declaration = syntax_fingerprint(&without_documentation(&declaration.to_token_stream()));
         let declaration = if cfg.identity().is_empty() && ancestors.is_empty() {
             declaration
         } else {

@@ -12,6 +12,7 @@ pub(super) fn file(path: &str, physical: usize, production: usize) -> FileMeasur
         physical_lines: physical,
         production_lines: production,
         test_lines,
+        production_targets: vec!["crate".to_owned()],
         production_module: Vec::new(),
         production_internal_imports: Vec::new(),
         production_public_reexports: Vec::new(),

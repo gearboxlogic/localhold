@@ -287,6 +287,31 @@ fn unrelated_public_reexports_do_not_change_signature_evidence() {
 }
 
 #[test]
+fn public_reexports_match_signatures_only_within_the_same_target() {
+    let policy = policy();
+    let components = components(&[("src/lib.rs", "sqlite-store"), ("src/main.rs", "composition")]);
+    let mut baseline = inventory(&[("src/lib.rs", 1, 0), ("src/main.rs", 0, 0)]);
+    baseline.files[0].production_targets = vec!["src/lib.rs".to_owned()];
+    baseline.files[0].production_signature_store_sites.sqlite_store = vec![signature("private-adapter-method", &["hidden", "Adapter"])];
+    baseline.files[1].production_targets = vec!["src/main.rs".to_owned()];
+    let mut current = baseline.clone();
+    current.files[1].production_public_reexports = vec![PublicReexportEvidence {
+        exported_path: vec!["Adapter".to_owned()],
+        target_path: vec!["hidden".to_owned(), "Adapter".to_owned()],
+        fingerprint: "binary-adapter-reexport".to_owned(),
+        cfg: ProductionCfgContext::default(),
+    }];
+
+    policy
+        .compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components))
+        .expect("a binary re-export cannot expose a library item with the same module path");
+
+    current.files[1].production_targets = vec!["src/lib.rs".to_owned()];
+    let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
+    assert!(error.to_string().contains("production signature"));
+}
+
+#[test]
 fn transitive_public_reexports_are_signature_evidence() {
     let policy = policy();
     let components = components(&[("src/ui/mod.rs", "composition"), ("src/ui/facade.rs", "composition"), ("src/ui/helper.rs", "sqlite-store")]);
@@ -707,6 +732,7 @@ fn file(path: &str, sqlite_store: usize, postgres_store: usize) -> FileMeasureme
         physical_lines: 1,
         production_lines: 1,
         test_lines: 0,
+        production_targets: vec!["crate".to_owned()],
         production_module: Vec::new(),
         production_internal_imports: Vec::new(),
         production_public_reexports: Vec::new(),

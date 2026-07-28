@@ -192,6 +192,7 @@ fn inventory(files: &[ImportFixture<'_>]) -> Inventory {
                 physical_lines: 1,
                 production_lines: 1,
                 test_lines: 0,
+                production_targets: vec!["crate".to_owned()],
                 production_module: Vec::new(),
                 production_internal_imports: imports.iter().map(|target| (*target).to_owned()).collect(),
                 production_public_reexports: Vec::new(),

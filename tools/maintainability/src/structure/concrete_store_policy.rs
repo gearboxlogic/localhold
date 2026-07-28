@@ -505,20 +505,31 @@ fn canonical_binding_fingerprint(inventory: &Inventory, paths: PathAttribution<'
     Ok(syntax_fingerprint(&evidence.join("\0")))
 }
 
-fn public_reexport_evidence(inventory: &Inventory, paths: PathAttribution<'_>, target_item: &[String], target_cfg: &super::syntax::ProductionCfgContext) -> Vec<String> {
+fn public_reexport_evidence(
+    inventory: &Inventory,
+    paths: PathAttribution<'_>,
+    target_item: &[String],
+    target_cfg: &super::syntax::ProductionCfgContext,
+    production_targets: &[String],
+) -> Vec<String> {
     if target_item.is_empty() {
         return Vec::new();
     }
-    let reexports = inventory
-        .files
-        .iter()
-        .flat_map(|file| file.production_public_reexports.iter().map(move |reexport| (file, reexport)))
-        .collect::<Vec<_>>();
-    let mut evidence = reexports
-        .iter()
-        .filter(|(_, reexport)| reexport_reaches_item(reexport, &reexports, target_item, target_cfg))
-        .map(|(file, reexport)| format!("{}:{}:{}", paths.site_path(&file.path).len(), paths.site_path(&file.path), reexport.fingerprint))
-        .collect::<Vec<_>>();
+    let mut evidence = Vec::new();
+    for target in production_targets {
+        let reexports = inventory
+            .files
+            .iter()
+            .filter(|file| file.production_targets.contains(target))
+            .flat_map(|file| file.production_public_reexports.iter().map(move |reexport| (file, reexport)))
+            .collect::<Vec<_>>();
+        evidence.extend(
+            reexports
+                .iter()
+                .filter(|(_, reexport)| reexport_reaches_item(reexport, &reexports, target_item, target_cfg))
+                .map(|(file, reexport)| format!("{}:{}:{}", paths.site_path(&file.path).len(), paths.site_path(&file.path), reexport.fingerprint)),
+        );
+    }
     evidence.sort();
     evidence.dedup();
     evidence
@@ -706,7 +717,13 @@ fn record_signature_site_fingerprint(
     store: ConcreteStoreName,
     signature: &ConcreteStoreSignatureSite,
 ) -> Result<()> {
-    let public_reexports = public_reexport_evidence(file_context.inventory, file_context.paths, &signature.item_path, &signature.cfg);
+    let public_reexports = public_reexport_evidence(
+        file_context.inventory,
+        file_context.paths,
+        &signature.item_path,
+        &signature.cfg,
+        &file_context.file.production_targets,
+    );
     let context = SiteEvidenceContext {
         component: effective_component,
         path: file_context.site_path,

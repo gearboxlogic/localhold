@@ -26,6 +26,7 @@ pub struct FileMeasurement {
     pub physical_lines: usize,
     pub production_lines: usize,
     pub test_lines: usize,
+    pub production_targets: Vec<String>,
     pub production_module: Vec<String>,
     pub production_internal_imports: Vec<String>,
     pub production_public_reexports: Vec<PublicReexportEvidence>,
@@ -56,6 +57,7 @@ struct SourceReachability {
     test_only: BTreeSet<String>,
     composition_only: BTreeSet<String>,
     production_contexts: BTreeMap<String, ProductionSourceContext>,
+    production_targets: BTreeMap<String, Vec<String>>,
 }
 
 pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Inventory> {
@@ -270,11 +272,17 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
                 .map_err(|error| anyhow::anyhow!("{error} in {path}"))?,
             )
         };
+        let production_targets = if file_is_test_only {
+            Vec::new()
+        } else {
+            reachability.production_targets.get(&path).cloned().context("production source has no target identity")?
+        };
         files.push(FileMeasurement {
             path,
             physical_lines,
             production_lines: physical_lines.saturating_sub(test_lines),
             test_lines,
+            production_targets,
             production_module: production_facts.module,
             production_internal_imports: production_facts.internal_imports,
             production_public_reexports: production_facts.public_reexports,
@@ -372,23 +380,45 @@ fn classify_source_reachability(
             fallback_roots.insert(path);
         }
     }
-    let contextual_roots = production_roots
-        .iter()
-        .chain(&fallback_roots)
-        .chain(
-            production_reachable
-                .iter()
-                .filter(|path| !edges.iter().any(|edge| !edge.test_only && edge.target.as_str() == path.as_str())),
-        )
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let contextual_roots = production_contextual_roots(production_roots, &fallback_roots, &production_reachable, &edges);
+    let production_targets = production_target_memberships(&edges, &contextual_roots);
     let production_contexts = production_contexts(&edges, &contextual_roots)?;
     let contextually_production = production_contexts.keys().cloned().collect::<BTreeSet<_>>();
     Ok(SourceReachability {
         test_only: known.difference(&contextually_production).cloned().collect(),
         composition_only: composition_reachable.difference(&library_reachable).cloned().collect(),
         production_contexts,
+        production_targets,
     })
+}
+
+fn production_contextual_roots(
+    declared_roots: &BTreeSet<String>,
+    fallback_roots: &BTreeSet<String>,
+    production_reachable: &BTreeSet<String>,
+    edges: &[ModuleEdge],
+) -> BTreeSet<String> {
+    declared_roots
+        .iter()
+        .chain(fallback_roots)
+        .chain(
+            production_reachable
+                .iter()
+                .filter(|path| !edges.iter().any(|edge| !edge.test_only && edge.target.as_str() == path.as_str())),
+        )
+        .cloned()
+        .collect()
+}
+
+fn production_target_memberships(edges: &[ModuleEdge], roots: &BTreeSet<String>) -> BTreeMap<String, Vec<String>> {
+    let mut memberships = BTreeMap::<String, BTreeSet<String>>::new();
+    for root in roots {
+        let root_set = std::iter::once(root.clone()).collect();
+        for path in production_reachable_from(edges, &root_set) {
+            memberships.entry(path).or_default().insert(root.clone());
+        }
+    }
+    memberships.into_iter().map(|(path, targets)| (path, targets.into_iter().collect())).collect()
 }
 
 struct TargetRoots {

@@ -247,7 +247,7 @@ impl<'ast> Visit<'ast> for ImportCollector {
             Meta::NameValue(value) => Some(value.value.to_token_stream()),
         };
         if let Some(tokens) = tokens
-            && let Some(restricted) = restricted_macro_identifier(&tokens)
+            && let Some(restricted) = restricted_attribute_identifier(&tokens, &self.module)
         {
             self.error = Some(anyhow::anyhow!(
                 "production attribute token stream names restricted crate module {restricted:?} and cannot be classified safely"
@@ -384,6 +384,33 @@ fn restricted_macro_identifier(tokens: &TokenStream) -> Option<String> {
     })
 }
 
+fn restricted_attribute_identifier(tokens: &TokenStream, module: &[String]) -> Option<String> {
+    restricted_macro_identifier(tokens).or_else(|| {
+        tokens.clone().into_iter().find_map(|token| match token {
+            TokenTree::Group(group) => restricted_attribute_identifier(&group.stream(), module),
+            TokenTree::Literal(literal) => restricted_string_path(&literal, module),
+            TokenTree::Ident(_) | TokenTree::Punct(_) => None,
+        })
+    })
+}
+
+fn restricted_string_path(literal: &proc_macro2::Literal, module: &[String]) -> Option<String> {
+    let syn::Lit::Str(literal) = syn::parse_str::<syn::Lit>(&literal.to_string()).ok()? else {
+        return None;
+    };
+    let value = literal.value();
+    if !value.contains("::") {
+        return None;
+    }
+    let path = syn::parse_str::<SynPath>(&value).ok()?;
+    if path.leading_colon.is_some() {
+        return None;
+    }
+    let segments = path.segments.iter().map(|segment| normalized_ident(&segment.ident)).collect::<Vec<_>>();
+    let resolved = resolve_path(module, &segments).ok()??;
+    matches!(resolved.first().map(String::as_str), Some("server" | "ui")).then(|| resolved[0].clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +486,18 @@ mod tests {
 
         let test_only = "#[cfg(test)]\n#[adapter(crate::ui::View)]\nfn build() {}\n";
         assert!(imports("src/adapter.rs", test_only).expect("test-only attribute").is_empty());
+    }
+
+    #[test]
+    fn string_encoded_attribute_paths_fail_closed() {
+        let source = "#[serde(serialize_with = \"crate::server::serialize\")]\nstruct Record;\n";
+        assert!(imports("src/adapter.rs", source).unwrap_err().to_string().contains("production attribute token stream"));
+
+        let external = "#[serde(serialize_with = \"::server::serialize\")]\nstruct Record;\n";
+        assert!(imports("src/adapter.rs", external).expect("absolute external path").is_empty());
+
+        let plain_text = "#[serde(rename = \"server::label\")]\nstruct Record;\n";
+        assert!(imports("src/nested/adapter.rs", plain_text).expect("non-root relative label").is_empty());
     }
 
     #[test]

@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use proc_macro2::{TokenStream, TokenTree};
 
 use super::super::syntax::{item_is_test_only, normalized_ident};
+use crate::scan::RESERVED_LOCAL_MACROS;
 
 pub(super) fn safe_macro_definitions(items: &[syn::Item], parent_test_only: bool, inherited: &BTreeSet<String>) -> Result<BTreeSet<String>> {
     let mut definitions = BTreeMap::new();
@@ -19,6 +20,13 @@ pub(super) fn safe_macro_definitions(items: &[syn::Item], parent_test_only: bool
         }
         let name = normalized_ident(name);
         definitions.entry(name).and_modify(|definition| *definition = None).or_insert(Some(&item_macro.mac.tokens));
+    }
+    for (name, tokens) in definitions.iter().filter_map(|(name, tokens)| tokens.map(|tokens| (name, tokens))) {
+        if RESERVED_LOCAL_MACROS.contains(&name.as_str())
+            && let Some(restricted) = token_stream_names_restricted_module(tokens)
+        {
+            bail!("reviewed local macro {name:?} generates restricted crate module {restricted:?}");
+        }
     }
 
     let mut safe = inherited.clone();
@@ -67,6 +75,17 @@ fn token_stream_names_module(tokens: &TokenStream) -> bool {
         TokenTree::Group(group) => token_stream_names_module(&group.stream()),
         TokenTree::Ident(ident) => ident == "mod",
         TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
+}
+
+fn token_stream_names_restricted_module(tokens: &TokenStream) -> Option<String> {
+    tokens.clone().into_iter().find_map(|token| match token {
+        TokenTree::Group(group) => token_stream_names_restricted_module(&group.stream()),
+        TokenTree::Ident(ident) => {
+            let name = normalized_ident(&ident);
+            matches!(name.as_str(), "server" | "ui").then_some(name)
+        }
+        TokenTree::Punct(_) | TokenTree::Literal(_) => None,
     })
 }
 

@@ -387,6 +387,9 @@ fn target_roots<'a>(manifest: &str, known: impl Iterator<Item = &'a String>) -> 
     if let Some(library) = manifest.get("lib")
         && let Some(path) = add_declared_target_root(library, "library", &known, &mut roots)?
     {
+        if path.starts_with("src/server/") || path.starts_with("src/ui/") {
+            bail!("package library target cannot use an exempt server/UI directory as its crate root: {path}");
+        }
         roots.retain(|candidate| !libraries.contains(candidate) || candidate == &path);
         libraries.clear();
         libraries.insert(path);

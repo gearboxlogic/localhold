@@ -245,6 +245,26 @@ fn custom_library_targets_resolve_imports_from_the_crate_root() {
 }
 
 #[test]
+fn custom_library_roots_cannot_claim_server_or_ui_exemptions() {
+    for path in ["src/server/mod.rs", "src/ui/lib.rs"] {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        for root in ["src", "tests", "benches"] {
+            fs::create_dir_all(repository.path().join(root)).expect("source root");
+        }
+        fs::create_dir_all(repository.path().join(path).parent().expect("library parent")).expect("library parent");
+        fs::write(
+            repository.path().join("Cargo.toml"),
+            format!("[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\n[lib]\npath = \"{path}\"\n"),
+        )
+        .expect("package manifest");
+        fs::write(repository.path().join(path), "use crate::server::Hidden;\n").expect("custom library root");
+
+        let error = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).unwrap_err();
+        assert!(error.to_string().contains("cannot use an exempt server/UI directory"));
+    }
+}
+
+#[test]
 fn nested_custom_library_targets_resolve_child_imports_from_the_crate_root() {
     let repository = tempfile::tempdir().expect("temporary repository");
     for root in ["src/core", "tests", "benches"] {
@@ -396,6 +416,21 @@ fn local_item_macros_cannot_substitute_module_keywords() {
 
     let error = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).unwrap_err();
     assert!(error.to_string().contains("production item macros cannot safely define module edges"));
+}
+
+#[test]
+fn reviewed_local_macros_cannot_export_restricted_dependencies() {
+    let sources = BTreeMap::from([
+        ("src/lib.rs".to_owned(), "mod server;\n".to_owned()),
+        (
+            "src/server.rs".to_owned(),
+            "#[macro_export]\nmacro_rules! transport_test { () => { $crate::server::secret() } }\n".to_owned(),
+        ),
+    ]);
+
+    let error = measure_sources(sources).unwrap_err();
+    assert!(error.to_string().contains("reviewed local macro"));
+    assert!(error.to_string().contains("server"));
 }
 
 #[test]

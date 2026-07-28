@@ -29,6 +29,8 @@ pub(super) struct ConcreteStoreInventory {
     pub(super) public_struct_declarations: ConcreteStoreSites,
     pub(super) sites: ConcreteStoreSites,
     pub(super) generic_default_sites: ConcreteStoreSites,
+    pub(super) signature_sites: ConcreteStoreSites,
+    pub(super) binding_sites: ConcreteStoreSites,
 }
 
 impl ConcreteStoreInventory {
@@ -39,6 +41,10 @@ impl ConcreteStoreInventory {
         self.sites.postgres_store.sort();
         self.generic_default_sites.sqlite_store.sort();
         self.generic_default_sites.postgres_store.sort();
+        self.signature_sites.sqlite_store.sort();
+        self.signature_sites.postgres_store.sort();
+        self.binding_sites.sqlite_store.sort();
+        self.binding_sites.postgres_store.sort();
     }
 
     pub(super) fn record_ident(&mut self, ident: &proc_macro2::Ident, site_context: &str) -> Result<()> {
@@ -84,6 +90,26 @@ impl ConcreteStoreInventory {
             match token {
                 TokenTree::Group(group) => self.record_generic_default_tokens(&group.stream(), site_context),
                 TokenTree::Ident(ident) => self.record_generic_default_name(&normalized_ident(&ident), site_context),
+                TokenTree::Literal(_) | TokenTree::Punct(_) => {}
+            }
+        }
+    }
+
+    pub(super) fn record_signature_tokens(&mut self, tokens: &TokenStream, site_context: &str) {
+        for token in resolving_tokens(tokens) {
+            match token {
+                TokenTree::Group(group) => self.record_signature_tokens(&group.stream(), site_context),
+                TokenTree::Ident(ident) => self.record_signature_name(&normalized_ident(&ident), site_context),
+                TokenTree::Literal(_) | TokenTree::Punct(_) => {}
+            }
+        }
+    }
+
+    pub(super) fn record_binding_tokens(&mut self, tokens: &TokenStream, site_context: &str) {
+        for token in resolving_tokens(tokens) {
+            match token {
+                TokenTree::Group(group) => self.record_binding_tokens(&group.stream(), site_context),
+                TokenTree::Ident(ident) => self.record_binding_name(&normalized_ident(&ident), site_context),
                 TokenTree::Literal(_) | TokenTree::Punct(_) => {}
             }
         }
@@ -211,6 +237,25 @@ impl ConcreteStoreInventory {
         let sites = match name {
             "SqliteStore" => &mut self.generic_default_sites.sqlite_store,
             "PostgresStore" => &mut self.generic_default_sites.postgres_store,
+            _ => return,
+        };
+        sites.push(syntax_fingerprint(&site_context));
+    }
+
+    fn record_signature_name(&mut self, name: &str, site_context: &str) {
+        let sites = match name {
+            "SqliteStore" => &mut self.signature_sites.sqlite_store,
+            "PostgresStore" => &mut self.signature_sites.postgres_store,
+            _ => return,
+        };
+        sites.push(syntax_fingerprint(&site_context));
+        self.record_binding_name(name, site_context);
+    }
+
+    fn record_binding_name(&mut self, name: &str, site_context: &str) {
+        let sites = match name {
+            "SqliteStore" => &mut self.binding_sites.sqlite_store,
+            "PostgresStore" => &mut self.binding_sites.postgres_store,
             _ => return,
         };
         sites.push(syntax_fingerprint(&site_context));

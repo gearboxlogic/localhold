@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use super::classify::{FileMeasurement, Inventory};
 use super::manifest::PreviousRevision;
+use crate::scan::syntax_fingerprint;
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 const BASE_REVISION_ENV: &str = "LOCALHOLD_MAINTAINABILITY_BASE_REV";
@@ -43,6 +44,10 @@ struct ConcreteStoreDeclaration {
     store: ConcreteStoreName,
     #[serde(default)]
     fingerprint: String,
+    #[serde(default)]
+    baseline_binding_fingerprint: String,
+    #[serde(default)]
+    current_binding_fingerprint: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -67,7 +72,7 @@ enum ConcreteStoreName {
 }
 
 type ObservedStore = (String, String, ConcreteStoreName);
-type DeclarationSite = (String, String, ConcreteStoreName, String);
+type DeclarationSite = (String, String, ConcreteStoreName, String, String);
 type DeclarationInventory = BTreeMap<DeclarationSite, usize>;
 
 #[derive(Clone, Copy)]
@@ -140,12 +145,23 @@ impl ConcreteStorePolicy {
             .canonical_declarations
             .iter()
             .map(|declaration| {
-                (
-                    (declaration.component.clone(), declaration.path.clone(), declaration.store, declaration.fingerprint.clone()),
+                let binding = match label {
+                    "baseline" => &declaration.baseline_binding_fingerprint,
+                    "current" => &declaration.current_binding_fingerprint,
+                    _ => bail!("unsupported canonical declaration comparison label {label:?}"),
+                };
+                Ok((
+                    (
+                        declaration.component.clone(),
+                        declaration.path.clone(),
+                        declaration.store,
+                        declaration.fingerprint.clone(),
+                        binding.clone(),
+                    ),
                     1_usize,
-                )
+                ))
             })
-            .collect::<BTreeMap<_, _>>();
+            .collect::<Result<BTreeMap<_, _>>>()?;
         let mut observed = DeclarationInventory::new();
         for file in &inventory.files {
             let component = paths
@@ -154,8 +170,21 @@ impl ConcreteStorePolicy {
             for (store, fingerprints) in [
                 (ConcreteStoreName::SqliteStore, &file.production_public_concrete_store_structs.sqlite_store),
                 (ConcreteStoreName::PostgresStore, &file.production_public_concrete_store_structs.postgres_store),
-            ] {
-                record_declaration_fingerprints(&mut observed, component, paths.site_path(&file.path), store, fingerprints)?;
+            ]
+            .into_iter()
+            .filter(|(_, fingerprints)| !fingerprints.is_empty())
+            {
+                let binding = canonical_binding_fingerprint(inventory, paths, component, store)?;
+                record_declaration_fingerprints(
+                    &mut observed,
+                    DeclarationContext {
+                        component,
+                        path: paths.site_path(&file.path),
+                        store,
+                        binding_fingerprint: &binding,
+                    },
+                    fingerprints,
+                )?;
             }
         }
         if observed != expected {
@@ -189,13 +218,17 @@ impl ConcreteStorePolicy {
             .iter()
             .map(|debt| ((debt.path.clone(), debt.store), debt.component.clone()))
             .collect::<BTreeMap<_, _>>();
-        let current_sites = site_fingerprints(current.inventory, current.paths, Some(&unrestricted), Some(&debt_components), false)?;
-        let reference_sites = site_fingerprints(reference.inventory, reference.paths, Some(&unrestricted), Some(&debt_components), false)?;
+        let current_sites = site_fingerprints(current.inventory, current.paths, Some(&unrestricted), Some(&debt_components), SiteSource::AllSyntax)?;
+        let reference_sites = site_fingerprints(reference.inventory, reference.paths, Some(&unrestricted), Some(&debt_components), SiteSource::AllSyntax)?;
         require_occurrence_subset("restricted concrete-store syntax", reference_label, &current_sites, &reference_sites)?;
 
-        let current_defaults = site_fingerprints(current.inventory, current.paths, None, Some(&debt_components), true)?;
-        let reference_defaults = site_fingerprints(reference.inventory, reference.paths, None, Some(&debt_components), true)?;
-        require_occurrence_subset("concrete-store generic default", reference_label, &current_defaults, &reference_defaults)
+        let current_defaults = site_fingerprints(current.inventory, current.paths, None, Some(&debt_components), SiteSource::GenericDefaults)?;
+        let reference_defaults = site_fingerprints(reference.inventory, reference.paths, None, Some(&debt_components), SiteSource::GenericDefaults)?;
+        require_occurrence_subset("concrete-store generic default", reference_label, &current_defaults, &reference_defaults)?;
+
+        let current_signatures = site_fingerprints(current.inventory, current.paths, None, None, SiteSource::Signatures)?;
+        let reference_signatures = site_fingerprints(reference.inventory, reference.paths, None, None, SiteSource::Signatures)?;
+        require_occurrence_subset("concrete-store-bearing production signature", reference_label, &current_signatures, &reference_signatures)
     }
 
     pub fn require_baseline_commit(&self, expected: &str) -> Result<()> {
@@ -399,13 +432,55 @@ impl ConcreteStorePolicy {
 type SiteFingerprint = (String, String, ConcreteStoreName, String);
 type DebtComponents = BTreeMap<(String, ConcreteStoreName), String>;
 
-fn record_declaration_fingerprints(observed: &mut DeclarationInventory, component: &str, path: &str, store: ConcreteStoreName, fingerprints: &[String]) -> Result<()> {
+#[derive(Clone, Copy)]
+struct DeclarationContext<'a> {
+    component: &'a str,
+    path: &'a str,
+    store: ConcreteStoreName,
+    binding_fingerprint: &'a str,
+}
+
+#[derive(Clone, Copy)]
+enum SiteSource {
+    AllSyntax,
+    GenericDefaults,
+    Signatures,
+}
+
+fn record_declaration_fingerprints(observed: &mut DeclarationInventory, context: DeclarationContext<'_>, fingerprints: &[String]) -> Result<()> {
     for fingerprint in fingerprints {
-        let key = (component.to_owned(), path.to_owned(), store, fingerprint.clone());
+        let key = (
+            context.component.to_owned(),
+            context.path.to_owned(),
+            context.store,
+            fingerprint.clone(),
+            context.binding_fingerprint.to_owned(),
+        );
         let count = observed.entry(key).or_default();
         *count = count.checked_add(1).context("canonical concrete-store declaration count overflow")?;
     }
     Ok(())
+}
+
+fn canonical_binding_fingerprint(inventory: &Inventory, paths: PathAttribution<'_>, component: &str, store: ConcreteStoreName) -> Result<String> {
+    let mut evidence = Vec::new();
+    for file in &inventory.files {
+        if paths.component_for(&file.path) != Some(component) {
+            continue;
+        }
+        let fingerprints = match store {
+            ConcreteStoreName::SqliteStore => &file.production_store_binding_sites.sqlite_store,
+            ConcreteStoreName::PostgresStore => &file.production_store_binding_sites.postgres_store,
+        };
+        for fingerprint in fingerprints {
+            evidence.push(format!("{}:{}:{fingerprint}", paths.site_path(&file.path).len(), paths.site_path(&file.path)));
+        }
+    }
+    if evidence.is_empty() {
+        bail!("canonical {store:?} declaration in component {component:?} has no implementation or use evidence");
+    }
+    evidence.sort();
+    Ok(syntax_fingerprint(&evidence.join("\0")))
 }
 
 fn validate_declaration(declaration: &ConcreteStoreDeclaration, unrestricted: &BTreeSet<&str>, allow_missing_fingerprint: bool) -> Result<()> {
@@ -415,6 +490,13 @@ fn validate_declaration(declaration: &ConcreteStoreDeclaration, unrestricted: &B
         "" if !allow_missing_fingerprint => bail!("canonical concrete-store declaration fingerprints must not be empty"),
         "" => {}
         fingerprint => validate_fingerprint(fingerprint)?,
+    }
+    for binding in [&declaration.baseline_binding_fingerprint, &declaration.current_binding_fingerprint] {
+        match binding.as_str() {
+            "" if !allow_missing_fingerprint => bail!("canonical concrete-store binding fingerprints must not be empty"),
+            "" => {}
+            fingerprint => validate_fingerprint(fingerprint)?,
+        }
     }
     if !unrestricted.contains(declaration.component.as_str()) {
         bail!("canonical concrete-store declarations must remain inside an unrestricted component");
@@ -431,6 +513,12 @@ fn compare_canonical_declarations(current: &[ConcreteStoreDeclaration], previous
         if expected.fingerprint.is_empty() {
             expected.fingerprint.clone_from(&current.fingerprint);
         }
+        if expected.baseline_binding_fingerprint.is_empty() {
+            expected.baseline_binding_fingerprint.clone_from(&current.baseline_binding_fingerprint);
+        }
+        if expected.current_binding_fingerprint.is_empty() {
+            expected.current_binding_fingerprint.clone_from(&current.current_binding_fingerprint);
+        }
         if *current != expected {
             bail!("canonical concrete-store declarations are immutable");
         }
@@ -443,7 +531,7 @@ fn site_fingerprints(
     paths: PathAttribution<'_>,
     excluded_components: Option<&BTreeSet<&str>>,
     debt_components: Option<&DebtComponents>,
-    generic_defaults: bool,
+    source: SiteSource,
 ) -> Result<BTreeMap<SiteFingerprint, usize>> {
     let mut sites = BTreeMap::new();
     for file in &inventory.files {
@@ -452,14 +540,14 @@ fn site_fingerprints(
             .with_context(|| format!("concrete-store syntax inventory path {:?} has no logical component", file.path))?;
         let canonical_path = paths.canonical_path(&file.path);
         let site_path = paths.site_path(&file.path);
-        let source = if generic_defaults {
-            &file.production_generic_default_store_sites
-        } else {
-            &file.production_concrete_store_sites
+        let fingerprints = match source {
+            SiteSource::AllSyntax => &file.production_concrete_store_sites,
+            SiteSource::GenericDefaults => &file.production_generic_default_store_sites,
+            SiteSource::Signatures => &file.production_signature_store_sites,
         };
         for (store, fingerprints) in [
-            (ConcreteStoreName::SqliteStore, &source.sqlite_store),
-            (ConcreteStoreName::PostgresStore, &source.postgres_store),
+            (ConcreteStoreName::SqliteStore, &fingerprints.sqlite_store),
+            (ConcreteStoreName::PostgresStore, &fingerprints.postgres_store),
         ] {
             let effective_component = debt_components
                 .and_then(|components| components.get(&(canonical_path.to_owned(), store)))

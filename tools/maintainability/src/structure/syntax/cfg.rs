@@ -1,8 +1,11 @@
 use anyhow::{Context, Result};
+use proc_macro2::{Delimiter, Spacing, TokenStream, TokenTree};
 use quote::ToTokens as _;
 use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
 use syn::{Attribute, Expr, Meta, Token};
+
+use super::normalized_ident;
 
 mod sat;
 use sat::is_satisfiable;
@@ -204,8 +207,48 @@ fn predicate(meta: &Meta) -> Result<Predicate> {
             }
             Ok(Predicate::Not(Box::new(predicates.remove(0))))
         }
-        Meta::Path(_) | Meta::NameValue(_) | Meta::List(_) => Ok(Predicate::Atom(meta.to_token_stream().to_string())),
+        Meta::Path(_) | Meta::NameValue(_) | Meta::List(_) => Ok(Predicate::Atom(normalized_atom_identity(&meta.to_token_stream()))),
     }
+}
+
+fn normalized_atom_identity(tokens: &TokenStream) -> String {
+    let mut identity = String::new();
+    write_normalized_tokens(tokens, &mut identity);
+    identity
+}
+
+fn write_normalized_tokens(tokens: &TokenStream, identity: &mut String) {
+    for token in tokens.clone() {
+        match token {
+            TokenTree::Group(group) => {
+                identity.push(match group.delimiter() {
+                    Delimiter::Parenthesis => '(',
+                    Delimiter::Brace => '{',
+                    Delimiter::Bracket => '[',
+                    Delimiter::None => '_',
+                });
+                write_normalized_tokens(&group.stream(), identity);
+                identity.push(')');
+            }
+            TokenTree::Ident(ident) => write_identity_part('i', &normalized_ident(&ident), identity),
+            TokenTree::Literal(literal) => write_identity_part('l', &literal.to_string(), identity),
+            TokenTree::Punct(punctuation) => {
+                identity.push('p');
+                identity.push(punctuation.as_char());
+                identity.push(match punctuation.spacing() {
+                    Spacing::Alone => 'a',
+                    Spacing::Joint => 'j',
+                });
+            }
+        }
+    }
+}
+
+fn write_identity_part(kind: char, value: &str, identity: &mut String) {
+    identity.push(kind);
+    identity.push_str(&value.len().to_string());
+    identity.push(':');
+    identity.push_str(value);
 }
 
 fn parse_predicate_list(list: &syn::MetaList) -> Result<Vec<Predicate>> {

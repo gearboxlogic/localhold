@@ -22,14 +22,22 @@ fn exact_recovery_debt_passes_but_new_production_names_fail() {
 
 #[test]
 fn canonical_backend_declarations_cannot_be_renamed_behind_compatibility_exports() {
-    let policy = policy();
+    let mut policy = policy();
     let components = components(&[("src/store/sqlite.rs", "sqlite-store"), ("src/store/postgres.rs", "postgres-store")]);
     let mut exact = inventory(&[("src/store/sqlite.rs", 0, 0), ("src/store/postgres.rs", 0, 0)]);
     exact.files[0].production_public_concrete_store_structs.sqlite_store = vec![declaration_fingerprint(ConcreteStoreName::SqliteStore)];
     exact.files[1].production_public_concrete_store_structs.postgres_store = vec![declaration_fingerprint(ConcreteStoreName::PostgresStore)];
+    exact.files[0].production_store_binding_sites.sqlite_store = vec!["sqlite-declaration".to_owned(), "sqlite-implementation".to_owned()];
+    exact.files[1].production_store_binding_sites.postgres_store = vec!["postgres-declaration".to_owned(), "postgres-implementation".to_owned()];
+    adopt_binding_fingerprints(&mut policy, &exact, paths(&components));
     policy
         .compare_canonical_declarations("current", &exact, paths(&components))
         .expect("canonical public structs remain declared");
+
+    let mut orphaned = exact.clone();
+    orphaned.files[0].production_store_binding_sites.sqlite_store = vec!["sqlite-declaration".to_owned()];
+    let error = policy.compare_canonical_declarations("current", &orphaned, paths(&components)).unwrap_err();
+    assert!(error.to_string().contains("canonical declaration mismatch"));
 
     exact.files[0].production_public_concrete_store_structs.sqlite_store = vec!["f".repeat(64)];
     let error = policy.compare_canonical_declarations("current", &exact, paths(&components)).unwrap_err();
@@ -38,15 +46,19 @@ fn canonical_backend_declarations_cannot_be_renamed_behind_compatibility_exports
 
 #[test]
 fn canonical_declarations_cannot_move_between_split_successors() {
-    let policy = policy();
+    let mut policy = policy();
     let components = components(&[("src/store/sqlite/backend.rs", "sqlite-store"), ("src/store/postgres.rs", "postgres-store")]);
     let mut current = inventory(&[("src/store/sqlite/backend.rs", 0, 0), ("src/store/postgres.rs", 0, 0)]);
     current.files[0].production_public_concrete_store_structs.sqlite_store = vec![declaration_fingerprint(ConcreteStoreName::SqliteStore)];
     current.files[1].production_public_concrete_store_structs.postgres_store = vec![declaration_fingerprint(ConcreteStoreName::PostgresStore)];
+    current.files[0].production_store_binding_sites.sqlite_store = vec!["sqlite-binding".to_owned()];
+    current.files[1].production_store_binding_sites.postgres_store = vec!["postgres-binding".to_owned()];
     let canonical = BTreeMap::from([("src/store/sqlite/backend.rs".to_owned(), "src/store/sqlite.rs".to_owned())]);
     let retained_site = canonical.clone();
+    let retained_paths = PathAttribution::with_lineage(&components, &canonical, &retained_site);
+    adopt_binding_fingerprints(&mut policy, &current, retained_paths);
     policy
-        .compare_canonical_declarations("current", &current, PathAttribution::with_lineage(&components, &canonical, &retained_site))
+        .compare_canonical_declarations("current", &current, retained_paths)
         .expect("retained split successor keeps the reviewed declaration identity");
 
     let sibling_site = BTreeMap::from([("src/store/sqlite/backend.rs".to_owned(), "src/store/sqlite/backend.rs".to_owned())]);
@@ -135,6 +147,16 @@ fn reviewed_site_fingerprints_prevent_same_count_moves_and_new_generic_defaults(
             .unwrap_err()
             .to_string()
             .contains("generic default")
+    );
+
+    let mut new_signature = unrestricted_baseline.clone();
+    new_signature.files[0].production_signature_store_sites.sqlite_store = vec!["exported-open".to_owned()];
+    assert!(
+        policy
+            .compare_site_fingerprints(&new_signature, &unrestricted_baseline, paths(&unrestricted_components), paths(&unrestricted_components),)
+            .unwrap_err()
+            .to_string()
+            .contains("production signature")
     );
 }
 
@@ -269,6 +291,8 @@ fn policy_evolution_allows_only_downward_current_counts() {
     let mut pre_fingerprint_policy = previous.clone();
     for declaration in &mut pre_fingerprint_policy.canonical_declarations {
         declaration.fingerprint.clear();
+        declaration.baseline_binding_fingerprint.clear();
+        declaration.current_binding_fingerprint.clear();
     }
     previous
         .compare_policy(&pre_fingerprint_policy)
@@ -310,6 +334,10 @@ fn policy_validation_closes_capability_and_evidence_escapes() {
     let mut missing_fingerprint = policy.clone();
     missing_fingerprint.canonical_declarations[0].fingerprint.clear();
     assert!(missing_fingerprint.validate().unwrap_err().to_string().contains("fingerprints must not be empty"));
+
+    let mut missing_binding = policy.clone();
+    missing_binding.canonical_declarations[0].current_binding_fingerprint.clear();
+    assert!(missing_binding.validate().unwrap_err().to_string().contains("binding fingerprints must not be empty"));
 
     let mut initial_reduction = policy;
     initial_reduction.debt[0].current_count = 0;
@@ -477,6 +505,16 @@ fn declaration(component: &str, path: &str, store: ConcreteStoreName) -> Concret
         path: path.to_owned(),
         store,
         fingerprint: declaration_fingerprint(store),
+        baseline_binding_fingerprint: "2".repeat(64),
+        current_binding_fingerprint: "2".repeat(64),
+    }
+}
+
+fn adopt_binding_fingerprints(policy: &mut ConcreteStorePolicy, inventory: &Inventory, paths: PathAttribution<'_>) {
+    for declaration in &mut policy.canonical_declarations {
+        let binding = canonical_binding_fingerprint(inventory, paths, &declaration.component, declaration.store).expect("fixture binding fingerprint");
+        declaration.baseline_binding_fingerprint.clone_from(&binding);
+        declaration.current_binding_fingerprint = binding;
     }
 }
 
@@ -523,6 +561,8 @@ fn file(path: &str, sqlite_store: usize, postgres_store: usize) -> FileMeasureme
         production_public_concrete_store_structs: ConcreteStoreSites::default(),
         production_concrete_store_sites: ConcreteStoreSites::default(),
         production_generic_default_store_sites: ConcreteStoreSites::default(),
+        production_signature_store_sites: ConcreteStoreSites::default(),
+        production_store_binding_sites: ConcreteStoreSites::default(),
     }
 }
 

@@ -3,8 +3,9 @@ use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::visit::{self, Visit};
 use syn::{
-    Arm, Attribute, BareFnArg, BareVariadic, Expr, Field, FieldPat, FieldValue, File, FnArg, ForeignItem, GenericParam, ImplItem, ImplItemType, Item, ItemExternCrate, ItemMacro,
-    ItemMod, ItemStruct, ItemType, ItemUse, Local, Pat, Path as SynPath, Stmt, StmtMacro, TraitItem, TraitItemType, Variadic, Variant, Visibility,
+    Arm, Attribute, BareFnArg, BareVariadic, Expr, Field, FieldPat, FieldValue, File, FnArg, ForeignItem, ForeignItemFn, ForeignItemStatic, GenericParam, ImplItem, ImplItemConst,
+    ImplItemFn, ImplItemType, Item, ItemConst, ItemExternCrate, ItemFn, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemType, ItemUse, Local, Pat, Path as SynPath, Stmt,
+    StmtMacro, TraitItem, TraitItemConst, TraitItemFn, TraitItemType, Variadic, Variant, Visibility,
 };
 
 use crate::scan::{reviewed_attribute_expansion, reviewed_macro_expansion, syntax_fingerprint};
@@ -29,6 +30,8 @@ pub struct ProductionSyntaxFacts {
     pub public_concrete_store_structs: ConcreteStoreSites,
     pub concrete_store_sites: ConcreteStoreSites,
     pub generic_default_concrete_store_sites: ConcreteStoreSites,
+    pub signature_concrete_store_sites: ConcreteStoreSites,
+    pub binding_concrete_store_sites: ConcreteStoreSites,
 }
 
 #[derive(Clone, Copy)]
@@ -81,6 +84,8 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
         public_concrete_store_structs: collector.concrete_stores.public_struct_declarations,
         concrete_store_sites: collector.concrete_stores.sites,
         generic_default_concrete_store_sites: collector.concrete_stores.generic_default_sites,
+        signature_concrete_store_sites: collector.concrete_stores.signature_sites,
+        binding_concrete_store_sites: collector.concrete_stores.binding_sites,
     })
 }
 
@@ -187,6 +192,16 @@ impl ProductionSyntaxCollector {
         if self.generic_default_depth > 0 {
             self.concrete_stores.record_generic_default_tokens(tokens, context);
         }
+    }
+
+    fn record_concrete_stores_in_signature(&mut self, kind: &str, syntax: &impl ToTokens) {
+        let context = format!(
+            "{kind}:{}\0cfg:{}\0ancestors:{}",
+            syntax_fingerprint(syntax),
+            self.cfg_context.identity(),
+            self.declaration_ancestors.join("\0")
+        );
+        self.concrete_stores.record_signature_tokens(&syntax.to_token_stream(), &context);
     }
 
     fn enter_site_context(&mut self, kind: &str, syntax: &impl ToTokens) -> Option<String> {
@@ -321,6 +336,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             return;
         };
         let previous = self.enter_site_context("field", node);
+        self.record_concrete_stores_in_signature("field-type", &node.ty);
         visit::visit_field(self, node);
         self.leave_site_context(previous);
         self.leave_production_node(cfg);
@@ -379,6 +395,59 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
                 .record_public_struct_declaration(item, &self.cfg_context.identity(), &self.declaration_ancestors);
         }
         visit::visit_item_struct(self, item);
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast ItemImpl) {
+        let mut header = item.clone();
+        header.items.clear();
+        let context = format!("impl-header:{}", syntax_fingerprint(&header));
+        self.concrete_stores.record_binding_tokens(&header.to_token_stream(), &context);
+        visit::visit_item_impl(self, item);
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast ItemFn) {
+        self.record_concrete_stores_in_signature("function-signature", &item.sig);
+        visit::visit_item_fn(self, item);
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast ImplItemFn) {
+        self.record_concrete_stores_in_signature("method-signature", &item.sig);
+        visit::visit_impl_item_fn(self, item);
+    }
+
+    fn visit_trait_item_fn(&mut self, item: &'ast TraitItemFn) {
+        self.record_concrete_stores_in_signature("trait-method-signature", &item.sig);
+        visit::visit_trait_item_fn(self, item);
+    }
+
+    fn visit_foreign_item_fn(&mut self, item: &'ast ForeignItemFn) {
+        self.record_concrete_stores_in_signature("foreign-function-signature", &item.sig);
+        visit::visit_foreign_item_fn(self, item);
+    }
+
+    fn visit_item_const(&mut self, item: &'ast ItemConst) {
+        self.record_concrete_stores_in_signature("const-type", &item.ty);
+        visit::visit_item_const(self, item);
+    }
+
+    fn visit_item_static(&mut self, item: &'ast ItemStatic) {
+        self.record_concrete_stores_in_signature("static-type", &item.ty);
+        visit::visit_item_static(self, item);
+    }
+
+    fn visit_impl_item_const(&mut self, item: &'ast ImplItemConst) {
+        self.record_concrete_stores_in_signature("associated-const-type", &item.ty);
+        visit::visit_impl_item_const(self, item);
+    }
+
+    fn visit_trait_item_const(&mut self, item: &'ast TraitItemConst) {
+        self.record_concrete_stores_in_signature("trait-const-type", &item.ty);
+        visit::visit_trait_item_const(self, item);
+    }
+
+    fn visit_foreign_item_static(&mut self, item: &'ast ForeignItemStatic) {
+        self.record_concrete_stores_in_signature("foreign-static-type", &item.ty);
+        visit::visit_foreign_item_static(self, item);
     }
 
     fn visit_item_type(&mut self, item: &'ast ItemType) {

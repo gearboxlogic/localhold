@@ -28,6 +28,8 @@ pub struct FileMeasurement {
     pub production_public_concrete_store_structs: ConcreteStoreSites,
     pub production_concrete_store_sites: ConcreteStoreSites,
     pub production_generic_default_store_sites: ConcreteStoreSites,
+    pub production_signature_store_sites: ConcreteStoreSites,
+    pub production_store_binding_sites: ConcreteStoreSites,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -267,6 +269,8 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
             production_public_concrete_store_structs: production_facts.public_concrete_store_structs,
             production_concrete_store_sites: production_facts.concrete_store_sites,
             production_generic_default_store_sites: production_facts.generic_default_concrete_store_sites,
+            production_signature_store_sites: production_facts.signature_concrete_store_sites,
+            production_store_binding_sites: production_facts.binding_concrete_store_sites,
         });
     }
     Ok(Inventory { files })

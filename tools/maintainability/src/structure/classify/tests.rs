@@ -105,6 +105,24 @@ fn any_production_module_edge_keeps_the_target_in_production() {
 }
 
 #[test]
+fn concrete_store_counts_follow_production_reachability() {
+    let inventory = inventory(&[
+        (
+            "src/lib.rs",
+            "use crate::store::SqliteStore;\n\
+             fn production(_: PostgresStore) {}\n\
+             #[cfg(test)] fn test_only(_: SqliteStore, _: PostgresStore) {}\n\
+             #[cfg(test)] mod support;\n",
+        ),
+        ("src/support.rs", "fn helper(_: SqliteStore, _: PostgresStore) {}\n"),
+    ]);
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_path["src/lib.rs"].production_concrete_stores.sqlite_store, 1);
+    assert_eq!(by_path["src/lib.rs"].production_concrete_stores.postgres_store, 1);
+    assert_eq!(by_path["src/support.rs"].production_concrete_stores, super::ConcreteStoreCounts::default());
+}
+
+#[test]
 fn integration_and_benchmark_roots_are_wholly_test_only() {
     let inventory = inventory(&[("benches/load.rs", "fn benchmark_helper() {}\n"), ("tests/contract.rs", "fn integration_helper() {}\n")]);
     assert_eq!(inventory.files.len(), 2);

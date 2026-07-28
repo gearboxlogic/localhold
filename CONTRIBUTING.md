@@ -219,6 +219,14 @@ editing the recovery inventory or existing evidence fails closed. Removing an
 exceptional import requires append-only retirement evidence; once retired, the
 same dependency cannot be reintroduced.
 
+Production references to `SqliteStore` and `PostgresStore` are likewise
+confined to the persistence implementation, schema/context migration, binary
+composition, UI, and doctor components. Test-only syntax is excluded. The
+enumerated protocol default and embedding-status references are non-growing
+recovery debt in `policy/maintainability/concrete-stores.json`; their exact
+per-file counts may decrease but cannot move, grow, or return after reaching
+zero.
+
 During the feature freeze:
 
 - ordinary production files may not exceed 800 physical lines;

@@ -7,7 +7,10 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use super::syntax::{TestLineCollector, attributes_disable_production, item_is_test_only, normalized_ident, production_internal_imports, reject_module_path_overrides};
+use super::syntax::{
+    ConcreteStoreCounts, ProductionSyntaxFacts, ProductionSyntaxOptions, TestLineCollector, attributes_disable_production, item_is_test_only, normalized_ident,
+    production_syntax_facts, reject_module_path_overrides,
+};
 
 mod module_macro;
 use module_macro::{audit_reviewed_macro_definitions, record_item_macro, safe_macro_definitions};
@@ -19,6 +22,7 @@ pub struct FileMeasurement {
     pub production_lines: usize,
     pub test_lines: usize,
     pub production_internal_imports: Vec<String>,
+    pub production_concrete_stores: ConcreteStoreCounts,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -227,24 +231,25 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
         let physical_lines = physical_line_count(&parsed.source);
         let file_is_test_only = reachability.test_only.contains(&path);
         let mut collector = TestLineCollector::new(physical_lines);
-        let (test_lines, production_internal_imports) = if file_is_test_only {
-            (physical_lines, Vec::new())
+        let (test_lines, production_facts) = if file_is_test_only {
+            (physical_lines, ProductionSyntaxFacts::default())
         } else {
             collector.visit_file(&parsed.syntax)?;
+            let collect_internal_imports =
+                path.starts_with("src/") && !reachability.composition_only.contains(&path) && !path.starts_with("src/server/") && !path.starts_with("src/ui/");
             (
                 collector.test_line_count(),
-                if !path.starts_with("src/") || reachability.composition_only.contains(&path) || path.starts_with("src/server/") || path.starts_with("src/ui/") {
-                    Vec::new()
-                } else {
-                    production_internal_imports(
-                        &parsed.syntax,
-                        &path,
-                        library_root_for_source(&path, library_roots),
-                        *rust_2015_absolute_paths,
+                production_syntax_facts(
+                    &parsed.syntax,
+                    &path,
+                    library_root_for_source(&path, library_roots),
+                    ProductionSyntaxOptions {
+                        collect_internal_imports,
+                        rust_2015_absolute_paths: *rust_2015_absolute_paths,
                         require_reviewed_expansions,
-                    )
-                    .map_err(|error| anyhow::anyhow!("{error} in {path}"))?
-                },
+                    },
+                )
+                .map_err(|error| anyhow::anyhow!("{error} in {path}"))?,
             )
         };
         files.push(FileMeasurement {
@@ -252,7 +257,8 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
             physical_lines,
             production_lines: physical_lines.saturating_sub(test_lines),
             test_lines,
-            production_internal_imports,
+            production_internal_imports: production_facts.internal_imports,
+            production_concrete_stores: production_facts.concrete_stores,
         });
     }
     Ok(Inventory { files })

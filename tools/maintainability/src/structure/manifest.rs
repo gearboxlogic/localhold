@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -20,6 +21,14 @@ impl StructureManifest {
         let manifest: Self = serde_json::from_slice(&bytes).with_context(|| format!("parse structure manifest {}", path.display()))?;
         manifest.validate_current()?;
         Ok(manifest)
+    }
+
+    pub(super) fn current_component_paths(&self) -> Result<BTreeMap<&str, &str>> {
+        measure::component_path_map(&self.components, |component| &component.paths)
+    }
+
+    pub(super) fn baseline_component_paths(&self) -> Result<BTreeMap<&str, &str>> {
+        measure::component_path_map(&self.components, |component| &component.baseline_paths)
     }
 }
 

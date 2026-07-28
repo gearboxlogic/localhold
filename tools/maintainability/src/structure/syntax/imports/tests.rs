@@ -2,7 +2,21 @@ use super::*;
 
 fn imports(path: &str, source: &str) -> Result<Vec<String>> {
     let syntax = syn::parse_file(source)?;
-    production_internal_imports(&syntax, path, Some("src/lib.rs"), false, true)
+    production_imports(&syntax, path, Some("src/lib.rs"), false)
+}
+
+fn production_imports(file: &syn::File, path: &str, crate_root: Option<&str>, rust_2015_absolute_paths: bool) -> Result<Vec<String>> {
+    Ok(production_syntax_facts(
+        file,
+        path,
+        crate_root,
+        ProductionSyntaxOptions {
+            collect_internal_imports: true,
+            rust_2015_absolute_paths,
+            require_reviewed_expansions: true,
+        },
+    )?
+    .internal_imports)
 }
 
 #[test]
@@ -42,10 +56,7 @@ fn bare_paths_resolve_only_at_the_crate_root() -> Result<()> {
     assert_eq!(imports("src/adapter.rs", source).expect("lexical bare paths"), ["crate::server::Actual"]);
 
     let syntax = syn::parse_file("use server::AtRoot;\n")?;
-    assert_eq!(
-        production_internal_imports(&syntax, "src/core.rs", Some("src/core.rs"), false, true)?,
-        ["crate::server::AtRoot"]
-    );
+    assert_eq!(production_imports(&syntax, "src/core.rs", Some("src/core.rs"), false)?, ["crate::server::AtRoot"]);
     Ok(())
 }
 
@@ -53,7 +64,7 @@ fn bare_paths_resolve_only_at_the_crate_root() -> Result<()> {
 fn nested_custom_library_roots_define_relative_module_paths() -> Result<()> {
     let syntax = syn::parse_file("use super::server::Service;\n")?;
     assert_eq!(
-        production_internal_imports(&syntax, "src/core/worker.rs", Some("src/core/lib.rs"), false, true)?,
+        production_imports(&syntax, "src/core/worker.rs", Some("src/core/lib.rs"), false)?,
         ["crate::server::Service"]
     );
     Ok(())
@@ -145,7 +156,7 @@ fn rust_2015_absolute_paths_are_classified_as_crate_relative() -> Result<()> {
          fn build() -> ::server::Qualified { ::ui::qualified() }\n",
     )?;
     assert_eq!(
-        production_internal_imports(&syntax, "src/adapter.rs", Some("src/lib.rs"), true, true)?,
+        production_imports(&syntax, "src/adapter.rs", Some("src/lib.rs"), true)?,
         ["crate::server::External", "crate::server::Qualified", "crate::ui::qualified"]
     );
     Ok(())
@@ -154,10 +165,7 @@ fn rust_2015_absolute_paths_are_classified_as_crate_relative() -> Result<()> {
 #[test]
 fn rust_2015_nested_bare_use_paths_are_classified_from_the_crate_root() -> Result<()> {
     let syntax = syn::parse_file("mod nested { use server::Service; }\n")?;
-    assert_eq!(
-        production_internal_imports(&syntax, "src/adapter.rs", Some("src/lib.rs"), true, true)?,
-        ["crate::server::Service"]
-    );
+    assert_eq!(production_imports(&syntax, "src/adapter.rs", Some("src/lib.rs"), true)?, ["crate::server::Service"]);
     Ok(())
 }
 
@@ -233,4 +241,59 @@ fn unreviewed_production_expansions_fail_closed() {
     );
     let test_only = "#[cfg(test)]\n#[inject]\nfn call() { inject!(); }\n";
     assert!(imports("src/adapter.rs", test_only).expect("test-only opaque expansions").is_empty());
+}
+
+#[test]
+fn concrete_store_names_are_counted_only_in_production_syntax() -> Result<()> {
+    let source = "use crate::store::{r#SqliteStore, PostgresStore};\n\
+                  fn open(store: SqliteStore) -> PostgresStore { numbered_placeholders!(SqliteStore); store }\n\
+                  #[cfg(test)] fn test_only(_: SqliteStore) { numbered_placeholders!(PostgresStore); }\n\
+                  #[cfg(feature = \"testing\")] const TESTING: PostgresStore = unreachable!();\n\
+                  const TEXT: &str = \"SqliteStore PostgresStore\"; // SqliteStore\n";
+    let syntax = syn::parse_file(source)?;
+    let facts = production_syntax_facts(
+        &syntax,
+        "src/store_fixture.rs",
+        Some("src/lib.rs"),
+        ProductionSyntaxOptions {
+            collect_internal_imports: false,
+            rust_2015_absolute_paths: false,
+            require_reviewed_expansions: true,
+        },
+    )?;
+    assert_eq!(
+        facts.concrete_stores,
+        ConcreteStoreCounts {
+            sqlite_store: 3,
+            postgres_store: 2,
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn path_valued_attribute_literals_count_concrete_stores() -> Result<()> {
+    let source = "#[serde(serialize_with = \"crate::store::SqliteStore\")]\nstruct Record;\n\
+                  #[serde(rename = \"PostgresStore\")]\nstruct Renamed;\n\
+                  #[cfg_attr(test, serde(serialize_with = \"crate::store::SqliteStore\"))]\nstruct TestOnly;\n\
+                  #[cfg_attr(feature = \"other\", serde(serialize_with = \"crate::store::PostgresStore\"))]\nstruct Production;\n";
+    let syntax = syn::parse_file(source)?;
+    let facts = production_syntax_facts(
+        &syntax,
+        "src/store_fixture.rs",
+        Some("src/lib.rs"),
+        ProductionSyntaxOptions {
+            collect_internal_imports: false,
+            rust_2015_absolute_paths: false,
+            require_reviewed_expansions: true,
+        },
+    )?;
+    assert_eq!(
+        facts.concrete_stores,
+        ConcreteStoreCounts {
+            sqlite_store: 1,
+            postgres_store: 1,
+        }
+    );
+    Ok(())
 }

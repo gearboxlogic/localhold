@@ -1,6 +1,7 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "program_phase": 0,
+  "feature_freeze": "active",
   "baseline_commit": "b05f7a43345b39d40b456fb9ed46d479c4bf26e0",
   "tracked_roots": [
     "src",
@@ -783,5 +784,6 @@
   ],
   "path_evolutions": [],
   "component_transfers": [],
-  "file_exceptions": []
+  "file_exceptions": [],
+  "split_allowances": []
 }

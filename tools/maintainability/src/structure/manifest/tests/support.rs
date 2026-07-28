@@ -1,7 +1,7 @@
 use crate::structure::classify::{FileMeasurement, Inventory};
 use crate::structure::manifest::model::{
-    ComponentTransfer, FileException, FileExceptionKind, FileExceptionStatus, Hotspot, HotspotKind, HotspotStatus, Limits, LogicalComponent, PathEvolution, PathEvolutionKind,
-    PreGateAdjustment, StructureManifest,
+    ComponentTransfer, FeatureFreezeStatus, FileException, FileExceptionKind, FileExceptionStatus, Hotspot, HotspotKind, HotspotStatus, Limits, LogicalComponent, PathEvolution,
+    PathEvolutionKind, PreGateAdjustment, SplitAllowance, SplitAllowanceStatus, StructureManifest,
 };
 
 pub(super) fn file(path: &str, physical: usize, production: usize) -> FileMeasurement {
@@ -61,8 +61,9 @@ pub(super) fn hotspot_manifest(kind: HotspotKind, status: HotspotStatus, success
 
 fn base_manifest() -> StructureManifest {
     StructureManifest {
-        schema_version: 3,
+        schema_version: 4,
         program_phase: 0,
+        feature_freeze: FeatureFreezeStatus::Active,
         baseline_commit: "a".repeat(40),
         tracked_roots: vec!["src".to_owned(), "tests".to_owned(), "benches".to_owned()],
         limits: Limits {
@@ -75,6 +76,7 @@ fn base_manifest() -> StructureManifest {
         path_evolutions: Vec::new(),
         component_transfers: Vec::new(),
         file_exceptions: Vec::new(),
+        split_allowances: Vec::new(),
     }
 }
 
@@ -147,5 +149,23 @@ pub(super) fn adjustment() -> PreGateAdjustment {
         issue: "issue".to_owned(),
         pull_request: "pull request".to_owned(),
         rationale: "reviewed before the gate existed".to_owned(),
+    }
+}
+
+pub(super) fn split_allowance(hotspot: &str, path_evolution: &str, physical: usize, production: usize) -> SplitAllowance {
+    SplitAllowance {
+        id: format!("{hotspot}.split-overhead"),
+        hotspot: hotspot.to_owned(),
+        path_evolution: path_evolution.to_owned(),
+        status: SplitAllowanceStatus::Active,
+        approved_physical_lines: physical,
+        approved_production_lines: production,
+        current_physical_lines: physical,
+        current_production_lines: production,
+        owner: "maintainers".to_owned(),
+        recovery_issue: "https://example.invalid/issues/recover-split-overhead".to_owned(),
+        pull_request: "https://example.invalid/pulls/1".to_owned(),
+        rationale: "temporary mechanical overhead from the hotspot's first structural split".to_owned(),
+        due_phase: 1,
     }
 }

@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 
 use super::measure::ObservedFiles;
 use super::model::{
-    CURRENT_SCHEMA_VERSION, FIXTURE_MATRIX_EXCEPTION_LIMIT, FileException, FileExceptionKind, FileExceptionStatus, PRODUCTION_EXCEPTION_LIMIT, PRODUCTION_FILE_LIMIT,
+    FILE_EXCEPTION_SCHEMA_VERSION, FIXTURE_MATRIX_EXCEPTION_LIMIT, FileException, FileExceptionKind, FileExceptionStatus, PRODUCTION_EXCEPTION_LIMIT, PRODUCTION_FILE_LIMIT,
     StructureManifest, TEST_EXCEPTION_LIMIT, TEST_FILE_LIMIT,
 };
 use super::validate::{require_text, validate_id, validate_relative_rust_path};
@@ -47,7 +47,7 @@ impl StructureManifest {
 
     pub(super) fn compare_file_exception_policy(&self, previous: &Self, current_files: &ObservedFiles<'_>) -> Result<()> {
         self.compare_file_exceptions(current_files)?;
-        if previous.schema_version < CURRENT_SCHEMA_VERSION && self.program_phase != 0 {
+        if previous.schema_version < FILE_EXCEPTION_SCHEMA_VERSION && self.program_phase != 0 {
             bail!("structure schema version 3 must establish the maintainability program at phase 0");
         }
         compare_program_phase(previous.program_phase, self.program_phase)?;

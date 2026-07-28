@@ -5,8 +5,8 @@ use anyhow::{Context, Result, bail};
 
 use super::measure::component_path_map;
 use super::model::{
-    CURRENT_SCHEMA_VERSION, ComponentTransfer, EVOLUTION_SCHEMA_VERSION, Hotspot, HotspotStatus, LEGACY_SCHEMA_VERSION, PRODUCTION_FILE_LIMIT, PathEvolution, PathEvolutionKind,
-    PreGateAdjustment, StructureManifest, TEST_FILE_LIMIT,
+    CURRENT_SCHEMA_VERSION, ComponentTransfer, EVOLUTION_SCHEMA_VERSION, FILE_EXCEPTION_SCHEMA_VERSION, FeatureFreezeStatus, Hotspot, HotspotStatus, LEGACY_SCHEMA_VERSION,
+    PRODUCTION_FILE_LIMIT, PathEvolution, PathEvolutionKind, PreGateAdjustment, StructureManifest, TEST_FILE_LIMIT,
 };
 use crate::structure::TRACKED_ROOTS;
 
@@ -19,14 +19,23 @@ impl StructureManifest {
     }
 
     pub(super) fn validate_previous(&self) -> Result<()> {
-        if !matches!(self.schema_version, LEGACY_SCHEMA_VERSION | EVOLUTION_SCHEMA_VERSION | CURRENT_SCHEMA_VERSION) {
+        if !matches!(
+            self.schema_version,
+            LEGACY_SCHEMA_VERSION | EVOLUTION_SCHEMA_VERSION | FILE_EXCEPTION_SCHEMA_VERSION | CURRENT_SCHEMA_VERSION
+        ) {
             bail!("unsupported previous structure manifest schema {}", self.schema_version);
         }
         if self.schema_version == LEGACY_SCHEMA_VERSION && (!self.path_evolutions.is_empty() || !self.component_transfers.is_empty()) {
             bail!("legacy structure manifest cannot contain evolution ledgers");
         }
-        if self.schema_version < CURRENT_SCHEMA_VERSION && (self.program_phase != 0 || !self.file_exceptions.is_empty()) {
+        if self.schema_version < FILE_EXCEPTION_SCHEMA_VERSION && (self.program_phase != 0 || !self.file_exceptions.is_empty()) {
             bail!("structure manifest schemas before version 3 cannot contain phase or file-exception policy");
+        }
+        if self.schema_version < CURRENT_SCHEMA_VERSION && !self.split_allowances.is_empty() {
+            bail!("structure manifest schemas before version 4 cannot contain split-overhead allowances");
+        }
+        if self.schema_version < CURRENT_SCHEMA_VERSION && self.feature_freeze != FeatureFreezeStatus::Active {
+            bail!("structure manifest schemas before version 4 cannot record feature-freeze exit");
         }
         self.validate_common()
     }
@@ -45,7 +54,8 @@ impl StructureManifest {
         self.validate_adjustments()?;
         self.validate_path_evolutions()?;
         self.validate_component_transfers()?;
-        self.validate_file_exceptions()
+        self.validate_file_exceptions()?;
+        self.validate_split_allowances()
     }
 
     fn validate_components(&self) -> Result<()> {

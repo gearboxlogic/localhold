@@ -216,6 +216,13 @@ During the feature freeze:
   request base, every measured path change must be covered exactly once, and
   existing or retired paths cannot be used to hide a merge, replay, or
   resurrection;
+- the first structural split of an active hotspot may carry one temporary,
+  append-only overhead allowance. Physical and production overhead are
+  measured separately and each is capped at 3% of the lines actually moved out
+  of the source. The allowance never raises canonical hotspot or component
+  ceilings, cannot move components or renew on a later re-split, and every
+  later pull request touching its successor set must strictly reduce every
+  outstanding overhead class;
 - production moved between logical components also requires an append-only
   `component_transfers` record tied to the path evolution. Its amount must
   equal the syntax-classified production lines in its destination paths.
@@ -259,6 +266,20 @@ a transfer record naming the source and destination component, exact
 cross-component paths carry lineage but no production transfer, so a
 test-only ownership move must also rename its path to preserve cycle evidence.
 
+When a first hotspot split has unavoidable mechanical overhead, append one
+`split_allowances` record tied to that hotspot and the new split-evolution ID.
+Record exact approved and current physical/production overhead, owner,
+pre-merge recovery issue, pull request, rationale, and a future `due_phase`.
+When the source path remains a successor, the 3% base is only the classified
+lines that left that source, not the source's full size. Canonical component and
+hotspot ceilings stay unchanged. Ratchet both current allowance fields to the
+measured remainder whenever successors shrink; a later touch must reduce each
+field that was nonzero in the pull request base. Once both reach zero, mark the
+record `resolved`. Resolved evidence is immutable, and an active or overdue
+allowance cannot be transferred, renewed, or reused by a successor re-split.
+The gate uses Git path changes as well as count differences, so rewriting a
+successor without changing its line count still triggers the repayment rule.
+
 For a cohesive file exception, append a stable ID, exact measured approved and
 current physical ceilings, owner, issue, pull request, and a concrete cohesion
 rationale. Select the production or test kind that matches syntax
@@ -274,6 +295,11 @@ Resolved evidence remains in the ledger.
 backward or skip a phase, and a historical fixture exception must be resolved
 before its removal phase opens. Advancing the phase never changes a canonical
 component or hotspot ceiling.
+
+`feature_freeze` is the irreversible machine-readable freeze state. It remains
+`active` throughout the recovery program. Every permanent gate must accept the
+exit transition before it may become `exited`; the structure gate specifically
+rejects that transition while any split-overhead allowance remains active.
 
 The checker reads and classifies both the pull request base and working tree.
 Changing only the JSON cannot manufacture a transfer or reset debt: ledger

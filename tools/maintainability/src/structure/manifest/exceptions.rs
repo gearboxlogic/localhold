@@ -206,7 +206,7 @@ fn compare_new_exception(exception: &FileException, previous: &StructureManifest
     if exception.status != FileExceptionStatus::Active {
         bail!("new file exception {:?} must start active", exception.id);
     }
-    if exception.kind == FileExceptionKind::HistoricalFixtureMatrix && historical_fixture_was_previously_approved(exception, previous) {
+    if conflicts_with_historical_fixture_approval(exception, previous) {
         bail!("historical fixture matrix exception {:?} cannot be renewed or transferred", exception.id);
     }
     let file = current_files
@@ -222,11 +222,11 @@ fn compare_new_exception(exception: &FileException, previous: &StructureManifest
     Ok(())
 }
 
-fn historical_fixture_was_previously_approved(exception: &FileException, previous: &StructureManifest) -> bool {
-    previous
-        .file_exceptions
-        .iter()
-        .any(|prior| prior.kind == FileExceptionKind::HistoricalFixtureMatrix && (prior.path == exception.path || prior.fixture_name == exception.fixture_name))
+fn conflicts_with_historical_fixture_approval(exception: &FileException, previous: &StructureManifest) -> bool {
+    previous.file_exceptions.iter().any(|prior| {
+        prior.kind == FileExceptionKind::HistoricalFixtureMatrix
+            && (prior.path == exception.path || exception.kind == FileExceptionKind::HistoricalFixtureMatrix && prior.fixture_name == exception.fixture_name)
+    })
 }
 
 fn validate_exception_file_kind(exception: &FileException, file: &FileMeasurement) -> Result<()> {

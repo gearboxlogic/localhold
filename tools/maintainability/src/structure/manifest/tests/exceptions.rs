@@ -225,6 +225,32 @@ fn historical_fixture_matrix_expires_at_its_due_phase() {
 }
 
 #[test]
+fn historical_fixture_cannot_switch_to_a_cohesive_exception() {
+    let mut previous = ordinary_manifest("tests/fixtures/history.rs", 0, 0);
+    let mut historical = file_exception("fixture.published-history", "tests/fixtures/history.rs", FileExceptionKind::HistoricalFixtureMatrix, 1_400);
+    historical.status = FileExceptionStatus::Resolved;
+    historical.current_physical_ceiling = 1_000;
+    previous.file_exceptions.push(historical);
+    let previous_files = inventory(&[("tests/fixtures/history.rs", 1_000, 0)]);
+
+    let mut kind_switched = previous.clone();
+    kind_switched.file_exceptions.push(file_exception(
+        "reviewed.kind-switched-history",
+        "tests/fixtures/history.rs",
+        FileExceptionKind::TestCohesive,
+        1_100,
+    ));
+    let kind_switched_files = inventory(&[("tests/fixtures/history.rs", 1_100, 0)]);
+    assert!(
+        kind_switched
+            .compare_policy(&previous, &previous_files, &kind_switched_files)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be renewed or transferred")
+    );
+}
+
+#[test]
 fn reviewed_file_limit_can_resolve_a_hotspot_without_erasing_aggregate_debt() {
     let mut resolved = hotspot_manifest(HotspotKind::Production, HotspotStatus::Resolved, &["src/hot.rs"], 900, 700);
     resolved

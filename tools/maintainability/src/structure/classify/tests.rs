@@ -147,6 +147,22 @@ fn out_of_line_modules_inherit_cfg_constraints_from_their_declaration_path() {
 }
 
 #[test]
+fn out_of_line_store_signatures_inherit_module_visibility_identity() {
+    let private = inventory(&[("src/lib.rs", "mod helper;\n"), ("src/helper.rs", "pub fn open() -> SqliteStore { loop {} }\n")]);
+    let restricted = inventory(&[("src/lib.rs", "pub(crate) mod helper;\n"), ("src/helper.rs", "pub fn open() -> SqliteStore { loop {} }\n")]);
+    let signature_sites = |inventory: &super::Inventory| {
+        inventory
+            .files
+            .iter()
+            .find(|file| file.path == "src/helper.rs")
+            .expect("helper measurement")
+            .production_signature_store_sites
+            .clone()
+    };
+    assert_ne!(signature_sites(&private), signature_sites(&restricted));
+}
+
+#[test]
 fn multiple_module_paths_disjoin_their_inherited_cfg_constraints() {
     let inventory = inventory(&[
         (

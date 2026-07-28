@@ -7,15 +7,17 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
+use crate::scan::syntax_fingerprint;
+
 use super::syntax::{
-    ConcreteStoreCounts, ConcreteStoreSites, ProductionCfgContext, ProductionSyntaxFacts, ProductionSyntaxOptions, TestLineCollector, normalized_ident, production_cfg_context,
-    production_syntax_facts_with_context, reject_module_path_overrides,
+    ConcreteStoreCounts, ConcreteStoreSites, ProductionCfgContext, ProductionSyntaxContext, ProductionSyntaxFacts, ProductionSyntaxOptions, TestLineCollector, normalized_ident,
+    production_cfg_context, production_syntax_facts_with_context, reject_module_path_overrides,
 };
 
 mod module_macro;
 use module_macro::{audit_reviewed_macro_definitions, record_item_macro, safe_macro_definitions};
 mod reachability;
-use reachability::{ModuleEdge, production_contexts, production_reachable_from, propagate_reachability};
+use reachability::{ModuleEdge, ProductionSourceContext, production_contexts, production_reachable_from, propagate_reachability};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct FileMeasurement {
@@ -50,7 +52,7 @@ struct TreeEntry {
 struct SourceReachability {
     test_only: BTreeSet<String>,
     composition_only: BTreeSet<String>,
-    production_contexts: BTreeMap<String, ProductionCfgContext>,
+    production_contexts: BTreeMap<String, ProductionSourceContext>,
 }
 
 pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Inventory> {
@@ -234,7 +236,10 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
         let (test_lines, production_facts) = if file_is_test_only {
             (physical_lines, ProductionSyntaxFacts::default())
         } else {
-            let initial_cfg_context = reachability
+            let ProductionSourceContext {
+                cfg: initial_cfg_context,
+                declaration_ancestors,
+            } = reachability
                 .production_contexts
                 .get(&path)
                 .cloned()
@@ -254,7 +259,10 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
                         rust_2015_absolute_paths: *rust_2015_absolute_paths,
                         require_reviewed_expansions,
                     },
-                    initial_cfg_context,
+                    ProductionSyntaxContext {
+                        cfg: initial_cfg_context,
+                        declaration_ancestors,
+                    },
                 )
                 .map_err(|error| anyhow::anyhow!("{error} in {path}"))?,
             )
@@ -636,6 +644,7 @@ struct ModuleScope<'a> {
     parent_test_only: bool,
     inherited_macros: &'a BTreeSet<String>,
     production_context: Option<ProductionCfgContext>,
+    declaration_ancestors: Vec<String>,
 }
 
 impl ModuleGraph<'_> {
@@ -649,6 +658,7 @@ impl ModuleGraph<'_> {
                 parent_test_only,
                 inherited_macros: &BTreeSet::new(),
                 production_context,
+                declaration_ancestors: Vec::new(),
             },
         )
     }
@@ -669,6 +679,8 @@ impl ModuleGraph<'_> {
             };
             let test_only = scope.parent_test_only || production_context.is_none();
             let module_name = normalized_ident(&module.ident);
+            let mut declaration_ancestors = scope.declaration_ancestors.clone();
+            declaration_ancestors.push(format!("mod:{}:{}", module_name, syntax_fingerprint(&module.vis)));
             if let Some((_, nested)) = &module.content {
                 let nested_dir = scope.module_dir.join(&module_name);
                 self.collect_with_macros(
@@ -679,6 +691,7 @@ impl ModuleGraph<'_> {
                         parent_test_only: test_only,
                         inherited_macros: &safe_macros,
                         production_context,
+                        declaration_ancestors,
                     },
                 )?;
                 continue;
@@ -691,6 +704,7 @@ impl ModuleGraph<'_> {
                     target,
                     test_only,
                     production_context,
+                    declaration_ancestors,
                 });
             }
         }

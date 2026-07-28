@@ -618,6 +618,7 @@ fn concrete_store_names_cannot_be_hidden_by_aliases() {
         "macro_rules! constructor { () => { SqliteStore::in_memory() } }\n",
         "macro_rules! bound { () => { #[serde(bound = \"crate::store::SqliteStore: Serialize\")] struct Generated; } }\n",
         "macro_rules! callback { () => { #[serde(default = r#\"crate::store::PostgresStore::default\"#)] struct Generated; } }\n",
+        "macro_rules! conditional { () => { #[cfg_attr(feature = \"other\", serde(bound = \"crate::store::SqliteStore: Serialize\"))] struct Generated; } }\n",
     ] {
         assert!(
             imports("src/store/alias.rs", source)
@@ -627,6 +628,24 @@ fn concrete_store_names_cannot_be_hidden_by_aliases() {
             "{source}"
         );
     }
+
+    for source in [
+        "macro_rules! label { () => { \"SqliteStore\" } }\n",
+        "macro_rules! diagnostic { () => { compile_error!(\"PostgresStore\") } }\n",
+    ] {
+        assert!(imports("src/store/alias.rs", source).is_ok(), "{source}");
+    }
+}
+
+#[test]
+fn field_signature_identity_tracks_containing_type_and_variant() -> Result<()> {
+    let internal = concrete_facts("struct Internal { pub(crate) store: SqliteStore }\n")?;
+    let exposed = concrete_facts("pub struct Exposed { pub(crate) store: SqliteStore }\n")?;
+    let first_variant = concrete_facts("pub enum Choice { First { store: PostgresStore }, Second }\n")?;
+    let second_variant = concrete_facts("pub enum Choice { First, Second { store: PostgresStore } }\n")?;
+    assert_ne!(internal.signature_concrete_store_sites, exposed.signature_concrete_store_sites);
+    assert_ne!(first_variant.signature_concrete_store_sites, second_variant.signature_concrete_store_sites);
+    Ok(())
 }
 
 #[test]

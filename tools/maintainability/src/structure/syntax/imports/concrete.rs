@@ -271,22 +271,58 @@ pub(super) fn context_fingerprint(parent: Option<&str>, kind: &str, syntax: &imp
 }
 
 pub(super) fn tokens_contain_concrete_store(tokens: &TokenStream) -> bool {
-    for token in resolving_tokens(tokens) {
+    let tokens = resolving_tokens(tokens).into_iter().collect::<Vec<_>>();
+    for (index, token) in tokens.iter().enumerate() {
+        if attribute_group(&tokens, index).is_some_and(attribute_group_contains_concrete_store) {
+            return true;
+        }
         match token {
             TokenTree::Group(group) if tokens_contain_concrete_store(&group.stream()) => return true,
-            TokenTree::Ident(ident) if is_concrete_store_name(&normalized_ident(&ident)) => return true,
-            TokenTree::Literal(literal) if literal_contains_concrete_store(&literal) => return true,
+            TokenTree::Ident(ident) if is_concrete_store_name(&normalized_ident(ident)) => return true,
             TokenTree::Group(_) | TokenTree::Ident(_) | TokenTree::Literal(_) | TokenTree::Punct(_) => {}
         }
     }
     false
 }
 
-fn literal_contains_concrete_store(literal: &proc_macro2::Literal) -> bool {
-    let Ok(syn::Lit::Str(literal)) = syn::parse_str::<syn::Lit>(&literal.to_string()) else {
+fn attribute_group(tokens: &[TokenTree], index: usize) -> Option<&proc_macro2::Group> {
+    if !matches!(tokens.get(index), Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == '#') {
+        return None;
+    }
+    let group_index = if matches!(tokens.get(index + 1), Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == '!') {
+        index + 2
+    } else {
+        index + 1
+    };
+    let Some(TokenTree::Group(group)) = tokens.get(group_index) else {
+        return None;
+    };
+    (group.delimiter() == proc_macro2::Delimiter::Bracket).then_some(group)
+}
+
+fn attribute_group_contains_concrete_store(group: &proc_macro2::Group) -> bool {
+    let Ok(meta) = syn::parse2::<Meta>(group.stream()) else {
         return false;
     };
-    literal.value().parse::<TokenStream>().is_ok_and(|tokens| tokens_contain_concrete_store(&tokens))
+    attribute_meta_contains_concrete_store(&meta)
+}
+
+fn attribute_meta_contains_concrete_store(meta: &Meta) -> bool {
+    if meta.path().is_ident("cfg_attr")
+        && let Meta::List(list) = meta
+        && let Ok(nested) = Punctuated::<Meta, Token![,]>::parse_terminated.parse2(list.tokens.clone())
+    {
+        return nested.iter().skip(1).any(attribute_meta_contains_concrete_store);
+    }
+    let governed = matches!(
+        meta.path().segments.last().map(|segment| normalized_ident(&segment.ident)),
+        Some(name) if matches!(name.as_str(), "serde" | "schemars")
+    );
+    if !governed {
+        return false;
+    }
+    let mut inventory = ConcreteStoreInventory::default();
+    inventory.record_meta(meta, "macro-attribute").is_ok() && (inventory.counts.sqlite_store != 0 || inventory.counts.postgres_store != 0)
 }
 
 pub(super) fn is_concrete_store_name(name: &str) -> bool {

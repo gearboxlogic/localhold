@@ -41,9 +41,15 @@ pub struct ProductionSyntaxOptions {
     pub require_reviewed_expansions: bool,
 }
 
+#[derive(Default)]
+pub(in crate::structure) struct ProductionSyntaxContext {
+    pub(in crate::structure) cfg: ProductionCfgContext,
+    pub(in crate::structure) declaration_ancestors: Vec<String>,
+}
+
 #[cfg(test)]
 pub fn production_syntax_facts(file: &syn::File, source_path: &str, crate_root: Option<&str>, options: ProductionSyntaxOptions) -> Result<ProductionSyntaxFacts> {
-    production_syntax_facts_with_context(file, source_path, crate_root, options, ProductionCfgContext::default())
+    production_syntax_facts_with_context(file, source_path, crate_root, options, ProductionSyntaxContext::default())
 }
 
 pub(in crate::structure) fn production_syntax_facts_with_context(
@@ -51,7 +57,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
     source_path: &str,
     crate_root: Option<&str>,
     options: ProductionSyntaxOptions,
-    initial_cfg_context: ProductionCfgContext,
+    initial_context: ProductionSyntaxContext,
 ) -> Result<ProductionSyntaxFacts> {
     let module = if options.collect_internal_imports {
         source_module(source_path, crate_root)?
@@ -64,8 +70,8 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
         concrete_stores: ConcreteStoreInventory::default(),
         site_context: None,
         generic_default_depth: 0,
-        declaration_ancestors: Vec::new(),
-        cfg_context: initial_cfg_context,
+        declaration_ancestors: initial_context.declaration_ancestors,
+        cfg_context: initial_context.cfg,
         error: None,
         rust_2015_absolute_paths: options.rust_2015_absolute_paths,
         collect_internal_imports: options.collect_internal_imports,
@@ -248,7 +254,6 @@ macro_rules! visit_production_node {
 impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     visit_production_node!(visit_file, visit_file, File, node => Ok(node.attrs.as_slice()));
     visit_production_node!(visit_expr, visit_expr, Expr, node => expr_attributes(node));
-    visit_production_node!(visit_variant, visit_variant, Variant, node => Ok(node.attrs.as_slice()));
     visit_production_node!(visit_arm, visit_arm, Arm, node => Ok(node.attrs.as_slice()));
     visit_production_node!(visit_local, visit_local, Local, node => Ok(node.attrs.as_slice()));
     visit_production_node!(visit_stmt_macro, visit_stmt_macro, StmtMacro, node => Ok(node.attrs.as_slice()));
@@ -351,6 +356,16 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         self.record_concrete_stores_in_visible_signature("field-type", &node.vis, &node.ty);
         visit::visit_field(self, node);
         self.leave_site_context(previous);
+        self.leave_production_node(cfg);
+    }
+
+    fn visit_variant(&mut self, node: &'ast Variant) {
+        let Some(cfg) = self.enter_production_node(Ok(node.attrs.as_slice())) else {
+            return;
+        };
+        self.declaration_ancestors.push(format!("variant:{}", normalized_ident(&node.ident)));
+        visit::visit_variant(self, node);
+        self.declaration_ancestors.pop();
         self.leave_production_node(cfg);
     }
 
@@ -632,11 +647,14 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
 fn declaration_ancestor(item: &Item) -> Option<String> {
     match item {
         Item::Const(item) => Some(named_ancestor("const", &item.ident, &item.vis)),
+        Item::Enum(item) => Some(named_ancestor("enum", &item.ident, &item.vis)),
         Item::Fn(item) => Some(named_ancestor("fn", &item.sig.ident, &item.vis)),
         Item::Impl(item) => Some(format!("impl:{}", syntax_fingerprint(&item.self_ty))),
         Item::Mod(item) => Some(named_ancestor("mod", &item.ident, &item.vis)),
         Item::Static(item) => Some(named_ancestor("static", &item.ident, &item.vis)),
+        Item::Struct(item) => Some(named_ancestor("struct", &item.ident, &item.vis)),
         Item::Trait(item) => Some(named_ancestor("trait", &item.ident, &item.vis)),
+        Item::Union(item) => Some(named_ancestor("union", &item.ident, &item.vis)),
         _ => None,
     }
 }

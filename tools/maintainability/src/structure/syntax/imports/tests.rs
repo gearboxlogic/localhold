@@ -19,6 +19,19 @@ fn production_imports(file: &syn::File, path: &str, crate_root: Option<&str>, ru
     .internal_imports)
 }
 
+fn concrete_facts(source: &str) -> Result<ProductionSyntaxFacts> {
+    production_syntax_facts(
+        &syn::parse_file(source)?,
+        "src/store_fixture.rs",
+        Some("src/lib.rs"),
+        ProductionSyntaxOptions {
+            collect_internal_imports: false,
+            rust_2015_absolute_paths: false,
+            require_reviewed_expansions: true,
+        },
+    )
+}
+
 #[test]
 fn grouped_renamed_glob_and_relative_imports_are_normalized() {
     let source = "use crate::{server::{LocalHoldServer as Server, params::*}, ui};\n\
@@ -275,24 +288,17 @@ fn concrete_store_names_are_counted_only_in_production_syntax() -> Result<()> {
 fn path_valued_attribute_literals_count_concrete_stores() -> Result<()> {
     let source = "#[serde(serialize_with = \"crate::store::SqliteStore\")]\nstruct Record;\n\
                   #[serde(rename = \"PostgresStore\")]\nstruct Renamed;\n\
+                  #[schemars(bound = \"SqliteStore: MemoryReader\")]\nstruct Bound;\n\
+                  #[serde(bound(deserialize = \"SqliteStore: MemoryReader\"))]\nstruct NestedBound;\n\
+                  #[serde(deserialize_with = \"PostgresStore\")]\nstruct BarePath;\n\
                   #[cfg_attr(test, serde(serialize_with = \"crate::store::SqliteStore\"))]\nstruct TestOnly;\n\
                   #[cfg_attr(feature = \"other\", serde(serialize_with = \"crate::store::PostgresStore\"))]\nstruct Production;\n";
-    let syntax = syn::parse_file(source)?;
-    let facts = production_syntax_facts(
-        &syntax,
-        "src/store_fixture.rs",
-        Some("src/lib.rs"),
-        ProductionSyntaxOptions {
-            collect_internal_imports: false,
-            rust_2015_absolute_paths: false,
-            require_reviewed_expansions: true,
-        },
-    )?;
+    let facts = concrete_facts(source)?;
     assert_eq!(
         facts.concrete_stores,
         ConcreteStoreCounts {
-            sqlite_store: 1,
-            postgres_store: 1,
+            sqlite_store: 3,
+            postgres_store: 2,
         }
     );
     Ok(())
@@ -328,15 +334,45 @@ fn concrete_store_names_cannot_be_hidden_by_aliases() {
     for source in [
         "macro_rules! alias { () => { type DefaultStore = SqliteStore; } }\n",
         "macro_rules! reexport { () => { pub use PostgresStore as DefaultStore; } }\n",
+        "macro_rules! constructor { () => { SqliteStore::in_memory() } }\n",
     ] {
         assert!(
             imports("src/store/alias.rs", source)
                 .unwrap_err()
                 .to_string()
-                .contains("macro-generated aliases or renamed imports"),
+                .contains("macro definitions cannot inject concrete stores"),
             "{source}"
         );
     }
+}
+
+#[test]
+fn concrete_store_sites_pin_generic_defaults_and_enclosing_syntax() -> Result<()> {
+    let original = concrete_facts(
+        "pub struct Service<S: MemoryReader = SqliteStore>(S);\n\
+         fn register() { SqliteStore::register_extension(); }\n",
+    )?;
+    let whitespace_only = concrete_facts(
+        "pub struct Service < S : MemoryReader = SqliteStore > (S);\n\
+         fn register() {\n    SqliteStore :: register_extension();\n}\n",
+    )?;
+    assert_eq!(original.concrete_store_sites, whitespace_only.concrete_store_sites);
+    assert_eq!(original.generic_default_concrete_store_sites.sqlite_store.len(), 1);
+    assert!(
+        original
+            .concrete_store_sites
+            .sqlite_store
+            .contains(&original.generic_default_concrete_store_sites.sqlite_store[0])
+    );
+
+    let moved = concrete_facts(
+        "pub struct Service<S: MemoryReader>(S, SqliteStore);\n\
+         fn register() { SqliteStore::register_extension(); }\n",
+    )?;
+    assert_eq!(original.concrete_stores, moved.concrete_stores);
+    assert_ne!(original.concrete_store_sites, moved.concrete_store_sites);
+    assert!(moved.generic_default_concrete_store_sites.sqlite_store.is_empty());
+    Ok(())
 }
 
 #[test]

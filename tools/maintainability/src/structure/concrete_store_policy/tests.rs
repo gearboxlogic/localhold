@@ -1,6 +1,6 @@
 use super::*;
 use crate::structure::classify::{FileMeasurement, Inventory};
-use crate::structure::syntax::ConcreteStoreCounts;
+use crate::structure::syntax::{ConcreteStoreCounts, ConcreteStoreSites};
 
 type CountFixture<'a> = (&'a str, usize, usize);
 
@@ -38,6 +38,43 @@ fn baseline_and_current_counts_are_independent_ratchets() {
             .unwrap_err()
             .to_string()
             .contains("production-name mismatch")
+    );
+}
+
+#[test]
+fn reviewed_site_fingerprints_prevent_same_count_moves_and_new_generic_defaults() {
+    let policy = policy();
+    let restricted_components = components(&[("src/server/mod.rs", "protocol"), ("src/embedding/status.rs", "embedding")]);
+    let mut baseline = inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/status.rs", 2, 0)]);
+    baseline.files[0].production_concrete_store_sites.sqlite_store = vec!["server-default".to_owned()];
+    baseline.files[0].production_generic_default_store_sites.sqlite_store = vec!["server-default".to_owned()];
+    baseline.files[1].production_concrete_store_sites.sqlite_store = vec!["embedding-import".to_owned(), "embedding-call".to_owned()];
+
+    let exact = baseline.clone();
+    policy
+        .compare_site_fingerprints(&exact, &baseline, &restricted_components, &restricted_components)
+        .expect("unchanged reviewed syntax sites");
+
+    let mut moved = exact;
+    moved.files[0].production_concrete_store_sites.sqlite_store = vec!["server-field".to_owned()];
+    assert!(
+        policy
+            .compare_site_fingerprints(&moved, &baseline, &restricted_components, &restricted_components)
+            .unwrap_err()
+            .to_string()
+            .contains("moved or changed")
+    );
+
+    let unrestricted_components = components(&[("src/store/sqlite.rs", "sqlite-store")]);
+    let unrestricted_baseline = inventory(&[("src/store/sqlite.rs", 1, 0)]);
+    let mut new_default = unrestricted_baseline.clone();
+    new_default.files[0].production_generic_default_store_sites.sqlite_store = vec!["hidden-default".to_owned()];
+    assert!(
+        policy
+            .compare_site_fingerprints(&new_default, &unrestricted_baseline, &unrestricted_components, &unrestricted_components,)
+            .unwrap_err()
+            .to_string()
+            .contains("generic default")
     );
 }
 
@@ -209,6 +246,8 @@ fn file(path: &str, sqlite_store: usize, postgres_store: usize) -> FileMeasureme
         test_lines: 0,
         production_internal_imports: Vec::new(),
         production_concrete_stores: ConcreteStoreCounts { sqlite_store, postgres_store },
+        production_concrete_store_sites: ConcreteStoreSites::default(),
+        production_generic_default_store_sites: ConcreteStoreSites::default(),
     }
 }
 

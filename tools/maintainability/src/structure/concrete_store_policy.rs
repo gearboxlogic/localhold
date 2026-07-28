@@ -69,6 +69,23 @@ impl ConcreteStorePolicy {
         self.compare_inventory("baseline", inventory, component_paths, |debt| debt.baseline_count)
     }
 
+    pub fn compare_site_fingerprints(
+        &self,
+        current: &Inventory,
+        baseline: &Inventory,
+        current_component_paths: &BTreeMap<&str, &str>,
+        baseline_component_paths: &BTreeMap<&str, &str>,
+    ) -> Result<()> {
+        let unrestricted = self.unrestricted_components.iter().map(String::as_str).collect::<BTreeSet<_>>();
+        let current_sites = site_fingerprints(current, current_component_paths, Some(&unrestricted), false)?;
+        let baseline_sites = site_fingerprints(baseline, baseline_component_paths, Some(&unrestricted), false)?;
+        require_occurrence_subset("restricted concrete-store syntax", &current_sites, &baseline_sites)?;
+
+        let current_defaults = site_fingerprints(current, current_component_paths, None, true)?;
+        let baseline_defaults = site_fingerprints(baseline, baseline_component_paths, None, true)?;
+        require_occurrence_subset("concrete-store generic default", &current_defaults, &baseline_defaults)
+    }
+
     pub fn require_baseline_commit(&self, expected: &str) -> Result<()> {
         if self.baseline_commit != expected {
             bail!("concrete-store and structure policies must use the same baseline commit");
@@ -204,6 +221,51 @@ impl ConcreteStorePolicy {
         }
         Ok(())
     }
+}
+
+type SiteFingerprint = (String, String, ConcreteStoreName, String);
+
+fn site_fingerprints(
+    inventory: &Inventory,
+    component_paths: &BTreeMap<&str, &str>,
+    excluded_components: Option<&BTreeSet<&str>>,
+    generic_defaults: bool,
+) -> Result<BTreeMap<SiteFingerprint, usize>> {
+    let mut sites = BTreeMap::new();
+    for file in &inventory.files {
+        let component = component_paths
+            .get(file.path.as_str())
+            .with_context(|| format!("concrete-store syntax inventory path {:?} has no logical component", file.path))?;
+        if excluded_components.is_some_and(|excluded| excluded.contains(component)) {
+            continue;
+        }
+        let source = if generic_defaults {
+            &file.production_generic_default_store_sites
+        } else {
+            &file.production_concrete_store_sites
+        };
+        for (store, fingerprints) in [
+            (ConcreteStoreName::SqliteStore, &source.sqlite_store),
+            (ConcreteStoreName::PostgresStore, &source.postgres_store),
+        ] {
+            for fingerprint in fingerprints {
+                let key = ((*component).to_owned(), file.path.clone(), store, fingerprint.clone());
+                let count = sites.entry(key).or_insert(0_usize);
+                *count = count.checked_add(1).context("concrete-store syntax-site occurrence count overflow")?;
+            }
+        }
+    }
+    Ok(sites)
+}
+
+fn require_occurrence_subset(label: &str, current: &BTreeMap<SiteFingerprint, usize>, baseline: &BTreeMap<SiteFingerprint, usize>) -> Result<()> {
+    for (site, current_count) in current {
+        let baseline_count = baseline.get(site).copied().unwrap_or_default();
+        if *current_count > baseline_count {
+            bail!("{label} moved or changed outside its reviewed recovery-baseline site: site={site:?}");
+        }
+    }
+    Ok(())
 }
 
 fn validate_id(value: &str) -> Result<()> {

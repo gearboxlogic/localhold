@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use super::syntax::{
-    ConcreteStoreCounts, ProductionSyntaxFacts, ProductionSyntaxOptions, TestLineCollector, attributes_disable_production, item_is_test_only, normalized_ident,
+    ConcreteStoreCounts, ConcreteStoreSites, ProductionSyntaxFacts, ProductionSyntaxOptions, TestLineCollector, attributes_disable_production, item_is_test_only, normalized_ident,
     production_syntax_facts, reject_module_path_overrides,
 };
 
@@ -23,6 +23,8 @@ pub struct FileMeasurement {
     pub test_lines: usize,
     pub production_internal_imports: Vec<String>,
     pub production_concrete_stores: ConcreteStoreCounts,
+    pub production_concrete_store_sites: ConcreteStoreSites,
+    pub production_generic_default_store_sites: ConcreteStoreSites,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -259,6 +261,8 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
             test_lines,
             production_internal_imports: production_facts.internal_imports,
             production_concrete_stores: production_facts.concrete_stores,
+            production_concrete_store_sites: production_facts.concrete_store_sites,
+            production_generic_default_store_sites: production_facts.generic_default_concrete_store_sites,
         });
     }
     Ok(Inventory { files })

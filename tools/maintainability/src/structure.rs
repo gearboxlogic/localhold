@@ -31,7 +31,10 @@ pub fn check(workspace: &Path) -> Result<()> {
     let baseline = classify::scan_revision(workspace, &manifest.baseline_commit, &manifest.tracked_roots)?;
     manifest.compare_baseline(&baseline)?;
     import_policy.compare_baseline(&baseline)?;
-    concrete_store_policy.compare_baseline(&baseline, &manifest.baseline_component_paths()?)?;
+    let current_component_paths = manifest.current_component_paths()?;
+    let baseline_component_paths = manifest.baseline_component_paths()?;
+    concrete_store_policy.compare_baseline(&baseline, &baseline_component_paths)?;
+    concrete_store_policy.compare_site_fingerprints(&current, &baseline, &current_component_paths, &baseline_component_paths)?;
     manifest.compare_previous_revision(workspace, &current)?;
     import_policy.compare_previous_revision(workspace)?;
     concrete_store_policy.compare_previous_revision(workspace)

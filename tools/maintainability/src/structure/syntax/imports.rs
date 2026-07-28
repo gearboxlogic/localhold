@@ -1,35 +1,31 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use proc_macro2::{TokenStream, TokenTree};
-use quote::ToTokens as _;
-use serde::Serialize;
-use syn::parse::Parser as _;
-use syn::punctuated::Punctuated;
+use quote::ToTokens;
 use syn::visit::{self, Visit};
 use syn::{
-    Arm, Attribute, BareFnArg, BareVariadic, Expr, Field, FieldPat, FieldValue, File, FnArg, ForeignItem, GenericParam, ImplItem, ImplItemType, Item, ItemExternCrate, ItemMod,
-    ItemType, ItemUse, Local, Meta, Pat, Path as SynPath, StmtMacro, Token, TraitItem, TraitItemType, Variadic, Variant, Visibility,
+    Arm, Attribute, BareFnArg, BareVariadic, Expr, Field, FieldPat, FieldValue, File, FnArg, ForeignItem, GenericParam, ImplItem, ImplItemType, Item, ItemExternCrate, ItemMacro,
+    ItemMod, ItemType, ItemUse, Local, Pat, Path as SynPath, Stmt, StmtMacro, TraitItem, TraitItemType, Variadic, Variant, Visibility,
 };
 
 use crate::scan::{reviewed_attribute_expansion, reviewed_macro_expansion};
 
 use super::{
-    attributes_disable_production, cfg_can_apply_in_production, expr_attributes, fn_arg_attributes, foreign_item_attributes, generic_param_attributes, impl_item_attributes,
-    item_is_test_only, normalized_ident, pat_attributes, trait_item_attributes,
+    attributes_disable_production, expr_attributes, fn_arg_attributes, foreign_item_attributes, generic_param_attributes, impl_item_attributes, item_is_test_only,
+    normalized_ident, pat_attributes, trait_item_attributes,
 };
 
+mod concrete;
 mod resolution;
+pub use concrete::{ConcreteStoreCounts, ConcreteStoreSites};
+use concrete::{ConcreteStoreInventory, context_fingerprint, is_concrete_store_name, tokens_contain_concrete_store};
 use resolution::{StringScan, UsePath, flatten_use_tree, resolve_path, restricted_attribute_identifier, restricted_token_identifier, source_module};
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct ConcreteStoreCounts {
-    pub sqlite_store: usize,
-    pub postgres_store: usize,
-}
 
 #[derive(Default)]
 pub struct ProductionSyntaxFacts {
     pub internal_imports: Vec<String>,
     pub concrete_stores: ConcreteStoreCounts,
+    pub concrete_store_sites: ConcreteStoreSites,
+    pub generic_default_concrete_store_sites: ConcreteStoreSites,
 }
 
 #[derive(Clone, Copy)]
@@ -48,7 +44,8 @@ pub fn production_syntax_facts(file: &syn::File, source_path: &str, crate_root: 
     let mut collector = ProductionSyntaxCollector {
         module,
         imports: Vec::new(),
-        concrete_stores: ConcreteStoreCounts::default(),
+        concrete_stores: ConcreteStoreInventory::default(),
+        site_context: None,
         error: None,
         rust_2015_absolute_paths: options.rust_2015_absolute_paths,
         collect_internal_imports: options.collect_internal_imports,
@@ -60,16 +57,20 @@ pub fn production_syntax_facts(file: &syn::File, source_path: &str, crate_root: 
     }
     collector.imports.sort();
     collector.imports.dedup();
+    collector.concrete_stores.finish();
     Ok(ProductionSyntaxFacts {
         internal_imports: collector.imports,
-        concrete_stores: collector.concrete_stores,
+        concrete_stores: collector.concrete_stores.counts,
+        concrete_store_sites: collector.concrete_stores.sites,
+        generic_default_concrete_store_sites: collector.concrete_stores.generic_default_sites,
     })
 }
 
 struct ProductionSyntaxCollector {
     module: Vec<String>,
     imports: Vec<String>,
-    concrete_stores: ConcreteStoreCounts,
+    concrete_stores: ConcreteStoreInventory,
+    site_context: Option<String>,
     error: Option<anyhow::Error>,
     rust_2015_absolute_paths: bool,
     collect_internal_imports: bool,
@@ -136,105 +137,44 @@ impl ProductionSyntaxCollector {
     }
 
     fn record_concrete_store(&mut self, ident: &proc_macro2::Ident) {
-        let count = match normalized_ident(ident).as_str() {
-            "SqliteStore" => &mut self.concrete_stores.sqlite_store,
-            "PostgresStore" => &mut self.concrete_stores.postgres_store,
-            _ => return,
-        };
-        let Some(next) = count.checked_add(1) else {
-            self.error = Some(anyhow::anyhow!("production concrete-store name count overflow"));
-            return;
-        };
-        *count = next;
+        let context = self.site_context.as_deref().unwrap_or("unscoped-production-syntax");
+        if let Err(error) = self.concrete_stores.record_ident(ident, context) {
+            self.error = Some(error);
+        }
     }
 
     fn reject_concrete_store_alias(&mut self, before: ConcreteStoreCounts) {
-        if self.error.is_none() && self.concrete_stores != before {
+        if self.error.is_none() && self.concrete_stores.counts != before {
             self.error = Some(anyhow::anyhow!("production concrete stores cannot be hidden behind type aliases"));
         }
     }
 
     fn record_concrete_stores_in_tokens(&mut self, tokens: &TokenStream) {
-        for token in tokens.clone() {
-            match token {
-                TokenTree::Group(group) => self.record_concrete_stores_in_tokens(&group.stream()),
-                TokenTree::Ident(ident) => self.record_concrete_store(&ident),
-                TokenTree::Punct(_) | TokenTree::Literal(_) => {}
-            }
+        let context = self.site_context.as_deref().unwrap_or("unscoped-production-syntax");
+        if let Err(error) = self.concrete_stores.record_tokens(tokens, context) {
+            self.error = Some(error);
         }
     }
 
-    fn record_concrete_stores_in_attribute(&mut self, attribute: &Attribute) -> Result<()> {
-        if !attribute.path().is_ident("cfg_attr") {
-            self.record_concrete_stores_in_meta(&attribute.meta);
-            return Ok(());
-        }
-        let Meta::List(list) = &attribute.meta else {
-            return Ok(());
-        };
-        self.record_concrete_stores_in_cfg_attr(&list.tokens)
+    fn enter_site_context(&mut self, kind: &str, syntax: &impl ToTokens) -> Option<String> {
+        let context = context_fingerprint(self.site_context.as_deref(), kind, syntax);
+        self.site_context.replace(context)
     }
 
-    fn record_concrete_stores_in_cfg_attr(&mut self, tokens: &TokenStream) -> Result<()> {
-        let arguments = Punctuated::<Meta, Token![,]>::parse_terminated
-            .parse2(tokens.clone())
-            .context("parse cfg_attr arguments for production concrete-store classification")?;
-        let mut arguments = arguments.into_iter();
-        let Some(condition) = arguments.next() else {
-            return Ok(());
-        };
-        if !cfg_can_apply_in_production(&condition) {
-            return Ok(());
-        }
-        for nested in arguments {
-            self.record_concrete_stores_in_nested_meta(&nested)?;
-        }
-        Ok(())
+    fn leave_site_context(&mut self, previous: Option<String>) {
+        self.site_context = previous;
     }
 
-    fn record_concrete_stores_in_nested_meta(&mut self, nested: &Meta) -> Result<()> {
-        if !nested.path().is_ident("cfg_attr") {
-            self.record_concrete_stores_in_meta(nested);
-            return Ok(());
-        }
-        let Meta::List(list) = nested else {
-            return Ok(());
-        };
-        self.record_concrete_stores_in_cfg_attr(&list.tokens)
-    }
-
-    fn record_concrete_stores_in_meta(&mut self, meta: &Meta) {
-        let tokens = match meta {
-            Meta::Path(_) => return,
-            Meta::List(list) => list.tokens.clone(),
-            Meta::NameValue(value) => value.value.to_token_stream(),
-        };
-        self.record_concrete_stores_in_attribute_tokens(&tokens);
-    }
-
-    fn record_concrete_stores_in_attribute_tokens(&mut self, tokens: &TokenStream) {
-        for token in tokens.clone() {
-            match token {
-                TokenTree::Group(group) => self.record_concrete_stores_in_attribute_tokens(&group.stream()),
-                TokenTree::Literal(literal) => self.record_concrete_stores_in_path_literal(&literal),
-                TokenTree::Ident(_) | TokenTree::Punct(_) => {}
-            }
-        }
-    }
-
-    fn record_concrete_stores_in_path_literal(&mut self, literal: &proc_macro2::Literal) {
-        let Ok(syn::Lit::Str(literal)) = syn::parse_str::<syn::Lit>(&literal.to_string()) else {
+    fn record_generic_default(&mut self, parameter: &GenericParam) {
+        let GenericParam::Type(parameter) = parameter else {
             return;
         };
-        let value = literal.value();
-        if !value.contains("::") {
-            return;
-        }
-        let Ok(path) = syn::parse_str::<SynPath>(&value) else {
+        let Some(default) = &parameter.default else {
             return;
         };
-        for segment in path.segments {
-            self.record_concrete_store(&segment.ident);
+        let context = self.site_context.as_deref().unwrap_or("unscoped-generic-default");
+        if let Err(error) = self.concrete_stores.record_generic_default(default, context) {
+            self.error = Some(error);
         }
     }
 }
@@ -252,50 +192,16 @@ macro_rules! visit_production_node {
 
 impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     visit_production_node!(visit_file, visit_file, File, node => attributes_disable_production(&node.attrs));
-    visit_production_node!(visit_item, visit_item, Item, node => item_is_test_only(node));
-    visit_production_node!(
-        visit_impl_item,
-        visit_impl_item,
-        ImplItem,
-        node =>
-        impl_item_attributes(node).and_then(attributes_disable_production)
-    );
-    visit_production_node!(
-        visit_trait_item,
-        visit_trait_item,
-        TraitItem,
-        node =>
-        trait_item_attributes(node).and_then(attributes_disable_production)
-    );
-    visit_production_node!(
-        visit_foreign_item,
-        visit_foreign_item,
-        ForeignItem,
-        node =>
-        foreign_item_attributes(node).and_then(attributes_disable_production)
-    );
+    visit_production_node!(visit_expr, visit_expr, Expr, node => expr_attributes(node).and_then(attributes_disable_production));
     visit_production_node!(visit_variant, visit_variant, Variant, node => attributes_disable_production(&node.attrs));
-    visit_production_node!(visit_field, visit_field, Field, node => attributes_disable_production(&node.attrs));
     visit_production_node!(visit_arm, visit_arm, Arm, node => attributes_disable_production(&node.attrs));
     visit_production_node!(visit_local, visit_local, Local, node => attributes_disable_production(&node.attrs));
     visit_production_node!(visit_stmt_macro, visit_stmt_macro, StmtMacro, node => attributes_disable_production(&node.attrs));
-    visit_production_node!(
-        visit_expr,
-        visit_expr,
-        Expr,
-        node => expr_attributes(node).and_then(attributes_disable_production)
-    );
     visit_production_node!(
         visit_fn_arg,
         visit_fn_arg,
         FnArg,
         node => attributes_disable_production(fn_arg_attributes(node))
-    );
-    visit_production_node!(
-        visit_generic_param,
-        visit_generic_param,
-        GenericParam,
-        node => attributes_disable_production(generic_param_attributes(node))
     );
     visit_production_node!(
         visit_pat,
@@ -334,19 +240,83 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         node => attributes_disable_production(&node.attrs)
     );
 
+    fn visit_item(&mut self, node: &'ast Item) {
+        if self.skip_test_only(item_is_test_only(node)) {
+            return;
+        }
+        let previous = self.enter_site_context("item", node);
+        visit::visit_item(self, node);
+        self.leave_site_context(previous);
+    }
+
+    fn visit_impl_item(&mut self, node: &'ast ImplItem) {
+        if self.skip_test_only(impl_item_attributes(node).and_then(attributes_disable_production)) {
+            return;
+        }
+        let previous = self.enter_site_context("impl-item", node);
+        visit::visit_impl_item(self, node);
+        self.leave_site_context(previous);
+    }
+
+    fn visit_trait_item(&mut self, node: &'ast TraitItem) {
+        if self.skip_test_only(trait_item_attributes(node).and_then(attributes_disable_production)) {
+            return;
+        }
+        let previous = self.enter_site_context("trait-item", node);
+        visit::visit_trait_item(self, node);
+        self.leave_site_context(previous);
+    }
+
+    fn visit_foreign_item(&mut self, node: &'ast ForeignItem) {
+        if self.skip_test_only(foreign_item_attributes(node).and_then(attributes_disable_production)) {
+            return;
+        }
+        let previous = self.enter_site_context("foreign-item", node);
+        visit::visit_foreign_item(self, node);
+        self.leave_site_context(previous);
+    }
+
+    fn visit_stmt(&mut self, node: &'ast Stmt) {
+        let previous = self.enter_site_context("statement", node);
+        visit::visit_stmt(self, node);
+        self.leave_site_context(previous);
+    }
+
+    fn visit_field(&mut self, node: &'ast Field) {
+        if self.skip_test_only(attributes_disable_production(&node.attrs)) {
+            return;
+        }
+        let previous = self.enter_site_context("field", node);
+        visit::visit_field(self, node);
+        self.leave_site_context(previous);
+    }
+
+    fn visit_generic_param(&mut self, node: &'ast GenericParam) {
+        if self.skip_test_only(attributes_disable_production(generic_param_attributes(node))) {
+            return;
+        }
+        let previous = self.enter_site_context("generic-parameter", node);
+        self.record_generic_default(node);
+        visit::visit_generic_param(self, node);
+        self.leave_site_context(previous);
+    }
+
     fn visit_item_use(&mut self, item: &'ast ItemUse) {
+        let previous = self.enter_site_context("use", item);
         if self.error.is_none()
             && let Err(error) = self.collect_use(item)
         {
             self.error = Some(error);
+            self.leave_site_context(previous);
             return;
         }
         visit::visit_item_use(self, item);
+        self.leave_site_context(previous);
     }
 
     fn visit_item_type(&mut self, item: &'ast ItemType) {
         let import_count = self.imports.len();
-        let concrete_before = self.concrete_stores;
+        let concrete_before = self.concrete_stores.counts;
         visit::visit_item_type(self, item);
         if self.error.is_none() && self.imports.len() != import_count && !matches!(item.vis, Visibility::Inherited) {
             self.error = Some(anyhow::anyhow!("production restricted imports cannot be exposed through public type aliases"));
@@ -355,13 +325,13 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_impl_item_type(&mut self, item: &'ast ImplItemType) {
-        let concrete_before = self.concrete_stores;
+        let concrete_before = self.concrete_stores.counts;
         visit::visit_impl_item_type(self, item);
         self.reject_concrete_store_alias(concrete_before);
     }
 
     fn visit_trait_item_type(&mut self, item: &'ast TraitItemType) {
-        let concrete_before = self.concrete_stores;
+        let concrete_before = self.concrete_stores.counts;
         visit::visit_trait_item_type(self, item);
         self.reject_concrete_store_alias(concrete_before);
     }
@@ -409,6 +379,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             ));
             return;
         }
+        let previous = self.enter_site_context("macro-invocation", node);
         if self.collect_internal_imports {
             match restricted_token_identifier(&node.tokens, &self.module, self.rust_2015_absolute_paths, StringScan::RustFragment) {
                 Ok(Some(restricted)) => {
@@ -420,16 +391,19 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
                 Ok(None) => {}
                 Err(error) => {
                     self.error = Some(error);
+                    self.leave_site_context(previous);
                     return;
                 }
             }
         }
         if self.require_reviewed_expansions && !reviewed_macro_expansion(node) {
             self.error = Some(anyhow::anyhow!("production code invokes unreviewed macro expansion path {}", node.path.to_token_stream()));
+            self.leave_site_context(previous);
             return;
         }
         self.visit_path(&node.path);
         self.visit_token_stream(&node.tokens);
+        self.leave_site_context(previous);
     }
 
     fn visit_attribute(&mut self, attribute: &'ast Attribute) {
@@ -455,11 +429,25 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             self.error = Some(anyhow::anyhow!("production code uses unreviewed attribute expansion {}", attribute.meta.to_token_stream()));
             return;
         }
-        if let Err(error) = self.record_concrete_stores_in_attribute(attribute) {
+        let previous = self.enter_site_context("attribute", attribute);
+        if let Err(error) = self
+            .concrete_stores
+            .record_attribute(attribute, self.site_context.as_deref().expect("attribute site context"))
+        {
             self.error = Some(error);
+            self.leave_site_context(previous);
             return;
         }
         visit::visit_attribute(self, attribute);
+        self.leave_site_context(previous);
+    }
+
+    fn visit_item_macro(&mut self, item: &'ast ItemMacro) {
+        if item.ident.is_some() && tokens_contain_concrete_store(&item.mac.tokens) {
+            self.error = Some(anyhow::anyhow!("production macro definitions cannot inject concrete stores into call sites"));
+            return;
+        }
+        visit::visit_item_macro(self, item);
     }
 
     fn visit_item_mod(&mut self, item: &'ast ItemMod) {
@@ -479,10 +467,6 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         }
         self.module.pop();
     }
-}
-
-fn is_concrete_store_name(name: &str) -> bool {
-    matches!(name, "SqliteStore" | "PostgresStore")
 }
 
 fn tokens_may_hide_concrete_store(tokens: &TokenStream) -> bool {

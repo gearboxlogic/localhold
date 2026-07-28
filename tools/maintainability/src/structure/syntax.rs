@@ -8,7 +8,7 @@ use syn::{Attribute, Expr, ForeignItem, ImplItem, Item, Meta, Token, TraitItem};
 
 mod imports;
 
-pub use imports::{ConcreteStoreCounts, ProductionSyntaxFacts, ProductionSyntaxOptions, production_syntax_facts};
+pub use imports::{ConcreteStoreCounts, ConcreteStoreSites, ProductionSyntaxFacts, ProductionSyntaxOptions, production_syntax_facts};
 
 pub(super) fn normalized_ident(ident: &proc_macro2::Ident) -> String {
     let value = ident.to_string();

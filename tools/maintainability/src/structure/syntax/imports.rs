@@ -620,8 +620,10 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     fn visit_item_struct(&mut self, item: &'ast ItemStruct) {
         self.record_declaration_generics("struct-generics", &item.vis, &item.generics);
         if matches!(item.vis, Visibility::Public(_)) {
+            let mut item_path = self.module.clone();
+            item_path.push(normalized_ident(&item.ident));
             self.concrete_stores
-                .record_public_struct_declaration(item, &self.cfg_context.identity(), &self.declaration_ancestors);
+                .record_public_struct_declaration(item, &item_path, &self.cfg_context, &self.declaration_ancestors);
         }
         visit::visit_item_struct(self, item);
     }

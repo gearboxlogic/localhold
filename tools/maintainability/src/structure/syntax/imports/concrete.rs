@@ -65,8 +65,9 @@ impl ConcreteStoreInventory {
         self.record_name(&normalized_ident(ident), site_context)
     }
 
-    pub(super) fn record_public_struct_declaration(&mut self, item: &ItemStruct, cfg_identity: &str, ancestors: &[String]) {
-        let sites = match normalized_ident(&item.ident).as_str() {
+    pub(super) fn record_public_struct_declaration(&mut self, item: &ItemStruct, item_path: &[String], cfg: &ProductionCfgContext, ancestors: &[String]) {
+        let name = normalized_ident(&item.ident);
+        let sites = match name.as_str() {
             "SqliteStore" => &mut self.public_struct_declarations.sqlite_store,
             "PostgresStore" => &mut self.public_struct_declarations.postgres_store,
             _ => return,
@@ -77,12 +78,13 @@ impl ConcreteStoreInventory {
             field.attrs.retain(|attribute| !attribute.path().is_ident("doc"));
         }
         let declaration = syntax_fingerprint(&declaration);
-        if cfg_identity.is_empty() && ancestors.is_empty() {
-            sites.push(declaration);
-            return;
-        }
-        let ancestors = ancestors.join("\0");
-        sites.push(syntax_fingerprint(&format!("declaration:{declaration}\0cfg:{cfg_identity}\0ancestors:{ancestors}")));
+        let declaration = if cfg.identity().is_empty() && ancestors.is_empty() {
+            declaration
+        } else {
+            syntax_fingerprint(&format!("declaration:{declaration}\0cfg:{}\0ancestors:{}", cfg.identity(), ancestors.join("\0")))
+        };
+        sites.push(declaration.clone());
+        self.record_exposure_signature_name(&name, &format!("canonical-declaration:{declaration}"), item_path, cfg);
     }
 
     pub(super) fn record_tokens(&mut self, tokens: &TokenStream, site_context: &str) -> Result<()> {
@@ -269,7 +271,6 @@ impl ConcreteStoreInventory {
 
     fn record_signature_name(&mut self, name: &str, site_context: &str, item_path: &[String], cfg: &ProductionCfgContext) {
         self.record_exposure_signature_name(name, site_context, item_path, cfg);
-        self.record_binding_name(name, site_context);
     }
 
     fn record_exposure_signature_name(&mut self, name: &str, site_context: &str, item_path: &[String], cfg: &ProductionCfgContext) {

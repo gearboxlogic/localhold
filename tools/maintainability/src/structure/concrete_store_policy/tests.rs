@@ -213,6 +213,24 @@ fn public_reexports_must_share_a_cfg_with_the_concrete_signature() {
 }
 
 #[test]
+fn public_globs_are_evidence_for_canonical_store_declarations() {
+    let policy = policy();
+    let components = components(&[("src/lib.rs", "composition"), ("src/store/sqlite.rs", "sqlite-store")]);
+    let mut baseline = inventory(&[("src/lib.rs", 0, 0), ("src/store/sqlite.rs", 1, 0)]);
+    baseline.files[1].production_signature_store_sites.sqlite_store = vec![signature("canonical-sqlite-declaration", &["store", "sqlite", "SqliteStore"])];
+    let mut current = baseline.clone();
+    current.files[0].production_public_reexports = vec![PublicReexportEvidence {
+        exported_path: vec!["*".to_owned()],
+        target_path: vec!["store".to_owned(), "*".to_owned()],
+        fingerprint: "public-use-store-glob".to_owned(),
+        cfg: ProductionCfgContext::default(),
+    }];
+
+    let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
+    assert!(error.to_string().contains("production signature"));
+}
+
+#[test]
 fn inline_module_reexports_match_the_concrete_bearing_item() {
     let policy = policy();
     let components = components(&[("src/ui/mod.rs", "sqlite-store")]);

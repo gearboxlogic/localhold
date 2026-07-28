@@ -441,6 +441,13 @@ fn canonical_concrete_store_declarations_require_public_production_structs() -> 
     )?;
     assert_eq!(facts.public_concrete_store_structs.sqlite_store.len(), 1);
     assert!(facts.public_concrete_store_structs.postgres_store.is_empty());
+    assert!(
+        facts
+            .signature_concrete_store_sites
+            .sqlite_store
+            .iter()
+            .any(|site| site.item_path == ["store_fixture", "SqliteStore"])
+    );
     Ok(())
 }
 
@@ -754,6 +761,18 @@ fn canonical_binding_identity_tracks_trait_implementation_bodies() -> Result<()>
     assert_ne!(first.binding_concrete_store_sites, second.binding_concrete_store_sites);
     assert_eq!(first.binding_concrete_store_sites.sqlite_store.len(), 1);
     assert_ne!(first.concrete_store_sites, second.concrete_store_sites);
+    Ok(())
+}
+
+#[test]
+fn private_helper_signatures_do_not_change_canonical_binding_identity() -> Result<()> {
+    let canonical = concrete_facts("impl MemoryReader for SqliteStore { fn version(&self) -> u32 { 1 } }\n")?;
+    let with_private_helper = concrete_facts(
+        "impl MemoryReader for SqliteStore { fn version(&self) -> u32 { 1 } }\n\
+         fn inspect(_: &SqliteStore) {}\n",
+    )?;
+    assert_eq!(canonical.binding_concrete_store_sites, with_private_helper.binding_concrete_store_sites);
+    assert_ne!(canonical.signature_concrete_store_sites, with_private_helper.signature_concrete_store_sites);
     Ok(())
 }
 

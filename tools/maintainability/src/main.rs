@@ -19,6 +19,7 @@ enum Command {
     Inventory,
     ProductionClippy,
     StructureInventory { revision: Option<String> },
+    SuppressionInventory,
 }
 
 fn main() {
@@ -46,6 +47,10 @@ fn run() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&sites)?);
         }
         Command::ProductionClippy => production_clippy::run(&workspace)?,
+        Command::SuppressionInventory => {
+            let inventory = structure::suppression_inventory(&workspace)?;
+            println!("{}", serde_json::to_string_pretty(&inventory)?);
+        }
         Command::StructureInventory { revision } => {
             let inventory = if let Some(revision) = revision {
                 structure::scan_revision(&workspace, &revision)?
@@ -65,7 +70,8 @@ fn parse_args(arguments: impl Iterator<Item = String>) -> Result<Command> {
         Some("inventory") => Command::Inventory,
         Some("production-clippy") => Command::ProductionClippy,
         Some("structure-inventory") => Command::StructureInventory { revision: arguments.next() },
-        _ => bail!("usage: localhold-maintainability <check|inventory|production-clippy|structure-inventory [REVISION]>"),
+        Some("suppression-inventory") => Command::SuppressionInventory,
+        _ => bail!("usage: localhold-maintainability <check|inventory|production-clippy|structure-inventory [REVISION]|suppression-inventory>"),
     };
     if let Some(argument) = arguments.next() {
         bail!("unexpected argument {argument:?}");
@@ -94,6 +100,10 @@ mod tests {
         assert_eq!(
             parse_args(std::iter::once("production-clippy".to_owned())).expect("production Clippy command"),
             Command::ProductionClippy
+        );
+        assert_eq!(
+            parse_args(std::iter::once("suppression-inventory".to_owned())).expect("suppression inventory command"),
+            Command::SuppressionInventory
         );
         assert_eq!(
             parse_args(std::iter::once("structure-inventory".to_owned())).expect("structure inventory command"),

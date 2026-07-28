@@ -99,6 +99,11 @@ fn write_nested_identity(kind: char, nested: &[Predicate], output: &mut String) 
     output.push(']');
 }
 
+pub(in crate::structure) struct ClassifiedCfgMeta {
+    pub(in crate::structure) meta: Meta,
+    pub(in crate::structure) production_reachable: bool,
+}
+
 pub(in crate::structure) fn attributes_disable_production(attributes: &[Attribute]) -> Result<bool> {
     Ok(production_cfg_context(attributes, &ProductionCfgContext::default())?.is_none())
 }
@@ -121,8 +126,17 @@ pub(in crate::structure) fn production_cfg_context(attributes: &[Attribute], inh
 }
 
 pub(in crate::structure) fn production_cfg_attr_metas(tokens: &proc_macro2::TokenStream, context: &ProductionCfgContext) -> Result<Vec<Meta>> {
+    Ok(cfg_attr_metas_with_production_reachability(tokens, context)?
+        .into_iter()
+        .filter_map(|classified| classified.production_reachable.then_some(classified.meta))
+        .collect())
+}
+
+pub(in crate::structure) fn cfg_attr_metas_with_production_reachability(tokens: &proc_macro2::TokenStream, context: &ProductionCfgContext) -> Result<Vec<ClassifiedCfgMeta>> {
+    let mut effective = context.clone();
+    collect_cfg_attr_constraints(tokens, Predicate::Constant(true), &mut effective.constraints)?;
     let mut metas = Vec::new();
-    collect_production_cfg_attr_metas(tokens, context, Predicate::Constant(true), &mut metas)?;
+    collect_cfg_attr_metas(tokens, &effective, Predicate::Constant(true), &mut metas)?;
     Ok(metas)
 }
 
@@ -144,12 +158,10 @@ fn collect_cfg_attr_constraints(tokens: &proc_macro2::TokenStream, parent_activa
     Ok(())
 }
 
-fn collect_production_cfg_attr_metas(tokens: &proc_macro2::TokenStream, context: &ProductionCfgContext, parent_activation: Predicate, output: &mut Vec<Meta>) -> Result<()> {
+fn collect_cfg_attr_metas(tokens: &proc_macro2::TokenStream, context: &ProductionCfgContext, parent_activation: Predicate, output: &mut Vec<ClassifiedCfgMeta>) -> Result<()> {
     let attribute = parse_cfg_attr(tokens, "production attribute classification")?;
     let activation = Predicate::All(vec![parent_activation, predicate(&attribute.condition)?]);
-    if !context_is_satisfiable(context, Some(activation.clone())) {
-        return Ok(());
-    }
+    let reachable = context_is_satisfiable(context, Some(activation.clone()));
 
     for meta in attribute.nested {
         if meta.path().is_ident("cfg") {
@@ -159,9 +171,12 @@ fn collect_production_cfg_attr_metas(tokens: &proc_macro2::TokenStream, context:
             let Meta::List(list) = meta else {
                 continue;
             };
-            collect_production_cfg_attr_metas(&list.tokens, context, activation.clone(), output)?;
+            collect_cfg_attr_metas(&list.tokens, context, activation.clone(), output)?;
         } else {
-            output.push(meta);
+            output.push(ClassifiedCfgMeta {
+                meta,
+                production_reachable: reachable,
+            });
         }
     }
     Ok(())

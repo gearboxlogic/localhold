@@ -12,6 +12,7 @@ mod classify;
 mod concrete_store_policy;
 mod import_policy;
 mod manifest;
+mod suppression;
 mod syntax;
 mod visibility_policy;
 
@@ -78,6 +79,12 @@ pub fn scan_workspace(workspace: &Path) -> Result<Inventory> {
 pub fn scan_revision(workspace: &Path, revision: &str) -> Result<Inventory> {
     let roots = TRACKED_ROOTS.into_iter().map(str::to_owned).collect::<Vec<_>>();
     classify::scan_revision(workspace, revision, &roots)
+}
+
+pub fn suppression_inventory(workspace: &Path) -> Result<Vec<suppression::SourceSuppression>> {
+    let manifest = StructureManifest::load(&workspace.join(MANIFEST_PATH))?;
+    let inventory = classify::scan_workspace(workspace, &manifest.tracked_roots)?;
+    suppression::scan_workspace(workspace, &inventory, &manifest.current_component_paths()?)
 }
 
 #[cfg(test)]

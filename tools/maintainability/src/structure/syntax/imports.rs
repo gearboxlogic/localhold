@@ -166,14 +166,16 @@ impl ProductionSyntaxCollector {
     }
 
     fn record_generic_default(&mut self, parameter: &GenericParam) {
-        let GenericParam::Type(parameter) = parameter else {
-            return;
+        let default = match parameter {
+            GenericParam::Type(parameter) => parameter.default.as_ref().map(ToTokens::to_token_stream),
+            GenericParam::Const(parameter) => parameter.default.as_ref().map(ToTokens::to_token_stream),
+            GenericParam::Lifetime(_) => None,
         };
-        let Some(default) = &parameter.default else {
+        let Some(default) = default else {
             return;
         };
         let context = self.site_context.as_deref().unwrap_or("unscoped-generic-default");
-        if let Err(error) = self.concrete_stores.record_generic_default(default, context) {
+        if let Err(error) = self.concrete_stores.record_generic_default(&default, context) {
             self.error = Some(error);
         }
     }

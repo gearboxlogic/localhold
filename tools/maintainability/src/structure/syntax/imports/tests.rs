@@ -435,6 +435,29 @@ fn concrete_store_sites_pin_generic_defaults_and_enclosing_syntax() -> Result<()
 }
 
 #[test]
+fn const_generic_defaults_are_inventoried() -> Result<()> {
+    let facts = concrete_facts(
+        "struct SqliteVersion<const N: usize = { SqliteStore::FORMAT_VERSION }>;\n\
+         struct PostgresVersion<const N: usize = { PostgresStore::FORMAT_VERSION }>;\n",
+    )?;
+    let whitespace_only = concrete_facts(
+        "struct SqliteVersion < const N : usize = { SqliteStore :: FORMAT_VERSION } >;\n\
+         struct PostgresVersion < const N : usize = { PostgresStore :: FORMAT_VERSION } >;\n",
+    )?;
+    assert_eq!(
+        facts.concrete_stores,
+        ConcreteStoreCounts {
+            sqlite_store: 1,
+            postgres_store: 1,
+        }
+    );
+    assert_eq!(facts.generic_default_concrete_store_sites, whitespace_only.generic_default_concrete_store_sites);
+    assert_eq!(facts.generic_default_concrete_store_sites.sqlite_store.len(), 1);
+    assert_eq!(facts.generic_default_concrete_store_sites.postgres_store.len(), 1);
+    Ok(())
+}
+
+#[test]
 fn canonical_store_names_and_test_only_aliases_remain_classifiable() -> Result<()> {
     let source = "pub use crate::store::SqliteStore;\n\
                   type MemoryMap = std::collections::HashMap<u64, String>;\n\

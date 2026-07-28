@@ -750,7 +750,8 @@ fn type_and_trait_generic_bounds_are_signature_evidence() -> Result<()> {
 fn concrete_store_signature_identity_tracks_visibility() -> Result<()> {
     let private = concrete_facts("fn open() -> SqliteStore { SqliteStore::open() }\n")?;
     let restricted = concrete_facts("pub(crate) fn open() -> SqliteStore { SqliteStore::open() }\n")?;
-    assert_ne!(private.signature_concrete_store_sites, restricted.signature_concrete_store_sites);
+    assert!(private.signature_concrete_store_sites.sqlite_store.is_empty());
+    assert_eq!(restricted.signature_concrete_store_sites.sqlite_store.len(), 1);
     Ok(())
 }
 
@@ -771,8 +772,14 @@ fn private_helper_signatures_do_not_change_canonical_binding_identity() -> Resul
         "impl MemoryReader for SqliteStore { fn version(&self) -> u32 { 1 } }\n\
          fn inspect(_: &SqliteStore) {}\n",
     )?;
+    let with_restricted_helper = concrete_facts(
+        "impl MemoryReader for SqliteStore { fn version(&self) -> u32 { 1 } }\n\
+         pub(crate) fn inspect(_: &SqliteStore) {}\n",
+    )?;
     assert_eq!(canonical.binding_concrete_store_sites, with_private_helper.binding_concrete_store_sites);
-    assert_ne!(canonical.signature_concrete_store_sites, with_private_helper.signature_concrete_store_sites);
+    assert_eq!(canonical.binding_concrete_store_sites, with_restricted_helper.binding_concrete_store_sites);
+    assert_eq!(canonical.signature_concrete_store_sites, with_private_helper.signature_concrete_store_sites);
+    assert_ne!(canonical.signature_concrete_store_sites, with_restricted_helper.signature_concrete_store_sites);
     Ok(())
 }
 

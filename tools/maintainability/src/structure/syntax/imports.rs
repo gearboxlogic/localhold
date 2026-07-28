@@ -670,7 +670,9 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_fn(&mut self, item: &'ast ItemFn) {
-        self.record_concrete_stores_in_visible_signature("function-signature", &item.vis, &item.sig);
+        if !matches!(item.vis, Visibility::Inherited) {
+            self.record_concrete_stores_in_visible_signature("function-signature", &item.vis, &item.sig);
+        }
         visit::visit_item_fn(self, item);
     }
 

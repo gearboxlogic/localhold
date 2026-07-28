@@ -1,6 +1,7 @@
 mod check;
 mod expanded;
 mod manifest;
+mod production_clippy;
 mod scan;
 mod structure;
 
@@ -16,6 +17,7 @@ use crate::manifest::UnsafeManifest;
 enum Command {
     Check,
     Inventory,
+    ProductionClippy,
     StructureInventory { revision: Option<String> },
 }
 
@@ -43,6 +45,7 @@ fn run() -> Result<()> {
             let sites = scan::scan_workspace(&workspace, &roots)?;
             println!("{}", serde_json::to_string_pretty(&sites)?);
         }
+        Command::ProductionClippy => production_clippy::run(&workspace)?,
         Command::StructureInventory { revision } => {
             let inventory = if let Some(revision) = revision {
                 structure::scan_revision(&workspace, &revision)?
@@ -60,8 +63,9 @@ fn parse_args(arguments: impl Iterator<Item = String>) -> Result<Command> {
     let command = match arguments.next().as_deref() {
         Some("check") => Command::Check,
         Some("inventory") => Command::Inventory,
+        Some("production-clippy") => Command::ProductionClippy,
         Some("structure-inventory") => Command::StructureInventory { revision: arguments.next() },
-        _ => bail!("usage: localhold-maintainability <check|inventory|structure-inventory [REVISION]>"),
+        _ => bail!("usage: localhold-maintainability <check|inventory|production-clippy|structure-inventory [REVISION]>"),
     };
     if let Some(argument) = arguments.next() {
         bail!("unexpected argument {argument:?}");
@@ -87,6 +91,10 @@ mod tests {
     fn parser_accepts_only_closed_command_set() {
         assert_eq!(parse_args(std::iter::once("check".to_owned())).expect("check command"), Command::Check);
         assert_eq!(parse_args(std::iter::once("inventory".to_owned())).expect("inventory command"), Command::Inventory);
+        assert_eq!(
+            parse_args(std::iter::once("production-clippy".to_owned())).expect("production Clippy command"),
+            Command::ProductionClippy
+        );
         assert_eq!(
             parse_args(std::iter::once("structure-inventory".to_owned())).expect("structure inventory command"),
             Command::StructureInventory { revision: None }

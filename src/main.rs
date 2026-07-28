@@ -364,8 +364,8 @@ async fn try_run_reranker_cli() -> Option<CliExitResult> {
 }
 
 #[cfg(not(feature = "reranker-cuda"))]
-async fn run_reranker_gate_cli(_args: &[OsString]) -> CliExitResult {
-    Err(EngineError::config("reranker gate requires a LocalHold binary built with reranker-cuda support").into())
+fn run_reranker_gate_cli(_args: &[OsString]) -> std::future::Ready<CliExitResult> {
+    std::future::ready(Err(EngineError::config("reranker gate requires a LocalHold binary built with reranker-cuda support").into()))
 }
 
 #[cfg(feature = "reranker-cuda")]
@@ -425,8 +425,8 @@ fn gate_mib_to_bytes(mib: u64) -> Result<u64, EngineError> {
 }
 
 #[cfg(not(feature = "reranker"))]
-async fn run_models_command(_command: &str, _json: bool, _confirmed: bool) -> CliExitResult {
-    Err(EngineError::config("models commands require a LocalHold binary built with reranker support").into())
+fn run_models_command(_command: &str, _json: bool, _confirmed: bool) -> std::future::Ready<CliExitResult> {
+    std::future::ready(Err(EngineError::config("models commands require a LocalHold binary built with reranker support").into()))
 }
 
 #[cfg(feature = "reranker")]

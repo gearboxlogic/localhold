@@ -116,20 +116,20 @@ async fn run_with_store<S>(store: S, config: Config, clock: Arc<dyn Clock>, prin
 where
     S: MemoryStore + Clone + fmt::Debug + 'static,
 {
+    #[cfg(feature = "reranker")]
     let mut startup_notice = None;
-
     #[cfg(feature = "reranker")]
     let reranker_config = config.search.reranker.clone();
-
     #[cfg(not(feature = "reranker"))]
-    if config.search.reranker.enabled {
-        let requested = config.search.reranker.execution_provider;
-        if config.search.reranker.required {
-            return Err(localhold_reranker_unavailable(requested).into());
-        }
-        startup_notice = Some(format!("reranker off: {requested} support is not compiled into this binary"));
+    if config.search.reranker.enabled && config.search.reranker.required {
+        return Err(localhold_reranker_unavailable(config.search.reranker.execution_provider).into());
     }
-
+    #[cfg(not(feature = "reranker"))]
+    let startup_notice = config
+        .search
+        .reranker
+        .enabled
+        .then(|| format!("reranker off: {} support is not compiled into this binary", config.search.reranker.execution_provider));
     let embedding = create_deferred_embedding_provider_with_clock(&config.embedding, &config.limits, Arc::clone(&clock));
     let engine = LocalHoldEngine::new_with_clock(store, embedding, config.limits, config.search, Arc::clone(&clock));
 

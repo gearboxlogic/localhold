@@ -204,7 +204,9 @@ jobs:
           version: 2026.7.5
 
       - name: Clippy
-        run: just clippy
+        run: |
+          just production-clippy
+          just clippy
 
       - name: Test
         run: just test

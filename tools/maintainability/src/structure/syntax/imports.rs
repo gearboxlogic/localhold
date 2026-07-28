@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
 use serde::Serialize;
@@ -39,6 +39,7 @@ pub struct ProductionSyntaxFacts {
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct PublicReexportEvidence {
+    pub exported_path: Vec<String>,
     pub target_path: Vec<String>,
     pub fingerprint: String,
 }
@@ -160,6 +161,13 @@ impl ProductionSyntaxCollector {
             let Some(target_path) = resolve_path(&self.module, &path.segments, self.rust_2015_absolute_paths)? else {
                 continue;
             };
+            let mut exported_path = self.module.clone();
+            exported_path.push(
+                path.alias
+                    .clone()
+                    .or_else(|| target_path.last().cloned())
+                    .context("production public re-export has no exported name")?,
+            );
             let identity = format!(
                 "public-reexport:{}\0alias:{}\0visibility:{}\0cfg:{}\0ancestors:{}",
                 target_path.join("::"),
@@ -169,6 +177,7 @@ impl ProductionSyntaxCollector {
                 self.declaration_ancestors.join("\0")
             );
             self.public_reexports.push(PublicReexportEvidence {
+                exported_path,
                 target_path,
                 fingerprint: syntax_fingerprint(&identity),
             });
@@ -725,7 +734,12 @@ fn declaration_ancestor(item: &Item) -> Option<String> {
         Item::Const(item) => Some(named_ancestor("const", &item.ident, &item.vis)),
         Item::Enum(item) => Some(named_ancestor("enum", &item.ident, &item.vis)),
         Item::Fn(item) => Some(named_ancestor("fn", &item.sig.ident, &item.vis)),
-        Item::Impl(item) => Some(format!("impl:{}", syntax_fingerprint(&item.self_ty))),
+        Item::Impl(item) => {
+            let mut header = item.clone();
+            strip_impl_documentation(&mut header);
+            header.items.clear();
+            Some(format!("impl:{}", syntax_fingerprint(&header)))
+        }
         Item::Mod(item) => Some(named_ancestor("mod", &item.ident, &item.vis)),
         Item::Static(item) => Some(named_ancestor("static", &item.ident, &item.vis)),
         Item::Struct(item) => Some(named_ancestor("struct", &item.ident, &item.vis)),

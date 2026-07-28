@@ -47,11 +47,28 @@ fn grouped_renamed_glob_and_relative_imports_are_normalized() {
 #[test]
 fn test_only_imports_are_excluded_at_item_and_parent_scope() {
     let source = "#[cfg(test)]\nuse crate::server::params;\n\
+                  #[cfg(doctest)]\nuse crate::server::DocTestOnly;\n\
                   #[cfg(feature = \"testing\")]\nmod support { use crate::ui; }\n\
                   #[cfg(test)]\nfn test_path() -> crate::server::TestOnly { unreachable!() }\n\
                   #[cfg_attr(all(), cfg_attr(all(), cfg(test)))]\nuse crate::server::NestedTestOnly;\n\
                   use crate::server::LocalHoldServer;\n";
     assert_eq!(imports("src/http_transport.rs", source).expect("imports"), ["crate::server::LocalHoldServer"]);
+}
+
+#[test]
+fn concrete_method_signatures_track_their_complete_impl_header() -> Result<()> {
+    let inherent = concrete_facts(
+        "trait Reader { fn open() -> SqliteStore; }\n\
+         struct Adapter;\n\
+         impl Adapter { pub fn open() -> SqliteStore { loop {} } }\n",
+    )?;
+    let trait_implementation = concrete_facts(
+        "trait Reader { fn open() -> SqliteStore; }\n\
+         struct Adapter;\n\
+         impl Reader for Adapter { fn open() -> SqliteStore { loop {} } }\n",
+    )?;
+    assert_ne!(inherent.signature_concrete_store_sites, trait_implementation.signature_concrete_store_sites);
+    Ok(())
 }
 
 #[test]

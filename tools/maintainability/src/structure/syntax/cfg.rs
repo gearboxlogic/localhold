@@ -196,7 +196,7 @@ fn context_is_satisfiable(context: &ProductionCfgContext, condition: Option<Pred
 
 fn predicate(meta: &Meta) -> Result<Predicate> {
     match meta {
-        Meta::Path(path) if path.is_ident("test") => Ok(Predicate::Constant(false)),
+        Meta::Path(path) if path.is_ident("test") || path.is_ident("doctest") => Ok(Predicate::Constant(false)),
         Meta::NameValue(value) if is_testing_feature(value) => Ok(Predicate::Constant(false)),
         Meta::List(list) if list.path.is_ident("all") => Ok(Predicate::All(parse_predicate_list(list)?)),
         Meta::List(list) if list.path.is_ident("any") => Ok(Predicate::Any(parse_predicate_list(list)?)),

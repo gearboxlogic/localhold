@@ -204,8 +204,39 @@ fn public_reexports_are_inventoried_beside_concrete_store_signatures() {
     let exposed_helper = exposed.files.iter().find(|file| file.path == "src/helper.rs").expect("helper measurement");
     assert!(private_root.production_public_reexports.is_empty());
     assert_eq!(exposed_root.production_public_reexports.len(), 1);
+    assert_eq!(exposed_root.production_public_reexports[0].exported_path, ["open"]);
     assert_eq!(exposed_root.production_public_reexports[0].target_path, ["helper", "open"]);
     assert_eq!(exposed_helper.production_signature_store_sites.sqlite_store.len(), 1);
+}
+
+#[test]
+fn public_reexport_chains_normalize_exported_and_target_paths() {
+    let measured = inventory(&[
+        ("src/lib.rs", "mod ui;\n"),
+        (
+            "src/ui/mod.rs",
+            "mod helper;\n\
+             mod facade { pub use super::helper::open; }\n\
+             pub(crate) use self::facade::open;\n",
+        ),
+        ("src/ui/helper.rs", "pub fn open() -> SqliteStore { loop {} }\n"),
+    ]);
+    let ui = measured.files.iter().find(|file| file.path == "src/ui/mod.rs").expect("ui measurement");
+    let paths = ui
+        .production_public_reexports
+        .iter()
+        .map(|evidence| (evidence.exported_path.clone(), evidence.target_path.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        [
+            (
+                vec!["ui".to_owned(), "facade".to_owned(), "open".to_owned()],
+                vec!["ui".to_owned(), "helper".to_owned(), "open".to_owned()]
+            ),
+            (vec!["ui".to_owned(), "open".to_owned()], vec!["ui".to_owned(), "facade".to_owned(), "open".to_owned()]),
+        ]
+    );
 }
 
 #[test]

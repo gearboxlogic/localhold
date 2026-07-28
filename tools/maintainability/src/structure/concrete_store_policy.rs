@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use super::classify::{FileMeasurement, Inventory};
 use super::manifest::PreviousRevision;
+use super::syntax::PublicReexportEvidence;
 use crate::scan::syntax_fingerprint;
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
@@ -494,19 +495,46 @@ fn canonical_binding_fingerprint(inventory: &Inventory, paths: PathAttribution<'
 }
 
 fn public_reexport_evidence(inventory: &Inventory, paths: PathAttribution<'_>, target_module: &[String]) -> Vec<String> {
-    let mut evidence = inventory
+    let reexports = inventory
         .files
         .iter()
-        .flat_map(|file| {
-            file.production_public_reexports
-                .iter()
-                .filter(|reexport| reexport_applies_to_module(&reexport.target_path, target_module))
-                .map(move |reexport| format!("{}:{}:{}", paths.site_path(&file.path).len(), paths.site_path(&file.path), reexport.fingerprint))
-        })
+        .flat_map(|file| file.production_public_reexports.iter().map(move |reexport| (file, reexport)))
+        .collect::<Vec<_>>();
+    let mut evidence = reexports
+        .iter()
+        .filter(|(_, reexport)| reexport_reaches_module(reexport, &reexports, target_module))
+        .map(|(file, reexport)| format!("{}:{}:{}", paths.site_path(&file.path).len(), paths.site_path(&file.path), reexport.fingerprint))
         .collect::<Vec<_>>();
     evidence.sort();
     evidence.dedup();
     evidence
+}
+
+fn reexport_reaches_module(candidate: &PublicReexportEvidence, reexports: &[(&FileMeasurement, &PublicReexportEvidence)], target_module: &[String]) -> bool {
+    let mut pending = vec![candidate.target_path.clone()];
+    let mut visited = BTreeSet::new();
+    while let Some(path) = pending.pop() {
+        if !visited.insert(path.clone()) {
+            continue;
+        }
+        if reexport_applies_to_module(&path, target_module) {
+            return true;
+        }
+        pending.extend(reexports.iter().filter_map(|(_, reexport)| resolve_reexport_target(&path, reexport)));
+    }
+    false
+}
+
+fn resolve_reexport_target(path: &[String], reexport: &PublicReexportEvidence) -> Option<Vec<String>> {
+    let exported_glob = reexport.exported_path.last().is_some_and(|segment| segment == "*");
+    let exported_prefix = reexport.exported_path.strip_suffix(&["*".to_owned()]).unwrap_or(&reexport.exported_path);
+    if !path.starts_with(exported_prefix) || exported_glob && path.len() == exported_prefix.len() {
+        return None;
+    }
+    let target_prefix = reexport.target_path.strip_suffix(&["*".to_owned()]).unwrap_or(&reexport.target_path);
+    let mut resolved = target_prefix.to_vec();
+    resolved.extend_from_slice(&path[exported_prefix.len()..]);
+    (resolved != path).then_some(resolved)
 }
 
 fn reexport_applies_to_module(target_path: &[String], module: &[String]) -> bool {

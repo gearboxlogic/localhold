@@ -232,7 +232,9 @@ structure manifest transfers its path elsewhere. Production type aliases,
 associated-type aliases, renamed imports, and macro definitions cannot conceal
 or inject either concrete store name.
 Reviewed Serde and Schemars path and bound strings are parsed as Rust syntax,
-including bare single-segment store paths.
+including bare single-segment store paths. Signature evidence includes complete
+implementation headers and transitive public re-export chains, so changing how
+a concrete store becomes callable is a reviewed boundary change.
 
 During the feature freeze:
 

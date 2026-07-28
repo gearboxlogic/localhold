@@ -169,6 +169,7 @@ fn public_reexports_are_additive_signature_evidence() {
     private_signature.files[1].production_signature_store_sites.sqlite_store = vec!["private-open".to_owned()];
     let mut reexported_signature = private_signature.clone();
     reexported_signature.files[0].production_public_reexports = vec![PublicReexportEvidence {
+        exported_path: vec!["open".to_owned()],
         target_path: vec!["store".to_owned(), "sqlite".to_owned(), "open".to_owned()],
         fingerprint: "public-use-helper-open".to_owned(),
     }];
@@ -192,6 +193,7 @@ fn unrelated_public_reexports_do_not_change_signature_evidence() {
     baseline.files[1].production_module = vec!["metrics".to_owned()];
     let mut current = baseline.clone();
     current.files[1].production_public_reexports = vec![PublicReexportEvidence {
+        exported_path: vec!["Counter".to_owned()],
         target_path: vec!["metrics".to_owned(), "Counter".to_owned()],
         fingerprint: "public-use-counter".to_owned(),
     }];
@@ -199,6 +201,29 @@ fn unrelated_public_reexports_do_not_change_signature_evidence() {
     policy
         .compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components))
         .expect("an unrelated module re-export does not affect store signatures");
+}
+
+#[test]
+fn transitive_public_reexports_are_signature_evidence() {
+    let policy = policy();
+    let components = components(&[("src/ui/mod.rs", "composition"), ("src/ui/facade.rs", "composition"), ("src/ui/helper.rs", "sqlite-store")]);
+    let mut baseline = inventory(&[("src/ui/mod.rs", 0, 0), ("src/ui/facade.rs", 0, 0), ("src/ui/helper.rs", 1, 0)]);
+    baseline.files[2].production_module = vec!["ui".to_owned(), "helper".to_owned()];
+    baseline.files[2].production_signature_store_sites.sqlite_store = vec!["private-open".to_owned()];
+    baseline.files[1].production_public_reexports = vec![PublicReexportEvidence {
+        exported_path: vec!["ui".to_owned(), "facade".to_owned(), "open".to_owned()],
+        target_path: vec!["ui".to_owned(), "helper".to_owned(), "open".to_owned()],
+        fingerprint: "facade-open".to_owned(),
+    }];
+    let mut current = baseline.clone();
+    current.files[0].production_public_reexports = vec![PublicReexportEvidence {
+        exported_path: vec!["ui".to_owned(), "open".to_owned()],
+        target_path: vec!["ui".to_owned(), "facade".to_owned(), "open".to_owned()],
+        fingerprint: "ui-open".to_owned(),
+    }];
+
+    let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
+    assert!(error.to_string().contains("production signature"));
 }
 
 #[test]

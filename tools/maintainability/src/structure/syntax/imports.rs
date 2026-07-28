@@ -7,7 +7,7 @@ use syn::{
     ItemMod, ItemStruct, ItemType, ItemUse, Local, Pat, Path as SynPath, Stmt, StmtMacro, TraitItem, TraitItemType, Variadic, Variant, Visibility,
 };
 
-use crate::scan::{reviewed_attribute_expansion, reviewed_macro_expansion};
+use crate::scan::{reviewed_attribute_expansion, reviewed_macro_expansion, syntax_fingerprint};
 
 use super::{
     ProductionCfgContext, expr_attributes, fn_arg_attributes, foreign_item_attributes, generic_param_attributes, impl_item_attributes, item_attributes, normalized_ident,
@@ -48,6 +48,7 @@ pub fn production_syntax_facts(file: &syn::File, source_path: &str, crate_root: 
         concrete_stores: ConcreteStoreInventory::default(),
         site_context: None,
         generic_default_depth: 0,
+        declaration_ancestors: Vec::new(),
         cfg_context: ProductionCfgContext::default(),
         error: None,
         rust_2015_absolute_paths: options.rust_2015_absolute_paths,
@@ -76,6 +77,7 @@ struct ProductionSyntaxCollector {
     concrete_stores: ConcreteStoreInventory,
     site_context: Option<String>,
     generic_default_depth: usize,
+    declaration_ancestors: Vec<String>,
     cfg_context: ProductionCfgContext,
     error: Option<anyhow::Error>,
     rust_2015_absolute_paths: bool,
@@ -253,7 +255,14 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             return;
         };
         let previous = self.enter_site_context("item", node);
+        let ancestor = declaration_ancestor(node);
+        if let Some(ancestor) = &ancestor {
+            self.declaration_ancestors.push(ancestor.clone());
+        }
         visit::visit_item(self, node);
+        if ancestor.is_some() {
+            self.declaration_ancestors.pop();
+        }
         self.leave_site_context(previous);
         self.leave_production_node(cfg);
     }
@@ -353,7 +362,8 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
 
     fn visit_item_struct(&mut self, item: &'ast ItemStruct) {
         if matches!(item.vis, Visibility::Public(_)) {
-            self.concrete_stores.record_public_struct_declaration(item);
+            self.concrete_stores
+                .record_public_struct_declaration(item, &self.cfg_context.identity(), &self.declaration_ancestors);
         }
         visit::visit_item_struct(self, item);
     }
@@ -515,6 +525,22 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         }
         self.module.pop();
     }
+}
+
+fn declaration_ancestor(item: &Item) -> Option<String> {
+    match item {
+        Item::Const(item) => Some(named_ancestor("const", &item.ident, &item.vis)),
+        Item::Fn(item) => Some(named_ancestor("fn", &item.sig.ident, &item.vis)),
+        Item::Impl(item) => Some(format!("impl:{}", syntax_fingerprint(&item.self_ty))),
+        Item::Mod(item) => Some(named_ancestor("mod", &item.ident, &item.vis)),
+        Item::Static(item) => Some(named_ancestor("static", &item.ident, &item.vis)),
+        Item::Trait(item) => Some(named_ancestor("trait", &item.ident, &item.vis)),
+        _ => None,
+    }
+}
+
+fn named_ancestor(kind: &str, ident: &proc_macro2::Ident, visibility: &Visibility) -> String {
+    format!("{kind}:{}:{}", normalized_ident(ident), syntax_fingerprint(visibility))
 }
 
 fn tokens_may_hide_concrete_store(tokens: &TokenStream) -> bool {

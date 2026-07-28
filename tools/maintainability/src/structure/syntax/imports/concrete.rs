@@ -44,7 +44,7 @@ impl ConcreteStoreInventory {
         self.record_name(&normalized_ident(ident), site_context)
     }
 
-    pub(super) fn record_public_struct_declaration(&mut self, item: &ItemStruct) {
+    pub(super) fn record_public_struct_declaration(&mut self, item: &ItemStruct, cfg_identity: &str, ancestors: &[String]) {
         let sites = match normalized_ident(&item.ident).as_str() {
             "SqliteStore" => &mut self.public_struct_declarations.sqlite_store,
             "PostgresStore" => &mut self.public_struct_declarations.postgres_store,
@@ -54,7 +54,13 @@ impl ConcreteStoreInventory {
         declaration
             .attrs
             .retain(|attribute| !attribute.path().is_ident("doc") && !attribute.path().is_ident("derive"));
-        sites.push(syntax_fingerprint(&declaration));
+        let declaration = syntax_fingerprint(&declaration);
+        if cfg_identity.is_empty() && ancestors.is_empty() {
+            sites.push(declaration);
+            return;
+        }
+        let ancestors = ancestors.join("\0");
+        sites.push(syntax_fingerprint(&format!("declaration:{declaration}\0cfg:{cfg_identity}\0ancestors:{ancestors}")));
     }
 
     pub(super) fn record_tokens(&mut self, tokens: &TokenStream, site_context: &str) -> Result<()> {

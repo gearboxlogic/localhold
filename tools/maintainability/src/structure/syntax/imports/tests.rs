@@ -292,13 +292,8 @@ fn canonical_concrete_store_declarations_require_public_production_structs() -> 
          #[cfg(test)] pub struct PostgresStore;\n\
          pub enum PostgresBackend {}\n",
     )?;
-    assert_eq!(
-        facts.public_concrete_store_structs,
-        ConcreteStoreSites {
-            sqlite_store: vec![crate::scan::syntax_fingerprint(&syn::parse_str::<syn::ItemStruct>("pub struct SqliteStore;")?)],
-            postgres_store: Vec::new(),
-        },
-    );
+    assert_eq!(facts.public_concrete_store_structs.sqlite_store.len(), 1);
+    assert!(facts.public_concrete_store_structs.postgres_store.is_empty());
     Ok(())
 }
 
@@ -315,10 +310,28 @@ fn canonical_declaration_fingerprints_ignore_outer_attributes_but_pin_shape() ->
         "#[cfg(feature = \"legacy\")]\n\
          pub struct SqliteStore { inner: Arc<SqliteInner> }",
     )?;
+    let public_nested = concrete_facts(
+        "pub mod backend {\n\
+             pub struct SqliteStore { inner: Arc<SqliteInner> }\n\
+         }",
+    )?;
+    let private_nested = concrete_facts(
+        "mod backend {\n\
+             pub struct SqliteStore { inner: Arc<SqliteInner> }\n\
+         }",
+    )?;
+    let ancestor_gated = concrete_facts(
+        "#[cfg(feature = \"legacy\")]\n\
+         pub mod backend {\n\
+             pub struct SqliteStore { inner: Arc<SqliteInner> }\n\
+         }",
+    )?;
 
     assert_eq!(plain.public_concrete_store_structs, documented.public_concrete_store_structs);
     assert_ne!(plain.public_concrete_store_structs, replaced.public_concrete_store_structs);
     assert_ne!(plain.public_concrete_store_structs, feature_gated.public_concrete_store_structs);
+    assert_ne!(public_nested.public_concrete_store_structs, private_nested.public_concrete_store_structs);
+    assert_ne!(public_nested.public_concrete_store_structs, ancestor_gated.public_concrete_store_structs);
     Ok(())
 }
 

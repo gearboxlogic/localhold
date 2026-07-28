@@ -34,6 +34,47 @@ pub(in crate::structure) struct ProductionCfgContext {
     constraints: Vec<Predicate>,
 }
 
+impl ProductionCfgContext {
+    pub(in crate::structure) fn identity(&self) -> String {
+        let mut identity = String::new();
+        for constraint in &self.constraints {
+            constraint.write_identity(&mut identity);
+            identity.push(';');
+        }
+        identity
+    }
+}
+
+impl Predicate {
+    fn write_identity(&self, output: &mut String) {
+        match self {
+            Self::Constant(value) => output.push(if *value { '1' } else { '0' }),
+            Self::Atom(atom) => {
+                output.push('a');
+                output.push_str(&atom.len().to_string());
+                output.push(':');
+                output.push_str(atom);
+            }
+            Self::All(nested) => write_nested_identity('&', nested, output),
+            Self::Any(nested) => write_nested_identity('|', nested, output),
+            Self::Not(nested) => {
+                output.push('!');
+                nested.write_identity(output);
+            }
+        }
+    }
+}
+
+fn write_nested_identity(kind: char, nested: &[Predicate], output: &mut String) {
+    output.push(kind);
+    output.push('[');
+    for predicate in nested {
+        predicate.write_identity(output);
+        output.push(',');
+    }
+    output.push(']');
+}
+
 pub(in crate::structure) fn attributes_disable_production(attributes: &[Attribute]) -> Result<bool> {
     Ok(production_cfg_context(attributes, &ProductionCfgContext::default())?.is_none())
 }

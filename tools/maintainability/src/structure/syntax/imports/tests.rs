@@ -951,6 +951,28 @@ fn field_signature_identity_tracks_containing_type_and_variant() -> Result<()> {
 }
 
 #[test]
+fn private_containers_and_items_are_not_exposure_signatures() -> Result<()> {
+    let private = concrete_facts(
+        "struct Cache<T: Uses<SqliteStore>> { store: SqliteStore, visible_inside: PostgresStore }\n\
+         enum Internal { Store(PostgresStore) }\n\
+         const SQLITE: SqliteStore = loop {};\n\
+         static POSTGRES: PostgresStore = loop {};\n",
+    )?;
+    let exposed = concrete_facts(
+        "pub(crate) struct Cache<T: Uses<SqliteStore>> { pub(crate) store: SqliteStore, hidden: PostgresStore }\n\
+         pub(crate) enum Choice { Store(PostgresStore) }\n\
+         pub(crate) const SQLITE: SqliteStore = loop {};\n\
+         pub(crate) static POSTGRES: PostgresStore = loop {};\n",
+    )?;
+
+    assert!(private.signature_concrete_store_sites.sqlite_store.is_empty());
+    assert!(private.signature_concrete_store_sites.postgres_store.is_empty());
+    assert_eq!(exposed.signature_concrete_store_sites.sqlite_store.len(), 3);
+    assert_eq!(exposed.signature_concrete_store_sites.postgres_store.len(), 2);
+    Ok(())
+}
+
+#[test]
 fn concrete_store_sites_pin_generic_defaults_and_enclosing_syntax() -> Result<()> {
     let original = concrete_facts(
         "pub struct Service<S: MemoryReader = SqliteStore>(S);\n\

@@ -49,6 +49,13 @@ struct MacroShadow {
     cfg: ProductionCfgContext,
 }
 
+#[derive(Clone, Copy)]
+enum FieldExposure {
+    Struct(bool),
+    Enum(bool),
+    Union(bool),
+}
+
 type BuiltinStringifyAliases = BTreeSet<BuiltinStringifyAlias>;
 
 #[derive(Default)]
@@ -118,6 +125,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
         generic_default_depth: 0,
         impl_signature_headers: Vec::new(),
         impl_trait_exposures: Vec::new(),
+        field_exposures: Vec::new(),
         declaration_ancestors: initial_context.declaration_ancestors,
         cfg_context: initial_context.cfg,
         error: None,
@@ -162,6 +170,7 @@ struct ProductionSyntaxCollector {
     generic_default_depth: usize,
     impl_signature_headers: Vec<TokenStream>,
     impl_trait_exposures: Vec<bool>,
+    field_exposures: Vec<FieldExposure>,
     declaration_ancestors: Vec<String>,
     cfg_context: ProductionCfgContext,
     error: Option<anyhow::Error>,
@@ -391,7 +400,15 @@ impl ProductionSyntaxCollector {
     }
 
     fn impl_member_is_exposed(&self, visibility: &Visibility) -> bool {
-        !matches!(visibility, Visibility::Inherited) || self.impl_trait_exposures.last().copied().unwrap_or(false)
+        visibility_is_exposed(visibility) || self.impl_trait_exposures.last().copied().unwrap_or(false)
+    }
+
+    fn field_is_exposed(&self, visibility: &Visibility) -> bool {
+        match self.field_exposures.last() {
+            Some(FieldExposure::Enum(container_exposed)) => *container_exposed,
+            Some(FieldExposure::Struct(container_exposed) | FieldExposure::Union(container_exposed)) => *container_exposed && visibility_is_exposed(visibility),
+            None => visibility_is_exposed(visibility),
+        }
     }
 
     fn enter_site_context(&mut self, kind: &str, syntax: &impl ToTokens) -> Option<String> {
@@ -559,7 +576,9 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             return;
         };
         let previous = self.enter_site_context("field", node);
-        self.record_concrete_stores_in_visible_signature("field-type", &node.vis, &node.ty);
+        if self.field_is_exposed(&node.vis) {
+            self.record_concrete_stores_in_visible_signature("field-type", &node.vis, &node.ty);
+        }
         visit::visit_field(self, node);
         self.leave_site_context(previous);
         self.leave_production_node(cfg);
@@ -630,24 +649,39 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_struct(&mut self, item: &'ast ItemStruct) {
-        self.record_declaration_generics("struct-generics", &item.vis, &item.generics);
+        let exposed = visibility_is_exposed(&item.vis);
+        if exposed {
+            self.record_declaration_generics("struct-generics", &item.vis, &item.generics);
+        }
         if matches!(item.vis, Visibility::Public(_)) {
             let mut item_path = self.module.clone();
             item_path.push(normalized_ident(&item.ident));
             self.concrete_stores
                 .record_public_struct_declaration(item, &item_path, &self.cfg_context, &self.declaration_ancestors);
         }
+        self.field_exposures.push(FieldExposure::Struct(exposed));
         visit::visit_item_struct(self, item);
+        self.field_exposures.pop();
     }
 
     fn visit_item_enum(&mut self, item: &'ast ItemEnum) {
-        self.record_declaration_generics("enum-generics", &item.vis, &item.generics);
+        let exposed = visibility_is_exposed(&item.vis);
+        if exposed {
+            self.record_declaration_generics("enum-generics", &item.vis, &item.generics);
+        }
+        self.field_exposures.push(FieldExposure::Enum(exposed));
         visit::visit_item_enum(self, item);
+        self.field_exposures.pop();
     }
 
     fn visit_item_union(&mut self, item: &'ast ItemUnion) {
-        self.record_declaration_generics("union-generics", &item.vis, &item.generics);
+        let exposed = visibility_is_exposed(&item.vis);
+        if exposed {
+            self.record_declaration_generics("union-generics", &item.vis, &item.generics);
+        }
+        self.field_exposures.push(FieldExposure::Union(exposed));
         visit::visit_item_union(self, item);
+        self.field_exposures.pop();
     }
 
     fn visit_item_trait(&mut self, item: &'ast ItemTrait) {
@@ -685,7 +719,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_fn(&mut self, item: &'ast ItemFn) {
-        if !matches!(item.vis, Visibility::Inherited) {
+        if visibility_is_exposed(&item.vis) {
             self.record_concrete_stores_in_visible_signature("function-signature", &item.vis, &item.sig);
         }
         visit::visit_item_fn(self, item);
@@ -705,17 +739,23 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_foreign_item_fn(&mut self, item: &'ast ForeignItemFn) {
-        self.record_concrete_stores_in_visible_signature("foreign-function-signature", &item.vis, &item.sig);
+        if visibility_is_exposed(&item.vis) {
+            self.record_concrete_stores_in_visible_signature("foreign-function-signature", &item.vis, &item.sig);
+        }
         visit::visit_foreign_item_fn(self, item);
     }
 
     fn visit_item_const(&mut self, item: &'ast ItemConst) {
-        self.record_concrete_stores_in_visible_signature("const-type", &item.vis, &item.ty);
+        if visibility_is_exposed(&item.vis) {
+            self.record_concrete_stores_in_visible_signature("const-type", &item.vis, &item.ty);
+        }
         visit::visit_item_const(self, item);
     }
 
     fn visit_item_static(&mut self, item: &'ast ItemStatic) {
-        self.record_concrete_stores_in_visible_signature("static-type", &item.vis, &item.ty);
+        if visibility_is_exposed(&item.vis) {
+            self.record_concrete_stores_in_visible_signature("static-type", &item.vis, &item.ty);
+        }
         visit::visit_item_static(self, item);
     }
 
@@ -733,7 +773,9 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_foreign_item_static(&mut self, item: &'ast ForeignItemStatic) {
-        self.record_concrete_stores_in_visible_signature("foreign-static-type", &item.vis, &item.ty);
+        if visibility_is_exposed(&item.vis) {
+            self.record_concrete_stores_in_visible_signature("foreign-static-type", &item.vis, &item.ty);
+        }
         visit::visit_foreign_item_static(self, item);
     }
 
@@ -1044,6 +1086,10 @@ fn declaration_ancestor(item: &Item) -> Option<String> {
 
 fn named_ancestor(kind: &str, ident: &proc_macro2::Ident, visibility: &Visibility) -> String {
     format!("{kind}:{}:{}", normalized_ident(ident), syntax_fingerprint(visibility))
+}
+
+const fn visibility_is_exposed(visibility: &Visibility) -> bool {
+    !matches!(visibility, Visibility::Inherited)
 }
 
 fn is_explicit_builtin_stringify(node: &syn::Macro) -> bool {

@@ -222,7 +222,7 @@ impl ProductionSyntaxCollector {
     }
 
     fn record_public_reexport(&mut self, item: &ItemUse) -> Result<()> {
-        if matches!(item.vis, Visibility::Inherited) || item.leading_colon.is_some() && !self.rust_2015_absolute_paths {
+        if !visibility_is_exposed(&item.vis) || item.leading_colon.is_some() && !self.rust_2015_absolute_paths {
             return Ok(());
         }
         let mut paths = Vec::new();

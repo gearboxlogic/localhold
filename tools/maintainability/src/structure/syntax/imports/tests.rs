@@ -121,6 +121,15 @@ fn public_reexport_aliases_use_only_cfg_compatible_bindings() -> Result<()> {
 }
 
 #[test]
+fn self_restricted_uses_are_not_public_reexport_evidence() -> Result<()> {
+    for visibility in ["", "pub(self)", "pub(in self)"] {
+        let facts = concrete_facts(&format!("{visibility} use crate::stores::open;\n"))?;
+        assert!(facts.public_reexports.is_empty(), "{visibility}");
+    }
+    Ok(())
+}
+
+#[test]
 fn explicit_imports_take_precedence_over_compatible_globs() -> Result<()> {
     let facts = concrete_facts(
         "use crate::safe::facade;\n\

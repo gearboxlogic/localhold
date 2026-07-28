@@ -22,6 +22,14 @@ fn production_imports(file: &syn::File, path: &str, crate_root: Option<&str>, ru
 }
 
 fn concrete_facts(source: &str) -> Result<ProductionSyntaxFacts> {
+    concrete_facts_with_expansion_policy(source, true)
+}
+
+fn historical_concrete_facts(source: &str) -> Result<ProductionSyntaxFacts> {
+    concrete_facts_with_expansion_policy(source, false)
+}
+
+fn concrete_facts_with_expansion_policy(source: &str, require_reviewed_expansions: bool) -> Result<ProductionSyntaxFacts> {
     production_syntax_facts(
         &syn::parse_file(source)?,
         "src/store_fixture.rs",
@@ -29,7 +37,7 @@ fn concrete_facts(source: &str) -> Result<ProductionSyntaxFacts> {
         ProductionSyntaxOptions {
             collect_internal_imports: false,
             rust_2015_absolute_paths: false,
-            require_reviewed_expansions: true,
+            require_reviewed_expansions,
         },
     )
 }
@@ -848,21 +856,32 @@ fn canonical_binding_identity_ignores_impl_and_method_documentation() -> Result<
 
 #[test]
 fn ordinary_occurrence_identity_ignores_documentation() -> Result<()> {
-    let plain = concrete_facts(
+    let plain = historical_concrete_facts(
         "fn embedding_status() {\n\
              let sqlite = SqliteStore::status();\n\
              PostgresStore::record(sqlite);\n\
          }\n",
     )?;
-    let documented = concrete_facts(
-        "/// Reports the current embedding status.\n\
+    let documented = historical_concrete_facts(
+        "#[cfg_attr(feature = \"other\", doc = \"Reports the conditional embedding status.\")]\n\
+         #[cfg_attr(feature = \"other\", cfg_attr(feature = \"independent\", doc = \"Extended status details.\"))]\n\
+         /// Reports the current embedding status.\n\
          fn embedding_status() {\n\
+             #[cfg_attr(feature = \"other\", doc = \"The conditional local backend status.\")]\n\
              /// The local backend status.\n\
              let sqlite = SqliteStore::status();\n\
              PostgresStore::record(sqlite);\n\
          }\n",
     )?;
+    let non_documentation = historical_concrete_facts(
+        "#[cfg_attr(feature = \"optimized\", inline)]\n\
+         fn embedding_status() {\n\
+             let sqlite = SqliteStore::status();\n\
+             PostgresStore::record(sqlite);\n\
+         }\n",
+    )?;
     assert_eq!(plain.concrete_store_sites, documented.concrete_store_sites);
+    assert_ne!(plain.concrete_store_sites, non_documentation.concrete_store_sites);
     Ok(())
 }
 

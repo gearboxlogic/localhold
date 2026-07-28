@@ -309,11 +309,16 @@ fn without_documentation(tokens: &TokenStream) -> TokenStream {
     let mut normalized = TokenStream::new();
     let mut index = 0;
     while index < tokens.len() {
-        if let Some((attribute_end, attribute)) = parsed_attribute(&tokens, index)
-            && attribute.path().is_ident("doc")
-        {
-            index = attribute_end + 1;
-            continue;
+        if let Some((attribute_end, attribute)) = parsed_attribute(&tokens, index) {
+            if attribute.path().is_ident("doc") {
+                index = attribute_end + 1;
+                continue;
+            }
+            if attribute.path().is_ident("cfg_attr") {
+                extend_conditional_attribute(&mut normalized, &tokens, index, attribute_end, attribute);
+                index = attribute_end + 1;
+                continue;
+            }
         }
         match &tokens[index] {
             TokenTree::Group(group) => {
@@ -326,6 +331,19 @@ fn without_documentation(tokens: &TokenStream) -> TokenStream {
         index += 1;
     }
     normalized
+}
+
+fn extend_conditional_attribute(output: &mut TokenStream, tokens: &[TokenTree], start: usize, end: usize, attribute: Meta) {
+    let Some(attribute) = without_conditional_documentation(attribute) else {
+        return;
+    };
+    output.extend(tokens[start..end].iter().cloned());
+    let TokenTree::Group(original) = &tokens[end] else {
+        unreachable!("parsed attribute must end in a bracket group");
+    };
+    let mut replacement = Group::new(original.delimiter(), attribute.to_token_stream());
+    replacement.set_span(original.span());
+    output.extend([TokenTree::Group(replacement)]);
 }
 
 fn parsed_attribute(tokens: &[TokenTree], index: usize) -> Option<(usize, Meta)> {
@@ -345,6 +363,29 @@ fn parsed_attribute(tokens: &[TokenTree], index: usize) -> Option<(usize, Meta)>
     }
     let attribute = syn::parse2::<Meta>(group.stream()).ok()?;
     Some((group_index, attribute))
+}
+
+fn without_conditional_documentation(attribute: Meta) -> Option<Meta> {
+    if attribute.path().is_ident("doc") {
+        return None;
+    }
+    if !attribute.path().is_ident("cfg_attr") {
+        return Some(attribute);
+    }
+    let Meta::List(mut list) = attribute else {
+        return Some(attribute);
+    };
+    let Ok(nested) = Punctuated::<Meta, Token![,]>::parse_terminated.parse2(list.tokens.clone()) else {
+        return Some(Meta::List(list));
+    };
+    let mut nested = nested.into_iter();
+    let condition = nested.next()?;
+    let attributes = nested.filter_map(without_conditional_documentation).collect::<Vec<_>>();
+    if attributes.is_empty() {
+        return None;
+    }
+    list.tokens = quote::quote!(#condition, #(#attributes),*);
+    Some(Meta::List(list))
 }
 
 pub(super) fn tokens_contain_concrete_store(tokens: &TokenStream) -> bool {

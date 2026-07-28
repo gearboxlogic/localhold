@@ -412,17 +412,16 @@ fn source_module(source_path: &str, crate_root: Option<&str>) -> Result<Vec<Stri
 }
 
 fn restricted_token_identifier(tokens: &TokenStream, module: &[String], rust_2015_absolute_paths: bool, string_scan: StringScan) -> Result<Option<String>> {
+    if let Some(restricted) = restricted_fragment_identifier(tokens, module, rust_2015_absolute_paths)? {
+        return Ok(Some(restricted));
+    }
     for token in tokens.clone() {
         let restricted = match token {
             TokenTree::Group(group) => restricted_token_identifier(&group.stream(), module, rust_2015_absolute_paths, string_scan)?,
-            TokenTree::Ident(ident) => {
-                let normalized = normalized_ident(&ident);
-                matches!(normalized.as_str(), "server" | "ui").then_some(normalized)
-            }
             TokenTree::Literal(literal) if string_scan != StringScan::Skip => {
                 restricted_string_path(&literal, module, rust_2015_absolute_paths, string_scan == StringScan::GovernedAttribute)?
             }
-            TokenTree::Literal(_) | TokenTree::Punct(_) => None,
+            TokenTree::Ident(_) | TokenTree::Literal(_) | TokenTree::Punct(_) => None,
         };
         if restricted.is_some() {
             return Ok(restricted);

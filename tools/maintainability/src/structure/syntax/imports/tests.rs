@@ -64,11 +64,23 @@ fn restricted_names_in_production_macro_tokens_fail_closed() {
     let source = "macro_rules! dependency { () => { use crate::server::Service; } }\n";
     assert!(imports("src/adapter.rs", source).unwrap_err().to_string().contains("production macro token stream"));
 
+    let argument = "tracing::info!(\"{}\", crate::ui::label());\n";
+    assert!(imports("src/adapter.rs", argument).unwrap_err().to_string().contains("production macro token stream"));
+
     let encoded = "numbered_placeholders!(\"crate::server::serialize\");\n";
     assert!(imports("src/adapter.rs", encoded).unwrap_err().to_string().contains("production macro token stream"));
 
     let test_only = "#[cfg(test)]\nmacro_rules! dependency { () => { use crate::ui::View; } }\n";
     assert!(imports("src/adapter.rs", test_only).expect("test-only macro").is_empty());
+}
+
+#[test]
+fn ordinary_macro_identifiers_named_like_restricted_modules_are_allowed() {
+    let source = "fn log(server: &str, ui: &str) {\n\
+                  tracing::info!(server);\n\
+                  let _ = format!(\"{}\", ui);\n\
+                  }\n";
+    assert!(imports("src/adapter.rs", source).expect("local macro identifiers").is_empty());
 }
 
 #[test]

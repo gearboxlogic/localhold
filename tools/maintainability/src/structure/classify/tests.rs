@@ -88,6 +88,17 @@ fn integration_and_benchmark_roots_are_wholly_test_only() {
 }
 
 #[test]
+fn restricted_imports_are_collected_only_from_library_sources() {
+    let inventory = inventory(&[
+        ("src/lib.rs", "use crate::server::LibraryDependency;\n"),
+        ("src/main.rs", "use crate::server::CompositionDependency;\nfn main() {}\n"),
+    ]);
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_path["src/lib.rs"].production_internal_imports, ["crate::server::LibraryDependency"]);
+    assert!(by_path["src/main.rs"].production_internal_imports.is_empty());
+}
+
+#[test]
 fn production_cargo_targets_outside_src_are_rejected() {
     let repository = tempfile::tempdir().expect("temporary repository");
     for root in ["src", "tests", "benches"] {

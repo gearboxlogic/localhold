@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "b05f7a43345b39d40b456fb9ed46d479c4bf26e0",
+  "exceptions": [
+    {
+      "id": "phase0.http-transport-server",
+      "source": "src/http_transport.rs",
+      "target": "crate::server::LocalHoldServer",
+      "baseline": true,
+      "owner": "maintainers",
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "pull_request": "https://github.com/gearboxlogic/localhold/pull/131",
+      "rationale": "HTTP router construction currently requires the MCP server service and is the single reviewed transport-composition exception.",
+      "re_review_phase": "Phase 4 protocol/application boundary restoration"
+    }
+  ],
+  "retirements": []
+}

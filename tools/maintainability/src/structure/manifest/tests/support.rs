@@ -11,6 +11,7 @@ pub(super) fn file(path: &str, physical: usize, production: usize) -> FileMeasur
         physical_lines: physical,
         production_lines: production,
         test_lines,
+        production_internal_imports: Vec::new(),
     }
 }
 

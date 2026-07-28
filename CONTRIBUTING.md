@@ -197,6 +197,24 @@ available only through an explicit test invocation.
 Rust examples and explicitly declared Cargo targets outside the tracked roots
 are also rejected while the initial path map is closed.
 
+The audit also enforces production import direction. Library modules outside
+`src/server/`, `src/ui/`, and the binary composition roots may not import those
+two top-level modules. Grouped, renamed, glob, `self`, and `super` imports are
+normalized before comparison; imports under test-only syntax are excluded.
+Crate-root aliases are rejected because they could conceal a restricted
+dependency. The only recovery-baseline exception is
+`src/http_transport.rs` importing `crate::server::LocalHoldServer`.
+
+Reviewed import evidence lives in
+`policy/maintainability/architecture.json`. The ledger is append-only, uses the
+same fixed recovery commit as the structure manifest, and requires an owner,
+issue, pull request, rationale, and re-review phase. It cannot authorize a
+different source module or a broad server import. A later exact transport
+exception must be recorded as non-baseline evidence in the same pull request;
+editing the recovery inventory or existing evidence fails closed. Removing an
+exceptional import requires append-only retirement evidence; once retired, the
+same dependency cannot be reintroduced.
+
 During the feature freeze:
 
 - ordinary production files may not exceed 800 physical lines;

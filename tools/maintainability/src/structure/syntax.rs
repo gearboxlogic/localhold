@@ -6,6 +6,10 @@ use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 use syn::{Attribute, Expr, ForeignItem, ImplItem, Item, Meta, Token, TraitItem};
 
+mod imports;
+
+pub use imports::production_internal_imports;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Truth {
     AlwaysFalse,
@@ -33,6 +37,10 @@ impl TestLineCollector {
 
     pub fn test_line_count(&self) -> usize {
         self.test_lines.iter().filter(|line| **line).count()
+    }
+
+    fn line_is_test(&self, line: usize) -> bool {
+        line > 0 && self.test_lines.get(line - 1).copied().unwrap_or(false)
     }
 
     fn classify<T: syn::spanned::Spanned>(&mut self, attributes: Result<&[Attribute]>, node: &T) -> bool {

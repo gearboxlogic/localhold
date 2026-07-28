@@ -155,7 +155,7 @@ impl ConcreteStorePolicy {
                 (ConcreteStoreName::SqliteStore, &file.production_public_concrete_store_structs.sqlite_store),
                 (ConcreteStoreName::PostgresStore, &file.production_public_concrete_store_structs.postgres_store),
             ] {
-                record_declaration_fingerprints(&mut observed, component, paths.canonical_path(&file.path), store, fingerprints)?;
+                record_declaration_fingerprints(&mut observed, component, paths.site_path(&file.path), store, fingerprints)?;
             }
         }
         if observed != expected {

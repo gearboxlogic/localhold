@@ -51,7 +51,9 @@ impl ConcreteStoreInventory {
             _ => return,
         };
         let mut declaration = item.clone();
-        declaration.attrs.clear();
+        declaration
+            .attrs
+            .retain(|attribute| !attribute.path().is_ident("doc") && !attribute.path().is_ident("derive"));
         sites.push(syntax_fingerprint(&declaration));
     }
 

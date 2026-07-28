@@ -37,6 +37,26 @@ fn canonical_backend_declarations_cannot_be_renamed_behind_compatibility_exports
 }
 
 #[test]
+fn canonical_declarations_cannot_move_between_split_successors() {
+    let policy = policy();
+    let components = components(&[("src/store/sqlite/backend.rs", "sqlite-store"), ("src/store/postgres.rs", "postgres-store")]);
+    let mut current = inventory(&[("src/store/sqlite/backend.rs", 0, 0), ("src/store/postgres.rs", 0, 0)]);
+    current.files[0].production_public_concrete_store_structs.sqlite_store = vec![declaration_fingerprint(ConcreteStoreName::SqliteStore)];
+    current.files[1].production_public_concrete_store_structs.postgres_store = vec![declaration_fingerprint(ConcreteStoreName::PostgresStore)];
+    let canonical = BTreeMap::from([("src/store/sqlite/backend.rs".to_owned(), "src/store/sqlite.rs".to_owned())]);
+    let retained_site = canonical.clone();
+    policy
+        .compare_canonical_declarations("current", &current, PathAttribution::with_lineage(&components, &canonical, &retained_site))
+        .expect("retained split successor keeps the reviewed declaration identity");
+
+    let sibling_site = BTreeMap::from([("src/store/sqlite/backend.rs".to_owned(), "src/store/sqlite/backend.rs".to_owned())]);
+    let error = policy
+        .compare_canonical_declarations("current", &current, PathAttribution::with_lineage(&components, &canonical, &sibling_site))
+        .unwrap_err();
+    assert!(error.to_string().contains("canonical declaration mismatch"));
+}
+
+#[test]
 fn baseline_and_current_counts_are_independent_ratchets() {
     let mut policy = policy();
     policy.debt[1].current_count = 1;

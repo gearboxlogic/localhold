@@ -311,9 +311,14 @@ fn canonical_declaration_fingerprints_ignore_outer_attributes_but_pin_shape() ->
          pub struct SqliteStore { inner: Arc<SqliteInner> }",
     )?;
     let replaced = concrete_facts("pub struct SqliteStore;")?;
+    let feature_gated = concrete_facts(
+        "#[cfg(feature = \"legacy\")]\n\
+         pub struct SqliteStore { inner: Arc<SqliteInner> }",
+    )?;
 
     assert_eq!(plain.public_concrete_store_structs, documented.public_concrete_store_structs);
     assert_ne!(plain.public_concrete_store_structs, replaced.public_concrete_store_structs);
+    assert_ne!(plain.public_concrete_store_structs, feature_gated.public_concrete_store_structs);
     Ok(())
 }
 

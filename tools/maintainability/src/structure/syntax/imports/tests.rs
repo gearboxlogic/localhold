@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use super::*;
 
 fn imports(path: &str, source: &str) -> Result<Vec<String>> {
@@ -285,6 +287,27 @@ fn concrete_store_names_are_counted_only_in_production_syntax() -> Result<()> {
 }
 
 #[test]
+fn stringify_arguments_are_not_treated_as_resolved_syntax() -> Result<()> {
+    let source = "const SQLITE: &str = stringify!(SqliteStore);\n\
+                  const POSTGRES: &str = concat!(stringify!(PostgresStore));\n\
+                  const CODE: usize = SqliteStore::FORMAT_VERSION;\n";
+    assert_eq!(
+        concrete_facts(source)?.concrete_stores,
+        ConcreteStoreCounts {
+            sqlite_store: 1,
+            postgres_store: 0,
+        }
+    );
+
+    let restricted = "const ROUTE: &str = concat!(stringify!(crate::server::Service));\n";
+    assert!(imports("src/adapter.rs", restricted)?.is_empty());
+
+    let definition = "macro_rules! numbered_placeholders { () => { stringify!(SqliteStore) } }\nnumbered_placeholders!();\n";
+    assert_eq!(concrete_facts(definition)?.concrete_stores, ConcreteStoreCounts::default());
+    Ok(())
+}
+
+#[test]
 fn canonical_concrete_store_declarations_require_public_production_structs() -> Result<()> {
     let facts = concrete_facts(
         "pub struct SqliteStore;\n\
@@ -448,6 +471,24 @@ fn sibling_cfg_predicates_are_conjoined_for_production_attributes() -> Result<()
                       #[cfg_attr(not(feature = \"x\"), serde(default = \"crate::server::default\"))]\n\
                       struct InactiveAttribute;\n";
     assert!(imports("src/adapter.rs", restricted)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn cfg_contradictions_remain_detectable_with_many_unrelated_atoms() -> Result<()> {
+    let mut source = String::new();
+    for index in 0..24 {
+        write!(source, "#[cfg(feature = \"unrelated-{index}\")]\nmod level_{index} {{\n").expect("write cfg fixture");
+    }
+    source.push_str(
+        "#[cfg(feature = \"x\")]\n\
+         #[cfg(not(feature = \"x\"))]\n\
+         struct Dead(SqliteStore);\n",
+    );
+    for _ in 0..24 {
+        source.push_str("}\n");
+    }
+    assert_eq!(concrete_facts(&source)?.concrete_stores, ConcreteStoreCounts::default());
     Ok(())
 }
 

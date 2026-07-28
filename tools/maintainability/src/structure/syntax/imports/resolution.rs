@@ -6,6 +6,7 @@ use quote::ToTokens as _;
 use syn::{Attribute, Meta, Path as SynPath, UseTree};
 
 use super::super::{ProductionCfgContext, normalized_ident, production_cfg_attr_metas};
+use super::tokens::resolving_tokens;
 
 pub(super) struct UsePath {
     pub(super) segments: Vec<String>,
@@ -109,10 +110,11 @@ pub(super) enum StringScan {
 }
 
 pub(super) fn restricted_token_identifier(tokens: &TokenStream, module: &[String], rust_2015_absolute_paths: bool, string_scan: StringScan) -> Result<Option<String>> {
-    if let Some(restricted) = restricted_fragment_identifier(tokens, module, rust_2015_absolute_paths)? {
+    let tokens = resolving_tokens(tokens);
+    if let Some(restricted) = restricted_fragment_identifier(&tokens, module, rust_2015_absolute_paths)? {
         return Ok(Some(restricted));
     }
-    for token in tokens.clone() {
+    for token in tokens {
         let restricted = match token {
             TokenTree::Group(group) => restricted_token_identifier(&group.stream(), module, rust_2015_absolute_paths, string_scan)?,
             TokenTree::Literal(literal) if string_scan != StringScan::Skip => {

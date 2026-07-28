@@ -9,6 +9,7 @@ use syn::{Attribute, ItemStruct, Meta, Token};
 use crate::scan::syntax_fingerprint;
 
 use super::super::{ProductionCfgContext, normalized_ident, production_cfg_attr_metas};
+use super::tokens::resolving_tokens;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct ConcreteStoreCounts {
@@ -64,7 +65,7 @@ impl ConcreteStoreInventory {
     }
 
     pub(super) fn record_tokens(&mut self, tokens: &TokenStream, site_context: &str) -> Result<()> {
-        for token in tokens.clone() {
+        for token in resolving_tokens(tokens) {
             match token {
                 TokenTree::Group(group) => self.record_tokens(&group.stream(), site_context)?,
                 TokenTree::Ident(ident) => self.record_ident(&ident, site_context)?,
@@ -79,7 +80,7 @@ impl ConcreteStoreInventory {
     }
 
     pub(super) fn record_generic_default_tokens(&mut self, tokens: &TokenStream, site_context: &str) {
-        for token in tokens.clone() {
+        for token in resolving_tokens(tokens) {
             match token {
                 TokenTree::Group(group) => self.record_generic_default_tokens(&group.stream(), site_context),
                 TokenTree::Ident(ident) => self.record_generic_default_name(&normalized_ident(&ident), site_context),
@@ -225,7 +226,7 @@ pub(super) fn context_fingerprint(parent: Option<&str>, kind: &str, syntax: &imp
 }
 
 pub(super) fn tokens_contain_concrete_store(tokens: &TokenStream) -> bool {
-    for token in tokens.clone() {
+    for token in resolving_tokens(tokens) {
         match token {
             TokenTree::Group(group) if tokens_contain_concrete_store(&group.stream()) => return true,
             TokenTree::Ident(ident) if is_concrete_store_name(&normalized_ident(&ident)) => return true,

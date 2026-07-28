@@ -123,6 +123,66 @@ fn concrete_store_counts_follow_production_reachability() {
 }
 
 #[test]
+fn out_of_line_modules_inherit_cfg_constraints_from_their_declaration_path() {
+    let inventory = inventory(&[
+        ("src/lib.rs", "#[cfg(feature = \"x\")]\nmod backend;\n"),
+        (
+            "src/backend.rs",
+            "#[cfg(not(feature = \"x\"))]\n\
+             fn unreachable() { SqliteStore::register_extension(); }\n\
+             #[cfg(feature = \"x\")]\n\
+             fn reachable() { PostgresStore::connect(); }\n",
+        ),
+    ]);
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_path["src/backend.rs"].production_lines, 2);
+    assert_eq!(by_path["src/backend.rs"].test_lines, 2);
+    assert_eq!(
+        by_path["src/backend.rs"].production_concrete_stores,
+        super::ConcreteStoreCounts {
+            sqlite_store: 0,
+            postgres_store: 1,
+        }
+    );
+}
+
+#[test]
+fn multiple_module_paths_disjoin_their_inherited_cfg_constraints() {
+    let inventory = inventory(&[
+        (
+            "src/lib.rs",
+            "#[cfg(feature = \"x\")]\nmod shared;\n\
+             #[cfg(not(feature = \"x\"))]\nmod shared;\n",
+        ),
+        (
+            "src/shared.rs",
+            "#[cfg(feature = \"x\")]\nfn first() { SqliteStore::register_extension(); }\n\
+             #[cfg(not(feature = \"x\"))]\nfn second() { PostgresStore::connect(); }\n",
+        ),
+    ]);
+    let file = inventory.files.iter().find(|file| file.path == "src/shared.rs").expect("shared module measurement");
+    assert_eq!(
+        file.production_concrete_stores,
+        super::ConcreteStoreCounts {
+            sqlite_store: 1,
+            postgres_store: 1,
+        }
+    );
+}
+
+#[test]
+fn contradictory_transitive_module_paths_do_not_restore_broad_reachability() {
+    let inventory = inventory(&[
+        ("src/lib.rs", "#[cfg(feature = \"x\")]\nmod parent;\n"),
+        ("src/parent.rs", "#[cfg(not(feature = \"x\"))]\nmod child;\n"),
+        ("src/parent/child.rs", "fn dead() { SqliteStore::register_extension(); }\n"),
+    ]);
+    let child = inventory.files.iter().find(|file| file.path == "src/parent/child.rs").expect("child module measurement");
+    assert_eq!(child.production_lines, 0);
+    assert_eq!(child.production_concrete_stores, super::ConcreteStoreCounts::default());
+}
+
+#[test]
 fn integration_and_benchmark_roots_are_wholly_test_only() {
     let inventory = inventory(&[("benches/load.rs", "fn benchmark_helper() {}\n"), ("tests/contract.rs", "fn integration_helper() {}\n")]);
     assert_eq!(inventory.files.len(), 2);

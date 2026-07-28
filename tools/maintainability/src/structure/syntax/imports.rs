@@ -16,9 +16,11 @@ use super::{
 
 mod concrete;
 mod resolution;
+mod tokens;
 pub use concrete::{ConcreteStoreCounts, ConcreteStoreSites};
 use concrete::{ConcreteStoreInventory, context_fingerprint, is_concrete_store_name, tokens_contain_concrete_store};
 use resolution::{StringScan, UsePath, flatten_use_tree, resolve_path, restricted_attribute_identifier, restricted_token_identifier, source_module};
+use tokens::resolving_tokens;
 
 #[derive(Default)]
 pub struct ProductionSyntaxFacts {
@@ -36,7 +38,18 @@ pub struct ProductionSyntaxOptions {
     pub require_reviewed_expansions: bool,
 }
 
+#[cfg(test)]
 pub fn production_syntax_facts(file: &syn::File, source_path: &str, crate_root: Option<&str>, options: ProductionSyntaxOptions) -> Result<ProductionSyntaxFacts> {
+    production_syntax_facts_with_context(file, source_path, crate_root, options, ProductionCfgContext::default())
+}
+
+pub(in crate::structure) fn production_syntax_facts_with_context(
+    file: &syn::File,
+    source_path: &str,
+    crate_root: Option<&str>,
+    options: ProductionSyntaxOptions,
+    initial_cfg_context: ProductionCfgContext,
+) -> Result<ProductionSyntaxFacts> {
     let module = if options.collect_internal_imports {
         source_module(source_path, crate_root)?
     } else {
@@ -49,7 +62,7 @@ pub fn production_syntax_facts(file: &syn::File, source_path: &str, crate_root: 
         site_context: None,
         generic_default_depth: 0,
         declaration_ancestors: Vec::new(),
-        cfg_context: ProductionCfgContext::default(),
+        cfg_context: initial_cfg_context,
         error: None,
         rust_2015_absolute_paths: options.rust_2015_absolute_paths,
         collect_internal_imports: options.collect_internal_imports,
@@ -427,14 +440,15 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         if self.error.is_some() {
             return;
         }
-        if tokens_may_hide_concrete_store(&node.tokens) {
+        let stringifies = node.path.segments.last().is_some_and(|segment| normalized_ident(&segment.ident) == "stringify");
+        if !stringifies && tokens_may_hide_concrete_store(&node.tokens) {
             self.error = Some(anyhow::anyhow!(
                 "production concrete stores cannot be hidden behind macro-generated aliases or renamed imports"
             ));
             return;
         }
         let previous = self.enter_site_context("macro-invocation", node);
-        if self.collect_internal_imports {
+        if self.collect_internal_imports && !stringifies {
             match restricted_token_identifier(&node.tokens, &self.module, self.rust_2015_absolute_paths, StringScan::RustFragment) {
                 Ok(Some(restricted)) => {
                     self.error = Some(anyhow::anyhow!(
@@ -456,7 +470,9 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             return;
         }
         self.visit_path(&node.path);
-        self.visit_token_stream(&node.tokens);
+        if !stringifies {
+            self.visit_token_stream(&node.tokens);
+        }
         self.leave_site_context(previous);
     }
 
@@ -552,7 +568,7 @@ fn tokens_may_hide_concrete_store(tokens: &TokenStream) -> bool {
 }
 
 fn collect_token_identifiers(tokens: &TokenStream, identifiers: &mut Vec<String>) {
-    for token in tokens.clone() {
+    for token in resolving_tokens(tokens) {
         match token {
             TokenTree::Group(group) => collect_token_identifiers(&group.stream(), identifiers),
             TokenTree::Ident(ident) => identifiers.push(normalized_ident(&ident)),

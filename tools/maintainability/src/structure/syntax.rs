@@ -10,7 +10,8 @@ mod cfg;
 mod imports;
 
 pub(super) use cfg::{ProductionCfgContext, attributes_disable_production, production_cfg_attr_metas, production_cfg_context};
-pub use imports::{ConcreteStoreCounts, ConcreteStoreSites, ProductionSyntaxFacts, ProductionSyntaxOptions, production_syntax_facts};
+pub(super) use imports::production_syntax_facts_with_context;
+pub use imports::{ConcreteStoreCounts, ConcreteStoreSites, ProductionSyntaxFacts, ProductionSyntaxOptions};
 
 pub(super) fn normalized_ident(ident: &proc_macro2::Ident) -> String {
     let value = ident.to_string();
@@ -19,20 +20,28 @@ pub(super) fn normalized_ident(ident: &proc_macro2::Ident) -> String {
 
 pub struct TestLineCollector {
     test_lines: Vec<bool>,
+    cfg_context: ProductionCfgContext,
     error: Option<anyhow::Error>,
 }
 
 impl TestLineCollector {
+    #[cfg(test)]
     pub fn new(physical_lines: usize) -> Self {
+        Self::with_cfg_context(physical_lines, ProductionCfgContext::default())
+    }
+
+    pub(super) fn with_cfg_context(physical_lines: usize, cfg_context: ProductionCfgContext) -> Self {
         Self {
             test_lines: vec![false; physical_lines],
+            cfg_context,
             error: None,
         }
     }
 
     pub fn visit_file(&mut self, file: &syn::File) -> Result<()> {
-        if !self.classify(Ok(&file.attrs), file) {
+        if let Some(previous) = self.enter_node(Ok(&file.attrs), file) {
             Visit::visit_file(self, file);
+            self.cfg_context = previous;
         }
         self.error.take().map_or(Ok(()), Err)
     }
@@ -41,16 +50,16 @@ impl TestLineCollector {
         self.test_lines.iter().filter(|line| **line).count()
     }
 
-    fn classify<T: syn::spanned::Spanned>(&mut self, attributes: Result<&[Attribute]>, node: &T) -> bool {
-        match attributes.and_then(|attributes| attributes_disable_production(attributes).map(|test_only| (attributes, test_only))) {
-            Ok((attributes, true)) => {
+    fn enter_node<T: syn::spanned::Spanned>(&mut self, attributes: Result<&[Attribute]>, node: &T) -> Option<ProductionCfgContext> {
+        match attributes.and_then(|attributes| production_cfg_context(attributes, &self.cfg_context).map(|context| (attributes, context))) {
+            Ok((attributes, None)) => {
                 self.mark(attributes, node.span());
-                true
+                None
             }
-            Ok((_, false)) => false,
+            Ok((_, Some(context))) => Some(std::mem::replace(&mut self.cfg_context, context)),
             Err(error) => {
                 self.error = Some(error);
-                true
+                None
             }
         }
     }
@@ -71,66 +80,30 @@ impl TestLineCollector {
     }
 }
 
+macro_rules! visit_classified_node {
+    ($method:ident, $walk:ident, $node:ty, $binding:ident => $attributes:expr) => {
+        fn $method(&mut self, $binding: &'ast $node) {
+            let attributes: Result<&[Attribute]> = $attributes;
+            let Some(previous) = self.enter_node(attributes, $binding) else {
+                return;
+            };
+            visit::$walk(self, $binding);
+            self.cfg_context = previous;
+        }
+    };
+}
+
 impl<'ast> Visit<'ast> for TestLineCollector {
-    fn visit_item(&mut self, node: &'ast Item) {
-        if !self.classify(item_attributes(node), node) {
-            visit::visit_item(self, node);
-        }
-    }
-
-    fn visit_impl_item(&mut self, node: &'ast ImplItem) {
-        if !self.classify(impl_item_attributes(node), node) {
-            visit::visit_impl_item(self, node);
-        }
-    }
-
-    fn visit_trait_item(&mut self, node: &'ast TraitItem) {
-        if !self.classify(trait_item_attributes(node), node) {
-            visit::visit_trait_item(self, node);
-        }
-    }
-
-    fn visit_foreign_item(&mut self, node: &'ast ForeignItem) {
-        if !self.classify(foreign_item_attributes(node), node) {
-            visit::visit_foreign_item(self, node);
-        }
-    }
-
-    fn visit_variant(&mut self, node: &'ast syn::Variant) {
-        if !self.classify(Ok(&node.attrs), node) {
-            visit::visit_variant(self, node);
-        }
-    }
-
-    fn visit_field(&mut self, node: &'ast syn::Field) {
-        if !self.classify(Ok(&node.attrs), node) {
-            visit::visit_field(self, node);
-        }
-    }
-
-    fn visit_arm(&mut self, node: &'ast syn::Arm) {
-        if !self.classify(Ok(&node.attrs), node) {
-            visit::visit_arm(self, node);
-        }
-    }
-
-    fn visit_local(&mut self, node: &'ast syn::Local) {
-        if !self.classify(Ok(&node.attrs), node) {
-            visit::visit_local(self, node);
-        }
-    }
-
-    fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
-        if !self.classify(Ok(&node.attrs), node) {
-            visit::visit_stmt_macro(self, node);
-        }
-    }
-
-    fn visit_expr(&mut self, node: &'ast Expr) {
-        if !self.classify(expr_attributes(node), node) {
-            visit::visit_expr(self, node);
-        }
-    }
+    visit_classified_node!(visit_item, visit_item, Item, node => item_attributes(node));
+    visit_classified_node!(visit_impl_item, visit_impl_item, ImplItem, node => impl_item_attributes(node));
+    visit_classified_node!(visit_trait_item, visit_trait_item, TraitItem, node => trait_item_attributes(node));
+    visit_classified_node!(visit_foreign_item, visit_foreign_item, ForeignItem, node => foreign_item_attributes(node));
+    visit_classified_node!(visit_variant, visit_variant, syn::Variant, node => Ok(&node.attrs));
+    visit_classified_node!(visit_field, visit_field, syn::Field, node => Ok(&node.attrs));
+    visit_classified_node!(visit_arm, visit_arm, syn::Arm, node => Ok(&node.attrs));
+    visit_classified_node!(visit_local, visit_local, syn::Local, node => Ok(&node.attrs));
+    visit_classified_node!(visit_stmt_macro, visit_stmt_macro, syn::StmtMacro, node => Ok(&node.attrs));
+    visit_classified_node!(visit_expr, visit_expr, Expr, node => expr_attributes(node));
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         if node.path.is_ident("include") {

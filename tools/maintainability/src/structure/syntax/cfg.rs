@@ -1,12 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
-
 use anyhow::{Context, Result};
 use quote::ToTokens as _;
 use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
 use syn::{Attribute, Expr, Meta, Token};
 
-const MAX_ENUMERATED_ATOMS: usize = 16;
+mod sat;
+use sat::is_satisfiable;
 
 #[derive(Clone, Debug)]
 enum Predicate {
@@ -15,13 +14,6 @@ enum Predicate {
     All(Vec<Self>),
     Any(Vec<Self>),
     Not(Box<Self>),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PartialTruth {
-    False,
-    True,
-    Unknown,
 }
 
 struct CfgAttr {
@@ -42,6 +34,24 @@ impl ProductionCfgContext {
             identity.push(';');
         }
         identity
+    }
+
+    pub(in crate::structure) fn conjoin(&self, other: &Self) -> Option<Self> {
+        let mut constraints = self.constraints.clone();
+        constraints.extend(other.constraints.clone());
+        let context = Self { constraints };
+        context_is_satisfiable(&context, None).then_some(context)
+    }
+
+    pub(in crate::structure) fn disjunction(contexts: impl IntoIterator<Item = Self>) -> Option<Self> {
+        let alternatives = contexts.into_iter().map(|context| Predicate::All(context.constraints)).collect::<Vec<_>>();
+        match alternatives.as_slice() {
+            [] => None,
+            [Predicate::All(constraints)] => Some(Self { constraints: constraints.clone() }),
+            _ => Some(Self {
+                constraints: vec![Predicate::Any(alternatives)],
+            }),
+        }
     }
 }
 
@@ -221,67 +231,5 @@ fn is_testing_feature(value: &syn::MetaNameValue) -> bool {
 }
 
 fn any_assignment_satisfies(predicate: &Predicate) -> bool {
-    let mut atoms = BTreeSet::new();
-    collect_atoms(predicate, &mut atoms);
-    if atoms.len() > MAX_ENUMERATED_ATOMS {
-        return partial_evaluate(predicate) != PartialTruth::False;
-    }
-    let atoms = atoms.into_iter().enumerate().map(|(index, atom)| (atom, index)).collect::<BTreeMap<_, _>>();
-    (0..1_usize << atoms.len()).any(|assignment| evaluate(predicate, &atoms, assignment))
-}
-
-fn collect_atoms<'a>(predicate: &'a Predicate, atoms: &mut BTreeSet<&'a str>) {
-    match predicate {
-        Predicate::Atom(atom) => {
-            atoms.insert(atom);
-        }
-        Predicate::All(nested) | Predicate::Any(nested) => {
-            for predicate in nested {
-                collect_atoms(predicate, atoms);
-            }
-        }
-        Predicate::Not(nested) => collect_atoms(nested, atoms),
-        Predicate::Constant(_) => {}
-    }
-}
-
-fn evaluate(predicate: &Predicate, atoms: &BTreeMap<&str, usize>, assignment: usize) -> bool {
-    match predicate {
-        Predicate::Constant(value) => *value,
-        Predicate::Atom(atom) => assignment & (1 << atoms[atom.as_str()]) != 0,
-        Predicate::All(nested) => nested.iter().all(|predicate| evaluate(predicate, atoms, assignment)),
-        Predicate::Any(nested) => nested.iter().any(|predicate| evaluate(predicate, atoms, assignment)),
-        Predicate::Not(nested) => !evaluate(nested, atoms, assignment),
-    }
-}
-
-fn partial_evaluate(predicate: &Predicate) -> PartialTruth {
-    match predicate {
-        Predicate::Constant(true) => PartialTruth::True,
-        Predicate::Constant(false) => PartialTruth::False,
-        Predicate::Atom(_) => PartialTruth::Unknown,
-        Predicate::All(nested) => nested.iter().map(partial_evaluate).fold(PartialTruth::True, partial_all),
-        Predicate::Any(nested) => nested.iter().map(partial_evaluate).fold(PartialTruth::False, partial_any),
-        Predicate::Not(nested) => match partial_evaluate(nested) {
-            PartialTruth::False => PartialTruth::True,
-            PartialTruth::True => PartialTruth::False,
-            PartialTruth::Unknown => PartialTruth::Unknown,
-        },
-    }
-}
-
-const fn partial_all(left: PartialTruth, right: PartialTruth) -> PartialTruth {
-    match (left, right) {
-        (PartialTruth::False, _) | (_, PartialTruth::False) => PartialTruth::False,
-        (PartialTruth::True, PartialTruth::True) => PartialTruth::True,
-        _ => PartialTruth::Unknown,
-    }
-}
-
-const fn partial_any(left: PartialTruth, right: PartialTruth) -> PartialTruth {
-    match (left, right) {
-        (PartialTruth::True, _) | (_, PartialTruth::True) => PartialTruth::True,
-        (PartialTruth::False, PartialTruth::False) => PartialTruth::False,
-        _ => PartialTruth::Unknown,
-    }
+    is_satisfiable(predicate)
 }

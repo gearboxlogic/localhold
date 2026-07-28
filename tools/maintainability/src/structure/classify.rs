@@ -8,12 +8,14 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use super::syntax::{
-    ConcreteStoreCounts, ConcreteStoreSites, ProductionSyntaxFacts, ProductionSyntaxOptions, TestLineCollector, attributes_disable_production, item_is_test_only, normalized_ident,
-    production_syntax_facts, reject_module_path_overrides,
+    ConcreteStoreCounts, ConcreteStoreSites, ProductionCfgContext, ProductionSyntaxFacts, ProductionSyntaxOptions, TestLineCollector, normalized_ident, production_cfg_context,
+    production_syntax_facts_with_context, reject_module_path_overrides,
 };
 
 mod module_macro;
 use module_macro::{audit_reviewed_macro_definitions, record_item_macro, safe_macro_definitions};
+mod reachability;
+use reachability::{ModuleEdge, production_contexts, production_reachable_from, propagate_reachability};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct FileMeasurement {
@@ -38,13 +40,6 @@ struct ParsedSource {
     syntax: syn::File,
 }
 
-#[derive(Debug)]
-struct ModuleEdge {
-    source: String,
-    target: String,
-    test_only: bool,
-}
-
 struct TreeEntry {
     object_id: String,
     path: String,
@@ -53,6 +48,7 @@ struct TreeEntry {
 struct SourceReachability {
     test_only: BTreeSet<String>,
     composition_only: BTreeSet<String>,
+    production_contexts: BTreeMap<String, ProductionCfgContext>,
 }
 
 pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Inventory> {
@@ -233,16 +229,21 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
     for (path, parsed) in parsed {
         let physical_lines = physical_line_count(&parsed.source);
         let file_is_test_only = reachability.test_only.contains(&path);
-        let mut collector = TestLineCollector::new(physical_lines);
         let (test_lines, production_facts) = if file_is_test_only {
             (physical_lines, ProductionSyntaxFacts::default())
         } else {
+            let initial_cfg_context = reachability
+                .production_contexts
+                .get(&path)
+                .cloned()
+                .context("production source has no inherited cfg context")?;
+            let mut collector = TestLineCollector::with_cfg_context(physical_lines, initial_cfg_context.clone());
             collector.visit_file(&parsed.syntax)?;
             let collect_internal_imports =
                 path.starts_with("src/") && !reachability.composition_only.contains(&path) && !path.starts_with("src/server/") && !path.starts_with("src/ui/");
             (
                 collector.test_line_count(),
-                production_syntax_facts(
+                production_syntax_facts_with_context(
                     &parsed.syntax,
                     &path,
                     library_root_for_source(&path, library_roots),
@@ -251,6 +252,7 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
                         rust_2015_absolute_paths: *rust_2015_absolute_paths,
                         require_reviewed_expansions,
                     },
+                    initial_cfg_context,
                 )
                 .map_err(|error| anyhow::anyhow!("{error} in {path}"))?,
             )
@@ -301,12 +303,12 @@ fn classify_source_reachability(
         opaque_macro_sources: BTreeSet::new(),
     };
     for (path, source) in parsed {
-        let file_test_only = attributes_disable_production(&source.syntax.attrs).with_context(|| format!("classify crate attributes in {path}"))?;
+        let production_context = production_cfg_context(&source.syntax.attrs, &ProductionCfgContext::default()).with_context(|| format!("classify crate attributes in {path}"))?;
         if production_roots.contains(path) || explicit_test_roots.contains(path) {
             let crate_root_dir = Path::new(path).parent().context("Cargo target root has no parent directory")?;
-            graph.collect(path, &source.syntax.items, crate_root_dir, file_test_only)?;
+            graph.collect(path, &source.syntax.items, crate_root_dir, production_context)?;
         } else {
-            graph.collect(path, &source.syntax.items, &module_directory(path)?, file_test_only)?;
+            graph.collect(path, &source.syntax.items, &module_directory(path)?, production_context)?;
         }
     }
     let opaque_macro_sources = graph.opaque_macro_sources;
@@ -328,6 +330,7 @@ fn classify_source_reachability(
     let composition_reachable = production_reachable_from(&edges, composition_roots);
     let incoming: BTreeSet<_> = edges.iter().map(|edge| edge.target.as_str()).collect();
     let mut production_reachable = production_roots.clone();
+    let mut fallback_roots = BTreeSet::new();
     let mut test_reachable: BTreeSet<_> = known.iter().filter(|path| path.starts_with("tests/") || path.starts_with("benches/")).cloned().collect();
     test_reachable.extend(explicit_test_roots.iter().cloned());
     for path in known
@@ -348,48 +351,27 @@ fn classify_source_reachability(
             break;
         }
         for path in unknown {
-            production_reachable.insert(path);
+            production_reachable.insert(path.clone());
+            fallback_roots.insert(path);
         }
     }
+    let contextual_roots = production_roots
+        .iter()
+        .chain(&fallback_roots)
+        .chain(
+            production_reachable
+                .iter()
+                .filter(|path| !edges.iter().any(|edge| !edge.test_only && edge.target.as_str() == path.as_str())),
+        )
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let production_contexts = production_contexts(&edges, &contextual_roots)?;
+    let contextually_production = production_contexts.keys().cloned().collect::<BTreeSet<_>>();
     Ok(SourceReachability {
-        test_only: test_reachable.difference(&production_reachable).cloned().collect(),
+        test_only: known.difference(&contextually_production).cloned().collect(),
         composition_only: composition_reachable.difference(&library_reachable).cloned().collect(),
+        production_contexts,
     })
-}
-
-fn production_reachable_from(edges: &[ModuleEdge], roots: &BTreeSet<String>) -> BTreeSet<String> {
-    let mut reachable = roots.clone();
-    loop {
-        let mut changed = false;
-        for edge in edges {
-            if !edge.test_only && reachable.contains(&edge.source) {
-                changed |= reachable.insert(edge.target.clone());
-            }
-        }
-        if !changed {
-            return reachable;
-        }
-    }
-}
-
-fn propagate_reachability(edges: &[ModuleEdge], production: &mut BTreeSet<String>, test: &mut BTreeSet<String>) {
-    loop {
-        let mut changed = false;
-        for edge in edges {
-            changed |= match (production.contains(&edge.source), edge.test_only) {
-                (true, true) => test.insert(edge.target.clone()),
-                (true, false) => production.insert(edge.target.clone()),
-                (false, _) => false,
-            };
-            let source_is_test = test.contains(&edge.source);
-            if source_is_test {
-                changed |= test.insert(edge.target.clone());
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
 }
 
 struct TargetRoots {
@@ -649,10 +631,12 @@ struct ModuleScope<'a> {
     module_dir: &'a Path,
     parent_test_only: bool,
     inherited_macros: &'a BTreeSet<String>,
+    production_context: Option<ProductionCfgContext>,
 }
 
 impl ModuleGraph<'_> {
-    fn collect(&mut self, source_path: &str, items: &[syn::Item], module_dir: &Path, parent_test_only: bool) -> Result<()> {
+    fn collect(&mut self, source_path: &str, items: &[syn::Item], module_dir: &Path, production_context: Option<ProductionCfgContext>) -> Result<()> {
+        let parent_test_only = production_context.is_none();
         self.collect_with_macros(
             items,
             &ModuleScope {
@@ -660,6 +644,7 @@ impl ModuleGraph<'_> {
                 module_dir,
                 parent_test_only,
                 inherited_macros: &BTreeSet::new(),
+                production_context,
             },
         )
     }
@@ -674,7 +659,11 @@ impl ModuleGraph<'_> {
                 continue;
             };
             reject_module_path_overrides(&module.attrs)?;
-            let test_only = scope.parent_test_only || item_is_test_only(item)?;
+            let production_context = match &scope.production_context {
+                Some(inherited) => production_cfg_context(&module.attrs, inherited)?,
+                None => None,
+            };
+            let test_only = scope.parent_test_only || production_context.is_none();
             let module_name = normalized_ident(&module.ident);
             if let Some((_, nested)) = &module.content {
                 let nested_dir = scope.module_dir.join(&module_name);
@@ -685,6 +674,7 @@ impl ModuleGraph<'_> {
                         module_dir: &nested_dir,
                         parent_test_only: test_only,
                         inherited_macros: &safe_macros,
+                        production_context,
                     },
                 )?;
                 continue;
@@ -696,6 +686,7 @@ impl ModuleGraph<'_> {
                     source: scope.source_path.to_owned(),
                     target,
                     test_only,
+                    production_context,
                 });
             }
         }

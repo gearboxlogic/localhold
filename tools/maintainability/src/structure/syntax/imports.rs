@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result, bail};
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
@@ -20,11 +22,13 @@ mod concrete;
 mod reexports;
 mod resolution;
 mod tokens;
-pub use concrete::{ConcreteStoreCounts, ConcreteStoreSites};
+pub use concrete::{ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites};
 use concrete::{ConcreteStoreInventory, context_fingerprint, is_concrete_store_name, tokens_contain_concrete_store};
 use reexports::{UseResolution, resolve_public_reexport_aliases};
 use resolution::{StringScan, UsePath, flatten_use_tree, resolve_path, restricted_attribute_identifier, restricted_token_identifier, source_module};
 use tokens::resolving_tokens;
+
+type BuiltinStringifyAliases = BTreeSet<(Vec<String>, String)>;
 
 #[derive(Default)]
 pub struct ProductionSyntaxFacts {
@@ -35,7 +39,7 @@ pub struct ProductionSyntaxFacts {
     pub public_concrete_store_structs: ConcreteStoreSites,
     pub concrete_store_sites: ConcreteStoreSites,
     pub generic_default_concrete_store_sites: ConcreteStoreSites,
-    pub signature_concrete_store_sites: ConcreteStoreSites,
+    pub signature_concrete_store_sites: ConcreteStoreSignatureSites,
     pub binding_concrete_store_sites: ConcreteStoreSites,
 }
 
@@ -76,8 +80,10 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
     } else {
         Vec::new()
     };
+    let builtin_stringify_aliases = collect_builtin_stringify_aliases(file, &module, &initial_context.cfg)?;
     let mut collector = ProductionSyntaxCollector {
         module,
+        builtin_stringify_aliases,
         imports: Vec::new(),
         use_resolutions: Vec::new(),
         public_reexports: Vec::new(),
@@ -117,6 +123,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
 
 struct ProductionSyntaxCollector {
     module: Vec<String>,
+    builtin_stringify_aliases: BuiltinStringifyAliases,
     imports: Vec<String>,
     use_resolutions: Vec<UseResolution>,
     public_reexports: Vec<PublicReexportEvidence>,
@@ -316,7 +323,7 @@ impl ProductionSyntaxCollector {
             self.cfg_context.identity(),
             self.declaration_ancestors.join("\0")
         );
-        self.concrete_stores.record_signature_tokens(tokens, &context);
+        self.concrete_stores.record_signature_tokens(tokens, &context, &self.module);
     }
 
     fn record_concrete_stores_in_exposure_signature_with_identity(&mut self, kind: &str, tokens: &TokenStream, identity: &TokenStream) {
@@ -326,7 +333,7 @@ impl ProductionSyntaxCollector {
             self.cfg_context.identity(),
             self.declaration_ancestors.join("\0")
         );
-        self.concrete_stores.record_exposure_signature_tokens(tokens, &context);
+        self.concrete_stores.record_exposure_signature_tokens(tokens, &context, &self.module);
     }
 
     fn record_impl_header_for_visible_member(&mut self, kind: &str, visibility: &Visibility, member: &impl ToTokens) {
@@ -697,7 +704,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         if self.error.is_some() {
             return;
         }
-        let stringifies = is_explicit_builtin_stringify(node);
+        let stringifies = is_explicit_builtin_stringify(node) || self.is_imported_builtin_stringify(node);
         if !stringifies && tokens_may_hide_concrete_store(&node.tokens) {
             self.error = Some(anyhow::anyhow!(
                 "production concrete stores cannot be hidden behind macro-generated aliases or renamed imports"
@@ -797,6 +804,56 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             self.visit_item(nested);
         }
         self.module.pop();
+    }
+}
+
+impl ProductionSyntaxCollector {
+    fn is_imported_builtin_stringify(&self, node: &syn::Macro) -> bool {
+        if node.path.leading_colon.is_some() || node.path.segments.len() != 1 {
+            return false;
+        }
+        let alias = normalized_ident(&node.path.segments[0].ident);
+        self.builtin_stringify_aliases.contains(&(self.module.clone(), alias))
+    }
+}
+
+fn collect_builtin_stringify_aliases(file: &File, module: &[String], inherited_cfg: &ProductionCfgContext) -> Result<BuiltinStringifyAliases> {
+    let mut aliases = BTreeSet::new();
+    collect_builtin_stringify_aliases_in_items(&file.items, module, inherited_cfg, &mut aliases)?;
+    Ok(aliases)
+}
+
+fn collect_builtin_stringify_aliases_in_items(items: &[Item], module: &[String], inherited_cfg: &ProductionCfgContext, aliases: &mut BuiltinStringifyAliases) -> Result<()> {
+    for item in items {
+        let Some(cfg) = production_cfg_context(item_attributes(item)?, inherited_cfg)? else {
+            continue;
+        };
+        match item {
+            Item::Use(item) => collect_builtin_stringify_aliases_from_use(item, module, aliases),
+            Item::Mod(item) => {
+                if let Some((_, nested)) = &item.content {
+                    let mut nested_module = module.to_vec();
+                    nested_module.push(normalized_ident(&item.ident));
+                    collect_builtin_stringify_aliases_in_items(nested, &nested_module, &cfg, aliases)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn collect_builtin_stringify_aliases_from_use(item: &ItemUse, module: &[String], aliases: &mut BuiltinStringifyAliases) {
+    if item.leading_colon.is_none() {
+        return;
+    }
+    let mut paths = Vec::new();
+    flatten_use_tree(&item.tree, &mut Vec::new(), &mut paths);
+    for path in paths
+        .into_iter()
+        .filter(|path| path.segments == ["core", "stringify"] || path.segments == ["std", "stringify"])
+    {
+        aliases.insert((module.to_vec(), path.alias.unwrap_or_else(|| "stringify".to_owned())));
     }
 }
 

@@ -10,7 +10,9 @@ mod cfg;
 mod imports;
 
 pub(super) use cfg::{ProductionCfgContext, attributes_disable_production, production_cfg_attr_metas, production_cfg_context};
-pub use imports::{ConcreteStoreCounts, ConcreteStoreSites, ProductionSyntaxFacts, ProductionSyntaxOptions, PublicReexportEvidence};
+pub use imports::{
+    ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionSyntaxFacts, ProductionSyntaxOptions, PublicReexportEvidence,
+};
 pub(super) use imports::{ProductionSyntaxContext, production_syntax_facts_with_context};
 
 pub(super) fn normalized_ident(ident: &proc_macro2::Ident) -> String {

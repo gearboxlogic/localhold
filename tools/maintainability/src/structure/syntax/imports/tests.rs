@@ -50,6 +50,8 @@ fn test_only_imports_are_excluded_at_item_and_parent_scope() {
                   #[cfg(doctest)]\nuse crate::server::DocTestOnly;\n\
                   #[cfg(feature = \"testing\")]\nmod support { use crate::ui; }\n\
                   #[cfg(test)]\nfn test_path() -> crate::server::TestOnly { unreachable!() }\n\
+                  #[test]\nfn direct_test_path() -> crate::server::DirectTestOnly { unreachable!() }\n\
+                  #[cfg_attr(all(), test)]\nfn attributed_test_path() -> crate::server::AttributedTestOnly { unreachable!() }\n\
                   #[cfg_attr(all(), cfg_attr(all(), cfg(test)))]\nuse crate::server::NestedTestOnly;\n\
                   use crate::server::LocalHoldServer;\n";
     assert_eq!(imports("src/http_transport.rs", source).expect("imports"), ["crate::server::LocalHoldServer"]);
@@ -321,6 +323,14 @@ fn explicit_builtin_stringify_arguments_are_not_treated_as_resolved_syntax() -> 
 
     let definition = "macro_rules! numbered_placeholders { () => { ::core::stringify!(SqliteStore) } }\nnumbered_placeholders!();\n";
     assert_eq!(concrete_facts(definition)?.concrete_stores, ConcreteStoreCounts::default());
+
+    for imported in [
+        "use ::core::stringify as text;\nconst STORE: &str = text!(SqliteStore);\n",
+        "const STORE: &str = text!(PostgresStore);\nuse ::std::stringify as text;\n",
+        "mod nested { use ::core::stringify; const STORE: &str = stringify!(SqliteStore); }\n",
+    ] {
+        assert_eq!(concrete_facts(imported)?.concrete_stores, ConcreteStoreCounts::default());
+    }
     Ok(())
 }
 

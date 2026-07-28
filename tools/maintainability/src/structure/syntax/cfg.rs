@@ -95,7 +95,9 @@ pub(in crate::structure) fn attributes_disable_production(attributes: &[Attribut
 pub(in crate::structure) fn production_cfg_context(attributes: &[Attribute], inherited: &ProductionCfgContext) -> Result<Option<ProductionCfgContext>> {
     let mut context = inherited.clone();
     for attribute in attributes {
-        if attribute.path().is_ident("cfg") {
+        if attribute.path().is_ident("test") {
+            return Ok(None);
+        } else if attribute.path().is_ident("cfg") {
             let meta = parse_single_meta(attribute).context("parse cfg predicate for line classification")?;
             context.constraints.push(predicate(&meta)?);
         } else if attribute.path().is_ident("cfg_attr")
@@ -120,6 +122,8 @@ fn collect_cfg_attr_constraints(tokens: &proc_macro2::TokenStream, parent_activa
         if meta.path().is_ident("cfg") {
             let required = predicate(&parse_cfg_meta(&meta)?)?;
             output.push(Predicate::Any(vec![Predicate::Not(Box::new(activation.clone())), required]));
+        } else if meta.path().is_ident("test") {
+            output.push(Predicate::Not(Box::new(activation.clone())));
         } else if meta.path().is_ident("cfg_attr")
             && let Meta::List(list) = meta
         {

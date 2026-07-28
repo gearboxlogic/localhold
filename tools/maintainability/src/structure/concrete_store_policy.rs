@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use super::classify::{FileMeasurement, Inventory};
 use super::manifest::PreviousRevision;
-use super::syntax::PublicReexportEvidence;
+use super::syntax::{ConcreteStoreSignatureSite, PublicReexportEvidence};
 use crate::scan::syntax_fingerprint;
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
@@ -441,7 +441,7 @@ struct DeclarationContext<'a> {
     binding_fingerprint: &'a str,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum SiteSource {
     AllSyntax,
     GenericDefaults,
@@ -454,6 +454,17 @@ struct SiteEvidenceContext<'a> {
     path: &'a str,
     store: ConcreteStoreName,
     public_reexports: &'a [String],
+}
+
+struct FileSiteEvidenceContext<'a> {
+    inventory: &'a Inventory,
+    paths: PathAttribution<'a>,
+    file: &'a FileMeasurement,
+    excluded_components: Option<&'a BTreeSet<&'a str>>,
+    debt_components: Option<&'a DebtComponents>,
+    component: &'a str,
+    canonical_path: &'a str,
+    site_path: &'a str,
 }
 
 fn record_declaration_fingerprints(observed: &mut DeclarationInventory, context: DeclarationContext<'_>, fingerprints: &[String]) -> Result<()> {
@@ -604,36 +615,91 @@ fn site_fingerprints(
             .with_context(|| format!("concrete-store syntax inventory path {:?} has no logical component", file.path))?;
         let canonical_path = paths.canonical_path(&file.path);
         let site_path = paths.site_path(&file.path);
-        let fingerprints = match source {
-            SiteSource::AllSyntax => &file.production_concrete_store_sites,
-            SiteSource::GenericDefaults => &file.production_generic_default_store_sites,
-            SiteSource::Signatures => &file.production_signature_store_sites,
+        let context = FileSiteEvidenceContext {
+            inventory,
+            paths,
+            file,
+            excluded_components,
+            debt_components,
+            component,
+            canonical_path,
+            site_path,
         };
-        let public_reexports = matches!(source, SiteSource::Signatures)
-            .then(|| public_reexport_evidence(inventory, paths, &file.production_module))
-            .unwrap_or_default();
-        for (store, fingerprints) in [
-            (ConcreteStoreName::SqliteStore, &fingerprints.sqlite_store),
-            (ConcreteStoreName::PostgresStore, &fingerprints.postgres_store),
-        ] {
-            let effective_component = debt_components
-                .and_then(|components| components.get(&(canonical_path.to_owned(), store)))
-                .map_or(component, String::as_str);
-            if excluded_components.is_some_and(|excluded| excluded.contains(effective_component)) {
-                continue;
-            }
-            let context = SiteEvidenceContext {
-                component: effective_component,
-                path: site_path,
-                store,
-                public_reexports: &public_reexports,
-            };
-            for fingerprint in fingerprints {
-                record_site_evidence(&mut sites, context, fingerprint)?;
-            }
+        for store in [ConcreteStoreName::SqliteStore, ConcreteStoreName::PostgresStore] {
+            record_store_site_fingerprints(&mut sites, &context, source, store)?;
         }
     }
     Ok(sites)
+}
+
+fn record_store_site_fingerprints(
+    sites: &mut BTreeMap<SiteFingerprint, usize>,
+    file_context: &FileSiteEvidenceContext<'_>,
+    source: SiteSource,
+    store: ConcreteStoreName,
+) -> Result<()> {
+    let effective_component = file_context
+        .debt_components
+        .and_then(|components| components.get(&(file_context.canonical_path.to_owned(), store)))
+        .map_or(file_context.component, String::as_str);
+    if file_context.excluded_components.is_some_and(|excluded| excluded.contains(effective_component)) {
+        return Ok(());
+    }
+    if source == SiteSource::Signatures {
+        return record_signature_site_fingerprints(sites, file_context, effective_component, store);
+    }
+    let fingerprints = match source {
+        SiteSource::AllSyntax => &file_context.file.production_concrete_store_sites,
+        SiteSource::GenericDefaults => &file_context.file.production_generic_default_store_sites,
+        SiteSource::Signatures => unreachable!("signature sites handled above"),
+    };
+    let fingerprints = match store {
+        ConcreteStoreName::SqliteStore => &fingerprints.sqlite_store,
+        ConcreteStoreName::PostgresStore => &fingerprints.postgres_store,
+    };
+    let context = SiteEvidenceContext {
+        component: effective_component,
+        path: file_context.site_path,
+        store,
+        public_reexports: &[],
+    };
+    for fingerprint in fingerprints {
+        record_site_evidence(sites, context, fingerprint)?;
+    }
+    Ok(())
+}
+
+fn record_signature_site_fingerprints(
+    sites: &mut BTreeMap<SiteFingerprint, usize>,
+    file_context: &FileSiteEvidenceContext<'_>,
+    effective_component: &str,
+    store: ConcreteStoreName,
+) -> Result<()> {
+    let signatures = match store {
+        ConcreteStoreName::SqliteStore => &file_context.file.production_signature_store_sites.sqlite_store,
+        ConcreteStoreName::PostgresStore => &file_context.file.production_signature_store_sites.postgres_store,
+    };
+    for signature in signatures {
+        record_signature_site_fingerprint(sites, file_context, effective_component, store, signature)?;
+    }
+    Ok(())
+}
+
+fn record_signature_site_fingerprint(
+    sites: &mut BTreeMap<SiteFingerprint, usize>,
+    file_context: &FileSiteEvidenceContext<'_>,
+    effective_component: &str,
+    store: ConcreteStoreName,
+    signature: &ConcreteStoreSignatureSite,
+) -> Result<()> {
+    let public_reexports = public_reexport_evidence(file_context.inventory, file_context.paths, &signature.module);
+    let context = SiteEvidenceContext {
+        component: effective_component,
+        path: file_context.site_path,
+        store,
+        public_reexports: &public_reexports,
+    };
+    record_site_evidence(sites, context, &signature.fingerprint)
 }
 
 fn record_site_evidence(sites: &mut BTreeMap<SiteFingerprint, usize>, context: SiteEvidenceContext<'_>, signature: &str) -> Result<()> {

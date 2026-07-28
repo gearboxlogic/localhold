@@ -10,8 +10,8 @@ use serde::Serialize;
 use crate::scan::syntax_fingerprint;
 
 use super::syntax::{
-    ConcreteStoreCounts, ConcreteStoreSites, ProductionCfgContext, ProductionSyntaxContext, ProductionSyntaxFacts, ProductionSyntaxOptions, PublicReexportEvidence,
-    TestLineCollector, normalized_ident, production_cfg_context, production_syntax_facts_with_context, reject_module_path_overrides,
+    ConcreteStoreCounts, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionCfgContext, ProductionSyntaxContext, ProductionSyntaxFacts, ProductionSyntaxOptions,
+    PublicReexportEvidence, TestLineCollector, normalized_ident, production_cfg_context, production_syntax_facts_with_context, reject_module_path_overrides,
 };
 
 mod module_macro;
@@ -32,7 +32,7 @@ pub struct FileMeasurement {
     pub production_public_concrete_store_structs: ConcreteStoreSites,
     pub production_concrete_store_sites: ConcreteStoreSites,
     pub production_generic_default_store_sites: ConcreteStoreSites,
-    pub production_signature_store_sites: ConcreteStoreSites,
+    pub production_signature_store_sites: ConcreteStoreSignatureSites,
     pub production_store_binding_sites: ConcreteStoreSites,
 }
 

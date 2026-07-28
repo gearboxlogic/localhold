@@ -45,7 +45,7 @@ impl StructureManifest {
         let current = self.current_component_paths()?;
         let current_paths = current.keys().copied().collect::<std::collections::BTreeSet<_>>();
         lineage.retain(|path, _| current_paths.contains(path.as_str()));
-        for path in &current_paths {
+        for path in current_paths.iter().filter(|path| is_intrinsically_test_only_path(path)) {
             lineage.entry((*path).to_owned()).or_insert_with(|| (*path).to_owned());
         }
         let lineage_paths = lineage.keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>();
@@ -69,6 +69,10 @@ fn evolve_path_lineage(lineage: &mut BTreeMap<String, String>, evolution: &PathE
         }
     }
     Ok(())
+}
+
+fn is_intrinsically_test_only_path(path: &str) -> bool {
+    ["tests/", "benches/"].iter().any(|prefix| path.starts_with(prefix))
 }
 
 #[cfg(test)]

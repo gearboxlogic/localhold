@@ -43,6 +43,28 @@ fn current_paths_retain_their_transitive_baseline_lineage() {
 }
 
 #[test]
+fn current_production_paths_require_governed_baseline_lineage() {
+    let mut manifest = ordinary_manifest("src/lib.rs", 10, 10);
+    manifest.components[0].paths.push("src/unreviewed.rs".to_owned());
+    assert!(
+        manifest
+            .canonical_current_paths()
+            .unwrap_err()
+            .to_string()
+            .contains("do not match their governed baseline path lineage")
+    );
+
+    manifest.components[0].paths[1] = "tests/pre-gate.rs".to_owned();
+    assert_eq!(
+        manifest.canonical_current_paths().expect("intrinsically test-only pre-gate path"),
+        std::collections::BTreeMap::from([
+            ("src/lib.rs".to_owned(), "src/lib.rs".to_owned()),
+            ("tests/pre-gate.rs".to_owned(), "tests/pre-gate.rs".to_owned()),
+        ])
+    );
+}
+
+#[test]
 fn governed_split_preserves_component_and_hotspot_debt() {
     let previous = hotspot_manifest(HotspotKind::Production, HotspotStatus::Active, &["src/hot.rs"], 900, 700);
     let previous_files = inventory(&[("src/hot.rs", 900, 700)]);

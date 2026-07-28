@@ -27,6 +27,7 @@ mod reexports;
 mod resolution;
 mod stringify;
 mod tokens;
+mod visibility;
 use concrete::{BindingSiteContext, ConcreteStoreInventory, SignatureSiteContext, context_fingerprint, is_concrete_store_name, production_generics, without_documentation};
 pub use concrete::{ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites};
 pub use declarations::TypeDeclarationEvidence;
@@ -47,6 +48,7 @@ use stringify::{
     stringify_imports_in_block,
 };
 use tokens::resolving_tokens;
+pub use visibility::VisibilityCounts;
 
 #[derive(Clone, Copy)]
 enum FieldExposure {
@@ -67,6 +69,7 @@ pub struct ProductionSyntaxFacts {
     pub generic_default_concrete_store_sites: ConcreteStoreSites,
     pub signature_concrete_store_sites: ConcreteStoreSignatureSites,
     pub binding_concrete_store_sites: ConcreteStoreSites,
+    pub visibilities: VisibilityCounts,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -159,6 +162,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
         generic_default_concrete_store_sites: collector.concrete_stores.generic_default_sites,
         signature_concrete_store_sites: collector.concrete_stores.signature_sites,
         binding_concrete_store_sites,
+        visibilities: collector.visibilities,
     })
 }
 
@@ -180,6 +184,7 @@ fn collect_production_syntax(
         public_reexports: Vec::new(),
         type_declarations: Vec::new(),
         concrete_stores: ConcreteStoreInventory::default(),
+        visibilities: VisibilityCounts::default(),
         site_context: None,
         block_depth: 0,
         block_type_scopes: Vec::new(),
@@ -219,6 +224,7 @@ struct ProductionSyntaxCollector {
     public_reexports: Vec<PendingPublicReexport>,
     type_declarations: Vec<TypeDeclarationEvidence>,
     concrete_stores: ConcreteStoreInventory,
+    visibilities: VisibilityCounts,
     site_context: Option<String>,
     block_depth: usize,
     block_type_scopes: Vec<BlockTypeBindings>,
@@ -618,6 +624,18 @@ impl ProductionSyntaxCollector {
             Some(FieldExposure::Enum(container_exposed)) => *container_exposed,
             Some(FieldExposure::Struct(container_exposed) | FieldExposure::Union(container_exposed)) => *container_exposed && visibility_is_exposed(visibility),
             None => visibility_is_exposed(visibility),
+        }
+    }
+
+    fn record_visibility(&mut self, visibility: &Visibility) {
+        if let Err(error) = self.visibilities.record_visibility(visibility) {
+            self.error = Some(error);
+        }
+    }
+
+    fn record_visibilities_in_tokens(&mut self, tokens: &TokenStream) {
+        if let Err(error) = self.visibilities.record_tokens(tokens) {
+            self.error = Some(error);
         }
     }
 
@@ -1278,6 +1296,12 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
 
     fn visit_token_stream(&mut self, tokens: &'ast TokenStream) {
         self.record_concrete_stores_in_tokens(tokens);
+        self.record_visibilities_in_tokens(tokens);
+    }
+
+    fn visit_visibility(&mut self, visibility: &'ast Visibility) {
+        self.record_visibility(visibility);
+        visit::visit_visibility(self, visibility);
     }
 
     fn visit_path(&mut self, path: &'ast SynPath) {
@@ -1368,6 +1392,11 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         if self.generic_default_depth > 0
             && let Err(error) = self.concrete_stores.record_generic_default_attribute(attribute, site_context, &self.cfg_context)
         {
+            self.error = Some(error);
+            self.leave_site_context(previous);
+            return;
+        }
+        if let Err(error) = self.visibilities.record_attribute(attribute, &self.cfg_context) {
             self.error = Some(error);
             self.leave_site_context(previous);
             return;

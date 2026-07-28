@@ -414,6 +414,11 @@ fn cfg_attr_scans_only_nested_attributes_that_can_apply_in_production() {
 
     let production = "#[cfg_attr(feature = \"other\", serde(serialize_with = \"crate::server::serialize\"))]\nstruct Record;\n";
     assert!(imports("src/adapter.rs", production).unwrap_err().to_string().contains("production attribute token stream"));
+
+    let disabled = "#[cfg_attr(feature = \"other\", cfg(test), serde(serialize_with = \"crate::server::serialize\"))]\n\
+                    #[cfg_attr(feature = \"other\", cfg_attr(all(), cfg(feature = \"testing\")), serde(serialize_with = \"crate::ui::serialize\"))]\n\
+                    struct Disabled;\n";
+    assert!(imports("src/adapter.rs", disabled).expect("production-disabled nested attributes").is_empty());
 }
 
 #[test]
@@ -1586,5 +1591,50 @@ fn canonical_store_names_and_test_only_aliases_remain_classifiable() -> Result<(
             postgres_store: 0,
         }
     );
+    Ok(())
+}
+
+#[test]
+fn restricted_visibilities_are_counted_only_in_production_syntax() -> Result<()> {
+    let source = "pub(crate) struct CrateVisible;\n\
+                  pub(in crate::adapter) fn narrowed() {}\n\
+                  mod nested { pub(super) fn parent_visible() {} pub(in super::deeper) fn deeper() {} }\n\
+                  #[cfg(test)] pub(crate) fn test_only() {}\n\
+                  #[cfg(feature = \"testing\")] pub(super) fn testing_only() {}\n\
+                  const TEXT: &str = \"pub(crate) pub(super)\";\n";
+    assert_eq!(concrete_facts(source)?.visibilities, VisibilityCounts { pub_crate: 2, pub_super: 2 });
+    Ok(())
+}
+
+#[test]
+fn macro_token_visibilities_are_counted_without_plain_text() -> Result<()> {
+    let source = "macro_rules! exports { () => { pub(crate) fn generated() {} pub(in super) struct Parent; } }\n\
+                  const TEXT: &str = \"pub(crate)\";\n";
+    assert_eq!(concrete_facts(source)?.visibilities, VisibilityCounts { pub_crate: 1, pub_super: 1 });
+    Ok(())
+}
+
+#[test]
+fn cfg_attr_visibility_tokens_follow_production_cfg_semantics() -> Result<()> {
+    let source = "#[cfg_attr(test, serde(something(pub(crate))))]\n\
+                  #[cfg_attr(feature = \"testing\", serde(something(pub(super))))]\n\
+                  struct TestOnly;\n\
+                  #[cfg_attr(feature = \"other\", serde(something(pub(crate))))]\n\
+                  #[cfg_attr(all(), cfg_attr(feature = \"other\", serde(something(pub(super)))))]\n\
+                  #[cfg_attr(feature = \"other\", cfg_attr(feature = \"independent\", cfg(test)), serde(something(pub(super))))]\n\
+                  struct ProductionCapable;\n";
+    assert_eq!(concrete_facts(source)?.visibilities, VisibilityCounts { pub_crate: 1, pub_super: 2 });
+    Ok(())
+}
+
+#[test]
+fn cfg_attr_disabling_siblings_remove_visibility_tokens_from_production() -> Result<()> {
+    let source = "#[cfg_attr(feature = \"other\", cfg(test), serde(something(pub(crate))))]\n\
+                  struct Direct;\n\
+                  #[cfg_attr(feature = \"other\", cfg_attr(all(), cfg(feature = \"testing\")), serde(something(pub(super))))]\n\
+                  struct Nested;\n\
+                  #[cfg_attr(feature = \"other\", cfg_attr(feature = \"other\", cfg(test)), serde(something(pub(crate))))]\n\
+                  struct RepeatedCondition;\n";
+    assert_eq!(concrete_facts(source)?.visibilities, VisibilityCounts::default());
     Ok(())
 }

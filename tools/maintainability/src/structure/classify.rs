@@ -11,8 +11,8 @@ use crate::scan::syntax_fingerprint;
 
 use super::syntax::{
     ConcreteStoreCounts, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionAncestorPath, ProductionCfgContext, ProductionSourceRevision, ProductionSyntaxContext,
-    ProductionSyntaxFacts, ProductionSyntaxOptions, PublicReexportEvidence, TestLineCollector, TypeDeclarationEvidence, normalized_ident, production_cfg_context,
-    production_syntax_facts_with_context, reject_module_path_overrides, source_module, visibility_is_exposed,
+    ProductionSyntaxFacts, ProductionSyntaxOptions, PublicReexportEvidence, TestLineCollector, TypeDeclarationEvidence, VisibilityCounts, normalized_ident,
+    production_cfg_context, production_syntax_facts_with_context, reject_module_path_overrides, source_module, visibility_is_exposed,
 };
 
 mod module_macro;
@@ -37,6 +37,7 @@ pub struct FileMeasurement {
     pub production_generic_default_store_sites: ConcreteStoreSites,
     pub production_signature_store_sites: ConcreteStoreSignatureSites,
     pub production_store_binding_sites: ConcreteStoreSites,
+    pub production_visibilities: VisibilityCounts,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -308,6 +309,7 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
             production_generic_default_store_sites: production_facts.generic_default_concrete_store_sites,
             production_signature_store_sites: production_facts.signature_concrete_store_sites,
             production_store_binding_sites: production_facts.binding_concrete_store_sites,
+            production_visibilities: production_facts.visibilities,
         });
     }
     Ok(Inventory { files })

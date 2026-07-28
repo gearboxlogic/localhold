@@ -3,7 +3,7 @@ use crate::structure::manifest::model::{
     ComponentTransfer, FeatureFreezeStatus, FileException, FileExceptionKind, FileExceptionStatus, Hotspot, HotspotKind, HotspotStatus, Limits, LogicalComponent, PathEvolution,
     PathEvolutionKind, PreGateAdjustment, SplitAllowance, SplitAllowanceStatus, StructureManifest,
 };
-use crate::structure::syntax::{ConcreteStoreCounts, ConcreteStoreSignatureSites, ConcreteStoreSites};
+use crate::structure::syntax::{ConcreteStoreCounts, ConcreteStoreSignatureSites, ConcreteStoreSites, VisibilityCounts};
 
 pub(super) fn file(path: &str, physical: usize, production: usize) -> FileMeasurement {
     let test_lines = physical.checked_sub(production).expect("fixture production lines must not exceed physical lines");
@@ -23,6 +23,7 @@ pub(super) fn file(path: &str, physical: usize, production: usize) -> FileMeasur
         production_generic_default_store_sites: ConcreteStoreSites::default(),
         production_signature_store_sites: ConcreteStoreSignatureSites::default(),
         production_store_binding_sites: ConcreteStoreSites::default(),
+        production_visibilities: VisibilityCounts::default(),
     }
 }
 

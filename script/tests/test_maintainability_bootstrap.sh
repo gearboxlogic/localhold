@@ -80,6 +80,18 @@ touch "$fixture/parent/.cargo/config"
 expect_failure
 rm -r "$fixture/parent/.cargo"
 
+fake_bin="$fixture/fake-bin"
+mkdir "$fake_bin"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    '[[ ${1:-} == -m && ${2:-} == "$FAKE_DRIVE_ROOT" ]] || exit 1' \
+    'printf "D:/\n"' >"$fake_bin/cygpath"
+chmod +x "$fake_bin/cygpath"
+mkdir -p "$fixture/parent/.cargo"
+touch "$fixture/parent/.cargo/config"
+FAKE_DRIVE_ROOT=$test_repository PATH="$fake_bin:$PATH" run_check >/dev/null
+rm -r "$fixture/parent/.cargo"
+
 cargo_home="$fixture/cargo-home"
 mkdir -p "$cargo_home"
 touch "$cargo_home/config.toml"

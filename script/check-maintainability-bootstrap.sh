@@ -54,12 +54,27 @@ reject_cargo_config() {
     done
 }
 
+is_filesystem_root() {
+    local directory=$1
+    local parent
+    parent=$(dirname -- "$directory")
+    if [[ $parent == "$directory" ]]; then
+        return 0
+    fi
+    if command -v cygpath >/dev/null 2>&1; then
+        local windows_directory
+        if windows_directory=$(cygpath -m "$directory" 2>/dev/null) && [[ $windows_directory =~ ^[[:alpha:]]:/$ ]]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
 directory=$repository_root
 while :; do
     reject_cargo_config "$directory/.cargo"
-    parent=$(dirname -- "$directory")
-    [[ $parent == "$directory" ]] && break
-    directory=$parent
+    is_filesystem_root "$directory" && break
+    directory=$(dirname -- "$directory")
 done
 
 cargo_home=${CARGO_HOME:-}

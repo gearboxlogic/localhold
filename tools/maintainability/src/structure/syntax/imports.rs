@@ -30,7 +30,7 @@ struct ImportCollector<'a> {
 
 impl ImportCollector<'_> {
     fn collect_use(&mut self, item: &ItemUse) -> Result<()> {
-        if self.test_lines.line_is_test(item.span().start().line) {
+        if item.leading_colon.is_some() || self.test_lines.line_is_test(item.span().start().line) {
             return Ok(());
         }
         let mut paths = Vec::new();
@@ -78,7 +78,7 @@ impl<'ast> Visit<'ast> for ImportCollector<'_> {
     }
 
     fn visit_path(&mut self, path: &'ast Path) {
-        if self.error.is_none() && !self.test_lines.line_is_test(path.span().start().line) {
+        if self.error.is_none() && path.leading_colon.is_none() && !self.test_lines.line_is_test(path.span().start().line) {
             let segments = path.segments.iter().map(|segment| normalized_ident(&segment.ident)).collect::<Vec<_>>();
             let is_qualified = segments.len() > 1 || matches!(segments.first().map(String::as_str), Some("crate" | "self" | "super"));
             if is_qualified && let Err(error) = self.collect_segments(&segments, false) {
@@ -221,6 +221,14 @@ mod tests {
             imports("src/adapter.rs", source).expect("imports and qualified paths"),
             ["crate::server::Imported", "crate::server::Qualified", "crate::ui::qualified"]
         );
+    }
+
+    #[test]
+    fn absolute_external_paths_are_not_classified_as_crate_relative() {
+        let source = "use ::server::External;\n\
+                      use ::ui::External as ExternalUi;\n\
+                      fn build() -> ::server::Qualified { ::ui::qualified() }\n";
+        assert!(imports("src/adapter.rs", source).expect("absolute external paths").is_empty());
     }
 
     #[test]

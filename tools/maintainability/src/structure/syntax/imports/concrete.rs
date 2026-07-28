@@ -71,6 +71,9 @@ impl ConcreteStoreInventory {
         };
         let mut declaration = item.clone();
         declaration.attrs.retain(|attribute| !attribute.path().is_ident("doc"));
+        for field in &mut declaration.fields {
+            field.attrs.retain(|attribute| !attribute.path().is_ident("doc"));
+        }
         let declaration = syntax_fingerprint(&declaration);
         if cfg_identity.is_empty() && ancestors.is_empty() {
             sites.push(declaration);

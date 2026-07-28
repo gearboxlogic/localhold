@@ -24,7 +24,7 @@ mod resolution;
 mod tokens;
 pub use concrete::{ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites};
 use concrete::{ConcreteStoreInventory, context_fingerprint, is_concrete_store_name, tokens_contain_concrete_store};
-use reexports::{UseResolution, resolve_public_reexport_aliases};
+use reexports::{PendingPublicReexport, UseResolution, resolve_public_reexport_aliases};
 use resolution::{StringScan, UsePath, flatten_use_tree, resolve_path, restricted_attribute_identifier, restricted_token_identifier, source_module};
 use tokens::resolving_tokens;
 
@@ -107,14 +107,14 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
     }
     collector.imports.sort();
     collector.imports.dedup();
-    resolve_public_reexport_aliases(&mut collector.public_reexports, &collector.use_resolutions);
-    collector.public_reexports.sort();
-    collector.public_reexports.dedup();
+    let mut public_reexports = resolve_public_reexport_aliases(collector.public_reexports, &collector.use_resolutions);
+    public_reexports.sort();
+    public_reexports.dedup();
     collector.concrete_stores.finish();
     Ok(ProductionSyntaxFacts {
         module: collector.module,
         internal_imports: collector.imports,
-        public_reexports: collector.public_reexports,
+        public_reexports,
         concrete_stores: collector.concrete_stores.counts,
         public_concrete_store_structs: collector.concrete_stores.public_struct_declarations,
         concrete_store_sites: collector.concrete_stores.sites,
@@ -130,7 +130,7 @@ struct ProductionSyntaxCollector {
     builtin_stringify_block_aliases: Vec<BTreeSet<String>>,
     imports: Vec<String>,
     use_resolutions: Vec<UseResolution>,
-    public_reexports: Vec<PublicReexportEvidence>,
+    public_reexports: Vec<PendingPublicReexport>,
     concrete_stores: ConcreteStoreInventory,
     site_context: Option<String>,
     block_depth: usize,
@@ -196,10 +196,13 @@ impl ProductionSyntaxCollector {
                 self.cfg_context.identity(),
                 self.declaration_ancestors.join("\0")
             );
-            self.public_reexports.push(PublicReexportEvidence {
-                exported_path,
-                target_path,
-                fingerprint: syntax_fingerprint(&identity),
+            self.public_reexports.push(PendingPublicReexport {
+                evidence: PublicReexportEvidence {
+                    exported_path,
+                    target_path,
+                    fingerprint: syntax_fingerprint(&identity),
+                },
+                cfg: self.cfg_context.clone(),
             });
         }
         Ok(())
@@ -229,6 +232,7 @@ impl ProductionSyntaxCollector {
                 exported_path,
                 target_path,
                 fingerprint: syntax_fingerprint(&identity),
+                cfg: self.cfg_context.clone(),
             });
         }
         Ok(())

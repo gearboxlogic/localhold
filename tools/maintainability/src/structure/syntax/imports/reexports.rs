@@ -2,22 +2,39 @@ use std::collections::BTreeSet;
 
 use crate::scan::syntax_fingerprint;
 
+use super::super::ProductionCfgContext;
 use super::PublicReexportEvidence;
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct PendingPublicReexport {
+    pub(super) evidence: PublicReexportEvidence,
+    pub(super) cfg: ProductionCfgContext,
+}
+
+#[derive(Clone, Debug)]
 pub(super) struct UseResolution {
     pub(super) exported_path: Vec<String>,
     pub(super) target_path: Vec<String>,
     pub(super) fingerprint: String,
+    pub(super) cfg: ProductionCfgContext,
 }
 
 type ResolvedUseTargets = Vec<(Vec<String>, Vec<String>)>;
 
-pub(super) fn resolve_public_reexport_aliases(reexports: &mut Vec<PublicReexportEvidence>, resolutions: &[UseResolution]) {
-    let unresolved = std::mem::take(reexports);
-    for evidence in unresolved {
+struct AliasResolver<'a> {
+    resolutions: &'a [UseResolution],
+    targets: &'a mut ResolvedUseTargets,
+}
+
+pub(super) fn resolve_public_reexport_aliases(reexports: Vec<PendingPublicReexport>, resolutions: &[UseResolution]) -> Vec<PublicReexportEvidence> {
+    let mut resolved = Vec::new();
+    for pending in reexports {
+        let evidence = pending.evidence;
         let mut targets = Vec::new();
-        resolve_use_aliases(evidence.target_path.clone(), resolutions, &mut BTreeSet::new(), &mut Vec::new(), &mut targets);
+        AliasResolver {
+            resolutions,
+            targets: &mut targets,
+        }
+        .resolve(evidence.target_path.clone(), &pending.cfg, &mut BTreeSet::new(), &mut Vec::new());
         for (target_path, alias_fingerprints) in targets {
             let fingerprint = if alias_fingerprints.is_empty() && target_path == evidence.target_path {
                 evidence.fingerprint.clone()
@@ -29,38 +46,39 @@ pub(super) fn resolve_public_reexport_aliases(reexports: &mut Vec<PublicReexport
                     alias_fingerprints.join("\0")
                 ))
             };
-            reexports.push(PublicReexportEvidence {
+            resolved.push(PublicReexportEvidence {
                 exported_path: evidence.exported_path.clone(),
                 target_path,
                 fingerprint,
             });
         }
     }
+    resolved
 }
 
-fn resolve_use_aliases(
-    path: Vec<String>,
-    resolutions: &[UseResolution],
-    visited: &mut BTreeSet<Vec<String>>,
-    alias_fingerprints: &mut Vec<String>,
-    targets: &mut ResolvedUseTargets,
-) {
-    if !visited.insert(path.clone()) {
-        targets.push((path, alias_fingerprints.clone()));
-        return;
-    }
-    let rewritten = resolutions
-        .iter()
-        .filter_map(|resolution| rewrite_use_target(&path, resolution).map(|target| (target, &resolution.fingerprint)))
-        .filter(|(target, _)| target != &path)
-        .collect::<Vec<_>>();
-    if rewritten.is_empty() {
-        targets.push((path.clone(), alias_fingerprints.clone()));
-    } else {
-        for (target, fingerprint) in rewritten {
-            alias_fingerprints.push(fingerprint.clone());
-            resolve_use_aliases(target, resolutions, &mut visited.clone(), alias_fingerprints, targets);
-            alias_fingerprints.pop();
+impl AliasResolver<'_> {
+    fn resolve(&mut self, path: Vec<String>, cfg: &ProductionCfgContext, visited: &mut BTreeSet<Vec<String>>, alias_fingerprints: &mut Vec<String>) {
+        if !visited.insert(path.clone()) {
+            self.targets.push((path, alias_fingerprints.clone()));
+            return;
+        }
+        let rewritten = self
+            .resolutions
+            .iter()
+            .filter_map(|resolution| {
+                let compatible_cfg = cfg.conjoin(&resolution.cfg)?;
+                rewrite_use_target(&path, resolution).map(|target| (target, resolution.fingerprint.clone(), compatible_cfg))
+            })
+            .filter(|(target, _, _)| target != &path)
+            .collect::<Vec<_>>();
+        if rewritten.is_empty() {
+            self.targets.push((path, alias_fingerprints.clone()));
+        } else {
+            for (target, fingerprint, compatible_cfg) in rewritten {
+                alias_fingerprints.push(fingerprint);
+                self.resolve(target, &compatible_cfg, &mut visited.clone(), alias_fingerprints);
+                alias_fingerprints.pop();
+            }
         }
     }
 }

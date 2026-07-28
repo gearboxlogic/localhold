@@ -98,6 +98,21 @@ fn bare_paths_resolve_relative_to_their_rust_2018_module() -> Result<()> {
 }
 
 #[test]
+fn public_reexport_aliases_use_only_cfg_compatible_bindings() -> Result<()> {
+    let facts = concrete_facts(
+        "#[cfg(feature = \"legacy\")]\n\
+         use crate::store_helper as facade;\n\
+         #[cfg(not(feature = \"legacy\"))]\n\
+         use crate::unrelated as facade;\n\
+         #[cfg(not(feature = \"legacy\"))]\n\
+         pub use facade::open;\n",
+    )?;
+    assert_eq!(facts.public_reexports.len(), 1);
+    assert_eq!(facts.public_reexports[0].target_path, ["unrelated", "open"]);
+    Ok(())
+}
+
+#[test]
 fn nested_custom_library_roots_define_relative_module_paths() -> Result<()> {
     let syntax = syn::parse_file("use super::server::Service;\n")?;
     assert_eq!(
@@ -406,6 +421,12 @@ fn canonical_concrete_store_declarations_require_public_production_structs() -> 
 fn canonical_declaration_fingerprints_ignore_outer_attributes_but_pin_shape() -> Result<()> {
     let plain = concrete_facts("pub struct SqliteStore { inner: Arc<SqliteInner> }")?;
     let documented = concrete_facts("/// SQLite backend.\npub struct SqliteStore { inner: Arc<SqliteInner> }")?;
+    let documented_field = concrete_facts(
+        "pub struct SqliteStore {\n\
+             /// Shared backend state.\n\
+             inner: Arc<SqliteInner>\n\
+         }",
+    )?;
     let derived = concrete_facts("#[derive(Clone, Debug)]\npub struct SqliteStore { inner: Arc<SqliteInner> }")?;
     let replaced = concrete_facts("pub struct SqliteStore;")?;
     let feature_gated = concrete_facts(
@@ -430,6 +451,7 @@ fn canonical_declaration_fingerprints_ignore_outer_attributes_but_pin_shape() ->
     )?;
 
     assert_eq!(plain.public_concrete_store_structs, documented.public_concrete_store_structs);
+    assert_eq!(plain.public_concrete_store_structs, documented_field.public_concrete_store_structs);
     assert_ne!(plain.public_concrete_store_structs, derived.public_concrete_store_structs);
     assert_ne!(plain.public_concrete_store_structs, replaced.public_concrete_store_structs);
     assert_ne!(plain.public_concrete_store_structs, feature_gated.public_concrete_store_structs);

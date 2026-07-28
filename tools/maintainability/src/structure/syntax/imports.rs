@@ -195,13 +195,25 @@ impl ProductionSyntaxCollector {
     }
 
     fn record_concrete_stores_in_signature(&mut self, kind: &str, syntax: &impl ToTokens) {
+        let tokens = syntax.to_token_stream();
+        self.record_concrete_stores_in_signature_with_identity(kind, &tokens, &tokens);
+    }
+
+    fn record_concrete_stores_in_visible_signature(&mut self, kind: &str, visibility: &Visibility, syntax: &impl ToTokens) {
+        let tokens = syntax.to_token_stream();
+        let mut identity = visibility.to_token_stream();
+        identity.extend(tokens.clone());
+        self.record_concrete_stores_in_signature_with_identity(kind, &tokens, &identity);
+    }
+
+    fn record_concrete_stores_in_signature_with_identity(&mut self, kind: &str, tokens: &TokenStream, identity: &TokenStream) {
         let context = format!(
             "{kind}:{}\0cfg:{}\0ancestors:{}",
-            syntax_fingerprint(syntax),
+            syntax_fingerprint(identity),
             self.cfg_context.identity(),
             self.declaration_ancestors.join("\0")
         );
-        self.concrete_stores.record_signature_tokens(&syntax.to_token_stream(), &context);
+        self.concrete_stores.record_signature_tokens(tokens, &context);
     }
 
     fn enter_site_context(&mut self, kind: &str, syntax: &impl ToTokens) -> Option<String> {
@@ -336,7 +348,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             return;
         };
         let previous = self.enter_site_context("field", node);
-        self.record_concrete_stores_in_signature("field-type", &node.ty);
+        self.record_concrete_stores_in_visible_signature("field-type", &node.vis, &node.ty);
         visit::visit_field(self, node);
         self.leave_site_context(previous);
         self.leave_production_node(cfg);
@@ -400,22 +412,23 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     fn visit_item_impl(&mut self, item: &'ast ItemImpl) {
         let mut header = item.clone();
         header.items.clear();
-        let context = if item.trait_.is_some() {
+        let binding = if item.trait_.is_some() {
             format!("trait-implementation:{}", syntax_fingerprint(item))
         } else {
             format!("impl-header:{}", syntax_fingerprint(&header))
         };
+        let context = format!("{binding}\0cfg:{}\0ancestors:{}", self.cfg_context.identity(), self.declaration_ancestors.join("\0"));
         self.concrete_stores.record_binding_tokens(&header.to_token_stream(), &context);
         visit::visit_item_impl(self, item);
     }
 
     fn visit_item_fn(&mut self, item: &'ast ItemFn) {
-        self.record_concrete_stores_in_signature("function-signature", &item.sig);
+        self.record_concrete_stores_in_visible_signature("function-signature", &item.vis, &item.sig);
         visit::visit_item_fn(self, item);
     }
 
     fn visit_impl_item_fn(&mut self, item: &'ast ImplItemFn) {
-        self.record_concrete_stores_in_signature("method-signature", &item.sig);
+        self.record_concrete_stores_in_visible_signature("method-signature", &item.vis, &item.sig);
         visit::visit_impl_item_fn(self, item);
     }
 
@@ -425,22 +438,22 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_foreign_item_fn(&mut self, item: &'ast ForeignItemFn) {
-        self.record_concrete_stores_in_signature("foreign-function-signature", &item.sig);
+        self.record_concrete_stores_in_visible_signature("foreign-function-signature", &item.vis, &item.sig);
         visit::visit_foreign_item_fn(self, item);
     }
 
     fn visit_item_const(&mut self, item: &'ast ItemConst) {
-        self.record_concrete_stores_in_signature("const-type", &item.ty);
+        self.record_concrete_stores_in_visible_signature("const-type", &item.vis, &item.ty);
         visit::visit_item_const(self, item);
     }
 
     fn visit_item_static(&mut self, item: &'ast ItemStatic) {
-        self.record_concrete_stores_in_signature("static-type", &item.ty);
+        self.record_concrete_stores_in_visible_signature("static-type", &item.vis, &item.ty);
         visit::visit_item_static(self, item);
     }
 
     fn visit_impl_item_const(&mut self, item: &'ast ImplItemConst) {
-        self.record_concrete_stores_in_signature("associated-const-type", &item.ty);
+        self.record_concrete_stores_in_visible_signature("associated-const-type", &item.vis, &item.ty);
         visit::visit_impl_item_const(self, item);
     }
 
@@ -450,7 +463,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_foreign_item_static(&mut self, item: &'ast ForeignItemStatic) {
-        self.record_concrete_stores_in_signature("foreign-static-type", &item.ty);
+        self.record_concrete_stores_in_visible_signature("foreign-static-type", &item.vis, &item.ty);
         visit::visit_foreign_item_static(self, item);
     }
 

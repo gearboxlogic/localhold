@@ -18,6 +18,7 @@ enum ClauseState {
 #[derive(Default)]
 struct Encoder {
     atoms: BTreeMap<String, usize>,
+    exclusive_groups: BTreeMap<String, Vec<usize>>,
     clauses: Vec<Vec<Literal>>,
     variable_count: usize,
 }
@@ -37,12 +38,21 @@ impl Encoder {
                 self.clauses.push(vec![Literal { variable, positive: *value }]);
                 variable
             }
-            Predicate::Atom(atom) => {
-                if let Some(variable) = self.atoms.get(atom) {
+            Predicate::Atom { identity, exclusive_group } => {
+                if let Some(variable) = self.atoms.get(identity) {
                     return *variable;
                 }
                 let variable = self.new_variable();
-                self.atoms.insert(atom.clone(), variable);
+                self.atoms.insert(identity.clone(), variable);
+                if let Some(group) = exclusive_group {
+                    let peers = self.exclusive_groups.entry(group.clone()).or_default();
+                    self.clauses.extend(
+                        peers
+                            .iter()
+                            .map(|peer| vec![Literal { variable, positive: false }, Literal { variable: *peer, positive: false }]),
+                    );
+                    peers.push(variable);
+                }
                 variable
             }
             Predicate::All(nested) => {
@@ -170,15 +180,21 @@ mod tests {
 
     #[test]
     fn contradiction_remains_unsatisfiable_beyond_enumeration_sized_inputs() {
-        let mut predicates = (0..24).map(|index| Predicate::Atom(format!("feature-{index}"))).collect::<Vec<_>>();
-        predicates.push(Predicate::Atom("contradiction".to_owned()));
-        predicates.push(Predicate::Not(Box::new(Predicate::Atom("contradiction".to_owned()))));
+        let atom = |identity: String| Predicate::Atom { identity, exclusive_group: None };
+        let mut predicates = (0..24).map(|index| atom(format!("feature-{index}"))).collect::<Vec<_>>();
+        predicates.push(atom("contradiction".to_owned()));
+        predicates.push(Predicate::Not(Box::new(atom("contradiction".to_owned()))));
         assert!(!is_satisfiable(&Predicate::All(predicates)));
     }
 
     #[test]
     fn large_disjunction_with_one_available_branch_is_satisfiable() {
-        let alternatives = (0..24).map(|index| Predicate::Atom(format!("feature-{index}"))).collect::<Vec<_>>();
+        let alternatives = (0..24)
+            .map(|index| Predicate::Atom {
+                identity: format!("feature-{index}"),
+                exclusive_group: None,
+            })
+            .collect::<Vec<_>>();
         assert!(is_satisfiable(&Predicate::Any(alternatives)));
     }
 }

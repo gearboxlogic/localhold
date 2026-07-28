@@ -507,10 +507,41 @@ fn raw_and_cooked_cfg_literals_share_one_atom_identity() -> Result<()> {
 }
 
 #[test]
+fn mutually_exclusive_target_values_disable_unreachable_store_syntax() -> Result<()> {
+    let facts = concrete_facts(
+        "#[cfg(target_os = \"linux\")]\n\
+         mod linux {\n\
+             #[cfg(target_os = \"windows\")]\n\
+             struct Unreachable(SqliteStore);\n\
+         }\n\
+         #[cfg(any(target_os = \"linux\", target_os = \"windows\"))]\n\
+         struct Reachable(PostgresStore);\n\
+         #[cfg(all(target_feature = \"sse2\", target_feature = \"avx\"))]\n\
+         struct MultipleTargetFeatures(PostgresStore);\n",
+    )?;
+    assert_eq!(
+        facts.concrete_stores,
+        ConcreteStoreCounts {
+            sqlite_store: 0,
+            postgres_store: 2,
+        }
+    );
+    Ok(())
+}
+
+#[test]
 fn concrete_store_bearing_signatures_are_inventoried_separately_from_bodies() -> Result<()> {
     let facts = concrete_facts("pub(crate) fn open() -> SqliteStore { SqliteStore::open() }\n")?;
     assert_eq!(facts.signature_concrete_store_sites.sqlite_store.len(), 1);
     assert_eq!(facts.concrete_stores.sqlite_store, 2);
+    Ok(())
+}
+
+#[test]
+fn concrete_store_signature_identity_tracks_visibility() -> Result<()> {
+    let private = concrete_facts("fn open() -> SqliteStore { SqliteStore::open() }\n")?;
+    let restricted = concrete_facts("pub(crate) fn open() -> SqliteStore { SqliteStore::open() }\n")?;
+    assert_ne!(private.signature_concrete_store_sites, restricted.signature_concrete_store_sites);
     Ok(())
 }
 
@@ -521,6 +552,18 @@ fn canonical_binding_identity_tracks_trait_implementation_bodies() -> Result<()>
     assert_ne!(first.binding_concrete_store_sites, second.binding_concrete_store_sites);
     assert_eq!(first.binding_concrete_store_sites.sqlite_store.len(), 1);
     assert_ne!(first.concrete_store_sites, second.concrete_store_sites);
+    Ok(())
+}
+
+#[test]
+fn canonical_binding_identity_tracks_cfg_and_ancestor_placement() -> Result<()> {
+    let direct = concrete_facts("#[cfg(feature = \"legacy\")] impl MemoryReader for SqliteStore {}\n")?;
+    let changed_cfg = concrete_facts("#[cfg(feature = \"current\")] impl MemoryReader for SqliteStore {}\n")?;
+    let nested = concrete_facts("#[cfg(feature = \"legacy\")] mod legacy { impl MemoryReader for SqliteStore {} }\n")?;
+    assert_ne!(direct.binding_concrete_store_sites, changed_cfg.binding_concrete_store_sites);
+    assert_ne!(direct.binding_concrete_store_sites, nested.binding_concrete_store_sites);
+    assert_eq!(direct.binding_concrete_store_sites.sqlite_store.len(), 1);
+    assert_eq!(nested.binding_concrete_store_sites.sqlite_store.len(), 1);
     Ok(())
 }
 

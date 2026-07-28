@@ -13,7 +13,7 @@ use sat::is_satisfiable;
 #[derive(Clone, Debug)]
 enum Predicate {
     Constant(bool),
-    Atom(String),
+    Atom { identity: String, exclusive_group: Option<String> },
     All(Vec<Self>),
     Any(Vec<Self>),
     Not(Box<Self>),
@@ -62,7 +62,7 @@ impl Predicate {
     fn write_identity(&self, output: &mut String) {
         match self {
             Self::Constant(value) => output.push(if *value { '1' } else { '0' }),
-            Self::Atom(atom) => {
+            Self::Atom { identity: atom, .. } => {
                 output.push('a');
                 output.push_str(&atom.len().to_string());
                 output.push(':');
@@ -207,8 +207,23 @@ fn predicate(meta: &Meta) -> Result<Predicate> {
             }
             Ok(Predicate::Not(Box::new(predicates.remove(0))))
         }
-        Meta::Path(_) | Meta::NameValue(_) | Meta::List(_) => Ok(Predicate::Atom(normalized_atom_identity(&meta.to_token_stream()))),
+        Meta::Path(_) | Meta::NameValue(_) | Meta::List(_) => Ok(Predicate::Atom {
+            identity: normalized_atom_identity(&meta.to_token_stream()),
+            exclusive_group: exclusive_cfg_group(meta),
+        }),
     }
+}
+
+fn exclusive_cfg_group(meta: &Meta) -> Option<String> {
+    let Meta::NameValue(value) = meta else {
+        return None;
+    };
+    let key = value.path.get_ident().map(normalized_ident)?;
+    matches!(
+        key.as_str(),
+        "panic" | "target_abi" | "target_arch" | "target_endian" | "target_env" | "target_os" | "target_pointer_width" | "target_vendor"
+    )
+    .then_some(key)
 }
 
 fn normalized_atom_identity(tokens: &TokenStream) -> String {

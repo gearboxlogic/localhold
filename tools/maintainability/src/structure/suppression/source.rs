@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
+use quote::ToTokens;
 use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{Arm, Attribute, Expr, ForeignItem, GenericParam, ImplItem, Item, Local, Meta, StmtMacro, Token, TraitItem, Variant};
 
-use self::nodes::{foreign_item_scope, impl_item_scope, item_scope, trait_item_scope};
+use self::nodes::{SuppressionScope, foreign_item_scope, impl_item_scope, item_scope, trait_item_scope};
 use super::{SourceCategory, SourceSuppression};
 use crate::scan::syntax_fingerprint;
 use crate::structure::syntax::{
@@ -23,6 +24,8 @@ mod tests;
 struct PendingSuppression {
     item: String,
     scope: String,
+    signature: Option<String>,
+    target: Option<String>,
     category: SourceCategory,
     level: String,
     lint: String,
@@ -36,6 +39,8 @@ pub(super) struct SourceScanner {
     cfg_context: ProductionCfgContext,
     item: String,
     scope: String,
+    signature: Option<String>,
+    target: Option<String>,
     pending: Vec<PendingSuppression>,
     error: Option<anyhow::Error>,
 }
@@ -47,6 +52,8 @@ impl SourceScanner {
             cfg_context: ProductionCfgContext::default(),
             item: "<module>".to_owned(),
             scope: "module".to_owned(),
+            signature: None,
+            target: None,
             pending: Vec::new(),
             error: None,
         };
@@ -60,17 +67,24 @@ impl SourceScanner {
             let key = (
                 pending.item.clone(),
                 pending.scope.clone(),
+                pending.signature.clone(),
+                pending.target.clone(),
                 pending.category,
                 pending.level.clone(),
                 pending.lint.clone(),
+                pending.reason.clone(),
                 pending.macro_carried,
+                pending.fingerprint.clone(),
             );
             let occurrence = occurrences.entry(key).or_insert(0_usize);
-            sites.push(SourceSuppression {
+            let mut site = SourceSuppression {
+                id: String::new(),
                 path: path.to_owned(),
                 component: component.to_owned(),
                 item: pending.item,
                 scope: pending.scope,
+                signature: pending.signature,
+                target: pending.target,
                 category: pending.category,
                 level: pending.level,
                 lint: pending.lint,
@@ -78,13 +92,15 @@ impl SourceScanner {
                 macro_carried: pending.macro_carried,
                 occurrence: *occurrence,
                 fingerprint: pending.fingerprint,
-            });
+            };
+            site.id = site.stable_id();
+            sites.push(site);
             *occurrence = occurrence.checked_add(1).context("lint suppression occurrence overflow")?;
         }
         Ok(sites)
     }
 
-    fn visit_classified<'ast, T>(&mut self, attributes: Result<&[Attribute]>, item: Option<(String, String)>, node: &'ast T, visit: impl FnOnce(&mut Self, &'ast T)) {
+    fn visit_classified<'ast, T>(&mut self, attributes: Result<&[Attribute]>, item: Option<SuppressionScope>, node: &'ast T, visit: impl FnOnce(&mut Self, &'ast T)) {
         if self.error.is_some() {
             return;
         }
@@ -92,6 +108,8 @@ impl SourceScanner {
         let previous_cfg_context = self.cfg_context.clone();
         let previous_item = self.item.clone();
         let previous_scope = self.scope.clone();
+        let previous_signature = self.signature.clone();
+        let previous_target = self.target.clone();
         let attributes = match attributes {
             Ok(attributes) => attributes,
             Err(error) => {
@@ -109,21 +127,31 @@ impl SourceScanner {
                 }
             }
         }
-        if let Some((item, scope)) = item {
-            self.item = if previous_item == "<module>" { item } else { format!("{previous_item}::{item}") };
-            self.scope = scope;
+        if let Some(item) = item {
+            self.item = if previous_item == "<module>" {
+                item.item
+            } else {
+                format!("{previous_item}::{}", item.item)
+            };
+            self.scope = item.scope;
+            self.signature = item.signature;
+            self.target = None;
         }
         visit(self, node);
         self.category = previous_category;
         self.cfg_context = previous_cfg_context;
         self.item = previous_item;
         self.scope = previous_scope;
+        self.signature = previous_signature;
+        self.target = previous_target;
     }
 
-    fn visit_anonymous_scope<'ast, T>(&mut self, attributes: Result<&[Attribute]>, scope: &str, node: &'ast T, visit: impl FnOnce(&mut Self, &'ast T)) {
+    fn visit_anonymous_scope<'ast, T: ToTokens>(&mut self, attributes: Result<&[Attribute]>, scope: &str, node: &'ast T, visit: impl FnOnce(&mut Self, &'ast T)) {
         let previous_scope = std::mem::replace(&mut self.scope, scope.to_owned());
+        let previous_target = self.target.replace(syntax_fingerprint(node));
         self.visit_classified(attributes, None, node, visit);
         self.scope = previous_scope;
+        self.target = previous_target;
     }
 
     fn record_attribute(&mut self, attribute: &Attribute, macro_carried: bool) -> Result<()> {
@@ -176,6 +204,8 @@ impl SourceScanner {
             self.pending.push(PendingSuppression {
                 item: self.item.clone(),
                 scope: self.scope.clone(),
+                signature: self.signature.clone(),
+                target: self.target.clone(),
                 category,
                 level: level.to_owned(),
                 lint,
@@ -265,7 +295,16 @@ impl<'ast> Visit<'ast> for SourceScanner {
     }
 
     fn visit_variant(&mut self, node: &'ast Variant) {
-        self.visit_classified(Ok(&node.attrs), Some((normalized_ident(&node.ident), "variant".to_owned())), node, visit::visit_variant);
+        self.visit_classified(
+            Ok(&node.attrs),
+            Some(SuppressionScope {
+                item: normalized_ident(&node.ident),
+                scope: "variant".to_owned(),
+                signature: None,
+            }),
+            node,
+            visit::visit_variant,
+        );
     }
 
     fn visit_field(&mut self, node: &'ast syn::Field) {

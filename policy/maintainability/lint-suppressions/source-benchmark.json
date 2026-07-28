@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "category": "benchmark",
+  "entries": [
+    {"id":"source.0176b537f486051bd9c9192e5d9cd9a761c3d8161ee39a89a72a609318b1c51f","max_occurrences":1},
+    {"id":"source.0b02e0f87e05e145fbf441c43c0ed80944df1f1ade81843f166aea0569b33af4","max_occurrences":4},
+    {"id":"source.0eaf94c4ead27c079aba4d33fce20118b1f42eed2c941cb99331141b18874f80","max_occurrences":1},
+    {"id":"source.0ee3db5f65298f42cb80521910c4a0dfd169888dbc135353816d1a0c35078f27","max_occurrences":1},
+    {"id":"source.12e10a0a24fcddb0756d7e8beab98d587952bdd91db9eb348e029ef4e7a7c612","max_occurrences":1},
+    {"id":"source.232bfbcd3e6b2d2f682049bde0f316c9c35896d2b2459feb6216a155d32abe94","max_occurrences":1},
+    {"id":"source.2e2378043d115068a61963d73e07f308ca9e08d6a2038342e30cc2b89a660ee4","max_occurrences":1},
+    {"id":"source.421eb0fdadd576dae7eb0bdc610c9a008bf8dde0e8c5423024a76e4add7d48d3","max_occurrences":1},
+    {"id":"source.47dbd3cd7fa5ed71aec9e5f5d7bc07be6af23ea7b21b15aebd5f2761982210e8","max_occurrences":1},
+    {"id":"source.7e99c1389b12b9a5891009c77d3a8ca79f3bebb43d2d158b29c930b2ef6a9b6a","max_occurrences":4},
+    {"id":"source.8851830add42e480241f8bd4865af1b7588b402c96b546c5690a5c1fb270be4a","max_occurrences":1},
+    {"id":"source.93cdf7ac05cf15cd672754b6d0b6f1ff227b48d4cf11499ee372bef76104bc8f","max_occurrences":1},
+    {"id":"source.940ed1f2191edaff84cc51b32a506f1cc6c344bfe25c15e400aac477477ac004","max_occurrences":1},
+    {"id":"source.b52bb0b39232a3d88b5459576d69b94aa24c89d07ef4cdfb066c04799c9d2798","max_occurrences":1},
+    {"id":"source.cf82578408349a20554007e2cde7aa3da80b11eea1739b326a6918009a60b89f","max_occurrences":1},
+    {"id":"source.d15dde4f23a93030235a0b796a0b5a770195b52ef78988fa83e78ae650052509","max_occurrences":1},
+    {"id":"source.dea32ba3e0e066293a5624e5f20627866b7820798028a460c91a7727dcaf8c4f","max_occurrences":1},
+    {"id":"source.e98e4a64ddc9178317e219061c06696c549b329fb52bb2e5ec4a67a4577f23f0","max_occurrences":4}
+  ]
+}

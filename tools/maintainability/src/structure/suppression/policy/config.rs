@@ -1,0 +1,352 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Component, Path};
+use std::process::Command;
+
+use anyhow::{Context, Result, bail};
+
+use super::model::{CargoAllowance, ClippyConfigurationFile, ClippyConstraint, ClippySetting, Disposition, Status};
+use super::{require_id, require_text};
+
+type CargoAllowKey = (String, String, String);
+
+#[cfg(test)]
+mod tests;
+
+pub(super) fn validate_cargo_allowances(entries: &[CargoAllowance]) -> Result<()> {
+    let mut ids = BTreeSet::new();
+    let mut keys = BTreeSet::new();
+    for entry in entries {
+        require_id("Cargo allowance", &entry.id)?;
+        if !ids.insert(entry.id.as_str()) {
+            bail!("duplicate Cargo lint allowance ID {:?}", entry.id);
+        }
+        validate_relative_path(&entry.manifest, "Cargo allowance manifest")?;
+        require_name("Cargo lint family", &entry.family)?;
+        require_name("Cargo lint", &entry.lint)?;
+        if !keys.insert((entry.manifest.as_str(), entry.family.as_str(), entry.lint.as_str())) {
+            bail!("duplicate Cargo lint allowance for {} {}::{}", entry.manifest, entry.family, entry.lint);
+        }
+        for (label, value) in [
+            ("owner", entry.owner.as_str()),
+            ("issue", entry.issue.as_str()),
+            ("pull request", entry.pull_request.as_str()),
+            ("rationale", entry.rationale.as_str()),
+            ("safety invariant", entry.safety_invariant.as_str()),
+            ("alternatives considered", entry.alternatives_considered.as_str()),
+            ("substitute", entry.substitute.as_str()),
+            ("sentinel", entry.sentinel.as_str()),
+            ("evidence", entry.evidence.as_str()),
+            ("re-review phase", entry.re_review_phase.as_str()),
+        ] {
+            require_text(&entry.id, label, value)?;
+        }
+        validate_temporary_fields(&entry.id, entry.disposition, entry.removal_issue.as_deref(), entry.removal_phase.as_deref())?;
+    }
+    Ok(())
+}
+
+pub(super) fn compare_cargo_allows(workspace: &Path, entries: &[CargoAllowance]) -> Result<()> {
+    let observed = scan_cargo_allows(workspace)?;
+    let expected = entries
+        .iter()
+        .filter(|entry| entry.status == Status::Active)
+        .map(|entry| (entry.manifest.clone(), entry.family.clone(), entry.lint.clone()))
+        .collect::<BTreeSet<_>>();
+    if observed != expected {
+        bail!("Cargo lint allow configuration differs from reviewed policy: expected={expected:?}, observed={observed:?}");
+    }
+    Ok(())
+}
+
+pub(super) fn validate_clippy_configuration(policy: &ClippyConfigurationFile) -> Result<()> {
+    if policy.schema_version != 1 {
+        bail!("unsupported Clippy configuration policy schema {}", policy.schema_version);
+    }
+    let mut ids = BTreeSet::new();
+    let mut keys = BTreeSet::new();
+    for entry in &policy.entries {
+        require_id("Clippy configuration", &entry.id)?;
+        require_name("Clippy configuration key", &entry.key)?;
+        if !ids.insert(entry.id.as_str()) || !keys.insert(entry.key.as_str()) {
+            bail!("duplicate Clippy configuration policy ID or key");
+        }
+        for (label, value) in [
+            ("owner", entry.owner.as_str()),
+            ("issue", entry.issue.as_str()),
+            ("pull request", entry.pull_request.as_str()),
+            ("rationale", entry.rationale.as_str()),
+            ("safety invariant", entry.safety_invariant.as_str()),
+            ("alternatives considered", entry.alternatives_considered.as_str()),
+            ("sentinel", entry.sentinel.as_str()),
+            ("evidence", entry.evidence.as_str()),
+            ("re-review phase", entry.re_review_phase.as_str()),
+        ] {
+            require_text(&entry.id, label, value)?;
+        }
+        validate_clippy_constraint(entry)?;
+    }
+    Ok(())
+}
+
+pub(super) fn compare_clippy_configuration(workspace: &Path, entries: &[ClippySetting]) -> Result<()> {
+    let path = workspace.join("clippy.toml");
+    let source = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let parsed = source.parse::<toml::Table>().context("parse clippy.toml")?;
+    let active = entries.iter().map(|entry| (entry.key.as_str(), entry)).collect::<BTreeMap<_, _>>();
+    let observed = parsed.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    let expected = active.keys().copied().collect::<BTreeSet<_>>();
+    if observed != expected {
+        bail!("clippy.toml keys differ from reviewed policy: expected={expected:?}, observed={observed:?}");
+    }
+    for (key, setting) in active {
+        compare_clippy_value(key, &parsed[key], &setting.constraint)?;
+    }
+    Ok(())
+}
+
+pub(super) fn compare_clippy_previous_revision(workspace: &Path, revision: &str, previous_entries: &[ClippySetting]) -> Result<()> {
+    let current_source = fs::read_to_string(workspace.join("clippy.toml")).context("read current clippy.toml")?;
+    let current = current_source.parse::<toml::Table>().context("parse current clippy.toml")?;
+    let object = format!("{revision}:clippy.toml");
+    let output = Command::new("git")
+        .current_dir(workspace)
+        .args(["show", "--no-ext-diff", &object])
+        .output()
+        .context("read clippy.toml from maintainability base revision")?;
+    if !output.status.success() {
+        bail!("maintainability base revision has no readable clippy.toml");
+    }
+    let previous_source = String::from_utf8(output.stdout).context("previous clippy.toml is not UTF-8")?;
+    let previous = previous_source.parse::<toml::Table>().context("parse previous clippy.toml")?;
+    for entry in previous_entries {
+        let current_value = current
+            .get(&entry.key)
+            .with_context(|| format!("current clippy.toml is missing reviewed key {:?}", entry.key))?;
+        let previous_value = previous
+            .get(&entry.key)
+            .with_context(|| format!("previous clippy.toml is missing reviewed key {:?}", entry.key))?;
+        compare_clippy_ratchet(&entry.key, current_value, previous_value, &entry.constraint)?;
+    }
+    Ok(())
+}
+
+pub(super) fn reject_checked_in_weakening(workspace: &Path) -> Result<()> {
+    for path in execution_surfaces(workspace)? {
+        let source = fs::read_to_string(workspace.join(&path)).with_context(|| format!("read lint command execution surface {path}"))?;
+        let names_rust_tool = source.contains("cargo") || source.contains("rustc") || source.contains("clippy");
+        if names_rust_tool && weakening_token(&source) {
+            bail!("checked-in Rust command surface {path:?} contains a lint-weakening argument");
+        }
+        if weakening_environment(&source) && !may_name_scrubbed_environment(&path) {
+            bail!("checked-in Rust command surface {path:?} contains a lint-weakening environment channel");
+        }
+    }
+    Ok(())
+}
+
+fn scan_cargo_allows(workspace: &Path) -> Result<BTreeSet<CargoAllowKey>> {
+    let mut observed = BTreeSet::new();
+    for manifest in tracked_manifests(workspace)? {
+        let path = workspace.join(&manifest);
+        if fs::symlink_metadata(&path)
+            .with_context(|| format!("inspect Cargo manifest {}", path.display()))?
+            .file_type()
+            .is_symlink()
+        {
+            bail!("Cargo lint manifest cannot be a symlink: {manifest}");
+        }
+        let source = fs::read_to_string(&path).with_context(|| format!("read Cargo manifest {}", path.display()))?;
+        let parsed = source.parse::<toml::Table>().with_context(|| format!("parse Cargo manifest {}", path.display()))?;
+        let Some(lints) = parsed.get("lints").and_then(toml::Value::as_table) else {
+            continue;
+        };
+        record_manifest_allows(&manifest, lints, &mut observed)?;
+    }
+    Ok(observed)
+}
+
+fn record_manifest_allows(manifest: &str, lints: &toml::Table, observed: &mut BTreeSet<CargoAllowKey>) -> Result<()> {
+    for (family, settings) in lints {
+        let settings = settings.as_table().with_context(|| format!("Cargo lint family {family:?} in {manifest} is not a table"))?;
+        for (lint, setting) in settings {
+            let level = lint_level(setting).with_context(|| format!("parse Cargo lint {family}::{lint} in {manifest}"))?;
+            if level == "allow" {
+                observed.insert((manifest.to_owned(), family.clone(), lint.clone()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn tracked_manifests(workspace: &Path) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .current_dir(workspace)
+        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "Cargo.toml", ":(glob)**/Cargo.toml"])
+        .output()
+        .context("list tracked and proposed Cargo manifests")?;
+    if !output.status.success() {
+        bail!("git ls-files failed while listing Cargo lint manifests");
+    }
+    parse_nul_paths(&output.stdout, |path| path.ends_with("Cargo.toml"))
+}
+
+fn execution_surfaces(workspace: &Path) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .current_dir(workspace)
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            "Justfile",
+            "mise.toml",
+            ".github/workflows",
+            "script",
+        ])
+        .output()
+        .context("list checked-in command execution surfaces")?;
+    if !output.status.success() {
+        bail!("git ls-files failed while listing command execution surfaces");
+    }
+    parse_nul_paths(&output.stdout, |_| true)
+}
+
+fn parse_nul_paths(output: &[u8], include: impl Fn(&str) -> bool) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    for raw in output.split(|byte| *byte == b'\0').filter(|path| !path.is_empty()) {
+        let path = std::str::from_utf8(raw).context("tracked lint-policy path is not UTF-8")?;
+        validate_relative_path(path, "tracked lint-policy path")?;
+        if include(path) {
+            paths.push(path.to_owned());
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn lint_level(value: &toml::Value) -> Result<&str> {
+    if let Some(level) = value.as_str() {
+        return Ok(level);
+    }
+    value
+        .as_table()
+        .and_then(|table| table.get("level"))
+        .and_then(toml::Value::as_str)
+        .context("lint setting must be a string or a table with a string level")
+}
+
+fn compare_clippy_value(key: &str, actual: &toml::Value, constraint: &ClippyConstraint) -> Result<()> {
+    match constraint {
+        ClippyConstraint::MaximumInteger { value } => {
+            let actual = actual.as_integer().with_context(|| format!("Clippy setting {key:?} must be an integer"))?;
+            if actual <= 0 || actual > *value {
+                bail!("Clippy setting {key:?} must remain positive and no greater than its reviewed maximum {value}");
+            }
+        }
+        ClippyConstraint::StringSubset { values } => {
+            let actual = actual.as_array().with_context(|| format!("Clippy setting {key:?} must be an array"))?;
+            let actual = actual
+                .iter()
+                .map(|value| value.as_str().with_context(|| format!("Clippy setting {key:?} contains a non-string value")))
+                .collect::<Result<BTreeSet<_>>>()?;
+            let allowed = values.iter().map(String::as_str).collect::<BTreeSet<_>>();
+            if !actual.is_subset(&allowed) {
+                bail!("Clippy setting {key:?} expands its reviewed allowlist");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn compare_clippy_ratchet(key: &str, current: &toml::Value, previous: &toml::Value, constraint: &ClippyConstraint) -> Result<()> {
+    match constraint {
+        ClippyConstraint::MaximumInteger { .. } => {
+            let current = current.as_integer().with_context(|| format!("current Clippy setting {key:?} must be an integer"))?;
+            let previous = previous.as_integer().with_context(|| format!("previous Clippy setting {key:?} must be an integer"))?;
+            if current > previous {
+                bail!("Clippy threshold {key:?} cannot rise from its previous-revision value");
+            }
+        }
+        ClippyConstraint::StringSubset { .. } => {
+            let current = string_set(key, current, "current")?;
+            let previous = string_set(key, previous, "previous")?;
+            if !current.is_subset(&previous) {
+                bail!("Clippy allowlist {key:?} cannot expand beyond its previous-revision value");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn string_set<'a>(key: &str, value: &'a toml::Value, revision: &str) -> Result<BTreeSet<&'a str>> {
+    value
+        .as_array()
+        .with_context(|| format!("{revision} Clippy setting {key:?} must be an array"))?
+        .iter()
+        .map(|value| value.as_str().with_context(|| format!("{revision} Clippy setting {key:?} contains a non-string value")))
+        .collect()
+}
+
+fn validate_clippy_constraint(entry: &ClippySetting) -> Result<()> {
+    match &entry.constraint {
+        ClippyConstraint::MaximumInteger { value } if *value <= 0 => {
+            bail!("Clippy configuration {:?} maximum must be positive", entry.id);
+        }
+        ClippyConstraint::StringSubset { values } if values.is_empty() || values.iter().any(|value| value.trim().is_empty()) => {
+            bail!("Clippy configuration {:?} string allowlist must contain non-empty values", entry.id);
+        }
+        ClippyConstraint::StringSubset { values } if values.iter().collect::<BTreeSet<_>>().len() != values.len() => {
+            bail!("Clippy configuration {:?} string allowlist contains duplicates", entry.id);
+        }
+        ClippyConstraint::MaximumInteger { .. } | ClippyConstraint::StringSubset { .. } => {}
+    }
+    Ok(())
+}
+
+fn weakening_token(source: &str) -> bool {
+    source.contains("--cap-lints")
+        || source
+            .split(|character: char| character.is_whitespace() || matches!(character, '\'' | '"' | '\\' | '='))
+            .any(|token| token == "-A" || token.starts_with("-A") && token.len() > 2 || token == "--allow")
+}
+
+fn weakening_environment(source: &str) -> bool {
+    ["RUSTFLAGS", "RUSTDOCFLAGS", "CLIPPY_ARGS"].iter().any(|name| source.contains(name))
+}
+
+fn may_name_scrubbed_environment(path: &str) -> bool {
+    matches!(path, "script/check-maintainability-bootstrap.sh" | "script/tests/test_maintainability_bootstrap.sh")
+}
+
+fn validate_temporary_fields(id: &str, disposition: Disposition, removal_issue: Option<&str>, removal_phase: Option<&str>) -> Result<()> {
+    match disposition {
+        Disposition::Permanent if removal_issue.is_some() || removal_phase.is_some() => {
+            bail!("permanent Cargo lint allowance {id:?} cannot carry temporary removal fields");
+        }
+        Disposition::Temporary => {
+            require_text(id, "removal issue", removal_issue.unwrap_or_default())?;
+            require_text(id, "removal phase", removal_phase.unwrap_or_default())?;
+        }
+        Disposition::Permanent => {}
+    }
+    Ok(())
+}
+
+fn require_name(label: &str, value: &str) -> Result<()> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')) {
+        bail!("{label} must use lowercase ASCII letters, digits, '-', or '_'");
+    }
+    Ok(())
+}
+
+fn validate_relative_path(value: &str, label: &str) -> Result<()> {
+    let path = Path::new(value);
+    if path.is_absolute() || path.components().any(|component| !matches!(component, Component::Normal(_))) {
+        bail!("{label} must be a normalized relative path: {value:?}");
+    }
+    Ok(())
+}

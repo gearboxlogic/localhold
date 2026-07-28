@@ -110,3 +110,56 @@ fn empty_reasons_are_inventoried_for_policy_rejection() -> Result<()> {
     assert!(sites[0].reason.is_empty());
     Ok(())
 }
+
+#[test]
+fn stable_ids_follow_the_reviewed_item_across_file_splits() -> Result<()> {
+    let syntax = syn::parse_file("#[expect(clippy::too_many_lines, reason = \"legacy handler\")]\nfn serve() {}\n")?;
+    let first = SourceScanner::scan("src/first.rs", "protocol", SourceCategory::Production, &syntax)?;
+    let moved = SourceScanner::scan("src/split.rs", "protocol", SourceCategory::Production, &syntax)?;
+    let transferred = SourceScanner::scan("src/split.rs", "transport", SourceCategory::Production, &syntax)?;
+    let changed_signature = SourceScanner::scan(
+        "src/split.rs",
+        "protocol",
+        SourceCategory::Production,
+        &syn::parse_file("#[expect(clippy::too_many_lines, reason = \"legacy handler\")]\nfn serve(input: usize) {}\n")?,
+    )?;
+    assert_eq!(first[0].id, moved[0].id);
+    assert_ne!(first[0].id, transferred[0].id);
+    assert_ne!(first[0].id, changed_signature[0].id);
+    assert!(first[0].signature.is_some());
+    assert!(first[0].id.starts_with("source."));
+    Ok(())
+}
+
+#[test]
+fn stable_ids_pin_anonymous_targets_and_duplicate_cardinality() -> Result<()> {
+    let first = scan(
+        "fn serve() {\n\
+             #[expect(clippy::indexing_slicing, reason = \"validated offset\")]\n\
+             values[0];\n\
+         }\n",
+        SourceCategory::Production,
+    )?;
+    let moved = scan(
+        "fn serve() {\n\
+             #[expect(clippy::indexing_slicing, reason = \"validated offset\")]\n\
+             other[0];\n\
+         }\n",
+        SourceCategory::Production,
+    )?;
+    assert_ne!(first[0].id, moved[0].id);
+    assert!(first[0].target.is_some());
+
+    let duplicates = scan(
+        "fn serve() {\n\
+             #[expect(clippy::indexing_slicing, reason = \"validated offset\")]\n\
+             values[0];\n\
+             #[expect(clippy::indexing_slicing, reason = \"validated offset\")]\n\
+             values[0];\n\
+         }\n",
+        SourceCategory::Production,
+    )?;
+    assert_eq!(duplicates[0].id, duplicates[1].id);
+    assert_eq!([duplicates[0].occurrence, duplicates[1].occurrence], [0, 1]);
+    Ok(())
+}

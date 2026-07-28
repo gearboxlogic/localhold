@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "adoption_commit": "8a09004ffe47d49f4202c5ad1830fd7e9bae1dc4",
+  "source_baselines": [
+    {
+      "category": "production",
+      "path": "policy/maintainability/lint-suppressions/source-production.json",
+      "expected_sites": 353,
+      "expected_signatures": 350
+    },
+    {
+      "category": "test",
+      "path": "policy/maintainability/lint-suppressions/source-test.json",
+      "expected_sites": 96,
+      "expected_signatures": 95
+    },
+    {
+      "category": "benchmark",
+      "path": "policy/maintainability/lint-suppressions/source-benchmark.json",
+      "expected_sites": 27,
+      "expected_signatures": 18
+    }
+  ],
+  "source_governance": [
+    {
+      "category": "production",
+      "owner": "maintainers",
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "Existing production expectations are recovery debt, not precedent for new lint suppression.",
+      "safety_invariant": "Only the exact reviewed item, lint, reason, scope, category, and syntax signature may remain; the occurrence count can only fall.",
+      "alternatives_considered": "Refactoring the flagged production behavior is preferred and will retire the expectation when its maintainability phase reaches that component.",
+      "evidence": "The adoption inventory records every production expect attribute after cfg-aware syntax classification.",
+      "re_review_phase": "Phase 1 suppression audit and component-by-component maintainability recovery"
+    },
+    {
+      "category": "test",
+      "owner": "maintainers",
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "Existing test expectations remain temporarily to preserve behavior while the high-signal test suite is rebuilt and compared.",
+      "safety_invariant": "A test expectation must stay attached to its reviewed helper or case and must not weaken production code.",
+      "alternatives_considered": "The test audit will replace broad helpers and incidental lint debt with focused assertions before old tests are removed.",
+      "evidence": "The adoption inventory separates test-only cfg branches and integration targets from production syntax.",
+      "re_review_phase": "Phase 2 high-signal test architecture and legacy-test comparison"
+    },
+    {
+      "category": "benchmark",
+      "owner": "maintainers",
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "Existing benchmark expectations cover harness-only output, setup, and measurement behavior and remain recovery evidence until benchmark review.",
+      "safety_invariant": "Benchmark expectations cannot authorize product or test code and their reviewed occurrence counts cannot grow.",
+      "alternatives_considered": "Harness-specific wrappers or benchmark-local APIs should replace expectations when they improve signal without distorting measured code.",
+      "evidence": "The adoption inventory classifies each explicit benchmark target independently.",
+      "re_review_phase": "Phase 3 benchmark signal and performance-baseline audit"
+    }
+  ],
+  "source_exceptions": [],
+  "cargo_allowances_paths": [
+    "policy/maintainability/lint-suppressions/cargo-platform.json",
+    "policy/maintainability/lint-suppressions/cargo-idioms-a.json",
+    "policy/maintainability/lint-suppressions/cargo-idioms-b.json",
+    "policy/maintainability/lint-suppressions/cargo-idioms-c.json"
+  ],
+  "clippy_configuration_path": "policy/maintainability/lint-suppressions/clippy-configuration.json"
+}

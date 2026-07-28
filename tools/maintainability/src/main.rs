@@ -40,6 +40,7 @@ fn run() -> Result<()> {
             structure::check(&workspace)?;
             println!("first-party unsafe safety contract check passed");
             println!("source structure budget check passed");
+            println!("lint suppression governance check passed");
         }
         Command::Inventory => {
             let roots = UnsafeManifest::required_roots();

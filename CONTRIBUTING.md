@@ -256,6 +256,49 @@ policy. Cargo metadata supplies the closed feature set, including implicit
 optional-dependency features, so adding or changing a Cargo feature must update
 the production matrix in the same pull request.
 
+Lint suppression is governed as explicit recovery debt, not as a convenient
+way to make a warning disappear. The checker inventories every source
+`expect` or `allow` attribute after the same cfg-aware production
+classification used by the structural audit. Source `allow` attributes, empty
+reasons, and macro-carried lint levels are rejected. Each existing
+`expect` is bound to its logical component, item hierarchy, scope, category,
+lint, reason, attribute syntax, anonymous target syntax, and—when it is inside
+a function—the normalized function signature. Identical duplicate sites share
+one ID with an exact occurrence ceiling. Moving an unchanged item during a
+same-component file split preserves that identity; changing its API or target,
+moving it between components, broadening its level, or reusing a retired
+occurrence does not.
+
+The exact production, test, and benchmark recovery multisets live in the
+small, category-specific fragments under
+`policy/maintainability/lint-suppressions/`. Counts may only fall. A genuinely
+required new source exception must name its exact computed source ID and carry
+an owner, issue, pull request, rationale, safety invariant, alternatives,
+evidence, and re-review phase. Temporary exceptions additionally require a
+removal issue and phase. Existing exception evidence is append-only, retirement
+is irreversible, and a new exception authorizes only its stated occurrence
+count.
+
+Cargo-level `allow` settings are exhaustively matched against the reviewed
+allowance fragments in the same directory, including tool fixtures. Every
+allowance documents its substitute enforcement and sentinel. Existing fragment
+paths are immutable, while a new fragment may be appended before an existing
+fragment approaches the repository's file-size rail. `clippy.toml`
+keys are closed: numeric thresholds can only decrease, and string allowlists
+can only shrink. Checked-in Cargo, rustc, and Clippy command surfaces reject
+`-A`, `--allow`, `--cap-lints`, and lint-weakening flag environment channels.
+The bootstrap scrubber and its exact self-test may name those environment
+channels so they can remove and verify them, but they remain subject to the
+argument scan; no directory-wide command-surface exemption exists.
+Ordinary agent changes must fix the warning or remove stale suppression debt;
+they must not edit policy evidence merely to make the gate pass.
+
+Inspect the cfg-classified source inventory without writing files:
+
+```bash
+cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- suppression-inventory
+```
+
 During the feature freeze:
 
 - ordinary production files may not exceed 800 physical lines;

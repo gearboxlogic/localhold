@@ -645,14 +645,16 @@ impl ModuleGraph<'_> {
 }
 
 fn resolve_module(module_dir: &Path, name: &str, known: &BTreeSet<String>) -> Result<Option<String>> {
-    let candidates = [module_dir.join(format!("{name}.rs")), module_dir.join(name).join("mod.rs")];
-    let matches = candidates
+    let candidates = [module_dir.join(format!("{name}.rs")), module_dir.join(name).join("mod.rs")]
         .iter()
         .map(|path| normalized_path(path))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .filter(|path| known.contains(path))
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
+    for candidate in &candidates {
+        if let Some(actual) = known.iter().find(|actual| *actual != candidate && actual.to_lowercase() == candidate.to_lowercase()) {
+            bail!("module {name:?} source path case does not match its declaration: expected {candidate}, found {actual}");
+        }
+    }
+    let matches = candidates.into_iter().filter(|path| known.contains(path)).collect::<Vec<_>>();
     match matches.as_slice() {
         [] => Ok(None),
         [path] => Ok(Some(path.clone())),
@@ -664,11 +666,7 @@ fn module_directory(path: &str) -> Result<PathBuf> {
     let path = Path::new(path);
     let parent = path.parent().context("Rust source path has no parent")?;
     let stem = path.file_stem().and_then(|stem| stem.to_str()).context("Rust source path has no UTF-8 stem")?;
-    Ok(if matches!(stem, "lib" | "main" | "mod") {
-        parent.to_path_buf()
-    } else {
-        parent.join(stem)
-    })
+    Ok(if stem == "mod" { parent.to_path_buf() } else { parent.join(stem) })
 }
 
 fn physical_line_count(source: &str) -> usize {

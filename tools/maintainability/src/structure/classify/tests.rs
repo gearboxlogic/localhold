@@ -236,6 +236,51 @@ fn custom_binary_child_modules_are_composition_only() {
 }
 
 #[test]
+fn ordinary_lib_and_main_modules_resolve_children_from_their_named_directory() {
+    for module in ["lib", "main"] {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        for root in [format!("src/foo/{module}"), "tests".to_owned(), "benches".to_owned()] {
+            fs::create_dir_all(repository.path().join(root)).expect("source root");
+        }
+        let nested = format!("src/foo/{module}/nested.rs");
+        fs::write(
+            repository.path().join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+                 \n[[bin]]\nname = \"nested-{module}\"\npath = \"{nested}\"\n"
+            ),
+        )
+        .expect("package manifest");
+        fs::write(repository.path().join("src/lib.rs"), "mod foo;\n").expect("library root");
+        fs::write(repository.path().join("src/foo.rs"), format!("mod {module};\n")).expect("ordinary parent module");
+        fs::write(repository.path().join(format!("src/foo/{module}.rs")), "mod nested;\n").expect("ordinary named module");
+        fs::write(repository.path().join(nested), "use crate::server::Service;\nfn main() {}\n").expect("shared nested module");
+
+        let error = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).unwrap_err();
+        assert!(error.to_string().contains("composition target must not also be reachable from a library target"));
+    }
+}
+
+#[test]
+fn case_mismatched_module_sources_fail_closed_on_every_platform() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src", "tests", "benches"] {
+        fs::create_dir(repository.path().join(root)).expect("source root");
+    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+         \n[[bin]]\nname = \"shared\"\npath = \"src/Shared.rs\"\n",
+    )
+    .expect("package manifest");
+    fs::write(repository.path().join("src/lib.rs"), "mod shared;\n").expect("library root");
+    fs::write(repository.path().join("src/Shared.rs"), "use crate::server::Service;\nfn main() {}\n").expect("mismatched module source");
+
+    let error = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).unwrap_err();
+    assert!(format!("{error:#}").contains("source path case does not match its declaration"));
+}
+
+#[test]
 fn disabled_automatic_binaries_leave_src_bin_modules_in_the_library_graph() {
     let repository = tempfile::tempdir().expect("temporary repository");
     for root in ["src/bin", "tests", "benches"] {

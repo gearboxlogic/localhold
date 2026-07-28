@@ -2,9 +2,19 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, bail};
 use proc_macro2::{TokenStream, TokenTree};
+use syn::visit::{self, Visit};
+use syn::{Arm, Expr, GenericParam, ImplItem, Item, Local, TraitItem, Variant};
 
-use super::super::syntax::{item_is_test_only, normalized_ident};
+use super::super::syntax::{
+    attributes_disable_production, expr_attributes, generic_param_attributes, impl_item_attributes, item_is_test_only, normalized_ident, trait_item_attributes,
+};
 use crate::scan::RESERVED_LOCAL_MACROS;
+
+pub(super) fn audit_reviewed_macro_definitions(file: &syn::File) -> Result<()> {
+    let mut audit = ReviewedMacroAudit { error: None };
+    audit.visit_file(file);
+    audit.error.map_or(Ok(()), Err)
+}
 
 pub(super) fn safe_macro_definitions(items: &[syn::Item], parent_test_only: bool, inherited: &BTreeSet<String>) -> Result<BTreeSet<String>> {
     let mut definitions = BTreeMap::new();
@@ -85,8 +95,108 @@ fn token_stream_names_restricted_module(tokens: &TokenStream) -> Option<String> 
             let name = normalized_ident(&ident);
             matches!(name.as_str(), "server" | "ui").then_some(name)
         }
-        TokenTree::Punct(_) | TokenTree::Literal(_) => None,
+        TokenTree::Literal(literal) => string_literal_names_restricted_module(&literal),
+        TokenTree::Punct(_) => None,
     })
+}
+
+fn string_literal_names_restricted_module(literal: &proc_macro2::Literal) -> Option<String> {
+    let Ok(syn::Lit::Str(literal)) = syn::parse_str::<syn::Lit>(&literal.to_string()) else {
+        return None;
+    };
+    let value = literal.value();
+    if !value.contains("::") {
+        return None;
+    }
+    value
+        .parse::<TokenStream>()
+        .map_or_else(|_| Some("unclassifiable path literal".to_owned()), |tokens| token_stream_names_restricted_module(&tokens))
+}
+
+struct ReviewedMacroAudit {
+    error: Option<anyhow::Error>,
+}
+
+impl ReviewedMacroAudit {
+    fn skip_test_only(&mut self, test_only: Result<bool>) -> bool {
+        if self.error.is_some() {
+            return true;
+        }
+        match test_only {
+            Ok(test_only) => test_only,
+            Err(error) => {
+                self.error = Some(error);
+                true
+            }
+        }
+    }
+
+    fn audit_item_macro(&mut self, item: &syn::ItemMacro) {
+        let Some(name) = item.ident.as_ref().map(normalized_ident) else {
+            return;
+        };
+        if RESERVED_LOCAL_MACROS.contains(&name.as_str())
+            && let Some(restricted) = token_stream_names_restricted_module(&item.mac.tokens)
+        {
+            self.error = Some(anyhow::anyhow!("reviewed local macro {name:?} generates restricted crate module {restricted:?}"));
+        }
+    }
+}
+
+macro_rules! visit_production_node {
+    ($method:ident, $walk:ident, $node:ty, $binding:ident => $test_only:expr) => {
+        fn $method(&mut self, $binding: &'ast $node) {
+            let test_only: Result<bool> = $test_only;
+            if !self.skip_test_only(test_only) {
+                visit::$walk(self, $binding);
+            }
+        }
+    };
+}
+
+impl<'ast> Visit<'ast> for ReviewedMacroAudit {
+    visit_production_node!(visit_file, visit_file, syn::File, node => attributes_disable_production(&node.attrs));
+    visit_production_node!(
+        visit_impl_item,
+        visit_impl_item,
+        ImplItem,
+        node =>
+        impl_item_attributes(node).and_then(attributes_disable_production)
+    );
+    visit_production_node!(
+        visit_trait_item,
+        visit_trait_item,
+        TraitItem,
+        node =>
+        trait_item_attributes(node).and_then(attributes_disable_production)
+    );
+    visit_production_node!(visit_variant, visit_variant, Variant, node => attributes_disable_production(&node.attrs));
+    visit_production_node!(visit_arm, visit_arm, Arm, node => attributes_disable_production(&node.attrs));
+    visit_production_node!(visit_local, visit_local, Local, node => attributes_disable_production(&node.attrs));
+    visit_production_node!(
+        visit_expr,
+        visit_expr,
+        Expr,
+        node => expr_attributes(node).and_then(attributes_disable_production)
+    );
+    visit_production_node!(
+        visit_generic_param,
+        visit_generic_param,
+        GenericParam,
+        node => attributes_disable_production(generic_param_attributes(node))
+    );
+
+    fn visit_item(&mut self, item: &'ast Item) {
+        if self.skip_test_only(item_is_test_only(item)) {
+            return;
+        }
+        if let Item::Macro(item_macro) = item {
+            self.audit_item_macro(item_macro);
+        }
+        if self.error.is_none() {
+            visit::visit_item(self, item);
+        }
+    }
 }
 
 fn token_stream_has_opaque_parameters(tokens: &TokenStream) -> bool {

@@ -10,7 +10,7 @@ use serde::Serialize;
 use super::syntax::{TestLineCollector, item_is_test_only, normalized_ident, production_internal_imports, reject_module_path_overrides};
 
 mod module_macro;
-use module_macro::{record_item_macro, safe_macro_definitions};
+use module_macro::{audit_reviewed_macro_definitions, record_item_macro, safe_macro_definitions};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct FileMeasurement {
@@ -289,6 +289,7 @@ fn classify_source_reachability(
         opaque_macro_sources: BTreeSet::new(),
     };
     for (path, source) in parsed {
+        audit_reviewed_macro_definitions(&source.syntax).with_context(|| format!("audit reviewed macro definitions in {path}"))?;
         if production_roots.contains(path) || explicit_test_roots.contains(path) {
             let crate_root_dir = Path::new(path).parent().context("Cargo target root has no parent directory")?;
             graph.collect(path, &source.syntax.items, crate_root_dir, false)?;

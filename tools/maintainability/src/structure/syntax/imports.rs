@@ -50,6 +50,13 @@ struct ImportCollector {
     require_reviewed_expansions: bool,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum StringScan {
+    Skip,
+    RustFragment,
+    GovernedAttribute,
+}
+
 impl ImportCollector {
     fn collect_use(&mut self, item: &ItemUse) -> Result<()> {
         if item.leading_colon.is_some() && !self.rust_2015_absolute_paths {
@@ -240,11 +247,18 @@ impl<'ast> Visit<'ast> for ImportCollector {
         if self.error.is_some() {
             return;
         }
-        if let Some(restricted) = restricted_macro_identifier(&node.tokens, &self.module, self.rust_2015_absolute_paths) {
-            self.error = Some(anyhow::anyhow!(
-                "production macro token stream names restricted crate module {restricted:?} and cannot be classified safely"
-            ));
-            return;
+        match restricted_token_identifier(&node.tokens, &self.module, self.rust_2015_absolute_paths, StringScan::RustFragment) {
+            Ok(Some(restricted)) => {
+                self.error = Some(anyhow::anyhow!(
+                    "production macro token stream names restricted crate module {restricted:?} and cannot be classified safely"
+                ));
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
         }
         if self.require_reviewed_expansions && !reviewed_macro_expansion(node) {
             self.error = Some(anyhow::anyhow!("production code invokes unreviewed macro expansion path {}", node.path.to_token_stream()));
@@ -389,21 +403,29 @@ fn source_module(source_path: &str, crate_root: Option<&str>) -> Result<Vec<Stri
     Ok(parts)
 }
 
-fn restricted_macro_identifier(tokens: &TokenStream, module: &[String], rust_2015_absolute_paths: bool) -> Option<String> {
-    tokens.clone().into_iter().find_map(|token| match token {
-        TokenTree::Group(group) => restricted_macro_identifier(&group.stream(), module, rust_2015_absolute_paths),
-        TokenTree::Ident(ident) => {
-            let normalized = normalized_ident(&ident);
-            matches!(normalized.as_str(), "server" | "ui").then_some(normalized)
+fn restricted_token_identifier(tokens: &TokenStream, module: &[String], rust_2015_absolute_paths: bool, string_scan: StringScan) -> Result<Option<String>> {
+    for token in tokens.clone() {
+        let restricted = match token {
+            TokenTree::Group(group) => restricted_token_identifier(&group.stream(), module, rust_2015_absolute_paths, string_scan)?,
+            TokenTree::Ident(ident) => {
+                let normalized = normalized_ident(&ident);
+                matches!(normalized.as_str(), "server" | "ui").then_some(normalized)
+            }
+            TokenTree::Literal(literal) if string_scan != StringScan::Skip => {
+                restricted_string_path(&literal, module, rust_2015_absolute_paths, string_scan == StringScan::GovernedAttribute)?
+            }
+            TokenTree::Literal(_) | TokenTree::Punct(_) => None,
+        };
+        if restricted.is_some() {
+            return Ok(restricted);
         }
-        TokenTree::Literal(literal) => restricted_string_path(&literal, module, rust_2015_absolute_paths),
-        TokenTree::Punct(_) => None,
-    })
+    }
+    Ok(None)
 }
 
 fn restricted_attribute_identifier(attribute: &Attribute, module: &[String], rust_2015_absolute_paths: bool) -> Result<Option<String>> {
     if !attribute.path().is_ident("cfg_attr") {
-        return Ok(restricted_meta_contents(&attribute.meta, module, rust_2015_absolute_paths));
+        return restricted_meta_contents(&attribute.meta, module, rust_2015_absolute_paths);
     }
     let Meta::List(list) = &attribute.meta else {
         return Ok(None);
@@ -429,7 +451,7 @@ fn restricted_cfg_attr_contents(tokens: &TokenStream, module: &[String], rust_20
             };
             restricted_cfg_attr_contents(&list.tokens, module, rust_2015_absolute_paths)?
         } else {
-            restricted_meta_contents(&nested, module, rust_2015_absolute_paths)
+            restricted_meta_contents(&nested, module, rust_2015_absolute_paths)?
         };
         if restricted.is_some() {
             return Ok(restricted);
@@ -438,33 +460,124 @@ fn restricted_cfg_attr_contents(tokens: &TokenStream, module: &[String], rust_20
     Ok(None)
 }
 
-fn restricted_meta_contents(meta: &Meta, module: &[String], rust_2015_absolute_paths: bool) -> Option<String> {
-    let tokens = match meta {
-        Meta::Path(_) => return None,
-        Meta::List(list) => &list.tokens,
-        Meta::NameValue(value) => return restricted_macro_identifier(&value.value.to_token_stream(), module, rust_2015_absolute_paths),
+fn restricted_meta_contents(meta: &Meta, module: &[String], rust_2015_absolute_paths: bool) -> Result<Option<String>> {
+    let string_scan = if matches!(
+        meta.path().segments.last().map(|segment| normalized_ident(&segment.ident)),
+        Some(name) if matches!(name.as_str(), "serde" | "schemars")
+    ) {
+        StringScan::GovernedAttribute
+    } else {
+        StringScan::Skip
     };
-    restricted_macro_identifier(tokens, module, rust_2015_absolute_paths)
+    let tokens = match meta {
+        Meta::Path(_) => return Ok(None),
+        Meta::List(list) => &list.tokens,
+        Meta::NameValue(value) => {
+            return restricted_token_identifier(&value.value.to_token_stream(), module, rust_2015_absolute_paths, string_scan);
+        }
+    };
+    restricted_token_identifier(tokens, module, rust_2015_absolute_paths, string_scan)
 }
 
-fn restricted_string_path(literal: &proc_macro2::Literal, module: &[String], rust_2015_absolute_paths: bool) -> Option<String> {
-    let syn::Lit::Str(literal) = syn::parse_str::<syn::Lit>(&literal.to_string()).ok()? else {
-        return None;
+fn restricted_string_path(literal: &proc_macro2::Literal, module: &[String], rust_2015_absolute_paths: bool, fail_unclassifiable: bool) -> Result<Option<String>> {
+    let Ok(syn::Lit::Str(literal)) = syn::parse_str::<syn::Lit>(&literal.to_string()) else {
+        return Ok(None);
     };
     let value = literal.value();
     if !value.contains("::") {
-        return None;
+        return Ok(None);
     }
-    let path = syn::parse_str::<SynPath>(&value).ok()?;
+    if let Ok(path) = syn::parse_str::<SynPath>(&value) {
+        return restricted_path_identifier(&path, module, rust_2015_absolute_paths);
+    }
+    let tokens = match value.parse::<TokenStream>() {
+        Ok(tokens) => tokens,
+        Err(_) if fail_unclassifiable => {
+            bail!("path-bearing string in reviewed expansion is not classifiable Rust syntax");
+        }
+        Err(_) => return Ok(None),
+    };
+    restricted_fragment_identifier(&tokens, module, rust_2015_absolute_paths)
+}
+
+fn restricted_path_identifier(path: &SynPath, module: &[String], rust_2015_absolute_paths: bool) -> Result<Option<String>> {
     if path.leading_colon.is_some() && !rust_2015_absolute_paths {
-        return None;
+        return Ok(None);
     }
     let mut segments = path.segments.iter().map(|segment| normalized_ident(&segment.ident)).collect::<Vec<_>>();
     if path.leading_colon.is_some() {
         segments.insert(0, "crate".to_owned());
     }
-    let resolved = resolve_path(module, &segments, false).ok()??;
-    matches!(resolved.first().map(String::as_str), Some("server" | "ui")).then(|| resolved[0].clone())
+    let Some(resolved) = resolve_path(module, &segments, false)? else {
+        return Ok(None);
+    };
+    Ok(matches!(resolved.first().map(String::as_str), Some("server" | "ui")).then(|| resolved[0].clone()))
+}
+
+fn restricted_fragment_identifier(tokens: &TokenStream, module: &[String], rust_2015_absolute_paths: bool) -> Result<Option<String>> {
+    let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
+    for token in &tokens {
+        if let TokenTree::Group(group) = token
+            && let Some(restricted) = restricted_fragment_identifier(&group.stream(), module, rust_2015_absolute_paths)?
+        {
+            return Ok(Some(restricted));
+        }
+    }
+    for index in 0..tokens.len() {
+        let (leading_colon, start) = path_start(&tokens, index);
+        let Some(start) = start else {
+            continue;
+        };
+        if leading_colon && !rust_2015_absolute_paths {
+            continue;
+        }
+        if !leading_colon && preceded_by_path_separator(&tokens, start) {
+            continue;
+        }
+        let mut segments = path_segments(&tokens, start);
+        if segments.len() < 2 {
+            continue;
+        }
+        if leading_colon {
+            segments.insert(0, "crate".to_owned());
+        }
+        let Some(resolved) = resolve_path(module, &segments, false)? else {
+            continue;
+        };
+        if matches!(resolved.first().map(String::as_str), Some("server" | "ui")) {
+            return Ok(Some(resolved[0].clone()));
+        }
+    }
+    Ok(None)
+}
+
+fn path_start(tokens: &[TokenTree], index: usize) -> (bool, Option<usize>) {
+    if matches!(tokens.get(index), Some(TokenTree::Ident(_))) {
+        return (false, Some(index));
+    }
+    let leading_colon = punctuation(tokens.get(index), ':') && punctuation(tokens.get(index + 1), ':') && matches!(tokens.get(index + 2), Some(TokenTree::Ident(_)));
+    (leading_colon, leading_colon.then_some(index + 2))
+}
+
+fn path_segments(tokens: &[TokenTree], start: usize) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut index = start;
+    while let Some(TokenTree::Ident(ident)) = tokens.get(index) {
+        segments.push(normalized_ident(ident));
+        if !punctuation(tokens.get(index + 1), ':') || !punctuation(tokens.get(index + 2), ':') {
+            break;
+        }
+        index += 3;
+    }
+    segments
+}
+
+fn preceded_by_path_separator(tokens: &[TokenTree], index: usize) -> bool {
+    index >= 2 && punctuation(tokens.get(index - 2), ':') && punctuation(tokens.get(index - 1), ':')
+}
+
+fn punctuation(token: Option<&TokenTree>, expected: char) -> bool {
+    matches!(token, Some(TokenTree::Punct(punctuation)) if punctuation.as_char() == expected)
 }
 
 #[cfg(test)]
@@ -554,6 +667,15 @@ mod tests {
     fn string_encoded_attribute_paths_fail_closed() {
         let source = "#[serde(serialize_with = \"crate::server::serialize\")]\nstruct Record;\n";
         assert!(imports("src/adapter.rs", source).unwrap_err().to_string().contains("production attribute token stream"));
+
+        let bound = "#[serde(bound(serialize = \"T: crate::server::Marker\"))]\nstruct Generic<T>(T);\n";
+        assert!(imports("src/adapter.rs", bound).unwrap_err().to_string().contains("production attribute token stream"));
+
+        let external_bound = "#[serde(bound(serialize = \"T: external::Marker\"))]\nstruct Generic<T>(T);\n";
+        assert!(imports("src/adapter.rs", external_bound).expect("external bound").is_empty());
+
+        let unclassifiable = "#[serde(bound(serialize = \"T: external::Marker /*\"))]\nstruct Generic<T>(T);\n";
+        assert!(imports("src/adapter.rs", unclassifiable).unwrap_err().to_string().contains("not classifiable Rust syntax"));
 
         let external = "#[serde(serialize_with = \"::server::serialize\")]\nstruct Record;\n";
         assert!(imports("src/adapter.rs", external).expect("absolute external path").is_empty());

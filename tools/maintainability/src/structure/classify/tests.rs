@@ -493,8 +493,55 @@ fn reviewed_local_macros_cannot_export_restricted_dependencies() {
     ]);
 
     let error = measure_sources(sources).unwrap_err();
-    assert!(error.to_string().contains("reviewed local macro"));
-    assert!(error.to_string().contains("server"));
+    let message = format!("{error:#}");
+    assert!(message.contains("reviewed local macro"), "{message}");
+    assert!(message.contains("server"));
+}
+
+#[test]
+fn reviewed_local_macro_definitions_cannot_encode_restricted_path_literals() {
+    let sources = BTreeMap::from([
+        ("src/lib.rs".to_owned(), "mod server;\n".to_owned()),
+        (
+            "src/server.rs".to_owned(),
+            "#[macro_export]\nmacro_rules! transport_test {\n\
+                 () => { #[serde(serialize_with = \"crate::server::serialize\")] struct Generated; }\n\
+             }\n"
+            .to_owned(),
+        ),
+    ]);
+
+    let error = measure_sources(sources).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("reviewed local macro"), "{message}");
+    assert!(message.contains("server"));
+}
+
+#[test]
+fn reviewed_exported_macros_are_audited_below_non_module_items() {
+    let sources = BTreeMap::from([
+        ("src/lib.rs".to_owned(), "mod server;\n".to_owned()),
+        (
+            "src/server.rs".to_owned(),
+            "fn install() {\n\
+                 #[macro_export]\nmacro_rules! transport_test { () => { $crate::server::secret() } }\n\
+             }\n"
+            .to_owned(),
+        ),
+    ]);
+    let error = measure_sources(sources).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("reviewed local macro"), "{message}");
+    assert!(message.contains("server"));
+
+    let test_only = BTreeMap::from([(
+        "src/lib.rs".to_owned(),
+        "#[cfg(test)]\nfn install() {\n\
+             #[macro_export]\nmacro_rules! transport_test { () => { $crate::server::test_only() } }\n\
+         }\n"
+        .to_owned(),
+    )]);
+    measure_sources(test_only).expect("test-only nested macro definition");
 }
 
 #[test]

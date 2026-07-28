@@ -13,7 +13,11 @@ use sat::is_satisfiable;
 #[derive(Clone, Debug)]
 enum Predicate {
     Constant(bool),
-    Atom { identity: String, exclusive_group: Option<String> },
+    Atom {
+        identity: String,
+        exclusive_group: Option<String>,
+        required_target_family: Option<String>,
+    },
     All(Vec<Self>),
     Any(Vec<Self>),
     Not(Box<Self>),
@@ -214,14 +218,18 @@ fn predicate(meta: &Meta) -> Result<Predicate> {
         Meta::Path(_) | Meta::NameValue(_) | Meta::List(_) => {
             let target_family = target_family_value(meta);
             Ok(Predicate::Atom {
-                identity: target_family.as_ref().map_or_else(
-                    || normalized_atom_identity(&meta.to_token_stream()),
-                    |family| format!("target-family:{}:{family}", family.len()),
-                ),
-                exclusive_group: target_family.map_or_else(|| exclusive_cfg_group(meta), |_| Some("target_family".to_owned())),
+                identity: target_family
+                    .as_ref()
+                    .map_or_else(|| normalized_atom_identity(&meta.to_token_stream()), |family| target_family_identity(family)),
+                exclusive_group: target_family.as_ref().map_or_else(|| exclusive_cfg_group(meta), |_| None),
+                required_target_family: target_os_family(meta).map(str::to_owned),
             })
         }
     }
+}
+
+fn target_family_identity(family: &str) -> String {
+    format!("target-family:{}:{family}", family.len())
 }
 
 fn target_family_value(meta: &Meta) -> Option<String> {
@@ -238,6 +246,27 @@ fn target_family_value(meta: &Meta) -> Option<String> {
             Some(family.value())
         }
         Meta::Path(_) | Meta::NameValue(_) | Meta::List(_) => None,
+    }
+}
+
+fn target_os_family(meta: &Meta) -> Option<&'static str> {
+    let Meta::NameValue(value) = meta else {
+        return None;
+    };
+    if normalized_cfg_path(&value.path).as_deref() != Some("target_os") {
+        return None;
+    }
+    let Expr::Lit(expression) = &value.value else {
+        return None;
+    };
+    let syn::Lit::Str(os) = &expression.lit else {
+        return None;
+    };
+    match os.value().as_str() {
+        "windows" => Some("windows"),
+        "aix" | "android" | "dragonfly" | "emscripten" | "freebsd" | "fuchsia" | "haiku" | "hurd" | "illumos" | "ios" | "linux" | "macos" | "netbsd" | "nto" | "openbsd"
+        | "redox" | "solaris" | "tvos" | "visionos" | "watchos" => Some("unix"),
+        _ => None,
     }
 }
 

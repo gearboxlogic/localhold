@@ -38,20 +38,21 @@ impl Encoder {
                 self.clauses.push(vec![Literal { variable, positive: *value }]);
                 variable
             }
-            Predicate::Atom { identity, exclusive_group } => {
-                if let Some(variable) = self.atoms.get(identity) {
-                    return *variable;
-                }
-                let variable = self.new_variable();
-                self.atoms.insert(identity.clone(), variable);
-                if let Some(group) = exclusive_group {
-                    let peers = self.exclusive_groups.entry(group.clone()).or_default();
-                    self.clauses.extend(
-                        peers
-                            .iter()
-                            .map(|peer| vec![Literal { variable, positive: false }, Literal { variable: *peer, positive: false }]),
-                    );
-                    peers.push(variable);
+            Predicate::Atom {
+                identity,
+                exclusive_group,
+                required_target_family,
+            } => {
+                let variable = self.atom(identity, exclusive_group.as_deref());
+                if let Some(family) = required_target_family {
+                    let required = self.atom(&super::target_family_identity(family), None);
+                    self.clauses.push(vec![
+                        Literal { variable, positive: false },
+                        Literal {
+                            variable: required,
+                            positive: true,
+                        },
+                    ]);
                 }
                 variable
             }
@@ -113,6 +114,40 @@ impl Encoder {
             None => panic!("cfg predicate variable count overflow"),
         };
         variable
+    }
+
+    fn atom(&mut self, identity: &str, exclusive_group: Option<&str>) -> usize {
+        let variable = if let Some(variable) = self.atoms.get(identity) {
+            *variable
+        } else {
+            let variable = self.new_variable();
+            self.atoms.insert(identity.to_owned(), variable);
+            variable
+        };
+        if let Some(group) = exclusive_group {
+            let peers = self.exclusive_groups.entry(group.to_owned()).or_default();
+            if !peers.contains(&variable) {
+                self.clauses.extend(
+                    peers
+                        .iter()
+                        .map(|peer| vec![Literal { variable, positive: false }, Literal { variable: *peer, positive: false }]),
+                );
+                peers.push(variable);
+            }
+        }
+        self.restrict_incompatible_target_families(identity, variable);
+        variable
+    }
+
+    fn restrict_incompatible_target_families(&mut self, identity: &str, variable: usize) {
+        let incompatible = match identity {
+            "target-family:4:unix" => "target-family:7:windows",
+            "target-family:7:windows" => "target-family:4:unix",
+            _ => return,
+        };
+        if let Some(peer) = self.atoms.get(incompatible) {
+            self.clauses.push(vec![Literal { variable, positive: false }, Literal { variable: *peer, positive: false }]);
+        }
     }
 }
 
@@ -180,7 +215,11 @@ mod tests {
 
     #[test]
     fn contradiction_remains_unsatisfiable_beyond_enumeration_sized_inputs() {
-        let atom = |identity: String| Predicate::Atom { identity, exclusive_group: None };
+        let atom = |identity: String| Predicate::Atom {
+            identity,
+            exclusive_group: None,
+            required_target_family: None,
+        };
         let mut predicates = (0..24).map(|index| atom(format!("feature-{index}"))).collect::<Vec<_>>();
         predicates.push(atom("contradiction".to_owned()));
         predicates.push(Predicate::Not(Box::new(atom("contradiction".to_owned()))));
@@ -193,6 +232,7 @@ mod tests {
             .map(|index| Predicate::Atom {
                 identity: format!("feature-{index}"),
                 exclusive_group: None,
+                required_target_family: None,
             })
             .collect::<Vec<_>>();
         assert!(is_satisfiable(&Predicate::Any(alternatives)));

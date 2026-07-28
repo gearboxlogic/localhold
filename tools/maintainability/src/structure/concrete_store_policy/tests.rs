@@ -199,6 +199,12 @@ fn inline_module_reexports_match_the_concrete_bearing_item() {
 
     let error = policy.compare_site_fingerprints(&exposed, &baseline, paths(&components), paths(&components)).unwrap_err();
     assert!(error.to_string().contains("production signature"));
+
+    exposed.files[0].production_public_reexports[0].target_path = vec!["ui".to_owned(), "helper".to_owned(), "Envelope".to_owned(), "Sqlite".to_owned()];
+    baseline.files[0].production_signature_store_sites.sqlite_store = vec![signature("private-variant", &["ui", "helper", "Envelope"])];
+    exposed.files[0].production_signature_store_sites.sqlite_store = baseline.files[0].production_signature_store_sites.sqlite_store.clone();
+    let error = policy.compare_site_fingerprints(&exposed, &baseline, paths(&components), paths(&components)).unwrap_err();
+    assert!(error.to_string().contains("production signature"));
 }
 
 #[test]

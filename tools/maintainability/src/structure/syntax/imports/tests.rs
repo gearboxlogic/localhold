@@ -356,6 +356,32 @@ fn shadowable_stringify_names_do_not_hide_store_tokens() -> Result<()> {
             postgres_store: 0,
         }
     );
+
+    let Err(imported_then_lexically_shadowed) = concrete_facts(
+        "use ::core::stringify as text;\n\
+         fn open() {\n\
+             macro_rules! text { ($store:ty) => { <$store>::open() } }\n\
+             text!(SqliteStore);\n\
+         }\n",
+    ) else {
+        panic!("a lexically shadowed unreviewed alias must fail closed");
+    };
+    assert!(imported_then_lexically_shadowed.to_string().contains("unreviewed macro expansion path text"));
+
+    let shadowed_reviewed_name = concrete_facts(
+        "use ::core::stringify;\n\
+         fn open() {\n\
+             macro_rules! stringify { ($store:ty) => { <$store>::open() } }\n\
+             stringify!(SqliteStore);\n\
+         }\n",
+    )?;
+    assert_eq!(
+        shadowed_reviewed_name.concrete_stores,
+        ConcreteStoreCounts {
+            sqlite_store: 1,
+            postgres_store: 0,
+        }
+    );
     Ok(())
 }
 
@@ -605,6 +631,23 @@ fn mutually_exclusive_target_values_disable_unreachable_store_syntax() -> Result
         ConcreteStoreCounts {
             sqlite_store: 0,
             postgres_store: 2,
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn target_os_values_imply_their_target_family() -> Result<()> {
+    let facts = concrete_facts(
+        "#[cfg(target_os = \"linux\")] #[cfg(windows)] struct ImpossibleLinux(SqliteStore);\n\
+         #[cfg(target_os = \"windows\")] #[cfg(unix)] struct ImpossibleWindows(PostgresStore);\n\
+         #[cfg(target_os = \"emscripten\")] #[cfg(all(unix, target_family = \"wasm\"))] struct EmscriptenCanHaveTwoFamilies(PostgresStore);\n",
+    )?;
+    assert_eq!(
+        facts.concrete_stores,
+        ConcreteStoreCounts {
+            sqlite_store: 0,
+            postgres_store: 1,
         }
     );
     Ok(())

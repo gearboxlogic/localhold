@@ -557,7 +557,9 @@ fn reexport_applies_to_item(target_path: &[String], item: &[String]) -> bool {
     } else {
         target_path
     };
-    target_without_glob == item || !target_without_glob.is_empty() && item.starts_with(target_without_glob)
+    target_without_glob == item
+        || !target_without_glob.is_empty() && item.starts_with(target_without_glob)
+        || target_without_glob.len() == item.len().saturating_add(1) && target_without_glob.starts_with(item)
 }
 
 fn validate_declaration(declaration: &ConcreteStoreDeclaration, unrestricted: &BTreeSet<&str>, allow_missing_fingerprint: bool) -> Result<()> {

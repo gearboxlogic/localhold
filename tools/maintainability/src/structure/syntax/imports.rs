@@ -90,6 +90,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
         concrete_stores: ConcreteStoreInventory::default(),
         site_context: None,
         block_depth: 0,
+        macro_shadow_scopes: vec![BTreeSet::new()],
         generic_default_depth: 0,
         impl_signature_headers: Vec::new(),
         declaration_ancestors: initial_context.declaration_ancestors,
@@ -131,6 +132,7 @@ struct ProductionSyntaxCollector {
     concrete_stores: ConcreteStoreInventory,
     site_context: Option<String>,
     block_depth: usize,
+    macro_shadow_scopes: Vec<BTreeSet<String>>,
     generic_default_depth: usize,
     impl_signature_headers: Vec<TokenStream>,
     declaration_ancestors: Vec<String>,
@@ -445,7 +447,9 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
 
     fn visit_block(&mut self, node: &'ast Block) {
         self.block_depth += 1;
+        self.macro_shadow_scopes.push(BTreeSet::new());
         visit::visit_block(self, node);
+        self.macro_shadow_scopes.pop();
         self.block_depth -= 1;
     }
 
@@ -815,6 +819,11 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             self.error = Some(anyhow::anyhow!("production macro definitions cannot inject concrete stores into call sites"));
             return;
         }
+        if let Some(name) = &item.ident
+            && let Some(scope) = self.macro_shadow_scopes.last_mut()
+        {
+            scope.insert(normalized_ident(name));
+        }
         visit::visit_item_macro(self, item);
     }
 
@@ -830,9 +839,11 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             return;
         };
         self.module.push(normalized_ident(&item.ident));
+        self.macro_shadow_scopes.push(BTreeSet::new());
         for nested in items {
             self.visit_item(nested);
         }
+        self.macro_shadow_scopes.pop();
         self.module.pop();
     }
 }
@@ -843,7 +854,7 @@ impl ProductionSyntaxCollector {
             return false;
         }
         let alias = normalized_ident(&node.path.segments[0].ident);
-        self.builtin_stringify_aliases.contains(&(self.module.clone(), alias))
+        self.builtin_stringify_aliases.contains(&(self.module.clone(), alias.clone())) && !self.macro_shadow_scopes.iter().rev().any(|scope| scope.contains(&alias))
     }
 }
 

@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use super::classify::Inventory;
+use super::classify::{FileMeasurement, Inventory};
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 const BASE_REVISION_ENV: &str = "LOCALHOLD_MAINTAINABILITY_BASE_REV";
@@ -53,6 +53,8 @@ enum ConcreteStoreName {
     PostgresStore,
 }
 
+type ObservedStore<'a> = (String, &'a str, ConcreteStoreName, usize);
+
 impl ConcreteStorePolicy {
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = fs::read(path).with_context(|| format!("read concrete-store policy {}", path.display()))?;
@@ -77,12 +79,17 @@ impl ConcreteStorePolicy {
         baseline_component_paths: &BTreeMap<&str, &str>,
     ) -> Result<()> {
         let unrestricted = self.unrestricted_components.iter().map(String::as_str).collect::<BTreeSet<_>>();
-        let current_sites = site_fingerprints(current, current_component_paths, Some(&unrestricted), false)?;
-        let baseline_sites = site_fingerprints(baseline, baseline_component_paths, Some(&unrestricted), false)?;
+        let debt_components = self
+            .debt
+            .iter()
+            .map(|debt| ((debt.path.clone(), debt.store), debt.component.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let current_sites = site_fingerprints(current, current_component_paths, Some(&unrestricted), Some(&debt_components), false)?;
+        let baseline_sites = site_fingerprints(baseline, baseline_component_paths, Some(&unrestricted), Some(&debt_components), false)?;
         require_occurrence_subset("restricted concrete-store syntax", &current_sites, &baseline_sites)?;
 
-        let current_defaults = site_fingerprints(current, current_component_paths, None, true)?;
-        let baseline_defaults = site_fingerprints(baseline, baseline_component_paths, None, true)?;
+        let current_defaults = site_fingerprints(current, current_component_paths, None, None, true)?;
+        let baseline_defaults = site_fingerprints(baseline, baseline_component_paths, None, None, true)?;
         require_occurrence_subset("concrete-store generic default", &current_defaults, &baseline_defaults)
     }
 
@@ -120,21 +127,10 @@ impl ConcreteStorePolicy {
         let unrestricted = self.unrestricted_components.iter().map(String::as_str).collect::<BTreeSet<_>>();
         let mut observed = Vec::new();
         for file in &inventory.files {
-            let component = component_paths
+            let assigned_component = component_paths
                 .get(file.path.as_str())
                 .with_context(|| format!("concrete-store {label} inventory path {:?} has no logical component", file.path))?;
-            if unrestricted.contains(component) {
-                continue;
-            }
-            observed.extend(
-                [
-                    (ConcreteStoreName::SqliteStore, file.production_concrete_stores.sqlite_store),
-                    (ConcreteStoreName::PostgresStore, file.production_concrete_stores.postgres_store),
-                ]
-                .into_iter()
-                .filter(|(_, count)| *count > 0)
-                .map(|(store, count)| (component.to_string(), file.path.as_str(), store, count)),
-            );
+            self.record_observed_file(file, assigned_component, &unrestricted, &mut observed);
         }
         observed.sort_unstable();
 
@@ -151,6 +147,26 @@ impl ConcreteStorePolicy {
             bail!("concrete-store {label} production-name mismatch: expected={expected:?}, observed={observed:?}");
         }
         Ok(())
+    }
+
+    fn record_observed_file<'a>(&self, file: &'a FileMeasurement, assigned_component: &str, unrestricted: &BTreeSet<&str>, observed: &mut Vec<ObservedStore<'a>>) {
+        for (store, count) in [
+            (ConcreteStoreName::SqliteStore, file.production_concrete_stores.sqlite_store),
+            (ConcreteStoreName::PostgresStore, file.production_concrete_stores.postgres_store),
+        ] {
+            if count == 0 {
+                continue;
+            }
+            let debt_component = self
+                .debt
+                .iter()
+                .find(|debt| debt.path == file.path && debt.store == store)
+                .map(|debt| debt.component.as_str());
+            if debt_component.is_none() && unrestricted.contains(assigned_component) {
+                continue;
+            }
+            observed.push((debt_component.unwrap_or(assigned_component).to_owned(), file.path.as_str(), store, count));
+        }
     }
 
     fn validate(&self) -> Result<()> {
@@ -224,11 +240,13 @@ impl ConcreteStorePolicy {
 }
 
 type SiteFingerprint = (String, String, ConcreteStoreName, String);
+type DebtComponents = BTreeMap<(String, ConcreteStoreName), String>;
 
 fn site_fingerprints(
     inventory: &Inventory,
     component_paths: &BTreeMap<&str, &str>,
     excluded_components: Option<&BTreeSet<&str>>,
+    debt_components: Option<&DebtComponents>,
     generic_defaults: bool,
 ) -> Result<BTreeMap<SiteFingerprint, usize>> {
     let mut sites = BTreeMap::new();
@@ -236,9 +254,6 @@ fn site_fingerprints(
         let component = component_paths
             .get(file.path.as_str())
             .with_context(|| format!("concrete-store syntax inventory path {:?} has no logical component", file.path))?;
-        if excluded_components.is_some_and(|excluded| excluded.contains(component)) {
-            continue;
-        }
         let source = if generic_defaults {
             &file.production_generic_default_store_sites
         } else {
@@ -248,8 +263,14 @@ fn site_fingerprints(
             (ConcreteStoreName::SqliteStore, &source.sqlite_store),
             (ConcreteStoreName::PostgresStore, &source.postgres_store),
         ] {
+            let effective_component = debt_components
+                .and_then(|components| components.get(&(file.path.clone(), store)))
+                .map_or(*component, String::as_str);
+            if excluded_components.is_some_and(|excluded| excluded.contains(effective_component)) {
+                continue;
+            }
             for fingerprint in fingerprints {
-                let key = ((*component).to_owned(), file.path.clone(), store, fingerprint.clone());
+                let key = (effective_component.to_owned(), file.path.clone(), store, fingerprint.clone());
                 let count = sites.entry(key).or_insert(0_usize);
                 *count = count.checked_add(1).context("concrete-store syntax-site occurrence count overflow")?;
             }

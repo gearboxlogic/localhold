@@ -305,6 +305,25 @@ fn path_valued_attribute_literals_count_concrete_stores() -> Result<()> {
 }
 
 #[test]
+fn cfg_attr_store_tokens_are_counted_only_when_the_branch_can_apply_in_production() -> Result<()> {
+    let facts = concrete_facts(
+        "#[cfg_attr(test, serde(default = SqliteStore))]\n\
+         #[cfg_attr(feature = \"testing\", serde(default = PostgresStore))]\n\
+         struct TestInstrumentation;\n\
+         #[cfg_attr(feature = \"other\", serde(default = SqliteStore))]\n\
+         struct ProductionInstrumentation;\n",
+    )?;
+    assert_eq!(
+        facts.concrete_stores,
+        ConcreteStoreCounts {
+            sqlite_store: 1,
+            postgres_store: 0,
+        }
+    );
+    Ok(())
+}
+
+#[test]
 fn concrete_store_names_cannot_be_hidden_by_aliases() {
     for source in [
         "type DefaultStore = SqliteStore;\n",

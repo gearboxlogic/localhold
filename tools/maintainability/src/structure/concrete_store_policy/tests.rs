@@ -65,6 +65,27 @@ fn reviewed_site_fingerprints_prevent_same_count_moves_and_new_generic_defaults(
             .contains("moved or changed")
     );
 
+    let mut duplicated = baseline.clone();
+    duplicated.files[1].production_concrete_store_sites.sqlite_store.push("embedding-import".to_owned());
+    assert!(
+        policy
+            .compare_site_fingerprints(&duplicated, &baseline, &restricted_components, &restricted_components)
+            .unwrap_err()
+            .to_string()
+            .contains("moved or changed")
+    );
+
+    let transferred_components = components(&[("src/server/mod.rs", "sqlite-store"), ("src/embedding/status.rs", "embedding")]);
+    let mut moved_after_transfer = baseline.clone();
+    moved_after_transfer.files[0].production_concrete_store_sites.sqlite_store = vec!["server-field".to_owned()];
+    assert!(
+        policy
+            .compare_site_fingerprints(&moved_after_transfer, &baseline, &transferred_components, &restricted_components,)
+            .unwrap_err()
+            .to_string()
+            .contains("moved or changed")
+    );
+
     let unrestricted_components = components(&[("src/store/sqlite.rs", "sqlite-store")]);
     let unrestricted_baseline = inventory(&[("src/store/sqlite.rs", 1, 0)]);
     let mut new_default = unrestricted_baseline.clone();
@@ -75,6 +96,21 @@ fn reviewed_site_fingerprints_prevent_same_count_moves_and_new_generic_defaults(
             .unwrap_err()
             .to_string()
             .contains("generic default")
+    );
+}
+
+#[test]
+fn active_debt_remains_governed_after_a_same_path_component_transfer() {
+    let mut policy = policy();
+    policy.debt[0].current_count = 0;
+    let transferred_components = components(&[("src/server/mod.rs", "sqlite-store"), ("src/embedding/status.rs", "embedding")]);
+    let current = inventory(&[("src/server/mod.rs", 1, 0), ("src/embedding/status.rs", 2, 0)]);
+    assert!(
+        policy
+            .compare_current(&current, &transferred_components)
+            .unwrap_err()
+            .to_string()
+            .contains("production-name mismatch")
     );
 }
 

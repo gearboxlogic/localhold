@@ -227,8 +227,10 @@ recovery debt in `policy/maintainability/concrete-stores.json`; their exact
 per-file counts may decrease but cannot move, grow, or return after reaching
 zero. Normalized enclosing-syntax fingerprints pin each remaining occurrence
 to its reviewed recovery-baseline site, including concrete-store generic
-defaults. Production type aliases, associated-type aliases, renamed imports,
-and macro definitions cannot conceal or inject either concrete store name.
+defaults. Active debt remains attributed to its reviewed component even if the
+structure manifest transfers its path elsewhere. Production type aliases,
+associated-type aliases, renamed imports, and macro definitions cannot conceal
+or inject either concrete store name.
 Reviewed Serde and Schemars path and bound strings are parsed as Rust syntax,
 including bare single-segment store paths.
 

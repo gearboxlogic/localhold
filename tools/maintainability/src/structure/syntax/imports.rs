@@ -438,7 +438,6 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             self.leave_site_context(previous);
             return;
         }
-        visit::visit_attribute(self, attribute);
         self.leave_site_context(previous);
     }
 

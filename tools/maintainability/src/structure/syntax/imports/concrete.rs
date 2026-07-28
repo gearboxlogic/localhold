@@ -110,7 +110,12 @@ impl ConcreteStoreInventory {
             Some(name) if matches!(name.as_str(), "serde" | "schemars")
         );
         match meta {
-            Meta::Path(_) => Ok(()),
+            Meta::Path(path) => {
+                for segment in &path.segments {
+                    self.record_ident(&segment.ident, site_context)?;
+                }
+                Ok(())
+            }
             Meta::NameValue(value) => self.record_attribute_tokens(&value.value.to_token_stream(), governed, site_context),
             Meta::List(list) if governed => {
                 let nested = Punctuated::<Meta, Token![,]>::parse_terminated
@@ -134,7 +139,12 @@ impl ConcreteStoreInventory {
                 .map(|segment| normalized_ident(&segment.ident))
                 .is_some_and(|name| is_rust_fragment_key(&name));
         match meta {
-            Meta::Path(_) => Ok(()),
+            Meta::Path(path) => {
+                for segment in &path.segments {
+                    self.record_ident(&segment.ident, site_context)?;
+                }
+                Ok(())
+            }
             Meta::NameValue(value) => self.record_attribute_tokens(&value.value.to_token_stream(), rust_fragment, site_context),
             Meta::List(list) => self.record_governed_list(&list.tokens, rust_fragment, site_context),
         }
@@ -155,7 +165,8 @@ impl ConcreteStoreInventory {
             match token {
                 TokenTree::Group(group) => self.record_attribute_tokens(&group.stream(), rust_fragment, site_context)?,
                 TokenTree::Literal(literal) => self.record_attribute_literal(&literal, rust_fragment, site_context)?,
-                TokenTree::Ident(_) | TokenTree::Punct(_) => {}
+                TokenTree::Ident(ident) => self.record_ident(&ident, site_context)?,
+                TokenTree::Punct(_) => {}
             }
         }
         Ok(())

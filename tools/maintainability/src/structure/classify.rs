@@ -199,14 +199,15 @@ fn collect_sources(workspace: &Path, root: &Path, sources: &mut BTreeMap<String,
 
 #[cfg(test)]
 fn measure_sources(sources: BTreeMap<String, String>) -> Result<Inventory> {
-    let production_roots = conventional_production_roots(sources.keys());
-    let composition_roots = conventional_composition_roots(production_roots.iter());
-    let library_roots = conventional_library_roots(production_roots.iter());
+    let production_roots = conventional_production_roots(sources.keys(), true, true);
+    let composition_roots = conventional_composition_roots(production_roots.iter(), true);
+    let library_roots = conventional_library_roots(production_roots.iter(), true);
     let target_roots = TargetRoots {
         production: production_roots,
         test: BTreeSet::new(),
         composition: composition_roots,
         libraries: library_roots,
+        rust_2015_absolute_paths: false,
     };
     measure_sources_with_roots(sources, &target_roots, true)
 }
@@ -217,6 +218,7 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
         test: explicit_test_roots,
         composition: composition_roots,
         libraries: library_roots,
+        rust_2015_absolute_paths,
     } = target_roots;
     let parsed = parse_sources(sources)?;
     let reachability = classify_source_reachability(&parsed, production_roots, explicit_test_roots, composition_roots, library_roots)?;
@@ -234,8 +236,14 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
                 if !path.starts_with("src/") || reachability.composition_only.contains(&path) || path.starts_with("src/server/") || path.starts_with("src/ui/") {
                     Vec::new()
                 } else {
-                    production_internal_imports(&parsed.syntax, &path, library_root_for_source(&path, library_roots), require_reviewed_expansions)
-                        .map_err(|error| anyhow::anyhow!("{error} in {path}"))?
+                    production_internal_imports(
+                        &parsed.syntax,
+                        &path,
+                        library_root_for_source(&path, library_roots),
+                        *rust_2015_absolute_paths,
+                        require_reviewed_expansions,
+                    )
+                    .map_err(|error| anyhow::anyhow!("{error} in {path}"))?
                 },
             )
         };
@@ -369,6 +377,7 @@ struct TargetRoots {
     test: BTreeSet<String>,
     composition: BTreeSet<String>,
     libraries: BTreeSet<String>,
+    rust_2015_absolute_paths: bool,
 }
 
 fn workspace_target_roots<'a>(workspace: &Path, known: impl Iterator<Item = &'a String>) -> Result<TargetRoots> {
@@ -381,22 +390,31 @@ fn target_roots<'a>(manifest: &str, known: impl Iterator<Item = &'a String>) -> 
     let known = known.cloned().collect::<BTreeSet<_>>();
     let manifest: toml::Value = toml::from_str(manifest).context("parse package manifest")?;
     validate_testing_feature_is_isolated(&manifest)?;
-    let mut roots = conventional_production_roots(known.iter());
-    let mut composition = conventional_composition_roots(roots.iter());
-    let mut libraries = conventional_library_roots(roots.iter());
-    if let Some(library) = manifest.get("lib")
-        && let Some(path) = add_declared_target_root(library, "library", &known, &mut roots)?
-    {
-        if path.starts_with("src/server/") || path.starts_with("src/ui/") {
-            bail!("package library target cannot use an exempt server/UI directory as its crate root: {path}");
+    let auto_library = package_auto_target(&manifest, "autolib")?;
+    let auto_binaries = package_auto_target(&manifest, "autobins")?;
+    let rust_2015_absolute_paths = package_uses_rust_2015_paths(&manifest)?;
+    let mut roots = conventional_production_roots(known.iter(), auto_library, auto_binaries);
+    let mut composition = conventional_composition_roots(roots.iter(), auto_binaries);
+    let mut libraries = conventional_library_roots(roots.iter(), auto_library);
+    if let Some(library) = manifest.get("lib") {
+        if !auto_library && library.get("path").is_none() {
+            bail!("declared library target must set path when package autolib is false");
         }
-        roots.retain(|candidate| !libraries.contains(candidate) || candidate == &path);
-        libraries.clear();
-        libraries.insert(path);
+        if let Some(path) = add_declared_target_root(library, "library", &known, &mut roots)? {
+            if path.starts_with("src/server/") || path.starts_with("src/ui/") {
+                bail!("package library target cannot use an exempt server/UI directory as its crate root: {path}");
+            }
+            roots.retain(|candidate| !libraries.contains(candidate) || candidate == &path);
+            libraries.clear();
+            libraries.insert(path);
+        }
     }
     if let Some(binaries) = manifest.get("bin") {
         let binaries = binaries.as_array().context("package bin targets must be an array of tables")?;
         for binary in binaries {
+            if !auto_binaries && binary.get("path").is_none() {
+                bail!("declared binary targets must set path when package autobins is false");
+            }
             if let Some(path) = add_declared_target_root(binary, "binary", &known, &mut roots)? {
                 composition.insert(path);
             }
@@ -414,7 +432,30 @@ fn target_roots<'a>(manifest: &str, known: impl Iterator<Item = &'a String>) -> 
         test,
         composition,
         libraries,
+        rust_2015_absolute_paths,
     })
+}
+
+fn package_auto_target(manifest: &toml::Value, key: &str) -> Result<bool> {
+    let package = manifest.get("package").context("package manifest must define [package]")?;
+    let package = package.as_table().context("package manifest [package] must be a table")?;
+    package
+        .get(key)
+        .map_or(Ok(true), |value| value.as_bool().with_context(|| format!("package {key} must be a boolean")))
+}
+
+fn package_uses_rust_2015_paths(manifest: &toml::Value) -> Result<bool> {
+    let package = manifest.get("package").context("package manifest must define [package]")?;
+    let package = package.as_table().context("package manifest [package] must be a table")?;
+    let Some(edition) = package.get("edition") else {
+        return Ok(true);
+    };
+    let edition = edition.as_str().context("package edition must be a string")?;
+    match edition {
+        "2015" => Ok(true),
+        "2018" | "2021" | "2024" => Ok(false),
+        _ => bail!("unsupported package edition {edition:?} for production import classification"),
+    }
 }
 
 fn validate_testing_feature_is_isolated(manifest: &toml::Value) -> Result<()> {
@@ -434,19 +475,34 @@ fn validate_testing_feature_is_isolated(manifest: &toml::Value) -> Result<()> {
     Ok(())
 }
 
-fn conventional_production_roots<'a>(known: impl Iterator<Item = &'a String>) -> BTreeSet<String> {
+fn conventional_production_roots<'a>(known: impl Iterator<Item = &'a String>, auto_library: bool, auto_binaries: bool) -> BTreeSet<String> {
     known
-        .filter(|path| matches!(path.as_str(), "src/lib.rs" | "src/main.rs") || path.starts_with("src/bin/"))
+        .filter(|path| auto_library && path.as_str() == "src/lib.rs" || auto_binaries && is_conventional_binary_root(path))
         .cloned()
         .collect()
 }
 
-fn conventional_composition_roots<'a>(known: impl Iterator<Item = &'a String>) -> BTreeSet<String> {
-    known.filter(|path| path.as_str() == "src/main.rs" || path.starts_with("src/bin/")).cloned().collect()
+fn conventional_composition_roots<'a>(known: impl Iterator<Item = &'a String>, auto_binaries: bool) -> BTreeSet<String> {
+    known.filter(|path| auto_binaries && is_conventional_binary_root(path)).cloned().collect()
 }
 
-fn conventional_library_roots<'a>(known: impl Iterator<Item = &'a String>) -> BTreeSet<String> {
-    known.filter(|path| path.as_str() == "src/lib.rs").cloned().collect()
+fn conventional_library_roots<'a>(known: impl Iterator<Item = &'a String>, auto_library: bool) -> BTreeSet<String> {
+    known.filter(|path| auto_library && path.as_str() == "src/lib.rs").cloned().collect()
+}
+
+fn is_conventional_binary_root(path: &str) -> bool {
+    if path == "src/main.rs" {
+        return true;
+    }
+    let Some(relative) = path.strip_prefix("src/bin/") else {
+        return false;
+    };
+    let mut components = relative.split('/');
+    match (components.next(), components.next(), components.next()) {
+        (Some(file), None, None) => Path::new(file).extension().is_some_and(|extension| extension == "rs"),
+        (Some(_), Some("main.rs"), None) => true,
+        _ => false,
+    }
 }
 
 fn add_declared_target_root(target: &toml::Value, kind: &str, known: &BTreeSet<String>, roots: &mut BTreeSet<String>) -> Result<Option<String>> {

@@ -3,25 +3,34 @@ use std::path::Path as FsPath;
 use anyhow::{Context, Result, bail};
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens as _;
+use syn::parse::Parser as _;
+use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{
     Arm, Attribute, BareFnArg, BareVariadic, Expr, Field, FieldPat, FieldValue, File, FnArg, ForeignItem, GenericParam, ImplItem, Item, ItemExternCrate, ItemMod, ItemUse, Local,
-    Meta, Pat, Path as SynPath, StmtMacro, TraitItem, UseTree, Variadic, Variant, Visibility,
+    Meta, Pat, Path as SynPath, StmtMacro, Token, TraitItem, UseTree, Variadic, Variant, Visibility,
 };
 
 use crate::scan::{reviewed_attribute_expansion, reviewed_macro_expansion};
 
 use super::{
-    attributes_disable_production, expr_attributes, fn_arg_attributes, foreign_item_attributes, generic_param_attributes, impl_item_attributes, item_is_test_only,
-    normalized_ident, pat_attributes, trait_item_attributes,
+    attributes_disable_production, cfg_can_apply_in_production, expr_attributes, fn_arg_attributes, foreign_item_attributes, generic_param_attributes, impl_item_attributes,
+    item_is_test_only, normalized_ident, pat_attributes, trait_item_attributes,
 };
 
-pub fn production_internal_imports(file: &syn::File, source_path: &str, crate_root: Option<&str>, require_reviewed_expansions: bool) -> Result<Vec<String>> {
+pub fn production_internal_imports(
+    file: &syn::File,
+    source_path: &str,
+    crate_root: Option<&str>,
+    rust_2015_absolute_paths: bool,
+    require_reviewed_expansions: bool,
+) -> Result<Vec<String>> {
     let module = source_module(source_path, crate_root)?;
     let mut collector = ImportCollector {
         module,
         imports: Vec::new(),
         error: None,
+        rust_2015_absolute_paths,
         require_reviewed_expansions,
     };
     collector.visit_file(file);
@@ -37,18 +46,22 @@ struct ImportCollector {
     module: Vec<String>,
     imports: Vec<String>,
     error: Option<anyhow::Error>,
+    rust_2015_absolute_paths: bool,
     require_reviewed_expansions: bool,
 }
 
 impl ImportCollector {
     fn collect_use(&mut self, item: &ItemUse) -> Result<()> {
-        if item.leading_colon.is_some() {
+        if item.leading_colon.is_some() && !self.rust_2015_absolute_paths {
             return Ok(());
         }
         let import_count = self.imports.len();
         let mut paths = Vec::new();
         flatten_use_tree(&item.tree, &mut Vec::new(), &mut paths);
-        for path in paths {
+        for mut path in paths {
+            if item.leading_colon.is_some() {
+                path.segments.insert(0, "crate".to_owned());
+            }
             self.collect_path(&path)?;
         }
         if self.imports.len() != import_count && !matches!(item.vis, Visibility::Inherited) {
@@ -209,8 +222,11 @@ impl<'ast> Visit<'ast> for ImportCollector {
     }
 
     fn visit_path(&mut self, path: &'ast SynPath) {
-        if self.error.is_none() && path.leading_colon.is_none() {
-            let segments = path.segments.iter().map(|segment| normalized_ident(&segment.ident)).collect::<Vec<_>>();
+        if self.error.is_none() && (path.leading_colon.is_none() || self.rust_2015_absolute_paths) {
+            let mut segments = path.segments.iter().map(|segment| normalized_ident(&segment.ident)).collect::<Vec<_>>();
+            if path.leading_colon.is_some() {
+                segments.insert(0, "crate".to_owned());
+            }
             let is_qualified = segments.len() > 1 || matches!(segments.first().map(String::as_str), Some("crate" | "self" | "super"));
             if is_qualified && let Err(error) = self.collect_segments(&segments, false) {
                 self.error = Some(error);
@@ -224,7 +240,7 @@ impl<'ast> Visit<'ast> for ImportCollector {
         if self.error.is_some() {
             return;
         }
-        if let Some(restricted) = restricted_macro_identifier(&node.tokens) {
+        if let Some(restricted) = restricted_macro_identifier(&node.tokens, &self.module, self.rust_2015_absolute_paths) {
             self.error = Some(anyhow::anyhow!(
                 "production macro token stream names restricted crate module {restricted:?} and cannot be classified safely"
             ));
@@ -241,18 +257,18 @@ impl<'ast> Visit<'ast> for ImportCollector {
         if self.error.is_some() {
             return;
         }
-        let tokens = match &attribute.meta {
-            Meta::Path(_) => None,
-            Meta::List(list) => Some(list.tokens.clone()),
-            Meta::NameValue(value) => Some(value.value.to_token_stream()),
-        };
-        if let Some(tokens) = tokens
-            && let Some(restricted) = restricted_attribute_identifier(&tokens, &self.module)
-        {
-            self.error = Some(anyhow::anyhow!(
-                "production attribute token stream names restricted crate module {restricted:?} and cannot be classified safely"
-            ));
-            return;
+        match restricted_attribute_identifier(attribute, &self.module, self.rust_2015_absolute_paths) {
+            Ok(Some(restricted)) => {
+                self.error = Some(anyhow::anyhow!(
+                    "production attribute token stream names restricted crate module {restricted:?} and cannot be classified safely"
+                ));
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
         }
         if self.require_reviewed_expansions && !reviewed_attribute_expansion(attribute) {
             self.error = Some(anyhow::anyhow!("production code uses unreviewed attribute expansion {}", attribute.meta.to_token_stream()));
@@ -373,28 +389,65 @@ fn source_module(source_path: &str, crate_root: Option<&str>) -> Result<Vec<Stri
     Ok(parts)
 }
 
-fn restricted_macro_identifier(tokens: &TokenStream) -> Option<String> {
+fn restricted_macro_identifier(tokens: &TokenStream, module: &[String], rust_2015_absolute_paths: bool) -> Option<String> {
     tokens.clone().into_iter().find_map(|token| match token {
-        TokenTree::Group(group) => restricted_macro_identifier(&group.stream()),
+        TokenTree::Group(group) => restricted_macro_identifier(&group.stream(), module, rust_2015_absolute_paths),
         TokenTree::Ident(ident) => {
             let normalized = normalized_ident(&ident);
             matches!(normalized.as_str(), "server" | "ui").then_some(normalized)
         }
-        TokenTree::Punct(_) | TokenTree::Literal(_) => None,
+        TokenTree::Literal(literal) => restricted_string_path(&literal, module, rust_2015_absolute_paths),
+        TokenTree::Punct(_) => None,
     })
 }
 
-fn restricted_attribute_identifier(tokens: &TokenStream, module: &[String]) -> Option<String> {
-    restricted_macro_identifier(tokens).or_else(|| {
-        tokens.clone().into_iter().find_map(|token| match token {
-            TokenTree::Group(group) => restricted_attribute_identifier(&group.stream(), module),
-            TokenTree::Literal(literal) => restricted_string_path(&literal, module),
-            TokenTree::Ident(_) | TokenTree::Punct(_) => None,
-        })
-    })
+fn restricted_attribute_identifier(attribute: &Attribute, module: &[String], rust_2015_absolute_paths: bool) -> Result<Option<String>> {
+    if !attribute.path().is_ident("cfg_attr") {
+        return Ok(restricted_meta_contents(&attribute.meta, module, rust_2015_absolute_paths));
+    }
+    let Meta::List(list) = &attribute.meta else {
+        return Ok(None);
+    };
+    restricted_cfg_attr_contents(&list.tokens, module, rust_2015_absolute_paths)
 }
 
-fn restricted_string_path(literal: &proc_macro2::Literal, module: &[String]) -> Option<String> {
+fn restricted_cfg_attr_contents(tokens: &TokenStream, module: &[String], rust_2015_absolute_paths: bool) -> Result<Option<String>> {
+    let arguments = Punctuated::<Meta, Token![,]>::parse_terminated
+        .parse2(tokens.clone())
+        .context("parse cfg_attr arguments for production import classification")?;
+    let mut arguments = arguments.into_iter();
+    let Some(condition) = arguments.next() else {
+        return Ok(None);
+    };
+    if !cfg_can_apply_in_production(&condition) {
+        return Ok(None);
+    }
+    for nested in arguments {
+        let restricted = if nested.path().is_ident("cfg_attr") {
+            let Meta::List(list) = nested else {
+                continue;
+            };
+            restricted_cfg_attr_contents(&list.tokens, module, rust_2015_absolute_paths)?
+        } else {
+            restricted_meta_contents(&nested, module, rust_2015_absolute_paths)
+        };
+        if restricted.is_some() {
+            return Ok(restricted);
+        }
+    }
+    Ok(None)
+}
+
+fn restricted_meta_contents(meta: &Meta, module: &[String], rust_2015_absolute_paths: bool) -> Option<String> {
+    let tokens = match meta {
+        Meta::Path(_) => return None,
+        Meta::List(list) => &list.tokens,
+        Meta::NameValue(value) => return restricted_macro_identifier(&value.value.to_token_stream(), module, rust_2015_absolute_paths),
+    };
+    restricted_macro_identifier(tokens, module, rust_2015_absolute_paths)
+}
+
+fn restricted_string_path(literal: &proc_macro2::Literal, module: &[String], rust_2015_absolute_paths: bool) -> Option<String> {
     let syn::Lit::Str(literal) = syn::parse_str::<syn::Lit>(&literal.to_string()).ok()? else {
         return None;
     };
@@ -403,10 +456,13 @@ fn restricted_string_path(literal: &proc_macro2::Literal, module: &[String]) -> 
         return None;
     }
     let path = syn::parse_str::<SynPath>(&value).ok()?;
-    if path.leading_colon.is_some() {
+    if path.leading_colon.is_some() && !rust_2015_absolute_paths {
         return None;
     }
-    let segments = path.segments.iter().map(|segment| normalized_ident(&segment.ident)).collect::<Vec<_>>();
+    let mut segments = path.segments.iter().map(|segment| normalized_ident(&segment.ident)).collect::<Vec<_>>();
+    if path.leading_colon.is_some() {
+        segments.insert(0, "crate".to_owned());
+    }
     let resolved = resolve_path(module, &segments).ok()??;
     matches!(resolved.first().map(String::as_str), Some("server" | "ui")).then(|| resolved[0].clone())
 }
@@ -417,7 +473,7 @@ mod tests {
 
     fn imports(path: &str, source: &str) -> Result<Vec<String>> {
         let syntax = syn::parse_file(source)?;
-        production_internal_imports(&syntax, path, Some("src/lib.rs"), true)
+        production_internal_imports(&syntax, path, Some("src/lib.rs"), false, true)
     }
 
     #[test]
@@ -456,7 +512,10 @@ mod tests {
         assert_eq!(imports("src/adapter.rs", source).expect("lexical bare paths"), ["crate::server::Actual"]);
 
         let syntax = syn::parse_file("use server::AtRoot;\n")?;
-        assert_eq!(production_internal_imports(&syntax, "src/core.rs", Some("src/core.rs"), true)?, ["crate::server::AtRoot"]);
+        assert_eq!(
+            production_internal_imports(&syntax, "src/core.rs", Some("src/core.rs"), false, true)?,
+            ["crate::server::AtRoot"]
+        );
         Ok(())
     }
 
@@ -464,7 +523,7 @@ mod tests {
     fn nested_custom_library_roots_define_relative_module_paths() -> Result<()> {
         let syntax = syn::parse_file("use super::server::Service;\n")?;
         assert_eq!(
-            production_internal_imports(&syntax, "src/core/worker.rs", Some("src/core/lib.rs"), true)?,
+            production_internal_imports(&syntax, "src/core/worker.rs", Some("src/core/lib.rs"), false, true)?,
             ["crate::server::Service"]
         );
         Ok(())
@@ -474,6 +533,9 @@ mod tests {
     fn restricted_names_in_production_macro_tokens_fail_closed() {
         let source = "macro_rules! dependency { () => { use crate::server::Service; } }\n";
         assert!(imports("src/adapter.rs", source).unwrap_err().to_string().contains("production macro token stream"));
+
+        let encoded = "numbered_placeholders!(\"crate::server::serialize\");\n";
+        assert!(imports("src/adapter.rs", encoded).unwrap_err().to_string().contains("production macro token stream"));
 
         let test_only = "#[cfg(test)]\nmacro_rules! dependency { () => { use crate::ui::View; } }\n";
         assert!(imports("src/adapter.rs", test_only).expect("test-only macro").is_empty());
@@ -501,6 +563,17 @@ mod tests {
     }
 
     #[test]
+    fn cfg_attr_scans_only_nested_attributes_that_can_apply_in_production() {
+        let test_only = "#[cfg_attr(test, serde(serialize_with = \"crate::server::serialize\"))]\n\
+                         #[cfg_attr(feature = \"testing\", serde(serialize_with = \"crate::ui::serialize\"))]\n\
+                         struct Record;\n";
+        assert!(imports("src/adapter.rs", test_only).expect("test-only nested attributes").is_empty());
+
+        let production = "#[cfg_attr(feature = \"other\", serde(serialize_with = \"crate::server::serialize\"))]\nstruct Record;\n";
+        assert!(imports("src/adapter.rs", production).unwrap_err().to_string().contains("production attribute token stream"));
+    }
+
+    #[test]
     fn test_only_and_production_items_on_one_line_are_distinguished() {
         let source = "#[cfg(test)] fn helper() { crate::ui::test_only(); } use crate::server::Service;\n";
         assert_eq!(imports("src/adapter.rs", source).expect("same-line items"), ["crate::server::Service"]);
@@ -512,6 +585,19 @@ mod tests {
                       use ::ui::External as ExternalUi;\n\
                       fn build() -> ::server::Qualified { ::ui::qualified() }\n";
         assert!(imports("src/adapter.rs", source).expect("absolute external paths").is_empty());
+    }
+
+    #[test]
+    fn rust_2015_absolute_paths_are_classified_as_crate_relative() -> Result<()> {
+        let syntax = syn::parse_file(
+            "use ::server::External;\n\
+             fn build() -> ::server::Qualified { ::ui::qualified() }\n",
+        )?;
+        assert_eq!(
+            production_internal_imports(&syntax, "src/adapter.rs", Some("src/lib.rs"), true, true)?,
+            ["crate::server::External", "crate::server::Qualified", "crate::ui::qualified"]
+        );
+        Ok(())
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use super::{measure_sources, physical_line_count, scan_revision, scan_workspace};
+use super::{is_conventional_binary_root, measure_sources, physical_line_count, scan_revision, scan_workspace};
 
 fn inventory(sources: &[(&str, &str)]) -> super::Inventory {
     let sources = sources.iter().map(|(path, source)| ((*path).to_owned(), (*source).to_owned())).collect::<BTreeMap<_, _>>();
@@ -16,6 +16,16 @@ fn physical_lines_are_lf_crlf_and_final_newline_stable() {
     assert_eq!(physical_line_count("one"), 1);
     assert_eq!(physical_line_count("one\n"), 1);
     assert_eq!(physical_line_count("one\r\ntwo\r\n"), 2);
+}
+
+#[test]
+fn automatic_binary_roots_exclude_nested_support_modules() {
+    assert!(is_conventional_binary_root("src/main.rs"));
+    assert!(is_conventional_binary_root("src/bin/worker.rs"));
+    assert!(is_conventional_binary_root("src/bin/worker/main.rs"));
+    assert!(!is_conventional_binary_root("src/bin.rs"));
+    assert!(!is_conventional_binary_root("src/bin/worker/support.rs"));
+    assert!(!is_conventional_binary_root("src/bin/worker/nested/main.rs"));
 }
 
 #[test]
@@ -203,6 +213,40 @@ fn custom_binary_child_modules_are_composition_only() {
     let inventory = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).expect("workspace inventory");
     let worker = inventory.files.iter().find(|file| file.path == "src/cli/worker.rs").expect("worker measurement");
     assert!(worker.production_internal_imports.is_empty());
+}
+
+#[test]
+fn disabled_automatic_binaries_leave_src_bin_modules_in_the_library_graph() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src/bin", "tests", "benches"] {
+        fs::create_dir_all(repository.path().join(root)).expect("source root");
+    }
+    fs::write(
+        repository.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\nautobins = false\n",
+    )
+    .expect("package manifest");
+    fs::write(repository.path().join("src/lib.rs"), "mod bin { mod worker; }\n").expect("library root");
+    fs::write(repository.path().join("src/bin/worker.rs"), "use crate::server::Service;\n").expect("library child");
+
+    let inventory = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).expect("workspace inventory");
+    let worker = inventory.files.iter().find(|file| file.path == "src/bin/worker.rs").expect("worker measurement");
+    assert_eq!(worker.production_internal_imports, ["crate::server::Service"]);
+}
+
+#[test]
+fn default_rust_2015_manifest_classifies_absolute_crate_paths() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    for root in ["src", "tests", "benches"] {
+        fs::create_dir(repository.path().join(root)).expect("source root");
+    }
+    fs::write(repository.path().join("Cargo.toml"), "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n").expect("package manifest");
+    fs::write(repository.path().join("src/lib.rs"), "mod server;\nfn build() -> ::server::Service { loop {} }\n").expect("library root");
+    fs::write(repository.path().join("src/server.rs"), "pub struct Service;\n").expect("server module");
+
+    let inventory = scan_workspace(repository.path(), &["src".to_owned(), "tests".to_owned(), "benches".to_owned()]).expect("workspace inventory");
+    let library = inventory.files.iter().find(|file| file.path == "src/lib.rs").expect("library measurement");
+    assert_eq!(library.production_internal_imports, ["crate::server::Service"]);
 }
 
 #[test]

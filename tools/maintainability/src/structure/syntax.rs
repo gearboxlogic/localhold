@@ -264,6 +264,10 @@ fn evaluate(meta: &Meta) -> Truth {
     }
 }
 
+pub(super) fn cfg_can_apply_in_production(meta: &Meta) -> bool {
+    evaluate(meta) != Truth::AlwaysFalse
+}
+
 fn evaluate_leaf(meta: &Meta) -> Truth {
     let Meta::NameValue(value) = meta else {
         return Truth::Unknown;

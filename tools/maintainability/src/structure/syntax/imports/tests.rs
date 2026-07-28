@@ -609,6 +609,18 @@ fn concrete_store_bearing_signatures_are_inventoried_separately_from_bodies() ->
 }
 
 #[test]
+fn store_specialized_impl_headers_are_exposure_signatures() -> Result<()> {
+    let private = concrete_facts("impl Adapter<SqliteStore> { fn open() -> Self { loop {} } }\n")?;
+    let exposed = concrete_facts("impl Adapter<SqliteStore> { pub(crate) fn open() -> Self { loop {} } }\n")?;
+    let trait_impl = concrete_facts("impl Routed for Adapter<PostgresStore> { fn open() -> Self { loop {} } }\n")?;
+
+    assert!(private.signature_concrete_store_sites.sqlite_store.is_empty());
+    assert_eq!(exposed.signature_concrete_store_sites.sqlite_store.len(), 1);
+    assert_eq!(trait_impl.signature_concrete_store_sites.postgres_store.len(), 1);
+    Ok(())
+}
+
+#[test]
 fn type_and_trait_generic_bounds_are_signature_evidence() -> Result<()> {
     let facts = concrete_facts(
         "pub(crate) struct Adapter<T: Uses<SqliteStore>>(T);\n\

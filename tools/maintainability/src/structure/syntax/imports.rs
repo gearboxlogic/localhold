@@ -17,10 +17,12 @@ use super::{
 };
 
 mod concrete;
+mod reexports;
 mod resolution;
 mod tokens;
 pub use concrete::{ConcreteStoreCounts, ConcreteStoreSites};
 use concrete::{ConcreteStoreInventory, context_fingerprint, is_concrete_store_name, tokens_contain_concrete_store};
+use reexports::{UseResolution, resolve_public_reexport_aliases};
 use resolution::{StringScan, UsePath, flatten_use_tree, resolve_path, restricted_attribute_identifier, restricted_token_identifier, source_module};
 use tokens::resolving_tokens;
 
@@ -77,10 +79,12 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
     let mut collector = ProductionSyntaxCollector {
         module,
         imports: Vec::new(),
+        use_resolutions: Vec::new(),
         public_reexports: Vec::new(),
         concrete_stores: ConcreteStoreInventory::default(),
         site_context: None,
         generic_default_depth: 0,
+        impl_signature_headers: Vec::new(),
         declaration_ancestors: initial_context.declaration_ancestors,
         cfg_context: initial_context.cfg,
         error: None,
@@ -94,6 +98,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
     }
     collector.imports.sort();
     collector.imports.dedup();
+    resolve_public_reexport_aliases(&mut collector.public_reexports, &collector.use_resolutions);
     collector.public_reexports.sort();
     collector.public_reexports.dedup();
     collector.concrete_stores.finish();
@@ -113,10 +118,12 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
 struct ProductionSyntaxCollector {
     module: Vec<String>,
     imports: Vec<String>,
+    use_resolutions: Vec<UseResolution>,
     public_reexports: Vec<PublicReexportEvidence>,
     concrete_stores: ConcreteStoreInventory,
     site_context: Option<String>,
     generic_default_depth: usize,
+    impl_signature_headers: Vec<TokenStream>,
     declaration_ancestors: Vec<String>,
     cfg_context: ProductionCfgContext,
     error: Option<anyhow::Error>,
@@ -177,6 +184,35 @@ impl ProductionSyntaxCollector {
                 self.declaration_ancestors.join("\0")
             );
             self.public_reexports.push(PublicReexportEvidence {
+                exported_path,
+                target_path,
+                fingerprint: syntax_fingerprint(&identity),
+            });
+        }
+        Ok(())
+    }
+
+    fn record_use_resolutions(&mut self, item: &ItemUse) -> Result<()> {
+        let mut paths = Vec::new();
+        flatten_use_tree(&item.tree, &mut Vec::new(), &mut paths);
+        for mut path in paths {
+            if item.leading_colon.is_some() {
+                path.segments.insert(0, "crate".to_owned());
+            }
+            let Some(target_path) = resolve_path(&self.module, &path.segments, self.rust_2015_absolute_paths)? else {
+                continue;
+            };
+            let mut exported_path = self.module.clone();
+            exported_path.push(path.alias.clone().or_else(|| target_path.last().cloned()).context("production use has no imported name")?);
+            let identity = format!(
+                "use-resolution:{}\0alias:{}\0visibility:{}\0cfg:{}\0ancestors:{}",
+                target_path.join("::"),
+                path.alias.as_deref().unwrap_or_default(),
+                syntax_fingerprint(&item.vis),
+                self.cfg_context.identity(),
+                self.declaration_ancestors.join("\0")
+            );
+            self.use_resolutions.push(UseResolution {
                 exported_path,
                 target_path,
                 fingerprint: syntax_fingerprint(&identity),
@@ -281,6 +317,29 @@ impl ProductionSyntaxCollector {
             self.declaration_ancestors.join("\0")
         );
         self.concrete_stores.record_signature_tokens(tokens, &context);
+    }
+
+    fn record_concrete_stores_in_exposure_signature_with_identity(&mut self, kind: &str, tokens: &TokenStream, identity: &TokenStream) {
+        let context = format!(
+            "{kind}:{}\0cfg:{}\0ancestors:{}",
+            syntax_fingerprint(identity),
+            self.cfg_context.identity(),
+            self.declaration_ancestors.join("\0")
+        );
+        self.concrete_stores.record_exposure_signature_tokens(tokens, &context);
+    }
+
+    fn record_impl_header_for_visible_member(&mut self, kind: &str, visibility: &Visibility, member: &impl ToTokens) {
+        if matches!(visibility, Visibility::Inherited) {
+            return;
+        }
+        let Some(header) = self.impl_signature_headers.last().cloned() else {
+            return;
+        };
+        let mut identity = header.clone();
+        identity.extend(visibility.to_token_stream());
+        identity.extend(member.to_token_stream());
+        self.record_concrete_stores_in_exposure_signature_with_identity(kind, &header, &identity);
     }
 
     fn enter_site_context(&mut self, kind: &str, syntax: &impl ToTokens) -> Option<String> {
@@ -466,7 +525,10 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
 
     fn visit_item_use(&mut self, item: &'ast ItemUse) {
         let previous = self.enter_site_context("use", item);
-        let result = self.collect_use(item).and_then(|()| self.record_public_reexport(item));
+        let result = self
+            .collect_use(item)
+            .and_then(|()| self.record_use_resolutions(item))
+            .and_then(|()| self.record_public_reexport(item));
         if self.error.is_none()
             && let Err(error) = result
         {
@@ -519,7 +581,13 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         };
         let context = format!("{binding}\0cfg:{}\0ancestors:{}", self.cfg_context.identity(), self.declaration_ancestors.join("\0"));
         self.concrete_stores.record_binding_tokens(&header.to_token_stream(), &context);
+        if item.trait_.is_some() {
+            let tokens = header.to_token_stream();
+            self.record_concrete_stores_in_exposure_signature_with_identity("trait-impl-header", &tokens, &tokens);
+        }
+        self.impl_signature_headers.push(header.to_token_stream());
         visit::visit_item_impl(self, item);
+        self.impl_signature_headers.pop();
     }
 
     fn visit_item_fn(&mut self, item: &'ast ItemFn) {
@@ -528,6 +596,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_impl_item_fn(&mut self, item: &'ast ImplItemFn) {
+        self.record_impl_header_for_visible_member("inherent-impl-method", &item.vis, &item.sig);
         self.record_concrete_stores_in_visible_signature("method-signature", &item.vis, &item.sig);
         visit::visit_impl_item_fn(self, item);
     }
@@ -553,6 +622,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_impl_item_const(&mut self, item: &'ast ImplItemConst) {
+        self.record_impl_header_for_visible_member("inherent-impl-const", &item.vis, &item.ty);
         self.record_concrete_stores_in_visible_signature("associated-const-type", &item.vis, &item.ty);
         visit::visit_impl_item_const(self, item);
     }
@@ -579,6 +649,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
 
     fn visit_impl_item_type(&mut self, item: &'ast ImplItemType) {
         let concrete_before = self.concrete_stores.counts;
+        self.record_impl_header_for_visible_member("inherent-impl-type", &item.vis, &item.ty);
         visit::visit_impl_item_type(self, item);
         self.reject_concrete_store_alias(concrete_before);
     }

@@ -105,6 +105,16 @@ impl ConcreteStoreInventory {
         }
     }
 
+    pub(super) fn record_exposure_signature_tokens(&mut self, tokens: &TokenStream, site_context: &str) {
+        for token in resolving_tokens(tokens) {
+            match token {
+                TokenTree::Group(group) => self.record_exposure_signature_tokens(&group.stream(), site_context),
+                TokenTree::Ident(ident) => self.record_exposure_signature_name(&normalized_ident(&ident), site_context),
+                TokenTree::Literal(_) | TokenTree::Punct(_) => {}
+            }
+        }
+    }
+
     pub(super) fn record_binding_tokens(&mut self, tokens: &TokenStream, site_context: &str) {
         for token in resolving_tokens(tokens) {
             match token {
@@ -243,13 +253,17 @@ impl ConcreteStoreInventory {
     }
 
     fn record_signature_name(&mut self, name: &str, site_context: &str) {
+        self.record_exposure_signature_name(name, site_context);
+        self.record_binding_name(name, site_context);
+    }
+
+    fn record_exposure_signature_name(&mut self, name: &str, site_context: &str) {
         let sites = match name {
             "SqliteStore" => &mut self.signature_sites.sqlite_store,
             "PostgresStore" => &mut self.signature_sites.postgres_store,
             _ => return,
         };
         sites.push(syntax_fingerprint(&site_context));
-        self.record_binding_name(name, site_context);
     }
 
     fn record_binding_name(&mut self, name: &str, site_context: &str) {

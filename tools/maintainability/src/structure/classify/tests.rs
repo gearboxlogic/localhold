@@ -234,9 +234,30 @@ fn public_reexport_chains_normalize_exported_and_target_paths() {
                 vec!["ui".to_owned(), "facade".to_owned(), "open".to_owned()],
                 vec!["ui".to_owned(), "helper".to_owned(), "open".to_owned()]
             ),
-            (vec!["ui".to_owned(), "open".to_owned()], vec!["ui".to_owned(), "facade".to_owned(), "open".to_owned()]),
+            (vec!["ui".to_owned(), "open".to_owned()], vec!["ui".to_owned(), "helper".to_owned(), "open".to_owned()]),
         ]
     );
+}
+
+#[test]
+fn public_reexports_resolve_private_import_aliases_regardless_of_item_order() {
+    for source in [
+        "mod helper;\n\
+         use self::helper as facade;\n\
+         pub(crate) use self::facade::open;\n",
+        "mod helper;\n\
+         pub(crate) use self::facade::open;\n\
+         use self::helper as facade;\n",
+    ] {
+        let measured = inventory(&[
+            ("src/lib.rs", "mod ui;\n"),
+            ("src/ui/mod.rs", source),
+            ("src/ui/helper.rs", "pub fn open() -> SqliteStore { loop {} }\n"),
+        ]);
+        let ui = measured.files.iter().find(|file| file.path == "src/ui/mod.rs").expect("ui measurement");
+        assert_eq!(ui.production_public_reexports.len(), 1);
+        assert_eq!(ui.production_public_reexports[0].target_path, ["ui", "helper", "open"]);
+    }
 }
 
 #[test]

@@ -5,6 +5,8 @@ use std::process::Command;
 
 use super::{is_conventional_binary_root, measure_sources, physical_line_count, scan_revision, scan_workspace};
 
+mod target_features;
+
 fn inventory(sources: &[(&str, &str)]) -> super::Inventory {
     let sources = sources.iter().map(|(path, source)| ((*path).to_owned(), (*source).to_owned())).collect::<BTreeMap<_, _>>();
     measure_sources(sources).expect("fixture inventory")
@@ -79,6 +81,8 @@ fn external_modules_reachable_only_from_tests_are_wholly_test_only() {
     assert_eq!(by_path["src/lib.rs"].production_lines, 1);
     assert_eq!(by_path["src/tests.rs"].production_lines, 0);
     assert_eq!(by_path["src/tests/nested.rs"].production_lines, 0);
+    assert!(by_path["src/tests.rs"].production_targets.is_empty());
+    assert!(by_path["src/tests/nested.rs"].production_targets.is_empty());
 }
 
 #[test]
@@ -102,6 +106,350 @@ fn any_production_module_edge_keeps_the_target_in_production() {
     ]);
     let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
     assert_eq!(by_path["src/shared.rs"].production_lines, 1);
+}
+
+#[test]
+fn production_sources_retain_their_originating_target_roots() {
+    let inventory = inventory(&[("src/lib.rs", "mod shared;\n"), ("src/main.rs", "mod shared;\n"), ("src/shared.rs", "fn shared() {}\n")]);
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_path["src/lib.rs"].production_targets, ["src/lib.rs"]);
+    assert_eq!(by_path["src/main.rs"].production_targets, ["src/main.rs"]);
+    assert_eq!(by_path["src/shared.rs"].production_targets, ["src/lib.rs", "src/main.rs"]);
+}
+
+#[test]
+fn production_target_memberships_exclude_cfg_impossible_paths() {
+    let inventory = inventory(&[
+        ("src/lib.rs", "mod shared;\n"),
+        ("src/main.rs", "#![cfg(feature = \"legacy\")]\nmod shared;\nfn main() {}\n"),
+        ("src/shared.rs", "#[cfg(not(feature = \"legacy\"))]\nmod child;\n"),
+        ("src/shared/child.rs", "fn child() {}\n"),
+    ]);
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_path["src/shared.rs"].production_targets, ["src/lib.rs", "src/main.rs"]);
+    assert_eq!(by_path["src/shared/child.rs"].production_targets, ["src/lib.rs"]);
+}
+
+#[test]
+fn binary_crate_roots_resolve_reexports_from_the_empty_module() {
+    let inventory = inventory(&[
+        ("src/main.rs", "mod hidden;\npub(crate) use hidden::open;\nfn main() {}\n"),
+        ("src/hidden.rs", "pub(crate) fn open(_: SqliteStore) {}\n"),
+    ]);
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    let root = by_path["src/main.rs"];
+    let hidden = by_path["src/hidden.rs"];
+    assert!(root.production_module.is_empty());
+    assert_eq!(hidden.production_module, ["hidden"]);
+    assert_eq!(root.production_public_reexports[0].target_path, ["hidden", "open"]);
+    assert_eq!(hidden.production_signature_store_sites.sqlite_store[0].item_path, ["hidden", "open"]);
+}
+
+#[test]
+fn concrete_store_counts_follow_production_reachability() {
+    let inventory = inventory(&[
+        (
+            "src/lib.rs",
+            "use crate::store::SqliteStore;\n\
+             fn production(_: PostgresStore) {}\n\
+             #[cfg(test)] fn test_only(_: SqliteStore, _: PostgresStore) {}\n\
+             #[cfg(test)] mod support;\n",
+        ),
+        ("src/support.rs", "fn helper(_: SqliteStore, _: PostgresStore) {}\n"),
+    ]);
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_path["src/lib.rs"].production_concrete_stores.sqlite_store, 1);
+    assert_eq!(by_path["src/lib.rs"].production_concrete_stores.postgres_store, 1);
+    assert_eq!(by_path["src/support.rs"].production_concrete_stores, super::ConcreteStoreCounts::default());
+}
+
+#[test]
+fn out_of_line_modules_inherit_cfg_constraints_from_their_declaration_path() {
+    let inventory = inventory(&[
+        ("src/lib.rs", "#[cfg(feature = \"x\")]\nmod backend;\n"),
+        (
+            "src/backend.rs",
+            "#[cfg(not(feature = \"x\"))]\n\
+             fn unreachable() { SqliteStore::register_extension(); }\n\
+             #[cfg(feature = \"x\")]\n\
+             fn reachable() { PostgresStore::connect(); }\n",
+        ),
+    ]);
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_path["src/backend.rs"].production_lines, 2);
+    assert_eq!(by_path["src/backend.rs"].test_lines, 2);
+    assert_eq!(
+        by_path["src/backend.rs"].production_concrete_stores,
+        super::ConcreteStoreCounts {
+            sqlite_store: 0,
+            postgres_store: 1,
+        }
+    );
+}
+
+#[test]
+fn out_of_line_store_signatures_inherit_module_visibility_identity() {
+    let private = inventory(&[("src/lib.rs", "mod helper;\n"), ("src/helper.rs", "pub fn open() -> SqliteStore { loop {} }\n")]);
+    let restricted = inventory(&[("src/lib.rs", "pub(crate) mod helper;\n"), ("src/helper.rs", "pub fn open() -> SqliteStore { loop {} }\n")]);
+    let signature_sites = |inventory: &super::Inventory| {
+        inventory
+            .files
+            .iter()
+            .find(|file| file.path == "src/helper.rs")
+            .expect("helper measurement")
+            .production_signature_store_sites
+            .clone()
+    };
+    assert_ne!(signature_sites(&private), signature_sites(&restricted));
+}
+
+#[test]
+fn out_of_line_store_signatures_keep_cfg_visibility_pairs() {
+    let public_on_feature = inventory(&[
+        (
+            "src/lib.rs",
+            "#[cfg(feature = \"x\")]\npub mod helper;\n\
+             #[cfg(not(feature = \"x\"))]\nmod helper;\n",
+        ),
+        ("src/helper.rs", "pub fn open() -> SqliteStore { loop {} }\n"),
+    ]);
+    let public_without_feature = inventory(&[
+        (
+            "src/lib.rs",
+            "#[cfg(feature = \"x\")]\nmod helper;\n\
+             #[cfg(not(feature = \"x\"))]\npub mod helper;\n",
+        ),
+        ("src/helper.rs", "pub fn open() -> SqliteStore { loop {} }\n"),
+    ]);
+    let signature_sites = |inventory: &super::Inventory| {
+        inventory
+            .files
+            .iter()
+            .find(|file| file.path == "src/helper.rs")
+            .expect("helper measurement")
+            .production_signature_store_sites
+            .clone()
+    };
+    assert_ne!(signature_sites(&public_on_feature), signature_sites(&public_without_feature));
+}
+
+#[test]
+fn public_reexports_are_inventoried_beside_concrete_store_signatures() {
+    let private = inventory(&[("src/lib.rs", "mod helper;\n"), ("src/helper.rs", "pub fn open() -> SqliteStore { loop {} }\n")]);
+    let exposed = inventory(&[
+        ("src/lib.rs", "mod helper;\npub use helper::open;\n"),
+        ("src/helper.rs", "pub fn open() -> SqliteStore { loop {} }\n"),
+    ]);
+    let private_root = private.files.iter().find(|file| file.path == "src/lib.rs").expect("private root measurement");
+    let exposed_root = exposed.files.iter().find(|file| file.path == "src/lib.rs").expect("exposed root measurement");
+    let exposed_helper = exposed.files.iter().find(|file| file.path == "src/helper.rs").expect("helper measurement");
+    assert!(private_root.production_public_reexports.is_empty());
+    assert_eq!(exposed_root.production_public_reexports.len(), 1);
+    assert_eq!(exposed_root.production_public_reexports[0].exported_path, ["open"]);
+    assert_eq!(exposed_root.production_public_reexports[0].target_path, ["helper", "open"]);
+    assert_eq!(exposed_helper.production_signature_store_sites.sqlite_store.len(), 1);
+    assert_eq!(exposed_helper.production_signature_store_sites.sqlite_store[0].item_path, ["helper", "open"]);
+}
+
+#[test]
+fn public_reexports_match_concrete_store_methods_to_their_impl_type() {
+    let measured = inventory(&[
+        (
+            "src/lib.rs",
+            "mod hidden;\n\
+             pub(crate) use hidden::Adapter;\n",
+        ),
+        (
+            "src/hidden.rs",
+            "pub(crate) struct Adapter;\n\
+             impl InternalAdapter {\n\
+                 pub(crate) fn open() -> SqliteStore { loop {} }\n\
+             }\n\
+             use self::Adapter as InternalAdapter;\n",
+        ),
+    ]);
+    let root = measured.files.iter().find(|file| file.path == "src/lib.rs").expect("root measurement");
+    let hidden = measured.files.iter().find(|file| file.path == "src/hidden.rs").expect("hidden measurement");
+    assert_eq!(root.production_public_reexports[0].target_path, ["hidden", "Adapter"]);
+    assert!(
+        hidden
+            .production_signature_store_sites
+            .sqlite_store
+            .iter()
+            .any(|site| site.item_path == ["hidden", "Adapter"])
+    );
+}
+
+#[test]
+fn public_type_aliases_match_concrete_store_methods_to_their_target() {
+    let measured = inventory(&[
+        (
+            "src/lib.rs",
+            "mod hidden;\n\
+             pub(crate) type PublicAdapter = hidden::Adapter;\n",
+        ),
+        (
+            "src/hidden.rs",
+            "pub(crate) struct Adapter;\n\
+             impl Adapter {\n\
+                 pub(crate) fn open() -> SqliteStore { loop {} }\n\
+             }\n",
+        ),
+    ]);
+    let root = measured.files.iter().find(|file| file.path == "src/lib.rs").expect("root measurement");
+    let hidden = measured.files.iter().find(|file| file.path == "src/hidden.rs").expect("hidden measurement");
+    assert_eq!(root.production_public_reexports.len(), 1);
+    assert_eq!(root.production_public_reexports[0].exported_path, ["PublicAdapter"]);
+    assert_eq!(root.production_public_reexports[0].target_path, ["hidden", "Adapter"]);
+    assert!(
+        hidden
+            .production_signature_store_sites
+            .sqlite_store
+            .iter()
+            .any(|site| site.item_path == ["hidden", "Adapter"])
+    );
+}
+
+#[test]
+fn public_reexport_chains_normalize_exported_and_target_paths() {
+    let measured = inventory(&[
+        ("src/lib.rs", "mod ui;\n"),
+        (
+            "src/ui/mod.rs",
+            "mod helper;\n\
+             mod facade { pub use super::helper::open; }\n\
+             pub(crate) use self::facade::open;\n",
+        ),
+        ("src/ui/helper.rs", "pub fn open() -> SqliteStore { loop {} }\n"),
+    ]);
+    let ui = measured.files.iter().find(|file| file.path == "src/ui/mod.rs").expect("ui measurement");
+    let paths = ui
+        .production_public_reexports
+        .iter()
+        .map(|evidence| (evidence.exported_path.clone(), evidence.target_path.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        [
+            (
+                vec!["ui".to_owned(), "facade".to_owned(), "open".to_owned()],
+                vec!["ui".to_owned(), "helper".to_owned(), "open".to_owned()]
+            ),
+            (vec!["ui".to_owned(), "open".to_owned()], vec!["ui".to_owned(), "helper".to_owned(), "open".to_owned()]),
+        ]
+    );
+}
+
+#[test]
+fn public_reexports_resolve_private_import_aliases_regardless_of_item_order() {
+    for source in [
+        "mod helper;\n\
+         use self::helper as facade;\n\
+         pub(crate) use self::facade::open;\n",
+        "mod helper;\n\
+         pub(crate) use self::facade::open;\n\
+         use self::helper as facade;\n",
+    ] {
+        let measured = inventory(&[
+            ("src/lib.rs", "mod ui;\n"),
+            ("src/ui/mod.rs", source),
+            ("src/ui/helper.rs", "pub fn open() -> SqliteStore { loop {} }\n"),
+        ]);
+        let ui = measured.files.iter().find(|file| file.path == "src/ui/mod.rs").expect("ui measurement");
+        assert_eq!(ui.production_public_reexports.len(), 1);
+        assert_eq!(ui.production_public_reexports[0].target_path, ["ui", "helper", "open"]);
+    }
+}
+
+#[test]
+fn public_reexports_ignore_block_scoped_import_aliases() {
+    let measured = inventory(&[
+        ("src/lib.rs", "mod ui;\n"),
+        (
+            "src/ui/mod.rs",
+            "mod facade;\n\
+             mod helper;\n\
+             fn local() { use self::helper as facade; }\n\
+             pub(crate) use self::facade::open;\n",
+        ),
+        ("src/ui/facade.rs", "pub fn open() -> SqliteStore { loop {} }\n"),
+        ("src/ui/helper.rs", "pub fn open() -> PostgresStore { loop {} }\n"),
+    ]);
+    let ui = measured.files.iter().find(|file| file.path == "src/ui/mod.rs").expect("ui measurement");
+    assert_eq!(ui.production_public_reexports.len(), 1);
+    assert_eq!(ui.production_public_reexports[0].target_path, ["ui", "facade", "open"]);
+}
+
+#[test]
+fn multiple_module_paths_disjoin_their_inherited_cfg_constraints() {
+    let inventory = inventory(&[
+        (
+            "src/lib.rs",
+            "#[cfg(feature = \"x\")]\nmod shared;\n\
+             #[cfg(not(feature = \"x\"))]\nmod shared;\n",
+        ),
+        (
+            "src/shared.rs",
+            "#[cfg(feature = \"x\")]\nfn first() { SqliteStore::register_extension(); }\n\
+             #[cfg(not(feature = \"x\"))]\nfn second() { PostgresStore::connect(); }\n",
+        ),
+    ]);
+    let file = inventory.files.iter().find(|file| file.path == "src/shared.rs").expect("shared module measurement");
+    assert_eq!(
+        file.production_concrete_stores,
+        super::ConcreteStoreCounts {
+            sqlite_store: 1,
+            postgres_store: 1,
+        }
+    );
+}
+
+#[test]
+fn mutually_exclusive_module_ancestors_only_fingerprint_applicable_paths() {
+    let measurements = |legacy_visibility: &str, current_visibility: &str| {
+        inventory(&[
+            (
+                "src/lib.rs",
+                &format!(
+                    "#[cfg(feature = \"legacy\")]\n{legacy_visibility}mod shared;\n\
+                     #[cfg(not(feature = \"legacy\"))]\n{current_visibility}mod shared;\n"
+                ),
+            ),
+            (
+                "src/shared.rs",
+                "#[cfg(not(feature = \"legacy\"))]\n\
+                 pub(crate) fn open() -> SqliteStore { loop {} }\n",
+            ),
+        ])
+    };
+    let signature_sites = |inventory: &super::Inventory| {
+        inventory
+            .files
+            .iter()
+            .find(|file| file.path == "src/shared.rs")
+            .expect("shared module measurement")
+            .production_signature_store_sites
+            .sqlite_store
+            .clone()
+    };
+
+    let baseline = measurements("", "");
+    let inactive_path_changed = measurements("pub(crate) ", "");
+    let active_path_changed = measurements("", "pub(crate) ");
+    assert_eq!(signature_sites(&baseline), signature_sites(&inactive_path_changed));
+    assert_ne!(signature_sites(&baseline), signature_sites(&active_path_changed));
+}
+
+#[test]
+fn contradictory_transitive_module_paths_do_not_restore_broad_reachability() {
+    let inventory = inventory(&[
+        ("src/lib.rs", "#[cfg(feature = \"x\")]\nmod parent;\n"),
+        ("src/parent.rs", "#[cfg(not(feature = \"x\"))]\nmod child;\n"),
+        ("src/parent/child.rs", "fn dead() { SqliteStore::register_extension(); }\n"),
+    ]);
+    let child = inventory.files.iter().find(|file| file.path == "src/parent/child.rs").expect("child module measurement");
+    assert_eq!(child.production_lines, 0);
+    assert_eq!(child.production_concrete_stores, super::ConcreteStoreCounts::default());
 }
 
 #[test]

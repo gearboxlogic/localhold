@@ -12,17 +12,23 @@ use crate::structure::classify::{self, Inventory};
 
 const BASE_REVISION_ENV: &str = "LOCALHOLD_MAINTAINABILITY_BASE_REV";
 
+#[derive(Debug)]
+pub(in crate::structure) struct PreviousRevision {
+    pub(in crate::structure) manifest: StructureManifest,
+    pub(in crate::structure) inventory: Inventory,
+}
+
 impl StructureManifest {
-    pub fn compare_previous_revision(&self, workspace: &Path, current_inventory: &Inventory) -> Result<()> {
+    pub fn compare_previous_revision(&self, workspace: &Path, current_inventory: &Inventory) -> Result<Option<PreviousRevision>> {
         self.compare_previous_revision_from(workspace, env::var(BASE_REVISION_ENV).ok().as_deref(), current_inventory)
     }
 
-    pub(super) fn compare_previous_revision_from(&self, workspace: &Path, revision: Option<&str>, current_inventory: &Inventory) -> Result<()> {
+    pub(super) fn compare_previous_revision_from(&self, workspace: &Path, revision: Option<&str>, current_inventory: &Inventory) -> Result<Option<PreviousRevision>> {
         let Some(revision) = revision else {
-            return Ok(());
+            return Ok(None);
         };
         if revision.is_empty() || revision.len() == 40 && revision.bytes().all(|byte| byte == b'0') {
-            return Ok(());
+            return Ok(None);
         }
         validate_revision(revision).context("validate maintainability base revision")?;
         let object = format!("{revision}:{MANIFEST_PATH}");
@@ -32,7 +38,8 @@ impl StructureManifest {
             .output()
             .context("read structure policy from maintainability base revision")?;
         if !output.status.success() {
-            return verify_initial_policy_revision(workspace, revision, &object);
+            verify_initial_policy_revision(workspace, revision, &object)?;
+            return Ok(None);
         }
 
         let previous: Self = serde_json::from_slice(&output.stdout).context("parse structure policy from maintainability base revision")?;
@@ -42,7 +49,11 @@ impl StructureManifest {
             .compare_current(&previous_inventory)
             .context("verify structure policy evidence from maintainability base revision")?;
         let touched = changed_rust_paths(workspace, revision, &self.tracked_roots)?;
-        self.compare_policy_with_touched(&previous, &previous_inventory, current_inventory, &touched)
+        self.compare_policy_with_touched(&previous, &previous_inventory, current_inventory, &touched)?;
+        Ok(Some(PreviousRevision {
+            manifest: previous,
+            inventory: previous_inventory,
+        }))
     }
 }
 

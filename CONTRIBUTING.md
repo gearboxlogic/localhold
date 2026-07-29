@@ -219,6 +219,23 @@ editing the recovery inventory or existing evidence fails closed. Removing an
 exceptional import requires append-only retirement evidence; once retired, the
 same dependency cannot be reintroduced.
 
+Production references to `SqliteStore` and `PostgresStore` are likewise
+confined to the persistence implementation, schema/context migration, binary
+composition, UI, and doctor components. Test-only syntax is excluded. The
+enumerated protocol default and embedding-status references are non-growing
+recovery debt in `policy/maintainability/concrete-stores.json`; their exact
+per-file counts may decrease but cannot move, grow, or return after reaching
+zero. Normalized enclosing-syntax fingerprints pin each remaining occurrence
+to its reviewed recovery-baseline site, including concrete-store generic
+defaults. Active debt remains attributed to its reviewed component even if the
+structure manifest transfers its path elsewhere. Production type aliases,
+associated-type aliases, renamed imports, and macro definitions cannot conceal
+or inject either concrete store name.
+Reviewed Serde and Schemars path and bound strings are parsed as Rust syntax,
+including bare single-segment store paths. Signature evidence includes complete
+implementation headers and transitive public re-export chains, so changing how
+a concrete store becomes callable is a reviewed boundary change.
+
 During the feature freeze:
 
 - ordinary production files may not exceed 800 physical lines;
@@ -234,10 +251,11 @@ During the feature freeze:
 - path changes require an append-only `path_evolutions` record. A `rename`
   preserves physical and production counts exactly, a `split` may not increase
   their aggregate, and a `test-extraction` must preserve production exactly
-  while adding a test-only successor. Sources must be active in the pull
-  request base, every measured path change must be covered exactly once, and
-  existing or retired paths cannot be used to hide a merge, replay, or
-  resurrection;
+  while adding a test-only successor. Each record has exactly one source; a
+  split or test extraction has at least two successors. The source must be
+  active in the pull request base, every measured path change must be covered
+  exactly once, and existing or retired paths cannot be used to hide a merge,
+  replay, or resurrection;
 - the first structural split of an active hotspot may carry one temporary,
   append-only overhead allowance. Physical and production overhead are
   measured separately and each is capped at 3% of the lines actually moved out

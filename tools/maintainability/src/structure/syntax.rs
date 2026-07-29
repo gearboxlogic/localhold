@@ -6,38 +6,53 @@ use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 use syn::{Attribute, Expr, ForeignItem, ImplItem, Item, Meta, Token, TraitItem};
 
+mod cfg;
 mod imports;
 
-pub use imports::production_internal_imports;
+pub(super) use cfg::{ProductionCfgContext, attributes_disable_production, production_cfg_attr_metas, production_cfg_context};
+pub use imports::{
+    ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionSyntaxFacts, ProductionSyntaxOptions, PublicReexportEvidence,
+    TypeDeclarationEvidence,
+};
+pub(super) use imports::{ProductionAncestorPath, ProductionSourceRevision, ProductionSyntaxContext, TypeDeclarationKind, production_syntax_facts_with_context, source_module};
 
 pub(super) fn normalized_ident(ident: &proc_macro2::Ident) -> String {
     let value = ident.to_string();
     value.strip_prefix("r#").unwrap_or(&value).to_owned()
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Truth {
-    AlwaysFalse,
-    AlwaysTrue,
-    Unknown,
+pub(super) fn visibility_is_exposed(visibility: &syn::Visibility) -> bool {
+    match visibility {
+        syn::Visibility::Inherited => false,
+        syn::Visibility::Restricted(restricted) => !restricted.path.is_ident("self"),
+        syn::Visibility::Public(_) => true,
+    }
 }
 
 pub struct TestLineCollector {
     test_lines: Vec<bool>,
+    cfg_context: ProductionCfgContext,
     error: Option<anyhow::Error>,
 }
 
 impl TestLineCollector {
+    #[cfg(test)]
     pub fn new(physical_lines: usize) -> Self {
+        Self::with_cfg_context(physical_lines, ProductionCfgContext::default())
+    }
+
+    pub(super) fn with_cfg_context(physical_lines: usize, cfg_context: ProductionCfgContext) -> Self {
         Self {
             test_lines: vec![false; physical_lines],
+            cfg_context,
             error: None,
         }
     }
 
     pub fn visit_file(&mut self, file: &syn::File) -> Result<()> {
-        if !self.classify(Ok(&file.attrs), file) {
+        if let Some(previous) = self.enter_node(Ok(&file.attrs), file) {
             Visit::visit_file(self, file);
+            self.cfg_context = previous;
         }
         self.error.take().map_or(Ok(()), Err)
     }
@@ -46,16 +61,16 @@ impl TestLineCollector {
         self.test_lines.iter().filter(|line| **line).count()
     }
 
-    fn classify<T: syn::spanned::Spanned>(&mut self, attributes: Result<&[Attribute]>, node: &T) -> bool {
-        match attributes.and_then(|attributes| attributes_disable_production(attributes).map(|test_only| (attributes, test_only))) {
-            Ok((attributes, true)) => {
+    fn enter_node<T: syn::spanned::Spanned>(&mut self, attributes: Result<&[Attribute]>, node: &T) -> Option<ProductionCfgContext> {
+        match attributes.and_then(|attributes| production_cfg_context(attributes, &self.cfg_context).map(|context| (attributes, context))) {
+            Ok((attributes, None)) => {
                 self.mark(attributes, node.span());
-                true
+                None
             }
-            Ok((_, false)) => false,
+            Ok((_, Some(context))) => Some(std::mem::replace(&mut self.cfg_context, context)),
             Err(error) => {
                 self.error = Some(error);
-                true
+                None
             }
         }
     }
@@ -76,66 +91,30 @@ impl TestLineCollector {
     }
 }
 
+macro_rules! visit_classified_node {
+    ($method:ident, $walk:ident, $node:ty, $binding:ident => $attributes:expr) => {
+        fn $method(&mut self, $binding: &'ast $node) {
+            let attributes: Result<&[Attribute]> = $attributes;
+            let Some(previous) = self.enter_node(attributes, $binding) else {
+                return;
+            };
+            visit::$walk(self, $binding);
+            self.cfg_context = previous;
+        }
+    };
+}
+
 impl<'ast> Visit<'ast> for TestLineCollector {
-    fn visit_item(&mut self, node: &'ast Item) {
-        if !self.classify(item_attributes(node), node) {
-            visit::visit_item(self, node);
-        }
-    }
-
-    fn visit_impl_item(&mut self, node: &'ast ImplItem) {
-        if !self.classify(impl_item_attributes(node), node) {
-            visit::visit_impl_item(self, node);
-        }
-    }
-
-    fn visit_trait_item(&mut self, node: &'ast TraitItem) {
-        if !self.classify(trait_item_attributes(node), node) {
-            visit::visit_trait_item(self, node);
-        }
-    }
-
-    fn visit_foreign_item(&mut self, node: &'ast ForeignItem) {
-        if !self.classify(foreign_item_attributes(node), node) {
-            visit::visit_foreign_item(self, node);
-        }
-    }
-
-    fn visit_variant(&mut self, node: &'ast syn::Variant) {
-        if !self.classify(Ok(&node.attrs), node) {
-            visit::visit_variant(self, node);
-        }
-    }
-
-    fn visit_field(&mut self, node: &'ast syn::Field) {
-        if !self.classify(Ok(&node.attrs), node) {
-            visit::visit_field(self, node);
-        }
-    }
-
-    fn visit_arm(&mut self, node: &'ast syn::Arm) {
-        if !self.classify(Ok(&node.attrs), node) {
-            visit::visit_arm(self, node);
-        }
-    }
-
-    fn visit_local(&mut self, node: &'ast syn::Local) {
-        if !self.classify(Ok(&node.attrs), node) {
-            visit::visit_local(self, node);
-        }
-    }
-
-    fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
-        if !self.classify(Ok(&node.attrs), node) {
-            visit::visit_stmt_macro(self, node);
-        }
-    }
-
-    fn visit_expr(&mut self, node: &'ast Expr) {
-        if !self.classify(expr_attributes(node), node) {
-            visit::visit_expr(self, node);
-        }
-    }
+    visit_classified_node!(visit_item, visit_item, Item, node => item_attributes(node));
+    visit_classified_node!(visit_impl_item, visit_impl_item, ImplItem, node => impl_item_attributes(node));
+    visit_classified_node!(visit_trait_item, visit_trait_item, TraitItem, node => trait_item_attributes(node));
+    visit_classified_node!(visit_foreign_item, visit_foreign_item, ForeignItem, node => foreign_item_attributes(node));
+    visit_classified_node!(visit_variant, visit_variant, syn::Variant, node => Ok(&node.attrs));
+    visit_classified_node!(visit_field, visit_field, syn::Field, node => Ok(&node.attrs));
+    visit_classified_node!(visit_arm, visit_arm, syn::Arm, node => Ok(&node.attrs));
+    visit_classified_node!(visit_local, visit_local, syn::Local, node => Ok(&node.attrs));
+    visit_classified_node!(visit_stmt_macro, visit_stmt_macro, syn::StmtMacro, node => Ok(&node.attrs));
+    visit_classified_node!(visit_expr, visit_expr, Expr, node => expr_attributes(node));
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         if node.path.is_ident("include") {
@@ -186,139 +165,6 @@ fn meta_contains_path(meta: &Meta) -> Result<bool> {
         .parse2(list.tokens.clone())
         .context("parse nested cfg_attr arguments for module path classification")?;
     arguments.iter().skip(1).try_fold(false, |found, nested| Ok(found || meta_contains_path(nested)?))
-}
-
-pub(super) fn attributes_disable_production(attributes: &[Attribute]) -> Result<bool> {
-    for attribute in attributes {
-        if attribute.path().is_ident("cfg") {
-            let predicate = parse_single_meta(attribute).context("parse cfg predicate for line classification")?;
-            if evaluate(&predicate) == Truth::AlwaysFalse {
-                return Ok(true);
-            }
-        } else if attribute.path().is_ident("cfg_attr") && cfg_attr_disables_production(attribute)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn cfg_attr_disables_production(attribute: &Attribute) -> Result<bool> {
-    let Meta::List(list) = &attribute.meta else {
-        return Ok(false);
-    };
-    cfg_attr_tokens_disable_production(&list.tokens)
-}
-
-fn cfg_attr_tokens_disable_production(tokens: &proc_macro2::TokenStream) -> Result<bool> {
-    let arguments = Punctuated::<Meta, Token![,]>::parse_terminated
-        .parse2(tokens.clone())
-        .context("parse cfg_attr arguments for line classification")?;
-    let mut arguments = arguments.into_iter();
-    let Some(condition) = arguments.next() else {
-        return Ok(false);
-    };
-    if evaluate(&condition) != Truth::AlwaysTrue {
-        return Ok(false);
-    }
-    for nested in arguments {
-        if nested.path().is_ident("cfg") {
-            let Meta::List(list) = nested else {
-                anyhow::bail!("nested cfg predicate must use list syntax")
-            };
-            let predicate = Punctuated::<Meta, Token![,]>::parse_terminated
-                .parse2(list.tokens)
-                .context("parse nested cfg_attr cfg predicate")?;
-            if predicate.len() != 1 {
-                anyhow::bail!("nested cfg attribute must contain exactly one predicate");
-            }
-            if evaluate(predicate.first().context("nested cfg predicate disappeared")?) == Truth::AlwaysFalse {
-                return Ok(true);
-            }
-        } else if nested.path().is_ident("cfg_attr")
-            && let Meta::List(list) = nested
-            && cfg_attr_tokens_disable_production(&list.tokens)?
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn parse_single_meta(attribute: &Attribute) -> Result<Meta> {
-    let Meta::List(list) = &attribute.meta else {
-        return Ok(attribute.meta.clone());
-    };
-    let predicates = Punctuated::<Meta, Token![,]>::parse_terminated.parse2(list.tokens.clone())?;
-    if predicates.len() != 1 {
-        anyhow::bail!("cfg attribute must contain exactly one predicate");
-    }
-    predicates.into_iter().next().context("cfg predicate disappeared")
-}
-
-fn evaluate(meta: &Meta) -> Truth {
-    match meta {
-        Meta::Path(path) if path.is_ident("test") => Truth::AlwaysFalse,
-        Meta::Path(_) | Meta::NameValue(_) => evaluate_leaf(meta),
-        Meta::List(list) if list.path.is_ident("all") => evaluate_list(list, combine_all, Truth::AlwaysTrue),
-        Meta::List(list) if list.path.is_ident("any") => evaluate_list(list, combine_any, Truth::AlwaysFalse),
-        Meta::List(list) if list.path.is_ident("not") => {
-            let Ok(arguments) = Punctuated::<Meta, Token![,]>::parse_terminated.parse2(list.tokens.clone()) else {
-                return Truth::Unknown;
-            };
-            if arguments.len() != 1 {
-                return Truth::Unknown;
-            }
-            match evaluate(arguments.first().expect("length checked")) {
-                Truth::AlwaysFalse => Truth::AlwaysTrue,
-                Truth::AlwaysTrue => Truth::AlwaysFalse,
-                Truth::Unknown => Truth::Unknown,
-            }
-        }
-        Meta::List(_) => Truth::Unknown,
-    }
-}
-
-pub(super) fn cfg_can_apply_in_production(meta: &Meta) -> bool {
-    evaluate(meta) != Truth::AlwaysFalse
-}
-
-fn evaluate_leaf(meta: &Meta) -> Truth {
-    let Meta::NameValue(value) = meta else {
-        return Truth::Unknown;
-    };
-    if !value.path.is_ident("feature") {
-        return Truth::Unknown;
-    }
-    let Expr::Lit(expression) = &value.value else {
-        return Truth::Unknown;
-    };
-    let syn::Lit::Str(feature) = &expression.lit else {
-        return Truth::Unknown;
-    };
-    if feature.value() == "testing" { Truth::AlwaysFalse } else { Truth::Unknown }
-}
-
-fn evaluate_list(list: &syn::MetaList, combine: fn(Truth, Truth) -> Truth, initial: Truth) -> Truth {
-    let Ok(arguments) = Punctuated::<Meta, Token![,]>::parse_terminated.parse2(list.tokens.clone()) else {
-        return Truth::Unknown;
-    };
-    arguments.iter().map(evaluate).fold(initial, combine)
-}
-
-const fn combine_all(left: Truth, right: Truth) -> Truth {
-    match (left, right) {
-        (Truth::AlwaysFalse, _) | (_, Truth::AlwaysFalse) => Truth::AlwaysFalse,
-        (Truth::AlwaysTrue, Truth::AlwaysTrue) => Truth::AlwaysTrue,
-        _ => Truth::Unknown,
-    }
-}
-
-const fn combine_any(left: Truth, right: Truth) -> Truth {
-    match (left, right) {
-        (Truth::AlwaysTrue, _) | (_, Truth::AlwaysTrue) => Truth::AlwaysTrue,
-        (Truth::AlwaysFalse, Truth::AlwaysFalse) => Truth::AlwaysFalse,
-        _ => Truth::Unknown,
-    }
 }
 
 pub(super) fn item_attributes(item: &Item) -> Result<&[Attribute]> {

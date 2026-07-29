@@ -1,5 +1,6 @@
 use super::*;
 use crate::structure::classify::FileMeasurement;
+use crate::structure::syntax::{ConcreteStoreCounts, ConcreteStoreSignatureSites, ConcreteStoreSites};
 
 type ImportFixture<'a> = (&'a str, &'a [&'a str]);
 
@@ -191,7 +192,17 @@ fn inventory(files: &[ImportFixture<'_>]) -> Inventory {
                 physical_lines: 1,
                 production_lines: 1,
                 test_lines: 0,
+                production_targets: vec!["crate".to_owned()],
+                production_module: Vec::new(),
                 production_internal_imports: imports.iter().map(|target| (*target).to_owned()).collect(),
+                production_public_reexports: Vec::new(),
+                production_type_declarations: Vec::new(),
+                production_concrete_stores: ConcreteStoreCounts::default(),
+                production_public_concrete_store_structs: ConcreteStoreSites::default(),
+                production_concrete_store_sites: ConcreteStoreSites::default(),
+                production_generic_default_store_sites: ConcreteStoreSites::default(),
+                production_signature_store_sites: ConcreteStoreSignatureSites::default(),
+                production_store_binding_sites: ConcreteStoreSites::default(),
             })
             .collect(),
     }

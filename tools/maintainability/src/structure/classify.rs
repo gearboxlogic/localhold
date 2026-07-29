@@ -7,10 +7,18 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use super::syntax::{TestLineCollector, attributes_disable_production, item_is_test_only, normalized_ident, production_internal_imports, reject_module_path_overrides};
+use crate::scan::syntax_fingerprint;
+
+use super::syntax::{
+    ConcreteStoreCounts, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionAncestorPath, ProductionCfgContext, ProductionSourceRevision, ProductionSyntaxContext,
+    ProductionSyntaxFacts, ProductionSyntaxOptions, PublicReexportEvidence, TestLineCollector, TypeDeclarationEvidence, normalized_ident, production_cfg_context,
+    production_syntax_facts_with_context, reject_module_path_overrides, source_module, visibility_is_exposed,
+};
 
 mod module_macro;
 use module_macro::{audit_reviewed_macro_definitions, record_item_macro, safe_macro_definitions};
+mod reachability;
+use reachability::{ModuleEdge, ProductionSourceContext, production_contexts, production_reachable_from, propagate_reachability};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct FileMeasurement {
@@ -18,7 +26,17 @@ pub struct FileMeasurement {
     pub physical_lines: usize,
     pub production_lines: usize,
     pub test_lines: usize,
+    pub production_targets: Vec<String>,
+    pub production_module: Vec<String>,
     pub production_internal_imports: Vec<String>,
+    pub production_public_reexports: Vec<PublicReexportEvidence>,
+    pub production_type_declarations: Vec<TypeDeclarationEvidence>,
+    pub production_concrete_stores: ConcreteStoreCounts,
+    pub production_public_concrete_store_structs: ConcreteStoreSites,
+    pub production_concrete_store_sites: ConcreteStoreSites,
+    pub production_generic_default_store_sites: ConcreteStoreSites,
+    pub production_signature_store_sites: ConcreteStoreSignatureSites,
+    pub production_store_binding_sites: ConcreteStoreSites,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -31,13 +49,6 @@ struct ParsedSource {
     syntax: syn::File,
 }
 
-#[derive(Debug)]
-struct ModuleEdge {
-    source: String,
-    target: String,
-    test_only: bool,
-}
-
 struct TreeEntry {
     object_id: String,
     path: String,
@@ -46,7 +57,11 @@ struct TreeEntry {
 struct SourceReachability {
     test_only: BTreeSet<String>,
     composition_only: BTreeSet<String>,
+    production_contexts: BTreeMap<String, ProductionSourceContext>,
+    production_targets: BTreeMap<String, Vec<String>>,
 }
+
+type ProductionTargetMemberships = BTreeMap<String, Vec<String>>;
 
 pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Inventory> {
     reject_untracked_rust_sources(workspace, "examples")?;
@@ -212,6 +227,14 @@ fn measure_sources(sources: BTreeMap<String, String>) -> Result<Inventory> {
     measure_sources_with_roots(sources, &target_roots, true)
 }
 
+const fn production_source_revision(require_reviewed_expansions: bool) -> ProductionSourceRevision {
+    if require_reviewed_expansions {
+        ProductionSourceRevision::Current
+    } else {
+        ProductionSourceRevision::Historical
+    }
+}
+
 fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &TargetRoots, require_reviewed_expansions: bool) -> Result<Inventory> {
     let TargetRoots {
         production: production_roots,
@@ -226,25 +249,47 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
     for (path, parsed) in parsed {
         let physical_lines = physical_line_count(&parsed.source);
         let file_is_test_only = reachability.test_only.contains(&path);
-        let mut collector = TestLineCollector::new(physical_lines);
-        let (test_lines, production_internal_imports) = if file_is_test_only {
-            (physical_lines, Vec::new())
+        let production_targets = if file_is_test_only {
+            Vec::new()
         } else {
+            reachability.production_targets.get(&path).cloned().context("production source has no target identity")?
+        };
+        let (test_lines, production_facts) = if file_is_test_only {
+            (physical_lines, ProductionSyntaxFacts::default())
+        } else {
+            let ProductionSourceContext {
+                cfg: initial_cfg_context,
+                declaration_ancestors,
+                module_exposure_cfg,
+            } = reachability
+                .production_contexts
+                .get(&path)
+                .cloned()
+                .context("production source has no inherited cfg context")?;
+            let mut collector = TestLineCollector::with_cfg_context(physical_lines, initial_cfg_context.clone());
             collector.visit_file(&parsed.syntax)?;
+            let collect_internal_imports =
+                path.starts_with("src/") && !reachability.composition_only.contains(&path) && !path.starts_with("src/server/") && !path.starts_with("src/ui/");
+            let crate_root = crate_root_for_source(&path, &production_targets, production_roots, library_roots)?;
             (
                 collector.test_line_count(),
-                if !path.starts_with("src/") || reachability.composition_only.contains(&path) || path.starts_with("src/server/") || path.starts_with("src/ui/") {
-                    Vec::new()
-                } else {
-                    production_internal_imports(
-                        &parsed.syntax,
-                        &path,
-                        library_root_for_source(&path, library_roots),
-                        *rust_2015_absolute_paths,
+                production_syntax_facts_with_context(
+                    &parsed.syntax,
+                    &path,
+                    crate_root.as_deref(),
+                    ProductionSyntaxOptions {
+                        collect_internal_imports,
+                        rust_2015_absolute_paths: *rust_2015_absolute_paths,
                         require_reviewed_expansions,
-                    )
-                    .map_err(|error| anyhow::anyhow!("{error} in {path}"))?
-                },
+                    },
+                    ProductionSyntaxContext {
+                        cfg: initial_cfg_context,
+                        declaration_ancestors,
+                        module_exposure_cfg,
+                        source_revision: production_source_revision(require_reviewed_expansions),
+                    },
+                )
+                .map_err(|error| anyhow::anyhow!("{error} in {path}"))?,
             )
         };
         files.push(FileMeasurement {
@@ -252,7 +297,17 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
             physical_lines,
             production_lines: physical_lines.saturating_sub(test_lines),
             test_lines,
-            production_internal_imports,
+            production_targets,
+            production_module: production_facts.module,
+            production_internal_imports: production_facts.internal_imports,
+            production_public_reexports: production_facts.public_reexports,
+            production_type_declarations: production_facts.type_declarations,
+            production_concrete_stores: production_facts.concrete_stores,
+            production_public_concrete_store_structs: production_facts.public_concrete_store_structs,
+            production_concrete_store_sites: production_facts.concrete_store_sites,
+            production_generic_default_store_sites: production_facts.generic_default_concrete_store_sites,
+            production_signature_store_sites: production_facts.signature_concrete_store_sites,
+            production_store_binding_sites: production_facts.binding_concrete_store_sites,
         });
     }
     Ok(Inventory { files })
@@ -263,6 +318,18 @@ fn library_root_for_source<'a>(source: &str, library_roots: &'a BTreeSet<String>
         .iter()
         .find(|root| Path::new(root.as_str()).parent().is_some_and(|parent| Path::new(source).starts_with(parent)))
         .map(String::as_str)
+}
+
+fn crate_root_for_source(source: &str, source_targets: &[String], production_roots: &BTreeSet<String>, library_roots: &BTreeSet<String>) -> Result<Option<String>> {
+    let roots = source_targets.iter().filter(|target| production_roots.contains(*target)).collect::<Vec<_>>();
+    if roots.is_empty() {
+        return Ok(library_root_for_source(source, library_roots).map(str::to_owned));
+    }
+    let modules = roots.iter().map(|root| source_module(source, Some(root))).collect::<Result<BTreeSet<_>>>()?;
+    if modules.len() != 1 {
+        bail!("production source {source:?} has target-dependent module paths through {roots:?}");
+    }
+    Ok(roots.first().map(|root| (*root).clone()))
 }
 
 fn parse_sources(sources: BTreeMap<String, String>) -> Result<BTreeMap<String, ParsedSource>> {
@@ -289,12 +356,12 @@ fn classify_source_reachability(
         opaque_macro_sources: BTreeSet::new(),
     };
     for (path, source) in parsed {
-        let file_test_only = attributes_disable_production(&source.syntax.attrs).with_context(|| format!("classify crate attributes in {path}"))?;
+        let production_context = production_cfg_context(&source.syntax.attrs, &ProductionCfgContext::default()).with_context(|| format!("classify crate attributes in {path}"))?;
         if production_roots.contains(path) || explicit_test_roots.contains(path) {
             let crate_root_dir = Path::new(path).parent().context("Cargo target root has no parent directory")?;
-            graph.collect(path, &source.syntax.items, crate_root_dir, file_test_only)?;
+            graph.collect(path, &source.syntax.items, crate_root_dir, production_context)?;
         } else {
-            graph.collect(path, &source.syntax.items, &module_directory(path)?, file_test_only)?;
+            graph.collect(path, &source.syntax.items, &module_directory(path)?, production_context)?;
         }
     }
     let opaque_macro_sources = graph.opaque_macro_sources;
@@ -316,6 +383,7 @@ fn classify_source_reachability(
     let composition_reachable = production_reachable_from(&edges, composition_roots);
     let incoming: BTreeSet<_> = edges.iter().map(|edge| edge.target.as_str()).collect();
     let mut production_reachable = production_roots.clone();
+    let mut fallback_roots = BTreeSet::new();
     let mut test_reachable: BTreeSet<_> = known.iter().filter(|path| path.starts_with("tests/") || path.starts_with("benches/")).cloned().collect();
     test_reachable.extend(explicit_test_roots.iter().cloned());
     for path in known
@@ -336,48 +404,49 @@ fn classify_source_reachability(
             break;
         }
         for path in unknown {
-            production_reachable.insert(path);
+            production_reachable.insert(path.clone());
+            fallback_roots.insert(path);
         }
     }
+    let contextual_roots = production_contextual_roots(production_roots, &fallback_roots, &production_reachable, &edges);
+    let production_targets = production_target_memberships(&edges, &contextual_roots)?;
+    let production_contexts = production_contexts(&edges, &contextual_roots)?;
+    let contextually_production = production_contexts.keys().cloned().collect::<BTreeSet<_>>();
     Ok(SourceReachability {
-        test_only: test_reachable.difference(&production_reachable).cloned().collect(),
+        test_only: known.difference(&contextually_production).cloned().collect(),
         composition_only: composition_reachable.difference(&library_reachable).cloned().collect(),
+        production_contexts,
+        production_targets,
     })
 }
 
-fn production_reachable_from(edges: &[ModuleEdge], roots: &BTreeSet<String>) -> BTreeSet<String> {
-    let mut reachable = roots.clone();
-    loop {
-        let mut changed = false;
-        for edge in edges {
-            if !edge.test_only && reachable.contains(&edge.source) {
-                changed |= reachable.insert(edge.target.clone());
-            }
-        }
-        if !changed {
-            return reachable;
-        }
-    }
+fn production_contextual_roots(
+    declared_roots: &BTreeSet<String>,
+    fallback_roots: &BTreeSet<String>,
+    production_reachable: &BTreeSet<String>,
+    edges: &[ModuleEdge],
+) -> BTreeSet<String> {
+    declared_roots
+        .iter()
+        .chain(fallback_roots)
+        .chain(
+            production_reachable
+                .iter()
+                .filter(|path| !edges.iter().any(|edge| !edge.test_only && edge.target.as_str() == path.as_str())),
+        )
+        .cloned()
+        .collect()
 }
 
-fn propagate_reachability(edges: &[ModuleEdge], production: &mut BTreeSet<String>, test: &mut BTreeSet<String>) {
-    loop {
-        let mut changed = false;
-        for edge in edges {
-            changed |= match (production.contains(&edge.source), edge.test_only) {
-                (true, true) => test.insert(edge.target.clone()),
-                (true, false) => production.insert(edge.target.clone()),
-                (false, _) => false,
-            };
-            let source_is_test = test.contains(&edge.source);
-            if source_is_test {
-                changed |= test.insert(edge.target.clone());
-            }
-        }
-        if !changed {
-            break;
+fn production_target_memberships(edges: &[ModuleEdge], roots: &BTreeSet<String>) -> Result<ProductionTargetMemberships> {
+    let mut memberships = BTreeMap::<String, BTreeSet<String>>::new();
+    for root in roots {
+        let root_set = std::iter::once(root.clone()).collect();
+        for path in production_contexts(edges, &root_set)?.into_keys() {
+            memberships.entry(path).or_default().insert(root.clone());
         }
     }
+    Ok(memberships.into_iter().map(|(path, targets)| (path, targets.into_iter().collect())).collect())
 }
 
 struct TargetRoots {
@@ -405,6 +474,7 @@ fn target_roots<'a>(manifest: &str, known: impl Iterator<Item = &'a String>) -> 
     let mut roots = conventional_production_roots(known.iter(), auto_library, auto_binaries);
     let mut composition = conventional_composition_roots(roots.iter(), auto_binaries);
     let mut libraries = conventional_library_roots(roots.iter(), auto_library);
+    let mut test = BTreeSet::new();
     if let Some(library) = manifest.get("lib") {
         let path = add_declared_target_root(library, "library", &["src/lib.rs".to_owned()], &known, &mut roots)?;
         if path.starts_with("src/server/") || path.starts_with("src/ui/") {
@@ -416,16 +486,27 @@ fn target_roots<'a>(manifest: &str, known: impl Iterator<Item = &'a String>) -> 
     }
     if let Some(binaries) = manifest.get("bin") {
         let binaries = binaries.as_array().context("package bin targets must be an array of tables")?;
+        let mut testing_only = BTreeSet::new();
+        let mut production = libraries.clone();
         for binary in binaries {
             let candidates = inferred_binary_paths(binary, package_name)?;
             let path = add_declared_target_root(binary, "binary", &candidates, &known, &mut roots)?;
-            composition.insert(path);
+            if target_requires_testing(binary, "binary")? {
+                testing_only.insert(path);
+            } else {
+                composition.insert(path.clone());
+                production.insert(path);
+            }
+        }
+        for path in testing_only.difference(&production) {
+            roots.remove(path);
+            composition.remove(path);
+            test.insert(path.clone());
         }
     }
     let examples = validate_auxiliary_target_roots(&manifest, "example", &known)?;
     roots.extend(examples.iter().cloned());
     composition.extend(examples);
-    let mut test = BTreeSet::new();
     for kind in ["test", "bench"] {
         test.extend(validate_auxiliary_target_roots(&manifest, kind, &known)?);
     }
@@ -436,6 +517,22 @@ fn target_roots<'a>(manifest: &str, known: impl Iterator<Item = &'a String>) -> 
         libraries,
         rust_2015_absolute_paths,
     })
+}
+
+fn target_requires_testing(target: &toml::Value, kind: &str) -> Result<bool> {
+    let target = target.as_table().with_context(|| format!("package {kind} target must be a table"))?;
+    let Some(required) = target.get("required-features") else {
+        return Ok(false);
+    };
+    let required = required.as_array().with_context(|| format!("package {kind} target required-features must be an array"))?;
+    let mut requires_testing = false;
+    for feature in required {
+        let feature = feature
+            .as_str()
+            .with_context(|| format!("package {kind} target required-features entries must be strings"))?;
+        requires_testing |= feature == "testing";
+    }
+    Ok(requires_testing)
 }
 
 fn package_auto_target(manifest: &toml::Value, key: &str) -> Result<bool> {
@@ -637,10 +734,14 @@ struct ModuleScope<'a> {
     module_dir: &'a Path,
     parent_test_only: bool,
     inherited_macros: &'a BTreeSet<String>,
+    production_context: Option<ProductionCfgContext>,
+    declaration_ancestors: Vec<String>,
+    modules_exposed: bool,
 }
 
 impl ModuleGraph<'_> {
-    fn collect(&mut self, source_path: &str, items: &[syn::Item], module_dir: &Path, parent_test_only: bool) -> Result<()> {
+    fn collect(&mut self, source_path: &str, items: &[syn::Item], module_dir: &Path, production_context: Option<ProductionCfgContext>) -> Result<()> {
+        let parent_test_only = production_context.is_none();
         self.collect_with_macros(
             items,
             &ModuleScope {
@@ -648,6 +749,9 @@ impl ModuleGraph<'_> {
                 module_dir,
                 parent_test_only,
                 inherited_macros: &BTreeSet::new(),
+                production_context,
+                declaration_ancestors: Vec::new(),
+                modules_exposed: true,
             },
         )
     }
@@ -662,8 +766,15 @@ impl ModuleGraph<'_> {
                 continue;
             };
             reject_module_path_overrides(&module.attrs)?;
-            let test_only = scope.parent_test_only || item_is_test_only(item)?;
+            let production_context = match &scope.production_context {
+                Some(inherited) => production_cfg_context(&module.attrs, inherited)?,
+                None => None,
+            };
+            let test_only = scope.parent_test_only || production_context.is_none();
             let module_name = normalized_ident(&module.ident);
+            let mut declaration_ancestors = scope.declaration_ancestors.clone();
+            declaration_ancestors.push(format!("mod:{}:{}", module_name, syntax_fingerprint(&module.vis)));
+            let modules_exposed = scope.modules_exposed && visibility_is_exposed(&module.vis);
             if let Some((_, nested)) = &module.content {
                 let nested_dir = scope.module_dir.join(&module_name);
                 self.collect_with_macros(
@@ -673,6 +784,9 @@ impl ModuleGraph<'_> {
                         module_dir: &nested_dir,
                         parent_test_only: test_only,
                         inherited_macros: &safe_macros,
+                        production_context,
+                        declaration_ancestors,
+                        modules_exposed,
                     },
                 )?;
                 continue;
@@ -684,6 +798,9 @@ impl ModuleGraph<'_> {
                     source: scope.source_path.to_owned(),
                     target,
                     test_only,
+                    production_context,
+                    declaration_ancestors,
+                    modules_exposed,
                 });
             }
         }

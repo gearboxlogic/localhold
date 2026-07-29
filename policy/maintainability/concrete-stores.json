@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "b05f7a43345b39d40b456fb9ed46d479c4bf26e0",
+  "unrestricted_components": [
+    "composition",
+    "context-governance",
+    "doctor",
+    "migration-schema",
+    "persistence-core",
+    "postgres-store",
+    "sqlite-store",
+    "ui"
+  ],
+  "canonical_declarations": [
+    {
+      "component": "sqlite-store",
+      "path": "src/store/sqlite.rs",
+      "store": "SqliteStore",
+      "fingerprint": "cd2442e5b03bf38320db517b570842ce2cc4f37e2528e32f77e6ee6fb503a442",
+      "baseline_binding_fingerprint": "21df9fb1c32ad8aa34504139a3844846ec189fb190038f404cde52d3839f7977",
+      "current_binding_fingerprint": "21df9fb1c32ad8aa34504139a3844846ec189fb190038f404cde52d3839f7977"
+    },
+    {
+      "component": "postgres-store",
+      "path": "src/store/postgres.rs",
+      "store": "PostgresStore",
+      "fingerprint": "82ac6580d834e4425f3b0290d499d3ef97ee5123595d7b418cd167903977441f",
+      "baseline_binding_fingerprint": "5f7265582c0350068d90e2aeebd2a7fbcc8e0c3e8e635fd549907748366fd4f1",
+      "current_binding_fingerprint": "5f7265582c0350068d90e2aeebd2a7fbcc8e0c3e8e635fd549907748366fd4f1"
+    }
+  ],
+  "debt": [
+    {
+      "id": "phase0.protocol-default-sqlite-store",
+      "component": "protocol",
+      "path": "src/server/mod.rs",
+      "store": "SqliteStore",
+      "baseline_count": 1,
+      "current_count": 1,
+      "owner": "maintainers",
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "The public server type still defaults its generic store parameter to SQLite; new protocol coupling to a concrete backend is prohibited.",
+      "resolution_phase": "Phase 4 protocol and application boundary restoration"
+    },
+    {
+      "id": "phase0.embedding-status-sqlite-store",
+      "component": "embedding",
+      "path": "src/embedding/status.rs",
+      "store": "SqliteStore",
+      "baseline_count": 2,
+      "current_count": 2,
+      "owner": "maintainers",
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "Embedding status currently registers the SQLite vector extension for a read-only compatibility check; new embedding coupling to a concrete backend is prohibited.",
+      "resolution_phase": "Phase 5 embedding boundary restoration or reviewed permanent diagnostic exemption"
+    }
+  ]
+}

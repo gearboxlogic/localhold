@@ -50,6 +50,19 @@ pub(in crate::structure::syntax::imports) fn public_type_exposures(
     })
 }
 
+pub(in crate::structure::syntax::imports) fn public_path_argument_type_exposures(
+    path: &Path,
+    generic_types: &BTreeSet<String>,
+    context: &PublicTypeExposureContext<'_>,
+) -> Result<Vec<PendingPublicReexport>> {
+    let fingerprint = syntax_fingerprint(&without_documentation(&path.to_token_stream()));
+    collect_type_exposures(generic_types.clone(), &fingerprint, "path-arguments", context, |collector| {
+        for segment in &path.segments {
+            collector.visit_path_arguments(&segment.arguments);
+        }
+    })
+}
+
 fn collect_type_exposures(
     generic_types: BTreeSet<String>,
     boundary_fingerprint: &str,

@@ -979,10 +979,13 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         let mut header = item.clone();
         header.items.clear();
         let header_tokens = without_documentation(&header.to_token_stream());
-        if item.trait_.as_ref().is_some_and(|(negative, _, _)| negative.is_none())
-            && let Some(trait_path) = trait_path.as_deref()
+        if let Some(trait_path) = trait_path.as_deref()
+            && let Err(error) = self.record_trait_implementation_exposures(item, &item_path, trait_path, &header_tokens)
         {
-            self.record_trait_implementation_exposure(&item_path, trait_path, &header_tokens);
+            self.error = Some(error);
+            self.impl_trait_paths.pop();
+            self.impl_item_paths.pop();
+            return;
         }
         let binding = if item.trait_.is_some() {
             format!("trait-implementation:{}", syntax_fingerprint(&binding_tokens))
@@ -1128,6 +1131,12 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
 
     fn visit_trait_item_type(&mut self, item: &'ast TraitItemType) {
         let concrete_before = self.concrete_stores.counts;
+        if self.trait_member_is_exposed()
+            && let Err(error) = self.record_trait_associated_type_bound_exposures(item)
+        {
+            self.error = Some(error);
+            return;
+        }
         visit::visit_trait_item_type(self, item);
         self.reject_concrete_store_alias(concrete_before);
     }

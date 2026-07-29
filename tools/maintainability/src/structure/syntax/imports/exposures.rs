@@ -3,13 +3,13 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 use proc_macro2::TokenStream;
 use syn::{
-    Field, ForeignItemStatic, Generics, ImplItemConst, ImplItemFn, ImplItemType, ItemConst, ItemStatic, ItemTrait, Signature, TraitBoundModifier, TraitItemConst, TypeParamBound,
-    Visibility,
+    Field, ForeignItemStatic, Generics, ImplItemConst, ImplItemFn, ImplItemType, ItemConst, ItemImpl, ItemStatic, ItemTrait, Signature, TraitBoundModifier, TraitItemConst,
+    TraitItemType, TypeParamBound, Visibility,
 };
 
 use crate::scan::syntax_fingerprint;
 
-use super::reexports::{PendingPublicReexport, PublicTypeExposureContext, public_signature_type_exposures, public_type_exposures};
+use super::reexports::{PendingPublicReexport, PublicTypeExposureContext, public_path_argument_type_exposures, public_signature_type_exposures, public_type_exposures};
 use super::{ProductionSyntaxCollector, PublicReexportEvidence, normalized_ident};
 
 #[derive(Clone, Copy)]
@@ -147,15 +147,22 @@ impl ProductionSyntaxCollector {
     pub(super) fn record_exposed_supertraits(&mut self, item: &ItemTrait) -> Result<()> {
         let mut source_path = self.module.clone();
         source_path.push(normalized_ident(&item.ident));
-        self.record_supertrait_bounds(&source_path, &item.vis, &item.supertraits)?;
+        let boundary = TypeExposureBoundary {
+            kind: "supertrait",
+            exported_path: &source_path,
+            source_path: Some(&source_path),
+            required_trait_path: None,
+            visibility: &item.vis,
+        };
+        self.record_trait_bound_exposures(boundary, &item.supertraits)?;
         let predicates = item.generics.where_clause.iter().flat_map(|clause| &clause.predicates);
         for bounds in predicates.filter_map(self_supertrait_bounds) {
-            self.record_supertrait_bounds(&source_path, &item.vis, bounds)?;
+            self.record_trait_bound_exposures(boundary, bounds)?;
         }
         Ok(())
     }
 
-    fn record_supertrait_bounds<'a>(&mut self, source_path: &[String], visibility: &Visibility, bounds: impl IntoIterator<Item = &'a TypeParamBound>) -> Result<()> {
+    fn record_trait_bound_exposures<'a>(&mut self, boundary: TypeExposureBoundary<'_>, bounds: impl IntoIterator<Item = &'a TypeParamBound>) -> Result<()> {
         for bound in bounds {
             let TypeParamBound::Trait(bound) = bound else {
                 continue;
@@ -167,23 +174,37 @@ impl ProductionSyntaxCollector {
                 qself: None,
                 path: bound.path.clone(),
             });
-            self.record_type_exposures(
-                TypeExposureBoundary {
-                    kind: "supertrait",
-                    exported_path: source_path,
-                    source_path: Some(source_path),
-                    required_trait_path: None,
-                    visibility,
-                },
-                &ty,
-            )?;
+            self.record_type_exposures(boundary, &ty)?;
         }
         Ok(())
     }
 
-    pub(super) fn record_trait_implementation_exposure(&mut self, item_path: &[String], trait_path: &[String], header: &TokenStream) {
-        if item_path.is_empty() || trait_path.is_empty() {
-            return;
+    pub(super) fn record_trait_associated_type_bound_exposures(&mut self, item: &TraitItemType) -> Result<()> {
+        let source_path = self.signature_item_path();
+        if source_path.is_empty() {
+            return Ok(());
+        }
+        let visibility = Visibility::Inherited;
+        let boundary_kind = format!("trait-associated-type-bound:{}", normalized_ident(&item.ident));
+        let boundary = TypeExposureBoundary {
+            kind: &boundary_kind,
+            exported_path: &source_path,
+            source_path: Some(&source_path),
+            required_trait_path: None,
+            visibility: &visibility,
+        };
+        self.enter_generic_scope(&item.generics);
+        let result = self.record_trait_bound_exposures(boundary, &item.bounds);
+        self.leave_generic_scope();
+        result
+    }
+
+    pub(super) fn record_trait_implementation_exposures(&mut self, item: &ItemImpl, item_path: &[String], trait_path: &[String], header: &TokenStream) -> Result<()> {
+        let Some((negative, implemented_trait, _)) = &item.trait_ else {
+            return Ok(());
+        };
+        if negative.is_some() || item_path.is_empty() || trait_path.is_empty() {
+            return Ok(());
         }
         let identity = format!(
             "trait-implementation-exposure:{}\0self:{}\0trait:{}\0cfg:{}\0ancestors:{}",
@@ -205,6 +226,29 @@ impl ProductionSyntaxCollector {
             cfg: self.cfg_context.clone(),
             source_path: Some(item_path.to_vec()),
         });
+        let mut generic_types = self.active_generic_types();
+        generic_types.extend(item.generics.type_params().map(|parameter| normalized_ident(&parameter.ident)));
+        let visibility = Visibility::Inherited;
+        let ancestors = self.declaration_ancestor_identity();
+        let argument_exposures = public_path_argument_type_exposures(
+            implemented_trait,
+            &generic_types,
+            &PublicTypeExposureContext {
+                boundary_kind: "trait-implementation-arguments",
+                exported_path: item_path,
+                source_path: Some(item_path),
+                required_trait_path: Some(trait_path),
+                module: &self.module,
+                visibility: &visibility,
+                cfg: &self.cfg_context,
+                direct_exposure_cfg: self.direct_exposure_cfg(),
+                ancestors: &ancestors,
+                rust_2015_absolute_paths: self.rust_2015_absolute_paths,
+                source_revision: self.source_revision,
+            },
+        )?;
+        self.public_reexports.extend(argument_exposures);
+        Ok(())
     }
 
     pub(super) fn record_field_type_exposure(&mut self, field: &Field) -> Result<()> {

@@ -224,3 +224,53 @@ fn trait_implementations_expose_defaulted_trait_members() -> Result<()> {
     assert!(implementation.direct_exposure_cfg.is_some());
     Ok(())
 }
+
+#[test]
+fn exposed_trait_associated_type_bounds_are_type_exposure_evidence() -> Result<()> {
+    let facts = concrete_facts(
+        "mod hidden {\n\
+             pub(crate) trait Internal { fn inspect(&self) -> SqliteStore; }\n\
+         }\n\
+         pub(crate) trait Public {\n\
+             type Output: hidden::Internal;\n\
+             fn output(&self) -> Self::Output;\n\
+         }\n",
+    )?;
+    let bound = facts
+        .public_reexports
+        .iter()
+        .find(|evidence| evidence.exported_path == ["store_fixture", "Public"] && evidence.target_path == ["store_fixture", "hidden", "Internal"])
+        .expect("associated type bound exposure");
+    assert!(bound.required_trait_path.is_none());
+    assert!(bound.direct_exposure_cfg.is_some());
+    Ok(())
+}
+
+#[test]
+fn trait_implementation_arguments_are_conditional_type_exposure_evidence() -> Result<()> {
+    let facts = concrete_facts(
+        "mod hidden {\n\
+             pub(crate) struct Adapter;\n\
+             impl Adapter { pub(crate) fn open(&self) -> SqliteStore { loop {} } }\n\
+         }\n\
+         pub(crate) trait Access<T> {\n\
+             fn access(&self) -> &T { loop {} }\n\
+         }\n\
+         pub(crate) struct Wrapper;\n\
+         impl Access<hidden::Adapter> for Wrapper {}\n\
+         pub(crate) struct GenericWrapper<T>(T);\n\
+         impl<T> Access<T> for GenericWrapper<T> {}\n",
+    )?;
+    let adapter = facts
+        .public_reexports
+        .iter()
+        .find(|evidence| evidence.exported_path == ["store_fixture", "Wrapper"] && evidence.target_path == ["store_fixture", "hidden", "Adapter"])
+        .expect("trait implementation argument exposure");
+    assert_eq!(adapter.required_trait_path.as_ref().map(|path| path.join("::")).as_deref(), Some("store_fixture::Access"));
+    assert!(adapter.direct_exposure_cfg.is_some());
+    assert!(
+        facts.public_reexports.iter().all(|evidence| evidence.target_path != ["store_fixture", "T"]),
+        "implementation generic parameters are not item exposure targets"
+    );
+    Ok(())
+}

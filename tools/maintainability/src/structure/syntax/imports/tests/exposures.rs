@@ -234,6 +234,98 @@ fn private_type_aliases_resolve_impl_self_types() -> Result<()> {
 }
 
 #[test]
+fn exposed_aliases_record_generic_and_compound_target_constituents() -> Result<()> {
+    let facts = concrete_facts(
+        "pub(crate) struct Box<T>(T);\n\
+         mod hidden { pub(crate) struct Adapter; }\n\
+         pub(crate) type GenericAdapter = Box<hidden::Adapter>;\n\
+         pub(crate) type CompoundAdapter = (hidden::Adapter,);\n",
+    )?;
+    for alias in ["GenericAdapter", "CompoundAdapter"] {
+        let adapter = facts
+            .public_reexports
+            .iter()
+            .find(|evidence| evidence.exported_path == ["store_fixture", alias] && evidence.target_path == ["store_fixture", "hidden", "Adapter"])
+            .unwrap_or_else(|| panic!("{alias} constituent exposure"));
+        assert!(adapter.direct_exposure_cfg.is_some());
+    }
+    assert_eq!(
+        facts
+            .public_reexports
+            .iter()
+            .filter(|evidence| { evidence.exported_path == ["store_fixture", "GenericAdapter"] && evidence.target_path == ["store_fixture", "Box"] })
+            .count(),
+        1,
+        "the direct alias target is not duplicated by constituent analysis"
+    );
+    Ok(())
+}
+
+#[test]
+fn block_contained_impls_keep_global_self_types_but_not_local_shadows() -> Result<()> {
+    let facts = concrete_facts(
+        "mod hidden {\n\
+             pub(crate) struct Adapter;\n\
+             fn install() {\n\
+                 impl Adapter { pub(crate) fn open() -> SqliteStore { loop {} } }\n\
+                 struct Local;\n\
+                 impl Local { pub(crate) fn inspect() -> PostgresStore { loop {} } }\n\
+             }\n\
+         }\n\
+         pub(crate) use hidden::Adapter;\n",
+    )?;
+    let global = facts
+        .signature_concrete_store_sites
+        .sqlite_store
+        .iter()
+        .find(|site| site.impl_self_type)
+        .expect("block-contained global impl signature");
+    assert_eq!(global.item_path, ["store_fixture", "hidden", "Adapter"]);
+    assert!(global.direct_exposure_cfg.is_none());
+    assert!(
+        facts
+            .signature_concrete_store_sites
+            .postgres_store
+            .iter()
+            .all(|site| site.item_path != ["store_fixture", "hidden", "Local"]),
+        "block-local nominal types do not bind module item paths"
+    );
+
+    let mutually_exclusive = concrete_facts(
+        "mod hidden {\n\
+             pub(crate) struct Adapter;\n\
+             fn install() {\n\
+                 #[cfg(feature = \"local\")] struct Adapter;\n\
+                 #[cfg(not(feature = \"local\"))]\n\
+                 impl Adapter { pub(crate) fn open() -> SqliteStore { loop {} } }\n\
+             }\n\
+         }\n\
+         pub(crate) use hidden::Adapter;\n",
+    )?;
+    let global = mutually_exclusive
+        .signature_concrete_store_sites
+        .sqlite_store
+        .iter()
+        .find(|site| site.impl_self_type)
+        .expect("cfg-exclusive block shadow leaves the global impl binding active");
+    assert_eq!(global.item_path, ["store_fixture", "hidden", "Adapter"]);
+
+    let Err(error) = concrete_facts(
+        "mod hidden {\n\
+             pub(crate) struct Adapter;\n\
+             fn install() {\n\
+                 use Adapter as Alias;\n\
+                 impl Alias { pub(crate) fn open() -> SqliteStore { loop {} } }\n\
+             }\n\
+         }\n",
+    ) else {
+        panic!("a block-local impl alias must fail closed");
+    };
+    assert!(error.to_string().contains("block-local alias"), "{error:#}");
+    Ok(())
+}
+
+#[test]
 fn trait_implementations_expose_defaulted_trait_members() -> Result<()> {
     let facts = concrete_facts(
         "pub(crate) trait StoreAccess {\n\

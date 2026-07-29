@@ -182,6 +182,7 @@ fn collect_production_syntax(
         concrete_stores: ConcreteStoreInventory::default(),
         site_context: None,
         block_depth: 0,
+        block_type_scopes: Vec::new(),
         macro_shadow_scopes: vec![BTreeSet::new()],
         generic_default_depth: 0,
         impl_signature_headers: Vec::new(),
@@ -220,6 +221,7 @@ struct ProductionSyntaxCollector {
     concrete_stores: ConcreteStoreInventory,
     site_context: Option<String>,
     block_depth: usize,
+    block_type_scopes: Vec<BlockTypeBindings>,
     macro_shadow_scopes: Vec<BTreeSet<MacroShadow>>,
     generic_default_depth: usize,
     impl_signature_headers: Vec<TokenStream>,
@@ -243,6 +245,19 @@ struct ProductionSyntaxCollector {
 enum SiteContextEntry {
     Entered(Option<String>),
     Failed,
+}
+
+#[derive(Default)]
+struct BlockTypeBindings {
+    nominal_types: BTreeSet<BlockTypeBinding>,
+    ambiguous_roots: BTreeSet<BlockTypeBinding>,
+    glob_imports: BTreeSet<ProductionCfgContext>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct BlockTypeBinding {
+    name: String,
+    cfg: ProductionCfgContext,
 }
 
 impl ProductionSyntaxCollector {
@@ -357,7 +372,9 @@ impl ProductionSyntaxCollector {
         if let Some(resolution) = type_alias_resolution(item, &context)? {
             self.use_resolutions.push(resolution);
         }
-        if let Some(alias) = public_type_alias(item, context)? {
+        let alias = public_type_alias(item, context)?;
+        self.record_exposed_type_alias_exposures(item, alias.as_ref().map(|alias| alias.evidence.target_path.as_slice()))?;
+        if let Some(alias) = alias {
             self.public_reexports.push(alias);
         }
         Ok(())
@@ -630,11 +647,11 @@ impl ProductionSyntaxCollector {
     }
 
     fn signature_item_path(&self) -> Vec<String> {
-        if self.block_depth > 0 {
-            return Vec::new();
-        }
         if let Some(path) = self.impl_item_paths.last().filter(|path| !path.is_empty()) {
             return path.clone();
+        }
+        if self.block_depth > 0 {
+            return Vec::new();
         }
         let Some(name) = self.declaration_ancestors.iter().rev().find_map(|ancestor| {
             ["const:", "enum:", "fn:", "static:", "struct:", "trait:", "union:"]
@@ -662,6 +679,37 @@ impl ProductionSyntaxCollector {
         }
         if path.path.leading_colon.is_some() && !self.rust_2015_absolute_paths {
             return Ok(Vec::new());
+        }
+        if self.block_depth > 0
+            && path.path.leading_colon.is_none()
+            && path
+                .path
+                .segments
+                .first()
+                .is_none_or(|segment| !matches!(normalized_ident(&segment.ident).as_str(), "crate" | "self" | "super"))
+        {
+            let root = path.path.segments.first().map(|segment| normalized_ident(&segment.ident));
+            if path.path.segments.len() == 1
+                && root.as_ref().is_some_and(|name| {
+                    self.block_type_scopes
+                        .iter()
+                        .rev()
+                        .any(|scope| block_binding_applies(&scope.nominal_types, name, &self.cfg_context))
+                })
+            {
+                return Ok(Vec::new());
+            }
+            if root.as_ref().is_some_and(|name| {
+                self.block_type_scopes
+                    .iter()
+                    .rev()
+                    .any(|scope| block_scope_has_ambiguous_binding(scope, name, &self.cfg_context))
+            }) {
+                bail!(
+                    "block-contained impl self type `{}` uses a block-local alias, module, or glob import and cannot be resolved safely",
+                    item.self_ty.to_token_stream()
+                );
+            }
         }
         let mut segments = path.path.segments.iter().map(|segment| normalized_ident(&segment.ident)).collect::<Vec<_>>();
         if path.path.leading_colon.is_some() {
@@ -760,7 +808,15 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
                 return;
             }
         };
+        let type_bindings = match block_local_type_bindings(node, &self.cfg_context) {
+            Ok(bindings) => bindings,
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        };
         self.block_depth += 1;
+        self.block_type_scopes.push(type_bindings);
         self.macro_shadow_scopes.push(BTreeSet::new());
         self.builtin_stringify_block_aliases.push(imports.aliases);
         self.macro_import_shadow_scopes.push(imports.shadows);
@@ -768,6 +824,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         self.macro_import_shadow_scopes.pop();
         self.builtin_stringify_block_aliases.pop();
         self.macro_shadow_scopes.pop();
+        self.block_type_scopes.pop();
         self.block_depth -= 1;
     }
 
@@ -1458,6 +1515,77 @@ fn declaration_ancestor(item: &Item) -> Option<String> {
         Item::Union(item) => Some(named_ancestor("union", &item.ident, &item.vis)),
         _ => None,
     }
+}
+
+fn block_local_type_bindings(block: &Block, inherited_cfg: &ProductionCfgContext) -> Result<BlockTypeBindings> {
+    let mut bindings = BlockTypeBindings::default();
+    for item in block.stmts.iter().filter_map(|statement| match statement {
+        Stmt::Item(item) => Some(item),
+        Stmt::Local(_) | Stmt::Expr(_, _) | Stmt::Macro(_) => None,
+    }) {
+        let Some(cfg) = production_cfg_context(item_attributes(item)?, inherited_cfg)? else {
+            continue;
+        };
+        let nominal = match item {
+            Item::Enum(item) => Some(&item.ident),
+            Item::Struct(item) => Some(&item.ident),
+            Item::Union(item) => Some(&item.ident),
+            _ => None,
+        };
+        if let Some(ident) = nominal {
+            bindings.nominal_types.insert(BlockTypeBinding {
+                name: normalized_ident(ident),
+                cfg,
+            });
+            continue;
+        }
+        match item {
+            Item::ExternCrate(item) => {
+                let ident = item.rename.as_ref().map_or(&item.ident, |(_, rename)| rename);
+                bindings.ambiguous_roots.insert(BlockTypeBinding {
+                    name: normalized_ident(ident),
+                    cfg,
+                });
+            }
+            Item::Mod(item) => {
+                bindings.ambiguous_roots.insert(BlockTypeBinding {
+                    name: normalized_ident(&item.ident),
+                    cfg,
+                });
+            }
+            Item::Type(item) => {
+                bindings.ambiguous_roots.insert(BlockTypeBinding {
+                    name: normalized_ident(&item.ident),
+                    cfg,
+                });
+            }
+            Item::Use(item) => record_block_use_bindings(item, &cfg, &mut bindings),
+            _ => {}
+        }
+    }
+    Ok(bindings)
+}
+
+fn record_block_use_bindings(item: &ItemUse, cfg: &ProductionCfgContext, bindings: &mut BlockTypeBindings) {
+    let mut paths = Vec::new();
+    flatten_use_tree(&item.tree, &mut Vec::new(), &mut paths);
+    for path in paths {
+        if path.segments.last().is_some_and(|segment| segment == "*") {
+            bindings.glob_imports.insert(cfg.clone());
+            continue;
+        }
+        if let Some(name) = path.alias.or_else(|| path.segments.last().cloned()) {
+            bindings.ambiguous_roots.insert(BlockTypeBinding { name, cfg: cfg.clone() });
+        }
+    }
+}
+
+fn block_binding_applies(bindings: &BTreeSet<BlockTypeBinding>, name: &str, cfg: &ProductionCfgContext) -> bool {
+    bindings.iter().any(|binding| binding.name == name && binding.cfg.conjoin(cfg).is_some())
+}
+
+fn block_scope_has_ambiguous_binding(scope: &BlockTypeBindings, name: &str, cfg: &ProductionCfgContext) -> bool {
+    block_binding_applies(&scope.ambiguous_roots, name, cfg) || scope.glob_imports.iter().any(|glob_cfg| glob_cfg.conjoin(cfg).is_some())
 }
 
 fn named_ancestor(kind: &str, ident: &proc_macro2::Ident, visibility: &Visibility) -> String {

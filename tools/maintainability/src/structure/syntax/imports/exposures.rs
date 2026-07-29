@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 use proc_macro2::{Ident, TokenStream};
 use syn::{
-    Field, ForeignItemStatic, Generics, ImplItemConst, ImplItemFn, ImplItemType, ItemConst, ItemImpl, ItemStatic, ItemTrait, Signature, TraitBoundModifier, TraitItemConst,
-    TraitItemType, TypeParamBound, Visibility,
+    Field, ForeignItemStatic, Generics, ImplItemConst, ImplItemFn, ImplItemType, ItemConst, ItemImpl, ItemStatic, ItemTrait, ItemType, Signature, TraitBoundModifier,
+    TraitItemConst, TraitItemType, TypeParamBound, Visibility,
 };
 
 use crate::scan::syntax_fingerprint;
@@ -14,7 +14,7 @@ use super::reexports::{
     PendingPublicReexport, PublicTypeExposureContext, public_generic_default_type_exposures, public_path_argument_type_exposures, public_signature_type_exposures,
     public_type_exposures,
 };
-use super::{ProductionSyntaxCollector, PublicReexportEvidence, normalized_ident};
+use super::{ProductionSyntaxCollector, PublicReexportEvidence, normalized_ident, visibility_is_exposed};
 
 #[derive(Clone, Copy)]
 struct TypeExposureBoundary<'a> {
@@ -125,6 +125,37 @@ impl ProductionSyntaxCollector {
             &signature,
         )?;
         self.record_concrete_stores_in_visible_signature(boundary_kind, visibility, &signature);
+        Ok(())
+    }
+
+    pub(super) fn record_exposed_type_alias_exposures(&mut self, item: &ItemType, direct_target: Option<&[String]>) -> Result<()> {
+        if !visibility_is_exposed(&item.vis) {
+            return Ok(());
+        }
+        let mut exported_path = self.module.clone();
+        exported_path.push(normalized_ident(&item.ident));
+        let mut generic_types = self.active_generic_types();
+        generic_types.extend(item.generics.type_params().map(|parameter| normalized_ident(&parameter.ident)));
+        let ancestors = self.declaration_ancestor_identity();
+        let exposures = public_type_exposures(
+            &item.ty,
+            &generic_types,
+            &PublicTypeExposureContext {
+                boundary_kind: "type-alias-target",
+                exported_path: &exported_path,
+                source_path: None,
+                required_trait_path: None,
+                module: &self.module,
+                visibility: &item.vis,
+                cfg: &self.cfg_context,
+                direct_exposure_cfg: self.direct_exposure_cfg(),
+                ancestors: &ancestors,
+                rust_2015_absolute_paths: self.rust_2015_absolute_paths,
+                source_revision: self.source_revision,
+            },
+        )?;
+        self.public_reexports
+            .extend(exposures.into_iter().filter(|exposure| direct_target != Some(exposure.evidence.target_path.as_slice())));
         Ok(())
     }
 

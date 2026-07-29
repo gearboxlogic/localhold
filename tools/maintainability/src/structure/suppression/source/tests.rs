@@ -146,6 +146,52 @@ fn stable_ids_follow_the_reviewed_item_across_file_splits() -> Result<()> {
 }
 
 #[test]
+fn target_fingerprints_ignore_sibling_suppression_debt() -> Result<()> {
+    let stacked = scan(
+        "#[expect(clippy::panic, reason = \"legacy panic\")]\n\
+         #[expect(clippy::todo, reason = \"legacy placeholder\")]\n\
+         fn serve() { todo!() }\n",
+        SourceCategory::Production,
+    )?;
+    let reduced = scan(
+        "#[expect(clippy::todo, reason = \"legacy placeholder\")]\n\
+         fn serve() { todo!() }\n",
+        SourceCategory::Production,
+    )?;
+    let stacked_todo = stacked.iter().find(|site| site.lint == "clippy::todo").expect("stacked todo");
+    assert_eq!(stacked_todo.id, reduced[0].id);
+    assert_eq!(stacked_todo.target, reduced[0].target);
+
+    let shared_attribute = scan(
+        "#[expect(clippy::panic, clippy::todo, reason = \"legacy paths\")]\n\
+         fn shared() { todo!() }\n",
+        SourceCategory::Production,
+    )?;
+    let reduced_attribute = scan(
+        "#[expect(clippy::todo, reason = \"legacy paths\")]\n\
+         fn shared() { todo!() }\n",
+        SourceCategory::Production,
+    )?;
+    let shared_todo = shared_attribute.iter().find(|site| site.lint == "clippy::todo").expect("shared todo");
+    assert_eq!(shared_todo.id, reduced_attribute[0].id);
+
+    let conditional = scan(
+        "#[cfg_attr(test, expect(clippy::panic, clippy::todo, reason = \"conditional paths\"), inline)]\n\
+         fn conditional() { todo!() }\n",
+        SourceCategory::Production,
+    )?;
+    let reduced_conditional = scan(
+        "#[cfg_attr(test, expect(clippy::todo, reason = \"conditional paths\"), inline)]\n\
+         fn conditional() { todo!() }\n",
+        SourceCategory::Production,
+    )?;
+    let conditional_todo = conditional.iter().find(|site| site.lint == "clippy::todo").expect("conditional todo");
+    assert_eq!(conditional_todo.id, reduced_conditional[0].id);
+    assert_eq!(conditional_todo.target, reduced_conditional[0].target);
+    Ok(())
+}
+
+#[test]
 fn stable_ids_pin_item_bodies_and_complete_impl_headers() -> Result<()> {
     let first = scan(
         "#[expect(clippy::panic, reason = \"protocol failure\")]\nfn serve() { panic!() }\n",

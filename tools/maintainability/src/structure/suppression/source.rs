@@ -10,14 +10,15 @@ use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{Arm, Attribute, Expr, ForeignItem, GenericParam, ImplItem, Item, Local, Meta, StmtMacro, Token, TraitItem, Variant};
 
+use self::fingerprint::{suppression_free_fingerprint, suppression_site_fingerprint};
 use self::nodes::{SuppressionScope, foreign_item_scope, impl_item_scope, item_scope, trait_item_scope};
 use super::{SourceCategory, SourceSuppression};
-use crate::scan::syntax_fingerprint;
 use crate::structure::syntax::{
     ProductionCfgContext, cfg_attr_metas_with_production_reachability, expr_attributes, foreign_item_attributes, generic_param_attributes, impl_item_attributes, item_attributes,
     normalized_ident, pat_attributes, production_cfg_context, trait_item_attributes,
 };
 
+mod fingerprint;
 mod nodes;
 #[cfg(test)]
 mod tests;
@@ -137,7 +138,7 @@ impl SourceScanner {
             };
             self.scope = item.scope;
             self.signature = item.signature;
-            self.target = Some(syntax_fingerprint(node));
+            self.target = Some(suppression_free_fingerprint(node));
         }
         visit(self, node);
         self.category = previous_category;
@@ -150,22 +151,22 @@ impl SourceScanner {
 
     fn visit_anonymous_scope<'ast, T: ToTokens>(&mut self, attributes: Result<&[Attribute]>, scope: &str, node: &'ast T, visit: impl FnOnce(&mut Self, &'ast T)) {
         let previous_scope = std::mem::replace(&mut self.scope, scope.to_owned());
-        let previous_target = self.target.replace(syntax_fingerprint(node));
+        let previous_target = self.target.replace(suppression_free_fingerprint(node));
         self.visit_classified(attributes, None, node, visit);
         self.scope = previous_scope;
         self.target = previous_target;
     }
 
     fn record_attribute(&mut self, attribute: &Attribute, macro_carried: bool) -> Result<()> {
-        self.record_meta(&attribute.meta, self.category, macro_carried, &syntax_fingerprint(attribute))
+        self.record_meta(&attribute.meta, self.category, macro_carried, None)
     }
 
-    fn record_meta(&mut self, meta: &Meta, category: SourceCategory, macro_carried: bool, fingerprint: &str) -> Result<()> {
+    fn record_meta(&mut self, meta: &Meta, category: SourceCategory, macro_carried: bool, activation_identity: Option<&str>) -> Result<()> {
         if meta.path().is_ident("cfg_attr") {
             let Meta::List(list) = meta else {
                 return Ok(());
             };
-            return self.record_cfg_attr(list, category, macro_carried, fingerprint);
+            return self.record_cfg_attr(list, category, macro_carried);
         }
         let level = if meta.path().is_ident("expect") {
             "expect"
@@ -180,6 +181,7 @@ impl SourceScanner {
         let arguments = Punctuated::<Meta, Token![,]>::parse_terminated
             .parse2(suppression.tokens.clone())
             .with_context(|| format!("parse {level} lint suppression"))?;
+        let fingerprint = suppression_site_fingerprint(meta, activation_identity)?;
         let reason = arguments
             .iter()
             .find_map(|argument| {
@@ -213,17 +215,17 @@ impl SourceScanner {
                 lint,
                 reason: reason.clone(),
                 macro_carried,
-                fingerprint: fingerprint.to_owned(),
+                fingerprint: fingerprint.clone(),
             });
         }
         Ok(())
     }
 
-    fn record_cfg_attr(&mut self, cfg_attr: &syn::MetaList, category: SourceCategory, macro_carried: bool, fingerprint: &str) -> Result<()> {
+    fn record_cfg_attr(&mut self, cfg_attr: &syn::MetaList, category: SourceCategory, macro_carried: bool) -> Result<()> {
         let metas = cfg_attr_metas_with_production_reachability(&cfg_attr.tokens, &self.cfg_context)?;
         for classified in metas {
             let category = category_for_branch(category, classified.production_reachable);
-            self.record_meta(&classified.meta, category, macro_carried, fingerprint)?;
+            self.record_meta(&classified.meta, category, macro_carried, Some(&classified.activation_identity))?;
         }
         Ok(())
     }
@@ -252,8 +254,7 @@ impl SourceScanner {
         match syn::parse2::<Meta>(group.stream()) {
             Ok(meta) => {
                 validate_audited_module_path_meta(&meta).context("validate macro-carried module path")?;
-                let fingerprint = syntax_fingerprint(&meta);
-                self.record_meta(&meta, self.category, true, &fingerprint).context("classify macro-carried lint attribute")
+                self.record_meta(&meta, self.category, true, None).context("classify macro-carried lint attribute")
             }
             Err(error) => Err(error).context("opaque macro-carried attribute could hide a lint suppression"),
         }

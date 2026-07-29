@@ -44,7 +44,7 @@ install_mise_tools() {
 
 sanity() {
   say "Sanity check"
-  # Use `mise x` to evaluate mise.toml env (CARGO_HOME, _.path, etc.)
+  # Use `mise x` to evaluate the tool-cache home and path from mise.toml.
   mise x -- rustc --version
   mise x -- cargo --version
   mise x -- just --version

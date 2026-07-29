@@ -102,6 +102,7 @@ fn write_nested_identity(kind: char, nested: &[Predicate], output: &mut String) 
 pub(in crate::structure) struct ClassifiedCfgMeta {
     pub(in crate::structure) meta: Meta,
     pub(in crate::structure) production_reachable: bool,
+    pub(in crate::structure) activation_identity: String,
 }
 
 pub(in crate::structure) fn attributes_disable_production(attributes: &[Attribute]) -> Result<bool> {
@@ -173,9 +174,12 @@ fn collect_cfg_attr_metas(tokens: &proc_macro2::TokenStream, context: &Productio
             };
             collect_cfg_attr_metas(&list.tokens, context, activation.clone(), output)?;
         } else {
+            let mut activation_identity = String::new();
+            activation.write_identity(&mut activation_identity);
             output.push(ClassifiedCfgMeta {
                 meta,
                 production_reachable: reachable,
+                activation_identity,
             });
         }
     }

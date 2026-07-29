@@ -54,6 +54,9 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_token("cargo --config build.rustflags='-A warnings' clippy"));
     assert!(weakening_token("cargo deny --config deny.toml; cargo --config build.rustflags='-A warnings' clippy"));
     assert!(weakening_token("cargo \\\n  --config build.rustflags='-A warnings' clippy"));
+    assert!(weakening_token("cargo -Z unstable-options -C ../other build"));
+    assert!(weakening_token("cargo --change-directory=../other build"));
+    assert!(!weakening_token("cargo rustc -- -C opt-level=3"));
     assert!(weakening_token("sh -c \"cargo --config net.offline=true check # literal\""));
     assert!(!weakening_token("cargo deny --config deny.toml"));
     assert!(!weakening_token("gitleaks --config policy.toml # cargo output"));
@@ -69,6 +72,10 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_environment("CLIPPY_CONF_DIR=unreviewed"));
     assert!(weakening_environment("RUSTC_WRAPPER=unreviewed"));
     assert!(weakening_environment("CARGO_TARGET_TEST_RUSTFLAGS=unreviewed"));
+    assert!(weakening_environment("CARGO_HOME=unreviewed"));
+    assert!(weakening_environment_for_surface("script/check.ps1", "$env:rustflags = $dynamic"));
+    assert!(weakening_environment_for_surface("script/check.cmd", "set cargo_encoded_rustflags=%DYNAMIC%"));
+    assert!(!weakening_environment_for_surface("script/check.sh", "rustflags=local"));
     assert!(!weakening_environment("rustc --version"));
     let scrubber = format!("{}\n", BOOTSTRAP_ENVIRONMENT_LINES.join("\n"));
     assert!(scrubber_environment_references_are_exact("script/check-maintainability-bootstrap.sh", &scrubber));
@@ -84,6 +91,7 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
         "script/tests/test_maintainability_bootstrap.sh",
         &BOOTSTRAP_TEST_ENVIRONMENT_LINES.join("\n"),
     ));
+    assert!(scrubber_environment_references_are_exact("mise.toml", &MISE_ENVIRONMENT_LINES.join("\n")));
     assert!(!scrubber_environment_references_are_exact("script/tests/new-command.sh", &scrubber));
 }
 
@@ -116,8 +124,12 @@ fn command_surfaces_include_scripts_outside_the_legacy_script_directory() {
         "module.just",
         ".github/workflows/ci.yml",
         ".github/actions/check/action.yaml",
+        ".cargo/config",
+        "nested/.cargo/config.toml",
+        "nested/.CARGO/CONFIG.TOML",
         "script/release.py",
         "tools/ci/check.sh",
+        "tools/ci/check.PS1",
         "Makefile",
         "package.json",
     ] {
@@ -125,6 +137,30 @@ fn command_surfaces_include_scripts_outside_the_legacy_script_directory() {
     }
     assert!(!is_execution_surface("CONTRIBUTING.md"));
     assert!(!is_execution_surface("src/lib.rs"));
+}
+
+#[test]
+fn command_policy_rejects_cargo_configuration_relocation() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    fs::write(workspace.path().join("script/check.sh"), "cargo check\n").expect("safe command");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+    reject_checked_in_weakening(workspace.path()).expect("safe Cargo command");
+
+    fs::create_dir_all(workspace.path().join(".cargo")).expect("Cargo configuration directory");
+    fs::write(workspace.path().join(".cargo/config.toml"), "[build]\nrustflags = ['-A', 'warnings']\n").expect("Cargo configuration");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("Cargo configuration"));
+    fs::remove_dir_all(workspace.path().join(".cargo")).expect("remove Cargo configuration");
+
+    fs::write(workspace.path().join("script/check.sh"), "CARGO_HOME=$DYNAMIC_HOME cargo check\n").expect("Cargo home injection");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("environment channel"));
+
+    fs::write(workspace.path().join("script/check.sh"), "cargo -Z unstable-options -C ../other check\n").expect("Cargo directory relocation");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"));
 }
 
 #[test]

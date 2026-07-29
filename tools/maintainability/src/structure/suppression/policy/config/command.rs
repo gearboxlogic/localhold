@@ -7,25 +7,33 @@ use anyhow::{Context, Result, bail};
 use super::parse_nul_paths;
 
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
+    "cargo_home=${CARGO_HOME:-}",
     "            RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
     "                RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \\",
     "                CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \\",
     "                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER)",
 ];
 pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
+    "CARGO_HOME='C:\\cargo-home' \\",
+    "export CARGO_HOME=$cargo_home",
+    "unset CARGO_HOME",
     "RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted CLIPPY_CONF_DIR=untrusted \\",
     "    RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \\",
     "    CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \\",
     "    run_check -- bash -c 'for name in RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS CLIPPY_CONF_DIR RUSTDOC RUSTC_WRAPPER CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do [[ ! -v $name ]] || exit 1; done' >/dev/null",
 ];
+pub(super) const MISE_ENVIRONMENT_LINES: &[&str] = &["CARGO_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/cargo\""];
 
 pub fn reject_checked_in_weakening(workspace: &Path) -> Result<()> {
     for path in execution_surfaces(workspace)? {
+        if is_cargo_config(Path::new(&path)) {
+            bail!("checked-in Cargo configuration {path:?} is unsupported because it can override lint policy");
+        }
         let source = fs::read_to_string(workspace.join(&path)).with_context(|| format!("read lint command execution surface {path}"))?;
         if weakening_token(&source) {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening argument");
         }
-        if weakening_environment(&source) && !scrubber_environment_references_are_exact(&path, &source) {
+        if weakening_environment_for_surface(&path, &source) && !scrubber_environment_references_are_exact(&path, &source) {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening environment channel");
         }
     }
@@ -55,6 +63,7 @@ fn weakening_rust_command(command: &str) -> bool {
         return false;
     }
     command.contains("--cap-lints")
+        || cargo_changes_directory_before_compiler_arguments(&tokens)
         || tokens.iter().any(|token| {
             *token == "-A"
                 || token.starts_with("-A") && token.len() > 2
@@ -64,6 +73,16 @@ fn weakening_rust_command(command: &str) -> bool {
                 || matches!(*token, "--warn" | "--force-warn")
         })
         || tokens.iter().any(|token| token.starts_with("--config")) && !is_cargo_deny_command(&tokens)
+}
+
+fn cargo_changes_directory_before_compiler_arguments(tokens: &[&str]) -> bool {
+    let Some(cargo_index) = tokens.iter().position(|token| is_cargo_tool_token(token)) else {
+        return false;
+    };
+    tokens[cargo_index.saturating_add(1)..]
+        .iter()
+        .take_while(|token| **token != "--")
+        .any(|token| *token == "-C" || token.starts_with("-C") && token.len() > 2 || *token == "--change-directory" || token.starts_with("--change-directory="))
 }
 
 fn command_without_comment(segment: &str) -> &str {
@@ -97,12 +116,20 @@ fn command_tokens(command: &str) -> Vec<&str> {
 }
 
 fn is_rust_tool_token(token: &str) -> bool {
-    let token = token.trim_matches(|character| matches!(character, '$' | '{' | '}' | '(' | ')' | ':' | ','));
-    let basename = token.rsplit(['/', '\\']).next().unwrap_or(token);
+    let basename = tool_basename(token);
     matches!(
         basename,
         "cargo" | "cargo.exe" | "rustc" | "rustc.exe" | "rustdoc" | "rustdoc.exe" | "clippy-driver" | "clippy-driver.exe" | "CARGO" | "RUSTC" | "RUSTDOC"
     )
+}
+
+fn is_cargo_tool_token(token: &str) -> bool {
+    matches!(tool_basename(token), "cargo" | "cargo.exe" | "CARGO")
+}
+
+fn tool_basename(token: &str) -> &str {
+    let token = token.trim_matches(|character| matches!(character, '$' | '{' | '}' | '(' | ')' | ':' | ','));
+    token.rsplit(['/', '\\']).next().unwrap_or(token)
 }
 
 fn is_cargo_deny_command(tokens: &[&str]) -> bool {
@@ -110,10 +137,22 @@ fn is_cargo_deny_command(tokens: &[&str]) -> bool {
 }
 
 pub(super) fn weakening_environment(source: &str) -> bool {
+    weakening_environment_with_case(source, false)
+}
+
+pub(super) fn weakening_environment_for_surface(path: &str, source: &str) -> bool {
+    let case_insensitive = Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "ps1" | "cmd" | "bat"));
+    weakening_environment_with_case(source, case_insensitive)
+}
+
+fn weakening_environment_with_case(source: &str, case_insensitive: bool) -> bool {
     source
         .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
         .filter(|name| !name.is_empty())
-        .filter(|name| name.bytes().any(|byte| byte.is_ascii_uppercase()))
+        .filter(|name| case_insensitive || name.bytes().any(|byte| byte.is_ascii_uppercase()))
         .map(str::to_ascii_uppercase)
         .any(|name| {
             matches!(
@@ -128,6 +167,7 @@ pub(super) fn weakening_environment(source: &str) -> bool {
                     | "RUSTDOC"
                     | "RUSTC_WRAPPER"
                     | "RUSTC_WORKSPACE_WRAPPER"
+                    | "CARGO_HOME"
                     | "CARGO_BUILD_TARGET"
                     | "CARGO_BUILD_RUSTFLAGS"
                     | "CARGO_BUILD_RUSTDOCFLAGS"
@@ -144,6 +184,7 @@ pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str
     let allowed = match path {
         "script/check-maintainability-bootstrap.sh" => BOOTSTRAP_ENVIRONMENT_LINES,
         "script/tests/test_maintainability_bootstrap.sh" => BOOTSTRAP_TEST_ENVIRONMENT_LINES,
+        "mise.toml" => MISE_ENVIRONMENT_LINES,
         _ => return false,
     };
     let lines = source.lines().collect::<Vec<_>>();
@@ -161,6 +202,7 @@ pub(super) fn is_execution_surface(path: &str) -> bool {
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| extension.eq_ignore_ascii_case("just"))
         || path == Path::new("mise.toml")
+        || is_cargo_config(path)
         || path.starts_with(".github/workflows")
         || path.starts_with(".github/actions") && matches!(lowercase_basename.as_str(), "action.yml" | "action.yaml")
         || path.starts_with("script")
@@ -168,8 +210,18 @@ pub(super) fn is_execution_surface(path: &str) -> bool {
     {
         return true;
     }
-    matches!(
-        path.extension().and_then(|extension| extension.to_str()),
-        Some("sh" | "bash" | "zsh" | "fish" | "ps1" | "cmd" | "bat" | "py")
-    )
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "sh" | "bash" | "zsh" | "fish" | "ps1" | "cmd" | "bat" | "py"))
+}
+
+fn is_cargo_config(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("config") || name.eq_ignore_ascii_case("config.toml"))
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case(".cargo"))
 }

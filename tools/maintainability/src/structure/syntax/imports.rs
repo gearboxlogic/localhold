@@ -31,7 +31,8 @@ pub use declarations::TypeDeclarationEvidence;
 use declarations::{TypeDeclarationContext, type_declaration_evidence};
 use macro_definitions::contains_production_concrete_store;
 use reexports::{PendingPublicReexport, UseResolution, resolve_impl_signature_aliases, resolve_public_reexport_aliases};
-use resolution::{StringScan, UsePath, flatten_use_tree, resolve_path, restricted_attribute_identifier, restricted_token_identifier, source_module};
+pub(in crate::structure) use resolution::source_module;
+use resolution::{StringScan, UsePath, flatten_use_tree, resolve_path, restricted_attribute_identifier, restricted_token_identifier};
 use stringify::{
     BlockBuiltinStringifyAlias, MacroShadow, ModuleStringifyImports, binding_is_fully_builtin, collect_module_stringify_imports, is_explicit_builtin_stringify,
     stringify_imports_in_block,
@@ -368,12 +369,12 @@ impl ProductionSyntaxCollector {
     }
 
     fn record_concrete_stores_in_signature(&mut self, kind: &str, syntax: &impl ToTokens) {
-        let tokens = syntax.to_token_stream();
+        let tokens = without_documentation(&syntax.to_token_stream());
         self.record_concrete_stores_in_signature_with_identity(kind, &tokens, &tokens);
     }
 
     fn record_concrete_stores_in_visible_signature(&mut self, kind: &str, visibility: &Visibility, syntax: &impl ToTokens) {
-        let tokens = syntax.to_token_stream();
+        let tokens = without_documentation(&syntax.to_token_stream());
         let mut identity = visibility.to_token_stream();
         identity.extend(tokens.clone());
         self.record_concrete_stores_in_signature_with_identity(kind, &tokens, &identity);

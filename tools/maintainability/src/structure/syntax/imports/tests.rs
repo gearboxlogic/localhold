@@ -919,6 +919,32 @@ fn type_and_trait_generic_bounds_are_signature_evidence() -> Result<()> {
 }
 
 #[test]
+fn generic_signature_identity_ignores_documentation() -> Result<()> {
+    let plain = concrete_facts(
+        "pub(crate) struct Adapter<S = SqliteStore>(S);\n\
+         pub(crate) fn open<S: Uses<PostgresStore>>() {}\n\
+         pub(crate) trait Routed<S: Uses<SqliteStore>> {}\n",
+    )?;
+    let documented = historical_concrete_facts(
+        "pub(crate) struct Adapter<\n\
+             /// Selected backend.\n\
+             #[cfg_attr(docsrs, doc = \"Conditional backend details.\")]\n\
+             S = SqliteStore\n\
+         >(S);\n\
+         pub(crate) fn open<\n\
+             #[cfg_attr(docsrs, cfg_attr(all(), doc = \"Conditional route details.\"))]\n\
+             S: Uses<PostgresStore>\n\
+         >() {}\n\
+         pub(crate) trait Routed<\n\
+             /// Routed backend.\n\
+             S: Uses<SqliteStore>\n\
+         > {}\n",
+    )?;
+    assert_eq!(plain.signature_concrete_store_sites, documented.signature_concrete_store_sites);
+    Ok(())
+}
+
+#[test]
 fn concrete_store_signature_identity_tracks_visibility() -> Result<()> {
     let private = concrete_facts("fn open() -> SqliteStore { SqliteStore::open() }\n")?;
     let restricted = concrete_facts("pub(crate) fn open() -> SqliteStore { SqliteStore::open() }\n")?;

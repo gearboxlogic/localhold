@@ -12,7 +12,7 @@ use crate::scan::syntax_fingerprint;
 use super::syntax::{
     ConcreteStoreCounts, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionAncestorPath, ProductionCfgContext, ProductionSyntaxContext, ProductionSyntaxFacts,
     ProductionSyntaxOptions, PublicReexportEvidence, TestLineCollector, TypeDeclarationEvidence, normalized_ident, production_cfg_context, production_syntax_facts_with_context,
-    reject_module_path_overrides, visibility_is_exposed,
+    reject_module_path_overrides, source_module, visibility_is_exposed,
 };
 
 mod module_macro;
@@ -241,6 +241,11 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
     for (path, parsed) in parsed {
         let physical_lines = physical_line_count(&parsed.source);
         let file_is_test_only = reachability.test_only.contains(&path);
+        let production_targets = if file_is_test_only {
+            Vec::new()
+        } else {
+            reachability.production_targets.get(&path).cloned().context("production source has no target identity")?
+        };
         let (test_lines, production_facts) = if file_is_test_only {
             (physical_lines, ProductionSyntaxFacts::default())
         } else {
@@ -257,12 +262,13 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
             collector.visit_file(&parsed.syntax)?;
             let collect_internal_imports =
                 path.starts_with("src/") && !reachability.composition_only.contains(&path) && !path.starts_with("src/server/") && !path.starts_with("src/ui/");
+            let crate_root = crate_root_for_source(&path, &production_targets, production_roots, library_roots)?;
             (
                 collector.test_line_count(),
                 production_syntax_facts_with_context(
                     &parsed.syntax,
                     &path,
-                    library_root_for_source(&path, library_roots),
+                    crate_root.as_deref(),
                     ProductionSyntaxOptions {
                         collect_internal_imports,
                         rust_2015_absolute_paths: *rust_2015_absolute_paths,
@@ -276,11 +282,6 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
                 )
                 .map_err(|error| anyhow::anyhow!("{error} in {path}"))?,
             )
-        };
-        let production_targets = if file_is_test_only {
-            Vec::new()
-        } else {
-            reachability.production_targets.get(&path).cloned().context("production source has no target identity")?
         };
         files.push(FileMeasurement {
             path,
@@ -308,6 +309,18 @@ fn library_root_for_source<'a>(source: &str, library_roots: &'a BTreeSet<String>
         .iter()
         .find(|root| Path::new(root.as_str()).parent().is_some_and(|parent| Path::new(source).starts_with(parent)))
         .map(String::as_str)
+}
+
+fn crate_root_for_source(source: &str, source_targets: &[String], production_roots: &BTreeSet<String>, library_roots: &BTreeSet<String>) -> Result<Option<String>> {
+    let roots = source_targets.iter().filter(|target| production_roots.contains(*target)).collect::<Vec<_>>();
+    if roots.is_empty() {
+        return Ok(library_root_for_source(source, library_roots).map(str::to_owned));
+    }
+    let modules = roots.iter().map(|root| source_module(source, Some(root))).collect::<Result<BTreeSet<_>>>()?;
+    if modules.len() != 1 {
+        bail!("production source {source:?} has target-dependent module paths through {roots:?}");
+    }
+    Ok(roots.first().map(|root| (*root).clone()))
 }
 
 fn parse_sources(sources: BTreeMap<String, String>) -> Result<BTreeMap<String, ParsedSource>> {

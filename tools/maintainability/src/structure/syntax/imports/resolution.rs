@@ -93,7 +93,7 @@ pub(super) fn resolve_path(module: &[String], path: &[String], rust_2015_use_pat
     Ok(Some(resolved))
 }
 
-pub(super) fn source_module(source_path: &str, crate_root: Option<&str>) -> Result<Vec<String>> {
+pub(in crate::structure) fn source_module(source_path: &str, crate_root: Option<&str>) -> Result<Vec<String>> {
     if crate_root == Some(source_path) {
         return Ok(Vec::new());
     }

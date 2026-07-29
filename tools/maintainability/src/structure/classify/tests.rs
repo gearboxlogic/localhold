@@ -129,6 +129,21 @@ fn production_target_memberships_exclude_cfg_impossible_paths() {
 }
 
 #[test]
+fn binary_crate_roots_resolve_reexports_from_the_empty_module() {
+    let inventory = inventory(&[
+        ("src/main.rs", "mod hidden;\npub(crate) use hidden::open;\nfn main() {}\n"),
+        ("src/hidden.rs", "pub(crate) fn open(_: SqliteStore) {}\n"),
+    ]);
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    let root = by_path["src/main.rs"];
+    let hidden = by_path["src/hidden.rs"];
+    assert!(root.production_module.is_empty());
+    assert_eq!(hidden.production_module, ["hidden"]);
+    assert_eq!(root.production_public_reexports[0].target_path, ["hidden", "open"]);
+    assert_eq!(hidden.production_signature_store_sites.sqlite_store[0].item_path, ["hidden", "open"]);
+}
+
+#[test]
 fn concrete_store_counts_follow_production_reachability() {
     let inventory = inventory(&[
         (

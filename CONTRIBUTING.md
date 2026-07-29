@@ -251,10 +251,11 @@ During the feature freeze:
 - path changes require an append-only `path_evolutions` record. A `rename`
   preserves physical and production counts exactly, a `split` may not increase
   their aggregate, and a `test-extraction` must preserve production exactly
-  while adding a test-only successor. Sources must be active in the pull
-  request base, every measured path change must be covered exactly once, and
-  existing or retired paths cannot be used to hide a merge, replay, or
-  resurrection;
+  while adding a test-only successor. Each record has exactly one source; a
+  split or test extraction has at least two successors. The source must be
+  active in the pull request base, every measured path change must be covered
+  exactly once, and existing or retired paths cannot be used to hide a merge,
+  replay, or resurrection;
 - the first structural split of an active hotspot may carry one temporary,
   append-only overhead allowance. Physical and production overhead are
   measured separately and each is capped at 3% of the lines actually moved out

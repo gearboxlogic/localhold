@@ -88,6 +88,23 @@ fn current_production_paths_require_governed_baseline_lineage() {
 }
 
 #[test]
+fn split_and_test_extraction_require_exactly_one_source() {
+    for kind in [PathEvolutionKind::Split, PathEvolutionKind::TestExtraction] {
+        let mut manifest = ordinary_manifest("src/first.rs", 10, 10);
+        manifest.components[0].baseline_paths.push("src/second.rs".to_owned());
+        manifest.components[0].paths = strings(&["src/combined.rs", "src/extracted.rs"]);
+        manifest.path_evolutions.push(evolution(
+            "split.multiple-sources",
+            kind,
+            &["src/first.rs", "src/second.rs"],
+            &["src/combined.rs", "src/extracted.rs"],
+        ));
+
+        assert!(manifest.validate_current().unwrap_err().to_string().contains("invalid source/successor cardinality"));
+    }
+}
+
+#[test]
 fn governed_split_preserves_component_and_hotspot_debt() {
     let previous = hotspot_manifest(HotspotKind::Production, HotspotStatus::Active, &["src/hot.rs"], 900, 700);
     let previous_files = inventory(&[("src/hot.rs", 900, 700)]);

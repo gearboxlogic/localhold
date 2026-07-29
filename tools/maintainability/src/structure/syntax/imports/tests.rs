@@ -1061,12 +1061,11 @@ fn concrete_store_signature_identity_tracks_visibility() -> Result<()> {
 }
 
 #[test]
-fn canonical_binding_identity_tracks_trait_implementation_bodies() -> Result<()> {
+fn canonical_binding_identity_ignores_trait_implementation_bodies() -> Result<()> {
     let first = concrete_facts("impl MemoryReader for SqliteStore { fn version(&self) -> u32 { 1 } }\n")?;
     let second = concrete_facts("impl MemoryReader for SqliteStore { fn version(&self) -> u32 { 2 } }\n")?;
-    assert_ne!(first.binding_concrete_store_sites, second.binding_concrete_store_sites);
+    assert_eq!(first.binding_concrete_store_sites, second.binding_concrete_store_sites);
     assert_eq!(first.binding_concrete_store_sites.sqlite_store.len(), 1);
-    assert_ne!(first.concrete_store_sites, second.concrete_store_sites);
     Ok(())
 }
 
@@ -1330,6 +1329,23 @@ fn macro_definitions_honor_test_only_cfg_gates() -> Result<()> {
         panic!("a production macro transcriber cannot inject a concrete store");
     };
     assert!(error.to_string().contains("macro definitions cannot inject concrete stores"));
+    Ok(())
+}
+
+#[test]
+fn reviewed_macro_repetitions_are_analyzable_and_malformed_transcribers_fail_closed() -> Result<()> {
+    concrete_facts(
+        "macro_rules! numbered_placeholders {\n\
+             ($($n:literal),+ $(,)?) => {\n\
+                 concat!(\"?\", $(\", ?\", stringify!($n)),+)\n\
+             };\n\
+         }\n",
+    )?;
+
+    let Err(error) = concrete_facts("macro_rules! transport_test { () => { let } }\n") else {
+        panic!("a malformed reviewed macro transcriber must fail closed");
+    };
+    assert!(error.to_string().contains("reviewed production macro definition"), "{error:#}");
     Ok(())
 }
 

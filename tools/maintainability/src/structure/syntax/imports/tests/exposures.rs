@@ -32,6 +32,36 @@ fn exposed_function_signature_types_resolve_aliases_without_treating_generics_as
 }
 
 #[test]
+fn reviewed_macro_transcribers_contribute_generated_type_exposures() -> Result<()> {
+    let source = "mod hidden {\n\
+                      pub(crate) struct Adapter;\n\
+                      impl Adapter { pub(crate) fn open() -> SqliteStore { loop {} } }\n\
+                  }\n\
+                  use hidden::Adapter as InternalAdapter;\n";
+    let first = concrete_facts(&format!(
+        "{source}macro_rules! transport_test {{ () => {{ pub(crate) fn adapter() -> InternalAdapter {{ loop {{}} }} }} }}\n"
+    ))?;
+    let second = concrete_facts(&format!(
+        "{source}macro_rules! transport_test {{ () => {{ pub(crate) fn adapter() -> InternalAdapter {{ panic!() }} }} }}\n"
+    ))?;
+    let generated = first
+        .public_reexports
+        .iter()
+        .find(|evidence| evidence.target_path == ["store_fixture", "hidden", "Adapter"])
+        .expect("macro-generated function type exposure");
+    assert_eq!(generated.exported_path, ["store_fixture", "adapter"]);
+    assert!(generated.direct_exposure_cfg.is_some());
+    assert!(
+        second
+            .public_reexports
+            .iter()
+            .any(|evidence| evidence.target_path == generated.target_path && evidence.exported_path == generated.exported_path && evidence.fingerprint == generated.fingerprint),
+        "generated exposure identity ignores function body changes"
+    );
+    Ok(())
+}
+
+#[test]
 fn exposed_qualified_function_signature_types_fail_closed() -> Result<()> {
     let source = "trait Reveal { type Output; }\n\
                   struct Marker;\n";
@@ -302,5 +332,42 @@ fn exposed_generic_defaults_are_type_exposure_evidence() -> Result<()> {
             .all(|evidence| evidence.exported_path != ["store_fixture", "Generic"] || evidence.target_path != ["store_fixture", "T"]),
         "generic parameters are not default exposure targets"
     );
+    Ok(())
+}
+
+#[test]
+fn impl_self_type_constituents_expose_generic_and_compound_implementations() -> Result<()> {
+    let facts = concrete_facts(
+        "pub(crate) struct Box<T>(T);\n\
+         mod hidden {\n\
+             pub(crate) struct Adapter;\n\
+             pub(crate) trait GenericAccess { fn open(&self) -> SqliteStore { loop {} } }\n\
+             pub(crate) trait CompoundAccess { fn open(&self) -> SqliteStore { loop {} } }\n\
+             impl GenericAccess for super::Box<Adapter> {}\n\
+             impl CompoundAccess for (Adapter,) {}\n\
+         }\n\
+         pub(crate) use hidden::{Adapter, CompoundAccess, GenericAccess};\n",
+    )?;
+    let generic = facts
+        .public_reexports
+        .iter()
+        .find(|evidence| {
+            evidence.exported_path == ["store_fixture", "hidden", "Adapter"]
+                && evidence.target_path == ["store_fixture", "Box"]
+                && evidence.required_trait_path.as_ref().map(|path| path.join("::")).as_deref() == Some("store_fixture::hidden::GenericAccess")
+        })
+        .expect("generic impl self-type constituent exposure");
+    assert!(generic.direct_exposure_cfg.is_none());
+
+    let compound = facts
+        .public_reexports
+        .iter()
+        .find(|evidence| {
+            evidence.exported_path == ["store_fixture", "hidden", "Adapter"]
+                && evidence.target_path.last().is_some_and(|segment| segment.starts_with("{impl-self:"))
+                && evidence.required_trait_path.as_ref().map(|path| path.join("::")).as_deref() == Some("store_fixture::hidden::CompoundAccess")
+        })
+        .expect("compound impl self-type constituent exposure");
+    assert!(compound.direct_exposure_cfg.is_none());
     Ok(())
 }

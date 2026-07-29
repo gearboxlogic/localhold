@@ -11,7 +11,7 @@ use syn::{
     ItemType, ItemUnion, ItemUse, Local, Pat, Path as SynPath, Stmt, StmtMacro, TraitItem, TraitItemConst, TraitItemFn, TraitItemType, Variadic, Variant, Visibility,
 };
 
-use crate::scan::{reviewed_attribute_expansion, reviewed_macro_expansion, syntax_fingerprint};
+use crate::scan::{RESERVED_LOCAL_MACROS, reviewed_attribute_expansion, reviewed_macro_expansion, syntax_fingerprint};
 
 use super::{
     ProductionCfgContext, expr_attributes, fn_arg_attributes, foreign_item_attributes, generic_param_attributes, impl_item_attributes, item_attributes, normalized_ident,
@@ -32,10 +32,10 @@ pub use concrete::{ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStor
 pub use declarations::TypeDeclarationEvidence;
 pub(in crate::structure) use declarations::TypeDeclarationKind;
 use declarations::{TypeDeclarationContext, type_declaration_evidence};
-use macro_definitions::contains_production_concrete_store;
-use production::{
-    production_foreign_item_tokens, production_impl_item_tokens, production_impl_tokens, production_item_tokens, production_stmt_tokens, production_trait_item_tokens,
-};
+use macro_definitions::{contains_production_concrete_store, reviewed_macro_transcribers};
+#[cfg(test)]
+use production::production_impl_tokens;
+use production::{production_foreign_item_tokens, production_impl_item_tokens, production_item_tokens, production_stmt_tokens, production_trait_item_tokens};
 use reexports::{
     PendingPublicReexport, PublicTypeAliasContext, UseResolution, public_type_alias, resolve_binding_aliases, resolve_impl_signature_aliases, resolve_public_reexport_aliases,
     type_alias_resolution,
@@ -136,42 +136,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
     } else {
         Vec::new()
     };
-    let module_stringify_imports = collect_module_stringify_imports(file, &module, &initial_context.cfg)?;
-    let mut collector = ProductionSyntaxCollector {
-        module,
-        module_stringify_imports,
-        builtin_stringify_block_aliases: Vec::new(),
-        macro_import_shadow_scopes: Vec::new(),
-        imports: Vec::new(),
-        use_resolutions: Vec::new(),
-        public_reexports: Vec::new(),
-        type_declarations: Vec::new(),
-        concrete_stores: ConcreteStoreInventory::default(),
-        site_context: None,
-        block_depth: 0,
-        macro_shadow_scopes: vec![BTreeSet::new()],
-        generic_default_depth: 0,
-        impl_signature_headers: Vec::new(),
-        impl_trait_exposures: Vec::new(),
-        impl_trait_paths: Vec::new(),
-        trait_exposures: Vec::new(),
-        field_exposures: Vec::new(),
-        generic_type_scopes: Vec::new(),
-        impl_item_paths: Vec::new(),
-        inherited_declaration_ancestors: initial_context.declaration_ancestors,
-        declaration_ancestors: Vec::new(),
-        cfg_context: initial_context.cfg,
-        module_exposure_cfg: initial_context.module_exposure_cfg,
-        error: None,
-        rust_2015_absolute_paths: options.rust_2015_absolute_paths,
-        collect_internal_imports: options.collect_internal_imports,
-        require_reviewed_expansions: options.require_reviewed_expansions,
-        source_revision: initial_context.source_revision,
-    };
-    collector.visit_file(file);
-    if let Some(error) = collector.error {
-        return Err(error);
-    }
+    let mut collector = collect_production_syntax(file, module, options, initial_context, Vec::new())?;
     collector.imports.sort();
     collector.imports.dedup();
     collector.type_declarations.sort();
@@ -195,6 +160,52 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
         signature_concrete_store_sites: collector.concrete_stores.signature_sites,
         binding_concrete_store_sites,
     })
+}
+
+fn collect_production_syntax(
+    file: &syn::File,
+    module: Vec<String>,
+    options: ProductionSyntaxOptions,
+    initial_context: ProductionSyntaxContext,
+    declaration_ancestors: Vec<String>,
+) -> Result<ProductionSyntaxCollector> {
+    let module_stringify_imports = collect_module_stringify_imports(file, &module, &initial_context.cfg)?;
+    let mut collector = ProductionSyntaxCollector {
+        module,
+        module_stringify_imports,
+        builtin_stringify_block_aliases: Vec::new(),
+        macro_import_shadow_scopes: Vec::new(),
+        imports: Vec::new(),
+        use_resolutions: Vec::new(),
+        public_reexports: Vec::new(),
+        type_declarations: Vec::new(),
+        concrete_stores: ConcreteStoreInventory::default(),
+        site_context: None,
+        block_depth: 0,
+        macro_shadow_scopes: vec![BTreeSet::new()],
+        generic_default_depth: 0,
+        impl_signature_headers: Vec::new(),
+        impl_trait_exposures: Vec::new(),
+        impl_trait_paths: Vec::new(),
+        trait_exposures: Vec::new(),
+        field_exposures: Vec::new(),
+        generic_type_scopes: Vec::new(),
+        impl_item_paths: Vec::new(),
+        inherited_declaration_ancestors: initial_context.declaration_ancestors,
+        declaration_ancestors,
+        cfg_context: initial_context.cfg,
+        module_exposure_cfg: initial_context.module_exposure_cfg,
+        error: None,
+        rust_2015_absolute_paths: options.rust_2015_absolute_paths,
+        collect_internal_imports: options.collect_internal_imports,
+        require_reviewed_expansions: options.require_reviewed_expansions,
+        source_revision: initial_context.source_revision,
+    };
+    collector.visit_file(file);
+    if let Some(error) = collector.error {
+        return Err(error);
+    }
+    Ok(collector)
 }
 
 struct ProductionSyntaxCollector {
@@ -235,6 +246,36 @@ enum SiteContextEntry {
 }
 
 impl ProductionSyntaxCollector {
+    fn collect_reviewed_macro_transcribers(&mut self, name: &str, tokens: &TokenStream) -> Result<()> {
+        for transcriber in reviewed_macro_transcribers(tokens)? {
+            let mut declaration_ancestors = self.declaration_ancestors.clone();
+            declaration_ancestors.push(format!("macro-transcriber:{name}:matcher:{}", transcriber.matcher_fingerprint));
+            let generated = collect_production_syntax(
+                &transcriber.syntax,
+                self.module.clone(),
+                ProductionSyntaxOptions {
+                    collect_internal_imports: false,
+                    rust_2015_absolute_paths: self.rust_2015_absolute_paths,
+                    require_reviewed_expansions: false,
+                },
+                ProductionSyntaxContext {
+                    cfg: self.cfg_context.clone(),
+                    declaration_ancestors: self.inherited_declaration_ancestors.clone(),
+                    module_exposure_cfg: self.module_exposure_cfg.clone(),
+                    source_revision: self.source_revision,
+                },
+                declaration_ancestors,
+            )?;
+            if generated.concrete_stores.counts.sqlite_store != 0 || generated.concrete_stores.counts.postgres_store != 0 {
+                bail!("production macro definitions cannot inject concrete stores into call sites");
+            }
+            self.use_resolutions.extend(generated.use_resolutions);
+            self.public_reexports.extend(generated.public_reexports);
+            self.type_declarations.extend(generated.type_declarations);
+        }
+        Ok(())
+    }
+
     fn collect_use(&mut self, item: &ItemUse) -> Result<()> {
         if item.leading_colon.is_some() && !self.rust_2015_absolute_paths {
             return Ok(());
@@ -610,9 +651,16 @@ impl ProductionSyntaxCollector {
 
     fn implemented_type_path(&self, item: &ItemImpl) -> Result<Vec<String>> {
         let syn::Type::Path(path) = item.self_ty.as_ref() else {
-            return Ok(Vec::new());
+            let mut path = self.module.clone();
+            path.push(format!("{{impl-self:{}}}", syntax_fingerprint(&without_documentation(&item.self_ty.to_token_stream()))));
+            return Ok(path);
         };
-        if path.qself.is_some() || path.path.leading_colon.is_some() && !self.rust_2015_absolute_paths {
+        if path.qself.is_some() {
+            let mut synthetic_path = self.module.clone();
+            synthetic_path.push(format!("{{impl-self:{}}}", syntax_fingerprint(&without_documentation(&item.self_ty.to_token_stream()))));
+            return Ok(synthetic_path);
+        }
+        if path.path.leading_colon.is_some() && !self.rust_2015_absolute_paths {
             return Ok(Vec::new());
         }
         let mut segments = path.path.segments.iter().map(|segment| normalized_ident(&segment.ident)).collect::<Vec<_>>();
@@ -983,18 +1031,15 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             }
         };
         self.impl_trait_paths.push(trait_path.clone());
-        let binding_tokens = match production_impl_tokens(item, &self.cfg_context) {
-            Ok(tokens) => without_documentation(&tokens),
-            Err(error) => {
-                self.error = Some(error);
-                self.impl_trait_paths.pop();
-                self.impl_item_paths.pop();
-                return;
-            }
-        };
         let mut header = item.clone();
         header.items.clear();
         let header_tokens = without_documentation(&header.to_token_stream());
+        if let Err(error) = self.record_impl_self_type_exposures(item, &item_path, trait_path.as_deref()) {
+            self.error = Some(error);
+            self.impl_trait_paths.pop();
+            self.impl_item_paths.pop();
+            return;
+        }
         if let Some(trait_path) = trait_path.as_deref()
             && let Err(error) = self.record_trait_implementation_exposures(item, &item_path, trait_path, &header_tokens)
         {
@@ -1003,11 +1048,8 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             self.impl_item_paths.pop();
             return;
         }
-        let binding = if item.trait_.is_some() {
-            format!("trait-implementation:{}", syntax_fingerprint(&binding_tokens))
-        } else {
-            format!("impl-header:{}", syntax_fingerprint(&header_tokens))
-        };
+        let binding = if item.trait_.is_some() { "trait-implementation" } else { "impl-header" };
+        let binding = format!("{binding}:{}", syntax_fingerprint(&header_tokens));
         let context = format!("{binding}\0cfg:{}\0ancestors:{}", self.cfg_context.identity(), self.declaration_ancestor_identity());
         self.concrete_stores.record_binding_tokens(
             &header_tokens,
@@ -1291,6 +1333,13 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             self.error = Some(anyhow::anyhow!("production macro definitions cannot inject concrete stores into call sites"));
             return;
         }
+        let name = normalized_ident(name);
+        if RESERVED_LOCAL_MACROS.contains(&name.as_str())
+            && let Err(error) = self.collect_reviewed_macro_transcribers(&name, &item.mac.tokens)
+        {
+            self.error = Some(error.context(format!("reviewed production macro definition `{name}` cannot be analyzed")));
+            return;
+        }
         if self.collect_internal_imports {
             match restricted_token_identifier(&item.mac.tokens, &self.module, self.rust_2015_absolute_paths, StringScan::RustFragment) {
                 Ok(Some(restricted)) => {
@@ -1308,7 +1357,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         }
         if let Some(scope) = self.macro_shadow_scopes.last_mut() {
             scope.insert(MacroShadow {
-                name: normalized_ident(name),
+                name,
                 cfg: self.cfg_context.clone(),
             });
         }

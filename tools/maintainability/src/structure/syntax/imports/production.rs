@@ -14,6 +14,7 @@ pub(super) fn production_item_tokens(item: &Item, cfg: &ProductionCfgContext) ->
     normalize(item.clone(), cfg, fold::fold_item)
 }
 
+#[cfg(test)]
 pub(super) fn production_impl_tokens(item: &ItemImpl, cfg: &ProductionCfgContext) -> Result<TokenStream> {
     normalize(item.clone(), cfg, ProductionNormalizer::fold_item_impl)
 }

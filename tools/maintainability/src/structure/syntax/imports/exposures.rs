@@ -281,6 +281,51 @@ impl ProductionSyntaxCollector {
         Ok(())
     }
 
+    pub(super) fn record_impl_self_type_exposures(&mut self, item: &ItemImpl, item_path: &[String], required_trait_path: Option<&[String]>) -> Result<()> {
+        if item_path.is_empty() {
+            return Ok(());
+        }
+        let mut generic_types = self.active_generic_types();
+        generic_types.extend(item.generics.type_params().map(|parameter| normalized_ident(&parameter.ident)));
+        let visibility = Visibility::Inherited;
+        let ancestors = self.declaration_ancestor_identity();
+        let exposures = public_type_exposures(
+            &item.self_ty,
+            &generic_types,
+            &PublicTypeExposureContext {
+                boundary_kind: "impl-self-type-constituents",
+                exported_path: item_path,
+                source_path: Some(item_path),
+                required_trait_path,
+                module: &self.module,
+                visibility: &visibility,
+                cfg: &self.cfg_context,
+                direct_exposure_cfg: self.direct_exposure_cfg(),
+                ancestors: &ancestors,
+                rust_2015_absolute_paths: self.rust_2015_absolute_paths,
+                source_revision: self.source_revision,
+            },
+        )?;
+        self.public_reexports.extend(exposures.into_iter().filter_map(|mut exposure| {
+            let constituent_path = std::mem::take(&mut exposure.evidence.target_path);
+            if constituent_path == item_path {
+                return None;
+            }
+            let identity = format!(
+                "impl-self-type-constituent-exposure:{}\0source:{}\0target:{}",
+                exposure.evidence.fingerprint,
+                constituent_path.join("::"),
+                item_path.join("::")
+            );
+            exposure.evidence.exported_path.clone_from(&constituent_path);
+            exposure.evidence.target_path = item_path.to_vec();
+            exposure.evidence.fingerprint = syntax_fingerprint(&identity);
+            exposure.source_path = Some(constituent_path);
+            Some(exposure)
+        }));
+        Ok(())
+    }
+
     pub(super) fn record_field_type_exposure(&mut self, field: &Field) -> Result<()> {
         self.record_concrete_stores_in_visible_signature("field-type", &field.vis, &field.ty);
         let source_path = self.signature_item_path();

@@ -1,6 +1,6 @@
 use super::*;
 use crate::structure::classify::FileMeasurement;
-use crate::structure::syntax::{ConcreteStoreCounts, ConcreteStoreSignatureSites, ConcreteStoreSites};
+use crate::structure::syntax::{ConcreteStoreCounts, ConcreteStoreSignatureSites, ConcreteStoreSites, VisibilityCounts};
 
 type ImportFixture<'a> = (&'a str, &'a [&'a str]);
 
@@ -203,6 +203,7 @@ fn inventory(files: &[ImportFixture<'_>]) -> Inventory {
                 production_generic_default_store_sites: ConcreteStoreSites::default(),
                 production_signature_store_sites: ConcreteStoreSignatureSites::default(),
                 production_store_binding_sites: ConcreteStoreSites::default(),
+                production_visibilities: VisibilityCounts::default(),
             })
             .collect(),
     }

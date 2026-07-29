@@ -2,7 +2,7 @@ use super::*;
 use crate::structure::classify::{FileMeasurement, Inventory};
 use crate::structure::syntax::{
     ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionCfgContext, PublicReexportEvidence, TypeDeclarationEvidence,
-    TypeDeclarationKind, production_cfg_context,
+    TypeDeclarationKind, VisibilityCounts, production_cfg_context,
 };
 
 type CountFixture<'a> = (&'a str, usize, usize);
@@ -1004,6 +1004,7 @@ fn file(path: &str, sqlite_store: usize, postgres_store: usize) -> FileMeasureme
         production_generic_default_store_sites: ConcreteStoreSites::default(),
         production_signature_store_sites: ConcreteStoreSignatureSites::default(),
         production_store_binding_sites: ConcreteStoreSites::default(),
+        production_visibilities: VisibilityCounts::default(),
     }
 }
 

@@ -27,6 +27,7 @@ mod reexports;
 mod resolution;
 mod stringify;
 mod tokens;
+mod visibility;
 use concrete::{BindingSiteContext, ConcreteStoreInventory, SignatureSiteContext, context_fingerprint, is_concrete_store_name, production_generics, without_documentation};
 pub use concrete::{ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites};
 pub use declarations::TypeDeclarationEvidence;
@@ -47,6 +48,8 @@ use stringify::{
     stringify_imports_in_block,
 };
 use tokens::resolving_tokens;
+pub use visibility::VisibilityCounts;
+use visibility::VisibilityMacroAudit;
 
 #[derive(Clone, Copy)]
 enum FieldExposure {
@@ -67,6 +70,7 @@ pub struct ProductionSyntaxFacts {
     pub generic_default_concrete_store_sites: ConcreteStoreSites,
     pub signature_concrete_store_sites: ConcreteStoreSignatureSites,
     pub binding_concrete_store_sites: ConcreteStoreSites,
+    pub visibilities: VisibilityCounts,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -148,6 +152,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
     resolve_binding_aliases(&mut collector.concrete_stores.binding_sites, &collector.use_resolutions, &collector.type_declarations);
     collector.concrete_stores.finish();
     let binding_concrete_store_sites = collector.concrete_stores.binding_fingerprints();
+    collector.visibility_macros.finish()?;
     Ok(ProductionSyntaxFacts {
         module: collector.module,
         internal_imports: collector.imports,
@@ -159,6 +164,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
         generic_default_concrete_store_sites: collector.concrete_stores.generic_default_sites,
         signature_concrete_store_sites: collector.concrete_stores.signature_sites,
         binding_concrete_store_sites,
+        visibilities: collector.visibilities,
     })
 }
 
@@ -180,6 +186,8 @@ fn collect_production_syntax(
         public_reexports: Vec::new(),
         type_declarations: Vec::new(),
         concrete_stores: ConcreteStoreInventory::default(),
+        visibilities: VisibilityCounts::default(),
+        visibility_macros: VisibilityMacroAudit::default(),
         site_context: None,
         block_depth: 0,
         block_type_scopes: Vec::new(),
@@ -219,6 +227,8 @@ struct ProductionSyntaxCollector {
     public_reexports: Vec<PendingPublicReexport>,
     type_declarations: Vec<TypeDeclarationEvidence>,
     concrete_stores: ConcreteStoreInventory,
+    visibilities: VisibilityCounts,
+    visibility_macros: VisibilityMacroAudit,
     site_context: Option<String>,
     block_depth: usize,
     block_type_scopes: Vec<BlockTypeBindings>,
@@ -621,6 +631,18 @@ impl ProductionSyntaxCollector {
         }
     }
 
+    fn record_visibility(&mut self, visibility: &Visibility) {
+        if let Err(error) = self.visibilities.record_visibility(visibility) {
+            self.error = Some(error);
+        }
+    }
+
+    fn record_visibilities_in_tokens(&mut self, tokens: &TokenStream) {
+        if let Err(error) = self.visibilities.record_tokens(tokens) {
+            self.error = Some(error);
+        }
+    }
+
     fn enter_site_context(&mut self, kind: &str, syntax: &impl ToTokens) -> Option<String> {
         let context = context_fingerprint(self.site_context.as_deref(), kind, syntax);
         self.site_context.replace(context)
@@ -959,13 +981,17 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
 
     fn visit_item_use(&mut self, item: &'ast ItemUse) {
         let previous = self.enter_site_context("use", item);
-        let result = self.collect_use(item).and_then(|()| {
-            if self.block_depth == 0 {
-                self.record_use_resolutions(item)?;
-                self.record_public_reexport(item)?;
-            }
-            Ok(())
-        });
+        let result = self
+            .visibility_macros
+            .record_import(&self.module, item, self.rust_2015_absolute_paths)
+            .and_then(|()| self.collect_use(item))
+            .and_then(|()| {
+                if self.block_depth == 0 {
+                    self.record_use_resolutions(item)?;
+                    self.record_public_reexport(item)?;
+                }
+                Ok(())
+            });
         if self.error.is_none()
             && let Err(error) = result
         {
@@ -1278,6 +1304,12 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
 
     fn visit_token_stream(&mut self, tokens: &'ast TokenStream) {
         self.record_concrete_stores_in_tokens(tokens);
+        self.record_visibilities_in_tokens(tokens);
+    }
+
+    fn visit_visibility(&mut self, visibility: &'ast Visibility) {
+        self.record_visibility(visibility);
+        visit::visit_visibility(self, visibility);
     }
 
     fn visit_path(&mut self, path: &'ast SynPath) {
@@ -1300,6 +1332,10 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             return;
         }
         let stringifies = is_explicit_builtin_stringify(node) || self.is_imported_builtin_stringify(node);
+        if !stringifies && let Err(error) = self.visibility_macros.record_invocation(&self.module, &node.path, &node.tokens) {
+            self.error = Some(error);
+            return;
+        }
         if !stringifies && tokens_may_hide_concrete_store(&node.tokens) {
             self.error = Some(anyhow::anyhow!(
                 "production concrete stores cannot be hidden behind macro-generated aliases or renamed imports"
@@ -1330,7 +1366,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         }
         self.visit_path(&node.path);
         if !stringifies {
-            self.visit_token_stream(&node.tokens);
+            self.record_concrete_stores_in_tokens(&node.tokens);
         }
         self.leave_site_context(previous);
     }
@@ -1372,6 +1408,11 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             self.leave_site_context(previous);
             return;
         }
+        if let Err(error) = self.visibilities.record_attribute(attribute, &self.cfg_context) {
+            self.error = Some(error);
+            self.leave_site_context(previous);
+            return;
+        }
         self.leave_site_context(previous);
     }
 
@@ -1389,6 +1430,18 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         if contains_production_concrete_store(&item.mac.tokens, &self.cfg_context) {
             self.error = Some(anyhow::anyhow!("production macro definitions cannot inject concrete stores into call sites"));
             return;
+        }
+        match self.visibility_macros.record_definition(&self.module, item, &self.cfg_context) {
+            Ok(counts) => {
+                if let Err(error) = self.visibilities.add(counts) {
+                    self.error = Some(error);
+                    return;
+                }
+            }
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
         }
         let name = normalized_ident(name);
         if RESERVED_LOCAL_MACROS.contains(&name.as_str())
@@ -1424,6 +1477,10 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         for attribute in &item.attrs {
             self.visit_attribute(attribute);
         }
+        if self.error.is_some() {
+            return;
+        }
+        self.record_visibility(&item.vis);
         if self.error.is_some() {
             return;
         }

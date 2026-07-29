@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 use super::*;
 
 mod exposures;
+mod visibility;
 
 fn imports(path: &str, source: &str) -> Result<Vec<String>> {
     let syntax = syn::parse_file(source)?;
@@ -414,6 +415,11 @@ fn cfg_attr_scans_only_nested_attributes_that_can_apply_in_production() {
 
     let production = "#[cfg_attr(feature = \"other\", serde(serialize_with = \"crate::server::serialize\"))]\nstruct Record;\n";
     assert!(imports("src/adapter.rs", production).unwrap_err().to_string().contains("production attribute token stream"));
+
+    let disabled = "#[cfg_attr(feature = \"other\", cfg(test), serde(serialize_with = \"crate::server::serialize\"))]\n\
+                    #[cfg_attr(feature = \"other\", cfg_attr(all(), cfg(feature = \"testing\")), serde(serialize_with = \"crate::ui::serialize\"))]\n\
+                    struct Disabled;\n";
+    assert!(imports("src/adapter.rs", disabled).expect("production-disabled nested attributes").is_empty());
 }
 
 #[test]

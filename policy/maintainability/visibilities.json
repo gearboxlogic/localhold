@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "b05f7a43345b39d40b456fb9ed46d479c4bf26e0",
+  "components": [
+    {
+      "component": "benchmarks",
+      "baseline": {"pub_crate": 0, "pub_super": 0},
+      "current": {"pub_crate": 0, "pub_super": 0}
+    },
+    {
+      "component": "composition",
+      "baseline": {"pub_crate": 7, "pub_super": 0},
+      "current": {"pub_crate": 7, "pub_super": 0}
+    },
+    {
+      "component": "config",
+      "baseline": {"pub_crate": 6, "pub_super": 6},
+      "current": {"pub_crate": 6, "pub_super": 6}
+    },
+    {
+      "component": "context-governance",
+      "baseline": {"pub_crate": 6, "pub_super": 0},
+      "current": {"pub_crate": 6, "pub_super": 0}
+    },
+    {
+      "component": "doctor",
+      "baseline": {"pub_crate": 0, "pub_super": 0},
+      "current": {"pub_crate": 0, "pub_super": 0}
+    },
+    {
+      "component": "domain-types",
+      "baseline": {"pub_crate": 1, "pub_super": 0},
+      "current": {"pub_crate": 1, "pub_super": 0}
+    },
+    {
+      "component": "embedding",
+      "baseline": {"pub_crate": 37, "pub_super": 1},
+      "current": {"pub_crate": 37, "pub_super": 1}
+    },
+    {
+      "component": "engine-application",
+      "baseline": {"pub_crate": 60, "pub_super": 0},
+      "current": {"pub_crate": 60, "pub_super": 0}
+    },
+    {
+      "component": "integration-tests",
+      "baseline": {"pub_crate": 0, "pub_super": 0},
+      "current": {"pub_crate": 0, "pub_super": 0}
+    },
+    {
+      "component": "migration-schema",
+      "baseline": {"pub_crate": 59, "pub_super": 0},
+      "current": {"pub_crate": 59, "pub_super": 0}
+    },
+    {
+      "component": "persistence-core",
+      "baseline": {"pub_crate": 140, "pub_super": 0},
+      "current": {"pub_crate": 140, "pub_super": 0}
+    },
+    {
+      "component": "postgres-store",
+      "baseline": {"pub_crate": 71, "pub_super": 0},
+      "current": {"pub_crate": 71, "pub_super": 0}
+    },
+    {
+      "component": "protocol",
+      "baseline": {"pub_crate": 8, "pub_super": 0},
+      "current": {"pub_crate": 8, "pub_super": 0}
+    },
+    {
+      "component": "reranker",
+      "baseline": {"pub_crate": 10, "pub_super": 1},
+      "current": {"pub_crate": 10, "pub_super": 1}
+    },
+    {
+      "component": "sqlite-store",
+      "baseline": {"pub_crate": 25, "pub_super": 0},
+      "current": {"pub_crate": 25, "pub_super": 0}
+    },
+    {
+      "component": "transport",
+      "baseline": {"pub_crate": 4, "pub_super": 0},
+      "current": {"pub_crate": 4, "pub_super": 0}
+    },
+    {
+      "component": "ui",
+      "baseline": {"pub_crate": 65, "pub_super": 0},
+      "current": {"pub_crate": 65, "pub_super": 0}
+    }
+  ],
+  "exceptions": []
+}

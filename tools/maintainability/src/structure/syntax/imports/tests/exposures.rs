@@ -39,10 +39,12 @@ fn reviewed_macro_transcribers_contribute_generated_type_exposures() -> Result<(
                   }\n\
                   use hidden::Adapter as InternalAdapter;\n";
     let first = concrete_facts(&format!(
-        "{source}macro_rules! transport_test {{ () => {{ pub(crate) fn adapter() -> InternalAdapter {{ loop {{}} }} }} }}\n"
+        "{source}macro_rules! transport_test {{ () => {{ pub(crate) fn adapter() -> InternalAdapter {{ loop {{}} }} }} }}\n\
+         transport_test!();\n"
     ))?;
     let second = concrete_facts(&format!(
-        "{source}macro_rules! transport_test {{ () => {{ pub(crate) fn adapter() -> InternalAdapter {{ panic!() }} }} }}\n"
+        "{source}macro_rules! transport_test {{ () => {{ pub(crate) fn adapter() -> InternalAdapter {{ panic!() }} }} }}\n\
+         transport_test!();\n"
     ))?;
     let generated = first
         .public_reexports

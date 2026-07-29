@@ -236,6 +236,16 @@ including bare single-segment store paths. Signature evidence includes complete
 implementation headers and transitive public re-export chains, so changing how
 a concrete store becomes callable is a reviewed boundary change.
 
+The restricted-visibility audit records production `pub(crate)` and
+`pub(super)` declarations per logical component. Counts may decrease, and the
+checked-in current count must be lowered in the same change. Any increase
+requires a new, issue- and pull-request-linked exception whose delta exactly
+matches that increase. `pub(super)` exceptions are limited to a reviewed
+component subtree and may use the Phase 0 issue. `pub(crate)` and
+`pub(in crate::...)` exceptions represent cross-component surface growth and
+always require a distinct architectural issue. Existing exceptions are
+immutable and cannot be reused to resurrect visibility later.
+
 During the feature freeze:
 
 - ordinary production files may not exceed 800 physical lines;

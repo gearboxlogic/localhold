@@ -153,3 +153,74 @@ fn trait_associated_type_targets_retain_self_and_trait_exposure_requirements() -
     assert!(adapter.direct_exposure_cfg.is_some());
     Ok(())
 }
+
+#[test]
+fn exposed_supertraits_are_type_exposure_evidence() -> Result<()> {
+    let facts = concrete_facts(
+        "mod hidden {\n\
+             pub(crate) trait Internal { fn inspect(&self) -> SqliteStore; }\n\
+             pub(crate) trait Additional { fn inspect_more(&self) -> SqliteStore; }\n\
+         }\n\
+         pub(crate) trait Public: hidden::Internal where Self: hidden::Additional {}\n",
+    )?;
+    let exposed_traits = facts
+        .public_reexports
+        .iter()
+        .filter(|evidence| evidence.exported_path == ["store_fixture", "Public"])
+        .map(|evidence| evidence.target_path.join("::"))
+        .collect::<Vec<_>>();
+    assert!(exposed_traits.iter().any(|path| path == "store_fixture::hidden::Internal"));
+    assert!(exposed_traits.iter().any(|path| path == "store_fixture::hidden::Additional"));
+    assert!(
+        facts
+            .public_reexports
+            .iter()
+            .filter(|evidence| evidence.exported_path == ["store_fixture", "Public"])
+            .all(|evidence| evidence.direct_exposure_cfg.is_some())
+    );
+    Ok(())
+}
+
+#[test]
+fn private_type_aliases_resolve_impl_self_types() -> Result<()> {
+    let facts = concrete_facts(
+        "mod hidden { pub(crate) struct Adapter; }\n\
+         type InternalAdapter = hidden::Adapter;\n\
+         impl InternalAdapter { pub(crate) fn open(&self) -> SqliteStore { loop {} } }\n\
+         pub(crate) use hidden::Adapter;\n",
+    )?;
+    let signature = facts
+        .signature_concrete_store_sites
+        .sqlite_store
+        .iter()
+        .find(|site| site.impl_self_type)
+        .expect("store-bearing impl signature");
+    assert_eq!(signature.item_path, ["store_fixture", "hidden", "Adapter"]);
+    assert!(
+        facts.public_reexports.iter().all(|evidence| evidence.exported_path != ["store_fixture", "InternalAdapter"]),
+        "private type aliases are resolution-only evidence"
+    );
+    Ok(())
+}
+
+#[test]
+fn trait_implementations_expose_defaulted_trait_members() -> Result<()> {
+    let facts = concrete_facts(
+        "pub(crate) trait StoreAccess {\n\
+             fn inspect(&self) -> SqliteStore { loop {} }\n\
+         }\n\
+         pub(crate) struct Adapter;\n\
+         impl StoreAccess for Adapter {}\n",
+    )?;
+    let implementation = facts
+        .public_reexports
+        .iter()
+        .find(|evidence| evidence.exported_path == ["store_fixture", "Adapter"] && evidence.target_path == ["store_fixture", "StoreAccess"])
+        .expect("trait implementation exposure");
+    assert_eq!(
+        implementation.required_trait_path.as_ref().map(|path| path.join("::")).as_deref(),
+        Some("store_fixture::StoreAccess")
+    );
+    assert!(implementation.direct_exposure_cfg.is_some());
+    Ok(())
+}

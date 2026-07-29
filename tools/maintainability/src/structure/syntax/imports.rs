@@ -38,6 +38,7 @@ use production::{
 };
 use reexports::{
     PendingPublicReexport, PublicTypeAliasContext, UseResolution, public_type_alias, resolve_binding_aliases, resolve_impl_signature_aliases, resolve_public_reexport_aliases,
+    type_alias_resolution,
 };
 pub(in crate::structure) use resolution::source_module;
 use resolution::{StringScan, UsePath, flatten_use_tree, resolve_path, restricted_attribute_identifier, restricted_token_identifier};
@@ -303,22 +304,21 @@ impl ProductionSyntaxCollector {
         Ok(())
     }
 
-    fn record_public_type_alias(&mut self, item: &ItemType) -> Result<()> {
+    fn record_type_alias_evidence(&mut self, item: &ItemType) -> Result<()> {
         let ancestors = self.declaration_ancestor_identity();
-        let Some(alias) = public_type_alias(
-            item,
-            PublicTypeAliasContext {
-                module: &self.module,
-                cfg: &self.cfg_context,
-                direct_exposure_cfg: self.direct_exposure_cfg(),
-                ancestors: &ancestors,
-                rust_2015_absolute_paths: self.rust_2015_absolute_paths,
-            },
-        )?
-        else {
-            return Ok(());
+        let context = PublicTypeAliasContext {
+            module: &self.module,
+            cfg: &self.cfg_context,
+            direct_exposure_cfg: self.direct_exposure_cfg(),
+            ancestors: &ancestors,
+            rust_2015_absolute_paths: self.rust_2015_absolute_paths,
         };
-        self.public_reexports.push(alias);
+        if let Some(resolution) = type_alias_resolution(item, &context)? {
+            self.use_resolutions.push(resolution);
+        }
+        if let Some(alias) = public_type_alias(item, context)? {
+            self.public_reexports.push(alias);
+        }
         Ok(())
     }
 
@@ -938,6 +938,11 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             self.record_concrete_stores_in_signature("trait-header", &header);
         }
         self.enter_generic_scope(&item.generics);
+        if exposed && let Err(error) = self.record_exposed_supertraits(item) {
+            self.error = Some(error);
+            self.leave_generic_scope();
+            return;
+        }
         self.trait_exposures.push(exposed);
         visit::visit_item_trait(self, item);
         self.trait_exposures.pop();
@@ -952,7 +957,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
                 return;
             }
         };
-        self.impl_item_paths.push(item_path);
+        self.impl_item_paths.push(item_path.clone());
         let trait_path = match self.implemented_trait_path(item) {
             Ok(path) => path,
             Err(error) => {
@@ -961,7 +966,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
                 return;
             }
         };
-        self.impl_trait_paths.push(trait_path);
+        self.impl_trait_paths.push(trait_path.clone());
         let binding_tokens = match production_impl_tokens(item, &self.cfg_context) {
             Ok(tokens) => without_documentation(&tokens),
             Err(error) => {
@@ -974,6 +979,11 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         let mut header = item.clone();
         header.items.clear();
         let header_tokens = without_documentation(&header.to_token_stream());
+        if item.trait_.as_ref().is_some_and(|(negative, _, _)| negative.is_none())
+            && let Some(trait_path) = trait_path.as_deref()
+        {
+            self.record_trait_implementation_exposure(&item_path, trait_path, &header_tokens);
+        }
         let binding = if item.trait_.is_some() {
             format!("trait-implementation:{}", syntax_fingerprint(&binding_tokens))
         } else {
@@ -1091,7 +1101,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
 
     fn visit_item_type(&mut self, item: &'ast ItemType) {
         if self.block_depth == 0
-            && let Err(error) = self.record_public_type_alias(item)
+            && let Err(error) = self.record_type_alias_evidence(item)
         {
             self.error = Some(error);
             return;

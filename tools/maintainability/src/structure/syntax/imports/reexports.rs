@@ -34,10 +34,64 @@ pub(super) struct PublicTypeAliasContext<'a> {
     pub(super) rust_2015_absolute_paths: bool,
 }
 
+struct TypeAliasPaths {
+    exported_path: Vec<String>,
+    target_path: Vec<String>,
+}
+
 pub(super) fn public_type_alias(item: &ItemType, context: PublicTypeAliasContext<'_>) -> Result<Option<PendingPublicReexport>> {
     if !visibility_is_exposed(&item.vis) {
         return Ok(None);
     }
+    let Some(paths) = type_alias_paths(item, &context)? else {
+        return Ok(None);
+    };
+    let alias = normalized_ident(&item.ident);
+    let identity = format!(
+        "public-type-alias:{}\0alias:{alias}\0visibility:{}\0cfg:{}\0ancestors:{}",
+        paths.target_path.join("::"),
+        syntax_fingerprint(&item.vis),
+        context.cfg.identity(),
+        context.ancestors
+    );
+    Ok(Some(PendingPublicReexport {
+        evidence: PublicReexportEvidence {
+            exported_path: paths.exported_path,
+            target_path: paths.target_path,
+            fingerprint: syntax_fingerprint(&identity),
+            cfg: context.cfg.clone(),
+            direct_exposure_cfg: context.direct_exposure_cfg,
+            required_trait_path: None,
+        },
+        cfg: context.cfg.clone(),
+        source_path: None,
+    }))
+}
+
+pub(super) fn type_alias_resolution(item: &ItemType, context: &PublicTypeAliasContext<'_>) -> Result<Option<UseResolution>> {
+    if matches!(item.ty.as_ref(), Type::Path(alias_target) if alias_target.qself.is_some()) {
+        return Ok(None);
+    }
+    let Some(paths) = type_alias_paths(item, context)? else {
+        return Ok(None);
+    };
+    let identity = format!(
+        "type-alias-resolution:{}\0alias:{}\0visibility:{}\0cfg:{}\0ancestors:{}",
+        paths.target_path.join("::"),
+        normalized_ident(&item.ident),
+        syntax_fingerprint(&item.vis),
+        context.cfg.identity(),
+        context.ancestors
+    );
+    Ok(Some(UseResolution {
+        exported_path: paths.exported_path,
+        target_path: paths.target_path,
+        fingerprint: syntax_fingerprint(&identity),
+        cfg: context.cfg.clone(),
+    }))
+}
+
+fn type_alias_paths(item: &ItemType, context: &PublicTypeAliasContext<'_>) -> Result<Option<TypeAliasPaths>> {
     let Type::Path(alias_target) = item.ty.as_ref() else {
         return Ok(None);
     };
@@ -62,26 +116,8 @@ pub(super) fn public_type_alias(item: &ItemType, context: PublicTypeAliasContext
     };
     let alias = normalized_ident(&item.ident);
     let mut exported_path = context.module.to_vec();
-    exported_path.push(alias.clone());
-    let identity = format!(
-        "public-type-alias:{}\0alias:{alias}\0visibility:{}\0cfg:{}\0ancestors:{}",
-        target_path.join("::"),
-        syntax_fingerprint(&item.vis),
-        context.cfg.identity(),
-        context.ancestors
-    );
-    Ok(Some(PendingPublicReexport {
-        evidence: PublicReexportEvidence {
-            exported_path,
-            target_path,
-            fingerprint: syntax_fingerprint(&identity),
-            cfg: context.cfg.clone(),
-            direct_exposure_cfg: context.direct_exposure_cfg,
-            required_trait_path: None,
-        },
-        cfg: context.cfg.clone(),
-        source_path: None,
-    }))
+    exported_path.push(alias);
+    Ok(Some(TypeAliasPaths { exported_path, target_path }))
 }
 
 type ResolvedUseTargets = Vec<ResolvedPath>;

@@ -190,6 +190,32 @@ fn public_reexports_are_additive_signature_evidence() {
 }
 
 #[test]
+fn trait_implementation_edges_are_additive_signature_evidence() {
+    let policy = policy();
+    let components = components(&[("src/adapter.rs", "sqlite-store")]);
+    let mut baseline = inventory(&[("src/adapter.rs", 1, 0)]);
+    baseline.files[0].production_signature_store_sites.sqlite_store = vec![signature("default-inspect", &["StoreAccess"])];
+    let mut trait_declaration = type_declaration("store-access-trait", &["StoreAccess"]);
+    trait_declaration.kind = TypeDeclarationKind::Trait;
+    baseline.files[0].production_type_declarations = vec![trait_declaration, type_declaration("adapter-type", &["Adapter"])];
+
+    let mut implemented = baseline.clone();
+    implemented.files[0].production_public_reexports = vec![PublicReexportEvidence {
+        exported_path: vec!["Adapter".to_owned()],
+        target_path: vec!["StoreAccess".to_owned()],
+        fingerprint: "adapter-store-access-implementation".to_owned(),
+        cfg: ProductionCfgContext::default(),
+        direct_exposure_cfg: Some(ProductionCfgContext::default()),
+        required_trait_path: Some(vec!["StoreAccess".to_owned()]),
+    }];
+
+    let error = policy
+        .compare_site_fingerprints(&implemented, &baseline, paths(&components), paths(&components))
+        .unwrap_err();
+    assert!(error.to_string().contains("production signature"));
+}
+
+#[test]
 fn latent_private_module_signatures_do_not_count_until_exposed() {
     let policy = policy();
     let components = components(&[("src/lib.rs", "composition")]);

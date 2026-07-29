@@ -116,7 +116,7 @@ expect_failure
 unset CARGO_HOME
 rm -r "$cargo_home"
 
-RUSTC_WRAPPER=untrusted CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \
-    run_check -- bash -c '[[ ! -v RUSTC_WRAPPER && ! -v CARGO_TARGET_TEST_RUSTFLAGS && ! -v CARGO_TARGET_TEST_LINKER && ! -v CARGO_TARGET_TEST_RUNNER ]]' >/dev/null
+CLIPPY_CONF_DIR=untrusted RUSTC_WRAPPER=untrusted CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \
+    run_check -- bash -c '[[ ! -v CLIPPY_CONF_DIR && ! -v RUSTC_WRAPPER && ! -v CARGO_TARGET_TEST_RUSTFLAGS && ! -v CARGO_TARGET_TEST_LINKER && ! -v CARGO_TARGET_TEST_RUNNER ]]' >/dev/null
 
 printf 'maintainability bootstrap tests passed\n'

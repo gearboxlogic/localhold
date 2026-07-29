@@ -260,6 +260,7 @@ fn audit_environment_override(name: &OsStr) -> bool {
                 | "CARGO_ENCODED_RUSTFLAGS"
                 | "CARGO_BUILD_TARGET"
                 | "CLIPPY_ARGS"
+                | "CLIPPY_CONF_DIR"
                 | "RUSTC"
                 | "RUSTC_WRAPPER"
                 | "RUSTC_WORKSPACE_WRAPPER"

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Component, Path};
+use std::io::ErrorKind;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -10,8 +11,13 @@ use super::{require_id, require_text};
 
 type CargoAllowKey = (String, String, String);
 
+mod command;
 #[cfg(test)]
 mod tests;
+
+pub(super) use command::reject_checked_in_weakening;
+#[cfg(test)]
+use command::{is_execution_surface, scrubber_environment_references_are_exact, weakening_environment, weakening_token};
 
 pub(super) fn validate_cargo_allowances(entries: &[CargoAllowance]) -> Result<()> {
     let mut ids = BTreeSet::new();
@@ -91,6 +97,11 @@ pub(super) fn validate_clippy_configuration(policy: &ClippyConfigurationFile) ->
 
 pub(super) fn compare_clippy_configuration(workspace: &Path, entries: &[ClippySetting]) -> Result<()> {
     let path = workspace.join("clippy.toml");
+    let metadata = fs::symlink_metadata(&path).with_context(|| format!("inspect {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("clippy.toml must be a regular non-symlink file");
+    }
+    reject_alternate_clippy_configuration(workspace)?;
     let source = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     let parsed = source.parse::<toml::Table>().context("parse clippy.toml")?;
     let active = entries.iter().map(|entry| (entry.key.as_str(), entry)).collect::<BTreeMap<_, _>>();
@@ -127,20 +138,6 @@ pub(super) fn compare_clippy_previous_revision(workspace: &Path, revision: &str,
             .get(&entry.key)
             .with_context(|| format!("previous clippy.toml is missing reviewed key {:?}", entry.key))?;
         compare_clippy_ratchet(&entry.key, current_value, previous_value, &entry.constraint)?;
-    }
-    Ok(())
-}
-
-pub(super) fn reject_checked_in_weakening(workspace: &Path) -> Result<()> {
-    for path in execution_surfaces(workspace)? {
-        let source = fs::read_to_string(workspace.join(&path)).with_context(|| format!("read lint command execution surface {path}"))?;
-        let names_rust_tool = source.contains("cargo") || source.contains("rustc") || source.contains("clippy");
-        if names_rust_tool && weakening_token(&source) {
-            bail!("checked-in Rust command surface {path:?} contains a lint-weakening argument");
-        }
-        if weakening_environment(&source) && !may_name_scrubbed_environment(&path) {
-            bail!("checked-in Rust command surface {path:?} contains a lint-weakening environment channel");
-        }
     }
     Ok(())
 }
@@ -191,30 +188,7 @@ fn tracked_manifests(workspace: &Path) -> Result<Vec<String>> {
     parse_nul_paths(&output.stdout, |path| path.ends_with("Cargo.toml"))
 }
 
-fn execution_surfaces(workspace: &Path) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .current_dir(workspace)
-        .args([
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--",
-            "Justfile",
-            "mise.toml",
-            ".github/workflows",
-            "script",
-        ])
-        .output()
-        .context("list checked-in command execution surfaces")?;
-    if !output.status.success() {
-        bail!("git ls-files failed while listing command execution surfaces");
-    }
-    parse_nul_paths(&output.stdout, |_| true)
-}
-
-fn parse_nul_paths(output: &[u8], include: impl Fn(&str) -> bool) -> Result<Vec<String>> {
+pub(super) fn parse_nul_paths(output: &[u8], include: impl Fn(&str) -> bool) -> Result<Vec<String>> {
     let mut paths = Vec::new();
     for raw in output.split(|byte| *byte == b'\0').filter(|path| !path.is_empty()) {
         let path = std::str::from_utf8(raw).context("tracked lint-policy path is not UTF-8")?;
@@ -307,21 +281,6 @@ fn validate_clippy_constraint(entry: &ClippySetting) -> Result<()> {
     Ok(())
 }
 
-fn weakening_token(source: &str) -> bool {
-    source.contains("--cap-lints")
-        || source
-            .split(|character: char| character.is_whitespace() || matches!(character, '\'' | '"' | '\\' | '='))
-            .any(|token| token == "-A" || token.starts_with("-A") && token.len() > 2 || token == "--allow")
-}
-
-fn weakening_environment(source: &str) -> bool {
-    ["RUSTFLAGS", "RUSTDOCFLAGS", "CLIPPY_ARGS"].iter().any(|name| source.contains(name))
-}
-
-fn may_name_scrubbed_environment(path: &str) -> bool {
-    matches!(path, "script/check-maintainability-bootstrap.sh" | "script/tests/test_maintainability_bootstrap.sh")
-}
-
 fn validate_temporary_fields(id: &str, disposition: Disposition, removal_issue: Option<&str>, removal_phase: Option<&str>) -> Result<()> {
     match disposition {
         Disposition::Permanent if removal_issue.is_some() || removal_phase.is_some() => {
@@ -347,6 +306,32 @@ fn validate_relative_path(value: &str, label: &str) -> Result<()> {
     let path = Path::new(value);
     if path.is_absolute() || path.components().any(|component| !matches!(component, Component::Normal(_))) {
         bail!("{label} must be a normalized relative path: {value:?}");
+    }
+    Ok(())
+}
+
+fn reject_alternate_clippy_configuration(workspace: &Path) -> Result<()> {
+    let mut directories = BTreeSet::from([PathBuf::new()]);
+    for manifest in tracked_manifests(workspace)? {
+        let parent = Path::new(&manifest).parent().context("Cargo manifest has no parent directory")?;
+        directories.extend(parent.ancestors().map(Path::to_path_buf));
+    }
+    for directory in directories {
+        for name in ["clippy.toml", ".clippy.toml"] {
+            let relative = directory.join(name);
+            if relative == Path::new("clippy.toml") {
+                continue;
+            }
+            let candidate = workspace.join(&relative);
+            match fs::symlink_metadata(&candidate) {
+                Ok(_) => {
+                    let relative = relative.display();
+                    bail!("alternate Clippy configuration is unsupported; remove {relative} and govern the root clippy.toml");
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error).with_context(|| format!("inspect alternate Clippy configuration {}", candidate.display())),
+            }
+        }
     }
     Ok(())
 }

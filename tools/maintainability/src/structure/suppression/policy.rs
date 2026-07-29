@@ -57,6 +57,7 @@ impl SuppressionPolicy {
     }
 
     pub(in crate::structure) fn compare_current(&self, workspace: &Path, sites: &[SourceSuppression]) -> Result<SourceCounts> {
+        super::reject_tooling_suppressions(workspace)?;
         let observed = compare_current(sites, &self.source_baseline, &self.model.source_exceptions, false)?;
         compare_cargo_allows(workspace, &self.cargo_allowances.entries)?;
         compare_clippy_configuration(workspace, &self.clippy_configuration.entries)?;

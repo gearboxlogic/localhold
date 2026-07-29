@@ -1,24 +1,24 @@
 {
   "schema_version": 1,
-  "adoption_commit": "8a09004ffe47d49f4202c5ad1830fd7e9bae1dc4",
+  "adoption_commit": "2fbcbf44e5aa510e4eda9cd7cb2599b009a4d99d",
   "source_baselines": [
     {
       "category": "production",
       "path": "policy/maintainability/lint-suppressions/source-production.json",
       "expected_sites": 353,
-      "expected_signatures": 350
+      "expected_signatures": 353
     },
     {
       "category": "test",
       "path": "policy/maintainability/lint-suppressions/source-test.json",
       "expected_sites": 96,
-      "expected_signatures": 95
+      "expected_signatures": 96
     },
     {
       "category": "benchmark",
       "path": "policy/maintainability/lint-suppressions/source-benchmark.json",
       "expected_sites": 27,
-      "expected_signatures": 18
+      "expected_signatures": 27
     }
   ],
   "source_governance": [

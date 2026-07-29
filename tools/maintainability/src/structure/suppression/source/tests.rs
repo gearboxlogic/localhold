@@ -104,6 +104,16 @@ fn malformed_macro_carried_lint_attributes_fail_closed() {
 }
 
 #[test]
+fn macro_metavariables_cannot_construct_attributes() {
+    let error = scan(
+        "macro_rules! generated { ($attribute:meta) => { #[$attribute] fn expanded() {} }; }\n",
+        SourceCategory::Production,
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("opaque macro-carried attribute could hide a lint suppression"));
+}
+
+#[test]
 fn empty_reasons_are_inventoried_for_policy_rejection() -> Result<()> {
     let sites = scan("#[allow(clippy::panic)] fn unchecked() {}\n", SourceCategory::Production)?;
     assert_eq!(sites.len(), 1);
@@ -128,6 +138,58 @@ fn stable_ids_follow_the_reviewed_item_across_file_splits() -> Result<()> {
     assert_ne!(first[0].id, changed_signature[0].id);
     assert!(first[0].signature.is_some());
     assert!(first[0].id.starts_with("source."));
+    Ok(())
+}
+
+#[test]
+fn stable_ids_pin_item_bodies_and_complete_impl_headers() -> Result<()> {
+    let first = scan(
+        "#[expect(clippy::panic, reason = \"protocol failure\")]\nfn serve() { panic!() }\n",
+        SourceCategory::Production,
+    )?;
+    let changed_body = scan(
+        "#[expect(clippy::panic, reason = \"protocol failure\")]\nfn serve() { todo!() }\n",
+        SourceCategory::Production,
+    )?;
+    assert_ne!(first[0].id, changed_body[0].id);
+
+    let first_impl = scan(
+        "trait First { fn serve(&self); }\n\
+         struct Service;\n\
+         impl First for Service {\n\
+             #[expect(clippy::panic, reason = \"protocol failure\")]\n\
+             fn serve(&self) { panic!() }\n\
+         }\n",
+        SourceCategory::Production,
+    )?;
+    let second_impl = scan(
+        "trait Second { fn serve(&self); }\n\
+         struct Service;\n\
+         impl Second for Service {\n\
+             #[expect(clippy::panic, reason = \"protocol failure\")]\n\
+             fn serve(&self) { panic!() }\n\
+         }\n",
+        SourceCategory::Production,
+    )?;
+    assert_ne!(first_impl[0].id, second_impl[0].id);
+    Ok(())
+}
+
+#[test]
+fn argument_and_use_suppressions_pin_their_exact_targets() -> Result<()> {
+    let first_argument = scan(
+        "fn serve(#[expect(unused_variables, reason = \"trait shape\")] first: usize, second: usize) {}\n",
+        SourceCategory::Production,
+    )?;
+    let second_argument = scan(
+        "fn serve(first: usize, #[expect(unused_variables, reason = \"trait shape\")] second: usize) {}\n",
+        SourceCategory::Production,
+    )?;
+    assert_ne!(first_argument[0].id, second_argument[0].id);
+
+    let first_use = scan("#[expect(unused_imports, reason = \"platform route\")]\nuse first::Route;\n", SourceCategory::Production)?;
+    let second_use = scan("#[expect(unused_imports, reason = \"platform route\")]\nuse second::Route;\n", SourceCategory::Production)?;
+    assert_ne!(first_use[0].id, second_use[0].id);
     Ok(())
 }
 

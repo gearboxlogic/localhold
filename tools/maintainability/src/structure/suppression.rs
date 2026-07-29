@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -12,6 +12,8 @@ use super::classify::Inventory;
 
 mod policy;
 mod source;
+#[cfg(test)]
+mod tests;
 pub(super) use policy::SuppressionPolicy;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -97,6 +99,32 @@ pub fn scan_revision(workspace: &Path, revision: &str, inventory: &Inventory, co
     })
 }
 
+pub(super) fn reject_tooling_suppressions(workspace: &Path) -> Result<()> {
+    let tools_root = fs::canonicalize(workspace.join("tools")).context("resolve maintainer-tool source root")?;
+    for path in tooling_rust_paths(workspace)? {
+        let absolute = workspace.join(&path);
+        let metadata = fs::symlink_metadata(&absolute).with_context(|| format!("inspect maintainer-tool source {}", absolute.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("maintainer-tool Rust source must be a regular non-symlink file: {path:?}");
+        }
+        let canonical = fs::canonicalize(&absolute).with_context(|| format!("resolve maintainer-tool source {}", absolute.display()))?;
+        if !canonical.starts_with(&tools_root) {
+            bail!("maintainer-tool Rust source escapes the tools root: {path:?}");
+        }
+        let source = fs::read_to_string(&absolute).with_context(|| format!("read maintainer-tool source {}", absolute.display()))?;
+        let syntax = syn::parse_file(&source).with_context(|| format!("parse maintainer-tool source {path}"))?;
+        let sites = SourceScanner::scan(&path, "maintainer-tooling", SourceCategory::Production, &syntax)?;
+        if let Some(site) = sites.first() {
+            bail!(
+                "maintainer-tool Rust must remain suppression-free; remove source suppression {} from {:?}",
+                site.id,
+                site.path
+            );
+        }
+    }
+    Ok(())
+}
+
 fn scan_with(inventory: &Inventory, component_paths: &BTreeMap<&str, &str>, mut read_source: impl FnMut(&str) -> Result<String>) -> Result<Vec<SourceSuppression>> {
     let measurements = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
     let mut sites = Vec::new();
@@ -117,4 +145,30 @@ fn scan_with(inventory: &Inventory, component_paths: &BTreeMap<&str, &str>, mut 
     }
     sites.sort();
     Ok(sites)
+}
+
+fn tooling_rust_paths(workspace: &Path) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .current_dir(workspace)
+        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "tools"])
+        .output()
+        .context("list maintainer-tool Rust sources")?;
+    if !output.status.success() {
+        bail!("git ls-files failed while listing maintainer-tool Rust sources");
+    }
+    let mut paths = Vec::new();
+    for raw in output.stdout.split(|byte| *byte == b'\0').filter(|path| !path.is_empty()) {
+        let path = std::str::from_utf8(raw).context("maintainer-tool source path is not UTF-8")?;
+        let relative = Path::new(path);
+        if relative.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+            continue;
+        }
+        if relative.is_absolute() || !relative.starts_with("tools") || relative.components().any(|component| !matches!(component, Component::Normal(_))) {
+            bail!("maintainer-tool source path must be normalized under tools/: {path:?}");
+        }
+        paths.push(path.to_owned());
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }

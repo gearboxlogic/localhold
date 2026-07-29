@@ -13,7 +13,7 @@ use super::{SourceCategory, SourceSuppression};
 use crate::scan::syntax_fingerprint;
 use crate::structure::syntax::{
     ProductionCfgContext, cfg_attr_metas_with_production_reachability, expr_attributes, foreign_item_attributes, generic_param_attributes, impl_item_attributes, item_attributes,
-    normalized_ident, production_cfg_context, trait_item_attributes,
+    normalized_ident, pat_attributes, production_cfg_context, trait_item_attributes,
 };
 
 mod nodes;
@@ -100,7 +100,7 @@ impl SourceScanner {
         Ok(sites)
     }
 
-    fn visit_classified<'ast, T>(&mut self, attributes: Result<&[Attribute]>, item: Option<SuppressionScope>, node: &'ast T, visit: impl FnOnce(&mut Self, &'ast T)) {
+    fn visit_classified<'ast, T: ToTokens>(&mut self, attributes: Result<&[Attribute]>, item: Option<SuppressionScope>, node: &'ast T, visit: impl FnOnce(&mut Self, &'ast T)) {
         if self.error.is_some() {
             return;
         }
@@ -135,7 +135,7 @@ impl SourceScanner {
             };
             self.scope = item.scope;
             self.signature = item.signature;
-            self.target = None;
+            self.target = Some(syntax_fingerprint(node));
         }
         visit(self, node);
         self.category = previous_category;
@@ -252,8 +252,7 @@ impl SourceScanner {
                 let fingerprint = syntax_fingerprint(&meta);
                 self.record_meta(&meta, self.category, true, &fingerprint).context("classify macro-carried lint attribute")
             }
-            Err(error) if tokens_name_lint_level(&group.stream()) => Err(error).context("macro-carried lint-like attribute is not classifiable"),
-            Err(_) => Ok(()),
+            Err(error) => Err(error).context("opaque macro-carried attribute could hide a lint suppression"),
         }
     }
 }
@@ -266,32 +265,45 @@ fn category_for_branch(category: SourceCategory, production_reachable: bool) -> 
     }
 }
 
-fn tokens_name_lint_level(tokens: &TokenStream) -> bool {
-    tokens
-        .clone()
-        .into_iter()
-        .any(|token| matches!(token, TokenTree::Ident(ident) if ident == "expect" || ident == "allow"))
-}
-
 impl<'ast> Visit<'ast> for SourceScanner {
     fn visit_file(&mut self, node: &'ast syn::File) {
-        self.visit_classified(Ok(&node.attrs), None, node, visit::visit_file);
+        self.visit_anonymous_scope(Ok(&node.attrs), "module", node, visit::visit_file);
     }
 
     fn visit_item(&mut self, node: &'ast Item) {
-        self.visit_classified(item_attributes(node), item_scope(node), node, visit::visit_item);
+        let attributes = item_attributes(node);
+        if let Some(scope) = item_scope(node) {
+            self.visit_classified(attributes, Some(scope), node, visit::visit_item);
+        } else {
+            self.visit_anonymous_scope(attributes, "item", node, visit::visit_item);
+        }
     }
 
     fn visit_impl_item(&mut self, node: &'ast ImplItem) {
-        self.visit_classified(impl_item_attributes(node), impl_item_scope(node), node, visit::visit_impl_item);
+        let attributes = impl_item_attributes(node);
+        if let Some(scope) = impl_item_scope(node) {
+            self.visit_classified(attributes, Some(scope), node, visit::visit_impl_item);
+        } else {
+            self.visit_anonymous_scope(attributes, "impl-item", node, visit::visit_impl_item);
+        }
     }
 
     fn visit_trait_item(&mut self, node: &'ast TraitItem) {
-        self.visit_classified(trait_item_attributes(node), trait_item_scope(node), node, visit::visit_trait_item);
+        let attributes = trait_item_attributes(node);
+        if let Some(scope) = trait_item_scope(node) {
+            self.visit_classified(attributes, Some(scope), node, visit::visit_trait_item);
+        } else {
+            self.visit_anonymous_scope(attributes, "trait-item", node, visit::visit_trait_item);
+        }
     }
 
     fn visit_foreign_item(&mut self, node: &'ast ForeignItem) {
-        self.visit_classified(foreign_item_attributes(node), foreign_item_scope(node), node, visit::visit_foreign_item);
+        let attributes = foreign_item_attributes(node);
+        if let Some(scope) = foreign_item_scope(node) {
+            self.visit_classified(attributes, Some(scope), node, visit::visit_foreign_item);
+        } else {
+            self.visit_anonymous_scope(attributes, "foreign-item", node, visit::visit_foreign_item);
+        }
     }
 
     fn visit_variant(&mut self, node: &'ast Variant) {
@@ -313,6 +325,22 @@ impl<'ast> Visit<'ast> for SourceScanner {
 
     fn visit_generic_param(&mut self, node: &'ast GenericParam) {
         self.visit_anonymous_scope(Ok(generic_param_attributes(node)), "generic-parameter", node, visit::visit_generic_param);
+    }
+
+    fn visit_fn_arg(&mut self, node: &'ast syn::FnArg) {
+        self.visit_anonymous_scope(Ok(crate::structure::syntax::fn_arg_attributes(node)), "function-argument", node, visit::visit_fn_arg);
+    }
+
+    fn visit_bare_fn_arg(&mut self, node: &'ast syn::BareFnArg) {
+        self.visit_anonymous_scope(Ok(&node.attrs), "bare-function-argument", node, visit::visit_bare_fn_arg);
+    }
+
+    fn visit_variadic(&mut self, node: &'ast syn::Variadic) {
+        self.visit_anonymous_scope(Ok(&node.attrs), "variadic-argument", node, visit::visit_variadic);
+    }
+
+    fn visit_pat(&mut self, node: &'ast syn::Pat) {
+        self.visit_anonymous_scope(pat_attributes(node), "pattern", node, visit::visit_pat);
     }
 
     fn visit_arm(&mut self, node: &'ast Arm) {

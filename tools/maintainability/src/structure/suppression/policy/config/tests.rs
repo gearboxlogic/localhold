@@ -49,13 +49,58 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_token("cargo clippy -- -A warnings"));
     assert!(weakening_token("cargo rustc -- --cap-lints=allow"));
     assert!(weakening_token("cargo clippy -- --allow warnings"));
+    assert!(weakening_token("cargo clippy -- -W warnings"));
+    assert!(weakening_token("cargo clippy -- --warn warnings"));
+    assert!(weakening_token("cargo --config build.rustflags='-A warnings' clippy"));
+    assert!(weakening_token("cargo deny --config deny.toml; cargo --config build.rustflags='-A warnings' clippy"));
+    assert!(weakening_token("cargo \\\n  --config build.rustflags='-A warnings' clippy"));
+    assert!(weakening_token("sh -c \"cargo --config net.offline=true check # literal\""));
+    assert!(!weakening_token("cargo deny --config deny.toml"));
+    assert!(!weakening_token("gitleaks --config policy.toml # cargo output"));
     assert!(!weakening_token("hold doctor --allow-downloads"));
     assert!(weakening_environment("export RUSTFLAGS='-A warnings'\nexec \"$CHECK\""));
     assert!(weakening_environment("RUSTDOCFLAGS=--cap-lints=allow"));
     assert!(weakening_environment("CLIPPY_ARGS='--allow warnings'"));
-    assert!(may_name_scrubbed_environment("script/check-maintainability-bootstrap.sh"));
-    assert!(may_name_scrubbed_environment("script/tests/test_maintainability_bootstrap.sh"));
-    assert!(!may_name_scrubbed_environment("script/tests/new-command.sh"));
+    assert!(weakening_environment("CLIPPY_CONF_DIR=unreviewed"));
+    assert!(weakening_environment("RUSTC_WRAPPER=unreviewed"));
+    assert!(weakening_environment("CARGO_TARGET_TEST_RUSTFLAGS=unreviewed"));
+    assert!(!weakening_environment("rustc --version"));
+    let scrubber = "            RUSTFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | RUSTC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTFLAGS | \\\n";
+    assert!(scrubber_environment_references_are_exact("script/check-maintainability-bootstrap.sh", scrubber));
+    assert!(!scrubber_environment_references_are_exact(
+        "script/check-maintainability-bootstrap.sh",
+        &format!("{scrubber}RUSTFLAGS='-A warnings'\n"),
+    ));
+    assert!(!scrubber_environment_references_are_exact("script/tests/new-command.sh", scrubber));
+}
+
+#[test]
+fn alternate_clippy_configuration_is_rejected_beside_nested_packages() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("tools/checker")).expect("nested package");
+    fs::write(workspace.path().join("Cargo.toml"), "[package]\nname='root'\nversion='0.1.0'\n").expect("root manifest");
+    fs::write(workspace.path().join("tools/checker/Cargo.toml"), "[package]\nname='checker'\nversion='0.1.0'\n").expect("nested manifest");
+    fs::write(workspace.path().join("clippy.toml"), "").expect("root Clippy configuration");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+    reject_alternate_clippy_configuration(workspace.path()).expect("one canonical Clippy configuration");
+
+    fs::write(workspace.path().join("tools/.clippy.toml"), "").expect("alternate Clippy configuration");
+    assert!(
+        reject_alternate_clippy_configuration(workspace.path())
+            .unwrap_err()
+            .to_string()
+            .contains("alternate Clippy configuration")
+    );
+}
+
+#[test]
+fn command_surfaces_include_scripts_outside_the_legacy_script_directory() {
+    for path in ["Justfile", ".github/workflows/ci.yml", "script/release.py", "tools/ci/check.sh", "Makefile", "package.json"] {
+        assert!(is_execution_surface(path), "missing command surface {path}");
+    }
+    assert!(!is_execution_surface("CONTRIBUTING.md"));
+    assert!(!is_execution_surface("src/lib.rs"));
 }
 
 #[test]

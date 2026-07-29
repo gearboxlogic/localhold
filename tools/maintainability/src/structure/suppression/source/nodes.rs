@@ -1,3 +1,4 @@
+use quote::ToTokens as _;
 use syn::{ForeignItem, ImplItem, Item, TraitItem};
 
 use crate::scan::syntax_fingerprint;
@@ -15,8 +16,16 @@ pub(super) fn item_scope(item: &Item) -> Option<SuppressionScope> {
         Item::Enum(item) => (normalized_ident(&item.ident), "item-enum"),
         Item::ExternCrate(item) => (normalized_ident(&item.ident), "item-extern-crate"),
         Item::Fn(item) => return Some(function_scope(&item.sig, "item-fn")),
-        Item::ForeignMod(_) => ("extern".to_owned(), "item-foreign-mod"),
-        Item::Impl(item) => (format!("impl:{}", syntax_fingerprint(&item.self_ty)), "item-impl"),
+        Item::ForeignMod(item) => {
+            let mut header = item.clone();
+            header.items.clear();
+            (format!("extern:{}", syntax_fingerprint(&header)), "item-foreign-mod")
+        }
+        Item::Impl(item) => {
+            let mut header = item.clone();
+            header.items.clear();
+            (format!("impl:{}", syntax_fingerprint(&header.to_token_stream())), "item-impl")
+        }
         Item::Macro(item) => (item.ident.as_ref().map_or_else(|| "<macro>".to_owned(), normalized_ident), "item-macro"),
         Item::Mod(item) => (normalized_ident(&item.ident), "item-mod"),
         Item::Static(item) => (normalized_ident(&item.ident), "item-static"),

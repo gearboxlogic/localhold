@@ -262,12 +262,14 @@ way to make a warning disappear. The checker inventories every source
 classification used by the structural audit. Source `allow` attributes, empty
 reasons, and macro-carried lint levels are rejected. Each existing
 `expect` is bound to its logical component, item hierarchy, scope, category,
-lint, reason, attribute syntax, anonymous target syntax, and—when it is inside
-a function—the normalized function signature. Identical duplicate sites share
-one ID with an exact occurrence ceiling. Moving an unchanged item during a
-same-component file split preserves that identity; changing its API or target,
-moving it between components, broadening its level, or reusing a retired
-occurrence does not.
+lint, reason, attribute syntax, and the complete normalized syntax of the item,
+file, argument, pattern, or anonymous target governed by that attribute.
+Byte-equivalent scopes share one ID with an exact occurrence ceiling. Moving
+an unchanged item during a same-component file split preserves that identity;
+changing its body, API, containing implementation, or target, moving it between
+components, broadening its level, or reusing a retired occurrence does not.
+Rust in maintainer tools has a zero-suppression policy: attribute-like fixture
+text is supported, but an actual `allow` or `expect` in tool source is rejected.
 
 The exact production, test, and benchmark recovery multisets live in the
 small, category-specific fragments under
@@ -285,11 +287,14 @@ allowance documents its substitute enforcement and sentinel. Existing fragment
 paths are immutable, while a new fragment may be appended before an existing
 fragment approaches the repository's file-size rail. `clippy.toml`
 keys are closed: numeric thresholds can only decrease, and string allowlists
-can only shrink. Checked-in Cargo, rustc, and Clippy command surfaces reject
-`-A`, `--allow`, `--cap-lints`, and lint-weakening flag environment channels.
-The bootstrap scrubber and its exact self-test may name those environment
-channels so they can remove and verify them, but they remain subject to the
-argument scan; no directory-wide command-surface exemption exists.
+can only shrink. The root `clippy.toml` is the only supported Clippy
+configuration; nested alternatives and `CLIPPY_CONF_DIR` are rejected.
+Checked-in Cargo, rustc, and Clippy command surfaces reject `-A`, `-W`,
+`--allow`, `--warn`, `--force-warn`, `--cap-lints`, command-line Cargo
+configuration, and compiler or lint override environment channels. The
+bootstrap scrubber and its exact self-test may name those environment channels
+so they can remove and verify them, but they remain subject to the argument
+scan; no directory-wide command-surface exemption exists.
 Ordinary agent changes must fix the warning or remove stale suppression debt;
 they must not edit policy evidence merely to make the gate pass.
 

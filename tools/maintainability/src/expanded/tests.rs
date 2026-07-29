@@ -71,6 +71,7 @@ fn compiler_environment_rejects_cargo_aliases_and_override_channels() {
         "RUSTFLAGS",
         "CARGO_ENCODED_RUSTFLAGS",
         "CARGO_BUILD_TARGET",
+        "CLIPPY_CONF_DIR",
         "RUSTC_WRAPPER",
         "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
         "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",

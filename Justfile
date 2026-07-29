@@ -42,17 +42,23 @@ test-soak:
 clippy:
     cargo clippy --all-targets --all-features --locked -- -D warnings
 
+# Run every shipped library/binary feature profile in release mode without test-only cfg or features
+production-clippy:
+    cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- production-clippy
+
 # Format all code (requires nightly: `rustup toolchain install nightly -c rustfmt`)
 fmt:
     rustup run nightly cargo-fmt --all
     cargo fmt --manifest-path tools/dependency-unsafe/Cargo.toml
     cargo fmt --manifest-path tools/maintainability/Cargo.toml
+    cargo fmt --manifest-path tools/maintainability/fixtures/production-clippy/Cargo.toml
 
 # Check formatting (requires nightly)
 fmt-check:
     rustup run nightly cargo-fmt --all -- --check
     cargo fmt --manifest-path tools/dependency-unsafe/Cargo.toml -- --check
     cargo fmt --manifest-path tools/maintainability/Cargo.toml -- --check
+    cargo fmt --manifest-path tools/maintainability/fixtures/production-clippy/Cargo.toml -- --check
 
 # Run cargo-deny supply chain audit
 deny:
@@ -107,6 +113,7 @@ check-quality:
     just hygiene
     just time-abstraction
     just fmt-check
+    just production-clippy
     just clippy
     just deny
     just test

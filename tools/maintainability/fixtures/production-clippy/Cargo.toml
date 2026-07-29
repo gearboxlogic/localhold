@@ -1,0 +1,17 @@
+[package]
+name = "production-clippy-sentinel"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[features]
+lib-violation = []
+
+[[bin]]
+name = "unwrap-violation"
+path = "src/bin/unwrap_violation.rs"
+
+[workspace]
+
+[lints.clippy]
+unwrap_used = "allow"

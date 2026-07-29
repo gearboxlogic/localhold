@@ -138,7 +138,7 @@ single_char_lifetime_names = "allow"   # 'a, 'b are standard Rust convention
 std_instead_of_alloc = "allow"         # project is not no_std; unnecessary restriction
 std_instead_of_core = "allow"          # project is not no_std; unnecessary restriction
 tests_outside_test_module = "allow"    # integration tests in separate files is the standard pattern
-unwrap_used = "allow"                  # too broad for blanket denial; expect_used covers the important cases
+unwrap_used = "allow"                  # test targets may unwrap; the production matrix overrides this to deny
 
 # Hard denials — correctness & hygiene
 print_stdout = "deny"

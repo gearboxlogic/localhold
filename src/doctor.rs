@@ -159,17 +159,12 @@ fn single_line(value: &str) -> String {
 /// Run all diagnostics without creating a database or downloading model files
 /// unless `allow_downloads` is set.
 pub async fn run(options: DoctorOptions) -> DoctorReport {
-    Box::pin(run_with_clock(options, std::sync::Arc::new(crate::clock::SystemClock::new()))).await
+    Box::pin(run_with_clock_inner(options, std::sync::Arc::new(crate::clock::SystemClock::new()))).await
 }
 
 /// Run diagnostics with timeouts driven by an injected clock.
 #[cfg(any(test, feature = "testing"))]
 pub async fn run_with_clock(options: DoctorOptions, clock: std::sync::Arc<dyn crate::clock::Clock>) -> DoctorReport {
-    Box::pin(run_with_clock_inner(options, clock)).await
-}
-
-#[cfg(not(any(test, feature = "testing")))]
-async fn run_with_clock(options: DoctorOptions, clock: std::sync::Arc<dyn crate::clock::Clock>) -> DoctorReport {
     Box::pin(run_with_clock_inner(options, clock)).await
 }
 
@@ -785,7 +780,7 @@ fn sqlite_embedding_map_fk_status(connection: &Connection) -> Result<SqliteEmbed
 #[expect(clippy::too_many_lines, reason = "PostgreSQL readiness is kept linear so each read-only compatibility gate is explicit")]
 async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> DiagnosticCheck {
     let connect = PgPoolOptions::new().max_connections(1).connect(&config.database.postgres.url);
-    let Ok(Ok(pool)) = crate::clock::timeout(clock, Duration::from_secs(10), connect).await else {
+    let Ok(Ok(pool)) = Box::pin(crate::clock::timeout(clock, Duration::from_secs(10), connect)).await else {
         return check("storage", DiagnosticStatus::Failed, "PostgreSQL is unreachable or rejected the configured connection");
     };
     let vector_installed: Result<bool, _> = query_scalar("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector')").fetch_one(&pool).await;
@@ -1286,18 +1281,9 @@ async fn embedding_check(config: &Config, clock: std::sync::Arc<dyn crate::clock
     }
 }
 
-async fn reranker_check(config: &Config, options: DoctorOptions, clock: std::sync::Arc<dyn crate::clock::Clock>) -> DiagnosticCheck {
-    #[cfg(not(feature = "reranker"))]
-    let _options = options;
-    #[cfg(not(feature = "reranker"))]
-    let _clock = clock;
-    let reranker = &config.search.reranker;
-    let compiled = crate::reranker::policy::compiled_execution_providers()
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
-    if !reranker.enabled {
+fn disabled_reranker_check(reranker: &crate::config::RerankerConfig) -> Option<DiagnosticCheck> {
+    (!reranker.enabled).then(|| {
+        let compiled = compiled_reranker_providers();
         #[cfg(feature = "reranker")]
         let identity = crate::reranker::runtime::model_identity(reranker).map_or_else(
             |_error| "configured model has invalid revision or hash configuration".to_owned(),
@@ -1305,60 +1291,74 @@ async fn reranker_check(config: &Config, options: DoctorOptions, clock: std::syn
         );
         #[cfg(not(feature = "reranker"))]
         let identity = "configured model identity unavailable in this build";
-        return check(
-            "reranker",
-            DiagnosticStatus::Healthy,
-            format!("disabled; {identity}; compiled providers: {}", if compiled.is_empty() { "none" } else { &compiled }),
-        );
-    }
-    #[cfg(not(feature = "reranker"))]
-    {
+        let summary = format!("disabled; {identity}; compiled providers: {}", if compiled.is_empty() { "none" } else { &compiled });
+        check("reranker", DiagnosticStatus::Healthy, summary)
+    })
+}
+
+#[cfg(not(feature = "reranker"))]
+fn reranker_check(config: &Config, _options: DoctorOptions, _clock: std::sync::Arc<dyn crate::clock::Clock>) -> std::future::Ready<DiagnosticCheck> {
+    let reranker = &config.search.reranker;
+    std::future::ready(disabled_reranker_check(reranker).unwrap_or_else(|| {
         let status = if reranker.required { DiagnosticStatus::Failed } else { DiagnosticStatus::Degraded };
-        return check("reranker", status, "enabled but this binary was compiled without reranker support");
+        check("reranker", status, "enabled but this binary was compiled without reranker support")
+    }))
+}
+
+#[cfg(feature = "reranker")]
+async fn reranker_check(config: &Config, options: DoctorOptions, clock: std::sync::Arc<dyn crate::clock::Clock>) -> DiagnosticCheck {
+    let reranker = &config.search.reranker;
+    if let Some(disabled) = disabled_reranker_check(reranker) {
+        return disabled;
     }
-    #[cfg(feature = "reranker")]
-    {
-        let identity = crate::reranker::runtime::model_identity(reranker);
-        let identity_summary = identity.map_or_else(
-            |_error| "configured model has invalid revision or hash configuration".to_owned(),
-            |identity| format!("configured {} {} model identity validated", identity.artifact, identity.precision),
-        );
-        match crate::reranker::runtime::initialize_for_diagnostics_with_clock(reranker, options.allow_downloads, clock).await {
-            Ok(initialized) => {
-                let selected = initialized.selected_execution_provider().map_or_else(|| "none".into(), |provider| provider.to_string());
-                let active = initialized.active_execution_provider().map_or_else(|| "none".into(), |provider| provider.to_string());
-                check(
-                    "reranker",
-                    if active == "none" { DiagnosticStatus::Degraded } else { DiagnosticStatus::Healthy },
-                    format!("{identity_summary}; compiled {compiled}; selected {selected}; active {active}; inference probe completed"),
-                )
-            }
-            Err(error) => {
-                let download_may_fix = !options.allow_downloads && reranker.model_path.is_empty() && matches!(error, crate::reranker::RerankerError::Unavailable);
-                let provider_guidance = reranker_provider_guidance(&error);
-                let status = if reranker.required && !download_may_fix {
-                    DiagnosticStatus::Failed
-                } else {
-                    DiagnosticStatus::Degraded
-                };
-                check(
-                    "reranker",
-                    status,
-                    format!(
-                        "{identity_summary}; inference probe unavailable{}{}",
-                        if download_may_fix {
-                            "; rerun with --allow-downloads to permit first-use artifacts"
-                        } else if options.allow_downloads {
-                            " after downloads were allowed"
-                        } else {
-                            " with configured local artifacts"
-                        },
-                        provider_guidance,
-                    ),
-                )
-            }
+    let compiled = compiled_reranker_providers();
+    let identity_summary = crate::reranker::runtime::model_identity(reranker).map_or_else(
+        |_error| "configured model has invalid revision or hash configuration".to_owned(),
+        |identity| format!("configured {} {} model identity validated", identity.artifact, identity.precision),
+    );
+    match crate::reranker::runtime::initialize_for_diagnostics_with_clock(reranker, options.allow_downloads, clock).await {
+        Ok(initialized) => {
+            let selected = initialized.selected_execution_provider().map_or_else(|| "none".into(), |provider| provider.to_string());
+            let active = initialized.active_execution_provider().map_or_else(|| "none".into(), |provider| provider.to_string());
+            check(
+                "reranker",
+                if active == "none" { DiagnosticStatus::Degraded } else { DiagnosticStatus::Healthy },
+                format!("{identity_summary}; compiled {compiled}; selected {selected}; active {active}; inference probe completed"),
+            )
+        }
+        Err(error) => {
+            let download_may_fix = !options.allow_downloads && reranker.model_path.is_empty() && matches!(error, crate::reranker::RerankerError::Unavailable);
+            let provider_guidance = reranker_provider_guidance(&error);
+            let status = if reranker.required && !download_may_fix {
+                DiagnosticStatus::Failed
+            } else {
+                DiagnosticStatus::Degraded
+            };
+            check(
+                "reranker",
+                status,
+                format!(
+                    "{identity_summary}; inference probe unavailable{}{}",
+                    if download_may_fix {
+                        "; rerun with --allow-downloads to permit first-use artifacts"
+                    } else if options.allow_downloads {
+                        " after downloads were allowed"
+                    } else {
+                        " with configured local artifacts"
+                    },
+                    provider_guidance,
+                ),
+            )
         }
     }
+}
+
+fn compiled_reranker_providers() -> String {
+    crate::reranker::policy::compiled_execution_providers()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 #[cfg(feature = "reranker")]

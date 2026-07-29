@@ -246,6 +246,16 @@ component subtree and may use the Phase 0 issue. `pub(crate)` and
 always require a distinct architectural issue. Existing exceptions are
 immutable and cannot be reused to resurrect visibility later.
 
+`just production-clippy` checks the library and every shipped binary under the
+default, CPU-reranker, and CUDA-reranker production feature profiles in release
+mode. These lanes always disable default and test-only features, deny all
+warnings, and deny `clippy::unwrap_used`; they do not compile `cfg(test)` code.
+Checked-in sentinels prove that a release-only unwrap in either shipped target
+fails while ordinary test-only unwraps remain governed by the separate test
+policy. Cargo metadata supplies the closed feature set, including implicit
+optional-dependency features, so adding or changing a Cargo feature must update
+the production matrix in the same pull request.
+
 During the feature freeze:
 
 - ordinary production files may not exceed 800 physical lines;

@@ -274,3 +274,33 @@ fn trait_implementation_arguments_are_conditional_type_exposure_evidence() -> Re
     );
     Ok(())
 }
+
+#[test]
+fn exposed_generic_defaults_are_type_exposure_evidence() -> Result<()> {
+    let facts = concrete_facts(
+        "mod hidden { pub(crate) struct Adapter; }\n\
+         pub(crate) struct Wrapper<T = hidden::Adapter>(T);\n\
+         pub(crate) enum Choice<T = hidden::Adapter> { Value(T) }\n\
+         pub(crate) union Slot<T = hidden::Adapter> { value: core::mem::ManuallyDrop<T> }\n\
+         pub(crate) trait Access<T = hidden::Adapter> {}\n\
+         pub(crate) type Alias<T = hidden::Adapter> = T;\n\
+         pub(crate) struct Generic<T, U = T>(T, U);\n",
+    )?;
+    for declaration in ["Wrapper", "Choice", "Slot", "Access", "Alias"] {
+        assert!(
+            facts
+                .public_reexports
+                .iter()
+                .any(|evidence| { evidence.exported_path == ["store_fixture", declaration] && evidence.target_path == ["store_fixture", "hidden", "Adapter"] }),
+            "{declaration} generic default exposure"
+        );
+    }
+    assert!(
+        facts
+            .public_reexports
+            .iter()
+            .all(|evidence| evidence.exported_path != ["store_fixture", "Generic"] || evidence.target_path != ["store_fixture", "T"]),
+        "generic parameters are not default exposure targets"
+    );
+    Ok(())
+}

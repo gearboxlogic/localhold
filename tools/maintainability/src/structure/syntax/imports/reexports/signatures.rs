@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 use quote::ToTokens as _;
 use syn::visit::{self, Visit};
-use syn::{Path, Signature, TraitBound, Type, TypePath, Visibility};
+use syn::{Generics, Path, Signature, TraitBound, Type, TypePath, Visibility};
 
 use crate::scan::syntax_fingerprint;
 
@@ -59,6 +59,21 @@ pub(in crate::structure::syntax::imports) fn public_path_argument_type_exposures
     collect_type_exposures(generic_types.clone(), &fingerprint, "path-arguments", context, |collector| {
         for segment in &path.segments {
             collector.visit_path_arguments(&segment.arguments);
+        }
+    })
+}
+
+pub(in crate::structure::syntax::imports) fn public_generic_default_type_exposures(
+    generics: &Generics,
+    inherited_generic_types: &BTreeSet<String>,
+    context: &PublicTypeExposureContext<'_>,
+) -> Result<Vec<PendingPublicReexport>> {
+    let mut generic_types = inherited_generic_types.clone();
+    generic_types.extend(generics.type_params().map(|parameter| normalized_ident(&parameter.ident)));
+    let fingerprint = syntax_fingerprint(&without_documentation(&generics.to_token_stream()));
+    collect_type_exposures(generic_types, &fingerprint, "generic-defaults", context, |collector| {
+        for default in generics.type_params().filter_map(|parameter| parameter.default.as_ref()) {
+            collector.visit_type(default);
         }
     })
 }

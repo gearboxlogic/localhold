@@ -877,6 +877,10 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         let exposed = visibility_is_exposed(&item.vis);
         if exposed {
             self.record_declaration_generics("struct-generics", &item.vis, &item.generics);
+            if let Err(error) = self.record_exposed_generic_default_types("struct-generics", &item.ident, &item.vis, &item.generics) {
+                self.error = Some(error);
+                return;
+            }
         }
         if matches!(item.vis, Visibility::Public(_)) {
             let mut item_path = self.module.clone();
@@ -907,6 +911,10 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         let exposed = visibility_is_exposed(&item.vis);
         if exposed {
             self.record_declaration_generics("enum-generics", &item.vis, &item.generics);
+            if let Err(error) = self.record_exposed_generic_default_types("enum-generics", &item.ident, &item.vis, &item.generics) {
+                self.error = Some(error);
+                return;
+            }
         }
         self.enter_generic_scope(&item.generics);
         self.field_exposures.push(FieldExposure::Enum(exposed));
@@ -920,6 +928,10 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         let exposed = visibility_is_exposed(&item.vis);
         if exposed {
             self.record_declaration_generics("union-generics", &item.vis, &item.generics);
+            if let Err(error) = self.record_exposed_generic_default_types("union-generics", &item.ident, &item.vis, &item.generics) {
+                self.error = Some(error);
+                return;
+            }
         }
         self.enter_generic_scope(&item.generics);
         self.field_exposures.push(FieldExposure::Union(exposed));
@@ -936,6 +948,10 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             header.attrs.clear();
             header.items.clear();
             self.record_concrete_stores_in_signature("trait-header", &header);
+            if let Err(error) = self.record_exposed_generic_default_types("trait-generics", &item.ident, &item.vis, &item.generics) {
+                self.error = Some(error);
+                return;
+            }
         }
         self.enter_generic_scope(&item.generics);
         if exposed && let Err(error) = self.record_exposed_supertraits(item) {
@@ -1103,6 +1119,12 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_type(&mut self, item: &'ast ItemType) {
+        if visibility_is_exposed(&item.vis)
+            && let Err(error) = self.record_exposed_generic_default_types("type-alias-generics", &item.ident, &item.vis, &item.generics)
+        {
+            self.error = Some(error);
+            return;
+        }
         if self.block_depth == 0
             && let Err(error) = self.record_type_alias_evidence(item)
         {

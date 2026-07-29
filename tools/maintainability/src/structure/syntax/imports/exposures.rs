@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::Result;
-use proc_macro2::TokenStream;
+use proc_macro2::{Ident, TokenStream};
 use syn::{
     Field, ForeignItemStatic, Generics, ImplItemConst, ImplItemFn, ImplItemType, ItemConst, ItemImpl, ItemStatic, ItemTrait, Signature, TraitBoundModifier, TraitItemConst,
     TraitItemType, TypeParamBound, Visibility,
@@ -9,7 +9,11 @@ use syn::{
 
 use crate::scan::syntax_fingerprint;
 
-use super::reexports::{PendingPublicReexport, PublicTypeExposureContext, public_path_argument_type_exposures, public_signature_type_exposures, public_type_exposures};
+use super::concrete::production_generics;
+use super::reexports::{
+    PendingPublicReexport, PublicTypeExposureContext, public_generic_default_type_exposures, public_path_argument_type_exposures, public_signature_type_exposures,
+    public_type_exposures,
+};
 use super::{ProductionSyntaxCollector, PublicReexportEvidence, normalized_ident};
 
 #[derive(Clone, Copy)]
@@ -32,6 +36,32 @@ fn self_supertrait_bounds(predicate: &syn::WherePredicate) -> Option<&syn::punct
 }
 
 impl ProductionSyntaxCollector {
+    pub(super) fn record_exposed_generic_default_types(&mut self, boundary_kind: &str, ident: &Ident, visibility: &Visibility, generics: &Generics) -> Result<()> {
+        let generics = production_generics(generics, &self.cfg_context)?;
+        let mut exported_path = self.module.clone();
+        exported_path.push(normalized_ident(ident));
+        let ancestors = self.declaration_ancestor_identity();
+        let exposures = public_generic_default_type_exposures(
+            &generics,
+            &self.active_generic_types(),
+            &PublicTypeExposureContext {
+                boundary_kind,
+                exported_path: &exported_path,
+                source_path: Some(&exported_path),
+                required_trait_path: None,
+                module: &self.module,
+                visibility,
+                cfg: &self.cfg_context,
+                direct_exposure_cfg: self.direct_exposure_cfg(),
+                ancestors: &ancestors,
+                rust_2015_absolute_paths: self.rust_2015_absolute_paths,
+                source_revision: self.source_revision,
+            },
+        )?;
+        self.public_reexports.extend(exposures);
+        Ok(())
+    }
+
     fn record_signature_type_exposures(&mut self, boundary: TypeExposureBoundary<'_>, signature: &Signature) -> Result<()> {
         let ancestors = self.declaration_ancestor_identity();
         let generic_types = self.active_generic_types();

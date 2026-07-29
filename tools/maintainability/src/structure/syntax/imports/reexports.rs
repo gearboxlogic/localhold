@@ -10,7 +10,9 @@ use super::resolution::resolve_path;
 use super::{PublicReexportEvidence, TypeDeclarationEvidence};
 
 mod signatures;
-pub(super) use signatures::{PublicTypeExposureContext, public_path_argument_type_exposures, public_signature_type_exposures, public_type_exposures};
+pub(super) use signatures::{
+    PublicTypeExposureContext, public_generic_default_type_exposures, public_path_argument_type_exposures, public_signature_type_exposures, public_type_exposures,
+};
 
 pub(super) struct PendingPublicReexport {
     pub(super) evidence: PublicReexportEvidence,

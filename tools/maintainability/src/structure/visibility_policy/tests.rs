@@ -12,6 +12,15 @@ fn exact_component_counts_pass_and_growth_fails() {
 
     let growth = inventory(&[file("src/config.rs", 3, 1), file("src/embedding.rs", 1, 0)]);
     assert!(policy.compare_current(&growth, &paths).unwrap_err().to_string().contains("production-count mismatch"));
+
+    let unrecorded_reduction = inventory(&[file("src/config.rs", 1, 1), file("src/embedding.rs", 1, 0)]);
+    assert!(
+        policy
+            .compare_current(&unrecorded_reduction, &paths)
+            .unwrap_err()
+            .to_string()
+            .contains("production-count mismatch")
+    );
 }
 
 #[test]

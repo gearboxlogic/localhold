@@ -2,16 +2,18 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 use proc_macro2::{Delimiter, Group, TokenStream, TokenTree};
-use syn::Path;
+use syn::{Attribute, ItemMacro, ItemUse, Meta, Path};
 
+use super::super::resolution::{flatten_use_tree, resolve_path};
 use super::super::tokens::resolving_tokens;
 use super::VisibilityCounts;
-use crate::structure::syntax::normalized_ident;
+use crate::structure::syntax::{ProductionCfgContext, normalized_ident, production_cfg_attr_metas};
 
 #[derive(Default)]
 pub struct VisibilityMacroAudit {
     definitions: BTreeMap<MacroId, MacroDefinition>,
     direct_invocations: Vec<MacroInvocation>,
+    imports: Vec<MacroImport>,
 }
 
 struct MacroDefinition {
@@ -31,10 +33,15 @@ struct MacroInvocation {
     segments: Vec<String>,
 }
 
+struct MacroImport {
+    path: Vec<String>,
+}
+
 impl VisibilityMacroAudit {
-    pub fn record_definition(&mut self, module: &[String], name: &proc_macro2::Ident, tokens: &TokenStream) -> Result<()> {
+    pub fn record_definition(&mut self, module: &[String], item: &ItemMacro, cfg_context: &ProductionCfgContext) -> Result<()> {
+        let name = item.ident.as_ref().context("visibility macro definition has no name")?;
         let name = normalized_ident(name);
-        let tokens = resolving_tokens(tokens);
+        let tokens = resolving_tokens(&item.mac.tokens);
         let transcribers = macro_transcribers(&tokens);
         let all_counts = VisibilityCounts::from_tokens(&tokens)?;
         let body_counts = transcribers.iter().try_fold(VisibilityCounts::default(), |mut total, body| {
@@ -45,6 +52,9 @@ impl VisibilityMacroAudit {
             bail!("production macro {name:?} places restricted visibility outside a macro transcriber");
         }
         if !all_counts.is_empty() {
+            if production_macro_export(&item.attrs, cfg_context)? {
+                bail!("production macro {name:?} with restricted visibility cannot be exported with #[macro_export]");
+            }
             if transcribers.iter().any(|body| contains_macro_definition(&body.stream())) {
                 bail!("production macro {name:?} with restricted visibility cannot define nested macros");
             }
@@ -72,6 +82,27 @@ impl VisibilityMacroAudit {
         Ok(())
     }
 
+    pub fn record_import(&mut self, module: &[String], item: &ItemUse, rust_2015_absolute_paths: bool) -> Result<()> {
+        if item.leading_colon.is_some() && !rust_2015_absolute_paths {
+            return Ok(());
+        }
+        let mut paths = Vec::new();
+        flatten_use_tree(&item.tree, &mut Vec::new(), &mut paths);
+        for mut path in paths {
+            if path.alias.as_deref() == Some("_") {
+                continue;
+            }
+            if item.leading_colon.is_some() {
+                path.segments.insert(0, "crate".to_owned());
+            }
+            let Some(path) = resolve_path(module, &path.segments, rust_2015_absolute_paths)? else {
+                continue;
+            };
+            self.imports.push(MacroImport { path });
+        }
+        Ok(())
+    }
+
     pub fn record_invocation(&mut self, module: &[String], path: &Path, tokens: &TokenStream) -> Result<()> {
         let tokens = resolving_tokens(tokens);
         if invocation_may_supply_visibility(&tokens)? {
@@ -89,6 +120,15 @@ impl VisibilityMacroAudit {
     }
 
     pub fn finish(&self) -> Result<()> {
+        for import in &self.imports {
+            if let Some(id) = self.imported_restricted_definition(import) {
+                bail!(
+                    "production macro {:?} in module {:?} with restricted visibility cannot be imported because imports make expansion counts ambiguous",
+                    id.name,
+                    id.module
+                );
+            }
+        }
         for (id, definition) in &self.definitions {
             if !definition.has_restricted_visibility {
                 continue;
@@ -122,6 +162,22 @@ impl VisibilityMacroAudit {
         Ok(())
     }
 
+    fn imported_restricted_definition(&self, import: &MacroImport) -> Option<&MacroId> {
+        let (name, module) = import.path.split_last()?;
+        if name == "*" {
+            return self
+                .definitions
+                .iter()
+                .find_map(|(id, definition)| (definition.has_restricted_visibility && id.module == module).then_some(id));
+        }
+        self.definitions
+            .get_key_value(&MacroId {
+                module: module.to_vec(),
+                name: name.clone(),
+            })
+            .and_then(|(id, definition)| definition.has_restricted_visibility.then_some(id))
+    }
+
     fn resolve_invocation(&self, invocation: &MacroInvocation) -> Option<&MacroId> {
         let (first, rest) = invocation.segments.split_first()?;
         if invocation.leading_colon {
@@ -151,6 +207,25 @@ impl VisibilityMacroAudit {
             .filter(|id| id.name == *first && invocation.module.starts_with(&id.module))
             .max_by_key(|id| id.module.len())
     }
+}
+
+fn production_macro_export(attributes: &[Attribute], cfg_context: &ProductionCfgContext) -> Result<bool> {
+    for attribute in attributes {
+        if attribute.path().is_ident("macro_export") {
+            return Ok(true);
+        }
+        let Meta::List(list) = &attribute.meta else {
+            continue;
+        };
+        if attribute.path().is_ident("cfg_attr")
+            && production_cfg_attr_metas(&list.tokens, cfg_context)?
+                .iter()
+                .any(|meta| meta.path().is_ident("macro_export"))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn resolve_super_path(module: &[String], segments: &[String]) -> Option<Vec<String>> {

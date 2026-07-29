@@ -102,6 +102,35 @@ fn restricted_visibility_macro_cannot_define_a_nested_macro() -> Result<()> {
 }
 
 #[test]
+fn restricted_visibility_macro_cannot_be_imported_or_exported() -> Result<()> {
+    let imported = "mod definitions {\n\
+                        macro_rules! define_memory_columns {\n\
+                            ($name:ident) => { pub(crate) struct $name; }\n\
+                        }\n\
+                        define_memory_columns!(Direct);\n\
+                        pub(super) use define_memory_columns;\n\
+                    }\n\
+                    mod consumer {\n\
+                        use super::definitions::define_memory_columns;\n\
+                        define_memory_columns!(Indirect);\n\
+                    }\n";
+    let error = concrete_facts(imported).err().context("imported visibility macro should fail")?;
+    assert!(error.to_string().contains("cannot be imported"), "{error:#}");
+
+    let exported = "#[cfg_attr(feature = \"other\", macro_export)]\n\
+                    macro_rules! define_memory_columns { () => { pub(crate) struct Generated; } }\n\
+                    define_memory_columns!();\n";
+    let error = concrete_facts(exported).err().context("exported visibility macro should fail")?;
+    assert!(error.to_string().contains("cannot be exported"), "{error:#}");
+
+    let test_only_export = "#[cfg_attr(test, macro_export)]\n\
+                            macro_rules! define_memory_columns { () => { pub(crate) struct Generated; } }\n\
+                            define_memory_columns!();\n";
+    assert_eq!(concrete_facts(test_only_export)?.visibilities, VisibilityCounts { pub_crate: 1, pub_super: 0 });
+    Ok(())
+}
+
+#[test]
 fn macro_arguments_cannot_supply_or_construct_restricted_visibility() -> Result<()> {
     let direct = "macro_rules! define_memory_columns { ($($tokens:tt)*) => { $($tokens)* } }\n\
                   define_memory_columns!(pub(crate) struct Generated;);\n";

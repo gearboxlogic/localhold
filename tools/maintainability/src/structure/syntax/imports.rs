@@ -990,13 +990,17 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
 
     fn visit_item_use(&mut self, item: &'ast ItemUse) {
         let previous = self.enter_site_context("use", item);
-        let result = self.collect_use(item).and_then(|()| {
-            if self.block_depth == 0 {
-                self.record_use_resolutions(item)?;
-                self.record_public_reexport(item)?;
-            }
-            Ok(())
-        });
+        let result = self
+            .visibility_macros
+            .record_import(&self.module, item, self.rust_2015_absolute_paths)
+            .and_then(|()| self.collect_use(item))
+            .and_then(|()| {
+                if self.block_depth == 0 {
+                    self.record_use_resolutions(item)?;
+                    self.record_public_reexport(item)?;
+                }
+                Ok(())
+            });
         if self.error.is_none()
             && let Err(error) = result
         {
@@ -1442,7 +1446,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             self.error = Some(anyhow::anyhow!("production macro definitions cannot inject concrete stores into call sites"));
             return;
         }
-        if let Err(error) = self.visibility_macros.record_definition(&self.module, name, &item.mac.tokens) {
+        if let Err(error) = self.visibility_macros.record_definition(&self.module, item, &self.cfg_context) {
             self.error = Some(error);
             return;
         }

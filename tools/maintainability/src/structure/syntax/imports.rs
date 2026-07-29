@@ -26,8 +26,8 @@ mod reexports;
 mod resolution;
 mod stringify;
 mod tokens;
+use concrete::{BindingSiteContext, ConcreteStoreInventory, SignatureSiteContext, context_fingerprint, is_concrete_store_name, production_generics, without_documentation};
 pub use concrete::{ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites};
-use concrete::{ConcreteStoreInventory, SignatureSiteContext, context_fingerprint, is_concrete_store_name, production_generics, without_documentation};
 pub use declarations::TypeDeclarationEvidence;
 pub(in crate::structure) use declarations::TypeDeclarationKind;
 use declarations::{TypeDeclarationContext, type_declaration_evidence};
@@ -35,7 +35,9 @@ use macro_definitions::contains_production_concrete_store;
 use production::{
     production_foreign_item_tokens, production_impl_item_tokens, production_impl_tokens, production_item_tokens, production_stmt_tokens, production_trait_item_tokens,
 };
-use reexports::{PendingPublicReexport, UseResolution, resolve_impl_signature_aliases, resolve_public_reexport_aliases};
+use reexports::{
+    PendingPublicReexport, PublicTypeAliasContext, UseResolution, public_type_alias, resolve_binding_aliases, resolve_impl_signature_aliases, resolve_public_reexport_aliases,
+};
 pub(in crate::structure) use resolution::source_module;
 use resolution::{StringScan, UsePath, flatten_use_tree, resolve_path, restricted_attribute_identifier, restricted_token_identifier};
 use stringify::{
@@ -164,7 +166,9 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
     collector.type_declarations.sort();
     collector.type_declarations.dedup();
     resolve_impl_signature_aliases(&mut collector.concrete_stores.signature_sites, &collector.use_resolutions);
+    resolve_binding_aliases(&mut collector.concrete_stores.binding_sites, &collector.use_resolutions);
     collector.concrete_stores.finish();
+    let binding_concrete_store_sites = collector.concrete_stores.binding_fingerprints();
     Ok(ProductionSyntaxFacts {
         module: collector.module,
         internal_imports: collector.imports,
@@ -175,7 +179,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
         concrete_store_sites: collector.concrete_stores.sites,
         generic_default_concrete_store_sites: collector.concrete_stores.generic_default_sites,
         signature_concrete_store_sites: collector.concrete_stores.signature_sites,
-        binding_concrete_store_sites: collector.concrete_stores.binding_sites,
+        binding_concrete_store_sites,
     })
 }
 
@@ -276,6 +280,25 @@ impl ProductionSyntaxCollector {
                 cfg: self.cfg_context.clone(),
             });
         }
+        Ok(())
+    }
+
+    fn record_public_type_alias(&mut self, item: &ItemType) -> Result<()> {
+        let ancestors = self.declaration_ancestor_identity();
+        let Some(alias) = public_type_alias(
+            item,
+            PublicTypeAliasContext {
+                module: &self.module,
+                cfg: &self.cfg_context,
+                direct_exposure_cfg: self.direct_exposure_cfg(),
+                ancestors: &ancestors,
+                rust_2015_absolute_paths: self.rust_2015_absolute_paths,
+            },
+        )?
+        else {
+            return Ok(());
+        };
+        self.public_reexports.push(alias);
         Ok(())
     }
 
@@ -921,7 +944,14 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             format!("impl-header:{}", syntax_fingerprint(&header_tokens))
         };
         let context = format!("{binding}\0cfg:{}\0ancestors:{}", self.cfg_context.identity(), self.declaration_ancestor_identity());
-        self.concrete_stores.record_binding_tokens(&header_tokens, &context);
+        self.concrete_stores.record_binding_tokens(
+            &header_tokens,
+            &BindingSiteContext {
+                fingerprint: &context,
+                item_path: self.impl_item_paths.last().map_or(&[], Vec::as_slice),
+                cfg: &self.cfg_context,
+            },
+        );
         let trait_exposure = item.trait_.is_some();
         if trait_exposure {
             self.record_concrete_stores_in_exposure_signature_with_identity("trait-impl-header", &header_tokens, &header_tokens);
@@ -1026,6 +1056,12 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_type(&mut self, item: &'ast ItemType) {
+        if self.block_depth == 0
+            && let Err(error) = self.record_public_type_alias(item)
+        {
+            self.error = Some(error);
+            return;
+        }
         let import_count = self.imports.len();
         let concrete_before = self.concrete_stores.counts;
         visit::visit_item_type(self, item);

@@ -136,6 +136,25 @@ fn public_reexport_aliases_use_only_cfg_compatible_bindings() -> Result<()> {
 }
 
 #[test]
+fn exposed_type_aliases_are_public_reexport_evidence() -> Result<()> {
+    let facts = concrete_facts(
+        "mod hidden { pub(crate) struct Adapter; }\n\
+         pub(crate) type PublicAdapter = hidden::Adapter;\n",
+    )?;
+    assert_eq!(facts.public_reexports.len(), 1);
+    assert_eq!(facts.public_reexports[0].exported_path, ["store_fixture", "PublicAdapter"]);
+    assert_eq!(facts.public_reexports[0].target_path, ["store_fixture", "hidden", "Adapter"]);
+    assert!(facts.public_reexports[0].direct_exposure_cfg.is_some());
+
+    let generic = concrete_facts(
+        "pub(crate) struct T;\n\
+         pub(crate) type Identity<T> = T;\n",
+    )?;
+    assert!(generic.public_reexports.is_empty());
+    Ok(())
+}
+
+#[test]
 fn self_restricted_uses_are_not_public_reexport_evidence() -> Result<()> {
     for visibility in ["", "pub(self)", "pub(in self)"] {
         let facts = concrete_facts(&format!("{visibility} use crate::stores::open;\n"))?;
@@ -960,6 +979,24 @@ fn canonical_binding_identity_tracks_trait_implementation_bodies() -> Result<()>
     assert_ne!(first.binding_concrete_store_sites, second.binding_concrete_store_sites);
     assert_eq!(first.binding_concrete_store_sites.sqlite_store.len(), 1);
     assert_ne!(first.concrete_store_sites, second.concrete_store_sites);
+    Ok(())
+}
+
+#[test]
+fn canonical_binding_identity_tracks_the_resolved_impl_self_type() -> Result<()> {
+    let canonical = concrete_facts(
+        "mod canonical { pub(crate) struct SqliteStore; }\n\
+         impl SqliteStore {}\n\
+         use canonical::SqliteStore;\n",
+    )?;
+    let shadow = concrete_facts(
+        "mod shadow { pub(crate) struct SqliteStore; }\n\
+         impl SqliteStore {}\n\
+         use shadow::SqliteStore;\n",
+    )?;
+    assert_eq!(canonical.binding_concrete_store_sites.sqlite_store.len(), 1);
+    assert_eq!(shadow.binding_concrete_store_sites.sqlite_store.len(), 1);
+    assert_ne!(canonical.binding_concrete_store_sites, shadow.binding_concrete_store_sites);
     Ok(())
 }
 

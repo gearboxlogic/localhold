@@ -43,6 +43,19 @@ pub struct ConcreteStoreSignatureSites {
     pub postgres_store: Vec<ConcreteStoreSignatureSite>,
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct ConcreteStoreBindingSite {
+    pub(super) fingerprint: String,
+    pub(super) item_path: Vec<String>,
+    pub(super) cfg: ProductionCfgContext,
+}
+
+#[derive(Default)]
+pub(super) struct ConcreteStoreBindingSites {
+    pub(super) sqlite_store: Vec<ConcreteStoreBindingSite>,
+    pub(super) postgres_store: Vec<ConcreteStoreBindingSite>,
+}
+
 #[derive(Default)]
 pub(super) struct ConcreteStoreInventory {
     pub(super) counts: ConcreteStoreCounts,
@@ -50,7 +63,7 @@ pub(super) struct ConcreteStoreInventory {
     pub(super) sites: ConcreteStoreSites,
     pub(super) generic_default_sites: ConcreteStoreSites,
     pub(super) signature_sites: ConcreteStoreSignatureSites,
-    pub(super) binding_sites: ConcreteStoreSites,
+    pub(super) binding_sites: ConcreteStoreBindingSites,
 }
 
 pub(super) struct SignatureSiteContext<'a> {
@@ -59,6 +72,12 @@ pub(super) struct SignatureSiteContext<'a> {
     pub(super) impl_self_type: bool,
     pub(super) direct_exposure_cfg: Option<&'a ProductionCfgContext>,
     pub(super) required_trait_path: Option<&'a [String]>,
+}
+
+pub(super) struct BindingSiteContext<'a> {
+    pub(super) fingerprint: &'a str,
+    pub(super) item_path: &'a [String],
+    pub(super) cfg: &'a ProductionCfgContext,
 }
 
 impl ConcreteStoreInventory {
@@ -73,6 +92,13 @@ impl ConcreteStoreInventory {
         self.signature_sites.postgres_store.sort();
         self.binding_sites.sqlite_store.sort();
         self.binding_sites.postgres_store.sort();
+    }
+
+    pub(super) fn binding_fingerprints(&self) -> ConcreteStoreSites {
+        ConcreteStoreSites {
+            sqlite_store: self.binding_sites.sqlite_store.iter().map(|site| site.fingerprint.clone()).collect(),
+            postgres_store: self.binding_sites.postgres_store.iter().map(|site| site.fingerprint.clone()).collect(),
+        }
     }
 
     pub(super) fn record_ident(&mut self, ident: &proc_macro2::Ident, site_context: &str) -> Result<()> {
@@ -155,7 +181,7 @@ impl ConcreteStoreInventory {
         }
     }
 
-    pub(super) fn record_binding_tokens(&mut self, tokens: &TokenStream, site_context: &str) {
+    pub(super) fn record_binding_tokens(&mut self, tokens: &TokenStream, site_context: &BindingSiteContext<'_>) {
         for token in resolving_tokens(tokens) {
             match token {
                 TokenTree::Group(group) => self.record_binding_tokens(&group.stream(), site_context),
@@ -312,13 +338,17 @@ impl ConcreteStoreInventory {
         });
     }
 
-    fn record_binding_name(&mut self, name: &str, site_context: &str) {
+    fn record_binding_name(&mut self, name: &str, site_context: &BindingSiteContext<'_>) {
         let sites = match name {
             "SqliteStore" => &mut self.binding_sites.sqlite_store,
             "PostgresStore" => &mut self.binding_sites.postgres_store,
             _ => return,
         };
-        sites.push(syntax_fingerprint(&site_context));
+        sites.push(ConcreteStoreBindingSite {
+            fingerprint: syntax_fingerprint(&site_context.fingerprint),
+            item_path: site_context.item_path.to_vec(),
+            cfg: site_context.cfg.clone(),
+        });
     }
 }
 

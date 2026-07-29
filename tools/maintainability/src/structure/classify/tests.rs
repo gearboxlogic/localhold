@@ -279,6 +279,36 @@ fn public_reexports_match_concrete_store_methods_to_their_impl_type() {
 }
 
 #[test]
+fn public_type_aliases_match_concrete_store_methods_to_their_target() {
+    let measured = inventory(&[
+        (
+            "src/lib.rs",
+            "mod hidden;\n\
+             pub(crate) type PublicAdapter = hidden::Adapter;\n",
+        ),
+        (
+            "src/hidden.rs",
+            "pub(crate) struct Adapter;\n\
+             impl Adapter {\n\
+                 pub(crate) fn open() -> SqliteStore { loop {} }\n\
+             }\n",
+        ),
+    ]);
+    let root = measured.files.iter().find(|file| file.path == "src/lib.rs").expect("root measurement");
+    let hidden = measured.files.iter().find(|file| file.path == "src/hidden.rs").expect("hidden measurement");
+    assert_eq!(root.production_public_reexports.len(), 1);
+    assert_eq!(root.production_public_reexports[0].exported_path, ["PublicAdapter"]);
+    assert_eq!(root.production_public_reexports[0].target_path, ["hidden", "Adapter"]);
+    assert!(
+        hidden
+            .production_signature_store_sites
+            .sqlite_store
+            .iter()
+            .any(|site| site.item_path == ["hidden", "Adapter"])
+    );
+}
+
+#[test]
 fn public_reexport_chains_normalize_exported_and_target_paths() {
     let measured = inventory(&[
         ("src/lib.rs", "mod ui;\n"),

@@ -14,7 +14,7 @@ pub use imports::{
     ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionSyntaxFacts, ProductionSyntaxOptions, PublicReexportEvidence,
     TypeDeclarationEvidence,
 };
-pub(super) use imports::{ProductionAncestorPath, ProductionSyntaxContext, TypeDeclarationKind, production_syntax_facts_with_context, source_module};
+pub(super) use imports::{ProductionAncestorPath, ProductionSourceRevision, ProductionSyntaxContext, TypeDeclarationKind, production_syntax_facts_with_context, source_module};
 
 pub(super) fn normalized_ident(ident: &proc_macro2::Ident) -> String {
     let value = ident.to_string();

@@ -177,6 +177,7 @@ fn public_reexports_are_additive_signature_evidence() {
         fingerprint: "public-use-helper-open".to_owned(),
         cfg: ProductionCfgContext::default(),
         direct_exposure_cfg: Some(ProductionCfgContext::default()),
+        required_trait_path: None,
     }];
 
     let error = policy
@@ -224,6 +225,7 @@ fn public_reexports_must_share_a_cfg_with_the_concrete_signature() {
         fingerprint: "public-use-helper-open".to_owned(),
         cfg: cfg_context("not(feature = \"legacy\")"),
         direct_exposure_cfg: Some(cfg_context("not(feature = \"legacy\")")),
+        required_trait_path: None,
     }];
 
     policy
@@ -249,6 +251,7 @@ fn public_globs_are_evidence_for_canonical_store_declarations() {
         fingerprint: "public-use-store-glob".to_owned(),
         cfg: ProductionCfgContext::default(),
         direct_exposure_cfg: Some(ProductionCfgContext::default()),
+        required_trait_path: None,
     }];
 
     let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
@@ -269,6 +272,7 @@ fn inline_module_reexports_match_the_concrete_bearing_item() {
         fingerprint: "public-use-helper-open".to_owned(),
         cfg: ProductionCfgContext::default(),
         direct_exposure_cfg: Some(ProductionCfgContext::default()),
+        required_trait_path: None,
     }];
 
     let error = policy.compare_site_fingerprints(&exposed, &baseline, paths(&components), paths(&components)).unwrap_err();
@@ -296,6 +300,7 @@ fn unrelated_public_reexports_do_not_change_signature_evidence() {
         fingerprint: "public-use-counter".to_owned(),
         cfg: ProductionCfgContext::default(),
         direct_exposure_cfg: Some(ProductionCfgContext::default()),
+        required_trait_path: None,
     }];
 
     policy
@@ -308,6 +313,7 @@ fn unrelated_public_reexports_do_not_change_signature_evidence() {
         fingerprint: "public-use-same-module-unrelated".to_owned(),
         cfg: ProductionCfgContext::default(),
         direct_exposure_cfg: Some(ProductionCfgContext::default()),
+        required_trait_path: None,
     }];
     policy
         .compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components))
@@ -329,6 +335,7 @@ fn public_reexports_match_signatures_only_within_the_same_target() {
         fingerprint: "binary-adapter-reexport".to_owned(),
         cfg: ProductionCfgContext::default(),
         direct_exposure_cfg: Some(ProductionCfgContext::default()),
+        required_trait_path: None,
     }];
 
     policy
@@ -370,6 +377,7 @@ fn exposed_function_return_types_make_impl_boundaries_reachable() {
         fingerprint: "public-function-return-adapter".to_owned(),
         cfg: ProductionCfgContext::default(),
         direct_exposure_cfg: Some(ProductionCfgContext::default()),
+        required_trait_path: None,
     }];
 
     let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
@@ -405,12 +413,56 @@ fn private_trait_implementations_are_not_exposure_signatures() {
         fingerprint: "internal-trait-reexport".to_owned(),
         cfg: ProductionCfgContext::default(),
         direct_exposure_cfg: Some(ProductionCfgContext::default()),
+        required_trait_path: None,
     }];
     let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
     assert!(error.to_string().contains("production signature"));
 
     current.files[0].production_public_reexports.clear();
     current.files[0].production_type_declarations[0].direct_exposure_cfg = Some(ProductionCfgContext::default());
+    let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
+    assert!(error.to_string().contains("production signature"));
+}
+
+#[test]
+fn associated_type_exposure_edges_require_an_externally_reachable_trait() {
+    let policy = policy();
+    let components = components(&[("src/adapter.rs", "sqlite-store")]);
+    let mut baseline = inventory(&[("src/adapter.rs", 1, 0)]);
+    baseline.files[0].production_signature_store_sites.sqlite_store = vec![impl_signature("adapter-open", &["hidden", "Adapter"])];
+    let mut private_adapter = type_declaration("private-adapter", &["hidden", "Adapter"]);
+    private_adapter.direct_exposure_cfg = None;
+    baseline.files[0].production_type_declarations = vec![private_adapter];
+
+    let mut current = baseline.clone();
+    let mut private_trait = type_declaration("private-deref", &["PrivateDeref"]);
+    private_trait.kind = TypeDeclarationKind::Trait;
+    private_trait.direct_exposure_cfg = None;
+    current.files[0].production_type_declarations.push(private_trait);
+    current.files[0].production_public_reexports = vec![PublicReexportEvidence {
+        exported_path: vec!["Wrapper".to_owned()],
+        target_path: vec!["hidden".to_owned(), "Adapter".to_owned()],
+        fingerprint: "wrapper-associated-target".to_owned(),
+        cfg: ProductionCfgContext::default(),
+        direct_exposure_cfg: Some(ProductionCfgContext::default()),
+        required_trait_path: Some(vec!["PrivateDeref".to_owned()]),
+    }];
+
+    policy
+        .compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components))
+        .expect("an associated type on a private trait cannot expose its target");
+
+    current.files[0]
+        .production_type_declarations
+        .last_mut()
+        .expect("private trait declaration")
+        .direct_exposure_cfg = Some(ProductionCfgContext::default());
+    let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
+    assert!(error.to_string().contains("production signature"));
+
+    current.files[0]
+        .production_type_declarations
+        .retain(|declaration| declaration.kind != TypeDeclarationKind::Trait);
     let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
     assert!(error.to_string().contains("production signature"));
 }
@@ -457,6 +509,7 @@ fn transitive_public_reexports_are_signature_evidence() {
         fingerprint: "facade-open".to_owned(),
         cfg: ProductionCfgContext::default(),
         direct_exposure_cfg: None,
+        required_trait_path: None,
     }];
     let mut current = baseline.clone();
     current.files[0].production_public_reexports = vec![PublicReexportEvidence {
@@ -465,7 +518,54 @@ fn transitive_public_reexports_are_signature_evidence() {
         fingerprint: "ui-open".to_owned(),
         cfg: ProductionCfgContext::default(),
         direct_exposure_cfg: Some(ProductionCfgContext::default()),
+        required_trait_path: None,
     }];
+
+    let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
+    assert!(error.to_string().contains("production signature"));
+}
+
+#[test]
+fn cyclic_reexports_preserve_an_alternate_path_to_signature_evidence() {
+    let policy = policy();
+    let components = components(&[("src/lib.rs", "composition"), ("src/store/sqlite.rs", "sqlite-store")]);
+    let mut baseline = inventory(&[("src/lib.rs", 0, 0), ("src/store/sqlite.rs", 1, 0)]);
+    baseline.files[1].production_signature_store_sites.sqlite_store = vec![signature("private-open", &["store", "sqlite", "open"])];
+    let mut current = baseline.clone();
+    current.files[0].production_public_reexports = vec![
+        PublicReexportEvidence {
+            exported_path: vec!["open".to_owned()],
+            target_path: vec!["cycle".to_owned(), "a".to_owned()],
+            fingerprint: "public-open".to_owned(),
+            cfg: ProductionCfgContext::default(),
+            direct_exposure_cfg: Some(ProductionCfgContext::default()),
+            required_trait_path: None,
+        },
+        PublicReexportEvidence {
+            exported_path: vec!["cycle".to_owned(), "a".to_owned()],
+            target_path: vec!["cycle".to_owned(), "b".to_owned()],
+            fingerprint: "cycle-a-to-b".to_owned(),
+            cfg: ProductionCfgContext::default(),
+            direct_exposure_cfg: None,
+            required_trait_path: None,
+        },
+        PublicReexportEvidence {
+            exported_path: vec!["cycle".to_owned(), "b".to_owned()],
+            target_path: vec!["cycle".to_owned(), "a".to_owned()],
+            fingerprint: "cycle-b-to-a".to_owned(),
+            cfg: ProductionCfgContext::default(),
+            direct_exposure_cfg: None,
+            required_trait_path: None,
+        },
+        PublicReexportEvidence {
+            exported_path: vec!["cycle".to_owned(), "a".to_owned()],
+            target_path: vec!["store".to_owned(), "sqlite".to_owned(), "open".to_owned()],
+            fingerprint: "cycle-a-to-open".to_owned(),
+            cfg: ProductionCfgContext::default(),
+            direct_exposure_cfg: None,
+            required_trait_path: None,
+        },
+    ];
 
     let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
     assert!(error.to_string().contains("production signature"));

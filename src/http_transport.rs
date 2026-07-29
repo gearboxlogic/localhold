@@ -23,7 +23,7 @@ use rmcp::{
         RestoreOutcome, SessionId, SessionManager, StreamableHttpServerConfig, StreamableHttpService,
         session::{
             ServerSseMessage,
-            local::{LocalSessionManager, LocalSessionManagerError},
+            local::{LocalSessionManager, LocalSessionManagerError, SessionTransport},
         },
     },
 };
@@ -259,7 +259,7 @@ enum CappedSessionManagerError {
 
 impl SessionManager for CappedSessionManager {
     type Error = CappedSessionManagerError;
-    type Transport = <LocalSessionManager as SessionManager>::Transport;
+    type Transport = SessionTransport;
 
     async fn create_session(&self) -> Result<(SessionId, Self::Transport), Self::Error> {
         let _guard = self.create_lock.lock().await;

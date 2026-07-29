@@ -1,0 +1,256 @@
+use std::collections::BTreeSet;
+
+use anyhow::Result;
+use syn::{Field, ForeignItemStatic, Generics, ImplItemConst, ImplItemFn, ImplItemType, ItemConst, ItemStatic, Signature, TraitItemConst, Visibility};
+
+use super::reexports::{PublicTypeExposureContext, public_signature_type_exposures, public_type_exposures};
+use super::{ProductionSyntaxCollector, normalized_ident};
+
+#[derive(Clone, Copy)]
+struct TypeExposureBoundary<'a> {
+    kind: &'a str,
+    exported_path: &'a [String],
+    source_path: Option<&'a [String]>,
+    required_trait_path: Option<&'a [String]>,
+    visibility: &'a Visibility,
+}
+
+impl ProductionSyntaxCollector {
+    fn record_signature_type_exposures(&mut self, boundary: TypeExposureBoundary<'_>, signature: &Signature) -> Result<()> {
+        let ancestors = self.declaration_ancestor_identity();
+        let generic_types = self.active_generic_types();
+        let exposures = public_signature_type_exposures(
+            signature,
+            &generic_types,
+            &PublicTypeExposureContext {
+                boundary_kind: boundary.kind,
+                exported_path: boundary.exported_path,
+                source_path: boundary.source_path,
+                required_trait_path: boundary.required_trait_path,
+                module: &self.module,
+                visibility: boundary.visibility,
+                cfg: &self.cfg_context,
+                direct_exposure_cfg: self.direct_exposure_cfg(),
+                ancestors: &ancestors,
+                rust_2015_absolute_paths: self.rust_2015_absolute_paths,
+                source_revision: self.source_revision,
+            },
+        )?;
+        self.public_reexports.extend(exposures);
+        Ok(())
+    }
+
+    fn record_type_exposures(&mut self, boundary: TypeExposureBoundary<'_>, ty: &syn::Type) -> Result<()> {
+        let ancestors = self.declaration_ancestor_identity();
+        let generic_types = self.active_generic_types();
+        let exposures = public_type_exposures(
+            ty,
+            &generic_types,
+            &PublicTypeExposureContext {
+                boundary_kind: boundary.kind,
+                exported_path: boundary.exported_path,
+                source_path: boundary.source_path,
+                required_trait_path: boundary.required_trait_path,
+                module: &self.module,
+                visibility: boundary.visibility,
+                cfg: &self.cfg_context,
+                direct_exposure_cfg: self.direct_exposure_cfg(),
+                ancestors: &ancestors,
+                rust_2015_absolute_paths: self.rust_2015_absolute_paths,
+                source_revision: self.source_revision,
+            },
+        )?;
+        self.public_reexports.extend(exposures);
+        Ok(())
+    }
+
+    pub(super) fn record_exposed_function_signature(&mut self, boundary_kind: &str, visibility: &Visibility, signature: &Signature) -> Result<()> {
+        let signature = self.production_signature(signature)?;
+        let mut exported_path = self.module.clone();
+        exported_path.push(normalized_ident(&signature.ident));
+        self.record_signature_type_exposures(
+            TypeExposureBoundary {
+                kind: boundary_kind,
+                exported_path: &exported_path,
+                source_path: None,
+                required_trait_path: None,
+                visibility,
+            },
+            &signature,
+        )?;
+        self.record_concrete_stores_in_visible_signature(boundary_kind, visibility, &signature);
+        Ok(())
+    }
+
+    fn record_exposed_method_signature(&mut self, boundary_kind: &str, visibility: &Visibility, signature: &Signature) -> Result<()> {
+        let source_path = self.impl_item_paths.last().filter(|path| !path.is_empty()).cloned();
+        let mut fallback_path = self.module.clone();
+        fallback_path.push(normalized_ident(&signature.ident));
+        let exported_path = source_path.as_deref().unwrap_or(&fallback_path);
+        let required_trait_path = self.impl_trait_paths.last().cloned().flatten();
+        self.record_signature_type_exposures(
+            TypeExposureBoundary {
+                kind: boundary_kind,
+                exported_path,
+                source_path: source_path.as_deref(),
+                required_trait_path: required_trait_path.as_deref(),
+                visibility,
+            },
+            signature,
+        )
+    }
+
+    pub(super) fn record_impl_method_exposure(&mut self, item: &ImplItemFn) -> Result<()> {
+        let signature = self.production_signature(&item.sig)?;
+        self.record_impl_header_for_visible_member("inherent-impl-method", &item.vis, &signature);
+        if self.impl_member_is_exposed(&item.vis) {
+            self.record_exposed_method_signature("method-signature", &item.vis, &signature)?;
+            self.record_concrete_stores_in_visible_signature("method-signature", &item.vis, &signature);
+        }
+        Ok(())
+    }
+
+    pub(super) fn record_exposed_trait_signature(&mut self, signature: &Signature) -> Result<()> {
+        let signature = self.production_signature(signature)?;
+        let source_path = self.signature_item_path();
+        let visibility = Visibility::Inherited;
+        self.record_signature_type_exposures(
+            TypeExposureBoundary {
+                kind: "trait-method-signature",
+                exported_path: &source_path,
+                source_path: (!source_path.is_empty()).then_some(source_path.as_slice()),
+                required_trait_path: None,
+                visibility: &visibility,
+            },
+            &signature,
+        )?;
+        self.record_concrete_stores_in_signature("trait-method-signature", &signature);
+        Ok(())
+    }
+
+    pub(super) fn record_field_type_exposure(&mut self, field: &Field) -> Result<()> {
+        self.record_concrete_stores_in_visible_signature("field-type", &field.vis, &field.ty);
+        let source_path = self.signature_item_path();
+        self.record_type_exposures(
+            TypeExposureBoundary {
+                kind: "field-type",
+                exported_path: &source_path,
+                source_path: (!source_path.is_empty()).then_some(source_path.as_slice()),
+                required_trait_path: None,
+                visibility: &field.vis,
+            },
+            &field.ty,
+        )
+    }
+
+    pub(super) fn record_item_const_type_exposure(&mut self, item: &ItemConst) -> Result<()> {
+        self.record_concrete_stores_in_visible_signature("const-type", &item.vis, &item.ty);
+        let exported_path = self.signature_item_path();
+        self.record_type_exposures(
+            TypeExposureBoundary {
+                kind: "const-type",
+                exported_path: &exported_path,
+                source_path: None,
+                required_trait_path: None,
+                visibility: &item.vis,
+            },
+            &item.ty,
+        )
+    }
+
+    pub(super) fn record_item_static_type_exposure(&mut self, item: &ItemStatic) -> Result<()> {
+        self.record_concrete_stores_in_visible_signature("static-type", &item.vis, &item.ty);
+        let exported_path = self.signature_item_path();
+        self.record_type_exposures(
+            TypeExposureBoundary {
+                kind: "static-type",
+                exported_path: &exported_path,
+                source_path: None,
+                required_trait_path: None,
+                visibility: &item.vis,
+            },
+            &item.ty,
+        )
+    }
+
+    pub(super) fn record_impl_const_type_exposure(&mut self, item: &ImplItemConst) -> Result<()> {
+        self.record_impl_header_for_visible_member("inherent-impl-const", &item.vis, &item.ty);
+        if !self.impl_member_is_exposed(&item.vis) {
+            return Ok(());
+        }
+        self.record_concrete_stores_in_visible_signature("associated-const-type", &item.vis, &item.ty);
+        let source_path = self.impl_item_paths.last().filter(|path| !path.is_empty()).cloned().unwrap_or_default();
+        let required_trait_path = self.impl_trait_paths.last().cloned().flatten();
+        self.record_type_exposures(
+            TypeExposureBoundary {
+                kind: "associated-const-type",
+                exported_path: &source_path,
+                source_path: (!source_path.is_empty()).then_some(source_path.as_slice()),
+                required_trait_path: required_trait_path.as_deref(),
+                visibility: &item.vis,
+            },
+            &item.ty,
+        )
+    }
+
+    pub(super) fn record_trait_const_type_exposure(&mut self, item: &TraitItemConst) -> Result<()> {
+        self.record_concrete_stores_in_signature("trait-const-type", &item.ty);
+        let source_path = self.signature_item_path();
+        let visibility = Visibility::Inherited;
+        self.record_type_exposures(
+            TypeExposureBoundary {
+                kind: "trait-const-type",
+                exported_path: &source_path,
+                source_path: (!source_path.is_empty()).then_some(source_path.as_slice()),
+                required_trait_path: None,
+                visibility: &visibility,
+            },
+            &item.ty,
+        )
+    }
+
+    pub(super) fn record_foreign_static_type_exposure(&mut self, item: &ForeignItemStatic) -> Result<()> {
+        self.record_concrete_stores_in_visible_signature("foreign-static-type", &item.vis, &item.ty);
+        let exported_path = self.signature_item_path();
+        self.record_type_exposures(
+            TypeExposureBoundary {
+                kind: "foreign-static-type",
+                exported_path: &exported_path,
+                source_path: None,
+                required_trait_path: None,
+                visibility: &item.vis,
+            },
+            &item.ty,
+        )
+    }
+
+    pub(super) fn record_impl_associated_type_exposure(&mut self, item: &ImplItemType) -> Result<()> {
+        let Some(required_trait_path) = self.impl_trait_paths.last().cloned().flatten() else {
+            return Ok(());
+        };
+        let source_path = self.impl_item_paths.last().filter(|path| !path.is_empty()).cloned().unwrap_or_default();
+        self.record_type_exposures(
+            TypeExposureBoundary {
+                kind: "trait-associated-type",
+                exported_path: &source_path,
+                source_path: (!source_path.is_empty()).then_some(source_path.as_slice()),
+                required_trait_path: Some(&required_trait_path),
+                visibility: &item.vis,
+            },
+            &item.ty,
+        )
+    }
+
+    fn active_generic_types(&self) -> BTreeSet<String> {
+        self.generic_type_scopes.iter().flatten().cloned().collect()
+    }
+
+    pub(super) fn enter_generic_scope(&mut self, generics: &Generics) {
+        self.generic_type_scopes
+            .push(generics.type_params().map(|parameter| normalized_ident(&parameter.ident)).collect());
+    }
+
+    pub(super) fn leave_generic_scope(&mut self) {
+        self.generic_type_scopes.pop();
+    }
+}

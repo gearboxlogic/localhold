@@ -10,9 +10,9 @@ use serde::Serialize;
 use crate::scan::syntax_fingerprint;
 
 use super::syntax::{
-    ConcreteStoreCounts, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionAncestorPath, ProductionCfgContext, ProductionSyntaxContext, ProductionSyntaxFacts,
-    ProductionSyntaxOptions, PublicReexportEvidence, TestLineCollector, TypeDeclarationEvidence, normalized_ident, production_cfg_context, production_syntax_facts_with_context,
-    reject_module_path_overrides, source_module, visibility_is_exposed,
+    ConcreteStoreCounts, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionAncestorPath, ProductionCfgContext, ProductionSourceRevision, ProductionSyntaxContext,
+    ProductionSyntaxFacts, ProductionSyntaxOptions, PublicReexportEvidence, TestLineCollector, TypeDeclarationEvidence, normalized_ident, production_cfg_context,
+    production_syntax_facts_with_context, reject_module_path_overrides, source_module, visibility_is_exposed,
 };
 
 mod module_macro;
@@ -227,6 +227,14 @@ fn measure_sources(sources: BTreeMap<String, String>) -> Result<Inventory> {
     measure_sources_with_roots(sources, &target_roots, true)
 }
 
+const fn production_source_revision(require_reviewed_expansions: bool) -> ProductionSourceRevision {
+    if require_reviewed_expansions {
+        ProductionSourceRevision::Current
+    } else {
+        ProductionSourceRevision::Historical
+    }
+}
+
 fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &TargetRoots, require_reviewed_expansions: bool) -> Result<Inventory> {
     let TargetRoots {
         production: production_roots,
@@ -278,6 +286,7 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
                         cfg: initial_cfg_context,
                         declaration_ancestors,
                         module_exposure_cfg,
+                        source_revision: production_source_revision(require_reviewed_expansions),
                     },
                 )
                 .map_err(|error| anyhow::anyhow!("{error} in {path}"))?,
@@ -465,6 +474,7 @@ fn target_roots<'a>(manifest: &str, known: impl Iterator<Item = &'a String>) -> 
     let mut roots = conventional_production_roots(known.iter(), auto_library, auto_binaries);
     let mut composition = conventional_composition_roots(roots.iter(), auto_binaries);
     let mut libraries = conventional_library_roots(roots.iter(), auto_library);
+    let mut test = BTreeSet::new();
     if let Some(library) = manifest.get("lib") {
         let path = add_declared_target_root(library, "library", &["src/lib.rs".to_owned()], &known, &mut roots)?;
         if path.starts_with("src/server/") || path.starts_with("src/ui/") {
@@ -476,16 +486,27 @@ fn target_roots<'a>(manifest: &str, known: impl Iterator<Item = &'a String>) -> 
     }
     if let Some(binaries) = manifest.get("bin") {
         let binaries = binaries.as_array().context("package bin targets must be an array of tables")?;
+        let mut testing_only = BTreeSet::new();
+        let mut production = libraries.clone();
         for binary in binaries {
             let candidates = inferred_binary_paths(binary, package_name)?;
             let path = add_declared_target_root(binary, "binary", &candidates, &known, &mut roots)?;
-            composition.insert(path);
+            if target_requires_testing(binary, "binary")? {
+                testing_only.insert(path);
+            } else {
+                composition.insert(path.clone());
+                production.insert(path);
+            }
+        }
+        for path in testing_only.difference(&production) {
+            roots.remove(path);
+            composition.remove(path);
+            test.insert(path.clone());
         }
     }
     let examples = validate_auxiliary_target_roots(&manifest, "example", &known)?;
     roots.extend(examples.iter().cloned());
     composition.extend(examples);
-    let mut test = BTreeSet::new();
     for kind in ["test", "bench"] {
         test.extend(validate_auxiliary_target_roots(&manifest, kind, &known)?);
     }
@@ -496,6 +517,22 @@ fn target_roots<'a>(manifest: &str, known: impl Iterator<Item = &'a String>) -> 
         libraries,
         rust_2015_absolute_paths,
     })
+}
+
+fn target_requires_testing(target: &toml::Value, kind: &str) -> Result<bool> {
+    let target = target.as_table().with_context(|| format!("package {kind} target must be a table"))?;
+    let Some(required) = target.get("required-features") else {
+        return Ok(false);
+    };
+    let required = required.as_array().with_context(|| format!("package {kind} target required-features must be an array"))?;
+    let mut requires_testing = false;
+    for feature in required {
+        let feature = feature
+            .as_str()
+            .with_context(|| format!("package {kind} target required-features entries must be strings"))?;
+        requires_testing |= feature == "testing";
+    }
+    Ok(requires_testing)
 }
 
 fn package_auto_target(manifest: &toml::Value, key: &str) -> Result<bool> {

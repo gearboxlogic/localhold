@@ -2,7 +2,7 @@ use proc_macro2::{Group, Ident, TokenStream, TokenTree};
 use quote::quote;
 
 use super::concrete::tokens_contain_concrete_store;
-use super::{ProductionCfgContext, ProductionSyntaxContext, ProductionSyntaxOptions, production_syntax_facts_with_context};
+use super::{ProductionCfgContext, ProductionSourceRevision, ProductionSyntaxContext, ProductionSyntaxOptions, production_syntax_facts_with_context};
 
 pub(super) fn contains_production_concrete_store(tokens: &TokenStream, cfg: &ProductionCfgContext) -> bool {
     let transcribers = macro_transcribers(tokens);
@@ -53,6 +53,7 @@ fn transcriber_contains_production_concrete_store(tokens: &TokenStream, cfg: &Pr
             cfg: cfg.clone(),
             declaration_ancestors: Vec::new(),
             module_exposure_cfg: Some(cfg.clone()),
+            source_revision: ProductionSourceRevision::Current,
         },
     );
     match facts {

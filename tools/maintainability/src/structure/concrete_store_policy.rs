@@ -559,6 +559,7 @@ fn site_fingerprints(
     source: SiteSource,
 ) -> Result<BTreeMap<SiteFingerprint, usize>> {
     let mut sites = BTreeMap::new();
+    let mut signature_cache = SignatureEvidenceCache::default();
     for file in &inventory.files {
         let component = paths
             .component_for(&file.path)
@@ -576,7 +577,7 @@ fn site_fingerprints(
             site_path,
         };
         for store in [ConcreteStoreName::SqliteStore, ConcreteStoreName::PostgresStore] {
-            record_store_site_fingerprints(&mut sites, &context, source, store)?;
+            record_store_site_fingerprints(&mut sites, &context, source, store, &mut signature_cache)?;
         }
     }
     Ok(sites)
@@ -587,6 +588,7 @@ fn record_store_site_fingerprints(
     file_context: &FileSiteEvidenceContext<'_>,
     source: SiteSource,
     store: ConcreteStoreName,
+    signature_cache: &mut SignatureEvidenceCache,
 ) -> Result<()> {
     let effective_component = file_context
         .debt_components
@@ -596,7 +598,7 @@ fn record_store_site_fingerprints(
         return Ok(());
     }
     if source == SiteSource::Signatures {
-        return record_signature_site_fingerprints(sites, file_context, effective_component, store);
+        return record_signature_site_fingerprints(sites, file_context, effective_component, store, signature_cache);
     }
     let fingerprints = match source {
         SiteSource::AllSyntax => &file_context.file.production_concrete_store_sites,
@@ -624,23 +626,34 @@ fn record_signature_site_fingerprints(
     file_context: &FileSiteEvidenceContext<'_>,
     effective_component: &str,
     store: ConcreteStoreName,
+    cache: &mut SignatureEvidenceCache,
 ) -> Result<()> {
+    let effective_store = EffectiveStore {
+        component: effective_component,
+        store,
+    };
     let signatures = match store {
         ConcreteStoreName::SqliteStore => &file_context.file.production_signature_store_sites.sqlite_store,
         ConcreteStoreName::PostgresStore => &file_context.file.production_signature_store_sites.postgres_store,
     };
     for signature in signatures {
-        record_signature_site_fingerprint(sites, file_context, effective_component, store, signature)?;
+        record_signature_site_fingerprint(sites, file_context, effective_store, signature, cache)?;
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct EffectiveStore<'a> {
+    component: &'a str,
+    store: ConcreteStoreName,
 }
 
 fn record_signature_site_fingerprint(
     sites: &mut BTreeMap<SiteFingerprint, usize>,
     file_context: &FileSiteEvidenceContext<'_>,
-    effective_component: &str,
-    store: ConcreteStoreName,
+    effective_store: EffectiveStore<'_>,
     signature: &ConcreteStoreSignatureSite,
+    cache: &mut SignatureEvidenceCache,
 ) -> Result<()> {
     let trait_exposures = signature.required_trait_path.as_ref().map_or_else(
         || {
@@ -650,23 +663,34 @@ fn record_signature_site_fingerprint(
             }]
         },
         |trait_path| {
-            trait_exposure_evidence(
-                file_context.inventory,
-                file_context.paths,
-                trait_path,
-                &signature.cfg,
-                &file_context.file.production_targets,
-            )
+            cache
+                .trait_exposures
+                .entry((trait_path.clone(), signature.cfg.clone(), file_context.file.production_targets.clone()))
+                .or_insert_with(|| {
+                    trait_exposure_evidence(
+                        file_context.inventory,
+                        file_context.paths,
+                        trait_path,
+                        &signature.cfg,
+                        &file_context.file.production_targets,
+                    )
+                })
+                .clone()
         },
     );
     for trait_exposure in trait_exposures {
-        let public_reexports = public_reexport_evidence(
-            file_context.inventory,
-            file_context.paths,
-            &signature.item_path,
-            &trait_exposure.cfg,
-            &file_context.file.production_targets,
-        );
+        let public_reexports = cache
+            .public_reexports
+            .entry((signature.item_path.clone(), trait_exposure.cfg.clone(), file_context.file.production_targets.clone()))
+            .or_insert_with(|| {
+                public_reexport_evidence(
+                    file_context.inventory,
+                    file_context.paths,
+                    &signature.item_path,
+                    &trait_exposure.cfg,
+                    &file_context.file.production_targets,
+                )
+            });
         let type_declarations = signature.impl_self_type.then(|| {
             type_declaration_evidence(
                 file_context.inventory,
@@ -677,10 +701,10 @@ fn record_signature_site_fingerprint(
             )
         });
         let context = SiteEvidenceContext {
-            component: effective_component,
+            component: effective_store.component,
             path: file_context.site_path,
-            store,
-            public_reexports: &public_reexports,
+            store: effective_store.store,
+            public_reexports,
         };
         let trait_fingerprint = if trait_exposure.fingerprint.is_empty() {
             signature.fingerprint.clone()
@@ -699,6 +723,14 @@ fn record_signature_site_fingerprint(
         }
     }
     Ok(())
+}
+
+type ExposureCacheKey = (Vec<String>, ProductionCfgContext, Vec<String>);
+
+#[derive(Default)]
+struct SignatureEvidenceCache {
+    trait_exposures: BTreeMap<ExposureCacheKey, Vec<TraitExposureEvidence>>,
+    public_reexports: BTreeMap<ExposureCacheKey, Vec<String>>,
 }
 
 fn record_signature_evidence(

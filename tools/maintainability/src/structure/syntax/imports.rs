@@ -20,6 +20,7 @@ use super::{
 
 mod concrete;
 mod declarations;
+mod exposures;
 mod macro_definitions;
 mod production;
 mod reexports;
@@ -36,8 +37,7 @@ use production::{
     production_foreign_item_tokens, production_impl_item_tokens, production_impl_tokens, production_item_tokens, production_stmt_tokens, production_trait_item_tokens,
 };
 use reexports::{
-    PendingPublicReexport, PublicSignatureExposureContext, PublicTypeAliasContext, UseResolution, public_signature_type_exposures, public_type_alias, resolve_binding_aliases,
-    resolve_impl_signature_aliases, resolve_public_reexport_aliases,
+    PendingPublicReexport, PublicTypeAliasContext, UseResolution, public_type_alias, resolve_binding_aliases, resolve_impl_signature_aliases, resolve_public_reexport_aliases,
 };
 pub(in crate::structure) use resolution::source_module;
 use resolution::{StringScan, UsePath, flatten_use_tree, resolve_path, restricted_attribute_identifier, restricted_token_identifier};
@@ -77,6 +77,8 @@ pub struct PublicReexportEvidence {
     pub(in crate::structure) cfg: ProductionCfgContext,
     #[serde(skip)]
     pub(in crate::structure) direct_exposure_cfg: Option<ProductionCfgContext>,
+    #[serde(skip)]
+    pub(in crate::structure) required_trait_path: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -84,6 +86,12 @@ pub struct ProductionSyntaxOptions {
     pub collect_internal_imports: bool,
     pub rust_2015_absolute_paths: bool,
     pub require_reviewed_expansions: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(in crate::structure) enum ProductionSourceRevision {
+    Current,
+    Historical,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -96,6 +104,7 @@ pub(in crate::structure) struct ProductionSyntaxContext {
     pub(in crate::structure) cfg: ProductionCfgContext,
     pub(in crate::structure) declaration_ancestors: Vec<ProductionAncestorPath>,
     pub(in crate::structure) module_exposure_cfg: Option<ProductionCfgContext>,
+    pub(in crate::structure) source_revision: ProductionSourceRevision,
 }
 
 impl Default for ProductionSyntaxContext {
@@ -104,6 +113,7 @@ impl Default for ProductionSyntaxContext {
             cfg: ProductionCfgContext::default(),
             declaration_ancestors: Vec::new(),
             module_exposure_cfg: Some(ProductionCfgContext::default()),
+            source_revision: ProductionSourceRevision::Current,
         }
     }
 }
@@ -145,6 +155,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
         impl_trait_paths: Vec::new(),
         trait_exposures: Vec::new(),
         field_exposures: Vec::new(),
+        generic_type_scopes: Vec::new(),
         impl_item_paths: Vec::new(),
         inherited_declaration_ancestors: initial_context.declaration_ancestors,
         declaration_ancestors: Vec::new(),
@@ -154,6 +165,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
         rust_2015_absolute_paths: options.rust_2015_absolute_paths,
         collect_internal_imports: options.collect_internal_imports,
         require_reviewed_expansions: options.require_reviewed_expansions,
+        source_revision: initial_context.source_revision,
     };
     collector.visit_file(file);
     if let Some(error) = collector.error {
@@ -203,6 +215,7 @@ struct ProductionSyntaxCollector {
     impl_trait_paths: Vec<Option<Vec<String>>>,
     trait_exposures: Vec<bool>,
     field_exposures: Vec<FieldExposure>,
+    generic_type_scopes: Vec<BTreeSet<String>>,
     impl_item_paths: Vec<Vec<String>>,
     inherited_declaration_ancestors: Vec<ProductionAncestorPath>,
     declaration_ancestors: Vec<String>,
@@ -212,6 +225,7 @@ struct ProductionSyntaxCollector {
     rust_2015_absolute_paths: bool,
     collect_internal_imports: bool,
     require_reviewed_expansions: bool,
+    source_revision: ProductionSourceRevision,
 }
 
 enum SiteContextEntry {
@@ -249,6 +263,9 @@ impl ProductionSyntaxCollector {
         let mut paths = Vec::new();
         flatten_use_tree(&item.tree, &mut Vec::new(), &mut paths);
         for mut path in paths {
+            if path.alias.as_deref() == Some("_") {
+                continue;
+            }
             if item.leading_colon.is_some() {
                 path.segments.insert(0, "crate".to_owned());
             }
@@ -277,8 +294,10 @@ impl ProductionSyntaxCollector {
                     fingerprint: syntax_fingerprint(&identity),
                     cfg: self.cfg_context.clone(),
                     direct_exposure_cfg: self.direct_exposure_cfg(),
+                    required_trait_path: None,
                 },
                 cfg: self.cfg_context.clone(),
+                source_path: None,
             });
         }
         Ok(())
@@ -303,33 +322,6 @@ impl ProductionSyntaxCollector {
         Ok(())
     }
 
-    fn record_public_signature_type_exposures(&mut self, boundary_kind: &str, visibility: &Visibility, signature: &syn::Signature) -> Result<()> {
-        let mut exported_path = self.module.clone();
-        exported_path.push(normalized_ident(&signature.ident));
-        let ancestors = self.declaration_ancestor_identity();
-        self.public_reexports.extend(public_signature_type_exposures(
-            signature,
-            &PublicSignatureExposureContext {
-                boundary_kind,
-                exported_path: &exported_path,
-                module: &self.module,
-                visibility,
-                cfg: &self.cfg_context,
-                direct_exposure_cfg: self.direct_exposure_cfg(),
-                ancestors: &ancestors,
-                rust_2015_absolute_paths: self.rust_2015_absolute_paths,
-            },
-        )?);
-        Ok(())
-    }
-
-    fn record_exposed_function_signature(&mut self, boundary_kind: &str, visibility: &Visibility, signature: &syn::Signature) -> Result<()> {
-        let signature = self.production_signature(signature)?;
-        self.record_public_signature_type_exposures(boundary_kind, visibility, &signature)?;
-        self.record_concrete_stores_in_visible_signature(boundary_kind, visibility, &signature);
-        Ok(())
-    }
-
     fn record_use_resolutions(&mut self, item: &ItemUse) -> Result<()> {
         if item.leading_colon.is_some() && !self.rust_2015_absolute_paths {
             return Ok(());
@@ -337,6 +329,9 @@ impl ProductionSyntaxCollector {
         let mut paths = Vec::new();
         flatten_use_tree(&item.tree, &mut Vec::new(), &mut paths);
         for mut path in paths {
+            if path.alias.as_deref() == Some("_") {
+                continue;
+            }
             if item.leading_colon.is_some() {
                 path.segments.insert(0, "crate".to_owned());
             }
@@ -800,8 +795,13 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             return;
         };
         let previous = self.enter_site_context("field", node);
-        if self.field_is_exposed(&node.vis) {
-            self.record_concrete_stores_in_visible_signature("field-type", &node.vis, &node.ty);
+        if self.field_is_exposed(&node.vis)
+            && let Err(error) = self.record_field_type_exposure(node)
+        {
+            self.error = Some(error);
+            self.leave_site_context(previous);
+            self.leave_production_node(cfg);
+            return;
         }
         visit::visit_field(self, node);
         self.leave_site_context(previous);
@@ -895,9 +895,11 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
                 return;
             }
         }
+        self.enter_generic_scope(&item.generics);
         self.field_exposures.push(FieldExposure::Struct(exposed));
         visit::visit_item_struct(self, item);
         self.field_exposures.pop();
+        self.leave_generic_scope();
     }
 
     fn visit_item_enum(&mut self, item: &'ast ItemEnum) {
@@ -906,9 +908,11 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         if exposed {
             self.record_declaration_generics("enum-generics", &item.vis, &item.generics);
         }
+        self.enter_generic_scope(&item.generics);
         self.field_exposures.push(FieldExposure::Enum(exposed));
         visit::visit_item_enum(self, item);
         self.field_exposures.pop();
+        self.leave_generic_scope();
     }
 
     fn visit_item_union(&mut self, item: &'ast ItemUnion) {
@@ -917,9 +921,11 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         if exposed {
             self.record_declaration_generics("union-generics", &item.vis, &item.generics);
         }
+        self.enter_generic_scope(&item.generics);
         self.field_exposures.push(FieldExposure::Union(exposed));
         visit::visit_item_union(self, item);
         self.field_exposures.pop();
+        self.leave_generic_scope();
     }
 
     fn visit_item_trait(&mut self, item: &'ast ItemTrait) {
@@ -931,9 +937,11 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             header.items.clear();
             self.record_concrete_stores_in_signature("trait-header", &header);
         }
+        self.enter_generic_scope(&item.generics);
         self.trait_exposures.push(exposed);
         visit::visit_item_trait(self, item);
         self.trait_exposures.pop();
+        self.leave_generic_scope();
     }
 
     fn visit_item_impl(&mut self, item: &'ast ItemImpl) {
@@ -984,11 +992,13 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         if trait_exposure {
             self.record_concrete_stores_in_exposure_signature_with_identity("trait-impl-header", &header_tokens, &header_tokens);
         }
+        self.enter_generic_scope(&item.generics);
         self.impl_signature_headers.push(header_tokens);
         self.impl_trait_exposures.push(trait_exposure);
         visit::visit_item_impl(self, item);
         self.impl_trait_exposures.pop();
         self.impl_signature_headers.pop();
+        self.leave_generic_scope();
         self.impl_trait_paths.pop();
         self.impl_item_paths.pop();
     }
@@ -1004,29 +1014,19 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_impl_item_fn(&mut self, item: &'ast ImplItemFn) {
-        let signature = match self.production_signature(&item.sig) {
-            Ok(signature) => signature,
-            Err(error) => {
-                self.error = Some(error);
-                return;
-            }
-        };
-        self.record_impl_header_for_visible_member("inherent-impl-method", &item.vis, &signature);
-        if self.impl_member_is_exposed(&item.vis) {
-            self.record_concrete_stores_in_visible_signature("method-signature", &item.vis, &signature);
+        if let Err(error) = self.record_impl_method_exposure(item) {
+            self.error = Some(error);
+            return;
         }
         visit::visit_impl_item_fn(self, item);
     }
 
     fn visit_trait_item_fn(&mut self, item: &'ast TraitItemFn) {
-        if self.trait_member_is_exposed() {
-            match self.production_signature(&item.sig) {
-                Ok(signature) => self.record_concrete_stores_in_signature("trait-method-signature", &signature),
-                Err(error) => {
-                    self.error = Some(error);
-                    return;
-                }
-            }
+        if self.trait_member_is_exposed()
+            && let Err(error) = self.record_exposed_trait_signature(&item.sig)
+        {
+            self.error = Some(error);
+            return;
         }
         visit::visit_trait_item_fn(self, item);
     }
@@ -1042,37 +1042,49 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_const(&mut self, item: &'ast ItemConst) {
-        if visibility_is_exposed(&item.vis) {
-            self.record_concrete_stores_in_visible_signature("const-type", &item.vis, &item.ty);
+        if visibility_is_exposed(&item.vis)
+            && let Err(error) = self.record_item_const_type_exposure(item)
+        {
+            self.error = Some(error);
+            return;
         }
         visit::visit_item_const(self, item);
     }
 
     fn visit_item_static(&mut self, item: &'ast ItemStatic) {
-        if visibility_is_exposed(&item.vis) {
-            self.record_concrete_stores_in_visible_signature("static-type", &item.vis, &item.ty);
+        if visibility_is_exposed(&item.vis)
+            && let Err(error) = self.record_item_static_type_exposure(item)
+        {
+            self.error = Some(error);
+            return;
         }
         visit::visit_item_static(self, item);
     }
 
     fn visit_impl_item_const(&mut self, item: &'ast ImplItemConst) {
-        self.record_impl_header_for_visible_member("inherent-impl-const", &item.vis, &item.ty);
-        if self.impl_member_is_exposed(&item.vis) {
-            self.record_concrete_stores_in_visible_signature("associated-const-type", &item.vis, &item.ty);
+        if let Err(error) = self.record_impl_const_type_exposure(item) {
+            self.error = Some(error);
+            return;
         }
         visit::visit_impl_item_const(self, item);
     }
 
     fn visit_trait_item_const(&mut self, item: &'ast TraitItemConst) {
-        if self.trait_member_is_exposed() {
-            self.record_concrete_stores_in_signature("trait-const-type", &item.ty);
+        if self.trait_member_is_exposed()
+            && let Err(error) = self.record_trait_const_type_exposure(item)
+        {
+            self.error = Some(error);
+            return;
         }
         visit::visit_trait_item_const(self, item);
     }
 
     fn visit_foreign_item_static(&mut self, item: &'ast ForeignItemStatic) {
-        if visibility_is_exposed(&item.vis) {
-            self.record_concrete_stores_in_visible_signature("foreign-static-type", &item.vis, &item.ty);
+        if visibility_is_exposed(&item.vis)
+            && let Err(error) = self.record_foreign_static_type_exposure(item)
+        {
+            self.error = Some(error);
+            return;
         }
         visit::visit_foreign_item_static(self, item);
     }
@@ -1096,6 +1108,10 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     fn visit_impl_item_type(&mut self, item: &'ast ImplItemType) {
         let concrete_before = self.concrete_stores.counts;
         self.record_impl_header_for_visible_member("inherent-impl-type", &item.vis, &item.ty);
+        if let Err(error) = self.record_impl_associated_type_exposure(item) {
+            self.error = Some(error);
+            return;
+        }
         visit::visit_impl_item_type(self, item);
         self.reject_concrete_store_alias(concrete_before);
     }

@@ -3,53 +3,82 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 use quote::ToTokens as _;
 use syn::visit::{self, Visit};
-use syn::{Path, Signature, TraitBound, TypePath, Visibility};
+use syn::{Path, Signature, TraitBound, Type, TypePath, Visibility};
 
 use crate::scan::syntax_fingerprint;
 
-use super::super::super::{ProductionCfgContext, normalized_ident};
+use super::super::super::{ProductionCfgContext, ProductionSourceRevision, normalized_ident};
 use super::super::concrete::without_documentation;
 use super::super::resolution::resolve_path;
 use super::{PendingPublicReexport, PublicReexportEvidence};
 
-pub(in crate::structure::syntax::imports) struct PublicSignatureExposureContext<'a> {
+pub(in crate::structure::syntax::imports) struct PublicTypeExposureContext<'a> {
     pub(in crate::structure::syntax::imports) boundary_kind: &'a str,
     pub(in crate::structure::syntax::imports) exported_path: &'a [String],
+    pub(in crate::structure::syntax::imports) source_path: Option<&'a [String]>,
+    pub(in crate::structure::syntax::imports) required_trait_path: Option<&'a [String]>,
     pub(in crate::structure::syntax::imports) module: &'a [String],
     pub(in crate::structure::syntax::imports) visibility: &'a Visibility,
     pub(in crate::structure::syntax::imports) cfg: &'a ProductionCfgContext,
     pub(in crate::structure::syntax::imports) direct_exposure_cfg: Option<ProductionCfgContext>,
     pub(in crate::structure::syntax::imports) ancestors: &'a str,
     pub(in crate::structure::syntax::imports) rust_2015_absolute_paths: bool,
+    pub(in crate::structure::syntax::imports) source_revision: ProductionSourceRevision,
 }
 
 pub(in crate::structure::syntax::imports) fn public_signature_type_exposures(
     signature: &Signature,
-    context: &PublicSignatureExposureContext<'_>,
+    inherited_generic_types: &BTreeSet<String>,
+    context: &PublicTypeExposureContext<'_>,
 ) -> Result<Vec<PendingPublicReexport>> {
-    let generic_types = signature.generics.type_params().map(|parameter| normalized_ident(&parameter.ident)).collect();
+    let mut generic_types = inherited_generic_types.clone();
+    generic_types.extend(signature.generics.type_params().map(|parameter| normalized_ident(&parameter.ident)));
+    let fingerprint = syntax_fingerprint(&without_documentation(&signature.to_token_stream()));
+    collect_type_exposures(generic_types, &fingerprint, "signature", context, |collector| {
+        collector.visit_signature(signature);
+    })
+}
+
+pub(in crate::structure::syntax::imports) fn public_type_exposures(
+    ty: &Type,
+    generic_types: &BTreeSet<String>,
+    context: &PublicTypeExposureContext<'_>,
+) -> Result<Vec<PendingPublicReexport>> {
+    let fingerprint = syntax_fingerprint(&without_documentation(&ty.to_token_stream()));
+    collect_type_exposures(generic_types.clone(), &fingerprint, "type", context, |collector| {
+        collector.visit_type(ty);
+    })
+}
+
+fn collect_type_exposures(
+    generic_types: BTreeSet<String>,
+    boundary_fingerprint: &str,
+    syntax_kind: &str,
+    context: &PublicTypeExposureContext<'_>,
+    visit: impl FnOnce(&mut SignatureTypeCollector<'_>),
+) -> Result<Vec<PendingPublicReexport>> {
     let mut collector = SignatureTypeCollector {
         module: context.module,
         generic_types,
         targets: BTreeSet::new(),
         rust_2015_absolute_paths: context.rust_2015_absolute_paths,
+        source_revision: context.source_revision,
         error: None,
     };
-    collector.visit_signature(signature);
+    visit(&mut collector);
     if let Some(error) = collector.error {
         return Err(error);
     }
 
-    let signature_fingerprint = syntax_fingerprint(&without_documentation(&signature.to_token_stream()));
     Ok(collector
         .targets
         .into_iter()
         .map(|target_path| {
             let identity = format!(
-                "public-signature-type:{}\0boundary:{}\0signature:{}\0target:{}\0visibility:{}\0cfg:{}\0ancestors:{}",
+                "public-signature-type:{}\0boundary:{}\0{syntax_kind}:{}\0target:{}\0visibility:{}\0cfg:{}\0ancestors:{}",
                 context.boundary_kind,
                 context.exported_path.join("::"),
-                signature_fingerprint,
+                boundary_fingerprint,
                 target_path.join("::"),
                 syntax_fingerprint(context.visibility),
                 context.cfg.identity(),
@@ -62,8 +91,10 @@ pub(in crate::structure::syntax::imports) fn public_signature_type_exposures(
                     fingerprint: syntax_fingerprint(&identity),
                     cfg: context.cfg.clone(),
                     direct_exposure_cfg: context.direct_exposure_cfg.clone(),
+                    required_trait_path: context.required_trait_path.map(<[String]>::to_vec),
                 },
                 cfg: context.cfg.clone(),
+                source_path: context.source_path.map(<[String]>::to_vec),
             }
         })
         .collect())
@@ -74,6 +105,7 @@ struct SignatureTypeCollector<'a> {
     generic_types: BTreeSet<String>,
     targets: BTreeSet<Vec<String>>,
     rust_2015_absolute_paths: bool,
+    source_revision: ProductionSourceRevision,
     error: Option<anyhow::Error>,
 }
 
@@ -105,7 +137,16 @@ impl SignatureTypeCollector<'_> {
 impl<'ast> Visit<'ast> for SignatureTypeCollector<'_> {
     fn visit_type_path(&mut self, path: &'ast TypePath) {
         if path.qself.is_some() {
-            self.error = Some(anyhow::anyhow!("exposed qualified signature types cannot be resolved to a concrete target"));
+            if self.source_revision == ProductionSourceRevision::Historical {
+                // Historical evidence is only a ceiling for current exposure.
+                // Omitting an unresolvable historical edge cannot authorize a
+                // new current edge; current source still fails closed below.
+                return;
+            }
+            self.error = Some(anyhow::anyhow!(
+                "exposed qualified signature type `{}` cannot be resolved to a concrete target",
+                path.to_token_stream()
+            ));
             return;
         }
         self.record_path(&path.path);

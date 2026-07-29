@@ -2,6 +2,8 @@ use std::fmt::Write as _;
 
 use super::*;
 
+mod exposures;
+
 fn imports(path: &str, source: &str) -> Result<Vec<String>> {
     let syntax = syn::parse_file(source)?;
     production_imports(&syntax, path, Some("src/lib.rs"), false)
@@ -30,7 +32,7 @@ fn historical_concrete_facts(source: &str) -> Result<ProductionSyntaxFacts> {
 }
 
 fn concrete_facts_with_expansion_policy(source: &str, require_reviewed_expansions: bool) -> Result<ProductionSyntaxFacts> {
-    production_syntax_facts(
+    production_syntax_facts_with_context(
         &syn::parse_file(source)?,
         "src/store_fixture.rs",
         Some("src/lib.rs"),
@@ -38,6 +40,14 @@ fn concrete_facts_with_expansion_policy(source: &str, require_reviewed_expansion
             collect_internal_imports: false,
             rust_2015_absolute_paths: false,
             require_reviewed_expansions,
+        },
+        ProductionSyntaxContext {
+            source_revision: if require_reviewed_expansions {
+                ProductionSourceRevision::Current
+            } else {
+                ProductionSourceRevision::Historical
+            },
+            ..ProductionSyntaxContext::default()
         },
     )
 }
@@ -166,7 +176,12 @@ fn exposed_qualified_type_aliases_fail_closed() -> Result<()> {
     assert!(error.to_string().contains("exposed qualified type aliases"), "{error:#}");
 
     let private = concrete_facts(&format!("{source}type PrivateAdapter = <Marker as Reveal>::Output;\n"))?;
-    assert!(private.public_reexports.is_empty());
+    assert!(
+        private
+            .public_reexports
+            .iter()
+            .all(|evidence| evidence.exported_path != ["store_fixture", "PrivateAdapter"])
+    );
     Ok(())
 }
 
@@ -176,6 +191,13 @@ fn self_restricted_uses_are_not_public_reexport_evidence() -> Result<()> {
         let facts = concrete_facts(&format!("{visibility} use crate::stores::open;\n"))?;
         assert!(facts.public_reexports.is_empty(), "{visibility}");
     }
+    Ok(())
+}
+
+#[test]
+fn underscore_import_aliases_are_not_nameable_reexport_evidence() -> Result<()> {
+    let facts = concrete_facts("mod hidden { pub(crate) struct Adapter; }\npub(crate) use hidden::Adapter as _;\n")?;
+    assert!(facts.public_reexports.is_empty());
     Ok(())
 }
 
@@ -267,48 +289,12 @@ fn local_type_declarations_shadow_globs_only_in_their_cfg_region() -> Result<()>
     assert!(local.cfg.conjoin(&current).is_none());
     assert!(imported.cfg.conjoin(&legacy).is_none());
     assert!(imported.cfg.conjoin(&current).is_some());
-    Ok(())
-}
-
-#[test]
-fn exposed_function_signatures_are_type_exposure_evidence() -> Result<()> {
-    let facts = concrete_facts(
-        "mod hidden {\n\
-             pub(crate) struct Adapter;\n\
-             impl Adapter { pub(crate) fn open() -> SqliteStore { loop {} } }\n\
-         }\n\
-         pub(crate) fn adapter(value: hidden::Adapter) -> hidden::Adapter { value }\n",
-    )?;
-    assert_eq!(facts.public_reexports.len(), 1);
-    assert_eq!(facts.public_reexports[0].exported_path, ["store_fixture", "adapter"]);
-    assert_eq!(facts.public_reexports[0].target_path, ["store_fixture", "hidden", "Adapter"]);
-    assert!(facts.public_reexports[0].direct_exposure_cfg.is_some());
-    Ok(())
-}
-
-#[test]
-fn exposed_function_signature_types_resolve_aliases_without_treating_generics_as_items() -> Result<()> {
-    let facts = concrete_facts(
-        "mod hidden { pub(crate) struct Adapter; }\n\
-         use hidden::Adapter as InternalAdapter;\n\
-         pub(crate) fn adapter<T>(value: T) -> InternalAdapter { loop {} }\n",
-    )?;
-    assert_eq!(facts.public_reexports.len(), 1);
-    assert_eq!(facts.public_reexports[0].target_path, ["store_fixture", "hidden", "Adapter"]);
-    Ok(())
-}
-
-#[test]
-fn exposed_qualified_function_signature_types_fail_closed() -> Result<()> {
-    let source = "trait Reveal { type Output; }\n\
-                  struct Marker;\n";
-    let Err(error) = concrete_facts(&format!("{source}pub(crate) fn adapter() -> <Marker as Reveal>::Output {{ loop {{}} }}\n")) else {
-        panic!("an exposed qualified signature type must fail closed");
-    };
-    assert!(error.to_string().contains("exposed qualified signature types"), "{error:#}");
-
-    let private = concrete_facts(&format!("{source}fn adapter() -> <Marker as Reveal>::Output {{ loop {{}} }}\n"))?;
-    assert!(private.public_reexports.is_empty());
+    assert!(
+        facts
+            .public_reexports
+            .iter()
+            .all(|evidence| !evidence.target_path.windows(2).any(|segments| segments == ["hidden", "hidden"]))
+    );
     Ok(())
 }
 

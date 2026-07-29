@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use super::classify::Inventory;
+use super::manifest::PreviousRevision;
 use super::syntax::VisibilityCounts;
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
@@ -97,7 +98,13 @@ impl VisibilityPolicy {
         self.compare_inventory("baseline", inventory, component_paths, |component| component.baseline)
     }
 
-    pub fn compare_previous_revision(&self, workspace: &Path) -> Result<()> {
+    pub fn compare_previous_revision(
+        &self,
+        workspace: &Path,
+        current: &Inventory,
+        current_paths: &BTreeMap<&str, &str>,
+        previous_revision: Option<&PreviousRevision>,
+    ) -> Result<()> {
         let Ok(revision) = env::var(BASE_REVISION_ENV) else {
             return Ok(());
         };
@@ -117,7 +124,13 @@ impl VisibilityPolicy {
         }
         let previous: Self = serde_json::from_slice(&output.stdout).context("parse visibility policy from maintainability base revision")?;
         previous.validate()?;
-        self.compare_policy(&previous)
+        self.compare_policy(&previous)?;
+        let previous_revision = previous_revision.context("visibility policy has previous-revision evidence but the structure inventory does not")?;
+        let previous_paths = previous_revision.manifest.current_component_paths()?;
+        previous
+            .compare_current(&previous_revision.inventory, &previous_paths)
+            .context("verify visibility policy evidence from maintainability base revision")?;
+        self.compare_scope_evolution((current, current_paths), (&previous_revision.inventory, &previous_paths), &previous)
     }
 
     fn compare_inventory(

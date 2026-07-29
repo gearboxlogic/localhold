@@ -5,7 +5,9 @@ use quote::quote;
 use crate::scan::syntax_fingerprint;
 
 use super::concrete::tokens_contain_concrete_store;
-use super::{ProductionCfgContext, ProductionSourceRevision, ProductionSyntaxContext, ProductionSyntaxOptions, production_syntax_facts_with_context};
+use super::{
+    ProductionCfgContext, ProductionSourceRevision, ProductionSyntaxContext, ProductionSyntaxFacts, ProductionSyntaxOptions, VisibilityCounts, production_syntax_facts_with_context,
+};
 
 pub(super) struct ReviewedMacroTranscriber {
     pub(super) syntax: syn::File,
@@ -40,6 +42,16 @@ pub(super) fn reviewed_macro_transcribers(tokens: &TokenStream) -> Result<Vec<Re
         .collect()
 }
 
+pub(super) fn production_macro_visibility_counts(tokens: &TokenStream, cfg: &ProductionCfgContext) -> Result<VisibilityCounts> {
+    reviewed_macro_transcribers(tokens)?
+        .into_iter()
+        .try_fold(VisibilityCounts::default(), |mut counts, transcriber| {
+            let facts = production_transcriber_facts(&transcriber.syntax, cfg).context("analyze macro_rules transcriber as production syntax")?;
+            counts.add(facts.visibilities)?;
+            Ok(counts)
+        })
+}
+
 struct MacroTranscriber {
     matcher: TokenStream,
     tokens: TokenStream,
@@ -70,8 +82,16 @@ fn transcriber_contains_production_concrete_store(tokens: &TokenStream, cfg: &Pr
     let Ok(syntax) = parse_transcriber(tokens) else {
         return true;
     };
-    let facts = production_syntax_facts_with_context(
-        &syntax,
+    let facts = production_transcriber_facts(&syntax, cfg);
+    match facts {
+        Ok(facts) => facts.concrete_stores.sqlite_store != 0 || facts.concrete_stores.postgres_store != 0,
+        Err(_) => true,
+    }
+}
+
+fn production_transcriber_facts(syntax: &syn::File, cfg: &ProductionCfgContext) -> Result<ProductionSyntaxFacts> {
+    production_syntax_facts_with_context(
+        syntax,
         "macro-transcriber.rs",
         None,
         ProductionSyntaxOptions {
@@ -85,11 +105,7 @@ fn transcriber_contains_production_concrete_store(tokens: &TokenStream, cfg: &Pr
             module_exposure_cfg: Some(cfg.clone()),
             source_revision: ProductionSourceRevision::Current,
         },
-    );
-    match facts {
-        Ok(facts) => facts.concrete_stores.sqlite_store != 0 || facts.concrete_stores.postgres_store != 0,
-        Err(_) => true,
-    }
+    )
 }
 
 fn parse_transcriber(tokens: &TokenStream) -> Result<syn::File> {

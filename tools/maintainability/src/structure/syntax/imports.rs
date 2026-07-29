@@ -202,7 +202,6 @@ fn collect_production_syntax(
         impl_item_paths: Vec::new(),
         inherited_declaration_ancestors: initial_context.declaration_ancestors,
         declaration_ancestors,
-        macro_context: MacroContext::Invocation,
         cfg_context: initial_context.cfg,
         module_exposure_cfg: initial_context.module_exposure_cfg,
         error: None,
@@ -244,7 +243,6 @@ struct ProductionSyntaxCollector {
     impl_item_paths: Vec<Vec<String>>,
     inherited_declaration_ancestors: Vec<ProductionAncestorPath>,
     declaration_ancestors: Vec<String>,
-    macro_context: MacroContext,
     cfg_context: ProductionCfgContext,
     module_exposure_cfg: Option<ProductionCfgContext>,
     error: Option<anyhow::Error>,
@@ -270,13 +268,6 @@ struct BlockTypeBindings {
 struct BlockTypeBinding {
     name: String,
     cfg: ProductionCfgContext,
-}
-
-#[derive(Clone, Copy, Default, Eq, PartialEq)]
-enum MacroContext {
-    #[default]
-    Invocation,
-    Definition,
 }
 
 impl ProductionSyntaxCollector {
@@ -1341,10 +1332,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             return;
         }
         let stringifies = is_explicit_builtin_stringify(node) || self.is_imported_builtin_stringify(node);
-        if self.macro_context == MacroContext::Invocation
-            && !stringifies
-            && let Err(error) = self.visibility_macros.record_invocation(&self.module, &node.path, &node.tokens)
-        {
+        if !stringifies && let Err(error) = self.visibility_macros.record_invocation(&self.module, &node.path, &node.tokens) {
             self.error = Some(error);
             return;
         }
@@ -1379,9 +1367,6 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         self.visit_path(&node.path);
         if !stringifies {
             self.record_concrete_stores_in_tokens(&node.tokens);
-            if self.macro_context == MacroContext::Definition {
-                self.record_visibilities_in_tokens(&node.tokens);
-            }
         }
         self.leave_site_context(previous);
     }
@@ -1446,9 +1431,17 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             self.error = Some(anyhow::anyhow!("production macro definitions cannot inject concrete stores into call sites"));
             return;
         }
-        if let Err(error) = self.visibility_macros.record_definition(&self.module, item, &self.cfg_context) {
-            self.error = Some(error);
-            return;
+        match self.visibility_macros.record_definition(&self.module, item, &self.cfg_context) {
+            Ok(counts) => {
+                if let Err(error) = self.visibilities.add(counts) {
+                    self.error = Some(error);
+                    return;
+                }
+            }
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
         }
         let name = normalized_ident(name);
         if RESERVED_LOCAL_MACROS.contains(&name.as_str())
@@ -1478,15 +1471,16 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
                 cfg: self.cfg_context.clone(),
             });
         }
-        self.macro_context = MacroContext::Definition;
-        self.record_visibilities_in_tokens(&item.mac.tokens);
-        self.macro_context = MacroContext::Invocation;
     }
 
     fn visit_item_mod(&mut self, item: &'ast ItemMod) {
         for attribute in &item.attrs {
             self.visit_attribute(attribute);
         }
+        if self.error.is_some() {
+            return;
+        }
+        self.record_visibility(&item.vis);
         if self.error.is_some() {
             return;
         }

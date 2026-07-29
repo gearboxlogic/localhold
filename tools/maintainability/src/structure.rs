@@ -67,7 +67,7 @@ pub fn check(workspace: &Path) -> Result<()> {
         PathAttribution::with_lineage(&current_component_paths, &canonical_current_paths, &current_site_paths),
         previous.as_ref(),
     )?;
-    visibility_policy.compare_previous_revision(workspace)
+    visibility_policy.compare_previous_revision(workspace, &current, &current_component_paths, previous.as_ref())
 }
 
 pub fn scan_workspace(workspace: &Path) -> Result<Inventory> {

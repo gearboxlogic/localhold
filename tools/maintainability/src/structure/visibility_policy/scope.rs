@@ -29,6 +29,52 @@ impl VisibilityPolicy {
         }
         Ok(())
     }
+
+    pub(super) fn compare_scope_evolution(
+        &self,
+        current: (&Inventory, &BTreeMap<&str, &str>),
+        previous: (&Inventory, &BTreeMap<&str, &str>),
+        previous_policy: &Self,
+    ) -> Result<()> {
+        let all_deltas = exception_subtree_deltas(&self.exceptions)?;
+        let appended_deltas = exception_subtree_deltas(&self.exceptions[previous_policy.exceptions.len()..])?;
+        let mut subtrees = BTreeMap::<&str, Vec<&str>>::new();
+        for &(component, subtree) in all_deltas.keys() {
+            subtrees.entry(component).or_default().push(subtree);
+        }
+        for (component, governed) in subtrees {
+            for subtree in &governed {
+                let approved = appended_deltas.get(&(component, *subtree)).copied().unwrap_or_default();
+                compare_subtree_evolution(current, previous, component, subtree, approved)?;
+            }
+            let current_outside = count_outside_subtrees(current.0, current.1, component, &governed)?;
+            let previous_outside = count_outside_subtrees(previous.0, previous.1, component, &governed)?;
+            if current_outside > previous_outside {
+                bail!(
+                    "pub(super) visibility growth for component {component:?} escaped its governed subtrees since the previous revision: previous_outside={previous_outside}, current_outside={current_outside}"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn compare_subtree_evolution(
+    current: (&Inventory, &BTreeMap<&str, &str>),
+    previous: (&Inventory, &BTreeMap<&str, &str>),
+    component: &str,
+    subtree: &str,
+    approved: usize,
+) -> Result<()> {
+    let current_inside = count_in_subtree(current.0, current.1, component, subtree)?;
+    let previous_inside = count_in_subtree(previous.0, previous.1, component, subtree)?;
+    let increase = current_inside.saturating_sub(previous_inside);
+    if increase != approved {
+        bail!(
+            "pub(super) visibility increase for component {component:?} and subtree {subtree:?} must exactly match newly appended subtree exception deltas: increase={increase}, appended={approved}"
+        );
+    }
+    Ok(())
 }
 
 pub(super) fn validate_non_overlapping_subtrees(exceptions: &[VisibilityException]) -> Result<()> {

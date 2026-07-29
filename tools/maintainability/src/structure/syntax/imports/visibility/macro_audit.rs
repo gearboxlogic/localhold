@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use proc_macro2::{Delimiter, Group, TokenStream, TokenTree};
 use syn::{Attribute, ItemMacro, ItemUse, Meta, Path};
 
+use super::super::macro_definitions::production_macro_visibility_counts;
 use super::super::resolution::{flatten_use_tree, resolve_path};
 use super::super::tokens::resolving_tokens;
 use super::VisibilityCounts;
@@ -38,7 +39,7 @@ struct MacroImport {
 }
 
 impl VisibilityMacroAudit {
-    pub fn record_definition(&mut self, module: &[String], item: &ItemMacro, cfg_context: &ProductionCfgContext) -> Result<()> {
+    pub fn record_definition(&mut self, module: &[String], item: &ItemMacro, cfg_context: &ProductionCfgContext) -> Result<VisibilityCounts> {
         let name = item.ident.as_ref().context("visibility macro definition has no name")?;
         let name = normalized_ident(name);
         let tokens = resolving_tokens(&item.mac.tokens);
@@ -51,12 +52,23 @@ impl VisibilityMacroAudit {
         if all_counts != body_counts {
             bail!("production macro {name:?} places restricted visibility outside a macro transcriber");
         }
-        if !all_counts.is_empty() {
+        if transcribers.iter().any(|body| contains_dynamic_macro_invocation(&body.stream())) {
+            bail!("production macro {name:?} cannot dispatch macro invocations through metavariables");
+        }
+        if transcribers.iter().any(|body| transcriber_may_construct_restricted_visibility(&body.stream())) {
+            bail!("production macro {name:?} cannot construct restricted visibility from metavariables");
+        }
+        if !all_counts.is_empty() && transcribers.iter().any(|body| contains_macro_definition(&body.stream())) {
+            bail!("production macro {name:?} with restricted visibility cannot define nested macros");
+        }
+        let production_counts = if all_counts.is_empty() {
+            VisibilityCounts::default()
+        } else {
+            production_macro_visibility_counts(&item.mac.tokens, cfg_context)?
+        };
+        if !production_counts.is_empty() {
             if production_macro_export(&item.attrs, cfg_context)? {
                 bail!("production macro {name:?} with restricted visibility cannot be exported with #[macro_export]");
-            }
-            if transcribers.iter().any(|body| contains_macro_definition(&body.stream())) {
-                bail!("production macro {name:?} with restricted visibility cannot define nested macros");
             }
             if transcribers.len() != 1 {
                 bail!("production macro {name:?} with restricted visibility must have exactly one expansion arm");
@@ -65,11 +77,8 @@ impl VisibilityMacroAudit {
                 bail!("production macro {name:?} cannot repeat restricted visibility");
             }
         }
-        if transcribers.iter().any(|body| transcriber_may_construct_restricted_visibility(&body.stream())) {
-            bail!("production macro {name:?} cannot construct restricted visibility from metavariables");
-        }
         let definition = MacroDefinition {
-            has_restricted_visibility: !all_counts.is_empty(),
+            has_restricted_visibility: !production_counts.is_empty(),
             references: macro_references(&tokens),
         };
         let id = MacroId {
@@ -79,7 +88,7 @@ impl VisibilityMacroAudit {
         if self.definitions.insert(id, definition).is_some() {
             bail!("production macro name {name:?} is ambiguous within module {module:?} for restricted-visibility accounting");
         }
-        Ok(())
+        Ok(production_counts)
     }
 
     pub fn record_import(&mut self, module: &[String], item: &ItemUse, rust_2015_absolute_paths: bool) -> Result<()> {
@@ -239,14 +248,6 @@ fn resolve_super_path(module: &[String], segments: &[String]) -> Option<Vec<Stri
     Some(path)
 }
 
-impl VisibilityCounts {
-    fn add(&mut self, other: Self) -> Result<()> {
-        self.pub_crate = self.pub_crate.checked_add(other.pub_crate).context("production pub(crate) macro count overflow")?;
-        self.pub_super = self.pub_super.checked_add(other.pub_super).context("production pub(super) macro count overflow")?;
-        Ok(())
-    }
-}
-
 fn macro_transcribers(tokens: &TokenStream) -> Vec<Group> {
     let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
     tokens
@@ -258,6 +259,22 @@ fn macro_transcribers(tokens: &TokenStream) -> Vec<Group> {
             _ => None,
         })
         .collect()
+}
+
+fn contains_dynamic_macro_invocation(tokens: &TokenStream) -> bool {
+    let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
+    tokens.windows(3).any(|window| {
+        matches!(
+            window,
+            [TokenTree::Punct(dollar), TokenTree::Ident(_), TokenTree::Punct(bang)]
+                if dollar.as_char() == '$' && bang.as_char() == '!'
+        )
+    }) || tokens.iter().any(|token| {
+        let TokenTree::Group(group) = token else {
+            return false;
+        };
+        contains_dynamic_macro_invocation(&group.stream())
+    })
 }
 
 fn contains_macro_definition(tokens: &TokenStream) -> bool {

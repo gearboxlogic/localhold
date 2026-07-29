@@ -15,11 +15,32 @@ fn restricted_visibilities_are_counted_only_in_production_syntax() -> Result<()>
 }
 
 #[test]
+fn restricted_module_declarations_are_counted() -> Result<()> {
+    let source = "pub(crate) mod crate_visible {}\n\
+                  mod nested { pub(super) mod parent_visible {} }\n\
+                  #[cfg(test)] pub(crate) mod test_only {}\n";
+    assert_eq!(concrete_facts(source)?.visibilities, VisibilityCounts { pub_crate: 1, pub_super: 1 });
+    Ok(())
+}
+
+#[test]
 fn macro_token_visibilities_are_counted_without_plain_text() -> Result<()> {
     let source = "macro_rules! define_memory_columns { () => { pub(crate) fn generated() {} pub(in super) struct Parent; } }\n\
                   define_memory_columns!();\n\
                   const TEXT: &str = \"pub(crate)\";\n";
     assert_eq!(concrete_facts(source)?.visibilities, VisibilityCounts { pub_crate: 1, pub_super: 1 });
+    Ok(())
+}
+
+#[test]
+fn macro_transcriber_visibilities_follow_production_cfg_semantics() -> Result<()> {
+    let source = "macro_rules! test_only { () => { #[cfg(test)] pub(crate) struct TestOnly; } }\n\
+                  macro_rules! define_memory_columns { () => {\n\
+                      #[cfg(test)] pub(crate) struct TestOnly;\n\
+                      #[cfg(feature = \"other\")] pub(super) struct Production;\n\
+                  } }\n\
+                  define_memory_columns!();\n";
+    assert_eq!(concrete_facts(source)?.visibilities, VisibilityCounts { pub_crate: 0, pub_super: 1 });
     Ok(())
 }
 
@@ -83,6 +104,17 @@ fn restricted_visibility_macro_cannot_be_invoked_indirectly() -> Result<()> {
                   concat_with_sep!();\n";
     let error = concrete_facts(source).err().context("indirect visibility macro invocation should fail")?;
     assert!(error.to_string().contains("cannot be invoked indirectly"));
+    Ok(())
+}
+
+#[test]
+fn macro_invocations_cannot_be_dispatched_through_metavariables() -> Result<()> {
+    let source = "macro_rules! restricted { () => { pub(crate) struct Generated; } }\n\
+                  macro_rules! forward { ($macro:ident) => { $macro!(); } }\n\
+                  restricted!();\n\
+                  forward!(restricted);\n";
+    let error = concrete_facts(source).err().context("dynamic visibility macro invocation should fail")?;
+    assert!(error.to_string().contains("cannot dispatch macro invocations through metavariables"), "{error:#}");
     Ok(())
 }
 

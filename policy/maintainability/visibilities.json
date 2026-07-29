@@ -9,8 +9,8 @@
     },
     {
       "component": "composition",
-      "baseline": {"pub_crate": 0, "pub_super": 0},
-      "current": {"pub_crate": 0, "pub_super": 0}
+      "baseline": {"pub_crate": 7, "pub_super": 0},
+      "current": {"pub_crate": 7, "pub_super": 0}
     },
     {
       "component": "config",
@@ -34,8 +34,8 @@
     },
     {
       "component": "embedding",
-      "baseline": {"pub_crate": 33, "pub_super": 1},
-      "current": {"pub_crate": 33, "pub_super": 1}
+      "baseline": {"pub_crate": 37, "pub_super": 1},
+      "current": {"pub_crate": 37, "pub_super": 1}
     },
     {
       "component": "engine-application",
@@ -54,8 +54,8 @@
     },
     {
       "component": "persistence-core",
-      "baseline": {"pub_crate": 137, "pub_super": 0},
-      "current": {"pub_crate": 137, "pub_super": 0}
+      "baseline": {"pub_crate": 140, "pub_super": 0},
+      "current": {"pub_crate": 140, "pub_super": 0}
     },
     {
       "component": "postgres-store",

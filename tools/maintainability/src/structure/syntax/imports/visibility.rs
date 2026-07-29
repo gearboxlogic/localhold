@@ -16,6 +16,12 @@ pub struct VisibilityCounts {
 }
 
 impl VisibilityCounts {
+    pub(super) fn add(&mut self, other: Self) -> Result<()> {
+        self.pub_crate = self.pub_crate.checked_add(other.pub_crate).context("production pub(crate) visibility count overflow")?;
+        self.pub_super = self.pub_super.checked_add(other.pub_super).context("production pub(super) visibility count overflow")?;
+        Ok(())
+    }
+
     pub(super) fn record_visibility(&mut self, visibility: &Visibility) -> Result<()> {
         let Visibility::Restricted(restricted) = visibility else {
             return Ok(());

@@ -96,6 +96,35 @@ fn old_exceptions_cannot_authorize_visibility_resurrection() {
 }
 
 #[test]
+fn old_subtree_exceptions_cannot_fund_resurrection_with_a_new_exception() {
+    let mut previous = policy(&[component("config", budget(0, 0), budget(0, 0))]);
+    previous.exceptions.push(subtree_exception("phase0.config-a", "config", "src/config/a", 1));
+    previous.validate().expect("historical subtree exception");
+
+    let mut current = previous.clone();
+    current.components[0].current.pub_super = 1;
+    current.exceptions.push(subtree_exception("phase0.config-b", "config", "src/config/b", 1));
+    current.validate().expect("new subtree exception");
+    current.compare_policy(&previous).expect("component total matches the new exception");
+
+    let paths = components(&[("src/config/a/mod.rs", "config"), ("src/config/b/mod.rs", "config")]);
+    let previous_inventory = inventory(&[file("src/config/a/mod.rs", 0, 0), file("src/config/b/mod.rs", 0, 0)]);
+    let resurrected = inventory(&[file("src/config/a/mod.rs", 0, 1), file("src/config/b/mod.rs", 0, 0)]);
+    assert!(
+        current
+            .compare_scope_evolution((&resurrected, &paths), (&previous_inventory, &paths), &previous)
+            .unwrap_err()
+            .to_string()
+            .contains("newly appended subtree exception")
+    );
+
+    let reviewed = inventory(&[file("src/config/a/mod.rs", 0, 0), file("src/config/b/mod.rs", 0, 1)]);
+    current
+        .compare_scope_evolution((&reviewed, &paths), (&previous_inventory, &paths), &previous)
+        .expect("growth stays in the newly reviewed subtree");
+}
+
+#[test]
 fn exception_evidence_is_append_only_and_component_baselines_are_immutable() {
     let mut previous = policy(&[component("config", budget(0, 0), budget(1, 0))]);
     previous.exceptions.push(cross_component_exception(

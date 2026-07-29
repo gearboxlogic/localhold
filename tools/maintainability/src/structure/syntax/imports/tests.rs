@@ -227,6 +227,78 @@ fn explicit_imports_take_precedence_over_globs_only_in_their_cfg_region() -> Res
 }
 
 #[test]
+fn local_type_declarations_take_precedence_over_compatible_globs() -> Result<()> {
+    let facts = concrete_facts(
+        "mod hidden { pub(crate) struct Adapter; }\n\
+         use hidden::*;\n\
+         pub(crate) struct Adapter;\n\
+         impl Adapter { pub(crate) fn open() -> SqliteStore { loop {} } }\n",
+    )?;
+    let signature = facts.signature_concrete_store_sites.sqlite_store.first().expect("concrete impl signature");
+    assert_eq!(signature.item_path, ["store_fixture", "Adapter"]);
+    Ok(())
+}
+
+#[test]
+fn local_type_declarations_shadow_globs_only_in_their_cfg_region() -> Result<()> {
+    let facts = concrete_facts(
+        "mod hidden { pub(crate) struct Adapter; }\n\
+         use hidden::*;\n\
+         #[cfg(feature = \"legacy\")]\n\
+         pub(crate) struct Adapter;\n\
+         impl Adapter { pub(crate) fn open() -> SqliteStore { loop {} } }\n",
+    )?;
+    assert_eq!(facts.signature_concrete_store_sites.sqlite_store.len(), 2);
+    let legacy = production_cfg_context(&[syn::parse_quote!(#[cfg(feature = "legacy")])], &ProductionCfgContext::default())?.expect("legacy cfg");
+    let current = production_cfg_context(&[syn::parse_quote!(#[cfg(not(feature = "legacy"))])], &ProductionCfgContext::default())?.expect("current cfg");
+    let local = facts
+        .signature_concrete_store_sites
+        .sqlite_store
+        .iter()
+        .find(|signature| signature.item_path == ["store_fixture", "Adapter"])
+        .expect("local declaration");
+    let imported = facts
+        .signature_concrete_store_sites
+        .sqlite_store
+        .iter()
+        .find(|signature| signature.item_path == ["store_fixture", "hidden", "Adapter"])
+        .expect("glob import");
+    assert!(local.cfg.conjoin(&legacy).is_some());
+    assert!(local.cfg.conjoin(&current).is_none());
+    assert!(imported.cfg.conjoin(&legacy).is_none());
+    assert!(imported.cfg.conjoin(&current).is_some());
+    Ok(())
+}
+
+#[test]
+fn exposed_function_signatures_are_type_exposure_evidence() -> Result<()> {
+    let facts = concrete_facts(
+        "mod hidden {\n\
+             pub(crate) struct Adapter;\n\
+             impl Adapter { pub(crate) fn open() -> SqliteStore { loop {} } }\n\
+         }\n\
+         pub(crate) fn adapter(value: hidden::Adapter) -> hidden::Adapter { value }\n",
+    )?;
+    assert_eq!(facts.public_reexports.len(), 1);
+    assert_eq!(facts.public_reexports[0].exported_path, ["store_fixture", "adapter"]);
+    assert_eq!(facts.public_reexports[0].target_path, ["store_fixture", "hidden", "Adapter"]);
+    assert!(facts.public_reexports[0].direct_exposure_cfg.is_some());
+    Ok(())
+}
+
+#[test]
+fn exposed_function_signature_types_resolve_aliases_without_treating_generics_as_items() -> Result<()> {
+    let facts = concrete_facts(
+        "mod hidden { pub(crate) struct Adapter; }\n\
+         use hidden::Adapter as InternalAdapter;\n\
+         pub(crate) fn adapter<T>(value: T) -> InternalAdapter { loop {} }\n",
+    )?;
+    assert_eq!(facts.public_reexports.len(), 1);
+    assert_eq!(facts.public_reexports[0].target_path, ["store_fixture", "hidden", "Adapter"]);
+    Ok(())
+}
+
+#[test]
 fn builtin_stringify_aliases_use_only_cfg_compatible_bindings() {
     for source in [
         "#[cfg(feature = \"legacy\")]\n\

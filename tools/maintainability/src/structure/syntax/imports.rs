@@ -36,7 +36,8 @@ use production::{
     production_foreign_item_tokens, production_impl_item_tokens, production_impl_tokens, production_item_tokens, production_stmt_tokens, production_trait_item_tokens,
 };
 use reexports::{
-    PendingPublicReexport, PublicTypeAliasContext, UseResolution, public_type_alias, resolve_binding_aliases, resolve_impl_signature_aliases, resolve_public_reexport_aliases,
+    PendingPublicReexport, PublicSignatureExposureContext, PublicTypeAliasContext, UseResolution, public_signature_type_exposures, public_type_alias, resolve_binding_aliases,
+    resolve_impl_signature_aliases, resolve_public_reexport_aliases,
 };
 pub(in crate::structure) use resolution::source_module;
 use resolution::{StringScan, UsePath, flatten_use_tree, resolve_path, restricted_attribute_identifier, restricted_token_identifier};
@@ -160,13 +161,13 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
     }
     collector.imports.sort();
     collector.imports.dedup();
-    let mut public_reexports = resolve_public_reexport_aliases(collector.public_reexports, &collector.use_resolutions);
-    public_reexports.sort();
-    public_reexports.dedup();
     collector.type_declarations.sort();
     collector.type_declarations.dedup();
-    resolve_impl_signature_aliases(&mut collector.concrete_stores.signature_sites, &collector.use_resolutions);
-    resolve_binding_aliases(&mut collector.concrete_stores.binding_sites, &collector.use_resolutions);
+    let mut public_reexports = resolve_public_reexport_aliases(collector.public_reexports, &collector.use_resolutions, &collector.type_declarations);
+    public_reexports.sort();
+    public_reexports.dedup();
+    resolve_impl_signature_aliases(&mut collector.concrete_stores.signature_sites, &collector.use_resolutions, &collector.type_declarations);
+    resolve_binding_aliases(&mut collector.concrete_stores.binding_sites, &collector.use_resolutions, &collector.type_declarations);
     collector.concrete_stores.finish();
     let binding_concrete_store_sites = collector.concrete_stores.binding_fingerprints();
     Ok(ProductionSyntaxFacts {
@@ -299,6 +300,33 @@ impl ProductionSyntaxCollector {
             return Ok(());
         };
         self.public_reexports.push(alias);
+        Ok(())
+    }
+
+    fn record_public_signature_type_exposures(&mut self, boundary_kind: &str, visibility: &Visibility, signature: &syn::Signature) -> Result<()> {
+        let mut exported_path = self.module.clone();
+        exported_path.push(normalized_ident(&signature.ident));
+        let ancestors = self.declaration_ancestor_identity();
+        self.public_reexports.extend(public_signature_type_exposures(
+            signature,
+            &PublicSignatureExposureContext {
+                boundary_kind,
+                exported_path: &exported_path,
+                module: &self.module,
+                visibility,
+                cfg: &self.cfg_context,
+                direct_exposure_cfg: self.direct_exposure_cfg(),
+                ancestors: &ancestors,
+                rust_2015_absolute_paths: self.rust_2015_absolute_paths,
+            },
+        )?);
+        Ok(())
+    }
+
+    fn record_exposed_function_signature(&mut self, boundary_kind: &str, visibility: &Visibility, signature: &syn::Signature) -> Result<()> {
+        let signature = self.production_signature(signature)?;
+        self.record_public_signature_type_exposures(boundary_kind, visibility, &signature)?;
+        self.record_concrete_stores_in_visible_signature(boundary_kind, visibility, &signature);
         Ok(())
     }
 
@@ -966,14 +994,11 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_fn(&mut self, item: &'ast ItemFn) {
-        if visibility_is_exposed(&item.vis) {
-            match self.production_signature(&item.sig) {
-                Ok(signature) => self.record_concrete_stores_in_visible_signature("function-signature", &item.vis, &signature),
-                Err(error) => {
-                    self.error = Some(error);
-                    return;
-                }
-            }
+        if visibility_is_exposed(&item.vis)
+            && let Err(error) = self.record_exposed_function_signature("function-signature", &item.vis, &item.sig)
+        {
+            self.error = Some(error);
+            return;
         }
         visit::visit_item_fn(self, item);
     }
@@ -1007,14 +1032,11 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_foreign_item_fn(&mut self, item: &'ast ForeignItemFn) {
-        if visibility_is_exposed(&item.vis) {
-            match self.production_signature(&item.sig) {
-                Ok(signature) => self.record_concrete_stores_in_visible_signature("foreign-function-signature", &item.vis, &signature),
-                Err(error) => {
-                    self.error = Some(error);
-                    return;
-                }
-            }
+        if visibility_is_exposed(&item.vis)
+            && let Err(error) = self.record_exposed_function_signature("foreign-function-signature", &item.vis, &item.sig)
+        {
+            self.error = Some(error);
+            return;
         }
         visit::visit_foreign_item_fn(self, item);
     }

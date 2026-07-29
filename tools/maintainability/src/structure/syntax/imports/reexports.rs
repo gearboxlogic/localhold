@@ -5,9 +5,12 @@ use anyhow::{Result, bail};
 use syn::{ItemType, Type};
 
 use super::super::{ProductionCfgContext, normalized_ident, visibility_is_exposed};
-use super::PublicReexportEvidence;
 use super::concrete::{ConcreteStoreBindingSite, ConcreteStoreBindingSites, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites};
 use super::resolution::resolve_path;
+use super::{PublicReexportEvidence, TypeDeclarationEvidence};
+
+mod signatures;
+pub(super) use signatures::{PublicSignatureExposureContext, public_signature_type_exposures};
 
 pub(super) struct PendingPublicReexport {
     pub(super) evidence: PublicReexportEvidence,
@@ -94,6 +97,7 @@ struct ResolvedTraitPath {
 
 struct AliasResolver<'a> {
     resolutions: &'a [UseResolution],
+    declarations: &'a [TypeDeclarationEvidence],
     targets: &'a mut ResolvedUseTargets,
 }
 
@@ -104,11 +108,15 @@ struct UseRewrite {
     is_glob: bool,
 }
 
-pub(super) fn resolve_public_reexport_aliases(reexports: Vec<PendingPublicReexport>, resolutions: &[UseResolution]) -> Vec<PublicReexportEvidence> {
+pub(super) fn resolve_public_reexport_aliases(
+    reexports: Vec<PendingPublicReexport>,
+    resolutions: &[UseResolution],
+    declarations: &[TypeDeclarationEvidence],
+) -> Vec<PublicReexportEvidence> {
     let mut resolved = Vec::new();
     for pending in reexports {
         let evidence = pending.evidence;
-        for target in resolve_use_aliases(evidence.target_path.clone(), &pending.cfg, resolutions) {
+        for target in resolve_use_aliases(evidence.target_path.clone(), &pending.cfg, resolutions, declarations) {
             let fingerprint = if target.aliases.is_empty() && target.path == evidence.target_path {
                 evidence.fingerprint.clone()
             } else {
@@ -131,17 +139,17 @@ pub(super) fn resolve_public_reexport_aliases(reexports: Vec<PendingPublicReexpo
     resolved
 }
 
-pub(super) fn resolve_impl_signature_aliases(sites: &mut ConcreteStoreSignatureSites, resolutions: &[UseResolution]) {
-    resolve_impl_signature_site_aliases(&mut sites.sqlite_store, resolutions);
-    resolve_impl_signature_site_aliases(&mut sites.postgres_store, resolutions);
+pub(super) fn resolve_impl_signature_aliases(sites: &mut ConcreteStoreSignatureSites, resolutions: &[UseResolution], declarations: &[TypeDeclarationEvidence]) {
+    resolve_impl_signature_site_aliases(&mut sites.sqlite_store, resolutions, declarations);
+    resolve_impl_signature_site_aliases(&mut sites.postgres_store, resolutions, declarations);
 }
 
-pub(super) fn resolve_binding_aliases(sites: &mut ConcreteStoreBindingSites, resolutions: &[UseResolution]) {
-    resolve_store_binding_aliases(&mut sites.sqlite_store, resolutions);
-    resolve_store_binding_aliases(&mut sites.postgres_store, resolutions);
+pub(super) fn resolve_binding_aliases(sites: &mut ConcreteStoreBindingSites, resolutions: &[UseResolution], declarations: &[TypeDeclarationEvidence]) {
+    resolve_store_binding_aliases(&mut sites.sqlite_store, resolutions, declarations);
+    resolve_store_binding_aliases(&mut sites.postgres_store, resolutions, declarations);
 }
 
-fn resolve_store_binding_aliases(sites: &mut Vec<ConcreteStoreBindingSite>, resolutions: &[UseResolution]) {
+fn resolve_store_binding_aliases(sites: &mut Vec<ConcreteStoreBindingSite>, resolutions: &[UseResolution], declarations: &[TypeDeclarationEvidence]) {
     let mut resolved = Vec::new();
     for site in std::mem::take(sites) {
         if site.item_path.is_empty() {
@@ -149,7 +157,7 @@ fn resolve_store_binding_aliases(sites: &mut Vec<ConcreteStoreBindingSite>, reso
             continue;
         }
         resolved.extend(
-            resolve_use_aliases(site.item_path, &site.cfg, resolutions)
+            resolve_use_aliases(site.item_path, &site.cfg, resolutions, declarations)
                 .into_iter()
                 .map(|target| ConcreteStoreBindingSite {
                     fingerprint: syntax_fingerprint(&format!(
@@ -166,12 +174,12 @@ fn resolve_store_binding_aliases(sites: &mut Vec<ConcreteStoreBindingSite>, reso
     *sites = resolved;
 }
 
-fn resolve_impl_signature_site_aliases(sites: &mut Vec<ConcreteStoreSignatureSite>, resolutions: &[UseResolution]) {
+fn resolve_impl_signature_site_aliases(sites: &mut Vec<ConcreteStoreSignatureSite>, resolutions: &[UseResolution], declarations: &[TypeDeclarationEvidence]) {
     let mut resolved = Vec::new();
     for site in std::mem::take(sites) {
-        for item in resolved_item_paths(&site, resolutions) {
+        for item in resolved_item_paths(&site, resolutions, declarations) {
             resolved.extend(
-                resolved_trait_paths(&site, &item.cfg, resolutions)
+                resolved_trait_paths(&site, &item.cfg, resolutions, declarations)
                     .into_iter()
                     .map(|implemented_trait| resolved_signature_site(&site, &item, implemented_trait)),
             );
@@ -180,9 +188,9 @@ fn resolve_impl_signature_site_aliases(sites: &mut Vec<ConcreteStoreSignatureSit
     *sites = resolved;
 }
 
-fn resolved_item_paths(site: &ConcreteStoreSignatureSite, resolutions: &[UseResolution]) -> ResolvedUseTargets {
+fn resolved_item_paths(site: &ConcreteStoreSignatureSite, resolutions: &[UseResolution], declarations: &[TypeDeclarationEvidence]) -> ResolvedUseTargets {
     if site.impl_self_type && !site.item_path.is_empty() {
-        resolve_use_aliases(site.item_path.clone(), &site.cfg, resolutions)
+        resolve_use_aliases(site.item_path.clone(), &site.cfg, resolutions, declarations)
     } else {
         vec![ResolvedPath {
             path: site.item_path.clone(),
@@ -192,7 +200,12 @@ fn resolved_item_paths(site: &ConcreteStoreSignatureSite, resolutions: &[UseReso
     }
 }
 
-fn resolved_trait_paths(site: &ConcreteStoreSignatureSite, cfg: &ProductionCfgContext, resolutions: &[UseResolution]) -> Vec<ResolvedTraitPath> {
+fn resolved_trait_paths(
+    site: &ConcreteStoreSignatureSite,
+    cfg: &ProductionCfgContext,
+    resolutions: &[UseResolution],
+    declarations: &[TypeDeclarationEvidence],
+) -> Vec<ResolvedTraitPath> {
     site.required_trait_path.as_ref().map_or_else(
         || {
             vec![ResolvedTraitPath {
@@ -202,7 +215,7 @@ fn resolved_trait_paths(site: &ConcreteStoreSignatureSite, cfg: &ProductionCfgCo
             }]
         },
         |trait_path| {
-            resolve_use_aliases(trait_path.clone(), cfg, resolutions)
+            resolve_use_aliases(trait_path.clone(), cfg, resolutions, declarations)
                 .into_iter()
                 .map(|resolved| ResolvedTraitPath {
                     path: Some(resolved.path),
@@ -237,10 +250,11 @@ fn resolved_path_identity(identity: &str, kind: &str, original: &[String], resol
     syntax_fingerprint(&format!("{identity}\0resolved-{kind}:{}\0aliases:{}", resolved.join("::"), aliases.join("\0")))
 }
 
-fn resolve_use_aliases(path: Vec<String>, cfg: &ProductionCfgContext, resolutions: &[UseResolution]) -> ResolvedUseTargets {
+fn resolve_use_aliases(path: Vec<String>, cfg: &ProductionCfgContext, resolutions: &[UseResolution], declarations: &[TypeDeclarationEvidence]) -> ResolvedUseTargets {
     let mut targets = Vec::new();
     AliasResolver {
         resolutions,
+        declarations,
         targets: &mut targets,
     }
     .resolve(path, cfg, &mut BTreeSet::new(), &mut Vec::new());
@@ -271,7 +285,18 @@ impl AliasResolver<'_> {
             })
             .filter(|rewrite| rewrite.target != path)
             .collect::<Vec<_>>();
-        let explicit_cfgs = rewritten.iter().filter(|rewrite| !rewrite.is_glob).map(|rewrite| rewrite.cfg.clone()).collect::<Vec<_>>();
+        let local_cfgs = self
+            .declarations
+            .iter()
+            .filter(|declaration| declaration.item_path == path)
+            .filter_map(|declaration| cfg.conjoin(&declaration.cfg))
+            .collect::<Vec<_>>();
+        let explicit_cfgs = rewritten
+            .iter()
+            .filter(|rewrite| !rewrite.is_glob)
+            .map(|rewrite| rewrite.cfg.clone())
+            .chain(local_cfgs.iter().cloned())
+            .collect::<Vec<_>>();
         if rewritten.is_empty() {
             self.targets.push(ResolvedPath {
                 path,
@@ -279,6 +304,11 @@ impl AliasResolver<'_> {
                 cfg: cfg.clone(),
             });
         } else {
+            self.targets.extend(local_cfgs.into_iter().map(|local_cfg| ResolvedPath {
+                path: path.clone(),
+                aliases: alias_fingerprints.clone(),
+                cfg: local_cfg,
+            }));
             for rewrite in rewritten.into_iter().filter_map(|rewrite| apply_explicit_precedence(rewrite, &explicit_cfgs)) {
                 alias_fingerprints.push(rewrite.fingerprint);
                 self.resolve(rewrite.target, &rewrite.cfg, &mut visited.clone(), alias_fingerprints);

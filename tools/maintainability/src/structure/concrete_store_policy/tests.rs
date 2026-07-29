@@ -355,6 +355,28 @@ fn impl_self_type_visibility_is_signature_evidence() {
 }
 
 #[test]
+fn exposed_function_return_types_make_impl_boundaries_reachable() {
+    let policy = policy();
+    let components = components(&[("src/adapter.rs", "sqlite-store")]);
+    let mut baseline = inventory(&[("src/adapter.rs", 1, 0)]);
+    baseline.files[0].production_signature_store_sites.sqlite_store = vec![impl_signature("adapter-open", &["hidden", "Adapter"])];
+    let mut private_declaration = type_declaration("private-adapter", &["hidden", "Adapter"]);
+    private_declaration.direct_exposure_cfg = None;
+    baseline.files[0].production_type_declarations = vec![private_declaration];
+    let mut current = baseline.clone();
+    current.files[0].production_public_reexports = vec![PublicReexportEvidence {
+        exported_path: vec!["adapter".to_owned()],
+        target_path: vec!["hidden".to_owned(), "Adapter".to_owned()],
+        fingerprint: "public-function-return-adapter".to_owned(),
+        cfg: ProductionCfgContext::default(),
+        direct_exposure_cfg: Some(ProductionCfgContext::default()),
+    }];
+
+    let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
+    assert!(error.to_string().contains("production signature"));
+}
+
+#[test]
 fn private_trait_implementations_are_not_exposure_signatures() {
     let policy = policy();
     let components = components(&[("src/adapter.rs", "sqlite-store")]);

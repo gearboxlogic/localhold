@@ -52,6 +52,7 @@ fn transcriber_contains_production_concrete_store(tokens: &TokenStream, cfg: &Pr
         ProductionSyntaxContext {
             cfg: cfg.clone(),
             declaration_ancestors: Vec::new(),
+            module_exposure_cfg: Some(cfg.clone()),
         },
     );
     match facts {

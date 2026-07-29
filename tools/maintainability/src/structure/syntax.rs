@@ -21,6 +21,14 @@ pub(super) fn normalized_ident(ident: &proc_macro2::Ident) -> String {
     value.strip_prefix("r#").unwrap_or(&value).to_owned()
 }
 
+pub(super) fn visibility_is_exposed(visibility: &syn::Visibility) -> bool {
+    match visibility {
+        syn::Visibility::Inherited => false,
+        syn::Visibility::Restricted(restricted) => !restricted.path.is_ident("self"),
+        syn::Visibility::Public(_) => true,
+    }
+}
+
 pub struct TestLineCollector {
     test_lines: Vec<bool>,
     cfg_context: ProductionCfgContext,

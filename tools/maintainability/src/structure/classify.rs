@@ -12,7 +12,7 @@ use crate::scan::syntax_fingerprint;
 use super::syntax::{
     ConcreteStoreCounts, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionAncestorPath, ProductionCfgContext, ProductionSyntaxContext, ProductionSyntaxFacts,
     ProductionSyntaxOptions, PublicReexportEvidence, TestLineCollector, TypeDeclarationEvidence, normalized_ident, production_cfg_context, production_syntax_facts_with_context,
-    reject_module_path_overrides,
+    reject_module_path_overrides, visibility_is_exposed,
 };
 
 mod module_macro;
@@ -60,6 +60,8 @@ struct SourceReachability {
     production_contexts: BTreeMap<String, ProductionSourceContext>,
     production_targets: BTreeMap<String, Vec<String>>,
 }
+
+type ProductionTargetMemberships = BTreeMap<String, Vec<String>>;
 
 pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Inventory> {
     reject_untracked_rust_sources(workspace, "examples")?;
@@ -245,6 +247,7 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
             let ProductionSourceContext {
                 cfg: initial_cfg_context,
                 declaration_ancestors,
+                module_exposure_cfg,
             } = reachability
                 .production_contexts
                 .get(&path)
@@ -268,6 +271,7 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
                     ProductionSyntaxContext {
                         cfg: initial_cfg_context,
                         declaration_ancestors,
+                        module_exposure_cfg,
                     },
                 )
                 .map_err(|error| anyhow::anyhow!("{error} in {path}"))?,
@@ -383,7 +387,7 @@ fn classify_source_reachability(
         }
     }
     let contextual_roots = production_contextual_roots(production_roots, &fallback_roots, &production_reachable, &edges);
-    let production_targets = production_target_memberships(&edges, &contextual_roots);
+    let production_targets = production_target_memberships(&edges, &contextual_roots)?;
     let production_contexts = production_contexts(&edges, &contextual_roots)?;
     let contextually_production = production_contexts.keys().cloned().collect::<BTreeSet<_>>();
     Ok(SourceReachability {
@@ -412,15 +416,15 @@ fn production_contextual_roots(
         .collect()
 }
 
-fn production_target_memberships(edges: &[ModuleEdge], roots: &BTreeSet<String>) -> BTreeMap<String, Vec<String>> {
+fn production_target_memberships(edges: &[ModuleEdge], roots: &BTreeSet<String>) -> Result<ProductionTargetMemberships> {
     let mut memberships = BTreeMap::<String, BTreeSet<String>>::new();
     for root in roots {
         let root_set = std::iter::once(root.clone()).collect();
-        for path in production_reachable_from(edges, &root_set) {
+        for path in production_contexts(edges, &root_set)?.into_keys() {
             memberships.entry(path).or_default().insert(root.clone());
         }
     }
-    memberships.into_iter().map(|(path, targets)| (path, targets.into_iter().collect())).collect()
+    Ok(memberships.into_iter().map(|(path, targets)| (path, targets.into_iter().collect())).collect())
 }
 
 struct TargetRoots {
@@ -682,6 +686,7 @@ struct ModuleScope<'a> {
     inherited_macros: &'a BTreeSet<String>,
     production_context: Option<ProductionCfgContext>,
     declaration_ancestors: Vec<String>,
+    modules_exposed: bool,
 }
 
 impl ModuleGraph<'_> {
@@ -696,6 +701,7 @@ impl ModuleGraph<'_> {
                 inherited_macros: &BTreeSet::new(),
                 production_context,
                 declaration_ancestors: Vec::new(),
+                modules_exposed: true,
             },
         )
     }
@@ -718,6 +724,7 @@ impl ModuleGraph<'_> {
             let module_name = normalized_ident(&module.ident);
             let mut declaration_ancestors = scope.declaration_ancestors.clone();
             declaration_ancestors.push(format!("mod:{}:{}", module_name, syntax_fingerprint(&module.vis)));
+            let modules_exposed = scope.modules_exposed && visibility_is_exposed(&module.vis);
             if let Some((_, nested)) = &module.content {
                 let nested_dir = scope.module_dir.join(&module_name);
                 self.collect_with_macros(
@@ -729,6 +736,7 @@ impl ModuleGraph<'_> {
                         inherited_macros: &safe_macros,
                         production_context,
                         declaration_ancestors,
+                        modules_exposed,
                     },
                 )?;
                 continue;
@@ -742,6 +750,7 @@ impl ModuleGraph<'_> {
                     test_only,
                     production_context,
                     declaration_ancestors,
+                    modules_exposed,
                 });
             }
         }

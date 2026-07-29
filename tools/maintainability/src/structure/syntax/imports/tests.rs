@@ -213,6 +213,28 @@ fn builtin_stringify_aliases_use_only_cfg_compatible_bindings() {
 }
 
 #[test]
+fn module_stringify_aliases_require_builtin_coverage_without_cfg_shadows() -> Result<()> {
+    let shadowed = "#[cfg(feature = \"legacy\")]\n\
+                    use ::core::stringify as text;\n\
+                    #[cfg(not(feature = \"legacy\"))]\n\
+                    use crate::other as text;\n\
+                    const STORE: &str = text!(SqliteStore);\n";
+    let Err(error) = concrete_facts(shadowed) else {
+        panic!("a non-builtin binding in one cfg region must keep the invocation opaque");
+    };
+    assert!(error.to_string().contains("unreviewed macro expansion path text"), "{error:#}");
+
+    let fully_builtin = "#[cfg(feature = \"legacy\")]\n\
+                         use ::core::stringify as text;\n\
+                         #[cfg(not(feature = \"legacy\"))]\n\
+                         use ::std::stringify as text;\n\
+                         const STORE: &str = text!(PostgresStore);\n";
+    let facts = concrete_facts(fully_builtin)?;
+    assert_eq!(facts.concrete_stores, ConcreteStoreCounts::default());
+    Ok(())
+}
+
+#[test]
 fn nested_custom_library_roots_define_relative_module_paths() -> Result<()> {
     let syntax = syn::parse_file("use super::server::Service;\n")?;
     assert_eq!(
@@ -943,7 +965,15 @@ fn canonical_binding_identity_ignores_impl_and_method_documentation() -> Result<
              fn version(&self) -> u32 { 1 }\n\
          }\n",
     )?;
+    let conditionally_documented = historical_concrete_facts(
+        "#[cfg_attr(docsrs, doc = \"Implementation documentation.\")]\n\
+         impl MemoryReader for SqliteStore {\n\
+             #[cfg_attr(docsrs, cfg_attr(all(), doc = \"Method documentation.\"))]\n\
+             fn version(&self) -> u32 { 1 }\n\
+         }\n",
+    )?;
     assert_eq!(plain.binding_concrete_store_sites, documented.binding_concrete_store_sites);
+    assert_eq!(plain.binding_concrete_store_sites, conditionally_documented.binding_concrete_store_sites);
     Ok(())
 }
 
@@ -1113,6 +1143,26 @@ fn private_containers_and_items_are_not_exposure_signatures() -> Result<()> {
     assert!(private.signature_concrete_store_sites.postgres_store.is_empty());
     assert_eq!(exposed.signature_concrete_store_sites.sqlite_store.len(), 3);
     assert_eq!(exposed.signature_concrete_store_sites.postgres_store.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn locally_visible_items_in_private_modules_are_latent_exposure_signatures() -> Result<()> {
+    let private = concrete_facts("mod hidden { pub(crate) fn inspect(_: SqliteStore) {} }\n")?;
+    let private_site = private.signature_concrete_store_sites.sqlite_store.first().expect("latent private-module signature");
+    assert!(private_site.direct_exposure_cfg.is_none());
+
+    let exposed = concrete_facts("pub(crate) mod hidden { pub(crate) fn inspect(_: SqliteStore) {} }\n")?;
+    let exposed_site = exposed.signature_concrete_store_sites.sqlite_store.first().expect("directly exposed signature");
+    assert!(exposed_site.direct_exposure_cfg.is_some());
+
+    let nested_private = concrete_facts(
+        "pub(crate) mod facade {\n\
+             mod hidden { pub(crate) fn inspect(_: PostgresStore) {} }\n\
+         }\n",
+    )?;
+    let nested_site = nested_private.signature_concrete_store_sites.postgres_store.first().expect("nested latent signature");
+    assert!(nested_site.direct_exposure_cfg.is_none());
     Ok(())
 }
 

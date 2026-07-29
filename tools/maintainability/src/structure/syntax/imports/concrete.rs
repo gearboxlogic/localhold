@@ -31,6 +31,8 @@ pub struct ConcreteStoreSignatureSite {
     pub(in crate::structure) cfg: ProductionCfgContext,
     #[serde(skip)]
     pub(in crate::structure) impl_self_type: bool,
+    #[serde(skip)]
+    pub(in crate::structure) direct_exposure_cfg: Option<ProductionCfgContext>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
@@ -53,6 +55,7 @@ pub(super) struct SignatureSiteContext<'a> {
     pub(super) item_path: &'a [String],
     pub(super) cfg: &'a ProductionCfgContext,
     pub(super) impl_self_type: bool,
+    pub(super) direct_exposure_cfg: Option<&'a ProductionCfgContext>,
 }
 
 impl ConcreteStoreInventory {
@@ -73,7 +76,7 @@ impl ConcreteStoreInventory {
         self.record_name(&normalized_ident(ident), site_context)
     }
 
-    pub(super) fn record_public_struct_declaration(&mut self, item: &ItemStruct, item_path: &[String], cfg: &ProductionCfgContext, ancestors: &str) -> Result<()> {
+    pub(super) fn record_public_struct_declaration(&mut self, item: &ItemStruct, signature: &SignatureSiteContext<'_>, ancestors: &str) -> Result<()> {
         let name = normalized_ident(&item.ident);
         let sites = match name.as_str() {
             "SqliteStore" => &mut self.public_struct_declarations.sqlite_store,
@@ -82,31 +85,23 @@ impl ConcreteStoreInventory {
         };
         let mut declaration = item.clone();
         declaration.attrs.retain(|attribute| !attribute.path().is_ident("doc"));
-        declaration.generics = production_generics(&declaration.generics, cfg)?;
+        declaration.generics = production_generics(&declaration.generics, signature.cfg)?;
         match &mut declaration.fields {
-            Fields::Named(fields) => fields.named = production_fields(&fields.named, cfg)?,
-            Fields::Unnamed(fields) => fields.unnamed = production_fields(&fields.unnamed, cfg)?,
+            Fields::Named(fields) => fields.named = production_fields(&fields.named, signature.cfg)?,
+            Fields::Unnamed(fields) => fields.unnamed = production_fields(&fields.unnamed, signature.cfg)?,
             Fields::Unit => {}
         }
         for field in &mut declaration.fields {
             field.attrs.retain(|attribute| !attribute.path().is_ident("doc"));
         }
         let declaration = syntax_fingerprint(&without_documentation(&declaration.to_token_stream()));
-        let declaration = if cfg.identity().is_empty() && ancestors.is_empty() {
+        let declaration = if signature.cfg.identity().is_empty() && ancestors.is_empty() {
             declaration
         } else {
-            syntax_fingerprint(&format!("declaration:{declaration}\0cfg:{}\0ancestors:{ancestors}", cfg.identity()))
+            syntax_fingerprint(&format!("declaration:{declaration}\0cfg:{}\0ancestors:{ancestors}", signature.cfg.identity()))
         };
         sites.push(declaration.clone());
-        self.record_exposure_signature_name(
-            &name,
-            &format!("canonical-declaration:{declaration}"),
-            &SignatureSiteContext {
-                item_path,
-                cfg,
-                impl_self_type: false,
-            },
-        );
+        self.record_exposure_signature_name(&name, &format!("canonical-declaration:{declaration}"), signature);
         Ok(())
     }
 
@@ -309,6 +304,7 @@ impl ConcreteStoreInventory {
             item_path: signature.item_path.to_vec(),
             cfg: signature.cfg.clone(),
             impl_self_type: signature.impl_self_type,
+            direct_exposure_cfg: signature.direct_exposure_cfg.cloned(),
         });
     }
 
@@ -359,7 +355,7 @@ pub(super) fn context_fingerprint(parent: Option<&str>, kind: &str, syntax: &imp
     }
 }
 
-fn without_documentation(tokens: &TokenStream) -> TokenStream {
+pub(super) fn without_documentation(tokens: &TokenStream) -> TokenStream {
     let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
     let mut normalized = TokenStream::new();
     let mut index = 0;

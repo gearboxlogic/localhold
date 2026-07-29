@@ -614,7 +614,7 @@ fn record_store_site_fingerprints(
         public_reexports: &[],
     };
     for fingerprint in fingerprints {
-        record_site_evidence(sites, context, fingerprint)?;
+        record_site_evidence(sites, context, fingerprint, Some(fingerprint))?;
     }
     Ok(())
 }
@@ -665,19 +665,32 @@ fn record_signature_site_fingerprint(
         public_reexports: &public_reexports,
     };
     match type_declarations.as_deref() {
-        Some([]) | None => record_site_evidence(sites, context, &signature.fingerprint),
+        Some([]) | None => record_signature_evidence(sites, context, signature, &signature.fingerprint),
         Some(declarations) => {
             for declaration in declarations {
                 let fingerprint = syntax_fingerprint(&format!("signature:{}\0impl-self-type-declaration:{declaration}", signature.fingerprint));
-                record_site_evidence(sites, context, &fingerprint)?;
+                record_signature_evidence(sites, context, signature, &fingerprint)?;
             }
             Ok(())
         }
     }
 }
 
-fn record_site_evidence(sites: &mut BTreeMap<SiteFingerprint, usize>, context: SiteEvidenceContext<'_>, signature: &str) -> Result<()> {
-    let evidence = std::iter::once(signature.to_owned()).chain(
+fn record_signature_evidence(
+    sites: &mut BTreeMap<SiteFingerprint, usize>,
+    context: SiteEvidenceContext<'_>,
+    signature: &ConcreteStoreSignatureSite,
+    fingerprint: &str,
+) -> Result<()> {
+    let direct_fingerprint = signature
+        .direct_exposure_cfg
+        .as_ref()
+        .map(|cfg| syntax_fingerprint(&format!("signature:{fingerprint}\0direct-exposure-cfg:{}", cfg.identity())));
+    record_site_evidence(sites, context, fingerprint, direct_fingerprint.as_deref())
+}
+
+fn record_site_evidence(sites: &mut BTreeMap<SiteFingerprint, usize>, context: SiteEvidenceContext<'_>, signature: &str, direct_fingerprint: Option<&str>) -> Result<()> {
+    let evidence = direct_fingerprint.iter().map(|fingerprint| (*fingerprint).to_owned()).chain(
         context
             .public_reexports
             .iter()

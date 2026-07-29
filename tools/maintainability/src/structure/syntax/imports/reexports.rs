@@ -52,6 +52,7 @@ pub(super) fn resolve_public_reexport_aliases(reexports: Vec<PendingPublicReexpo
                 exported_path: evidence.exported_path.clone(),
                 target_path,
                 fingerprint,
+                direct_exposure_cfg: evidence.direct_exposure_cfg.as_ref().and_then(|direct| direct.conjoin(&cfg)),
                 cfg,
             });
         }
@@ -85,6 +86,7 @@ fn resolve_impl_signature_site_aliases(sites: &mut Vec<ConcreteStoreSignatureSit
             resolved.push(ConcreteStoreSignatureSite {
                 fingerprint,
                 item_path,
+                direct_exposure_cfg: site.direct_exposure_cfg.as_ref().and_then(|direct| direct.conjoin(&cfg)),
                 cfg,
                 impl_self_type: true,
             });

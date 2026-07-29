@@ -116,6 +116,19 @@ fn production_sources_retain_their_originating_target_roots() {
 }
 
 #[test]
+fn production_target_memberships_exclude_cfg_impossible_paths() {
+    let inventory = inventory(&[
+        ("src/lib.rs", "mod shared;\n"),
+        ("src/main.rs", "#![cfg(feature = \"legacy\")]\nmod shared;\nfn main() {}\n"),
+        ("src/shared.rs", "#[cfg(not(feature = \"legacy\"))]\nmod child;\n"),
+        ("src/shared/child.rs", "fn child() {}\n"),
+    ]);
+    let by_path = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_path["src/shared.rs"].production_targets, ["src/lib.rs", "src/main.rs"]);
+    assert_eq!(by_path["src/shared/child.rs"].production_targets, ["src/lib.rs"]);
+}
+
+#[test]
 fn concrete_store_counts_follow_production_reachability() {
     let inventory = inventory(&[
         (

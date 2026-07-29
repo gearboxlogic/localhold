@@ -11,18 +11,28 @@ pub(super) struct ModuleEdge {
     pub(super) test_only: bool,
     pub(super) production_context: Option<ProductionCfgContext>,
     pub(super) declaration_ancestors: Vec<String>,
+    pub(super) modules_exposed: bool,
 }
 
 #[derive(Clone)]
 pub(super) struct ProductionSourceContext {
     pub(super) cfg: ProductionCfgContext,
     pub(super) declaration_ancestors: Vec<ProductionAncestorPath>,
+    pub(super) module_exposure_cfg: Option<ProductionCfgContext>,
 }
 
 #[derive(Clone)]
 struct ProductionPathContext {
     cfg: ProductionCfgContext,
     declaration_ancestors: Vec<String>,
+    modules_exposed: bool,
+}
+
+struct ProductionPathEdge {
+    target: String,
+    cfg: ProductionCfgContext,
+    declaration_ancestors: Vec<String>,
+    modules_exposed: bool,
 }
 
 struct ContextPathCollector<'a> {
@@ -43,6 +53,7 @@ pub(super) fn production_contexts(edges: &[ModuleEdge], roots: &BTreeSet<String>
             &ProductionPathContext {
                 cfg: ProductionCfgContext::default(),
                 declaration_ancestors: Vec::new(),
+                modules_exposed: true,
             },
         )?;
     }
@@ -61,7 +72,15 @@ pub(super) fn production_contexts(edges: &[ModuleEdge], roots: &BTreeSet<String>
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
-            Ok((path, ProductionSourceContext { cfg, declaration_ancestors }))
+            let module_exposure_cfg = ProductionCfgContext::disjunction(contexts.values().filter(|context| context.modules_exposed).map(|context| context.cfg.clone()));
+            Ok((
+                path,
+                ProductionSourceContext {
+                    cfg,
+                    declaration_ancestors,
+                    module_exposure_cfg,
+                },
+            ))
         })
         .collect()
 }
@@ -71,32 +90,48 @@ impl ContextPathCollector<'_> {
         if !self.active.insert(source.to_owned()) {
             bail!("production module graph contains a cycle through {source:?}");
         }
-        let identity = format!("{}\0{}", inherited.cfg.identity(), inherited.declaration_ancestors.join("\0"));
+        let identity = format!(
+            "{}\0{}\0modules-exposed:{}",
+            inherited.cfg.identity(),
+            inherited.declaration_ancestors.join("\0"),
+            inherited.modules_exposed
+        );
         if self.paths.entry(source.to_owned()).or_default().insert(identity, inherited.clone()).is_none() {
             let outgoing = self
                 .edges
                 .iter()
                 .filter(|edge| !edge.test_only && edge.source == source)
                 .map(|edge| {
-                    let local = edge.production_context.clone().context("production module edge has no cfg context")?;
-                    Ok((edge.target.clone(), local, edge.declaration_ancestors.clone()))
+                    Ok(ProductionPathEdge {
+                        target: edge.target.clone(),
+                        cfg: edge.production_context.clone().context("production module edge has no cfg context")?,
+                        declaration_ancestors: edge.declaration_ancestors.clone(),
+                        modules_exposed: edge.modules_exposed,
+                    })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            for (target, local, local_ancestors) in outgoing {
-                self.descend(inherited, &target, &local, local_ancestors)?;
+            for edge in outgoing {
+                self.descend(inherited, edge)?;
             }
         }
         self.active.remove(source);
         Ok(())
     }
 
-    fn descend(&mut self, inherited: &ProductionPathContext, target: &str, local: &ProductionCfgContext, local_ancestors: Vec<String>) -> Result<()> {
-        let Some(cfg) = inherited.cfg.conjoin(local) else {
+    fn descend(&mut self, inherited: &ProductionPathContext, edge: ProductionPathEdge) -> Result<()> {
+        let Some(cfg) = inherited.cfg.conjoin(&edge.cfg) else {
             return Ok(());
         };
         let mut declaration_ancestors = inherited.declaration_ancestors.clone();
-        declaration_ancestors.extend(local_ancestors);
-        self.collect(target, &ProductionPathContext { cfg, declaration_ancestors })
+        declaration_ancestors.extend(edge.declaration_ancestors);
+        self.collect(
+            &edge.target,
+            &ProductionPathContext {
+                cfg,
+                declaration_ancestors,
+                modules_exposed: inherited.modules_exposed && edge.modules_exposed,
+            },
+        )
     }
 }
 

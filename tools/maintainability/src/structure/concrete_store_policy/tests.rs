@@ -176,6 +176,7 @@ fn public_reexports_are_additive_signature_evidence() {
         target_path: vec!["store".to_owned(), "sqlite".to_owned(), "open".to_owned()],
         fingerprint: "public-use-helper-open".to_owned(),
         cfg: ProductionCfgContext::default(),
+        direct_exposure_cfg: Some(ProductionCfgContext::default()),
     }];
 
     let error = policy
@@ -188,6 +189,25 @@ fn public_reexports_are_additive_signature_evidence() {
 }
 
 #[test]
+fn latent_private_module_signatures_do_not_count_until_exposed() {
+    let policy = policy();
+    let components = components(&[("src/lib.rs", "composition")]);
+    let baseline = inventory(&[("src/lib.rs", 0, 0)]);
+    let mut latent = baseline.clone();
+    let mut latent_signature = signature("hidden-open", &["hidden", "open"]);
+    latent_signature.direct_exposure_cfg = None;
+    latent.files[0].production_signature_store_sites.sqlite_store = vec![latent_signature];
+
+    policy
+        .compare_site_fingerprints(&latent, &baseline, paths(&components), paths(&components))
+        .expect("a locally visible item inside a private module is not direct exposure");
+
+    latent.files[0].production_signature_store_sites.sqlite_store[0].direct_exposure_cfg = Some(ProductionCfgContext::default());
+    let error = policy.compare_site_fingerprints(&latent, &baseline, paths(&components), paths(&components)).unwrap_err();
+    assert!(error.to_string().contains("production signature"));
+}
+
+#[test]
 fn public_reexports_must_share_a_cfg_with_the_concrete_signature() {
     let policy = policy();
     let components = components(&[("src/lib.rs", "composition"), ("src/store/sqlite.rs", "sqlite-store")]);
@@ -195,6 +215,7 @@ fn public_reexports_must_share_a_cfg_with_the_concrete_signature() {
     baseline.files[1].production_module = vec!["store".to_owned(), "sqlite".to_owned()];
     let mut gated_signature = signature("private-open", &["store", "sqlite", "open"]);
     gated_signature.cfg = cfg_context("feature = \"legacy\"");
+    gated_signature.direct_exposure_cfg = Some(cfg_context("feature = \"legacy\""));
     baseline.files[1].production_signature_store_sites.sqlite_store = vec![gated_signature];
     let mut current = baseline.clone();
     current.files[0].production_public_reexports = vec![PublicReexportEvidence {
@@ -202,6 +223,7 @@ fn public_reexports_must_share_a_cfg_with_the_concrete_signature() {
         target_path: vec!["store".to_owned(), "sqlite".to_owned(), "open".to_owned()],
         fingerprint: "public-use-helper-open".to_owned(),
         cfg: cfg_context("not(feature = \"legacy\")"),
+        direct_exposure_cfg: Some(cfg_context("not(feature = \"legacy\")")),
     }];
 
     policy
@@ -209,6 +231,7 @@ fn public_reexports_must_share_a_cfg_with_the_concrete_signature() {
         .expect("a mutually exclusive re-export cannot expose the concrete signature");
 
     current.files[0].production_public_reexports[0].cfg = cfg_context("feature = \"legacy\"");
+    current.files[0].production_public_reexports[0].direct_exposure_cfg = Some(cfg_context("feature = \"legacy\""));
     let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
     assert!(error.to_string().contains("production signature"));
 }
@@ -225,6 +248,7 @@ fn public_globs_are_evidence_for_canonical_store_declarations() {
         target_path: vec!["store".to_owned(), "*".to_owned()],
         fingerprint: "public-use-store-glob".to_owned(),
         cfg: ProductionCfgContext::default(),
+        direct_exposure_cfg: Some(ProductionCfgContext::default()),
     }];
 
     let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
@@ -244,6 +268,7 @@ fn inline_module_reexports_match_the_concrete_bearing_item() {
         target_path: vec!["ui".to_owned(), "helper".to_owned(), "open".to_owned()],
         fingerprint: "public-use-helper-open".to_owned(),
         cfg: ProductionCfgContext::default(),
+        direct_exposure_cfg: Some(ProductionCfgContext::default()),
     }];
 
     let error = policy.compare_site_fingerprints(&exposed, &baseline, paths(&components), paths(&components)).unwrap_err();
@@ -270,6 +295,7 @@ fn unrelated_public_reexports_do_not_change_signature_evidence() {
         target_path: vec!["metrics".to_owned(), "Counter".to_owned()],
         fingerprint: "public-use-counter".to_owned(),
         cfg: ProductionCfgContext::default(),
+        direct_exposure_cfg: Some(ProductionCfgContext::default()),
     }];
 
     policy
@@ -281,6 +307,7 @@ fn unrelated_public_reexports_do_not_change_signature_evidence() {
         target_path: vec!["store".to_owned(), "sqlite".to_owned(), "unrelated".to_owned()],
         fingerprint: "public-use-same-module-unrelated".to_owned(),
         cfg: ProductionCfgContext::default(),
+        direct_exposure_cfg: Some(ProductionCfgContext::default()),
     }];
     policy
         .compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components))
@@ -301,6 +328,7 @@ fn public_reexports_match_signatures_only_within_the_same_target() {
         target_path: vec!["hidden".to_owned(), "Adapter".to_owned()],
         fingerprint: "binary-adapter-reexport".to_owned(),
         cfg: ProductionCfgContext::default(),
+        direct_exposure_cfg: Some(ProductionCfgContext::default()),
     }];
 
     policy
@@ -334,6 +362,7 @@ fn impl_self_type_declarations_must_share_the_signature_target_and_cfg() {
     baseline.files[0].production_targets = vec!["src/lib.rs".to_owned()];
     let mut signature = impl_signature("adapter-open", &["hidden", "Adapter"]);
     signature.cfg = cfg_context("feature = \"legacy\"");
+    signature.direct_exposure_cfg = Some(cfg_context("feature = \"legacy\""));
     baseline.files[0].production_signature_store_sites.sqlite_store = vec![signature];
     baseline.files[1].production_targets = vec!["src/main.rs".to_owned()];
     let mut declaration = type_declaration("private-adapter", &["hidden", "Adapter"]);
@@ -366,6 +395,7 @@ fn transitive_public_reexports_are_signature_evidence() {
         target_path: vec!["ui".to_owned(), "helper".to_owned(), "open".to_owned()],
         fingerprint: "facade-open".to_owned(),
         cfg: ProductionCfgContext::default(),
+        direct_exposure_cfg: None,
     }];
     let mut current = baseline.clone();
     current.files[0].production_public_reexports = vec![PublicReexportEvidence {
@@ -373,6 +403,7 @@ fn transitive_public_reexports_are_signature_evidence() {
         target_path: vec!["ui".to_owned(), "facade".to_owned(), "open".to_owned()],
         fingerprint: "ui-open".to_owned(),
         cfg: ProductionCfgContext::default(),
+        direct_exposure_cfg: Some(ProductionCfgContext::default()),
     }];
 
     let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
@@ -795,6 +826,7 @@ fn signature(fingerprint: &str, item_path: &[&str]) -> ConcreteStoreSignatureSit
         item_path: item_path.iter().map(|segment| (*segment).to_owned()).collect(),
         cfg: ProductionCfgContext::default(),
         impl_self_type: false,
+        direct_exposure_cfg: Some(ProductionCfgContext::default()),
     }
 }
 

@@ -69,7 +69,7 @@ fn reexport_reaches_item(
     target_item: &[String],
     target_cfg: &ProductionCfgContext,
 ) -> bool {
-    let Some(candidate_cfg) = candidate.cfg.conjoin(target_cfg) else {
+    let Some(candidate_cfg) = candidate.direct_exposure_cfg.as_ref().and_then(|direct| direct.conjoin(target_cfg)) else {
         return false;
     };
     let mut pending = vec![(candidate.target_path.clone(), candidate_cfg, BTreeSet::new())];

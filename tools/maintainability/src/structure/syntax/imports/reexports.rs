@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::scan::syntax_fingerprint;
-use anyhow::Result;
+use anyhow::{Result, bail};
 use syn::{ItemType, Type};
 
 use super::super::{ProductionCfgContext, normalized_ident, visibility_is_exposed};
@@ -37,7 +37,10 @@ pub(super) fn public_type_alias(item: &ItemType, context: PublicTypeAliasContext
     let Type::Path(alias_target) = item.ty.as_ref() else {
         return Ok(None);
     };
-    if alias_target.qself.is_some() || alias_target.path.leading_colon.is_some() && !context.rust_2015_absolute_paths {
+    if alias_target.qself.is_some() {
+        bail!("exposed qualified type aliases cannot be resolved to a concrete target");
+    }
+    if alias_target.path.leading_colon.is_some() && !context.rust_2015_absolute_paths {
         return Ok(None);
     }
     let mut segments = alias_target.path.segments.iter().map(|segment| normalized_ident(&segment.ident)).collect::<Vec<_>>();

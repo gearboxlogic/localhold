@@ -155,6 +155,22 @@ fn exposed_type_aliases_are_public_reexport_evidence() -> Result<()> {
 }
 
 #[test]
+fn exposed_qualified_type_aliases_fail_closed() -> Result<()> {
+    let source = "mod hidden { pub(crate) struct Adapter; }\n\
+                  trait Reveal { type Output; }\n\
+                  struct Marker;\n\
+                  impl Reveal for Marker { type Output = hidden::Adapter; }\n";
+    let Err(error) = concrete_facts(&format!("{source}pub(crate) type PublicAdapter = <Marker as Reveal>::Output;\n")) else {
+        panic!("an exposed qualified alias must fail closed");
+    };
+    assert!(error.to_string().contains("exposed qualified type aliases"), "{error:#}");
+
+    let private = concrete_facts(&format!("{source}type PrivateAdapter = <Marker as Reveal>::Output;\n"))?;
+    assert!(private.public_reexports.is_empty());
+    Ok(())
+}
+
+#[test]
 fn self_restricted_uses_are_not_public_reexport_evidence() -> Result<()> {
     for visibility in ["", "pub(self)", "pub(in self)"] {
         let facts = concrete_facts(&format!("{visibility} use crate::stores::open;\n"))?;

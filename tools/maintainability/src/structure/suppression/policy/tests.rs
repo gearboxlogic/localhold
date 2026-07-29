@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use super::model::{Disposition, SourceException, Status};
 use super::source::{compare_current, validate_exceptions};
+#[cfg(unix)]
 use super::{POLICY_ROOT, checked_policy_path};
 use crate::structure::suppression::{SourceCategory, SourceSuppression};
 

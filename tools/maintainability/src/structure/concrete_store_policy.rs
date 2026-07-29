@@ -9,11 +9,11 @@ use serde::Deserialize;
 
 use super::classify::{FileMeasurement, Inventory};
 use super::manifest::PreviousRevision;
-use super::syntax::ConcreteStoreSignatureSite;
+use super::syntax::{ConcreteStoreSignatureSite, ProductionCfgContext};
 use crate::scan::syntax_fingerprint;
 
 mod exposure;
-use exposure::{public_reexport_evidence, type_declaration_evidence};
+use exposure::{TraitExposureEvidence, public_reexport_evidence, trait_exposure_evidence, type_declaration_evidence};
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 const BASE_REVISION_ENV: &str = "LOCALHOLD_MAINTAINABILITY_BASE_REV";
@@ -642,50 +642,72 @@ fn record_signature_site_fingerprint(
     store: ConcreteStoreName,
     signature: &ConcreteStoreSignatureSite,
 ) -> Result<()> {
-    let public_reexports = public_reexport_evidence(
-        file_context.inventory,
-        file_context.paths,
-        &signature.item_path,
-        &signature.cfg,
-        &file_context.file.production_targets,
+    let trait_exposures = signature.required_trait_path.as_ref().map_or_else(
+        || {
+            vec![TraitExposureEvidence {
+                fingerprint: String::new(),
+                cfg: signature.cfg.clone(),
+            }]
+        },
+        |trait_path| {
+            trait_exposure_evidence(
+                file_context.inventory,
+                file_context.paths,
+                trait_path,
+                &signature.cfg,
+                &file_context.file.production_targets,
+            )
+        },
     );
-    let type_declarations = signature.impl_self_type.then(|| {
-        type_declaration_evidence(
+    for trait_exposure in trait_exposures {
+        let public_reexports = public_reexport_evidence(
             file_context.inventory,
             file_context.paths,
             &signature.item_path,
-            &signature.cfg,
+            &trait_exposure.cfg,
             &file_context.file.production_targets,
-        )
-    });
-    let context = SiteEvidenceContext {
-        component: effective_component,
-        path: file_context.site_path,
-        store,
-        public_reexports: &public_reexports,
-    };
-    match type_declarations.as_deref() {
-        Some([]) | None => record_signature_evidence(sites, context, signature, &signature.fingerprint),
-        Some(declarations) => {
-            for declaration in declarations {
-                let fingerprint = syntax_fingerprint(&format!("signature:{}\0impl-self-type-declaration:{declaration}", signature.fingerprint));
-                record_signature_evidence(sites, context, signature, &fingerprint)?;
+        );
+        let type_declarations = signature.impl_self_type.then(|| {
+            type_declaration_evidence(
+                file_context.inventory,
+                file_context.paths,
+                &signature.item_path,
+                &trait_exposure.cfg,
+                &file_context.file.production_targets,
+            )
+        });
+        let context = SiteEvidenceContext {
+            component: effective_component,
+            path: file_context.site_path,
+            store,
+            public_reexports: &public_reexports,
+        };
+        let trait_fingerprint = if trait_exposure.fingerprint.is_empty() {
+            signature.fingerprint.clone()
+        } else {
+            syntax_fingerprint(&format!("signature:{}\0trait-exposure:{}", signature.fingerprint, trait_exposure.fingerprint))
+        };
+        let direct_exposure_cfg = signature.direct_exposure_cfg.as_ref().and_then(|direct| direct.conjoin(&trait_exposure.cfg));
+        match type_declarations.as_deref() {
+            Some([]) | None => record_signature_evidence(sites, context, direct_exposure_cfg.as_ref(), &trait_fingerprint)?,
+            Some(declarations) => {
+                for declaration in declarations {
+                    let fingerprint = syntax_fingerprint(&format!("signature:{trait_fingerprint}\0impl-self-type-declaration:{declaration}"));
+                    record_signature_evidence(sites, context, direct_exposure_cfg.as_ref(), &fingerprint)?;
+                }
             }
-            Ok(())
         }
     }
+    Ok(())
 }
 
 fn record_signature_evidence(
     sites: &mut BTreeMap<SiteFingerprint, usize>,
     context: SiteEvidenceContext<'_>,
-    signature: &ConcreteStoreSignatureSite,
+    direct_exposure_cfg: Option<&ProductionCfgContext>,
     fingerprint: &str,
 ) -> Result<()> {
-    let direct_fingerprint = signature
-        .direct_exposure_cfg
-        .as_ref()
-        .map(|cfg| syntax_fingerprint(&format!("signature:{fingerprint}\0direct-exposure-cfg:{}", cfg.identity())));
+    let direct_fingerprint = direct_exposure_cfg.map(|cfg| syntax_fingerprint(&format!("signature:{fingerprint}\0direct-exposure-cfg:{}", cfg.identity())));
     record_site_evidence(sites, context, fingerprint, direct_fingerprint.as_deref())
 }
 

@@ -33,6 +33,8 @@ pub struct ConcreteStoreSignatureSite {
     pub(in crate::structure) impl_self_type: bool,
     #[serde(skip)]
     pub(in crate::structure) direct_exposure_cfg: Option<ProductionCfgContext>,
+    #[serde(skip)]
+    pub(in crate::structure) required_trait_path: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
@@ -56,6 +58,7 @@ pub(super) struct SignatureSiteContext<'a> {
     pub(super) cfg: &'a ProductionCfgContext,
     pub(super) impl_self_type: bool,
     pub(super) direct_exposure_cfg: Option<&'a ProductionCfgContext>,
+    pub(super) required_trait_path: Option<&'a [String]>,
 }
 
 impl ConcreteStoreInventory {
@@ -305,6 +308,7 @@ impl ConcreteStoreInventory {
             cfg: signature.cfg.clone(),
             impl_self_type: signature.impl_self_type,
             direct_exposure_cfg: signature.direct_exposure_cfg.cloned(),
+            required_trait_path: signature.required_trait_path.map(<[String]>::to_vec),
         });
     }
 

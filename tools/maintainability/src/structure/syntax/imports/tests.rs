@@ -1004,6 +1004,75 @@ fn canonical_binding_identity_ignores_impl_and_method_documentation() -> Result<
 }
 
 #[test]
+fn production_site_identity_ignores_test_only_descendants() -> Result<()> {
+    let plain = concrete_facts(
+        "fn refresh(ready: bool) {\n\
+             if ready { SqliteStore::refresh(); }\n\
+         }\n",
+    )?;
+    let instrumented = concrete_facts(
+        "fn refresh(ready: bool) {\n\
+             if ready {\n\
+                 #[cfg(test)] let _test = PostgresStore::instrument();\n\
+                 #[cfg(feature = \"testing\")] struct Adapter(SqliteStore);\n\
+                 SqliteStore::refresh();\n\
+             }\n\
+         }\n",
+    )?;
+    assert_eq!(plain.concrete_stores, instrumented.concrete_stores);
+    assert_eq!(plain.concrete_store_sites, instrumented.concrete_store_sites);
+    Ok(())
+}
+
+#[test]
+fn canonical_binding_identity_ignores_test_only_impl_syntax() -> Result<()> {
+    let plain_source = "impl MemoryReader for SqliteStore {\n\
+             fn version(&self) -> u32 { 1 }\n\
+         }\n";
+    let instrumented_source = "impl MemoryReader for SqliteStore {\n\
+             fn version(&self) -> u32 {\n\
+                 #[cfg(test)] let _test = PostgresStore::instrument();\n\
+                 1\n\
+             }\n\
+             #[cfg(test)] fn test_hook(&self) { PostgresStore::instrument(); }\n\
+             #[cfg(feature = \"testing\")] const TESTING: Option<PostgresStore> = None;\n\
+         }\n";
+    let plain_syntax = syn::parse_file(plain_source)?;
+    let instrumented_syntax = syn::parse_file(instrumented_source)?;
+    let Item::Impl(plain_impl) = &plain_syntax.items[0] else {
+        panic!("plain fixture must be an impl");
+    };
+    let Item::Impl(instrumented_impl) = &instrumented_syntax.items[0] else {
+        panic!("instrumented fixture must be an impl");
+    };
+    assert_eq!(
+        production_impl_tokens(plain_impl, &ProductionCfgContext::default())?.to_string(),
+        production_impl_tokens(instrumented_impl, &ProductionCfgContext::default())?.to_string()
+    );
+
+    let plain = concrete_facts(plain_source)?;
+    let instrumented = concrete_facts(instrumented_source)?;
+    assert_eq!(plain.binding_concrete_store_sites, instrumented.binding_concrete_store_sites);
+    Ok(())
+}
+
+#[test]
+fn block_local_types_do_not_bind_module_impl_evidence() -> Result<()> {
+    let plain = concrete_facts(
+        "struct Adapter;\n\
+         impl Adapter { pub(crate) fn open() -> SqliteStore { loop {} } }\n",
+    )?;
+    let with_local_shadow = concrete_facts(
+        "struct Adapter;\n\
+         impl Adapter { pub(crate) fn open() -> SqliteStore { loop {} } }\n\
+         fn inspect() { struct Adapter; let _ = Adapter; }\n",
+    )?;
+    assert_eq!(plain.type_declarations, with_local_shadow.type_declarations);
+    assert_eq!(plain.signature_concrete_store_sites, with_local_shadow.signature_concrete_store_sites);
+    Ok(())
+}
+
+#[test]
 fn ordinary_occurrence_identity_ignores_documentation() -> Result<()> {
     let plain = historical_concrete_facts(
         "fn embedding_status() {\n\
@@ -1218,6 +1287,34 @@ fn private_traits_and_self_restricted_items_are_not_exposure_signatures() -> Res
     assert!(private.signature_concrete_store_sites.postgres_store.is_empty());
     assert_eq!(exposed.signature_concrete_store_sites.sqlite_store.len(), 3);
     assert_eq!(exposed.signature_concrete_store_sites.postgres_store.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn trait_impl_signatures_retain_the_resolved_trait_requirement() -> Result<()> {
+    let facts = concrete_facts(
+        "mod hidden { pub(crate) trait Internal { fn inspect(_: SqliteStore); } }\n\
+         use hidden::Internal as InternalTrait;\n\
+         struct Adapter;\n\
+         impl InternalTrait for Adapter { fn inspect(_: SqliteStore) {} }\n",
+    )?;
+    let signatures = facts
+        .signature_concrete_store_sites
+        .sqlite_store
+        .iter()
+        .filter(|signature| signature.required_trait_path.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(signatures.len(), 1);
+    assert_eq!(
+        signatures[0].required_trait_path.as_ref().map(|path| path.join("::")).as_deref(),
+        Some("store_fixture::hidden::Internal")
+    );
+    assert!(
+        facts
+            .type_declarations
+            .iter()
+            .any(|declaration| declaration.kind == TypeDeclarationKind::Trait && declaration.item_path == ["store_fixture", "hidden", "Internal"])
+    );
     Ok(())
 }
 

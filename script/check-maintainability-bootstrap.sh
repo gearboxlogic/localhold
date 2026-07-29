@@ -25,7 +25,7 @@ fi
 tool_root="$repository_root/tools/maintainability"
 manifest="$tool_root/Cargo.toml"
 lockfile="$tool_root/Cargo.lock"
-readonly reviewed_manifest_sha256=1a90e4ee4291d0eb6c9a58df5e89e69e756f08c030a969aad0681af243f5aea4
+readonly reviewed_manifest_sha256=cca207767614bd2c1d46bc06092b69e90157aeb450797fcc7cad4e1ed67c89b9
 readonly reviewed_lockfile_sha256=825c6448351761aa5c4c6e1ce6b3696c927c4f46c5d43642846380d24f10467c
 
 if [[ ! -f "$manifest" ]]; then

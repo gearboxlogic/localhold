@@ -21,6 +21,7 @@ use super::{
 mod concrete;
 mod declarations;
 mod macro_definitions;
+mod production;
 mod reexports;
 mod resolution;
 mod stringify;
@@ -28,8 +29,12 @@ mod tokens;
 pub use concrete::{ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites};
 use concrete::{ConcreteStoreInventory, SignatureSiteContext, context_fingerprint, is_concrete_store_name, production_generics, without_documentation};
 pub use declarations::TypeDeclarationEvidence;
+pub(in crate::structure) use declarations::TypeDeclarationKind;
 use declarations::{TypeDeclarationContext, type_declaration_evidence};
 use macro_definitions::contains_production_concrete_store;
+use production::{
+    production_foreign_item_tokens, production_impl_item_tokens, production_impl_tokens, production_item_tokens, production_stmt_tokens, production_trait_item_tokens,
+};
 use reexports::{PendingPublicReexport, UseResolution, resolve_impl_signature_aliases, resolve_public_reexport_aliases};
 pub(in crate::structure) use resolution::source_module;
 use resolution::{StringScan, UsePath, flatten_use_tree, resolve_path, restricted_attribute_identifier, restricted_token_identifier};
@@ -134,6 +139,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
         generic_default_depth: 0,
         impl_signature_headers: Vec::new(),
         impl_trait_exposures: Vec::new(),
+        impl_trait_paths: Vec::new(),
         trait_exposures: Vec::new(),
         field_exposures: Vec::new(),
         impl_item_paths: Vec::new(),
@@ -189,6 +195,7 @@ struct ProductionSyntaxCollector {
     generic_default_depth: usize,
     impl_signature_headers: Vec<TokenStream>,
     impl_trait_exposures: Vec<bool>,
+    impl_trait_paths: Vec<Option<Vec<String>>>,
     trait_exposures: Vec<bool>,
     field_exposures: Vec<FieldExposure>,
     impl_item_paths: Vec<Vec<String>>,
@@ -200,6 +207,11 @@ struct ProductionSyntaxCollector {
     rust_2015_absolute_paths: bool,
     collect_internal_imports: bool,
     require_reviewed_expansions: bool,
+}
+
+enum SiteContextEntry {
+    Entered(Option<String>),
+    Failed,
 }
 
 impl ProductionSyntaxCollector {
@@ -429,6 +441,7 @@ impl ProductionSyntaxCollector {
             cfg: &self.cfg_context,
             impl_self_type: !self.impl_item_paths.is_empty(),
             direct_exposure_cfg: direct_exposure_cfg.as_ref(),
+            required_trait_path: self.impl_trait_paths.last().and_then(Option::as_deref),
         };
         self.concrete_stores.record_signature_tokens(tokens, &context, &signature);
     }
@@ -447,20 +460,26 @@ impl ProductionSyntaxCollector {
             cfg: &self.cfg_context,
             impl_self_type: !self.impl_item_paths.is_empty(),
             direct_exposure_cfg: direct_exposure_cfg.as_ref(),
+            required_trait_path: self.impl_trait_paths.last().and_then(Option::as_deref),
         };
         self.concrete_stores.record_exposure_signature_tokens(tokens, &context, &signature);
     }
 
-    fn record_type_declaration(&mut self, kind: &str, ident: &proc_macro2::Ident, visibility: &Visibility) {
+    fn record_type_declaration(&mut self, kind: TypeDeclarationKind, syntax_kind: &str, ident: &proc_macro2::Ident, visibility: &Visibility) {
+        if self.block_depth > 0 {
+            return;
+        }
         let ancestors = self.declaration_ancestor_identity();
         self.type_declarations.push(type_declaration_evidence(
             kind,
+            syntax_kind,
             ident,
             visibility,
             &TypeDeclarationContext {
                 module: &self.module,
                 cfg: &self.cfg_context,
                 ancestors: &ancestors,
+                direct_exposure_cfg: visibility_is_exposed(visibility).then(|| self.direct_exposure_cfg()).flatten(),
             },
         ));
     }
@@ -501,6 +520,16 @@ impl ProductionSyntaxCollector {
     fn enter_site_context(&mut self, kind: &str, syntax: &impl ToTokens) -> Option<String> {
         let context = context_fingerprint(self.site_context.as_deref(), kind, syntax);
         self.site_context.replace(context)
+    }
+
+    fn enter_normalized_site_context(&mut self, kind: &str, tokens: Result<TokenStream>) -> SiteContextEntry {
+        match tokens {
+            Ok(tokens) => SiteContextEntry::Entered(self.enter_site_context(kind, &tokens)),
+            Err(error) => {
+                self.error = Some(error);
+                SiteContextEntry::Failed
+            }
+        }
     }
 
     fn leave_site_context(&mut self, previous: Option<String>) {
@@ -545,6 +574,20 @@ impl ProductionSyntaxCollector {
             segments.insert(0, "crate".to_owned());
         }
         Ok(resolve_path(&self.module, &segments, false)?.unwrap_or_default())
+    }
+
+    fn implemented_trait_path(&self, item: &ItemImpl) -> Result<Option<Vec<String>>> {
+        let Some((_, path, _)) = &item.trait_ else {
+            return Ok(None);
+        };
+        if path.leading_colon.is_some() && !self.rust_2015_absolute_paths {
+            return Ok(None);
+        }
+        let mut segments = path.segments.iter().map(|segment| normalized_ident(&segment.ident)).collect::<Vec<_>>();
+        if path.leading_colon.is_some() {
+            segments.insert(0, "crate".to_owned());
+        }
+        Ok(resolve_path(&self.module, &segments, false)?.filter(|path| !path.is_empty()))
     }
 
     fn declaration_ancestor_identity(&self) -> String {
@@ -638,7 +681,10 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         let Some(cfg) = self.enter_production_node(item_attributes(node)) else {
             return;
         };
-        let previous = self.enter_site_context("item", node);
+        let SiteContextEntry::Entered(previous) = self.enter_normalized_site_context("item", production_item_tokens(node, &self.cfg_context)) else {
+            self.leave_production_node(cfg);
+            return;
+        };
         let ancestor = declaration_ancestor(node);
         if let Some(ancestor) = &ancestor {
             self.declaration_ancestors.push(ancestor.clone());
@@ -655,7 +701,10 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         let Some(cfg) = self.enter_production_node(impl_item_attributes(node)) else {
             return;
         };
-        let previous = self.enter_site_context("impl-item", node);
+        let SiteContextEntry::Entered(previous) = self.enter_normalized_site_context("impl-item", production_impl_item_tokens(node, &self.cfg_context)) else {
+            self.leave_production_node(cfg);
+            return;
+        };
         visit::visit_impl_item(self, node);
         self.leave_site_context(previous);
         self.leave_production_node(cfg);
@@ -665,7 +714,10 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         let Some(cfg) = self.enter_production_node(trait_item_attributes(node)) else {
             return;
         };
-        let previous = self.enter_site_context("trait-item", node);
+        let SiteContextEntry::Entered(previous) = self.enter_normalized_site_context("trait-item", production_trait_item_tokens(node, &self.cfg_context)) else {
+            self.leave_production_node(cfg);
+            return;
+        };
         visit::visit_trait_item(self, node);
         self.leave_site_context(previous);
         self.leave_production_node(cfg);
@@ -675,14 +727,19 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         let Some(cfg) = self.enter_production_node(foreign_item_attributes(node)) else {
             return;
         };
-        let previous = self.enter_site_context("foreign-item", node);
+        let SiteContextEntry::Entered(previous) = self.enter_normalized_site_context("foreign-item", production_foreign_item_tokens(node, &self.cfg_context)) else {
+            self.leave_production_node(cfg);
+            return;
+        };
         visit::visit_foreign_item(self, node);
         self.leave_site_context(previous);
         self.leave_production_node(cfg);
     }
 
     fn visit_stmt(&mut self, node: &'ast Stmt) {
-        let previous = self.enter_site_context("statement", node);
+        let SiteContextEntry::Entered(previous) = self.enter_normalized_site_context("statement", production_stmt_tokens(node, &self.cfg_context)) else {
+            return;
+        };
         visit::visit_stmt(self, node);
         self.leave_site_context(previous);
     }
@@ -765,7 +822,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_struct(&mut self, item: &'ast ItemStruct) {
-        self.record_type_declaration("struct", &item.ident, &item.vis);
+        self.record_type_declaration(TypeDeclarationKind::Type, "struct", &item.ident, &item.vis);
         let exposed = visibility_is_exposed(&item.vis);
         if exposed {
             self.record_declaration_generics("struct-generics", &item.vis, &item.generics);
@@ -780,6 +837,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
                 cfg: &self.cfg_context,
                 impl_self_type: false,
                 direct_exposure_cfg: direct_exposure_cfg.as_ref(),
+                required_trait_path: None,
             };
             if let Err(error) = self.concrete_stores.record_public_struct_declaration(item, &signature, &ancestors) {
                 self.error = Some(error);
@@ -792,7 +850,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_enum(&mut self, item: &'ast ItemEnum) {
-        self.record_type_declaration("enum", &item.ident, &item.vis);
+        self.record_type_declaration(TypeDeclarationKind::Type, "enum", &item.ident, &item.vis);
         let exposed = visibility_is_exposed(&item.vis);
         if exposed {
             self.record_declaration_generics("enum-generics", &item.vis, &item.generics);
@@ -803,7 +861,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_union(&mut self, item: &'ast ItemUnion) {
-        self.record_type_declaration("union", &item.ident, &item.vis);
+        self.record_type_declaration(TypeDeclarationKind::Type, "union", &item.ident, &item.vis);
         let exposed = visibility_is_exposed(&item.vis);
         if exposed {
             self.record_declaration_generics("union-generics", &item.vis, &item.generics);
@@ -814,6 +872,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_trait(&mut self, item: &'ast ItemTrait) {
+        self.record_type_declaration(TypeDeclarationKind::Trait, "trait", &item.ident, &item.vis);
         let exposed = visibility_is_exposed(&item.vis);
         if exposed {
             let mut header = item.clone();
@@ -835,7 +894,24 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
             }
         };
         self.impl_item_paths.push(item_path);
-        let binding_tokens = without_documentation(&item.to_token_stream());
+        let trait_path = match self.implemented_trait_path(item) {
+            Ok(path) => path,
+            Err(error) => {
+                self.error = Some(error);
+                self.impl_item_paths.pop();
+                return;
+            }
+        };
+        self.impl_trait_paths.push(trait_path);
+        let binding_tokens = match production_impl_tokens(item, &self.cfg_context) {
+            Ok(tokens) => without_documentation(&tokens),
+            Err(error) => {
+                self.error = Some(error);
+                self.impl_trait_paths.pop();
+                self.impl_item_paths.pop();
+                return;
+            }
+        };
         let mut header = item.clone();
         header.items.clear();
         let header_tokens = without_documentation(&header.to_token_stream());
@@ -855,6 +931,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
         visit::visit_item_impl(self, item);
         self.impl_trait_exposures.pop();
         self.impl_signature_headers.pop();
+        self.impl_trait_paths.pop();
         self.impl_item_paths.pop();
     }
 

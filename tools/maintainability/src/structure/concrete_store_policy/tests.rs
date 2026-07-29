@@ -2,7 +2,7 @@ use super::*;
 use crate::structure::classify::{FileMeasurement, Inventory};
 use crate::structure::syntax::{
     ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionCfgContext, PublicReexportEvidence, TypeDeclarationEvidence,
-    production_cfg_context,
+    TypeDeclarationKind, production_cfg_context,
 };
 
 type CountFixture<'a> = (&'a str, usize, usize);
@@ -350,6 +350,45 @@ fn impl_self_type_visibility_is_signature_evidence() {
     let mut current = baseline.clone();
     current.files[1].production_type_declarations[0].fingerprint = "restricted-adapter".to_owned();
 
+    let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
+    assert!(error.to_string().contains("production signature"));
+}
+
+#[test]
+fn private_trait_implementations_are_not_exposure_signatures() {
+    let policy = policy();
+    let components = components(&[("src/adapter.rs", "sqlite-store")]);
+    let baseline = inventory(&[("src/adapter.rs", 0, 0)]);
+    let mut current = inventory(&[("src/adapter.rs", 1, 0)]);
+    let mut signature = impl_signature("internal-inspect", &["Adapter"]);
+    signature.required_trait_path = Some(vec!["Internal".to_owned()]);
+    current.files[0].production_signature_store_sites.sqlite_store = vec![signature];
+    let mut private_declaration = type_declaration("private-internal", &["Internal"]);
+    private_declaration.kind = TypeDeclarationKind::Trait;
+    private_declaration.direct_exposure_cfg = None;
+    current.files[0].production_type_declarations = vec![private_declaration.clone()];
+
+    policy
+        .compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components))
+        .expect("a private trait implementation cannot expose its members");
+
+    current.files[0].production_type_declarations.clear();
+    let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
+    assert!(error.to_string().contains("production signature"));
+
+    current.files[0].production_type_declarations = vec![private_declaration];
+    current.files[0].production_public_reexports = vec![PublicReexportEvidence {
+        exported_path: vec!["Internal".to_owned()],
+        target_path: vec!["Internal".to_owned()],
+        fingerprint: "internal-trait-reexport".to_owned(),
+        cfg: ProductionCfgContext::default(),
+        direct_exposure_cfg: Some(ProductionCfgContext::default()),
+    }];
+    let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
+    assert!(error.to_string().contains("production signature"));
+
+    current.files[0].production_public_reexports.clear();
+    current.files[0].production_type_declarations[0].direct_exposure_cfg = Some(ProductionCfgContext::default());
     let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
     assert!(error.to_string().contains("production signature"));
 }
@@ -827,6 +866,7 @@ fn signature(fingerprint: &str, item_path: &[&str]) -> ConcreteStoreSignatureSit
         cfg: ProductionCfgContext::default(),
         impl_self_type: false,
         direct_exposure_cfg: Some(ProductionCfgContext::default()),
+        required_trait_path: None,
     }
 }
 
@@ -842,6 +882,8 @@ fn type_declaration(fingerprint: &str, item_path: &[&str]) -> TypeDeclarationEvi
         fingerprint: fingerprint.to_owned(),
         item_path: item_path.iter().map(|segment| (*segment).to_owned()).collect(),
         cfg: ProductionCfgContext::default(),
+        kind: TypeDeclarationKind::Type,
+        direct_exposure_cfg: Some(ProductionCfgContext::default()),
     }
 }
 

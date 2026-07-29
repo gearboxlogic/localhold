@@ -6,6 +6,7 @@ use std::process::Command;
 use super::{is_conventional_binary_root, measure_sources, physical_line_count, scan_revision, scan_workspace};
 
 mod target_features;
+mod visibility_macros;
 
 fn inventory(sources: &[(&str, &str)]) -> super::Inventory {
     let sources = sources.iter().map(|(path, source)| ((*path).to_owned(), (*source).to_owned())).collect::<BTreeMap<_, _>>();

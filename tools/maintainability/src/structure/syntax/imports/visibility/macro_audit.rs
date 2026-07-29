@@ -45,6 +45,9 @@ impl VisibilityMacroAudit {
             bail!("production macro {name:?} places restricted visibility outside a macro transcriber");
         }
         if !all_counts.is_empty() {
+            if transcribers.iter().any(|body| contains_macro_definition(&body.stream())) {
+                bail!("production macro {name:?} with restricted visibility cannot define nested macros");
+            }
             if transcribers.len() != 1 {
                 bail!("production macro {name:?} with restricted visibility must have exactly one expansion arm");
             }
@@ -180,6 +183,22 @@ fn macro_transcribers(tokens: &TokenStream) -> Vec<Group> {
             _ => None,
         })
         .collect()
+}
+
+fn contains_macro_definition(tokens: &TokenStream) -> bool {
+    let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
+    tokens.windows(2).any(|window| {
+        matches!(
+            window,
+            [TokenTree::Ident(ident), TokenTree::Punct(punctuation)]
+                if normalized_ident(ident) == "macro_rules" && punctuation.as_char() == '!'
+        )
+    }) || tokens.iter().any(|token| {
+        let TokenTree::Group(group) = token else {
+            return false;
+        };
+        contains_macro_definition(&group.stream())
+    })
 }
 
 fn visibility_in_repetition(tokens: &TokenStream, inside_repetition: bool) -> Result<bool> {

@@ -87,6 +87,21 @@ fn restricted_visibility_macro_cannot_be_invoked_indirectly() -> Result<()> {
 }
 
 #[test]
+fn restricted_visibility_macro_cannot_define_a_nested_macro() -> Result<()> {
+    let source = "macro_rules! outer {\n\
+                      () => {\n\
+                          macro_rules! generated { () => { pub(crate) struct Generated; } }\n\
+                          generated!();\n\
+                          generated!();\n\
+                      }\n\
+                  }\n\
+                  outer!();\n";
+    let error = concrete_facts(source).err().context("nested visibility macro definition should fail")?;
+    assert!(error.to_string().contains("cannot define nested macros"), "{error:#}");
+    Ok(())
+}
+
+#[test]
 fn macro_arguments_cannot_supply_or_construct_restricted_visibility() -> Result<()> {
     let direct = "macro_rules! define_memory_columns { ($($tokens:tt)*) => { $($tokens)* } }\n\
                   define_memory_columns!(pub(crate) struct Generated;);\n";

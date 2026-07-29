@@ -11,8 +11,8 @@ use crate::scan::syntax_fingerprint;
 
 use super::syntax::{
     ConcreteStoreCounts, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionAncestorPath, ProductionCfgContext, ProductionSourceRevision, ProductionSyntaxContext,
-    ProductionSyntaxFacts, ProductionSyntaxOptions, PublicReexportEvidence, TestLineCollector, TypeDeclarationEvidence, VisibilityCounts, normalized_ident,
-    production_cfg_context, production_syntax_facts_with_context, reject_module_path_overrides, source_module, visibility_is_exposed,
+    ProductionSyntaxFacts, ProductionSyntaxOptions, PublicReexportEvidence, TestLineCollector, TypeDeclarationEvidence, VisibilityCounts, normalized_ident, production_cfg_context,
+    production_syntax_facts_with_context, reject_module_path_overrides, source_module, visibility_is_exposed,
 };
 
 mod module_macro;
@@ -293,26 +293,30 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
                 .map_err(|error| anyhow::anyhow!("{error} in {path}"))?,
             )
         };
-        files.push(FileMeasurement {
-            path,
-            physical_lines,
-            production_lines: physical_lines.saturating_sub(test_lines),
-            test_lines,
-            production_targets,
-            production_module: production_facts.module,
-            production_internal_imports: production_facts.internal_imports,
-            production_public_reexports: production_facts.public_reexports,
-            production_type_declarations: production_facts.type_declarations,
-            production_concrete_stores: production_facts.concrete_stores,
-            production_public_concrete_store_structs: production_facts.public_concrete_store_structs,
-            production_concrete_store_sites: production_facts.concrete_store_sites,
-            production_generic_default_store_sites: production_facts.generic_default_concrete_store_sites,
-            production_signature_store_sites: production_facts.signature_concrete_store_sites,
-            production_store_binding_sites: production_facts.binding_concrete_store_sites,
-            production_visibilities: production_facts.visibilities,
-        });
+        files.push(file_measurement(path, physical_lines, test_lines, production_targets, production_facts));
     }
     Ok(Inventory { files })
+}
+
+fn file_measurement(path: String, physical_lines: usize, test_lines: usize, production_targets: Vec<String>, production_facts: ProductionSyntaxFacts) -> FileMeasurement {
+    FileMeasurement {
+        path,
+        physical_lines,
+        production_lines: physical_lines.saturating_sub(test_lines),
+        test_lines,
+        production_targets,
+        production_module: production_facts.module,
+        production_internal_imports: production_facts.internal_imports,
+        production_public_reexports: production_facts.public_reexports,
+        production_type_declarations: production_facts.type_declarations,
+        production_concrete_stores: production_facts.concrete_stores,
+        production_public_concrete_store_structs: production_facts.public_concrete_store_structs,
+        production_concrete_store_sites: production_facts.concrete_store_sites,
+        production_generic_default_store_sites: production_facts.generic_default_concrete_store_sites,
+        production_signature_store_sites: production_facts.signature_concrete_store_sites,
+        production_store_binding_sites: production_facts.binding_concrete_store_sites,
+        production_visibilities: production_facts.visibilities,
+    }
 }
 
 fn library_root_for_source<'a>(source: &str, library_roots: &'a BTreeSet<String>) -> Option<&'a str> {

@@ -1,5 +1,5 @@
-#[cfg(feature = "lib-violation")]
-/// Deliberately violates the production unwrap policy when the sentinel enables it.
+#[cfg(all(feature = "lib-violation", not(debug_assertions)))]
+/// Deliberately violates the release-only production unwrap policy when enabled.
 pub fn unwrap_violation(value: Option<u8>) -> u8 {
     value.unwrap()
 }

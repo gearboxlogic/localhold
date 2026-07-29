@@ -64,7 +64,7 @@ async fn main() -> AppResult {
     if let Some(result) = try_run_embeddings_cli().await {
         return finish_cli(result);
     }
-    if let Some(result) = try_run_ui_cli().await {
+    if let Some(result) = Box::pin(try_run_ui_cli()).await {
         return finish_cli(result);
     }
     if let Some(argument) = std::env::args_os().nth(1) {
@@ -149,7 +149,7 @@ async fn try_run_ui_cli() -> Option<CliExitResult> {
         Ok(principal) => principal,
         Err(error) => return Some(Err(error.into())),
     };
-    Some(localhold::ui::run(localhold::ui::UiOptions::new(principal)).await)
+    Some(Box::pin(localhold::ui::run(localhold::ui::UiOptions::new(principal))).await)
 }
 
 fn parse_ui_principal(args: &[OsString], usage: &str) -> Result<Option<String>, EngineError> {

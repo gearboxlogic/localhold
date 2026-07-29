@@ -247,7 +247,7 @@ type StatusResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 /// Inspect embedding configuration, provider health, profile identity, and rebuild progress.
 #[must_use]
 pub async fn inspect(config: &Config) -> EmbeddingStatusReport {
-    inspect_with_clock_inner(config, Arc::new(SystemClock::new())).await
+    Box::pin(inspect_with_clock_inner(config, Arc::new(SystemClock::new()))).await
 }
 
 /// Inspect embeddings with all provider and storage deadlines driven by `clock`.
@@ -258,7 +258,7 @@ pub async fn inspect_with_clock(config: &Config, clock: Arc<dyn Clock>) -> Embed
 
 async fn inspect_with_clock_inner(config: &Config, clock: Arc<dyn Clock>) -> EmbeddingStatusReport {
     let provider_health = probe_provider(config, Arc::clone(&clock)).await;
-    let observation = inspect_storage(config, clock.as_ref()).await;
+    let observation = Box::pin(inspect_storage(config, clock.as_ref())).await;
     build_report(config, provider_health, observation)
 }
 
@@ -400,7 +400,7 @@ pub(crate) async fn probe_provider(config: &Config, clock: Arc<dyn Clock>) -> Em
 async fn inspect_storage(config: &Config, clock: &dyn Clock) -> StorageObservation {
     match config.database.backend {
         DatabaseBackend::Sqlite => inspect_sqlite_storage(config.database.sqlite_path()).await,
-        DatabaseBackend::Postgres => inspect_postgres_storage(config, clock).await,
+        DatabaseBackend::Postgres => Box::pin(inspect_postgres_storage(config, clock)).await,
     }
 }
 
@@ -519,7 +519,7 @@ async fn inspect_postgres_storage(config: &Config, clock: &dyn Clock) -> Storage
 
     let started_at = clock.monotonic();
     let connect = PgPoolOptions::new().max_connections(1).connect(&config.database.postgres.url);
-    let Ok(Ok(pool)) = crate::clock::timeout(clock, TIMEOUT, connect).await else {
+    let Ok(Ok(pool)) = Box::pin(crate::clock::timeout(clock, TIMEOUT, connect)).await else {
         return StorageObservation::Unavailable;
     };
     let elapsed = clock.monotonic().saturating_sub(started_at);
@@ -527,7 +527,7 @@ async fn inspect_postgres_storage(config: &Config, clock: &dyn Clock) -> Storage
     let observation = if remaining.is_zero() {
         StorageObservation::Unavailable
     } else {
-        crate::clock::timeout(clock, remaining, inspect_postgres_pool(&pool, config.database.postgres.auto_migrate))
+        Box::pin(crate::clock::timeout(clock, remaining, inspect_postgres_pool(&pool, config.database.postgres.auto_migrate)))
             .await
             .unwrap_or(Ok(StorageObservation::Unavailable))
             .unwrap_or(StorageObservation::Unavailable)

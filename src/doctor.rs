@@ -780,7 +780,7 @@ fn sqlite_embedding_map_fk_status(connection: &Connection) -> Result<SqliteEmbed
 #[expect(clippy::too_many_lines, reason = "PostgreSQL readiness is kept linear so each read-only compatibility gate is explicit")]
 async fn postgres_check(config: &Config, clock: &dyn crate::clock::Clock) -> DiagnosticCheck {
     let connect = PgPoolOptions::new().max_connections(1).connect(&config.database.postgres.url);
-    let Ok(Ok(pool)) = crate::clock::timeout(clock, Duration::from_secs(10), connect).await else {
+    let Ok(Ok(pool)) = Box::pin(crate::clock::timeout(clock, Duration::from_secs(10), connect)).await else {
         return check("storage", DiagnosticStatus::Failed, "PostgreSQL is unreachable or rejected the configured connection");
     };
     let vector_installed: Result<bool, _> = query_scalar("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector')").fetch_one(&pool).await;

@@ -42,7 +42,7 @@ test-soak:
 clippy:
     cargo clippy --all-targets --all-features --locked -- -D warnings
 
-# Run every shipped library/binary feature profile without test-only cfg or features
+# Run every shipped library/binary feature profile in release mode without test-only cfg or features
 production-clippy:
     cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- production-clippy
 

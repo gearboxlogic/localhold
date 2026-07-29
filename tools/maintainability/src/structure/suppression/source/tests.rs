@@ -81,13 +81,17 @@ fn nested_scopes_and_macro_carried_attributes_remain_distinct() -> Result<()> {
          }\n\
          macro_rules! generated {\n\
              () => { #[expect(clippy::too_many_lines, reason = \"macro shape\")] fn expanded() {} };\n\
+         }\n\
+         macro_rules! generated_inner {\n\
+             () => { mod hidden { #![expect(dead_code, reason = \"macro inner\")] fn unused() {} } };\n\
          }\n",
         SourceCategory::Production,
     )?;
-    assert_eq!(sites.len(), 3);
+    assert_eq!(sites.len(), 4);
     assert!(sites.iter().any(|site| site.item.ends_with("::call") && site.scope == "impl-fn" && !site.macro_carried));
     assert!(sites.iter().any(|site| site.item.ends_with("::call") && site.scope == "local" && !site.macro_carried));
     assert!(sites.iter().any(|site| site.item == "generated" && site.scope == "item-macro" && site.macro_carried));
+    assert!(sites.iter().any(|site| site.item == "generated_inner" && site.scope == "item-macro" && site.macro_carried));
     Ok(())
 }
 

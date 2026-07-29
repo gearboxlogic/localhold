@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::env;
 use std::fs;
 use std::path::{Component, Path};
 use std::process::{Command, Stdio};
@@ -8,9 +7,9 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use super::classify::Inventory;
+use super::revision::maintainability_base_revision;
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
-const BASE_REVISION_ENV: &str = "LOCALHOLD_MAINTAINABILITY_BASE_REV";
 const POLICY_PATH: &str = "policy/maintainability/architecture.json";
 const HTTP_TRANSPORT_PATH: &str = "src/http_transport.rs";
 
@@ -73,12 +72,9 @@ impl ImportPolicy {
     }
 
     pub fn compare_previous_revision(&self, workspace: &Path) -> Result<()> {
-        let Ok(revision) = env::var(BASE_REVISION_ENV) else {
+        let Some(revision) = maintainability_base_revision()? else {
             return Ok(());
         };
-        if revision.is_empty() || revision.len() == 40 && revision.bytes().all(|byte| byte == b'0') {
-            return Ok(());
-        }
         validate_revision(&revision)?;
         let object = format!("{revision}:{POLICY_PATH}");
         let output = Command::new("git")

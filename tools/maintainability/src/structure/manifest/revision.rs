@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::env;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -9,8 +8,7 @@ use super::model::StructureManifest;
 use super::validate::{validate_relative_rust_path, validate_revision};
 use crate::structure::MANIFEST_PATH;
 use crate::structure::classify::{self, Inventory};
-
-const BASE_REVISION_ENV: &str = "LOCALHOLD_MAINTAINABILITY_BASE_REV";
+use crate::structure::revision::maintainability_base_revision;
 
 #[derive(Debug)]
 pub(in crate::structure) struct PreviousRevision {
@@ -20,7 +18,8 @@ pub(in crate::structure) struct PreviousRevision {
 
 impl StructureManifest {
     pub fn compare_previous_revision(&self, workspace: &Path, current_inventory: &Inventory) -> Result<Option<PreviousRevision>> {
-        self.compare_previous_revision_from(workspace, env::var(BASE_REVISION_ENV).ok().as_deref(), current_inventory)
+        let revision = maintainability_base_revision()?;
+        self.compare_previous_revision_from(workspace, revision.as_deref(), current_inventory)
     }
 
     pub(super) fn compare_previous_revision_from(&self, workspace: &Path, revision: Option<&str>, current_inventory: &Inventory) -> Result<Option<PreviousRevision>> {

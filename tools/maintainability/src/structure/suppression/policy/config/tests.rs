@@ -57,21 +57,34 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_token("sh -c \"cargo --config net.offline=true check # literal\""));
     assert!(!weakening_token("cargo deny --config deny.toml"));
     assert!(!weakening_token("gitleaks --config policy.toml # cargo output"));
+    assert!(!weakening_token("cargo build\ncc -Wall -Wextra"));
     assert!(!weakening_token("hold doctor --allow-downloads"));
     assert!(weakening_environment("export RUSTFLAGS='-A warnings'\nexec \"$CHECK\""));
+    assert!(weakening_environment("CARGO_ENCODED_RUSTFLAGS=dynamic"));
     assert!(weakening_environment("RUSTDOCFLAGS=--cap-lints=allow"));
+    assert!(weakening_environment("CARGO_ENCODED_RUSTDOCFLAGS=dynamic"));
+    assert!(weakening_environment("CARGO_BUILD_RUSTDOCFLAGS=--cap-lints=allow"));
+    assert!(weakening_environment("CARGO_TARGET_TEST_RUSTDOCFLAGS=--cap-lints=allow"));
     assert!(weakening_environment("CLIPPY_ARGS='--allow warnings'"));
     assert!(weakening_environment("CLIPPY_CONF_DIR=unreviewed"));
     assert!(weakening_environment("RUSTC_WRAPPER=unreviewed"));
     assert!(weakening_environment("CARGO_TARGET_TEST_RUSTFLAGS=unreviewed"));
     assert!(!weakening_environment("rustc --version"));
-    let scrubber = "            RUSTFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | RUSTC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTFLAGS | \\\n";
-    assert!(scrubber_environment_references_are_exact("script/check-maintainability-bootstrap.sh", scrubber));
+    let scrubber = format!("{}\n", BOOTSTRAP_ENVIRONMENT_LINES.join("\n"));
+    assert!(scrubber_environment_references_are_exact("script/check-maintainability-bootstrap.sh", &scrubber));
     assert!(!scrubber_environment_references_are_exact(
         "script/check-maintainability-bootstrap.sh",
         &format!("{scrubber}RUSTFLAGS='-A warnings'\n"),
     ));
-    assert!(!scrubber_environment_references_are_exact("script/tests/new-command.sh", scrubber));
+    assert!(!scrubber_environment_references_are_exact(
+        "script/check-maintainability-bootstrap.sh",
+        &BOOTSTRAP_ENVIRONMENT_LINES[1..].join("\n"),
+    ));
+    assert!(scrubber_environment_references_are_exact(
+        "script/tests/test_maintainability_bootstrap.sh",
+        &BOOTSTRAP_TEST_ENVIRONMENT_LINES.join("\n"),
+    ));
+    assert!(!scrubber_environment_references_are_exact("script/tests/new-command.sh", &scrubber));
 }
 
 #[test]
@@ -96,7 +109,18 @@ fn alternate_clippy_configuration_is_rejected_beside_nested_packages() {
 
 #[test]
 fn command_surfaces_include_scripts_outside_the_legacy_script_directory() {
-    for path in ["Justfile", ".github/workflows/ci.yml", "script/release.py", "tools/ci/check.sh", "Makefile", "package.json"] {
+    for path in [
+        "Justfile",
+        "justfile",
+        ".JUSTFILE",
+        "module.just",
+        ".github/workflows/ci.yml",
+        ".github/actions/check/action.yaml",
+        "script/release.py",
+        "tools/ci/check.sh",
+        "Makefile",
+        "package.json",
+    ] {
         assert!(is_execution_surface(path), "missing command surface {path}");
     }
     assert!(!is_execution_surface("CONTRIBUTING.md"));

@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::env;
 use std::fs;
 use std::path::{Component, Path};
 use std::process::{Command, Stdio};
@@ -9,6 +8,7 @@ use serde::Deserialize;
 
 use super::classify::{FileMeasurement, Inventory};
 use super::manifest::PreviousRevision;
+use super::revision::maintainability_base_revision;
 use super::syntax::{ConcreteStoreSignatureSite, ProductionCfgContext};
 use crate::scan::syntax_fingerprint;
 
@@ -16,7 +16,6 @@ mod exposure;
 use exposure::{TraitExposureEvidence, public_reexport_evidence, trait_exposure_evidence, type_declaration_evidence};
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
-const BASE_REVISION_ENV: &str = "LOCALHOLD_MAINTAINABILITY_BASE_REV";
 const POLICY_PATH: &str = "policy/maintainability/concrete-stores.json";
 const UNRESTRICTED_COMPONENTS: [&str; 8] = [
     "composition",
@@ -249,12 +248,9 @@ impl ConcreteStorePolicy {
         current_paths: PathAttribution<'_>,
         previous_structure: Option<&PreviousRevision>,
     ) -> Result<()> {
-        let Ok(revision) = env::var(BASE_REVISION_ENV) else {
+        let Some(revision) = maintainability_base_revision()? else {
             return Ok(());
         };
-        if revision.is_empty() || revision.len() == 40 && revision.bytes().all(|byte| byte == b'0') {
-            return Ok(());
-        }
         validate_revision(&revision)?;
         let object = format!("{revision}:{POLICY_PATH}");
         let output = Command::new("git")

@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
+use std::path::{Component, Path};
 
 use anyhow::{Context, Result, bail};
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use quote::ToTokens;
+use syn::ext::IdentExt as _;
 use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
@@ -230,12 +232,12 @@ impl SourceScanner {
         let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
         let mut index = 0_usize;
         while index < tokens.len() {
-            if matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '#')
-                && let Some(TokenTree::Group(group)) = tokens.get(index + 1)
-                && group.delimiter() == Delimiter::Bracket
-            {
+            if is_include_invocation(&tokens, index) {
+                bail!("Rust source include! cannot be classified safely");
+            }
+            if let Some((attribute_index, group)) = macro_attribute_group(&tokens, index) {
                 self.record_macro_attribute(group)?;
-                index = index.saturating_add(2);
+                index = attribute_index.saturating_add(1);
                 continue;
             }
             if let Some(TokenTree::Group(group)) = tokens.get(index) {
@@ -249,11 +251,33 @@ impl SourceScanner {
     fn record_macro_attribute(&mut self, group: &proc_macro2::Group) -> Result<()> {
         match syn::parse2::<Meta>(group.stream()) {
             Ok(meta) => {
+                validate_audited_module_path_meta(&meta).context("validate macro-carried module path")?;
                 let fingerprint = syntax_fingerprint(&meta);
                 self.record_meta(&meta, self.category, true, &fingerprint).context("classify macro-carried lint attribute")
             }
             Err(error) => Err(error).context("opaque macro-carried attribute could hide a lint suppression"),
         }
+    }
+}
+
+fn is_include_invocation(tokens: &[TokenTree], index: usize) -> bool {
+    matches!(tokens.get(index), Some(TokenTree::Ident(ident)) if ident.unraw() == "include")
+        && matches!(tokens.get(index.saturating_add(1)), Some(TokenTree::Punct(punct)) if punct.as_char() == '!')
+}
+
+fn macro_attribute_group(tokens: &[TokenTree], index: usize) -> Option<(usize, &proc_macro2::Group)> {
+    if !matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '#') {
+        return None;
+    }
+    let following_index = index.saturating_add(1);
+    let attribute_index = if matches!(tokens.get(following_index), Some(TokenTree::Punct(punct)) if punct.as_char() == '!') {
+        following_index.saturating_add(1)
+    } else {
+        following_index
+    };
+    match tokens.get(attribute_index) {
+        Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Bracket => Some((attribute_index, group)),
+        _ => None,
     }
 }
 
@@ -360,19 +384,63 @@ impl<'ast> Visit<'ast> for SourceScanner {
     }
 
     fn visit_attribute(&mut self, attribute: &'ast Attribute) {
-        if self.error.is_none()
-            && let Err(error) = self.record_attribute(attribute, false)
-        {
-            self.error = Some(error);
+        if self.error.is_none() {
+            if let Err(error) = validate_audited_module_path(attribute) {
+                self.error = Some(error);
+            } else if let Err(error) = self.record_attribute(attribute, false) {
+                self.error = Some(error);
+            }
         }
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        if self.error.is_none()
-            && let Err(error) = self.record_macro_tokens(&node.tokens)
-        {
-            self.error = Some(error);
+        if self.error.is_none() {
+            if node.path.segments.last().is_some_and(|segment| segment.ident.unraw() == "include") {
+                self.error = Some(anyhow::anyhow!("Rust source include! cannot be classified safely"));
+            } else if let Err(error) = self.record_macro_tokens(&node.tokens) {
+                self.error = Some(error);
+            }
         }
         visit::visit_macro(self, node);
     }
+}
+
+fn validate_audited_module_path(attribute: &Attribute) -> Result<()> {
+    validate_audited_module_path_meta(&attribute.meta)
+}
+
+fn validate_audited_module_path_meta(meta: &Meta) -> Result<()> {
+    if meta.path().is_ident("path") {
+        let Meta::NameValue(value) = meta else {
+            bail!("explicit Rust module path must use a string literal");
+        };
+        let Expr::Lit(expression) = &value.value else {
+            bail!("explicit Rust module path must use a string literal");
+        };
+        let syn::Lit::Str(value) = &expression.lit else {
+            bail!("explicit Rust module path must use a string literal");
+        };
+        let module_path = value.value();
+        let path = Path::new(&module_path);
+        if path.extension().and_then(|extension| extension.to_str()) != Some("rs")
+            || path.is_absolute()
+            || path.components().any(|component| !matches!(component, Component::Normal(_)))
+        {
+            bail!("explicit Rust module path must name a normalized .rs source in the audited source tree");
+        }
+        return Ok(());
+    }
+    if !meta.path().is_ident("cfg_attr") {
+        return Ok(());
+    }
+    let Meta::List(list) = meta else {
+        return Ok(());
+    };
+    let arguments = Punctuated::<Meta, Token![,]>::parse_terminated
+        .parse2(list.tokens.clone())
+        .context("parse cfg_attr arguments for suppression source classification")?;
+    for nested in arguments.iter().skip(1) {
+        validate_audited_module_path_meta(nested)?;
+    }
+    Ok(())
 }

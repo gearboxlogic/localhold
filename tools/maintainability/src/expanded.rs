@@ -258,18 +258,23 @@ fn audit_environment_override(name: &OsStr) -> bool {
             name.as_str(),
             "RUSTFLAGS"
                 | "CARGO_ENCODED_RUSTFLAGS"
+                | "RUSTDOCFLAGS"
+                | "CARGO_ENCODED_RUSTDOCFLAGS"
                 | "CARGO_BUILD_TARGET"
                 | "CLIPPY_ARGS"
                 | "CLIPPY_CONF_DIR"
                 | "RUSTC"
+                | "RUSTDOC"
                 | "RUSTC_WRAPPER"
                 | "RUSTC_WORKSPACE_WRAPPER"
                 | "CARGO_BUILD_RUSTFLAGS"
+                | "CARGO_BUILD_RUSTDOCFLAGS"
                 | "CARGO_BUILD_RUSTC"
+                | "CARGO_BUILD_RUSTDOC"
                 | "CARGO_BUILD_RUSTC_WRAPPER"
                 | "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"
         ) || name.starts_with("CARGO_ALIAS_")
-            || name.starts_with("CARGO_TARGET_") && (name.ends_with("_RUSTFLAGS") || name.ends_with("_LINKER") || name.ends_with("_RUNNER"))
+            || name.starts_with("CARGO_TARGET_") && (name.ends_with("_RUSTFLAGS") || name.ends_with("_RUSTDOCFLAGS") || name.ends_with("_LINKER") || name.ends_with("_RUNNER"))
     })
 }
 

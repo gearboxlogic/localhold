@@ -1,4 +1,3 @@
-use std::env;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -10,9 +9,8 @@ use super::model::{CargoAllowance, CargoAllowanceFile, ClippyConfigurationFile, 
 use super::source::{added_exception_capacity, collect_baselines, compare_current, require_count_subset};
 use super::{POLICY_PATH, SuppressionPolicy, validate_model, validate_policy_relative, validate_revision};
 use crate::structure::manifest::PreviousRevision;
+use crate::structure::revision::maintainability_base_revision;
 use crate::structure::suppression::{self, SourceSuppression};
-
-const BASE_REVISION_ENV: &str = "LOCALHOLD_MAINTAINABILITY_BASE_REV";
 
 impl SuppressionPolicy {
     pub(in crate::structure) fn compare_previous_revision(
@@ -22,12 +20,9 @@ impl SuppressionPolicy {
         current_counts: &super::source::SourceCounts,
         previous_structure: Option<&PreviousRevision>,
     ) -> Result<()> {
-        let Ok(revision) = env::var(BASE_REVISION_ENV) else {
+        let Some(revision) = maintainability_base_revision()? else {
             return Ok(());
         };
-        if revision.is_empty() || revision.len() == 40 && revision.bytes().all(|byte| byte == b'0') {
-            return Ok(());
-        }
         validate_revision(&revision)?;
         let Some(previous) = load_revision(workspace, &revision)? else {
             if self.model.adoption_commit != revision {
@@ -150,8 +145,8 @@ fn compare_cargo_allowances(current: &[CargoAllowance], previous: &[CargoAllowan
 }
 
 fn compare_clippy_settings(current: &[ClippySetting], previous: &[ClippySetting]) -> Result<()> {
-    if current.len() < previous.len() || current.iter().zip(previous).any(|(current, previous)| current != previous) {
-        bail!("existing Clippy configuration policy is immutable");
+    if current != previous {
+        bail!("Clippy configuration policy key set and evidence are immutable");
     }
     Ok(())
 }
@@ -181,5 +176,22 @@ mod tests {
         let previous = vec!["first.json".to_owned()];
         require_append_only_paths("fragments", &["first.json".to_owned(), "second.json".to_owned()], &previous).expect("append a new fragment");
         assert!(require_append_only_paths("fragments", &["renamed.json".to_owned()], &previous).is_err());
+
+        let setting = ClippySetting {
+            id: "clippy.threshold".to_owned(),
+            key: "too-many-lines-threshold".to_owned(),
+            constraint: super::super::model::ClippyConstraint::MaximumInteger { value: 100 },
+            owner: "maintainers".to_owned(),
+            issue: "issue".to_owned(),
+            pull_request: "pull request".to_owned(),
+            rationale: "visible debt".to_owned(),
+            safety_invariant: "cannot rise".to_owned(),
+            alternatives_considered: "default rejected".to_owned(),
+            sentinel: "Clippy".to_owned(),
+            evidence: "inventory".to_owned(),
+            re_review_phase: "Phase 1".to_owned(),
+        };
+        assert!(compare_clippy_settings(std::slice::from_ref(&setting), std::slice::from_ref(&setting)).is_ok());
+        assert!(compare_clippy_settings(&[setting.clone(), setting], &[]).is_err());
     }
 }

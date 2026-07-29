@@ -17,7 +17,9 @@ mod tests;
 
 pub(super) use command::reject_checked_in_weakening;
 #[cfg(test)]
-use command::{is_execution_surface, scrubber_environment_references_are_exact, weakening_environment, weakening_token};
+use command::{
+    BOOTSTRAP_ENVIRONMENT_LINES, BOOTSTRAP_TEST_ENVIRONMENT_LINES, is_execution_surface, scrubber_environment_references_are_exact, weakening_environment, weakening_token,
+};
 
 pub(super) fn validate_cargo_allowances(entries: &[CargoAllowance]) -> Result<()> {
     let mut ids = BTreeSet::new();

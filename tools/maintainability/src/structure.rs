@@ -13,6 +13,7 @@ mod classify;
 mod concrete_store_policy;
 mod import_policy;
 mod manifest;
+mod revision;
 mod suppression;
 mod syntax;
 mod visibility_policy;

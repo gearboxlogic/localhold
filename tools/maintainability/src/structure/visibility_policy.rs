@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::env;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -9,10 +8,10 @@ use serde::Deserialize;
 
 use super::classify::Inventory;
 use super::manifest::PreviousRevision;
+use super::revision::maintainability_base_revision;
 use super::syntax::VisibilityCounts;
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
-const BASE_REVISION_ENV: &str = "LOCALHOLD_MAINTAINABILITY_BASE_REV";
 const POLICY_PATH: &str = "policy/maintainability/visibilities.json";
 const PHASE_ZERO_ISSUE: &str = "https://github.com/gearboxlogic/localhold/issues/124";
 type ExceptionDeltas<'a> = BTreeMap<(&'a str, VisibilityKind), usize>;
@@ -105,12 +104,9 @@ impl VisibilityPolicy {
         current_paths: &BTreeMap<&str, &str>,
         previous_revision: Option<&PreviousRevision>,
     ) -> Result<()> {
-        let Ok(revision) = env::var(BASE_REVISION_ENV) else {
+        let Some(revision) = maintainability_base_revision()? else {
             return Ok(());
         };
-        if revision.is_empty() || revision.len() == 40 && revision.bytes().all(|byte| byte == b'0') {
-            return Ok(());
-        }
         validate_revision(&revision)?;
         let object = format!("{revision}:{POLICY_PATH}");
         let output = Command::new("git")

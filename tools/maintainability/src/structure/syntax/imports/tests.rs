@@ -299,6 +299,20 @@ fn exposed_function_signature_types_resolve_aliases_without_treating_generics_as
 }
 
 #[test]
+fn exposed_qualified_function_signature_types_fail_closed() -> Result<()> {
+    let source = "trait Reveal { type Output; }\n\
+                  struct Marker;\n";
+    let Err(error) = concrete_facts(&format!("{source}pub(crate) fn adapter() -> <Marker as Reveal>::Output {{ loop {{}} }}\n")) else {
+        panic!("an exposed qualified signature type must fail closed");
+    };
+    assert!(error.to_string().contains("exposed qualified signature types"), "{error:#}");
+
+    let private = concrete_facts(&format!("{source}fn adapter() -> <Marker as Reveal>::Output {{ loop {{}} }}\n"))?;
+    assert!(private.public_reexports.is_empty());
+    Ok(())
+}
+
+#[test]
 fn builtin_stringify_aliases_use_only_cfg_compatible_bindings() {
     for source in [
         "#[cfg(feature = \"legacy\")]\n\

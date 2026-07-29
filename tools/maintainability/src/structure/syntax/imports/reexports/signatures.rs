@@ -104,9 +104,11 @@ impl SignatureTypeCollector<'_> {
 
 impl<'ast> Visit<'ast> for SignatureTypeCollector<'_> {
     fn visit_type_path(&mut self, path: &'ast TypePath) {
-        if path.qself.is_none() {
-            self.record_path(&path.path);
+        if path.qself.is_some() {
+            self.error = Some(anyhow::anyhow!("exposed qualified signature types cannot be resolved to a concrete target"));
+            return;
         }
+        self.record_path(&path.path);
         visit::visit_type_path(self, path);
     }
 

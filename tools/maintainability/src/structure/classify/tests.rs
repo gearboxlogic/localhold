@@ -232,9 +232,10 @@ fn public_reexports_match_concrete_store_methods_to_their_impl_type() {
         (
             "src/hidden.rs",
             "pub(crate) struct Adapter;\n\
-             impl Adapter {\n\
+             impl InternalAdapter {\n\
                  pub(crate) fn open() -> SqliteStore { loop {} }\n\
-             }\n",
+             }\n\
+             use self::Adapter as InternalAdapter;\n",
         ),
     ]);
     let root = measured.files.iter().find(|file| file.path == "src/lib.rs").expect("root measurement");

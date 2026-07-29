@@ -11,7 +11,7 @@ use crate::scan::syntax_fingerprint;
 
 use super::syntax::{
     ConcreteStoreCounts, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionAncestorPath, ProductionCfgContext, ProductionSyntaxContext, ProductionSyntaxFacts,
-    ProductionSyntaxOptions, PublicReexportEvidence, TestLineCollector, normalized_ident, production_cfg_context, production_syntax_facts_with_context,
+    ProductionSyntaxOptions, PublicReexportEvidence, TestLineCollector, TypeDeclarationEvidence, normalized_ident, production_cfg_context, production_syntax_facts_with_context,
     reject_module_path_overrides,
 };
 
@@ -30,6 +30,7 @@ pub struct FileMeasurement {
     pub production_module: Vec<String>,
     pub production_internal_imports: Vec<String>,
     pub production_public_reexports: Vec<PublicReexportEvidence>,
+    pub production_type_declarations: Vec<TypeDeclarationEvidence>,
     pub production_concrete_stores: ConcreteStoreCounts,
     pub production_public_concrete_store_structs: ConcreteStoreSites,
     pub production_concrete_store_sites: ConcreteStoreSites,
@@ -286,6 +287,7 @@ fn measure_sources_with_roots(sources: BTreeMap<String, String>, target_roots: &
             production_module: production_facts.module,
             production_internal_imports: production_facts.internal_imports,
             production_public_reexports: production_facts.public_reexports,
+            production_type_declarations: production_facts.type_declarations,
             production_concrete_stores: production_facts.concrete_stores,
             production_public_concrete_store_structs: production_facts.public_concrete_store_structs,
             production_concrete_store_sites: production_facts.concrete_store_sites,

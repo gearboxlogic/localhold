@@ -82,6 +82,21 @@ fn concrete_method_signatures_track_their_complete_impl_header() -> Result<()> {
 }
 
 #[test]
+fn impl_signature_self_types_resolve_use_aliases_after_collection() -> Result<()> {
+    let facts = concrete_facts(
+        "mod hidden { pub(crate) struct Adapter; }\n\
+         impl InternalAdapter { pub(crate) fn open() -> SqliteStore { loop {} } }\n\
+         pub(crate) use hidden::Adapter;\n\
+         use hidden::Adapter as InternalAdapter;\n",
+    )?;
+    let signature = facts.signature_concrete_store_sites.sqlite_store.first().expect("concrete impl signature");
+    assert_eq!(signature.item_path, ["store_fixture", "hidden", "Adapter"]);
+    assert!(signature.impl_self_type);
+    assert_eq!(facts.type_declarations[0].item_path, ["store_fixture", "hidden", "Adapter"]);
+    Ok(())
+}
+
+#[test]
 fn qualified_paths_are_collected_without_double_counting_imports() {
     let source = "use crate::server::Imported;\n\
                   fn build() -> crate::server::Imported { crate::ui::qualified(); crate::ui::qualified() }\n";

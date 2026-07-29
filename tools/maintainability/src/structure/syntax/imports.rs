@@ -19,14 +19,17 @@ use super::{
 };
 
 mod concrete;
+mod declarations;
 mod macro_definitions;
 mod reexports;
 mod resolution;
 mod tokens;
 pub use concrete::{ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites};
-use concrete::{ConcreteStoreInventory, context_fingerprint, is_concrete_store_name, production_generics};
+use concrete::{ConcreteStoreInventory, SignatureSiteContext, context_fingerprint, is_concrete_store_name, production_generics};
+pub use declarations::TypeDeclarationEvidence;
+use declarations::{TypeDeclarationContext, type_declaration_evidence};
 use macro_definitions::contains_production_concrete_store;
-use reexports::{PendingPublicReexport, UseResolution, resolve_public_reexport_aliases};
+use reexports::{PendingPublicReexport, UseResolution, resolve_impl_signature_aliases, resolve_public_reexport_aliases};
 use resolution::{StringScan, UsePath, flatten_use_tree, resolve_path, restricted_attribute_identifier, restricted_token_identifier, source_module};
 use tokens::resolving_tokens;
 
@@ -68,6 +71,7 @@ pub struct ProductionSyntaxFacts {
     pub module: Vec<String>,
     pub internal_imports: Vec<String>,
     pub public_reexports: Vec<PublicReexportEvidence>,
+    pub type_declarations: Vec<TypeDeclarationEvidence>,
     pub concrete_stores: ConcreteStoreCounts,
     pub public_concrete_store_structs: ConcreteStoreSites,
     pub concrete_store_sites: ConcreteStoreSites,
@@ -130,6 +134,7 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
         imports: Vec::new(),
         use_resolutions: Vec::new(),
         public_reexports: Vec::new(),
+        type_declarations: Vec::new(),
         concrete_stores: ConcreteStoreInventory::default(),
         site_context: None,
         block_depth: 0,
@@ -157,11 +162,15 @@ pub(in crate::structure) fn production_syntax_facts_with_context(
     let mut public_reexports = resolve_public_reexport_aliases(collector.public_reexports, &collector.use_resolutions);
     public_reexports.sort();
     public_reexports.dedup();
+    collector.type_declarations.sort();
+    collector.type_declarations.dedup();
+    resolve_impl_signature_aliases(&mut collector.concrete_stores.signature_sites, &collector.use_resolutions);
     collector.concrete_stores.finish();
     Ok(ProductionSyntaxFacts {
         module: collector.module,
         internal_imports: collector.imports,
         public_reexports,
+        type_declarations: collector.type_declarations,
         concrete_stores: collector.concrete_stores.counts,
         public_concrete_store_structs: collector.concrete_stores.public_struct_declarations,
         concrete_store_sites: collector.concrete_stores.sites,
@@ -179,6 +188,7 @@ struct ProductionSyntaxCollector {
     imports: Vec<String>,
     use_resolutions: Vec<UseResolution>,
     public_reexports: Vec<PendingPublicReexport>,
+    type_declarations: Vec<TypeDeclarationEvidence>,
     concrete_stores: ConcreteStoreInventory,
     site_context: Option<String>,
     block_depth: usize,
@@ -418,7 +428,12 @@ impl ProductionSyntaxCollector {
             self.declaration_ancestor_identity()
         );
         let item_path = self.signature_item_path();
-        self.concrete_stores.record_signature_tokens(tokens, &context, &item_path, &self.cfg_context);
+        let signature = SignatureSiteContext {
+            item_path: &item_path,
+            cfg: &self.cfg_context,
+            impl_self_type: !self.impl_item_paths.is_empty(),
+        };
+        self.concrete_stores.record_signature_tokens(tokens, &context, &signature);
     }
 
     fn record_concrete_stores_in_exposure_signature_with_identity(&mut self, kind: &str, tokens: &TokenStream, identity: &TokenStream) {
@@ -429,7 +444,26 @@ impl ProductionSyntaxCollector {
             self.declaration_ancestor_identity()
         );
         let item_path = self.signature_item_path();
-        self.concrete_stores.record_exposure_signature_tokens(tokens, &context, &item_path, &self.cfg_context);
+        let signature = SignatureSiteContext {
+            item_path: &item_path,
+            cfg: &self.cfg_context,
+            impl_self_type: !self.impl_item_paths.is_empty(),
+        };
+        self.concrete_stores.record_exposure_signature_tokens(tokens, &context, &signature);
+    }
+
+    fn record_type_declaration(&mut self, kind: &str, ident: &proc_macro2::Ident, visibility: &Visibility) {
+        let ancestors = self.declaration_ancestor_identity();
+        self.type_declarations.push(type_declaration_evidence(
+            kind,
+            ident,
+            visibility,
+            &TypeDeclarationContext {
+                module: &self.module,
+                cfg: &self.cfg_context,
+                ancestors: &ancestors,
+            },
+        ));
     }
 
     fn record_impl_header_for_visible_member(&mut self, kind: &str, visibility: &Visibility, member: &impl ToTokens) {
@@ -728,6 +762,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_struct(&mut self, item: &'ast ItemStruct) {
+        self.record_type_declaration("struct", &item.ident, &item.vis);
         let exposed = visibility_is_exposed(&item.vis);
         if exposed {
             self.record_declaration_generics("struct-generics", &item.vis, &item.generics);
@@ -747,6 +782,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_enum(&mut self, item: &'ast ItemEnum) {
+        self.record_type_declaration("enum", &item.ident, &item.vis);
         let exposed = visibility_is_exposed(&item.vis);
         if exposed {
             self.record_declaration_generics("enum-generics", &item.vis, &item.generics);
@@ -757,6 +793,7 @@ impl<'ast> Visit<'ast> for ProductionSyntaxCollector {
     }
 
     fn visit_item_union(&mut self, item: &'ast ItemUnion) {
+        self.record_type_declaration("union", &item.ident, &item.vis);
         let exposed = visibility_is_exposed(&item.vis);
         if exposed {
             self.record_declaration_generics("union-generics", &item.vis, &item.generics);

@@ -1,7 +1,8 @@
 use super::*;
 use crate::structure::classify::{FileMeasurement, Inventory};
 use crate::structure::syntax::{
-    ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionCfgContext, PublicReexportEvidence, production_cfg_context,
+    ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionCfgContext, PublicReexportEvidence, TypeDeclarationEvidence,
+    production_cfg_context,
 };
 
 type CountFixture<'a> = (&'a str, usize, usize);
@@ -307,6 +308,48 @@ fn public_reexports_match_signatures_only_within_the_same_target() {
         .expect("a binary re-export cannot expose a library item with the same module path");
 
     current.files[1].production_targets = vec!["src/lib.rs".to_owned()];
+    let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
+    assert!(error.to_string().contains("production signature"));
+}
+
+#[test]
+fn impl_self_type_visibility_is_signature_evidence() {
+    let policy = policy();
+    let components = components(&[("src/adapter.rs", "sqlite-store"), ("src/hidden.rs", "sqlite-store")]);
+    let mut baseline = inventory(&[("src/adapter.rs", 1, 0), ("src/hidden.rs", 0, 0)]);
+    baseline.files[0].production_signature_store_sites.sqlite_store = vec![impl_signature("adapter-open", &["hidden", "Adapter"])];
+    baseline.files[1].production_type_declarations = vec![type_declaration("private-adapter", &["hidden", "Adapter"])];
+    let mut current = baseline.clone();
+    current.files[1].production_type_declarations[0].fingerprint = "restricted-adapter".to_owned();
+
+    let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
+    assert!(error.to_string().contains("production signature"));
+}
+
+#[test]
+fn impl_self_type_declarations_must_share_the_signature_target_and_cfg() {
+    let policy = policy();
+    let components = components(&[("src/lib.rs", "sqlite-store"), ("src/main.rs", "composition")]);
+    let mut baseline = inventory(&[("src/lib.rs", 1, 0), ("src/main.rs", 0, 0)]);
+    baseline.files[0].production_targets = vec!["src/lib.rs".to_owned()];
+    let mut signature = impl_signature("adapter-open", &["hidden", "Adapter"]);
+    signature.cfg = cfg_context("feature = \"legacy\"");
+    baseline.files[0].production_signature_store_sites.sqlite_store = vec![signature];
+    baseline.files[1].production_targets = vec!["src/main.rs".to_owned()];
+    let mut declaration = type_declaration("private-adapter", &["hidden", "Adapter"]);
+    declaration.cfg = cfg_context("not(feature = \"legacy\")");
+    baseline.files[1].production_type_declarations = vec![declaration];
+    let mut current = baseline.clone();
+    current.files[1].production_type_declarations[0].fingerprint = "restricted-adapter".to_owned();
+
+    policy
+        .compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components))
+        .expect("a declaration in another target with an exclusive cfg cannot affect the impl signature");
+
+    baseline.files[1].production_targets = vec!["src/lib.rs".to_owned()];
+    current.files[1].production_targets = vec!["src/lib.rs".to_owned()];
+    baseline.files[1].production_type_declarations[0].cfg = cfg_context("feature = \"legacy\"");
+    current.files[1].production_type_declarations[0].cfg = cfg_context("feature = \"legacy\"");
     let error = policy.compare_site_fingerprints(&current, &baseline, paths(&components), paths(&components)).unwrap_err();
     assert!(error.to_string().contains("production signature"));
 }
@@ -736,6 +779,7 @@ fn file(path: &str, sqlite_store: usize, postgres_store: usize) -> FileMeasureme
         production_module: Vec::new(),
         production_internal_imports: Vec::new(),
         production_public_reexports: Vec::new(),
+        production_type_declarations: Vec::new(),
         production_concrete_stores: ConcreteStoreCounts { sqlite_store, postgres_store },
         production_public_concrete_store_structs: ConcreteStoreSites::default(),
         production_concrete_store_sites: ConcreteStoreSites::default(),
@@ -747,6 +791,22 @@ fn file(path: &str, sqlite_store: usize, postgres_store: usize) -> FileMeasureme
 
 fn signature(fingerprint: &str, item_path: &[&str]) -> ConcreteStoreSignatureSite {
     ConcreteStoreSignatureSite {
+        fingerprint: fingerprint.to_owned(),
+        item_path: item_path.iter().map(|segment| (*segment).to_owned()).collect(),
+        cfg: ProductionCfgContext::default(),
+        impl_self_type: false,
+    }
+}
+
+fn impl_signature(fingerprint: &str, item_path: &[&str]) -> ConcreteStoreSignatureSite {
+    ConcreteStoreSignatureSite {
+        impl_self_type: true,
+        ..signature(fingerprint, item_path)
+    }
+}
+
+fn type_declaration(fingerprint: &str, item_path: &[&str]) -> TypeDeclarationEvidence {
+    TypeDeclarationEvidence {
         fingerprint: fingerprint.to_owned(),
         item_path: item_path.iter().map(|segment| (*segment).to_owned()).collect(),
         cfg: ProductionCfgContext::default(),

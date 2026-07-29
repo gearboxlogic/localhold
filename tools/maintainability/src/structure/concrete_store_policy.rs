@@ -9,8 +9,11 @@ use serde::Deserialize;
 
 use super::classify::{FileMeasurement, Inventory};
 use super::manifest::PreviousRevision;
-use super::syntax::{ConcreteStoreSignatureSite, PublicReexportEvidence};
+use super::syntax::ConcreteStoreSignatureSite;
 use crate::scan::syntax_fingerprint;
+
+mod exposure;
+use exposure::{public_reexport_evidence, type_declaration_evidence};
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 const BASE_REVISION_ENV: &str = "LOCALHOLD_MAINTAINABILITY_BASE_REV";
@@ -505,84 +508,6 @@ fn canonical_binding_fingerprint(inventory: &Inventory, paths: PathAttribution<'
     Ok(syntax_fingerprint(&evidence.join("\0")))
 }
 
-fn public_reexport_evidence(
-    inventory: &Inventory,
-    paths: PathAttribution<'_>,
-    target_item: &[String],
-    target_cfg: &super::syntax::ProductionCfgContext,
-    production_targets: &[String],
-) -> Vec<String> {
-    if target_item.is_empty() {
-        return Vec::new();
-    }
-    let mut evidence = Vec::new();
-    for target in production_targets {
-        let reexports = inventory
-            .files
-            .iter()
-            .filter(|file| file.production_targets.contains(target))
-            .flat_map(|file| file.production_public_reexports.iter().map(move |reexport| (file, reexport)))
-            .collect::<Vec<_>>();
-        evidence.extend(
-            reexports
-                .iter()
-                .filter(|(_, reexport)| reexport_reaches_item(reexport, &reexports, target_item, target_cfg))
-                .map(|(file, reexport)| format!("{}:{}:{}", paths.site_path(&file.path).len(), paths.site_path(&file.path), reexport.fingerprint)),
-        );
-    }
-    evidence.sort();
-    evidence.dedup();
-    evidence
-}
-
-fn reexport_reaches_item(
-    candidate: &PublicReexportEvidence,
-    reexports: &[(&FileMeasurement, &PublicReexportEvidence)],
-    target_item: &[String],
-    target_cfg: &super::syntax::ProductionCfgContext,
-) -> bool {
-    let Some(candidate_cfg) = candidate.cfg.conjoin(target_cfg) else {
-        return false;
-    };
-    let mut pending = vec![(candidate.target_path.clone(), candidate_cfg, BTreeSet::new())];
-    while let Some((path, cfg, mut visited)) = pending.pop() {
-        if !visited.insert(path.clone()) {
-            continue;
-        }
-        if reexport_applies_to_item(&path, target_item) {
-            return true;
-        }
-        pending.extend(reexports.iter().filter_map(|(_, reexport)| {
-            let compatible_cfg = cfg.conjoin(&reexport.cfg)?;
-            resolve_reexport_target(&path, reexport).map(|path| (path, compatible_cfg, visited.clone()))
-        }));
-    }
-    false
-}
-
-fn resolve_reexport_target(path: &[String], reexport: &PublicReexportEvidence) -> Option<Vec<String>> {
-    let exported_glob = reexport.exported_path.last().is_some_and(|segment| segment == "*");
-    let exported_prefix = reexport.exported_path.strip_suffix(&["*".to_owned()]).unwrap_or(&reexport.exported_path);
-    if !path.starts_with(exported_prefix) || exported_glob && path.len() == exported_prefix.len() {
-        return None;
-    }
-    let target_prefix = reexport.target_path.strip_suffix(&["*".to_owned()]).unwrap_or(&reexport.target_path);
-    let mut resolved = target_prefix.to_vec();
-    resolved.extend_from_slice(&path[exported_prefix.len()..]);
-    (resolved != path).then_some(resolved)
-}
-
-fn reexport_applies_to_item(target_path: &[String], item: &[String]) -> bool {
-    let target_without_glob = if target_path.last().is_some_and(|segment| segment == "*") {
-        &target_path[..target_path.len() - 1]
-    } else {
-        target_path
-    };
-    target_without_glob == item
-        || !target_without_glob.is_empty() && item.starts_with(target_without_glob)
-        || target_without_glob.len() == item.len().saturating_add(1) && target_without_glob.starts_with(item)
-}
-
 fn validate_declaration(declaration: &ConcreteStoreDeclaration, unrestricted: &BTreeSet<&str>, allow_missing_fingerprint: bool) -> Result<()> {
     validate_component(&declaration.component)?;
     validate_relative_rust_path(&declaration.path)?;
@@ -724,13 +649,31 @@ fn record_signature_site_fingerprint(
         &signature.cfg,
         &file_context.file.production_targets,
     );
+    let type_declarations = signature.impl_self_type.then(|| {
+        type_declaration_evidence(
+            file_context.inventory,
+            file_context.paths,
+            &signature.item_path,
+            &signature.cfg,
+            &file_context.file.production_targets,
+        )
+    });
     let context = SiteEvidenceContext {
         component: effective_component,
         path: file_context.site_path,
         store,
         public_reexports: &public_reexports,
     };
-    record_site_evidence(sites, context, &signature.fingerprint)
+    match type_declarations.as_deref() {
+        Some([]) | None => record_site_evidence(sites, context, &signature.fingerprint),
+        Some(declarations) => {
+            for declaration in declarations {
+                let fingerprint = syntax_fingerprint(&format!("signature:{}\0impl-self-type-declaration:{declaration}", signature.fingerprint));
+                record_site_evidence(sites, context, &fingerprint)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 fn record_site_evidence(sites: &mut BTreeMap<SiteFingerprint, usize>, context: SiteEvidenceContext<'_>, signature: &str) -> Result<()> {

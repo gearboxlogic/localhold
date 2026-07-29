@@ -12,6 +12,7 @@ mod imports;
 pub(super) use cfg::{ProductionCfgContext, attributes_disable_production, production_cfg_attr_metas, production_cfg_context};
 pub use imports::{
     ConcreteStoreCounts, ConcreteStoreSignatureSite, ConcreteStoreSignatureSites, ConcreteStoreSites, ProductionSyntaxFacts, ProductionSyntaxOptions, PublicReexportEvidence,
+    TypeDeclarationEvidence,
 };
 pub(super) use imports::{ProductionAncestorPath, ProductionSyntaxContext, production_syntax_facts_with_context};
 

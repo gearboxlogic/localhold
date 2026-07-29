@@ -4,6 +4,7 @@ use crate::scan::syntax_fingerprint;
 
 use super::super::ProductionCfgContext;
 use super::PublicReexportEvidence;
+use super::concrete::{ConcreteStoreSignatureSite, ConcreteStoreSignatureSites};
 
 pub(super) struct PendingPublicReexport {
     pub(super) evidence: PublicReexportEvidence,
@@ -36,13 +37,7 @@ pub(super) fn resolve_public_reexport_aliases(reexports: Vec<PendingPublicReexpo
     let mut resolved = Vec::new();
     for pending in reexports {
         let evidence = pending.evidence;
-        let mut targets = Vec::new();
-        AliasResolver {
-            resolutions,
-            targets: &mut targets,
-        }
-        .resolve(evidence.target_path.clone(), &pending.cfg, &mut BTreeSet::new(), &mut Vec::new());
-        for (target_path, alias_fingerprints, cfg) in targets {
+        for (target_path, alias_fingerprints, cfg) in resolve_use_aliases(evidence.target_path.clone(), &pending.cfg, resolutions) {
             let fingerprint = if alias_fingerprints.is_empty() && target_path == evidence.target_path {
                 evidence.fingerprint.clone()
             } else {
@@ -62,6 +57,50 @@ pub(super) fn resolve_public_reexport_aliases(reexports: Vec<PendingPublicReexpo
         }
     }
     resolved
+}
+
+pub(super) fn resolve_impl_signature_aliases(sites: &mut ConcreteStoreSignatureSites, resolutions: &[UseResolution]) {
+    resolve_impl_signature_site_aliases(&mut sites.sqlite_store, resolutions);
+    resolve_impl_signature_site_aliases(&mut sites.postgres_store, resolutions);
+}
+
+fn resolve_impl_signature_site_aliases(sites: &mut Vec<ConcreteStoreSignatureSite>, resolutions: &[UseResolution]) {
+    let mut resolved = Vec::new();
+    for site in std::mem::take(sites) {
+        if !site.impl_self_type || site.item_path.is_empty() {
+            resolved.push(site);
+            continue;
+        }
+        for (item_path, alias_fingerprints, cfg) in resolve_use_aliases(site.item_path.clone(), &site.cfg, resolutions) {
+            let fingerprint = if alias_fingerprints.is_empty() && item_path == site.item_path {
+                site.fingerprint.clone()
+            } else {
+                syntax_fingerprint(&format!(
+                    "{}\0resolved-impl-self-type:{}\0aliases:{}",
+                    site.fingerprint,
+                    item_path.join("::"),
+                    alias_fingerprints.join("\0")
+                ))
+            };
+            resolved.push(ConcreteStoreSignatureSite {
+                fingerprint,
+                item_path,
+                cfg,
+                impl_self_type: true,
+            });
+        }
+    }
+    *sites = resolved;
+}
+
+fn resolve_use_aliases(path: Vec<String>, cfg: &ProductionCfgContext, resolutions: &[UseResolution]) -> ResolvedUseTargets {
+    let mut targets = Vec::new();
+    AliasResolver {
+        resolutions,
+        targets: &mut targets,
+    }
+    .resolve(path, cfg, &mut BTreeSet::new(), &mut Vec::new());
+    targets
 }
 
 impl AliasResolver<'_> {

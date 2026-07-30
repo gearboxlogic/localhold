@@ -73,6 +73,8 @@ pub(super) fn validate(path: &str, source: &str) -> Result<()> {
                 active_job.violations.insert(JobViolation::ContinuesOnError);
             } else if key == "needs" {
                 active_job.violations.insert(JobViolation::HasDependencies);
+            } else if key == "services" {
+                active_job.violations.insert(JobViolation::HasServices);
             } else if key == "runs-on" {
                 active_job.runner = literal_scalar(value);
             } else if key == "steps" && value.trim().is_empty() {
@@ -238,6 +240,7 @@ fn finish_job(job: Option<&Job>) -> Result<()> {
     };
     if !job.has_bash_shell_default
         || job.violations.contains(&JobViolation::HasDependencies)
+        || job.violations.contains(&JobViolation::HasServices)
         || job.violations.contains(&JobViolation::NonBashShell)
         || job.completed_steps != GOVERNED_STEP_COUNT
     {
@@ -308,6 +311,7 @@ enum JobViolation {
     Conditional,
     ContinuesOnError,
     HasDependencies,
+    HasServices,
     NonBashShell,
 }
 

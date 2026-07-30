@@ -114,10 +114,7 @@ fn contains_source_command(source: &str) -> bool {
 }
 
 fn is_shell_command_prefix(word: &str) -> bool {
-    matches!(
-        word,
-        "!" | "if" | "then" | "elif" | "while" | "until" | "do" | "env" | "command" | "exec" | "builtin" | "nohup" | "sudo" | "time"
-    ) || word.starts_with('-')
+    matches!(word, "!" | "if" | "then" | "elif" | "while" | "until" | "do" | "command" | "exec" | "builtin" | "nohup") || word.starts_with('-')
 }
 
 fn is_environment_assignment(word: &str) -> bool {

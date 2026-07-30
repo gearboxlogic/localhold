@@ -85,6 +85,10 @@ run_check() {
     "$check" --root "$test_repository" "$@"
 }
 
+run_local_check() {
+    "$test_repository/script/check-maintainability-bootstrap.sh" "$@"
+}
+
 expect_failure() {
     if run_check >/dev/null 2>&1; then
         printf 'maintainability bootstrap fixture unexpectedly passed\n' >&2
@@ -106,15 +110,21 @@ git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example
 test_head=$(git -C "$test_repository" rev-parse HEAD)
 run_check >/dev/null
 
+printf 'pub fn locally_changed() {}\n' >"$test_repository/src/lib.rs"
+run_local_check >/dev/null
+run_local_check --test-environment >/dev/null
+restore_reviewed_graph
+
 (
     for _ in {1..1000}; do
         snapshot_candidates=("$test_repository"/target/s.*)
         snapshot=${snapshot_candidates[0]}
         if [[ -d $snapshot/target && -w $snapshot/target && ! -w $snapshot/tools/maintainability/src/main.rs ]]; then
-            mkdir -p "$snapshot/target/dependency-unsafe/actual-test"
-            printf 'preserved evidence\n' >"$snapshot/target/dependency-unsafe/actual-test/evidence.txt"
-            printf '#![allow(warnings)]\npub fn changed_after_verification() {}\n' >"$test_repository/src/lib.rs"
-            exit 0
+            if mkdir -p "$snapshot/target/dependency-unsafe/actual-test" 2>/dev/null; then
+                printf 'preserved evidence\n' >"$snapshot/target/dependency-unsafe/actual-test/evidence.txt"
+                printf '#![allow(warnings)]\npub fn changed_after_verification() {}\n' >"$test_repository/src/lib.rs"
+                exit 0
+            fi
         fi
         sleep 0.01
     done

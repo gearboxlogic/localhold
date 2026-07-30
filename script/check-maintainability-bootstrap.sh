@@ -43,6 +43,14 @@ if $using_test_root && [[ $mode != verify && $mode != test-environment ]]; then
     printf 'alternate roots may only verify the bootstrap or its environment\n' >&2
     exit 1
 fi
+github_context_present=false
+if [[ -v GITHUB_ACTIONS || -v GITHUB_EVENT_PATH || -v GITHUB_SHA ]]; then
+    github_context_present=true
+fi
+governed_snapshot=$using_test_root
+if $github_context_present; then
+    governed_snapshot=true
+fi
 
 tool_root="$repository_root/tools/maintainability"
 source_root="$tool_root/src"
@@ -60,7 +68,7 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=f9ead9aeff6aae855040ce3aea2e8901119071beef46061332dc3526378a9de6
-readonly reviewed_bootstrap_tests_sha256=3d8f1b431b2a5947aead24be5d4acbe54d52836d69daf72ef10f273ee079f523
+readonly reviewed_bootstrap_tests_sha256=d6fe6be0018b93bcb533d887c06d4205dc692a3f1665bca0cfbcf99d743227a7
 readonly reviewed_gate_runner_sha256=a614e7a0804eed432d84f5b5e9283406c0c4f0915c9f79ce1b6b9b5fd2142433
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
@@ -182,7 +190,7 @@ verify_checker_sources() {
         printf 'cannot read the checked-out revision before compiling the maintainability checker\n' >&2
         exit 1
     }
-    if [[ -v GITHUB_ACTIONS || -v GITHUB_EVENT_PATH || -v GITHUB_SHA ]]; then
+    if $github_context_present; then
         if [[ ${GITHUB_ACTIONS:-} != true || -z ${GITHUB_EVENT_PATH:-} || -z ${GITHUB_SHA:-} ]]; then
             printf 'incomplete or invalid GitHub Actions environment cannot select a different checker revision\n' >&2
             exit 1
@@ -414,8 +422,10 @@ if [[ $actual_gate_runner_sha256 != "$reviewed_gate_runner_sha256" ]]; then
     exit 1
 fi
 
-verify_checker_sources
-verify_reviewed_tracked_tree
+if $governed_snapshot; then
+    verify_checker_sources
+    verify_reviewed_tracked_tree
+fi
 
 printf 'maintainability bootstrap check passed\n'
 
@@ -427,6 +437,11 @@ if [[ $mode != verify ]]; then
     fi
     LOCALHOLD_MAINTAINABILITY_GIT=$git_executable
     export LOCALHOLD_MAINTAINABILITY_GIT
+
+    if ! $governed_snapshot; then
+        "$bash_command" "$gate_runner" "$mode"
+        exit
+    fi
 
     checked_head=$(git_checked rev-parse --verify 'HEAD^{commit}')
     target_parent="$repository_root/target"

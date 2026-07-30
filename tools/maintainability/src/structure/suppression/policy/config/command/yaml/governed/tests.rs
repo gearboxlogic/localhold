@@ -73,6 +73,13 @@ fn governed_gate_steps_are_unconditional_and_platform_bound() {
     let dependent_job = accepted.replacen("    runs-on:", "    needs: skipped-setup\n    runs-on:", 1);
     assert_rejected(&dependent_job);
 
+    let service_container = accepted.replacen(
+        "    runs-on:",
+        "    services:\n      attacker:\n        image: attacker/example\n        volumes:\n          - ${{ github.workspace }}:/workspace\n    runs-on:",
+        1,
+    );
+    assert_rejected(&service_container);
+
     let sh_default = accepted.replacen("        shell: bash", "        shell: sh", 1);
     assert_rejected(&sh_default);
 

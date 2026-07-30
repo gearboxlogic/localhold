@@ -7,11 +7,16 @@ enum RunValue {
     Block { indentation: usize, folded: bool },
 }
 
+struct BlockScalar {
+    indentation: usize,
+    rejects_expressions: bool,
+}
+
 pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()> {
     if !is_github_yaml(path) {
         return Ok(());
     }
-    let mut block_indentation = None;
+    let mut block_indentation: Option<BlockScalar> = None;
     let mut inline_run_indentation = None;
     for line in source.lines() {
         let indentation = leading_spaces(line);
@@ -24,7 +29,12 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
             }
             inline_run_indentation = None;
         }
-        if block_indentation.is_some_and(|header| line.trim().is_empty() || indentation > header) {
+        if let Some(block) = &block_indentation
+            && (line.trim().is_empty() || indentation > block.indentation)
+        {
+            if block.rejects_expressions && contains_github_expression(line) {
+                bail!("checked-in GitHub YAML {path:?} uses an unsupported dynamic run expression");
+            }
             continue;
         }
         block_indentation = None;
@@ -56,13 +66,23 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
                 bail!("checked-in GitHub YAML {path:?} uses an unsupported shell template");
             }
         } else if is_block_scalar(value) {
-            block_indentation = Some(indentation);
+            block_indentation = Some(BlockScalar {
+                indentation,
+                rejects_expressions: key == "run",
+            });
         } else if key == "run" && !value.is_empty() {
-            literal_scalar(value).ok_or_else(|| anyhow::anyhow!("checked-in GitHub YAML {path:?} uses an unsupported inline run scalar"))?;
+            let run = literal_scalar(value).ok_or_else(|| anyhow::anyhow!("checked-in GitHub YAML {path:?} uses an unsupported inline run scalar"))?;
+            if contains_github_expression(&run) {
+                bail!("checked-in GitHub YAML {path:?} uses an unsupported dynamic run expression");
+            }
             inline_run_indentation = Some(indentation);
         }
     }
     Ok(())
+}
+
+fn contains_github_expression(value: &str) -> bool {
+    value.contains("${{")
 }
 
 fn contains_working_directory_key(line: &str) -> bool {

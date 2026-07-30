@@ -24,14 +24,17 @@ pub(in crate::structure::suppression::policy::config::command) fn cargo_manifest
 
 pub(in crate::structure::suppression::policy::config::command) fn execution_inputs_for_surface(path: &str, source: &str) -> (BTreeSet<String>, bool) {
     if let Some(scripts) = package_json::script_commands(path, source) {
-        return scripts.map_or_else(|_| (BTreeSet::new(), true), |scripts| collect_execution_inputs(scripts.iter().map(String::as_str)));
+        return scripts.map_or_else(|_| (BTreeSet::new(), true), |scripts| collect_execution_inputs(scripts.iter().map(String::as_str), true));
     }
     let source = normalized_source_for_surface(path, source);
     let embedded_commands = super::super::yaml::run_commands(path, &source);
     if is_yaml(path) {
-        return collect_execution_inputs(embedded_commands.iter().map(String::as_str));
+        return collect_execution_inputs(embedded_commands.iter().map(String::as_str), true);
     }
-    collect_execution_inputs(std::iter::once(source.as_str()).chain(embedded_commands.iter().map(String::as_str)))
+    collect_execution_inputs(
+        std::iter::once(source.as_str()).chain(embedded_commands.iter().map(String::as_str)),
+        supports_direct_program_paths(path),
+    )
 }
 
 fn collect_cargo_manifest_paths<'a>(sources: impl IntoIterator<Item = &'a str>, case_insensitive_tools: bool) -> (BTreeSet<String>, bool) {
@@ -82,12 +85,12 @@ fn is_manifest_capable_tool_token(token: &str, case_insensitive: bool) -> bool {
     is_cargo_tool_token(token, case_insensitive) || matches_tool_name(tool_basename(token), case_insensitive, &["cargo-clippy", "cargo-clippy.exe"])
 }
 
-fn collect_execution_inputs<'a>(sources: impl IntoIterator<Item = &'a str>) -> (BTreeSet<String>, bool) {
+fn collect_execution_inputs<'a>(sources: impl IntoIterator<Item = &'a str>, direct_program_paths: bool) -> (BTreeSet<String>, bool) {
     let mut inputs = BTreeSet::new();
     let mut unresolved = false;
     for source in sources {
         for tokens in tokens::source_command_tokens(source) {
-            let (candidates, opaque) = execution_input_candidates(&tokens);
+            let (candidates, opaque) = execution_input_candidates(&tokens, direct_program_paths);
             unresolved |= opaque;
             record_execution_inputs(candidates, &mut inputs, &mut unresolved);
         }
@@ -105,7 +108,7 @@ fn record_execution_inputs(candidates: Vec<&str>, inputs: &mut BTreeSet<String>,
     }
 }
 
-fn execution_input_candidates(tokens: &[String]) -> (Vec<&str>, bool) {
+fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> (Vec<&str>, bool) {
     let command_index = tokens.iter().position(|token| {
         let word = token.trim_matches(['(', ')', '{', '}']);
         !word.is_empty()
@@ -116,7 +119,8 @@ fn execution_input_candidates(tokens: &[String]) -> (Vec<&str>, bool) {
     let Some(command_index) = command_index else {
         return (Vec::new(), false);
     };
-    let command = tool_basename(&tokens[command_index]).to_ascii_lowercase();
+    let command_token = nested_command_token(tokens[command_index].trim_matches(['(', ')', '{', '}']));
+    let command = tool_basename(command_token).to_ascii_lowercase();
     let arguments = &tokens[command_index.saturating_add(1)..];
     let selected = match command.as_str() {
         "eval" | "iex" | "invoke-expression" => SelectedInput::Opaque,
@@ -127,6 +131,7 @@ fn execution_input_candidates(tokens: &[String]) -> (Vec<&str>, bool) {
             let (inputs, opaque) = makefile_inputs(arguments);
             return (inputs, opaque || make_environment_selection_is_opaque(&tokens[..command_index]));
         }
+        _ if direct_program_paths && is_relative_program_path(command_token) => SelectedInput::Literal(command_token),
         _ => return (Vec::new(), false),
     };
     match selected {
@@ -134,6 +139,27 @@ fn execution_input_candidates(tokens: &[String]) -> (Vec<&str>, bool) {
         SelectedInput::Literal(candidate) => (vec![candidate], false),
         SelectedInput::Opaque => (Vec::new(), true),
     }
+}
+
+fn nested_command_token(token: &str) -> &str {
+    let token = token.rsplit_once("$(").map_or(token, |(_, command)| command);
+    token.rsplit_once('`').map_or(token, |(_, command)| command)
+}
+
+fn is_relative_program_path(command: &str) -> bool {
+    ["./", "../", r".\", r"..\"].iter().any(|prefix| command.starts_with(prefix))
+}
+
+fn supports_direct_program_paths(path: &str) -> bool {
+    let path = Path::new(path);
+    let basename = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    matches!(basename.to_ascii_lowercase().as_str(), "justfile" | ".justfile" | "makefile" | "gnumakefile")
+        || path.extension().and_then(|extension| extension.to_str()).is_none_or(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "sh" | "bash" | "zsh" | "fish" | "ps1" | "cmd" | "bat" | "just" | "toml"
+            )
+        })
 }
 
 enum SelectedInput<'a> {
@@ -294,7 +320,7 @@ fn is_make_environment_selection(token: &str) -> bool {
 }
 
 fn normalized_literal_input(candidate: &str) -> Option<String> {
-    if contains_dynamic_value(candidate) || candidate.contains('\\') {
+    if contains_dynamic_value(candidate) || candidate.contains(['\\', ':']) {
         return None;
     }
     let path = Path::new(candidate);
@@ -313,7 +339,7 @@ fn normalized_literal_input(candidate: &str) -> Option<String> {
 }
 
 fn contains_dynamic_value(value: &str) -> bool {
-    value.contains(['$', '`', '%', '!', '*', '?', '[', '{'])
+    value.contains(['$', '`', '%', '!', '*', '?', '[', '{', '~'])
 }
 
 #[cfg(test)]
@@ -322,7 +348,7 @@ mod tests {
 
     fn inputs(command: &str) -> (Vec<String>, bool) {
         let commands = tokens::source_command_tokens(command);
-        let (candidates, mut opaque) = execution_input_candidates(&commands[0]);
+        let (candidates, mut opaque) = execution_input_candidates(&commands[0], true);
         let candidates = candidates
             .into_iter()
             .filter_map(|candidate| {
@@ -342,6 +368,14 @@ mod tests {
         assert_eq!(inputs(r#"bash -c "$(cat quality/lint.txt)""#), (Vec::new(), true));
         assert_eq!(inputs(r#"command eval "$(printf '\143\141\162\147\157')""#), (Vec::new(), true));
         assert_eq!(inputs("Invoke-Expression $encoded"), (Vec::new(), true));
+        assert_eq!(inputs("./quality/run-lints"), (vec!["quality/run-lints".to_owned()], false));
+        assert_eq!(inputs("quality/run-lints"), (Vec::new(), false));
+        assert_eq!(inputs("./$PROGRAM"), (Vec::new(), true));
+        assert_eq!(inputs("../quality/run-lints"), (Vec::new(), true));
+        assert_eq!(inputs(r"'.\quality\run-lints.cmd'"), (Vec::new(), true));
+        assert_eq!(inputs("status=$(./quality/run-lints)"), (vec!["quality/run-lints".to_owned()], false));
+        assert_eq!(inputs("kernel=$(/usr/bin/uname -s)"), (Vec::new(), false));
+        assert_eq!(inputs(r#""$repository_root/script/check.sh""#), (Vec::new(), false));
         assert_eq!(inputs("bash_command=$(trusted_system_command bash)"), (Vec::new(), false));
         assert_eq!(inputs("python -m quality.lint"), (Vec::new(), false));
         assert_eq!(inputs("python -m $MODULE"), (Vec::new(), true));

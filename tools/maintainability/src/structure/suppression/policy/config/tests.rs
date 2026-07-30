@@ -228,6 +228,10 @@ fn python_command_arrays_cannot_split_lint_arguments_from_cargo() {
         "script/check.py",
         "subprocess.run([\"cargo\", \"clippy\", \"--\", \"-\" \"A\", \"warnings\"])\n"
     ));
+    assert!(weakening_token_for_surface(
+        "script/check.py",
+        "subprocess.run([\"cargo\", \"clippy\", \"--\", chr(45) + \"A\", \"warnings\"])\n"
+    ));
 }
 
 #[test]
@@ -539,6 +543,14 @@ fn command_policy_governs_opaque_shell_programs_and_selected_makefiles() {
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
 
+    fs::write(
+        workspace.path().join("Justfile"),
+        "transient:\n    printf '%s\\n' '#!/bin/sh' 'cargo clippy -- -A warnings' > ./quality-run\n    chmod +x ./quality-run\n    ./quality-run\n",
+    )
+    .expect("transient relative program");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("tracked path inventory"), "{error:#}");
+
     fs::write(workspace.path().join("Justfile"), "make:\n    make -f quality/lint.rules\n").expect("Make dispatch");
     fs::write(workspace.path().join("quality/lint.rules"), "lint:\n\tcargo clippy -- -A warnings\n").expect("selected Makefile");
     git(workspace.path(), &["add", "."]);
@@ -686,6 +698,8 @@ fn github_yaml_rejects_unsupported_execution_metadata() {
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: \"cargo clippy --\n          -A warnings\"\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo clippy --\n          -A warnings\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - \"r\\u0075n\": cargo clippy -- -A warnings\n",
+        "name: lint\non: push\njobs:\n  lint:\n    strategy:\n      matrix:\n        command:\n          - cargo clippy -- -A warnings\n    runs-on: ubuntu-latest\n    steps:\n      - run: ${{ matrix.command }}\n",
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          cargo ${{ matrix.subcommand }}\n",
     ] {
         let workspace = tempfile::tempdir().expect("temporary workspace");
         fs::create_dir_all(workspace.path().join(".github/workflows")).expect("workflow directory");
@@ -700,7 +714,8 @@ fn github_yaml_rejects_unsupported_execution_metadata() {
                 || error.to_string().contains("working-directory")
                 || error.to_string().contains("flow mapping or complex sequence")
                 || error.to_string().contains("inline run scalar")
-                || error.to_string().contains("quoted mapping key"),
+                || error.to_string().contains("quoted mapping key")
+                || error.to_string().contains("dynamic run expression"),
             "{error:#}"
         );
     }

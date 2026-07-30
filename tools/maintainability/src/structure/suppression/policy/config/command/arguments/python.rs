@@ -1,3 +1,5 @@
+mod process;
+
 pub(super) fn join_implicit_continuations(source: &str) -> String {
     Scanner::new(source).scan()
 }
@@ -9,7 +11,11 @@ pub(super) fn has_adjacent_string_literals(source: &str) -> bool {
 }
 
 pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
-    join_implicit_continuations(source).lines().any(|line| {
+    let normalized = join_implicit_continuations(source);
+    if references_process_api(&normalized) && references_rust_tool(&normalized) && process::has_non_literal_arguments(&normalized) {
+        return true;
+    }
+    normalized.lines().any(|line| {
         has_adjacent_string_literals_in(line) && (references_process_api(line) || references_rust_tool(line))
             || references_process_api(line) && AdjacentLiteralScanner::new(line).has_decoded_escape()
     })
@@ -246,7 +252,17 @@ mod tests {
         assert!(has_opaque_process_arguments("subprocess.run([\"-\" \"A\"])\n"));
         assert!(has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", "\x2dA", "warnings"])"#));
         assert!(has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", b"\u002dA", "warnings"])"#));
+        assert!(has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", chr(45) + "A", "warnings"])"#));
+        assert!(has_opaque_process_arguments(
+            "import subprocess\narguments = ['cargo', 'clippy']\nsubprocess.run(arguments)\n"
+        ));
+        assert!(has_opaque_process_arguments(
+            "from subprocess import run\narguments = ['cargo', 'clippy']\nrun(arguments)\n"
+        ));
         assert!(!has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", r"\x2dA", "warnings"])"#));
+        assert!(!has_opaque_process_arguments(
+            r#"subprocess.run(["cargo", "metadata", "--locked"], cwd=repository, check=True)"#
+        ));
         assert!(!has_opaque_process_arguments("head = (f'<svg viewBox=\"0 0 64 64\" ' f'role=\"img\">')\n"));
         assert!(!has_opaque_process_arguments(
             "PATTERN = (r'^v[0-9]+' r'(?:-dev)?$')\nimport subprocess\nsubprocess.run(['git', 'status'])\n"

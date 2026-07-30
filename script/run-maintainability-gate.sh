@@ -40,7 +40,7 @@ authenticated_tool() {
     local actual
     actual=$(sha256_file "$path")
     if [[ $actual != "$expected" ]]; then
-        printf 'pinned Rust 1.97.0 tool digest differs from the reviewed release: %s\n' "$path" >&2
+        printf 'reviewed Rust tool digest differs: %s\n' "$path" >&2
         exit 1
     fi
     printf '%s\n' "$path"
@@ -48,10 +48,11 @@ authenticated_tool() {
 
 kernel=$("$uname_command" -s)
 machine=$("$uname_command" -m)
-# Binary digests come from the SHA-256-verified 2026-07-09 official Rust 1.97.0 component archives.
+# Tool digests come from the SHA-256-verified official Rust 1.97.0 component
+# archives and the official Rustup 1.29.0 archive.
 if [[ $kernel == Linux && $machine == x86_64 ]]; then
-    toolchain_triple=x86_64-unknown-linux-gnu
     tool_extension=
+    expected_rustup_sha256=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
     expected_cargo_sha256=eff12bab37b9d9e01324db4583eaf55b2cd82ac3008a7e59876e4cd2e9a028f5
     expected_rustc_sha256=df13f58759c0662831983e3a6501c63c1fc12ea60ec4e1d1ac35e5fe43c500c0
     expected_rustdoc_sha256=ed74ac3f2be8270ed5da788cdecb8cd0e530fb6b5b380e63aedb62323beb7c85
@@ -61,8 +62,8 @@ if [[ $kernel == Linux && $machine == x86_64 ]]; then
     expected_rustfmt_sha256=fbdba7404a80bc6d36fa2bb4cdd7ca3fc7f060a109207ef03eaef63058cd1216
     windows_toolchain=false
 elif [[ $kernel == MINGW* || $kernel == MSYS* || $kernel == CYGWIN* ]] && [[ $machine == x86_64 ]]; then
-    toolchain_triple=x86_64-pc-windows-msvc
     tool_extension=.exe
+    expected_rustup_sha256=86478e53f769379d7f0ebfa7c9aa97cb76ca92233f79aa2cc0dbee2efaac73c7
     expected_cargo_sha256=3cd119fe81dfedb9dce4573696bf65058f16b57c9e5babe415b71624315cbb7d
     expected_rustc_sha256=6d1c5543ed3a45cfbc1c1332d42d6550d883c14d3c2e323427e631c331cebeeb
     expected_rustdoc_sha256=7967c1da7e3bec5cd699b7f4bf7a69a1f9292e1ac38bef8dba403fa55ebddda3
@@ -76,38 +77,64 @@ else
     exit 1
 fi
 
-rustup_home=${RUSTUP_HOME:-${HOME:?maintainability gate requires RUSTUP_HOME or HOME}/.rustup}
-if [[ $rustup_home =~ ^[[:alpha:]]:[/\\] ]]; then
+if $windows_toolchain; then
     readonly cygpath_command=/usr/bin/cygpath
     [[ -f $cygpath_command && -x $cygpath_command ]] || {
         printf 'maintainability gate requires an OS-owned cygpath\n' >&2
         exit 1
     }
+fi
+
+rustup_home=${RUSTUP_HOME:-${HOME:?maintainability gate requires RUSTUP_HOME or HOME}/.rustup}
+if [[ $rustup_home =~ ^[[:alpha:]]:[/\\] ]]; then
     rustup_home=$("$cygpath_command" -u "$rustup_home")
 elif [[ $rustup_home != /* ]]; then
     printf 'maintainability gate requires an absolute Rustup home\n' >&2
     exit 1
 fi
+rustup_environment=$rustup_home
+if $windows_toolchain; then
+    rustup_environment=$("$cygpath_command" -w "$rustup_home")
+fi
 
-toolchain_bin=
-# Rustup uses the host-qualified name; mise exposes the same locked toolchain
-# through a version-only alias. Every selected executable is still authenticated below.
-for candidate in "$rustup_home/toolchains/1.97.0-$toolchain_triple/bin" "$rustup_home/toolchains/1.97.0/bin"; do
-    if [[ ! -e $candidate ]]; then
+rustup_executable=
+IFS=: read -r -a path_directories <<<"$PATH"
+for rustup_directory in "${path_directories[@]}"; do
+    [[ -n $rustup_directory ]] || rustup_directory=.
+    candidate="$rustup_directory/rustup$tool_extension"
+    if [[ ! -f $candidate || -L $candidate || ! -x $candidate ]]; then
         continue
     fi
-    if [[ ! -d $candidate || -L $candidate ]]; then
-        printf 'pinned Rust toolchain bin must be a regular directory: %s\n' "$candidate" >&2
-        exit 1
+    rustup_directory=$(cd -- "$rustup_directory" && pwd -P)
+    candidate="$rustup_directory/rustup$tool_extension"
+    if [[ $(sha256_file "$candidate") == "$expected_rustup_sha256" ]]; then
+        rustup_executable=$candidate
+        break
     fi
-    if [[ -n $toolchain_bin ]]; then
-        printf 'maintainability gate found ambiguous pinned Rust toolchain directories\n' >&2
-        exit 1
-    fi
-    toolchain_bin=$candidate
 done
-if [[ -z $toolchain_bin ]]; then
-    printf 'maintainability gate requires the pinned Rust 1.97.0 toolchain directory\n' >&2
+if [[ -z $rustup_executable ]]; then
+    printf 'maintainability gate requires Rustup 1.29.0 on PATH\n' >&2
+    exit 1
+fi
+rustup_executable=$(authenticated_tool "$rustup_executable" "$expected_rustup_sha256")
+
+resolved_cargo=$(RUSTUP_HOME=$rustup_environment "$rustup_executable" which --toolchain 1.97.0 cargo) || {
+    printf 'authenticated Rustup could not resolve the pinned Rust 1.97.0 Cargo executable\n' >&2
+    exit 1
+}
+if [[ -z $resolved_cargo || $resolved_cargo == *$'\n'* ]]; then
+    printf 'authenticated Rustup returned an invalid Cargo path\n' >&2
+    exit 1
+fi
+if $windows_toolchain; then
+    resolved_cargo=$("$cygpath_command" -u "$resolved_cargo")
+elif [[ $resolved_cargo != /* ]]; then
+    printf 'authenticated Rustup returned a non-absolute Cargo path\n' >&2
+    exit 1
+fi
+toolchain_bin=${resolved_cargo%/*}
+if [[ ! -d $toolchain_bin || -L $toolchain_bin ]]; then
+    printf 'resolved pinned Rust toolchain bin must be a regular directory: %s\n' "$toolchain_bin" >&2
     exit 1
 fi
 toolchain_bin=$(cd -- "$toolchain_bin" && pwd -P)

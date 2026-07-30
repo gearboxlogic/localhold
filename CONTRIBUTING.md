@@ -108,9 +108,9 @@ before every validation or delegated gate execution. A bootstrap change
 therefore requires an explicit workflow digest update in the same reviewed
 diff. Delegation uses fixed source-safety, dependency-audit, and combined modes;
 the bootstrap cannot execute an arbitrary command or a PATH-selected task
-dispatcher. Its separate hash-pinned gate runner verifies the Cargo, rustc,
-rustdoc, Clippy, and rustfmt executables against the official Rust 1.97.0 Linux
-x86_64 or Windows x86_64 release bytes before use. Git and core bootstrap
+dispatcher. Its separate hash-pinned gate runner verifies Rustup 1.29.0 plus
+the Cargo, rustc, rustdoc, Clippy, and rustfmt executables against the official
+Linux x86_64 or Windows x86_64 release bytes before use. Git and core bootstrap
 utilities must resolve from OS-owned directories. On Windows, the bootstrap
 converts trusted native tool paths from the Git Bash namespace before passing
 them to maintainer binaries.
@@ -320,9 +320,10 @@ macros are also rejected because their expansions could emit hidden lint policy.
 The dependency jobs validate the reviewed mise configuration, lockfile,
 `Justfile`, bootstrap tests, and fixed gate runner before tool activation. They
 then use only the bootstrap's fixed dispatcher and digest-authenticated Rust
-tools; a PATH-selected `just`, Cargo, compiler, Clippy, or rustfmt executable
-cannot satisfy the gate. The checker source set must match the checked-out
-revision immediately before compilation. The comparison base is derived from the runner
+tools; a PATH-selected `just`, Rustup, Cargo, compiler, Clippy, or rustfmt
+executable cannot satisfy the gate. The checker source set must match the
+checked-out revision immediately before compilation. The comparison base is
+derived from the runner
 event, the checkout must match the event head, and any configured base must
 match the event base, so versioned workflow changes cannot select the checked
 head or silently omit previous-revision enforcement.

@@ -174,11 +174,13 @@ mkdir "$fake_bin"
 cargo_name=cargo
 printf '%s\n' '#!/usr/bin/bash' 'touch "$FAKE_JUST_MARKER"' >"$fake_bin/just"
 printf '%s\n' '#!/usr/bin/bash' 'touch "$FAKE_CARGO_MARKER"' >"$fake_bin/$cargo_name"
-chmod +x "$fake_bin/just" "$fake_bin/$cargo_name"
+printf '%s\n' '#!/usr/bin/bash' 'touch "$FAKE_RUSTUP_MARKER"' >"$fake_bin/rustup"
+chmod +x "$fake_bin/just" "$fake_bin/$cargo_name" "$fake_bin/rustup"
 fake_just_marker="$fixture/fake-just-ran"
 fake_cargo_marker="$fixture/fake-cargo-ran"
-FAKE_JUST_MARKER=$fake_just_marker FAKE_CARGO_MARKER=$fake_cargo_marker PATH="$fake_bin:$PATH" run_check --test-environment >/dev/null
-if [[ -e $fake_just_marker || -e $fake_cargo_marker ]]; then
+fake_rustup_marker="$fixture/fake-rustup-ran"
+FAKE_JUST_MARKER=$fake_just_marker FAKE_CARGO_MARKER=$fake_cargo_marker FAKE_RUSTUP_MARKER=$fake_rustup_marker PATH="$fake_bin:$PATH" run_check --test-environment >/dev/null
+if [[ -e $fake_just_marker || -e $fake_cargo_marker || -e $fake_rustup_marker ]]; then
     printf 'maintainability bootstrap executed an untrusted PATH dispatcher\n' >&2
     exit 1
 fi
@@ -204,14 +206,16 @@ else
     printf 'maintainability bootstrap tests require Linux or Windows x86_64\n' >&2
     exit 1
 fi
-trusted_rustup_home=${RUSTUP_HOME:-${HOME:?}/.rustup}
+trusted_rustup_environment=${RUSTUP_HOME:-${HOME:?}/.rustup}
+trusted_rustup_home=$trusted_rustup_environment
 if [[ $trusted_rustup_home =~ ^[[:alpha:]]:[/\\] ]]; then
     trusted_rustup_home=$(/usr/bin/cygpath -u "$trusted_rustup_home")
 fi
-trusted_toolchain_bin="$trusted_rustup_home/toolchains/1.97.0-$toolchain_triple/bin"
-if [[ ! -d $trusted_toolchain_bin ]]; then
-    trusted_toolchain_bin="$trusted_rustup_home/toolchains/1.97.0/bin"
+trusted_cargo=$(RUSTUP_HOME=$trusted_rustup_environment rustup which --toolchain 1.97.0 cargo)
+if [[ $kernel != Linux ]]; then
+    trusted_cargo=$(/usr/bin/cygpath -u "$trusted_cargo")
 fi
+trusted_toolchain_bin=${trusted_cargo%/*}
 if [[ ! -d $trusted_toolchain_bin ]]; then
     printf 'maintainability bootstrap tests require the pinned Rust 1.97.0 toolchain\n' >&2
     exit 1
@@ -226,24 +230,14 @@ if RUSTUP_HOME=$fake_rustup_home run_check --test-environment >/dev/null 2>&1; t
     printf 'maintainability bootstrap trusted unauthenticated tools beside an authentic Cargo executable\n' >&2
     exit 1
 fi
-
-short_rustup_home="$fixture/short-rustup"
-short_toolchain_bin="$short_rustup_home/toolchains/1.97.0/bin"
-mkdir -p "$short_toolchain_bin"
 for tool in cargo rustc rustdoc cargo-clippy clippy-driver cargo-fmt rustfmt; do
-    cp "$trusted_toolchain_bin/$tool$tool_extension" "$short_toolchain_bin/$tool$tool_extension"
+    cp "$trusted_toolchain_bin/$tool$tool_extension" "$fake_toolchain_bin/$tool$tool_extension"
 done
-short_rustup_environment=$short_rustup_home
+fake_rustup_environment=$fake_rustup_home
 if [[ $kernel != Linux ]]; then
-    short_rustup_environment=$(/usr/bin/cygpath -w "$short_rustup_home")
+    fake_rustup_environment=$(/usr/bin/cygpath -w "$fake_rustup_home")
 fi
-RUSTUP_HOME=$short_rustup_environment run_check --test-environment >/dev/null
-mkdir -p "$short_rustup_home/toolchains/1.97.0-$toolchain_triple/bin"
-if RUSTUP_HOME=$short_rustup_environment run_check --test-environment >/dev/null 2>&1; then
-    printf 'maintainability bootstrap accepted ambiguous pinned Rust toolchain directories\n' >&2
-    exit 1
-fi
-rm -r "$short_rustup_home/toolchains/1.97.0-$toolchain_triple"
+RUSTUP_HOME=$fake_rustup_environment run_check --test-environment >/dev/null
 
 RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \
     RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \

@@ -9,7 +9,12 @@ use super::super::{parse_nul_paths, validate_relative_path};
 use super::actions::validate_local_actions;
 use super::is_execution_surface;
 
-pub(super) fn execution_surfaces(workspace: &Path) -> Result<Vec<String>> {
+pub(super) struct ExecutionSurfaceSet {
+    pub(super) paths: Vec<String>,
+    pub(super) tracked_paths: BTreeSet<String>,
+}
+
+pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet> {
     let output = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
@@ -19,6 +24,7 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<Vec<String>> {
         bail!("git ls-files failed while listing command execution surfaces");
     }
     let paths = parse_nul_paths(&output.stdout, |_| true)?.into_iter().collect::<BTreeSet<_>>();
+    let tracked_paths = tracked_paths(workspace)?;
     let executables = tracked_executables(workspace)?;
     validate_local_actions(workspace, &paths)?;
     let mut surfaces = BTreeSet::new();
@@ -36,7 +42,22 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<Vec<String>> {
             surfaces.insert(path);
         }
     }
-    Ok(surfaces.into_iter().collect())
+    Ok(ExecutionSurfaceSet {
+        paths: surfaces.into_iter().collect(),
+        tracked_paths,
+    })
+}
+
+fn tracked_paths(workspace: &Path) -> Result<BTreeSet<String>> {
+    let output = crate::structure::revision::git_command()
+        .current_dir(workspace)
+        .args(["ls-files", "-z", "--cached"])
+        .output()
+        .context("list tracked command surfaces")?;
+    if !output.status.success() {
+        bail!("git ls-files failed while listing tracked command surfaces");
+    }
+    Ok(parse_nul_paths(&output.stdout, |_| true)?.into_iter().collect())
 }
 
 fn tracked_executables(workspace: &Path) -> Result<BTreeSet<String>> {

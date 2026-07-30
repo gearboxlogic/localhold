@@ -95,26 +95,34 @@ if $windows_toolchain; then
     rustup_environment=$("$cygpath_command" -w "$rustup_home")
 fi
 
-rustup_executable=
-IFS=: read -r -a path_directories <<<"$PATH"
-for rustup_directory in "${path_directories[@]}"; do
-    [[ -n $rustup_directory ]] || rustup_directory=.
-    candidate="$rustup_directory/rustup$tool_extension"
-    if [[ ! -f $candidate || -L $candidate || ! -x $candidate ]]; then
-        continue
-    fi
-    rustup_directory=$(cd -- "$rustup_directory" && pwd -P)
-    candidate="$rustup_directory/rustup$tool_extension"
-    if [[ $(sha256_file "$candidate") == "$expected_rustup_sha256" ]]; then
-        rustup_executable=$candidate
-        break
-    fi
-done
+rustup_executable=${LOCALHOLD_MAINTAINABILITY_RUSTUP:-}
+if [[ -n $rustup_executable && $rustup_executable != /* ]]; then
+    printf 'maintainability gate requires an absolute authenticated Rustup handoff\n' >&2
+    exit 1
+fi
+if [[ -z $rustup_executable ]]; then
+    IFS=: read -r -a path_directories <<<"$PATH"
+    for rustup_directory in "${path_directories[@]}"; do
+        [[ -n $rustup_directory ]] || rustup_directory=.
+        candidate="$rustup_directory/rustup$tool_extension"
+        if [[ ! -f $candidate || -L $candidate || ! -x $candidate ]]; then
+            continue
+        fi
+        rustup_directory=$(cd -- "$rustup_directory" && pwd -P)
+        candidate="$rustup_directory/rustup$tool_extension"
+        if [[ $(sha256_file "$candidate") == "$expected_rustup_sha256" ]]; then
+            rustup_executable=$candidate
+            break
+        fi
+    done
+fi
 if [[ -z $rustup_executable ]]; then
     printf 'maintainability gate requires Rustup 1.29.0 on PATH\n' >&2
     exit 1
 fi
 rustup_executable=$(authenticated_tool "$rustup_executable" "$expected_rustup_sha256")
+LOCALHOLD_MAINTAINABILITY_RUSTUP=$rustup_executable
+export LOCALHOLD_MAINTAINABILITY_RUSTUP
 
 resolved_cargo=$(RUSTUP_HOME=$rustup_environment "$rustup_executable" which --toolchain 1.97.0 cargo) || {
     printf 'authenticated Rustup could not resolve the pinned Rust 1.97.0 Cargo executable\n' >&2
@@ -155,13 +163,52 @@ if $windows_toolchain; then
     native_rustdoc=$("$cygpath_command" -w "$native_rustdoc")
     native_rustfmt=$("$cygpath_command" -w "$native_rustfmt")
 fi
-PATH="$toolchain_bin:$PATH"
+trusted_path="$toolchain_bin:/usr/bin:/bin"
+if $windows_toolchain; then
+    readonly where_command=/c/Windows/System32/where.exe
+    if [[ ! -f $where_command || -L $where_command || ! -x $where_command ]]; then
+        printf 'maintainability gate requires the OS-owned Windows command locator\n' >&2
+        exit 1
+    fi
+    linker_candidates=$("$where_command" link.exe) || {
+        printf 'maintainability gate could not locate the MSVC linker\n' >&2
+        exit 1
+    }
+    trusted_linker_bin=
+    while IFS= read -r linker_candidate; do
+        linker_candidate=${linker_candidate%$'\r'}
+        [[ -n $linker_candidate ]] || continue
+        linker_candidate=$("$cygpath_command" -u "$linker_candidate")
+        if [[ ! -f $linker_candidate || -L $linker_candidate || ! -x $linker_candidate ]]; then
+            continue
+        fi
+        linker_name=${linker_candidate##*/}
+        linker_directory=${linker_candidate%/*}
+        linker_directory=$(cd -- "$linker_directory" && pwd -P)
+        linker_candidate="$linker_directory/$linker_name"
+        case ${linker_directory,,} in
+            /[a-z]/program\ files/microsoft\ visual\ studio/*/vc/tools/msvc/*/bin/hostx64/x64)
+                if [[ ${linker_name,,} == link.exe && -f $linker_candidate && ! -L $linker_candidate && -x $linker_candidate ]]; then
+                    trusted_linker_bin=$linker_directory
+                    break
+                fi
+                ;;
+        esac
+    done <<<"$linker_candidates"
+    if [[ -z $trusted_linker_bin ]]; then
+        printf 'maintainability gate requires an OS-owned Visual Studio Hostx64 linker\n' >&2
+        exit 1
+    fi
+    trusted_path="$toolchain_bin:$trusted_linker_bin:/usr/bin:/mingw64/bin:/c/Windows/System32"
+fi
+PATH=$trusted_path
+readonly PATH
 CARGO=$native_cargo
 RUSTC=$native_rustc
 RUSTDOC=$native_rustdoc
 RUSTFMT=$native_rustfmt
 LOCALHOLD_MAINTAINABILITY_CARGO=$native_cargo
-export PATH CARGO RUSTC RUSTDOC RUSTFMT LOCALHOLD_MAINTAINABILITY_CARGO
+export PATH CARGO RUSTC RUSTDOC RUSTFMT LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_RUSTUP
 
 run_source_safety() {
     "$bash_command" "$repository_root/script/tests/test_maintainability_bootstrap.sh"
@@ -179,7 +226,7 @@ run_dependency_unsafe() {
 
 verify_test_environment() {
     local name
-    for name in BASH_ENV LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER \
+    for name in BASH_ENV GITHUB_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER \
         RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS \
         CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do
         if [[ -v $name ]]; then
@@ -187,7 +234,11 @@ verify_test_environment() {
             exit 1
         fi
     done
-    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $git_command ]]
+    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $LOCALHOLD_MAINTAINABILITY_RUSTUP && -n $git_command ]]
+    if [[ $PATH != "$trusted_path" ]]; then
+        printf 'maintainability bootstrap retained an untrusted executable search path\n' >&2
+        exit 1
+    fi
     printf 'maintainability bootstrap environment test passed\n'
 }
 

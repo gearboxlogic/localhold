@@ -95,6 +95,9 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_token_for_surface("script/check.ps1", "Rustc.ExE -W warnings source.rs"));
     assert!(weakening_token_for_surface("script/check.sh", "CARGO.EXE clippy -- -A warnings"));
     assert!(weakening_token("rustc @policy/lints.args source.rs"));
+    assert!(weakening_token_for_surface("package.json", r#"{"scripts":{"lint":"cargo clippy -- \u002dAwarnings"}}"#));
+    assert!(!weakening_token_for_surface("package.json", r#"{"scripts":{"lint":"cargo clippy -- \u002dDwarnings"}}"#));
+    assert!(weakening_token_for_surface("package.json", r#"{"scripts":{"lint":42}}"#));
     assert!(weakening_token("rustc -D warnings --allow=warnings source.rs"));
     assert!(weakening_token("rustc -D warnings --warn=warnings source.rs"));
     assert!(weakening_token("rustc -D warnings --force-warn=unused_variables source.rs"));
@@ -225,6 +228,7 @@ fn weakening_environment_channels_are_detected() {
     assert!(weakening_environment("CARGO_HOME=unreviewed"));
     assert!(weakening_environment("unset GITHUB_ACTIONS"));
     assert!(weakening_environment("unset GITHUB_EVENT_PATH"));
+    assert!(weakening_environment("GITHUB_PATH=untrusted"));
     assert!(weakening_environment("GITHUB_SHA=untrusted"));
     assert!(weakening_environment("LOCALHOLD_MAINTAINABILITY_BASE_REV=$GITHUB_SHA"));
     assert!(weakening_environment("MISE_OVERRIDE_CONFIG_FILENAMES=policy.toml"));
@@ -251,6 +255,10 @@ fn weakening_environment_channels_are_detected() {
     ));
     assert!(!scrubber_environment_references_are_exact(
         "script/check-maintainability-bootstrap.sh",
+        &format!("{scrubber}PATH=/tmp\n"),
+    ));
+    assert!(!scrubber_environment_references_are_exact(
+        "script/check-maintainability-bootstrap.sh",
         &BOOTSTRAP_ENVIRONMENT_LINES[1..].join("\n"),
     ));
     assert!(scrubber_environment_references_are_exact(
@@ -271,6 +279,32 @@ fn weakening_environment_channels_are_detected() {
         &GPU_RELEASE_REVISION_ENVIRONMENT_LINES.join("\n"),
     ));
     assert!(!scrubber_environment_references_are_exact("script/tests/new-command.sh", &scrubber));
+}
+
+#[test]
+fn executable_path_changes_are_governed_only_when_rust_tools_can_use_them() {
+    assert!(weakening_environment_for_surface("script/check.sh", "PATH=/tmp cargo clippy"));
+    assert!(weakening_environment_for_surface("script/check.sh", "TOKEN=value PATH=/tmp cargo clippy"));
+    assert!(weakening_environment_for_surface("package.json", r#"{"scripts":{"lint":"P\u0041TH=/tmp cargo clippy"}}"#));
+    assert!(weakening_environment_for_surface("script/check.ps1", "$env:Path = 'C:\\untrusted'; cargo clippy"));
+    assert!(!weakening_environment_for_surface("script/check.sh", "path=/tmp cargo clippy"));
+    assert!(!weakening_environment_for_surface("script/check.sh", "PATH=/tmp node application.js"));
+}
+
+#[test]
+fn yaml_environment_channels_are_distinguished_from_action_inputs() {
+    assert!(weakening_environment_for_surface(
+        ".github/workflows/ci.yml",
+        "jobs:\n  lint:\n    env:\n      Path: /tmp\n    steps:\n      - run: cargo clippy\n"
+    ));
+    assert!(weakening_environment_for_surface(
+        ".github/workflows/ci.yml",
+        "env:\n  rustflags: -A warnings\njobs:\n  lint:\n    steps:\n      - run: cargo clippy\n"
+    ));
+    assert!(!weakening_environment_for_surface(
+        ".github/workflows/ci.yml",
+        "steps:\n  - uses: actions/cache@example\n    with:\n      path: target\n"
+    ));
 }
 
 #[test]
@@ -465,6 +499,37 @@ fn reviewed_remote_and_repository_local_actions_are_accepted() {
     git(workspace.path(), &["add", "."]);
 
     reject_checked_in_weakening(workspace.path()).expect("reviewed action references");
+}
+
+#[test]
+fn local_action_references_must_resolve_to_tracked_files() {
+    for (reference, generated_path, generated_source) in [
+        (
+            "./.github/actions/generated",
+            ".github/actions/generated/action.yml",
+            "name: generated\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: |\n        cargo check\n",
+        ),
+        (
+            "./.github/workflows/generated.yml",
+            ".github/workflows/generated.yml",
+            "name: generated\non: workflow_call\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          cargo check\n",
+        ),
+    ] {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        fs::create_dir_all(workspace.path().join(".github/workflows")).expect("workflow directory");
+        fs::write(
+            workspace.path().join(".github/workflows/lint.yml"),
+            format!("name: lint\non: push\njobs:\n  delegated:\n    uses: {reference}\n"),
+        )
+        .expect("workflow");
+        git(workspace.path(), &["init", "-q"]);
+        git(workspace.path(), &["add", ".github/workflows/lint.yml"]);
+        fs::create_dir_all(workspace.path().join(generated_path).parent().expect("generated parent")).expect("generated directory");
+        fs::write(workspace.path().join(generated_path), generated_source).expect("untracked generated command surface");
+
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("tracked"), "{error:#}");
+    }
 }
 
 #[test]

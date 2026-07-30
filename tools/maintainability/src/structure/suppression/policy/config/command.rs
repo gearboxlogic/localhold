@@ -12,14 +12,21 @@ pub(super) use arguments::has_sourced_file_indirection;
 #[cfg(test)]
 pub(super) use arguments::weakening_token;
 pub(super) use arguments::weakening_token_for_surface;
-use arguments::{direct_rust_sources_for_surface, normalized_shell_tokens};
+use arguments::{direct_rust_sources_for_surface, normalized_shell_tokens, normalized_shell_words, package_script_commands};
 use surfaces::execution_surfaces;
 
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "cargo_home=${CARGO_HOME:-}",
+    "        cargo_home=\"$HOME/.cargo\"",
+    "        cargo_home=\"$USERPROFILE/.cargo\"",
+    "    cargo_home=\"$repository_root/$cargo_home\"",
+    "    cargo_home=$(\"$cygpath_command\" -u \"$cargo_home\")",
+    "git_command=$(trusted_system_command git)",
+    "    git_executable=$git_command",
+    "        git_executable=$(\"$cygpath_command\" -w \"$git_executable\")",
     "    LOCALHOLD_MAINTAINABILITY_GIT=$git_executable",
     "    export LOCALHOLD_MAINTAINABILITY_GIT",
-    "            BASH_ENV | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
+    "            BASH_ENV | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
     "                RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \\",
     "                CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \\",
     "                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_*)",
@@ -30,14 +37,19 @@ pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
 ];
 pub(super) const GATE_RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "readonly git_command=${LOCALHOLD_MAINTAINABILITY_GIT:?maintainability bootstrap did not provide an absolute Git command}",
+    "rustup_executable=${LOCALHOLD_MAINTAINABILITY_RUSTUP:-}",
+    "LOCALHOLD_MAINTAINABILITY_RUSTUP=$rustup_executable",
+    "export LOCALHOLD_MAINTAINABILITY_RUSTUP",
+    "PATH=$trusted_path",
+    "readonly PATH",
     "RUSTC=$native_rustc",
     "RUSTDOC=$native_rustdoc",
     "LOCALHOLD_MAINTAINABILITY_CARGO=$native_cargo",
-    "export PATH CARGO RUSTC RUSTDOC RUSTFMT LOCALHOLD_MAINTAINABILITY_CARGO",
-    "    for name in BASH_ENV LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER \\",
+    "export PATH CARGO RUSTC RUSTDOC RUSTFMT LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_RUSTUP",
+    "    for name in BASH_ENV GITHUB_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER \\",
     "        RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS \\",
     "        CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do",
-    "    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $git_command ]]",
+    "    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $LOCALHOLD_MAINTAINABILITY_RUSTUP && -n $git_command ]]",
 ];
 pub(super) const RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "readonly cargo_command=${LOCALHOLD_MAINTAINABILITY_CARGO:?maintainability bootstrap did not provide an absolute Cargo command}",
@@ -48,10 +60,16 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "if GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=0000000000000000000000000000000000000000 run_check >/dev/null 2>&1; then",
     "    printf 'maintainability bootstrap accepted a checker revision other than GITHUB_SHA\\n' >&2",
     "GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head run_check >/dev/null",
+    "bash_env=$fixture/bash-env",
+    "cargo_home=\"$fixture/cargo-home\"",
     "export CARGO_HOME=$cargo_home",
     "unset CARGO_HOME",
     "for loader_variable in LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD; do",
-    "BASH_ENV=$bash_env LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \\",
+    "FAKE_JUST_MARKER=$fake_just_marker FAKE_CARGO_MARKER=$fake_cargo_marker FAKE_RUSTUP_MARKER=$fake_rustup_marker PATH=\"$fake_bin:$PATH\" run_check --test-environment >/dev/null",
+    "if LOCALHOLD_MAINTAINABILITY_RUSTUP=\"$fake_bin/rustup\" run_check --test-environment >/dev/null 2>&1; then",
+    "if PATH=\"$fake_system_bin:$PATH\" run_check >/dev/null 2>&1; then",
+    "trusted_rustup_command=${LOCALHOLD_MAINTAINABILITY_RUSTUP:-rustup}",
+    "BASH_ENV=$bash_env GITHUB_PATH=untrusted LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \\",
     "    RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \\",
     "    CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \\",
     "    run_check --test-environment >/dev/null",
@@ -83,10 +101,12 @@ pub(super) const GPU_RELEASE_REVISION_ENVIRONMENT_LINES: &[&str] = &[
     "          unset ORT_DYLIB_PATH LD_LIBRARY_PATH LD_PRELOAD",
     "          unset ORT_DYLIB_PATH LD_LIBRARY_PATH LD_PRELOAD",
     "          unset ORT_DYLIB_PATH LD_LIBRARY_PATH LD_PRELOAD",
+    "            PATH=/usr/bin:/bin \\",
 ];
 
 pub fn reject_checked_in_weakening(workspace: &Path) -> Result<BTreeSet<String>> {
-    for path in execution_surfaces(workspace)? {
+    let surfaces = execution_surfaces(workspace)?;
+    for path in surfaces.paths {
         if is_cargo_config(Path::new(&path)) {
             bail!("checked-in Cargo configuration {path:?} is unsupported because it can override lint policy");
         }
@@ -95,7 +115,7 @@ pub fn reject_checked_in_weakening(workspace: &Path) -> Result<BTreeSet<String>>
         }
         let source = fs::read_to_string(workspace.join(&path)).with_context(|| format!("read lint command execution surface {path}"))?;
         yaml::validate_execution_metadata(&path, &source)?;
-        actions::validate_action_references(&path, &source)?;
+        actions::validate_action_references(workspace, &surfaces.tracked_paths, &path, &source)?;
         if has_make_include_indirection(Path::new(&path), &source) {
             bail!("checked-in Make command surface {path:?} uses unsupported include indirection");
         }
@@ -151,20 +171,74 @@ pub(super) fn weakening_environment(source: &str) -> bool {
     weakening_environment_names(source) || normalized_shell_tokens(source).iter().any(|token| weakening_environment_names(token))
 }
 
-pub(super) fn weakening_environment_for_surface(_path: &str, source: &str) -> bool {
-    weakening_environment(source) || case_insensitive_environment_assignment(source)
+pub(super) fn weakening_environment_for_surface(path: &str, source: &str) -> bool {
+    if let Some(scripts) = package_script_commands(path, source) {
+        return scripts.map_or(true, |scripts| scripts.iter().any(|script| weakening_environment_for_surface("", script)));
+    }
+    weakening_environment(source)
+        || case_insensitive_environment_assignment(source)
+        || yaml::environment_variables(path, source).iter().any(|(name, _)| is_weakening_environment_name(name))
+        || rust_tool_referenced(source) && path_environment_assignment(path, source)
 }
 
 fn case_insensitive_environment_assignment(source: &str) -> bool {
+    environment_assignment_matches(source, is_weakening_environment_name)
+}
+
+fn path_environment_assignment(path: &str, source: &str) -> bool {
+    let assignment_predicate: fn(&str) -> bool = if has_case_insensitive_environment_names(path) {
+        is_path_environment_name
+    } else {
+        is_exact_path_environment_name
+    };
+    environment_assignment_matches(source, assignment_predicate) || yaml::environment_variables(path, source).iter().any(|(name, _)| is_path_environment_name(name))
+}
+
+fn has_case_insensitive_environment_names(path: &str) -> bool {
+    let path = Path::new(path);
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "ps1" | "cmd" | "bat" | "yml" | "yaml"))
+        || path.file_name().and_then(|name| name.to_str()) == Some("package.json")
+}
+
+fn environment_assignment_matches(source: &str, predicate: fn(&str) -> bool) -> bool {
     source.split(['\n', ';', '&', '|']).any(|segment| {
-        let assignment = segment
-            .split_once('=')
-            .and_then(|(left, _)| left.split_whitespace().next_back())
-            .map(normalized_environment_name);
-        assignment.is_some_and(is_weakening_environment_name)
-            || normalized_shell_tokens(segment).windows(2).any(|tokens| {
-                matches!(tokens[0].to_ascii_lowercase().as_str(), "export" | "unset" | "set" | "setenv") && is_weakening_environment_name(normalized_environment_name(&tokens[1]))
-            })
+        let words = normalized_shell_words(segment);
+        words
+            .iter()
+            .any(|word| word.split_once('=').map(|(name, _)| normalized_environment_name(name)).is_some_and(predicate))
+            || words.windows(2).any(|tokens| tokens[1] == "=" && predicate(normalized_environment_name(&tokens[0])))
+            || normalized_shell_tokens(segment)
+                .windows(2)
+                .any(|tokens| matches!(tokens[0].to_ascii_lowercase().as_str(), "export" | "unset" | "set" | "setenv") && predicate(normalized_environment_name(&tokens[1])))
+    })
+}
+
+fn rust_tool_referenced(source: &str) -> bool {
+    normalized_shell_tokens(source).iter().any(|token| {
+        let token = normalized_environment_name(token).trim_matches(|character: char| matches!(character, '/' | '\\'));
+        let basename = token.rsplit(['/', '\\']).next().unwrap_or(token).to_ascii_lowercase();
+        matches!(
+            basename.as_str(),
+            "cargo"
+                | "cargo.exe"
+                | "cargo_executable"
+                | "cargo-clippy"
+                | "cargo-clippy.exe"
+                | "cargo_clippy_executable"
+                | "native_cargo"
+                | "rustc"
+                | "rustc.exe"
+                | "rustc_executable"
+                | "native_rustc"
+                | "rustdoc"
+                | "rustdoc.exe"
+                | "rustdoc_executable"
+                | "native_rustdoc"
+                | "clippy-driver"
+                | "clippy-driver.exe"
+        )
     })
 }
 
@@ -213,10 +287,12 @@ fn is_weakening_environment_name(name: &str) -> bool {
             | "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"
             | "GITHUB_ACTIONS"
             | "GITHUB_EVENT_PATH"
+            | "GITHUB_PATH"
             | "GITHUB_SHA"
             | "LOCALHOLD_MAINTAINABILITY_BASE_REV"
             | "LOCALHOLD_MAINTAINABILITY_CARGO"
             | "LOCALHOLD_MAINTAINABILITY_GIT"
+            | "LOCALHOLD_MAINTAINABILITY_RUSTUP"
             | "MISE_CONFIG_DIR"
             | "MISE_CONFIG_FILE"
             | "MISE_CEILING_PATHS"
@@ -233,6 +309,14 @@ fn is_weakening_environment_name(name: &str) -> bool {
         || name.starts_with("GIT_")
 }
 
+const fn is_path_environment_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("PATH")
+}
+
+fn is_exact_path_environment_name(name: &str) -> bool {
+    name == "PATH"
+}
+
 pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str) -> bool {
     let allowed = match path {
         "script/check-maintainability-bootstrap.sh" => BOOTSTRAP_ENVIRONMENT_LINES,
@@ -245,10 +329,19 @@ pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str
         _ => return false,
     };
     let lines = source.lines().collect::<Vec<_>>();
+    let rust_tools_are_referenced = rust_tool_referenced(source);
+    let yaml_environment_lines = yaml::environment_variables(path, source)
+        .into_iter()
+        .filter(|(name, _)| is_weakening_environment_name(name) || rust_tools_are_referenced && is_path_environment_name(name))
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>();
     allowed.iter().all(|expected| {
         let expected_count = allowed.iter().filter(|candidate| *candidate == expected).count();
         lines.iter().filter(|line| *line == expected).count() == expected_count
-    }) && lines.iter().filter(|line| weakening_environment(line)).all(|line| allowed.contains(line))
+    }) && lines
+        .iter()
+        .filter(|line| weakening_environment_for_surface("", line) || rust_tools_are_referenced && path_environment_assignment("", line) || yaml_environment_lines.contains(line))
+        .all(|line| allowed.contains(line))
 }
 
 pub(super) fn is_execution_surface(path: &str) -> bool {

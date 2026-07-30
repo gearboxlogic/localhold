@@ -202,6 +202,10 @@ if [[ -e $fake_just_marker || -e $fake_cargo_marker || -e $fake_rustup_marker ]]
     printf 'maintainability bootstrap executed an untrusted PATH dispatcher\n' >&2
     exit 1
 fi
+if LOCALHOLD_MAINTAINABILITY_RUSTUP="$fake_bin/rustup" run_check --test-environment >/dev/null 2>&1; then
+    printf 'maintainability bootstrap accepted an unauthenticated Rustup handoff\n' >&2
+    exit 1
+fi
 
 fake_system_bin="$fixture/fake-system-bin"
 mkdir "$fake_system_bin"
@@ -229,7 +233,8 @@ trusted_rustup_home=$trusted_rustup_environment
 if [[ $trusted_rustup_home =~ ^[[:alpha:]]:[/\\] ]]; then
     trusted_rustup_home=$(/usr/bin/cygpath -u "$trusted_rustup_home")
 fi
-trusted_cargo=$(RUSTUP_HOME=$trusted_rustup_environment rustup which --toolchain 1.97.0 cargo)
+trusted_rustup_command=${LOCALHOLD_MAINTAINABILITY_RUSTUP:-rustup}
+trusted_cargo=$(RUSTUP_HOME=$trusted_rustup_environment "$trusted_rustup_command" which --toolchain 1.97.0 cargo)
 if [[ $kernel != Linux ]]; then
     trusted_cargo=$(/usr/bin/cygpath -u "$trusted_cargo")
 fi
@@ -259,7 +264,7 @@ RUSTUP_HOME=$fake_rustup_environment run_check --test-environment >/dev/null
 
 bash_env=$fixture/bash-env
 : >"$bash_env"
-BASH_ENV=$bash_env LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \
+BASH_ENV=$bash_env GITHUB_PATH=untrusted LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \
     RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \
     CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \
     run_check --test-environment >/dev/null

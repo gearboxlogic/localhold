@@ -139,6 +139,48 @@ pub(super) fn run_commands(path: &str, source: &str) -> Vec<String> {
     commands
 }
 
+pub(super) fn environment_variables<'a>(path: &str, source: &'a str) -> Vec<(&'a str, &'a str)> {
+    if !is_github_yaml(path) {
+        return Vec::new();
+    }
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut variables = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        let Some((key, value)) = yaml_key_value(line) else {
+            index += 1;
+            continue;
+        };
+        if key != "env" || !value.trim().is_empty() {
+            index += 1;
+            continue;
+        }
+        let header_indentation = leading_spaces(line);
+        let mut variable_indentation = None;
+        index += 1;
+        while index < lines.len() {
+            let variable_line = lines[index];
+            if variable_line.trim().is_empty() || variable_line.trim_start().starts_with('#') {
+                index += 1;
+                continue;
+            }
+            let indentation = leading_spaces(variable_line);
+            if indentation <= header_indentation {
+                break;
+            }
+            let expected_indentation = *variable_indentation.get_or_insert(indentation);
+            if indentation == expected_indentation
+                && let Some((name, _)) = yaml_key_value(variable_line)
+            {
+                variables.push((name, variable_line));
+            }
+            index += 1;
+        }
+    }
+    variables
+}
+
 pub(super) fn yaml_key_value(line: &str) -> Option<(&str, &str)> {
     let mut content = line.trim_start();
     if let Some(rest) = content.strip_prefix("- ") {

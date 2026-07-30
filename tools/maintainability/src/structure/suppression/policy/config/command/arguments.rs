@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use anyhow::Result;
+
+mod package_json;
 mod powershell;
 mod python;
 mod tokens;
@@ -16,6 +19,9 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
         return true;
     }
     let case_insensitive_tools = has_case_insensitive_tool_names(path);
+    if let Some(scripts) = package_json::script_commands(path, source) {
+        return scripts.map_or(true, |scripts| scripts.iter().any(|script| weakening_token_with_case(script, case_insensitive_tools)));
+    }
     let source = normalized_source_for_surface(path, source);
     let embedded_commands = super::yaml::run_commands(path, &source);
     if is_yaml(path) {
@@ -26,6 +32,18 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
 
 pub(super) fn direct_rust_sources_for_surface(path: &str, source: &str) -> (BTreeSet<String>, bool) {
     let case_insensitive_tools = has_case_insensitive_tool_names(path);
+    if let Some(scripts) = package_json::script_commands(path, source) {
+        let Ok(scripts) = scripts else {
+            return (BTreeSet::new(), true);
+        };
+        let mut sources = BTreeSet::new();
+        let mut unresolved = false;
+        for script in scripts {
+            unresolved |= collect_direct_rust_sources(&script, case_insensitive_tools, &mut sources);
+            unresolved |= untrusted_directory_change_with_rust_tool(&script, case_insensitive_tools);
+        }
+        return (sources, unresolved);
+    }
     let source = normalized_source_for_surface(path, source);
     let mut sources = BTreeSet::new();
     let embedded_commands = super::yaml::run_commands(path, &source);
@@ -43,9 +61,20 @@ pub(super) fn normalized_shell_tokens(source: &str) -> Vec<String> {
     tokens::normalized_shell_tokens(source)
 }
 
+pub(super) fn normalized_shell_words(source: &str) -> Vec<String> {
+    tokens::source_command_tokens(source).into_iter().flatten().collect()
+}
+
+pub(super) fn package_script_commands(path: &str, source: &str) -> Option<Result<Vec<String>>> {
+    package_json::script_commands(path, source)
+}
+
 pub(in crate::structure::suppression::policy::config) fn has_sourced_file_indirection(path: &str, source: &str) -> bool {
     if !supports_shell_source(path) {
         return false;
+    }
+    if let Some(scripts) = package_json::script_commands(path, source) {
+        return scripts.map_or(true, |scripts| scripts.iter().any(|script| contains_source_command(script)));
     }
     let source = normalized_source_for_surface(path, source);
     let embedded_commands = super::yaml::run_commands(path, &source);

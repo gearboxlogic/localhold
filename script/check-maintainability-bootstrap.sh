@@ -54,8 +54,8 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=15d4fb8871e21aa8d0a57b45858f6abf423c62c11e8de2449917da5979004f84
-readonly reviewed_bootstrap_tests_sha256=b59a142e2ad861038aab722300c22d11acddd0978a7f55ef825dece1cc052e86
-readonly reviewed_gate_runner_sha256=5c37eeaac2ae1f7d93c90bdd1b4a7bacdff9acab04088b63da80f081a63f42b4
+readonly reviewed_bootstrap_tests_sha256=5e5d70a922bff8b1e09668d4ee3851ac159fbe312e63e643aa51e0ae97089290
+readonly reviewed_gate_runner_sha256=e8673dccdffa488d46a00f63fe2d95980e229293f99f907b55d377c1fed19e8d
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then
@@ -133,7 +133,7 @@ scrub_untrusted_environment() {
     while IFS= read -r name; do
         uppercase=${name^^}
         case "$uppercase" in
-            BASH_ENV | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
+            BASH_ENV | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
                 RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \
                 CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \
                 CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_*)

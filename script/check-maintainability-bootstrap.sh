@@ -14,6 +14,7 @@ usage() {
 script_path=${BASH_SOURCE[0]}
 script_directory=${script_path%/*}
 [[ $script_directory != "$script_path" ]] || script_directory=.
+script_directory=$(cd -- "$script_directory" && pwd -P)
 repository_root=$(cd -- "$script_directory/.." && pwd -P)
 using_test_root=false
 if [[ ${1:-} == --root ]]; then
@@ -59,7 +60,7 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=f9ead9aeff6aae855040ce3aea2e8901119071beef46061332dc3526378a9de6
-readonly reviewed_bootstrap_tests_sha256=3046d702d152d2bfb36cb255329c6184c08f4605adb39bcc31a16be1e5ef2aec
+readonly reviewed_bootstrap_tests_sha256=ee0cb37f2f23e28f5753a8e874715a056c00f9e9923c11121f130037eb5da1a6
 readonly reviewed_gate_runner_sha256=4a41471e22445124747dec9add2d0088b7dc59cc68d994ee378d84adf54896d5
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
@@ -151,6 +152,13 @@ scrub_untrusted_environment() {
 scrub_untrusted_environment
 git_command=$(trusted_system_command git)
 find_command=$(trusted_system_command find)
+mkdir_command=$(trusted_system_command mkdir)
+mktemp_command=$(trusted_system_command mktemp)
+rmdir_command=$(trusted_system_command rmdir)
+rm_command=$(trusted_system_command rm)
+chmod_command=$(trusted_system_command chmod)
+tar_command=$(trusted_system_command tar)
+bash_command=$(trusted_system_command bash)
 
 git_checked() {
     "$git_command" --no-replace-objects -c diff.external= -C "$repository_root" "$@"
@@ -412,6 +420,53 @@ if [[ $mode != verify ]]; then
     fi
     LOCALHOLD_MAINTAINABILITY_GIT=$git_executable
     export LOCALHOLD_MAINTAINABILITY_GIT
-    bash_command=$(trusted_system_command bash)
-    exec "$bash_command" "$gate_runner" "$mode"
+
+    checked_head=$(git_checked rev-parse --verify 'HEAD^{commit}')
+    target_parent="$repository_root/target"
+    if [[ -L $target_parent || -e $target_parent && ! -d $target_parent ]]; then
+        printf 'maintainability snapshot parent must be a regular non-symlink directory\n' >&2
+        exit 1
+    fi
+    if [[ ! -d $target_parent ]]; then
+        "$mkdir_command" -- "$target_parent"
+    fi
+    target_parent=$(cd -- "$target_parent" && pwd -P)
+    if [[ $target_parent != "$repository_root/target" ]]; then
+        printf 'maintainability snapshot parent resolves outside the repository target directory\n' >&2
+        exit 1
+    fi
+
+    umask 077
+    snapshot_root=$("$mktemp_command" -d "$target_parent/maintainability-source.XXXXXXXX")
+    "$rmdir_command" -- "$snapshot_root"
+    cleanup_snapshot() {
+        if [[ -n ${snapshot_root:-} && -e $snapshot_root ]]; then
+            "$chmod_command" -R u+w -- "$snapshot_root" 2>/dev/null || true
+            "$rm_command" -rf -- "$snapshot_root"
+        fi
+    }
+    trap cleanup_snapshot EXIT
+
+    git_checked clone --no-hardlinks --no-checkout --quiet -- "$repository_root" "$snapshot_root"
+    "$git_command" --no-replace-objects -c diff.external= -C "$snapshot_root" update-ref --no-deref HEAD "$checked_head"
+    "$git_command" --no-replace-objects -c diff.external= -C "$snapshot_root" read-tree "$checked_head"
+    "$git_command" --no-replace-objects -c diff.external= -C "$snapshot_root" archive --format=tar "$checked_head" | "$tar_command" -xf - -C "$snapshot_root"
+    "$mkdir_command" -- "$snapshot_root/target"
+    "$chmod_command" -R a-w -- "$snapshot_root"
+    "$chmod_command" u+rwx -- "$snapshot_root/target"
+    if [[ -w "$snapshot_root/tools/maintainability/src/main.rs" ]]; then
+        printf 'maintainability source snapshot remains writable after isolation\n' >&2
+        exit 1
+    fi
+    snapshot_bootstrap="$snapshot_root/script/check-maintainability-bootstrap.sh"
+    "$bash_command" "$snapshot_bootstrap" --root "$snapshot_root"
+
+    status=0
+    "$bash_command" "$snapshot_root/script/run-maintainability-gate.sh" "$mode" || status=$?
+    if (( status == 0 )); then
+        "$bash_command" "$snapshot_bootstrap" --root "$snapshot_root" || status=$?
+    fi
+    cleanup_snapshot
+    trap - EXIT
+    exit "$status"
 fi

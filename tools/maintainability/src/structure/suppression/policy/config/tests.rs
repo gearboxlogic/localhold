@@ -545,7 +545,7 @@ fn command_policy_governs_opaque_shell_programs_and_selected_makefiles() {
 
     fs::write(
         workspace.path().join("Justfile"),
-        "transient:\n    printf '%s\\n' '#!/bin/sh' 'cargo clippy -- -A warnings' > ./quality-run\n    chmod +x ./quality-run\n    ./quality-run\n",
+        "transient:\n    printf '%s\\n' '#!/bin/sh' 'cargo clippy -- -A warnings' > quality/run-lints\n    chmod +x quality/run-lints\n    quality/run-lints\n",
     )
     .expect("transient relative program");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
@@ -700,6 +700,7 @@ fn github_yaml_rejects_unsupported_execution_metadata() {
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - \"r\\u0075n\": cargo clippy -- -A warnings\n",
         "name: lint\non: push\njobs:\n  lint:\n    strategy:\n      matrix:\n        command:\n          - cargo clippy -- -A warnings\n    runs-on: ubuntu-latest\n    steps:\n      - run: ${{ matrix.command }}\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          cargo ${{ matrix.subcommand }}\n",
+        "name: lint\non: push\njobs:\n  lint:\n    container: attacker.example/runner:latest\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo check\n",
     ] {
         let workspace = tempfile::tempdir().expect("temporary workspace");
         fs::create_dir_all(workspace.path().join(".github/workflows")).expect("workflow directory");
@@ -715,7 +716,8 @@ fn github_yaml_rejects_unsupported_execution_metadata() {
                 || error.to_string().contains("flow mapping or complex sequence")
                 || error.to_string().contains("inline run scalar")
                 || error.to_string().contains("quoted mapping key")
-                || error.to_string().contains("dynamic run expression"),
+                || error.to_string().contains("dynamic run expression")
+                || error.to_string().contains("job container"),
             "{error:#}"
         );
     }

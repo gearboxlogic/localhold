@@ -89,13 +89,31 @@ fn collect_execution_inputs<'a>(sources: impl IntoIterator<Item = &'a str>, dire
     let mut inputs = BTreeSet::new();
     let mut unresolved = false;
     for source in sources {
+        let normalized;
+        let source = if direct_program_paths {
+            normalized = tokens::without_noncommand_shell_data(source);
+            normalized.as_str()
+        } else {
+            source
+        };
         for tokens in tokens::source_command_tokens(source) {
-            let (candidates, opaque) = execution_input_candidates(&tokens, direct_program_paths);
-            unresolved |= opaque;
-            record_execution_inputs(candidates, &mut inputs, &mut unresolved);
+            for nested_tokens in tokens
+                .iter()
+                .filter(|token| token.chars().any(char::is_whitespace) && (token.contains("$(") || token.contains('`')))
+                .flat_map(|nested| tokens::source_command_tokens(nested))
+            {
+                record_execution_inputs_from_tokens(&nested_tokens, direct_program_paths, &mut inputs, &mut unresolved);
+            }
+            record_execution_inputs_from_tokens(&tokens, direct_program_paths, &mut inputs, &mut unresolved);
         }
     }
     (inputs, unresolved)
+}
+
+fn record_execution_inputs_from_tokens(tokens: &[String], direct_program_paths: bool, inputs: &mut BTreeSet<String>, unresolved: &mut bool) {
+    let (candidates, opaque) = execution_input_candidates(tokens, direct_program_paths);
+    *unresolved |= opaque;
+    record_execution_inputs(candidates, inputs, unresolved);
 }
 
 fn record_execution_inputs(candidates: Vec<&str>, inputs: &mut BTreeSet<String>, unresolved: &mut bool) {
@@ -119,7 +137,11 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
     let Some(command_index) = command_index else {
         return (Vec::new(), false);
     };
-    let command_token = nested_command_token(tokens[command_index].trim_matches(['(', ')', '{', '}']));
+    let command_word = tokens[command_index].trim_matches(['(', ')', '{', '}']);
+    if command_word.chars().any(char::is_whitespace) && (command_word.contains("$(") || command_word.contains('`')) {
+        return (Vec::new(), false);
+    }
+    let command_token = nested_command_token(command_word);
     let command = tool_basename(command_token).to_ascii_lowercase();
     let arguments = &tokens[command_index.saturating_add(1)..];
     let selected = match command.as_str() {
@@ -147,7 +169,10 @@ fn nested_command_token(token: &str) -> &str {
 }
 
 fn is_relative_program_path(command: &str) -> bool {
-    ["./", "../", r".\", r"..\"].iter().any(|prefix| command.starts_with(prefix))
+    if ["./", "../", r".\", r"..\"].iter().any(|prefix| command.starts_with(prefix)) {
+        return true;
+    }
+    !command.starts_with('/') && !contains_dynamic_value(command) && command.contains(['/', '\\'])
 }
 
 fn supports_direct_program_paths(path: &str) -> bool {
@@ -180,6 +205,9 @@ fn shell_input(arguments: &[String]) -> SelectedInput<'_> {
             || lowercase.starts_with("--init-file=")
             || lowercase.starts_with("--rcfile=")
         {
+            return SelectedInput::Opaque;
+        }
+        if argument.starts_with("<<") {
             return SelectedInput::Opaque;
         }
         if argument == "--" {
@@ -344,20 +372,11 @@ fn contains_dynamic_value(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{execution_input_candidates, normalized_literal_input, tokens};
+    use super::collect_execution_inputs;
 
     fn inputs(command: &str) -> (Vec<String>, bool) {
-        let commands = tokens::source_command_tokens(command);
-        let (candidates, mut opaque) = execution_input_candidates(&commands[0], true);
-        let candidates = candidates
-            .into_iter()
-            .filter_map(|candidate| {
-                let normalized = normalized_literal_input(candidate);
-                opaque |= normalized.is_none();
-                normalized
-            })
-            .collect();
-        (candidates, opaque)
+        let (candidates, opaque) = collect_execution_inputs(std::iter::once(command), true);
+        (candidates.into_iter().collect(), opaque)
     }
 
     #[test]
@@ -369,11 +388,12 @@ mod tests {
         assert_eq!(inputs(r#"command eval "$(printf '\143\141\162\147\157')""#), (Vec::new(), true));
         assert_eq!(inputs("Invoke-Expression $encoded"), (Vec::new(), true));
         assert_eq!(inputs("./quality/run-lints"), (vec!["quality/run-lints".to_owned()], false));
-        assert_eq!(inputs("quality/run-lints"), (Vec::new(), false));
+        assert_eq!(inputs("quality/run-lints"), (vec!["quality/run-lints".to_owned()], false));
         assert_eq!(inputs("./$PROGRAM"), (Vec::new(), true));
         assert_eq!(inputs("../quality/run-lints"), (Vec::new(), true));
         assert_eq!(inputs(r"'.\quality\run-lints.cmd'"), (Vec::new(), true));
         assert_eq!(inputs("status=$(./quality/run-lints)"), (vec!["quality/run-lints".to_owned()], false));
+        assert_eq!(inputs(r#"tag="$(python3 script/release.py tag)""#), (vec!["script/release.py".to_owned()], false));
         assert_eq!(inputs("kernel=$(/usr/bin/uname -s)"), (Vec::new(), false));
         assert_eq!(inputs(r#""$repository_root/script/check.sh""#), (Vec::new(), false));
         assert_eq!(inputs("bash_command=$(trusted_system_command bash)"), (Vec::new(), false));
@@ -382,7 +402,7 @@ mod tests {
         assert_eq!(inputs("pwsh -File quality/lint.ps1"), (vec!["quality/lint.ps1".to_owned()], false));
         assert_eq!(
             inputs("make -f quality/lint.rules --file=quality/common.rules"),
-            (vec!["quality/lint.rules".to_owned(), "quality/common.rules".to_owned()], false)
+            (vec!["quality/common.rules".to_owned(), "quality/lint.rules".to_owned()], false)
         );
         assert_eq!(inputs("make -f $MAKEFILE"), (Vec::new(), true));
         assert_eq!(inputs("make -C quality -f lint.rules"), (vec!["lint.rules".to_owned()], true));

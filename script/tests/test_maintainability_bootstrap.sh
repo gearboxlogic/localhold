@@ -65,6 +65,7 @@ restore_reviewed_graph() {
     cp "$repository_root/mise.toml" "$test_repository/mise.toml"
     cp "$repository_root/mise.lock" "$test_repository/mise.lock"
     mkdir -p "$test_repository/script"
+    cp "$check" "$test_repository/script/check-maintainability-bootstrap.sh"
     cp "$source_runner" "$test_repository/script/run-source-safety.sh"
     cp "$source_gate_runner" "$test_repository/script/run-maintainability-gate.sh"
     printf '%s\n' '#!/usr/bin/bash' 'printf reviewed-command\\n' >"$test_repository/script/reviewed-command.sh"
@@ -72,6 +73,7 @@ restore_reviewed_graph() {
     cp "$source_bootstrap_tests" "$test_repository/script/tests/test_maintainability_bootstrap.sh"
     mkdir -p "$test_repository/src"
     printf 'pub fn reviewed() {}\n' >"$test_repository/src/lib.rs"
+    chmod -R u+w -- "$test_repository"
 }
 
 run_check() {
@@ -98,6 +100,33 @@ git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example
 git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example.invalid commit -qm 'reviewed fixture'
 test_head=$(git -C "$test_repository" rev-parse HEAD)
 run_check >/dev/null
+
+(
+    for _ in {1..1000}; do
+        if compgen -G "$test_repository/target/maintainability-source.*" >/dev/null; then
+            printf '#![allow(warnings)]\npub fn changed_after_verification() {}\n' >"$test_repository/src/lib.rs"
+            exit 0
+        fi
+        sleep 0.01
+    done
+    exit 1
+) &
+snapshot_mutator_pid=$!
+snapshot_status=0
+run_check --test-environment >/dev/null || snapshot_status=$?
+if ! wait "$snapshot_mutator_pid"; then
+    printf 'maintainability bootstrap did not create an isolated source snapshot\n' >&2
+    exit 1
+fi
+if (( snapshot_status != 0 )); then
+    printf 'maintainability bootstrap used the mutable working tree after verification\n' >&2
+    exit 1
+fi
+if compgen -G "$test_repository/target/maintainability-source.*" >/dev/null; then
+    printf 'maintainability bootstrap retained an isolated source snapshot\n' >&2
+    exit 1
+fi
+restore_reviewed_graph
 
 printf '#![allow(warnings)]\npub fn reviewed() {}\n' >"$test_repository/src/lib.rs"
 expect_failure_before_command

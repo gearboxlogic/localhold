@@ -2,6 +2,8 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 
+mod governed;
+
 enum RunValue {
     Inline(String),
     Block { indentation: usize, folded: bool },
@@ -16,6 +18,7 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
     if !is_github_yaml(path) {
         return Ok(());
     }
+    governed::validate(path, source)?;
     let mut block_indentation: Option<BlockScalar> = None;
     let mut inline_run_indentation = None;
     for line in source.lines() {
@@ -54,6 +57,9 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
             continue;
         };
         let value = value.trim_start();
+        if key == "container" {
+            bail!("checked-in GitHub YAML {path:?} uses an unsupported job container");
+        }
         if starts_yaml_reference(value) {
             bail!("checked-in GitHub YAML {path:?} uses unsupported anchors or aliases");
         }

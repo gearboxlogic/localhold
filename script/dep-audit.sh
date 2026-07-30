@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
-    printf 'dependency audit must run inside a Git repository\n' >&2
-    exit 1
-}
-cd "$repo_root"
+repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+readonly repository_root
+cd -- "$repository_root"
 
 failed=0
 

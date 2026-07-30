@@ -7,10 +7,8 @@ if (( $# != 1 )) || [[ $mode != source-safety && $mode != dependency-unsafe && $
     exit 1
 fi
 
-script_path=${BASH_SOURCE[0]}
-script_directory=${script_path%/*}
-[[ $script_directory != "$script_path" ]] || script_directory=.
-repository_root=$(cd -- "$script_directory/.." && pwd -P)
+repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+readonly repository_root
 cd -- "$repository_root"
 
 readonly git_command=${LOCALHOLD_MAINTAINABILITY_GIT:?maintainability bootstrap did not provide an absolute Git command}
@@ -181,7 +179,7 @@ run_dependency_unsafe() {
 
 verify_test_environment() {
     local name
-    for name in BASH_ENV RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER \
+    for name in BASH_ENV LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER \
         RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS \
         CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do
         if [[ -v $name ]]; then

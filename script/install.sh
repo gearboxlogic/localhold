@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+readonly repository_root
 prefix="${LOCALHOLD_PREFIX:-$HOME/.local}"
 destdir="${DESTDIR:-}"
 profile="cpu"
-build_dir="${LOCALHOLD_BUILD_DIR:-${CARGO_TARGET_DIR:-$repo_root/target}}"
+build_dir="${LOCALHOLD_BUILD_DIR:-${CARGO_TARGET_DIR:-$repository_root/target}}"
 
 usage() {
   cat <<'EOF'
@@ -86,7 +87,7 @@ if [[ "$(uname -s)" == "Linux" ]]; then
   }
 fi
 
-cd "$repo_root"
+cd -- "$repository_root"
 "${CARGO:-cargo}" build --release --locked --features "$features" --target-dir "$build_dir"
 
 bin_dir="${destdir}${prefix}/bin"

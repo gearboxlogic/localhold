@@ -42,6 +42,13 @@ if (( guard_count != 4 )); then
     printf 'every CI maintainability bootstrap execution must have an immediate workflow digest guard\n' >&2
     exit 1
 fi
+for loader_variable in LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD; do
+    loader_guard_count=$(grep -Fc "          $loader_variable: ''" "$ci_workflow" || true)
+    if (( loader_guard_count != 4 )); then
+        printf 'every CI maintainability bootstrap execution must clear %s before Bash starts\n' "$loader_variable" >&2
+        exit 1
+    fi
+done
 
 write_manifest() {
     printf '%s\n' "$1" >"$test_tool/Cargo.toml"
@@ -58,8 +65,11 @@ restore_reviewed_graph() {
     mkdir -p "$test_repository/script"
     cp "$source_runner" "$test_repository/script/run-source-safety.sh"
     cp "$source_gate_runner" "$test_repository/script/run-maintainability-gate.sh"
+    printf '%s\n' '#!/usr/bin/bash' 'printf reviewed-command\\n' >"$test_repository/script/reviewed-command.sh"
     mkdir -p "$test_repository/script/tests"
     cp "$source_bootstrap_tests" "$test_repository/script/tests/test_maintainability_bootstrap.sh"
+    mkdir -p "$test_repository/src"
+    printf 'pub fn reviewed() {}\n' >"$test_repository/src/lib.rs"
 }
 
 run_check() {
@@ -87,6 +97,14 @@ git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example
 test_head=$(git -C "$test_repository" rev-parse HEAD)
 run_check >/dev/null
 
+printf '#![allow(warnings)]\npub fn reviewed() {}\n' >"$test_repository/src/lib.rs"
+expect_failure_before_command
+
+restore_reviewed_graph
+printf '%s\n' '#!/usr/bin/bash' 'printf changed-command\\n' >"$test_repository/script/reviewed-command.sh"
+expect_failure_before_command
+
+restore_reviewed_graph
 printf 'fn main() {}\n' >"$test_tool/src/main.rs"
 expect_failure_before_command
 
@@ -241,7 +259,7 @@ RUSTUP_HOME=$fake_rustup_environment run_check --test-environment >/dev/null
 
 bash_env=$fixture/bash-env
 : >"$bash_env"
-BASH_ENV=$bash_env RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \
+BASH_ENV=$bash_env LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \
     RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \
     CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \
     run_check --test-environment >/dev/null

@@ -12,7 +12,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 499c7a9b14da714fbe50123be1042b5ba75b7599777d77a8417090bbd15ab02e
+  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 015d802ca79ab2d195bf8462351f035313c50126fdcff59ff225992a6fc0a85b
   XDG_CACHE_HOME: ${{ github.workspace }}/.cache
 
 permissions:
@@ -127,6 +127,9 @@ jobs:
       - name: Validate maintainability bootstrap before tool activation
         env:
           BASH_ENV: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          LD_PRELOAD: ''
           LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}
         run: |
           if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
@@ -146,6 +149,9 @@ jobs:
         id: audit
         env:
           BASH_ENV: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          LD_PRELOAD: ''
           LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}
           LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}
         run: |
@@ -282,6 +288,9 @@ jobs:
       - name: Validate maintainability bootstrap before tool activation
         env:
           BASH_ENV: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          LD_PRELOAD: ''
           LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}
         run: |
           if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
@@ -301,6 +310,9 @@ jobs:
         id: audit
         env:
           BASH_ENV: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          LD_PRELOAD: ''
           LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}
           LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}
         run: |

@@ -31,10 +31,10 @@ pub(super) fn direct_rust_sources_for_surface(path: &str, source: &str) -> (BTre
     let embedded_commands = super::yaml::run_commands(path, &source);
     let mut unresolved = !is_yaml(path) && collect_direct_rust_sources(&source, case_insensitive_tools, &mut sources);
     unresolved |= is_python(path) && !sources.is_empty();
-    unresolved |= !is_yaml(path) && !is_python(path) && directory_change_precedes_direct_compiler(&source, case_insensitive_tools);
+    unresolved |= !is_yaml(path) && !is_python(path) && untrusted_directory_change_with_rust_tool(&source, case_insensitive_tools);
     for command in embedded_commands {
         unresolved |= collect_direct_rust_sources(&command, case_insensitive_tools, &mut sources);
-        unresolved |= directory_change_precedes_direct_compiler(&command, case_insensitive_tools);
+        unresolved |= untrusted_directory_change_with_rust_tool(&command, case_insensitive_tools);
     }
     (sources, unresolved)
 }
@@ -335,21 +335,20 @@ fn collect_direct_rust_sources(source: &str, case_insensitive_tools: bool, sourc
     unresolved
 }
 
-fn directory_change_precedes_direct_compiler(source: &str, case_insensitive_tools: bool) -> bool {
-    let mut changed_directory = false;
-    for tokens in tokens::normalized_shell_commands(source) {
-        changed_directory |= is_directory_change_command(&tokens);
-        if changed_directory
-            && tokens.iter().enumerate().any(|(index, token)| {
-                is_literal_direct_compiler_token(token, case_insensitive_tools)
+fn untrusted_directory_change_with_rust_tool(source: &str, case_insensitive_tools: bool) -> bool {
+    let commands = tokens::normalized_shell_commands(source);
+    let has_rust_execution = commands.iter().any(|tokens| {
+        tokens.iter().enumerate().any(|(index, token)| {
+            is_cargo_tool_token(token, case_insensitive_tools)
+                || is_literal_direct_compiler_token(token, case_insensitive_tools)
                     && !tokens[..index].iter().any(|preceding| is_cargo_tool_token(preceding, case_insensitive_tools))
                     && !is_informational_compiler_invocation(&tokens[index.saturating_add(1)..])
-            })
-        {
-            return true;
-        }
-    }
-    false
+        })
+    });
+    has_rust_execution
+        && commands
+            .iter()
+            .any(|tokens| is_directory_change_command(tokens) && !is_audited_repository_root_change(tokens, source))
 }
 
 fn is_directory_change_command(tokens: &[String]) -> bool {
@@ -358,6 +357,25 @@ fn is_directory_change_command(tokens: &[String]) -> bool {
         .map(|word| word.trim_matches(['(', ')', '{', '}']))
         .find(|word| !word.is_empty() && !is_shell_command_prefix(word) && !is_environment_assignment(word))
         .is_some_and(|word| matches!(word.to_ascii_lowercase().as_str(), "cd" | "chdir" | "pushd" | "set-location"))
+}
+
+fn is_audited_repository_root_change(tokens: &[String], source: &str) -> bool {
+    let mut words = tokens
+        .iter()
+        .map(|word| word.trim_matches(['(', ')', '{', '}']))
+        .filter(|word| !word.is_empty() && !is_shell_command_prefix(word) && !is_environment_assignment(word));
+    if !words.next().is_some_and(|word| word.eq_ignore_ascii_case("cd")) {
+        return false;
+    }
+    let target = words.find(|word| *word != "--");
+    if target != Some("$repository_root") || words.next().is_some() {
+        return false;
+    }
+    let lines = source.lines().map(str::trim).collect::<Vec<_>>();
+    let assignment = r#"repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"#;
+    lines.windows(2).filter(|lines| lines[0] == assignment && lines[1] == "readonly repository_root").count() == 1
+        && lines.iter().filter(|line| line.starts_with("repository_root=")).count() == 1
+        && lines.iter().filter(|line| **line == "readonly repository_root").count() == 1
 }
 
 fn is_python(path: &str) -> bool {

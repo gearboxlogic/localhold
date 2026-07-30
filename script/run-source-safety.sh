@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-script_path=${BASH_SOURCE[0]}
-script_directory=${script_path%/*}
-[[ $script_directory != "$script_path" ]] || script_directory=.
-repository_root=$(cd -- "$script_directory/.." && pwd -P)
+repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+readonly repository_root
 cd -- "$repository_root"
 
 readonly cargo_command=${LOCALHOLD_MAINTAINABILITY_CARGO:?maintainability bootstrap did not provide an absolute Cargo command}

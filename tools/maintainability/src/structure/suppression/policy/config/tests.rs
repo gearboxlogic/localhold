@@ -202,6 +202,9 @@ fn folded_yaml_commands_are_scanned_as_executed() {
 #[test]
 fn weakening_environment_channels_are_detected() {
     assert!(weakening_environment("BASH_ENV=script/ci-startup.sh"));
+    assert!(weakening_environment("LD_AUDIT=untrusted.so"));
+    assert!(weakening_environment("LD_LIBRARY_PATH=untrusted"));
+    assert!(weakening_environment("LD_PRELOAD=untrusted.so"));
     assert!(weakening_environment("export RUSTFLAGS='-A warnings'\nexec \"$CHECK\""));
     assert!(weakening_environment("export RUST''FLAGS='--cap-lints allow'"));
     assert!(weakening_environment("CARGO_ENCODED_RUSTFLAGS=dynamic"));
@@ -528,6 +531,27 @@ fn command_policy_rejects_directly_compiled_rust_helpers() {
     assert!(reject_checked_in_weakening(workspace.path()).expect("relocated informational compiler command").is_empty());
 
     fs::write(workspace.path().join("script/check.sh"), "cd misc && rustc check.rs\n").expect("relocated compiler command");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("without auditable repository-relative .rs inputs"));
+
+    fs::write(workspace.path().join("misc/Cargo.toml"), "[package]\nname='unchecked'\nversion='0.1.0'\n").expect("alternate package manifest");
+    fs::write(workspace.path().join("script/check.sh"), "cd misc && cargo clippy -- -D warnings\n").expect("relocated Cargo command");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("without auditable repository-relative .rs inputs"));
+
+    let reviewed_root = r#"repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+readonly repository_root
+cd -- "$repository_root"
+cargo clippy -- -D warnings
+"#;
+    fs::write(workspace.path().join("script/check.sh"), reviewed_root).expect("audited repository-root command");
+    assert!(reject_checked_in_weakening(workspace.path()).expect("audited repository-root Cargo command").is_empty());
+
+    fs::write(
+        workspace.path().join("script/check.sh"),
+        format!("{reviewed_root}repository_root=quality\ncd -- \"$repository_root\"\ncargo clippy -- -D warnings\n"),
+    )
+    .expect("reassigned repository-root command");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("without auditable repository-relative .rs inputs"));
 

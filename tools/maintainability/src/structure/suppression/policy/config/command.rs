@@ -19,7 +19,7 @@ pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "cargo_home=${CARGO_HOME:-}",
     "    LOCALHOLD_MAINTAINABILITY_GIT=$git_executable",
     "    export LOCALHOLD_MAINTAINABILITY_GIT",
-    "            BASH_ENV | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
+    "            BASH_ENV | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
     "                RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \\",
     "                CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \\",
     "                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_*)",
@@ -34,7 +34,7 @@ pub(super) const GATE_RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "RUSTDOC=$native_rustdoc",
     "LOCALHOLD_MAINTAINABILITY_CARGO=$native_cargo",
     "export PATH CARGO RUSTC RUSTDOC RUSTFMT LOCALHOLD_MAINTAINABILITY_CARGO",
-    "    for name in BASH_ENV RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER \\",
+    "    for name in BASH_ENV LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER \\",
     "        RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS \\",
     "        CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do",
     "    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $git_command ]]",
@@ -50,7 +50,8 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head run_check >/dev/null",
     "export CARGO_HOME=$cargo_home",
     "unset CARGO_HOME",
-    "BASH_ENV=$bash_env RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \\",
+    "for loader_variable in LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD; do",
+    "BASH_ENV=$bash_env LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \\",
     "    RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \\",
     "    CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \\",
     "    run_check --test-environment >/dev/null",
@@ -61,10 +62,28 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          BASH_ENV: ''",
     "          BASH_ENV: ''",
     "          BASH_ENV: ''",
+    "          LD_AUDIT: ''",
+    "          LD_AUDIT: ''",
+    "          LD_AUDIT: ''",
+    "          LD_AUDIT: ''",
+    "          LD_LIBRARY_PATH: ''",
+    "          LD_LIBRARY_PATH: ''",
+    "          LD_LIBRARY_PATH: ''",
+    "          LD_LIBRARY_PATH: ''",
+    "          LD_PRELOAD: ''",
+    "          LD_PRELOAD: ''",
+    "          LD_PRELOAD: ''",
+    "          LD_PRELOAD: ''",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
 ];
-pub(super) const GPU_RELEASE_REVISION_ENVIRONMENT_LINES: &[&str] = &["          test \"$(git rev-parse HEAD)\" = \"$GITHUB_SHA\""];
+pub(super) const GPU_RELEASE_REVISION_ENVIRONMENT_LINES: &[&str] = &[
+    "          test \"$(git rev-parse HEAD)\" = \"$GITHUB_SHA\"",
+    "          unset ORT_DYLIB_PATH LD_LIBRARY_PATH LD_PRELOAD",
+    "          unset ORT_DYLIB_PATH LD_LIBRARY_PATH LD_PRELOAD",
+    "          unset ORT_DYLIB_PATH LD_LIBRARY_PATH LD_PRELOAD",
+    "          unset ORT_DYLIB_PATH LD_LIBRARY_PATH LD_PRELOAD",
+];
 
 pub fn reject_checked_in_weakening(workspace: &Path) -> Result<BTreeSet<String>> {
     for path in execution_surfaces(workspace)? {
@@ -169,6 +188,9 @@ fn is_weakening_environment_name(name: &str) -> bool {
     matches!(
         name.as_str(),
         "BASH_ENV"
+            | "LD_AUDIT"
+            | "LD_LIBRARY_PATH"
+            | "LD_PRELOAD"
             | "RUSTFLAGS"
             | "CARGO_ENCODED_RUSTFLAGS"
             | "RUSTDOCFLAGS"

@@ -26,8 +26,8 @@ case "$model" in
 esac
 shift
 
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-repository_root=$(cd -- "$script_dir/.." && pwd -P)
+repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+readonly repository_root
 cache_root="$repository_root/.cache"
 scratch_root="$cache_root/claude-reviews"
 claude_pid=

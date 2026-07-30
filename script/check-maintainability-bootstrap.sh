@@ -53,9 +53,9 @@ readonly reviewed_lockfile_sha256=825c6448351761aa5c4c6e1ce6b3696c927c4f46c5d436
 readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d1b3fd69aa74c0df6f1
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
-readonly reviewed_runner_sha256=09c7b7cc9472acc7ec19633a9ccbf54eb7cf66215ec5921ade3cbd3eacd5eb1e
-readonly reviewed_bootstrap_tests_sha256=d34cf080710da2a6df4787cf576da0687ab15c86543da358015936871c301da3
-readonly reviewed_gate_runner_sha256=900c9a07b9439795fe85113eb23e410f681d02d3c2b708ac0d68cb6d9a9e0b85
+readonly reviewed_runner_sha256=15d4fb8871e21aa8d0a57b45858f6abf423c62c11e8de2449917da5979004f84
+readonly reviewed_bootstrap_tests_sha256=b59a142e2ad861038aab722300c22d11acddd0978a7f55ef825dece1cc052e86
+readonly reviewed_gate_runner_sha256=5c37eeaac2ae1f7d93c90bdd1b4a7bacdff9acab04088b63da80f081a63f42b4
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then
@@ -133,7 +133,7 @@ scrub_untrusted_environment() {
     while IFS= read -r name; do
         uppercase=${name^^}
         case "$uppercase" in
-            BASH_ENV | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
+            BASH_ENV | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
                 RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \
                 CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \
                 CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_*)
@@ -222,6 +222,72 @@ verify_checker_sources() {
     done < <("$find_command" "$source_root" \( -type f -o -type l \) -print0)
     if (( observed_count != expected_count )); then
         printf 'maintainability checker source set differs from the checked-out revision\n' >&2
+        exit 1
+    fi
+}
+
+verify_reviewed_tracked_tree() {
+    local checked_head
+    checked_head=$(git_checked rev-parse --verify 'HEAD^{commit}') || {
+        printf 'cannot read the checked-out revision before verifying governed inputs\n' >&2
+        exit 1
+    }
+
+    local -A expected_index_entries=()
+    local expected_count=0
+    local entry
+    local metadata
+    local mode
+    local object_type
+    local expected_hash
+    local relative_path
+    local actual_hash
+    while IFS= read -r -d '' entry; do
+        metadata=${entry%%$'\t'*}
+        relative_path=${entry#*$'\t'}
+        read -r mode object_type expected_hash <<<"$metadata"
+        if [[ $object_type != blob || $mode != 100644 && $mode != 100755 ]]; then
+            printf 'checked-out revision contains an unsupported tracked entry: %s\n' "$relative_path" >&2
+            exit 1
+        fi
+        if [[ ! -f "$repository_root/$relative_path" || -L "$repository_root/$relative_path" ]]; then
+            printf 'reviewed tracked input must be a regular non-symlink file: %s\n' "$relative_path" >&2
+            exit 1
+        fi
+        actual_hash=$(git_checked hash-object --no-filters -- "$repository_root/$relative_path") || {
+            printf 'cannot hash reviewed tracked input: %s\n' "$relative_path" >&2
+            exit 1
+        }
+        if [[ $actual_hash != "$expected_hash" ]]; then
+            printf 'reviewed tracked input differs from the checked-out revision: %s\n' "$relative_path" >&2
+            exit 1
+        fi
+        expected_index_entries["$relative_path"]="$mode $expected_hash"
+        ((expected_count += 1))
+    done < <(git_checked ls-tree -r -z --full-tree "$checked_head")
+    if (( expected_count == 0 )); then
+        printf 'checked-out revision contains no reviewed tracked inputs\n' >&2
+        exit 1
+    fi
+
+    local indexed_count=0
+    local stage
+    while IFS= read -r -d '' entry; do
+        metadata=${entry%%$'\t'*}
+        relative_path=${entry#*$'\t'}
+        read -r mode expected_hash stage <<<"$metadata"
+        if [[ $stage != 0 || $mode != 100644 && $mode != 100755 ]]; then
+            printf 'index contains an unsupported tracked entry: %s\n' "$relative_path" >&2
+            exit 1
+        fi
+        if [[ ${expected_index_entries["$relative_path"]:-} != "$mode $expected_hash" ]]; then
+            printf 'index differs from the checked-out revision: %s\n' "$relative_path" >&2
+            exit 1
+        fi
+        ((indexed_count += 1))
+    done < <(git_checked ls-files -z --stage)
+    if (( indexed_count != expected_count )); then
+        printf 'index path set differs from the checked-out revision\n' >&2
         exit 1
     fi
 }
@@ -329,6 +395,7 @@ if [[ $actual_gate_runner_sha256 != "$reviewed_gate_runner_sha256" ]]; then
 fi
 
 verify_checker_sources
+verify_reviewed_tracked_tree
 
 printf 'maintainability bootstrap check passed\n'
 

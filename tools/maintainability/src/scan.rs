@@ -15,7 +15,7 @@ use syn::{
     ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemTraitAlias, ItemType, ItemUnion, ItemUse, Macro, StaticMutability, TraitItemConst, TraitItemFn, TraitItemType,
 };
 
-use self::documentation::{is_doc_comment, unsupported_runnable_doctest};
+pub use self::documentation::{is_doc_comment, unsupported_runnable_doctest};
 use self::files::{collect_optional as collect_optional_rust_files, collect_required as collect_rust_files};
 use self::policy::{
     contains_include_macro, contains_opaque_attribute, contains_path_attribute, contains_structural_ident, contains_unaudited_macro_syntax, generated_name_binding,

@@ -3,7 +3,7 @@ use syn::ext::IdentExt as _;
 use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 
-pub(super) fn unsupported_runnable_doctest(syntax: &syn::File) -> Option<&'static str> {
+pub fn unsupported_runnable_doctest(syntax: &syn::File) -> Option<&'static str> {
     let mut collector = DocCommentCollector::default();
     collector.visit_file(syntax);
 
@@ -21,7 +21,7 @@ pub(super) fn unsupported_runnable_doctest(syntax: &syn::File) -> Option<&'stati
     None
 }
 
-pub(super) fn is_doc_comment(attribute: &Attribute) -> bool {
+pub fn is_doc_comment(attribute: &Attribute) -> bool {
     doc_comment_source(attribute).is_some()
 }
 

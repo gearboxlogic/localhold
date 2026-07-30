@@ -58,6 +58,9 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_token("cargo --change-directory=../other build"));
     assert!(!weakening_token("cargo rustc -- -C opt-level=3"));
     assert!(weakening_token("cargo-clippy clippy -- -A warnings"));
+    assert!(weakening_token("cargo clippy -- -\"\"A warnings"));
+    assert!(weakening_token("cargo clippy -- \"--al\"low warnings"));
+    assert!(weakening_token("cargo clippy -- -\\A warnings"));
     assert!(weakening_token("rustc @policy/lints.args source.rs"));
     assert!(weakening_token("LABEL=@not-a-response rustc @policy/lints.args source.rs"));
     assert!(weakening_token("cargo rustc -- @policy/lints.args"));

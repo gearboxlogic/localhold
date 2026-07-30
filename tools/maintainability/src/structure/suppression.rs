@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use self::source::SourceScanner;
 use super::classify::Inventory;
 
+mod modules;
 mod policy;
 mod source;
 mod targets;
@@ -79,7 +80,7 @@ impl SourceCategory {
 }
 
 pub fn scan_workspace(workspace: &Path, inventory: &Inventory, component_paths: &BTreeMap<&str, &str>) -> Result<Vec<SourceSuppression>> {
-    let target_sources = targets::root_package_target_sources(workspace)?;
+    let target_sources = modules::expand_target_sources(workspace, targets::root_package_target_sources(workspace)?, |path| component_paths.contains_key(path))?;
     scan_with(inventory, component_paths, &target_sources, |path| {
         let source_path = workspace.join(path);
         fs::read_to_string(&source_path).with_context(|| format!("read suppression source {}", source_path.display()))
@@ -88,7 +89,7 @@ pub fn scan_workspace(workspace: &Path, inventory: &Inventory, component_paths: 
 
 pub fn scan_revision(workspace: &Path, revision: &str, inventory: &Inventory, component_paths: &BTreeMap<&str, &str>) -> Result<Vec<SourceSuppression>> {
     let mut target_sources = BTreeMap::new();
-    for (path, category) in targets::root_package_target_sources(workspace)? {
+    for (path, category) in modules::expand_target_sources(workspace, targets::root_package_target_sources(workspace)?, |path| component_paths.contains_key(path))? {
         if component_paths.contains_key(path.as_str()) || revision_contains_path(workspace, revision, &path)? {
             target_sources.insert(path, category);
         }
@@ -109,7 +110,17 @@ pub fn scan_revision(workspace: &Path, revision: &str, inventory: &Inventory, co
 
 pub(super) fn reject_tooling_suppressions(workspace: &Path) -> Result<()> {
     let tools_root = fs::canonicalize(workspace.join("tools")).context("resolve maintainer-tool source root")?;
-    for path in tooling_rust_paths(workspace)? {
+    let tooling_paths = tooling_paths(workspace)?;
+    let manifests = tooling_paths
+        .iter()
+        .filter(|path| Path::new(path).file_name().and_then(|name| name.to_str()) == Some("Cargo.toml"))
+        .cloned()
+        .collect::<Vec<_>>();
+    targets::reject_tooling_target_escapes(workspace, &manifests)?;
+    for path in tooling_paths
+        .into_iter()
+        .filter(|path| Path::new(path).extension().and_then(|extension| extension.to_str()) == Some("rs"))
+    {
         let absolute = workspace.join(&path);
         let metadata = fs::symlink_metadata(&absolute).with_context(|| format!("inspect maintainer-tool source {}", absolute.display()))?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -187,7 +198,7 @@ fn revision_contains_path(workspace: &Path, revision: &str, path: &str) -> Resul
     Ok(true)
 }
 
-fn tooling_rust_paths(workspace: &Path) -> Result<Vec<String>> {
+fn tooling_paths(workspace: &Path) -> Result<Vec<String>> {
     let output = Command::new("git")
         .current_dir(workspace)
         .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "tools"])
@@ -200,11 +211,8 @@ fn tooling_rust_paths(workspace: &Path) -> Result<Vec<String>> {
     for raw in output.stdout.split(|byte| *byte == b'\0').filter(|path| !path.is_empty()) {
         let path = std::str::from_utf8(raw).context("maintainer-tool source path is not UTF-8")?;
         let relative = Path::new(path);
-        if relative.extension().and_then(|extension| extension.to_str()) != Some("rs") {
-            continue;
-        }
         if relative.is_absolute() || !relative.starts_with("tools") || relative.components().any(|component| !matches!(component, Component::Normal(_))) {
-            bail!("maintainer-tool source path must be normalized under tools/: {path:?}");
+            bail!("maintainer-tool path must be normalized under tools/: {path:?}");
         }
         paths.push(path.to_owned());
     }

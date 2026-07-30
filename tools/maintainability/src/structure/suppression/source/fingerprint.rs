@@ -28,7 +28,7 @@ fn normalized_suppression_meta(meta: &Meta) -> Result<TokenStream> {
     let Meta::List(list) = meta else {
         return Ok(meta.to_token_stream());
     };
-    if !list.path.is_ident("allow") && !list.path.is_ident("expect") {
+    if !list.path.is_ident("allow") && !list.path.is_ident("expect") && !list.path.is_ident("warn") {
         return Ok(meta.to_token_stream());
     }
     let arguments = Punctuated::<Meta, Token![,]>::parse_terminated
@@ -74,7 +74,7 @@ fn normalized_attribute(group: &Group) -> Option<TokenStream> {
 }
 
 fn normalized_meta_without_suppressions(meta: &Meta) -> Option<TokenStream> {
-    if meta.path().is_ident("allow") || meta.path().is_ident("expect") {
+    if meta.path().is_ident("allow") || meta.path().is_ident("expect") || meta.path().is_ident("warn") {
         return None;
     }
     if !meta.path().is_ident("cfg_attr") {

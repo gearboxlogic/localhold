@@ -126,6 +126,40 @@ fn empty_reasons_are_inventoried_for_policy_rejection() -> Result<()> {
 }
 
 #[test]
+fn warn_overrides_are_inventoried_for_policy_rejection() -> Result<()> {
+    let sites = scan(
+        "#[warn(clippy::unwrap_used, reason = \"lowered deny\")]\nfn unchecked() {}\n\
+         #[cfg_attr(test, warn(clippy::panic, reason = \"conditional override\"))]\nfn conditional() {}\n",
+        SourceCategory::Production,
+    )?;
+    assert_eq!(
+        sites.iter().map(|site| (site.level.as_str(), site.lint.as_str(), site.category)).collect::<Vec<_>>(),
+        [("warn", "clippy::unwrap_used", SourceCategory::Production), ("warn", "clippy::panic", SourceCategory::Test),]
+    );
+    Ok(())
+}
+
+#[test]
+fn runnable_doctests_and_explicit_doc_inputs_fail_closed() {
+    let doctest = scan(
+        "/// ```\n/// #![allow(unused_variables)]\n/// let hidden = 1;\n/// ```\nfn documented() {}\n",
+        SourceCategory::Production,
+    )
+    .unwrap_err();
+    assert!(doctest.to_string().contains("runnable Rust doctests"));
+
+    let included = scan("#[doc = include_str!(\"guide.md\")]\nfn documented() {}\n", SourceCategory::Production).unwrap_err();
+    assert!(format!("{included:#}").contains("included doctest content cannot be audited"));
+
+    let conditional = scan(
+        "#[cfg_attr(feature = \"guide\", doc = include_str!(\"guide.md\"))]\nfn documented() {}\n",
+        SourceCategory::Production,
+    )
+    .unwrap_err();
+    assert!(format!("{conditional:#}").contains("included doctest content cannot be audited"));
+}
+
+#[test]
 fn stable_ids_follow_the_reviewed_item_across_file_splits() -> Result<()> {
     let syntax = syn::parse_file("#[expect(clippy::too_many_lines, reason = \"legacy handler\")]\nfn serve() {}\n")?;
     let first = SourceScanner::scan("src/first.rs", "protocol", SourceCategory::Production, &syntax)?;

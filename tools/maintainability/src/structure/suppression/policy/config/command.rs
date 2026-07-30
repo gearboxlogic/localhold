@@ -64,6 +64,9 @@ pub(super) fn weakening_token(source: &str) -> bool {
 
 fn weakening_rust_command(command: &str) -> bool {
     let tokens = command_tokens(command);
+    if tokens.iter().any(|token| token.chars().any(char::is_whitespace) && weakening_token(token)) {
+        return true;
+    }
     if !tokens.iter().any(|token| is_rust_tool_token(token)) {
         return false;
     }
@@ -71,24 +74,24 @@ fn weakening_rust_command(command: &str) -> bool {
         || cargo_changes_directory_before_compiler_arguments(&tokens)
         || rust_response_file(&tokens)
         || tokens.iter().any(|token| {
-            *token == "-A"
+            token == "-A"
                 || token.starts_with("-A") && token.len() > 2
-                || *token == "--allow"
-                || *token == "-W"
+                || token == "--allow"
+                || token == "-W"
                 || token.starts_with("-W") && token.len() > 2
-                || matches!(*token, "--warn" | "--force-warn")
+                || matches!(token.as_str(), "--warn" | "--force-warn")
         })
         || tokens.iter().any(|token| token.starts_with("--config")) && !is_cargo_deny_command(&tokens)
 }
 
-fn cargo_changes_directory_before_compiler_arguments(tokens: &[&str]) -> bool {
+fn cargo_changes_directory_before_compiler_arguments(tokens: &[String]) -> bool {
     let Some(cargo_index) = tokens.iter().position(|token| is_cargo_tool_token(token)) else {
         return false;
     };
     tokens[cargo_index.saturating_add(1)..]
         .iter()
-        .take_while(|token| **token != "--")
-        .any(|token| *token == "-C" || token.starts_with("-C") && token.len() > 2 || *token == "--change-directory" || token.starts_with("--change-directory="))
+        .take_while(|token| token.as_str() != "--")
+        .any(|token| token == "-C" || token.starts_with("-C") && token.len() > 2 || token == "--change-directory" || token.starts_with("--change-directory="))
 }
 
 fn command_without_comment(segment: &str) -> &str {
@@ -114,11 +117,48 @@ fn command_without_comment(segment: &str) -> &str {
     segment
 }
 
-fn command_tokens(command: &str) -> Vec<&str> {
-    command
-        .split(|character: char| character.is_whitespace() || matches!(character, '\'' | '"' | '\\' | '='))
-        .filter(|token| !token.is_empty())
-        .collect()
+fn command_tokens(command: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for character in command.chars() {
+        if escaped {
+            token.push(character);
+            escaped = false;
+        } else if quote == Some('\'') {
+            if character == '\'' {
+                quote = None;
+            } else {
+                token.push(character);
+            }
+        } else if quote == Some('"') {
+            if character == '"' {
+                quote = None;
+            } else if character == '\\' {
+                escaped = true;
+            } else {
+                token.push(character);
+            }
+        } else if matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if character == '\\' {
+            escaped = true;
+        } else if character.is_whitespace() || character == '=' {
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+        } else {
+            token.push(character);
+        }
+    }
+    if escaped {
+        token.push('\\');
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    tokens
 }
 
 fn is_rust_tool_token(token: &str) -> bool {
@@ -141,7 +181,7 @@ fn is_rust_tool_token(token: &str) -> bool {
     )
 }
 
-fn rust_response_file(tokens: &[&str]) -> bool {
+fn rust_response_file(tokens: &[String]) -> bool {
     tokens
         .iter()
         .enumerate()
@@ -153,7 +193,7 @@ fn rust_response_file(tokens: &[&str]) -> bool {
                     is_cargo_tool_token(token)
                         && preceding[index.saturating_add(1)..]
                             .iter()
-                            .any(|argument| matches!(*argument, "rustc" | "rustdoc" | "clippy"))
+                            .any(|argument| matches!(argument.as_str(), "rustc" | "rustdoc" | "clippy"))
                 })
         })
 }
@@ -174,8 +214,8 @@ fn tool_basename(token: &str) -> &str {
     token.rsplit(['/', '\\']).next().unwrap_or(token)
 }
 
-fn is_cargo_deny_command(tokens: &[&str]) -> bool {
-    tokens.windows(2).any(|pair| pair == ["cargo", "deny"])
+fn is_cargo_deny_command(tokens: &[String]) -> bool {
+    tokens.windows(2).any(|pair| pair[0] == "cargo" && pair[1] == "deny")
 }
 
 pub(super) fn weakening_environment(source: &str) -> bool {

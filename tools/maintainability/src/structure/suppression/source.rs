@@ -13,6 +13,7 @@ use syn::{Arm, Attribute, Expr, ForeignItem, GenericParam, ImplItem, Item, Local
 use self::fingerprint::{suppression_free_fingerprint, suppression_site_fingerprint};
 use self::nodes::{SuppressionScope, foreign_item_scope, impl_item_scope, item_scope, trait_item_scope};
 use super::{SourceCategory, SourceSuppression};
+use crate::scan::{is_doc_comment, unsupported_runnable_doctest};
 use crate::structure::syntax::{
     ProductionCfgContext, cfg_attr_metas_with_production_reachability, expr_attributes, foreign_item_attributes, generic_param_attributes, impl_item_attributes, item_attributes,
     normalized_ident, pat_attributes, production_cfg_context, trait_item_attributes,
@@ -50,6 +51,9 @@ pub(super) struct SourceScanner {
 
 impl SourceScanner {
     pub(super) fn scan(path: &str, component: &str, category: SourceCategory, syntax: &syn::File) -> Result<Vec<SourceSuppression>> {
+        if let Some(reason) = unsupported_runnable_doctest(syntax) {
+            bail!("{path}: {reason}");
+        }
         let mut scanner = Self {
             category,
             cfg_context: ProductionCfgContext::default(),
@@ -172,6 +176,8 @@ impl SourceScanner {
             "expect"
         } else if meta.path().is_ident("allow") {
             "allow"
+        } else if meta.path().is_ident("warn") {
+            "warn"
         } else {
             return Ok(());
         };
@@ -253,6 +259,7 @@ impl SourceScanner {
     fn record_macro_attribute(&mut self, group: &proc_macro2::Group) -> Result<()> {
         match syn::parse2::<Meta>(group.stream()) {
             Ok(meta) => {
+                reject_explicit_documentation_meta(&meta)?;
                 validate_audited_module_path_meta(&meta).context("validate macro-carried module path")?;
                 self.record_meta(&meta, self.category, true, None).context("classify macro-carried lint attribute")
             }
@@ -386,7 +393,11 @@ impl<'ast> Visit<'ast> for SourceScanner {
 
     fn visit_attribute(&mut self, attribute: &'ast Attribute) {
         if self.error.is_none() {
-            if let Err(error) = validate_audited_module_path(attribute) {
+            if is_doc_comment(attribute) {
+                self.record_attribute(attribute, false).unwrap_or_else(|error| self.error = Some(error));
+            } else if let Err(error) = reject_explicit_documentation_meta(&attribute.meta) {
+                self.error = Some(error);
+            } else if let Err(error) = validate_audited_module_path(attribute) {
                 self.error = Some(error);
             } else if let Err(error) = self.record_attribute(attribute, false) {
                 self.error = Some(error);
@@ -404,6 +415,25 @@ impl<'ast> Visit<'ast> for SourceScanner {
         }
         visit::visit_macro(self, node);
     }
+}
+
+fn reject_explicit_documentation_meta(meta: &Meta) -> Result<()> {
+    if meta.path().is_ident("doc") {
+        bail!("explicit #[doc] attributes are unsupported because included doctest content cannot be audited");
+    }
+    if !meta.path().is_ident("cfg_attr") {
+        return Ok(());
+    }
+    let Meta::List(list) = meta else {
+        return Ok(());
+    };
+    let arguments = Punctuated::<Meta, Token![,]>::parse_terminated
+        .parse2(list.tokens.clone())
+        .context("parse cfg_attr arguments for documentation source classification")?;
+    for nested in arguments.iter().skip(1) {
+        reject_explicit_documentation_meta(nested)?;
+    }
+    Ok(())
 }
 
 fn validate_audited_module_path(attribute: &Attribute) -> Result<()> {

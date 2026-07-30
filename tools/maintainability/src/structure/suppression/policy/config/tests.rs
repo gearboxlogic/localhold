@@ -73,6 +73,26 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(!weakening_token("gitleaks --config policy.toml # cargo output"));
     assert!(!weakening_token("cargo build\ncc -Wall -Wextra"));
     assert!(!weakening_token("hold doctor --allow-downloads"));
+}
+
+#[test]
+fn folded_yaml_commands_are_scanned_as_executed() {
+    assert!(weakening_token_for_surface(
+        ".github/workflows/ci.yml",
+        "steps:\n  - run: >-\n      cargo clippy --\n      -A warnings\n"
+    ));
+    assert!(weakening_token_for_surface(
+        ".github/actions/check/action.yaml",
+        "runs:\n  steps:\n    - 'run': > # folded command\n        cargo clippy --\n        --allow warnings\n"
+    ));
+    assert!(!weakening_token_for_surface(
+        ".github/workflows/ci.yml",
+        "steps:\n  - run: >\n      cargo build\n\n      echo application -A argument\n"
+    ));
+}
+
+#[test]
+fn weakening_environment_channels_are_detected() {
     assert!(weakening_environment("export RUSTFLAGS='-A warnings'\nexec \"$CHECK\""));
     assert!(weakening_environment("CARGO_ENCODED_RUSTFLAGS=dynamic"));
     assert!(weakening_environment("RUSTDOCFLAGS=--cap-lints=allow"));
@@ -198,6 +218,26 @@ fn command_policy_rejects_cargo_configuration_relocation() {
     fs::write(workspace.path().join("script/check.sh"), "cargo -Z unstable-options -C ../other check\n").expect("Cargo directory relocation");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("lint-weakening argument"));
+
+    fs::remove_file(workspace.path().join("script/check.sh")).expect("delete command surface");
+    reject_checked_in_weakening(workspace.path()).expect("deleted command surfaces are absent");
+}
+
+#[test]
+fn command_policy_scans_extensionless_scripts() {
+    for (source, executable) in [("cargo clippy -- -A warnings\n", true), ("#!/bin/sh\ncargo clippy -- -A warnings\n", false)] {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        fs::create_dir_all(workspace.path().join("tools")).expect("tool directory");
+        fs::write(workspace.path().join("tools/run-lints"), source).expect("extensionless lint script");
+        git(workspace.path(), &["init", "-q"]);
+        git(workspace.path(), &["add", "."]);
+        if executable {
+            git(workspace.path(), &["update-index", "--chmod=+x", "tools/run-lints"]);
+        }
+
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("lint-weakening argument"));
+    }
 }
 
 #[test]

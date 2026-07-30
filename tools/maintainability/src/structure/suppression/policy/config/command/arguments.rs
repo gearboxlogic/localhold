@@ -6,7 +6,11 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token(source:
 }
 
 pub(in crate::structure::suppression::policy::config) fn weakening_token_for_surface(path: &str, source: &str) -> bool {
-    weakening_token_with_case(source, is_windows_command_surface(path))
+    let case_insensitive_tools = is_windows_command_surface(path);
+    weakening_token_with_case(source, case_insensitive_tools)
+        || super::yaml::folded_run_commands(path, source)
+            .iter()
+            .any(|command| weakening_token_with_case(command, case_insensitive_tools))
 }
 
 fn weakening_token_with_case(source: &str, case_insensitive_tools: bool) -> bool {

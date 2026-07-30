@@ -1,16 +1,16 @@
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use super::parse_nul_paths;
-
 mod arguments;
+mod surfaces;
+mod yaml;
 use arguments::is_windows_command_surface;
 #[cfg(test)]
 pub(super) use arguments::weakening_token;
 pub(super) use arguments::weakening_token_for_surface;
+use surfaces::execution_surfaces;
 
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "cargo_home=${CARGO_HOME:-}",
@@ -49,18 +49,6 @@ pub fn reject_checked_in_weakening(workspace: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn execution_surfaces(workspace: &Path) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .current_dir(workspace)
-        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
-        .output()
-        .context("list checked-in command execution surfaces")?;
-    if !output.status.success() {
-        bail!("git ls-files failed while listing command execution surfaces");
-    }
-    parse_nul_paths(&output.stdout, is_execution_surface)
 }
 
 pub(super) fn weakening_environment(source: &str) -> bool {

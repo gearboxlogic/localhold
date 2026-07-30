@@ -39,12 +39,15 @@ fn revision_rust_sources(workspace: &Path, revision: &str) -> Result<BTreeSet<St
     for record in output.stdout.split(|byte| *byte == b'\0').filter(|record| !record.is_empty()) {
         let record = std::str::from_utf8(record).context("suppression comparison tree entry is not UTF-8")?;
         let (metadata, path) = record.split_once('\t').context("suppression comparison tree entry has no path")?;
-        if Path::new(path).extension().and_then(|extension| extension.to_str()) != Some("rs") {
+        let fields = metadata.split(' ').collect::<Vec<_>>();
+        if fields.len() != 3 {
+            bail!("suppression comparison tree entry has malformed metadata");
+        }
+        if fields[1] != "blob" || fields[0] != "100644" && fields[0] != "100755" {
             continue;
         }
-        let fields = metadata.split(' ').collect::<Vec<_>>();
-        if fields.len() != 3 || fields[0] != "100644" && fields[0] != "100755" || fields[1] != "blob" {
-            bail!("suppression comparison Rust source must be a regular Git blob: {path:?}");
+        if Path::new(path).extension().and_then(|extension| extension.to_str()) != Some("rs") {
+            continue;
         }
         validate_source_path(path)?;
         sources.insert(path.to_owned());

@@ -134,6 +134,13 @@ fn revision_scan_uses_the_previous_cargo_targets_and_module_graph() {
     )
     .expect("old example root");
     fs::write(old_example.join("helper.rs"), "#![allow(clippy::panic, reason = \"legacy example helper\")]\n").expect("old example helper");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        fs::create_dir_all(workspace.path().join("docs")).expect("documentation directory");
+        symlink("../examples/old/helper.rs", workspace.path().join("docs/snippet.rs")).expect("unreferenced Rust symlink");
+    }
     git(workspace.path(), &["init", "-q"]);
     git(workspace.path(), &["add", "."]);
     git(

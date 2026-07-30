@@ -48,7 +48,7 @@ fn runs_using(source: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
-fn is_action_metadata(path: &str) -> bool {
+pub(super) fn is_action_metadata(path: &str) -> bool {
     matches!(
         Path::new(path).file_name().and_then(|name| name.to_str()).map(str::to_ascii_lowercase).as_deref(),
         Some("action.yml" | "action.yaml")

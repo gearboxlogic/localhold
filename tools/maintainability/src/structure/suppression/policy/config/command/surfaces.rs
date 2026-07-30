@@ -2,7 +2,6 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{ErrorKind, Read};
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -11,7 +10,7 @@ use super::actions::validate_local_actions;
 use super::is_execution_surface;
 
 pub(super) fn execution_surfaces(workspace: &Path) -> Result<Vec<String>> {
-    let output = Command::new("git")
+    let output = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
         .output()
@@ -41,7 +40,7 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<Vec<String>> {
 }
 
 fn tracked_executables(workspace: &Path) -> Result<BTreeSet<String>> {
-    let output = Command::new("git")
+    let output = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["ls-files", "-z", "--stage", "--cached"])
         .output()

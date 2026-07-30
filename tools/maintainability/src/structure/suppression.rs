@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -196,7 +195,7 @@ fn scan_with(
 }
 
 fn tooling_paths(workspace: &Path) -> Result<Vec<String>> {
-    let output = Command::new("git")
+    let output = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "tools"])
         .output()

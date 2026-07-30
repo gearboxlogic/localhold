@@ -7,10 +7,11 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 const BASE_REVISION_ENV: &str = "LOCALHOLD_MAINTAINABILITY_BASE_REV";
+const GIT_COMMAND_ENV: &str = "LOCALHOLD_MAINTAINABILITY_GIT";
 const ZERO_REVISION: &str = "0000000000000000000000000000000000000000";
 
 pub(super) fn git_command() -> Command {
-    let mut command = Command::new("git");
+    let mut command = Command::new(env::var_os(GIT_COMMAND_ENV).unwrap_or_else(|| "git".into()));
     command.env("GIT_NO_REPLACE_OBJECTS", "1");
     command
 }
@@ -29,7 +30,29 @@ pub(super) fn maintainability_base_revision() -> Result<Option<String>> {
     let event_base = event_base_revision(&event)?;
     let head = head.context("GitHub Actions maintainability checks require GITHUB_SHA")?;
     validate_revision(&head, "GitHub head revision")?;
+    require_checked_out_head(&head, &checked_out_head_revision()?)?;
     select_base_revision(configured.as_deref(), Some(event_base), Some(&head))
+}
+
+fn checked_out_head_revision() -> Result<String> {
+    let output = git_command()
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .context("read checked-out Git head revision")?;
+    if !output.status.success() {
+        bail!("cannot read checked-out Git head revision");
+    }
+    let revision = String::from_utf8(output.stdout).context("checked-out Git head revision is not UTF-8")?;
+    let revision = revision.trim();
+    validate_revision(revision, "checked-out Git head revision")?;
+    Ok(revision.to_owned())
+}
+
+fn require_checked_out_head(github_head: &str, checked_out_head: &str) -> Result<()> {
+    if !github_head.eq_ignore_ascii_case(checked_out_head) {
+        bail!("checked-out Git head revision differs from GITHUB_SHA");
+    }
+    Ok(())
 }
 
 fn github_actions_environment(marker: Option<&str>, has_event_path: bool, has_head: bool) -> Result<bool> {
@@ -101,6 +124,13 @@ mod tests {
         assert_eq!(select_base_revision(Some(BASE), Some(BASE), Some(HEAD)).unwrap().as_deref(), Some(BASE));
         assert!(select_base_revision(Some(HEAD), Some(BASE), Some(HEAD)).is_err());
         assert!(select_base_revision(Some(BASE), Some(BASE), Some(BASE)).is_err());
+    }
+
+    #[test]
+    fn github_head_must_match_the_checked_out_revision() {
+        require_checked_out_head(HEAD, HEAD).expect("exact event head");
+        require_checked_out_head(&HEAD.to_ascii_uppercase(), HEAD).expect("hex case does not change revision identity");
+        assert!(require_checked_out_head(HEAD, BASE).is_err());
     }
 
     #[test]

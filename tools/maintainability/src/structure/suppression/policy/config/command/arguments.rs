@@ -130,6 +130,7 @@ fn weakening_rust_command(command: &str, case_insensitive_tools: bool) -> bool {
         || declares_rust_tool_alias(&tokens)
         || cargo_changes_directory_before_compiler_arguments(&tokens, case_insensitive_tools)
         || rust_response_file(&tokens, case_insensitive_tools)
+        || injects_crate_attribute(&tokens)
         || tokens
             .iter()
             .any(|token| token == "-A" || token.starts_with("-A") && token.len() > 2 || token == "-W" || token.starts_with("-W") && token.len() > 2 || is_long_lint_option(token))
@@ -160,6 +161,14 @@ fn is_long_lint_option(token: &str) -> bool {
     ["--allow", "--warn", "--force-warn", "--cap-lints"]
         .iter()
         .any(|option| token == *option || token.strip_prefix(option).is_some_and(|suffix| suffix.starts_with('=')))
+}
+
+fn injects_crate_attribute(tokens: &[String]) -> bool {
+    tokens.iter().enumerate().any(|(index, token)| {
+        token == "-Zcrate-attr"
+            || token.starts_with("-Zcrate-attr=")
+            || token == "-Z" && tokens.get(index + 1).is_some_and(|value| value == "crate-attr" || value.starts_with("crate-attr="))
+    })
 }
 
 fn collect_direct_rust_sources(source: &str, case_insensitive_tools: bool, sources: &mut BTreeSet<String>) -> bool {
@@ -336,5 +345,5 @@ pub(super) fn has_case_insensitive_tool_names(path: &str) -> bool {
             .extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "yml" | "yaml"))
-            && (path.starts_with(".github/workflows") || path.starts_with(".github/actions"))
+            && (path.starts_with(".github/workflows") || super::actions::is_action_metadata(path.to_string_lossy().as_ref()))
 }

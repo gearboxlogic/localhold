@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -90,7 +89,7 @@ fn read_manifest(path: &Path) -> Result<toml::Table> {
 }
 
 pub(super) fn tracked_manifests(workspace: &Path) -> Result<Vec<String>> {
-    let output = Command::new("git")
+    let output = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "Cargo.toml", ":(glob)**/Cargo.toml"])
         .output()

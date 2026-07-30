@@ -19,22 +19,25 @@ use surfaces::execution_surfaces;
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "cargo_home=${CARGO_HOME:-}",
     "    LOCALHOLD_MAINTAINABILITY_CARGO=$(trusted_command_path cargo)",
-    "    export LOCALHOLD_MAINTAINABILITY_CARGO",
-    "            RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
+    "    LOCALHOLD_MAINTAINABILITY_GIT=$git_executable",
+    "    export LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_GIT",
+    "            RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
     "                RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \\",
     "                CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \\",
-    "                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER)",
+    "                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_*)",
 ];
-pub(super) const RUNNER_ENVIRONMENT_LINES: &[&str] =
-    &["readonly cargo_command=${LOCALHOLD_MAINTAINABILITY_CARGO:?maintainability bootstrap did not provide an absolute Cargo command}"];
+pub(super) const RUNNER_ENVIRONMENT_LINES: &[&str] = &[
+    "readonly cargo_command=${LOCALHOLD_MAINTAINABILITY_CARGO:?maintainability bootstrap did not provide an absolute Cargo command}",
+    "readonly git_command=${LOCALHOLD_MAINTAINABILITY_GIT:?maintainability bootstrap did not provide an absolute Git command}",
+];
 pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "CARGO_HOME='C:\\cargo-home' \\",
     "export CARGO_HOME=$cargo_home",
     "unset CARGO_HOME",
-    "RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted CLIPPY_CONF_DIR=untrusted \\",
+    "RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \\",
     "    RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \\",
     "    CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \\",
-    "    run_check -- bash -c 'for name in RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS CLIPPY_CONF_DIR RUSTDOC RUSTC_WRAPPER CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do [[ ! -v $name ]] || exit 1; done' >/dev/null",
+    "    run_check -- bash -c 'for name in RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTDOC RUSTC_WRAPPER CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do [[ ! -v $name ]] || exit 1; done' >/dev/null",
 ];
 pub(super) const MISE_ENVIRONMENT_LINES: &[&str] = &["CARGO_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/cargo\""];
 pub(super) const CI_REVISION_ENVIRONMENT_LINES: &[&str] = &[
@@ -98,6 +101,7 @@ fn weakening_environment_names(source: &str, case_insensitive: bool) -> bool {
                     | "CLIPPY_CONF_DIR"
                     | "RUSTC"
                     | "RUSTDOC"
+                    | "RUSTC_BOOTSTRAP"
                     | "RUSTC_WRAPPER"
                     | "RUSTC_WORKSPACE_WRAPPER"
                     | "CARGO_HOME"
@@ -113,6 +117,7 @@ fn weakening_environment_names(source: &str, case_insensitive: bool) -> bool {
                     | "GITHUB_SHA"
                     | "LOCALHOLD_MAINTAINABILITY_BASE_REV"
                     | "LOCALHOLD_MAINTAINABILITY_CARGO"
+                    | "LOCALHOLD_MAINTAINABILITY_GIT"
                     | "MISE_CONFIG_DIR"
                     | "MISE_CONFIG_FILE"
                     | "MISE_CEILING_PATHS"
@@ -126,6 +131,7 @@ fn weakening_environment_names(source: &str, case_insensitive: bool) -> bool {
                     | "MISE_SYSTEM_DIR"
             ) || name.starts_with("CARGO_ALIAS_")
                 || name.starts_with("CARGO_TARGET_") && (name.ends_with("_RUSTFLAGS") || name.ends_with("_RUSTDOCFLAGS") || name.ends_with("_LINKER") || name.ends_with("_RUNNER"))
+                || name.starts_with("GIT_")
         })
 }
 

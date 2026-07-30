@@ -145,9 +145,25 @@ if [[ -e "$fixture/repository-cargo-ran" ]]; then
 fi
 rm -r "$test_repository/bin"
 
-RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted CLIPPY_CONF_DIR=untrusted \
+restore_reviewed_graph
+mkdir -p "$test_repository/bin"
+git_name=git
+fake_git="$test_repository/bin/$git_name"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fake_git"
+chmod +x "$fake_git"
+if PATH="$test_repository/bin:$PATH" run_check -- touch "$fixture/repository-git-ran" >/dev/null 2>&1; then
+    printf 'maintainability bootstrap accepted a repository-controlled Git executable\n' >&2
+    exit 1
+fi
+if [[ -e "$fixture/repository-git-ran" ]]; then
+    printf 'maintainability bootstrap ran a command with repository-controlled Git\n' >&2
+    exit 1
+fi
+rm -r "$test_repository/bin"
+
+RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \
     RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \
     CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \
-    run_check -- bash -c 'for name in RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS CLIPPY_CONF_DIR RUSTDOC RUSTC_WRAPPER CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do [[ ! -v $name ]] || exit 1; done' >/dev/null
+    run_check -- bash -c 'for name in RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTDOC RUSTC_WRAPPER CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do [[ ! -v $name ]] || exit 1; done' >/dev/null
 
 printf 'maintainability bootstrap tests passed\n'

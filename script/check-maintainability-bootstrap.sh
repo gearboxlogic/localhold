@@ -35,7 +35,7 @@ readonly reviewed_manifest_sha256=cca207767614bd2c1d46bc06092b69e90157aeb450797f
 readonly reviewed_lockfile_sha256=825c6448351761aa5c4c6e1ce6b3696c927c4f46c5d43642846380d24f10467c
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
-readonly reviewed_runner_sha256=26e1e58ba33248a825d63d0ab0ebcd1d3afec0fac0ab8566aaa5bbbf77bff3bc
+readonly reviewed_runner_sha256=09c7b7cc9472acc7ec19633a9ccbf54eb7cf66215ec5921ade3cbd3eacd5eb1e
 
 for reviewed_path in "$manifest" "$lockfile" "$mise_config" "$mise_lockfile" "$runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then
@@ -197,14 +197,20 @@ printf 'maintainability bootstrap check passed\n'
 
 if (( ${#command[@]} > 0 )); then
     LOCALHOLD_MAINTAINABILITY_CARGO=$(trusted_command_path cargo)
-    export LOCALHOLD_MAINTAINABILITY_CARGO
+    git_executable=$(trusted_command_path git)
+    if [[ $OSTYPE == msys* || $OSTYPE == cygwin* ]]; then
+        cygpath_command=$(trusted_command_path cygpath)
+        git_executable=$("$cygpath_command" -w "$git_executable")
+    fi
+    LOCALHOLD_MAINTAINABILITY_GIT=$git_executable
+    export LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_GIT
     while IFS= read -r name; do
         uppercase=${name^^}
         case "$uppercase" in
-            RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
+            RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
                 RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \
                 CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \
-                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER)
+                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_*)
                 unset "$name"
                 ;;
         esac

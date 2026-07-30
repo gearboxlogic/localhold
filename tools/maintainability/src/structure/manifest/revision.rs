@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+#[cfg(test)]
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -66,7 +69,7 @@ fn changed_rust_paths(workspace: &Path, revision: &str, roots: &[String]) -> Res
     if !diff.status.success() {
         bail!("git diff failed while listing changed structural paths");
     }
-    let untracked = Command::new("git")
+    let untracked = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["ls-files", "--others", "--exclude-standard", "-z", "--"])
         .args(roots)

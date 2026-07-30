@@ -8,8 +8,13 @@ repository_root=$(cd -- "$script_directory/.." && pwd -P)
 cd -- "$repository_root"
 
 readonly cargo_command=${LOCALHOLD_MAINTAINABILITY_CARGO:?maintainability bootstrap did not provide an absolute Cargo command}
+readonly git_command=${LOCALHOLD_MAINTAINABILITY_GIT:?maintainability bootstrap did not provide an absolute Git command}
 if [[ $cargo_command != /* && ! $cargo_command =~ ^[[:alpha:]]:[/\\] ]]; then
     printf 'maintainability bootstrap Cargo command must be absolute\n' >&2
+    exit 1
+fi
+if [[ $git_command != /* && ! $git_command =~ ^[[:alpha:]]:[/\\] ]]; then
+    printf 'maintainability bootstrap Git command must be absolute\n' >&2
     exit 1
 fi
 

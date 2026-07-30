@@ -75,6 +75,8 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_token("cargo clippy -- --allow warnings"));
     assert!(weakening_token("cargo clippy -- -W warnings"));
     assert!(weakening_token("cargo clippy -- --warn warnings"));
+    assert!(weakening_token("RUSTC_BOOTSTRAP=1 cargo clippy -- -D warnings -Zcrate-attr='allow(dead_code)'"));
+    assert!(weakening_token("rustc -Z crate-attr=allow(dead_code) source.rs"));
     assert!(weakening_token("cargo --config build.rustflags='-A warnings' clippy"));
     assert!(weakening_token("cargo deny --config deny.toml; cargo --config build.rustflags='-A warnings' clippy"));
     assert!(weakening_token("cargo \\\n  --config build.rustflags='-A warnings' clippy"));
@@ -156,6 +158,8 @@ fn weakening_environment_channels_are_detected() {
     assert!(weakening_environment("CLIPPY_ARGS='--allow warnings'"));
     assert!(weakening_environment("CLIPPY_CONF_DIR=unreviewed"));
     assert!(weakening_environment("RUSTC_WRAPPER=unreviewed"));
+    assert!(weakening_environment("RUSTC_BOOTSTRAP=1"));
+    assert!(weakening_environment("GIT_DIR=untrusted"));
     assert!(weakening_environment("CARGO_TARGET_TEST_RUSTFLAGS=unreviewed"));
     assert!(weakening_environment("CARGO_HOME=unreviewed"));
     assert!(weakening_environment("unset GITHUB_ACTIONS"));
@@ -303,18 +307,20 @@ fn command_policy_scans_extensionless_scripts() {
 
 #[test]
 fn local_composite_actions_are_scanned_in_any_directory() {
-    let workspace = tempfile::tempdir().expect("temporary workspace");
-    fs::create_dir_all(workspace.path().join("actions/lint")).expect("action directory");
-    fs::write(
-        workspace.path().join("actions/lint/action.yml"),
-        "name: lint\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: cargo clippy -- -A warnings\n",
-    )
-    .expect("composite action");
-    git(workspace.path(), &["init", "-q"]);
-    git(workspace.path(), &["add", "."]);
+    for command in ["cargo clippy -- -A warnings", "CARGO.EXE clippy -- -A warnings"] {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        fs::create_dir_all(workspace.path().join("actions/lint")).expect("action directory");
+        fs::write(
+            workspace.path().join("actions/lint/action.yml"),
+            format!("name: lint\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: {command}\n"),
+        )
+        .expect("composite action");
+        git(workspace.path(), &["init", "-q"]);
+        git(workspace.path(), &["add", "."]);
 
-    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"));
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("lint-weakening argument"));
+    }
 }
 
 #[test]

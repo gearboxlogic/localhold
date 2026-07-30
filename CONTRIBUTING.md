@@ -291,7 +291,8 @@ can only shrink. The root `clippy.toml` is the only supported Clippy
 configuration; nested alternatives and `CLIPPY_CONF_DIR` are rejected.
 Checked-in Cargo, rustc, rustdoc, and Clippy command surfaces reject `-A`, `-W`,
 `--allow`, `--warn`, `--force-warn`, `--cap-lints`, command-line Cargo
-configuration, and compiler or lint override environment channels. The
+configuration, injected crate attributes, and compiler or lint override
+environment channels. The
 bootstrap scrubber and its exact self-test may name those environment channels
 so they can remove and verify them, but they remain subject to the argument
 scan; no directory-wide command-surface exemption exists. In GitHub Actions,
@@ -300,10 +301,11 @@ auditable; Node and Docker action entrypoints are unsupported. Workflow and
 action YAML may not use anchors, aliases, or custom shell templates to redirect
 an audited `run` command. The dependency jobs validate the reviewed mise
 configuration and lockfile before tool activation, then run the hash-pinned
-source-safety driver through the resolved absolute Cargo executable. The
-comparison base is derived from the runner event and any configured base
-must match it, so versioned workflow changes cannot select the checked head or
-silently omit previous-revision enforcement.
+source-safety driver through resolved absolute Cargo and Git executables. The
+comparison base is derived from the runner event, the checkout must match the
+event head, and any configured base must match the event base, so versioned
+workflow changes cannot select the checked head or silently omit
+previous-revision enforcement.
 Ordinary agent changes must fix the warning or remove stale suppression debt;
 they must not edit policy evidence merely to make the gate pass.
 

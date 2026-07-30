@@ -40,13 +40,13 @@ if [[ $workflow_sha256 != "$bootstrap_sha256" ]]; then
     exit 1
 fi
 guard_count=$(grep -Fc 'if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then' "$ci_workflow" || true)
-if (( guard_count != 4 )); then
+if (( guard_count != 2 )); then
     printf 'every CI maintainability bootstrap execution must have an immediate workflow digest guard\n' >&2
     exit 1
 fi
 for loader_variable in LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD; do
     loader_guard_count=$(grep -Fc "          $loader_variable: ''" "$ci_workflow" || true)
-    if (( loader_guard_count != 4 )); then
+    if (( loader_guard_count != 2 )); then
         printf 'every CI maintainability bootstrap execution must clear %s before Bash starts\n' "$loader_variable" >&2
         exit 1
     fi

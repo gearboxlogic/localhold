@@ -60,7 +60,7 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=f9ead9aeff6aae855040ce3aea2e8901119071beef46061332dc3526378a9de6
-readonly reviewed_bootstrap_tests_sha256=e56f8cb747bbd66df87d5abd222e3b460de16d6b7fc03629aa4c64143f50b0bd
+readonly reviewed_bootstrap_tests_sha256=0236b37520b203a22d7e68927e9f059864f181dcf31899964a48349a86fa7900
 readonly reviewed_gate_runner_sha256=a614e7a0804eed432d84f5b5e9283406c0c4f0915c9f79ce1b6b9b5fd2142433
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
@@ -454,6 +454,9 @@ if [[ $mode != verify ]]; then
     "$git_command" --no-replace-objects -c diff.external= -C "$snapshot_root" read-tree "$checked_head"
     "$git_command" --no-replace-objects -c diff.external= -C "$snapshot_root" archive --format=tar "$checked_head" | "$tar_command" -xf - -C "$snapshot_root"
     "$mkdir_command" -- "$snapshot_root/target"
+    # Governed CI permits only pinned actions before this first repository
+    # command. These mode bits are additional accidental-mutation protection;
+    # the closed workflow step sequence is the process-isolation boundary.
     "$chmod_command" -R a-w -- "$snapshot_root"
     "$chmod_command" u+rwx -- "$snapshot_root/target"
     if [[ -w "$snapshot_root/tools/maintainability/src/main.rs" ]]; then

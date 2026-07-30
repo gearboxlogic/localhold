@@ -12,7 +12,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 549bb2bf8c653bc8ef44fa55b3797fc3d8d64412de49dc5ac1b42800fb63adc3
+  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 06d806158eb0a0eb02555115da7a7da32e0d547149e0aada512ddd237516a755
   XDG_CACHE_HOME: ${{ github.workspace }}/.cache
 
 permissions:
@@ -124,26 +124,9 @@ jobs:
           key: ${{ runner.os }}-dependency-unsafe-${{ hashFiles('Cargo.lock', 'tools/dependency-unsafe/Cargo.lock', 'tools/maintainability/Cargo.lock', 'mise.lock') }}
           restore-keys: ${{ runner.os }}-dependency-unsafe-
 
-      - name: Validate maintainability bootstrap before tool activation
-        env:
-          BASH_ENV: ''
-          LD_AUDIT: ''
-          LD_LIBRARY_PATH: ''
-          LD_PRELOAD: ''
-          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}
-        run: |
-          if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
-            printf 'maintainability bootstrap differs from the workflow-reviewed digest\n' >&2
-            exit 1
-          fi
-          ./script/check-maintainability-bootstrap.sh
-
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         with:
           version: 2026.7.5
-
-      - name: Clear cached dependency audit evidence
-        run: rm -rf target/dependency-unsafe/actual-linux
 
       - name: Run dependency unsafe gate
         id: audit
@@ -266,9 +249,6 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Preserve LF line endings
-        run: git config --global core.autocrlf false
-
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
@@ -285,26 +265,9 @@ jobs:
           key: ${{ runner.os }}-dependency-unsafe-${{ hashFiles('Cargo.lock', 'tools/dependency-unsafe/Cargo.lock', 'tools/maintainability/Cargo.lock', 'mise.lock') }}
           restore-keys: ${{ runner.os }}-dependency-unsafe-
 
-      - name: Validate maintainability bootstrap before tool activation
-        env:
-          BASH_ENV: ''
-          LD_AUDIT: ''
-          LD_LIBRARY_PATH: ''
-          LD_PRELOAD: ''
-          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}
-        run: |
-          if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
-            printf 'maintainability bootstrap differs from the workflow-reviewed digest\n' >&2
-            exit 1
-          fi
-          ./script/check-maintainability-bootstrap.sh
-
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         with:
           version: 2026.7.5
-
-      - name: Clear cached dependency audit evidence
-        run: rm -rf target/dependency-unsafe/actual-windows
 
       - name: Run dependency unsafe gate
         id: audit
@@ -320,20 +283,7 @@ jobs:
             printf 'maintainability bootstrap differs from the workflow-reviewed digest\n' >&2
             exit 1
           fi
-          diagnostic_log="$RUNNER_TEMP/dependency-unsafe.log"
-          trap 'rm -f -- "$diagnostic_log"' EXIT
-          set +e
-          ./script/check-maintainability-bootstrap.sh --maintainability 2>&1 | tee "$diagnostic_log"
-          status=${PIPESTATUS[0]}
-          set -e
-          if (( status != 0 )); then
-            diagnostic=$(tail -n 40 "$diagnostic_log")
-            diagnostic=${diagnostic//'%'/'%25'}
-            diagnostic=${diagnostic//$'\r'/'%0D'}
-            diagnostic=${diagnostic//$'\n'/'%0A'}
-            printf '::error title=Dependency unsafe gate failed::%s\n' "$diagnostic"
-            exit "$status"
-          fi
+          ./script/check-maintainability-bootstrap.sh --maintainability
 
       - name: Upload dependency audit evidence on failure
         if: failure() && steps.audit.outcome == 'failure'

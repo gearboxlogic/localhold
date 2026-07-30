@@ -89,9 +89,25 @@ elif [[ $rustup_home != /* ]]; then
     exit 1
 fi
 
-toolchain_bin="$rustup_home/toolchains/1.97.0-$toolchain_triple/bin"
-if [[ ! -d $toolchain_bin || -L $toolchain_bin ]]; then
-    printf 'maintainability gate requires the pinned Rust toolchain directory: %s\n' "$toolchain_bin" >&2
+toolchain_bin=
+# Rustup uses the host-qualified name; mise exposes the same locked toolchain
+# through a version-only alias. Every selected executable is still authenticated below.
+for candidate in "$rustup_home/toolchains/1.97.0-$toolchain_triple/bin" "$rustup_home/toolchains/1.97.0/bin"; do
+    if [[ ! -e $candidate ]]; then
+        continue
+    fi
+    if [[ ! -d $candidate || -L $candidate ]]; then
+        printf 'pinned Rust toolchain bin must be a regular directory: %s\n' "$candidate" >&2
+        exit 1
+    fi
+    if [[ -n $toolchain_bin ]]; then
+        printf 'maintainability gate found ambiguous pinned Rust toolchain directories\n' >&2
+        exit 1
+    fi
+    toolchain_bin=$candidate
+done
+if [[ -z $toolchain_bin ]]; then
+    printf 'maintainability gate requires the pinned Rust 1.97.0 toolchain directory\n' >&2
     exit 1
 fi
 toolchain_bin=$(cd -- "$toolchain_bin" && pwd -P)

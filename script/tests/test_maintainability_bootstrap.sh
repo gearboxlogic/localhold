@@ -209,6 +209,13 @@ if [[ $trusted_rustup_home =~ ^[[:alpha:]]:[/\\] ]]; then
     trusted_rustup_home=$(/usr/bin/cygpath -u "$trusted_rustup_home")
 fi
 trusted_toolchain_bin="$trusted_rustup_home/toolchains/1.97.0-$toolchain_triple/bin"
+if [[ ! -d $trusted_toolchain_bin ]]; then
+    trusted_toolchain_bin="$trusted_rustup_home/toolchains/1.97.0/bin"
+fi
+if [[ ! -d $trusted_toolchain_bin ]]; then
+    printf 'maintainability bootstrap tests require the pinned Rust 1.97.0 toolchain\n' >&2
+    exit 1
+fi
 fake_rustup_home="$fixture/fake-rustup"
 fake_toolchain_bin="$fake_rustup_home/toolchains/1.97.0-$toolchain_triple/bin"
 mkdir -p "$fake_toolchain_bin"
@@ -219,6 +226,24 @@ if RUSTUP_HOME=$fake_rustup_home run_check --test-environment >/dev/null 2>&1; t
     printf 'maintainability bootstrap trusted unauthenticated tools beside an authentic Cargo executable\n' >&2
     exit 1
 fi
+
+short_rustup_home="$fixture/short-rustup"
+short_toolchain_bin="$short_rustup_home/toolchains/1.97.0/bin"
+mkdir -p "$short_toolchain_bin"
+for tool in cargo rustc rustdoc cargo-clippy clippy-driver cargo-fmt rustfmt; do
+    cp "$trusted_toolchain_bin/$tool$tool_extension" "$short_toolchain_bin/$tool$tool_extension"
+done
+short_rustup_environment=$short_rustup_home
+if [[ $kernel != Linux ]]; then
+    short_rustup_environment=$(/usr/bin/cygpath -w "$short_rustup_home")
+fi
+RUSTUP_HOME=$short_rustup_environment run_check --test-environment >/dev/null
+mkdir -p "$short_rustup_home/toolchains/1.97.0-$toolchain_triple/bin"
+if RUSTUP_HOME=$short_rustup_environment run_check --test-environment >/dev/null 2>&1; then
+    printf 'maintainability bootstrap accepted ambiguous pinned Rust toolchain directories\n' >&2
+    exit 1
+fi
+rm -r "$short_rustup_home/toolchains/1.97.0-$toolchain_triple"
 
 RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \
     RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \

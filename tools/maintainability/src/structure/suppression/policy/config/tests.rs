@@ -529,6 +529,16 @@ fn command_policy_governs_opaque_shell_programs_and_selected_makefiles() {
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
 
+    fs::write(
+        workspace.path().join("Justfile"),
+        r#"eval:
+    command eval "$(printf '\143\141\162\147\157\040\143\154\151\160\160\171\040\055\055\040\055\101\040\167\141\162\156\151\156\147\163')"
+"#,
+    )
+    .expect("opaque eval dispatch");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
+
     fs::write(workspace.path().join("Justfile"), "make:\n    make -f quality/lint.rules\n").expect("Make dispatch");
     fs::write(workspace.path().join("quality/lint.rules"), "lint:\n\tcargo clippy -- -A warnings\n").expect("selected Makefile");
     git(workspace.path(), &["add", "."]);

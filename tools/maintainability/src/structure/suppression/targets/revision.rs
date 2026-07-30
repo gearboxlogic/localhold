@@ -190,9 +190,29 @@ fn add_declared_targets(manifest: &toml::Value, kind: DeclaredTargetKind, packag
     for target in targets {
         let target = target.as_table().with_context(|| format!("suppression comparison {} target must be a table", kind.name))?;
         let path = declared_target_path(target, kind, package_name, known)?;
-        insert_target(roots, known, &path, kind.category, kind.name)?;
+        let category = if kind.name == "bin" && target_requires_testing(target, kind.name)? {
+            SourceCategory::Test
+        } else {
+            kind.category
+        };
+        insert_target(roots, known, &path, category, kind.name)?;
     }
     Ok(())
+}
+
+fn target_requires_testing(target: &toml::map::Map<String, toml::Value>, kind: &str) -> Result<bool> {
+    let Some(required) = target.get("required-features") else {
+        return Ok(false);
+    };
+    let required = required
+        .as_array()
+        .with_context(|| format!("suppression comparison {kind} target required-features must be an array"))?;
+    required.iter().try_fold(false, |requires_testing, feature| {
+        let feature = feature
+            .as_str()
+            .with_context(|| format!("suppression comparison {kind} target required-features entries must be strings"))?;
+        Ok(requires_testing || feature == "testing")
+    })
 }
 
 fn declared_target_path(target: &toml::map::Map<String, toml::Value>, kind: DeclaredTargetKind, package_name: &str, known: &BTreeSet<String>) -> Result<String> {

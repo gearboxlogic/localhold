@@ -241,7 +241,7 @@ pub(super) fn audited_module_paths(meta: &Meta) -> Result<Vec<PathBuf>> {
 }
 
 fn collect_audited_module_paths(meta: &Meta, paths: &mut Vec<PathBuf>) -> Result<()> {
-    if meta.path().is_ident("path") {
+    if meta_has_normalized_ident(meta, "path") {
         let Meta::NameValue(value) = meta else {
             bail!("explicit Rust module path must use a string literal");
         };
@@ -256,7 +256,7 @@ fn collect_audited_module_paths(meta: &Meta, paths: &mut Vec<PathBuf>) -> Result
         paths.push(path);
         return Ok(());
     }
-    if !meta.path().is_ident("cfg_attr") {
+    if !meta_has_normalized_ident(meta, "cfg_attr") {
         return Ok(());
     }
     let Meta::List(list) = meta else {
@@ -271,11 +271,15 @@ fn collect_audited_module_paths(meta: &Meta, paths: &mut Vec<PathBuf>) -> Result
     Ok(())
 }
 
+fn meta_has_normalized_ident(meta: &Meta, expected: &str) -> bool {
+    meta.path().get_ident().is_some_and(|ident| ident.unraw() == expected)
+}
+
 fn direct_module_path(attributes: &[syn::Attribute]) -> Result<Option<PathBuf>> {
     let mut direct = Vec::new();
     for attribute in attributes {
         let paths = audited_module_paths(&attribute.meta)?;
-        if !paths.is_empty() && !attribute.path().is_ident("path") {
+        if !paths.is_empty() && !meta_has_normalized_ident(&attribute.meta, "path") {
             bail!("conditional explicit module paths are unsupported by suppression governance");
         }
         direct.extend(paths);

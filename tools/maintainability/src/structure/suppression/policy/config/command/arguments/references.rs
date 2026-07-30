@@ -119,6 +119,7 @@ fn execution_input_candidates(tokens: &[String]) -> (Vec<&str>, bool) {
     let command = tool_basename(&tokens[command_index]).to_ascii_lowercase();
     let arguments = &tokens[command_index.saturating_add(1)..];
     let selected = match command.as_str() {
+        "eval" | "iex" | "invoke-expression" => SelectedInput::Opaque,
         "bash" | "bash.exe" | "dash" | "dash.exe" | "fish" | "fish.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe" => shell_input(arguments),
         "python" | "python.exe" | "python3" | "python3.exe" => python_input(arguments),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),
@@ -339,6 +340,8 @@ mod tests {
         assert_eq!(inputs("/usr/bin/env -i bash -e ./quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
         assert_eq!(inputs("bash -lc 'cargo clippy'"), (Vec::new(), true));
         assert_eq!(inputs(r#"bash -c "$(cat quality/lint.txt)""#), (Vec::new(), true));
+        assert_eq!(inputs(r#"command eval "$(printf '\143\141\162\147\157')""#), (Vec::new(), true));
+        assert_eq!(inputs("Invoke-Expression $encoded"), (Vec::new(), true));
         assert_eq!(inputs("bash_command=$(trusted_system_command bash)"), (Vec::new(), false));
         assert_eq!(inputs("python -m quality.lint"), (Vec::new(), false));
         assert_eq!(inputs("python -m $MODULE"), (Vec::new(), true));

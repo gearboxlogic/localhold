@@ -18,8 +18,15 @@ pub(super) struct TargetRoots {
 
 impl TargetRoots {
     pub(super) fn insert(&mut self, path: String, category: SourceCategory, identity: String) -> Result<()> {
-        if self.categories.insert(path.clone(), category).is_some_and(|existing| existing != category) {
-            bail!("Cargo target source {path:?} has conflicting governance categories");
+        match self.categories.get(&path).copied() {
+            None => {
+                self.categories.insert(path.clone(), category);
+            }
+            Some(existing) if existing == category || existing == SourceCategory::Production => {}
+            Some(_) if category == SourceCategory::Production => {
+                self.categories.insert(path.clone(), category);
+            }
+            Some(_) => bail!("Cargo target source {path:?} has conflicting governance categories"),
         }
         self.identities.entry(path).or_default().insert(identity);
         Ok(())
@@ -36,7 +43,7 @@ pub(super) fn root_package_target_sources(workspace: &Path) -> Result<TargetRoot
         let source = target.get("src_path").and_then(Value::as_str).context("root package target has no source path")?;
         let path = checked_target_path(&workspace, Path::new(source))?;
         let kind = target_kind(target)?;
-        let category = target_category(kind);
+        let category = target_category(target, kind)?;
         sources.insert(path.clone(), category, format!("{kind}:{path}"))?;
     }
     Ok(sources)
@@ -165,10 +172,22 @@ fn target_kind(target: &Value) -> Result<&'static str> {
         .context("root package target has an unsupported kind")
 }
 
-fn target_category(kind: &str) -> SourceCategory {
-    match kind {
+fn target_category(target: &Value, kind: &str) -> Result<SourceCategory> {
+    Ok(match kind {
         "bench" => SourceCategory::Benchmark,
         "test" => SourceCategory::Test,
+        "bin" if target_requires_testing(target)? => SourceCategory::Test,
         _ => SourceCategory::Production,
-    }
+    })
+}
+
+fn target_requires_testing(target: &Value) -> Result<bool> {
+    let Some(required) = target.get("required-features") else {
+        return Ok(false);
+    };
+    let required = required.as_array().context("root package target required-features must be a list")?;
+    required.iter().try_fold(false, |requires_testing, feature| {
+        let feature = feature.as_str().context("root package target required-feature is not a string")?;
+        Ok(requires_testing || feature == "testing")
+    })
 }

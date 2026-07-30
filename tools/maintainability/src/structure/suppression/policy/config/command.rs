@@ -19,7 +19,7 @@ pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "cargo_home=${CARGO_HOME:-}",
     "    LOCALHOLD_MAINTAINABILITY_GIT=$git_executable",
     "    export LOCALHOLD_MAINTAINABILITY_GIT",
-    "            RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
+    "            BASH_ENV | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
     "                RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \\",
     "                CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \\",
     "                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_*)",
@@ -34,7 +34,7 @@ pub(super) const GATE_RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "RUSTDOC=$native_rustdoc",
     "LOCALHOLD_MAINTAINABILITY_CARGO=$native_cargo",
     "export PATH CARGO RUSTC RUSTDOC RUSTFMT LOCALHOLD_MAINTAINABILITY_CARGO",
-    "    for name in RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER \\",
+    "    for name in BASH_ENV RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER \\",
     "        RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS \\",
     "        CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do",
     "    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $git_command ]]",
@@ -50,13 +50,17 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head run_check >/dev/null",
     "export CARGO_HOME=$cargo_home",
     "unset CARGO_HOME",
-    "RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \\",
+    "BASH_ENV=$bash_env RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \\",
     "    RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \\",
     "    CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \\",
     "    run_check --test-environment >/dev/null",
 ];
 pub(super) const MISE_ENVIRONMENT_LINES: &[&str] = &["CARGO_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/cargo\""];
-pub(super) const CI_REVISION_ENVIRONMENT_LINES: &[&str] = &[
+pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
+    "          BASH_ENV: ''",
+    "          BASH_ENV: ''",
+    "          BASH_ENV: ''",
+    "          BASH_ENV: ''",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
 ];
@@ -164,7 +168,8 @@ fn is_weakening_environment_name(name: &str) -> bool {
     let name = name.to_ascii_uppercase();
     matches!(
         name.as_str(),
-        "RUSTFLAGS"
+        "BASH_ENV"
+            | "RUSTFLAGS"
             | "CARGO_ENCODED_RUSTFLAGS"
             | "RUSTDOCFLAGS"
             | "CARGO_ENCODED_RUSTDOCFLAGS"
@@ -212,7 +217,7 @@ pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str
         "script/run-source-safety.sh" => RUNNER_ENVIRONMENT_LINES,
         "script/tests/test_maintainability_bootstrap.sh" => BOOTSTRAP_TEST_ENVIRONMENT_LINES,
         "mise.toml" => MISE_ENVIRONMENT_LINES,
-        ".github/workflows/ci.yml" => CI_REVISION_ENVIRONMENT_LINES,
+        ".github/workflows/ci.yml" => CI_TRUST_ENVIRONMENT_LINES,
         ".github/workflows/gpu-release-gate.yml" => GPU_RELEASE_REVISION_ENVIRONMENT_LINES,
         _ => return false,
     };

@@ -153,6 +153,10 @@ fn shell_continuations_cannot_split_lint_arguments_from_cargo() {
         ".github/workflows/ci.yml",
         "steps:\n  - shell: cmd\n    run: |\n      cargo clippy -- ^\n        -A warnings\n"
     ));
+    assert!(weakening_token_for_surface(
+        "script/check.ps1",
+        "$lintArgs = @('-' + 'A', 'warnings')\ncargo clippy -- @lintArgs\n"
+    ));
 }
 
 #[test]
@@ -161,6 +165,18 @@ fn python_command_arrays_cannot_split_lint_arguments_from_cargo() {
         "script/check.py",
         "subprocess.run([\n    \"cargo\", # tool\n    \"clippy\",\n    \"--\",\n    \"-A\",\n    \"warnings\",\n])\n"
     ));
+    assert!(weakening_token_for_surface(
+        "script/check.py",
+        "subprocess.run([\"cargo\", \"clippy\", \"--\", \"-\" \"A\", \"warnings\"])\n"
+    ));
+}
+
+#[test]
+fn rust_commands_may_only_select_audited_tool_manifests() {
+    assert!(!weakening_token("cargo clippy --manifest-path tools/checker/Cargo.toml -- -D warnings"));
+    assert!(weakening_token("cargo clippy --manifest-path quality/checker/Cargo.toml -- -D warnings"));
+    assert!(weakening_token("cargo clippy --manifest-path ../checker/Cargo.toml -- -D warnings"));
+    assert!(weakening_token("cargo clippy --manifest-path"));
 }
 
 #[test]
@@ -185,6 +201,7 @@ fn folded_yaml_commands_are_scanned_as_executed() {
 
 #[test]
 fn weakening_environment_channels_are_detected() {
+    assert!(weakening_environment("BASH_ENV=script/ci-startup.sh"));
     assert!(weakening_environment("export RUSTFLAGS='-A warnings'\nexec \"$CHECK\""));
     assert!(weakening_environment("export RUST''FLAGS='--cap-lints allow'"));
     assert!(weakening_environment("CARGO_ENCODED_RUSTFLAGS=dynamic"));
@@ -236,11 +253,11 @@ fn weakening_environment_channels_are_detected() {
     assert!(scrubber_environment_references_are_exact("mise.toml", &MISE_ENVIRONMENT_LINES.join("\n")));
     assert!(scrubber_environment_references_are_exact(
         ".github/workflows/ci.yml",
-        &CI_REVISION_ENVIRONMENT_LINES.join("\n"),
+        &CI_TRUST_ENVIRONMENT_LINES.join("\n"),
     ));
     assert!(!scrubber_environment_references_are_exact(
         ".github/workflows/ci.yml",
-        &CI_REVISION_ENVIRONMENT_LINES[..1].join("\n"),
+        &CI_TRUST_ENVIRONMENT_LINES[..1].join("\n"),
     ));
     assert!(scrubber_environment_references_are_exact(
         ".github/workflows/gpu-release-gate.yml",

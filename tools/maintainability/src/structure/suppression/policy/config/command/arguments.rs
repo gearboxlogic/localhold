@@ -12,6 +12,9 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token(source:
 }
 
 pub(in crate::structure::suppression::policy::config) fn weakening_token_for_surface(path: &str, source: &str) -> bool {
+    if is_python(path) && python::has_opaque_process_arguments(source) {
+        return true;
+    }
     let case_insensitive_tools = has_case_insensitive_tool_names(path);
     let source = normalized_source_for_surface(path, source);
     let embedded_commands = super::yaml::run_commands(path, &source);
@@ -159,6 +162,7 @@ fn weakening_rust_command(command: &str, case_insensitive_tools: bool) -> bool {
     forwards_dynamic_arguments(&tokens, case_insensitive_tools)
         || declares_rust_tool_alias(&tokens)
         || cargo_changes_directory_before_compiler_arguments(&tokens, case_insensitive_tools)
+        || cargo_manifest_escapes_tools(&tokens, case_insensitive_tools)
         || rust_response_file(&tokens, case_insensitive_tools)
         || has_brace_expansion_arguments(&tokens, case_insensitive_tools)
         || injects_crate_attribute(&tokens)
@@ -244,13 +248,50 @@ fn forwards_dynamic_arguments(tokens: &[String], case_insensitive_tools: bool) -
     let Some(tool_index) = tokens.iter().position(|token| is_rust_tool_token(token, case_insensitive_tools)) else {
         return false;
     };
-    tokens[tool_index..].iter().any(|token| {
+    tokens[tool_index..].iter().enumerate().any(|(relative_index, token)| {
+        let index = tool_index + relative_index;
         token.contains('$')
-            || token.eq_ignore_ascii_case("@args")
-            || token.eq_ignore_ascii_case("@argv")
+            || token.starts_with('@') && opaque_splat_reaches_compiler(tokens, tool_index, index, case_insensitive_tools)
             || token == "%*"
             || token.split_once('%').is_some_and(|(_, suffix)| !suffix.is_empty() && suffix.contains('%'))
     })
+}
+
+fn opaque_splat_reaches_compiler(tokens: &[String], tool_index: usize, splat_index: usize, case_insensitive_tools: bool) -> bool {
+    if tokens[splat_index].eq_ignore_ascii_case("@args") || tokens[splat_index].eq_ignore_ascii_case("@argv") {
+        return true;
+    }
+    let preceding_arguments = &tokens[tool_index.saturating_add(1)..splat_index];
+    if !preceding_arguments.iter().any(|argument| argument == "--") || !is_cargo_tool_token(&tokens[tool_index], case_insensitive_tools) {
+        return true;
+    }
+    preceding_arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--")
+        .any(|argument| matches!(argument.as_str(), "clippy" | "rustc" | "rustdoc"))
+}
+
+fn cargo_manifest_escapes_tools(tokens: &[String], case_insensitive_tools: bool) -> bool {
+    let Some(tool_index) = tokens.iter().position(|token| is_rust_tool_token(token, case_insensitive_tools)) else {
+        return false;
+    };
+    let arguments = &tokens[tool_index.saturating_add(1)..];
+    let Some(manifest_index) = arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--")
+        .position(|argument| argument == "--manifest-path")
+    else {
+        return false;
+    };
+    arguments.get(manifest_index + 1).is_none_or(|manifest| !is_audited_tool_manifest(manifest))
+}
+
+fn is_audited_tool_manifest(manifest: &str) -> bool {
+    let path = Path::new(manifest);
+    !path.is_absolute()
+        && path.components().all(|component| matches!(component, std::path::Component::Normal(_)))
+        && path.starts_with("tools")
+        && path.file_name().and_then(|name| name.to_str()) == Some("Cargo.toml")
 }
 
 fn declares_rust_tool_alias(tokens: &[String]) -> bool {

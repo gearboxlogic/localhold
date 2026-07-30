@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 
+use serde_json::Value;
+
 use super::model::{Disposition, SourceException, Status};
 use super::source::{compare_current, validate_exceptions};
+use super::{POLICY_PATH, load_policy_file};
 #[cfg(unix)]
 use super::{POLICY_ROOT, checked_policy_path};
 use crate::structure::suppression::{SourceCategory, SourceSuppression};
@@ -48,6 +51,35 @@ fn temporary_source_exceptions_require_removal_evidence() {
     );
     exception.removal_phase = None;
     assert!(validate_exceptions(&[exception]).unwrap_err().to_string().contains("removal phase"));
+}
+
+#[test]
+fn current_policy_evidence_must_match_the_checked_out_revision() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let policy = workspace.path().join(POLICY_PATH);
+    std::fs::create_dir_all(policy.parent().expect("policy parent")).expect("policy directory");
+    std::fs::write(&policy, "{\"reviewed\":true}\n").expect("policy fixture");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+    git(
+        workspace.path(),
+        &[
+            "-c",
+            "user.name=LocalHold Tests",
+            "-c",
+            "user.email=tests@localhold.invalid",
+            "commit",
+            "-qm",
+            "policy fixture",
+        ],
+    );
+
+    let reviewed: Value = load_policy_file(workspace.path(), POLICY_PATH).expect("reviewed policy");
+    assert_eq!(reviewed["reviewed"], true);
+
+    std::fs::write(&policy, "{\"reviewed\":false}\n").expect("mutated policy fixture");
+    let error = load_policy_file::<Value>(workspace.path(), POLICY_PATH).unwrap_err();
+    assert!(error.to_string().contains("differs from the checked-out revision"));
 }
 
 #[cfg(unix)]
@@ -106,4 +138,9 @@ fn source_exception() -> SourceException {
         removal_issue: Some("removal issue".to_owned()),
         removal_phase: Some("Phase 2".to_owned()),
     }
+}
+
+fn git(workspace: &std::path::Path, arguments: &[&str]) {
+    let status = crate::structure::revision::git_command().current_dir(workspace).args(arguments).status().expect("run git");
+    assert!(status.success());
 }

@@ -87,6 +87,14 @@ fn maintainer_tooling_scans_ignored_modules_reachable_from_cargo_targets() {
 
     let error = reject_tooling_suppressions(workspace.path()).unwrap_err();
     assert!(format!("{error:#}").contains("must remain suppression-free"));
+
+    fs::remove_file(source.join("generated.rs")).expect("remove unreachable module source");
+    fs::write(source.join("main.rs"), "#[cfg(any())]\nmod generated;\nfn main() {}\n").expect("statically unreachable module");
+    reject_tooling_suppressions(workspace.path()).expect("statically unreachable modules need no source");
+
+    fs::write(source.join("main.rs"), "#[cfg(test)]\nmod generated;\nfn main() {}\n").expect("test-only module");
+    let error = reject_tooling_suppressions(workspace.path()).unwrap_err();
+    assert!(format!("{error:#}").contains("has no auditable source file"));
 }
 
 #[test]

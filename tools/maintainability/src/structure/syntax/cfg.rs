@@ -28,6 +28,12 @@ struct CfgAttr {
     nested: Vec<Meta>,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Evaluation {
+    Production,
+    AnyConfiguration,
+}
+
 #[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub(in crate::structure) struct ProductionCfgContext {
     constraints: Vec<Predicate>,
@@ -109,6 +115,21 @@ pub(in crate::structure) fn attributes_disable_production(attributes: &[Attribut
     Ok(production_cfg_context(attributes, &ProductionCfgContext::default())?.is_none())
 }
 
+pub(in crate::structure) fn cfg_attributes_can_be_enabled(attributes: &[Attribute]) -> Result<bool> {
+    let mut context = ProductionCfgContext::default();
+    for attribute in attributes {
+        if attribute.path().is_ident("cfg") {
+            let meta = parse_single_meta(attribute).context("parse cfg predicate for module reachability")?;
+            context.constraints.push(predicate_for(&meta, Evaluation::AnyConfiguration)?);
+        } else if attribute.path().is_ident("cfg_attr")
+            && let Meta::List(list) = &attribute.meta
+        {
+            collect_cfg_attr_constraints(&list.tokens, Predicate::Constant(true), Evaluation::AnyConfiguration, &mut context.constraints)?;
+        }
+    }
+    Ok(context_is_satisfiable(&context, None))
+}
+
 pub(in crate::structure) fn production_cfg_context(attributes: &[Attribute], inherited: &ProductionCfgContext) -> Result<Option<ProductionCfgContext>> {
     let mut context = inherited.clone();
     for attribute in attributes {
@@ -120,7 +141,7 @@ pub(in crate::structure) fn production_cfg_context(attributes: &[Attribute], inh
         } else if attribute.path().is_ident("cfg_attr")
             && let Meta::List(list) = &attribute.meta
         {
-            collect_cfg_attr_constraints(&list.tokens, Predicate::Constant(true), &mut context.constraints)?;
+            collect_cfg_attr_constraints(&list.tokens, Predicate::Constant(true), Evaluation::Production, &mut context.constraints)?;
         }
     }
     Ok(context_is_satisfiable(&context, None).then_some(context))
@@ -135,25 +156,25 @@ pub(in crate::structure) fn production_cfg_attr_metas(tokens: &proc_macro2::Toke
 
 pub(in crate::structure) fn cfg_attr_metas_with_production_reachability(tokens: &proc_macro2::TokenStream, context: &ProductionCfgContext) -> Result<Vec<ClassifiedCfgMeta>> {
     let mut effective = context.clone();
-    collect_cfg_attr_constraints(tokens, Predicate::Constant(true), &mut effective.constraints)?;
+    collect_cfg_attr_constraints(tokens, Predicate::Constant(true), Evaluation::Production, &mut effective.constraints)?;
     let mut metas = Vec::new();
     collect_cfg_attr_metas(tokens, &effective, Predicate::Constant(true), &mut metas)?;
     Ok(metas)
 }
 
-fn collect_cfg_attr_constraints(tokens: &proc_macro2::TokenStream, parent_activation: Predicate, output: &mut Vec<Predicate>) -> Result<()> {
+fn collect_cfg_attr_constraints(tokens: &proc_macro2::TokenStream, parent_activation: Predicate, evaluation: Evaluation, output: &mut Vec<Predicate>) -> Result<()> {
     let attribute = parse_cfg_attr(tokens, "production constraint classification")?;
-    let activation = Predicate::All(vec![parent_activation, predicate(&attribute.condition)?]);
+    let activation = Predicate::All(vec![parent_activation, predicate_for(&attribute.condition, evaluation)?]);
     for meta in attribute.nested {
         if meta.path().is_ident("cfg") {
-            let required = predicate(&parse_cfg_meta(&meta)?)?;
+            let required = predicate_for(&parse_cfg_meta(&meta)?, evaluation)?;
             output.push(Predicate::Any(vec![Predicate::Not(Box::new(activation.clone())), required]));
-        } else if meta.path().is_ident("test") {
+        } else if meta.path().is_ident("test") && evaluation == Evaluation::Production {
             output.push(Predicate::Not(Box::new(activation.clone())));
         } else if meta.path().is_ident("cfg_attr")
             && let Meta::List(list) = meta
         {
-            collect_cfg_attr_constraints(&list.tokens, activation.clone(), output)?;
+            collect_cfg_attr_constraints(&list.tokens, activation.clone(), evaluation, output)?;
         }
     }
     Ok(())
@@ -229,13 +250,17 @@ fn context_is_satisfiable(context: &ProductionCfgContext, condition: Option<Pred
 }
 
 fn predicate(meta: &Meta) -> Result<Predicate> {
+    predicate_for(meta, Evaluation::Production)
+}
+
+fn predicate_for(meta: &Meta, evaluation: Evaluation) -> Result<Predicate> {
     match meta {
-        Meta::Path(path) if path.is_ident("test") || path.is_ident("doctest") => Ok(Predicate::Constant(false)),
-        Meta::NameValue(value) if is_testing_feature(value) => Ok(Predicate::Constant(false)),
-        Meta::List(list) if list.path.is_ident("all") => Ok(Predicate::All(parse_predicate_list(list)?)),
-        Meta::List(list) if list.path.is_ident("any") => Ok(Predicate::Any(parse_predicate_list(list)?)),
+        Meta::Path(path) if evaluation == Evaluation::Production && (path.is_ident("test") || path.is_ident("doctest")) => Ok(Predicate::Constant(false)),
+        Meta::NameValue(value) if evaluation == Evaluation::Production && is_testing_feature(value) => Ok(Predicate::Constant(false)),
+        Meta::List(list) if list.path.is_ident("all") => Ok(Predicate::All(parse_predicate_list(list, evaluation)?)),
+        Meta::List(list) if list.path.is_ident("any") => Ok(Predicate::Any(parse_predicate_list(list, evaluation)?)),
         Meta::List(list) if list.path.is_ident("not") => {
-            let mut predicates = parse_predicate_list(list)?;
+            let mut predicates = parse_predicate_list(list, evaluation)?;
             if predicates.len() != 1 {
                 anyhow::bail!("cfg not predicate must contain exactly one argument");
             }
@@ -364,12 +389,12 @@ fn write_identity_part(kind: char, value: &str, identity: &mut String) {
     identity.push_str(value);
 }
 
-fn parse_predicate_list(list: &syn::MetaList) -> Result<Vec<Predicate>> {
+fn parse_predicate_list(list: &syn::MetaList, evaluation: Evaluation) -> Result<Vec<Predicate>> {
     Punctuated::<Meta, Token![,]>::parse_terminated
         .parse2(list.tokens.clone())
         .context("parse cfg predicate arguments")?
         .iter()
-        .map(predicate)
+        .map(|meta| predicate_for(meta, evaluation))
         .collect()
 }
 

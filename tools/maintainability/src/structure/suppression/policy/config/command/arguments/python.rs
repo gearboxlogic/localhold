@@ -2,6 +2,32 @@ pub(super) fn join_implicit_continuations(source: &str) -> String {
     Scanner::new(source).scan()
 }
 
+#[cfg(test)]
+pub(super) fn has_adjacent_string_literals(source: &str) -> bool {
+    let normalized = join_implicit_continuations(source);
+    has_adjacent_string_literals_in(&normalized)
+}
+
+pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
+    join_implicit_continuations(source)
+        .lines()
+        .any(|line| has_adjacent_string_literals_in(line) && (references_process_api(line) || references_rust_tool(line)))
+}
+
+fn has_adjacent_string_literals_in(source: &str) -> bool {
+    AdjacentLiteralScanner::new(source).has_adjacent_literals()
+}
+
+fn references_process_api(source: &str) -> bool {
+    let source = source.to_ascii_lowercase();
+    ["subprocess", "os.system", "os.popen", "popen(", "execv", "spawn"].iter().any(|name| source.contains(name))
+}
+
+fn references_rust_tool(source: &str) -> bool {
+    let source = source.to_ascii_lowercase();
+    ["cargo", "rustc", "rustdoc", "clippy-driver"].iter().any(|name| source.contains(name))
+}
+
 struct Scanner {
     characters: Vec<char>,
     output: String,
@@ -106,5 +132,104 @@ impl Scanner {
 
     fn current(&self) -> char {
         self.characters[self.index]
+    }
+}
+
+struct AdjacentLiteralScanner {
+    characters: Vec<char>,
+    index: usize,
+}
+
+impl AdjacentLiteralScanner {
+    fn new(source: &str) -> Self {
+        Self {
+            characters: source.chars().collect(),
+            index: 0,
+        }
+    }
+
+    fn has_adjacent_literals(mut self) -> bool {
+        while self.index < self.characters.len() {
+            let Some(end) = self.literal_end(self.index) else {
+                self.index += 1;
+                continue;
+            };
+            let next = self.separator_end(end);
+            if self.literal_end(next).is_some() {
+                return true;
+            }
+            self.index = end;
+        }
+        false
+    }
+
+    fn literal_end(&self, start: usize) -> Option<usize> {
+        let quote = self.quote_start(start)?;
+        let delimiter = self.characters[quote];
+        let triple = self.characters.get(quote + 1) == Some(&delimiter) && self.characters.get(quote + 2) == Some(&delimiter);
+        let quote_width = if triple { 3 } else { 1 };
+        let mut index = quote + quote_width;
+        while index < self.characters.len() {
+            if self.characters[index] == '\\' {
+                index = index.saturating_add(2);
+            } else if self.characters[index] == delimiter && (!triple || self.characters.get(index + 1) == Some(&delimiter) && self.characters.get(index + 2) == Some(&delimiter)) {
+                return Some(index + quote_width);
+            } else {
+                index += 1;
+            }
+        }
+        Some(self.characters.len())
+    }
+
+    fn quote_start(&self, start: usize) -> Option<usize> {
+        let character = *self.characters.get(start)?;
+        if matches!(character, '\'' | '"') {
+            return Some(start);
+        }
+        if start > 0 && is_identifier_character(self.characters[start - 1]) {
+            return None;
+        }
+        let mut end = start;
+        while end < self.characters.len() && end - start < 3 && matches!(self.characters[end].to_ascii_lowercase(), 'b' | 'f' | 'r' | 'u') {
+            end += 1;
+        }
+        (end > start && matches!(self.characters.get(end), Some('\'' | '"'))).then_some(end)
+    }
+
+    fn separator_end(&self, mut index: usize) -> usize {
+        loop {
+            while matches!(self.characters.get(index), Some(' ' | '\t' | '\r')) {
+                index += 1;
+            }
+            if self.characters.get(index) == Some(&'\\') && self.characters.get(index + 1) == Some(&'\n') {
+                index += 2;
+                continue;
+            }
+            return index;
+        }
+    }
+}
+
+fn is_identifier_character(character: char) -> bool {
+    character == '_' || character.is_alphanumeric()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{has_adjacent_string_literals, has_opaque_process_arguments};
+
+    #[test]
+    fn adjacent_literals_are_detected_only_within_one_python_expression() {
+        assert!(has_adjacent_string_literals("subprocess.run([\"cargo\", \"clippy\", \"--\", \"-\" \"A\", \"warnings\"])\n"));
+        assert!(has_adjacent_string_literals("VALUES = (r\"cargo\"  f\" clippy\")\n"));
+        assert!(has_adjacent_string_literals("VALUE = \"cargo\" \\\n    \" clippy\"\n"));
+        assert!(!has_adjacent_string_literals("\"module doc\"\n\"second statement\"\n"));
+        assert!(!has_adjacent_string_literals("subprocess.run([\"cargo\", \"clippy\"])\n"));
+        assert!(!has_adjacent_string_literals("identifier\"invalid but not concatenated\"\n"));
+        assert!(has_opaque_process_arguments("subprocess.run([\"-\" \"A\"])\n"));
+        assert!(!has_opaque_process_arguments("head = (f'<svg viewBox=\"0 0 64 64\" ' f'role=\"img\">')\n"));
+        assert!(!has_opaque_process_arguments(
+            "PATTERN = (r'^v[0-9]+' r'(?:-dev)?$')\nimport subprocess\nsubprocess.run(['git', 'status'])\n"
+        ));
     }
 }

@@ -11,7 +11,7 @@ use syn::{Meta, Token};
 
 use super::SourceCategory;
 use super::targets::TargetRoots;
-use crate::structure::syntax::{ProductionCfgContext, production_cfg_context};
+use crate::structure::syntax::{ProductionCfgContext, cfg_attributes_can_be_enabled, production_cfg_context};
 
 mod identities;
 mod revision;
@@ -151,6 +151,14 @@ impl<'ast> Visit<'ast> for ModuleCollector {
     fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
         if self.error.is_some() {
             return;
+        }
+        match cfg_attributes_can_be_enabled(&module.attrs) {
+            Ok(false) => return,
+            Ok(true) => {}
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
         }
         let explicit_path = match direct_module_path(&module.attrs) {
             Ok(Some(_)) if !self.structural => {

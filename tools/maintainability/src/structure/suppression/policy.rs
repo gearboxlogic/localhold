@@ -96,8 +96,20 @@ fn validate_model(model: &Policy) -> Result<()> {
 
 pub(super) fn load_policy_file<T: DeserializeOwned>(workspace: &Path, relative: &str) -> Result<T> {
     let path = checked_policy_path(workspace, relative)?;
-    let bytes = fs::read(&path).with_context(|| format!("read lint-suppression policy {}", path.display()))?;
-    serde_json::from_slice(&bytes).with_context(|| format!("parse lint-suppression policy {}", path.display()))
+    let worktree_bytes = fs::read(&path).with_context(|| format!("read lint-suppression policy {}", path.display()))?;
+    let object = format!("HEAD:{relative}");
+    let reviewed = crate::structure::revision::git_command()
+        .current_dir(workspace)
+        .args(["show", "--no-ext-diff", &object])
+        .output()
+        .with_context(|| format!("read lint-suppression policy {relative:?} from checked-out revision"))?;
+    if !reviewed.status.success() {
+        bail!("lint-suppression policy {relative:?} is unreadable in the checked-out revision");
+    }
+    if worktree_bytes != reviewed.stdout {
+        bail!("lint-suppression policy {relative:?} differs from the checked-out revision");
+    }
+    serde_json::from_slice(&reviewed.stdout).with_context(|| format!("parse lint-suppression policy {relative:?} from checked-out revision"))
 }
 
 fn checked_policy_path(workspace: &Path, relative: &str) -> Result<PathBuf> {

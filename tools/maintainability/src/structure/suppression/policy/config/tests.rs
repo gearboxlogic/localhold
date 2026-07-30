@@ -127,6 +127,23 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
 fn shell_continuations_cannot_split_lint_arguments_from_cargo() {
     assert!(weakening_token_for_surface("script/check.ps1", "cargo clippy -- `\r\n  -A warnings"));
     assert!(weakening_token_for_surface("script/check.ps1", "cargo clippy -- `\n  --allow=warnings"));
+    assert!(weakening_token_for_surface("script/check.ps1", "cargo clippy -- --a`llow warnings"));
+    assert!(weakening_token_for_surface("script/check.ps1", "ca`rgo clippy -- --allow warnings"));
+    assert!(weakening_token_for_surface("script/check.ps1", "cargo clippy -- \"--a`llow\" warnings"));
+    assert!(weakening_token_for_surface(
+        "script/check.ps1",
+        "# don't change quote state\ncargo clippy -- --a`llow warnings"
+    ));
+    assert!(weakening_token_for_surface(
+        "script/check.ps1",
+        "Write-Output \"don't change quote state\"\ncargo clippy -- --a`llow warnings"
+    ));
+    assert!(weakening_token_for_surface(
+        "script/check.ps1",
+        "<# don't change quote state #>\ncargo clippy -- --a`llow warnings"
+    ));
+    assert!(!weakening_token_for_surface("script/check.ps1", "Write-Output \"build``stamp\"\ncargo build"));
+    assert!(!weakening_token_for_surface("script/check.ps1", "Write-Output 'cargo clippy -- --a`llow warnings'"));
     assert!(weakening_token_for_surface("script/check.cmd", "cargo clippy -- ^\r\n  -A warnings"));
     assert!(weakening_token_for_surface("script/check.bat", "cargo clippy -- ^\n  --allow=warnings"));
     assert!(weakening_token_for_surface(

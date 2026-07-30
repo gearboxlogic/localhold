@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+mod powershell;
 mod python;
 mod tokens;
 use tokens::{command_tokens, command_without_comment};
@@ -104,7 +105,7 @@ fn is_yaml(path: &str) -> bool {
 
 fn normalized_source_for_surface(path: &str, source: &str) -> String {
     match Path::new(path).extension().and_then(|extension| extension.to_str()) {
-        Some(extension) if extension.eq_ignore_ascii_case("ps1") => source.replace("`\r\n", "").replace("`\n", ""),
+        Some(extension) if extension.eq_ignore_ascii_case("ps1") => powershell::normalize_escapes(source),
         Some(extension) if matches!(extension.to_ascii_lowercase().as_str(), "cmd" | "bat") => join_command_continuations(source),
         Some(extension) if extension.eq_ignore_ascii_case("py") => python::join_implicit_continuations(source),
         _ => source.to_owned(),

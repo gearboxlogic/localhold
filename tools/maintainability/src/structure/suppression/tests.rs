@@ -63,9 +63,10 @@ fn root_package_target_roots_outside_the_structure_map_are_scanned() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join("src")).expect("source directory");
     fs::create_dir_all(workspace.path().join("examples")).expect("example directory");
+    fs::create_dir_all(workspace.path().join("quality")).expect("auxiliary target directory");
     fs::write(
         workspace.path().join("Cargo.toml"),
-        "[package]\nname='target-fixture'\nversion='0.1.0'\nedition='2024'\nbuild='build.rs'\n",
+        "[package]\nname='target-fixture'\nversion='0.1.0'\nedition='2024'\nbuild='build.rs'\n\n[[test]]\nname='custom-test'\npath='quality/custom_test.rs'\n\n[[bench]]\nname='custom-bench'\npath='quality/custom_bench.rs'\nharness=false\n",
     )
     .expect("package manifest");
     fs::write(
@@ -80,11 +81,29 @@ fn root_package_target_roots_outside_the_structure_map_are_scanned() {
         "#![allow(clippy::panic, reason = \"legacy example\")]\nfn main() {}\n",
     )
     .expect("example target");
+    fs::write(
+        workspace.path().join("quality/custom_test.rs"),
+        "#![allow(clippy::panic, reason = \"legacy test\")]\nfn main() {}\n",
+    )
+    .expect("custom test target");
+    fs::write(
+        workspace.path().join("quality/custom_bench.rs"),
+        "#![allow(clippy::panic, reason = \"legacy benchmark\")]\nfn main() {}\n",
+    )
+    .expect("custom benchmark target");
 
     let sites = scan_workspace(workspace.path(), &Inventory { files: Vec::new() }, &BTreeMap::new()).expect("scan every Cargo target root");
     let mut observed = sites.iter().map(|site| (site.path.as_str(), site.category)).collect::<Vec<_>>();
     observed.sort_unstable();
-    assert_eq!(observed, [("build.rs", SourceCategory::Production), ("examples/demo.rs", SourceCategory::Production),]);
+    assert_eq!(
+        observed,
+        [
+            ("build.rs", SourceCategory::Production),
+            ("examples/demo.rs", SourceCategory::Production),
+            ("quality/custom_bench.rs", SourceCategory::Benchmark),
+            ("quality/custom_test.rs", SourceCategory::Test),
+        ]
+    );
 }
 
 fn git(workspace: &std::path::Path, arguments: &[&str]) {

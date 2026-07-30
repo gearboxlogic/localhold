@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path};
 use std::process::Command;
@@ -87,10 +87,10 @@ pub fn scan_workspace(workspace: &Path, inventory: &Inventory, component_paths: 
 }
 
 pub fn scan_revision(workspace: &Path, revision: &str, inventory: &Inventory, component_paths: &BTreeMap<&str, &str>) -> Result<Vec<SourceSuppression>> {
-    let mut target_sources = BTreeSet::new();
-    for path in targets::root_package_target_sources(workspace)? {
+    let mut target_sources = BTreeMap::new();
+    for (path, category) in targets::root_package_target_sources(workspace)? {
         if component_paths.contains_key(path.as_str()) || revision_contains_path(workspace, revision, &path)? {
-            target_sources.insert(path);
+            target_sources.insert(path, category);
         }
     }
     scan_with(inventory, component_paths, &target_sources, |path| {
@@ -136,7 +136,7 @@ pub(super) fn reject_tooling_suppressions(workspace: &Path) -> Result<()> {
 fn scan_with(
     inventory: &Inventory,
     component_paths: &BTreeMap<&str, &str>,
-    target_sources: &BTreeSet<String>,
+    target_sources: &BTreeMap<String, SourceCategory>,
     mut read_source: impl FnMut(&str) -> Result<String>,
 ) -> Result<Vec<SourceSuppression>> {
     let measurements = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
@@ -156,13 +156,13 @@ fn scan_with(
         let syntax = syn::parse_file(&source).with_context(|| format!("parse suppression source {path}"))?;
         sites.extend(SourceScanner::scan(path, component, category, &syntax)?);
     }
-    for path in target_sources {
+    for (path, &category) in target_sources {
         if component_paths.contains_key(path.as_str()) {
             continue;
         }
         let source = read_source(path)?;
         let syntax = syn::parse_file(&source).with_context(|| format!("parse Cargo target suppression source {path}"))?;
-        sites.extend(SourceScanner::scan(path, "cargo-target", SourceCategory::Production, &syntax)?);
+        sites.extend(SourceScanner::scan(path, "cargo-target", category, &syntax)?);
     }
     sites.sort();
     Ok(sites)

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -6,7 +6,9 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-pub(super) fn root_package_target_sources(workspace: &Path) -> Result<BTreeSet<String>> {
+use super::SourceCategory;
+
+pub(super) fn root_package_target_sources(workspace: &Path) -> Result<BTreeMap<String, SourceCategory>> {
     let workspace = fs::canonicalize(workspace).context("resolve workspace for Cargo target inventory")?;
     let manifest = fs::canonicalize(workspace.join("Cargo.toml")).context("resolve root package manifest for Cargo target inventory")?;
     let output = Command::new("cargo")
@@ -28,12 +30,14 @@ pub(super) fn root_package_target_sources(workspace: &Path) -> Result<BTreeSet<S
         bail!("Cargo metadata must contain exactly one root package");
     };
     let targets = package.get("targets").and_then(Value::as_array).context("root package metadata has no target list")?;
-    let mut sources = BTreeSet::new();
+    let mut sources = BTreeMap::new();
     for target in targets {
         let source = target.get("src_path").and_then(Value::as_str).context("root package target has no source path")?;
         let path = checked_target_path(&workspace, Path::new(source))?;
-        validate_target_kinds(target)?;
-        sources.insert(path);
+        let category = target_category(target)?;
+        if sources.insert(path.clone(), category).is_some_and(|existing| existing != category) {
+            bail!("Cargo target source {path:?} has conflicting governance categories");
+        }
     }
     Ok(sources)
 }
@@ -61,7 +65,7 @@ fn checked_target_path(workspace: &Path, path: &Path) -> Result<String> {
     Ok(relative.to_str().context("Cargo target source path is not UTF-8")?.replace('\\', "/"))
 }
 
-fn validate_target_kinds(target: &Value) -> Result<()> {
+fn target_category(target: &Value) -> Result<SourceCategory> {
     let kinds = target
         .get("kind")
         .and_then(Value::as_array)
@@ -72,5 +76,11 @@ fn validate_target_kinds(target: &Value) -> Result<()> {
     if kinds.is_empty() {
         bail!("root package target kind list is empty");
     }
-    Ok(())
+    if kinds.contains(&"bench") {
+        Ok(SourceCategory::Benchmark)
+    } else if kinds.contains(&"test") {
+        Ok(SourceCategory::Test)
+    } else {
+        Ok(SourceCategory::Production)
+    }
 }

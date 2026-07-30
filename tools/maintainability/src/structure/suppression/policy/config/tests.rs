@@ -379,6 +379,22 @@ fn rustup_mirror_overrides_are_governed_environment_channels() {
 }
 
 #[test]
+fn bootstrap_digest_overrides_require_the_exact_reviewed_bindings() {
+    for name in ["LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256", "LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256"] {
+        assert!(weakening_environment(&format!("{name}=attacker-controlled")));
+    }
+    let reviewed = CI_TRUST_ENVIRONMENT_LINES.join("\n");
+    assert!(!scrubber_environment_references_are_exact(
+        ".github/workflows/ci.yml",
+        &format!("{reviewed}\n          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: ${{{{ github.sha }}}}\n"),
+    ));
+    assert!(!scrubber_environment_references_are_exact(
+        ".github/workflows/ci.yml",
+        &format!("{reviewed}\n          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: attacker-controlled\n"),
+    ));
+}
+
+#[test]
 fn authenticated_dynamic_commands_require_the_exact_reviewed_lines() {
     assert!(super::command::reviewed_dynamic_command_references_are_exact(
         "script/run-maintainability-gate.sh",
@@ -529,6 +545,21 @@ fn command_policy_scans_extensionless_scripts() {
 
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+}
+
+#[test]
+fn command_policy_scans_positional_interpreter_programs() {
+    for (interpreter, program) in [("perl", "quality/lint.pl"), ("ruby", "quality/lint.rb")] {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+        fs::write(workspace.path().join("Justfile"), format!("lint:\n    {interpreter} {program}\n")).expect("interpreter invocation");
+        fs::write(workspace.path().join(program), "`cargo clippy -- -A warnings`\n").expect("non-executable lint program");
+        git(workspace.path(), &["init", "-q"]);
+        git(workspace.path(), &["add", "."]);
+
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+    }
 }
 
 #[test]
@@ -703,6 +734,7 @@ fn github_yaml_rejects_unsupported_execution_metadata() {
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -c 'cargo clippy -- -A warnings' -- {0}\n        run: just maintainability\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: |\n          bash -c 'cargo clippy -- -A warnings' -- {0}\n        run: just maintainability\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - working-directory: misc\n        run: rustc check.rs\n",
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - 'working-directory' : misc\n        run: rustc check.rs\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    defaults: {run: {working-directory: misc}}\n    steps:\n      - run: rustc check.rs\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps: [{run: cargo clippy -- -A warnings}]\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: \"cargo clippy --\n          -A warnings\"\n",

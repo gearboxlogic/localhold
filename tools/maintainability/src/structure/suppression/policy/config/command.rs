@@ -88,6 +88,8 @@ pub(super) const RUNNER_COMMAND_LINES: &[&str] = &[
 pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "unset GITHUB_ACTIONS GITHUB_EVENT_PATH GITHUB_SHA",
     "fixture_parent=\"$repository_root/target/bootstrap-tests\"",
+    "workflow_sha256=$(sed -n 's/^[[:space:]]*LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: //p' \"$ci_workflow\")",
+    "guard_count=$(grep -Fc 'if [[ \"$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256\" != \"$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256\" ]]; then' \"$ci_workflow\" || true)",
     "if GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=0000000000000000000000000000000000000000 run_check >/dev/null 2>&1; then",
     "    printf 'maintainability bootstrap accepted a checker revision other than GITHUB_SHA\\n' >&2",
     "GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head run_check >/dev/null",
@@ -121,8 +123,13 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          LD_LIBRARY_PATH: ''",
     "          LD_PRELOAD: ''",
     "          LD_PRELOAD: ''",
+    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 434c39b48e539af267bdb6fca5097c1f63237668f7b5498283602ac2830c547e",
+    "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
+    "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
+    "          if [[ \"$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256\" != \"$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256\" ]]; then",
+    "          if [[ \"$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256\" != \"$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256\" ]]; then",
 ];
 pub(super) const GPU_RELEASE_REVISION_ENVIRONMENT_LINES: &[&str] = &[
     "          test \"$(git rev-parse HEAD)\" = \"$GITHUB_SHA\"",
@@ -326,6 +333,8 @@ fn is_weakening_environment_name(name: &str) -> bool {
             | "GITHUB_PATH"
             | "GITHUB_SHA"
             | "LOCALHOLD_MAINTAINABILITY_BASE_REV"
+            | "LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256"
+            | "LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256"
             | "LOCALHOLD_MAINTAINABILITY_CARGO"
             | "LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY"
             | "LOCALHOLD_MAINTAINABILITY_CARGO_FMT"

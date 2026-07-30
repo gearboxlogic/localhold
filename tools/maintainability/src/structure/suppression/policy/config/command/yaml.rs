@@ -56,6 +56,9 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
         let Some((key, value)) = yaml_key_value(line) else {
             continue;
         };
+        if key == "working-directory" {
+            bail!("checked-in GitHub YAML {path:?} uses an unsupported working-directory override");
+        }
         let value = value.trim_start();
         if key == "container" {
             bail!("checked-in GitHub YAML {path:?} uses an unsupported job container");
@@ -238,7 +241,13 @@ pub(super) fn yaml_key_value(line: &str) -> Option<(&str, &str)> {
         content = rest.trim_start();
     }
     let (key, value) = content.split_once(':')?;
-    Some((key.trim_matches(['\'', '"']).trim(), value))
+    let key = key.trim();
+    let key = key
+        .strip_prefix('\'')
+        .and_then(|key| key.strip_suffix('\''))
+        .or_else(|| key.strip_prefix('"').and_then(|key| key.strip_suffix('"')))
+        .unwrap_or(key);
+    Some((key, value))
 }
 
 fn starts_yaml_reference(value: &str) -> bool {

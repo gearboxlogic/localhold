@@ -108,7 +108,11 @@ run_check >/dev/null
 
 (
     for _ in {1..1000}; do
-        if compgen -G "$test_repository/target/s.*" >/dev/null; then
+        snapshot_candidates=("$test_repository"/target/s.*)
+        snapshot=${snapshot_candidates[0]}
+        if [[ -d $snapshot/target && -w $snapshot/target ]]; then
+            mkdir -p "$snapshot/target/dependency-unsafe/actual-test"
+            printf 'preserved evidence\n' >"$snapshot/target/dependency-unsafe/actual-test/evidence.txt"
             printf '#![allow(warnings)]\npub fn changed_after_verification() {}\n' >"$test_repository/src/lib.rs"
             exit 0
         fi
@@ -129,6 +133,10 @@ if (( snapshot_status != 0 )); then
 fi
 if compgen -G "$test_repository/target/s.*" >/dev/null; then
     printf 'maintainability bootstrap retained an isolated source snapshot\n' >&2
+    exit 1
+fi
+if [[ $(<"$test_repository/target/dependency-unsafe/actual-test/evidence.txt") != 'preserved evidence' ]]; then
+    printf 'maintainability bootstrap did not preserve dependency audit evidence outside its source snapshot\n' >&2
     exit 1
 fi
 restore_reviewed_graph

@@ -48,6 +48,8 @@ pub(super) fn validate(path: &str, source: &str) -> Result<()> {
                 active_job.conditional = true;
             } else if key == "continue-on-error" {
                 active_job.continues_on_error = true;
+            } else if key == "needs" {
+                active_job.has_dependencies = true;
             } else if key == "runs-on" {
                 active_job.runner = literal_scalar(value);
             } else if key == "steps" && value.trim().is_empty() {
@@ -180,9 +182,9 @@ fn finish_job(job: Option<&Job>) -> Result<()> {
     let Some(job) = job.filter(|job| governed_job(&job.name).is_some()) else {
         return Ok(());
     };
-    if job.completed_steps != GOVERNED_STEP_COUNT {
+    if job.has_dependencies || job.completed_steps != GOVERNED_STEP_COUNT {
         bail!(
-            "checked-in GitHub YAML {WORKFLOW_PATH:?} must keep the reviewed isolated step sequence in governed dependency-unsafe job {:?}",
+            "checked-in GitHub YAML {WORKFLOW_PATH:?} must keep the reviewed dependency-free isolated step sequence in governed dependency-unsafe job {:?}",
             job.name
         );
     }
@@ -202,6 +204,7 @@ struct Job {
     conditional: bool,
     continues_on_error: bool,
     completed_steps: usize,
+    has_dependencies: bool,
     runner: Option<String>,
     steps_indentation: Option<usize>,
 }
@@ -213,6 +216,7 @@ impl Job {
             conditional: false,
             continues_on_error: false,
             completed_steps: 0,
+            has_dependencies: false,
             runner: None,
             steps_indentation: None,
         }

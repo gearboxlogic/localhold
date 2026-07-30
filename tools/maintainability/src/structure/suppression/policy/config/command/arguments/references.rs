@@ -154,6 +154,9 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "bash" | "bash.exe" | "dash" | "dash.exe" | "fish" | "fish.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe" => shell_input(arguments),
         "python" | "python.exe" | "python3" | "python3.exe" => python_input(arguments),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),
+        "bun" | "bun.exe" | "deno" | "deno.exe" | "lua" | "lua.exe" | "node" | "node.exe" | "perl" | "perl.exe" | "php" | "php.exe" | "ruby" | "ruby.exe" => {
+            positional_interpreter_input(arguments)
+        }
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
             let (inputs, opaque) = makefile_inputs(arguments);
             return (inputs, opaque || make_environment_selection_is_opaque(&tokens[..command_index]));
@@ -302,6 +305,22 @@ fn is_powershell_flag_without_operand(argument: &str) -> bool {
     )
 }
 
+fn positional_interpreter_input(arguments: &[String]) -> SelectedInput<'_> {
+    let Some(argument) = arguments.first() else {
+        return SelectedInput::Opaque;
+    };
+    if matches!(argument.to_ascii_lowercase().as_str(), "-h" | "--help" | "-v" | "--version") {
+        return SelectedInput::None;
+    }
+    if argument == "--" {
+        return arguments.get(1).map_or(SelectedInput::Opaque, |candidate| SelectedInput::Literal(candidate));
+    }
+    if argument.starts_with('-') {
+        return SelectedInput::Opaque;
+    }
+    SelectedInput::Literal(argument)
+}
+
 fn makefile_inputs(arguments: &[String]) -> (Vec<&str>, bool) {
     let mut inputs = Vec::new();
     let mut opaque = false;
@@ -405,6 +424,9 @@ mod tests {
         assert_eq!(inputs("python -m quality.lint"), (Vec::new(), false));
         assert_eq!(inputs("python -m $MODULE"), (Vec::new(), true));
         assert_eq!(inputs("pwsh -File quality/lint.ps1"), (vec!["quality/lint.ps1".to_owned()], false));
+        assert_eq!(inputs("perl quality/lint.pl"), (vec!["quality/lint.pl".to_owned()], false));
+        assert_eq!(inputs("ruby -- quality/lint.rb"), (vec!["quality/lint.rb".to_owned()], false));
+        assert_eq!(inputs("perl -e 'system q(cargo clippy)'"), (Vec::new(), true));
         assert_eq!(
             inputs("make -f quality/lint.rules --file=quality/common.rules"),
             (vec!["quality/common.rules".to_owned(), "quality/lint.rules".to_owned()], false)

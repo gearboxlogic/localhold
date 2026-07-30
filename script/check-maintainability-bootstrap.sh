@@ -60,7 +60,7 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=f9ead9aeff6aae855040ce3aea2e8901119071beef46061332dc3526378a9de6
-readonly reviewed_bootstrap_tests_sha256=9455e9411c82ef16e81e7d364a16067270f1a6e5537bf21de23409ca14e9df72
+readonly reviewed_bootstrap_tests_sha256=990b0c2d61032ea8e61e8a7b1405b1b3b9a6f35c42e0e99f9f2c009b92ab1f25
 readonly reviewed_gate_runner_sha256=a614e7a0804eed432d84f5b5e9283406c0c4f0915c9f79ce1b6b9b5fd2142433
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
@@ -156,6 +156,7 @@ mkdir_command=$(trusted_system_command mkdir)
 mktemp_command=$(trusted_system_command mktemp)
 rmdir_command=$(trusted_system_command rmdir)
 rm_command=$(trusted_system_command rm)
+mv_command=$(trusted_system_command mv)
 chmod_command=$(trusted_system_command chmod)
 tar_command=$(trusted_system_command tar)
 bash_command=$(trusted_system_command bash)
@@ -453,6 +454,49 @@ if [[ $mode != verify ]]; then
             "$rm_command" -rf -- "$snapshot_root"
         fi
     }
+    preserve_audit_evidence() {
+        local snapshot_evidence_parent="$snapshot_root/target/dependency-unsafe"
+        if [[ ! -e $snapshot_evidence_parent && ! -L $snapshot_evidence_parent ]]; then
+            return 0
+        fi
+        if [[ ! -d $snapshot_evidence_parent || -L $snapshot_evidence_parent ]]; then
+            printf 'maintainability audit evidence parent must be a regular directory\n' >&2
+            return 1
+        fi
+
+        local evidence_parent="$target_parent/dependency-unsafe"
+        if [[ -L $evidence_parent || -e $evidence_parent && ! -d $evidence_parent ]]; then
+            printf 'maintainability durable evidence parent must be a regular non-symlink directory\n' >&2
+            return 1
+        fi
+        if [[ ! -d $evidence_parent ]]; then
+            "$mkdir_command" -- "$evidence_parent" || return
+        fi
+        evidence_parent=$(cd -- "$evidence_parent" && pwd -P)
+        if [[ $evidence_parent != "$target_parent/dependency-unsafe" ]]; then
+            printf 'maintainability durable evidence parent resolves outside the repository target directory\n' >&2
+            return 1
+        fi
+
+        local evidence
+        local evidence_name
+        local destination
+        for evidence in "$snapshot_evidence_parent"/actual-*; do
+            if [[ ! -e $evidence && ! -L $evidence ]]; then
+                continue
+            fi
+            if [[ ! -d $evidence || -L $evidence ]]; then
+                printf 'maintainability audit evidence must be a regular non-symlink directory\n' >&2
+                return 1
+            fi
+            evidence_name=${evidence##*/}
+            destination="$evidence_parent/$evidence_name"
+            if [[ -e $destination || -L $destination ]]; then
+                "$rm_command" -rf -- "$destination" || return
+            fi
+            "$mv_command" -- "$evidence" "$destination" || return
+        done
+    }
     trap cleanup_snapshot EXIT
 
     git_checked clone --no-hardlinks --no-checkout --quiet -- "$repository_root" "$snapshot_root"
@@ -480,6 +524,7 @@ if [[ $mode != verify ]]; then
     if (( status == 0 )); then
         "$bash_command" "$snapshot_bootstrap" --root "$snapshot_root" || status=$?
     fi
+    preserve_audit_evidence || status=$?
     cleanup_snapshot
     trap - EXIT
     exit "$status"

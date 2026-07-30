@@ -55,6 +55,9 @@ fn governed_gate_steps_are_unconditional_and_platform_bound() {
 
     let wrong_runner = accepted.replacen("windows-latest", "ubuntu-latest", 1);
     assert_rejected(&wrong_runner);
+
+    let dependent_job = accepted.replacen("    runs-on:", "    needs: skipped-setup\n    runs-on:", 1);
+    assert_rejected(&dependent_job);
 }
 
 #[test]

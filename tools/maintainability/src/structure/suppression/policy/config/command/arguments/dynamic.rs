@@ -1,15 +1,25 @@
 use std::collections::BTreeSet;
 
-use super::{is_environment_assignment, is_rust_subcommand, is_rust_tool_token, is_shell_command_prefix, tokens};
+use super::{is_environment_assignment, is_rust_subcommand, is_rust_tool_token, is_shell_command_prefix, tokens, tool_basename};
+
+mod builtins;
 
 pub(super) fn has_rust_tool_assignment_flow(source: &str, case_insensitive_tools: bool) -> bool {
-    assigned_rust_tool_variables(source, case_insensitive_tools)
-        .iter()
-        .any(|name| references_variable(source, name))
+    let assigned_rust_tools = assigned_rust_tool_variables(source, case_insensitive_tools);
+    if assigned_rust_tools.iter().any(|name| references_variable(source, name)) {
+        return true;
+    }
+    let (computed, opaque_target) = builtins::assigned_variables(source);
+    opaque_target || computed.iter().any(|name| references_variable(source, name)) || computed_variables_reach_rust_command(source, &computed, case_insensitive_tools)
 }
 
 pub(super) fn has_opaque_command_assignment_flow(path: &str, source: &str) -> bool {
-    assigned_opaque_command_variables(path, source).iter().any(|name| references_variable(source, name))
+    let assigned = assigned_opaque_command_variables(path, source);
+    if assigned.iter().any(|name| references_variable(source, name)) {
+        return true;
+    }
+    let (computed, opaque_target) = builtins::assigned_variables(source);
+    opaque_target || computed.iter().any(|name| references_variable(source, name))
 }
 
 fn assigned_opaque_command_variables(path: &str, source: &str) -> BTreeSet<String> {
@@ -57,6 +67,35 @@ fn assigned_rust_tool_variables(source: &str, case_insensitive_tools: bool) -> B
             (is_rust_tool_token(value, case_insensitive_tools) || is_rust_subcommand(value)).then_some(name.to_owned())
         })
         .collect()
+}
+
+fn computed_variables_reach_rust_command(source: &str, assigned: &BTreeSet<String>, case_insensitive_tools: bool) -> bool {
+    tokens::source_command_tokens(source).iter().any(|command| {
+        let invokes_rust = command.iter().any(|word| is_rust_tool_token(tool_basename(word), case_insensitive_tools));
+        invokes_rust
+            && assigned
+                .iter()
+                .any(|name| command.iter().any(|word| references_named_variable(word, name, case_insensitive_tools)))
+    })
+}
+
+fn references_named_variable(word: &str, name: &str, case_insensitive: bool) -> bool {
+    let bytes = word.as_bytes();
+    bytes.iter().enumerate().any(|(index, byte)| {
+        if !matches!(byte, b'$' | b'%' | b'!') {
+            return false;
+        }
+        let mut start = index + 1;
+        if *byte == b'$' && bytes.get(start) == Some(&b'{') {
+            start += 1;
+        }
+        let mut end = start;
+        while bytes.get(end).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_') {
+            end += 1;
+        }
+        let candidate = &word[start..end];
+        !candidate.is_empty() && if case_insensitive { candidate.eq_ignore_ascii_case(name) } else { candidate == name }
+    })
 }
 
 fn assignment(word: &str) -> Option<(&str, &str)> {
@@ -164,6 +203,16 @@ mod tests {
     fn referenced_rust_tool_assignments_fail_closed() {
         assert!(has_rust_tool_assignment_flow("tool=cargo; sub=clippy; flag=-A; $tool $sub -- $flag warnings", false));
         assert!(has_rust_tool_assignment_flow("set TOOL=cargo\n%TOOL% build", true));
+        assert!(has_rust_tool_assignment_flow(
+            "printf -v tool %b cargo; printf -v sub %b clippy; printf -v option %b A; \"$tool\" \"$sub\" -- \"-$option\" warnings",
+            false
+        ));
+        assert!(has_rust_tool_assignment_flow("printf -v option %b A; cargo clippy -- \"-$option\" warnings", false));
+        assert!(has_rust_tool_assignment_flow(
+            "printf -v option %b A; cargo clippy -- \"$unrelated-$option\" warnings",
+            false
+        ));
+        assert!(has_rust_tool_assignment_flow("IFS= read -r tool <<<cargo; \"$tool\" check", false));
         assert!(!has_rust_tool_assignment_flow("tool=cargo\nprintf '%s\\n' configured", false));
         assert!(!has_rust_tool_assignment_flow("cargo_name=cargo\nprintf '%s\\n' \"$cargo_name\"", false));
         assert!(!has_rust_tool_assignment_flow("tool=node; $tool application.js", false));

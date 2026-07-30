@@ -60,8 +60,8 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=f9ead9aeff6aae855040ce3aea2e8901119071beef46061332dc3526378a9de6
-readonly reviewed_bootstrap_tests_sha256=d924bedc7f836b686547d2d9c332885e80c86958e7e8c32033247b2bb23773a5
-readonly reviewed_gate_runner_sha256=4a41471e22445124747dec9add2d0088b7dc59cc68d994ee378d84adf54896d5
+readonly reviewed_bootstrap_tests_sha256=e56f8cb747bbd66df87d5abd222e3b460de16d6b7fc03629aa4c64143f50b0bd
+readonly reviewed_gate_runner_sha256=a614e7a0804eed432d84f5b5e9283406c0c4f0915c9f79ce1b6b9b5fd2142433
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then
@@ -437,7 +437,9 @@ if [[ $mode != verify ]]; then
     fi
 
     umask 077
-    snapshot_root=$("$mktemp_command" -d "$target_parent/source.XXXXXXXX")
+    # Keep this private prefix short: nested dependency builds on Windows can
+    # still encounter MAX_PATH after adding their own temporary directories.
+    snapshot_root=$("$mktemp_command" -d "$target_parent/s.XXXXXXXX")
     "$rmdir_command" -- "$snapshot_root"
     cleanup_snapshot() {
         if [[ -n ${snapshot_root:-} && -e $snapshot_root ]]; then

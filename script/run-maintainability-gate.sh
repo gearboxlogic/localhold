@@ -265,7 +265,9 @@ if [[ $target_parent != "$repository_root/target" ]]; then
     exit 1
 fi
 umask 077
-target_directory=$("$mktemp_command" -d "$target_parent/maintainability-gate.XXXXXXXX")
+# These private names stay deliberately short because some MSVC dependency
+# builds resolve relative includes before collapsing `..` path components.
+target_directory=$("$mktemp_command" -d "$target_parent/g.XXXXXXXX")
 if [[ ! -d $target_directory || -L $target_directory ]]; then
     printf 'maintainability gate could not create a fresh target directory\n' >&2
     exit 1
@@ -275,7 +277,7 @@ cleanup_target_directory() {
 }
 trap cleanup_target_directory EXIT
 native_target_directory=$target_directory
-fresh_cargo_home="$target_directory/cargo-home"
+fresh_cargo_home="$target_directory/c"
 "$mkdir_command" -- "$fresh_cargo_home"
 if [[ ! -d $fresh_cargo_home || -L $fresh_cargo_home ]]; then
     printf 'maintainability gate could not create a fresh isolated Cargo home\n' >&2

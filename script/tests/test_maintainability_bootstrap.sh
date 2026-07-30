@@ -103,7 +103,7 @@ run_check >/dev/null
 
 (
     for _ in {1..1000}; do
-        if compgen -G "$test_repository/target/source.*" >/dev/null; then
+        if compgen -G "$test_repository/target/s.*" >/dev/null; then
             printf '#![allow(warnings)]\npub fn changed_after_verification() {}\n' >"$test_repository/src/lib.rs"
             exit 0
         fi
@@ -122,7 +122,7 @@ if (( snapshot_status != 0 )); then
     printf 'maintainability bootstrap used the mutable working tree after verification\n' >&2
     exit 1
 fi
-if compgen -G "$test_repository/target/source.*" >/dev/null; then
+if compgen -G "$test_repository/target/s.*" >/dev/null; then
     printf 'maintainability bootstrap retained an isolated source snapshot\n' >&2
     exit 1
 fi

@@ -6,8 +6,10 @@ unset GITHUB_ACTIONS GITHUB_EVENT_PATH GITHUB_SHA
 repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 check="$repository_root/script/check-maintainability-bootstrap.sh"
 ci_workflow="$repository_root/.github/workflows/ci.yml"
-fixture=$(mktemp -d)
-trap 'rm -rf -- "$fixture"' EXIT
+fixture_parent="$repository_root/target/maintainability-bootstrap-tests"
+mkdir -p "$fixture_parent"
+fixture=$(mktemp -d "$fixture_parent/run.XXXXXXXX")
+trap 'rm -rf -- "$fixture"; rmdir -- "$fixture_parent" 2>/dev/null || true' EXIT
 test_repository="$fixture/parent/repository"
 mkdir -p "$test_repository/tools/maintainability"
 source_tool="$repository_root/tools/maintainability"
@@ -221,9 +223,13 @@ machine=$(/usr/bin/uname -m)
 if [[ $kernel == Linux && $machine == x86_64 ]]; then
     toolchain_triple=x86_64-unknown-linux-gnu
     tool_extension=
+    runtime_library_one=lib/librustc_driver-a39fc8bf9e61dbb9.so
+    runtime_library_two=lib/libLLVM.so.22.1-rust-1.97.0-stable
 elif [[ $kernel == MINGW* || $kernel == MSYS* || $kernel == CYGWIN* ]] && [[ $machine == x86_64 ]]; then
     toolchain_triple=x86_64-pc-windows-msvc
     tool_extension=.exe
+    runtime_library_one=bin/std-24270508f4fdc995.dll
+    runtime_library_two=bin/rustc_driver-4aa755545f2784f5.dll
 else
     printf 'maintainability bootstrap tests require Linux or Windows x86_64\n' >&2
     exit 1
@@ -239,12 +245,14 @@ if [[ $kernel != Linux ]]; then
     trusted_cargo=$(/usr/bin/cygpath -u "$trusted_cargo")
 fi
 trusted_toolchain_bin=${trusted_cargo%/*}
+trusted_toolchain_root=${trusted_toolchain_bin%/*}
 if [[ ! -d $trusted_toolchain_bin ]]; then
     printf 'maintainability bootstrap tests require the pinned Rust 1.97.0 toolchain\n' >&2
     exit 1
 fi
 fake_rustup_home="$fixture/fake-rustup"
-fake_toolchain_bin="$fake_rustup_home/toolchains/1.97.0-$toolchain_triple/bin"
+fake_toolchain_root="$fake_rustup_home/toolchains/1.97.0-$toolchain_triple"
+fake_toolchain_bin="$fake_toolchain_root/bin"
 mkdir -p "$fake_toolchain_bin"
 cp "$trusted_toolchain_bin/cargo$tool_extension" "$fake_toolchain_bin/cargo$tool_extension"
 cp "$trusted_toolchain_bin/cargo$tool_extension" "$fake_toolchain_bin/rustc$tool_extension"
@@ -256,15 +264,24 @@ fi
 for tool in cargo rustc rustdoc cargo-clippy clippy-driver cargo-fmt rustfmt; do
     cp "$trusted_toolchain_bin/$tool$tool_extension" "$fake_toolchain_bin/$tool$tool_extension"
 done
+for runtime_library in "$runtime_library_one" "$runtime_library_two"; do
+    mkdir -p "$fake_toolchain_root/${runtime_library%/*}"
+    cp "$trusted_toolchain_root/$runtime_library" "$fake_toolchain_root/$runtime_library"
+done
 fake_rustup_environment=$fake_rustup_home
 if [[ $kernel != Linux ]]; then
     fake_rustup_environment=$(/usr/bin/cygpath -w "$fake_rustup_home")
 fi
 RUSTUP_HOME=$fake_rustup_environment run_check --test-environment >/dev/null
+printf '\nunauthenticated runtime\n' >>"$fake_toolchain_root/$runtime_library_one"
+if RUSTUP_HOME=$fake_rustup_environment run_check --test-environment >/dev/null 2>&1; then
+    printf 'maintainability bootstrap trusted an unauthenticated Rust runtime library\n' >&2
+    exit 1
+fi
 
 bash_env=$fixture/bash-env
 : >"$bash_env"
-BASH_ENV=$bash_env GITHUB_PATH=untrusted LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \
+BASH_ENV=$bash_env GITHUB_PATH=untrusted LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CARGO_TARGET_DIR="$fixture/untrusted-target" CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \
     RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \
     CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \
     run_check --test-environment >/dev/null

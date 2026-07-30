@@ -3,15 +3,18 @@ use std::path::Path;
 
 use anyhow::Result;
 
+mod dynamic;
 mod package_json;
 mod powershell;
 mod python;
+mod references;
 mod tokens;
+pub(super) use references::{cargo_manifest_paths_for_surface, literal_interpreter_scripts_for_surface};
 use tokens::{command_tokens, command_without_comment};
 
 #[cfg(test)]
 pub(in crate::structure::suppression::policy::config) fn weakening_token(source: &str) -> bool {
-    weakening_token_with_case(source, false)
+    weakening_token_with_case(source, false, true)
 }
 
 pub(in crate::structure::suppression::policy::config) fn weakening_token_for_surface(path: &str, source: &str) -> bool {
@@ -19,15 +22,23 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
         return true;
     }
     let case_insensitive_tools = has_case_insensitive_tool_names(path);
+    let reject_backticks = !is_powershell(path);
     if let Some(scripts) = package_json::script_commands(path, source) {
-        return scripts.map_or(true, |scripts| scripts.iter().any(|script| weakening_token_with_case(script, case_insensitive_tools)));
+        return scripts.map_or(true, |scripts| {
+            scripts.iter().any(|script| weakening_token_with_case(script, case_insensitive_tools, reject_backticks))
+        });
     }
     let source = normalized_source_for_surface(path, source);
     let embedded_commands = super::yaml::run_commands(path, &source);
     if is_yaml(path) {
-        return embedded_commands.iter().any(|command| weakening_token_with_case(command, case_insensitive_tools));
+        return embedded_commands
+            .iter()
+            .any(|command| weakening_token_with_case(command, case_insensitive_tools, reject_backticks));
     }
-    weakening_token_with_case(&source, case_insensitive_tools) || embedded_commands.iter().any(|command| weakening_token_with_case(command, case_insensitive_tools))
+    weakening_token_with_case(&source, case_insensitive_tools, reject_backticks)
+        || embedded_commands
+            .iter()
+            .any(|command| weakening_token_with_case(command, case_insensitive_tools, reject_backticks))
 }
 
 pub(super) fn direct_rust_sources_for_surface(path: &str, source: &str) -> (BTreeSet<String>, bool) {
@@ -144,7 +155,10 @@ fn normalized_source_for_surface(path: &str, source: &str) -> String {
     }
 }
 
-fn weakening_token_with_case(source: &str, case_insensitive_tools: bool) -> bool {
+fn weakening_token_with_case(source: &str, case_insensitive_tools: bool, reject_backticks: bool) -> bool {
+    if dynamic::has_rust_tool_assignment_flow(source, case_insensitive_tools) {
+        return true;
+    }
     let logical = join_command_continuations(source);
     if logical
         .split(['\n', ';', '&', '|'])
@@ -157,7 +171,7 @@ fn weakening_token_with_case(source: &str, case_insensitive_tools: bool) -> bool
     logical
         .split(['\n', ';', '&', '|'])
         .map(command_without_comment)
-        .any(|command| weakening_rust_command(command, case_insensitive_tools))
+        .any(|command| weakening_rust_command(command, case_insensitive_tools, reject_backticks))
 }
 
 fn join_command_continuations(source: &str) -> String {
@@ -170,14 +184,14 @@ fn join_command_continuations(source: &str) -> String {
         .replace("^\n", "")
 }
 
-fn weakening_rust_command(command: &str, case_insensitive_tools: bool) -> bool {
+fn weakening_rust_command(command: &str, case_insensitive_tools: bool, reject_backticks: bool) -> bool {
     if is_non_executing_assignment(command) {
         return false;
     }
     let tokens = command_tokens(command);
     if tokens
         .iter()
-        .any(|token| token.chars().any(char::is_whitespace) && weakening_token_with_case(token, case_insensitive_tools))
+        .any(|token| token.chars().any(char::is_whitespace) && weakening_token_with_case(token, case_insensitive_tools, reject_backticks))
     {
         return true;
     }
@@ -186,12 +200,12 @@ fn weakening_rust_command(command: &str, case_insensitive_tools: bool) -> bool {
         .iter()
         .any(|token| is_rust_tool_token(token, case_insensitive_tools) && !is_variable_assignment_target(command, token))
     {
-        return lint_option && has_dynamic_command_name(command, &tokens);
+        return has_dynamic_command_name(command, &tokens, reject_backticks) && (lint_option || tokens.iter().any(|token| is_rust_subcommand(token)));
     }
-    forwards_dynamic_arguments(&tokens, case_insensitive_tools)
+    forwards_dynamic_arguments(&tokens, case_insensitive_tools, reject_backticks)
         || declares_rust_tool_alias(&tokens)
         || cargo_changes_directory_before_compiler_arguments(&tokens, case_insensitive_tools)
-        || cargo_manifest_escapes_tools(&tokens, case_insensitive_tools)
+        || cargo_manifest_path_is_opaque(&tokens, case_insensitive_tools)
         || rust_response_file(&tokens, case_insensitive_tools)
         || has_pathname_expansion_arguments(&tokens, case_insensitive_tools)
         || has_brace_expansion_arguments(&tokens, case_insensitive_tools)
@@ -258,7 +272,7 @@ fn contains_shell_brace_expansion(token: &str) -> bool {
     false
 }
 
-fn has_dynamic_command_name(command: &str, tokens: &[String]) -> bool {
+fn has_dynamic_command_name(command: &str, tokens: &[String], reject_backticks: bool) -> bool {
     let mut index = 0;
     while let Some(token) = tokens.get(index) {
         let word = token.trim_matches(['(', ')', '{', '}']);
@@ -271,6 +285,7 @@ fn has_dynamic_command_name(command: &str, tokens: &[String]) -> bool {
             continue;
         }
         return word.contains('$')
+            || reject_backticks && word.contains('`')
             || contains_cmd_delayed_expansion(word)
             || word == "%*"
             || word.split_once('%').is_some_and(|(_, suffix)| !suffix.is_empty() && suffix.contains('%'));
@@ -290,13 +305,14 @@ fn is_lint_option(token: &str) -> bool {
     token == "-A" || token.starts_with("-A") && token.len() > 2 || token == "-W" || token.starts_with("-W") && token.len() > 2 || is_long_lint_option(token)
 }
 
-fn forwards_dynamic_arguments(tokens: &[String], case_insensitive_tools: bool) -> bool {
+fn forwards_dynamic_arguments(tokens: &[String], case_insensitive_tools: bool, reject_backticks: bool) -> bool {
     let Some(tool_index) = tokens.iter().position(|token| is_rust_tool_token(token, case_insensitive_tools)) else {
         return false;
     };
     tokens[tool_index..].iter().enumerate().any(|(relative_index, token)| {
         let index = tool_index + relative_index;
         token.contains('$')
+            || reject_backticks && token.contains('`')
             || contains_cmd_delayed_expansion(token)
             || token.starts_with('@') && opaque_splat_reaches_compiler(tokens, tool_index, index, case_insensitive_tools)
             || token == "%*"
@@ -306,6 +322,10 @@ fn forwards_dynamic_arguments(tokens: &[String], case_insensitive_tools: bool) -
 
 fn contains_cmd_delayed_expansion(token: &str) -> bool {
     token.bytes().filter(|byte| *byte == b'!').take(2).count() == 2
+}
+
+fn is_rust_subcommand(token: &str) -> bool {
+    matches!(token.to_ascii_lowercase().as_str(), "clippy" | "rustc" | "rustdoc")
 }
 
 fn opaque_splat_reaches_compiler(tokens: &[String], tool_index: usize, splat_index: usize, case_insensitive_tools: bool) -> bool {
@@ -322,7 +342,7 @@ fn opaque_splat_reaches_compiler(tokens: &[String], tool_index: usize, splat_ind
         .any(|argument| matches!(argument.as_str(), "clippy" | "rustc" | "rustdoc"))
 }
 
-fn cargo_manifest_escapes_tools(tokens: &[String], case_insensitive_tools: bool) -> bool {
+fn cargo_manifest_path_is_opaque(tokens: &[String], case_insensitive_tools: bool) -> bool {
     let Some(tool_index) = tokens.iter().position(|token| is_rust_tool_token(token, case_insensitive_tools)) else {
         return false;
     };
@@ -334,14 +354,14 @@ fn cargo_manifest_escapes_tools(tokens: &[String], case_insensitive_tools: bool)
     else {
         return false;
     };
-    arguments.get(manifest_index + 1).is_none_or(|manifest| !is_audited_tool_manifest(manifest))
+    arguments.get(manifest_index + 1).is_none_or(|manifest| !is_normalized_manifest_path(manifest))
 }
 
-fn is_audited_tool_manifest(manifest: &str) -> bool {
+fn is_normalized_manifest_path(manifest: &str) -> bool {
     let path = Path::new(manifest);
     !path.is_absolute()
+        && !manifest.contains('\\')
         && path.components().all(|component| matches!(component, std::path::Component::Normal(_)))
-        && path.starts_with("tools")
         && path.file_name().and_then(|name| name.to_str()) == Some("Cargo.toml")
 }
 
@@ -434,6 +454,13 @@ fn is_python(path: &str) -> bool {
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
+}
+
+fn is_powershell(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ps1"))
 }
 
 fn is_literal_direct_compiler_token(token: &str, case_insensitive: bool) -> bool {

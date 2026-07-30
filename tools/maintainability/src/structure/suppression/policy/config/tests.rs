@@ -155,6 +155,9 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(!weakening_token("RUSTC=$trusted_rustc"));
     assert!(weakening_token("CARGO=$(cargo clippy -- -A warnings)"));
     assert!(weakening_token("LINT_FLAGS='-A warnings'\ncargo clippy -- $LINT_FLAGS"));
+    assert!(weakening_token("tool=cargo; flag=-A; $tool clippy -- $flag warnings"));
+    assert!(weakening_token("tool=cargo; sub=clippy; flag=-A; $tool $sub -- $flag warnings"));
+    assert!(weakening_token("cargo clippy -- `printf '%s' \"$LINT_LEVEL\"` warnings"));
     assert!(weakening_token("cargo rustc -- @policy/lints.args"));
     assert!(!weakening_token("cargo run -- @application-argument"));
     assert!(weakening_token("sh -c \"cargo --config net.offline=true check # literal\""));
@@ -228,11 +231,41 @@ fn python_command_arrays_cannot_split_lint_arguments_from_cargo() {
 }
 
 #[test]
-fn rust_commands_may_only_select_audited_tool_manifests() {
+fn rust_commands_reject_opaque_manifest_paths_before_inventory_validation() {
     assert!(!weakening_token("cargo clippy --manifest-path tools/checker/Cargo.toml -- -D warnings"));
-    assert!(weakening_token("cargo clippy --manifest-path quality/checker/Cargo.toml -- -D warnings"));
+    assert!(!weakening_token("cargo clippy --manifest-path quality/checker/Cargo.toml -- -D warnings"));
     assert!(weakening_token("cargo clippy --manifest-path ../checker/Cargo.toml -- -D warnings"));
     assert!(weakening_token("cargo clippy --manifest-path"));
+}
+
+#[test]
+fn command_policy_requires_manifest_membership_in_the_audited_inventory() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    fs::create_dir_all(workspace.path().join("tools/checker/target/generated")).expect("generated manifest directory");
+    fs::write(workspace.path().join(".gitignore"), "tools/checker/target/\n").expect("ignore generated target");
+    fs::write(workspace.path().join("tools/checker/Cargo.toml"), "[package]\nname='checker'\nversion='0.1.0'\n").expect("audited manifest");
+    fs::write(
+        workspace.path().join("tools/checker/target/generated/Cargo.toml"),
+        "[package]\nname='generated'\nversion='0.1.0'\n",
+    )
+    .expect("ignored generated manifest");
+    fs::write(
+        workspace.path().join("script/check.sh"),
+        "cargo clippy --manifest-path tools/checker/Cargo.toml -- -D warnings\n",
+    )
+    .expect("audited manifest command");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+    reject_checked_in_weakening(workspace.path()).expect("audited manifest selection");
+
+    fs::write(
+        workspace.path().join("script/check.sh"),
+        "cargo clippy --manifest-path=tools/checker/target/generated/Cargo.toml -- -D warnings\n",
+    )
+    .expect("ignored manifest command");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("audited manifest inventory"), "{error:#}");
 }
 
 #[test]
@@ -455,6 +488,16 @@ fn command_policy_scans_extensionless_scripts() {
         let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
         assert!(error.to_string().contains("lint-weakening argument"));
     }
+
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::write(workspace.path().join("Justfile"), "lint:\n    bash quality/lint.txt\n").expect("interpreter invocation");
+    fs::write(workspace.path().join("quality/lint.txt"), "cargo clippy -- -A warnings\n").expect("non-executable lint script");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
 }
 
 #[test]
@@ -595,6 +638,7 @@ fn github_yaml_rejects_unsupported_execution_metadata() {
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps: [{run: cargo clippy -- -A warnings}]\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: \"cargo clippy --\n          -A warnings\"\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo clippy --\n          -A warnings\n",
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - \"r\\u0075n\": cargo clippy -- -A warnings\n",
     ] {
         let workspace = tempfile::tempdir().expect("temporary workspace");
         fs::create_dir_all(workspace.path().join(".github/workflows")).expect("workflow directory");
@@ -608,7 +652,8 @@ fn github_yaml_rejects_unsupported_execution_metadata() {
                 || error.to_string().contains("unsupported shell template")
                 || error.to_string().contains("working-directory")
                 || error.to_string().contains("flow mapping or complex sequence")
-                || error.to_string().contains("inline run scalar"),
+                || error.to_string().contains("inline run scalar")
+                || error.to_string().contains("quoted mapping key"),
             "{error:#}"
         );
     }

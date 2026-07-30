@@ -162,6 +162,25 @@ fn warn_overrides_are_inventoried_for_policy_rejection() -> Result<()> {
 }
 
 #[test]
+fn raw_identifiers_cannot_hide_lint_attributes() -> Result<()> {
+    let sites = scan(
+        "#[r#allow(clippy::panic, r#reason = \"raw allow\")]\nfn allowed() {}\n\
+         #[r#warn(clippy::unwrap_used, reason = \"raw warn\")]\nfn warned() {}\n\
+         #[r#cfg_attr(test, r#expect(clippy::indexing_slicing, reason = \"raw conditional\"))]\nfn conditional() {}\n",
+        SourceCategory::Production,
+    )?;
+    assert_eq!(
+        sites.iter().map(|site| (site.level.as_str(), site.lint.as_str(), site.reason.as_str())).collect::<Vec<_>>(),
+        [
+            ("allow", "clippy::panic", "raw allow"),
+            ("warn", "clippy::unwrap_used", "raw warn"),
+            ("expect", "clippy::indexing_slicing", "raw conditional"),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
 fn runnable_doctests_and_explicit_doc_inputs_fail_closed() {
     let doctest = scan(
         "/// ```\n/// #![allow(unused_variables)]\n/// let hidden = 1;\n/// ```\nfn documented() {}\n",

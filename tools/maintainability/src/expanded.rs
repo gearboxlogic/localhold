@@ -42,6 +42,10 @@ struct AuditLane<'a> {
 }
 
 pub fn verify(workspace: &Path, sites: &[UnsafeSite], cargo_metadata: &[u8]) -> Result<()> {
+    verify_with_target_directory(workspace, sites, cargo_metadata, None)
+}
+
+fn verify_with_target_directory(workspace: &Path, sites: &[UnsafeSite], cargo_metadata: &[u8], target_directory: Option<&Path>) -> Result<()> {
     let workspace = fs::canonicalize(workspace).with_context(|| format!("resolve workspace {}", workspace.display()))?;
     let manifest_path = workspace.join("Cargo.toml");
     let manifest = fs::canonicalize(&manifest_path).with_context(|| format!("resolve workspace manifest {}", manifest_path.display()))?;
@@ -77,7 +81,7 @@ pub fn verify(workspace: &Path, sites: &[UnsafeSite], cargo_metadata: &[u8]) -> 
         {
             continue;
         }
-        let audit = run_audit_lane(&workspace, &manifest, &lane)?;
+        let audit = run_audit_lane(&workspace, &manifest, &lane, target_directory)?;
         let diagnostics = if matches!(lane.label, "unit-test" | "benchmark") {
             subtract_diagnostics(&audit.diagnostics, &normal_diagnostics)
         } else {
@@ -99,6 +103,7 @@ pub fn verify(workspace: &Path, sites: &[UnsafeSite], cargo_metadata: &[u8]) -> 
                 cargo_args: &["--examples"],
                 target_kinds: &["example"],
             },
+            target_directory,
         )?;
         compare_target_diagnostics(sites, &audit.diagnostics)?;
         dep_info.extend(audit.dep_info);
@@ -151,7 +156,7 @@ struct CargoTarget {
     kind: Vec<String>,
 }
 
-fn run_audit_lane(workspace: &Path, manifest: &Path, lane: &AuditLane<'_>) -> Result<AuditOutput> {
+fn run_audit_lane(workspace: &Path, manifest: &Path, lane: &AuditLane<'_>, target_directory: Option<&Path>) -> Result<AuditOutput> {
     let mut command = Command::new(env!("CARGO"));
     command
         .current_dir(workspace)
@@ -166,6 +171,9 @@ fn run_audit_lane(workspace: &Path, manifest: &Path, lane: &AuditLane<'_>) -> Re
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
     sanitize_compiler_environment(&mut command);
+    if let Some(target_directory) = target_directory {
+        command.env("CARGO_TARGET_DIR", target_directory);
+    }
 
     let mut child = command.spawn().with_context(|| format!("start compiler-expanded {} audit", lane.label))?;
     let stdout = child

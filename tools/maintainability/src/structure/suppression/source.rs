@@ -191,17 +191,18 @@ impl SourceScanner {
     }
 
     fn record_meta(&mut self, meta: &Meta, category: SourceCategory, macro_carried: bool, activation_identity: Option<&str>) -> Result<()> {
-        if meta.path().is_ident("cfg_attr") {
+        let attribute = normalized_meta_ident(meta);
+        if attribute.as_deref() == Some("cfg_attr") {
             let Meta::List(list) = meta else {
                 return Ok(());
             };
             return self.record_cfg_attr(list, category, macro_carried);
         }
-        let level = if meta.path().is_ident("expect") {
+        let level = if attribute.as_deref() == Some("expect") {
             "expect"
-        } else if meta.path().is_ident("allow") {
+        } else if attribute.as_deref() == Some("allow") {
             "allow"
-        } else if meta.path().is_ident("warn") {
+        } else if attribute.as_deref() == Some("warn") {
             "warn"
         } else {
             return Ok(());
@@ -219,7 +220,7 @@ impl SourceScanner {
                 let Meta::NameValue(value) = argument else {
                     return None;
                 };
-                if !value.path.is_ident("reason") {
+                if normalized_path_ident(&value.path).as_deref() != Some("reason") {
                     return None;
                 }
                 let syn::Expr::Lit(expression) = &value.value else {
@@ -291,6 +292,16 @@ impl SourceScanner {
             Err(error) => Err(error).context("opaque macro-carried attribute could hide a lint suppression"),
         }
     }
+}
+
+fn normalized_meta_ident(meta: &Meta) -> Option<String> {
+    normalized_path_ident(meta.path())
+}
+
+fn normalized_path_ident(path: &syn::Path) -> Option<String> {
+    let mut segments = path.segments.iter();
+    let ident = normalized_ident(&segments.next()?.ident);
+    segments.next().is_none().then_some(ident)
 }
 
 fn is_include_invocation(tokens: &[TokenTree], index: usize) -> bool {

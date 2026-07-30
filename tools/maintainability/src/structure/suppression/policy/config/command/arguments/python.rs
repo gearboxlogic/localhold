@@ -9,9 +9,10 @@ pub(super) fn has_adjacent_string_literals(source: &str) -> bool {
 }
 
 pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
-    join_implicit_continuations(source)
-        .lines()
-        .any(|line| has_adjacent_string_literals_in(line) && (references_process_api(line) || references_rust_tool(line)))
+    join_implicit_continuations(source).lines().any(|line| {
+        has_adjacent_string_literals_in(line) && (references_process_api(line) || references_rust_tool(line))
+            || references_process_api(line) && AdjacentLiteralScanner::new(line).has_decoded_escape()
+    })
 }
 
 fn has_adjacent_string_literals_in(source: &str) -> bool {
@@ -163,6 +164,22 @@ impl AdjacentLiteralScanner {
         false
     }
 
+    fn has_decoded_escape(mut self) -> bool {
+        while self.index < self.characters.len() {
+            let Some(quote) = self.quote_start(self.index) else {
+                self.index += 1;
+                continue;
+            };
+            let raw = self.characters[self.index..quote].iter().any(|character| character.eq_ignore_ascii_case(&'r'));
+            let end = self.literal_end(self.index).unwrap_or(self.characters.len());
+            if !raw && self.characters[quote..end].contains(&'\\') {
+                return true;
+            }
+            self.index = end;
+        }
+        false
+    }
+
     fn literal_end(&self, start: usize) -> Option<usize> {
         let quote = self.quote_start(start)?;
         let delimiter = self.characters[quote];
@@ -227,6 +244,9 @@ mod tests {
         assert!(!has_adjacent_string_literals("subprocess.run([\"cargo\", \"clippy\"])\n"));
         assert!(!has_adjacent_string_literals("identifier\"invalid but not concatenated\"\n"));
         assert!(has_opaque_process_arguments("subprocess.run([\"-\" \"A\"])\n"));
+        assert!(has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", "\x2dA", "warnings"])"#));
+        assert!(has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", b"\u002dA", "warnings"])"#));
+        assert!(!has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", r"\x2dA", "warnings"])"#));
         assert!(!has_opaque_process_arguments("head = (f'<svg viewBox=\"0 0 64 64\" ' f'role=\"img\">')\n"));
         assert!(!has_opaque_process_arguments(
             "PATTERN = (r'^v[0-9]+' r'(?:-dev)?$')\nimport subprocess\nsubprocess.run(['git', 'status'])\n"

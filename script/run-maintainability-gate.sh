@@ -15,7 +15,10 @@ readonly git_command=${LOCALHOLD_MAINTAINABILITY_GIT:?maintainability bootstrap 
 readonly sha256_command=/usr/bin/sha256sum
 readonly uname_command=/usr/bin/uname
 readonly bash_command=/usr/bin/bash
-for system_command in "$sha256_command" "$uname_command" "$bash_command"; do
+readonly mkdir_command=/usr/bin/mkdir
+readonly mktemp_command=/usr/bin/mktemp
+readonly rm_command=/usr/bin/rm
+for system_command in "$sha256_command" "$uname_command" "$bash_command" "$mkdir_command" "$mktemp_command" "$rm_command"; do
     if [[ ! -f $system_command || ! -x $system_command ]]; then
         printf 'maintainability gate requires an OS-owned executable: %s\n' "$system_command" >&2
         exit 1
@@ -44,10 +47,28 @@ authenticated_tool() {
     printf '%s\n' "$path"
 }
 
+authenticated_runtime_library() {
+    local path=$1
+    local expected=$2
+    if [[ ! -f $path || -L $path ]]; then
+        printf 'pinned Rust runtime library must be a regular non-symlink file: %s\n' "$path" >&2
+        exit 1
+    fi
+    local actual
+    actual=$(sha256_file "$path")
+    if [[ $actual != "$expected" ]]; then
+        printf 'reviewed Rust runtime library digest differs: %s\n' "$path" >&2
+        exit 1
+    fi
+}
+
 kernel=$("$uname_command" -s)
 machine=$("$uname_command" -m)
-# Tool digests come from the SHA-256-verified official Rust 1.97.0 component
-# archives and the official Rustup 1.29.0 archive.
+# Tool and runtime-library digests come from the official Rust 1.97.0 channel
+# manifest (SHA-256 3804d2666f7c12ce64205baa69b6be52f910b45b158091013264beb7aa1de7f5),
+# its Linux rustc archive (0a8787303c88b018af61b5c53a0c7024d516d175e623eeab35a35eab11dbcad0),
+# its Windows rustc archive (32f62b4162c729c080d0f5fddc8386ae6d160bd493016e850c1dba26aa20a196),
+# and the official Rustup 1.29.0 archive.
 if [[ $kernel == Linux && $machine == x86_64 ]]; then
     tool_extension=
     expected_rustup_sha256=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
@@ -58,6 +79,10 @@ if [[ $kernel == Linux && $machine == x86_64 ]]; then
     expected_clippy_driver_sha256=2230bc9dd3084c8032c5bbe7efef288e55715b5831e54a1dc3fe1182d1884584
     expected_cargo_fmt_sha256=024e11d5e200ab70d76a2c6f973784b2c92896cb65e2f4235c79f34ed4836233
     expected_rustfmt_sha256=fbdba7404a80bc6d36fa2bb4cdd7ca3fc7f060a109207ef03eaef63058cd1216
+    runtime_library_one=lib/librustc_driver-a39fc8bf9e61dbb9.so
+    expected_runtime_library_one_sha256=05db21ad99d7224822697fac743a53307a18fcdecc5f9241c7e4e3df0240cdfa
+    runtime_library_two=lib/libLLVM.so.22.1-rust-1.97.0-stable
+    expected_runtime_library_two_sha256=e0fb4933d61e8c27e45796a91a0774bcff8379d414b33f898b1a95b9a9c05fb2
     windows_toolchain=false
 elif [[ $kernel == MINGW* || $kernel == MSYS* || $kernel == CYGWIN* ]] && [[ $machine == x86_64 ]]; then
     tool_extension=.exe
@@ -69,6 +94,10 @@ elif [[ $kernel == MINGW* || $kernel == MSYS* || $kernel == CYGWIN* ]] && [[ $ma
     expected_clippy_driver_sha256=4ff747c4e2a55d05bfd42b6ea1849c558d4533e44ef44e009706b2be473c5450
     expected_cargo_fmt_sha256=3eb9b94afb841b7dd95687a35fe815d592bc130961147213d4f2b5dd579597bd
     expected_rustfmt_sha256=607162816ec4f330fee34d6954e20631a76657c4264d75ae80c14183f8dc1b18
+    runtime_library_one=bin/std-24270508f4fdc995.dll
+    expected_runtime_library_one_sha256=cf4f7e4b6ce329025270c5d35fec90c62f1af6c5bd7052e150d296c25b3eaf02
+    runtime_library_two=bin/rustc_driver-4aa755545f2784f5.dll
+    expected_runtime_library_two_sha256=ad21f47663430f5cda9fede05ee4a0de543ce6aa8b1c231a1949104670eb09db
     windows_toolchain=true
 else
     printf 'maintainability evidence requires Linux or Windows x86_64, not %s %s\n' "$kernel" "$machine" >&2
@@ -144,6 +173,11 @@ if [[ ! -d $toolchain_bin || -L $toolchain_bin ]]; then
     exit 1
 fi
 toolchain_bin=$(cd -- "$toolchain_bin" && pwd -P)
+toolchain_root=${toolchain_bin%/*}
+if [[ ! -d $toolchain_root || -L $toolchain_root ]]; then
+    printf 'resolved pinned Rust toolchain root must be a regular directory: %s\n' "$toolchain_root" >&2
+    exit 1
+fi
 
 cargo_executable=$(authenticated_tool "$toolchain_bin/cargo$tool_extension" "$expected_cargo_sha256")
 rustc_executable=$(authenticated_tool "$toolchain_bin/rustc$tool_extension" "$expected_rustc_sha256")
@@ -152,6 +186,8 @@ cargo_clippy_executable=$(authenticated_tool "$toolchain_bin/cargo-clippy$tool_e
 authenticated_tool "$toolchain_bin/clippy-driver$tool_extension" "$expected_clippy_driver_sha256" >/dev/null
 cargo_fmt_executable=$(authenticated_tool "$toolchain_bin/cargo-fmt$tool_extension" "$expected_cargo_fmt_sha256")
 rustfmt_executable=$(authenticated_tool "$toolchain_bin/rustfmt$tool_extension" "$expected_rustfmt_sha256")
+authenticated_runtime_library "$toolchain_root/$runtime_library_one" "$expected_runtime_library_one_sha256"
+authenticated_runtime_library "$toolchain_root/$runtime_library_two" "$expected_runtime_library_two_sha256"
 
 native_cargo=$cargo_executable
 native_rustc=$rustc_executable
@@ -208,7 +244,36 @@ RUSTC=$native_rustc
 RUSTDOC=$native_rustdoc
 RUSTFMT=$native_rustfmt
 LOCALHOLD_MAINTAINABILITY_CARGO=$native_cargo
-export PATH CARGO RUSTC RUSTDOC RUSTFMT LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_RUSTUP
+target_parent="$repository_root/target"
+if [[ -L $target_parent || -e $target_parent && ! -d $target_parent ]]; then
+    printf 'maintainability target parent must be a regular non-symlink directory\n' >&2
+    exit 1
+fi
+if [[ ! -d $target_parent ]]; then
+    "$mkdir_command" -- "$target_parent"
+fi
+target_parent=$(cd -- "$target_parent" && pwd -P)
+if [[ $target_parent != "$repository_root/target" ]]; then
+    printf 'maintainability target parent resolves outside the repository target directory\n' >&2
+    exit 1
+fi
+umask 077
+target_directory=$("$mktemp_command" -d "$target_parent/maintainability-gate.XXXXXXXX")
+if [[ ! -d $target_directory || -L $target_directory ]]; then
+    printf 'maintainability gate could not create a fresh target directory\n' >&2
+    exit 1
+fi
+cleanup_target_directory() {
+    "$rm_command" -rf -- "$target_directory"
+}
+trap cleanup_target_directory EXIT
+native_target_directory=$target_directory
+if $windows_toolchain; then
+    native_target_directory=$("$cygpath_command" -w "$target_directory")
+fi
+CARGO_TARGET_DIR=$native_target_directory
+readonly CARGO_TARGET_DIR
+export PATH CARGO RUSTC RUSTDOC RUSTFMT CARGO_TARGET_DIR LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_RUSTUP
 
 run_source_safety() {
     "$bash_command" "$repository_root/script/tests/test_maintainability_bootstrap.sh"
@@ -216,12 +281,12 @@ run_source_safety() {
 }
 
 run_dependency_unsafe() {
-    "$cargo_executable" fetch --locked
-    "$cargo_executable" fetch --manifest-path tools/dependency-unsafe/Cargo.toml --locked
-    "$cargo_fmt_executable" fmt --manifest-path tools/dependency-unsafe/Cargo.toml -- --check
-    "$cargo_executable" test --manifest-path tools/dependency-unsafe/Cargo.toml --locked
-    "$cargo_clippy_executable" clippy --manifest-path tools/dependency-unsafe/Cargo.toml --all-targets --locked -- -D warnings
-    "$cargo_executable" run --manifest-path tools/dependency-unsafe/Cargo.toml --locked -- check
+    cargo fetch --locked
+    cargo fetch --manifest-path tools/dependency-unsafe/Cargo.toml --locked
+    cargo fmt --manifest-path tools/dependency-unsafe/Cargo.toml -- --check
+    cargo test --manifest-path tools/dependency-unsafe/Cargo.toml --locked
+    cargo clippy --manifest-path tools/dependency-unsafe/Cargo.toml --all-targets --locked -- -D warnings
+    cargo run --manifest-path tools/dependency-unsafe/Cargo.toml --locked -- check
 }
 
 verify_test_environment() {
@@ -235,6 +300,10 @@ verify_test_environment() {
         fi
     done
     [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $LOCALHOLD_MAINTAINABILITY_RUSTUP && -n $git_command ]]
+    if [[ ! -d $target_directory || -L $target_directory || ${target_directory%/*} != "$target_parent" || $CARGO_TARGET_DIR != "$native_target_directory" ]]; then
+        printf 'maintainability bootstrap did not provide a fresh isolated Cargo target directory\n' >&2
+        exit 1
+    fi
     if [[ $PATH != "$trusted_path" ]]; then
         printf 'maintainability bootstrap retained an untrusted executable search path\n' >&2
         exit 1

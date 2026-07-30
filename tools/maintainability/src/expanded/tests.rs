@@ -8,7 +8,9 @@ use tempfile::{TempDir, tempdir};
 use crate::scan::{SiteKind, SourceRange, UnsafeSite, scan_workspace};
 
 use super::dep_info::{is_audited_compiler_input, parse as parse_dep_info, parse_make_words};
-use super::{AuditLane, AuditOutput, Diagnostic, audit_environment_override, compare_diagnostics, is_root_manifest, parse_cargo_output, subtract_diagnostics, verify};
+use super::{
+    AuditLane, AuditOutput, Diagnostic, audit_environment_override, compare_diagnostics, is_root_manifest, parse_cargo_output, subtract_diagnostics, verify_with_target_directory,
+};
 
 fn site(range: SourceRange) -> UnsafeSite {
     UnsafeSite {
@@ -304,13 +306,15 @@ fn benchmark_enabled_non_bench_target_diagnostics_are_audited() {
 }
 
 fn verify_fixture(fixture: &TempDir, sites: &[UnsafeSite]) -> anyhow::Result<()> {
+    let target_directory = fixture.path().join("target");
     let output = Command::new(env!("CARGO"))
         .current_dir(fixture.path())
+        .env("CARGO_TARGET_DIR", &target_directory)
         .args(["metadata", "--format-version=1", "--no-deps", "--locked"])
         .output()
         .expect("fixture Cargo metadata");
     assert!(output.status.success(), "fixture Cargo metadata failed: {}", String::from_utf8_lossy(&output.stderr));
-    verify(fixture.path(), sites, &output.stdout)
+    verify_with_target_directory(fixture.path(), sites, &output.stdout, Some(&target_directory))
 }
 
 fn append_root_manifest(fixture: &TempDir, source: &str) {

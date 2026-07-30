@@ -37,6 +37,9 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
         if starts_flow_collection(line) {
             bail!("checked-in GitHub YAML {path:?} uses an unsupported flow mapping or complex sequence");
         }
+        if quoted_mapping_key_has_escape(line) {
+            bail!("checked-in GitHub YAML {path:?} uses unsupported escapes in a quoted mapping key");
+        }
         let Some((key, value)) = yaml_key_value(line) else {
             continue;
         };
@@ -74,6 +77,28 @@ fn starts_unsupported_key_property(line: &str) -> bool {
 
 fn starts_flow_collection(line: &str) -> bool {
     yaml_node_content(line).starts_with(['{', '['])
+}
+
+fn quoted_mapping_key_has_escape(line: &str) -> bool {
+    let content = yaml_node_content(line);
+    let Some(content) = content.strip_prefix('"') else {
+        return false;
+    };
+    let mut escaped = false;
+    let mut contained_escape = false;
+    for (index, character) in content.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            contained_escape = true;
+        } else if character == '"' {
+            return contained_escape && content[index + character.len_utf8()..].trim_start().starts_with(':');
+        }
+    }
+    false
 }
 
 fn yaml_node_content(line: &str) -> &str {

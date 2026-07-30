@@ -737,6 +737,20 @@ fn command_policy_rejects_sourced_environment_files() {
 }
 
 #[test]
+fn command_policy_rejects_opaque_dynamic_command_names() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::write(workspace.path().join("script/check.sh"), "command=$(cat quality/lint.txt)\n$command\n").expect("dynamic command surface");
+    fs::write(workspace.path().join("quality/lint.txt"), "cargo clippy -- -A warnings\n").expect("opaque command payload");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
+}
+
+#[test]
 fn make_include_indirection_is_rejected() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join("build")).expect("Make fragment directory");
@@ -806,6 +820,14 @@ fn command_policy_rejects_directly_compiled_rust_helpers() {
 
     fs::write(workspace.path().join("misc/Cargo.toml"), "[package]\nname='unchecked'\nversion='0.1.0'\n").expect("alternate package manifest");
     fs::write(workspace.path().join("script/check.sh"), "cd misc && cargo clippy -- -D warnings\n").expect("relocated Cargo command");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("without auditable repository-relative .rs inputs"));
+
+    fs::write(workspace.path().join("script/check.sh"), "env --chdir=quality cargo clippy -- -D warnings\n").expect("env-relocated Cargo command");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("without auditable repository-relative .rs inputs"));
+
+    fs::write(workspace.path().join("script/check.sh"), "env -C misc rustc check.rs\n").expect("env-relocated compiler command");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("without auditable repository-relative .rs inputs"));
 

@@ -3,9 +3,9 @@ use super::validate;
 const JOB: &str = r#"  dependency-unsafe-linux:
     runs-on: ubuntu-latest
     steps:
+      - name: Install reviewed Rust toolchain
+        run: rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d
       - name: Run dependency unsafe gate
         run: |
           if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
@@ -20,7 +20,12 @@ const JOB: &str = r#"  dependency-unsafe-linux:
 fn workflow() -> String {
     let windows_job = JOB
         .replace("dependency-unsafe-linux", "dependency-unsafe-windows")
-        .replace("ubuntu-latest", "windows-latest");
+        .replace("ubuntu-latest", "windows-latest")
+        .replacen(
+            "      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
+            "      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0\n        env:\n          GIT_CONFIG_COUNT: '1'\n          GIT_CONFIG_KEY_0: core.autocrlf\n          GIT_CONFIG_VALUE_0: 'false'",
+            1,
+        );
     format!("name: CI\non: push\njobs:\n{JOB}{windows_job}")
 }
 
@@ -91,9 +96,39 @@ fn governed_jobs_have_a_closed_isolated_step_sequence() {
     assert_rejected(&preceding_command);
 
     let unreviewed_action = accepted.replacen(
-        "      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d",
+        "      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
         "      - uses: attacker/example@1111111111111111111111111111111111111111",
         1,
     );
     assert_rejected(&unreviewed_action);
+
+    let unreviewed_toolchain = accepted.replacen("rustup toolchain install 1.97.0", "mise install", 1);
+    assert_rejected(&unreviewed_toolchain);
+
+    let bare_sequence_step = accepted.replacen(
+        "      - name: Install reviewed Rust toolchain",
+        "      -\n        run: /usr/bin/nohup /tmp/background-helper\n      - name: Install reviewed Rust toolchain",
+        1,
+    );
+    assert_rejected(&bare_sequence_step);
+}
+
+#[test]
+fn windows_checkout_requires_exact_line_ending_configuration() {
+    let accepted = workflow();
+    let missing = accepted.replacen("          GIT_CONFIG_COUNT: '1'\n", "", 1);
+    assert_rejected(&missing);
+
+    let altered = accepted.replacen("          GIT_CONFIG_VALUE_0: 'false'", "          GIT_CONFIG_VALUE_0: 'true'", 1);
+    assert_rejected(&altered);
+
+    let duplicate = accepted.replacen("          GIT_CONFIG_COUNT: '1'", "          GIT_CONFIG_COUNT: '1'\n          GIT_CONFIG_COUNT: '1'", 1);
+    assert_rejected(&duplicate);
+
+    let linux_environment = accepted.replacen(
+        "      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
+        "      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0\n        env:\n          GIT_CONFIG_COUNT: '1'\n          GIT_CONFIG_KEY_0: core.autocrlf\n          GIT_CONFIG_VALUE_0: 'false'",
+        1,
+    );
+    assert_rejected(&linux_environment);
 }

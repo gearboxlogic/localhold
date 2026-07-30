@@ -423,11 +423,27 @@ fn untrusted_directory_change_with_rust_tool(source: &str, case_insensitive_tool
 }
 
 fn is_directory_change_command(tokens: &[String]) -> bool {
+    if env_changes_directory(tokens) {
+        return true;
+    }
     tokens
         .iter()
         .map(|word| word.trim_matches(['(', ')', '{', '}']))
         .find(|word| !word.is_empty() && !is_shell_command_prefix(word) && !is_environment_assignment(word))
         .is_some_and(|word| matches!(word.to_ascii_lowercase().as_str(), "cd" | "chdir" | "pushd" | "set-location"))
+}
+
+fn env_changes_directory(tokens: &[String]) -> bool {
+    let Some(env_index) = tokens
+        .iter()
+        .position(|word| tool_basename(word.trim_matches(['(', ')', '{', '}'])).eq_ignore_ascii_case("env"))
+    else {
+        return false;
+    };
+    tokens[env_index.saturating_add(1)..].iter().take_while(|word| !is_rust_tool_token(word, true)).any(|word| {
+        let word = word.to_ascii_lowercase();
+        matches!(word.as_str(), "-c" | "--chdir") || word.starts_with("--chdir=") || word.starts_with("-c") && word.len() > 2
+    })
 }
 
 fn is_audited_repository_root_change(tokens: &[String], source: &str) -> bool {

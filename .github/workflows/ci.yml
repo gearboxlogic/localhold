@@ -12,7 +12,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 06d806158eb0a0eb02555115da7a7da32e0d547149e0aada512ddd237516a755
+  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 000118731cba18fa97b16e1d39f945f85d459a25d604a726c5d41e2820dcd798
   XDG_CACHE_HOME: ${{ github.workspace }}/.cache
 
 permissions:
@@ -108,25 +108,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Install reviewed Rust toolchain
+        run: rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Cache Cargo registry and audit tool
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            .cache/localhold/cargo/registry
-            .cache/localhold/cargo/git
-            tools/dependency-unsafe/target
-            tools/maintainability/target
-          key: ${{ runner.os }}-dependency-unsafe-${{ hashFiles('Cargo.lock', 'tools/dependency-unsafe/Cargo.lock', 'tools/maintainability/Cargo.lock', 'mise.lock') }}
-          restore-keys: ${{ runner.os }}-dependency-unsafe-
-
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
-        with:
-          version: 2026.7.5
 
       - name: Run dependency unsafe gate
         id: audit
@@ -249,25 +237,17 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: Install reviewed Rust toolchain
+        run: rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Cache Cargo registry and audit tool
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            .cache/localhold/cargo/registry
-            .cache/localhold/cargo/git
-            tools/dependency-unsafe/target
-            tools/maintainability/target
-          key: ${{ runner.os }}-dependency-unsafe-${{ hashFiles('Cargo.lock', 'tools/dependency-unsafe/Cargo.lock', 'tools/maintainability/Cargo.lock', 'mise.lock') }}
-          restore-keys: ${{ runner.os }}-dependency-unsafe-
-
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
-        with:
-          version: 2026.7.5
 
       - name: Run dependency unsafe gate
         id: audit

@@ -24,16 +24,20 @@ pub(in crate::structure::suppression::policy::config::command) fn cargo_manifest
 
 pub(in crate::structure::suppression::policy::config::command) fn execution_inputs_for_surface(path: &str, source: &str) -> (BTreeSet<String>, bool) {
     if let Some(scripts) = package_json::script_commands(path, source) {
-        return scripts.map_or_else(|_| (BTreeSet::new(), true), |scripts| collect_execution_inputs(scripts.iter().map(String::as_str), true));
+        return scripts.map_or_else(
+            |_| (BTreeSet::new(), true),
+            |scripts| collect_execution_inputs(scripts.iter().map(String::as_str), true, path),
+        );
     }
     let source = normalized_source_for_surface(path, source);
     let embedded_commands = super::super::yaml::run_commands(path, &source);
     if is_yaml(path) {
-        return collect_execution_inputs(embedded_commands.iter().map(String::as_str), true);
+        return collect_execution_inputs(embedded_commands.iter().map(String::as_str), true, path);
     }
     collect_execution_inputs(
         std::iter::once(source.as_str()).chain(embedded_commands.iter().map(String::as_str)),
         supports_direct_program_paths(path),
+        path,
     )
 }
 
@@ -85,10 +89,11 @@ fn is_manifest_capable_tool_token(token: &str, case_insensitive: bool) -> bool {
     is_cargo_tool_token(token, case_insensitive) || matches_tool_name(tool_basename(token), case_insensitive, &["cargo-clippy", "cargo-clippy.exe"])
 }
 
-fn collect_execution_inputs<'a>(sources: impl IntoIterator<Item = &'a str>, direct_program_paths: bool) -> (BTreeSet<String>, bool) {
+fn collect_execution_inputs<'a>(sources: impl IntoIterator<Item = &'a str>, direct_program_paths: bool, path: &str) -> (BTreeSet<String>, bool) {
     let mut inputs = BTreeSet::new();
     let mut unresolved = false;
     for source in sources {
+        unresolved |= super::dynamic::has_opaque_command_assignment_flow(path, source);
         let normalized;
         let source = if direct_program_paths {
             normalized = tokens::without_noncommand_shell_data(source);
@@ -375,7 +380,7 @@ mod tests {
     use super::collect_execution_inputs;
 
     fn inputs(command: &str) -> (Vec<String>, bool) {
-        let (candidates, opaque) = collect_execution_inputs(std::iter::once(command), true);
+        let (candidates, opaque) = collect_execution_inputs(std::iter::once(command), true, "script/check.sh");
         (candidates.into_iter().collect(), opaque)
     }
 
@@ -408,5 +413,6 @@ mod tests {
         assert_eq!(inputs("make -C quality -f lint.rules"), (vec!["lint.rules".to_owned()], true));
         assert_eq!(inputs("make MAKEFILES=quality/lint.rules"), (Vec::new(), true));
         assert_eq!(inputs("MAKEFILES=quality/lint.rules make"), (Vec::new(), true));
+        assert_eq!(inputs("command=$(cat quality/lint.txt); $command"), (Vec::new(), true));
     }
 }

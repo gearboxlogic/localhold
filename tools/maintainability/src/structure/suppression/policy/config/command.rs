@@ -112,6 +112,9 @@ pub(super) const MISE_ENVIRONMENT_LINES: &[&str] = &["CARGO_HOME = \"{{ env.XDG_
 pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          BASH_ENV: ''",
     "          BASH_ENV: ''",
+    "          GIT_CONFIG_COUNT: '1'",
+    "          GIT_CONFIG_KEY_0: core.autocrlf",
+    "          GIT_CONFIG_VALUE_0: 'false'",
     "          LD_AUDIT: ''",
     "          LD_AUDIT: ''",
     "          LD_LIBRARY_PATH: ''",

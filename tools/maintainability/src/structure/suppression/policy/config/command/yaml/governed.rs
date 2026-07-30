@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, bail};
 
@@ -6,6 +6,8 @@ use super::{is_block_scalar, leading_spaces, literal_scalar, yaml_key_value};
 
 const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 const GATE_NAME: &str = "Run dependency unsafe gate";
+const TOOLCHAIN_NAME: &str = "Install reviewed Rust toolchain";
+const TOOLCHAIN_RUN_SOURCE: &str = "rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt";
 const GATE_RUN_SOURCE: &str = r#"if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
   printf 'maintainability bootstrap differs from the workflow-reviewed digest\n' >&2
   exit 1
@@ -13,10 +15,9 @@ fi
 ./script/check-maintainability-bootstrap.sh --maintainability"#;
 const GOVERNED_JOBS: [(&str, &str); 2] = [("dependency-unsafe-linux", "ubuntu-latest"), ("dependency-unsafe-windows", "windows-latest")];
 const CHECKOUT_ACTION: &str = "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0";
-const CACHE_ACTION: &str = "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
-const MISE_ACTION: &str = "jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d";
 const UPLOAD_ACTION: &str = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a";
-const GOVERNED_STEP_COUNT: usize = 5;
+const GOVERNED_STEP_COUNT: usize = 4;
+const WINDOWS_CHECKOUT_ENVIRONMENT: [(&str, &str); 3] = [("GIT_CONFIG_COUNT", "1"), ("GIT_CONFIG_KEY_0", "core.autocrlf"), ("GIT_CONFIG_VALUE_0", "false")];
 
 pub(super) fn validate(path: &str, source: &str) -> Result<()> {
     if path != WORKFLOW_PATH {
@@ -31,7 +32,7 @@ pub(super) fn validate(path: &str, source: &str) -> Result<()> {
         if content.is_empty() || content.starts_with('#') {
             continue;
         }
-        if indentation == 2 && !content.starts_with("- ") {
+        if indentation == 2 && !is_sequence_item(content) {
             finish_step(job.as_mut(), step.take(), &mut governed_jobs)?;
             finish_job(job.as_ref())?;
             job = yaml_key_value(line).map(|(name, _)| Job::new(name));
@@ -62,7 +63,7 @@ pub(super) fn validate(path: &str, source: &str) -> Result<()> {
             finish_step(job.as_mut(), step.take(), &mut governed_jobs)?;
             continue;
         }
-        if content.starts_with("- ") {
+        if is_sequence_item(content) {
             finish_step(job.as_mut(), step.take(), &mut governed_jobs)?;
             step = Some(Step::default());
         }
@@ -124,11 +125,9 @@ fn finish_step(job: Option<&mut Job>, step: Option<Step>, governed_jobs: &mut BT
 
 fn validate_governed_step(job: &Job, step: &Step) -> Result<()> {
     let expected_action = match job.completed_steps {
-        0 => Some(CHECKOUT_ACTION),
-        1 => Some(CACHE_ACTION),
-        2 => Some(MISE_ACTION),
-        3 => None,
-        4 => Some(UPLOAD_ACTION),
+        0 | 2 => None,
+        1 => Some(CHECKOUT_ACTION),
+        3 => Some(UPLOAD_ACTION),
         _ => {
             bail!(
                 "checked-in GitHub YAML {WORKFLOW_PATH:?} adds an unreviewed step to governed dependency-unsafe job {:?}",
@@ -136,14 +135,39 @@ fn validate_governed_step(job: &Job, step: &Step) -> Result<()> {
             );
         }
     };
-    if job.completed_steps == 3 {
+    let expected_checkout_environment = if job.name == "dependency-unsafe-windows" && job.completed_steps == 1 {
+        WINDOWS_CHECKOUT_ENVIRONMENT.as_slice()
+    } else {
+        &[]
+    };
+    if job.completed_steps == 1 && !step.has_exact_environment(expected_checkout_environment) {
+        bail!(
+            "checked-in GitHub YAML {WORKFLOW_PATH:?} must preserve reviewed checkout line-ending configuration in governed job {:?}",
+            job.name
+        );
+    }
+    if job.completed_steps == 0 {
+        if step.name.as_deref() != Some(TOOLCHAIN_NAME)
+            || step.uses.is_some()
+            || !step.run_declared
+            || step.run_source.trim_end() != TOOLCHAIN_RUN_SOURCE
+            || !step.has_exact_environment(&[])
+            || step.conditional
+            || step.continues_on_error
+        {
+            bail!(
+                "checked-in GitHub YAML {WORKFLOW_PATH:?} must install only the reviewed Rust toolchain before checkout in governed job {:?}",
+                job.name
+            );
+        }
+    } else if job.completed_steps == 2 {
         if step.name.as_deref() != Some(GATE_NAME) || step.uses.is_some() || !step.run_declared || !step.invokes_gate() {
             bail!(
                 "checked-in GitHub YAML {WORKFLOW_PATH:?} must run the governed dependency-unsafe gate before any repository-controlled command in job {:?}",
                 job.name
             );
         }
-    } else if step.uses.as_deref() != expected_action || step.run_declared || step.continues_on_error || job.completed_steps < 4 && step.conditional {
+    } else if step.uses.as_deref() != expected_action || step.run_declared || step.continues_on_error || job.completed_steps < 3 && step.conditional {
         bail!(
             "checked-in GitHub YAML {WORKFLOW_PATH:?} changes the reviewed isolated step sequence in governed dependency-unsafe job {:?}",
             job.name
@@ -167,6 +191,10 @@ fn finish_job(job: Option<&Job>) -> Result<()> {
 
 fn governed_job(name: &str) -> Option<(&'static str, &'static str)> {
     GOVERNED_JOBS.iter().copied().find(|(job, _)| *job == name)
+}
+
+fn is_sequence_item(content: &str) -> bool {
+    content == "-" || content.starts_with("- ")
 }
 
 struct Job {
@@ -196,6 +224,8 @@ struct Step {
     name: Option<String>,
     conditional: bool,
     continues_on_error: bool,
+    environment: Environment,
+    environment_block_indentation: Option<usize>,
     run_block_indentation: Option<usize>,
     run_declared: bool,
     run_source: String,
@@ -205,6 +235,17 @@ struct Step {
 impl Step {
     fn observe(&mut self, line: &str) {
         let indentation = leading_spaces(line);
+        if let Some(environment_indentation) = self.environment_block_indentation {
+            if line.trim().is_empty() {
+                return;
+            }
+            if indentation > environment_indentation {
+                let entry_indentation = environment_indentation.saturating_add(2);
+                self.environment.observe(line, indentation == entry_indentation);
+                return;
+            }
+            self.environment_block_indentation = None;
+        }
         if let Some(run_indentation) = self.run_block_indentation {
             if line.trim().is_empty() {
                 self.run_source.push('\n');
@@ -225,6 +266,9 @@ impl Step {
             "name" => self.name = literal_scalar(value).or_else(|| Some(value.trim().to_owned())),
             "if" => self.conditional = true,
             "continue-on-error" => self.continues_on_error = true,
+            "env" if value.trim().is_empty() => {
+                self.environment_block_indentation = Some(indentation);
+            }
             "run" if is_block_scalar(value.trim_start()) => {
                 self.run_declared = true;
                 self.run_block_indentation = Some(indentation);
@@ -243,6 +287,34 @@ impl Step {
 
     fn invokes_gate(&self) -> bool {
         self.run_source.trim_end() == GATE_RUN_SOURCE
+    }
+
+    fn has_exact_environment(&self, expected: &[(&str, &str)]) -> bool {
+        self.environment.is_exact(expected)
+    }
+}
+
+#[derive(Default)]
+struct Environment {
+    entries: BTreeMap<String, String>,
+    invalid: bool,
+}
+
+impl Environment {
+    fn observe(&mut self, line: &str, has_expected_indentation: bool) {
+        let entry = has_expected_indentation
+            .then(|| yaml_key_value(line))
+            .flatten()
+            .and_then(|(name, value)| literal_scalar(value).map(|value| (name, value)));
+        let Some((name, value)) = entry else {
+            self.invalid = true;
+            return;
+        };
+        self.invalid |= self.entries.insert(name.to_owned(), value).is_some();
+    }
+
+    fn is_exact(&self, expected: &[(&str, &str)]) -> bool {
+        !self.invalid && self.entries.len() == expected.len() && expected.iter().all(|(name, value)| self.entries.get(*name).is_some_and(|actual| actual == value))
     }
 }
 

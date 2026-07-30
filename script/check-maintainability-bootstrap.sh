@@ -453,14 +453,17 @@ if [[ $mode != verify ]]; then
     "$git_command" --no-replace-objects -c diff.external= -C "$snapshot_root" update-ref --no-deref HEAD "$checked_head"
     "$git_command" --no-replace-objects -c diff.external= -C "$snapshot_root" read-tree "$checked_head"
     "$git_command" --no-replace-objects -c diff.external= -C "$snapshot_root" archive --format=tar "$checked_head" | "$tar_command" -xf - -C "$snapshot_root"
-    "$mkdir_command" -- "$snapshot_root/target"
+    audit_scratch_root="$snapshot_root/.cache"
+    "$mkdir_command" -- "$snapshot_root/target" "$audit_scratch_root"
     # Governed CI permits only pinned actions before this first repository
     # command. These mode bits are additional accidental-mutation protection;
     # the closed workflow step sequence is the process-isolation boundary.
     "$chmod_command" -R a-w -- "$snapshot_root"
-    "$chmod_command" u+rwx -- "$snapshot_root/target"
-    if [[ -w "$snapshot_root/tools/maintainability/src/main.rs" ]]; then
-        printf 'maintainability source snapshot remains writable after isolation\n' >&2
+    # The dependency audit owns .cache/dependency-unsafe for confined scratch
+    # space; all durable evidence remains under the separately writable target.
+    "$chmod_command" u+rwx -- "$snapshot_root/target" "$audit_scratch_root"
+    if [[ -w "$snapshot_root/tools/maintainability/src/main.rs" || ! -w "$snapshot_root/target" || ! -w "$audit_scratch_root" ]]; then
+        printf 'maintainability source snapshot has invalid isolation permissions\n' >&2
         exit 1
     fi
     snapshot_bootstrap="$snapshot_root/script/check-maintainability-bootstrap.sh"

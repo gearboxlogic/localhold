@@ -23,23 +23,34 @@ use self::policy::{
     is_unsafe_attribute, macro_name, untrusted_generated_attribute, untrusted_import, untrusted_nested_macro,
 };
 
-pub const REVIEWED_EXPANSION_PACKAGES: [&str; 14] = [
+pub const REVIEWED_EXPANSION_PACKAGES: [&str; 17] = [
+    "anyhow",
     "criterion",
     "futures",
     "insta",
     "ort",
     "proptest",
+    "quote",
     "rand",
     "rmcp",
     "rusqlite",
     "schemars",
     "serde",
     "serde_json",
+    "syn",
     "thiserror",
     "tokio",
     "tracing",
 ];
-pub const RESERVED_LOCAL_MACROS: [&str; 5] = ["concat_placeholders", "concat_with_sep", "define_memory_columns", "numbered_placeholders", "transport_test"];
+pub const RESERVED_LOCAL_MACROS: [&str; 7] = [
+    "concat_placeholders",
+    "concat_with_sep",
+    "define_memory_columns",
+    "numbered_placeholders",
+    "transport_test",
+    "visit_classified_node",
+    "visit_production_node",
+];
 
 pub fn reviewed_macro_expansion(macro_invocation: &Macro) -> bool {
     is_trusted_macro(macro_invocation)
@@ -47,6 +58,14 @@ pub fn reviewed_macro_expansion(macro_invocation: &Macro) -> bool {
 
 pub fn reviewed_attribute_expansion(attribute: &Attribute) -> bool {
     is_trusted_attribute(attribute)
+}
+
+pub fn untrusted_reviewed_expansion_import(item: &ItemUse) -> Option<String> {
+    untrusted_import(item)
+}
+
+pub fn is_reviewed_expansion_root(name: &str) -> bool {
+    is_reserved_expansion_root(name)
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]

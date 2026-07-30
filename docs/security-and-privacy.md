@@ -210,7 +210,13 @@ These paths are not contacted by a default running `hold` process:
   Checker dependency updates therefore require an intentional bootstrap digest
   update in the same review. The bootstrap also rejects repository, ancestor,
   and Cargo-home configuration and removes compiler, wrapper, linker, and
-  runner override environment variables before executing Cargo. Runnable rustdoc
+  runner override environment variables before executing Cargo. It exposes only
+  fixed gate modes rather than arbitrary command delegation, requires Git and
+  core utilities from OS-owned directories, and authenticates the complete
+  Cargo/rustc/rustdoc/Clippy/rustfmt executable set against official pinned Rust
+  1.97.0 Linux x86_64 or Windows x86_64 release digests. The separately
+  hash-pinned dispatcher, source runner, and bootstrap tests are all verified
+  before delegation. Runnable rustdoc
   modifiers, target-specific ignores, and class-only Rust fences are rejected
   unless the block is globally ignored or explicitly marked as a non-Rust
   language or `custom`; fences inside blockquotes, list items, and footnote

@@ -61,6 +61,7 @@ fn doc_comment_source(attribute: &Attribute) -> Option<String> {
 struct DocCommentScanner {
     block_doc: bool,
     fence: Option<Fence>,
+    previous_was_blank: Option<bool>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -86,10 +87,12 @@ impl DocCommentScanner {
         let content = content.strip_prefix(' ').unwrap_or(content);
         let content = strip_markdown_container_prefixes(content);
         let trimmed = content.trim_start();
-        match fence_delimiter(trimmed) {
+        let runnable = match fence_delimiter(trimmed) {
             Some((delimiter, rest)) => update_fence(&mut self.fence, delimiter, rest),
-            None => self.fence.is_none() && is_indented_code(content),
-        }
+            None => self.fence.is_none() && self.previous_was_blank != Some(false) && is_indented_code(content),
+        };
+        self.previous_was_blank = Some(trimmed.is_empty());
+        runnable
     }
 }
 

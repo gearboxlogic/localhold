@@ -74,7 +74,8 @@ fn expand_sources(
     while let Some((path, module_base, category)) = pending.pop_front() {
         let source = read_source(&path)?;
         let syntax = syn::parse_file(&source).with_context(|| format!("parse Cargo target module source {path}"))?;
-        let discovered = ModuleCollector::collect(module_base, category, is_structural(&path), &syntax)?;
+        let explicit_path_base = Path::new(&path).parent().unwrap_or_else(|| Path::new("")).to_path_buf();
+        let discovered = ModuleCollector::collect(module_base, explicit_path_base, category, is_structural(&path), &syntax)?;
         for discovered in discovered {
             let module = match discovered.explicit_source {
                 Some(module) => module,
@@ -116,6 +117,7 @@ fn register_source(sources: &mut BTreeMap<String, SourceCategory>, module: &str,
 
 struct ModuleCollector {
     module_base: PathBuf,
+    explicit_path_base: PathBuf,
     category: SourceCategory,
     structural: bool,
     production_context: Option<ProductionCfgContext>,
@@ -125,10 +127,11 @@ struct ModuleCollector {
 }
 
 impl ModuleCollector {
-    fn collect(module_base: PathBuf, category: SourceCategory, structural: bool, syntax: &syn::File) -> Result<Vec<DiscoveredModule>> {
+    fn collect(module_base: PathBuf, explicit_path_base: PathBuf, category: SourceCategory, structural: bool, syntax: &syn::File) -> Result<Vec<DiscoveredModule>> {
         let production_context = (category == SourceCategory::Production).then(ProductionCfgContext::default);
         let mut collector = Self {
             module_base,
+            explicit_path_base,
             category,
             structural,
             production_context,
@@ -181,10 +184,11 @@ impl<'ast> Visit<'ast> for ModuleCollector {
         let mut item_path = self.item_path.clone();
         item_path.push(name.clone());
         let item = item_path.join("::");
-        let explicit_source = explicit_path.map(|path| self.module_base.join(path));
+        let explicit_source = explicit_path.map(|path| self.explicit_path_base.join(path));
         let child_base = explicit_source.as_deref().map_or_else(|| self.module_base.join(&name), child_module_base);
         if let Some((_, items)) = &module.content {
-            let previous = std::mem::replace(&mut self.module_base, child_base);
+            let previous_base = std::mem::replace(&mut self.module_base, child_base.clone());
+            let previous_explicit_base = std::mem::replace(&mut self.explicit_path_base, child_base);
             let previous_category = std::mem::replace(&mut self.category, category);
             let previous_context = std::mem::replace(&mut self.production_context, production_context);
             let previous_item_path = std::mem::replace(&mut self.item_path, item_path);
@@ -194,7 +198,8 @@ impl<'ast> Visit<'ast> for ModuleCollector {
             self.item_path = previous_item_path;
             self.production_context = previous_context;
             self.category = previous_category;
-            self.module_base = previous;
+            self.explicit_path_base = previous_explicit_base;
+            self.module_base = previous_base;
             return;
         }
         self.discovered.push(DiscoveredModule {

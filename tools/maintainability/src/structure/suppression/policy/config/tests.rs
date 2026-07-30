@@ -89,7 +89,7 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_token("cargo clippy -- -\\A warnings"));
     assert!(weakening_token_for_surface("script/check.cmd", "CARGO.EXE clippy -- -A warnings"));
     assert!(weakening_token_for_surface("script/check.ps1", "Rustc.ExE -W warnings source.rs"));
-    assert!(!weakening_token_for_surface("script/check.sh", "CARGO.EXE clippy -- -A warnings"));
+    assert!(weakening_token_for_surface("script/check.sh", "CARGO.EXE clippy -- -A warnings"));
     assert!(weakening_token("rustc @policy/lints.args source.rs"));
     assert!(weakening_token("rustc -D warnings --allow=warnings source.rs"));
     assert!(weakening_token("rustc -D warnings --warn=warnings source.rs"));
@@ -107,6 +107,9 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(!weakening_token("cargo nextest run {{ ARGS }}"));
     assert!(!weakening_token("cargo build | grep -A 2"));
     assert!(!weakening_token("printf check | xargs echo | cargo build"));
+    assert!(!weakening_token("CARGO=$trusted_cargo"));
+    assert!(!weakening_token("RUSTC=$trusted_rustc"));
+    assert!(weakening_token("CARGO=$(cargo clippy -- -A warnings)"));
     assert!(weakening_token("LINT_FLAGS='-A warnings'\ncargo clippy -- $LINT_FLAGS"));
     assert!(weakening_token("cargo rustc -- @policy/lints.args"));
     assert!(!weakening_token("cargo run -- @application-argument"));
@@ -203,10 +206,17 @@ fn weakening_environment_channels_are_detected() {
     assert!(weakening_environment("MISE_OVERRIDE_CONFIG_FILENAMES=policy.toml"));
     assert!(weakening_environment_for_surface("script/check.ps1", "$env:rustflags = $dynamic"));
     assert!(weakening_environment_for_surface("script/check.cmd", "set cargo_encoded_rustflags=%DYNAMIC%"));
-    assert!(!weakening_environment_for_surface("script/check.sh", "rustflags=local"));
+    assert!(weakening_environment_for_surface(
+        "script/check.sh",
+        "rustflags='-A warnings'\nexport rustflags\ncargo clippy"
+    ));
     assert!(!weakening_environment("rustc --version"));
     let scrubber = format!("{}\n", BOOTSTRAP_ENVIRONMENT_LINES.join("\n"));
     assert!(scrubber_environment_references_are_exact("script/check-maintainability-bootstrap.sh", &scrubber));
+    assert!(scrubber_environment_references_are_exact(
+        "script/run-maintainability-gate.sh",
+        &GATE_RUNNER_ENVIRONMENT_LINES.join("\n"),
+    ));
     assert!(scrubber_environment_references_are_exact(
         "script/run-source-safety.sh",
         &RUNNER_ENVIRONMENT_LINES.join("\n")
@@ -468,16 +478,24 @@ fn yaml_source_labels_are_not_shell_indirection() {
 }
 
 #[test]
-fn command_policy_discovers_directly_compiled_rust_sources() {
+fn command_policy_rejects_directly_compiled_rust_helpers() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join("script")).expect("script directory");
-    fs::write(workspace.path().join("script/check.sh"), "rustc -D warnings script/check.rs\n").expect("direct compiler command");
+    fs::write(workspace.path().join("script/check.sh"), "rustc script/check.rs\n").expect("direct compiler command");
     fs::write(workspace.path().join("script/check.rs"), "fn main() {}\n").expect("direct Rust source");
     git(workspace.path(), &["init", "-q"]);
     git(workspace.path(), &["add", "."]);
 
-    let sources = reject_checked_in_weakening(workspace.path()).expect("non-weakening direct compiler command");
-    assert_eq!(sources, BTreeSet::from(["script/check.rs".to_owned()]));
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("opaque command helper"), "{error:#}");
+
+    fs::write(
+        workspace.path().join("script/check.rs"),
+        "fn main() { std::process::Command::new(\"cargo\").args([\"clippy\", \"--\", \"-A\", \"warnings\"]).status().unwrap(); }\n",
+    )
+    .expect("process-spawning Rust helper");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("opaque command helper"));
 
     fs::write(workspace.path().join("script/check.sh"), "rustc --version\n").expect("compiler version command");
     assert!(reject_checked_in_weakening(workspace.path()).expect("informational compiler command").is_empty());

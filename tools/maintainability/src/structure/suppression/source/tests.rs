@@ -116,6 +116,20 @@ fn unreviewed_procedural_attributes_and_derives_fail_closed() {
 }
 
 #[test]
+fn unreviewed_function_like_macros_fail_closed() {
+    let error = scan("evil::suppress! { fn hidden() {} }\n", SourceCategory::Production).unwrap_err();
+    assert!(format!("{error:#}").contains("function-like macro expansion could emit a lint suppression"));
+    scan("fn render() { let _message = format!(\"{}\", 1); }\n", SourceCategory::Production).expect("reviewed standard macro");
+    scan("use anyhow::bail;\nfn stop() { bail!(\"stop\"); }\n", SourceCategory::Production).expect("reviewed external macro import");
+
+    let alias = scan("use evil::suppress as bail;\nfn stop() { bail!(\"stop\"); }\n", SourceCategory::Production).unwrap_err();
+    assert!(format!("{alias:#}").contains("does not come from reviewed expansion package anyhow"));
+
+    let shadow = scan("mod anyhow {}\nfn stop() { anyhow::bail!(\"stop\"); }\n", SourceCategory::Production).unwrap_err();
+    assert!(format!("{shadow:#}").contains("shadows a reviewed expansion package"));
+}
+
+#[test]
 fn macro_metavariables_cannot_construct_attributes() {
     let error = scan(
         "macro_rules! generated { ($attribute:meta) => { #[$attribute] fn expanded() {} }; }\n",
@@ -199,12 +213,12 @@ fn target_fingerprints_ignore_sibling_suppression_debt() -> Result<()> {
     let stacked = scan(
         "#[expect(clippy::panic, reason = \"legacy panic\")]\n\
          #[expect(clippy::todo, reason = \"legacy placeholder\")]\n\
-         fn serve() { todo!() }\n",
+         fn serve() { panic!() }\n",
         SourceCategory::Production,
     )?;
     let reduced = scan(
         "#[expect(clippy::todo, reason = \"legacy placeholder\")]\n\
-         fn serve() { todo!() }\n",
+         fn serve() { panic!() }\n",
         SourceCategory::Production,
     )?;
     let stacked_todo = stacked.iter().find(|site| site.lint == "clippy::todo").expect("stacked todo");
@@ -213,12 +227,12 @@ fn target_fingerprints_ignore_sibling_suppression_debt() -> Result<()> {
 
     let shared_attribute = scan(
         "#[expect(clippy::panic, clippy::todo, reason = \"legacy paths\")]\n\
-         fn shared() { todo!() }\n",
+         fn shared() { panic!() }\n",
         SourceCategory::Production,
     )?;
     let reduced_attribute = scan(
         "#[expect(clippy::todo, reason = \"legacy paths\")]\n\
-         fn shared() { todo!() }\n",
+         fn shared() { panic!() }\n",
         SourceCategory::Production,
     )?;
     let shared_todo = shared_attribute.iter().find(|site| site.lint == "clippy::todo").expect("shared todo");
@@ -226,12 +240,12 @@ fn target_fingerprints_ignore_sibling_suppression_debt() -> Result<()> {
 
     let conditional = scan(
         "#[cfg_attr(test, expect(clippy::panic, clippy::todo, reason = \"conditional paths\"), inline)]\n\
-         fn conditional() { todo!() }\n",
+         fn conditional() { panic!() }\n",
         SourceCategory::Production,
     )?;
     let reduced_conditional = scan(
         "#[cfg_attr(test, expect(clippy::todo, reason = \"conditional paths\"), inline)]\n\
-         fn conditional() { todo!() }\n",
+         fn conditional() { panic!() }\n",
         SourceCategory::Production,
     )?;
     let conditional_todo = conditional.iter().find(|site| site.lint == "clippy::todo").expect("conditional todo");
@@ -247,7 +261,7 @@ fn stable_ids_pin_item_bodies_and_complete_impl_headers() -> Result<()> {
         SourceCategory::Production,
     )?;
     let changed_body = scan(
-        "#[expect(clippy::panic, reason = \"protocol failure\")]\nfn serve() { todo!() }\n",
+        "#[expect(clippy::panic, reason = \"protocol failure\")]\nfn serve() { println!(\"retry\") }\n",
         SourceCategory::Production,
     )?;
     assert_ne!(first[0].id, changed_body[0].id);

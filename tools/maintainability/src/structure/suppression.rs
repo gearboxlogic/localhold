@@ -113,11 +113,12 @@ pub(super) fn reject_tooling_suppressions(workspace: &Path) -> Result<()> {
         .filter(|path| Path::new(path).file_name().and_then(|name| name.to_str()) == Some("Cargo.toml"))
         .cloned()
         .collect::<Vec<_>>();
-    let target_paths = targets::tooling_target_sources(workspace, &manifests)?;
+    let target_roots = targets::tooling_target_sources(workspace, &manifests)?;
+    let target_sources = modules::expand_target_sources(workspace, target_roots, |_| true)?;
     let scan_paths = tooling_paths
         .into_iter()
         .filter(|path| Path::new(path).extension().and_then(|extension| extension.to_str()) == Some("rs"))
-        .chain(target_paths)
+        .chain(target_sources.categories.into_keys())
         .collect::<BTreeSet<_>>();
     for path in scan_paths {
         let absolute = workspace.join(&path);

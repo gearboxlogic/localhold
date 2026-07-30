@@ -139,6 +139,9 @@ fn join_command_continuations(source: &str) -> String {
 }
 
 fn weakening_rust_command(command: &str, case_insensitive_tools: bool) -> bool {
+    if is_non_executing_assignment(command) {
+        return false;
+    }
     let tokens = command_tokens(command);
     if tokens
         .iter()
@@ -147,7 +150,10 @@ fn weakening_rust_command(command: &str, case_insensitive_tools: bool) -> bool {
         return true;
     }
     let lint_option = tokens.iter().any(|token| is_lint_option(token));
-    if !tokens.iter().any(|token| is_rust_tool_token(token, case_insensitive_tools)) {
+    if !tokens
+        .iter()
+        .any(|token| is_rust_tool_token(token, case_insensitive_tools) && !is_variable_assignment_target(command, token))
+    {
         return lint_option && has_dynamic_command_name(command, &tokens);
     }
     forwards_dynamic_arguments(&tokens, case_insensitive_tools)
@@ -161,6 +167,18 @@ fn weakening_rust_command(command: &str, case_insensitive_tools: bool) -> bool {
             .iter()
             .enumerate()
             .any(|(index, token)| token.starts_with("--config") && !is_cargo_deny_config_argument(&tokens, index, case_insensitive_tools))
+}
+
+fn is_non_executing_assignment(command: &str) -> bool {
+    let Some((name, value)) = command.trim().split_once('=') else {
+        return false;
+    };
+    !value.contains("$(")
+        && !value.contains('`')
+        && !value.chars().any(char::is_whitespace)
+        && !name.is_empty()
+        && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && !name.as_bytes()[0].is_ascii_digit()
 }
 
 fn argument_feeder_invokes_rust_tool(tokens: &[String], case_insensitive_tools: bool) -> bool {
@@ -418,14 +436,6 @@ fn is_cargo_deny_config_argument(tokens: &[String], config_index: usize, case_in
     is_cargo_tool_token(&tokens[invocation_index], case_insensitive_tools) && tokens.get(invocation_index + 1).is_some_and(|subcommand| subcommand == "deny")
 }
 
-pub(super) fn has_case_insensitive_tool_names(path: &str) -> bool {
-    let path = Path::new(path);
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "ps1" | "cmd" | "bat"))
-        || path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "yml" | "yaml"))
-            && (path.starts_with(".github/workflows") || super::actions::is_action_metadata(path.to_string_lossy().as_ref()))
+pub(super) const fn has_case_insensitive_tool_names(_path: &str) -> bool {
+    true
 }

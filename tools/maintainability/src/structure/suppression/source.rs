@@ -7,13 +7,15 @@ use syn::ext::IdentExt as _;
 use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
-use syn::{Arm, Attribute, Expr, ForeignItem, GenericParam, ImplItem, Item, Local, Meta, StmtMacro, Token, TraitItem, Variant};
+use syn::{Arm, Attribute, Expr, ForeignItem, GenericParam, ImplItem, Item, ItemExternCrate, ItemMod, ItemUse, Local, Meta, StmtMacro, Token, TraitItem, Variant};
 
 pub(in crate::structure::suppression) use self::fingerprint::external_content_fingerprint;
 use self::fingerprint::{external_target_fingerprint, suppression_free_fingerprint, suppression_site_fingerprint};
 use self::nodes::{SuppressionScope, foreign_item_scope, impl_item_scope, item_scope, trait_item_scope};
 use super::{SourceCategory, SourceSuppression};
-use crate::scan::{is_doc_comment, reviewed_attribute_expansion, unsupported_runnable_doctest};
+use crate::scan::{
+    is_doc_comment, is_reviewed_expansion_root, reviewed_attribute_expansion, reviewed_macro_expansion, unsupported_runnable_doctest, untrusted_reviewed_expansion_import,
+};
 use crate::structure::syntax::{
     ProductionCfgContext, cfg_attr_metas_with_production_reachability, expr_attributes, foreign_item_attributes, generic_param_attributes, impl_item_attributes, item_attributes,
     normalized_ident, pat_attributes, production_cfg_context, trait_item_attributes,
@@ -434,11 +436,36 @@ impl<'ast> Visit<'ast> for SourceScanner {
         if self.error.is_none() {
             if node.path.segments.last().is_some_and(|segment| segment.ident.unraw() == "include") {
                 self.error = Some(anyhow::anyhow!("Rust source include! cannot be classified safely"));
+            } else if !reviewed_macro_expansion(node) {
+                self.error = Some(anyhow::anyhow!("unreviewed function-like macro expansion could emit a lint suppression"));
             } else if let Err(error) = self.record_macro_tokens(&node.tokens) {
                 self.error = Some(error);
             }
         }
         visit::visit_macro(self, node);
+    }
+
+    fn visit_item_use(&mut self, node: &'ast ItemUse) {
+        if self.error.is_none()
+            && let Some(reason) = untrusted_reviewed_expansion_import(node)
+        {
+            self.error = Some(anyhow::anyhow!("{reason}"));
+        }
+        visit::visit_item_use(self, node);
+    }
+
+    fn visit_item_mod(&mut self, node: &'ast ItemMod) {
+        if self.error.is_none() && is_reviewed_expansion_root(&node.ident.unraw().to_string()) {
+            self.error = Some(anyhow::anyhow!("local module shadows a reviewed expansion package"));
+        }
+        visit::visit_item_mod(self, node);
+    }
+
+    fn visit_item_extern_crate(&mut self, node: &'ast ItemExternCrate) {
+        if self.error.is_none() {
+            self.error = Some(anyhow::anyhow!("extern crate alias semantics are unsupported by lint-suppression governance"));
+        }
+        visit::visit_item_extern_crate(self, node);
     }
 }
 

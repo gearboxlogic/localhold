@@ -489,6 +489,7 @@ fn rejects_runnable_rust_doctests_but_allows_ignored_examples() {
     assert!(scan_result("/// ```custom,rust\n/// fn custom_rust() {}\n/// ```\nfn sample() {}").is_ok());
     assert!(scan_result("/// ```custom,no_run\n/// fn custom_no_run() {}\n/// ```\nfn sample() {}").is_ok());
     assert!(scan_result("/// ```text\n///     indented prose\n/// ```\nfn sample() {}").is_ok());
+    assert!(scan_result("/// Descriptive prose\n///     aligned continuation prose\nfn sample() {}").is_ok());
     assert!(scan_result("/// - output\n///   continued output\nfn sample() {}").is_ok());
     assert!(scan_result("/// ````text\n/// embedded Markdown:\n/// ```rust\n/// fn not_a_doctest() {}\n/// ```\n/// ````\nfn sample() {}").is_ok());
     assert!(

@@ -72,6 +72,25 @@ fn structural_explicit_modules_participate_in_external_fingerprints() {
 }
 
 #[test]
+fn explicit_paths_in_external_modules_resolve_from_the_source_directory() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("src/tests")).expect("source directory");
+    fs::write(workspace.path().join("src/lib.rs"), "mod artifact;\n").expect("crate root");
+    fs::write(workspace.path().join("src/artifact.rs"), "#[path = \"tests/artifact.rs\"]\nmod tests;\n").expect("external module");
+    fs::write(workspace.path().join("src/tests/artifact.rs"), "fn verifies_artifact() {}\n").expect("explicit nested module");
+    let mut roots = targets::TargetRoots::default();
+    roots
+        .insert("src/lib.rs".to_owned(), SourceCategory::Production, "lib:src/lib.rs".to_owned())
+        .expect("target root");
+
+    let expanded = modules::expand_target_sources(workspace.path(), roots, |_| true).expect("expand explicit module");
+    assert_eq!(
+        expanded.relations.get(&("src/artifact.rs".to_owned(), "tests".to_owned())).map(String::as_str),
+        Some("src/tests/artifact.rs")
+    );
+}
+
+#[test]
 fn explicit_production_targets_override_structural_directory_heuristics() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join("tests")).expect("target directory");

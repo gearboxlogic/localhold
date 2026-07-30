@@ -1,28 +1,41 @@
-#!/usr/bin/env bash
+#!/usr/bin/bash
 set -euo pipefail
+
+usage() {
+    printf 'usage: check-maintainability-bootstrap.sh [--root PATH] [--source-safety|--dependency-unsafe|--maintainability|--test-environment]\n' >&2
+    exit 1
+}
 
 script_path=${BASH_SOURCE[0]}
 script_directory=${script_path%/*}
 [[ $script_directory != "$script_path" ]] || script_directory=.
 repository_root=$(cd -- "$script_directory/.." && pwd -P)
+using_test_root=false
 if [[ ${1:-} == --root ]]; then
     if (( $# < 2 )); then
-        printf 'usage: check-maintainability-bootstrap.sh [--root PATH] [-- COMMAND...]\n' >&2
-        exit 1
+        usage
     fi
     repository_root=$2
+    using_test_root=true
     shift 2
 fi
 repository_root=$(cd -- "$repository_root" && pwd -P)
 
-command=()
+mode=verify
 if (( $# > 0 )); then
-    if [[ $1 != -- || $# == 1 ]]; then
-        printf 'usage: check-maintainability-bootstrap.sh [--root PATH] [-- COMMAND...]\n' >&2
-        exit 1
-    fi
+    case "$1" in
+        --source-safety) mode=source-safety ;;
+        --dependency-unsafe) mode=dependency-unsafe ;;
+        --maintainability) mode=maintainability ;;
+        --test-environment) mode=test-environment ;;
+        *) usage ;;
+    esac
     shift
-    command=("$@")
+fi
+(( $# == 0 )) || usage
+if $using_test_root && [[ $mode != verify && $mode != test-environment ]]; then
+    printf 'alternate roots may only verify the bootstrap or its environment\n' >&2
+    exit 1
 fi
 
 tool_root="$repository_root/tools/maintainability"
@@ -33,14 +46,18 @@ justfile="$repository_root/Justfile"
 mise_config="$repository_root/mise.toml"
 mise_lockfile="$repository_root/mise.lock"
 runner="$repository_root/script/run-source-safety.sh"
+bootstrap_tests="$repository_root/script/tests/test_maintainability_bootstrap.sh"
+gate_runner="$repository_root/script/run-maintainability-gate.sh"
 readonly reviewed_manifest_sha256=cca207767614bd2c1d46bc06092b69e90157aeb450797fcc7cad4e1ed67c89b9
 readonly reviewed_lockfile_sha256=825c6448351761aa5c4c6e1ce6b3696c927c4f46c5d43642846380d24f10467c
-readonly reviewed_justfile_sha256=7dc87e1cb1498ab85f0c547f6189aa00c60b5592d7ea485731b134dd3cd2c867
+readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d1b3fd69aa74c0df6f1
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=09c7b7cc9472acc7ec19633a9ccbf54eb7cf66215ec5921ade3cbd3eacd5eb1e
+readonly reviewed_bootstrap_tests_sha256=4be8401d8db70eff00160e298f051efc2c44513118fb6c9994963bf44a74dceb
+readonly reviewed_gate_runner_sha256=32fd3a1598da87212ac0622cc2df4be79a8c562f9efbdc316d8405189404512d
 
-for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner"; do
+for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then
         printf 'reviewed maintainability bootstrap input must be a regular non-symlink file: %s\n' "$reviewed_path" >&2
         exit 1
@@ -77,7 +94,7 @@ is_filesystem_root() {
     if command -v cygpath >/dev/null 2>&1; then
         local windows_directory
         local cygpath_command
-        cygpath_command=$(trusted_command_path cygpath)
+        cygpath_command=$(trusted_system_command cygpath)
         if windows_directory=$("$cygpath_command" -m "$directory" 2>/dev/null) && [[ $windows_directory =~ ^[[:alpha:]]:/$ ]]; then
             return 0
         fi
@@ -85,7 +102,7 @@ is_filesystem_root() {
     return 1
 }
 
-trusted_command_path() {
+trusted_system_command() {
     local name=$1
     local candidate
     candidate=$(type -P -- "$name") || {
@@ -96,8 +113,15 @@ trusted_command_path() {
     [[ $directory != "$candidate" ]] || directory=.
     directory=$(cd -- "$directory" && pwd -P)
     candidate="$directory/${candidate##*/}"
-    if [[ $candidate == "$repository_root" || $candidate == "$repository_root/"* ]]; then
-        printf 'maintainability bootstrap refuses a repository-controlled command: %s\n' "$candidate" >&2
+    case "$directory" in
+        /bin | /usr/bin | /mingw64/bin) ;;
+        *)
+            printf 'maintainability bootstrap requires an OS-owned command: %s\n' "$candidate" >&2
+            exit 1
+            ;;
+    esac
+    if [[ ! -f "$candidate" || ! -x "$candidate" ]]; then
+        printf 'maintainability bootstrap requires an executable system file: %s\n' "$candidate" >&2
         exit 1
     fi
     printf '%s\n' "$candidate"
@@ -120,8 +144,8 @@ scrub_untrusted_environment() {
 }
 
 scrub_untrusted_environment
-git_command=$(trusted_command_path git)
-find_command=$(trusted_command_path find)
+git_command=$(trusted_system_command git)
+find_command=$(trusted_system_command find)
 
 git_checked() {
     "$git_command" --no-replace-objects -c diff.external= -C "$repository_root" "$@"
@@ -143,7 +167,7 @@ verify_checker_sources() {
             printf 'incomplete or invalid GitHub Actions environment cannot select a different checker revision\n' >&2
             exit 1
         fi
-        if [[ ! $GITHUB_SHA =~ ^[[:xdigit:]]{40}$ || ${checked_head,,} != ${GITHUB_SHA,,} ]]; then
+        if [[ ! $GITHUB_SHA =~ ^[[:xdigit:]]{40}$ || ${checked_head,,} != "${GITHUB_SHA,,}" ]]; then
             printf 'checked-out Git head revision differs from GITHUB_SHA before checker compilation\n' >&2
             exit 1
         fi
@@ -220,14 +244,14 @@ elif [[ $cargo_home != /* && ! $cargo_home =~ ^[[:alpha:]]:[/\\] ]]; then
     cargo_home="$repository_root/$cargo_home"
 fi
 if [[ $cargo_home =~ ^[[:alpha:]]:[/\\] ]] && command -v cygpath >/dev/null 2>&1; then
-    cygpath_command=$(trusted_command_path cygpath)
+    cygpath_command=$(trusted_system_command cygpath)
     cargo_home=$("$cygpath_command" -u "$cargo_home")
 fi
 if [[ -n $cargo_home ]]; then
     reject_cargo_config "$cargo_home"
 fi
 
-awk_command=$(trusted_command_path awk)
+awk_command=$(trusted_system_command awk)
 build_setting=$(
     "$awk_command" '
         /^\[package\][[:space:]]*(#.*)?$/ { in_package = 1; next }
@@ -247,21 +271,12 @@ if [[ "$build_setting" != false ]]; then
     exit 1
 fi
 
+sha256_command=$(trusted_system_command sha256sum)
+
 sha256_file() {
     local path=$1
     local output
-    if command -v sha256sum >/dev/null 2>&1; then
-        local sha256_command
-        sha256_command=$(trusted_command_path sha256sum)
-        output=$("$sha256_command" -- "$path")
-    elif command -v shasum >/dev/null 2>&1; then
-        local shasum_command
-        shasum_command=$(trusted_command_path shasum)
-        output=$("$shasum_command" -a 256 -- "$path")
-    else
-        printf 'maintainability bootstrap requires sha256sum or shasum\n' >&2
-        exit 1
-    fi
+    output=$("$sha256_command" -- "$path")
     printf '%s\n' "${output%%[[:space:]]*}"
 }
 
@@ -301,23 +316,30 @@ if [[ $actual_runner_sha256 != "$reviewed_runner_sha256" ]]; then
     exit 1
 fi
 
+actual_bootstrap_tests_sha256=$(sha256_file "$bootstrap_tests")
+if [[ $actual_bootstrap_tests_sha256 != "$reviewed_bootstrap_tests_sha256" ]]; then
+    printf 'maintainability bootstrap tests do not match the reviewed test driver\n' >&2
+    exit 1
+fi
+
+actual_gate_runner_sha256=$(sha256_file "$gate_runner")
+if [[ $actual_gate_runner_sha256 != "$reviewed_gate_runner_sha256" ]]; then
+    printf 'maintainability gate runner does not match the reviewed fixed dispatcher\n' >&2
+    exit 1
+fi
+
 verify_checker_sources
 
 printf 'maintainability bootstrap check passed\n'
 
-if (( ${#command[@]} > 0 )); then
-    if [[ ${command[0]} != */* ]]; then
-        command[0]=$(trusted_command_path "${command[0]}")
-    fi
-    rust_tool_executable=$(trusted_command_path cargo)
+if [[ $mode != verify ]]; then
     git_executable=$git_command
     if [[ $OSTYPE == msys* || $OSTYPE == cygwin* ]]; then
-        cygpath_command=$(trusted_command_path cygpath)
-        rust_tool_executable=$("$cygpath_command" -w "$rust_tool_executable")
+        cygpath_command=$(trusted_system_command cygpath)
         git_executable=$("$cygpath_command" -w "$git_executable")
     fi
-    LOCALHOLD_MAINTAINABILITY_CARGO=$rust_tool_executable
     LOCALHOLD_MAINTAINABILITY_GIT=$git_executable
-    export LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_GIT
-    exec "${command[@]}"
+    export LOCALHOLD_MAINTAINABILITY_GIT
+    bash_command=$(trusted_system_command bash)
+    exec "$bash_command" "$gate_runner" "$mode"
 fi

@@ -85,12 +85,7 @@ time-abstraction:
 
 # Audit the target-specific dependency source exposure against reviewed baselines
 dependency-unsafe:
-    cargo fetch --locked
-    cargo fetch --manifest-path tools/dependency-unsafe/Cargo.toml --locked
-    cargo fmt --manifest-path tools/dependency-unsafe/Cargo.toml -- --check
-    cargo test --manifest-path tools/dependency-unsafe/Cargo.toml --locked
-    cargo clippy --manifest-path tools/dependency-unsafe/Cargo.toml --all-targets --locked -- -D warnings
-    cargo run --manifest-path tools/dependency-unsafe/Cargo.toml --locked -- check
+    ./script/check-maintainability-bootstrap.sh --dependency-unsafe
 
 # Regenerate one native dependency exposure baseline after approved review
 dependency-unsafe-generate PLATFORM:
@@ -100,13 +95,11 @@ dependency-unsafe-generate PLATFORM:
 
 # Reject unreviewed first-party unsafe code, structural growth, and boundary drift
 source-safety:
-    ./script/tests/test_maintainability_bootstrap.sh
-    ./script/check-maintainability-bootstrap.sh -- ./script/run-source-safety.sh
+    ./script/check-maintainability-bootstrap.sh --source-safety
 
 # Permanent maintainability safety rails; additional Phase 0 gates join here
 maintainability:
-    just source-safety
-    just dependency-unsafe
+    ./script/check-maintainability-bootstrap.sh --maintainability
 
 # Product and repository quality checks that do not include evidence baselines
 check-quality:

@@ -106,8 +106,14 @@ Cargo process. Required CI records the reviewed bootstrap `hashFiles` digest
 outside the script and compares it with the runner-computed value immediately
 before every validation or delegated gate execution. A bootstrap change
 therefore requires an explicit workflow digest update in the same reviewed
-diff. On Windows, the bootstrap converts both trusted Cargo and Git paths from
-the Git Bash namespace before passing them to native maintainer binaries.
+diff. Delegation uses fixed source-safety, dependency-audit, and combined modes;
+the bootstrap cannot execute an arbitrary command or a PATH-selected task
+dispatcher. Its separate hash-pinned gate runner verifies the Cargo, rustc,
+rustdoc, Clippy, and rustfmt executables against the official Rust 1.97.0 Linux
+x86_64 or Windows x86_64 release bytes before use. Git and core bootstrap
+utilities must resolve from OS-owned directories. On Windows, the bootstrap
+converts trusted native tool paths from the Git Bash namespace before passing
+them to maintainer binaries.
 Runnable Rust doctests are likewise rejected, including rustdoc-only modifiers,
 target-specific ignores, fences inside blockquotes or list items, and class-only
 fences that remain Rust unless marked `custom`; `custom` takes precedence over
@@ -309,13 +315,14 @@ redirect an audited `run` command; multiline inline `run` scalars are
 unsupported. Shell continuations are normalized before command arguments are
 audited, and a dynamic command name may not carry Rust lint options. Make
 include directives are unsupported; checked-in `.mk` command surfaces are
-audited directly. Unreviewed procedural attributes and derives are also
-rejected because their expansions could emit hidden lint policy. The dependency
-jobs validate the reviewed mise configuration, lockfile, and `Justfile` before
-tool activation, then execute the dispatcher through the bound bootstrap and
-run the hash-pinned source-safety driver through resolved absolute Cargo and Git
-executables. The checker source set must match the checked-out revision
-immediately before compilation. The comparison base is derived from the runner
+audited directly. Unreviewed procedural attributes, derives, and function-like
+macros are also rejected because their expansions could emit hidden lint policy.
+The dependency jobs validate the reviewed mise configuration, lockfile,
+`Justfile`, bootstrap tests, and fixed gate runner before tool activation. They
+then use only the bootstrap's fixed dispatcher and digest-authenticated Rust
+tools; a PATH-selected `just`, Cargo, compiler, Clippy, or rustfmt executable
+cannot satisfy the gate. The checker source set must match the checked-out
+revision immediately before compilation. The comparison base is derived from the runner
 event, the checkout must match the event head, and any configured base must
 match the event base, so versioned workflow changes cannot select the checked
 head or silently omit previous-revision enforcement.

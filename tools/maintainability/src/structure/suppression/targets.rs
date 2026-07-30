@@ -42,10 +42,10 @@ pub(super) fn root_package_target_sources(workspace: &Path) -> Result<TargetRoot
     Ok(sources)
 }
 
-pub(super) fn tooling_target_sources(workspace: &Path, manifests: &[String]) -> Result<BTreeSet<String>> {
+pub(super) fn tooling_target_sources(workspace: &Path, manifests: &[String]) -> Result<TargetRoots> {
     let workspace = fs::canonicalize(workspace).context("resolve workspace for maintainer Cargo target inventory")?;
     let tools = fs::canonicalize(workspace.join("tools")).context("resolve tools root for maintainer Cargo target inventory")?;
-    let mut sources = BTreeSet::new();
+    let mut sources = TargetRoots::default();
     for relative in manifests {
         let manifest = fs::canonicalize(workspace.join(relative)).with_context(|| format!("resolve maintainer manifest {relative}"))?;
         if !manifest.starts_with(&tools) {
@@ -72,7 +72,8 @@ pub(super) fn tooling_target_sources(workspace: &Path, manifests: &[String]) -> 
             if relative.components().any(|component| !matches!(component, Component::Normal(_))) {
                 bail!("maintainer Cargo target source path is not normalized: {}", relative.display());
             }
-            sources.insert(relative.to_str().context("maintainer Cargo target source path is not UTF-8")?.replace('\\', "/"));
+            let relative = relative.to_str().context("maintainer Cargo target source path is not UTF-8")?.replace('\\', "/");
+            sources.insert(relative.clone(), SourceCategory::Production, format!("maintainer:{relative}"))?;
         }
     }
     Ok(sources)

@@ -8,7 +8,6 @@ mod actions;
 mod arguments;
 mod surfaces;
 mod yaml;
-use arguments::has_case_insensitive_tool_names;
 pub(super) use arguments::has_sourced_file_indirection;
 #[cfg(test)]
 pub(super) use arguments::weakening_token;
@@ -18,17 +17,27 @@ use surfaces::execution_surfaces;
 
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "cargo_home=${CARGO_HOME:-}",
-    "    LOCALHOLD_MAINTAINABILITY_CARGO=$rust_tool_executable",
     "    LOCALHOLD_MAINTAINABILITY_GIT=$git_executable",
-    "    export LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_GIT",
+    "    export LOCALHOLD_MAINTAINABILITY_GIT",
     "            RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
     "                RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \\",
     "                CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \\",
     "                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_*)",
     "    if [[ -v GITHUB_ACTIONS || -v GITHUB_EVENT_PATH || -v GITHUB_SHA ]]; then",
     "        if [[ ${GITHUB_ACTIONS:-} != true || -z ${GITHUB_EVENT_PATH:-} || -z ${GITHUB_SHA:-} ]]; then",
-    "        if [[ ! $GITHUB_SHA =~ ^[[:xdigit:]]{40}$ || ${checked_head,,} != ${GITHUB_SHA,,} ]]; then",
+    "        if [[ ! $GITHUB_SHA =~ ^[[:xdigit:]]{40}$ || ${checked_head,,} != \"${GITHUB_SHA,,}\" ]]; then",
     "            printf 'checked-out Git head revision differs from GITHUB_SHA before checker compilation\\n' >&2",
+];
+pub(super) const GATE_RUNNER_ENVIRONMENT_LINES: &[&str] = &[
+    "readonly git_command=${LOCALHOLD_MAINTAINABILITY_GIT:?maintainability bootstrap did not provide an absolute Git command}",
+    "RUSTC=$native_rustc",
+    "RUSTDOC=$native_rustdoc",
+    "LOCALHOLD_MAINTAINABILITY_CARGO=$native_cargo",
+    "export PATH CARGO RUSTC RUSTDOC RUSTFMT LOCALHOLD_MAINTAINABILITY_CARGO",
+    "    for name in RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER \\",
+    "        RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS \\",
+    "        CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do",
+    "    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $git_command ]]",
 ];
 pub(super) const RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "readonly cargo_command=${LOCALHOLD_MAINTAINABILITY_CARGO:?maintainability bootstrap did not provide an absolute Cargo command}",
@@ -39,15 +48,12 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "if GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=0000000000000000000000000000000000000000 run_check >/dev/null 2>&1; then",
     "    printf 'maintainability bootstrap accepted a checker revision other than GITHUB_SHA\\n' >&2",
     "GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head run_check >/dev/null",
-    "CARGO_HOME='C:\\cargo-home' \\",
-    "    CARGO_HOME=$empty_cargo_home \\",
-    "    '[[ $LOCALHOLD_MAINTAINABILITY_CARGO == \"C:\\trusted\\cargo.exe\" && $LOCALHOLD_MAINTAINABILITY_GIT == \"C:\\trusted\\git.exe\" ]]'",
     "export CARGO_HOME=$cargo_home",
     "unset CARGO_HOME",
     "RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \\",
     "    RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \\",
     "    CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \\",
-    "    run_check -- bash -c 'for name in RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTDOC RUSTC_WRAPPER CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do [[ ! -v $name ]] || exit 1; done' >/dev/null",
+    "    run_check --test-environment >/dev/null",
 ];
 pub(super) const MISE_ENVIRONMENT_LINES: &[&str] = &["CARGO_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/cargo\""];
 pub(super) const CI_REVISION_ENVIRONMENT_LINES: &[&str] = &[
@@ -57,7 +63,6 @@ pub(super) const CI_REVISION_ENVIRONMENT_LINES: &[&str] = &[
 pub(super) const GPU_RELEASE_REVISION_ENVIRONMENT_LINES: &[&str] = &["          test \"$(git rev-parse HEAD)\" = \"$GITHUB_SHA\""];
 
 pub fn reject_checked_in_weakening(workspace: &Path) -> Result<BTreeSet<String>> {
-    let mut direct_rust_sources = BTreeSet::new();
     for path in execution_surfaces(workspace)? {
         if is_cargo_config(Path::new(&path)) {
             bail!("checked-in Cargo configuration {path:?} is unsupported because it can override lint policy");
@@ -83,9 +88,11 @@ pub fn reject_checked_in_weakening(workspace: &Path) -> Result<BTreeSet<String>>
         if unresolved {
             bail!("checked-in Rust command surface {path:?} contains a direct compiler invocation without auditable repository-relative .rs inputs");
         }
-        direct_rust_sources.extend(sources);
+        if !sources.is_empty() {
+            bail!("checked-in Rust command surface {path:?} directly compiles an opaque command helper; use an audited Cargo target instead");
+        }
     }
-    Ok(direct_rust_sources)
+    Ok(BTreeSet::new())
 }
 
 fn is_javascript(path: &Path) -> bool {
@@ -117,71 +124,91 @@ fn is_make_surface(path: &Path) -> bool {
 }
 
 pub(super) fn weakening_environment(source: &str) -> bool {
-    weakening_environment_with_case(source, false)
+    weakening_environment_names(source) || normalized_shell_tokens(source).iter().any(|token| weakening_environment_names(token))
 }
 
-pub(super) fn weakening_environment_for_surface(path: &str, source: &str) -> bool {
-    weakening_environment_with_case(source, has_case_insensitive_tool_names(path))
+pub(super) fn weakening_environment_for_surface(_path: &str, source: &str) -> bool {
+    weakening_environment(source) || case_insensitive_environment_assignment(source)
 }
 
-fn weakening_environment_with_case(source: &str, case_insensitive: bool) -> bool {
-    weakening_environment_names(source, case_insensitive) || normalized_shell_tokens(source).iter().any(|token| weakening_environment_names(token, case_insensitive))
+fn case_insensitive_environment_assignment(source: &str) -> bool {
+    source.split(['\n', ';', '&', '|']).any(|segment| {
+        let assignment = segment
+            .split_once('=')
+            .and_then(|(left, _)| left.split_whitespace().next_back())
+            .map(normalized_environment_name);
+        assignment.is_some_and(is_weakening_environment_name)
+            || normalized_shell_tokens(segment).windows(2).any(|tokens| {
+                matches!(tokens[0].to_ascii_lowercase().as_str(), "export" | "unset" | "set" | "setenv") && is_weakening_environment_name(normalized_environment_name(&tokens[1]))
+            })
+    })
 }
 
-fn weakening_environment_names(source: &str, case_insensitive: bool) -> bool {
+fn normalized_environment_name(name: &str) -> &str {
+    let name = name.trim_matches(|character: char| matches!(character, '$' | '{' | '}' | '(' | ')' | ':' | '"' | '\''));
+    match name.split_once(':') {
+        Some((prefix, value)) if prefix.eq_ignore_ascii_case("env") => value,
+        _ => name,
+    }
+}
+
+fn weakening_environment_names(source: &str) -> bool {
     source
         .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
         .filter(|name| !name.is_empty())
-        .filter(|name| case_insensitive || name.bytes().any(|byte| byte.is_ascii_uppercase()))
-        .map(str::to_ascii_uppercase)
-        .any(|name| {
-            matches!(
-                name.as_str(),
-                "RUSTFLAGS"
-                    | "CARGO_ENCODED_RUSTFLAGS"
-                    | "RUSTDOCFLAGS"
-                    | "CARGO_ENCODED_RUSTDOCFLAGS"
-                    | "CLIPPY_ARGS"
-                    | "CLIPPY_CONF_DIR"
-                    | "RUSTC"
-                    | "RUSTDOC"
-                    | "RUSTC_BOOTSTRAP"
-                    | "RUSTC_WRAPPER"
-                    | "RUSTC_WORKSPACE_WRAPPER"
-                    | "CARGO_HOME"
-                    | "CARGO_BUILD_TARGET"
-                    | "CARGO_BUILD_RUSTFLAGS"
-                    | "CARGO_BUILD_RUSTDOCFLAGS"
-                    | "CARGO_BUILD_RUSTC"
-                    | "CARGO_BUILD_RUSTDOC"
-                    | "CARGO_BUILD_RUSTC_WRAPPER"
-                    | "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"
-                    | "GITHUB_ACTIONS"
-                    | "GITHUB_EVENT_PATH"
-                    | "GITHUB_SHA"
-                    | "LOCALHOLD_MAINTAINABILITY_BASE_REV"
-                    | "LOCALHOLD_MAINTAINABILITY_CARGO"
-                    | "LOCALHOLD_MAINTAINABILITY_GIT"
-                    | "MISE_CONFIG_DIR"
-                    | "MISE_CONFIG_FILE"
-                    | "MISE_CEILING_PATHS"
-                    | "MISE_DEFAULT_CONFIG_FILENAME"
-                    | "MISE_ENV_FILE"
-                    | "MISE_GLOBAL_CONFIG_FILE"
-                    | "MISE_GLOBAL_CONFIG_ROOT"
-                    | "MISE_OVERRIDE_CONFIG_FILENAMES"
-                    | "MISE_SYSTEM_CONFIG_DIR"
-                    | "MISE_SYSTEM_CONFIG_FILE"
-                    | "MISE_SYSTEM_DIR"
-            ) || name.starts_with("CARGO_ALIAS_")
-                || name.starts_with("CARGO_TARGET_") && (name.ends_with("_RUSTFLAGS") || name.ends_with("_RUSTDOCFLAGS") || name.ends_with("_LINKER") || name.ends_with("_RUNNER"))
-                || name.starts_with("GIT_")
-        })
+        .filter(|name| name.bytes().any(|byte| byte.is_ascii_uppercase()))
+        .any(is_weakening_environment_name)
+}
+
+fn is_weakening_environment_name(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    matches!(
+        name.as_str(),
+        "RUSTFLAGS"
+            | "CARGO_ENCODED_RUSTFLAGS"
+            | "RUSTDOCFLAGS"
+            | "CARGO_ENCODED_RUSTDOCFLAGS"
+            | "CLIPPY_ARGS"
+            | "CLIPPY_CONF_DIR"
+            | "RUSTC"
+            | "RUSTDOC"
+            | "RUSTC_BOOTSTRAP"
+            | "RUSTC_WRAPPER"
+            | "RUSTC_WORKSPACE_WRAPPER"
+            | "CARGO_HOME"
+            | "CARGO_BUILD_TARGET"
+            | "CARGO_BUILD_RUSTFLAGS"
+            | "CARGO_BUILD_RUSTDOCFLAGS"
+            | "CARGO_BUILD_RUSTC"
+            | "CARGO_BUILD_RUSTDOC"
+            | "CARGO_BUILD_RUSTC_WRAPPER"
+            | "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"
+            | "GITHUB_ACTIONS"
+            | "GITHUB_EVENT_PATH"
+            | "GITHUB_SHA"
+            | "LOCALHOLD_MAINTAINABILITY_BASE_REV"
+            | "LOCALHOLD_MAINTAINABILITY_CARGO"
+            | "LOCALHOLD_MAINTAINABILITY_GIT"
+            | "MISE_CONFIG_DIR"
+            | "MISE_CONFIG_FILE"
+            | "MISE_CEILING_PATHS"
+            | "MISE_DEFAULT_CONFIG_FILENAME"
+            | "MISE_ENV_FILE"
+            | "MISE_GLOBAL_CONFIG_FILE"
+            | "MISE_GLOBAL_CONFIG_ROOT"
+            | "MISE_OVERRIDE_CONFIG_FILENAMES"
+            | "MISE_SYSTEM_CONFIG_DIR"
+            | "MISE_SYSTEM_CONFIG_FILE"
+            | "MISE_SYSTEM_DIR"
+    ) || name.starts_with("CARGO_ALIAS_")
+        || name.starts_with("CARGO_TARGET_") && (name.ends_with("_RUSTFLAGS") || name.ends_with("_RUSTDOCFLAGS") || name.ends_with("_LINKER") || name.ends_with("_RUNNER"))
+        || name.starts_with("GIT_")
 }
 
 pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str) -> bool {
     let allowed = match path {
         "script/check-maintainability-bootstrap.sh" => BOOTSTRAP_ENVIRONMENT_LINES,
+        "script/run-maintainability-gate.sh" => GATE_RUNNER_ENVIRONMENT_LINES,
         "script/run-source-safety.sh" => RUNNER_ENVIRONMENT_LINES,
         "script/tests/test_maintainability_bootstrap.sh" => BOOTSTRAP_TEST_ENVIRONMENT_LINES,
         "mise.toml" => MISE_ENVIRONMENT_LINES,

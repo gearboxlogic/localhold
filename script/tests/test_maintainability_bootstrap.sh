@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/bash
 set -euo pipefail
 
 unset GITHUB_ACTIONS GITHUB_EVENT_PATH GITHUB_SHA
@@ -13,6 +13,8 @@ mkdir -p "$test_repository/tools/maintainability"
 source_tool="$repository_root/tools/maintainability"
 test_tool="$test_repository/tools/maintainability"
 source_runner="$repository_root/script/run-source-safety.sh"
+source_bootstrap_tests="$repository_root/script/tests/test_maintainability_bootstrap.sh"
+source_gate_runner="$repository_root/script/run-maintainability-gate.sh"
 
 sha256_stream() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -55,6 +57,9 @@ restore_reviewed_graph() {
     cp "$repository_root/mise.lock" "$test_repository/mise.lock"
     mkdir -p "$test_repository/script"
     cp "$source_runner" "$test_repository/script/run-source-safety.sh"
+    cp "$source_gate_runner" "$test_repository/script/run-maintainability-gate.sh"
+    mkdir -p "$test_repository/script/tests"
+    cp "$source_bootstrap_tests" "$test_repository/script/tests/test_maintainability_bootstrap.sh"
 }
 
 run_check() {
@@ -69,13 +74,8 @@ expect_failure() {
 }
 
 expect_failure_before_command() {
-    local marker="$fixture/command-ran"
-    if run_check -- touch "$marker" >/dev/null 2>&1; then
+    if run_check --test-environment >/dev/null 2>&1; then
         printf 'maintainability bootstrap fixture unexpectedly passed\n' >&2
-        exit 1
-    fi
-    if [[ -e "$marker" ]]; then
-        printf 'maintainability bootstrap executed a command for an unreviewed dependency graph\n' >&2
         exit 1
     fi
 }
@@ -151,50 +151,6 @@ touch "$fixture/parent/.cargo/config"
 expect_failure
 rm -r "$fixture/parent/.cargo"
 
-fake_bin="$fixture/fake-bin"
-mkdir "$fake_bin"
-real_cygpath="$fake_bin/real-cygpath"
-printf '%s\n' \
-    '#!/usr/bin/env bash' \
-    '[[ ${1:-} == -u && ${2:-} == "C:\cargo-home" ]] || exit 1' \
-    'printf "%s\n" "$FAKE_CARGO_HOME"' >"$real_cygpath"
-chmod +x "$real_cygpath"
-printf '%s\n' \
-    '#!/usr/bin/env bash' \
-    'if [[ ${1:-} == -m && ${2:-} == "$FAKE_DRIVE_ROOT" ]]; then' \
-    '    printf "D:/\n"' \
-    '    exit' \
-    'fi' \
-    'if [[ ${1:-} == -w ]]; then' \
-    '    case "${2##*/}" in' \
-    "        cargo | cargo.exe) printf '%s\\n' 'C:\\trusted\\cargo.exe'; exit ;;" \
-    "        git | git.exe) printf '%s\\n' 'C:\\trusted\\git.exe'; exit ;;" \
-    '    esac' \
-    'fi' \
-    '[[ -n ${REAL_CYGPATH:-} ]] || exit 1' \
-    'exec "$REAL_CYGPATH" "$@"' >"$fake_bin/cygpath"
-chmod +x "$fake_bin/cygpath"
-mkdir -p "$fixture/parent/.cargo"
-touch "$fixture/parent/.cargo/config"
-fake_drive_root=$(cd -- "$test_repository" && pwd -P)
-CARGO_HOME='C:\cargo-home' \
-    FAKE_CARGO_HOME=$fixture \
-    FAKE_DRIVE_ROOT=$fake_drive_root \
-    REAL_CYGPATH=$real_cygpath \
-    PATH="$fake_bin:$PATH" \
-    run_check >/dev/null
-rm -r "$fixture/parent/.cargo"
-
-empty_cargo_home="$fixture/empty-cargo-home"
-mkdir "$empty_cargo_home"
-OSTYPE=msys \
-    CARGO_HOME=$empty_cargo_home \
-    FAKE_DRIVE_ROOT=$fake_drive_root \
-    REAL_CYGPATH=$real_cygpath \
-    PATH="$fake_bin:$PATH" \
-    run_check -- bash -c \
-    '[[ $LOCALHOLD_MAINTAINABILITY_CARGO == "C:\trusted\cargo.exe" && $LOCALHOLD_MAINTAINABILITY_GIT == "C:\trusted\git.exe" ]]'
-
 cargo_home="$fixture/cargo-home"
 mkdir -p "$cargo_home"
 touch "$cargo_home/config.toml"
@@ -204,40 +160,69 @@ unset CARGO_HOME
 rm -r "$cargo_home"
 
 restore_reviewed_graph
-mkdir -p "$test_repository/bin"
-cargo_name=cargo
-fake_cargo="$test_repository/bin/$cargo_name"
-printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fake_cargo"
-chmod +x "$fake_cargo"
-if PATH="$test_repository/bin:$PATH" run_check -- touch "$fixture/repository-cargo-ran" >/dev/null 2>&1; then
-    printf 'maintainability bootstrap accepted a repository-controlled Cargo executable\n' >&2
+if run_check -- just maintainability >/dev/null 2>&1; then
+    printf 'maintainability bootstrap accepted the removed arbitrary-command interface\n' >&2
     exit 1
 fi
-if [[ -e "$fixture/repository-cargo-ran" ]]; then
-    printf 'maintainability bootstrap ran a command through repository-controlled Cargo\n' >&2
+if run_check --source-safety >/dev/null 2>&1; then
+    printf 'maintainability bootstrap allowed an alternate root to run a delegated gate\n' >&2
     exit 1
 fi
-rm -r "$test_repository/bin"
 
-restore_reviewed_graph
-mkdir -p "$test_repository/bin"
-git_name=git
-fake_git="$test_repository/bin/$git_name"
-printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fake_git"
-chmod +x "$fake_git"
-if PATH="$test_repository/bin:$PATH" run_check -- touch "$fixture/repository-git-ran" >/dev/null 2>&1; then
-    printf 'maintainability bootstrap accepted a repository-controlled Git executable\n' >&2
+fake_bin="$fixture/fake-bin"
+mkdir "$fake_bin"
+cargo_name=cargo
+printf '%s\n' '#!/usr/bin/bash' 'touch "$FAKE_JUST_MARKER"' >"$fake_bin/just"
+printf '%s\n' '#!/usr/bin/bash' 'touch "$FAKE_CARGO_MARKER"' >"$fake_bin/$cargo_name"
+chmod +x "$fake_bin/just" "$fake_bin/$cargo_name"
+fake_just_marker="$fixture/fake-just-ran"
+fake_cargo_marker="$fixture/fake-cargo-ran"
+FAKE_JUST_MARKER=$fake_just_marker FAKE_CARGO_MARKER=$fake_cargo_marker PATH="$fake_bin:$PATH" run_check --test-environment >/dev/null
+if [[ -e $fake_just_marker || -e $fake_cargo_marker ]]; then
+    printf 'maintainability bootstrap executed an untrusted PATH dispatcher\n' >&2
     exit 1
 fi
-if [[ -e "$fixture/repository-git-ran" ]]; then
-    printf 'maintainability bootstrap ran a command with repository-controlled Git\n' >&2
+
+fake_system_bin="$fixture/fake-system-bin"
+mkdir "$fake_system_bin"
+printf '%s\n' '#!/usr/bin/bash' 'exit 0' >"$fake_system_bin/git"
+chmod +x "$fake_system_bin/git"
+if PATH="$fake_system_bin:$PATH" run_check >/dev/null 2>&1; then
+    printf 'maintainability bootstrap accepted a non-system Git executable\n' >&2
     exit 1
 fi
-rm -r "$test_repository/bin"
+
+kernel=$(/usr/bin/uname -s)
+machine=$(/usr/bin/uname -m)
+if [[ $kernel == Linux && $machine == x86_64 ]]; then
+    toolchain_triple=x86_64-unknown-linux-gnu
+    tool_extension=
+elif [[ $kernel == MINGW* || $kernel == MSYS* || $kernel == CYGWIN* ]] && [[ $machine == x86_64 ]]; then
+    toolchain_triple=x86_64-pc-windows-msvc
+    tool_extension=.exe
+else
+    printf 'maintainability bootstrap tests require Linux or Windows x86_64\n' >&2
+    exit 1
+fi
+trusted_rustup_home=${RUSTUP_HOME:-${HOME:?}/.rustup}
+if [[ $trusted_rustup_home =~ ^[[:alpha:]]:[/\\] ]]; then
+    trusted_rustup_home=$(/usr/bin/cygpath -u "$trusted_rustup_home")
+fi
+trusted_toolchain_bin="$trusted_rustup_home/toolchains/1.97.0-$toolchain_triple/bin"
+fake_rustup_home="$fixture/fake-rustup"
+fake_toolchain_bin="$fake_rustup_home/toolchains/1.97.0-$toolchain_triple/bin"
+mkdir -p "$fake_toolchain_bin"
+cp "$trusted_toolchain_bin/cargo$tool_extension" "$fake_toolchain_bin/cargo$tool_extension"
+cp "$trusted_toolchain_bin/cargo$tool_extension" "$fake_toolchain_bin/rustc$tool_extension"
+chmod +x "$fake_toolchain_bin/cargo$tool_extension" "$fake_toolchain_bin/rustc$tool_extension"
+if RUSTUP_HOME=$fake_rustup_home run_check --test-environment >/dev/null 2>&1; then
+    printf 'maintainability bootstrap trusted unauthenticated tools beside an authentic Cargo executable\n' >&2
+    exit 1
+fi
 
 RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \
     RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \
     CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \
-    run_check -- bash -c 'for name in RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTDOC RUSTC_WRAPPER CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do [[ ! -v $name ]] || exit 1; done' >/dev/null
+    run_check --test-environment >/dev/null
 
 printf 'maintainability bootstrap tests passed\n'

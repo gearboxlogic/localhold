@@ -108,6 +108,14 @@ fn malformed_macro_carried_lint_attributes_fail_closed() {
 }
 
 #[test]
+fn unreviewed_procedural_attributes_and_derives_fail_closed() {
+    for source in ["#[evil::Suppress] fn hidden() {}\n", "#[derive(evil::Suppress)] struct Hidden;\n"] {
+        let error = scan(source, SourceCategory::Production).unwrap_err();
+        assert!(format!("{error:#}").contains("could emit a lint suppression"));
+    }
+}
+
+#[test]
 fn macro_metavariables_cannot_construct_attributes() {
     let error = scan(
         "macro_rules! generated { ($attribute:meta) => { #[$attribute] fn expanded() {} }; }\n",

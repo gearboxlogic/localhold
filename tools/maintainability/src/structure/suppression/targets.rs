@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -80,7 +79,7 @@ pub(super) fn tooling_target_sources(workspace: &Path, manifests: &[String]) -> 
 }
 
 fn cargo_metadata(workspace: &Path, manifest: &Path) -> Result<Value> {
-    let output = Command::new("cargo")
+    let output = crate::structure::revision::cargo_command()
         .current_dir(workspace)
         .args(["metadata", "--no-deps", "--locked", "--format-version", "1", "--manifest-path"])
         .arg(manifest)

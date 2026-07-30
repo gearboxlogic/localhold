@@ -52,6 +52,9 @@ pub fn reject_checked_in_weakening(workspace: &Path) -> Result<BTreeSet<String>>
         if is_cargo_config(Path::new(&path)) {
             bail!("checked-in Cargo configuration {path:?} is unsupported because it can override lint policy");
         }
+        if is_javascript(Path::new(&path)) {
+            bail!("checked-in JavaScript command surface {path:?} is unsupported because process invocations cannot be audited as shell commands");
+        }
         let source = fs::read_to_string(workspace.join(&path)).with_context(|| format!("read lint command execution surface {path}"))?;
         yaml::validate_execution_metadata(&path, &source)?;
         if has_sourced_file_indirection(&path, &source) {
@@ -70,6 +73,12 @@ pub fn reject_checked_in_weakening(workspace: &Path) -> Result<BTreeSet<String>>
         direct_rust_sources.extend(sources);
     }
     Ok(direct_rust_sources)
+}
+
+fn is_javascript(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "js" | "cjs" | "mjs"))
 }
 
 pub(super) fn weakening_environment(source: &str) -> bool {

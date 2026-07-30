@@ -306,6 +306,22 @@ fn command_policy_scans_extensionless_scripts() {
 }
 
 #[test]
+fn javascript_command_surfaces_fail_closed_instead_of_using_shell_parsing() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("tools/ci")).expect("command directory");
+    fs::write(
+        workspace.path().join("tools/ci/check.js"),
+        "execFileSync(\"cargo\", [\n  \"clippy\",\n  \"--\",\n  \"-A\",\n  \"warnings\",\n]);\n",
+    )
+    .expect("JavaScript command surface");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("JavaScript command surface"));
+}
+
+#[test]
 fn local_composite_actions_are_scanned_in_any_directory() {
     for command in ["cargo clippy -- -A warnings", "CARGO.EXE clippy -- -A warnings"] {
         let workspace = tempfile::tempdir().expect("temporary workspace");
@@ -345,6 +361,9 @@ fn github_yaml_rejects_aliases_and_custom_shell_templates() {
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    env:\n      COMMAND: &lint cargo clippy -- -A warnings\n    steps:\n      - run: *lint\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -c 'cargo clippy -- -A warnings' -- {0}\n        run: just maintainability\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: |\n          bash -c 'cargo clippy -- -A warnings' -- {0}\n        run: just maintainability\n",
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - working-directory: misc\n        run: rustc check.rs\n",
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    defaults: {run: {working-directory: misc}}\n    steps:\n      - run: rustc check.rs\n",
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps: [{run: cargo clippy -- -A warnings}]\n",
     ] {
         let workspace = tempfile::tempdir().expect("temporary workspace");
         fs::create_dir_all(workspace.path().join(".github/workflows")).expect("workflow directory");
@@ -354,7 +373,10 @@ fn github_yaml_rejects_aliases_and_custom_shell_templates() {
 
         let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
         assert!(
-            error.to_string().contains("anchors or aliases") || error.to_string().contains("unsupported shell template"),
+            error.to_string().contains("anchors or aliases")
+                || error.to_string().contains("unsupported shell template")
+                || error.to_string().contains("working-directory")
+                || error.to_string().contains("flow mapping or complex sequence"),
             "{error:#}"
         );
     }

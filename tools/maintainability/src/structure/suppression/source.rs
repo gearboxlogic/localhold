@@ -13,7 +13,7 @@ pub(in crate::structure::suppression) use self::fingerprint::external_content_fi
 use self::fingerprint::{external_target_fingerprint, suppression_free_fingerprint, suppression_site_fingerprint};
 use self::nodes::{SuppressionScope, foreign_item_scope, impl_item_scope, item_scope, trait_item_scope};
 use super::{SourceCategory, SourceSuppression};
-use crate::scan::{is_doc_comment, unsupported_runnable_doctest};
+use crate::scan::{is_doc_comment, reviewed_attribute_expansion, unsupported_runnable_doctest};
 use crate::structure::syntax::{
     ProductionCfgContext, cfg_attr_metas_with_production_reachability, expr_attributes, foreign_item_attributes, generic_param_attributes, impl_item_attributes, item_attributes,
     normalized_ident, pat_attributes, production_cfg_context, trait_item_attributes,
@@ -422,6 +422,8 @@ impl<'ast> Visit<'ast> for SourceScanner {
                 self.error = Some(error);
             } else if let Err(error) = validate_audited_module_path(attribute) {
                 self.error = Some(error);
+            } else if !attribute.path().is_ident("path") && !reviewed_attribute_expansion(attribute) {
+                self.error = Some(anyhow::anyhow!("unreviewed procedural attribute or derive expansion could emit a lint suppression"));
             } else if let Err(error) = self.record_attribute(attribute, false) {
                 self.error = Some(error);
             }

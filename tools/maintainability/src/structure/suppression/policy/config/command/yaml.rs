@@ -18,12 +18,18 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
             continue;
         }
         block_indentation = None;
+        if contains_working_directory_key(line) {
+            bail!("checked-in GitHub YAML {path:?} uses an unsupported working-directory override");
+        }
         let Some((key, value)) = yaml_key_value(line) else {
             continue;
         };
         let value = value.trim_start();
         if starts_yaml_reference(value) {
             bail!("checked-in GitHub YAML {path:?} uses unsupported anchors or aliases");
+        }
+        if value.starts_with('{') || value.starts_with('[') && !is_simple_flow_sequence(value) {
+            bail!("checked-in GitHub YAML {path:?} uses an unsupported flow mapping or complex sequence");
         }
         if key == "shell" {
             let shell = literal_scalar(value).ok_or_else(|| anyhow::anyhow!("checked-in GitHub YAML {path:?} uses an unsupported shell template"))?;
@@ -35,6 +41,22 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
         }
     }
     Ok(())
+}
+
+fn contains_working_directory_key(line: &str) -> bool {
+    let content = line.split_once(" #").map_or(line, |(content, _)| content);
+    content.contains("working-directory:") || content.contains("working-directory':") || content.contains("working-directory\":")
+}
+
+fn is_simple_flow_sequence(value: &str) -> bool {
+    let value = value.split_once(" #").map_or(value, |(value, _)| value).trim();
+    let Some(contents) = value.strip_prefix('[').and_then(|value| value.strip_suffix(']')) else {
+        return false;
+    };
+    contents.split(',').all(|item| {
+        let item = item.trim();
+        !item.is_empty() && item.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/'))
+    })
 }
 
 pub(super) fn run_commands(path: &str, source: &str) -> Vec<String> {

@@ -7,8 +7,13 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 const BASE_REVISION_ENV: &str = "LOCALHOLD_MAINTAINABILITY_BASE_REV";
+const CARGO_COMMAND_ENV: &str = "LOCALHOLD_MAINTAINABILITY_CARGO";
 const GIT_COMMAND_ENV: &str = "LOCALHOLD_MAINTAINABILITY_GIT";
 const ZERO_REVISION: &str = "0000000000000000000000000000000000000000";
+
+pub(super) fn cargo_command() -> Command {
+    Command::new(env::var_os(CARGO_COMMAND_ENV).unwrap_or_else(|| "cargo".into()))
+}
 
 pub(super) fn git_command() -> Command {
     let mut command = Command::new(env::var_os(GIT_COMMAND_ENV).unwrap_or_else(|| "git".into()));
@@ -117,6 +122,12 @@ mod tests {
 
     const BASE: &str = "1111111111111111111111111111111111111111";
     const HEAD: &str = "2222222222222222222222222222222222222222";
+
+    #[test]
+    fn cargo_command_uses_the_bootstrap_override_when_present() {
+        let expected = env::var_os(CARGO_COMMAND_ENV).unwrap_or_else(|| "cargo".into());
+        assert_eq!(cargo_command().get_program(), expected);
+    }
 
     #[test]
     fn github_event_base_cannot_be_disabled_or_replaced() {

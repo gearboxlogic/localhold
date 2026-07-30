@@ -297,15 +297,17 @@ bootstrap scrubber and its exact self-test may name those environment channels
 so they can remove and verify them, but they remain subject to the argument
 scan; no directory-wide command-surface exemption exists. In GitHub Actions,
 local actions must use the composite runtime so their commands remain directly
-auditable; Node and Docker action entrypoints are unsupported. Workflow and
-action YAML may not use anchors, aliases, or custom shell templates to redirect
-an audited `run` command. The dependency jobs validate the reviewed mise
-configuration and lockfile before tool activation, then run the hash-pinned
-source-safety driver through resolved absolute Cargo and Git executables. The
-comparison base is derived from the runner event, the checkout must match the
-event head, and any configured base must match the event base, so versioned
-workflow changes cannot select the checked head or silently omit
-previous-revision enforcement.
+auditable; Node and Docker action entrypoints and checked-in JavaScript command
+surfaces are unsupported. Workflow and action YAML may not use anchors,
+aliases, custom shell templates, or working-directory overrides to redirect an
+audited `run` command. Unreviewed procedural attributes and derives are also
+rejected because their expansions could emit hidden lint policy. The dependency
+jobs validate the reviewed mise configuration and lockfile before tool
+activation, then run the hash-pinned source-safety driver through resolved
+absolute Cargo and Git executables. The comparison base is derived from the
+runner event, the checkout must match the event head, and any configured base
+must match the event base, so versioned workflow changes cannot select the
+checked head or silently omit previous-revision enforcement.
 Ordinary agent changes must fix the warning or remove stale suppression debt;
 they must not edit policy evidence merely to make the gate pass.
 

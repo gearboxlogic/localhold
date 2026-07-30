@@ -68,7 +68,7 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=f9ead9aeff6aae855040ce3aea2e8901119071beef46061332dc3526378a9de6
-readonly reviewed_bootstrap_tests_sha256=a86ba44a6b3467ccae17cb7bea1bb5b33688ebf753c71222fdc528497e1ecec2
+readonly reviewed_bootstrap_tests_sha256=52ea4c035437422f778509e419598eec8843e087f9de730974630bc514ab6bfb
 readonly reviewed_gate_runner_sha256=a614e7a0804eed432d84f5b5e9283406c0c4f0915c9f79ce1b6b9b5fd2142433
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
@@ -308,11 +308,13 @@ verify_reviewed_tracked_tree() {
             printf 'checked-out revision contains an unsupported tracked entry: %s\n' "$relative_path" >&2
             exit 1
         fi
-        if [[ ! -f "$repository_root/$relative_path" || -L "$repository_root/$relative_path" ]]; then
-            printf 'reviewed tracked input must be a regular non-symlink file: %s\n' "$relative_path" >&2
-            exit 1
-        fi
-        if ! $checker_sources_are_overlaid || [[ $relative_path != tools/maintainability/src/* ]]; then
+        if $checker_sources_are_overlaid && [[ $relative_path == tools/maintainability/src/* ]]; then
+            :
+        else
+            if [[ ! -f "$repository_root/$relative_path" || -L "$repository_root/$relative_path" ]]; then
+                printf 'reviewed tracked input must be a regular non-symlink file: %s\n' "$relative_path" >&2
+                exit 1
+            fi
             actual_hash=$(git_checked hash-object --no-filters -- "$repository_root/$relative_path") || {
                 printf 'cannot hash reviewed tracked input: %s\n' "$relative_path" >&2
                 exit 1

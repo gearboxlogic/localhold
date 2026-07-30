@@ -171,7 +171,9 @@ restore_reviewed_graph
 event_path="$fixture/event.json"
 printf '{}\n' >"$event_path"
 printf 'compile_error!("untrusted head checker must not execute");\n' >"$test_tool/src/main.rs"
-git -C "$test_repository" -c core.autocrlf=false -c user.name=LocalHold -c user.email=localhold@example.invalid add tools/maintainability/src/main.rs
+printf 'compile_error!("head-only checker source must not execute");\n' >"$test_tool/src/untrusted.rs"
+git -C "$test_repository" -c core.autocrlf=false -c user.name=LocalHold -c user.email=localhold@example.invalid add \
+    tools/maintainability/src/main.rs tools/maintainability/src/untrusted.rs
 git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example.invalid commit -qm 'untrusted checker head'
 test_head=$(git -C "$test_repository" rev-parse HEAD)
 if GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=0000000000000000000000000000000000000000 \

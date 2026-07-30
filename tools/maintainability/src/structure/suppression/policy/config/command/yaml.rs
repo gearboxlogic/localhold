@@ -31,6 +31,9 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
         if contains_working_directory_key(line) {
             bail!("checked-in GitHub YAML {path:?} uses an unsupported working-directory override");
         }
+        if starts_unsupported_key_property(line) {
+            bail!("checked-in GitHub YAML {path:?} uses unsupported anchors or aliases, node tags, or complex keys");
+        }
         let Some((key, value)) = yaml_key_value(line) else {
             continue;
         };
@@ -59,6 +62,14 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
 fn contains_working_directory_key(line: &str) -> bool {
     let content = line.split_once(" #").map_or(line, |(content, _)| content);
     content.contains("working-directory:") || content.contains("working-directory':") || content.contains("working-directory\":")
+}
+
+fn starts_unsupported_key_property(line: &str) -> bool {
+    let mut content = line.trim_start();
+    if let Some(rest) = content.strip_prefix("- ") {
+        content = rest.trim_start();
+    }
+    starts_yaml_reference(content) || content.starts_with(['!', '?'])
 }
 
 fn is_simple_flow_sequence(value: &str) -> bool {

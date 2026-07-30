@@ -365,6 +365,8 @@ fn local_node_actions_are_rejected_before_unscanned_entrypoints_can_run() {
 fn github_yaml_rejects_unsupported_execution_metadata() {
     for source in [
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    env:\n      COMMAND: &lint cargo clippy -- -A warnings\n    steps:\n      - run: *lint\n",
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - &lint run: cargo clippy -- -A warnings\n",
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - !audit run: cargo clippy -- -A warnings\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -c 'cargo clippy -- -A warnings' -- {0}\n        run: just maintainability\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: |\n          bash -c 'cargo clippy -- -A warnings' -- {0}\n        run: just maintainability\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - working-directory: misc\n        run: rustc check.rs\n",

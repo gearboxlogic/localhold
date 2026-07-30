@@ -23,6 +23,11 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "    run_check -- bash -c 'for name in RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS CLIPPY_CONF_DIR RUSTDOC RUSTC_WRAPPER CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do [[ ! -v $name ]] || exit 1; done' >/dev/null",
 ];
 pub(super) const MISE_ENVIRONMENT_LINES: &[&str] = &["CARGO_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/cargo\""];
+pub(super) const CI_REVISION_ENVIRONMENT_LINES: &[&str] = &[
+    "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
+    "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
+];
+pub(super) const GPU_RELEASE_REVISION_ENVIRONMENT_LINES: &[&str] = &["          test \"$(git rev-parse HEAD)\" = \"$GITHUB_SHA\""];
 
 pub fn reject_checked_in_weakening(workspace: &Path) -> Result<()> {
     for path in execution_surfaces(workspace)? {
@@ -64,6 +69,7 @@ fn weakening_rust_command(command: &str) -> bool {
     }
     command.contains("--cap-lints")
         || cargo_changes_directory_before_compiler_arguments(&tokens)
+        || rust_response_file(&tokens)
         || tokens.iter().any(|token| {
             *token == "-A"
                 || token.starts_with("-A") && token.len() > 2
@@ -119,7 +125,43 @@ fn is_rust_tool_token(token: &str) -> bool {
     let basename = tool_basename(token);
     matches!(
         basename,
-        "cargo" | "cargo.exe" | "rustc" | "rustc.exe" | "rustdoc" | "rustdoc.exe" | "clippy-driver" | "clippy-driver.exe" | "CARGO" | "RUSTC" | "RUSTDOC"
+        "cargo"
+            | "cargo.exe"
+            | "cargo-clippy"
+            | "cargo-clippy.exe"
+            | "rustc"
+            | "rustc.exe"
+            | "rustdoc"
+            | "rustdoc.exe"
+            | "clippy-driver"
+            | "clippy-driver.exe"
+            | "CARGO"
+            | "RUSTC"
+            | "RUSTDOC"
+    )
+}
+
+fn rust_response_file(tokens: &[&str]) -> bool {
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| token.starts_with('@') && token.len() > 1)
+        .any(|(response_index, _)| {
+            let preceding = &tokens[..response_index];
+            preceding.iter().any(|token| is_direct_compiler_token(token))
+                || preceding.iter().enumerate().any(|(index, token)| {
+                    is_cargo_tool_token(token)
+                        && preceding[index.saturating_add(1)..]
+                            .iter()
+                            .any(|argument| matches!(*argument, "rustc" | "rustdoc" | "clippy"))
+                })
+        })
+}
+
+fn is_direct_compiler_token(token: &str) -> bool {
+    matches!(
+        tool_basename(token),
+        "cargo-clippy" | "cargo-clippy.exe" | "rustc" | "rustc.exe" | "rustdoc" | "rustdoc.exe" | "clippy-driver" | "clippy-driver.exe" | "RUSTC" | "RUSTDOC"
     )
 }
 
@@ -175,6 +217,10 @@ fn weakening_environment_with_case(source: &str, case_insensitive: bool) -> bool
                     | "CARGO_BUILD_RUSTDOC"
                     | "CARGO_BUILD_RUSTC_WRAPPER"
                     | "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"
+                    | "GITHUB_ACTIONS"
+                    | "GITHUB_EVENT_PATH"
+                    | "GITHUB_SHA"
+                    | "LOCALHOLD_MAINTAINABILITY_BASE_REV"
             ) || name.starts_with("CARGO_ALIAS_")
                 || name.starts_with("CARGO_TARGET_") && (name.ends_with("_RUSTFLAGS") || name.ends_with("_RUSTDOCFLAGS") || name.ends_with("_LINKER") || name.ends_with("_RUNNER"))
         })
@@ -185,11 +231,15 @@ pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str
         "script/check-maintainability-bootstrap.sh" => BOOTSTRAP_ENVIRONMENT_LINES,
         "script/tests/test_maintainability_bootstrap.sh" => BOOTSTRAP_TEST_ENVIRONMENT_LINES,
         "mise.toml" => MISE_ENVIRONMENT_LINES,
+        ".github/workflows/ci.yml" => CI_REVISION_ENVIRONMENT_LINES,
+        ".github/workflows/gpu-release-gate.yml" => GPU_RELEASE_REVISION_ENVIRONMENT_LINES,
         _ => return false,
     };
     let lines = source.lines().collect::<Vec<_>>();
-    allowed.iter().all(|expected| lines.iter().filter(|line| *line == expected).count() == 1)
-        && lines.iter().filter(|line| weakening_environment(line)).all(|line| allowed.contains(line))
+    allowed.iter().all(|expected| {
+        let expected_count = allowed.iter().filter(|candidate| *candidate == expected).count();
+        lines.iter().filter(|line| *line == expected).count() == expected_count
+    }) && lines.iter().filter(|line| weakening_environment(line)).all(|line| allowed.contains(line))
 }
 
 pub(super) fn is_execution_surface(path: &str) -> bool {

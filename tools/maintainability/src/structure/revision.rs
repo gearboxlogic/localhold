@@ -10,19 +10,30 @@ const ZERO_REVISION: &str = "0000000000000000000000000000000000000000";
 
 pub(super) fn maintainability_base_revision() -> Result<Option<String>> {
     let configured = normalize_optional_revision(env::var(BASE_REVISION_ENV).ok().as_deref())?;
-    if env::var("GITHUB_ACTIONS").as_deref() != Ok("true") {
+    let event_path = env::var_os("GITHUB_EVENT_PATH");
+    let head = env::var("GITHUB_SHA").ok();
+    if !github_actions_environment(env::var("GITHUB_ACTIONS").ok().as_deref(), event_path.is_some(), head.is_some())? {
         return Ok(configured);
     }
 
-    let event_path = env::var_os("GITHUB_EVENT_PATH")
-        .map(PathBuf::from)
-        .context("GitHub Actions maintainability checks require GITHUB_EVENT_PATH")?;
+    let event_path = event_path.map(PathBuf::from).context("GitHub Actions maintainability checks require GITHUB_EVENT_PATH")?;
     let event_bytes = fs::read(&event_path).with_context(|| format!("read GitHub event {}", event_path.display()))?;
     let event: Value = serde_json::from_slice(&event_bytes).context("parse GitHub event for maintainability base revision")?;
     let event_base = event_base_revision(&event)?;
-    let head = env::var("GITHUB_SHA").context("GitHub Actions maintainability checks require GITHUB_SHA")?;
+    let head = head.context("GitHub Actions maintainability checks require GITHUB_SHA")?;
     validate_revision(&head, "GitHub head revision")?;
     select_base_revision(configured.as_deref(), Some(event_base), Some(&head))
+}
+
+fn github_actions_environment(marker: Option<&str>, has_event_path: bool, has_head: bool) -> Result<bool> {
+    let has_any_marker = marker.is_some() || has_event_path || has_head;
+    if !has_any_marker {
+        return Ok(false);
+    }
+    if marker.is_some_and(|value| value != "true") || !has_event_path || !has_head {
+        bail!("incomplete or invalid GitHub Actions environment cannot disable maintainability revision comparison");
+    }
+    Ok(true)
 }
 
 fn select_base_revision(configured: Option<&str>, github_base: Option<&str>, github_head: Option<&str>) -> Result<Option<String>> {
@@ -83,6 +94,16 @@ mod tests {
         assert_eq!(select_base_revision(Some(BASE), Some(BASE), Some(HEAD)).unwrap().as_deref(), Some(BASE));
         assert!(select_base_revision(Some(HEAD), Some(BASE), Some(HEAD)).is_err());
         assert!(select_base_revision(Some(BASE), Some(BASE), Some(BASE)).is_err());
+    }
+
+    #[test]
+    fn github_event_inputs_keep_actions_mode_fail_closed_without_the_marker() {
+        assert!(github_actions_environment(None, true, true).unwrap());
+        assert!(github_actions_environment(Some("true"), true, true).unwrap());
+        assert!(!github_actions_environment(None, false, false).unwrap());
+        assert!(github_actions_environment(Some("false"), true, true).is_err());
+        assert!(github_actions_environment(Some("true"), false, true).is_err());
+        assert!(github_actions_environment(None, true, false).is_err());
     }
 
     #[test]

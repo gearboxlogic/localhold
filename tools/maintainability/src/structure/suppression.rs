@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path};
 use std::process::Command;
@@ -12,6 +12,7 @@ use super::classify::Inventory;
 
 mod policy;
 mod source;
+mod targets;
 #[cfg(test)]
 mod tests;
 pub(super) use policy::SuppressionPolicy;
@@ -78,14 +79,21 @@ impl SourceCategory {
 }
 
 pub fn scan_workspace(workspace: &Path, inventory: &Inventory, component_paths: &BTreeMap<&str, &str>) -> Result<Vec<SourceSuppression>> {
-    scan_with(inventory, component_paths, |path| {
+    let target_sources = targets::root_package_target_sources(workspace)?;
+    scan_with(inventory, component_paths, &target_sources, |path| {
         let source_path = workspace.join(path);
         fs::read_to_string(&source_path).with_context(|| format!("read suppression source {}", source_path.display()))
     })
 }
 
 pub fn scan_revision(workspace: &Path, revision: &str, inventory: &Inventory, component_paths: &BTreeMap<&str, &str>) -> Result<Vec<SourceSuppression>> {
-    scan_with(inventory, component_paths, |path| {
+    let mut target_sources = BTreeSet::new();
+    for path in targets::root_package_target_sources(workspace)? {
+        if component_paths.contains_key(path.as_str()) || revision_contains_path(workspace, revision, &path)? {
+            target_sources.insert(path);
+        }
+    }
+    scan_with(inventory, component_paths, &target_sources, |path| {
         let object = format!("{revision}:{path}");
         let output = Command::new("git")
             .current_dir(workspace)
@@ -125,7 +133,12 @@ pub(super) fn reject_tooling_suppressions(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-fn scan_with(inventory: &Inventory, component_paths: &BTreeMap<&str, &str>, mut read_source: impl FnMut(&str) -> Result<String>) -> Result<Vec<SourceSuppression>> {
+fn scan_with(
+    inventory: &Inventory,
+    component_paths: &BTreeMap<&str, &str>,
+    target_sources: &BTreeSet<String>,
+    mut read_source: impl FnMut(&str) -> Result<String>,
+) -> Result<Vec<SourceSuppression>> {
     let measurements = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
     let mut sites = Vec::new();
     for (&path, &component) in component_paths {
@@ -143,8 +156,35 @@ fn scan_with(inventory: &Inventory, component_paths: &BTreeMap<&str, &str>, mut 
         let syntax = syn::parse_file(&source).with_context(|| format!("parse suppression source {path}"))?;
         sites.extend(SourceScanner::scan(path, component, category, &syntax)?);
     }
+    for path in target_sources {
+        if component_paths.contains_key(path.as_str()) {
+            continue;
+        }
+        let source = read_source(path)?;
+        let syntax = syn::parse_file(&source).with_context(|| format!("parse Cargo target suppression source {path}"))?;
+        sites.extend(SourceScanner::scan(path, "cargo-target", SourceCategory::Production, &syntax)?);
+    }
     sites.sort();
     Ok(sites)
+}
+
+fn revision_contains_path(workspace: &Path, revision: &str, path: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .current_dir(workspace)
+        .args(["ls-tree", "--name-only", "-z", revision, "--", path])
+        .output()
+        .with_context(|| format!("inspect Cargo target source {path:?} in revision {revision}"))?;
+    if !output.status.success() {
+        bail!("git ls-tree failed while inspecting Cargo target source {path:?} in revision {revision}");
+    }
+    if output.stdout.is_empty() {
+        return Ok(false);
+    }
+    let expected = format!("{path}\0");
+    if output.stdout != expected.as_bytes() {
+        bail!("git ls-tree returned an unexpected Cargo target source path");
+    }
+    Ok(true)
 }
 
 fn tooling_rust_paths(workspace: &Path) -> Result<Vec<String>> {

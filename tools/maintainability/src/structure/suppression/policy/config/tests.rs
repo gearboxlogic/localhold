@@ -57,6 +57,11 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_token("cargo -Z unstable-options -C ../other build"));
     assert!(weakening_token("cargo --change-directory=../other build"));
     assert!(!weakening_token("cargo rustc -- -C opt-level=3"));
+    assert!(weakening_token("cargo-clippy clippy -- -A warnings"));
+    assert!(weakening_token("rustc @policy/lints.args source.rs"));
+    assert!(weakening_token("LABEL=@not-a-response rustc @policy/lints.args source.rs"));
+    assert!(weakening_token("cargo rustc -- @policy/lints.args"));
+    assert!(!weakening_token("cargo run -- @application-argument"));
     assert!(weakening_token("sh -c \"cargo --config net.offline=true check # literal\""));
     assert!(!weakening_token("cargo deny --config deny.toml"));
     assert!(!weakening_token("gitleaks --config policy.toml # cargo output"));
@@ -73,6 +78,10 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_environment("RUSTC_WRAPPER=unreviewed"));
     assert!(weakening_environment("CARGO_TARGET_TEST_RUSTFLAGS=unreviewed"));
     assert!(weakening_environment("CARGO_HOME=unreviewed"));
+    assert!(weakening_environment("unset GITHUB_ACTIONS"));
+    assert!(weakening_environment("unset GITHUB_EVENT_PATH"));
+    assert!(weakening_environment("GITHUB_SHA=untrusted"));
+    assert!(weakening_environment("LOCALHOLD_MAINTAINABILITY_BASE_REV=$GITHUB_SHA"));
     assert!(weakening_environment_for_surface("script/check.ps1", "$env:rustflags = $dynamic"));
     assert!(weakening_environment_for_surface("script/check.cmd", "set cargo_encoded_rustflags=%DYNAMIC%"));
     assert!(!weakening_environment_for_surface("script/check.sh", "rustflags=local"));
@@ -92,6 +101,18 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
         &BOOTSTRAP_TEST_ENVIRONMENT_LINES.join("\n"),
     ));
     assert!(scrubber_environment_references_are_exact("mise.toml", &MISE_ENVIRONMENT_LINES.join("\n")));
+    assert!(scrubber_environment_references_are_exact(
+        ".github/workflows/ci.yml",
+        &CI_REVISION_ENVIRONMENT_LINES.join("\n"),
+    ));
+    assert!(!scrubber_environment_references_are_exact(
+        ".github/workflows/ci.yml",
+        &CI_REVISION_ENVIRONMENT_LINES[..1].join("\n"),
+    ));
+    assert!(scrubber_environment_references_are_exact(
+        ".github/workflows/gpu-release-gate.yml",
+        &GPU_RELEASE_REVISION_ENVIRONMENT_LINES.join("\n"),
+    ));
     assert!(!scrubber_environment_references_are_exact("script/tests/new-command.sh", &scrubber));
 }
 

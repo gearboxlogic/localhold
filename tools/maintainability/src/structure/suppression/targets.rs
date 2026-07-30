@@ -43,9 +43,10 @@ pub(super) fn root_package_target_sources(workspace: &Path) -> Result<TargetRoot
     Ok(sources)
 }
 
-pub(super) fn reject_tooling_target_escapes(workspace: &Path, manifests: &[String]) -> Result<()> {
+pub(super) fn tooling_target_sources(workspace: &Path, manifests: &[String]) -> Result<BTreeSet<String>> {
     let workspace = fs::canonicalize(workspace).context("resolve workspace for maintainer Cargo target inventory")?;
     let tools = fs::canonicalize(workspace.join("tools")).context("resolve tools root for maintainer Cargo target inventory")?;
+    let mut sources = BTreeSet::new();
     for relative in manifests {
         let manifest = fs::canonicalize(workspace.join(relative)).with_context(|| format!("resolve maintainer manifest {relative}"))?;
         if !manifest.starts_with(&tools) {
@@ -66,9 +67,16 @@ pub(super) fn reject_tooling_target_escapes(workspace: &Path, manifests: &[Strin
             if !source.starts_with(&tools) {
                 bail!("maintainer Cargo target source escapes the tools root: {}", source.display());
             }
+            let relative = source
+                .strip_prefix(&workspace)
+                .with_context(|| format!("maintainer Cargo target source escapes the workspace: {}", source.display()))?;
+            if relative.components().any(|component| !matches!(component, Component::Normal(_))) {
+                bail!("maintainer Cargo target source path is not normalized: {}", relative.display());
+            }
+            sources.insert(relative.to_str().context("maintainer Cargo target source path is not UTF-8")?.replace('\\', "/"));
         }
     }
-    Ok(())
+    Ok(sources)
 }
 
 fn cargo_metadata(workspace: &Path, manifest: &Path) -> Result<Value> {
@@ -93,6 +101,17 @@ fn package_targets<'a>(metadata: &'a Value, manifest: &Path) -> Result<&'a [Valu
     let [package] = matching.as_slice() else {
         bail!("Cargo metadata must contain exactly one selected package");
     };
+    let package_id = package.get("id").and_then(Value::as_str).context("selected Cargo package has no ID")?;
+    let workspace_members = metadata
+        .get("workspace_members")
+        .and_then(Value::as_array)
+        .context("Cargo metadata has no workspace member list")?
+        .iter()
+        .map(|member| member.as_str().context("Cargo workspace member ID is not a string"))
+        .collect::<Result<Vec<_>>>()?;
+    if workspace_members.as_slice() != [package_id] {
+        bail!("additional Cargo workspace packages are unsupported by suppression governance");
+    }
     package
         .get("targets")
         .and_then(Value::as_array)

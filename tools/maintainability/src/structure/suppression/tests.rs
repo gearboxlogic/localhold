@@ -5,6 +5,8 @@ use std::process::Command;
 use super::{SourceCategory, reject_direct_source_suppressions, reject_tooling_suppressions, scan_revision, scan_workspace};
 use crate::structure::classify::Inventory;
 
+mod targets;
+
 #[test]
 fn maintainer_tooling_rejects_real_suppressions_but_ignores_fixture_text() {
     let workspace = tempfile::tempdir().expect("temporary workspace");

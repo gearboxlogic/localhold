@@ -94,10 +94,17 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_token("rustc -D warnings --force-warn=unused_variables source.rs"));
     assert!(weakening_token("LABEL=@not-a-response rustc @policy/lints.args source.rs"));
     assert!(weakening_token("run_cargo() { cargo \"$@\"; }\nrun_cargo clippy -- -A warnings"));
+    assert!(weakening_token("LINT_FLAGS='-A warnings'\ncargo clippy -- $LINT_FLAGS"));
     assert!(weakening_token("cargo rustc -- @policy/lints.args"));
     assert!(!weakening_token("cargo run -- @application-argument"));
     assert!(weakening_token("sh -c \"cargo --config net.offline=true check # literal\""));
     assert!(!weakening_token("cargo deny --config deny.toml"));
+    assert!(weakening_token(
+        "echo \"$(cargo deny --version) $(cargo --config 'build.rustflags=[\\\"-A\\\",\\\"warnings\\\"]' clippy)\""
+    ));
+    assert!(weakening_token(
+        "echo \"$(cargo deny --version) $(cargo-clippy clippy --config 'build.rustflags=[\\\"-A\\\",\\\"warnings\\\"]')\""
+    ));
     assert!(!weakening_token("gitleaks --config policy.toml # cargo output"));
     assert!(!weakening_token("cargo build\ncc -Wall -Wextra"));
     assert!(!weakening_token("hold doctor --allow-downloads"));
@@ -351,7 +358,7 @@ fn command_policy_discovers_directly_compiled_rust_sources() {
 
     fs::write(workspace.path().join("script/check.sh"), "rustc \"$DIRECT_SOURCE\"\n").expect("opaque direct compiler command");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("without auditable repository-relative .rs inputs"));
+    assert!(error.to_string().contains("lint-weakening argument"));
 
     fs::create_dir(workspace.path().join("misc")).expect("alternate compiler directory");
     fs::write(workspace.path().join("check.rs"), "fn main() {}\n").expect("root Rust source");
@@ -361,6 +368,16 @@ fn command_policy_discovers_directly_compiled_rust_sources() {
 
     fs::write(workspace.path().join("script/check.sh"), "cd misc && rustc check.rs\n").expect("relocated compiler command");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("without auditable repository-relative .rs inputs"));
+
+    fs::write(workspace.path().join("script/check.sh"), "rustc --version\n").expect("safe shell command");
+    fs::write(
+        workspace.path().join("script/check.py"),
+        "import subprocess\nsubprocess.run([\n    \"rustc\",\n    \"check.rs\",\n], cwd=\"misc\", check=True)\n",
+    )
+    .expect("Python compiler command");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("script/check.py"));
     assert!(error.to_string().contains("without auditable repository-relative .rs inputs"));
 }
 

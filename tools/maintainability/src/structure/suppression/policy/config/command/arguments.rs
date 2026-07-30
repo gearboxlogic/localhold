@@ -26,7 +26,8 @@ pub(super) fn direct_rust_sources_for_surface(path: &str, source: &str) -> (BTre
     let mut sources = BTreeSet::new();
     let embedded_commands = super::yaml::run_commands(path, &source);
     let mut unresolved = !is_yaml(path) && collect_direct_rust_sources(&source, case_insensitive_tools, &mut sources);
-    unresolved |= !is_yaml(path) && supports_shell_working_directory(path) && directory_change_precedes_direct_compiler(&source, case_insensitive_tools);
+    unresolved |= is_python(path) && !sources.is_empty();
+    unresolved |= !is_yaml(path) && !is_python(path) && directory_change_precedes_direct_compiler(&source, case_insensitive_tools);
     for command in embedded_commands {
         unresolved |= collect_direct_rust_sources(&command, case_insensitive_tools, &mut sources);
         unresolved |= directory_change_precedes_direct_compiler(&command, case_insensitive_tools);
@@ -125,19 +126,29 @@ fn weakening_rust_command(command: &str, case_insensitive_tools: bool) -> bool {
     if !tokens.iter().any(|token| is_rust_tool_token(token, case_insensitive_tools)) {
         return false;
     }
-    forwards_dynamic_arguments(&tokens)
+    forwards_dynamic_arguments(&tokens, case_insensitive_tools)
         || declares_rust_tool_alias(&tokens)
         || cargo_changes_directory_before_compiler_arguments(&tokens, case_insensitive_tools)
         || rust_response_file(&tokens, case_insensitive_tools)
         || tokens
             .iter()
             .any(|token| token == "-A" || token.starts_with("-A") && token.len() > 2 || token == "-W" || token.starts_with("-W") && token.len() > 2 || is_long_lint_option(token))
-        || tokens.iter().any(|token| token.starts_with("--config")) && !is_cargo_deny_command(&tokens, case_insensitive_tools)
+        || tokens
+            .iter()
+            .enumerate()
+            .any(|(index, token)| token.starts_with("--config") && !is_cargo_deny_config_argument(&tokens, index, case_insensitive_tools))
 }
 
-fn forwards_dynamic_arguments(tokens: &[String]) -> bool {
-    tokens.iter().any(|token| {
-        matches!(token.to_ascii_lowercase().as_str(), "$@" | "$*" | "${@}" | "${*}" | "$args" | "@args" | "$argv" | "%*") || token.contains("${args[") || token.contains("${argv[")
+fn forwards_dynamic_arguments(tokens: &[String], case_insensitive_tools: bool) -> bool {
+    let Some(tool_index) = tokens.iter().position(|token| is_rust_tool_token(token, case_insensitive_tools)) else {
+        return false;
+    };
+    tokens[tool_index..].iter().any(|token| {
+        token.contains('$')
+            || token.eq_ignore_ascii_case("@args")
+            || token.eq_ignore_ascii_case("@argv")
+            || token == "%*"
+            || token.split_once('%').is_some_and(|(_, suffix)| !suffix.is_empty() && suffix.contains('%'))
     })
 }
 
@@ -199,8 +210,8 @@ fn is_directory_change_command(tokens: &[String]) -> bool {
         .is_some_and(|word| matches!(word.to_ascii_lowercase().as_str(), "cd" | "chdir" | "pushd" | "set-location"))
 }
 
-fn supports_shell_working_directory(path: &str) -> bool {
-    !Path::new(path)
+fn is_python(path: &str) -> bool {
+    Path::new(path)
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
@@ -309,8 +320,11 @@ fn tool_basename(token: &str) -> &str {
     token.rsplit(['/', '\\']).next().unwrap_or(token)
 }
 
-fn is_cargo_deny_command(tokens: &[String], case_insensitive_tools: bool) -> bool {
-    tokens.windows(2).any(|pair| is_cargo_tool_token(&pair[0], case_insensitive_tools) && pair[1] == "deny")
+fn is_cargo_deny_config_argument(tokens: &[String], config_index: usize, case_insensitive_tools: bool) -> bool {
+    let Some(invocation_index) = tokens[..config_index].iter().rposition(|token| is_rust_tool_token(token, case_insensitive_tools)) else {
+        return false;
+    };
+    is_cargo_tool_token(&tokens[invocation_index], case_insensitive_tools) && tokens.get(invocation_index + 1).is_some_and(|subcommand| subcommand == "deny")
 }
 
 pub(super) fn has_case_insensitive_tool_names(path: &str) -> bool {

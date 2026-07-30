@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::path::{Component, Path};
 
 use anyhow::{Context, Result, bail};
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
@@ -465,37 +464,6 @@ fn validate_audited_module_path(attribute: &Attribute) -> Result<()> {
 }
 
 fn validate_audited_module_path_meta(meta: &Meta) -> Result<()> {
-    if meta.path().is_ident("path") {
-        let Meta::NameValue(value) = meta else {
-            bail!("explicit Rust module path must use a string literal");
-        };
-        let Expr::Lit(expression) = &value.value else {
-            bail!("explicit Rust module path must use a string literal");
-        };
-        let syn::Lit::Str(value) = &expression.lit else {
-            bail!("explicit Rust module path must use a string literal");
-        };
-        let module_path = value.value();
-        let path = Path::new(&module_path);
-        if path.extension().and_then(|extension| extension.to_str()) != Some("rs")
-            || path.is_absolute()
-            || path.components().any(|component| !matches!(component, Component::Normal(_)))
-        {
-            bail!("explicit Rust module path must name a normalized .rs source in the audited source tree");
-        }
-        return Ok(());
-    }
-    if !meta.path().is_ident("cfg_attr") {
-        return Ok(());
-    }
-    let Meta::List(list) = meta else {
-        return Ok(());
-    };
-    let arguments = Punctuated::<Meta, Token![,]>::parse_terminated
-        .parse2(list.tokens.clone())
-        .context("parse cfg_attr arguments for suppression source classification")?;
-    for nested in arguments.iter().skip(1) {
-        validate_audited_module_path_meta(nested)?;
-    }
+    super::modules::audited_module_paths(meta)?;
     Ok(())
 }

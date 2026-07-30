@@ -114,11 +114,13 @@ pub(super) fn reject_tooling_suppressions(workspace: &Path) -> Result<()> {
         .filter(|path| Path::new(path).file_name().and_then(|name| name.to_str()) == Some("Cargo.toml"))
         .cloned()
         .collect::<Vec<_>>();
-    targets::reject_tooling_target_escapes(workspace, &manifests)?;
-    for path in tooling_paths
+    let target_paths = targets::tooling_target_sources(workspace, &manifests)?;
+    let scan_paths = tooling_paths
         .into_iter()
         .filter(|path| Path::new(path).extension().and_then(|extension| extension.to_str()) == Some("rs"))
-    {
+        .chain(target_paths)
+        .collect::<BTreeSet<_>>();
+    for path in scan_paths {
         let absolute = workspace.join(&path);
         let metadata = fs::symlink_metadata(&absolute).with_context(|| format!("inspect maintainer-tool source {}", absolute.display()))?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -167,13 +169,15 @@ fn scan_with(
         let measurement = measurements
             .get(path)
             .with_context(|| format!("suppression inventory path {path:?} has no structural measurement"))?;
-        let category = if path.starts_with("benches/") {
-            SourceCategory::Benchmark
-        } else if path.starts_with("tests/") || measurement.physical_lines > 0 && measurement.production_lines == 0 {
-            SourceCategory::Test
-        } else {
-            SourceCategory::Production
-        };
+        let category = target_sources.categories.get(path).copied().unwrap_or_else(|| {
+            if path.starts_with("benches/") {
+                SourceCategory::Benchmark
+            } else if path.starts_with("tests/") || measurement.physical_lines > 0 && measurement.production_lines == 0 {
+                SourceCategory::Test
+            } else {
+                SourceCategory::Production
+            }
+        });
         let parsed = syntax.get(path).with_context(|| format!("suppression source cache is missing {path:?}"))?;
         let targets = external_targets.get(path).cloned().unwrap_or_default();
         sites.extend(SourceScanner::scan_with_external_targets(path, component, category, parsed, &targets)?);

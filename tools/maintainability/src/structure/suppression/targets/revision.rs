@@ -73,6 +73,7 @@ fn manifest_target_sources(manifest: &str, known: &BTreeSet<String>) -> Result<T
         .get("package")
         .and_then(toml::Value::as_table)
         .context("suppression comparison Cargo.toml must define a package")?;
+    reject_additional_workspace_members(&manifest, package)?;
     let package_name = package
         .get("name")
         .and_then(toml::Value::as_str)
@@ -106,6 +107,28 @@ fn manifest_target_sources(manifest: &str, known: &BTreeSet<String>) -> Result<T
     }
     add_build_target(package, known, &mut roots)?;
     Ok(roots)
+}
+
+fn reject_additional_workspace_members(manifest: &toml::Value, package: &toml::map::Map<String, toml::Value>) -> Result<()> {
+    if package.contains_key("workspace") {
+        bail!("suppression comparison package cannot inherit an external Cargo workspace");
+    }
+    let Some(workspace) = manifest.get("workspace") else {
+        return Ok(());
+    };
+    let workspace = workspace.as_table().context("suppression comparison Cargo workspace must be a table")?;
+    let Some(members) = workspace.get("members") else {
+        return Ok(());
+    };
+    let members = members.as_array().context("suppression comparison Cargo workspace members must be an array")?;
+    let has_additional = members.iter().try_fold(false, |additional, member| {
+        let member = member.as_str().context("suppression comparison Cargo workspace member must be a string")?;
+        Ok::<_, anyhow::Error>(additional || !matches!(member, "." | "./"))
+    })?;
+    if has_additional {
+        bail!("additional Cargo workspace packages are unsupported by suppression governance");
+    }
+    Ok(())
 }
 
 fn add_library_target(manifest: &toml::Value, package: &toml::map::Map<String, toml::Value>, known: &BTreeSet<String>, roots: &mut TargetRoots) -> Result<()> {

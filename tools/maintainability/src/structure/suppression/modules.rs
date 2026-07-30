@@ -36,6 +36,7 @@ impl ExpandedSources {
 struct DiscoveredModule {
     base: PathBuf,
     name: String,
+    explicit_source: Option<PathBuf>,
     child_base: PathBuf,
     category: SourceCategory,
     item: String,
@@ -75,7 +76,10 @@ fn expand_sources(
         let syntax = syn::parse_file(&source).with_context(|| format!("parse Cargo target module source {path}"))?;
         let discovered = ModuleCollector::collect(module_base, category, is_structural(&path), &syntax)?;
         for discovered in discovered {
-            let module = resolve_module(&discovered.base, &discovered.name)?;
+            let module = match discovered.explicit_source {
+                Some(module) => module,
+                None => resolve_module(&discovered.base, &discovered.name)?,
+            };
             let module = check_path(&module)?;
             let relation_key = (path.clone(), discovered.item);
             if relations.insert(relation_key.clone(), module.clone()).is_some_and(|existing| existing != module) {
@@ -145,22 +149,19 @@ impl<'ast> Visit<'ast> for ModuleCollector {
         if self.error.is_some() {
             return;
         }
-        for attribute in &module.attrs {
-            match contains_path_override(&attribute.meta) {
-                Ok(true) if self.structural => return,
-                Ok(true) => {
-                    self.error = Some(anyhow::anyhow!(
-                        "explicit module paths in non-structural Cargo targets are unsupported; add the target to structural governance"
-                    ));
-                    return;
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    self.error = Some(error);
-                    return;
-                }
+        let explicit_path = match direct_module_path(&module.attrs) {
+            Ok(Some(_)) if !self.structural => {
+                self.error = Some(anyhow::anyhow!(
+                    "explicit module paths in non-structural Cargo targets are unsupported; add the target to structural governance"
+                ));
+                return;
             }
-        }
+            Ok(path) => path,
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        };
         let production_context = match &self.production_context {
             Some(inherited) => match production_cfg_context(&module.attrs, inherited) {
                 Ok(context) => context,
@@ -180,7 +181,8 @@ impl<'ast> Visit<'ast> for ModuleCollector {
         let mut item_path = self.item_path.clone();
         item_path.push(name.clone());
         let item = item_path.join("::");
-        let child_base = self.module_base.join(&name);
+        let explicit_source = explicit_path.map(|path| self.module_base.join(path));
+        let child_base = explicit_source.as_deref().map_or_else(|| self.module_base.join(&name), child_module_base);
         if let Some((_, items)) = &module.content {
             let previous = std::mem::replace(&mut self.module_base, child_base);
             let previous_category = std::mem::replace(&mut self.category, category);
@@ -198,6 +200,7 @@ impl<'ast> Visit<'ast> for ModuleCollector {
         self.discovered.push(DiscoveredModule {
             base: self.module_base.clone(),
             name,
+            explicit_source,
             child_base,
             category,
             item,
@@ -218,25 +221,67 @@ impl<'ast> Visit<'ast> for ModuleCollector {
     }
 }
 
-fn contains_path_override(meta: &Meta) -> Result<bool> {
+pub(super) fn audited_module_paths(meta: &Meta) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    collect_audited_module_paths(meta, &mut paths)?;
+    Ok(paths)
+}
+
+fn collect_audited_module_paths(meta: &Meta, paths: &mut Vec<PathBuf>) -> Result<()> {
     if meta.path().is_ident("path") {
-        return Ok(true);
+        let Meta::NameValue(value) = meta else {
+            bail!("explicit Rust module path must use a string literal");
+        };
+        let syn::Expr::Lit(expression) = &value.value else {
+            bail!("explicit Rust module path must use a string literal");
+        };
+        let syn::Lit::Str(value) = &expression.lit else {
+            bail!("explicit Rust module path must use a string literal");
+        };
+        let path = PathBuf::from(value.value());
+        normalized_module_path(&path).context("explicit Rust module path must name a normalized .rs source in the audited source tree")?;
+        paths.push(path);
+        return Ok(());
     }
     if !meta.path().is_ident("cfg_attr") {
-        return Ok(false);
+        return Ok(());
     }
     let Meta::List(list) = meta else {
-        return Ok(false);
+        return Ok(());
     };
     let nested = Punctuated::<Meta, Token![,]>::parse_terminated
         .parse2(list.tokens.clone())
-        .context("parse cfg_attr while resolving a non-structural Cargo target module")?;
+        .context("parse cfg_attr while resolving an audited Cargo target module")?;
     for meta in nested.iter().skip(1) {
-        if contains_path_override(meta)? {
-            return Ok(true);
-        }
+        collect_audited_module_paths(meta, paths)?;
     }
-    Ok(false)
+    Ok(())
+}
+
+fn direct_module_path(attributes: &[syn::Attribute]) -> Result<Option<PathBuf>> {
+    let mut direct = Vec::new();
+    for attribute in attributes {
+        let paths = audited_module_paths(&attribute.meta)?;
+        if !paths.is_empty() && !attribute.path().is_ident("path") {
+            bail!("conditional explicit module paths are unsupported by suppression governance");
+        }
+        direct.extend(paths);
+    }
+    direct.sort();
+    direct.dedup();
+    match direct.as_slice() {
+        [] => Ok(None),
+        [path] => Ok(Some(path.clone())),
+        _ => bail!("Cargo target module has multiple explicit source paths"),
+    }
+}
+
+fn child_module_base(source: &Path) -> PathBuf {
+    if source.file_name().and_then(|name| name.to_str()) == Some("mod.rs") {
+        source.parent().unwrap_or_else(|| Path::new("")).to_path_buf()
+    } else {
+        source.with_extension("")
+    }
 }
 
 fn resolve_external_module(workspace: &Path, module_base: &Path, name: &str) -> Result<PathBuf> {

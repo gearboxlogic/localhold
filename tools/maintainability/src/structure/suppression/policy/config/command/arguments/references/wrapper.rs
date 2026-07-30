@@ -179,6 +179,7 @@ fn is_unparsed_launcher(command: &str) -> bool {
             | "prlimit"
             | "sandbox-exec"
             | "script"
+            | "setpriv"
             | "setsid"
             | "stdbuf"
             | "strace"

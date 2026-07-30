@@ -12,6 +12,9 @@ pub(super) fn has_adjacent_string_literals(source: &str) -> bool {
 
 pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
     let normalized = join_implicit_continuations(source);
+    if references_command_capable_ffi(&normalized) {
+        return true;
+    }
     if has_dynamic_process_resolution(&normalized) && references_rust_tool(&normalized) {
         return true;
     }
@@ -25,6 +28,26 @@ pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
         has_adjacent_string_literals_in(line) && (references_process_api(line) || references_rust_tool(line))
             || references_process_api(line) && AdjacentLiteralScanner::new(line).has_decoded_escape()
     })
+}
+
+fn references_command_capable_ffi(source: &str) -> bool {
+    let compact = source.chars().filter(|character| !character.is_whitespace()).collect::<String>().to_ascii_lowercase();
+    [
+        "importctypes",
+        "fromctypesimport",
+        "importcffi",
+        "fromcffiimport",
+        "cdll(",
+        "pydll(",
+        "windll(",
+        "oledll(",
+        "cfunctype(",
+        "pyfunctype(",
+        "winfunctype(",
+        ".dlopen(",
+    ]
+    .iter()
+    .any(|name| compact.contains(name))
 }
 
 fn has_adjacent_string_literals_in(source: &str) -> bool {
@@ -302,6 +325,14 @@ runner.run(["cargo", "clippy", "--", chr(45) + "A", "warnings"])"#
         assert!(has_opaque_process_arguments(
             r#"runner = getattr(importlib.import_module("sub" + "process"), "r" + "un")
 runner(["car" + "go", "clippy", "--", chr(45) + "A", "warnings"])"#
+        ));
+        assert!(has_opaque_process_arguments(
+            r#"import ctypes
+ctypes.CDLL(None).system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
+        ));
+        assert!(has_opaque_process_arguments(
+            r#"from cffi import FFI
+FFI().dlopen(None).system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
         ));
         assert!(!has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", r"\x2dA", "warnings"])"#));
         assert!(!has_opaque_process_arguments(

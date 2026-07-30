@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 set -euo pipefail
 
-unset GITHUB_ACTIONS GITHUB_EVENT_PATH GITHUB_SHA
+unset GITHUB_ACTIONS GITHUB_EVENT_PATH GITHUB_SHA LOCALHOLD_MAINTAINABILITY_BASE_REV
 
 repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 check="$repository_root/script/check-maintainability-bootstrap.sh"
@@ -107,7 +107,7 @@ restore_reviewed_graph
 git -C "$test_repository" init -q
 git -C "$test_repository" -c core.autocrlf=false -c user.name=LocalHold -c user.email=localhold@example.invalid add .
 git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example.invalid commit -qm 'reviewed fixture'
-test_head=$(git -C "$test_repository" rev-parse HEAD)
+test_base=$(git -C "$test_repository" rev-parse HEAD)
 run_check >/dev/null
 
 printf 'pub fn locally_changed() {}\n' >"$test_repository/src/lib.rs"
@@ -170,11 +170,24 @@ expect_failure_before_command
 restore_reviewed_graph
 event_path="$fixture/event.json"
 printf '{}\n' >"$event_path"
-if GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=0000000000000000000000000000000000000000 run_check >/dev/null 2>&1; then
+printf 'compile_error!("untrusted head checker must not execute");\n' >"$test_tool/src/main.rs"
+git -C "$test_repository" -c core.autocrlf=false -c user.name=LocalHold -c user.email=localhold@example.invalid add tools/maintainability/src/main.rs
+git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example.invalid commit -qm 'untrusted checker head'
+test_head=$(git -C "$test_repository" rev-parse HEAD)
+if GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=0000000000000000000000000000000000000000 \
+    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment >/dev/null 2>&1; then
     printf 'maintainability bootstrap accepted a checker revision other than GITHUB_SHA\n' >&2
     exit 1
 fi
-GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head run_check >/dev/null
+if GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head \
+    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_head run_local_check --test-environment >/dev/null 2>&1; then
+    printf 'maintainability bootstrap accepted an untrusted checker base\n' >&2
+    exit 1
+fi
+GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head \
+    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment >/dev/null
+git -C "$test_repository" checkout -q --detach "$test_base"
+restore_reviewed_graph
 
 touch "$test_tool/build.rs"
 expect_failure

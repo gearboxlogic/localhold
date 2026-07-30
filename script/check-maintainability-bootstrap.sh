@@ -68,7 +68,7 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=f9ead9aeff6aae855040ce3aea2e8901119071beef46061332dc3526378a9de6
-readonly reviewed_bootstrap_tests_sha256=d6fe6be0018b93bcb533d887c06d4205dc692a3f1665bca0cfbcf99d743227a7
+readonly reviewed_bootstrap_tests_sha256=a86ba44a6b3467ccae17cb7bea1bb5b33688ebf753c71222fdc528497e1ecec2
 readonly reviewed_gate_runner_sha256=a614e7a0804eed432d84f5b5e9283406c0c4f0915c9f79ce1b6b9b5fd2142433
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
@@ -179,6 +179,26 @@ git_checked() {
     git_at "$repository_root" "$@"
 }
 
+trusted_github_base_revision() {
+    local checked_head=$1
+    local configured_base=${LOCALHOLD_MAINTAINABILITY_BASE_REV:-}
+    if [[ ! $configured_base =~ ^[[:xdigit:]]{40}$ ]]; then
+        printf 'GitHub maintainability checks require a full base revision\n' >&2
+        exit 1
+    fi
+
+    local first_parent
+    first_parent=$(git_checked rev-parse --verify "${checked_head}^1^{commit}") || {
+        printf 'GitHub checked revision has no trusted first parent\n' >&2
+        exit 1
+    }
+    if [[ ${configured_base,,} != "${first_parent,,}" ]]; then
+        printf 'configured maintainability base differs from the checked revision first parent\n' >&2
+        exit 1
+    fi
+    printf '%s\n' "$first_parent"
+}
+
 verify_checker_sources() {
     if [[ ! -d "$source_root" || -L "$source_root" ]]; then
         printf 'maintainability checker source root must be a regular directory: %s\n' "$source_root" >&2
@@ -199,6 +219,11 @@ verify_checker_sources() {
             printf 'checked-out Git head revision differs from GITHUB_SHA before checker compilation\n' >&2
             exit 1
         fi
+    fi
+
+    local checker_revision=$checked_head
+    if $using_test_root && $github_context_present; then
+        checker_revision=$(trusted_github_base_revision "$checked_head")
     fi
 
     local -A expected_paths=()
@@ -232,7 +257,7 @@ verify_checker_sources() {
         fi
         expected_paths["$relative_path"]=1
         ((expected_count += 1))
-    done < <(git_checked ls-tree -r -z --full-tree "$checked_head" -- tools/maintainability/src)
+    done < <(git_checked ls-tree -r -z --full-tree "$checker_revision" -- tools/maintainability/src)
     if (( expected_count == 0 )); then
         printf 'checked-out revision contains no maintainability checker sources\n' >&2
         exit 1
@@ -261,6 +286,11 @@ verify_reviewed_tracked_tree() {
         exit 1
     }
 
+    local checker_sources_are_overlaid=false
+    if $using_test_root && $github_context_present; then
+        checker_sources_are_overlaid=true
+    fi
+
     local -A expected_index_entries=()
     local expected_count=0
     local entry
@@ -282,13 +312,15 @@ verify_reviewed_tracked_tree() {
             printf 'reviewed tracked input must be a regular non-symlink file: %s\n' "$relative_path" >&2
             exit 1
         fi
-        actual_hash=$(git_checked hash-object --no-filters -- "$repository_root/$relative_path") || {
-            printf 'cannot hash reviewed tracked input: %s\n' "$relative_path" >&2
-            exit 1
-        }
-        if [[ $actual_hash != "$expected_hash" ]]; then
-            printf 'reviewed tracked input differs from the checked-out revision: %s\n' "$relative_path" >&2
-            exit 1
+        if ! $checker_sources_are_overlaid || [[ $relative_path != tools/maintainability/src/* ]]; then
+            actual_hash=$(git_checked hash-object --no-filters -- "$repository_root/$relative_path") || {
+                printf 'cannot hash reviewed tracked input: %s\n' "$relative_path" >&2
+                exit 1
+            }
+            if [[ $actual_hash != "$expected_hash" ]]; then
+                printf 'reviewed tracked input differs from the checked-out revision: %s\n' "$relative_path" >&2
+                exit 1
+            fi
         fi
         expected_index_entries["$relative_path"]="$mode $expected_hash"
         ((expected_count += 1))
@@ -518,6 +550,14 @@ if [[ $mode != verify ]]; then
     git_at "$snapshot_root" update-ref --no-deref HEAD "$checked_head"
     git_at "$snapshot_root" read-tree "$checked_head"
     git_at "$snapshot_root" archive --format=tar "$checked_head" | "$tar_command" -xf - -C "$snapshot_root"
+    if $github_context_present; then
+        # Checker changes activate only after this revision lands. The trusted
+        # first-parent checker audits the head tree without executing head code.
+        trusted_checker_revision=$(trusted_github_base_revision "$checked_head")
+        "$rm_command" -rf -- "$snapshot_root/tools/maintainability/src"
+        git_at "$snapshot_root" archive --format=tar "$trusted_checker_revision" -- tools/maintainability/src |
+            "$tar_command" -xf - -C "$snapshot_root"
+    fi
     audit_scratch_root="$snapshot_root/.cache"
     "$mkdir_command" -- "$snapshot_root/target" "$audit_scratch_root"
     # Governed CI permits only pinned actions before this first repository

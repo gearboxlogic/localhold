@@ -240,6 +240,10 @@ fn python_command_arrays_cannot_split_lint_arguments_from_cargo() {
         "script/check.py",
         "runner = __import__(\"sub\" + \"process\")\nrunner.run([\"cargo\", \"clippy\", \"--\", chr(45) + \"A\", \"warnings\"])\n"
     ));
+    assert!(weakening_token_for_surface(
+        "script/check.py",
+        "import ctypes\nctypes.CDLL(None).system(bytes.fromhex(\"636172676f20636c69707079202d2d202d41207761726e696e6773\"))\n"
+    ));
 }
 
 #[test]
@@ -634,6 +638,19 @@ fn command_policy_rejects_script_command_indirection() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
     fs::write(workspace.path().join("Justfile"), "lint:\n    script -q -e -c 'sh quality/lint.txt' /dev/null\n").expect("script command invocation");
+    fs::write(workspace.path().join("quality/lint.txt"), "cargo clippy -- -A warnings\n").expect("hidden lint program");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
+}
+
+#[test]
+fn command_policy_rejects_setpriv_command_indirection() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::write(workspace.path().join("Justfile"), "lint:\n    setpriv --no-new-privs sh quality/lint.txt\n").expect("setpriv invocation");
     fs::write(workspace.path().join("quality/lint.txt"), "cargo clippy -- -A warnings\n").expect("hidden lint program");
     git(workspace.path(), &["init", "-q"]);
     git(workspace.path(), &["add", "."]);

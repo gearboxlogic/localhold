@@ -58,9 +58,9 @@ readonly reviewed_lockfile_sha256=825c6448351761aa5c4c6e1ce6b3696c927c4f46c5d436
 readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d1b3fd69aa74c0df6f1
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
-readonly reviewed_runner_sha256=15d4fb8871e21aa8d0a57b45858f6abf423c62c11e8de2449917da5979004f84
+readonly reviewed_runner_sha256=3da430f33ec7f5e7ce5d5a2e6eca5a1d462db7532595cc54ba7f7132e051694b
 readonly reviewed_bootstrap_tests_sha256=ad63736a6e6a7ea6200859241cdcd8c68d5dd5c5b9eb33ae54411aacbb0330bb
-readonly reviewed_gate_runner_sha256=3a390155748c388a43f1a89570c40f3747d5c56143775dc722fdbe6cc753d53d
+readonly reviewed_gate_runner_sha256=d3833addbcdc17619f6bc3f95404d3fb95453a1e4149bd3180bb25455234a23f
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then

@@ -190,11 +190,13 @@ authenticated_runtime_library "$toolchain_root/$runtime_library_one" "$expected_
 authenticated_runtime_library "$toolchain_root/$runtime_library_two" "$expected_runtime_library_two_sha256"
 
 native_cargo=$cargo_executable
+native_cargo_fmt=$cargo_fmt_executable
 native_rustc=$rustc_executable
 native_rustdoc=$rustdoc_executable
 native_rustfmt=$rustfmt_executable
 if $windows_toolchain; then
     native_cargo=$("$cygpath_command" -w "$native_cargo")
+    native_cargo_fmt=$("$cygpath_command" -w "$native_cargo_fmt")
     native_rustc=$("$cygpath_command" -w "$native_rustc")
     native_rustdoc=$("$cygpath_command" -w "$native_rustdoc")
     native_rustfmt=$("$cygpath_command" -w "$native_rustfmt")
@@ -244,6 +246,7 @@ RUSTC=$native_rustc
 RUSTDOC=$native_rustdoc
 RUSTFMT=$native_rustfmt
 LOCALHOLD_MAINTAINABILITY_CARGO=$native_cargo
+LOCALHOLD_MAINTAINABILITY_CARGO_FMT=$native_cargo_fmt
 LOCALHOLD_MAINTAINABILITY_RUSTC=$native_rustc
 target_parent="$repository_root/target"
 if [[ -L $target_parent || -e $target_parent && ! -d $target_parent ]]; then
@@ -274,7 +277,7 @@ if $windows_toolchain; then
 fi
 CARGO_TARGET_DIR=$native_target_directory
 readonly CARGO_TARGET_DIR
-export PATH CARGO RUSTC RUSTDOC RUSTFMT CARGO_TARGET_DIR LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_RUSTC LOCALHOLD_MAINTAINABILITY_RUSTUP
+export PATH CARGO RUSTC RUSTDOC RUSTFMT CARGO_TARGET_DIR LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_CARGO_FMT LOCALHOLD_MAINTAINABILITY_RUSTC LOCALHOLD_MAINTAINABILITY_RUSTUP
 
 run_source_safety() {
     "$bash_command" "$repository_root/script/tests/test_maintainability_bootstrap.sh"
@@ -284,7 +287,7 @@ run_source_safety() {
 run_dependency_unsafe() {
     "$cargo_executable" fetch --locked
     "$cargo_executable" fetch --manifest-path tools/dependency-unsafe/Cargo.toml --locked
-    "$cargo_executable" fmt --manifest-path tools/dependency-unsafe/Cargo.toml -- --check
+    "$cargo_fmt_executable" --manifest-path tools/dependency-unsafe/Cargo.toml -- --check
     "$cargo_executable" test --manifest-path tools/dependency-unsafe/Cargo.toml --locked
     "$cargo_executable" clippy --manifest-path tools/dependency-unsafe/Cargo.toml --all-targets --locked -- -D warnings
     "$cargo_executable" run --manifest-path tools/dependency-unsafe/Cargo.toml --locked -- check
@@ -300,7 +303,7 @@ verify_test_environment() {
             exit 1
         fi
     done
-    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $LOCALHOLD_MAINTAINABILITY_RUSTC && -n $LOCALHOLD_MAINTAINABILITY_RUSTUP && -n $git_command ]]
+    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $LOCALHOLD_MAINTAINABILITY_CARGO_FMT && -n $LOCALHOLD_MAINTAINABILITY_RUSTC && -n $LOCALHOLD_MAINTAINABILITY_RUSTUP && -n $git_command ]]
     if [[ ! -d $target_directory || -L $target_directory || ${target_directory%/*} != "$target_parent" || $CARGO_TARGET_DIR != "$native_target_directory" ]]; then
         printf 'maintainability bootstrap did not provide a fresh isolated Cargo target directory\n' >&2
         exit 1

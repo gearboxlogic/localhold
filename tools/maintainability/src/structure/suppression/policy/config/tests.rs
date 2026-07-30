@@ -369,6 +369,16 @@ fn weakening_environment_channels_are_detected() {
 }
 
 #[test]
+fn rustup_mirror_overrides_are_governed_environment_channels() {
+    assert!(weakening_environment("RUSTUP_DIST_SERVER=https://example.invalid"));
+    assert!(weakening_environment("RUSTUP_UPDATE_ROOT=https://example.invalid"));
+    assert!(weakening_environment_for_surface(
+        ".github/workflows/ci.yml",
+        "jobs:\n  dependency-unsafe-linux:\n    env:\n      RUSTUP_DIST_SERVER: https://example.invalid\n"
+    ));
+}
+
+#[test]
 fn authenticated_dynamic_commands_require_the_exact_reviewed_lines() {
     assert!(super::command::reviewed_dynamic_command_references_are_exact(
         "script/run-maintainability-gate.sh",

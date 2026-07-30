@@ -311,6 +311,8 @@ fn is_weakening_environment_name(name: &str) -> bool {
             | "RUSTC_BOOTSTRAP"
             | "RUSTC_WRAPPER"
             | "RUSTC_WORKSPACE_WRAPPER"
+            | "RUSTUP_DIST_SERVER"
+            | "RUSTUP_UPDATE_ROOT"
             | "CARGO_HOME"
             | "CARGO_BUILD_TARGET"
             | "CARGO_BUILD_RUSTFLAGS"

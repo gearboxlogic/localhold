@@ -36,8 +36,10 @@ impl SuppressionPolicy {
         let component_paths = previous_structure.manifest.current_component_paths()?;
         let previous_sites = suppression::scan_revision(workspace, &revision, &previous_structure.inventory, &component_paths)?;
         let previous_counts = compare_current(&previous_sites, &previous.source_baseline, &previous.model.source_exceptions, false)?;
+        let added_capacity = added_exception_capacity(&self.model.source_exceptions, &previous.model.source_exceptions)?;
+        require_added_exception_capacity_used(current_counts, &previous_counts, &added_capacity)?;
         let mut allowed = previous_counts;
-        for (site, count) in added_exception_capacity(&self.model.source_exceptions, &previous.model.source_exceptions)? {
+        for (site, count) in added_capacity {
             let allowed_count = allowed.entry(site).or_insert(0_usize);
             *allowed_count = allowed_count.checked_add(count).context("lint-suppression previous-revision allowance overflow")?;
         }
@@ -59,6 +61,24 @@ impl SuppressionPolicy {
         compare_cargo_allowances(&self.cargo_allowances.entries, &previous.cargo_allowances.entries)?;
         compare_clippy_settings(&self.clippy_configuration.entries, &previous.clippy_configuration.entries)
     }
+}
+
+fn require_added_exception_capacity_used(
+    current: &super::source::SourceCounts,
+    previous: &super::source::SourceCounts,
+    added_capacity: &super::source::SourceCounts,
+) -> Result<()> {
+    for (site, added_count) in added_capacity {
+        let previous_count = previous.get(site).copied().unwrap_or_default();
+        let expected_count = previous_count.checked_add(*added_count).context("new lint-suppression source exception count overflow")?;
+        let current_count = current.get(site).copied().unwrap_or_default();
+        if current_count != expected_count {
+            bail!(
+                "new lint-suppression source exception capacity must exactly match source occurrence growth: site={site:?}, previous={previous_count}, current={current_count}, added={added_count}"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn load_revision(workspace: &Path, revision: &str) -> Result<Option<SuppressionPolicy>> {
@@ -193,5 +213,20 @@ mod tests {
         };
         assert!(compare_clippy_settings(std::slice::from_ref(&setting), std::slice::from_ref(&setting)).is_ok());
         assert!(compare_clippy_settings(&[setting.clone(), setting], &[]).is_err());
+    }
+
+    #[test]
+    fn new_source_exception_capacity_must_be_used_immediately() {
+        let site = (crate::structure::suppression::SourceCategory::Production, format!("source.{}", "a".repeat(64)));
+        let previous = std::iter::once((site.clone(), 1)).collect();
+        let added = std::iter::once((site.clone(), 1)).collect();
+        let exact_growth = std::iter::once((site.clone(), 2)).collect();
+        require_added_exception_capacity_used(&exact_growth, &previous, &added).expect("new capacity matches source growth");
+
+        let unchanged = std::iter::once((site.clone(), 1)).collect();
+        assert!(require_added_exception_capacity_used(&unchanged, &previous, &added).is_err());
+
+        let excessive_growth = std::iter::once((site, 3)).collect();
+        assert!(require_added_exception_capacity_used(&excessive_growth, &previous, &added).is_err());
     }
 }

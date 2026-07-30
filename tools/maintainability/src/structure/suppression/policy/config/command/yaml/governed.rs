@@ -161,7 +161,7 @@ fn validate_governed_step(job: &Job, step: &Step) -> Result<()> {
             );
         }
     } else if job.completed_steps == 2 {
-        if step.name.as_deref() != Some(GATE_NAME) || step.uses.is_some() || !step.run_declared || !step.invokes_gate() {
+        if step.name.as_deref() != Some(GATE_NAME) || step.uses.is_some() || !step.run_declared || step.run_block_style != Some(RunBlockStyle::Canonical) || !step.invokes_gate() {
             bail!(
                 "checked-in GitHub YAML {WORKFLOW_PATH:?} must run the governed dependency-unsafe gate before any repository-controlled command in job {:?}",
                 job.name
@@ -227,6 +227,7 @@ struct Step {
     environment: Environment,
     environment_block_indentation: Option<usize>,
     run_block_indentation: Option<usize>,
+    run_block_style: Option<RunBlockStyle>,
     run_declared: bool,
     run_source: String,
     uses: Option<String>,
@@ -271,6 +272,7 @@ impl Step {
             }
             "run" if is_block_scalar(value.trim_start()) => {
                 self.run_declared = true;
+                self.run_block_style = Some(if value.trim() == "|" { RunBlockStyle::Canonical } else { RunBlockStyle::Other });
                 self.run_block_indentation = Some(indentation);
             }
             "run" => {
@@ -292,6 +294,12 @@ impl Step {
     fn has_exact_environment(&self, expected: &[(&str, &str)]) -> bool {
         self.environment.is_exact(expected)
     }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RunBlockStyle {
+    Canonical,
+    Other,
 }
 
 #[derive(Default)]

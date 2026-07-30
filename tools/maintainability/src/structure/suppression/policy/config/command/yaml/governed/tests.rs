@@ -83,6 +83,23 @@ fn governed_invocation_comes_from_the_exact_run_scalar() {
         1,
     );
     assert_rejected(&neutralized_gate);
+
+    let explicit_indentation_spoof = accepted.replacen(
+        r#"        run: |
+          if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
+            printf 'maintainability bootstrap differs from the workflow-reviewed digest\n' >&2
+            exit 1
+          fi
+          ./script/check-maintainability-bootstrap.sh --maintainability"#,
+        r#"        run: |1
+         #if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
+         #  printf 'maintainability bootstrap differs from the workflow-reviewed digest\n' >&2
+         #  exit 1
+         #fi
+         #./script/check-maintainability-bootstrap.sh --maintainability"#,
+        1,
+    );
+    assert_rejected(&explicit_indentation_spoof);
 }
 
 #[test]

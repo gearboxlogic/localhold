@@ -102,12 +102,12 @@ itself sets `build = false`, and an independent bootstrap check runs before
 Cargo to reject a physical checker `build.rs`, removal of that setting, and
 repository, ancestor, or Cargo-home configuration. The bootstrap also removes
 compiler, wrapper, linker, and runner override environment variables from the
-Cargo process. Required CI records the reviewed bootstrap SHA-256 outside the
-script and compares it with the runner-computed file digest immediately before
-every validation or delegated gate execution. A bootstrap change therefore
-requires an explicit workflow digest update in the same reviewed diff. On
-Windows, the bootstrap converts both trusted Cargo and Git paths from the Git
-Bash namespace before passing them to native maintainer binaries.
+Cargo process. Required CI records the reviewed bootstrap `hashFiles` digest
+outside the script and compares it with the runner-computed value immediately
+before every validation or delegated gate execution. A bootstrap change
+therefore requires an explicit workflow digest update in the same reviewed
+diff. On Windows, the bootstrap converts both trusted Cargo and Git paths from
+the Git Bash namespace before passing them to native maintainer binaries.
 Runnable Rust doctests are likewise rejected, including rustdoc-only modifiers,
 target-specific ignores, fences inside blockquotes or list items, and class-only
 fences that remain Rust unless marked `custom`; `custom` takes precedence over

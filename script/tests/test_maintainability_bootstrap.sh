@@ -14,7 +14,21 @@ source_tool="$repository_root/tools/maintainability"
 test_tool="$test_repository/tools/maintainability"
 source_runner="$repository_root/script/run-source-safety.sh"
 
-bootstrap_sha256=$(sha256sum -- "$check")
+sha256_stream() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256
+    else
+        printf 'maintainability bootstrap tests require sha256sum or shasum\n' >&2
+        exit 1
+    fi
+}
+
+bootstrap_file_sha256=$(sha256_stream <"$check")
+bootstrap_file_sha256=${bootstrap_file_sha256%%[[:space:]]*}
+bootstrap_digest_bytes=$(printf '%s\n' "$bootstrap_file_sha256" | sed 's/../\\x&/g')
+bootstrap_sha256=$(printf '%b' "$bootstrap_digest_bytes" | sha256_stream)
 bootstrap_sha256=${bootstrap_sha256%%[[:space:]]*}
 workflow_sha256=$(sed -n 's/^[[:space:]]*LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: //p' "$ci_workflow")
 if [[ $workflow_sha256 != "$bootstrap_sha256" ]]; then

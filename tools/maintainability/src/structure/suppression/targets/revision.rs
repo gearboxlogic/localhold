@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use anyhow::{Context, Result, bail};
 
@@ -242,18 +242,18 @@ fn insert_target(roots: &mut TargetRoots, known: &BTreeSet<String>, path: &str, 
 }
 
 fn normalized_manifest_target_path(path: &str) -> Result<String> {
-    if path.contains('\\') {
-        bail!("suppression comparison Cargo target must use forward slashes");
+    if path.starts_with('/') || path.contains('\\') {
+        bail!("suppression comparison Cargo target must use a relative forward-slash path");
     }
-    let mut normalized = PathBuf::new();
-    for component in Path::new(path).components() {
+    let mut components = Vec::new();
+    for component in path.split('/') {
         match component {
-            Component::CurDir => {}
-            Component::Normal(component) => normalized.push(component),
-            _ => bail!("suppression comparison Cargo target must remain inside the root package"),
+            "" | "." => {}
+            ".." => bail!("suppression comparison Cargo target must remain inside the root package"),
+            component => components.push(component),
         }
     }
-    let normalized = normalized.to_str().context("suppression comparison Cargo target path is not UTF-8")?.to_owned();
+    let normalized = components.join("/");
     validate_source_path(&normalized)?;
     Ok(normalized)
 }

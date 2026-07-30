@@ -5,6 +5,7 @@ unset GITHUB_ACTIONS GITHUB_EVENT_PATH GITHUB_SHA
 
 repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 check="$repository_root/script/check-maintainability-bootstrap.sh"
+ci_workflow="$repository_root/.github/workflows/ci.yml"
 fixture=$(mktemp -d)
 trap 'rm -rf -- "$fixture"' EXIT
 test_repository="$fixture/parent/repository"
@@ -12,6 +13,19 @@ mkdir -p "$test_repository/tools/maintainability"
 source_tool="$repository_root/tools/maintainability"
 test_tool="$test_repository/tools/maintainability"
 source_runner="$repository_root/script/run-source-safety.sh"
+
+bootstrap_sha256=$(sha256sum -- "$check")
+bootstrap_sha256=${bootstrap_sha256%%[[:space:]]*}
+workflow_sha256=$(sed -n 's/^[[:space:]]*LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: //p' "$ci_workflow")
+if [[ $workflow_sha256 != "$bootstrap_sha256" ]]; then
+    printf 'CI maintainability bootstrap digest is stale\n' >&2
+    exit 1
+fi
+guard_count=$(grep -Fc 'if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then' "$ci_workflow" || true)
+if (( guard_count != 4 )); then
+    printf 'every CI maintainability bootstrap execution must have an immediate workflow digest guard\n' >&2
+    exit 1
+fi
 
 write_manifest() {
     printf '%s\n' "$1" >"$test_tool/Cargo.toml"
@@ -137,6 +151,12 @@ printf '%s\n' \
     '    printf "D:/\n"' \
     '    exit' \
     'fi' \
+    'if [[ ${1:-} == -w ]]; then' \
+    '    case "${2##*/}" in' \
+    "        cargo | cargo.exe) printf '%s\\n' 'C:\\trusted\\cargo.exe'; exit ;;" \
+    "        git | git.exe) printf '%s\\n' 'C:\\trusted\\git.exe'; exit ;;" \
+    '    esac' \
+    'fi' \
     '[[ -n ${REAL_CYGPATH:-} ]] || exit 1' \
     'exec "$REAL_CYGPATH" "$@"' >"$fake_bin/cygpath"
 chmod +x "$fake_bin/cygpath"
@@ -150,6 +170,16 @@ CARGO_HOME='C:\cargo-home' \
     PATH="$fake_bin:$PATH" \
     run_check >/dev/null
 rm -r "$fixture/parent/.cargo"
+
+empty_cargo_home="$fixture/empty-cargo-home"
+mkdir "$empty_cargo_home"
+OSTYPE=msys \
+    CARGO_HOME=$empty_cargo_home \
+    FAKE_DRIVE_ROOT=$fake_drive_root \
+    REAL_CYGPATH=$real_cygpath \
+    PATH="$fake_bin:$PATH" \
+    run_check -- bash -c \
+    '[[ $LOCALHOLD_MAINTAINABILITY_CARGO == "C:\trusted\cargo.exe" && $LOCALHOLD_MAINTAINABILITY_GIT == "C:\trusted\git.exe" ]]'
 
 cargo_home="$fixture/cargo-home"
 mkdir -p "$cargo_home"

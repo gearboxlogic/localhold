@@ -18,7 +18,7 @@ use surfaces::execution_surfaces;
 
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "cargo_home=${CARGO_HOME:-}",
-    "    LOCALHOLD_MAINTAINABILITY_CARGO=$(trusted_command_path cargo)",
+    "    LOCALHOLD_MAINTAINABILITY_CARGO=$rust_tool_executable",
     "    LOCALHOLD_MAINTAINABILITY_GIT=$git_executable",
     "    export LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_GIT",
     "            RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
@@ -40,6 +40,8 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "    printf 'maintainability bootstrap accepted a checker revision other than GITHUB_SHA\\n' >&2",
     "GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head run_check >/dev/null",
     "CARGO_HOME='C:\\cargo-home' \\",
+    "    CARGO_HOME=$empty_cargo_home \\",
+    "    '[[ $LOCALHOLD_MAINTAINABILITY_CARGO == \"C:\\trusted\\cargo.exe\" && $LOCALHOLD_MAINTAINABILITY_GIT == \"C:\\trusted\\git.exe\" ]]'",
     "export CARGO_HOME=$cargo_home",
     "unset CARGO_HOME",
     "RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \\",

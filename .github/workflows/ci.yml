@@ -12,6 +12,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 539790dedd61d6b4e6ce55e7e53091b43d35a6c2e475e28d5f07e9bd116e543b
   XDG_CACHE_HOME: ${{ github.workspace }}/.cache
 
 permissions:
@@ -124,7 +125,14 @@ jobs:
           restore-keys: ${{ runner.os }}-dependency-unsafe-
 
       - name: Validate maintainability bootstrap before tool activation
-        run: ./script/check-maintainability-bootstrap.sh
+        env:
+          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}
+        run: |
+          if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
+            printf 'maintainability bootstrap differs from the workflow-reviewed digest\n' >&2
+            exit 1
+          fi
+          ./script/check-maintainability-bootstrap.sh
 
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         with:
@@ -136,8 +144,14 @@ jobs:
       - name: Run dependency unsafe gate
         id: audit
         env:
+          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}
           LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}
-        run: ./script/check-maintainability-bootstrap.sh -- just maintainability
+        run: |
+          if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
+            printf 'maintainability bootstrap differs from the workflow-reviewed digest\n' >&2
+            exit 1
+          fi
+          ./script/check-maintainability-bootstrap.sh -- just maintainability
 
       - name: Upload dependency audit evidence on failure
         if: failure() && steps.audit.outcome == 'failure'
@@ -264,7 +278,14 @@ jobs:
           restore-keys: ${{ runner.os }}-dependency-unsafe-
 
       - name: Validate maintainability bootstrap before tool activation
-        run: ./script/check-maintainability-bootstrap.sh
+        env:
+          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}
+        run: |
+          if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
+            printf 'maintainability bootstrap differs from the workflow-reviewed digest\n' >&2
+            exit 1
+          fi
+          ./script/check-maintainability-bootstrap.sh
 
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         with:
@@ -276,8 +297,13 @@ jobs:
       - name: Run dependency unsafe gate
         id: audit
         env:
+          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}
           LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}
         run: |
+          if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
+            printf 'maintainability bootstrap differs from the workflow-reviewed digest\n' >&2
+            exit 1
+          fi
           diagnostic_log="$RUNNER_TEMP/dependency-unsafe.log"
           trap 'rm -f -- "$diagnostic_log"' EXIT
           set +e

@@ -309,12 +309,14 @@ if (( ${#command[@]} > 0 )); then
     if [[ ${command[0]} != */* ]]; then
         command[0]=$(trusted_command_path "${command[0]}")
     fi
-    LOCALHOLD_MAINTAINABILITY_CARGO=$(trusted_command_path cargo)
+    rust_tool_executable=$(trusted_command_path cargo)
     git_executable=$git_command
     if [[ $OSTYPE == msys* || $OSTYPE == cygwin* ]]; then
         cygpath_command=$(trusted_command_path cygpath)
+        rust_tool_executable=$("$cygpath_command" -w "$rust_tool_executable")
         git_executable=$("$cygpath_command" -w "$git_executable")
     fi
+    LOCALHOLD_MAINTAINABILITY_CARGO=$rust_tool_executable
     LOCALHOLD_MAINTAINABILITY_GIT=$git_executable
     export LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_GIT
     exec "${command[@]}"

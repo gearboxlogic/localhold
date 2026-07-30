@@ -6,11 +6,11 @@ unset GITHUB_ACTIONS GITHUB_EVENT_PATH GITHUB_SHA
 repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 check="$repository_root/script/check-maintainability-bootstrap.sh"
 ci_workflow="$repository_root/.github/workflows/ci.yml"
-fixture_parent="$repository_root/target/maintainability-bootstrap-tests"
+fixture_parent="$repository_root/target/bootstrap-tests"
 mkdir -p "$fixture_parent"
 fixture=$(mktemp -d "$fixture_parent/run.XXXXXXXX")
 trap 'rm -rf -- "$fixture"; rmdir -- "$fixture_parent" 2>/dev/null || true' EXIT
-test_repository="$fixture/parent/repository"
+test_repository="$fixture/repository"
 mkdir -p "$test_repository/tools/maintainability"
 source_tool="$repository_root/tools/maintainability"
 test_tool="$test_repository/tools/maintainability"
@@ -103,7 +103,7 @@ run_check >/dev/null
 
 (
     for _ in {1..1000}; do
-        if compgen -G "$test_repository/target/maintainability-source.*" >/dev/null; then
+        if compgen -G "$test_repository/target/source.*" >/dev/null; then
             printf '#![allow(warnings)]\npub fn changed_after_verification() {}\n' >"$test_repository/src/lib.rs"
             exit 0
         fi
@@ -122,7 +122,7 @@ if (( snapshot_status != 0 )); then
     printf 'maintainability bootstrap used the mutable working tree after verification\n' >&2
     exit 1
 fi
-if compgen -G "$test_repository/target/maintainability-source.*" >/dev/null; then
+if compgen -G "$test_repository/target/source.*" >/dev/null; then
     printf 'maintainability bootstrap retained an isolated source snapshot\n' >&2
     exit 1
 fi
@@ -195,10 +195,10 @@ touch "$test_repository/.cargo/config.toml"
 expect_failure
 rm -r "$test_repository/.cargo"
 
-mkdir -p "$fixture/parent/.cargo"
-touch "$fixture/parent/.cargo/config"
+mkdir -p "$fixture/.cargo"
+touch "$fixture/.cargo/config"
 expect_failure
-rm -r "$fixture/parent/.cargo"
+rm -r "$fixture/.cargo"
 
 cargo_home="$fixture/cargo-home"
 mkdir -p "$cargo_home"

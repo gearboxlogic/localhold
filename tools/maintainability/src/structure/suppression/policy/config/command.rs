@@ -87,7 +87,7 @@ pub(super) const RUNNER_COMMAND_LINES: &[&str] = &[
 ];
 pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "unset GITHUB_ACTIONS GITHUB_EVENT_PATH GITHUB_SHA",
-    "fixture_parent=\"$repository_root/target/maintainability-bootstrap-tests\"",
+    "fixture_parent=\"$repository_root/target/bootstrap-tests\"",
     "if GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=0000000000000000000000000000000000000000 run_check >/dev/null 2>&1; then",
     "    printf 'maintainability bootstrap accepted a checker revision other than GITHUB_SHA\\n' >&2",
     "GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head run_check >/dev/null",

@@ -144,7 +144,7 @@ fn verify_local_dependency_table(value: Option<&toml::Value>, label: &str, root_
     Ok(())
 }
 
-fn verify_expansion_dependency_routes(cargo: &toml::Value) -> Result<()> {
+pub fn verify_expansion_dependency_routes(cargo: &toml::Value) -> Result<()> {
     for replacement in ["patch", "replace"] {
         if cargo.get(replacement).is_some() {
             bail!("Cargo.toml [{replacement}] dependency replacement is not supported by the reviewed expansion-path contract");

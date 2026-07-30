@@ -199,12 +199,22 @@ fn runnable_doctests_and_explicit_doc_inputs_fail_closed() {
     let included = scan("#[doc = include_str!(\"guide.md\")]\nfn documented() {}\n", SourceCategory::Production).unwrap_err();
     assert!(format!("{included:#}").contains("included doctest content cannot be audited"));
 
+    let raw_included = scan("#[r#doc = include_str!(\"guide.md\")]\nfn documented() {}\n", SourceCategory::Production).unwrap_err();
+    assert!(format!("{raw_included:#}").contains("included doctest content cannot be audited"));
+
     let conditional = scan(
         "#[cfg_attr(feature = \"guide\", doc = include_str!(\"guide.md\"))]\nfn documented() {}\n",
         SourceCategory::Production,
     )
     .unwrap_err();
     assert!(format!("{conditional:#}").contains("included doctest content cannot be audited"));
+
+    let raw_conditional = scan(
+        "#[r#cfg_attr(feature = \"guide\", r#doc = include_str!(\"guide.md\"))]\nfn documented() {}\n",
+        SourceCategory::Production,
+    )
+    .unwrap_err();
+    assert!(format!("{raw_conditional:#}").contains("included doctest content cannot be audited"));
 }
 
 #[test]

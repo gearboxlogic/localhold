@@ -118,10 +118,10 @@ pub(in crate::structure) fn attributes_disable_production(attributes: &[Attribut
 pub(in crate::structure) fn cfg_attributes_can_be_enabled(attributes: &[Attribute]) -> Result<bool> {
     let mut context = ProductionCfgContext::default();
     for attribute in attributes {
-        if attribute.path().is_ident("cfg") {
+        if path_is_ident(attribute.path(), "cfg") {
             let meta = parse_single_meta(attribute).context("parse cfg predicate for module reachability")?;
             context.constraints.push(predicate_for(&meta, Evaluation::AnyConfiguration)?);
-        } else if attribute.path().is_ident("cfg_attr")
+        } else if path_is_ident(attribute.path(), "cfg_attr")
             && let Meta::List(list) = &attribute.meta
         {
             collect_cfg_attr_constraints(&list.tokens, Predicate::Constant(true), Evaluation::AnyConfiguration, &mut context.constraints)?;
@@ -133,12 +133,12 @@ pub(in crate::structure) fn cfg_attributes_can_be_enabled(attributes: &[Attribut
 pub(in crate::structure) fn production_cfg_context(attributes: &[Attribute], inherited: &ProductionCfgContext) -> Result<Option<ProductionCfgContext>> {
     let mut context = inherited.clone();
     for attribute in attributes {
-        if attribute.path().is_ident("test") {
+        if path_is_ident(attribute.path(), "test") {
             return Ok(None);
-        } else if attribute.path().is_ident("cfg") {
+        } else if path_is_ident(attribute.path(), "cfg") {
             let meta = parse_single_meta(attribute).context("parse cfg predicate for line classification")?;
             context.constraints.push(predicate(&meta)?);
-        } else if attribute.path().is_ident("cfg_attr")
+        } else if path_is_ident(attribute.path(), "cfg_attr")
             && let Meta::List(list) = &attribute.meta
         {
             collect_cfg_attr_constraints(&list.tokens, Predicate::Constant(true), Evaluation::Production, &mut context.constraints)?;
@@ -166,12 +166,12 @@ fn collect_cfg_attr_constraints(tokens: &proc_macro2::TokenStream, parent_activa
     let attribute = parse_cfg_attr(tokens, "production constraint classification")?;
     let activation = Predicate::All(vec![parent_activation, predicate_for(&attribute.condition, evaluation)?]);
     for meta in attribute.nested {
-        if meta.path().is_ident("cfg") {
+        if path_is_ident(meta.path(), "cfg") {
             let required = predicate_for(&parse_cfg_meta(&meta)?, evaluation)?;
             output.push(Predicate::Any(vec![Predicate::Not(Box::new(activation.clone())), required]));
-        } else if meta.path().is_ident("test") && evaluation == Evaluation::Production {
+        } else if path_is_ident(meta.path(), "test") && evaluation == Evaluation::Production {
             output.push(Predicate::Not(Box::new(activation.clone())));
-        } else if meta.path().is_ident("cfg_attr")
+        } else if path_is_ident(meta.path(), "cfg_attr")
             && let Meta::List(list) = meta
         {
             collect_cfg_attr_constraints(&list.tokens, activation.clone(), evaluation, output)?;
@@ -186,10 +186,10 @@ fn collect_cfg_attr_metas(tokens: &proc_macro2::TokenStream, context: &Productio
     let reachable = context_is_satisfiable(context, Some(activation.clone()));
 
     for meta in attribute.nested {
-        if meta.path().is_ident("cfg") {
+        if path_is_ident(meta.path(), "cfg") {
             continue;
         }
-        if meta.path().is_ident("cfg_attr") {
+        if path_is_ident(meta.path(), "cfg_attr") {
             let Meta::List(list) = meta else {
                 continue;
             };
@@ -255,11 +255,11 @@ fn predicate(meta: &Meta) -> Result<Predicate> {
 
 fn predicate_for(meta: &Meta, evaluation: Evaluation) -> Result<Predicate> {
     match meta {
-        Meta::Path(path) if evaluation == Evaluation::Production && (path.is_ident("test") || path.is_ident("doctest")) => Ok(Predicate::Constant(false)),
+        Meta::Path(path) if evaluation == Evaluation::Production && matches!(normalized_cfg_path(path).as_deref(), Some("test" | "doctest")) => Ok(Predicate::Constant(false)),
         Meta::NameValue(value) if evaluation == Evaluation::Production && is_testing_feature(value) => Ok(Predicate::Constant(false)),
-        Meta::List(list) if list.path.is_ident("all") => Ok(Predicate::All(parse_predicate_list(list, evaluation)?)),
-        Meta::List(list) if list.path.is_ident("any") => Ok(Predicate::Any(parse_predicate_list(list, evaluation)?)),
-        Meta::List(list) if list.path.is_ident("not") => {
+        Meta::List(list) if path_is_ident(&list.path, "all") => Ok(Predicate::All(parse_predicate_list(list, evaluation)?)),
+        Meta::List(list) if path_is_ident(&list.path, "any") => Ok(Predicate::Any(parse_predicate_list(list, evaluation)?)),
+        Meta::List(list) if path_is_ident(&list.path, "not") => {
             let mut predicates = parse_predicate_list(list, evaluation)?;
             if predicates.len() != 1 {
                 anyhow::bail!("cfg not predicate must contain exactly one argument");
@@ -326,6 +326,10 @@ fn target_os_families(meta: &Meta) -> &'static [&'static str] {
 
 fn normalized_cfg_path(path: &syn::Path) -> Option<String> {
     (path.leading_colon.is_none() && path.segments.len() == 1).then(|| normalized_ident(&path.segments[0].ident))
+}
+
+fn path_is_ident(path: &syn::Path, expected: &str) -> bool {
+    normalized_cfg_path(path).as_deref() == Some(expected)
 }
 
 fn exclusive_cfg_group(meta: &Meta) -> Option<String> {
@@ -399,7 +403,7 @@ fn parse_predicate_list(list: &syn::MetaList, evaluation: Evaluation) -> Result<
 }
 
 fn is_testing_feature(value: &syn::MetaNameValue) -> bool {
-    if !value.path.is_ident("feature") {
+    if !path_is_ident(&value.path, "feature") {
         return false;
     }
     let Expr::Lit(expression) = &value.value else {

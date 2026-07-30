@@ -6,7 +6,7 @@ use std::process::{Command, Output, Stdio};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::expanded::sanitize_compiler_environment;
+use crate::expanded::{cargo_clippy_command, sanitize_compiler_environment};
 
 const REQUIRED_FEATURES: [&str; 3] = ["reranker", "reranker-cuda", "testing"];
 const DENIED_LINTS: [&str; 2] = ["warnings", "clippy::unwrap_used"];
@@ -136,10 +136,10 @@ fn verify_feature_names(features: &BTreeSet<String>) -> Result<()> {
 }
 
 fn lane_command(workspace: &Path, lane: Lane) -> Command {
-    let mut command = Command::new(env!("CARGO"));
+    let mut command = cargo_clippy_command();
     command
         .current_dir(workspace)
-        .args(["clippy", lane.target.argument(), PRODUCTION_PROFILE_ARGUMENT, "--no-default-features"]);
+        .args([lane.target.argument(), PRODUCTION_PROFILE_ARGUMENT, "--no-default-features"]);
     if let Some(feature) = lane.feature {
         command.args(["--features", feature]);
     }
@@ -169,11 +169,11 @@ fn verify_sentinels(workspace: &Path) -> Result<()> {
 }
 
 fn sentinel_command(workspace: &Path, manifest: &Path, target: &Path, selection: &[&str], deny_unwrap: bool) -> Result<Output> {
-    let mut command = Command::new(env!("CARGO"));
+    let mut command = cargo_clippy_command();
     command
         .current_dir(workspace)
         .env("CARGO_TARGET_DIR", target)
-        .args(["clippy", PRODUCTION_PROFILE_ARGUMENT, "--manifest-path"])
+        .args([PRODUCTION_PROFILE_ARGUMENT, "--manifest-path"])
         .arg(manifest)
         .args(selection)
         .args(["--locked", "--", "-D", "warnings"]);

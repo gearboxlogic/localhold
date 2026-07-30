@@ -50,27 +50,31 @@ pub(super) const GATE_RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "RUSTC=$native_rustc",
     "RUSTDOC=$native_rustdoc",
     "LOCALHOLD_MAINTAINABILITY_CARGO=$native_cargo",
+    "LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY=$native_cargo_clippy",
     "LOCALHOLD_MAINTAINABILITY_CARGO_FMT=$native_cargo_fmt",
     "LOCALHOLD_MAINTAINABILITY_RUSTC=$native_rustc",
+    "CARGO_HOME=$native_cargo_home",
     "CARGO_TARGET_DIR=$native_target_directory",
-    "readonly CARGO_TARGET_DIR",
-    "export PATH CARGO RUSTC RUSTDOC RUSTFMT CARGO_TARGET_DIR LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_CARGO_FMT LOCALHOLD_MAINTAINABILITY_RUSTC LOCALHOLD_MAINTAINABILITY_RUSTUP",
+    "readonly CARGO_HOME CARGO_TARGET_DIR",
+    "export PATH CARGO RUSTC RUSTDOC RUSTFMT CARGO_HOME CARGO_TARGET_DIR LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY LOCALHOLD_MAINTAINABILITY_CARGO_FMT LOCALHOLD_MAINTAINABILITY_RUSTC LOCALHOLD_MAINTAINABILITY_RUSTUP",
     "    for name in BASH_ENV GITHUB_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER \\",
     "        RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS \\",
     "        CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do",
-    "    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $LOCALHOLD_MAINTAINABILITY_CARGO_FMT && -n $LOCALHOLD_MAINTAINABILITY_RUSTC && -n $LOCALHOLD_MAINTAINABILITY_RUSTUP && -n $git_command ]]",
+    "    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY && -n $LOCALHOLD_MAINTAINABILITY_CARGO_FMT && -n $LOCALHOLD_MAINTAINABILITY_RUSTC && -n $LOCALHOLD_MAINTAINABILITY_RUSTUP && -n $git_command ]]",
     "    if [[ ! -d $target_directory || -L $target_directory || ${target_directory%/*} != \"$target_parent\" || $CARGO_TARGET_DIR != \"$native_target_directory\" ]]; then",
+    "    if [[ ! -d $fresh_cargo_home || -L $fresh_cargo_home || ${fresh_cargo_home%/*} != \"$target_directory\" || $CARGO_HOME != \"$native_cargo_home\" ]]; then",
 ];
 pub(super) const GATE_RUNNER_COMMAND_LINES: &[&str] = &[
     "    \"$cargo_executable\" fetch --locked",
     "    \"$cargo_executable\" fetch --manifest-path tools/dependency-unsafe/Cargo.toml --locked",
     "    \"$cargo_fmt_executable\" --manifest-path tools/dependency-unsafe/Cargo.toml -- --check",
     "    \"$cargo_executable\" test --manifest-path tools/dependency-unsafe/Cargo.toml --locked",
-    "    \"$cargo_executable\" clippy --manifest-path tools/dependency-unsafe/Cargo.toml --all-targets --locked -- -D warnings",
+    "    \"$cargo_clippy_executable\" clippy --manifest-path tools/dependency-unsafe/Cargo.toml --all-targets --locked -- -D warnings",
     "    \"$cargo_executable\" run --manifest-path tools/dependency-unsafe/Cargo.toml --locked -- check",
 ];
 pub(super) const RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "readonly cargo_command=${LOCALHOLD_MAINTAINABILITY_CARGO:?maintainability bootstrap did not provide an absolute Cargo command}",
+    "readonly cargo_clippy_command=${LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY:?maintainability bootstrap did not provide an absolute Cargo Clippy command}",
     "readonly cargo_fmt_command=${LOCALHOLD_MAINTAINABILITY_CARGO_FMT:?maintainability bootstrap did not provide an absolute Cargo fmt command}",
     "readonly git_command=${LOCALHOLD_MAINTAINABILITY_GIT:?maintainability bootstrap did not provide an absolute Git command}",
 ];
@@ -78,7 +82,7 @@ pub(super) const RUNNER_COMMAND_LINES: &[&str] = &[
     "\"$cargo_command\" fetch --manifest-path tools/maintainability/Cargo.toml --locked",
     "\"$cargo_fmt_command\" --manifest-path tools/maintainability/Cargo.toml -- --check",
     "\"$cargo_command\" test --manifest-path tools/maintainability/Cargo.toml --locked",
-    "\"$cargo_command\" clippy --manifest-path tools/maintainability/Cargo.toml --all-targets --locked -- -D warnings",
+    "\"$cargo_clippy_command\" clippy --manifest-path tools/maintainability/Cargo.toml --all-targets --locked -- -D warnings",
     "\"$cargo_command\" run --manifest-path tools/maintainability/Cargo.toml --locked -- check",
 ];
 pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
@@ -99,7 +103,7 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "if run_check --test-environment >/dev/null 2>&1; then",
     "unset -f inherited_cargo_function",
     "trusted_rustup_command=${LOCALHOLD_MAINTAINABILITY_RUSTUP:-rustup}",
-    "BASH_ENV=$bash_env GITHUB_PATH=untrusted LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CARGO_TARGET_DIR=\"$fixture/untrusted-target\" CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \\",
+    "BASH_ENV=$bash_env GITHUB_PATH=untrusted LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CARGO_HOME=\"$fixture/untrusted-cargo-home\" CARGO_TARGET_DIR=\"$fixture/untrusted-target\" CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \\",
     "    RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \\",
     "    CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \\",
     "    run_check --test-environment >/dev/null",
@@ -326,6 +330,7 @@ fn is_weakening_environment_name(name: &str) -> bool {
             | "GITHUB_SHA"
             | "LOCALHOLD_MAINTAINABILITY_BASE_REV"
             | "LOCALHOLD_MAINTAINABILITY_CARGO"
+            | "LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY"
             | "LOCALHOLD_MAINTAINABILITY_CARGO_FMT"
             | "LOCALHOLD_MAINTAINABILITY_GIT"
             | "LOCALHOLD_MAINTAINABILITY_RUSTC"

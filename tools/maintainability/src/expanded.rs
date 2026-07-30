@@ -11,6 +11,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 const AUTHENTICATED_RUSTC_ENV: &str = "LOCALHOLD_MAINTAINABILITY_RUSTC";
+const AUTHENTICATED_CARGO_CLIPPY_ENV: &str = "LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY";
 
 use crate::scan::{SiteKind, UnsafeSite};
 
@@ -159,10 +160,9 @@ struct CargoTarget {
 }
 
 fn run_audit_lane(workspace: &Path, manifest: &Path, lane: &AuditLane<'_>, target_directory: Option<&Path>) -> Result<AuditOutput> {
-    let mut command = Command::new(env!("CARGO"));
+    let mut command = cargo_clippy_command();
     command
         .current_dir(workspace)
-        .arg("clippy")
         .args(lane.cargo_args)
         .args(["--all-features", "--locked", "--message-format=json", "--"])
         .args([
@@ -252,6 +252,13 @@ fn is_root_manifest(manifest: &Path, message: &Value) -> Result<bool> {
     };
     let reported = fs::canonicalize(reported).with_context(|| format!("resolve Cargo message manifest {reported}"))?;
     Ok(reported == manifest)
+}
+
+pub fn cargo_clippy_command() -> Command {
+    let executable = env::var_os(AUTHENTICATED_CARGO_CLIPPY_ENV).unwrap_or_else(|| env!("CARGO").into());
+    let mut command = Command::new(executable);
+    command.arg("clippy");
+    command
 }
 
 pub fn sanitize_compiler_environment(command: &mut Command) {

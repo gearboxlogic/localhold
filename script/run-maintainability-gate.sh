@@ -190,12 +190,14 @@ authenticated_runtime_library "$toolchain_root/$runtime_library_one" "$expected_
 authenticated_runtime_library "$toolchain_root/$runtime_library_two" "$expected_runtime_library_two_sha256"
 
 native_cargo=$cargo_executable
+native_cargo_clippy=$cargo_clippy_executable
 native_cargo_fmt=$cargo_fmt_executable
 native_rustc=$rustc_executable
 native_rustdoc=$rustdoc_executable
 native_rustfmt=$rustfmt_executable
 if $windows_toolchain; then
     native_cargo=$("$cygpath_command" -w "$native_cargo")
+    native_cargo_clippy=$("$cygpath_command" -w "$native_cargo_clippy")
     native_cargo_fmt=$("$cygpath_command" -w "$native_cargo_fmt")
     native_rustc=$("$cygpath_command" -w "$native_rustc")
     native_rustdoc=$("$cygpath_command" -w "$native_rustdoc")
@@ -246,6 +248,7 @@ RUSTC=$native_rustc
 RUSTDOC=$native_rustdoc
 RUSTFMT=$native_rustfmt
 LOCALHOLD_MAINTAINABILITY_CARGO=$native_cargo
+LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY=$native_cargo_clippy
 LOCALHOLD_MAINTAINABILITY_CARGO_FMT=$native_cargo_fmt
 LOCALHOLD_MAINTAINABILITY_RUSTC=$native_rustc
 target_parent="$repository_root/target"
@@ -272,12 +275,21 @@ cleanup_target_directory() {
 }
 trap cleanup_target_directory EXIT
 native_target_directory=$target_directory
+fresh_cargo_home="$target_directory/cargo-home"
+"$mkdir_command" -- "$fresh_cargo_home"
+if [[ ! -d $fresh_cargo_home || -L $fresh_cargo_home ]]; then
+    printf 'maintainability gate could not create a fresh isolated Cargo home\n' >&2
+    exit 1
+fi
+native_cargo_home=$fresh_cargo_home
 if $windows_toolchain; then
     native_target_directory=$("$cygpath_command" -w "$target_directory")
+    native_cargo_home=$("$cygpath_command" -w "$fresh_cargo_home")
 fi
+CARGO_HOME=$native_cargo_home
 CARGO_TARGET_DIR=$native_target_directory
-readonly CARGO_TARGET_DIR
-export PATH CARGO RUSTC RUSTDOC RUSTFMT CARGO_TARGET_DIR LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_CARGO_FMT LOCALHOLD_MAINTAINABILITY_RUSTC LOCALHOLD_MAINTAINABILITY_RUSTUP
+readonly CARGO_HOME CARGO_TARGET_DIR
+export PATH CARGO RUSTC RUSTDOC RUSTFMT CARGO_HOME CARGO_TARGET_DIR LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY LOCALHOLD_MAINTAINABILITY_CARGO_FMT LOCALHOLD_MAINTAINABILITY_RUSTC LOCALHOLD_MAINTAINABILITY_RUSTUP
 
 run_source_safety() {
     "$bash_command" "$repository_root/script/tests/test_maintainability_bootstrap.sh"
@@ -289,7 +301,7 @@ run_dependency_unsafe() {
     "$cargo_executable" fetch --manifest-path tools/dependency-unsafe/Cargo.toml --locked
     "$cargo_fmt_executable" --manifest-path tools/dependency-unsafe/Cargo.toml -- --check
     "$cargo_executable" test --manifest-path tools/dependency-unsafe/Cargo.toml --locked
-    "$cargo_executable" clippy --manifest-path tools/dependency-unsafe/Cargo.toml --all-targets --locked -- -D warnings
+    "$cargo_clippy_executable" clippy --manifest-path tools/dependency-unsafe/Cargo.toml --all-targets --locked -- -D warnings
     "$cargo_executable" run --manifest-path tools/dependency-unsafe/Cargo.toml --locked -- check
 }
 
@@ -303,9 +315,13 @@ verify_test_environment() {
             exit 1
         fi
     done
-    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $LOCALHOLD_MAINTAINABILITY_CARGO_FMT && -n $LOCALHOLD_MAINTAINABILITY_RUSTC && -n $LOCALHOLD_MAINTAINABILITY_RUSTUP && -n $git_command ]]
+    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY && -n $LOCALHOLD_MAINTAINABILITY_CARGO_FMT && -n $LOCALHOLD_MAINTAINABILITY_RUSTC && -n $LOCALHOLD_MAINTAINABILITY_RUSTUP && -n $git_command ]]
     if [[ ! -d $target_directory || -L $target_directory || ${target_directory%/*} != "$target_parent" || $CARGO_TARGET_DIR != "$native_target_directory" ]]; then
         printf 'maintainability bootstrap did not provide a fresh isolated Cargo target directory\n' >&2
+        exit 1
+    fi
+    if [[ ! -d $fresh_cargo_home || -L $fresh_cargo_home || ${fresh_cargo_home%/*} != "$target_directory" || $CARGO_HOME != "$native_cargo_home" ]]; then
+        printf 'maintainability bootstrap did not provide a fresh isolated Cargo home\n' >&2
         exit 1
     fi
     if [[ $PATH != "$trusted_path" ]]; then

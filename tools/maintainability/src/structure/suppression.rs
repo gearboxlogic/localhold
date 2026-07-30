@@ -113,6 +113,7 @@ pub(super) fn reject_tooling_suppressions(workspace: &Path) -> Result<()> {
         .filter(|path| Path::new(path).file_name().and_then(|name| name.to_str()) == Some("Cargo.toml"))
         .cloned()
         .collect::<Vec<_>>();
+    verify_tooling_expansion_dependencies(workspace, &manifests)?;
     let target_roots = targets::tooling_target_sources(workspace, &manifests)?;
     let target_sources = modules::expand_target_sources(workspace, target_roots, |_| true)?;
     let scan_paths = tooling_paths
@@ -140,6 +141,16 @@ pub(super) fn reject_tooling_suppressions(workspace: &Path) -> Result<()> {
                 site.path
             );
         }
+    }
+    Ok(())
+}
+
+fn verify_tooling_expansion_dependencies(workspace: &Path, manifests: &[String]) -> Result<()> {
+    for manifest in manifests {
+        let path = workspace.join(manifest);
+        let source = fs::read_to_string(&path).with_context(|| format!("read maintainer manifest {}", path.display()))?;
+        let cargo = toml::from_str(&source).with_context(|| format!("parse maintainer manifest {}", path.display()))?;
+        crate::check::verify_expansion_dependency_routes(&cargo).with_context(|| format!("validate reviewed expansion dependencies in maintainer manifest {}", path.display()))?;
     }
     Ok(())
 }

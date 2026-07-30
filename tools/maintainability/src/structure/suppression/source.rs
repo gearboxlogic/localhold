@@ -435,7 +435,7 @@ impl<'ast> Visit<'ast> for SourceScanner {
                 self.error = Some(error);
             } else if let Err(error) = validate_audited_module_path(attribute) {
                 self.error = Some(error);
-            } else if !attribute.path().is_ident("path") && !reviewed_attribute_expansion(attribute) {
+            } else if normalized_path_ident(attribute.path()).as_deref() != Some("path") && !reviewed_attribute_expansion(attribute) {
                 self.error = Some(anyhow::anyhow!("unreviewed procedural attribute or derive expansion could emit a lint suppression"));
             } else if let Err(error) = self.record_attribute(attribute, false) {
                 self.error = Some(error);
@@ -481,10 +481,10 @@ impl<'ast> Visit<'ast> for SourceScanner {
 }
 
 fn reject_explicit_documentation_meta(meta: &Meta) -> Result<()> {
-    if meta.path().is_ident("doc") {
+    if normalized_meta_ident(meta).as_deref() == Some("doc") {
         bail!("explicit #[doc] attributes are unsupported because included doctest content cannot be audited");
     }
-    if !meta.path().is_ident("cfg_attr") {
+    if normalized_meta_ident(meta).as_deref() != Some("cfg_attr") {
         return Ok(());
     }
     let Meta::List(list) = meta else {

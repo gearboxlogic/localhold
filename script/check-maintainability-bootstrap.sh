@@ -29,16 +29,18 @@ tool_root="$repository_root/tools/maintainability"
 source_root="$tool_root/src"
 manifest="$tool_root/Cargo.toml"
 lockfile="$tool_root/Cargo.lock"
+justfile="$repository_root/Justfile"
 mise_config="$repository_root/mise.toml"
 mise_lockfile="$repository_root/mise.lock"
 runner="$repository_root/script/run-source-safety.sh"
 readonly reviewed_manifest_sha256=cca207767614bd2c1d46bc06092b69e90157aeb450797fcc7cad4e1ed67c89b9
 readonly reviewed_lockfile_sha256=825c6448351761aa5c4c6e1ce6b3696c927c4f46c5d43642846380d24f10467c
+readonly reviewed_justfile_sha256=7dc87e1cb1498ab85f0c547f6189aa00c60b5592d7ea485731b134dd3cd2c867
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=09c7b7cc9472acc7ec19633a9ccbf54eb7cf66215ec5921ade3cbd3eacd5eb1e
 
-for reviewed_path in "$manifest" "$lockfile" "$mise_config" "$mise_lockfile" "$runner"; do
+for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then
         printf 'reviewed maintainability bootstrap input must be a regular non-symlink file: %s\n' "$reviewed_path" >&2
         exit 1
@@ -275,6 +277,12 @@ if [[ $actual_lockfile_sha256 != "$reviewed_lockfile_sha256" ]]; then
     exit 1
 fi
 
+actual_justfile_sha256=$(sha256_file "$justfile")
+if [[ $actual_justfile_sha256 != "$reviewed_justfile_sha256" ]]; then
+    printf 'Justfile does not match the reviewed maintainability dispatcher\n' >&2
+    exit 1
+fi
+
 actual_mise_config_sha256=$(sha256_file "$mise_config")
 if [[ $actual_mise_config_sha256 != "$reviewed_mise_config_sha256" ]]; then
     printf 'mise.toml does not match the reviewed maintainability tool environment\n' >&2
@@ -298,6 +306,9 @@ verify_checker_sources
 printf 'maintainability bootstrap check passed\n'
 
 if (( ${#command[@]} > 0 )); then
+    if [[ ${command[0]} != */* ]]; then
+        command[0]=$(trusted_command_path "${command[0]}")
+    fi
     LOCALHOLD_MAINTAINABILITY_CARGO=$(trusted_command_path cargo)
     git_executable=$git_command
     if [[ $OSTYPE == msys* || $OSTYPE == cygwin* ]]; then

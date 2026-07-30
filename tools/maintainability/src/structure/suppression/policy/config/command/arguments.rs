@@ -67,7 +67,10 @@ fn contains_source_command(source: &str) -> bool {
 }
 
 fn is_shell_command_prefix(word: &str) -> bool {
-    matches!(word, "!" | "if" | "then" | "elif" | "while" | "until" | "do" | "env") || word.starts_with('-')
+    matches!(
+        word,
+        "!" | "if" | "then" | "elif" | "while" | "until" | "do" | "env" | "command" | "exec" | "builtin" | "nohup" | "sudo" | "time"
+    ) || word.starts_with('-')
 }
 
 fn is_environment_assignment(word: &str) -> bool {
@@ -134,21 +137,49 @@ fn weakening_rust_command(command: &str, case_insensitive_tools: bool) -> bool {
     {
         return true;
     }
+    let lint_option = tokens.iter().any(|token| is_lint_option(token));
     if !tokens.iter().any(|token| is_rust_tool_token(token, case_insensitive_tools)) {
-        return false;
+        return lint_option && has_dynamic_command_name(command, &tokens);
     }
     forwards_dynamic_arguments(&tokens, case_insensitive_tools)
         || declares_rust_tool_alias(&tokens)
         || cargo_changes_directory_before_compiler_arguments(&tokens, case_insensitive_tools)
         || rust_response_file(&tokens, case_insensitive_tools)
         || injects_crate_attribute(&tokens)
-        || tokens
-            .iter()
-            .any(|token| token == "-A" || token.starts_with("-A") && token.len() > 2 || token == "-W" || token.starts_with("-W") && token.len() > 2 || is_long_lint_option(token))
+        || lint_option
         || tokens
             .iter()
             .enumerate()
             .any(|(index, token)| token.starts_with("--config") && !is_cargo_deny_config_argument(&tokens, index, case_insensitive_tools))
+}
+
+fn has_dynamic_command_name(command: &str, tokens: &[String]) -> bool {
+    let mut index = 0;
+    while let Some(token) = tokens.get(index) {
+        let word = token.trim_matches(['(', ')', '{', '}']);
+        if word.is_empty() || is_shell_command_prefix(word) || is_environment_assignment(word) {
+            index += 1;
+            continue;
+        }
+        if is_variable_assignment_target(command, word) {
+            index += 1;
+            continue;
+        }
+        return word.contains('$') || word == "%*" || word.split_once('%').is_some_and(|(_, suffix)| !suffix.is_empty() && suffix.contains('%'));
+    }
+    false
+}
+
+fn is_variable_assignment_target(command: &str, word: &str) -> bool {
+    let Some((left, _)) = command.split_once('=') else {
+        return false;
+    };
+    let left = left.trim().trim_matches(['(', ')', '{', '}', '\'', '"']);
+    left == word && (word.contains('$') || word.split_once('%').is_some_and(|(_, suffix)| suffix.contains('%')))
+}
+
+fn is_lint_option(token: &str) -> bool {
+    token == "-A" || token.starts_with("-A") && token.len() > 2 || token == "-W" || token.starts_with("-W") && token.len() > 2 || is_long_lint_option(token)
 }
 
 fn forwards_dynamic_arguments(tokens: &[String], case_insensitive_tools: bool) -> bool {

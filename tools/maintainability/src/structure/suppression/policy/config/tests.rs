@@ -96,6 +96,9 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_token("rustc -D warnings --force-warn=unused_variables source.rs"));
     assert!(weakening_token("LABEL=@not-a-response rustc @policy/lints.args source.rs"));
     assert!(weakening_token("run_cargo() { cargo \"$@\"; }\nrun_cargo clippy -- -A warnings"));
+    assert!(weakening_token("TOOL=cargo\ncommand \"$TOOL\" clippy -- -A warnings"));
+    assert!(weakening_token_for_surface("script/check.cmd", "set TOOL=cargo\n%TOOL% clippy -- -A warnings"));
+    assert!(!weakening_token_for_surface("script/check.ps1", "$actual = (Get-FileHash -Algorithm SHA256 $path).Hash\n"));
     assert!(weakening_token("LINT_FLAGS='-A warnings'\ncargo clippy -- $LINT_FLAGS"));
     assert!(weakening_token("cargo rustc -- @policy/lints.args"));
     assert!(!weakening_token("cargo run -- @application-argument"));
@@ -259,6 +262,7 @@ fn command_surfaces_include_scripts_outside_the_legacy_script_directory() {
         "tools/ci/check.sh",
         "tools/ci/check.PS1",
         "Makefile",
+        "build/lint.mk",
         "package.json",
     ] {
         assert!(is_execution_surface(path), "missing command surface {path}");
@@ -367,6 +371,7 @@ fn github_yaml_rejects_unsupported_execution_metadata() {
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    env:\n      COMMAND: &lint cargo clippy -- -A warnings\n    steps:\n      - run: *lint\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - &lint run: cargo clippy -- -A warnings\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - !audit run: cargo clippy -- -A warnings\n",
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - { run: \"cargo clippy -- -A warnings\" }\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -c 'cargo clippy -- -A warnings' -- {0}\n        run: just maintainability\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: |\n          bash -c 'cargo clippy -- -A warnings' -- {0}\n        run: just maintainability\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - working-directory: misc\n        run: rustc check.rs\n",
@@ -404,6 +409,19 @@ fn command_policy_rejects_sourced_environment_files() {
 
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("sourced-file indirection"));
+}
+
+#[test]
+fn make_include_indirection_is_rejected() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("build")).expect("Make fragment directory");
+    fs::write(workspace.path().join("Makefile"), "include build/lint.mk\n").expect("Makefile");
+    fs::write(workspace.path().join("build/lint.mk"), "lint:\n\tcargo clippy -- -A warnings\n").expect("Make fragment");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("include indirection"));
 }
 
 #[test]

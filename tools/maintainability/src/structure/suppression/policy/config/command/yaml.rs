@@ -34,6 +34,9 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
         if starts_unsupported_key_property(line) {
             bail!("checked-in GitHub YAML {path:?} uses unsupported anchors or aliases, node tags, or complex keys");
         }
+        if starts_flow_collection(line) {
+            bail!("checked-in GitHub YAML {path:?} uses an unsupported flow mapping or complex sequence");
+        }
         let Some((key, value)) = yaml_key_value(line) else {
             continue;
         };
@@ -65,11 +68,17 @@ fn contains_working_directory_key(line: &str) -> bool {
 }
 
 fn starts_unsupported_key_property(line: &str) -> bool {
-    let mut content = line.trim_start();
-    if let Some(rest) = content.strip_prefix("- ") {
-        content = rest.trim_start();
-    }
+    let content = yaml_node_content(line);
     starts_yaml_reference(content) || content.starts_with(['!', '?'])
+}
+
+fn starts_flow_collection(line: &str) -> bool {
+    yaml_node_content(line).starts_with(['{', '['])
+}
+
+fn yaml_node_content(line: &str) -> &str {
+    let content = line.trim_start();
+    content.strip_prefix("- ").map_or(content, str::trim_start)
 }
 
 fn is_simple_flow_sequence(value: &str) -> bool {

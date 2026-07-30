@@ -65,6 +65,9 @@ pub fn reject_checked_in_weakening(workspace: &Path) -> Result<BTreeSet<String>>
         }
         let source = fs::read_to_string(workspace.join(&path)).with_context(|| format!("read lint command execution surface {path}"))?;
         yaml::validate_execution_metadata(&path, &source)?;
+        if has_make_include_indirection(Path::new(&path), &source) {
+            bail!("checked-in Make command surface {path:?} uses unsupported include indirection");
+        }
         if has_sourced_file_indirection(&path, &source) {
             bail!("checked-in Rust command surface {path:?} uses unsupported sourced-file indirection");
         }
@@ -87,6 +90,28 @@ fn is_javascript(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "js" | "cjs" | "mjs"))
+}
+
+fn has_make_include_indirection(path: &Path, source: &str) -> bool {
+    if !is_make_surface(path) {
+        return false;
+    }
+    source
+        .lines()
+        .filter(|line| !line.starts_with('\t'))
+        .map(str::trim_start)
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.split_whitespace().next())
+        .any(|directive| matches!(directive, "include" | "-include" | "sinclude"))
+}
+
+fn is_make_surface(path: &Path) -> bool {
+    let basename = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    matches!(basename, "Makefile" | "makefile" | "GNUmakefile")
+        || path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("mk"))
 }
 
 pub(super) fn weakening_environment(source: &str) -> bool {
@@ -190,7 +215,7 @@ pub(super) fn is_execution_surface(path: &str) -> bool {
     path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
         matches!(
             extension.to_ascii_lowercase().as_str(),
-            "sh" | "bash" | "zsh" | "fish" | "ps1" | "cmd" | "bat" | "py" | "js" | "cjs" | "mjs"
+            "sh" | "bash" | "zsh" | "fish" | "ps1" | "cmd" | "bat" | "py" | "js" | "cjs" | "mjs" | "mk"
         )
     })
 }

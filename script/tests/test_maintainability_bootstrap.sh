@@ -22,6 +22,7 @@ restore_reviewed_graph() {
     cp "$source_tool/Cargo.lock" "$test_tool/Cargo.lock"
     rm -rf "$test_tool/src"
     cp -R "$source_tool/src" "$test_tool/src"
+    cp "$repository_root/Justfile" "$test_repository/Justfile"
     cp "$repository_root/mise.toml" "$test_repository/mise.toml"
     cp "$repository_root/mise.lock" "$test_repository/mise.lock"
     mkdir -p "$test_repository/script"
@@ -98,6 +99,10 @@ expect_failure_before_command
 restore_reviewed_graph
 printf '\n# unreviewed lock graph\n' >>"$test_tool/Cargo.lock"
 expect_failure
+
+restore_reviewed_graph
+printf '\nmaintainability:\n    true\n' >>"$test_repository/Justfile"
+expect_failure_before_command
 
 restore_reviewed_graph
 printf '\n_.path = ["{{config_root}}/bin"]\n' >>"$test_repository/mise.toml"

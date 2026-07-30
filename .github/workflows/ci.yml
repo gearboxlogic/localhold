@@ -137,7 +137,7 @@ jobs:
         id: audit
         env:
           LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}
-        run: just maintainability
+        run: ./script/check-maintainability-bootstrap.sh -- just maintainability
 
       - name: Upload dependency audit evidence on failure
         if: failure() && steps.audit.outcome == 'failure'
@@ -281,7 +281,7 @@ jobs:
           diagnostic_log="$RUNNER_TEMP/dependency-unsafe.log"
           trap 'rm -f -- "$diagnostic_log"' EXIT
           set +e
-          just maintainability 2>&1 | tee "$diagnostic_log"
+          ./script/check-maintainability-bootstrap.sh -- just maintainability 2>&1 | tee "$diagnostic_log"
           status=${PIPESTATUS[0]}
           set -e
           if (( status != 0 )); then

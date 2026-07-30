@@ -302,10 +302,13 @@ surfaces are unsupported. Workflow and action YAML may not use anchors,
 aliases, node tags, custom shell templates, or working-directory overrides to
 redirect an audited `run` command; multiline inline `run` scalars are
 unsupported. Shell continuations are normalized before command arguments are
-audited. Unreviewed procedural attributes and derives are also rejected because
-their expansions could emit hidden lint policy. The dependency jobs validate
-the reviewed mise configuration and lockfile before tool activation, then run
-the hash-pinned source-safety driver through resolved absolute Cargo and Git
+audited, and a dynamic command name may not carry Rust lint options. Make
+include directives are unsupported; checked-in `.mk` command surfaces are
+audited directly. Unreviewed procedural attributes and derives are also
+rejected because their expansions could emit hidden lint policy. The dependency
+jobs validate the reviewed mise configuration, lockfile, and `Justfile` before
+tool activation, then execute the dispatcher through the bound bootstrap and
+run the hash-pinned source-safety driver through resolved absolute Cargo and Git
 executables. The checker source set must match the checked-out revision
 immediately before compilation. The comparison base is derived from the runner
 event, the checkout must match the event head, and any configured base must

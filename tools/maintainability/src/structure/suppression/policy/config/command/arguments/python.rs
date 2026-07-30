@@ -12,6 +12,9 @@ pub(super) fn has_adjacent_string_literals(source: &str) -> bool {
 
 pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
     let normalized = join_implicit_continuations(source);
+    if has_dynamic_process_resolution(&normalized) && references_rust_tool(&normalized) {
+        return true;
+    }
     if references_exec_or_spawn_api(&normalized) && references_rust_tool(&normalized) {
         return true;
     }
@@ -38,9 +41,29 @@ fn references_exec_or_spawn_api(source: &str) -> bool {
     ["execl", "execv", "spawn"].iter().any(|name| source.contains(name))
 }
 
+fn has_dynamic_process_resolution(source: &str) -> bool {
+    let compact = source.chars().filter(|character| !character.is_whitespace()).collect::<String>().to_ascii_lowercase();
+    [
+        "__import__(",
+        "getattr(",
+        "globals(",
+        "importlib.",
+        "locals(",
+        "operator.attrgetter(",
+        "sys.modules",
+        "vars(",
+    ]
+    .iter()
+    .any(|name| compact.contains(name))
+}
+
 fn references_rust_tool(source: &str) -> bool {
     let source = source.to_ascii_lowercase();
-    ["cargo", "rustc", "rustdoc", "clippy-driver"].iter().any(|name| source.contains(name))
+    if ["cargo", "rustc", "rustdoc", "clippy-driver"].iter().any(|name| source.contains(name)) {
+        return true;
+    }
+    let compact = source.chars().filter(|character| character.is_alphanumeric()).collect::<String>();
+    ["cargo", "rustc", "rustdoc", "clippydriver"].iter().any(|name| compact.contains(name))
 }
 
 struct Scanner {
@@ -271,6 +294,14 @@ mod tests {
         assert!(has_opaque_process_arguments(
             r#"from os import execvpe
 execvpe("cargo", ["cargo", "clippy", "--", "-" + "A", "warnings"], environment)"#
+        ));
+        assert!(has_opaque_process_arguments(
+            r#"runner = __import__("sub" + "process")
+runner.run(["cargo", "clippy", "--", chr(45) + "A", "warnings"])"#
+        ));
+        assert!(has_opaque_process_arguments(
+            r#"runner = getattr(importlib.import_module("sub" + "process"), "r" + "un")
+runner(["car" + "go", "clippy", "--", chr(45) + "A", "warnings"])"#
         ));
         assert!(!has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", r"\x2dA", "warnings"])"#));
         assert!(!has_opaque_process_arguments(

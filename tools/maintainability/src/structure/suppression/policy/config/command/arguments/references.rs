@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
 use super::{
-    has_case_insensitive_tool_names, is_cargo_tool_token, is_environment_assignment, is_normalized_manifest_path, is_shell_command_prefix, is_yaml, matches_tool_name,
-    normalized_source_for_surface, package_json, tokens, tool_basename,
+    has_case_insensitive_tool_names, is_cargo_tool_token, is_environment_assignment, is_normalized_manifest_path, is_shell_command_prefix, is_unanalyzed_dynamic_interpreter,
+    is_yaml, matches_tool_name, normalized_source_for_surface, package_json, tokens, tool_basename,
 };
 
 pub(in crate::structure::suppression::policy::config::command) fn cargo_manifest_paths_for_surface(path: &str, source: &str) -> (BTreeSet<String>, bool) {
@@ -142,7 +142,8 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
     let Some(command_index) = command_index else {
         return (Vec::new(), false);
     };
-    let command_word = tokens[command_index].trim_matches(['(', ')', '{', '}']);
+    let raw_command_word = &tokens[command_index];
+    let command_word = raw_command_word.trim_matches(['(', ')', '{', '}']);
     if command_word.chars().any(char::is_whitespace) && (command_word.contains("$(") || command_word.contains('`')) {
         return (Vec::new(), false);
     }
@@ -154,9 +155,10 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "bash" | "bash.exe" | "dash" | "dash.exe" | "fish" | "fish.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe" => shell_input(arguments),
         "python" | "python.exe" | "python3" | "python3.exe" => python_input(arguments),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),
-        "bun" | "bun.exe" | "deno" | "deno.exe" | "lua" | "lua.exe" | "node" | "node.exe" | "perl" | "perl.exe" | "php" | "php.exe" | "ruby" | "ruby.exe" => {
-            positional_interpreter_input(arguments)
+        "timeout" | "timeout.exe" if exact_wrapper_command_word(raw_command_word, &command) => {
+            return timeout_execution_inputs(arguments, direct_program_paths);
         }
+        _ if is_unanalyzed_dynamic_interpreter(&command) => SelectedInput::Opaque,
         "awk" | "awk.exe" | "gawk" | "gawk.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe" => {
             let (inputs, opaque) = program_file_inputs(arguments, &AWK_PROGRAM_FILES);
             return (Vec::new(), opaque || !inputs.is_empty());
@@ -180,6 +182,10 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         SelectedInput::Literal(candidate) => (vec![candidate], false),
         SelectedInput::Opaque => (Vec::new(), true),
     }
+}
+
+fn exact_wrapper_command_word(word: &str, command: &str) -> bool {
+    word.trim_start_matches(['(', '{']).eq_ignore_ascii_case(command)
 }
 
 fn nested_command_token(token: &str) -> &str {
@@ -316,20 +322,39 @@ fn is_powershell_flag_without_operand(argument: &str) -> bool {
     )
 }
 
-fn positional_interpreter_input(arguments: &[String]) -> SelectedInput<'_> {
-    let Some(argument) = arguments.first() else {
-        return SelectedInput::Opaque;
+fn timeout_execution_inputs(arguments: &[String], direct_program_paths: bool) -> (Vec<&str>, bool) {
+    let Some(command_index) = timeout_command_index(arguments) else {
+        return (Vec::new(), true);
     };
-    if matches!(argument.to_ascii_lowercase().as_str(), "-h" | "--help" | "-v" | "--version") {
-        return SelectedInput::None;
+    execution_input_candidates(&arguments[command_index..], direct_program_paths)
+}
+
+fn timeout_command_index(arguments: &[String]) -> Option<usize> {
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        match argument.as_str() {
+            "--help" | "--version" => return None,
+            "--" => {
+                index += 1;
+                break;
+            }
+            "-k" | "--kill-after" | "-s" | "--signal" => {
+                index += 2;
+            }
+            "--foreground" | "--preserve-status" | "--verbose" | "-v" => {
+                index += 1;
+            }
+            _ if argument.starts_with("--kill-after=") || argument.starts_with("--signal=") => {
+                index += 1;
+            }
+            _ if argument.starts_with('-') => return None,
+            _ => break,
+        }
     }
-    if argument == "--" {
-        return arguments.get(1).map_or(SelectedInput::Opaque, |candidate| SelectedInput::Literal(candidate));
-    }
-    if argument.starts_with('-') {
-        return SelectedInput::Opaque;
-    }
-    SelectedInput::Literal(argument)
+    arguments.get(index)?;
+    let command_index = index + 1;
+    arguments.get(command_index)?;
+    Some(command_index)
 }
 
 fn find_command_action_is_opaque(arguments: &[String]) -> bool {
@@ -532,9 +557,17 @@ mod tests {
         assert_eq!(inputs("python -m quality.lint"), (Vec::new(), false));
         assert_eq!(inputs("python -m $MODULE"), (Vec::new(), true));
         assert_eq!(inputs("pwsh -File quality/lint.ps1"), (vec!["quality/lint.ps1".to_owned()], false));
-        assert_eq!(inputs("perl quality/lint.pl"), (vec!["quality/lint.pl".to_owned()], false));
-        assert_eq!(inputs("ruby -- quality/lint.rb"), (vec!["quality/lint.rb".to_owned()], false));
+        assert_eq!(inputs("perl quality/lint.pl"), (Vec::new(), true));
+        assert_eq!(inputs("ruby -- quality/lint.rb"), (Vec::new(), true));
         assert_eq!(inputs("perl -e 'system q(cargo clippy)'"), (Vec::new(), true));
+        assert_eq!(inputs("timeout 10 sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
+        assert_eq!(
+            inputs("timeout --signal TERM --kill-after=2s 10s sh quality/lint.txt"),
+            (vec!["quality/lint.txt".to_owned()], false)
+        );
+        assert_eq!(inputs("timeout 3s \"$binary\""), (Vec::new(), false));
+        assert_eq!(inputs("timeout --unknown 3s sh quality/lint.txt"), (Vec::new(), true));
+        assert_eq!(inputs(r"pattern='tokio::time::(sleep|sleep_until|interval|timeout)\('"), (Vec::new(), false));
         assert_eq!(inputs("awk -f quality/lint.awk /etc/hosts"), (Vec::new(), true));
         assert_eq!(inputs("gawk --file=quality/lint.awk /etc/hosts"), (Vec::new(), true));
         assert_eq!(inputs("gawk --exec quality/lint.awk /etc/hosts"), (Vec::new(), true));

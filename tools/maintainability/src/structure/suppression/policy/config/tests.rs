@@ -236,6 +236,22 @@ fn python_command_arrays_cannot_split_lint_arguments_from_cargo() {
         "script/check.py",
         "os.execlp(\"cargo\", \"cargo\", \"clippy\", \"--\", \"-\" + \"A\", \"warnings\")\n"
     ));
+    assert!(weakening_token_for_surface(
+        "script/check.py",
+        "runner = __import__(\"sub\" + \"process\")\nrunner.run([\"cargo\", \"clippy\", \"--\", chr(45) + \"A\", \"warnings\"])\n"
+    ));
+}
+
+#[test]
+fn unanalyzed_dynamic_programs_fail_closed() {
+    for (path, source) in [
+        ("quality/lint.pl", "system(\"cargo\", \"clippy\", \"--\", \"-\" . \"A\", \"warnings\")\n"),
+        ("quality/lint.rb", "system(\"cargo\", \"clippy\", \"--\", \"-\" + \"A\", \"warnings\")\n"),
+        ("quality/lint.lua", "os.execute(\"cargo clippy -- -\" .. \"A warnings\")\n"),
+        ("quality/lint.php", "exec(\"cargo clippy -- -\" . \"A warnings\");\n"),
+    ] {
+        assert!(weakening_token_for_surface(path, source), "dynamic program was not rejected: {path}");
+    }
 }
 
 #[test]
@@ -557,18 +573,34 @@ fn command_policy_scans_extensionless_scripts() {
 }
 
 #[test]
-fn command_policy_scans_positional_interpreter_programs() {
-    for (interpreter, program) in [("perl", "quality/lint.pl"), ("ruby", "quality/lint.rb")] {
+fn command_policy_rejects_unanalyzed_interpreter_programs() {
+    for (interpreter, program, source) in [
+        ("perl", "quality/lint.pl", "system(\"cargo\", \"clippy\", \"--\", \"-\" . \"A\", \"warnings\")\n"),
+        ("ruby", "quality/lint.rb", "system(\"cargo\", \"clippy\", \"--\", \"-\" + \"A\", \"warnings\")\n"),
+    ] {
         let workspace = tempfile::tempdir().expect("temporary workspace");
         fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
         fs::write(workspace.path().join("Justfile"), format!("lint:\n    {interpreter} {program}\n")).expect("interpreter invocation");
-        fs::write(workspace.path().join(program), "`cargo clippy -- -A warnings`\n").expect("non-executable lint program");
+        fs::write(workspace.path().join(program), source).expect("non-executable lint program");
         git(workspace.path(), &["init", "-q"]);
         git(workspace.path(), &["add", "."]);
 
         let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-        assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+        assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
     }
+}
+
+#[test]
+fn command_policy_scans_timeout_wrapped_programs() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::write(workspace.path().join("Justfile"), "lint:\n    timeout 10 sh quality/lint.txt\n").expect("timeout invocation");
+    fs::write(workspace.path().join("quality/lint.txt"), "cargo clippy -- -A warnings\n").expect("non-executable lint program");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
 }
 
 #[test]

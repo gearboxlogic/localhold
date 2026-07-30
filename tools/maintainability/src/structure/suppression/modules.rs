@@ -10,11 +10,12 @@ use syn::visit::{self, Visit};
 use syn::{Meta, Token};
 
 use super::SourceCategory;
+use crate::structure::syntax::{ProductionCfgContext, production_cfg_context};
 
 mod revision;
 pub(super) use revision::expand_revision_target_sources;
 
-type DiscoveredModule = (PathBuf, String, PathBuf);
+type DiscoveredModule = (PathBuf, String, PathBuf, SourceCategory);
 
 pub(super) fn expand_target_sources(workspace: &Path, roots: BTreeMap<String, SourceCategory>, is_structural: impl Fn(&str) -> bool) -> Result<BTreeMap<String, SourceCategory>> {
     expand_sources(
@@ -45,15 +46,15 @@ fn expand_sources(
     while let Some((path, module_base, category)) = pending.pop_front() {
         let source = read_source(&path)?;
         let syntax = syn::parse_file(&source).with_context(|| format!("parse Cargo target module source {path}"))?;
-        let discovered = ModuleCollector::collect(module_base, &syntax)?;
-        for (base, name, child_base) in discovered {
+        let discovered = ModuleCollector::collect(module_base, category, &syntax)?;
+        for (base, name, child_base, module_category) in discovered {
             let module = resolve_module(&base, &name)?;
             let module = check_path(&module)?;
-            if !register_source(&mut sources, &module, category)? {
+            if !register_source(&mut sources, &module, module_category)? {
                 continue;
             }
             if !is_structural(&module) {
-                pending.push_back((module, child_base, category));
+                pending.push_back((module, child_base, module_category));
             }
         }
     }
@@ -61,26 +62,35 @@ fn expand_sources(
 }
 
 fn register_source(sources: &mut BTreeMap<String, SourceCategory>, module: &str, category: SourceCategory) -> Result<bool> {
-    if let Some(existing) = sources.get(module) {
-        if *existing != category {
-            bail!("Cargo target module source {module:?} has conflicting governance categories");
+    match sources.get(module).copied() {
+        None => {
+            sources.insert(module.to_owned(), category);
+            Ok(true)
         }
-        return Ok(false);
+        Some(existing) if existing == category || existing == SourceCategory::Production => Ok(false),
+        Some(_) if category == SourceCategory::Production => {
+            sources.insert(module.to_owned(), category);
+            Ok(true)
+        }
+        Some(_) => bail!("Cargo target module source {module:?} has conflicting governance categories"),
     }
-    sources.insert(module.to_owned(), category);
-    Ok(true)
 }
 
 struct ModuleCollector {
     module_base: PathBuf,
+    category: SourceCategory,
+    production_context: Option<ProductionCfgContext>,
     discovered: Vec<DiscoveredModule>,
     error: Option<anyhow::Error>,
 }
 
 impl ModuleCollector {
-    fn collect(module_base: PathBuf, syntax: &syn::File) -> Result<Vec<DiscoveredModule>> {
+    fn collect(module_base: PathBuf, category: SourceCategory, syntax: &syn::File) -> Result<Vec<DiscoveredModule>> {
+        let production_context = (category == SourceCategory::Production).then(ProductionCfgContext::default);
         let mut collector = Self {
             module_base,
+            category,
+            production_context,
             discovered: Vec::new(),
             error: None,
         };
@@ -112,17 +122,36 @@ impl<'ast> Visit<'ast> for ModuleCollector {
                 }
             }
         }
+        let production_context = match &self.production_context {
+            Some(inherited) => match production_cfg_context(&module.attrs, inherited) {
+                Ok(context) => context,
+                Err(error) => {
+                    self.error = Some(error);
+                    return;
+                }
+            },
+            None => None,
+        };
+        let category = if self.category == SourceCategory::Production && production_context.is_none() {
+            SourceCategory::Test
+        } else {
+            self.category
+        };
         let name = module.ident.unraw().to_string();
         let child_base = self.module_base.join(&name);
         if let Some((_, items)) = &module.content {
             let previous = std::mem::replace(&mut self.module_base, child_base);
+            let previous_category = std::mem::replace(&mut self.category, category);
+            let previous_context = std::mem::replace(&mut self.production_context, production_context);
             for item in items {
                 self.visit_item(item);
             }
+            self.production_context = previous_context;
+            self.category = previous_category;
             self.module_base = previous;
             return;
         }
-        self.discovered.push((self.module_base.clone(), name, child_base));
+        self.discovered.push((self.module_base.clone(), name, child_base, category));
     }
 
     fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {

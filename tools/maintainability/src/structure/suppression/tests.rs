@@ -66,7 +66,7 @@ fn root_package_target_roots_outside_the_structure_map_are_scanned() {
     fs::create_dir_all(workspace.path().join("quality")).expect("auxiliary target directory");
     fs::write(
         workspace.path().join("Cargo.toml"),
-        "[package]\nname='target-fixture'\nversion='0.1.0'\nedition='2024'\nbuild='build.rs'\n\n[[test]]\nname='custom-test'\npath='quality/custom_test.rs'\n\n[[bench]]\nname='custom-bench'\npath='quality/custom_bench.rs'\nharness=false\n",
+        "[package]\nname='target-fixture'\nversion='0.1.0'\nedition='2024'\nbuild='build.rs'\nautoexamples=false\n\n[[example]]\nname='demo'\npath='examples/demo.rs'\n\n[[test]]\nname='custom-test'\npath='quality/custom_test.rs'\n\n[[bench]]\nname='custom-bench'\npath='quality/custom_bench.rs'\nharness=false\n",
     )
     .expect("package manifest");
     fs::write(
@@ -78,7 +78,7 @@ fn root_package_target_roots_outside_the_structure_map_are_scanned() {
     fs::write(workspace.path().join("build.rs"), "#[expect(clippy::panic, reason = \"legacy build\")]\nfn main() {}\n").expect("build target");
     fs::write(
         workspace.path().join("examples/demo.rs"),
-        "#![allow(clippy::panic, reason = \"legacy example\")]\nmod helper;\nfn main() {}\n",
+        "#![allow(clippy::panic, reason = \"legacy example\")]\nmod helper;\n#[cfg(test)] mod test_helper;\nfn main() {}\n",
     )
     .expect("example target");
     fs::write(
@@ -86,6 +86,11 @@ fn root_package_target_roots_outside_the_structure_map_are_scanned() {
         "#![allow(clippy::panic, reason = \"legacy example helper\")]\n",
     )
     .expect("example module");
+    fs::write(
+        workspace.path().join("examples/test_helper.rs"),
+        "#![allow(clippy::panic, reason = \"legacy example test helper\")]\n",
+    )
+    .expect("test-only example module");
     fs::write(
         workspace.path().join("quality/custom_test.rs"),
         "#![allow(clippy::panic, reason = \"legacy test\")]\nfn main() {}\n",
@@ -106,6 +111,7 @@ fn root_package_target_roots_outside_the_structure_map_are_scanned() {
             ("build.rs", SourceCategory::Production),
             ("examples/demo.rs", SourceCategory::Production),
             ("examples/helper.rs", SourceCategory::Production),
+            ("examples/test_helper.rs", SourceCategory::Test),
             ("quality/custom_bench.rs", SourceCategory::Benchmark),
             ("quality/custom_test.rs", SourceCategory::Test),
         ]

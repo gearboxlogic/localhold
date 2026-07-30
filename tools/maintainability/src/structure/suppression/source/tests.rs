@@ -148,6 +148,13 @@ fn runnable_doctests_and_explicit_doc_inputs_fail_closed() {
     .unwrap_err();
     assert!(doctest.to_string().contains("runnable Rust doctests"));
 
+    let indented = scan(
+        "/// Paragraph.\n///\n///     #![allow(unused_variables)]\n///     let hidden = 1;\nfn documented() {}\n",
+        SourceCategory::Production,
+    )
+    .unwrap_err();
+    assert!(indented.to_string().contains("runnable Rust doctests"));
+
     let included = scan("#[doc = include_str!(\"guide.md\")]\nfn documented() {}\n", SourceCategory::Production).unwrap_err();
     assert!(format!("{included:#}").contains("included doctest content cannot be audited"));
 

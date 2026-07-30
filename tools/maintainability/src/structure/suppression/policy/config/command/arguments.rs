@@ -270,7 +270,10 @@ fn has_dynamic_command_name(command: &str, tokens: &[String]) -> bool {
             index += 1;
             continue;
         }
-        return word.contains('$') || word == "%*" || word.split_once('%').is_some_and(|(_, suffix)| !suffix.is_empty() && suffix.contains('%'));
+        return word.contains('$')
+            || contains_cmd_delayed_expansion(word)
+            || word == "%*"
+            || word.split_once('%').is_some_and(|(_, suffix)| !suffix.is_empty() && suffix.contains('%'));
     }
     false
 }
@@ -294,10 +297,15 @@ fn forwards_dynamic_arguments(tokens: &[String], case_insensitive_tools: bool) -
     tokens[tool_index..].iter().enumerate().any(|(relative_index, token)| {
         let index = tool_index + relative_index;
         token.contains('$')
+            || contains_cmd_delayed_expansion(token)
             || token.starts_with('@') && opaque_splat_reaches_compiler(tokens, tool_index, index, case_insensitive_tools)
             || token == "%*"
             || token.split_once('%').is_some_and(|(_, suffix)| !suffix.is_empty() && suffix.contains('%'))
     })
+}
+
+fn contains_cmd_delayed_expansion(token: &str) -> bool {
+    token.bytes().filter(|byte| *byte == b'!').take(2).count() == 2
 }
 
 fn opaque_splat_reaches_compiler(tokens: &[String], tool_index: usize, splat_index: usize, case_insensitive_tools: bool) -> bool {

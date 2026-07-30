@@ -54,6 +54,43 @@ fn cargo_allow_scan_resolves_workspace_lint_inheritance() {
 }
 
 #[test]
+fn cargo_allow_scan_resolves_explicit_sibling_workspaces() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("tools/member")).expect("member directory");
+    fs::create_dir_all(workspace.path().join("quality")).expect("workspace directory");
+    fs::write(workspace.path().join("Cargo.toml"), "[workspace]\n[workspace.lints.rust]\nwarnings='deny'\n").expect("decoy ancestor workspace");
+    fs::write(workspace.path().join("quality/Cargo.toml"), "[workspace]\n[workspace.lints.rust]\nwarnings='allow'\n").expect("explicit workspace");
+    fs::write(
+        workspace.path().join("tools/member/Cargo.toml"),
+        "[package]\nname='member'\nversion='0.1.0'\nworkspace='../../quality'\n[lints]\nworkspace=true\n",
+    )
+    .expect("member manifest");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    assert_eq!(
+        scan_cargo_allows(workspace.path()).expect("explicit workspace allowances"),
+        BTreeSet::from([("tools/member/Cargo.toml".to_owned(), "rust".to_owned(), "warnings".to_owned())])
+    );
+}
+
+#[test]
+fn cargo_allow_scan_rejects_explicit_workspaces_outside_the_repository() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("tools/member")).expect("member directory");
+    fs::write(
+        workspace.path().join("tools/member/Cargo.toml"),
+        "[package]\nname='member'\nversion='0.1.0'\nworkspace='../../../quality'\n[lints]\nworkspace=true\n",
+    )
+    .expect("member manifest");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = scan_cargo_allows(workspace.path()).expect_err("escaping workspace path must fail closed");
+    assert!(format!("{error:#}").contains("escapes the repository"), "{error:#}");
+}
+
+#[test]
 fn clippy_constraints_are_directional() {
     compare_clippy_value("threshold", &toml::Value::Integer(4), &ClippyConstraint::MaximumInteger { value: 5 }).expect("lower threshold");
     assert!(compare_clippy_value("threshold", &toml::Value::Integer(6), &ClippyConstraint::MaximumInteger { value: 5 },).is_err());
@@ -131,6 +168,18 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(!weakening_token("gitleaks --config policy.toml # cargo output"));
     assert!(!weakening_token("cargo build\ncc -Wall -Wextra"));
     assert!(!weakening_token("hold doctor --allow-downloads"));
+}
+
+#[test]
+fn weakening_tokens_reject_cmd_delayed_expansion() {
+    assert!(weakening_token_for_surface(
+        "script/check.cmd",
+        "setlocal EnableDelayedExpansion\nset FLAG=-A\ncargo clippy -- !FLAG! warnings"
+    ));
+    assert!(weakening_token_for_surface(
+        "script/check.cmd",
+        "setlocal EnableDelayedExpansion\nset TOOL=cargo\n!TOOL! clippy -- -A warnings"
+    ));
 }
 
 #[test]

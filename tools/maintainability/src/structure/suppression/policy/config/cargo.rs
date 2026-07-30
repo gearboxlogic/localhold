@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -56,6 +56,11 @@ fn find_workspace_lints(workspace: &Path, manifest: &str, parsed: &toml::Table) 
     if let Some(lints) = workspace_lints(parsed, manifest)? {
         return Ok(lints);
     }
+    if let Some(explicit) = explicit_workspace_manifest(manifest, parsed)? {
+        let path = workspace.join(&explicit);
+        let workspace_manifest = read_manifest(&path)?;
+        return workspace_lints(&workspace_manifest, &explicit)?.with_context(|| format!("explicit Cargo workspace {explicit} selected by {manifest} does not define a workspace"));
+    }
     let manifest_path = Path::new(manifest);
     let parent = manifest_path.parent().unwrap_or_else(|| Path::new(""));
     for ancestor in parent.ancestors().skip(1) {
@@ -72,6 +77,45 @@ fn find_workspace_lints(workspace: &Path, manifest: &str, parsed: &toml::Table) 
     bail!("Cargo manifest {manifest} inherits workspace lints but no enclosing workspace defines them")
 }
 
+fn explicit_workspace_manifest(manifest: &str, parsed: &toml::Table) -> Result<Option<String>> {
+    let Some(package) = parsed.get("package") else {
+        return Ok(None);
+    };
+    let package = package.as_table().with_context(|| format!("Cargo package in {manifest} is not a table"))?;
+    let Some(explicit) = package.get("workspace") else {
+        return Ok(None);
+    };
+    let explicit = explicit
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .with_context(|| format!("Cargo package.workspace in {manifest} must be a non-empty string"))?;
+    let parent = Path::new(manifest).parent().unwrap_or_else(|| Path::new(""));
+    let root = resolve_repository_relative(parent, Path::new(explicit)).with_context(|| format!("resolve Cargo package.workspace {explicit:?} in {manifest}"))?;
+    let workspace_manifest = root.join("Cargo.toml");
+    workspace_manifest
+        .to_str()
+        .map(str::to_owned)
+        .map(Some)
+        .with_context(|| format!("explicit Cargo workspace path in {manifest} is not UTF-8"))
+}
+
+fn resolve_repository_relative(base: &Path, relative: &Path) -> Result<PathBuf> {
+    if relative.is_absolute() {
+        bail!("absolute workspace paths are unsupported");
+    }
+    let mut resolved = base.to_path_buf();
+    for component in relative.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(value) => resolved.push(value),
+            Component::ParentDir if resolved.pop() => {}
+            Component::ParentDir => bail!("workspace path escapes the repository"),
+            Component::RootDir | Component::Prefix(_) => bail!("absolute workspace paths are unsupported"),
+        }
+    }
+    Ok(resolved)
+}
+
 fn workspace_lints(parsed: &toml::Table, manifest: &str) -> Result<Option<toml::Table>> {
     let Some(workspace) = parsed.get("workspace") else {
         return Ok(None);
@@ -84,6 +128,10 @@ fn workspace_lints(parsed: &toml::Table, manifest: &str) -> Result<Option<toml::
 }
 
 fn read_manifest(path: &Path) -> Result<toml::Table> {
+    let metadata = fs::symlink_metadata(path).with_context(|| format!("inspect Cargo manifest {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("Cargo lint manifest must be a regular non-symlink file: {}", path.display());
+    }
     let source = fs::read_to_string(path).with_context(|| format!("read Cargo manifest {}", path.display()))?;
     source.parse::<toml::Table>().with_context(|| format!("parse Cargo manifest {}", path.display()))
 }

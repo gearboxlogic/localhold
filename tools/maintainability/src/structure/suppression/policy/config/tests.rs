@@ -232,6 +232,10 @@ fn python_command_arrays_cannot_split_lint_arguments_from_cargo() {
         "script/check.py",
         "subprocess.run([\"cargo\", \"clippy\", \"--\", chr(45) + \"A\", \"warnings\"])\n"
     ));
+    assert!(weakening_token_for_surface(
+        "script/check.py",
+        "os.execlp(\"cargo\", \"cargo\", \"clippy\", \"--\", \"-\" + \"A\", \"warnings\")\n"
+    ));
 }
 
 #[test]
@@ -589,6 +593,24 @@ fn command_policy_scans_awk_program_files() {
     git(workspace.path(), &["init", "-q"]);
     git(workspace.path(), &["add", "."]);
 
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
+}
+
+#[test]
+fn command_policy_rejects_find_and_xargs_command_indirection() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::write(workspace.path().join("quality/args.txt"), "quality/lint.txt\n").expect("xargs input");
+    fs::write(workspace.path().join("quality/lint.txt"), "cargo clippy -- -A warnings\n").expect("weakening command");
+    fs::write(workspace.path().join("Justfile"), "lint:\n    find /tmp -maxdepth 0 -exec sh quality/lint.txt \\;\n").expect("find invocation");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
+
+    fs::write(workspace.path().join("Justfile"), "lint:\n    xargs -a quality/args.txt sh\n").expect("xargs invocation");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
 }

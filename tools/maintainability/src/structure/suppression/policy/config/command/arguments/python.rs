@@ -12,6 +12,9 @@ pub(super) fn has_adjacent_string_literals(source: &str) -> bool {
 
 pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
     let normalized = join_implicit_continuations(source);
+    if references_exec_or_spawn_api(&normalized) && references_rust_tool(&normalized) {
+        return true;
+    }
     if references_process_api(&normalized) && references_rust_tool(&normalized) && process::has_non_literal_arguments(&normalized) {
         return true;
     }
@@ -27,7 +30,12 @@ fn has_adjacent_string_literals_in(source: &str) -> bool {
 
 fn references_process_api(source: &str) -> bool {
     let source = source.to_ascii_lowercase();
-    ["subprocess", "os.system", "os.popen", "popen(", "execv", "spawn"].iter().any(|name| source.contains(name))
+    ["subprocess", "os.system", "os.popen", "popen("].iter().any(|name| source.contains(name)) || references_exec_or_spawn_api(&source)
+}
+
+fn references_exec_or_spawn_api(source: &str) -> bool {
+    let source = source.to_ascii_lowercase();
+    ["execl", "execv", "spawn"].iter().any(|name| source.contains(name))
 }
 
 fn references_rust_tool(source: &str) -> bool {
@@ -258,6 +266,11 @@ mod tests {
         ));
         assert!(has_opaque_process_arguments(
             "from subprocess import run\narguments = ['cargo', 'clippy']\nrun(arguments)\n"
+        ));
+        assert!(has_opaque_process_arguments(r#"os.execlp("cargo", "cargo", "clippy", "--", "-" + "A", "warnings")"#));
+        assert!(has_opaque_process_arguments(
+            r#"from os import execvpe
+execvpe("cargo", ["cargo", "clippy", "--", "-" + "A", "warnings"], environment)"#
         ));
         assert!(!has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", r"\x2dA", "warnings"])"#));
         assert!(!has_opaque_process_arguments(

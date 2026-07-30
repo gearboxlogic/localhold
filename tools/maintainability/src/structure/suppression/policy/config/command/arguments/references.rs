@@ -150,7 +150,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
     let command = tool_basename(command_token).to_ascii_lowercase();
     let arguments = &tokens[command_index.saturating_add(1)..];
     let selected = match command.as_str() {
-        "eval" | "iex" | "invoke-expression" => SelectedInput::Opaque,
+        "eval" | "iex" | "invoke-expression" | "parallel" | "parallel.exe" | "xargs" | "xargs.exe" => SelectedInput::Opaque,
         "bash" | "bash.exe" | "dash" | "dash.exe" | "fish" | "fish.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe" => shell_input(arguments),
         "python" | "python.exe" | "python3" | "python3.exe" => python_input(arguments),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),
@@ -160,6 +160,9 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "awk" | "awk.exe" | "gawk" | "gawk.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe" => {
             let (inputs, opaque) = program_file_inputs(arguments, &AWK_PROGRAM_FILES);
             return (Vec::new(), opaque || !inputs.is_empty());
+        }
+        "find" | "find.exe" => {
+            return (Vec::new(), find_command_action_is_opaque(arguments));
         }
         "sed" | "sed.exe" => {
             let (inputs, opaque) = program_file_inputs(arguments, &SED_PROGRAM_FILES);
@@ -327,6 +330,10 @@ fn positional_interpreter_input(arguments: &[String]) -> SelectedInput<'_> {
         return SelectedInput::Opaque;
     }
     SelectedInput::Literal(argument)
+}
+
+fn find_command_action_is_opaque(arguments: &[String]) -> bool {
+    arguments.iter().any(|argument| matches!(argument.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir"))
 }
 
 const AWK_PROGRAM_FILES: ProgramFileSyntax = ProgramFileSyntax::new(&["--exec", "--file"], &['E', 'f'], &['F', 'e', 'v'], &['W']);
@@ -534,6 +541,10 @@ mod tests {
         assert_eq!(inputs("gawk --fil=quality/lint.awk /etc/hosts"), (Vec::new(), true));
         assert_eq!(inputs("gawk -W exec=quality/lint.awk /etc/hosts"), (Vec::new(), true));
         assert_eq!(inputs("awk -f $SCRIPT /etc/hosts"), (Vec::new(), true));
+        assert_eq!(inputs(r"find /tmp -maxdepth 0 -exec sh quality/lint.txt \;"), (Vec::new(), true));
+        assert_eq!(inputs("find /tmp -maxdepth 0 -print"), (Vec::new(), false));
+        assert_eq!(inputs("xargs -a quality/args.txt sh"), (Vec::new(), true));
+        assert_eq!(inputs("parallel sh :::: quality/args.txt"), (Vec::new(), true));
         assert_eq!(inputs("sed -nf quality/lint.sed /etc/hosts"), (vec!["quality/lint.sed".to_owned()], false));
         assert_eq!(inputs("sed --file=quality/lint.sed /etc/hosts"), (vec!["quality/lint.sed".to_owned()], false));
         assert_eq!(inputs("sed -f $SCRIPT /etc/hosts"), (Vec::new(), true));

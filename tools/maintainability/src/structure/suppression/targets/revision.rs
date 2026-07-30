@@ -1,10 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Component, Path};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use super::SourceCategory;
+use super::{SourceCategory, TargetRoots};
 
 #[derive(Clone, Copy)]
 struct DeclaredTargetKind {
@@ -14,7 +14,7 @@ struct DeclaredTargetKind {
 }
 
 pub(in crate::structure::suppression) struct RevisionTargets {
-    pub(in crate::structure::suppression) roots: BTreeMap<String, SourceCategory>,
+    pub(in crate::structure::suppression) roots: TargetRoots,
     pub(in crate::structure::suppression) rust_sources: BTreeSet<String>,
 }
 
@@ -68,7 +68,7 @@ fn revision_manifest(workspace: &Path, revision: &str) -> Result<String> {
     String::from_utf8(output.stdout).context("suppression comparison Cargo.toml is not UTF-8")
 }
 
-fn manifest_target_sources(manifest: &str, known: &BTreeSet<String>) -> Result<BTreeMap<String, SourceCategory>> {
+fn manifest_target_sources(manifest: &str, known: &BTreeSet<String>) -> Result<TargetRoots> {
     let manifest: toml::Value = toml::from_str(manifest).context("parse suppression comparison Cargo.toml")?;
     let package = manifest
         .get("package")
@@ -78,7 +78,7 @@ fn manifest_target_sources(manifest: &str, known: &BTreeSet<String>) -> Result<B
         .get("name")
         .and_then(toml::Value::as_str)
         .context("suppression comparison package must have a string name")?;
-    let mut roots = BTreeMap::new();
+    let mut roots = TargetRoots::default();
     add_library_target(&manifest, package, known, &mut roots)?;
     add_automatic_targets(package, known, &mut roots)?;
     for kind in [
@@ -109,42 +109,42 @@ fn manifest_target_sources(manifest: &str, known: &BTreeSet<String>) -> Result<B
     Ok(roots)
 }
 
-fn add_library_target(manifest: &toml::Value, package: &toml::map::Map<String, toml::Value>, known: &BTreeSet<String>, roots: &mut BTreeMap<String, SourceCategory>) -> Result<()> {
+fn add_library_target(manifest: &toml::Value, package: &toml::map::Map<String, toml::Value>, known: &BTreeSet<String>, roots: &mut TargetRoots) -> Result<()> {
     if let Some(target) = manifest.get("lib") {
         let target = target.as_table().context("suppression comparison library target must be a table")?;
         let path = target.get("path").map_or(Ok("src/lib.rs"), |value| {
             value.as_str().context("suppression comparison library target path must be a string")
         })?;
-        return insert_target(roots, known, path, SourceCategory::Production);
+        return insert_target(roots, known, path, SourceCategory::Production, "lib");
     }
     if package_auto_target(package, "autolib")? && known.contains("src/lib.rs") {
-        insert_target(roots, known, "src/lib.rs", SourceCategory::Production)?;
+        insert_target(roots, known, "src/lib.rs", SourceCategory::Production, "lib")?;
     }
     Ok(())
 }
 
-fn add_automatic_targets(package: &toml::map::Map<String, toml::Value>, known: &BTreeSet<String>, roots: &mut BTreeMap<String, SourceCategory>) -> Result<()> {
+fn add_automatic_targets(package: &toml::map::Map<String, toml::Value>, known: &BTreeSet<String>, roots: &mut TargetRoots) -> Result<()> {
     if package_auto_target(package, "autobins")? {
         if known.contains("src/main.rs") {
-            insert_target(roots, known, "src/main.rs", SourceCategory::Production)?;
+            insert_target(roots, known, "src/main.rs", SourceCategory::Production, "bin")?;
         }
-        add_conventional_targets(roots, known, "src/bin", SourceCategory::Production)?;
+        add_conventional_targets(roots, known, "src/bin", SourceCategory::Production, "bin")?;
     }
-    for (setting, directory, category) in [
-        ("autoexamples", "examples", SourceCategory::Production),
-        ("autotests", "tests", SourceCategory::Test),
-        ("autobenches", "benches", SourceCategory::Benchmark),
+    for (setting, directory, category, kind) in [
+        ("autoexamples", "examples", SourceCategory::Production, "example"),
+        ("autotests", "tests", SourceCategory::Test, "test"),
+        ("autobenches", "benches", SourceCategory::Benchmark, "bench"),
     ] {
         if package_auto_target(package, setting)? {
-            add_conventional_targets(roots, known, directory, category)?;
+            add_conventional_targets(roots, known, directory, category, kind)?;
         }
     }
     Ok(())
 }
 
-fn add_conventional_targets(roots: &mut BTreeMap<String, SourceCategory>, known: &BTreeSet<String>, directory: &str, category: SourceCategory) -> Result<()> {
+fn add_conventional_targets(roots: &mut TargetRoots, known: &BTreeSet<String>, directory: &str, category: SourceCategory, kind: &str) -> Result<()> {
     for path in known.iter().filter(|path| is_conventional_target(path, directory)) {
-        insert_target(roots, known, path, category)?;
+        insert_target(roots, known, path, category, kind)?;
     }
     Ok(())
 }
@@ -158,13 +158,7 @@ fn is_conventional_target(path: &str, directory: &str) -> bool {
         || matches!(components.as_slice(), [Component::Normal(_), Component::Normal(file)] if *file == "main.rs")
 }
 
-fn add_declared_targets(
-    manifest: &toml::Value,
-    kind: DeclaredTargetKind,
-    package_name: &str,
-    known: &BTreeSet<String>,
-    roots: &mut BTreeMap<String, SourceCategory>,
-) -> Result<()> {
+fn add_declared_targets(manifest: &toml::Value, kind: DeclaredTargetKind, package_name: &str, known: &BTreeSet<String>, roots: &mut TargetRoots) -> Result<()> {
     let Some(targets) = manifest.get(kind.name) else {
         return Ok(());
     };
@@ -174,7 +168,7 @@ fn add_declared_targets(
     for target in targets {
         let target = target.as_table().with_context(|| format!("suppression comparison {} target must be a table", kind.name))?;
         let path = declared_target_path(target, kind, package_name, known)?;
-        insert_target(roots, known, &path, kind.category)?;
+        insert_target(roots, known, &path, kind.category, kind.name)?;
     }
     Ok(())
 }
@@ -204,7 +198,7 @@ fn declared_target_path(target: &toml::map::Map<String, toml::Value>, kind: Decl
     }
 }
 
-fn add_build_target(package: &toml::map::Map<String, toml::Value>, known: &BTreeSet<String>, roots: &mut BTreeMap<String, SourceCategory>) -> Result<()> {
+fn add_build_target(package: &toml::map::Map<String, toml::Value>, known: &BTreeSet<String>, roots: &mut TargetRoots) -> Result<()> {
     let path = match package.get("build") {
         Some(toml::Value::Boolean(false)) => return Ok(()),
         Some(toml::Value::Boolean(true)) | None => "build.rs",
@@ -212,20 +206,17 @@ fn add_build_target(package: &toml::map::Map<String, toml::Value>, known: &BTree
         Some(_) => bail!("suppression comparison package build target must be a boolean or string"),
     };
     if package.get("build").is_some() || known.contains(path) {
-        insert_target(roots, known, path, SourceCategory::Production)?;
+        insert_target(roots, known, path, SourceCategory::Production, "custom-build")?;
     }
     Ok(())
 }
 
-fn insert_target(roots: &mut BTreeMap<String, SourceCategory>, known: &BTreeSet<String>, path: &str, category: SourceCategory) -> Result<()> {
+fn insert_target(roots: &mut TargetRoots, known: &BTreeSet<String>, path: &str, category: SourceCategory, kind: &str) -> Result<()> {
     validate_source_path(path)?;
     if !known.contains(path) {
         bail!("suppression comparison Cargo target source is missing: {path:?}");
     }
-    if roots.insert(path.to_owned(), category).is_some_and(|existing| existing != category) {
-        bail!("suppression comparison Cargo target source has conflicting categories: {path:?}");
-    }
-    Ok(())
+    roots.insert(path.to_owned(), category, format!("{kind}:{path}"))
 }
 
 fn package_auto_target(package: &toml::map::Map<String, toml::Value>, key: &str) -> Result<bool> {

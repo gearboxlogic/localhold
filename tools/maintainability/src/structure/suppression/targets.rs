@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -11,19 +11,34 @@ use super::SourceCategory;
 mod revision;
 pub(super) use revision::{RevisionTargets, revision_root_package_target_sources};
 
-pub(super) fn root_package_target_sources(workspace: &Path) -> Result<BTreeMap<String, SourceCategory>> {
+#[derive(Default)]
+pub(super) struct TargetRoots {
+    pub(super) categories: BTreeMap<String, SourceCategory>,
+    pub(super) identities: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl TargetRoots {
+    pub(super) fn insert(&mut self, path: String, category: SourceCategory, identity: String) -> Result<()> {
+        if self.categories.insert(path.clone(), category).is_some_and(|existing| existing != category) {
+            bail!("Cargo target source {path:?} has conflicting governance categories");
+        }
+        self.identities.entry(path).or_default().insert(identity);
+        Ok(())
+    }
+}
+
+pub(super) fn root_package_target_sources(workspace: &Path) -> Result<TargetRoots> {
     let workspace = fs::canonicalize(workspace).context("resolve workspace for Cargo target inventory")?;
     let manifest = fs::canonicalize(workspace.join("Cargo.toml")).context("resolve root package manifest for Cargo target inventory")?;
     let metadata = cargo_metadata(&workspace, &manifest)?;
     let targets = package_targets(&metadata, &manifest)?;
-    let mut sources = BTreeMap::new();
+    let mut sources = TargetRoots::default();
     for target in targets {
         let source = target.get("src_path").and_then(Value::as_str).context("root package target has no source path")?;
         let path = checked_target_path(&workspace, Path::new(source))?;
-        let category = target_category(target)?;
-        if sources.insert(path.clone(), category).is_some_and(|existing| existing != category) {
-            bail!("Cargo target source {path:?} has conflicting governance categories");
-        }
+        let kind = target_kind(target)?;
+        let category = target_category(kind);
+        sources.insert(path.clone(), category, format!("{kind}:{path}"))?;
     }
     Ok(sources)
 }
@@ -108,7 +123,7 @@ fn checked_target_path(workspace: &Path, path: &Path) -> Result<String> {
     Ok(relative.to_str().context("Cargo target source path is not UTF-8")?.replace('\\', "/"))
 }
 
-fn target_category(target: &Value) -> Result<SourceCategory> {
+fn target_kind(target: &Value) -> Result<&'static str> {
     let kinds = target
         .get("kind")
         .and_then(Value::as_array)
@@ -119,11 +134,22 @@ fn target_category(target: &Value) -> Result<SourceCategory> {
     if kinds.is_empty() {
         bail!("root package target kind list is empty");
     }
-    if kinds.contains(&"bench") {
-        Ok(SourceCategory::Benchmark)
-    } else if kinds.contains(&"test") {
-        Ok(SourceCategory::Test)
-    } else {
-        Ok(SourceCategory::Production)
+    for kind in ["bench", "test", "example", "custom-build", "bin"] {
+        if kinds.contains(&kind) {
+            return Ok(kind);
+        }
+    }
+    kinds
+        .iter()
+        .all(|kind| matches!(*kind, "lib" | "rlib" | "dylib" | "cdylib" | "staticlib" | "proc-macro"))
+        .then_some("lib")
+        .context("root package target has an unsupported kind")
+}
+
+fn target_category(kind: &str) -> SourceCategory {
+    match kind {
+        "bench" => SourceCategory::Benchmark,
+        "test" => SourceCategory::Test,
+        _ => SourceCategory::Production,
     }
 }

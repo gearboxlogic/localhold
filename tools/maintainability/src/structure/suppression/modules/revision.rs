@@ -1,16 +1,16 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
 use super::{ExpandedSources, expand_sources, normalized_module_path, select_external_module};
-use crate::structure::suppression::SourceCategory;
+use crate::structure::suppression::targets::TargetRoots;
 
 pub(in crate::structure::suppression) fn expand_revision_target_sources(
     workspace: &Path,
     revision: &str,
-    roots: BTreeMap<String, SourceCategory>,
+    roots: TargetRoots,
     rust_sources: &BTreeSet<String>,
     is_structural: impl Fn(&str) -> bool,
 ) -> Result<ExpandedSources> {

@@ -11,18 +11,20 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token(source:
 
 pub(in crate::structure::suppression::policy::config) fn weakening_token_for_surface(path: &str, source: &str) -> bool {
     let case_insensitive_tools = has_case_insensitive_tool_names(path);
-    let embedded_commands = super::yaml::run_commands(path, source);
+    let source = normalized_source_for_surface(path, source);
+    let embedded_commands = super::yaml::run_commands(path, &source);
     if is_yaml(path) {
         return embedded_commands.iter().any(|command| weakening_token_with_case(command, case_insensitive_tools));
     }
-    weakening_token_with_case(source, case_insensitive_tools) || embedded_commands.iter().any(|command| weakening_token_with_case(command, case_insensitive_tools))
+    weakening_token_with_case(&source, case_insensitive_tools) || embedded_commands.iter().any(|command| weakening_token_with_case(command, case_insensitive_tools))
 }
 
 pub(super) fn direct_rust_sources_for_surface(path: &str, source: &str) -> (BTreeSet<String>, bool) {
     let case_insensitive_tools = has_case_insensitive_tool_names(path);
+    let source = normalized_source_for_surface(path, source);
     let mut sources = BTreeSet::new();
-    let embedded_commands = super::yaml::run_commands(path, source);
-    let mut unresolved = !is_yaml(path) && collect_direct_rust_sources(source, case_insensitive_tools, &mut sources);
+    let embedded_commands = super::yaml::run_commands(path, &source);
+    let mut unresolved = !is_yaml(path) && collect_direct_rust_sources(&source, case_insensitive_tools, &mut sources);
     for command in embedded_commands {
         unresolved |= collect_direct_rust_sources(&command, case_insensitive_tools, &mut sources);
     }
@@ -37,11 +39,12 @@ pub(in crate::structure::suppression::policy::config) fn has_sourced_file_indire
     if !supports_shell_source(path) {
         return false;
     }
-    let embedded_commands = super::yaml::run_commands(path, source);
+    let source = normalized_source_for_surface(path, source);
+    let embedded_commands = super::yaml::run_commands(path, &source);
     if is_yaml(path) {
         return embedded_commands.iter().any(|command| contains_source_command(command));
     }
-    contains_source_command(source) || embedded_commands.iter().any(|command| contains_source_command(command))
+    contains_source_command(&source) || embedded_commands.iter().any(|command| contains_source_command(command))
 }
 
 fn contains_source_command(source: &str) -> bool {
@@ -92,6 +95,18 @@ fn is_yaml(path: &str) -> bool {
         .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "yml" | "yaml"))
 }
 
+fn normalized_source_for_surface(path: &str, source: &str) -> String {
+    if Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ps1"))
+    {
+        source.replace("`\r\n", "").replace("`\n", "")
+    } else {
+        source.to_owned()
+    }
+}
+
 fn weakening_token_with_case(source: &str, case_insensitive_tools: bool) -> bool {
     let logical = source.replace("\\\r\n", "").replace("\\\n", "");
     logical
@@ -111,12 +126,24 @@ fn weakening_rust_command(command: &str, case_insensitive_tools: bool) -> bool {
     if !tokens.iter().any(|token| is_rust_tool_token(token, case_insensitive_tools)) {
         return false;
     }
-    cargo_changes_directory_before_compiler_arguments(&tokens, case_insensitive_tools)
+    forwards_dynamic_arguments(&tokens)
+        || declares_rust_tool_alias(&tokens)
+        || cargo_changes_directory_before_compiler_arguments(&tokens, case_insensitive_tools)
         || rust_response_file(&tokens, case_insensitive_tools)
         || tokens
             .iter()
             .any(|token| token == "-A" || token.starts_with("-A") && token.len() > 2 || token == "-W" || token.starts_with("-W") && token.len() > 2 || is_long_lint_option(token))
         || tokens.iter().any(|token| token.starts_with("--config")) && !is_cargo_deny_command(&tokens, case_insensitive_tools)
+}
+
+fn forwards_dynamic_arguments(tokens: &[String]) -> bool {
+    tokens.iter().any(|token| {
+        matches!(token.to_ascii_lowercase().as_str(), "$@" | "$*" | "${@}" | "${*}" | "$args" | "@args" | "$argv" | "%*") || token.contains("${args[") || token.contains("${argv[")
+    })
+}
+
+fn declares_rust_tool_alias(tokens: &[String]) -> bool {
+    tokens.first().is_some_and(|token| matches!(token.to_ascii_lowercase().as_str(), "alias" | "set-alias"))
 }
 
 fn is_long_lint_option(token: &str) -> bool {

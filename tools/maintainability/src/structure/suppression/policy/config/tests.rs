@@ -93,6 +93,7 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_token("rustc -D warnings --warn=warnings source.rs"));
     assert!(weakening_token("rustc -D warnings --force-warn=unused_variables source.rs"));
     assert!(weakening_token("LABEL=@not-a-response rustc @policy/lints.args source.rs"));
+    assert!(weakening_token("run_cargo() { cargo \"$@\"; }\nrun_cargo clippy -- -A warnings"));
     assert!(weakening_token("cargo rustc -- @policy/lints.args"));
     assert!(!weakening_token("cargo run -- @application-argument"));
     assert!(weakening_token("sh -c \"cargo --config net.offline=true check # literal\""));
@@ -100,6 +101,12 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(!weakening_token("gitleaks --config policy.toml # cargo output"));
     assert!(!weakening_token("cargo build\ncc -Wall -Wextra"));
     assert!(!weakening_token("hold doctor --allow-downloads"));
+}
+
+#[test]
+fn powershell_continuations_cannot_split_lint_arguments_from_cargo() {
+    assert!(weakening_token_for_surface("script/check.ps1", "cargo clippy -- `\r\n  -A warnings"));
+    assert!(weakening_token_for_surface("script/check.ps1", "cargo clippy -- `\n  --allow=warnings"));
 }
 
 #[test]

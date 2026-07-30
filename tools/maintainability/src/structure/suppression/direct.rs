@@ -1,16 +1,17 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path};
 
 use anyhow::{Context, Result, bail};
 
+use super::targets::TargetRoots;
 use super::{SourceCategory, modules};
 use crate::structure::suppression::source::SourceScanner;
 
 pub(in crate::structure::suppression) fn reject_direct_source_suppressions(workspace: &Path, candidates: &BTreeSet<String>) -> Result<()> {
     let canonical_workspace = fs::canonicalize(workspace).context("resolve workspace for directly compiled Rust sources")?;
-    let mut roots = BTreeMap::new();
+    let mut roots = TargetRoots::default();
     for candidate in candidates {
         validate_direct_source_path(candidate)?;
         let absolute = workspace.join(candidate);
@@ -31,7 +32,7 @@ pub(in crate::structure::suppression) fn reject_direct_source_suppressions(works
         if relative != Path::new(candidate) {
             bail!("directly compiled Rust source cannot traverse symlinked path components: {candidate:?}");
         }
-        roots.insert(candidate.clone(), SourceCategory::Production);
+        roots.insert(candidate.clone(), SourceCategory::Production, format!("direct-rustc:{candidate}"))?;
     }
     let sources = modules::expand_target_sources(workspace, roots, |_| false)?;
     for (path, category) in sources.categories {

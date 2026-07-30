@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -10,14 +10,27 @@ use syn::visit::{self, Visit};
 use syn::{Meta, Token};
 
 use super::SourceCategory;
+use super::targets::TargetRoots;
 use crate::structure::syntax::{ProductionCfgContext, production_cfg_context};
 
+mod identities;
 mod revision;
 pub(super) use revision::expand_revision_target_sources;
 
 pub(super) struct ExpandedSources {
     pub(super) categories: BTreeMap<String, SourceCategory>,
     pub(super) relations: BTreeMap<(String, String), String>,
+    pub(super) target_identities: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl ExpandedSources {
+    pub(super) fn target_component(&self, path: &str) -> Result<String> {
+        let identities = self
+            .target_identities
+            .get(path)
+            .with_context(|| format!("Cargo target source {path:?} has no target identity"))?;
+        Ok(identities::component(identities))
+    }
 }
 
 struct DiscoveredModule {
@@ -28,7 +41,7 @@ struct DiscoveredModule {
     item: String,
 }
 
-pub(super) fn expand_target_sources(workspace: &Path, roots: BTreeMap<String, SourceCategory>, is_structural: impl Fn(&str) -> bool) -> Result<ExpandedSources> {
+pub(super) fn expand_target_sources(workspace: &Path, roots: TargetRoots, is_structural: impl Fn(&str) -> bool) -> Result<ExpandedSources> {
     expand_sources(
         roots,
         is_structural,
@@ -39,13 +52,16 @@ pub(super) fn expand_target_sources(workspace: &Path, roots: BTreeMap<String, So
 }
 
 fn expand_sources(
-    roots: BTreeMap<String, SourceCategory>,
+    roots: TargetRoots,
     is_structural: impl Fn(&str) -> bool,
     mut read_source: impl FnMut(&str) -> Result<String>,
     resolve_module: impl Fn(&Path, &str) -> Result<PathBuf>,
     check_path: impl Fn(&Path) -> Result<String>,
 ) -> Result<ExpandedSources> {
-    let mut sources = roots;
+    let TargetRoots {
+        categories: mut sources,
+        identities: root_identities,
+    } = roots;
     let mut relations = BTreeMap::new();
     let mut pending = sources
         .iter()
@@ -71,7 +87,12 @@ fn expand_sources(
             pending.push_back((module, discovered.child_base, discovered.category));
         }
     }
-    Ok(ExpandedSources { categories: sources, relations })
+    let target_identities = identities::propagate(&root_identities, &relations);
+    Ok(ExpandedSources {
+        categories: sources,
+        relations,
+        target_identities,
+    })
 }
 
 fn register_source(sources: &mut BTreeMap<String, SourceCategory>, module: &str, category: SourceCategory) -> Result<bool> {

@@ -184,7 +184,8 @@ fn scan_with(
         }
         let parsed = syntax.get(path).with_context(|| format!("Cargo target suppression source cache is missing {path:?}"))?;
         let targets = external_targets.get(path).cloned().unwrap_or_default();
-        sites.extend(SourceScanner::scan_with_external_targets(path, "cargo-target", category, parsed, &targets)?);
+        let component = target_sources.target_component(path)?;
+        sites.extend(SourceScanner::scan_with_external_targets(path, &component, category, parsed, &targets)?);
     }
     sites.sort();
     Ok(sites)

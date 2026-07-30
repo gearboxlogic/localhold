@@ -110,6 +110,14 @@ fn powershell_continuations_cannot_split_lint_arguments_from_cargo() {
 }
 
 #[test]
+fn python_command_arrays_cannot_split_lint_arguments_from_cargo() {
+    assert!(weakening_token_for_surface(
+        "script/check.py",
+        "subprocess.run([\n    \"cargo\", # tool\n    \"clippy\",\n    \"--\",\n    \"-A\",\n    \"warnings\",\n])\n"
+    ));
+}
+
+#[test]
 fn folded_yaml_commands_are_scanned_as_executed() {
     assert!(weakening_token_for_surface(
         ".github/workflows/ci.yml",
@@ -342,6 +350,16 @@ fn command_policy_discovers_directly_compiled_rust_sources() {
     assert!(reject_checked_in_weakening(workspace.path()).expect("informational compiler command").is_empty());
 
     fs::write(workspace.path().join("script/check.sh"), "rustc \"$DIRECT_SOURCE\"\n").expect("opaque direct compiler command");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("without auditable repository-relative .rs inputs"));
+
+    fs::create_dir(workspace.path().join("misc")).expect("alternate compiler directory");
+    fs::write(workspace.path().join("check.rs"), "fn main() {}\n").expect("root Rust source");
+    fs::write(workspace.path().join("misc/check.rs"), "fn main() {}\n").expect("alternate Rust source");
+    fs::write(workspace.path().join("script/check.sh"), "cd misc && rustc --version\n").expect("relocated informational command");
+    assert!(reject_checked_in_weakening(workspace.path()).expect("relocated informational compiler command").is_empty());
+
+    fs::write(workspace.path().join("script/check.sh"), "cd misc && rustc check.rs\n").expect("relocated compiler command");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("without auditable repository-relative .rs inputs"));
 }

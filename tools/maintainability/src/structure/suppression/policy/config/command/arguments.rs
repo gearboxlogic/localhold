@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+mod python;
 mod tokens;
 use tokens::{command_tokens, command_without_comment};
 
@@ -25,8 +26,10 @@ pub(super) fn direct_rust_sources_for_surface(path: &str, source: &str) -> (BTre
     let mut sources = BTreeSet::new();
     let embedded_commands = super::yaml::run_commands(path, &source);
     let mut unresolved = !is_yaml(path) && collect_direct_rust_sources(&source, case_insensitive_tools, &mut sources);
+    unresolved |= !is_yaml(path) && supports_shell_working_directory(path) && directory_change_precedes_direct_compiler(&source, case_insensitive_tools);
     for command in embedded_commands {
         unresolved |= collect_direct_rust_sources(&command, case_insensitive_tools, &mut sources);
+        unresolved |= directory_change_precedes_direct_compiler(&command, case_insensitive_tools);
     }
     (sources, unresolved)
 }
@@ -96,14 +99,10 @@ fn is_yaml(path: &str) -> bool {
 }
 
 fn normalized_source_for_surface(path: &str, source: &str) -> String {
-    if Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("ps1"))
-    {
-        source.replace("`\r\n", "").replace("`\n", "")
-    } else {
-        source.to_owned()
+    match Path::new(path).extension().and_then(|extension| extension.to_str()) {
+        Some(extension) if extension.eq_ignore_ascii_case("ps1") => source.replace("`\r\n", "").replace("`\n", ""),
+        Some(extension) if extension.eq_ignore_ascii_case("py") => python::join_implicit_continuations(source),
+        _ => source.to_owned(),
     }
 }
 
@@ -173,6 +172,38 @@ fn collect_direct_rust_sources(source: &str, case_insensitive_tools: bool, sourc
         }
     }
     unresolved
+}
+
+fn directory_change_precedes_direct_compiler(source: &str, case_insensitive_tools: bool) -> bool {
+    let mut changed_directory = false;
+    for tokens in tokens::normalized_shell_commands(source) {
+        changed_directory |= is_directory_change_command(&tokens);
+        if changed_directory
+            && tokens.iter().enumerate().any(|(index, token)| {
+                is_literal_direct_compiler_token(token, case_insensitive_tools)
+                    && !tokens[..index].iter().any(|preceding| is_cargo_tool_token(preceding, case_insensitive_tools))
+                    && !is_informational_compiler_invocation(&tokens[index.saturating_add(1)..])
+            })
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_directory_change_command(tokens: &[String]) -> bool {
+    tokens
+        .iter()
+        .map(|word| word.trim_matches(['(', ')', '{', '}']))
+        .find(|word| !word.is_empty() && !is_shell_command_prefix(word) && !is_environment_assignment(word))
+        .is_some_and(|word| matches!(word.to_ascii_lowercase().as_str(), "cd" | "chdir" | "pushd" | "set-location"))
+}
+
+fn supports_shell_working_directory(path: &str) -> bool {
+    !Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
 }
 
 fn is_literal_direct_compiler_token(token: &str, case_insensitive: bool) -> bool {

@@ -99,6 +99,14 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_token("TOOL=cargo\ncommand \"$TOOL\" clippy -- -A warnings"));
     assert!(weakening_token_for_surface("script/check.cmd", "set TOOL=cargo\n%TOOL% clippy -- -A warnings"));
     assert!(!weakening_token_for_surface("script/check.ps1", "$actual = (Get-FileHash -Algorithm SHA256 $path).Hash\n"));
+    assert!(weakening_token("printf '%s\\n' clippy -- -A warnings | xargs cargo"));
+    assert!(weakening_token("printf '%s\\n' check | xargs -- cargo"));
+    assert!(weakening_token("cargo clippy -- -{A,A}warnings"));
+    assert!(weakening_token("cargo clippy -- --{allow,warn}=warnings"));
+    assert!(weakening_token("cargo clippy -- -{A..Z}warnings"));
+    assert!(!weakening_token("cargo nextest run {{ ARGS }}"));
+    assert!(!weakening_token("cargo build | grep -A 2"));
+    assert!(!weakening_token("printf check | xargs echo | cargo build"));
     assert!(weakening_token("LINT_FLAGS='-A warnings'\ncargo clippy -- $LINT_FLAGS"));
     assert!(weakening_token("cargo rustc -- @policy/lints.args"));
     assert!(!weakening_token("cargo run -- @application-argument"));

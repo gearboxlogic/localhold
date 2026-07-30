@@ -113,6 +113,14 @@ fn normalized_source_for_surface(path: &str, source: &str) -> String {
 
 fn weakening_token_with_case(source: &str, case_insensitive_tools: bool) -> bool {
     let logical = join_command_continuations(source);
+    if logical
+        .split(['\n', ';', '&', '|'])
+        .map(command_without_comment)
+        .map(command_tokens)
+        .any(|tokens| argument_feeder_invokes_rust_tool(&tokens, case_insensitive_tools))
+    {
+        return true;
+    }
     logical
         .split(['\n', ';', '&', '|'])
         .map(command_without_comment)
@@ -145,12 +153,43 @@ fn weakening_rust_command(command: &str, case_insensitive_tools: bool) -> bool {
         || declares_rust_tool_alias(&tokens)
         || cargo_changes_directory_before_compiler_arguments(&tokens, case_insensitive_tools)
         || rust_response_file(&tokens, case_insensitive_tools)
+        || has_brace_expansion_arguments(&tokens, case_insensitive_tools)
         || injects_crate_attribute(&tokens)
         || lint_option
         || tokens
             .iter()
             .enumerate()
             .any(|(index, token)| token.starts_with("--config") && !is_cargo_deny_config_argument(&tokens, index, case_insensitive_tools))
+}
+
+fn argument_feeder_invokes_rust_tool(tokens: &[String], case_insensitive_tools: bool) -> bool {
+    tokens.iter().enumerate().any(|(index, token)| {
+        matches!(tool_basename(token).to_ascii_lowercase().as_str(), "xargs" | "xargs.exe" | "parallel" | "parallel.exe")
+            && tokens[index.saturating_add(1)..]
+                .iter()
+                .any(|argument| is_rust_tool_token(argument, case_insensitive_tools))
+    })
+}
+
+fn has_brace_expansion_arguments(tokens: &[String], case_insensitive_tools: bool) -> bool {
+    let Some(tool_index) = tokens.iter().position(|token| is_rust_tool_token(token, case_insensitive_tools)) else {
+        return false;
+    };
+    tokens[tool_index.saturating_add(1)..].iter().any(|token| contains_shell_brace_expansion(token))
+}
+
+fn contains_shell_brace_expansion(token: &str) -> bool {
+    let mut remainder = token;
+    while let Some((_, after_open)) = remainder.split_once('{') {
+        let Some((body, after_close)) = after_open.split_once('}') else {
+            return false;
+        };
+        if body.contains(',') || body.contains("..") {
+            return true;
+        }
+        remainder = after_close;
+    }
+    false
 }
 
 fn has_dynamic_command_name(command: &str, tokens: &[String]) -> bool {

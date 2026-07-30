@@ -164,6 +164,7 @@ fn weakening_rust_command(command: &str, case_insensitive_tools: bool) -> bool {
         || cargo_changes_directory_before_compiler_arguments(&tokens, case_insensitive_tools)
         || cargo_manifest_escapes_tools(&tokens, case_insensitive_tools)
         || rust_response_file(&tokens, case_insensitive_tools)
+        || has_pathname_expansion_arguments(&tokens, case_insensitive_tools)
         || has_brace_expansion_arguments(&tokens, case_insensitive_tools)
         || injects_crate_attribute(&tokens)
         || lint_option
@@ -199,6 +200,19 @@ fn has_brace_expansion_arguments(tokens: &[String], case_insensitive_tools: bool
         return false;
     };
     tokens[tool_index.saturating_add(1)..].iter().any(|token| contains_shell_brace_expansion(token))
+}
+
+fn has_pathname_expansion_arguments(tokens: &[String], case_insensitive_tools: bool) -> bool {
+    let Some(tool_index) = tokens.iter().position(|token| is_rust_tool_token(token, case_insensitive_tools)) else {
+        return false;
+    };
+    tokens[tool_index.saturating_add(1)..]
+        .iter()
+        .any(|token| token.contains(['*', '?', '[']) || contains_extended_glob(token))
+}
+
+fn contains_extended_glob(token: &str) -> bool {
+    token.as_bytes().windows(2).any(|characters| matches!(characters, [b'?' | b'*' | b'+' | b'@' | b'!', b'(']))
 }
 
 fn contains_shell_brace_expansion(token: &str) -> bool {

@@ -95,6 +95,7 @@ pub fn reject_checked_in_weakening(workspace: &Path) -> Result<BTreeSet<String>>
         }
         let source = fs::read_to_string(workspace.join(&path)).with_context(|| format!("read lint command execution surface {path}"))?;
         yaml::validate_execution_metadata(&path, &source)?;
+        actions::validate_action_references(&path, &source)?;
         if has_make_include_indirection(Path::new(&path), &source) {
             bail!("checked-in Make command surface {path:?} uses unsupported include indirection");
         }

@@ -80,6 +80,10 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_token("cargo --config build.rustflags='-A warnings' clippy"));
     assert!(weakening_token("cargo deny --config deny.toml; cargo --config build.rustflags='-A warnings' clippy"));
     assert!(weakening_token("cargo \\\n  --config build.rustflags='-A warnings' clippy"));
+    assert!(weakening_token("cargo clippy -- -*"));
+    assert!(weakening_token("cargo clippy -- -?warnings"));
+    assert!(weakening_token("cargo clippy -- -[A]warnings"));
+    assert!(weakening_token("cargo clippy -- @(-Awarnings|-Wwarnings)"));
     assert!(weakening_token("cargo -Z unstable-options -C ../other build"));
     assert!(weakening_token("cargo --change-directory=../other build"));
     assert!(!weakening_token("cargo rustc -- -C opt-level=3"));
@@ -418,6 +422,49 @@ fn local_node_actions_are_rejected_before_unscanned_entrypoints_can_run() {
         let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
         assert!(error.to_string().contains("only composite local actions are supported"));
     }
+}
+
+#[test]
+fn remote_actions_require_a_reviewed_exact_revision() {
+    for reference in [
+        "attacker/lint-action@1111111111111111111111111111111111111111",
+        "actions/checkout@main",
+        "docker://attacker/lint:latest",
+        "${{ github.event.pull_request.head.ref }}",
+    ] {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        fs::create_dir_all(workspace.path().join(".github/workflows")).expect("workflow directory");
+        fs::write(
+            workspace.path().join(".github/workflows/lint.yml"),
+            format!("name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: {reference}\n"),
+        )
+        .expect("workflow");
+        git(workspace.path(), &["init", "-q"]);
+        git(workspace.path(), &["add", "."]);
+
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("reviewed exact-revision allowlist"));
+    }
+}
+
+#[test]
+fn reviewed_remote_and_repository_local_actions_are_accepted() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join(".github/workflows")).expect("workflow directory");
+    fs::write(
+        workspace.path().join(".github/workflows/lint.yml"),
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0\n  delegated:\n    uses: ./.github/workflows/check.yml\n",
+    )
+    .expect("workflow");
+    fs::write(
+        workspace.path().join(".github/workflows/check.yml"),
+        "name: check\non: workflow_call\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo check\n",
+    )
+    .expect("local workflow");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    reject_checked_in_weakening(workspace.path()).expect("reviewed action references");
 }
 
 #[test]

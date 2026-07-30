@@ -10,7 +10,7 @@ fn cargo_allow_scan_covers_root_and_nested_manifests() {
     fs::create_dir_all(workspace.path().join("tool")).expect("tool directory");
     fs::write(
         workspace.path().join("Cargo.toml"),
-        "[package]\nname='root'\nversion='0.1.0'\n[lints.clippy]\nunwrap_used='allow'\npanic='warn'\n",
+        "[package]\nname='root'\nversion='0.1.0'\n[lints.clippy]\nunwrap_used={level='allow',priority=-2}\npanic='warn'\n",
     )
     .expect("root manifest");
     fs::write(
@@ -24,8 +24,8 @@ fn cargo_allow_scan_covers_root_and_nested_manifests() {
     assert_eq!(
         scan_cargo_allows(workspace.path()).expect("Cargo allowances"),
         BTreeSet::from([
-            ("Cargo.toml".to_owned(), "clippy".to_owned(), "unwrap_used".to_owned()),
-            ("tool/Cargo.toml".to_owned(), "rust".to_owned(), "unsafe_code".to_owned()),
+            ("Cargo.toml".to_owned(), "clippy".to_owned(), "unwrap_used".to_owned(), -2,),
+            ("tool/Cargo.toml".to_owned(), "rust".to_owned(), "unsafe_code".to_owned(), 0,),
         ])
     );
 }
@@ -49,7 +49,7 @@ fn cargo_allow_scan_resolves_workspace_lint_inheritance() {
 
     assert_eq!(
         scan_cargo_allows(workspace.path()).expect("inherited Cargo allowances"),
-        BTreeSet::from([("member/Cargo.toml".to_owned(), "rust".to_owned(), "warnings".to_owned())])
+        BTreeSet::from([("member/Cargo.toml".to_owned(), "rust".to_owned(), "warnings".to_owned(), 0,)])
     );
 }
 
@@ -70,7 +70,7 @@ fn cargo_allow_scan_resolves_explicit_sibling_workspaces() {
 
     assert_eq!(
         scan_cargo_allows(workspace.path()).expect("explicit workspace allowances"),
-        BTreeSet::from([("tools/member/Cargo.toml".to_owned(), "rust".to_owned(), "warnings".to_owned())])
+        BTreeSet::from([("tools/member/Cargo.toml".to_owned(), "rust".to_owned(), "warnings".to_owned(), 0,)])
     );
 }
 
@@ -578,6 +578,19 @@ fn command_policy_scans_sed_program_files() {
 
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+}
+
+#[test]
+fn command_policy_scans_awk_program_files() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::write(workspace.path().join("Justfile"), "lint:\n    awk -f quality/lint.awk /etc/hosts\n").expect("awk invocation");
+    fs::write(workspace.path().join("quality/lint.awk"), r#"{ system("cargo clippy -- -A warnings") }"#).expect("non-executable awk program");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
 }
 
 #[test]

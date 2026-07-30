@@ -157,8 +157,12 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "bun" | "bun.exe" | "deno" | "deno.exe" | "lua" | "lua.exe" | "node" | "node.exe" | "perl" | "perl.exe" | "php" | "php.exe" | "ruby" | "ruby.exe" => {
             positional_interpreter_input(arguments)
         }
+        "awk" | "awk.exe" | "gawk" | "gawk.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe" => {
+            let (inputs, opaque) = program_file_inputs(arguments, &AWK_PROGRAM_FILES);
+            return (Vec::new(), opaque || !inputs.is_empty());
+        }
         "sed" | "sed.exe" => {
-            let (inputs, opaque) = sed_script_inputs(arguments);
+            let (inputs, opaque) = program_file_inputs(arguments, &SED_PROGRAM_FILES);
             return (inputs, opaque);
         }
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
@@ -325,22 +329,53 @@ fn positional_interpreter_input(arguments: &[String]) -> SelectedInput<'_> {
     SelectedInput::Literal(argument)
 }
 
-fn sed_script_inputs(arguments: &[String]) -> (Vec<&str>, bool) {
+const AWK_PROGRAM_FILES: ProgramFileSyntax = ProgramFileSyntax::new(&["--exec", "--file"], &['E', 'f'], &['F', 'e', 'v'], &['W']);
+const SED_PROGRAM_FILES: ProgramFileSyntax = ProgramFileSyntax::new(&["--file"], &['f'], &['e', 'i'], &[]);
+
+struct ProgramFileSyntax {
+    long: &'static [&'static str],
+    short: &'static [char],
+    short_with_operand: &'static [char],
+    opaque_short: &'static [char],
+}
+
+impl ProgramFileSyntax {
+    const fn new(long: &'static [&'static str], short: &'static [char], short_with_operand: &'static [char], opaque_short: &'static [char]) -> Self {
+        Self {
+            long,
+            short,
+            short_with_operand,
+            opaque_short,
+        }
+    }
+}
+
+fn program_file_inputs<'a>(arguments: &'a [String], syntax: &ProgramFileSyntax) -> (Vec<&'a str>, bool) {
     let mut inputs = Vec::new();
     let mut opaque = false;
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
-        let selected = if argument == "--file" {
+        if argument == "--" {
+            break;
+        }
+        let matched_long_option = syntax.long.iter().find(|option| argument == **option);
+        let selected = if matched_long_option.is_some() {
             index += 1;
-            arguments.get(index).map_or(SelectedInput::Opaque, |candidate| SelectedInput::Literal(candidate))
-        } else if let Some(candidate) = argument.strip_prefix("--file=") {
-            if candidate.is_empty() {
-                SelectedInput::Opaque
-            } else {
-                SelectedInput::Literal(candidate)
-            }
+            program_file_input(arguments.get(index).map(String::as_str))
+        } else if let Some(candidate) = syntax
+            .long
+            .iter()
+            .find_map(|option| argument.strip_prefix(option).and_then(|candidate| candidate.strip_prefix('=')))
+        {
+            program_file_input(Some(candidate))
+        } else if abbreviated_long_program_file_option(argument, syntax) {
+            SelectedInput::Opaque
         } else {
-            sed_short_script_input(argument, arguments.get(index + 1).map(String::as_str))
+            let (selected, consumes_following) = short_program_file_input(argument, arguments.get(index + 1).map(String::as_str), syntax);
+            if consumes_following {
+                index += 1;
+            }
+            selected
         };
         match selected {
             SelectedInput::None => {}
@@ -352,24 +387,39 @@ fn sed_script_inputs(arguments: &[String]) -> (Vec<&str>, bool) {
     (inputs, opaque)
 }
 
-fn sed_short_script_input<'a>(argument: &'a str, following: Option<&'a str>) -> SelectedInput<'a> {
+fn abbreviated_long_program_file_option(argument: &str, syntax: &ProgramFileSyntax) -> bool {
+    let name = argument.split_once('=').map_or(argument, |(name, _)| name);
+    name.len() > 2 && name.starts_with("--") && syntax.long.iter().any(|option| option.starts_with(name))
+}
+
+fn program_file_input(candidate: Option<&str>) -> SelectedInput<'_> {
+    match candidate {
+        Some(candidate) if !candidate.is_empty() && candidate != "-" => SelectedInput::Literal(candidate),
+        Some(_) | None => SelectedInput::Opaque,
+    }
+}
+
+fn short_program_file_input<'a>(argument: &'a str, following: Option<&'a str>, syntax: &ProgramFileSyntax) -> (SelectedInput<'a>, bool) {
     let Some(options) = argument.strip_prefix('-').filter(|options| !options.starts_with('-')) else {
-        return SelectedInput::None;
+        return (SelectedInput::None, false);
     };
     for (index, option) in options.char_indices() {
-        if option == 'e' || option == 'i' {
-            return SelectedInput::None;
+        if syntax.opaque_short.contains(&option) {
+            return (SelectedInput::Opaque, false);
         }
-        if option == 'f' {
+        if syntax.short_with_operand.contains(&option) {
+            return (SelectedInput::None, false);
+        }
+        if syntax.short.contains(&option) {
             let candidate = &options[index + option.len_utf8()..];
             return if candidate.is_empty() {
-                following.map_or(SelectedInput::Opaque, SelectedInput::Literal)
+                (program_file_input(following), following.is_some())
             } else {
-                SelectedInput::Literal(candidate)
+                (program_file_input(Some(candidate)), false)
             };
         }
     }
-    SelectedInput::None
+    (SelectedInput::None, false)
 }
 
 fn makefile_inputs(arguments: &[String]) -> (Vec<&str>, bool) {
@@ -478,6 +528,12 @@ mod tests {
         assert_eq!(inputs("perl quality/lint.pl"), (vec!["quality/lint.pl".to_owned()], false));
         assert_eq!(inputs("ruby -- quality/lint.rb"), (vec!["quality/lint.rb".to_owned()], false));
         assert_eq!(inputs("perl -e 'system q(cargo clippy)'"), (Vec::new(), true));
+        assert_eq!(inputs("awk -f quality/lint.awk /etc/hosts"), (Vec::new(), true));
+        assert_eq!(inputs("gawk --file=quality/lint.awk /etc/hosts"), (Vec::new(), true));
+        assert_eq!(inputs("gawk --exec quality/lint.awk /etc/hosts"), (Vec::new(), true));
+        assert_eq!(inputs("gawk --fil=quality/lint.awk /etc/hosts"), (Vec::new(), true));
+        assert_eq!(inputs("gawk -W exec=quality/lint.awk /etc/hosts"), (Vec::new(), true));
+        assert_eq!(inputs("awk -f $SCRIPT /etc/hosts"), (Vec::new(), true));
         assert_eq!(inputs("sed -nf quality/lint.sed /etc/hosts"), (vec!["quality/lint.sed".to_owned()], false));
         assert_eq!(inputs("sed --file=quality/lint.sed /etc/hosts"), (vec!["quality/lint.sed".to_owned()], false));
         assert_eq!(inputs("sed -f $SCRIPT /etc/hosts"), (Vec::new(), true));

@@ -6,7 +6,10 @@ use super::{is_block_scalar, leading_spaces, literal_scalar, yaml_key_value};
 
 const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 const GATE_NAME: &str = "Run dependency unsafe gate";
+const GATE_ID: &str = "audit";
 const TOOLCHAIN_NAME: &str = "Install reviewed Rust toolchain";
+const UPLOAD_NAME: &str = "Upload dependency audit evidence on failure";
+const UPLOAD_CONDITION: &str = "failure() && steps.audit.outcome == 'failure'";
 const TOOLCHAIN_RUN_SOURCE: &str = "rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt";
 const GATE_RUN_SOURCE: &str = r#"if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
   printf 'maintainability bootstrap differs from the workflow-reviewed digest\n' >&2
@@ -17,7 +20,20 @@ const GOVERNED_JOBS: [(&str, &str); 2] = [("dependency-unsafe-linux", "ubuntu-la
 const CHECKOUT_ACTION: &str = "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0";
 const UPLOAD_ACTION: &str = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a";
 const GOVERNED_STEP_COUNT: usize = 4;
+const CHECKOUT_INPUTS: [(&str, &str); 2] = [("fetch-depth", "0"), ("persist-credentials", "false")];
 const WINDOWS_CHECKOUT_ENVIRONMENT: [(&str, &str); 3] = [("GIT_CONFIG_COUNT", "1"), ("GIT_CONFIG_KEY_0", "core.autocrlf"), ("GIT_CONFIG_VALUE_0", "false")];
+const LINUX_UPLOAD_INPUTS: [(&str, &str); 4] = [
+    ("name", "dependency-unsafe-linux-${{ github.sha }}"),
+    ("path", "target/dependency-unsafe/actual-linux"),
+    ("if-no-files-found", "warn"),
+    ("retention-days", "7"),
+];
+const WINDOWS_UPLOAD_INPUTS: [(&str, &str); 4] = [
+    ("name", "dependency-unsafe-windows-${{ github.sha }}"),
+    ("path", "target/dependency-unsafe/actual-windows"),
+    ("if-no-files-found", "warn"),
+    ("retention-days", "7"),
+];
 
 pub(super) fn validate(path: &str, source: &str) -> Result<()> {
     if path != WORKFLOW_PATH {
@@ -117,7 +133,7 @@ fn finish_step(job: Option<&mut Job>, step: Option<Step>, governed_jobs: &mut BT
             job.name
         );
     }
-    if job.violations.contains(&JobViolation::Conditional) || job.violations.contains(&JobViolation::ContinuesOnError) || step.conditional || step.continues_on_error {
+    if job.violations.contains(&JobViolation::Conditional) || job.violations.contains(&JobViolation::ContinuesOnError) || step.condition.is_some() || step.continues_on_error {
         bail!(
             "checked-in GitHub YAML {WORKFLOW_PATH:?} makes governed dependency-unsafe gate job {:?} conditional or non-failing",
             job.name
@@ -144,25 +160,16 @@ fn validate_governed_step(job: &Job, step: &Step) -> Result<()> {
             );
         }
     };
-    let expected_checkout_environment = if job.name == "dependency-unsafe-windows" && job.completed_steps == 1 {
-        WINDOWS_CHECKOUT_ENVIRONMENT.as_slice()
-    } else {
-        &[]
-    };
-    if job.completed_steps == 1 && !step.has_exact_environment(expected_checkout_environment) {
-        bail!(
-            "checked-in GitHub YAML {WORKFLOW_PATH:?} must preserve reviewed checkout line-ending configuration in governed job {:?}",
-            job.name
-        );
-    }
+    validate_governed_step_inputs(job, step)?;
     if job.completed_steps == 0 {
         if step.name.as_deref() != Some(TOOLCHAIN_NAME)
             || step.uses.is_some()
             || !step.run_declared
             || step.run_source.trim_end() != TOOLCHAIN_RUN_SOURCE
             || !step.has_exact_environment(&[])
-            || step.conditional
+            || step.condition.is_some()
             || step.continues_on_error
+            || step.id.is_some()
         {
             bail!(
                 "checked-in GitHub YAML {WORKFLOW_PATH:?} must install only the reviewed Rust toolchain before checkout in governed job {:?}",
@@ -170,17 +177,57 @@ fn validate_governed_step(job: &Job, step: &Step) -> Result<()> {
             );
         }
     } else if job.completed_steps == 2 {
-        if step.name.as_deref() != Some(GATE_NAME) || step.uses.is_some() || !step.run_declared || step.run_block_style != Some(RunBlockStyle::Canonical) || !step.invokes_gate() {
+        if step.name.as_deref() != Some(GATE_NAME)
+            || step.id.as_deref() != Some(GATE_ID)
+            || step.uses.is_some()
+            || !step.run_declared
+            || step.run_block_style != Some(RunBlockStyle::Canonical)
+            || !step.invokes_gate()
+            || step.condition.is_some()
+        {
             bail!(
                 "checked-in GitHub YAML {WORKFLOW_PATH:?} must run the governed dependency-unsafe gate before any repository-controlled command in job {:?}",
                 job.name
             );
         }
-    } else if step.uses.as_deref() != expected_action || step.run_declared || step.continues_on_error || job.completed_steps < 3 && step.conditional {
+    } else if step.uses.as_deref() != expected_action
+        || step.run_declared
+        || step.continues_on_error
+        || step.id.is_some()
+        || if job.completed_steps == 3 {
+            step.name.as_deref() != Some(UPLOAD_NAME) || step.condition.as_deref() != Some(UPLOAD_CONDITION)
+        } else {
+            step.name.is_some() || step.condition.is_some()
+        }
+    {
         bail!(
             "checked-in GitHub YAML {WORKFLOW_PATH:?} changes the reviewed isolated step sequence in governed dependency-unsafe job {:?}",
             job.name
         );
+    }
+    Ok(())
+}
+
+fn validate_governed_step_inputs(job: &Job, step: &Step) -> Result<()> {
+    let expected_checkout_environment = if job.name == "dependency-unsafe-windows" && job.completed_steps == 1 {
+        WINDOWS_CHECKOUT_ENVIRONMENT.as_slice()
+    } else {
+        &[]
+    };
+    let expected_inputs = match job.completed_steps {
+        1 => CHECKOUT_INPUTS.as_slice(),
+        3 if job.name == "dependency-unsafe-windows" => WINDOWS_UPLOAD_INPUTS.as_slice(),
+        3 => LINUX_UPLOAD_INPUTS.as_slice(),
+        _ => &[],
+    };
+    if job.completed_steps == 1 && !step.has_exact_environment(expected_checkout_environment) {
+        bail!(
+            "checked-in GitHub YAML {WORKFLOW_PATH:?} must preserve reviewed checkout line-ending configuration in governed job {:?}",
+            job.name
+        );
+    }
+    if !step.has_exact_inputs(expected_inputs) {
+        bail!("checked-in GitHub YAML {WORKFLOW_PATH:?} changes reviewed action inputs in governed job {:?}", job.name);
     }
     Ok(())
 }
@@ -267,10 +314,13 @@ enum JobViolation {
 #[derive(Default)]
 struct Step {
     name: Option<String>,
-    conditional: bool,
+    condition: Option<String>,
     continues_on_error: bool,
     environment: Environment,
     environment_block_indentation: Option<usize>,
+    id: Option<String>,
+    inputs: Environment,
+    inputs_block_indentation: Option<usize>,
     run_block_indentation: Option<usize>,
     run_block_style: Option<RunBlockStyle>,
     run_declared: bool,
@@ -281,6 +331,17 @@ struct Step {
 impl Step {
     fn observe(&mut self, line: &str) {
         let indentation = leading_spaces(line);
+        if let Some(inputs_indentation) = self.inputs_block_indentation {
+            if line.trim().is_empty() {
+                return;
+            }
+            if indentation > inputs_indentation {
+                let entry_indentation = inputs_indentation.saturating_add(2);
+                self.inputs.observe(line, indentation == entry_indentation);
+                return;
+            }
+            self.inputs_block_indentation = None;
+        }
         if let Some(environment_indentation) = self.environment_block_indentation {
             if line.trim().is_empty() {
                 return;
@@ -310,10 +371,14 @@ impl Step {
         };
         match key {
             "name" => self.name = literal_scalar(value).or_else(|| Some(value.trim().to_owned())),
-            "if" => self.conditional = true,
+            "if" => self.condition = literal_scalar(value).or_else(|| Some(value.trim().to_owned())),
             "continue-on-error" => self.continues_on_error = true,
+            "id" => self.id = literal_scalar(value),
             "env" if value.trim().is_empty() => {
                 self.environment_block_indentation = Some(indentation);
+            }
+            "with" if value.trim().is_empty() => {
+                self.inputs_block_indentation = Some(indentation);
             }
             "run" if is_block_scalar(value.trim_start()) => {
                 self.run_declared = true;
@@ -338,6 +403,10 @@ impl Step {
 
     fn has_exact_environment(&self, expected: &[(&str, &str)]) -> bool {
         self.environment.is_exact(expected)
+    }
+
+    fn has_exact_inputs(&self, expected: &[(&str, &str)]) -> bool {
+        self.inputs.is_exact(expected)
     }
 }
 

@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 
 use super::parse_nul_paths;
 
-type CargoAllowKey = (String, String, String);
+type CargoAllowKey = (String, String, String, i64);
 
 pub(super) fn scan_cargo_allows(workspace: &Path) -> Result<BTreeSet<CargoAllowKey>> {
     let mut observed = BTreeSet::new();
@@ -44,8 +44,9 @@ fn record_lint_families<'a>(manifest: &str, families: impl IntoIterator<Item = (
     for (family, settings) in families {
         let settings = settings.as_table().with_context(|| format!("Cargo lint family {family:?} in {manifest} is not a table"))?;
         for (lint, setting) in settings {
-            if lint_level(setting).with_context(|| format!("parse Cargo lint {family}::{lint} in {manifest}"))? == "allow" {
-                observed.insert((manifest.to_owned(), family.clone(), lint.clone()));
+            let (level, priority) = lint_setting(setting).with_context(|| format!("parse Cargo lint {family}::{lint} in {manifest}"))?;
+            if level == "allow" {
+                observed.insert((manifest.to_owned(), family.clone(), lint.clone(), priority));
             }
         }
     }
@@ -148,13 +149,14 @@ pub(super) fn tracked_manifests(workspace: &Path) -> Result<Vec<String>> {
     parse_nul_paths(&output.stdout, |path| path.ends_with("Cargo.toml"))
 }
 
-fn lint_level(value: &toml::Value) -> Result<&str> {
+fn lint_setting(value: &toml::Value) -> Result<(&str, i64)> {
     if let Some(level) = value.as_str() {
-        return Ok(level);
+        return Ok((level, 0));
     }
-    value
-        .as_table()
-        .and_then(|table| table.get("level"))
-        .and_then(toml::Value::as_str)
-        .context("lint setting must be a string or a table with a string level")
+    let table = value.as_table().context("lint setting must be a string or a table")?;
+    let level = table.get("level").and_then(toml::Value::as_str).context("lint setting table must contain a string level")?;
+    let priority = table
+        .get("priority")
+        .map_or(Ok(0), |priority| priority.as_integer().context("lint priority must be an integer"))?;
+    Ok((level, priority))
 }

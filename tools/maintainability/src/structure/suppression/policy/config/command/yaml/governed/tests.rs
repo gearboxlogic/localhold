@@ -9,21 +9,32 @@ const JOB: &str = r#"  dependency-unsafe-linux:
       - name: Install reviewed Rust toolchain
         run: rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Run dependency unsafe gate
+        id: audit
         run: |
           if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
             printf 'maintainability bootstrap differs from the workflow-reviewed digest\n' >&2
             exit 1
           fi
           ./script/check-maintainability-bootstrap.sh --maintainability
-      - if: failure()
+      - name: Upload dependency audit evidence on failure
+        if: failure() && steps.audit.outcome == 'failure'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: dependency-unsafe-linux-${{ github.sha }}
+          path: target/dependency-unsafe/actual-linux
+          if-no-files-found: warn
+          retention-days: 7
 "#;
 
 fn workflow() -> String {
     let windows_job = JOB
         .replace("dependency-unsafe-linux", "dependency-unsafe-windows")
         .replace("ubuntu-latest", "windows-latest")
+        .replace("target/dependency-unsafe/actual-linux", "target/dependency-unsafe/actual-windows")
         .replacen(
             "      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
             "      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0\n        env:\n          GIT_CONFIG_COUNT: '1'\n          GIT_CONFIG_KEY_0: core.autocrlf\n          GIT_CONFIG_VALUE_0: 'false'",
@@ -76,8 +87,8 @@ fn governed_invocation_comes_from_the_exact_run_scalar() {
     assert_rejected(&renamed);
 
     let comment_spoof = accepted.replacen(
-        "      - name: Run dependency unsafe gate\n        run: |",
-        "      - name: Run dependency unsafe gate # ./script/check-maintainability-bootstrap.sh --maintainability\n        run: true",
+        "      - name: Run dependency unsafe gate\n        id: audit\n        run: |",
+        "      - name: Run dependency unsafe gate # ./script/check-maintainability-bootstrap.sh --maintainability\n        id: audit\n        run: true",
         1,
     );
     assert_rejected(&comment_spoof);
@@ -140,6 +151,19 @@ fn governed_jobs_have_a_closed_isolated_step_sequence() {
         1,
     );
     assert_rejected(&bare_sequence_step);
+
+    let wrong_upload_condition = accepted.replacen("        if: failure() && steps.audit.outcome == 'failure'", "        if: false", 1);
+    assert_rejected(&wrong_upload_condition);
+
+    let missing_gate_id = accepted.replacen("        id: audit\n", "", 1);
+    assert_rejected(&missing_gate_id);
+
+    let wrong_upload_path = accepted.replacen(
+        "          path: target/dependency-unsafe/actual-linux",
+        "          path: target/dependency-unsafe/missing",
+        1,
+    );
+    assert_rejected(&wrong_upload_path);
 }
 
 #[test]

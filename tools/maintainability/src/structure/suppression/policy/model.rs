@@ -86,6 +86,7 @@ pub(super) struct CargoAllowance {
     pub(super) manifest: String,
     pub(super) family: String,
     pub(super) lint: String,
+    pub(super) priority: i64,
     pub(super) disposition: Disposition,
     pub(super) status: Status,
     pub(super) owner: String,

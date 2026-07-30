@@ -60,7 +60,7 @@ pub(super) fn compare_cargo_allows(workspace: &Path, entries: &[CargoAllowance])
     let expected = entries
         .iter()
         .filter(|entry| entry.status == Status::Active)
-        .map(|entry| (entry.manifest.clone(), entry.family.clone(), entry.lint.clone()))
+        .map(|entry| (entry.manifest.clone(), entry.family.clone(), entry.lint.clone(), entry.priority))
         .collect::<BTreeSet<_>>();
     if observed != expected {
         bail!("Cargo lint allow configuration differs from reviewed policy: expected={expected:?}, observed={observed:?}");

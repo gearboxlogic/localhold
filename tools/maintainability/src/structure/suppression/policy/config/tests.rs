@@ -48,6 +48,7 @@ fn clippy_constraints_are_directional() {
 fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_token("cargo clippy -- -A warnings"));
     assert!(weakening_token("cargo rustc -- --cap-lints=allow"));
+    assert!(weakening_token("cargo rustc -- \"--cap-\"lints allow"));
     assert!(weakening_token("cargo clippy -- --allow warnings"));
     assert!(weakening_token("cargo clippy -- -W warnings"));
     assert!(weakening_token("cargo clippy -- --warn warnings"));
@@ -65,6 +66,9 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_token_for_surface("script/check.ps1", "Rustc.ExE -W warnings source.rs"));
     assert!(!weakening_token_for_surface("script/check.sh", "CARGO.EXE clippy -- -A warnings"));
     assert!(weakening_token("rustc @policy/lints.args source.rs"));
+    assert!(weakening_token("rustc -D warnings --allow=warnings source.rs"));
+    assert!(weakening_token("rustc -D warnings --warn=warnings source.rs"));
+    assert!(weakening_token("rustc -D warnings --force-warn=unused_variables source.rs"));
     assert!(weakening_token("LABEL=@not-a-response rustc @policy/lints.args source.rs"));
     assert!(weakening_token("cargo rustc -- @policy/lints.args"));
     assert!(!weakening_token("cargo run -- @application-argument"));
@@ -89,11 +93,16 @@ fn folded_yaml_commands_are_scanned_as_executed() {
         ".github/workflows/ci.yml",
         "steps:\n  - run: >\n      cargo build\n\n      echo application -A argument\n"
     ));
+    assert!(weakening_token_for_surface(
+        ".github/workflows/ci.yml",
+        "jobs:\n  windows:\n    runs-on: windows-latest\n    steps:\n      - run: CARGO.EXE clippy -- -A warnings\n"
+    ));
 }
 
 #[test]
 fn weakening_environment_channels_are_detected() {
     assert!(weakening_environment("export RUSTFLAGS='-A warnings'\nexec \"$CHECK\""));
+    assert!(weakening_environment("export RUST''FLAGS='--cap-lints allow'"));
     assert!(weakening_environment("CARGO_ENCODED_RUSTFLAGS=dynamic"));
     assert!(weakening_environment("RUSTDOCFLAGS=--cap-lints=allow"));
     assert!(weakening_environment("CARGO_ENCODED_RUSTDOCFLAGS=dynamic"));
@@ -238,6 +247,26 @@ fn command_policy_scans_extensionless_scripts() {
         let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
         assert!(error.to_string().contains("lint-weakening argument"));
     }
+}
+
+#[test]
+fn command_policy_discovers_directly_compiled_rust_sources() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    fs::write(workspace.path().join("script/check.sh"), "rustc -D warnings script/check.rs\n").expect("direct compiler command");
+    fs::write(workspace.path().join("script/check.rs"), "fn main() {}\n").expect("direct Rust source");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let sources = reject_checked_in_weakening(workspace.path()).expect("non-weakening direct compiler command");
+    assert_eq!(sources, BTreeSet::from(["script/check.rs".to_owned()]));
+
+    fs::write(workspace.path().join("script/check.sh"), "rustc --version\n").expect("compiler version command");
+    assert!(reject_checked_in_weakening(workspace.path()).expect("informational compiler command").is_empty());
+
+    fs::write(workspace.path().join("script/check.sh"), "rustc \"$DIRECT_SOURCE\"\n").expect("opaque direct compiler command");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("without auditable repository-relative .rs inputs"));
 }
 
 #[test]

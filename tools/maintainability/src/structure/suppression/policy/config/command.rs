@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
@@ -6,10 +7,11 @@ use anyhow::{Context, Result, bail};
 mod arguments;
 mod surfaces;
 mod yaml;
-use arguments::is_windows_command_surface;
+use arguments::has_case_insensitive_tool_names;
 #[cfg(test)]
 pub(super) use arguments::weakening_token;
 pub(super) use arguments::weakening_token_for_surface;
+use arguments::{direct_rust_sources_for_surface, normalized_shell_tokens};
 use surfaces::execution_surfaces;
 
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
@@ -35,7 +37,8 @@ pub(super) const CI_REVISION_ENVIRONMENT_LINES: &[&str] = &[
 ];
 pub(super) const GPU_RELEASE_REVISION_ENVIRONMENT_LINES: &[&str] = &["          test \"$(git rev-parse HEAD)\" = \"$GITHUB_SHA\""];
 
-pub fn reject_checked_in_weakening(workspace: &Path) -> Result<()> {
+pub fn reject_checked_in_weakening(workspace: &Path) -> Result<BTreeSet<String>> {
+    let mut direct_rust_sources = BTreeSet::new();
     for path in execution_surfaces(workspace)? {
         if is_cargo_config(Path::new(&path)) {
             bail!("checked-in Cargo configuration {path:?} is unsupported because it can override lint policy");
@@ -47,8 +50,13 @@ pub fn reject_checked_in_weakening(workspace: &Path) -> Result<()> {
         if weakening_environment_for_surface(&path, &source) && !scrubber_environment_references_are_exact(&path, &source) {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening environment channel");
         }
+        let (sources, unresolved) = direct_rust_sources_for_surface(&path, &source);
+        if unresolved {
+            bail!("checked-in Rust command surface {path:?} contains a direct compiler invocation without auditable repository-relative .rs inputs");
+        }
+        direct_rust_sources.extend(sources);
     }
-    Ok(())
+    Ok(direct_rust_sources)
 }
 
 pub(super) fn weakening_environment(source: &str) -> bool {
@@ -56,10 +64,14 @@ pub(super) fn weakening_environment(source: &str) -> bool {
 }
 
 pub(super) fn weakening_environment_for_surface(path: &str, source: &str) -> bool {
-    weakening_environment_with_case(source, is_windows_command_surface(path))
+    weakening_environment_with_case(source, has_case_insensitive_tool_names(path))
 }
 
 fn weakening_environment_with_case(source: &str, case_insensitive: bool) -> bool {
+    weakening_environment_names(source, case_insensitive) || normalized_shell_tokens(source).iter().any(|token| weakening_environment_names(token, case_insensitive))
+}
+
+fn weakening_environment_names(source: &str, case_insensitive: bool) -> bool {
     source
         .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
         .filter(|name| !name.is_empty())

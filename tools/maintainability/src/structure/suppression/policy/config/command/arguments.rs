@@ -1,4 +1,8 @@
+use std::collections::BTreeSet;
 use std::path::Path;
+
+mod tokens;
+use tokens::{command_tokens, command_without_comment};
 
 #[cfg(test)]
 pub(in crate::structure::suppression::policy::config) fn weakening_token(source: &str) -> bool {
@@ -6,11 +10,25 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token(source:
 }
 
 pub(in crate::structure::suppression::policy::config) fn weakening_token_for_surface(path: &str, source: &str) -> bool {
-    let case_insensitive_tools = is_windows_command_surface(path);
+    let case_insensitive_tools = has_case_insensitive_tool_names(path);
     weakening_token_with_case(source, case_insensitive_tools)
         || super::yaml::folded_run_commands(path, source)
             .iter()
             .any(|command| weakening_token_with_case(command, case_insensitive_tools))
+}
+
+pub(super) fn direct_rust_sources_for_surface(path: &str, source: &str) -> (BTreeSet<String>, bool) {
+    let case_insensitive_tools = has_case_insensitive_tool_names(path);
+    let mut sources = BTreeSet::new();
+    let mut unresolved = collect_direct_rust_sources(source, case_insensitive_tools, &mut sources);
+    for command in super::yaml::folded_run_commands(path, source) {
+        unresolved |= collect_direct_rust_sources(&command, case_insensitive_tools, &mut sources);
+    }
+    (sources, unresolved)
+}
+
+pub(super) fn normalized_shell_tokens(source: &str) -> Vec<String> {
+    tokens::normalized_shell_tokens(source)
 }
 
 fn weakening_token_with_case(source: &str, case_insensitive_tools: bool) -> bool {
@@ -32,18 +50,61 @@ fn weakening_rust_command(command: &str, case_insensitive_tools: bool) -> bool {
     if !tokens.iter().any(|token| is_rust_tool_token(token, case_insensitive_tools)) {
         return false;
     }
-    command.contains("--cap-lints")
-        || cargo_changes_directory_before_compiler_arguments(&tokens, case_insensitive_tools)
+    cargo_changes_directory_before_compiler_arguments(&tokens, case_insensitive_tools)
         || rust_response_file(&tokens, case_insensitive_tools)
-        || tokens.iter().any(|token| {
-            token == "-A"
-                || token.starts_with("-A") && token.len() > 2
-                || token == "--allow"
-                || token == "-W"
-                || token.starts_with("-W") && token.len() > 2
-                || matches!(token.as_str(), "--warn" | "--force-warn")
-        })
+        || tokens
+            .iter()
+            .any(|token| token == "-A" || token.starts_with("-A") && token.len() > 2 || token == "-W" || token.starts_with("-W") && token.len() > 2 || is_long_lint_option(token))
         || tokens.iter().any(|token| token.starts_with("--config")) && !is_cargo_deny_command(&tokens, case_insensitive_tools)
+}
+
+fn is_long_lint_option(token: &str) -> bool {
+    ["--allow", "--warn", "--force-warn", "--cap-lints"]
+        .iter()
+        .any(|option| token == *option || token.strip_prefix(option).is_some_and(|suffix| suffix.starts_with('=')))
+}
+
+fn collect_direct_rust_sources(source: &str, case_insensitive_tools: bool, sources: &mut BTreeSet<String>) -> bool {
+    let logical = source.replace("\\\r\n", "").replace("\\\n", "");
+    let mut unresolved = false;
+    for command in logical.split(['\n', ';', '&', '|']).map(command_without_comment) {
+        let tokens = command_tokens(command);
+        for token in &tokens {
+            if token.chars().any(char::is_whitespace) {
+                unresolved |= collect_direct_rust_sources(token, case_insensitive_tools, sources);
+            }
+        }
+        for compiler_index in tokens.iter().enumerate().filter_map(|(index, token)| {
+            (is_literal_direct_compiler_token(token, case_insensitive_tools) && !tokens[..index].iter().any(|preceding| is_cargo_tool_token(preceding, case_insensitive_tools)))
+                .then_some(index)
+        }) {
+            let arguments = &tokens[compiler_index.saturating_add(1)..];
+            let candidates = arguments.iter().filter_map(|token| direct_source_candidate(token)).collect::<Vec<_>>();
+            unresolved |= candidates.is_empty() && !is_informational_compiler_invocation(arguments);
+            sources.extend(candidates);
+        }
+    }
+    unresolved
+}
+
+fn is_literal_direct_compiler_token(token: &str, case_insensitive: bool) -> bool {
+    !matches!(tool_basename(token), "RUSTC" | "RUSTDOC") && is_direct_compiler_token(token, case_insensitive)
+}
+
+fn direct_source_candidate(token: &str) -> Option<String> {
+    let candidate = token.trim_matches(|character| matches!(character, '(' | ')' | ',' | ':'));
+    Path::new(candidate)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+        .then(|| candidate.to_owned())
+}
+
+fn is_informational_compiler_invocation(arguments: &[String]) -> bool {
+    arguments.is_empty()
+        || arguments
+            .iter()
+            .any(|argument| matches!(argument.as_str(), "--version" | "-V" | "-vV" | "--help" | "-h" | "--print") || argument.starts_with("--print="))
 }
 
 fn cargo_changes_directory_before_compiler_arguments(tokens: &[String], case_insensitive_tools: bool) -> bool {
@@ -54,73 +115,6 @@ fn cargo_changes_directory_before_compiler_arguments(tokens: &[String], case_ins
         .iter()
         .take_while(|token| token.as_str() != "--")
         .any(|token| token == "-C" || token.starts_with("-C") && token.len() > 2 || token == "--change-directory" || token.starts_with("--change-directory="))
-}
-
-fn command_without_comment(segment: &str) -> &str {
-    let mut quote = None;
-    let mut escaped = false;
-    let mut previous = None;
-    for (index, character) in segment.char_indices() {
-        if escaped {
-            escaped = false;
-        } else if character == '\\' && quote != Some('\'') {
-            escaped = true;
-        } else if matches!(character, '\'' | '"') {
-            if quote == Some(character) {
-                quote = None;
-            } else if quote.is_none() {
-                quote = Some(character);
-            }
-        } else if character == '#' && quote.is_none() && previous.is_none_or(char::is_whitespace) {
-            return &segment[..index];
-        }
-        previous = Some(character);
-    }
-    segment
-}
-
-fn command_tokens(command: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut token = String::new();
-    let mut quote = None;
-    let mut escaped = false;
-    for character in command.chars() {
-        if escaped {
-            token.push(character);
-            escaped = false;
-        } else if quote == Some('\'') {
-            if character == '\'' {
-                quote = None;
-            } else {
-                token.push(character);
-            }
-        } else if quote == Some('"') {
-            if character == '"' {
-                quote = None;
-            } else if character == '\\' {
-                escaped = true;
-            } else {
-                token.push(character);
-            }
-        } else if matches!(character, '\'' | '"') {
-            quote = Some(character);
-        } else if character == '\\' {
-            escaped = true;
-        } else if character.is_whitespace() || character == '=' {
-            if !token.is_empty() {
-                tokens.push(std::mem::take(&mut token));
-            }
-        } else {
-            token.push(character);
-        }
-    }
-    if escaped {
-        token.push('\\');
-    }
-    if !token.is_empty() {
-        tokens.push(token);
-    }
-    tokens
 }
 
 fn is_rust_tool_token(token: &str, case_insensitive: bool) -> bool {
@@ -200,9 +194,14 @@ fn is_cargo_deny_command(tokens: &[String], case_insensitive_tools: bool) -> boo
     tokens.windows(2).any(|pair| is_cargo_tool_token(&pair[0], case_insensitive_tools) && pair[1] == "deny")
 }
 
-pub(super) fn is_windows_command_surface(path: &str) -> bool {
-    Path::new(path)
-        .extension()
+pub(super) fn has_case_insensitive_tool_names(path: &str) -> bool {
+    let path = Path::new(path);
+    path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "ps1" | "cmd" | "bat"))
+        || path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "yml" | "yaml"))
+            && (path.starts_with(".github/workflows") || path.starts_with(".github/actions"))
 }

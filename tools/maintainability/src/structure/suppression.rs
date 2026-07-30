@@ -10,12 +10,14 @@ use sha2::{Digest, Sha256};
 use self::source::SourceScanner;
 use super::classify::Inventory;
 
+mod direct;
 mod modules;
 mod policy;
 mod source;
 mod targets;
 #[cfg(test)]
 mod tests;
+pub(in crate::structure::suppression) use direct::reject_direct_source_suppressions;
 pub(super) use policy::SuppressionPolicy;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]

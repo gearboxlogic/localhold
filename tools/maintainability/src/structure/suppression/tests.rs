@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::process::Command;
 
-use super::{SourceCategory, reject_tooling_suppressions, scan_revision, scan_workspace};
+use super::{SourceCategory, reject_direct_source_suppressions, reject_tooling_suppressions, scan_revision, scan_workspace};
 use crate::structure::classify::Inventory;
 
 #[test]
@@ -56,6 +56,21 @@ fn maintainer_tooling_rejects_real_suppressions_but_ignores_fixture_text() {
     fs::write(source.join("main.rs"), "std::include!(\"checks.inc\");\nfn main() {}\n").expect("qualified source include");
     let error = reject_tooling_suppressions(workspace.path()).unwrap_err();
     assert!(format!("{error:#}").contains("include!"));
+}
+
+#[test]
+fn directly_compiled_sources_and_modules_remain_suppression_free() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    fs::write(workspace.path().join("script/check.rs"), "mod helper;\nfn main() {}\n").expect("direct Rust source");
+    fs::write(
+        workspace.path().join("script/helper.rs"),
+        "#![allow(dead_code, reason = \"direct compilation bypass\")]\nfn hidden() {}\n",
+    )
+    .expect("direct Rust module");
+
+    let error = reject_direct_source_suppressions(workspace.path(), &BTreeSet::from(["script/check.rs".to_owned()])).unwrap_err();
+    assert!(error.to_string().contains("must remain suppression-free"));
 }
 
 #[test]

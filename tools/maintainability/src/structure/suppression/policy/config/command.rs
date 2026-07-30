@@ -6,6 +6,12 @@ use anyhow::{Context, Result, bail};
 
 use super::parse_nul_paths;
 
+mod arguments;
+use arguments::is_windows_command_surface;
+#[cfg(test)]
+pub(super) use arguments::weakening_token;
+pub(super) use arguments::weakening_token_for_surface;
+
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "cargo_home=${CARGO_HOME:-}",
     "            RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
@@ -35,7 +41,7 @@ pub fn reject_checked_in_weakening(workspace: &Path) -> Result<()> {
             bail!("checked-in Cargo configuration {path:?} is unsupported because it can override lint policy");
         }
         let source = fs::read_to_string(workspace.join(&path)).with_context(|| format!("read lint command execution surface {path}"))?;
-        if weakening_token(&source) {
+        if weakening_token_for_surface(&path, &source) {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening argument");
         }
         if weakening_environment_for_surface(&path, &source) && !scrubber_environment_references_are_exact(&path, &source) {
@@ -57,177 +63,12 @@ fn execution_surfaces(workspace: &Path) -> Result<Vec<String>> {
     parse_nul_paths(&output.stdout, is_execution_surface)
 }
 
-pub(super) fn weakening_token(source: &str) -> bool {
-    let logical = source.replace("\\\r\n", "").replace("\\\n", "");
-    logical.split(['\n', ';', '&', '|']).map(command_without_comment).any(weakening_rust_command)
-}
-
-fn weakening_rust_command(command: &str) -> bool {
-    let tokens = command_tokens(command);
-    if tokens.iter().any(|token| token.chars().any(char::is_whitespace) && weakening_token(token)) {
-        return true;
-    }
-    if !tokens.iter().any(|token| is_rust_tool_token(token)) {
-        return false;
-    }
-    command.contains("--cap-lints")
-        || cargo_changes_directory_before_compiler_arguments(&tokens)
-        || rust_response_file(&tokens)
-        || tokens.iter().any(|token| {
-            token == "-A"
-                || token.starts_with("-A") && token.len() > 2
-                || token == "--allow"
-                || token == "-W"
-                || token.starts_with("-W") && token.len() > 2
-                || matches!(token.as_str(), "--warn" | "--force-warn")
-        })
-        || tokens.iter().any(|token| token.starts_with("--config")) && !is_cargo_deny_command(&tokens)
-}
-
-fn cargo_changes_directory_before_compiler_arguments(tokens: &[String]) -> bool {
-    let Some(cargo_index) = tokens.iter().position(|token| is_cargo_tool_token(token)) else {
-        return false;
-    };
-    tokens[cargo_index.saturating_add(1)..]
-        .iter()
-        .take_while(|token| token.as_str() != "--")
-        .any(|token| token == "-C" || token.starts_with("-C") && token.len() > 2 || token == "--change-directory" || token.starts_with("--change-directory="))
-}
-
-fn command_without_comment(segment: &str) -> &str {
-    let mut quote = None;
-    let mut escaped = false;
-    let mut previous = None;
-    for (index, character) in segment.char_indices() {
-        if escaped {
-            escaped = false;
-        } else if character == '\\' && quote != Some('\'') {
-            escaped = true;
-        } else if matches!(character, '\'' | '"') {
-            if quote == Some(character) {
-                quote = None;
-            } else if quote.is_none() {
-                quote = Some(character);
-            }
-        } else if character == '#' && quote.is_none() && previous.is_none_or(char::is_whitespace) {
-            return &segment[..index];
-        }
-        previous = Some(character);
-    }
-    segment
-}
-
-fn command_tokens(command: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut token = String::new();
-    let mut quote = None;
-    let mut escaped = false;
-    for character in command.chars() {
-        if escaped {
-            token.push(character);
-            escaped = false;
-        } else if quote == Some('\'') {
-            if character == '\'' {
-                quote = None;
-            } else {
-                token.push(character);
-            }
-        } else if quote == Some('"') {
-            if character == '"' {
-                quote = None;
-            } else if character == '\\' {
-                escaped = true;
-            } else {
-                token.push(character);
-            }
-        } else if matches!(character, '\'' | '"') {
-            quote = Some(character);
-        } else if character == '\\' {
-            escaped = true;
-        } else if character.is_whitespace() || character == '=' {
-            if !token.is_empty() {
-                tokens.push(std::mem::take(&mut token));
-            }
-        } else {
-            token.push(character);
-        }
-    }
-    if escaped {
-        token.push('\\');
-    }
-    if !token.is_empty() {
-        tokens.push(token);
-    }
-    tokens
-}
-
-fn is_rust_tool_token(token: &str) -> bool {
-    let basename = tool_basename(token);
-    matches!(
-        basename,
-        "cargo"
-            | "cargo.exe"
-            | "cargo-clippy"
-            | "cargo-clippy.exe"
-            | "rustc"
-            | "rustc.exe"
-            | "rustdoc"
-            | "rustdoc.exe"
-            | "clippy-driver"
-            | "clippy-driver.exe"
-            | "CARGO"
-            | "RUSTC"
-            | "RUSTDOC"
-    )
-}
-
-fn rust_response_file(tokens: &[String]) -> bool {
-    tokens
-        .iter()
-        .enumerate()
-        .filter(|(_, token)| token.starts_with('@') && token.len() > 1)
-        .any(|(response_index, _)| {
-            let preceding = &tokens[..response_index];
-            preceding.iter().any(|token| is_direct_compiler_token(token))
-                || preceding.iter().enumerate().any(|(index, token)| {
-                    is_cargo_tool_token(token)
-                        && preceding[index.saturating_add(1)..]
-                            .iter()
-                            .any(|argument| matches!(argument.as_str(), "rustc" | "rustdoc" | "clippy"))
-                })
-        })
-}
-
-fn is_direct_compiler_token(token: &str) -> bool {
-    matches!(
-        tool_basename(token),
-        "cargo-clippy" | "cargo-clippy.exe" | "rustc" | "rustc.exe" | "rustdoc" | "rustdoc.exe" | "clippy-driver" | "clippy-driver.exe" | "RUSTC" | "RUSTDOC"
-    )
-}
-
-fn is_cargo_tool_token(token: &str) -> bool {
-    matches!(tool_basename(token), "cargo" | "cargo.exe" | "CARGO")
-}
-
-fn tool_basename(token: &str) -> &str {
-    let token = token.trim_matches(|character| matches!(character, '$' | '{' | '}' | '(' | ')' | ':' | ','));
-    token.rsplit(['/', '\\']).next().unwrap_or(token)
-}
-
-fn is_cargo_deny_command(tokens: &[String]) -> bool {
-    tokens.windows(2).any(|pair| pair[0] == "cargo" && pair[1] == "deny")
-}
-
 pub(super) fn weakening_environment(source: &str) -> bool {
     weakening_environment_with_case(source, false)
 }
 
 pub(super) fn weakening_environment_for_surface(path: &str, source: &str) -> bool {
-    let case_insensitive = Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "ps1" | "cmd" | "bat"));
-    weakening_environment_with_case(source, case_insensitive)
+    weakening_environment_with_case(source, is_windows_command_surface(path))
 }
 
 fn weakening_environment_with_case(source: &str, case_insensitive: bool) -> bool {
@@ -261,6 +102,17 @@ fn weakening_environment_with_case(source: &str, case_insensitive: bool) -> bool
                     | "GITHUB_EVENT_PATH"
                     | "GITHUB_SHA"
                     | "LOCALHOLD_MAINTAINABILITY_BASE_REV"
+                    | "MISE_CONFIG_DIR"
+                    | "MISE_CONFIG_FILE"
+                    | "MISE_CEILING_PATHS"
+                    | "MISE_DEFAULT_CONFIG_FILENAME"
+                    | "MISE_ENV_FILE"
+                    | "MISE_GLOBAL_CONFIG_FILE"
+                    | "MISE_GLOBAL_CONFIG_ROOT"
+                    | "MISE_OVERRIDE_CONFIG_FILENAMES"
+                    | "MISE_SYSTEM_CONFIG_DIR"
+                    | "MISE_SYSTEM_CONFIG_FILE"
+                    | "MISE_SYSTEM_DIR"
             ) || name.starts_with("CARGO_ALIAS_")
                 || name.starts_with("CARGO_TARGET_") && (name.ends_with("_RUSTFLAGS") || name.ends_with("_RUSTDOCFLAGS") || name.ends_with("_LINKER") || name.ends_with("_RUNNER"))
         })
@@ -291,7 +143,7 @@ pub(super) fn is_execution_surface(path: &str) -> bool {
             .extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| extension.eq_ignore_ascii_case("just"))
-        || path == Path::new("mise.toml")
+        || is_mise_config(path)
         || is_cargo_config(path)
         || path.starts_with(".github/workflows")
         || path.starts_with(".github/actions") && matches!(lowercase_basename.as_str(), "action.yml" | "action.yaml")
@@ -303,6 +155,36 @@ pub(super) fn is_execution_surface(path: &str) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "sh" | "bash" | "zsh" | "fish" | "ps1" | "cmd" | "bat" | "py"))
+}
+
+fn is_mise_config(path: &Path) -> bool {
+    let lowercase = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    let path = Path::new(&lowercase);
+    let basename = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    if matches!(basename, ".rtx.toml" | ".rtx.local.toml") || mise_project_basename(basename) {
+        return true;
+    }
+    let parent = path.parent().and_then(Path::file_name).and_then(|name| name.to_str());
+    if parent.is_some_and(|parent| matches!(parent, "mise" | ".mise")) && mise_directory_basename(basename) {
+        return true;
+    }
+    has_toml_extension(basename) && path.parent().is_some_and(|parent| parent.ends_with(Path::new(".config/mise/conf.d")))
+}
+
+fn mise_project_basename(basename: &str) -> bool {
+    let basename = basename.strip_prefix('.').unwrap_or(basename);
+    basename == "mise.toml" || basename == "mise.local.toml" || basename.starts_with("mise.") && has_toml_extension(basename)
+}
+
+fn mise_directory_basename(basename: &str) -> bool {
+    basename == "config.toml" || basename == "config.local.toml" || basename.starts_with("config.") && has_toml_extension(basename)
+}
+
+fn has_toml_extension(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
 }
 
 fn is_cargo_config(path: &Path) -> bool {

@@ -11,9 +11,28 @@ use syn::{Meta, Token};
 
 use super::SourceCategory;
 
-type DiscoveredModule = (PathBuf, PathBuf);
+mod revision;
+pub(super) use revision::expand_revision_target_sources;
+
+type DiscoveredModule = (PathBuf, String, PathBuf);
 
 pub(super) fn expand_target_sources(workspace: &Path, roots: BTreeMap<String, SourceCategory>, is_structural: impl Fn(&str) -> bool) -> Result<BTreeMap<String, SourceCategory>> {
+    expand_sources(
+        roots,
+        is_structural,
+        |path| fs::read_to_string(workspace.join(path)).with_context(|| format!("read Cargo target module source {path}")),
+        |base, name| resolve_external_module(workspace, base, name),
+        |path| checked_module_path(workspace, path),
+    )
+}
+
+fn expand_sources(
+    roots: BTreeMap<String, SourceCategory>,
+    is_structural: impl Fn(&str) -> bool,
+    mut read_source: impl FnMut(&str) -> Result<String>,
+    resolve_module: impl Fn(&Path, &str) -> Result<PathBuf>,
+    check_path: impl Fn(&Path) -> Result<String>,
+) -> Result<BTreeMap<String, SourceCategory>> {
     let mut sources = roots;
     let mut pending = sources
         .iter()
@@ -24,11 +43,12 @@ pub(super) fn expand_target_sources(workspace: &Path, roots: BTreeMap<String, So
         })
         .collect::<VecDeque<_>>();
     while let Some((path, module_base, category)) = pending.pop_front() {
-        let source = fs::read_to_string(workspace.join(&path)).with_context(|| format!("read Cargo target module source {path}"))?;
+        let source = read_source(&path)?;
         let syntax = syn::parse_file(&source).with_context(|| format!("parse Cargo target module source {path}"))?;
-        let discovered = ModuleCollector::collect(workspace, module_base, &syntax)?;
-        for (module, child_base) in discovered {
-            let module = checked_module_path(workspace, &module)?;
+        let discovered = ModuleCollector::collect(module_base, &syntax)?;
+        for (base, name, child_base) in discovered {
+            let module = resolve_module(&base, &name)?;
+            let module = check_path(&module)?;
             if !register_source(&mut sources, &module, category)? {
                 continue;
             }
@@ -51,17 +71,15 @@ fn register_source(sources: &mut BTreeMap<String, SourceCategory>, module: &str,
     Ok(true)
 }
 
-struct ModuleCollector<'a> {
-    workspace: &'a Path,
+struct ModuleCollector {
     module_base: PathBuf,
     discovered: Vec<DiscoveredModule>,
     error: Option<anyhow::Error>,
 }
 
-impl ModuleCollector<'_> {
-    fn collect(workspace: &Path, module_base: PathBuf, syntax: &syn::File) -> Result<Vec<DiscoveredModule>> {
-        let mut collector = ModuleCollector {
-            workspace,
+impl ModuleCollector {
+    fn collect(module_base: PathBuf, syntax: &syn::File) -> Result<Vec<DiscoveredModule>> {
+        let mut collector = Self {
             module_base,
             discovered: Vec::new(),
             error: None,
@@ -74,7 +92,7 @@ impl ModuleCollector<'_> {
     }
 }
 
-impl<'ast> Visit<'ast> for ModuleCollector<'_> {
+impl<'ast> Visit<'ast> for ModuleCollector {
     fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
         if self.error.is_some() {
             return;
@@ -104,10 +122,7 @@ impl<'ast> Visit<'ast> for ModuleCollector<'_> {
             self.module_base = previous;
             return;
         }
-        match resolve_external_module(self.workspace, &self.module_base, &name) {
-            Ok(path) => self.discovered.push((path, child_base)),
-            Err(error) => self.error = Some(error),
-        }
+        self.discovered.push((self.module_base.clone(), name, child_base));
     }
 
     fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
@@ -143,16 +158,16 @@ fn contains_path_override(meta: &Meta) -> Result<bool> {
 }
 
 fn resolve_external_module(workspace: &Path, module_base: &Path, name: &str) -> Result<PathBuf> {
+    select_external_module(module_base, name, |path| {
+        workspace.join(path).try_exists().with_context(|| format!("inspect Cargo target module {}", path.display()))
+    })
+}
+
+fn select_external_module(module_base: &Path, name: &str, exists: impl Fn(&Path) -> Result<bool>) -> Result<PathBuf> {
     let flat = module_base.join(format!("{name}.rs"));
     let nested = module_base.join(name).join("mod.rs");
-    let flat_exists = workspace
-        .join(&flat)
-        .try_exists()
-        .with_context(|| format!("inspect Cargo target module {}", flat.display()))?;
-    let nested_exists = workspace
-        .join(&nested)
-        .try_exists()
-        .with_context(|| format!("inspect Cargo target module {}", nested.display()))?;
+    let flat_exists = exists(&flat)?;
+    let nested_exists = exists(&nested)?;
     match (flat_exists, nested_exists) {
         (true, false) => Ok(flat),
         (false, true) => Ok(nested),
@@ -162,12 +177,8 @@ fn resolve_external_module(workspace: &Path, module_base: &Path, name: &str) -> 
 }
 
 fn checked_module_path(workspace: &Path, relative: &Path) -> Result<String> {
-    if relative.is_absolute()
-        || relative.components().any(|component| !matches!(component, Component::Normal(_)))
-        || relative.extension().and_then(|extension| extension.to_str()) != Some("rs")
-    {
-        bail!("Cargo target module source must be a normalized relative Rust path");
-    }
+    let normalized = normalized_module_path(relative)?;
+    let relative = Path::new(&normalized);
     let absolute = workspace.join(relative);
     let metadata = fs::symlink_metadata(&absolute).with_context(|| format!("inspect Cargo target module source {}", absolute.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -180,6 +191,16 @@ fn checked_module_path(workspace: &Path, relative: &Path) -> Result<String> {
         .with_context(|| format!("Cargo target module source escapes the root package: {}", canonical.display()))?;
     if canonical_relative != relative {
         bail!("Cargo target module source cannot traverse symlinked path components");
+    }
+    Ok(normalized)
+}
+
+fn normalized_module_path(relative: &Path) -> Result<String> {
+    if relative.is_absolute()
+        || relative.components().any(|component| !matches!(component, Component::Normal(_)))
+        || relative.extension().and_then(|extension| extension.to_str()) != Some("rs")
+    {
+        bail!("Cargo target module source must be a normalized relative Rust path");
     }
     Ok(relative.to_str().context("Cargo target module source path is not UTF-8")?.replace('\\', "/"))
 }

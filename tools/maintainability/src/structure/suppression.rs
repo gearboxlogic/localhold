@@ -88,12 +88,8 @@ pub fn scan_workspace(workspace: &Path, inventory: &Inventory, component_paths: 
 }
 
 pub fn scan_revision(workspace: &Path, revision: &str, inventory: &Inventory, component_paths: &BTreeMap<&str, &str>) -> Result<Vec<SourceSuppression>> {
-    let mut target_sources = BTreeMap::new();
-    for (path, category) in modules::expand_target_sources(workspace, targets::root_package_target_sources(workspace)?, |path| component_paths.contains_key(path))? {
-        if component_paths.contains_key(path.as_str()) || revision_contains_path(workspace, revision, &path)? {
-            target_sources.insert(path, category);
-        }
-    }
+    let targets::RevisionTargets { roots, rust_sources } = targets::revision_root_package_target_sources(workspace, revision)?;
+    let target_sources = modules::expand_revision_target_sources(workspace, revision, roots, &rust_sources, |path| component_paths.contains_key(path))?;
     scan_with(inventory, component_paths, &target_sources, |path| {
         let object = format!("{revision}:{path}");
         let output = Command::new("git")
@@ -177,25 +173,6 @@ fn scan_with(
     }
     sites.sort();
     Ok(sites)
-}
-
-fn revision_contains_path(workspace: &Path, revision: &str, path: &str) -> Result<bool> {
-    let output = Command::new("git")
-        .current_dir(workspace)
-        .args(["ls-tree", "--name-only", "-z", revision, "--", path])
-        .output()
-        .with_context(|| format!("inspect Cargo target source {path:?} in revision {revision}"))?;
-    if !output.status.success() {
-        bail!("git ls-tree failed while inspecting Cargo target source {path:?} in revision {revision}");
-    }
-    if output.stdout.is_empty() {
-        return Ok(false);
-    }
-    let expected = format!("{path}\0");
-    if output.stdout != expected.as_bytes() {
-        bail!("git ls-tree returned an unexpected Cargo target source path");
-    }
-    Ok(true)
 }
 
 fn tooling_paths(workspace: &Path) -> Result<Vec<String>> {

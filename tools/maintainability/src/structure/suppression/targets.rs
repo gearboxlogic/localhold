@@ -8,6 +8,9 @@ use serde_json::Value;
 
 use super::SourceCategory;
 
+mod revision;
+pub(super) use revision::{RevisionTargets, revision_root_package_target_sources};
+
 pub(super) fn root_package_target_sources(workspace: &Path) -> Result<BTreeMap<String, SourceCategory>> {
     let workspace = fs::canonicalize(workspace).context("resolve workspace for Cargo target inventory")?;
     let manifest = fs::canonicalize(workspace.join("Cargo.toml")).context("resolve root package manifest for Cargo target inventory")?;

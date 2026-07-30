@@ -61,6 +61,9 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_token("cargo clippy -- -\"\"A warnings"));
     assert!(weakening_token("cargo clippy -- \"--al\"low warnings"));
     assert!(weakening_token("cargo clippy -- -\\A warnings"));
+    assert!(weakening_token_for_surface("script/check.cmd", "CARGO.EXE clippy -- -A warnings"));
+    assert!(weakening_token_for_surface("script/check.ps1", "Rustc.ExE -W warnings source.rs"));
+    assert!(!weakening_token_for_surface("script/check.sh", "CARGO.EXE clippy -- -A warnings"));
     assert!(weakening_token("rustc @policy/lints.args source.rs"));
     assert!(weakening_token("LABEL=@not-a-response rustc @policy/lints.args source.rs"));
     assert!(weakening_token("cargo rustc -- @policy/lints.args"));
@@ -85,6 +88,7 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
     assert!(weakening_environment("unset GITHUB_EVENT_PATH"));
     assert!(weakening_environment("GITHUB_SHA=untrusted"));
     assert!(weakening_environment("LOCALHOLD_MAINTAINABILITY_BASE_REV=$GITHUB_SHA"));
+    assert!(weakening_environment("MISE_OVERRIDE_CONFIG_FILENAMES=policy.toml"));
     assert!(weakening_environment_for_surface("script/check.ps1", "$env:rustflags = $dynamic"));
     assert!(weakening_environment_for_surface("script/check.cmd", "set cargo_encoded_rustflags=%DYNAMIC%"));
     assert!(!weakening_environment_for_surface("script/check.sh", "rustflags=local"));
@@ -146,6 +150,15 @@ fn command_surfaces_include_scripts_outside_the_legacy_script_directory() {
         "justfile",
         ".JUSTFILE",
         "module.just",
+        ".mise.toml",
+        "mise.development.toml",
+        ".mise.windows.local.toml",
+        "mise/config.local.toml",
+        ".mise/config.production.toml",
+        ".config/mise/config.ci.local.toml",
+        ".config/mise/conf.d/quality.toml",
+        ".CONFIG/MISE/CONF.D/QUALITY.TOML",
+        ".rtx.toml",
         ".github/workflows/ci.yml",
         ".github/actions/check/action.yaml",
         ".cargo/config",

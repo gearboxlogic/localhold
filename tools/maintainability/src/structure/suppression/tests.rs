@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::process::Command;
 
-use super::{SourceCategory, reject_tooling_suppressions, scan_workspace};
+use super::{SourceCategory, reject_tooling_suppressions, scan_revision, scan_workspace};
 use crate::structure::classify::Inventory;
 
 #[test]
@@ -113,6 +113,43 @@ fn root_package_target_roots_outside_the_structure_map_are_scanned() {
 }
 
 #[test]
+fn revision_scan_uses_the_previous_cargo_targets_and_module_graph() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let old_example = workspace.path().join("examples/old");
+    fs::create_dir_all(&old_example).expect("old example directory");
+    fs::write(
+        workspace.path().join("Cargo.toml"),
+        "[package]\nname='revision-target-fixture'\nversion='0.1.0'\nedition='2024'\nautoexamples=false\n\n[[example]]\nname='demo'\npath='examples/old/main.rs'\n",
+    )
+    .expect("old package manifest");
+    fs::write(
+        old_example.join("main.rs"),
+        "#![allow(clippy::panic, reason = \"legacy example root\")]\nmod helper;\nfn main() {}\n",
+    )
+    .expect("old example root");
+    fs::write(old_example.join("helper.rs"), "#![allow(clippy::panic, reason = \"legacy example helper\")]\n").expect("old example helper");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+    git(
+        workspace.path(),
+        &["-c", "user.name=LocalHold", "-c", "user.email=localhold@example.invalid", "commit", "-qm", "baseline"],
+    );
+    let revision = git_output(workspace.path(), &["rev-parse", "HEAD"]);
+
+    fs::rename(&old_example, workspace.path().join("examples/new")).expect("rename example directory");
+    fs::write(
+        workspace.path().join("Cargo.toml"),
+        "[package]\nname='revision-target-fixture'\nversion='0.1.0'\nedition='2024'\nautoexamples=false\n\n[[example]]\nname='demo'\npath='examples/new/main.rs'\n",
+    )
+    .expect("new package manifest");
+
+    let sites = scan_revision(workspace.path(), revision.trim(), &Inventory { files: Vec::new() }, &BTreeMap::new()).expect("scan prior Cargo target paths");
+    let mut paths = sites.iter().map(|site| site.path.as_str()).collect::<Vec<_>>();
+    paths.sort_unstable();
+    assert_eq!(paths, ["examples/old/helper.rs", "examples/old/main.rs"]);
+}
+
+#[test]
 fn maintainer_cargo_targets_cannot_escape_the_tools_root() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join("tools/checker")).expect("tool directory");
@@ -137,4 +174,10 @@ fn maintainer_cargo_targets_cannot_escape_the_tools_root() {
 fn git(workspace: &std::path::Path, arguments: &[&str]) {
     let status = Command::new("git").current_dir(workspace).args(arguments).status().expect("run git");
     assert!(status.success());
+}
+
+fn git_output(workspace: &std::path::Path, arguments: &[&str]) -> String {
+    let output = Command::new("git").current_dir(workspace).args(arguments).output().expect("run git");
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).expect("Git output is UTF-8")
 }

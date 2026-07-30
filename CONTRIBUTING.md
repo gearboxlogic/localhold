@@ -300,14 +300,17 @@ local actions must use the composite runtime so their commands remain directly
 auditable; Node and Docker action entrypoints and checked-in JavaScript command
 surfaces are unsupported. Workflow and action YAML may not use anchors,
 aliases, custom shell templates, or working-directory overrides to redirect an
-audited `run` command. Unreviewed procedural attributes and derives are also
-rejected because their expansions could emit hidden lint policy. The dependency
-jobs validate the reviewed mise configuration and lockfile before tool
-activation, then run the hash-pinned source-safety driver through resolved
-absolute Cargo and Git executables. The comparison base is derived from the
-runner event, the checkout must match the event head, and any configured base
-must match the event base, so versioned workflow changes cannot select the
-checked head or silently omit previous-revision enforcement.
+audited `run` command; multiline inline `run` scalars are unsupported. Shell
+continuations are normalized before command arguments are audited. Unreviewed
+procedural attributes and derives are also rejected because their expansions
+could emit hidden lint policy. The dependency jobs validate the reviewed mise
+configuration and lockfile before tool activation, then run the hash-pinned
+source-safety driver through resolved absolute Cargo and Git executables. The
+checker source set must match the checked-out revision immediately before
+compilation. The comparison base is derived from the runner event, the checkout
+must match the event head, and any configured base must match the event base, so
+versioned workflow changes cannot select the checked head or silently omit
+previous-revision enforcement.
 Ordinary agent changes must fix the warning or remove stale suppression debt;
 they must not edit policy evidence merely to make the gate pass.
 

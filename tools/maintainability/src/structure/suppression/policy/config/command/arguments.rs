@@ -102,17 +102,28 @@ fn is_yaml(path: &str) -> bool {
 fn normalized_source_for_surface(path: &str, source: &str) -> String {
     match Path::new(path).extension().and_then(|extension| extension.to_str()) {
         Some(extension) if extension.eq_ignore_ascii_case("ps1") => source.replace("`\r\n", "").replace("`\n", ""),
+        Some(extension) if matches!(extension.to_ascii_lowercase().as_str(), "cmd" | "bat") => join_command_continuations(source),
         Some(extension) if extension.eq_ignore_ascii_case("py") => python::join_implicit_continuations(source),
         _ => source.to_owned(),
     }
 }
 
 fn weakening_token_with_case(source: &str, case_insensitive_tools: bool) -> bool {
-    let logical = source.replace("\\\r\n", "").replace("\\\n", "");
+    let logical = join_command_continuations(source);
     logical
         .split(['\n', ';', '&', '|'])
         .map(command_without_comment)
         .any(|command| weakening_rust_command(command, case_insensitive_tools))
+}
+
+fn join_command_continuations(source: &str) -> String {
+    source
+        .replace("\\\r\n", "")
+        .replace("\\\n", "")
+        .replace("`\r\n", "")
+        .replace("`\n", "")
+        .replace("^\r\n", "")
+        .replace("^\n", "")
 }
 
 fn weakening_rust_command(command: &str, case_insensitive_tools: bool) -> bool {
@@ -172,7 +183,7 @@ fn injects_crate_attribute(tokens: &[String]) -> bool {
 }
 
 fn collect_direct_rust_sources(source: &str, case_insensitive_tools: bool, sources: &mut BTreeSet<String>) -> bool {
-    let logical = source.replace("\\\r\n", "").replace("\\\n", "");
+    let logical = join_command_continuations(source);
     let mut unresolved = false;
     for command in logical.split(['\n', ';', '&', '|']).map(command_without_comment) {
         let tokens = command_tokens(command);

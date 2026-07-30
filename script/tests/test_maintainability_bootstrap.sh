@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+unset GITHUB_ACTIONS GITHUB_EVENT_PATH GITHUB_SHA
+
 repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 check="$repository_root/script/check-maintainability-bootstrap.sh"
 fixture=$(mktemp -d)
@@ -18,6 +20,8 @@ write_manifest() {
 restore_reviewed_graph() {
     cp "$source_tool/Cargo.toml" "$test_tool/Cargo.toml"
     cp "$source_tool/Cargo.lock" "$test_tool/Cargo.lock"
+    rm -rf "$test_tool/src"
+    cp -R "$source_tool/src" "$test_tool/src"
     cp "$repository_root/mise.toml" "$test_repository/mise.toml"
     cp "$repository_root/mise.lock" "$test_repository/mise.lock"
     mkdir -p "$test_repository/script"
@@ -48,7 +52,28 @@ expect_failure_before_command() {
 }
 
 restore_reviewed_graph
+git -C "$test_repository" init -q
+git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example.invalid add .
+git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example.invalid commit -qm 'reviewed fixture'
+test_head=$(git -C "$test_repository" rev-parse HEAD)
 run_check >/dev/null
+
+printf 'fn main() {}\n' >"$test_tool/src/main.rs"
+expect_failure_before_command
+
+restore_reviewed_graph
+mkdir -p "$test_tool/src/bin"
+printf 'fn main() {}\n' >"$test_tool/src/bin/unreviewed.rs"
+expect_failure_before_command
+
+restore_reviewed_graph
+event_path="$fixture/event.json"
+printf '{}\n' >"$event_path"
+if GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=0000000000000000000000000000000000000000 run_check >/dev/null 2>&1; then
+    printf 'maintainability bootstrap accepted a checker revision other than GITHUB_SHA\n' >&2
+    exit 1
+fi
+GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head run_check >/dev/null
 
 touch "$test_tool/build.rs"
 expect_failure

@@ -26,6 +26,7 @@ if (( $# > 0 )); then
 fi
 
 tool_root="$repository_root/tools/maintainability"
+source_root="$tool_root/src"
 manifest="$tool_root/Cargo.toml"
 lockfile="$tool_root/Cargo.lock"
 mise_config="$repository_root/mise.toml"
@@ -98,6 +99,105 @@ trusted_command_path() {
         exit 1
     fi
     printf '%s\n' "$candidate"
+}
+
+scrub_untrusted_environment() {
+    local name
+    local uppercase
+    while IFS= read -r name; do
+        uppercase=${name^^}
+        case "$uppercase" in
+            RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
+                RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \
+                CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \
+                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_*)
+                unset "$name"
+                ;;
+        esac
+    done < <(compgen -e)
+}
+
+scrub_untrusted_environment
+git_command=$(trusted_command_path git)
+find_command=$(trusted_command_path find)
+
+git_checked() {
+    "$git_command" --no-replace-objects -c diff.external= -C "$repository_root" "$@"
+}
+
+verify_checker_sources() {
+    if [[ ! -d "$source_root" || -L "$source_root" ]]; then
+        printf 'maintainability checker source root must be a regular directory: %s\n' "$source_root" >&2
+        exit 1
+    fi
+
+    local checked_head
+    checked_head=$(git_checked rev-parse --verify 'HEAD^{commit}') || {
+        printf 'cannot read the checked-out revision before compiling the maintainability checker\n' >&2
+        exit 1
+    }
+    if [[ -v GITHUB_ACTIONS || -v GITHUB_EVENT_PATH || -v GITHUB_SHA ]]; then
+        if [[ ${GITHUB_ACTIONS:-} != true || -z ${GITHUB_EVENT_PATH:-} || -z ${GITHUB_SHA:-} ]]; then
+            printf 'incomplete or invalid GitHub Actions environment cannot select a different checker revision\n' >&2
+            exit 1
+        fi
+        if [[ ! $GITHUB_SHA =~ ^[[:xdigit:]]{40}$ || ${checked_head,,} != ${GITHUB_SHA,,} ]]; then
+            printf 'checked-out Git head revision differs from GITHUB_SHA before checker compilation\n' >&2
+            exit 1
+        fi
+    fi
+
+    local -A expected_paths=()
+    local expected_count=0
+    local entry
+    local metadata
+    local mode
+    local object_type
+    local expected_hash
+    local relative_path
+    local actual_hash
+    while IFS= read -r -d '' entry; do
+        metadata=${entry%%$'\t'*}
+        relative_path=${entry#*$'\t'}
+        read -r mode object_type expected_hash <<<"$metadata"
+        if [[ $object_type != blob || $mode != 100644 && $mode != 100755 ]]; then
+            printf 'maintainability checker source revision contains an unsupported entry: %s\n' "$relative_path" >&2
+            exit 1
+        fi
+        if [[ ! -f "$repository_root/$relative_path" || -L "$repository_root/$relative_path" ]]; then
+            printf 'maintainability checker source must be a regular non-symlink file: %s\n' "$relative_path" >&2
+            exit 1
+        fi
+        actual_hash=$(git_checked hash-object --no-filters -- "$repository_root/$relative_path") || {
+            printf 'cannot hash maintainability checker source: %s\n' "$relative_path" >&2
+            exit 1
+        }
+        if [[ $actual_hash != "$expected_hash" ]]; then
+            printf 'maintainability checker source differs from the checked-out revision: %s\n' "$relative_path" >&2
+            exit 1
+        fi
+        expected_paths["$relative_path"]=1
+        ((expected_count += 1))
+    done < <(git_checked ls-tree -r -z --full-tree "$checked_head" -- tools/maintainability/src)
+    if (( expected_count == 0 )); then
+        printf 'checked-out revision contains no maintainability checker sources\n' >&2
+        exit 1
+    fi
+
+    local observed_count=0
+    local observed_path
+    while IFS= read -r -d '' observed_path; do
+        relative_path=${observed_path#"$repository_root/"}
+        if [[ -z ${expected_paths["$relative_path"]+present} ]]; then
+            printf 'maintainability checker source is absent from the checked-out revision: %s\n' "$relative_path" >&2
+            exit 1
+        fi
+        ((observed_count += 1))
+    done < <("$find_command" "$source_root" \( -type f -o -type l \) -print0)
+    if (( observed_count != expected_count )); then
+        printf 'maintainability checker source set differs from the checked-out revision\n' >&2
+        exit 1
+    fi
 }
 
 directory=$repository_root
@@ -193,27 +293,18 @@ if [[ $actual_runner_sha256 != "$reviewed_runner_sha256" ]]; then
     exit 1
 fi
 
+verify_checker_sources
+
 printf 'maintainability bootstrap check passed\n'
 
 if (( ${#command[@]} > 0 )); then
     LOCALHOLD_MAINTAINABILITY_CARGO=$(trusted_command_path cargo)
-    git_executable=$(trusted_command_path git)
+    git_executable=$git_command
     if [[ $OSTYPE == msys* || $OSTYPE == cygwin* ]]; then
         cygpath_command=$(trusted_command_path cygpath)
         git_executable=$("$cygpath_command" -w "$git_executable")
     fi
     LOCALHOLD_MAINTAINABILITY_GIT=$git_executable
     export LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_GIT
-    while IFS= read -r name; do
-        uppercase=${name^^}
-        case "$uppercase" in
-            RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
-                RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \
-                CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \
-                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_*)
-                unset "$name"
-                ;;
-        esac
-    done < <(compgen -e)
     exec "${command[@]}"
 fi

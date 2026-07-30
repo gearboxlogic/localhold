@@ -12,8 +12,18 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
         return Ok(());
     }
     let mut block_indentation = None;
+    let mut inline_run_indentation = None;
     for line in source.lines() {
         let indentation = leading_spaces(line);
+        if let Some(header) = inline_run_indentation {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if indentation > header {
+                bail!("checked-in GitHub YAML {path:?} uses an unsupported multiline inline run scalar");
+            }
+            inline_run_indentation = None;
+        }
         if block_indentation.is_some_and(|header| line.trim().is_empty() || indentation > header) {
             continue;
         }
@@ -38,6 +48,9 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
             }
         } else if is_block_scalar(value) {
             block_indentation = Some(indentation);
+        } else if key == "run" && !value.is_empty() {
+            literal_scalar(value).ok_or_else(|| anyhow::anyhow!("checked-in GitHub YAML {path:?} uses an unsupported inline run scalar"))?;
+            inline_run_indentation = Some(indentation);
         }
     }
     Ok(())

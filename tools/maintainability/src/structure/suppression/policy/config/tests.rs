@@ -113,9 +113,15 @@ fn weakening_tokens_distinguish_rust_lint_flags_from_application_options() {
 }
 
 #[test]
-fn powershell_continuations_cannot_split_lint_arguments_from_cargo() {
+fn shell_continuations_cannot_split_lint_arguments_from_cargo() {
     assert!(weakening_token_for_surface("script/check.ps1", "cargo clippy -- `\r\n  -A warnings"));
     assert!(weakening_token_for_surface("script/check.ps1", "cargo clippy -- `\n  --allow=warnings"));
+    assert!(weakening_token_for_surface("script/check.cmd", "cargo clippy -- ^\r\n  -A warnings"));
+    assert!(weakening_token_for_surface("script/check.bat", "cargo clippy -- ^\n  --allow=warnings"));
+    assert!(weakening_token_for_surface(
+        ".github/workflows/ci.yml",
+        "steps:\n  - shell: cmd\n    run: |\n      cargo clippy -- ^\n        -A warnings\n"
+    ));
 }
 
 #[test]
@@ -356,7 +362,7 @@ fn local_node_actions_are_rejected_before_unscanned_entrypoints_can_run() {
 }
 
 #[test]
-fn github_yaml_rejects_aliases_and_custom_shell_templates() {
+fn github_yaml_rejects_unsupported_execution_metadata() {
     for source in [
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    env:\n      COMMAND: &lint cargo clippy -- -A warnings\n    steps:\n      - run: *lint\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -c 'cargo clippy -- -A warnings' -- {0}\n        run: just maintainability\n",
@@ -364,6 +370,8 @@ fn github_yaml_rejects_aliases_and_custom_shell_templates() {
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - working-directory: misc\n        run: rustc check.rs\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    defaults: {run: {working-directory: misc}}\n    steps:\n      - run: rustc check.rs\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps: [{run: cargo clippy -- -A warnings}]\n",
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: \"cargo clippy --\n          -A warnings\"\n",
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo clippy --\n          -A warnings\n",
     ] {
         let workspace = tempfile::tempdir().expect("temporary workspace");
         fs::create_dir_all(workspace.path().join(".github/workflows")).expect("workflow directory");
@@ -376,7 +384,8 @@ fn github_yaml_rejects_aliases_and_custom_shell_templates() {
             error.to_string().contains("anchors or aliases")
                 || error.to_string().contains("unsupported shell template")
                 || error.to_string().contains("working-directory")
-                || error.to_string().contains("flow mapping or complex sequence"),
+                || error.to_string().contains("flow mapping or complex sequence")
+                || error.to_string().contains("inline run scalar"),
             "{error:#}"
         );
     }

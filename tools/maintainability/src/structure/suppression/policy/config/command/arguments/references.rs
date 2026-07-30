@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use super::{
     has_case_insensitive_tool_names, is_cargo_tool_token, is_environment_assignment, is_normalized_manifest_path, is_shell_command_prefix, is_yaml, matches_tool_name,
@@ -169,15 +169,15 @@ fn normalized_literal_script(candidate: &str) -> Option<String> {
     if path.is_absolute() {
         return None;
     }
-    let mut normalized = PathBuf::new();
+    let mut normalized = Vec::new();
     for component in path.components() {
         match component {
             Component::CurDir => {}
-            Component::Normal(value) => normalized.push(value),
+            Component::Normal(value) => normalized.push(value.to_str()?.to_owned()),
             _ => return None,
         }
     }
-    (!normalized.as_os_str().is_empty()).then(|| normalized.to_string_lossy().into_owned())
+    (!normalized.is_empty()).then(|| normalized.join("/"))
 }
 
 fn contains_dynamic_value(value: &str) -> bool {

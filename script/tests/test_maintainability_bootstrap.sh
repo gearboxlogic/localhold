@@ -270,6 +270,16 @@ if PATH="$fake_system_bin:$PATH" run_check >/dev/null 2>&1; then
     exit 1
 fi
 
+tar_options_helper="$fixture/tar-options-helper"
+tar_options_marker="$fixture/tar-options-ran"
+printf '%s\n' '#!/usr/bin/bash' 'printf executed >"$TAR_OPTIONS_MARKER"' >"$tar_options_helper"
+chmod +x "$tar_options_helper"
+TAR_OPTIONS_MARKER=$tar_options_marker TAR_OPTIONS="--checkpoint=1 --checkpoint-action=exec=$tar_options_helper" run_check --test-environment >/dev/null
+if [[ -e $tar_options_marker ]]; then
+    printf 'maintainability bootstrap executed inherited TAR_OPTIONS\n' >&2
+    exit 1
+fi
+
 kernel=$(/usr/bin/uname -s)
 machine=$(/usr/bin/uname -m)
 if [[ $kernel == Linux && $machine == x86_64 ]]; then

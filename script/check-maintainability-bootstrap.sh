@@ -60,7 +60,7 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=f9ead9aeff6aae855040ce3aea2e8901119071beef46061332dc3526378a9de6
-readonly reviewed_bootstrap_tests_sha256=990b0c2d61032ea8e61e8a7b1405b1b3b9a6f35c42e0e99f9f2c009b92ab1f25
+readonly reviewed_bootstrap_tests_sha256=e53cb4cd9c78dfcb23fb5841888801c62ce5f35b62e2b398951a667d56784ef6
 readonly reviewed_gate_runner_sha256=a614e7a0804eed432d84f5b5e9283406c0c4f0915c9f79ce1b6b9b5fd2142433
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
@@ -142,7 +142,7 @@ scrub_untrusted_environment() {
             BASH_ENV | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
                 RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \
                 CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \
-                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_*)
+                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_* | TAR_OPTIONS)
                 unset "$name"
                 ;;
         esac

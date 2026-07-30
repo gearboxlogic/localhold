@@ -41,15 +41,22 @@ pub(super) fn validate(path: &str, source: &str) -> Result<()> {
         let Some(active_job) = &mut job else {
             continue;
         };
+        active_job.observe_shell_default(indentation, line);
+        if let Some((key, value)) = yaml_key_value(line)
+            && key == "shell"
+            && literal_scalar(value).as_deref() != Some("bash")
+        {
+            active_job.violations.insert(JobViolation::NonBashShell);
+        }
         if indentation == 4
             && let Some((key, value)) = yaml_key_value(line)
         {
             if key == "if" {
-                active_job.conditional = true;
+                active_job.violations.insert(JobViolation::Conditional);
             } else if key == "continue-on-error" {
-                active_job.continues_on_error = true;
+                active_job.violations.insert(JobViolation::ContinuesOnError);
             } else if key == "needs" {
-                active_job.has_dependencies = true;
+                active_job.violations.insert(JobViolation::HasDependencies);
             } else if key == "runs-on" {
                 active_job.runner = literal_scalar(value);
             } else if key == "steps" && value.trim().is_empty() {
@@ -110,7 +117,7 @@ fn finish_step(job: Option<&mut Job>, step: Option<Step>, governed_jobs: &mut BT
             job.name
         );
     }
-    if job.conditional || job.continues_on_error || step.conditional || step.continues_on_error {
+    if job.violations.contains(&JobViolation::Conditional) || job.violations.contains(&JobViolation::ContinuesOnError) || step.conditional || step.continues_on_error {
         bail!(
             "checked-in GitHub YAML {WORKFLOW_PATH:?} makes governed dependency-unsafe gate job {:?} conditional or non-failing",
             job.name
@@ -182,9 +189,13 @@ fn finish_job(job: Option<&Job>) -> Result<()> {
     let Some(job) = job.filter(|job| governed_job(&job.name).is_some()) else {
         return Ok(());
     };
-    if job.has_dependencies || job.completed_steps != GOVERNED_STEP_COUNT {
+    if !job.has_bash_shell_default
+        || job.violations.contains(&JobViolation::HasDependencies)
+        || job.violations.contains(&JobViolation::NonBashShell)
+        || job.completed_steps != GOVERNED_STEP_COUNT
+    {
         bail!(
-            "checked-in GitHub YAML {WORKFLOW_PATH:?} must keep the reviewed dependency-free isolated step sequence in governed dependency-unsafe job {:?}",
+            "checked-in GitHub YAML {WORKFLOW_PATH:?} must keep the reviewed dependency-free Bash-isolated step sequence in governed dependency-unsafe job {:?}",
             job.name
         );
     }
@@ -201,26 +212,56 @@ fn is_sequence_item(content: &str) -> bool {
 
 struct Job {
     name: String,
-    conditional: bool,
-    continues_on_error: bool,
     completed_steps: usize,
-    has_dependencies: bool,
     runner: Option<String>,
     steps_indentation: Option<usize>,
+    defaults_indentation: Option<usize>,
+    run_defaults_indentation: Option<usize>,
+    has_bash_shell_default: bool,
+    violations: BTreeSet<JobViolation>,
 }
 
 impl Job {
     fn new(name: &str) -> Self {
         Self {
             name: name.to_owned(),
-            conditional: false,
-            continues_on_error: false,
             completed_steps: 0,
-            has_dependencies: false,
             runner: None,
             steps_indentation: None,
+            defaults_indentation: None,
+            run_defaults_indentation: None,
+            has_bash_shell_default: false,
+            violations: BTreeSet::new(),
         }
     }
+
+    fn observe_shell_default(&mut self, indentation: usize, line: &str) {
+        if self.run_defaults_indentation.is_some_and(|parent| indentation <= parent) {
+            self.run_defaults_indentation = None;
+        }
+        if self.defaults_indentation.is_some_and(|parent| indentation <= parent) {
+            self.defaults_indentation = None;
+            self.run_defaults_indentation = None;
+        }
+        let Some((key, value)) = yaml_key_value(line) else {
+            return;
+        };
+        if indentation == 4 && key == "defaults" && value.trim().is_empty() {
+            self.defaults_indentation = Some(indentation);
+        } else if self.defaults_indentation.is_some() && indentation == 6 && key == "run" && value.trim().is_empty() {
+            self.run_defaults_indentation = Some(indentation);
+        } else if self.run_defaults_indentation.is_some() && indentation == 8 && key == "shell" {
+            self.has_bash_shell_default = literal_scalar(value).as_deref() == Some("bash");
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum JobViolation {
+    Conditional,
+    ContinuesOnError,
+    HasDependencies,
+    NonBashShell,
 }
 
 #[derive(Default)]

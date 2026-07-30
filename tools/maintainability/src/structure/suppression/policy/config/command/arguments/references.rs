@@ -157,6 +157,10 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "bun" | "bun.exe" | "deno" | "deno.exe" | "lua" | "lua.exe" | "node" | "node.exe" | "perl" | "perl.exe" | "php" | "php.exe" | "ruby" | "ruby.exe" => {
             positional_interpreter_input(arguments)
         }
+        "sed" | "sed.exe" => {
+            let (inputs, opaque) = sed_script_inputs(arguments);
+            return (inputs, opaque);
+        }
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
             let (inputs, opaque) = makefile_inputs(arguments);
             return (inputs, opaque || make_environment_selection_is_opaque(&tokens[..command_index]));
@@ -321,6 +325,53 @@ fn positional_interpreter_input(arguments: &[String]) -> SelectedInput<'_> {
     SelectedInput::Literal(argument)
 }
 
+fn sed_script_inputs(arguments: &[String]) -> (Vec<&str>, bool) {
+    let mut inputs = Vec::new();
+    let mut opaque = false;
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        let selected = if argument == "--file" {
+            index += 1;
+            arguments.get(index).map_or(SelectedInput::Opaque, |candidate| SelectedInput::Literal(candidate))
+        } else if let Some(candidate) = argument.strip_prefix("--file=") {
+            if candidate.is_empty() {
+                SelectedInput::Opaque
+            } else {
+                SelectedInput::Literal(candidate)
+            }
+        } else {
+            sed_short_script_input(argument, arguments.get(index + 1).map(String::as_str))
+        };
+        match selected {
+            SelectedInput::None => {}
+            SelectedInput::Literal(candidate) => inputs.push(candidate),
+            SelectedInput::Opaque => opaque = true,
+        }
+        index += 1;
+    }
+    (inputs, opaque)
+}
+
+fn sed_short_script_input<'a>(argument: &'a str, following: Option<&'a str>) -> SelectedInput<'a> {
+    let Some(options) = argument.strip_prefix('-').filter(|options| !options.starts_with('-')) else {
+        return SelectedInput::None;
+    };
+    for (index, option) in options.char_indices() {
+        if option == 'e' || option == 'i' {
+            return SelectedInput::None;
+        }
+        if option == 'f' {
+            let candidate = &options[index + option.len_utf8()..];
+            return if candidate.is_empty() {
+                following.map_or(SelectedInput::Opaque, SelectedInput::Literal)
+            } else {
+                SelectedInput::Literal(candidate)
+            };
+        }
+    }
+    SelectedInput::None
+}
+
 fn makefile_inputs(arguments: &[String]) -> (Vec<&str>, bool) {
     let mut inputs = Vec::new();
     let mut opaque = false;
@@ -427,6 +478,9 @@ mod tests {
         assert_eq!(inputs("perl quality/lint.pl"), (vec!["quality/lint.pl".to_owned()], false));
         assert_eq!(inputs("ruby -- quality/lint.rb"), (vec!["quality/lint.rb".to_owned()], false));
         assert_eq!(inputs("perl -e 'system q(cargo clippy)'"), (Vec::new(), true));
+        assert_eq!(inputs("sed -nf quality/lint.sed /etc/hosts"), (vec!["quality/lint.sed".to_owned()], false));
+        assert_eq!(inputs("sed --file=quality/lint.sed /etc/hosts"), (vec!["quality/lint.sed".to_owned()], false));
+        assert_eq!(inputs("sed -f $SCRIPT /etc/hosts"), (Vec::new(), true));
         assert_eq!(
             inputs("make -f quality/lint.rules --file=quality/common.rules"),
             (vec!["quality/common.rules".to_owned(), "quality/lint.rules".to_owned()], false)

@@ -2,6 +2,9 @@ use super::validate;
 
 const JOB: &str = r#"  dependency-unsafe-linux:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Install reviewed Rust toolchain
         run: rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
@@ -58,6 +61,12 @@ fn governed_gate_steps_are_unconditional_and_platform_bound() {
 
     let dependent_job = accepted.replacen("    runs-on:", "    needs: skipped-setup\n    runs-on:", 1);
     assert_rejected(&dependent_job);
+
+    let sh_default = accepted.replacen("        shell: bash", "        shell: sh", 1);
+    assert_rejected(&sh_default);
+
+    let missing_default = accepted.replacen("    defaults:\n      run:\n        shell: bash\n", "", 1);
+    assert_rejected(&missing_default);
 }
 
 #[test]

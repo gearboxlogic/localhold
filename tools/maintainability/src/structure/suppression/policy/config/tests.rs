@@ -379,6 +379,11 @@ fn rustup_mirror_overrides_are_governed_environment_channels() {
 }
 
 #[test]
+fn archive_tool_environment_overrides_are_governed() {
+    assert!(weakening_environment("TAR_OPTIONS=--checkpoint-action=exec=quality/helper"));
+}
+
+#[test]
 fn bootstrap_digest_overrides_require_the_exact_reviewed_bindings() {
     for name in ["LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256", "LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256"] {
         assert!(weakening_environment(&format!("{name}=attacker-controlled")));
@@ -563,6 +568,19 @@ fn command_policy_scans_positional_interpreter_programs() {
 }
 
 #[test]
+fn command_policy_scans_sed_program_files() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::write(workspace.path().join("Justfile"), "lint:\n    sed -f quality/lint.sed /etc/hosts\n").expect("sed invocation");
+    fs::write(workspace.path().join("quality/lint.sed"), "1e cargo clippy -- -A warnings\n").expect("non-executable sed program");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+}
+
+#[test]
 fn command_policy_governs_opaque_shell_programs_and_selected_makefiles() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
@@ -733,6 +751,7 @@ fn github_yaml_rejects_unsupported_execution_metadata() {
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - { run: \"cargo clippy -- -A warnings\" }\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -c 'cargo clippy -- -A warnings' -- {0}\n        run: just maintainability\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: |\n          bash -c 'cargo clippy -- -A warnings' -- {0}\n        run: just maintainability\n",
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: >\n          # hidden by incorrect folding\n            cargo clippy -- -A warnings\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - working-directory: misc\n        run: rustc check.rs\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - 'working-directory' : misc\n        run: rustc check.rs\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    defaults: {run: {working-directory: misc}}\n    steps:\n      - run: rustc check.rs\n",
@@ -754,6 +773,7 @@ fn github_yaml_rejects_unsupported_execution_metadata() {
         assert!(
             error.to_string().contains("anchors or aliases")
                 || error.to_string().contains("unsupported shell template")
+                || error.to_string().contains("folded run scalar")
                 || error.to_string().contains("working-directory")
                 || error.to_string().contains("flow mapping or complex sequence")
                 || error.to_string().contains("inline run scalar")

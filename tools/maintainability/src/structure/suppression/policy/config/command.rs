@@ -32,7 +32,7 @@ pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "            BASH_ENV | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
     "                RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \\",
     "                CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \\",
-    "                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_*)",
+    "                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_* | TAR_OPTIONS)",
     "    if [[ -v GITHUB_ACTIONS || -v GITHUB_EVENT_PATH || -v GITHUB_SHA ]]; then",
     "        if [[ ${GITHUB_ACTIONS:-} != true || -z ${GITHUB_EVENT_PATH:-} || -z ${GITHUB_SHA:-} ]]; then",
     "        if [[ ! $GITHUB_SHA =~ ^[[:xdigit:]]{40}$ || ${checked_head,,} != \"${GITHUB_SHA,,}\" ]]; then",
@@ -101,6 +101,8 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "FAKE_JUST_MARKER=$fake_just_marker FAKE_CARGO_MARKER=$fake_cargo_marker FAKE_RUSTUP_MARKER=$fake_rustup_marker PATH=\"$fake_bin:$PATH\" run_check --test-environment >/dev/null",
     "if LOCALHOLD_MAINTAINABILITY_RUSTUP=\"$fake_bin/rustup\" run_check --test-environment >/dev/null 2>&1; then",
     "if PATH=\"$fake_system_bin:$PATH\" run_check >/dev/null 2>&1; then",
+    "TAR_OPTIONS_MARKER=$tar_options_marker TAR_OPTIONS=\"--checkpoint=1 --checkpoint-action=exec=$tar_options_helper\" run_check --test-environment >/dev/null",
+    "    printf 'maintainability bootstrap executed inherited TAR_OPTIONS\\n' >&2",
     "export -f inherited_cargo_function",
     "if run_check --test-environment >/dev/null 2>&1; then",
     "unset -f inherited_cargo_function",
@@ -123,7 +125,7 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          LD_LIBRARY_PATH: ''",
     "          LD_PRELOAD: ''",
     "          LD_PRELOAD: ''",
-    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 434c39b48e539af267bdb6fca5097c1f63237668f7b5498283602ac2830c547e",
+    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 7f5690212d2c51cbec710ec2561c849c0f69a8ca503419681bf29508235f097d",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
@@ -320,6 +322,7 @@ fn is_weakening_environment_name(name: &str) -> bool {
             | "RUSTC_WORKSPACE_WRAPPER"
             | "RUSTUP_DIST_SERVER"
             | "RUSTUP_UPDATE_ROOT"
+            | "TAR_OPTIONS"
             | "CARGO_HOME"
             | "CARGO_BUILD_TARGET"
             | "CARGO_BUILD_RUSTFLAGS"

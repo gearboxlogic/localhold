@@ -74,6 +74,8 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
             if !matches!(shell.as_str(), "bash" | "sh" | "pwsh" | "powershell" | "cmd" | "python") {
                 bail!("checked-in GitHub YAML {path:?} uses an unsupported shell template");
             }
+        } else if key == "run" && value.starts_with('>') && is_block_scalar(value) {
+            bail!("checked-in GitHub YAML {path:?} uses an unsupported folded run scalar");
         } else if is_block_scalar(value) {
             block_indentation = Some(BlockScalar {
                 indentation,

@@ -169,6 +169,10 @@ fn weakening_environment_channels_are_detected() {
     assert!(!weakening_environment("rustc --version"));
     let scrubber = format!("{}\n", BOOTSTRAP_ENVIRONMENT_LINES.join("\n"));
     assert!(scrubber_environment_references_are_exact("script/check-maintainability-bootstrap.sh", &scrubber));
+    assert!(scrubber_environment_references_are_exact(
+        "script/run-source-safety.sh",
+        &RUNNER_ENVIRONMENT_LINES.join("\n")
+    ));
     assert!(!scrubber_environment_references_are_exact(
         "script/check-maintainability-bootstrap.sh",
         &format!("{scrubber}RUSTFLAGS='-A warnings'\n"),
@@ -239,6 +243,9 @@ fn command_surfaces_include_scripts_outside_the_legacy_script_directory() {
         "nested/.cargo/config.toml",
         "nested/.CARGO/CONFIG.TOML",
         "script/release.py",
+        "tools/ci/action.js",
+        "tools/ci/action.cjs",
+        "tools/ci/action.mjs",
         "tools/ci/check.sh",
         "tools/ci/check.PS1",
         "Makefile",
@@ -308,6 +315,43 @@ fn local_composite_actions_are_scanned_in_any_directory() {
 
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("lint-weakening argument"));
+}
+
+#[test]
+fn local_node_actions_are_rejected_before_unscanned_entrypoints_can_run() {
+    for entrypoint in ["index.js", "dist/entrypoint"] {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let action = workspace.path().join("actions/lint");
+        fs::create_dir_all(action.join("dist")).expect("action directory");
+        fs::write(action.join("action.yml"), format!("name: lint\nruns:\n  using: node20\n  main: {entrypoint}\n")).expect("Node action metadata");
+        fs::write(action.join(entrypoint), "require('node:child_process').execSync('cargo clippy -- -A warnings');\n").expect("Node action entrypoint");
+        git(workspace.path(), &["init", "-q"]);
+        git(workspace.path(), &["add", "."]);
+
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("only composite local actions are supported"));
+    }
+}
+
+#[test]
+fn github_yaml_rejects_aliases_and_custom_shell_templates() {
+    for source in [
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    env:\n      COMMAND: &lint cargo clippy -- -A warnings\n    steps:\n      - run: *lint\n",
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -c 'cargo clippy -- -A warnings' -- {0}\n        run: just maintainability\n",
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: |\n          bash -c 'cargo clippy -- -A warnings' -- {0}\n        run: just maintainability\n",
+    ] {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        fs::create_dir_all(workspace.path().join(".github/workflows")).expect("workflow directory");
+        fs::write(workspace.path().join(".github/workflows/lint.yml"), source).expect("workflow");
+        git(workspace.path(), &["init", "-q"]);
+        git(workspace.path(), &["add", "."]);
+
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(
+            error.to_string().contains("anchors or aliases") || error.to_string().contains("unsupported shell template"),
+            "{error:#}"
+        );
+    }
 }
 
 #[test]

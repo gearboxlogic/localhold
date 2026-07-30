@@ -4,6 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
+mod actions;
 mod arguments;
 mod surfaces;
 mod yaml;
@@ -17,11 +18,15 @@ use surfaces::execution_surfaces;
 
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "cargo_home=${CARGO_HOME:-}",
+    "    LOCALHOLD_MAINTAINABILITY_CARGO=$(trusted_command_path cargo)",
+    "    export LOCALHOLD_MAINTAINABILITY_CARGO",
     "            RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | CARGO_BUILD_TARGET | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
     "                RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \\",
     "                CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \\",
     "                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER)",
 ];
+pub(super) const RUNNER_ENVIRONMENT_LINES: &[&str] =
+    &["readonly cargo_command=${LOCALHOLD_MAINTAINABILITY_CARGO:?maintainability bootstrap did not provide an absolute Cargo command}"];
 pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "CARGO_HOME='C:\\cargo-home' \\",
     "export CARGO_HOME=$cargo_home",
@@ -45,6 +50,7 @@ pub fn reject_checked_in_weakening(workspace: &Path) -> Result<BTreeSet<String>>
             bail!("checked-in Cargo configuration {path:?} is unsupported because it can override lint policy");
         }
         let source = fs::read_to_string(workspace.join(&path)).with_context(|| format!("read lint command execution surface {path}"))?;
+        yaml::validate_execution_metadata(&path, &source)?;
         if has_sourced_file_indirection(&path, &source) {
             bail!("checked-in Rust command surface {path:?} uses unsupported sourced-file indirection");
         }
@@ -106,6 +112,7 @@ fn weakening_environment_names(source: &str, case_insensitive: bool) -> bool {
                     | "GITHUB_EVENT_PATH"
                     | "GITHUB_SHA"
                     | "LOCALHOLD_MAINTAINABILITY_BASE_REV"
+                    | "LOCALHOLD_MAINTAINABILITY_CARGO"
                     | "MISE_CONFIG_DIR"
                     | "MISE_CONFIG_FILE"
                     | "MISE_CEILING_PATHS"
@@ -125,6 +132,7 @@ fn weakening_environment_names(source: &str, case_insensitive: bool) -> bool {
 pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str) -> bool {
     let allowed = match path {
         "script/check-maintainability-bootstrap.sh" => BOOTSTRAP_ENVIRONMENT_LINES,
+        "script/run-source-safety.sh" => RUNNER_ENVIRONMENT_LINES,
         "script/tests/test_maintainability_bootstrap.sh" => BOOTSTRAP_TEST_ENVIRONMENT_LINES,
         "mise.toml" => MISE_ENVIRONMENT_LINES,
         ".github/workflows/ci.yml" => CI_REVISION_ENVIRONMENT_LINES,
@@ -156,9 +164,12 @@ pub(super) fn is_execution_surface(path: &str) -> bool {
     {
         return true;
     }
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "sh" | "bash" | "zsh" | "fish" | "ps1" | "cmd" | "bat" | "py"))
+    path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
+        matches!(
+            extension.to_ascii_lowercase().as_str(),
+            "sh" | "bash" | "zsh" | "fish" | "ps1" | "cmd" | "bat" | "py" | "js" | "cjs" | "mjs"
+        )
+    })
 }
 
 fn is_mise_config(path: &Path) -> bool {

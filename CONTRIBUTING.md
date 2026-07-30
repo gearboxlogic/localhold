@@ -295,7 +295,13 @@ configuration, and compiler or lint override environment channels. The
 bootstrap scrubber and its exact self-test may name those environment channels
 so they can remove and verify them, but they remain subject to the argument
 scan; no directory-wide command-surface exemption exists. In GitHub Actions,
-the comparison base is derived from the runner event and any configured base
+local actions must use the composite runtime so their commands remain directly
+auditable; Node and Docker action entrypoints are unsupported. Workflow and
+action YAML may not use anchors, aliases, or custom shell templates to redirect
+an audited `run` command. The dependency jobs validate the reviewed mise
+configuration and lockfile before tool activation, then run the hash-pinned
+source-safety driver through the resolved absolute Cargo executable. The
+comparison base is derived from the runner event and any configured base
 must match it, so versioned workflow changes cannot select the checked head or
 silently omit previous-revision enforcement.
 Ordinary agent changes must fix the warning or remove stale suppression debt;

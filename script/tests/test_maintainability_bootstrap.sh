@@ -9,6 +9,7 @@ test_repository="$fixture/parent/repository"
 mkdir -p "$test_repository/tools/maintainability"
 source_tool="$repository_root/tools/maintainability"
 test_tool="$test_repository/tools/maintainability"
+source_runner="$repository_root/script/run-source-safety.sh"
 
 write_manifest() {
     printf '%s\n' "$1" >"$test_tool/Cargo.toml"
@@ -17,6 +18,10 @@ write_manifest() {
 restore_reviewed_graph() {
     cp "$source_tool/Cargo.toml" "$test_tool/Cargo.toml"
     cp "$source_tool/Cargo.lock" "$test_tool/Cargo.lock"
+    cp "$repository_root/mise.toml" "$test_repository/mise.toml"
+    cp "$repository_root/mise.lock" "$test_repository/mise.lock"
+    mkdir -p "$test_repository/script"
+    cp "$source_runner" "$test_repository/script/run-source-safety.sh"
 }
 
 run_check() {
@@ -70,6 +75,14 @@ printf '\n# unreviewed lock graph\n' >>"$test_tool/Cargo.lock"
 expect_failure
 
 restore_reviewed_graph
+printf '\n_.path = ["{{config_root}}/bin"]\n' >>"$test_repository/mise.toml"
+expect_failure_before_command
+
+restore_reviewed_graph
+printf '\n# bypass reviewed runner\n' >>"$test_repository/script/run-source-safety.sh"
+expect_failure_before_command
+
+restore_reviewed_graph
 mkdir -p "$test_repository/.cargo"
 touch "$test_repository/.cargo/config.toml"
 expect_failure
@@ -115,6 +128,22 @@ export CARGO_HOME=$cargo_home
 expect_failure
 unset CARGO_HOME
 rm -r "$cargo_home"
+
+restore_reviewed_graph
+mkdir -p "$test_repository/bin"
+cargo_name=cargo
+fake_cargo="$test_repository/bin/$cargo_name"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fake_cargo"
+chmod +x "$fake_cargo"
+if PATH="$test_repository/bin:$PATH" run_check -- touch "$fixture/repository-cargo-ran" >/dev/null 2>&1; then
+    printf 'maintainability bootstrap accepted a repository-controlled Cargo executable\n' >&2
+    exit 1
+fi
+if [[ -e "$fixture/repository-cargo-ran" ]]; then
+    printf 'maintainability bootstrap ran a command through repository-controlled Cargo\n' >&2
+    exit 1
+fi
+rm -r "$test_repository/bin"
 
 RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted CLIPPY_CONF_DIR=untrusted \
     RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \

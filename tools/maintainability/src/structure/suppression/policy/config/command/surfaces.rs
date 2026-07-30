@@ -7,6 +7,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use super::super::{parse_nul_paths, validate_relative_path};
+use super::actions::validate_local_actions;
 use super::is_execution_surface;
 
 pub(super) fn execution_surfaces(workspace: &Path) -> Result<Vec<String>> {
@@ -18,21 +19,25 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<Vec<String>> {
     if !output.status.success() {
         bail!("git ls-files failed while listing command execution surfaces");
     }
+    let paths = parse_nul_paths(&output.stdout, |_| true)?.into_iter().collect::<BTreeSet<_>>();
     let executables = tracked_executables(workspace)?;
-    let mut surfaces = Vec::new();
-    for path in parse_nul_paths(&output.stdout, |_| true)? {
+    validate_local_actions(workspace, &paths)?;
+    let mut surfaces = BTreeSet::new();
+    for path in paths {
         let absolute = workspace.join(&path);
         match fs::symlink_metadata(&absolute) {
             Ok(metadata) if metadata.is_dir() => continue,
-            Ok(_) => {}
+            Ok(metadata) if metadata.file_type().is_symlink() => bail!("command execution surface cannot be a symlink: {path:?}"),
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => continue,
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(error) => return Err(error).with_context(|| format!("inspect possible command execution surface {}", absolute.display())),
         }
         if is_execution_surface(&path) || executables.contains(&path) || has_shebang(&absolute)? {
-            surfaces.push(path);
+            surfaces.insert(path);
         }
     }
-    Ok(surfaces)
+    Ok(surfaces.into_iter().collect())
 }
 
 fn tracked_executables(workspace: &Path) -> Result<BTreeSet<String>> {

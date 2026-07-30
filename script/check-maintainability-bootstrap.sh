@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+script_path=${BASH_SOURCE[0]}
+script_directory=${script_path%/*}
+[[ $script_directory != "$script_path" ]] || script_directory=.
+repository_root=$(cd -- "$script_directory/.." && pwd -P)
 if [[ ${1:-} == --root ]]; then
     if (( $# < 2 )); then
         printf 'usage: check-maintainability-bootstrap.sh [--root PATH] [-- COMMAND...]\n' >&2
@@ -25,17 +28,21 @@ fi
 tool_root="$repository_root/tools/maintainability"
 manifest="$tool_root/Cargo.toml"
 lockfile="$tool_root/Cargo.lock"
+mise_config="$repository_root/mise.toml"
+mise_lockfile="$repository_root/mise.lock"
+runner="$repository_root/script/run-source-safety.sh"
 readonly reviewed_manifest_sha256=cca207767614bd2c1d46bc06092b69e90157aeb450797fcc7cad4e1ed67c89b9
 readonly reviewed_lockfile_sha256=825c6448351761aa5c4c6e1ce6b3696c927c4f46c5d43642846380d24f10467c
+readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
+readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
+readonly reviewed_runner_sha256=26e1e58ba33248a825d63d0ab0ebcd1d3afec0fac0ab8566aaa5bbbf77bff3bc
 
-if [[ ! -f "$manifest" ]]; then
-    printf 'maintainability bootstrap manifest is missing: %s\n' "$manifest" >&2
-    exit 1
-fi
-if [[ ! -f "$lockfile" ]]; then
-    printf 'maintainability bootstrap lockfile is missing: %s\n' "$lockfile" >&2
-    exit 1
-fi
+for reviewed_path in "$manifest" "$lockfile" "$mise_config" "$mise_lockfile" "$runner"; do
+    if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then
+        printf 'reviewed maintainability bootstrap input must be a regular non-symlink file: %s\n' "$reviewed_path" >&2
+        exit 1
+    fi
+done
 
 if [[ -e "$tool_root/build.rs" ]]; then
     printf 'maintainability checker build.rs is unsupported: %s\n' "$tool_root/build.rs" >&2
@@ -56,25 +63,48 @@ reject_cargo_config() {
 
 is_filesystem_root() {
     local directory=$1
+    if [[ $directory == / || $directory == // ]]; then
+        return 0
+    fi
     local parent
-    parent=$(dirname -- "$directory")
+    parent=$(cd -- "$directory/.." && pwd -P)
     if [[ $parent == "$directory" ]]; then
         return 0
     fi
     if command -v cygpath >/dev/null 2>&1; then
         local windows_directory
-        if windows_directory=$(cygpath -m "$directory" 2>/dev/null) && [[ $windows_directory =~ ^[[:alpha:]]:/$ ]]; then
+        local cygpath_command
+        cygpath_command=$(trusted_command_path cygpath)
+        if windows_directory=$("$cygpath_command" -m "$directory" 2>/dev/null) && [[ $windows_directory =~ ^[[:alpha:]]:/$ ]]; then
             return 0
         fi
     fi
     return 1
 }
 
+trusted_command_path() {
+    local name=$1
+    local candidate
+    candidate=$(type -P -- "$name") || {
+        printf 'maintainability bootstrap requires command: %s\n' "$name" >&2
+        exit 1
+    }
+    local directory=${candidate%/*}
+    [[ $directory != "$candidate" ]] || directory=.
+    directory=$(cd -- "$directory" && pwd -P)
+    candidate="$directory/${candidate##*/}"
+    if [[ $candidate == "$repository_root" || $candidate == "$repository_root/"* ]]; then
+        printf 'maintainability bootstrap refuses a repository-controlled command: %s\n' "$candidate" >&2
+        exit 1
+    fi
+    printf '%s\n' "$candidate"
+}
+
 directory=$repository_root
 while :; do
     reject_cargo_config "$directory/.cargo"
     is_filesystem_root "$directory" && break
-    directory=$(dirname -- "$directory")
+    directory=$(cd -- "$directory/.." && pwd -P)
 done
 
 cargo_home=${CARGO_HOME:-}
@@ -88,14 +118,16 @@ elif [[ $cargo_home != /* && ! $cargo_home =~ ^[[:alpha:]]:[/\\] ]]; then
     cargo_home="$repository_root/$cargo_home"
 fi
 if [[ $cargo_home =~ ^[[:alpha:]]:[/\\] ]] && command -v cygpath >/dev/null 2>&1; then
-    cargo_home=$(cygpath -u "$cargo_home")
+    cygpath_command=$(trusted_command_path cygpath)
+    cargo_home=$("$cygpath_command" -u "$cargo_home")
 fi
 if [[ -n $cargo_home ]]; then
     reject_cargo_config "$cargo_home"
 fi
 
+awk_command=$(trusted_command_path awk)
 build_setting=$(
-    awk '
+    "$awk_command" '
         /^\[package\][[:space:]]*(#.*)?$/ { in_package = 1; next }
         /^\[/ { in_package = 0 }
         in_package && /^[[:space:]]*build[[:space:]]*=/ {
@@ -117,9 +149,13 @@ sha256_file() {
     local path=$1
     local output
     if command -v sha256sum >/dev/null 2>&1; then
-        output=$(sha256sum -- "$path")
+        local sha256_command
+        sha256_command=$(trusted_command_path sha256sum)
+        output=$("$sha256_command" -- "$path")
     elif command -v shasum >/dev/null 2>&1; then
-        output=$(shasum -a 256 -- "$path")
+        local shasum_command
+        shasum_command=$(trusted_command_path shasum)
+        output=$("$shasum_command" -a 256 -- "$path")
     else
         printf 'maintainability bootstrap requires sha256sum or shasum\n' >&2
         exit 1
@@ -139,9 +175,29 @@ if [[ $actual_lockfile_sha256 != "$reviewed_lockfile_sha256" ]]; then
     exit 1
 fi
 
+actual_mise_config_sha256=$(sha256_file "$mise_config")
+if [[ $actual_mise_config_sha256 != "$reviewed_mise_config_sha256" ]]; then
+    printf 'mise.toml does not match the reviewed maintainability tool environment\n' >&2
+    exit 1
+fi
+
+actual_mise_lockfile_sha256=$(sha256_file "$mise_lockfile")
+if [[ $actual_mise_lockfile_sha256 != "$reviewed_mise_lockfile_sha256" ]]; then
+    printf 'mise.lock does not match the reviewed maintainability tool environment\n' >&2
+    exit 1
+fi
+
+actual_runner_sha256=$(sha256_file "$runner")
+if [[ $actual_runner_sha256 != "$reviewed_runner_sha256" ]]; then
+    printf 'run-source-safety.sh does not match the reviewed bootstrap runner\n' >&2
+    exit 1
+fi
+
 printf 'maintainability bootstrap check passed\n'
 
 if (( ${#command[@]} > 0 )); then
+    LOCALHOLD_MAINTAINABILITY_CARGO=$(trusted_command_path cargo)
+    export LOCALHOLD_MAINTAINABILITY_CARGO
     while IFS= read -r name; do
         uppercase=${name^^}
         case "$uppercase" in

@@ -123,6 +123,9 @@ jobs:
           key: ${{ runner.os }}-dependency-unsafe-${{ hashFiles('Cargo.lock', 'tools/dependency-unsafe/Cargo.lock', 'tools/maintainability/Cargo.lock', 'mise.lock') }}
           restore-keys: ${{ runner.os }}-dependency-unsafe-
 
+      - name: Validate maintainability bootstrap before tool activation
+        run: ./script/check-maintainability-bootstrap.sh
+
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         with:
           version: 2026.7.5
@@ -259,6 +262,9 @@ jobs:
             tools/maintainability/target
           key: ${{ runner.os }}-dependency-unsafe-${{ hashFiles('Cargo.lock', 'tools/dependency-unsafe/Cargo.lock', 'tools/maintainability/Cargo.lock', 'mise.lock') }}
           restore-keys: ${{ runner.os }}-dependency-unsafe-
+
+      - name: Validate maintainability bootstrap before tool activation
+        run: ./script/check-maintainability-bootstrap.sh
 
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         with:

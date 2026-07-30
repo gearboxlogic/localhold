@@ -125,7 +125,7 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          LD_LIBRARY_PATH: ''",
     "          LD_PRELOAD: ''",
     "          LD_PRELOAD: ''",
-    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 7f5690212d2c51cbec710ec2561c849c0f69a8ca503419681bf29508235f097d",
+    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 1d374bff562c4b78c55d917a0626fc877ff34cca40bb5fe765fbc6e1414bc9c5",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",

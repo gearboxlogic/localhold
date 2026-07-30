@@ -314,6 +314,7 @@ fn weakening_environment_channels_are_detected() {
     assert!(weakening_environment("GITHUB_SHA=untrusted"));
     assert!(weakening_environment("LOCALHOLD_MAINTAINABILITY_BASE_REV=$GITHUB_SHA"));
     assert!(weakening_environment("MISE_OVERRIDE_CONFIG_FILENAMES=policy.toml"));
+    assert!(weakening_environment("MAKEFILES=quality/lint.rules"));
     assert!(weakening_environment_for_surface("script/check.ps1", "$env:rustflags = $dynamic"));
     assert!(weakening_environment_for_surface("script/check.cmd", "set cargo_encoded_rustflags=%DYNAMIC%"));
     assert!(weakening_environment_for_surface(
@@ -361,6 +362,22 @@ fn weakening_environment_channels_are_detected() {
         &GPU_RELEASE_REVISION_ENVIRONMENT_LINES.join("\n"),
     ));
     assert!(!scrubber_environment_references_are_exact("script/tests/new-command.sh", &scrubber));
+}
+
+#[test]
+fn authenticated_dynamic_commands_require_the_exact_reviewed_lines() {
+    assert!(super::command::reviewed_dynamic_command_references_are_exact(
+        "script/run-maintainability-gate.sh",
+        &GATE_RUNNER_COMMAND_LINES.join("\n"),
+    ));
+    assert!(super::command::reviewed_dynamic_command_references_are_exact(
+        "script/run-source-safety.sh",
+        &RUNNER_COMMAND_LINES.join("\n"),
+    ));
+    assert!(!super::command::reviewed_dynamic_command_references_are_exact(
+        "script/run-source-safety.sh",
+        &format!("{}\n\"$cargo_command\" clippy -- -A warnings", RUNNER_COMMAND_LINES.join("\n")),
+    ));
 }
 
 #[test]
@@ -494,6 +511,26 @@ fn command_policy_scans_extensionless_scripts() {
     fs::write(workspace.path().join("Justfile"), "lint:\n    bash quality/lint.txt\n").expect("interpreter invocation");
     fs::write(workspace.path().join("quality/lint.txt"), "cargo clippy -- -A warnings\n").expect("non-executable lint script");
     git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+}
+
+#[test]
+fn command_policy_governs_opaque_shell_programs_and_selected_makefiles() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::write(workspace.path().join("Justfile"), "shell:\n    bash -c \"$(cat quality/lint.txt)\"\n").expect("opaque shell dispatch");
+    fs::write(workspace.path().join("quality/lint.txt"), "cargo clippy -- -A warnings\n").expect("unreviewed shell program");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
+
+    fs::write(workspace.path().join("Justfile"), "make:\n    make -f quality/lint.rules\n").expect("Make dispatch");
+    fs::write(workspace.path().join("quality/lint.rules"), "lint:\n\tcargo clippy -- -A warnings\n").expect("selected Makefile");
     git(workspace.path(), &["add", "."]);
 
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();

@@ -189,6 +189,16 @@ if run_check --source-safety >/dev/null 2>&1; then
     exit 1
 fi
 
+inherited_cargo_function() {
+    :
+}
+export -f inherited_cargo_function
+if run_check --test-environment >/dev/null 2>&1; then
+    printf 'maintainability bootstrap accepted an inherited exported shell function\n' >&2
+    exit 1
+fi
+unset -f inherited_cargo_function
+
 fake_bin="$fixture/fake-bin"
 mkdir "$fake_bin"
 cargo_name=cargo

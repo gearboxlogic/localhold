@@ -1,6 +1,11 @@
 #!/usr/bin/bash
 set -euo pipefail
 
+if /usr/bin/env | /usr/bin/grep '^BASH_FUNC_' >/dev/null; then
+    /usr/bin/printf 'maintainability bootstrap rejects inherited exported shell functions\n' >&2
+    /usr/bin/false
+fi
+
 usage() {
     printf 'usage: check-maintainability-bootstrap.sh [--root PATH] [--source-safety|--dependency-unsafe|--maintainability|--test-environment]\n' >&2
     exit 1
@@ -53,9 +58,9 @@ readonly reviewed_lockfile_sha256=825c6448351761aa5c4c6e1ce6b3696c927c4f46c5d436
 readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d1b3fd69aa74c0df6f1
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
-readonly reviewed_runner_sha256=04d76513a3b308556718405cd2fa358a5957286ea8c5ef2b6f9d931ed9c0a2a0
-readonly reviewed_bootstrap_tests_sha256=1e3995901026f1c9696c1ad4e53a31c64e88c5002b5522008420182c30c72537
-readonly reviewed_gate_runner_sha256=7b2edf1ef112978bfa9552cc10316a553a158a40274cd0aefaf88a7311a09c70
+readonly reviewed_runner_sha256=15d4fb8871e21aa8d0a57b45858f6abf423c62c11e8de2449917da5979004f84
+readonly reviewed_bootstrap_tests_sha256=ad63736a6e6a7ea6200859241cdcd8c68d5dd5c5b9eb33ae54411aacbb0330bb
+readonly reviewed_gate_runner_sha256=3a390155748c388a43f1a89570c40f3747d5c56143775dc722fdbe6cc753d53d
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then

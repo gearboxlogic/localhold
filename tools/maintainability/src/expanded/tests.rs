@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs;
 use std::io::Cursor;
 use std::path::Path;
@@ -9,7 +10,8 @@ use crate::scan::{SiteKind, SourceRange, UnsafeSite, scan_workspace};
 
 use super::dep_info::{is_audited_compiler_input, parse as parse_dep_info, parse_make_words};
 use super::{
-    AuditLane, AuditOutput, Diagnostic, audit_environment_override, compare_diagnostics, is_root_manifest, parse_cargo_output, subtract_diagnostics, verify_with_target_directory,
+    AuditLane, AuditOutput, Diagnostic, audit_environment_override, compare_diagnostics, is_root_manifest, parse_cargo_output, sanitize_compiler_environment_with_rustc,
+    subtract_diagnostics, verify_with_target_directory,
 };
 
 fn site(range: SourceRange) -> UnsafeSite {
@@ -90,6 +92,15 @@ fn compiler_environment_rejects_cargo_aliases_and_override_channels() {
     for accepted in ["CARGO_BUILD_JOBS", "CARGO_TERM_COLOR", "RUST_BACKTRACE"] {
         assert!(!audit_environment_override(accepted.as_ref()), "{accepted}");
     }
+}
+
+#[test]
+fn compiler_environment_restores_only_the_authenticated_rustc_handoff() {
+    let mut command = Command::new("cargo");
+    command.env("RUSTC", "untrusted");
+    sanitize_compiler_environment_with_rustc(&mut command, Some(OsStr::new("/trusted/rustc")));
+    let rustc = command.get_envs().find(|(name, _)| *name == OsStr::new("RUSTC"));
+    assert_eq!(rustc, Some((OsStr::new("RUSTC"), Some(OsStr::new("/trusted/rustc")))));
 }
 
 #[test]

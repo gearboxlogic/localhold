@@ -9,7 +9,7 @@ mod powershell;
 mod python;
 mod references;
 mod tokens;
-pub(super) use references::{cargo_manifest_paths_for_surface, literal_interpreter_scripts_for_surface};
+pub(super) use references::{cargo_manifest_paths_for_surface, execution_inputs_for_surface};
 use tokens::{command_tokens, command_without_comment};
 
 #[cfg(test)]

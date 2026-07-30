@@ -22,16 +22,16 @@ pub(in crate::structure::suppression::policy::config::command) fn cargo_manifest
     collect_cargo_manifest_paths(std::iter::once(source.as_str()).chain(embedded_commands.iter().map(String::as_str)), case_insensitive_tools)
 }
 
-pub(in crate::structure::suppression::policy::config::command) fn literal_interpreter_scripts_for_surface(path: &str, source: &str) -> BTreeSet<String> {
+pub(in crate::structure::suppression::policy::config::command) fn execution_inputs_for_surface(path: &str, source: &str) -> (BTreeSet<String>, bool) {
     if let Some(scripts) = package_json::script_commands(path, source) {
-        return scripts.map_or_else(|_| BTreeSet::new(), |scripts| collect_literal_interpreter_scripts(scripts.iter().map(String::as_str)));
+        return scripts.map_or_else(|_| (BTreeSet::new(), true), |scripts| collect_execution_inputs(scripts.iter().map(String::as_str)));
     }
     let source = normalized_source_for_surface(path, source);
     let embedded_commands = super::super::yaml::run_commands(path, &source);
     if is_yaml(path) {
-        return collect_literal_interpreter_scripts(embedded_commands.iter().map(String::as_str));
+        return collect_execution_inputs(embedded_commands.iter().map(String::as_str));
     }
-    collect_literal_interpreter_scripts(std::iter::once(source.as_str()).chain(embedded_commands.iter().map(String::as_str)))
+    collect_execution_inputs(std::iter::once(source.as_str()).chain(embedded_commands.iter().map(String::as_str)))
 }
 
 fn collect_cargo_manifest_paths<'a>(sources: impl IntoIterator<Item = &'a str>, case_insensitive_tools: bool) -> (BTreeSet<String>, bool) {
@@ -82,86 +82,217 @@ fn is_manifest_capable_tool_token(token: &str, case_insensitive: bool) -> bool {
     is_cargo_tool_token(token, case_insensitive) || matches_tool_name(tool_basename(token), case_insensitive, &["cargo-clippy", "cargo-clippy.exe"])
 }
 
-fn collect_literal_interpreter_scripts<'a>(sources: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
-    let mut scripts = BTreeSet::new();
+fn collect_execution_inputs<'a>(sources: impl IntoIterator<Item = &'a str>) -> (BTreeSet<String>, bool) {
+    let mut inputs = BTreeSet::new();
+    let mut unresolved = false;
     for source in sources {
         for tokens in tokens::source_command_tokens(source) {
-            if let Some(script) = literal_interpreter_script(&tokens) {
-                scripts.insert(script);
-            }
+            let (candidates, opaque) = execution_input_candidates(&tokens);
+            unresolved |= opaque;
+            record_execution_inputs(candidates, &mut inputs, &mut unresolved);
         }
     }
-    scripts
+    (inputs, unresolved)
 }
 
-fn literal_interpreter_script(tokens: &[String]) -> Option<String> {
-    let interpreter_index = tokens.iter().position(|token| {
+fn record_execution_inputs(candidates: Vec<&str>, inputs: &mut BTreeSet<String>, unresolved: &mut bool) {
+    for candidate in candidates {
+        if let Some(input) = normalized_literal_input(candidate) {
+            inputs.insert(input);
+        } else {
+            *unresolved = true;
+        }
+    }
+}
+
+fn execution_input_candidates(tokens: &[String]) -> (Vec<&str>, bool) {
+    let command_index = tokens.iter().position(|token| {
         let word = token.trim_matches(['(', ')', '{', '}']);
-        !word.is_empty() && !is_shell_command_prefix(word) && !is_environment_assignment(word) && !tool_basename(word).eq_ignore_ascii_case("env")
-    })?;
-    let interpreter = tool_basename(&tokens[interpreter_index]).to_ascii_lowercase();
-    let arguments = &tokens[interpreter_index.saturating_add(1)..];
-    let candidate = match interpreter.as_str() {
-        "bash" | "bash.exe" | "dash" | "dash.exe" | "fish" | "fish.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe" => shell_script(arguments)?,
-        "python" | "python.exe" | "python3" | "python3.exe" => positional_script(arguments, &["-c", "-m"])?,
-        "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_script(arguments)?,
-        _ => return None,
+        !word.is_empty()
+            && !is_shell_command_prefix(word)
+            && (!is_environment_assignment(word) || word.contains("$(") || word.contains('`'))
+            && !tool_basename(word).eq_ignore_ascii_case("env")
+    });
+    let Some(command_index) = command_index else {
+        return (Vec::new(), false);
     };
-    normalized_literal_script(candidate)
+    let command = tool_basename(&tokens[command_index]).to_ascii_lowercase();
+    let arguments = &tokens[command_index.saturating_add(1)..];
+    let selected = match command.as_str() {
+        "bash" | "bash.exe" | "dash" | "dash.exe" | "fish" | "fish.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe" => shell_input(arguments),
+        "python" | "python.exe" | "python3" | "python3.exe" => python_input(arguments),
+        "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),
+        "make" | "make.exe" | "gmake" | "gmake.exe" => {
+            let (inputs, opaque) = makefile_inputs(arguments);
+            return (inputs, opaque || make_environment_selection_is_opaque(&tokens[..command_index]));
+        }
+        _ => return (Vec::new(), false),
+    };
+    match selected {
+        SelectedInput::None => (Vec::new(), false),
+        SelectedInput::Literal(candidate) => (vec![candidate], false),
+        SelectedInput::Opaque => (Vec::new(), true),
+    }
 }
 
-fn shell_script(arguments: &[String]) -> Option<&str> {
+enum SelectedInput<'a> {
+    None,
+    Literal(&'a str),
+    Opaque,
+}
+
+fn shell_input(arguments: &[String]) -> SelectedInput<'_> {
     for (index, argument) in arguments.iter().enumerate() {
         let lowercase = argument.to_ascii_lowercase();
-        if matches!(lowercase.as_str(), "-c" | "--command" | "-s" | "--stdin") || lowercase.starts_with('-') && !lowercase.starts_with("--") && lowercase[1..].contains(['c', 's'])
+        if matches!(lowercase.as_str(), "--help" | "--version") {
+            return SelectedInput::None;
+        }
+        if matches!(lowercase.as_str(), "-c" | "--command" | "-s" | "--stdin")
+            || (argument.starts_with('-') || argument.starts_with('+')) && !argument.starts_with("--") && argument[1..].contains(['c', 'C', 's', 'o', 'O'])
+            || matches!(lowercase.as_str(), "--init-file" | "--rcfile")
+            || lowercase.starts_with("--init-file=")
+            || lowercase.starts_with("--rcfile=")
         {
-            return None;
+            return SelectedInput::Opaque;
         }
         if argument == "--" {
-            return arguments.get(index + 1).map(String::as_str);
+            return arguments.get(index + 1).map_or(SelectedInput::Opaque, |candidate| SelectedInput::Literal(candidate));
         }
         if argument.starts_with(['-', '+']) {
             continue;
         }
-        return Some(argument);
+        return SelectedInput::Literal(argument);
     }
-    None
+    SelectedInput::Opaque
 }
 
-fn positional_script<'a>(arguments: &'a [String], non_file_modes: &[&str]) -> Option<&'a str> {
+fn python_input(arguments: &[String]) -> SelectedInput<'_> {
     let mut after_options = false;
-    for argument in arguments {
-        if !after_options && non_file_modes.iter().any(|mode| argument.eq_ignore_ascii_case(mode)) {
-            return None;
+    for (index, argument) in arguments.iter().enumerate() {
+        if !after_options && matches!(argument.as_str(), "-h" | "--help" | "-V" | "--version") {
+            return SelectedInput::None;
+        }
+        if !after_options && argument == "-c" {
+            return SelectedInput::Opaque;
+        }
+        if !after_options && argument == "-m" {
+            return arguments
+                .get(index + 1)
+                .filter(|module| is_literal_python_module(module))
+                .map_or(SelectedInput::Opaque, |_| SelectedInput::None);
         }
         if !after_options && argument == "--" {
             after_options = true;
             continue;
         }
         if !after_options && argument.starts_with('-') {
+            if is_python_flag_without_operand(argument) {
+                continue;
+            }
+            return SelectedInput::Opaque;
+        }
+        return if argument == "-" { SelectedInput::Opaque } else { SelectedInput::Literal(argument) };
+    }
+    SelectedInput::Opaque
+}
+
+fn is_literal_python_module(module: &str) -> bool {
+    !module.is_empty()
+        && module
+            .split('.')
+            .all(|segment| !segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+}
+
+fn is_python_flag_without_operand(argument: &str) -> bool {
+    matches!(
+        argument,
+        "-b" | "-bb" | "-B" | "-d" | "-E" | "-i" | "-I" | "-O" | "-OO" | "-P" | "-q" | "-R" | "-s" | "-S" | "-u" | "-v" | "-x"
+    ) || argument.starts_with("-W") && argument.len() > 2
+        || argument.starts_with("-X") && argument.len() > 2
+        || argument.starts_with("--check-hash-based-pycs=")
+}
+
+fn powershell_input(arguments: &[String]) -> SelectedInput<'_> {
+    for (index, argument) in arguments.iter().enumerate() {
+        let lowercase = argument.to_ascii_lowercase();
+        if matches!(lowercase.as_str(), "-help" | "-h" | "-?" | "-version") {
+            return SelectedInput::None;
+        }
+        if matches!(lowercase.as_str(), "-command" | "-c" | "-encodedcommand" | "-ec") {
+            return SelectedInput::Opaque;
+        }
+        if matches!(lowercase.as_str(), "-file" | "-f") {
+            return arguments.get(index + 1).map_or(SelectedInput::Opaque, |candidate| SelectedInput::Literal(candidate));
+        }
+        if argument.starts_with('-') {
+            if is_powershell_flag_without_operand(&lowercase) {
+                continue;
+            }
+            return SelectedInput::Opaque;
+        }
+        return SelectedInput::Literal(argument);
+    }
+    SelectedInput::Opaque
+}
+
+fn is_powershell_flag_without_operand(argument: &str) -> bool {
+    matches!(
+        argument,
+        "-login" | "-mta" | "-noexit" | "-nologo" | "-noninteractive" | "-noprofile" | "-noprofileloadtime" | "-sshservermode" | "-sta"
+    )
+}
+
+fn makefile_inputs(arguments: &[String]) -> (Vec<&str>, bool) {
+    let mut inputs = Vec::new();
+    let mut opaque = false;
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        if make_argument_is_opaque(argument) {
+            opaque = true;
+            index += 1;
             continue;
         }
-        return Some(argument);
+        let expects_operand = matches!(argument.as_str(), "-f" | "--file" | "--makefile");
+        let candidate = if expects_operand {
+            index += 1;
+            arguments.get(index).map(String::as_str)
+        } else {
+            argument
+                .strip_prefix("--file=")
+                .or_else(|| argument.strip_prefix("--makefile="))
+                .or_else(|| argument.strip_prefix("-f").filter(|candidate| !candidate.is_empty()))
+        };
+        match candidate {
+            Some("-") => opaque = true,
+            Some(candidate) => inputs.push(candidate),
+            None if expects_operand => opaque = true,
+            None => {}
+        }
+        index += 1;
     }
-    None
+    (inputs, opaque)
 }
 
-fn powershell_script(arguments: &[String]) -> Option<&str> {
-    for (index, argument) in arguments.iter().enumerate() {
-        if matches!(argument.to_ascii_lowercase().as_str(), "-command" | "-c" | "-encodedcommand" | "-ec") {
-            return None;
-        }
-        if matches!(argument.to_ascii_lowercase().as_str(), "-file" | "-f") {
-            return arguments.get(index + 1).map(String::as_str);
-        }
-        if !argument.starts_with('-') {
-            return Some(argument);
-        }
-    }
-    None
+fn make_argument_is_opaque(argument: &str) -> bool {
+    matches!(argument, "-C" | "--directory" | "--eval")
+        || argument.starts_with("--directory=")
+        || argument.starts_with("-C") && argument.len() > 2
+        || argument.starts_with("--eval=")
+        || is_make_environment_selection(argument)
 }
 
-fn normalized_literal_script(candidate: &str) -> Option<String> {
+fn make_environment_selection_is_opaque(tokens: &[String]) -> bool {
+    tokens.iter().any(|token| is_make_environment_selection(token))
+}
+
+fn is_make_environment_selection(token: &str) -> bool {
+    token
+        .split_once('=')
+        .map(|(name, _)| name)
+        .is_some_and(|name| matches!(name, "GNUMAKEFLAGS" | "MAKEFILES" | "MAKEFLAGS" | "MFLAGS"))
+}
+
+fn normalized_literal_input(candidate: &str) -> Option<String> {
     if contains_dynamic_value(candidate) || candidate.contains('\\') {
         return None;
     }
@@ -186,18 +317,39 @@ fn contains_dynamic_value(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{literal_interpreter_script, tokens};
+    use super::{execution_input_candidates, normalized_literal_input, tokens};
 
-    fn script(command: &str) -> Option<String> {
-        literal_interpreter_script(&tokens::source_command_tokens(command)[0])
+    fn inputs(command: &str) -> (Vec<String>, bool) {
+        let commands = tokens::source_command_tokens(command);
+        let (candidates, mut opaque) = execution_input_candidates(&commands[0]);
+        let candidates = candidates
+            .into_iter()
+            .filter_map(|candidate| {
+                let normalized = normalized_literal_input(candidate);
+                opaque |= normalized.is_none();
+                normalized
+            })
+            .collect();
+        (candidates, opaque)
     }
 
     #[test]
-    fn literal_interpreter_operands_distinguish_files_from_inline_code() {
-        assert_eq!(script("bash quality/lint.txt"), Some("quality/lint.txt".to_owned()));
-        assert_eq!(script("/usr/bin/env bash -e ./quality/lint.txt"), Some("quality/lint.txt".to_owned()));
-        assert_eq!(script("bash -lc 'cargo clippy'"), None);
-        assert_eq!(script("python -m quality.lint"), None);
-        assert_eq!(script("pwsh -File quality/lint.ps1"), Some("quality/lint.ps1".to_owned()));
+    fn execution_inputs_distinguish_files_from_opaque_programs() {
+        assert_eq!(inputs("bash quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
+        assert_eq!(inputs("/usr/bin/env -i bash -e ./quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
+        assert_eq!(inputs("bash -lc 'cargo clippy'"), (Vec::new(), true));
+        assert_eq!(inputs(r#"bash -c "$(cat quality/lint.txt)""#), (Vec::new(), true));
+        assert_eq!(inputs("bash_command=$(trusted_system_command bash)"), (Vec::new(), false));
+        assert_eq!(inputs("python -m quality.lint"), (Vec::new(), false));
+        assert_eq!(inputs("python -m $MODULE"), (Vec::new(), true));
+        assert_eq!(inputs("pwsh -File quality/lint.ps1"), (vec!["quality/lint.ps1".to_owned()], false));
+        assert_eq!(
+            inputs("make -f quality/lint.rules --file=quality/common.rules"),
+            (vec!["quality/lint.rules".to_owned(), "quality/common.rules".to_owned()], false)
+        );
+        assert_eq!(inputs("make -f $MAKEFILE"), (Vec::new(), true));
+        assert_eq!(inputs("make -C quality -f lint.rules"), (vec!["lint.rules".to_owned()], true));
+        assert_eq!(inputs("make MAKEFILES=quality/lint.rules"), (Vec::new(), true));
+        assert_eq!(inputs("MAKEFILES=quality/lint.rules make"), (Vec::new(), true));
     }
 }

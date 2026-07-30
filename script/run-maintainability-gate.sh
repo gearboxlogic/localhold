@@ -199,7 +199,7 @@ if $windows_toolchain; then
     native_rustdoc=$("$cygpath_command" -w "$native_rustdoc")
     native_rustfmt=$("$cygpath_command" -w "$native_rustfmt")
 fi
-trusted_path="$toolchain_bin:/usr/bin:/bin"
+trusted_path="/usr/bin:/bin"
 if $windows_toolchain; then
     readonly vswhere_command="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
     if [[ ! -f $vswhere_command || -L $vswhere_command || ! -x $vswhere_command ]]; then
@@ -235,7 +235,7 @@ if $windows_toolchain; then
         printf 'maintainability gate requires an OS-owned Visual Studio Hostx64 linker\n' >&2
         exit 1
     fi
-    trusted_path="$toolchain_bin:$trusted_linker_bin:/usr/bin:/mingw64/bin:/c/Windows/System32"
+    trusted_path="$trusted_linker_bin:/usr/bin:/mingw64/bin:/c/Windows/System32"
 fi
 PATH=$trusted_path
 readonly PATH
@@ -244,6 +244,7 @@ RUSTC=$native_rustc
 RUSTDOC=$native_rustdoc
 RUSTFMT=$native_rustfmt
 LOCALHOLD_MAINTAINABILITY_CARGO=$native_cargo
+LOCALHOLD_MAINTAINABILITY_RUSTC=$native_rustc
 target_parent="$repository_root/target"
 if [[ -L $target_parent || -e $target_parent && ! -d $target_parent ]]; then
     printf 'maintainability target parent must be a regular non-symlink directory\n' >&2
@@ -273,7 +274,7 @@ if $windows_toolchain; then
 fi
 CARGO_TARGET_DIR=$native_target_directory
 readonly CARGO_TARGET_DIR
-export PATH CARGO RUSTC RUSTDOC RUSTFMT CARGO_TARGET_DIR LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_RUSTUP
+export PATH CARGO RUSTC RUSTDOC RUSTFMT CARGO_TARGET_DIR LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_RUSTC LOCALHOLD_MAINTAINABILITY_RUSTUP
 
 run_source_safety() {
     "$bash_command" "$repository_root/script/tests/test_maintainability_bootstrap.sh"
@@ -281,12 +282,12 @@ run_source_safety() {
 }
 
 run_dependency_unsafe() {
-    cargo fetch --locked
-    cargo fetch --manifest-path tools/dependency-unsafe/Cargo.toml --locked
-    cargo fmt --manifest-path tools/dependency-unsafe/Cargo.toml -- --check
-    cargo test --manifest-path tools/dependency-unsafe/Cargo.toml --locked
-    cargo clippy --manifest-path tools/dependency-unsafe/Cargo.toml --all-targets --locked -- -D warnings
-    cargo run --manifest-path tools/dependency-unsafe/Cargo.toml --locked -- check
+    "$cargo_executable" fetch --locked
+    "$cargo_executable" fetch --manifest-path tools/dependency-unsafe/Cargo.toml --locked
+    "$cargo_executable" fmt --manifest-path tools/dependency-unsafe/Cargo.toml -- --check
+    "$cargo_executable" test --manifest-path tools/dependency-unsafe/Cargo.toml --locked
+    "$cargo_executable" clippy --manifest-path tools/dependency-unsafe/Cargo.toml --all-targets --locked -- -D warnings
+    "$cargo_executable" run --manifest-path tools/dependency-unsafe/Cargo.toml --locked -- check
 }
 
 verify_test_environment() {
@@ -299,7 +300,7 @@ verify_test_environment() {
             exit 1
         fi
     done
-    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $LOCALHOLD_MAINTAINABILITY_RUSTUP && -n $git_command ]]
+    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $LOCALHOLD_MAINTAINABILITY_RUSTC && -n $LOCALHOLD_MAINTAINABILITY_RUSTUP && -n $git_command ]]
     if [[ ! -d $target_directory || -L $target_directory || ${target_directory%/*} != "$target_parent" || $CARGO_TARGET_DIR != "$native_target_directory" ]]; then
         printf 'maintainability bootstrap did not provide a fresh isolated Cargo target directory\n' >&2
         exit 1

@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use super::super::{parse_nul_paths, validate_relative_path};
 use super::actions::validate_local_actions;
-use super::arguments::literal_interpreter_scripts_for_surface;
+use super::arguments::execution_inputs_for_surface;
 use super::is_execution_surface;
 
 pub(super) struct ExecutionSurfaceSet {
@@ -46,17 +46,21 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
     let mut pending = surfaces.iter().cloned().collect::<Vec<_>>();
     while let Some(surface) = pending.pop() {
         let source = fs::read_to_string(workspace.join(&surface)).with_context(|| format!("read command execution surface {surface}"))?;
-        for script in literal_interpreter_scripts_for_surface(&surface, &source) {
-            if !tracked_paths.contains(&script) {
-                bail!("command execution surface {surface:?} invokes an interpreter script outside the tracked path inventory: {script:?}");
+        let (referenced_inputs, unresolved_input) = execution_inputs_for_surface(&surface, &source);
+        if unresolved_input {
+            bail!("command execution surface {surface:?} uses an opaque interpreter program or makefile selection");
+        }
+        for input in referenced_inputs {
+            if !tracked_paths.contains(&input) {
+                bail!("command execution surface {surface:?} references an execution input outside the tracked path inventory: {input:?}");
             }
-            let absolute = workspace.join(&script);
-            let metadata = fs::symlink_metadata(&absolute).with_context(|| format!("inspect interpreter script {}", absolute.display()))?;
+            let absolute = workspace.join(&input);
+            let metadata = fs::symlink_metadata(&absolute).with_context(|| format!("inspect execution input {}", absolute.display()))?;
             if metadata.file_type().is_symlink() || !metadata.is_file() {
-                bail!("interpreter script must be a regular non-symlink file: {script:?}");
+                bail!("execution input must be a regular non-symlink file: {input:?}");
             }
-            if surfaces.insert(script.clone()) {
-                pending.push(script);
+            if surfaces.insert(input.clone()) {
+                pending.push(input);
             }
         }
     }

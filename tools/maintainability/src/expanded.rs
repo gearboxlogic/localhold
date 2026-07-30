@@ -10,6 +10,8 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::Value;
 
+const AUTHENTICATED_RUSTC_ENV: &str = "LOCALHOLD_MAINTAINABILITY_RUSTC";
+
 use crate::scan::{SiteKind, UnsafeSite};
 
 use self::dep_info::{collect as collect_dep_info, verify as verify_dep_info};
@@ -253,10 +255,18 @@ fn is_root_manifest(manifest: &Path, message: &Value) -> Result<bool> {
 }
 
 pub fn sanitize_compiler_environment(command: &mut Command) {
+    let authenticated_rustc = env::var_os(AUTHENTICATED_RUSTC_ENV);
+    sanitize_compiler_environment_with_rustc(command, authenticated_rustc.as_deref());
+}
+
+fn sanitize_compiler_environment_with_rustc(command: &mut Command, authenticated_rustc: Option<&OsStr>) {
     for (name, _) in env::vars_os() {
         if audit_environment_override(&name) {
             command.env_remove(name);
         }
+    }
+    if let Some(rustc) = authenticated_rustc {
+        command.env("RUSTC", rustc);
     }
 }
 

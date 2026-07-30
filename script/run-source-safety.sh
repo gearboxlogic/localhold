@@ -16,8 +16,8 @@ if [[ $git_command != /* && ! $git_command =~ ^[[:alpha:]]:[/\\] ]]; then
     exit 1
 fi
 
-cargo fetch --manifest-path tools/maintainability/Cargo.toml --locked
-cargo fmt --manifest-path tools/maintainability/Cargo.toml -- --check
-cargo test --manifest-path tools/maintainability/Cargo.toml --locked
-cargo clippy --manifest-path tools/maintainability/Cargo.toml --all-targets --locked -- -D warnings
-cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- check
+"$cargo_command" fetch --manifest-path tools/maintainability/Cargo.toml --locked
+"$cargo_command" fmt --manifest-path tools/maintainability/Cargo.toml -- --check
+"$cargo_command" test --manifest-path tools/maintainability/Cargo.toml --locked
+"$cargo_command" clippy --manifest-path tools/maintainability/Cargo.toml --all-targets --locked -- -D warnings
+"$cargo_command" run --manifest-path tools/maintainability/Cargo.toml --locked -- check

@@ -17,6 +17,8 @@ use arguments::{cargo_manifest_paths_for_surface, direct_rust_sources_for_surfac
 use surfaces::execution_surfaces;
 
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
+    "if /usr/bin/env | /usr/bin/grep '^BASH_FUNC_' >/dev/null; then",
+    "    /usr/bin/false",
     "cargo_home=${CARGO_HOME:-}",
     "        cargo_home=\"$HOME/.cargo\"",
     "        cargo_home=\"$USERPROFILE/.cargo\"",
@@ -41,23 +43,41 @@ pub(super) const GATE_RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "rustup_executable=${LOCALHOLD_MAINTAINABILITY_RUSTUP:-}",
     "LOCALHOLD_MAINTAINABILITY_RUSTUP=$rustup_executable",
     "export LOCALHOLD_MAINTAINABILITY_RUSTUP",
+    "trusted_path=\"/usr/bin:/bin\"",
+    "    trusted_path=\"$trusted_linker_bin:/usr/bin:/mingw64/bin:/c/Windows/System32\"",
     "PATH=$trusted_path",
     "readonly PATH",
     "RUSTC=$native_rustc",
     "RUSTDOC=$native_rustdoc",
     "LOCALHOLD_MAINTAINABILITY_CARGO=$native_cargo",
+    "LOCALHOLD_MAINTAINABILITY_RUSTC=$native_rustc",
     "CARGO_TARGET_DIR=$native_target_directory",
     "readonly CARGO_TARGET_DIR",
-    "export PATH CARGO RUSTC RUSTDOC RUSTFMT CARGO_TARGET_DIR LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_RUSTUP",
+    "export PATH CARGO RUSTC RUSTDOC RUSTFMT CARGO_TARGET_DIR LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_RUSTC LOCALHOLD_MAINTAINABILITY_RUSTUP",
     "    for name in BASH_ENV GITHUB_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER \\",
     "        RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS \\",
     "        CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do",
-    "    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $LOCALHOLD_MAINTAINABILITY_RUSTUP && -n $git_command ]]",
+    "    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $LOCALHOLD_MAINTAINABILITY_RUSTC && -n $LOCALHOLD_MAINTAINABILITY_RUSTUP && -n $git_command ]]",
     "    if [[ ! -d $target_directory || -L $target_directory || ${target_directory%/*} != \"$target_parent\" || $CARGO_TARGET_DIR != \"$native_target_directory\" ]]; then",
+];
+pub(super) const GATE_RUNNER_COMMAND_LINES: &[&str] = &[
+    "    \"$cargo_executable\" fetch --locked",
+    "    \"$cargo_executable\" fetch --manifest-path tools/dependency-unsafe/Cargo.toml --locked",
+    "    \"$cargo_executable\" fmt --manifest-path tools/dependency-unsafe/Cargo.toml -- --check",
+    "    \"$cargo_executable\" test --manifest-path tools/dependency-unsafe/Cargo.toml --locked",
+    "    \"$cargo_executable\" clippy --manifest-path tools/dependency-unsafe/Cargo.toml --all-targets --locked -- -D warnings",
+    "    \"$cargo_executable\" run --manifest-path tools/dependency-unsafe/Cargo.toml --locked -- check",
 ];
 pub(super) const RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "readonly cargo_command=${LOCALHOLD_MAINTAINABILITY_CARGO:?maintainability bootstrap did not provide an absolute Cargo command}",
     "readonly git_command=${LOCALHOLD_MAINTAINABILITY_GIT:?maintainability bootstrap did not provide an absolute Git command}",
+];
+pub(super) const RUNNER_COMMAND_LINES: &[&str] = &[
+    "\"$cargo_command\" fetch --manifest-path tools/maintainability/Cargo.toml --locked",
+    "\"$cargo_command\" fmt --manifest-path tools/maintainability/Cargo.toml -- --check",
+    "\"$cargo_command\" test --manifest-path tools/maintainability/Cargo.toml --locked",
+    "\"$cargo_command\" clippy --manifest-path tools/maintainability/Cargo.toml --all-targets --locked -- -D warnings",
+    "\"$cargo_command\" run --manifest-path tools/maintainability/Cargo.toml --locked -- check",
 ];
 pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "unset GITHUB_ACTIONS GITHUB_EVENT_PATH GITHUB_SHA",
@@ -73,6 +93,9 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "FAKE_JUST_MARKER=$fake_just_marker FAKE_CARGO_MARKER=$fake_cargo_marker FAKE_RUSTUP_MARKER=$fake_rustup_marker PATH=\"$fake_bin:$PATH\" run_check --test-environment >/dev/null",
     "if LOCALHOLD_MAINTAINABILITY_RUSTUP=\"$fake_bin/rustup\" run_check --test-environment >/dev/null 2>&1; then",
     "if PATH=\"$fake_system_bin:$PATH\" run_check >/dev/null 2>&1; then",
+    "export -f inherited_cargo_function",
+    "if run_check --test-environment >/dev/null 2>&1; then",
+    "unset -f inherited_cargo_function",
     "trusted_rustup_command=${LOCALHOLD_MAINTAINABILITY_RUSTUP:-rustup}",
     "BASH_ENV=$bash_env GITHUB_PATH=untrusted LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CARGO_TARGET_DIR=\"$fixture/untrusted-target\" CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \\",
     "    RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \\",
@@ -132,7 +155,7 @@ pub fn reject_checked_in_weakening(workspace: &Path) -> Result<BTreeSet<String>>
         if unresolved_manifest || !selected_manifests.is_subset(&audited_manifests) {
             bail!("checked-in Rust command surface {path:?} selects a Cargo manifest outside the audited manifest inventory");
         }
-        if weakening_token_for_surface(&path, &source) {
+        if weakening_token_for_surface(&path, &source) && !reviewed_dynamic_command_references_are_exact(&path, &source) {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening argument");
         }
         if weakening_environment_for_surface(&path, &source) && !scrubber_environment_references_are_exact(&path, &source) {
@@ -302,7 +325,12 @@ fn is_weakening_environment_name(name: &str) -> bool {
             | "LOCALHOLD_MAINTAINABILITY_BASE_REV"
             | "LOCALHOLD_MAINTAINABILITY_CARGO"
             | "LOCALHOLD_MAINTAINABILITY_GIT"
+            | "LOCALHOLD_MAINTAINABILITY_RUSTC"
             | "LOCALHOLD_MAINTAINABILITY_RUSTUP"
+            | "GNUMAKEFLAGS"
+            | "MAKEFILES"
+            | "MAKEFLAGS"
+            | "MFLAGS"
             | "MISE_CONFIG_DIR"
             | "MISE_CONFIG_FILE"
             | "MISE_CEILING_PATHS"
@@ -352,6 +380,17 @@ pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str
         .iter()
         .filter(|line| weakening_environment_for_surface("", line) || rust_tools_are_referenced && path_environment_assignment("", line) || yaml_environment_lines.contains(line))
         .all(|line| allowed.contains(line))
+}
+
+pub(super) fn reviewed_dynamic_command_references_are_exact(path: &str, source: &str) -> bool {
+    let expected = match path {
+        "script/run-maintainability-gate.sh" => GATE_RUNNER_COMMAND_LINES,
+        "script/run-source-safety.sh" => RUNNER_COMMAND_LINES,
+        _ => return false,
+    };
+    let lines = source.lines().collect::<Vec<_>>();
+    expected.iter().all(|line| lines.iter().filter(|candidate| *candidate == line).count() == 1)
+        && lines.iter().filter(|line| weakening_token_for_surface("", line)).all(|line| expected.contains(line))
 }
 
 pub(super) fn is_execution_surface(path: &str) -> bool {

@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::{Component, Path};
-use std::process::Command;
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -27,7 +26,7 @@ pub(in crate::structure::suppression) fn revision_root_package_target_sources(wo
 }
 
 fn revision_rust_sources(workspace: &Path, revision: &str) -> Result<BTreeSet<String>> {
-    let output = Command::new("git")
+    let output = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["ls-tree", "-r", "-z", "--full-tree", revision])
         .output()
@@ -57,7 +56,7 @@ fn revision_rust_sources(workspace: &Path, revision: &str) -> Result<BTreeSet<St
 
 fn revision_manifest(workspace: &Path, revision: &str) -> Result<String> {
     let object = format!("{revision}:Cargo.toml");
-    let output = Command::new("git")
+    let output = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["show", "--no-ext-diff", &object])
         .output()
@@ -212,11 +211,28 @@ fn add_build_target(package: &toml::map::Map<String, toml::Value>, known: &BTree
 }
 
 fn insert_target(roots: &mut TargetRoots, known: &BTreeSet<String>, path: &str, category: SourceCategory, kind: &str) -> Result<()> {
-    validate_source_path(path)?;
-    if !known.contains(path) {
+    let path = normalized_manifest_target_path(path)?;
+    if !known.contains(&path) {
         bail!("suppression comparison Cargo target source is missing: {path:?}");
     }
-    roots.insert(path.to_owned(), category, format!("{kind}:{path}"))
+    roots.insert(path.clone(), category, format!("{kind}:{path}"))
+}
+
+fn normalized_manifest_target_path(path: &str) -> Result<String> {
+    if path.contains('\\') {
+        bail!("suppression comparison Cargo target must use forward slashes");
+    }
+    let mut normalized = PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(component) => normalized.push(component),
+            _ => bail!("suppression comparison Cargo target must remain inside the root package"),
+        }
+    }
+    let normalized = normalized.to_str().context("suppression comparison Cargo target path is not UTF-8")?.to_owned();
+    validate_source_path(&normalized)?;
+    Ok(normalized)
 }
 
 fn package_auto_target(package: &toml::map::Map<String, toml::Value>, key: &str) -> Result<bool> {

@@ -88,5 +88,9 @@ fn is_github_yaml(path: &str) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "yml" | "yaml"))
-        && (path.starts_with(".github/workflows") || path.starts_with(".github/actions"))
+        && (path.starts_with(".github/workflows")
+            || matches!(
+                path.file_name().and_then(|name| name.to_str()).map(str::to_ascii_lowercase).as_deref(),
+                Some("action.yml" | "action.yaml")
+            ))
 }

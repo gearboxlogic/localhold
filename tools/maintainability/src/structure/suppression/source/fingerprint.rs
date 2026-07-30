@@ -14,10 +14,10 @@ pub(super) fn suppression_free_fingerprint(tokens: &impl ToTokens) -> String {
 
 pub(in crate::structure::suppression) fn external_content_fingerprint<'a>(sources: impl IntoIterator<Item = (&'a str, &'a syn::File)>) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"localhold-external-module-content-v1");
-    for (path, syntax) in sources {
+    digest.update(b"localhold-external-module-content-v2");
+    for (logical_module, syntax) in sources {
         let fingerprint = suppression_free_fingerprint(syntax);
-        for field in [path, fingerprint.as_str()] {
+        for field in [logical_module, fingerprint.as_str()] {
             digest.update(field.len().to_string().as_bytes());
             digest.update(b":");
             digest.update(field.as_bytes());

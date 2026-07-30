@@ -31,7 +31,7 @@ impl StructureManifest {
         }
         validate_revision(revision).context("validate maintainability base revision")?;
         let object = format!("{revision}:{MANIFEST_PATH}");
-        let output = Command::new("git")
+        let output = crate::structure::revision::git_command()
             .current_dir(workspace)
             .args(["show", "--no-ext-diff", &object])
             .output()
@@ -57,7 +57,7 @@ impl StructureManifest {
 }
 
 fn changed_rust_paths(workspace: &Path, revision: &str, roots: &[String]) -> Result<BTreeSet<String>> {
-    let diff = Command::new("git")
+    let diff = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["diff", "--no-ext-diff", "--no-renames", "--name-only", "-z", revision, "--"])
         .args(roots)
@@ -94,7 +94,7 @@ fn collect_rust_paths(output: &[u8], paths: &mut BTreeSet<String>) -> Result<()>
 }
 
 fn verify_initial_policy_revision(workspace: &Path, revision: &str, object: &str) -> Result<()> {
-    let status = Command::new("git")
+    let status = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["cat-file", "-e", &format!("{revision}^{{commit}}")])
         .stdout(Stdio::null())
@@ -104,7 +104,7 @@ fn verify_initial_policy_revision(workspace: &Path, revision: &str, object: &str
     if !status.success() {
         bail!("maintainability base revision {revision} is not available");
     }
-    let status = Command::new("git")
+    let status = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["cat-file", "-e", object])
         .stdout(Stdio::null())

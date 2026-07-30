@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -25,7 +24,7 @@ pub(in crate::structure::suppression) fn expand_revision_target_sources(
 
 fn read_revision_source(workspace: &Path, revision: &str, path: &str) -> Result<String> {
     let object = format!("{revision}:{path}");
-    let output = Command::new("git")
+    let output = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["show", "--no-ext-diff", &object])
         .output()

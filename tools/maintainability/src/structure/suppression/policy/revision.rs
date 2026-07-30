@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
@@ -63,7 +63,7 @@ impl SuppressionPolicy {
 
 fn load_revision(workspace: &Path, revision: &str) -> Result<Option<SuppressionPolicy>> {
     let object = format!("{revision}:{POLICY_PATH}");
-    let status = Command::new("git")
+    let status = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["cat-file", "-e", &object])
         .stdout(Stdio::null())
@@ -85,7 +85,7 @@ fn load_revision(workspace: &Path, revision: &str) -> Result<Option<SuppressionP
 fn git_show_json<T: DeserializeOwned>(workspace: &Path, revision: &str, path: &str) -> Result<T> {
     validate_policy_relative(path)?;
     let object = format!("{revision}:{path}");
-    let output = Command::new("git")
+    let output = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["show", "--no-ext-diff", &object])
         .output()
@@ -97,7 +97,7 @@ fn git_show_json<T: DeserializeOwned>(workspace: &Path, revision: &str, path: &s
 }
 
 fn verify_commit(workspace: &Path, revision: &str) -> Result<()> {
-    let status = Command::new("git")
+    let status = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["cat-file", "-e", &format!("{revision}^{{commit}}")])
         .stdout(Stdio::null())

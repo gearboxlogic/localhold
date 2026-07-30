@@ -150,7 +150,7 @@ pub(super) fn is_execution_surface(path: &str) -> bool {
         || is_mise_config(path)
         || is_cargo_config(path)
         || path.starts_with(".github/workflows")
-        || path.starts_with(".github/actions") && matches!(lowercase_basename.as_str(), "action.yml" | "action.yaml")
+        || matches!(lowercase_basename.as_str(), "action.yml" | "action.yaml")
         || path.starts_with("script")
         || matches!(basename, "Makefile" | "makefile" | "GNUmakefile" | "package.json")
     {

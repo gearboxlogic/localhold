@@ -1,33 +1,35 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use super::external_content_fingerprint;
 
 type ExternalTargets = BTreeMap<String, BTreeMap<String, String>>;
-type TargetSources = BTreeMap<(String, String), BTreeSet<String>>;
+type LogicalSources = BTreeMap<String, String>;
+type ModuleAdjacency<'a> = BTreeMap<&'a str, Vec<(&'a str, &'a str)>>;
+type TargetSources = BTreeMap<(String, String), LogicalSources>;
 
 pub(in crate::structure::suppression) fn external_target_maps(relations: &BTreeMap<(String, String), String>, syntax: &BTreeMap<String, syn::File>) -> Result<ExternalTargets> {
-    let mut adjacency: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-    for ((parent, _), child) in relations {
-        adjacency.entry(parent).or_default().insert(child);
+    let mut adjacency = ModuleAdjacency::new();
+    for ((parent, item), child) in relations {
+        adjacency.entry(parent).or_default().push((item, child));
     }
     let mut target_sources = TargetSources::new();
     for ((parent, item), child) in relations {
-        let reachable = reachable_sources(child, &adjacency);
+        let reachable = reachable_sources(item, child, &adjacency)?;
         for target in module_target_ancestors(item) {
-            target_sources.entry((parent.clone(), target)).or_default().extend(reachable.iter().cloned());
+            merge_sources(target_sources.entry((parent.clone(), target)).or_default(), &reachable)?;
         }
-        target_sources.entry((parent.clone(), "<module>".to_owned())).or_default().extend(reachable);
+        merge_sources(target_sources.entry((parent.clone(), "<module>".to_owned())).or_default(), &reachable)?;
     }
     let mut targets = ExternalTargets::new();
     for ((parent, item), sources) in target_sources {
         let sources = sources
             .iter()
-            .map(|path| {
+            .map(|(logical, path)| {
                 syntax
                     .get(path)
-                    .map(|parsed| (path.as_str(), parsed))
+                    .map(|parsed| (logical.as_str(), parsed))
                     .with_context(|| format!("external module fingerprint source is missing {path:?}"))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -36,18 +38,36 @@ pub(in crate::structure::suppression) fn external_target_maps(relations: &BTreeM
     Ok(targets)
 }
 
-fn reachable_sources(root: &str, adjacency: &BTreeMap<&str, BTreeSet<&str>>) -> BTreeSet<String> {
-    let mut reachable = BTreeSet::new();
-    let mut pending = vec![root];
-    while let Some(path) = pending.pop() {
-        if !reachable.insert(path.to_owned()) {
+fn reachable_sources(root_item: &str, root_path: &str, adjacency: &ModuleAdjacency<'_>) -> Result<LogicalSources> {
+    let mut reachable = LogicalSources::new();
+    let mut pending = vec![(root_item.to_owned(), root_path)];
+    while let Some((logical, path)) = pending.pop() {
+        if !insert_logical_source(&mut reachable, logical.clone(), path)? {
             continue;
         }
         if let Some(children) = adjacency.get(path) {
-            pending.extend(children);
+            pending.extend(children.iter().map(|(item, child)| (format!("{logical}::{item}"), *child)));
         }
     }
-    reachable
+    Ok(reachable)
+}
+
+fn merge_sources(target: &mut LogicalSources, sources: &LogicalSources) -> Result<()> {
+    for (logical, path) in sources {
+        insert_logical_source(target, logical.clone(), path)?;
+    }
+    Ok(())
+}
+
+fn insert_logical_source(sources: &mut LogicalSources, logical: String, path: &str) -> Result<bool> {
+    if let Some(existing) = sources.get(&logical) {
+        if existing != path {
+            bail!("logical external module {logical:?} resolves to multiple source files");
+        }
+        return Ok(false);
+    }
+    sources.insert(logical, path.to_owned());
+    Ok(true)
 }
 
 fn module_target_ancestors(item: &str) -> Vec<String> {

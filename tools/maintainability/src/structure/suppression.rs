@@ -94,7 +94,7 @@ pub fn scan_revision(workspace: &Path, revision: &str, inventory: &Inventory, co
     let target_sources = modules::expand_revision_target_sources(workspace, revision, roots, &rust_sources, |path| component_paths.contains_key(path))?;
     scan_with(inventory, component_paths, &target_sources, |path| {
         let object = format!("{revision}:{path}");
-        let output = Command::new("git")
+        let output = crate::structure::revision::git_command()
             .current_dir(workspace)
             .args(["show", "--no-ext-diff", &object])
             .output()

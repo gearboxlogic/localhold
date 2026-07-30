@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Component, Path};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -77,7 +77,7 @@ impl ImportPolicy {
         };
         validate_revision(&revision)?;
         let object = format!("{revision}:{POLICY_PATH}");
-        let output = Command::new("git")
+        let output = crate::structure::revision::git_command()
             .current_dir(workspace)
             .args(["show", "--no-ext-diff", &object])
             .output()
@@ -244,7 +244,7 @@ fn require_text(id: &str, label: &str, value: &str) -> Result<()> {
 }
 
 fn verify_initial_policy_revision(workspace: &Path, revision: &str, object: &str) -> Result<()> {
-    let status = Command::new("git")
+    let status = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["cat-file", "-e", &format!("{revision}^{{commit}}")])
         .stdout(Stdio::null())
@@ -254,7 +254,7 @@ fn verify_initial_policy_revision(workspace: &Path, revision: &str, object: &str
     if !status.success() {
         bail!("architecture policy base revision {revision} is not available");
     }
-    let status = Command::new("git")
+    let status = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["cat-file", "-e", object])
         .stdout(Stdio::null())

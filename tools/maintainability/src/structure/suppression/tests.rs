@@ -165,6 +165,13 @@ fn external_module_contents_participate_in_suppression_identity() {
     assert_eq!(expanded.len(), 1);
     assert_ne!(initial[0].target, expanded[0].target);
     assert_ne!(initial[0].id, expanded[0].id);
+
+    fs::write(&helper, "fn first_helper() {}\n").expect("restore helper contents");
+    fs::create_dir(workspace.path().join("tests/integration/helpers")).expect("nested helper directory");
+    fs::rename(&helper, workspace.path().join("tests/integration/helpers/mod.rs")).expect("move helper to nested layout");
+    let nested = scan_workspace(workspace.path(), &Inventory { files: Vec::new() }, &BTreeMap::new()).expect("nested-layout suppression inventory");
+    assert_eq!(initial[0].target, nested[0].target);
+    assert_eq!(initial[0].id, nested[0].id);
 }
 
 #[test]
@@ -209,7 +216,7 @@ fn revision_scan_uses_the_previous_cargo_targets_and_module_graph() {
     fs::create_dir_all(&old_example).expect("old example directory");
     fs::write(
         workspace.path().join("Cargo.toml"),
-        "[package]\nname='revision-target-fixture'\nversion='0.1.0'\nedition='2024'\nautoexamples=false\n\n[[example]]\nname='demo'\npath='examples/old/main.rs'\n",
+        "[package]\nname='revision-target-fixture'\nversion='0.1.0'\nedition='2024'\nautoexamples=false\n\n[[example]]\nname='demo'\npath='./examples/old/main.rs'\n",
     )
     .expect("old package manifest");
     fs::write(
@@ -248,6 +255,13 @@ fn revision_scan_uses_the_previous_cargo_targets_and_module_graph() {
         "[package]\nname='revision-target-fixture'\nversion='0.1.0'\nedition='2024'\nautoexamples=false\n\n[[example]]\nname='demo'\npath='examples/new/main.rs'\n",
     )
     .expect("new package manifest");
+    git(workspace.path(), &["add", "-A"]);
+    git(
+        workspace.path(),
+        &["-c", "user.name=LocalHold", "-c", "user.email=localhold@example.invalid", "commit", "-qm", "replacement"],
+    );
+    let replacement = git_output(workspace.path(), &["rev-parse", "HEAD"]);
+    git(workspace.path(), &["replace", revision.trim(), replacement.trim()]);
 
     let sites = scan_revision(workspace.path(), revision.trim(), &Inventory { files: Vec::new() }, &BTreeMap::new()).expect("scan prior Cargo target paths");
     let mut paths = sites.iter().map(|site| site.path.as_str()).collect::<Vec<_>>();

@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -124,7 +123,7 @@ pub(super) fn compare_clippy_previous_revision(workspace: &Path, revision: &str,
     let current_source = fs::read_to_string(workspace.join("clippy.toml")).context("read current clippy.toml")?;
     let current = current_source.parse::<toml::Table>().context("parse current clippy.toml")?;
     let object = format!("{revision}:clippy.toml");
-    let output = Command::new("git")
+    let output = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["show", "--no-ext-diff", &object])
         .output()

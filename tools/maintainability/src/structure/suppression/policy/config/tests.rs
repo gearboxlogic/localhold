@@ -280,6 +280,22 @@ fn command_policy_scans_extensionless_scripts() {
 }
 
 #[test]
+fn local_composite_actions_are_scanned_in_any_directory() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("actions/lint")).expect("action directory");
+    fs::write(
+        workspace.path().join("actions/lint/action.yml"),
+        "name: lint\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: cargo clippy -- -A warnings\n",
+    )
+    .expect("composite action");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"));
+}
+
+#[test]
 fn command_policy_rejects_sourced_environment_files() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join("policy")).expect("policy directory");

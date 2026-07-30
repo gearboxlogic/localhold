@@ -1,12 +1,19 @@
 use std::env;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 const BASE_REVISION_ENV: &str = "LOCALHOLD_MAINTAINABILITY_BASE_REV";
 const ZERO_REVISION: &str = "0000000000000000000000000000000000000000";
+
+pub(super) fn git_command() -> Command {
+    let mut command = Command::new("git");
+    command.env("GIT_NO_REPLACE_OBJECTS", "1");
+    command
+}
 
 pub(super) fn maintainability_base_revision() -> Result<Option<String>> {
     let configured = normalize_optional_revision(env::var(BASE_REVISION_ENV).ok().as_deref())?;

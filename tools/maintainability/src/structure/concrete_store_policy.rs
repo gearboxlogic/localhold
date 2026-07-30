@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -253,7 +253,7 @@ impl ConcreteStorePolicy {
         };
         validate_revision(&revision)?;
         let object = format!("{revision}:{POLICY_PATH}");
-        let output = Command::new("git")
+        let output = crate::structure::revision::git_command()
             .current_dir(workspace)
             .args(["show", "--no-ext-diff", &object])
             .output()
@@ -815,7 +815,7 @@ fn require_text(id: &str, label: &str, value: &str) -> Result<()> {
 }
 
 fn verify_initial_policy_revision(workspace: &Path, revision: &str, object: &str) -> Result<()> {
-    let status = Command::new("git")
+    let status = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["cat-file", "-e", &format!("{revision}^{{commit}}")])
         .stdout(Stdio::null())
@@ -825,7 +825,7 @@ fn verify_initial_policy_revision(workspace: &Path, revision: &str, object: &str
     if !status.success() {
         bail!("maintainability base revision {revision:?} is not a commit");
     }
-    let object_status = Command::new("git")
+    let object_status = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["cat-file", "-e", object])
         .stdout(Stdio::null())

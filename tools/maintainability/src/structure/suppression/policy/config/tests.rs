@@ -31,6 +31,29 @@ fn cargo_allow_scan_covers_root_and_nested_manifests() {
 }
 
 #[test]
+fn cargo_allow_scan_resolves_workspace_lint_inheritance() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("member")).expect("workspace member");
+    fs::write(
+        workspace.path().join("Cargo.toml"),
+        "[workspace]\nmembers=['member']\n\n[workspace.lints.rust]\nunsafe_code='forbid'\nwarnings='allow'\n",
+    )
+    .expect("workspace manifest");
+    fs::write(
+        workspace.path().join("member/Cargo.toml"),
+        "[package]\nname='member'\nversion='0.1.0'\n\n[lints]\nworkspace=true\n",
+    )
+    .expect("member manifest");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    assert_eq!(
+        scan_cargo_allows(workspace.path()).expect("inherited Cargo allowances"),
+        BTreeSet::from([("member/Cargo.toml".to_owned(), "rust".to_owned(), "warnings".to_owned())])
+    );
+}
+
+#[test]
 fn clippy_constraints_are_directional() {
     compare_clippy_value("threshold", &toml::Value::Integer(4), &ClippyConstraint::MaximumInteger { value: 5 }).expect("lower threshold");
     assert!(compare_clippy_value("threshold", &toml::Value::Integer(6), &ClippyConstraint::MaximumInteger { value: 5 },).is_err());
@@ -247,6 +270,37 @@ fn command_policy_scans_extensionless_scripts() {
         let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
         assert!(error.to_string().contains("lint-weakening argument"));
     }
+}
+
+#[test]
+fn command_policy_rejects_sourced_environment_files() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("policy")).expect("policy directory");
+    fs::write(workspace.path().join("Justfile"), "check:\n    . policy/lints.env; cargo clippy -- -D warnings\n").expect("sourced lint environment");
+    fs::write(workspace.path().join("policy/lints.env"), "export RUSTFLAGS=--cap-lints=allow\n").expect("lint environment");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("sourced-file indirection"));
+}
+
+#[test]
+fn yaml_source_labels_are_not_shell_indirection() {
+    assert!(!has_sourced_file_indirection(
+        ".github/workflows/ci.yml",
+        "steps:\n  - name: Restore source cache\n    run: cargo clippy\n"
+    ));
+    assert!(!has_sourced_file_indirection("script/install.sh", "Builds LocalHold from the locked source tree\n"));
+    assert!(has_sourced_file_indirection(
+        "script/check.sh",
+        "if MODE=strict source policy/lints.env; then cargo clippy; fi\n"
+    ));
+    assert!(has_sourced_file_indirection(
+        ".github/workflows/ci.yml",
+        "steps:\n  - run: |\n      . policy/lints.env\n      cargo clippy\n"
+    ));
+    assert!(has_sourced_file_indirection(".github/workflows/ci.yml", "steps:\n  - run: source policy/lints.env\n"));
 }
 
 #[test]

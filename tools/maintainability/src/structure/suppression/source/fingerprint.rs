@@ -12,6 +12,31 @@ pub(super) fn suppression_free_fingerprint(tokens: &impl ToTokens) -> String {
     syntax_fingerprint(&without_suppression_attributes(tokens.to_token_stream()))
 }
 
+pub(in crate::structure::suppression) fn external_content_fingerprint<'a>(sources: impl IntoIterator<Item = (&'a str, &'a syn::File)>) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"localhold-external-module-content-v1");
+    for (path, syntax) in sources {
+        let fingerprint = suppression_free_fingerprint(syntax);
+        for field in [path, fingerprint.as_str()] {
+            digest.update(field.len().to_string().as_bytes());
+            digest.update(b":");
+            digest.update(field.as_bytes());
+        }
+    }
+    format!("{:x}", digest.finalize())
+}
+
+pub(super) fn external_target_fingerprint(intrinsic: &str, external: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"localhold-external-module-target-v1");
+    for field in [intrinsic, external] {
+        digest.update(field.len().to_string().as_bytes());
+        digest.update(b":");
+        digest.update(field.as_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
+
 pub(super) fn suppression_site_fingerprint(meta: &Meta, activation_identity: Option<&str>) -> Result<String> {
     let normalized = normalized_suppression_meta(meta)?;
     let activation = activation_identity.unwrap_or_default();

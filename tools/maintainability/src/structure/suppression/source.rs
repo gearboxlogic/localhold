@@ -10,7 +10,8 @@ use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{Arm, Attribute, Expr, ForeignItem, GenericParam, ImplItem, Item, Local, Meta, StmtMacro, Token, TraitItem, Variant};
 
-use self::fingerprint::{suppression_free_fingerprint, suppression_site_fingerprint};
+pub(in crate::structure::suppression) use self::fingerprint::external_content_fingerprint;
+use self::fingerprint::{external_target_fingerprint, suppression_free_fingerprint, suppression_site_fingerprint};
 use self::nodes::{SuppressionScope, foreign_item_scope, impl_item_scope, item_scope, trait_item_scope};
 use super::{SourceCategory, SourceSuppression};
 use crate::scan::{is_doc_comment, unsupported_runnable_doctest};
@@ -18,7 +19,9 @@ use crate::structure::syntax::{
     ProductionCfgContext, cfg_attr_metas_with_production_reachability, expr_attributes, foreign_item_attributes, generic_param_attributes, impl_item_attributes, item_attributes,
     normalized_ident, pat_attributes, production_cfg_context, trait_item_attributes,
 };
+pub(in crate::structure::suppression) use external::external_target_maps;
 
+mod external;
 mod fingerprint;
 mod nodes;
 #[cfg(test)]
@@ -45,22 +48,38 @@ pub(super) struct SourceScanner {
     scope: String,
     signature: Option<String>,
     target: Option<String>,
+    external_targets: BTreeMap<String, String>,
     pending: Vec<PendingSuppression>,
     error: Option<anyhow::Error>,
 }
 
 impl SourceScanner {
     pub(super) fn scan(path: &str, component: &str, category: SourceCategory, syntax: &syn::File) -> Result<Vec<SourceSuppression>> {
+        Self::scan_with_external_targets(path, component, category, syntax, &BTreeMap::new())
+    }
+
+    pub(super) fn scan_with_external_targets(
+        path: &str,
+        component: &str,
+        category: SourceCategory,
+        syntax: &syn::File,
+        external_targets: &BTreeMap<String, String>,
+    ) -> Result<Vec<SourceSuppression>> {
         if let Some(reason) = unsupported_runnable_doctest(syntax) {
             bail!("{path}: {reason}");
         }
+        let target = external_targets.get("<module>").map(|external| {
+            let intrinsic = suppression_free_fingerprint(syntax);
+            external_target_fingerprint(&intrinsic, external)
+        });
         let mut scanner = Self {
             category,
             cfg_context: ProductionCfgContext::default(),
             item: "<module>".to_owned(),
             scope: "module".to_owned(),
             signature: None,
-            target: None,
+            target,
+            external_targets: external_targets.clone(),
             pending: Vec::new(),
             error: None,
         };
@@ -142,7 +161,12 @@ impl SourceScanner {
             };
             self.scope = item.scope;
             self.signature = item.signature;
-            self.target = Some(suppression_free_fingerprint(node));
+            let intrinsic = suppression_free_fingerprint(node);
+            self.target = Some(
+                self.external_targets
+                    .get(&self.item)
+                    .map_or_else(|| intrinsic.clone(), |external| external_target_fingerprint(&intrinsic, external)),
+            );
         }
         visit(self, node);
         self.category = previous_category;

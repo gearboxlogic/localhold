@@ -9,17 +9,18 @@ use anyhow::{Context, Result, bail};
 use super::model::{CargoAllowance, ClippyConfigurationFile, ClippyConstraint, ClippySetting, Disposition, Status};
 use super::{require_id, require_text};
 
-type CargoAllowKey = (String, String, String);
-
+mod cargo;
 mod command;
 #[cfg(test)]
 mod tests;
 
+use cargo::{scan_cargo_allows, tracked_manifests};
 pub(super) use command::reject_checked_in_weakening;
 #[cfg(test)]
 use command::{
     BOOTSTRAP_ENVIRONMENT_LINES, BOOTSTRAP_TEST_ENVIRONMENT_LINES, CI_REVISION_ENVIRONMENT_LINES, GPU_RELEASE_REVISION_ENVIRONMENT_LINES, MISE_ENVIRONMENT_LINES,
-    is_execution_surface, scrubber_environment_references_are_exact, weakening_environment, weakening_environment_for_surface, weakening_token, weakening_token_for_surface,
+    has_sourced_file_indirection, is_execution_surface, scrubber_environment_references_are_exact, weakening_environment, weakening_environment_for_surface, weakening_token,
+    weakening_token_for_surface,
 };
 
 pub(super) fn validate_cargo_allowances(entries: &[CargoAllowance]) -> Result<()> {
@@ -145,52 +146,6 @@ pub(super) fn compare_clippy_previous_revision(workspace: &Path, revision: &str,
     Ok(())
 }
 
-fn scan_cargo_allows(workspace: &Path) -> Result<BTreeSet<CargoAllowKey>> {
-    let mut observed = BTreeSet::new();
-    for manifest in tracked_manifests(workspace)? {
-        let path = workspace.join(&manifest);
-        if fs::symlink_metadata(&path)
-            .with_context(|| format!("inspect Cargo manifest {}", path.display()))?
-            .file_type()
-            .is_symlink()
-        {
-            bail!("Cargo lint manifest cannot be a symlink: {manifest}");
-        }
-        let source = fs::read_to_string(&path).with_context(|| format!("read Cargo manifest {}", path.display()))?;
-        let parsed = source.parse::<toml::Table>().with_context(|| format!("parse Cargo manifest {}", path.display()))?;
-        let Some(lints) = parsed.get("lints").and_then(toml::Value::as_table) else {
-            continue;
-        };
-        record_manifest_allows(&manifest, lints, &mut observed)?;
-    }
-    Ok(observed)
-}
-
-fn record_manifest_allows(manifest: &str, lints: &toml::Table, observed: &mut BTreeSet<CargoAllowKey>) -> Result<()> {
-    for (family, settings) in lints {
-        let settings = settings.as_table().with_context(|| format!("Cargo lint family {family:?} in {manifest} is not a table"))?;
-        for (lint, setting) in settings {
-            let level = lint_level(setting).with_context(|| format!("parse Cargo lint {family}::{lint} in {manifest}"))?;
-            if level == "allow" {
-                observed.insert((manifest.to_owned(), family.clone(), lint.clone()));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn tracked_manifests(workspace: &Path) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .current_dir(workspace)
-        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "Cargo.toml", ":(glob)**/Cargo.toml"])
-        .output()
-        .context("list tracked and proposed Cargo manifests")?;
-    if !output.status.success() {
-        bail!("git ls-files failed while listing Cargo lint manifests");
-    }
-    parse_nul_paths(&output.stdout, |path| path.ends_with("Cargo.toml"))
-}
-
 pub(super) fn parse_nul_paths(output: &[u8], include: impl Fn(&str) -> bool) -> Result<Vec<String>> {
     let mut paths = Vec::new();
     for raw in output.split(|byte| *byte == b'\0').filter(|path| !path.is_empty()) {
@@ -203,17 +158,6 @@ pub(super) fn parse_nul_paths(output: &[u8], include: impl Fn(&str) -> bool) -> 
     paths.sort();
     paths.dedup();
     Ok(paths)
-}
-
-fn lint_level(value: &toml::Value) -> Result<&str> {
-    if let Some(level) = value.as_str() {
-        return Ok(level);
-    }
-    value
-        .as_table()
-        .and_then(|table| table.get("level"))
-        .and_then(toml::Value::as_str)
-        .context("lint setting must be a string or a table with a string level")
 }
 
 fn compare_clippy_value(key: &str, actual: &toml::Value, constraint: &ClippyConstraint) -> Result<()> {

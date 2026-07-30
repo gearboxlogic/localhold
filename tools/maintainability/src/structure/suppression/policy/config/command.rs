@@ -8,6 +8,7 @@ mod arguments;
 mod surfaces;
 mod yaml;
 use arguments::has_case_insensitive_tool_names;
+pub(super) use arguments::has_sourced_file_indirection;
 #[cfg(test)]
 pub(super) use arguments::weakening_token;
 pub(super) use arguments::weakening_token_for_surface;
@@ -44,6 +45,9 @@ pub fn reject_checked_in_weakening(workspace: &Path) -> Result<BTreeSet<String>>
             bail!("checked-in Cargo configuration {path:?} is unsupported because it can override lint policy");
         }
         let source = fs::read_to_string(workspace.join(&path)).with_context(|| format!("read lint command execution surface {path}"))?;
+        if has_sourced_file_indirection(&path, &source) {
+            bail!("checked-in Rust command surface {path:?} uses unsupported sourced-file indirection");
+        }
         if weakening_token_for_surface(&path, &source) {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening argument");
         }

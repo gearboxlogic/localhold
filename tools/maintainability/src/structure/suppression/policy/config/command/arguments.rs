@@ -11,17 +11,19 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token(source:
 
 pub(in crate::structure::suppression::policy::config) fn weakening_token_for_surface(path: &str, source: &str) -> bool {
     let case_insensitive_tools = has_case_insensitive_tool_names(path);
-    weakening_token_with_case(source, case_insensitive_tools)
-        || super::yaml::folded_run_commands(path, source)
-            .iter()
-            .any(|command| weakening_token_with_case(command, case_insensitive_tools))
+    let embedded_commands = super::yaml::run_commands(path, source);
+    if is_yaml(path) {
+        return embedded_commands.iter().any(|command| weakening_token_with_case(command, case_insensitive_tools));
+    }
+    weakening_token_with_case(source, case_insensitive_tools) || embedded_commands.iter().any(|command| weakening_token_with_case(command, case_insensitive_tools))
 }
 
 pub(super) fn direct_rust_sources_for_surface(path: &str, source: &str) -> (BTreeSet<String>, bool) {
     let case_insensitive_tools = has_case_insensitive_tool_names(path);
     let mut sources = BTreeSet::new();
-    let mut unresolved = collect_direct_rust_sources(source, case_insensitive_tools, &mut sources);
-    for command in super::yaml::folded_run_commands(path, source) {
+    let embedded_commands = super::yaml::run_commands(path, source);
+    let mut unresolved = !is_yaml(path) && collect_direct_rust_sources(source, case_insensitive_tools, &mut sources);
+    for command in embedded_commands {
         unresolved |= collect_direct_rust_sources(&command, case_insensitive_tools, &mut sources);
     }
     (sources, unresolved)
@@ -29,6 +31,65 @@ pub(super) fn direct_rust_sources_for_surface(path: &str, source: &str) -> (BTre
 
 pub(super) fn normalized_shell_tokens(source: &str) -> Vec<String> {
     tokens::normalized_shell_tokens(source)
+}
+
+pub(in crate::structure::suppression::policy::config) fn has_sourced_file_indirection(path: &str, source: &str) -> bool {
+    if !supports_shell_source(path) {
+        return false;
+    }
+    let embedded_commands = super::yaml::run_commands(path, source);
+    if is_yaml(path) {
+        return embedded_commands.iter().any(|command| contains_source_command(command));
+    }
+    contains_source_command(source) || embedded_commands.iter().any(|command| contains_source_command(command))
+}
+
+fn contains_source_command(source: &str) -> bool {
+    tokens::source_command_tokens(source).iter().any(|command| {
+        let mut words = command.iter().map(|word| word.trim_matches(['(', ')', '{', '}'])).filter(|word| !word.is_empty());
+        loop {
+            let Some(word) = words.next() else {
+                return false;
+            };
+            if is_shell_command_prefix(word) || is_environment_assignment(word) {
+                continue;
+            }
+            return matches!(word, "." | "source") && words.next().is_some();
+        }
+    })
+}
+
+fn is_shell_command_prefix(word: &str) -> bool {
+    matches!(word, "!" | "if" | "then" | "elif" | "while" | "until" | "do" | "env") || word.starts_with('-')
+}
+
+fn is_environment_assignment(word: &str) -> bool {
+    word.split_once('=')
+        .is_some_and(|(name, _)| !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') && !name.as_bytes()[0].is_ascii_digit())
+}
+
+fn supports_shell_source(path: &str) -> bool {
+    let path = Path::new(path);
+    let basename = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    if matches!(
+        basename.to_ascii_lowercase().as_str(),
+        "justfile" | ".justfile" | "makefile" | "gnumakefile" | "package.json"
+    ) {
+        return true;
+    }
+    path.extension().and_then(|extension| extension.to_str()).is_none_or(|extension| {
+        matches!(
+            extension.to_ascii_lowercase().as_str(),
+            "sh" | "bash" | "zsh" | "fish" | "ps1" | "just" | "yml" | "yaml" | "toml"
+        )
+    })
+}
+
+fn is_yaml(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "yml" | "yaml"))
 }
 
 fn weakening_token_with_case(source: &str, case_insensitive_tools: bool) -> bool {

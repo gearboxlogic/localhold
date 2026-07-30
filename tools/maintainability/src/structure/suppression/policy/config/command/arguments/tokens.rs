@@ -1,8 +1,20 @@
 pub(super) fn normalized_shell_tokens(source: &str) -> Vec<String> {
+    normalized_shell_commands(source).into_iter().flatten().collect()
+}
+
+pub(super) fn normalized_shell_commands(source: &str) -> Vec<Vec<String>> {
     let logical = source.replace("\\\r\n", "").replace("\\\n", "");
     logical
         .split(['\n', ';', '&', '|'])
-        .flat_map(|segment| command_tokens(command_without_comment(segment)))
+        .map(|segment| command_tokens(command_without_comment(segment)))
+        .collect()
+}
+
+pub(super) fn source_command_tokens(source: &str) -> Vec<Vec<String>> {
+    let logical = source.replace("\\\r\n", "").replace("\\\n", "");
+    logical
+        .split(['\n', ';', '&', '|'])
+        .map(|segment| shell_tokens(command_without_comment(segment), false))
         .collect()
 }
 
@@ -30,6 +42,10 @@ pub(super) fn command_without_comment(segment: &str) -> &str {
 }
 
 pub(super) fn command_tokens(command: &str) -> Vec<String> {
+    shell_tokens(command, true)
+}
+
+fn shell_tokens(command: &str, split_equals: bool) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut token = String::new();
     let mut quote = None;
@@ -56,7 +72,7 @@ pub(super) fn command_tokens(command: &str) -> Vec<String> {
             quote = Some(character);
         } else if character == '\\' {
             escaped = true;
-        } else if character.is_whitespace() || character == '=' {
+        } else if character.is_whitespace() || split_equals && character == '=' {
             if !token.is_empty() {
                 tokens.push(std::mem::take(&mut token));
             }

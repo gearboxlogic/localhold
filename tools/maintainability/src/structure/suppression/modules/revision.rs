@@ -4,7 +4,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use super::{expand_sources, normalized_module_path, select_external_module};
+use super::{ExpandedSources, expand_sources, normalized_module_path, select_external_module};
 use crate::structure::suppression::SourceCategory;
 
 pub(in crate::structure::suppression) fn expand_revision_target_sources(
@@ -13,7 +13,7 @@ pub(in crate::structure::suppression) fn expand_revision_target_sources(
     roots: BTreeMap<String, SourceCategory>,
     rust_sources: &BTreeSet<String>,
     is_structural: impl Fn(&str) -> bool,
-) -> Result<BTreeMap<String, SourceCategory>> {
+) -> Result<ExpandedSources> {
     expand_sources(
         roots,
         is_structural,

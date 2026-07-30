@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path};
 use std::process::Command;
@@ -145,10 +145,23 @@ pub(super) fn reject_tooling_suppressions(workspace: &Path) -> Result<()> {
 fn scan_with(
     inventory: &Inventory,
     component_paths: &BTreeMap<&str, &str>,
-    target_sources: &BTreeMap<String, SourceCategory>,
+    target_sources: &modules::ExpandedSources,
     mut read_source: impl FnMut(&str) -> Result<String>,
 ) -> Result<Vec<SourceSuppression>> {
     let measurements = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    let paths = component_paths
+        .keys()
+        .copied()
+        .map(str::to_owned)
+        .chain(target_sources.categories.keys().cloned())
+        .collect::<BTreeSet<_>>();
+    let mut syntax = BTreeMap::new();
+    for path in paths {
+        let source = read_source(&path)?;
+        let parsed = syn::parse_file(&source).with_context(|| format!("parse suppression source {path}"))?;
+        syntax.insert(path, parsed);
+    }
+    let external_targets = source::external_target_maps(&target_sources.relations, &syntax)?;
     let mut sites = Vec::new();
     for (&path, &component) in component_paths {
         let measurement = measurements
@@ -161,17 +174,17 @@ fn scan_with(
         } else {
             SourceCategory::Production
         };
-        let source = read_source(path)?;
-        let syntax = syn::parse_file(&source).with_context(|| format!("parse suppression source {path}"))?;
-        sites.extend(SourceScanner::scan(path, component, category, &syntax)?);
+        let parsed = syntax.get(path).with_context(|| format!("suppression source cache is missing {path:?}"))?;
+        let targets = external_targets.get(path).cloned().unwrap_or_default();
+        sites.extend(SourceScanner::scan_with_external_targets(path, component, category, parsed, &targets)?);
     }
-    for (path, &category) in target_sources {
+    for (path, &category) in &target_sources.categories {
         if component_paths.contains_key(path.as_str()) {
             continue;
         }
-        let source = read_source(path)?;
-        let syntax = syn::parse_file(&source).with_context(|| format!("parse Cargo target suppression source {path}"))?;
-        sites.extend(SourceScanner::scan(path, "cargo-target", category, &syntax)?);
+        let parsed = syntax.get(path).with_context(|| format!("Cargo target suppression source cache is missing {path:?}"))?;
+        let targets = external_targets.get(path).cloned().unwrap_or_default();
+        sites.extend(SourceScanner::scan_with_external_targets(path, "cargo-target", category, parsed, &targets)?);
     }
     sites.sort();
     Ok(sites)

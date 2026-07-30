@@ -34,7 +34,7 @@ pub(in crate::structure::suppression) fn reject_direct_source_suppressions(works
         roots.insert(candidate.clone(), SourceCategory::Production);
     }
     let sources = modules::expand_target_sources(workspace, roots, |_| false)?;
-    for (path, category) in sources {
+    for (path, category) in sources.categories {
         let absolute = workspace.join(&path);
         let source = fs::read_to_string(&absolute).with_context(|| format!("read directly compiled Rust source {}", absolute.display()))?;
         let syntax = syn::parse_file(&source).with_context(|| format!("parse directly compiled Rust source {path}"))?;

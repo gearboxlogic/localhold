@@ -630,6 +630,19 @@ fn command_policy_scans_nohup_wrapped_programs() {
 }
 
 #[test]
+fn command_policy_rejects_script_command_indirection() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::write(workspace.path().join("Justfile"), "lint:\n    script -q -e -c 'sh quality/lint.txt' /dev/null\n").expect("script command invocation");
+    fs::write(workspace.path().join("quality/lint.txt"), "cargo clippy -- -A warnings\n").expect("hidden lint program");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
+}
+
+#[test]
 fn command_policy_scans_sed_program_files() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
@@ -916,6 +929,19 @@ fn make_include_indirection_is_rejected() {
 
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("include indirection"));
+}
+
+#[test]
+fn make_command_producing_expansions_are_rejected() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::write(workspace.path().join("Makefile"), "lint:\n\t$(shell cat quality/lint.txt)\n").expect("Makefile");
+    fs::write(workspace.path().join("quality/lint.txt"), "cargo clippy -- -A warnings\n").expect("hidden lint recipe");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("command-producing expansion"), "{error:#}");
 }
 
 #[test]

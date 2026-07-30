@@ -544,6 +544,7 @@ mod tests {
         assert_eq!(inputs("command -v cargo"), (Vec::new(), false));
         assert_eq!(inputs("exec -a lint sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
         assert_eq!(inputs("builtin eval 'cargo clippy'"), (Vec::new(), true));
+        assert_eq!(inputs("script -q -e -c 'sh quality/lint.txt' /dev/null"), (Vec::new(), true));
         assert_eq!(inputs("sudo -u root sh quality/lint.txt"), (Vec::new(), true));
         assert_eq!(inputs("time -o report sh quality/lint.txt"), (Vec::new(), true));
         assert_eq!(inputs("ionice -c 3 sh quality/lint.txt"), (Vec::new(), true));

@@ -60,7 +60,7 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=f9ead9aeff6aae855040ce3aea2e8901119071beef46061332dc3526378a9de6
-readonly reviewed_bootstrap_tests_sha256=0236b37520b203a22d7e68927e9f059864f181dcf31899964a48349a86fa7900
+readonly reviewed_bootstrap_tests_sha256=9455e9411c82ef16e81e7d364a16067270f1a6e5537bf21de23409ca14e9df72
 readonly reviewed_gate_runner_sha256=a614e7a0804eed432d84f5b5e9283406c0c4f0915c9f79ce1b6b9b5fd2142433
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
@@ -160,8 +160,14 @@ chmod_command=$(trusted_system_command chmod)
 tar_command=$(trusted_system_command tar)
 bash_command=$(trusted_system_command bash)
 
+git_at() {
+    local root=$1
+    shift
+    "$git_command" --no-replace-objects -c core.autocrlf=false -c diff.external= -C "$root" "$@"
+}
+
 git_checked() {
-    "$git_command" --no-replace-objects -c diff.external= -C "$repository_root" "$@"
+    git_at "$repository_root" "$@"
 }
 
 verify_checker_sources() {
@@ -450,9 +456,9 @@ if [[ $mode != verify ]]; then
     trap cleanup_snapshot EXIT
 
     git_checked clone --no-hardlinks --no-checkout --quiet -- "$repository_root" "$snapshot_root"
-    "$git_command" --no-replace-objects -c diff.external= -C "$snapshot_root" update-ref --no-deref HEAD "$checked_head"
-    "$git_command" --no-replace-objects -c diff.external= -C "$snapshot_root" read-tree "$checked_head"
-    "$git_command" --no-replace-objects -c diff.external= -C "$snapshot_root" archive --format=tar "$checked_head" | "$tar_command" -xf - -C "$snapshot_root"
+    git_at "$snapshot_root" update-ref --no-deref HEAD "$checked_head"
+    git_at "$snapshot_root" read-tree "$checked_head"
+    git_at "$snapshot_root" archive --format=tar "$checked_head" | "$tar_command" -xf - -C "$snapshot_root"
     audit_scratch_root="$snapshot_root/.cache"
     "$mkdir_command" -- "$snapshot_root/target" "$audit_scratch_root"
     # Governed CI permits only pinned actions before this first repository

@@ -10,6 +10,11 @@ fixture_parent="$repository_root/target/bootstrap-tests"
 mkdir -p "$fixture_parent"
 fixture=$(mktemp -d "$fixture_parent/run.XXXXXXXX")
 trap 'rm -rf -- "$fixture"; rmdir -- "$fixture_parent" 2>/dev/null || true' EXIT
+test_git_config_home="$fixture/git-config"
+mkdir -p "$test_git_config_home/git"
+printf '[core]\n\tautocrlf = true\n' >"$test_git_config_home/git/config"
+XDG_CONFIG_HOME=$test_git_config_home
+export XDG_CONFIG_HOME
 test_repository="$fixture/repository"
 mkdir -p "$test_repository/tools/maintainability"
 source_tool="$repository_root/tools/maintainability"
@@ -96,7 +101,7 @@ expect_failure_before_command() {
 
 restore_reviewed_graph
 git -C "$test_repository" init -q
-git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example.invalid add .
+git -C "$test_repository" -c core.autocrlf=false -c user.name=LocalHold -c user.email=localhold@example.invalid add .
 git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example.invalid commit -qm 'reviewed fixture'
 test_head=$(git -C "$test_repository" rev-parse HEAD)
 run_check >/dev/null

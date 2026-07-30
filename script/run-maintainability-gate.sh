@@ -165,12 +165,12 @@ if $windows_toolchain; then
 fi
 trusted_path="$toolchain_bin:/usr/bin:/bin"
 if $windows_toolchain; then
-    readonly where_command=/c/Windows/System32/where.exe
-    if [[ ! -f $where_command || -L $where_command || ! -x $where_command ]]; then
-        printf 'maintainability gate requires the OS-owned Windows command locator\n' >&2
+    readonly vswhere_command="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+    if [[ ! -f $vswhere_command || -L $vswhere_command || ! -x $vswhere_command ]]; then
+        printf 'maintainability gate requires the Visual Studio-owned installation locator\n' >&2
         exit 1
     fi
-    linker_candidates=$("$where_command" link.exe) || {
+    linker_candidates=$("$vswhere_command" -nologo -latest -products "*" -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\link.exe') || {
         printf 'maintainability gate could not locate the MSVC linker\n' >&2
         exit 1
     }

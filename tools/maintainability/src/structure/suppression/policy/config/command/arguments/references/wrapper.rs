@@ -10,10 +10,13 @@ pub(super) fn select<'a>(raw_command_word: &str, command: &str, arguments: &'a [
         return Selection::NotWrapper;
     }
     match command {
+        "command" | "command.exe" => command_builtin(arguments),
         "env" | "env.exe" => env_command(arguments),
+        "exec" | "exec.exe" => exec_builtin(arguments),
         "nice" | "nice.exe" => nice_command(arguments),
+        "nohup" | "nohup.exe" => nohup_command(arguments),
         "timeout" | "timeout.exe" => timeout_command(arguments),
-        "sudo" | "sudo.exe" | "time" | "time.exe" => Selection::Opaque,
+        "builtin" | "builtin.exe" | "sudo" | "sudo.exe" | "time" | "time.exe" => Selection::Opaque,
         _ if is_unparsed_launcher(command) => Selection::Opaque,
         _ => Selection::NotWrapper,
     }
@@ -22,6 +25,20 @@ pub(super) fn select<'a>(raw_command_word: &str, command: &str, arguments: &'a [
 fn is_exact_command_word(word: &str, command: &str) -> bool {
     let word = word.trim_start_matches(['(', '{']);
     word.rsplit(['/', '\\']).next().unwrap_or(word).eq_ignore_ascii_case(command)
+}
+
+fn command_builtin(arguments: &[String]) -> Selection<'_> {
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        match argument.as_str() {
+            "--" => return nested_after(arguments, index + 1),
+            "-p" => index += 1,
+            "-V" | "-v" => return Selection::NoCommand,
+            _ if argument.starts_with('-') => return Selection::Opaque,
+            _ => return Selection::Nested(&arguments[index..]),
+        }
+    }
+    Selection::NoCommand
 }
 
 fn env_command(arguments: &[String]) -> Selection<'_> {
@@ -48,6 +65,30 @@ fn env_command(arguments: &[String]) -> Selection<'_> {
     Selection::NoCommand
 }
 
+fn exec_builtin(arguments: &[String]) -> Selection<'_> {
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        match argument.as_str() {
+            "--" => return nested_after(arguments, index + 1),
+            "-a" => {
+                if arguments.get(index + 1).is_none() {
+                    return Selection::Opaque;
+                }
+                index += 2;
+            }
+            _ if argument
+                .strip_prefix('-')
+                .is_some_and(|options| !options.is_empty() && options.bytes().all(|option| matches!(option, b'c' | b'l'))) =>
+            {
+                index += 1;
+            }
+            _ if argument.starts_with('-') => return Selection::Opaque,
+            _ => return Selection::Nested(&arguments[index..]),
+        }
+    }
+    Selection::NoCommand
+}
+
 fn nice_command(arguments: &[String]) -> Selection<'_> {
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
@@ -68,6 +109,15 @@ fn nice_command(arguments: &[String]) -> Selection<'_> {
         }
     }
     Selection::NoCommand
+}
+
+fn nohup_command(arguments: &[String]) -> Selection<'_> {
+    match arguments.first().map(String::as_str) {
+        None | Some("--help" | "--version") => Selection::NoCommand,
+        Some("--") => nested_after(arguments, 1),
+        Some(argument) if argument.starts_with('-') => Selection::Opaque,
+        Some(_) => Selection::Nested(arguments),
+    }
 }
 
 fn timeout_command(arguments: &[String]) -> Selection<'_> {

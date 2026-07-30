@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
 use super::{
-    has_case_insensitive_tool_names, is_cargo_tool_token, is_environment_assignment, is_normalized_manifest_path, is_shell_command_prefix, is_unanalyzed_dynamic_interpreter,
-    is_yaml, matches_tool_name, normalized_source_for_surface, package_json, tokens, tool_basename,
+    has_case_insensitive_tool_names, is_cargo_tool_token, is_environment_assignment, is_normalized_manifest_path, is_unanalyzed_dynamic_interpreter, is_yaml, matches_tool_name,
+    normalized_source_for_surface, package_json, tokens, tool_basename,
 };
 
 mod wrapper;
@@ -136,7 +136,7 @@ fn record_execution_inputs(candidates: Vec<&str>, inputs: &mut BTreeSet<String>,
 fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> (Vec<&str>, bool) {
     let command_index = tokens.iter().position(|token| {
         let word = token.trim_matches(['(', ')', '{', '}']);
-        !word.is_empty() && !is_shell_command_prefix(word) && (!is_environment_assignment(word) || word.contains("$(") || word.contains('`'))
+        !word.is_empty() && !is_execution_input_prefix(word) && (!is_environment_assignment(word) || word.contains("$(") || word.contains('`'))
     });
     let Some(command_index) = command_index else {
         return (Vec::new(), false);
@@ -184,6 +184,10 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         SelectedInput::Literal(candidate) => (vec![candidate], false),
         SelectedInput::Opaque => (Vec::new(), true),
     }
+}
+
+fn is_execution_input_prefix(word: &str) -> bool {
+    matches!(word, "!" | "if" | "then" | "elif" | "while" | "until" | "do") || word.starts_with('-')
 }
 
 fn nested_command_token(token: &str) -> &str {
@@ -535,6 +539,11 @@ mod tests {
         assert_eq!(inputs("env -u RUSTFLAGS sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
         assert_eq!(inputs("env -i HOME=/tmp sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
         assert_eq!(inputs("env | sort"), (Vec::new(), false));
+        assert_eq!(inputs("nohup sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
+        assert_eq!(inputs("command -p sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
+        assert_eq!(inputs("command -v cargo"), (Vec::new(), false));
+        assert_eq!(inputs("exec -a lint sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
+        assert_eq!(inputs("builtin eval 'cargo clippy'"), (Vec::new(), true));
         assert_eq!(inputs("sudo -u root sh quality/lint.txt"), (Vec::new(), true));
         assert_eq!(inputs("time -o report sh quality/lint.txt"), (Vec::new(), true));
         assert_eq!(inputs("ionice -c 3 sh quality/lint.txt"), (Vec::new(), true));

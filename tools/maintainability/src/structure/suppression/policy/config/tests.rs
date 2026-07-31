@@ -233,6 +233,7 @@ fn shell_substitution_syntax_is_not_applied_to_other_command_languages() {
 
 #[test]
 fn python_command_arrays_cannot_split_lint_arguments_from_cargo() {
+    assert!(weakening_token_for_surface("script/check.py", "exec(bytes.fromhex(\"696d706f7274206f73\"))\n"));
     assert!(weakening_token_for_surface(
         "script/check.py",
         "subprocess.run([\n    \"cargo\", # tool\n    \"clippy\",\n    \"--\",\n    \"-A\",\n    \"warnings\",\n])\n"

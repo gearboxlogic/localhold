@@ -1,3 +1,4 @@
+mod evaluation;
 mod process;
 
 pub(super) fn join_implicit_continuations(source: &str) -> String {
@@ -12,6 +13,9 @@ pub(super) fn has_adjacent_string_literals(source: &str) -> bool {
 
 pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
     let normalized = join_implicit_continuations(source);
+    if evaluation::has_dynamic_code(&normalized) {
+        return true;
+    }
     if references_command_capable_ffi(&normalized) {
         return true;
     }

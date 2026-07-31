@@ -190,6 +190,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         }
         "sort" | "sort.exe" if sort_compression_program_is_opaque(arguments) => SelectedInput::Opaque,
         "tar" | "tar.exe" if tar_checkpoint_action_is_opaque(arguments) => SelectedInput::Opaque,
+        "zip" | "zip.exe" if zip_test_command_is_opaque(arguments) => SelectedInput::Opaque,
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
             let (inputs, opaque) = makefile_inputs(arguments);
             return (inputs, opaque || make_environment_selection_is_opaque(&tokens[..command_index]));
@@ -226,6 +227,13 @@ fn sort_compression_program_is_opaque(arguments: &[String]) -> bool {
         let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
         option.len() >= "--co".len() && "--compress-program".starts_with(option)
     })
+}
+
+fn zip_test_command_is_opaque(arguments: &[String]) -> bool {
+    arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--")
+        .any(|argument| argument.starts_with("-TT"))
 }
 
 fn is_execution_input_prefix(word: &str) -> bool {
@@ -523,6 +531,8 @@ mod tests {
             "tar --checkpoint-action exec='sh quality/lint.txt' -cf archive.tar .",
             "sort --compress-program=quality/lint.txt input.txt",
             "sort --co quality/lint.txt input.txt",
+            "zip -q -T -TT 'sh quality/lint.txt' archive.zip input.txt",
+            "zip -T -TTquality/lint.txt archive.zip input.txt",
             "sed -nf quality/lint.sed /etc/hosts",
             "sed --file=quality/lint.sed /etc/hosts",
             "sed -f $SCRIPT /etc/hosts",

@@ -274,6 +274,7 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
         ("rsync -e 'sh quality/lint.txt' localhost:/missing . || true\n", "opaque interpreter program"),
         ("cmake -P quality/lint.txt\n", "opaque interpreter program"),
         ("rustup run 1.97.0 sh quality/lint.txt\n", "lint-weakening argument"),
+        ("rustup run fake cargo clippy --locked -- -D warnings\n", "opaque interpreter program"),
         ("history -s 'sh quality/lint.txt'\nfc -s sh\n", "opaque interpreter program"),
         ("awk 'BEGIN { system(\"sh quality/lint.txt\") }'\n", "opaque interpreter program"),
         ("sed -n -e '1e sh quality/lint.txt' /etc/hosts\n", "opaque interpreter program"),
@@ -300,7 +301,9 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
             "opaque interpreter program",
         ),
         ("sort --compress-program=quality/lint.txt /etc/hosts\n", "opaque interpreter program"),
+        ("zip -q -T -TT 'sh quality/lint.txt' archive.zip /etc/hosts\n", "opaque interpreter program"),
         ("printf '%s\\n' \"$(just check-quality)\"\n", "lint-weakening argument"),
+        ("set +e; just check-quality; true\n", "lint-weakening argument"),
         ("$'\\x73\\x68' quality/lint.txt\n", "opaque interpreter program"),
     ] {
         fs::write(workspace.path().join("script/check.sh"), command).expect("opaque shell dispatcher");
@@ -347,6 +350,14 @@ fn command_policy_rejects_python_command_wrapper_dispatch() {
     git(workspace.path(), &["init", "-q"]);
     git(workspace.path(), &["add", "."]);
 
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+
+    fs::write(
+        workspace.path().join("script/check.py"),
+        "exec(bytes.fromhex(\"696d706f7274206f733b206f732e73797374656d2827636172676f20636c69707079202d2d202d41207761726e696e67732729\"))\n",
+    )
+    .expect("Python dynamic code evaluation");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
 }

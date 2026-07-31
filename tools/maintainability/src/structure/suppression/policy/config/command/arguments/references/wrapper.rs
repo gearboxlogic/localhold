@@ -162,6 +162,9 @@ fn rustup_command(arguments: &[String]) -> Selection<'_> {
     if arguments.get(index).is_some_and(|argument| argument.starts_with('-')) {
         return Selection::Opaque;
     }
+    if !matches!(arguments.get(index).map(String::as_str), Some("1.97.0" | "nightly")) {
+        return Selection::Opaque;
+    }
     index += 1;
     if arguments.get(index).is_some_and(|argument| argument == "--") {
         index += 1;
@@ -264,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn rustup_run_selects_the_nested_command() {
+    fn rustup_run_selects_nested_commands_only_for_reviewed_toolchains() {
         let arguments = vec![
             "run".to_owned(),
             "--install".to_owned(),
@@ -276,6 +279,14 @@ mod tests {
             panic!("rustup run should select its nested command");
         };
         assert_eq!(command, ["sh", "quality/lint.txt"]);
+        assert!(matches!(
+            select("rustup", "rustup", &["run".to_owned(), "nightly".to_owned(), "cargo-fmt".to_owned()]),
+            Selection::Nested(_)
+        ));
+        assert!(matches!(
+            select("rustup", "rustup", &["run".to_owned(), "fake".to_owned(), "cargo".to_owned(), "clippy".to_owned()]),
+            Selection::Opaque
+        ));
         assert!(matches!(select("rustup", "rustup", &["show".to_owned()]), Selection::NotWrapper));
         assert!(matches!(select("rustup", "rustup", &["run".to_owned(), "--help".to_owned()]), Selection::NoCommand));
     }

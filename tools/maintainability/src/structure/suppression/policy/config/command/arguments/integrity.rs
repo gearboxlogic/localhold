@@ -56,6 +56,9 @@ pub(super) fn failure_masks_quality_command(source: &str, case_insensitive_tools
             return true;
         }
     }
+    if quality_command_runs_without_errexit(&source, case_insensitive_tools) {
+        return true;
+    }
     if tokens::source_command_tokens(&source)
         .iter()
         .any(|command| control_flow_masks_quality_command(command, case_insensitive_tools))
@@ -68,6 +71,47 @@ pub(super) fn failure_masks_quality_command(source: &str, case_insensitive_tools
         }
     }
     false
+}
+
+fn quality_command_runs_without_errexit(source: &str, case_insensitive_tools: bool) -> bool {
+    let mut errexit = true;
+    for command in tokens::source_command_tokens(source) {
+        if !errexit && command_is_quality(&command, case_insensitive_tools) {
+            return true;
+        }
+        update_errexit(&command, &mut errexit);
+    }
+    false
+}
+
+fn update_errexit(command: &[String], errexit: &mut bool) {
+    let Some(index) = executable_index(command) else {
+        return;
+    };
+    if !tool_basename(&command[index]).eq_ignore_ascii_case("set") {
+        return;
+    }
+    let arguments = &command[index + 1..];
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        if argument == "--" {
+            return;
+        }
+        if matches!(argument.as_str(), "-o" | "+o") {
+            if arguments.get(index + 1).is_some_and(|option| option.eq_ignore_ascii_case("errexit")) {
+                *errexit = argument.starts_with('-');
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(options) = argument.strip_prefix(['-', '+'])
+            && !options.starts_with('o')
+            && options.contains('e')
+        {
+            *errexit = argument.starts_with('-');
+        }
+        index += 1;
+    }
 }
 
 fn line_masks_quality_command(line: &str, case_insensitive_tools: bool) -> bool {
@@ -237,6 +281,9 @@ mod tests {
         assert!(masks(r#"printf '%s\n' "$(just check-quality)""#));
         assert!(masks("printf '%s' `cargo clippy`"));
         assert!(masks(r#"printf '%s\n' "$(( $(cargo test) + 1 ))""#));
+        assert!(masks("set +e; just check-quality; true"));
+        assert!(masks("set +o errexit\ncargo clippy --locked"));
+        assert!(masks("set +eux; cargo test --locked"));
         assert!(masks("IF (CARGO.EXE clippy --locked) { Write-Output accepted }"));
         assert!(masks("just check-quality && echo completed || true"));
         assert!(masks("cargo clippy --locked | cat"));
@@ -251,6 +298,9 @@ mod tests {
         assert!(!masks("printf '%s\n' 'just check || true'"));
         assert!(!masks("printf '%s\n' '$(just check-quality)'"));
         assert!(!masks(r#"printf '%s\n' "$(printf 'just check-quality')""#));
+        assert!(!masks("set +e; set -e; just check-quality"));
+        assert!(!masks("set +o errexit; set -o errexit; cargo clippy --locked"));
+        assert!(!masks("set +x; cargo test --locked"));
         assert!(!masks("case \"$name\" in\n    CARGO | RUSTC | RUSTDOC) return ;;\nesac"));
     }
 

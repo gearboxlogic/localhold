@@ -591,6 +591,11 @@ fn command_policy_scans_extensionless_scripts() {
 #[test]
 fn command_policy_rejects_unanalyzed_interpreter_programs() {
     for (interpreter, program, source) in [
+        (
+            "python3",
+            "quality/lint.txt",
+            "import os\nos.system(bytes.fromhex('636172676f20636c69707079202d2d202d41207761726e696e6773'))\n",
+        ),
         ("perl", "quality/lint.pl", "system(\"cargo\", \"clippy\", \"--\", \"-\" . \"A\", \"warnings\")\n"),
         ("ruby", "quality/lint.rb", "system(\"cargo\", \"clippy\", \"--\", \"-\" + \"A\", \"warnings\")\n"),
         ("tclsh", "quality/lint.tcl", "exec cargo clippy -- [format %cA 45] warnings\n"),
@@ -747,6 +752,10 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
 
     for (command, reason) in [
         ("trap 'sh quality/lint.txt' EXIT\n", "opaque interpreter program"),
+        ("just check-quality &\n", "lint-weakening argument"),
+        ("hash -p /tmp/fake cargo\ncargo clippy -- -D warnings\n", "lint-weakening argument"),
+        ("chroot --skip-chdir / sh quality/lint.txt\n", "opaque interpreter program"),
+        ("git -c core.fsmonitor='sh quality/lint.txt' status\n", "opaque interpreter program"),
         ("setarch --uname-2.6 sh quality/lint.txt\n", "opaque interpreter program"),
         ("sg \"$(id -gn)\" -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
         ("su \"$(id -un)\" -c 'sh quality/lint.txt'\n", "opaque interpreter program"),

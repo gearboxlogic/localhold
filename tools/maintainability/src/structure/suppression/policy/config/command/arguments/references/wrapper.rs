@@ -166,6 +166,7 @@ fn is_unparsed_launcher(command: &str) -> bool {
         command.trim_end_matches(".exe"),
         "bwrap"
             | "chrt"
+            | "chroot"
             | "choom"
             | "cpulimit"
             | "daemonize"
@@ -210,6 +211,8 @@ mod tests {
         assert!(matches!(select("/usr/bin/flock", "flock", &arguments), Selection::Opaque));
         assert!(matches!(select("choom", "choom", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/choom", "choom", &arguments), Selection::Opaque));
+        assert!(matches!(select("chroot", "chroot", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/sbin/chroot", "chroot", &arguments), Selection::Opaque));
         assert!(matches!(select("setarch", "setarch", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/setarch", "setarch", &arguments), Selection::Opaque));
         assert!(matches!(select("sg", "sg", &arguments), Selection::Opaque));

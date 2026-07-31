@@ -174,6 +174,7 @@ fn weakening_token_with_options(source: &str, options: AnalysisOptions) -> bool 
     let logical = join_command_continuations(source);
     if options.inspects_integrity()
         && (integrity::declares_rust_tool_function(&logical, options.case_insensitive_tools())
+            || integrity::has_command_hash_override(&logical)
             || integrity::failure_masks_quality_command(&logical, options.case_insensitive_tools()))
     {
         return true;

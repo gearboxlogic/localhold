@@ -193,7 +193,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
             return (inputs, opaque || make_environment_selection_is_opaque(&tokens[..command_index]));
         }
         "git" | "git.exe" => {
-            return (Vec::new(), git::alias_configuration_is_opaque(arguments));
+            return (Vec::new(), git::configuration_is_opaque(arguments));
         }
         _ => match path::select_program(command_token, direct_program_paths) {
             path::ProgramPath::NotPath => return (Vec::new(), false),
@@ -292,7 +292,17 @@ fn python_input(arguments: &[String]) -> SelectedInput<'_> {
             }
             return SelectedInput::Opaque;
         }
-        return if argument == "-" { SelectedInput::Opaque } else { SelectedInput::Literal(argument) };
+        return if argument == "-" {
+            SelectedInput::Opaque
+        } else if Path::new(argument)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
+        {
+            SelectedInput::Literal(argument)
+        } else {
+            SelectedInput::Opaque
+        };
     }
     SelectedInput::Opaque
 }
@@ -525,18 +535,9 @@ mod tests {
         assert_eq!(inputs("../quality/run-lints"), (Vec::new(), true));
         assert_eq!(inputs(r"'.\quality\run-lints.cmd'"), (Vec::new(), true));
         assert_eq!(inputs("status=$(./quality/run-lints)"), (vec!["quality/run-lints".to_owned()], false));
-        assert_eq!(inputs(r#"tag="$(python3 script/release.py tag)""#), (vec!["script/release.py".to_owned()], false));
         assert_eq!(inputs("kernel=$(/usr/bin/uname -s)"), (Vec::new(), false));
         assert_eq!(inputs(r#""$repository_root/script/check.sh""#), (Vec::new(), false));
         assert_eq!(inputs("bash_command=$(trusted_system_command bash)"), (Vec::new(), false));
-        assert_eq!(inputs("python -m quality.lint"), (Vec::new(), false));
-        assert_eq!(inputs("python -m $MODULE"), (Vec::new(), true));
-        assert_eq!(inputs("pwsh -File quality/lint.ps1"), (vec!["quality/lint.ps1".to_owned()], false));
-        assert_eq!(inputs("perl quality/lint.pl"), (Vec::new(), true));
-        assert_eq!(inputs("ruby -- quality/lint.rb"), (Vec::new(), true));
-        assert_eq!(inputs("tclsh quality/lint.tcl"), (Vec::new(), true));
-        assert_eq!(inputs("/usr/bin/tclsh8.6 quality/lint.tcl"), (Vec::new(), true));
-        assert_eq!(inputs("perl -e 'system q(cargo clippy)'"), (Vec::new(), true));
         assert_eq!(inputs("timeout 10 sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
         assert_eq!(
             inputs("timeout --signal TERM --kill-after=2s 10s sh quality/lint.txt"),
@@ -556,8 +557,6 @@ mod tests {
         assert_eq!(inputs("builtin eval 'cargo clippy'"), (Vec::new(), true));
         assert_eq!(inputs("alias lint='sh quality/lint.txt'"), (Vec::new(), true));
         assert_eq!(inputs("builtin alias lint='sh quality/lint.txt'"), (Vec::new(), true));
-        assert_eq!(inputs("git -c alias.lint='!sh quality/lint.txt' lint"), (Vec::new(), true));
-        assert_eq!(inputs("git -c core.autocrlf=false status"), (Vec::new(), false));
         assert_eq!(inputs("script -q -e -c 'sh quality/lint.txt' /dev/null"), (Vec::new(), true));
         assert_eq!(inputs("setpriv --no-new-privs sh quality/lint.txt"), (Vec::new(), true));
         assert_eq!(inputs("sudo -u root sh quality/lint.txt"), (Vec::new(), true));
@@ -586,6 +585,23 @@ mod tests {
         assert_eq!(inputs("make MAKEFILES=quality/lint.rules"), (Vec::new(), true));
         assert_eq!(inputs("MAKEFILES=quality/lint.rules make"), (Vec::new(), true));
         assert_eq!(inputs("command=$(cat quality/lint.txt); $command"), (Vec::new(), true));
+    }
+
+    #[test]
+    fn language_and_git_dispatch_inputs_fail_closed() {
+        assert_eq!(inputs(r#"tag="$(python3 script/release.py tag)""#), (vec!["script/release.py".to_owned()], false));
+        assert_eq!(inputs("python3 quality/lint.txt"), (Vec::new(), true));
+        assert_eq!(inputs("python -m quality.lint"), (Vec::new(), false));
+        assert_eq!(inputs("python -m $MODULE"), (Vec::new(), true));
+        assert_eq!(inputs("pwsh -File quality/lint.ps1"), (vec!["quality/lint.ps1".to_owned()], false));
+        assert_eq!(inputs("perl quality/lint.pl"), (Vec::new(), true));
+        assert_eq!(inputs("ruby -- quality/lint.rb"), (Vec::new(), true));
+        assert_eq!(inputs("tclsh quality/lint.tcl"), (Vec::new(), true));
+        assert_eq!(inputs("/usr/bin/tclsh8.6 quality/lint.tcl"), (Vec::new(), true));
+        assert_eq!(inputs("perl -e 'system q(cargo clippy)'"), (Vec::new(), true));
+        assert_eq!(inputs("git -c alias.lint='!sh quality/lint.txt' lint"), (Vec::new(), true));
+        assert_eq!(inputs("git -c core.fsmonitor='sh quality/lint.txt' status"), (Vec::new(), true));
+        assert_eq!(inputs("git -c core.autocrlf=false status"), (Vec::new(), false));
     }
 
     #[test]

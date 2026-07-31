@@ -14,6 +14,19 @@ pub(super) fn declares_rust_tool_function(source: &str, case_insensitive_tools: 
     })
 }
 
+pub(super) fn has_command_hash_override(source: &str) -> bool {
+    tokens::source_command_tokens(&tokens::without_noncommand_shell_data(source)).iter().any(|command| {
+        executable_index(command).is_some_and(|index| {
+            tool_basename(&command[index]).eq_ignore_ascii_case("hash")
+                && command[index + 1..].iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
+                    argument
+                        .strip_prefix('-')
+                        .is_some_and(|options| !options.is_empty() && options.bytes().all(|option| option.is_ascii_alphabetic()) && options.contains('p'))
+                })
+        })
+    })
+}
+
 fn shell_function_signature(command: &str) -> Option<(&str, bool)> {
     let command = command.trim_start();
     if let Some(rest) = command.strip_prefix("function").filter(|rest| rest.chars().next().is_some_and(char::is_whitespace)) {
@@ -63,11 +76,23 @@ fn line_masks_quality_command(line: &str, case_insensitive_tools: bool) -> bool 
         if quote.is_none() && character == '#' {
             return false;
         }
-        if quote.is_none() && character == '|' && is_quality_command(&line[..index], case_insensitive_tools) {
+        if quote.is_none() && operator_masks_failure(line, index, character) && is_quality_command(&line[..index], case_insensitive_tools) {
             return true;
         }
     }
     false
+}
+
+fn operator_masks_failure(line: &str, index: usize, character: char) -> bool {
+    if character == '|' {
+        return true;
+    }
+    if character != '&' {
+        return false;
+    }
+    let previous = line[..index].chars().next_back();
+    let next = line[index + character.len_utf8()..].chars().next();
+    !matches!(previous, Some('&' | '<' | '>')) && !matches!(next, Some('&' | '>'))
 }
 
 fn updated_quote(quote: Option<char>, character: char) -> Option<char> {
@@ -82,10 +107,7 @@ fn updated_quote(quote: Option<char>, character: char) -> Option<char> {
 
 fn is_quality_command(command: &str, case_insensitive_tools: bool) -> bool {
     tokens::source_command_tokens(command).iter().any(|tokens| {
-        let Some(executable_index) = tokens.iter().position(|token| {
-            let word = token.trim_matches(['(', ')', '{', '}']);
-            !word.is_empty() && !is_shell_command_prefix(word) && !is_environment_assignment(word)
-        }) else {
+        let Some(executable_index) = executable_index(tokens) else {
             return false;
         };
         let executable = &tokens[executable_index];
@@ -117,9 +139,16 @@ fn is_quality_command(command: &str, case_insensitive_tools: bool) -> bool {
     })
 }
 
+fn executable_index(tokens: &[String]) -> Option<usize> {
+    tokens.iter().position(|token| {
+        let word = token.trim_matches(['(', ')', '{', '}']);
+        !word.is_empty() && !is_shell_command_prefix(word) && !is_environment_assignment(word)
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{declares_rust_tool_function, failure_masks_quality_command};
+    use super::{declares_rust_tool_function, failure_masks_quality_command, has_command_hash_override};
 
     #[test]
     fn rust_tool_functions_cannot_replace_required_executables() {
@@ -135,13 +164,25 @@ mod tests {
     fn required_quality_command_failures_cannot_be_masked() {
         assert!(failure_masks_quality_command("just check-quality | true", true));
         assert!(failure_masks_quality_command("just check-quality || true", true));
+        assert!(failure_masks_quality_command("just check-quality &", true));
         assert!(failure_masks_quality_command("just check-quality && echo completed || true", true));
         assert!(failure_masks_quality_command("cargo clippy --locked | cat", true));
         assert!(failure_masks_quality_command("cargo clippy --locked || true", true));
+        assert!(!failure_masks_quality_command("cargo clippy --locked && echo completed", true));
+        assert!(!failure_masks_quality_command("cargo clippy --locked &>clippy.log", true));
+        assert!(!failure_masks_quality_command("cargo clippy --locked 2>&1", true));
         assert!(!failure_masks_quality_command("cargo build | grep warning", true));
         assert!(!failure_masks_quality_command("echo cargo || true", true));
         assert!(!failure_masks_quality_command("printf '%s\n' 'just check | true'", true));
         assert!(!failure_masks_quality_command("printf '%s\n' 'just check || true'", true));
         assert!(!failure_masks_quality_command("case \"$name\" in\n    CARGO | RUSTC | RUSTDOC) return ;;\nesac", true));
+    }
+
+    #[test]
+    fn shell_command_hash_overrides_fail_closed() {
+        assert!(has_command_hash_override("hash -p /tmp/fake cargo"));
+        assert!(has_command_hash_override("builtin hash -lp /tmp/fake cargo"));
+        assert!(!has_command_hash_override("hash -r"));
+        assert!(!has_command_hash_override("printf '%s\n' 'hash -p /tmp/fake cargo'"));
     }
 }

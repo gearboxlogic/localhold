@@ -312,8 +312,11 @@ auditable; Node and Docker action entrypoints and checked-in JavaScript command
 surfaces are unsupported. Workflow and action YAML may not use anchors,
 aliases, node tags, custom shell templates, or working-directory overrides to
 redirect an audited `run` command; multiline inline `run` scalars are
-unsupported. Shell continuations are normalized before command arguments are
-audited, and a dynamic command name may not carry Rust lint options. Make
+unsupported. Audited `run` steps support Bash, `sh`, PowerShell, `pwsh`, and
+`cmd`; Python run bodies are unsupported until they have a language-aware
+command audit. Shell continuations are normalized before command arguments are
+audited, and shell alias declarations or a dynamic command name may not hide
+command dispatch. Make
 include directives are unsupported; checked-in `.mk` command surfaces are
 audited directly. Unreviewed procedural attributes, derives, and function-like
 macros are also rejected because their expansions could emit hidden lint policy.

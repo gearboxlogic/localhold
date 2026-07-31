@@ -170,7 +170,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
     }
     let selected = match command.as_str() {
         "trap" if !command_word.contains(['/', '\\']) => return (Vec::new(), trap::action_is_opaque(arguments, direct_program_paths)),
-        "coproc" | "eval" | "iex" | "invoke-expression" | "parallel" | "parallel.exe" | "trap" | "xargs" | "xargs.exe" => SelectedInput::Opaque,
+        "alias" | "coproc" | "eval" | "iex" | "invoke-expression" | "parallel" | "parallel.exe" | "trap" | "xargs" | "xargs.exe" => SelectedInput::Opaque,
         "mapfile" | "readarray" if mapfile_callback_is_opaque(arguments) => SelectedInput::Opaque,
         "bash" | "bash.exe" | "dash" | "dash.exe" | "fish" | "fish.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe" => shell_input(arguments),
         "python" | "python.exe" | "python3" | "python3.exe" => python_input(arguments),
@@ -549,6 +549,8 @@ mod tests {
         assert_eq!(inputs("command -v cargo"), (Vec::new(), false));
         assert_eq!(inputs("exec -a lint sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
         assert_eq!(inputs("builtin eval 'cargo clippy'"), (Vec::new(), true));
+        assert_eq!(inputs("alias lint='sh quality/lint.txt'"), (Vec::new(), true));
+        assert_eq!(inputs("builtin alias lint='sh quality/lint.txt'"), (Vec::new(), true));
         assert_eq!(inputs("git -c alias.lint='!sh quality/lint.txt' lint"), (Vec::new(), true));
         assert_eq!(inputs("git -c core.autocrlf=false status"), (Vec::new(), false));
         assert_eq!(inputs("script -q -e -c 'sh quality/lint.txt' /dev/null"), (Vec::new(), true));

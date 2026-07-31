@@ -725,6 +725,7 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
         ("trap 'sh quality/lint.txt' EXIT\n", "opaque interpreter program"),
         ("setarch --uname-2.6 sh quality/lint.txt\n", "opaque interpreter program"),
         ("sg \"$(id -gn)\" -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
+        ("shopt -s expand_aliases\nalias lint='sh quality/lint.txt'\nlint\n", "opaque interpreter program"),
         ("cat <(sh quality/lint.txt)\n", "lint-weakening argument"),
         ("coproc sh quality/lint.txt\n", "opaque interpreter program"),
         ("mapfile -C 'sh quality/lint.txt' -c 1 </etc/hosts\n", "opaque interpreter program"),
@@ -947,6 +948,22 @@ fn github_yaml_rejects_unsupported_execution_metadata() {
             "{error:#}"
         );
     }
+}
+
+#[test]
+fn github_yaml_rejects_unaudited_python_run_bodies() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join(".github/workflows")).expect("workflow directory");
+    fs::write(
+        workspace.path().join(".github/workflows/lint.yml"),
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: python\n        run: |\n          import os\n          os.system(bytes.fromhex('7368207175616c6974792f6c696e742e747874').decode())\n",
+    )
+    .expect("Python workflow");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("unsupported shell template"), "{error:#}");
 }
 
 #[test]

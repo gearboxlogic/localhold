@@ -20,6 +20,26 @@ const GOVERNED_JOBS: [(&str, &str); 2] = [("dependency-unsafe-linux", "ubuntu-la
 const CHECKOUT_ACTION: &str = "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0";
 const UPLOAD_ACTION: &str = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a";
 const GOVERNED_STEP_COUNT: usize = 4;
+const TOOLCHAIN_ENVIRONMENT: [(&str, &str); 3] = [
+    ("RUSTUP_DIST_SERVER", "https://static.rust-lang.org"),
+    ("RUSTUP_HOME", "${{ runner.temp }}/localhold-rustup"),
+    ("RUSTUP_UPDATE_ROOT", "https://static.rust-lang.org/rustup"),
+];
+const GATE_ENVIRONMENT: [(&str, &str); 7] = [
+    ("BASH_ENV", ""),
+    ("LD_AUDIT", ""),
+    ("LD_LIBRARY_PATH", ""),
+    ("LD_PRELOAD", ""),
+    (
+        "LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256",
+        "${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
+    ),
+    (
+        "LOCALHOLD_MAINTAINABILITY_BASE_REV",
+        "${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
+    ),
+    ("RUSTUP_HOME", "${{ runner.temp }}/localhold-rustup"),
+];
 const CHECKOUT_INPUTS: [(&str, &str); 2] = [("fetch-depth", "0"), ("persist-credentials", "false")];
 const WINDOWS_CHECKOUT_ENVIRONMENT: [(&str, &str); 3] = [("GIT_CONFIG_COUNT", "1"), ("GIT_CONFIG_KEY_0", "core.autocrlf"), ("GIT_CONFIG_VALUE_0", "false")];
 const LINUX_UPLOAD_INPUTS: [(&str, &str); 4] = [
@@ -168,7 +188,6 @@ fn validate_governed_step(job: &Job, step: &Step) -> Result<()> {
             || step.uses.is_some()
             || !step.run_declared
             || step.run_source.trim_end() != TOOLCHAIN_RUN_SOURCE
-            || !step.has_exact_environment(&[])
             || step.condition.is_some()
             || step.continues_on_error
             || step.id.is_some()
@@ -211,10 +230,11 @@ fn validate_governed_step(job: &Job, step: &Step) -> Result<()> {
 }
 
 fn validate_governed_step_inputs(job: &Job, step: &Step) -> Result<()> {
-    let expected_checkout_environment = if job.name == "dependency-unsafe-windows" && job.completed_steps == 1 {
-        WINDOWS_CHECKOUT_ENVIRONMENT.as_slice()
-    } else {
-        &[]
+    let expected_environment = match job.completed_steps {
+        0 => TOOLCHAIN_ENVIRONMENT.as_slice(),
+        1 if job.name == "dependency-unsafe-windows" => WINDOWS_CHECKOUT_ENVIRONMENT.as_slice(),
+        2 => GATE_ENVIRONMENT.as_slice(),
+        _ => &[],
     };
     let expected_inputs = match job.completed_steps {
         1 => CHECKOUT_INPUTS.as_slice(),
@@ -222,9 +242,9 @@ fn validate_governed_step_inputs(job: &Job, step: &Step) -> Result<()> {
         3 => LINUX_UPLOAD_INPUTS.as_slice(),
         _ => &[],
     };
-    if job.completed_steps == 1 && !step.has_exact_environment(expected_checkout_environment) {
+    if !step.has_exact_environment(expected_environment) {
         bail!(
-            "checked-in GitHub YAML {WORKFLOW_PATH:?} must preserve reviewed checkout line-ending configuration in governed job {:?}",
+            "checked-in GitHub YAML {WORKFLOW_PATH:?} must preserve the exact reviewed environment in governed job {:?}",
             job.name
         );
     }

@@ -12,6 +12,10 @@ readonly repository_root
 cd -- "$repository_root"
 
 readonly git_command=${LOCALHOLD_MAINTAINABILITY_GIT:?maintainability bootstrap did not provide an absolute Git command}
+GIT_CONFIG_NOSYSTEM=1
+GIT_CONFIG_GLOBAL=/dev/null
+readonly GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL
+export GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL
 readonly sha256_command=/usr/bin/sha256sum
 readonly uname_command=/usr/bin/uname
 readonly bash_command=/usr/bin/bash
@@ -314,7 +318,7 @@ fi
 CARGO_HOME=$native_cargo_home
 CARGO_TARGET_DIR=$relative_target_directory
 readonly CARGO_HOME CARGO_TARGET_DIR
-export PATH CARGO RUSTC RUSTDOC RUSTFMT RUSTUP_HOME RUSTUP_TOOLCHAIN CARGO_HOME CARGO_TARGET_DIR LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY LOCALHOLD_MAINTAINABILITY_CARGO_FMT LOCALHOLD_MAINTAINABILITY_RUSTC LOCALHOLD_MAINTAINABILITY_RUSTUP
+export PATH CARGO RUSTC RUSTDOC RUSTFMT RUSTUP_HOME RUSTUP_TOOLCHAIN CARGO_HOME CARGO_TARGET_DIR GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY LOCALHOLD_MAINTAINABILITY_CARGO_FMT LOCALHOLD_MAINTAINABILITY_RUSTC LOCALHOLD_MAINTAINABILITY_RUSTUP
 
 run_source_safety() {
     "$bash_command" "$repository_root/script/tests/test_maintainability_bootstrap.sh"
@@ -362,6 +366,10 @@ verify_test_environment() {
     done
     if [[ $RUSTUP_HOME != "$rustup_environment" || $RUSTUP_TOOLCHAIN != 1.97.0 ]]; then
         printf 'maintainability bootstrap compiler compatibility proxy is not pinned\n' >&2
+        exit 1
+    fi
+    if [[ $GIT_CONFIG_NOSYSTEM != 1 || $GIT_CONFIG_GLOBAL != /dev/null ]]; then
+        printf 'maintainability bootstrap retained untrusted Git configuration search paths\n' >&2
         exit 1
     fi
     if [[ $PATH != "$trusted_path" ]]; then

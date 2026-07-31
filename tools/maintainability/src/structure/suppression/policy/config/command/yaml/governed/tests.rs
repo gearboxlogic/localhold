@@ -7,6 +7,10 @@ const JOB: &str = r#"  dependency-unsafe-linux:
         shell: bash
     steps:
       - name: Install reviewed Rust toolchain
+        env:
+          RUSTUP_DIST_SERVER: https://static.rust-lang.org
+          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup
+          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
         run: rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -14,6 +18,14 @@ const JOB: &str = r#"  dependency-unsafe-linux:
           persist-credentials: false
       - name: Run dependency unsafe gate
         id: audit
+        env:
+          BASH_ENV: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          LD_PRELOAD: ''
+          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}
+          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}
+          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup
         run: |
           if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
             printf 'maintainability bootstrap differs from the workflow-reviewed digest\n' >&2
@@ -94,8 +106,8 @@ fn governed_invocation_comes_from_the_exact_run_scalar() {
     assert_rejected(&renamed);
 
     let comment_spoof = accepted.replacen(
-        "      - name: Run dependency unsafe gate\n        id: audit\n        run: |",
-        "      - name: Run dependency unsafe gate # ./script/check-maintainability-bootstrap.sh --maintainability\n        id: audit\n        run: true",
+        "      - name: Run dependency unsafe gate",
+        "      - name: Skip dependency unsafe gate # ./script/check-maintainability-bootstrap.sh --maintainability",
         1,
     );
     assert_rejected(&comment_spoof);
@@ -151,6 +163,19 @@ fn governed_jobs_have_a_closed_isolated_step_sequence() {
 
     let unreviewed_toolchain = accepted.replacen("rustup toolchain install 1.97.0", "mise install", 1);
     assert_rejected(&unreviewed_toolchain);
+
+    let untrusted_distribution = accepted.replacen("https://static.rust-lang.org", "https://attacker.invalid", 1);
+    assert_rejected(&untrusted_distribution);
+
+    let shared_rustup_home = accepted.replacen("${{ runner.temp }}/localhold-rustup", "${{ env.RUSTUP_HOME }}", 1);
+    assert_rejected(&shared_rustup_home);
+
+    let missing_gate_rustup_home = accepted.replacen(
+        "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}\n          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup\n        run: |",
+        "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}\n        run: |",
+        1,
+    );
+    assert_rejected(&missing_gate_rustup_home);
 
     let bare_sequence_step = accepted.replacen(
         "      - name: Install reviewed Rust toolchain",

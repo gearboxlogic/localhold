@@ -68,8 +68,8 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=f9ead9aeff6aae855040ce3aea2e8901119071beef46061332dc3526378a9de6
-readonly reviewed_bootstrap_tests_sha256=a58509d8550227a40007f531047f1f6be9ae155a59c28e99394bd1cc6c8a278c
-readonly reviewed_gate_runner_sha256=4283f980f6e785f50b52a6ce8c6968c2ceae2a5a9c61203f4a319df46b65d9d1
+readonly reviewed_bootstrap_tests_sha256=d666773a0b4c4d2fa2829539848315f617624f2287e0336f9d9098ed37681ecc
+readonly reviewed_gate_runner_sha256=dcf8335f2f2ed61dd49001060e27b15655368c1dcd5be021271e5b0b41a91cdd
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then
@@ -158,6 +158,10 @@ scrub_untrusted_environment() {
 }
 
 scrub_untrusted_environment
+GIT_CONFIG_NOSYSTEM=1
+GIT_CONFIG_GLOBAL=/dev/null
+readonly GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL
+export GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL
 git_command=$(trusted_system_command git)
 find_command=$(trusted_system_command find)
 mkdir_command=$(trusted_system_command mkdir)
@@ -172,7 +176,7 @@ bash_command=$(trusted_system_command bash)
 git_at() {
     local root=$1
     shift
-    "$git_command" --no-replace-objects -c core.autocrlf=false -c diff.external= -C "$root" "$@"
+    "$git_command" --no-replace-objects -c core.autocrlf=false -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -C "$root" "$@"
 }
 
 git_checked() {

@@ -110,6 +110,18 @@ git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example
 test_base=$(git -C "$test_repository" rev-parse HEAD)
 run_check >/dev/null
 
+inherited_config_marker="$fixture/global-git-config-ran"
+inherited_config_helper="$fixture/global-git-config-helper"
+printf '%s\n' '#!/usr/bin/bash' 'printf executed >"$GLOBAL_GIT_CONFIG_MARKER"' >"$inherited_config_helper"
+chmod +x "$inherited_config_helper"
+printf '[core]\n\tautocrlf = true\n\tfsmonitor = sh %s\n' "$inherited_config_helper" >"$test_git_config_home/git/config"
+GLOBAL_GIT_CONFIG_MARKER=$inherited_config_marker run_check --test-environment >/dev/null
+if [[ -e $inherited_config_marker ]]; then
+    printf 'maintainability bootstrap executed inherited global Git configuration\n' >&2
+    exit 1
+fi
+printf '[core]\n\tautocrlf = true\n' >"$test_git_config_home/git/config"
+
 printf 'pub fn locally_changed() {}\n' >"$test_repository/src/lib.rs"
 run_local_check >/dev/null
 run_local_check --test-environment >/dev/null

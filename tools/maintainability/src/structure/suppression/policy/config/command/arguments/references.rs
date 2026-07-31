@@ -6,6 +6,7 @@ use super::{
     normalized_source_for_surface, package_json, tokens, tool_basename,
 };
 
+mod git;
 mod wrapper;
 
 pub(in crate::structure::suppression::policy::config::command) fn cargo_manifest_paths_for_surface(path: &str, source: &str) -> (BTreeSet<String>, bool) {
@@ -175,6 +176,9 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
             let (inputs, opaque) = makefile_inputs(arguments);
             return (inputs, opaque || make_environment_selection_is_opaque(&tokens[..command_index]));
+        }
+        "git" | "git.exe" => {
+            return (Vec::new(), git::alias_configuration_is_opaque(arguments));
         }
         _ if direct_program_paths && is_relative_program_path(command_token) => SelectedInput::Literal(command_token),
         _ => return (Vec::new(), false),
@@ -544,6 +548,8 @@ mod tests {
         assert_eq!(inputs("command -v cargo"), (Vec::new(), false));
         assert_eq!(inputs("exec -a lint sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
         assert_eq!(inputs("builtin eval 'cargo clippy'"), (Vec::new(), true));
+        assert_eq!(inputs("git -c alias.lint='!sh quality/lint.txt' lint"), (Vec::new(), true));
+        assert_eq!(inputs("git -c core.autocrlf=false status"), (Vec::new(), false));
         assert_eq!(inputs("script -q -e -c 'sh quality/lint.txt' /dev/null"), (Vec::new(), true));
         assert_eq!(inputs("setpriv --no-new-privs sh quality/lint.txt"), (Vec::new(), true));
         assert_eq!(inputs("sudo -u root sh quality/lint.txt"), (Vec::new(), true));

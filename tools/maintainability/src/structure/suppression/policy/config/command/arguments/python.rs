@@ -21,7 +21,7 @@ pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
     if references_exec_or_spawn_api(&normalized) && references_rust_tool(&normalized) {
         return true;
     }
-    if references_process_api(&normalized) && references_rust_tool(&normalized) && process::has_non_literal_arguments(&normalized) {
+    if references_process_api(&normalized) && process::has_non_literal_arguments(&normalized) {
         return true;
     }
     normalized.lines().any(|line| {
@@ -334,10 +334,18 @@ ctypes.CDLL(None).system(bytes.fromhex("636172676f20636c69707079202d2d202d412077
             r#"from cffi import FFI
 FFI().dlopen(None).system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
         ));
+        assert!(has_opaque_process_arguments(
+            r#"os.system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
+        ));
+        assert!(has_opaque_process_arguments(r#"os.system("printf safe; " + command)"#));
+        assert!(has_opaque_process_arguments(r#"subprocess.run(bytes.fromhex("2f7573722f62696e2f636172676f"))"#));
+        assert!(has_opaque_process_arguments("subprocess.Popen(command)"));
         assert!(!has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", r"\x2dA", "warnings"])"#));
         assert!(!has_opaque_process_arguments(
             r#"subprocess.run(["cargo", "metadata", "--locked"], cwd=repository, check=True)"#
         ));
+        assert!(!has_opaque_process_arguments(r#"subprocess.run(["git", "show", f"{reference}:{source}"], check=False)"#));
+        assert!(!has_opaque_process_arguments(r#"subprocess.run([sys.executable, "script/check.py", value], check=True)"#));
         assert!(!has_opaque_process_arguments("head = (f'<svg viewBox=\"0 0 64 64\" ' f'role=\"img\">')\n"));
         assert!(!has_opaque_process_arguments(
             "PATTERN = (r'^v[0-9]+' r'(?:-dev)?$')\nimport subprocess\nsubprocess.run(['git', 'status'])\n"

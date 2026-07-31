@@ -171,6 +171,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
     let selected = match command.as_str() {
         "trap" if !command_word.contains(['/', '\\']) => return (Vec::new(), trap::action_is_opaque(arguments, direct_program_paths)),
         "coproc" | "eval" | "iex" | "invoke-expression" | "parallel" | "parallel.exe" | "trap" | "xargs" | "xargs.exe" => SelectedInput::Opaque,
+        "mapfile" | "readarray" if mapfile_callback_is_opaque(arguments) => SelectedInput::Opaque,
         "bash" | "bash.exe" | "dash" | "dash.exe" | "fish" | "fish.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe" => shell_input(arguments),
         "python" | "python.exe" | "python3" | "python3.exe" => python_input(arguments),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),
@@ -339,6 +340,16 @@ fn is_powershell_flag_without_operand(argument: &str) -> bool {
 
 fn find_command_action_is_opaque(arguments: &[String]) -> bool {
     arguments.iter().any(|argument| matches!(argument.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir"))
+}
+
+fn mapfile_callback_is_opaque(arguments: &[String]) -> bool {
+    arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
+        path::contains_dynamic_value(argument)
+            || argument
+                .strip_prefix('-')
+                .filter(|options| !options.starts_with('-'))
+                .is_some_and(|options| options.contains('C'))
+    })
 }
 
 const AWK_PROGRAM_FILES: ProgramFileSyntax = ProgramFileSyntax::new(&["--exec", "--file"], &['E', 'f'], &['F', 'e', 'v'], &['W']);
@@ -568,6 +579,14 @@ mod tests {
         assert_eq!(inputs("make MAKEFILES=quality/lint.rules"), (Vec::new(), true));
         assert_eq!(inputs("MAKEFILES=quality/lint.rules make"), (Vec::new(), true));
         assert_eq!(inputs("command=$(cat quality/lint.txt); $command"), (Vec::new(), true));
+    }
+
+    #[test]
+    fn mapfile_callbacks_fail_closed_without_rejecting_literal_array_reads() {
+        assert_eq!(inputs("mapfile -C 'sh quality/lint.txt' -c 1 </etc/hosts"), (Vec::new(), true));
+        assert_eq!(inputs("readarray -tC 'sh quality/lint.txt' -c 1 </etc/hosts"), (Vec::new(), true));
+        assert_eq!(inputs("mapfile $OPTIONS lines </etc/hosts"), (Vec::new(), true));
+        assert_eq!(inputs("mapfile -t lines </etc/hosts"), (Vec::new(), false));
     }
 
     #[test]

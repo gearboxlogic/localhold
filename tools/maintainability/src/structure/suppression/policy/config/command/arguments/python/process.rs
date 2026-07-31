@@ -1,10 +1,12 @@
 pub(super) fn has_non_literal_arguments(source: &str) -> bool {
-    let mut scanner = ProcessCallScanner::new(source);
     let mut found_call = false;
-    while let Some(opening_parenthesis) = scanner.next_call() {
-        found_call = true;
-        if !scanner.rust_process_argument_is_static(opening_parenthesis + 1) {
-            return true;
+    for line in source.lines() {
+        let mut scanner = ProcessCallScanner::new(line);
+        while let Some((opening_parenthesis, kind)) = scanner.next_call() {
+            found_call = true;
+            if !scanner.process_argument_is_static(opening_parenthesis + 1, kind) {
+                return true;
+            }
         }
     }
     !found_call
@@ -23,7 +25,7 @@ impl ProcessCallScanner {
         }
     }
 
-    fn next_call(&mut self) -> Option<usize> {
+    fn next_call(&mut self) -> Option<(usize, ProcessKind)> {
         while self.index < self.characters.len() {
             if let Some(end) = self.string_literal_end(self.index) {
                 self.index = end;
@@ -44,25 +46,38 @@ impl ProcessCallScanner {
             }
             let name = self.characters[name_start..self.index].iter().collect::<String>();
             let opening_parenthesis = self.skip_whitespace(self.index);
-            if self.characters.get(opening_parenthesis) == Some(&'(') && is_process_callable(&name) {
+            if let Some(kind) = self
+                .characters
+                .get(opening_parenthesis)
+                .filter(|character| **character == '(')
+                .and_then(|_| process_kind(&name))
+            {
                 self.index = opening_parenthesis + 1;
-                return Some(opening_parenthesis);
+                return Some((opening_parenthesis, kind));
             }
         }
         None
     }
 
-    fn rust_process_argument_is_static(&self, start: usize) -> bool {
+    fn process_argument_is_static(&self, start: usize, kind: ProcessKind) -> bool {
         let start = self.skip_whitespace(start);
         let Some(character) = self.characters.get(start) else {
             return false;
         };
         let first_literal = self.skip_whitespace(start + usize::from(matches!(character, '[' | '(')));
+        if kind == ProcessKind::Argv
+            && let Some(end) = self.sys_executable_end(first_literal)
+        {
+            return self.first_argv_element_ends_at(end, *character);
+        }
         let Some(first_literal_end) = self.string_literal_end(first_literal) else {
             return false;
         };
+        if kind == ProcessKind::Shell {
+            return self.argument_ends_at(first_literal_end);
+        }
         if !self.literal_references_rust_tool(first_literal, first_literal_end) {
-            return true;
+            return self.first_argv_element_ends_at(first_literal_end, *character);
         }
         let end = match character {
             '[' => self.static_string_sequence_end(start, ']'),
@@ -73,6 +88,29 @@ impl ProcessCallScanner {
             return false;
         };
         matches!(self.characters.get(self.skip_whitespace(end)), Some(',' | ')'))
+    }
+
+    fn argument_ends_at(&self, end: usize) -> bool {
+        matches!(self.characters.get(self.skip_whitespace(end)), Some(',' | ')'))
+    }
+
+    fn first_argv_element_ends_at(&self, end: usize, container: char) -> bool {
+        let next = self.characters.get(self.skip_whitespace(end));
+        match container {
+            '[' => matches!(next, Some(',' | ']')),
+            '(' => matches!(next, Some(',' | ')')),
+            _ => matches!(next, Some(',' | ')')),
+        }
+    }
+
+    fn sys_executable_end(&self, start: usize) -> Option<usize> {
+        const SYS_EXECUTABLE: &[char] = &['s', 'y', 's', '.', 'e', 'x', 'e', 'c', 'u', 't', 'a', 'b', 'l', 'e'];
+        (self.characters.get(start..start + SYS_EXECUTABLE.len()) == Some(SYS_EXECUTABLE)
+            && self
+                .characters
+                .get(start + SYS_EXECUTABLE.len())
+                .is_none_or(|character| !is_identifier_character(*character) && *character != '.'))
+        .then_some(start + SYS_EXECUTABLE.len())
     }
 
     fn literal_references_rust_tool(&self, start: usize, end: usize) -> bool {
@@ -133,12 +171,28 @@ impl ProcessCallScanner {
     }
 }
 
-fn is_process_callable(name: &str) -> bool {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProcessKind {
+    Argv,
+    Shell,
+}
+
+fn process_kind(name: &str) -> Option<ProcessKind> {
     let name = name.to_ascii_lowercase();
     let basename = name.rsplit('.').next().unwrap_or(&name);
-    name.starts_with("subprocess.") && matches!(basename, "run" | "call" | "check_call" | "check_output" | "getoutput" | "getstatusoutput" | "popen")
-        || name.starts_with("os.") && (matches!(basename, "system" | "popen") || basename.starts_with("exec") || basename.starts_with("spawn"))
-        || !name.contains('.') && (basename == "popen" || basename.starts_with("exec") || basename.starts_with("spawn"))
+    if name.starts_with("subprocess.") && matches!(basename, "getoutput" | "getstatusoutput")
+        || name.starts_with("os.") && matches!(basename, "system" | "popen")
+        || !name.contains('.') && basename == "popen"
+    {
+        return Some(ProcessKind::Shell);
+    }
+    if name.starts_with("subprocess.") && matches!(basename, "run" | "call" | "check_call" | "check_output" | "popen")
+        || name.starts_with("os.") && (basename.starts_with("exec") || basename.starts_with("spawn"))
+        || !name.contains('.') && (basename.starts_with("exec") || basename.starts_with("spawn"))
+    {
+        return Some(ProcessKind::Argv);
+    }
+    None
 }
 
 fn is_identifier_start(character: char) -> bool {
@@ -154,16 +208,25 @@ mod tests {
     use super::has_non_literal_arguments;
 
     #[test]
-    fn rust_process_argv_must_be_an_inline_static_string_sequence() {
+    fn process_executables_and_shell_commands_must_be_static() {
         assert!(!has_non_literal_arguments(
             r#"subprocess.run(["cargo", "metadata", "--locked"], cwd=repository, check=True)"#
         ));
         assert!(!has_non_literal_arguments(r#"os.system("cargo check")"#));
         assert!(!has_non_literal_arguments(r#"subprocess.run(["git", "show", f"{reference}:{source}"], check=False)"#));
+        assert!(!has_non_literal_arguments(r#"subprocess.run([sys.executable, "script/check.py", value])"#));
+        assert!(!has_non_literal_arguments(
+            "def inspect():\n    \"\"\"Inspect one file.\"\"\"\n    subprocess.run([\"readelf\", \"-d\", str(path)], check=False)\n"
+        ));
         assert!(has_non_literal_arguments(r#"subprocess.run(["cargo", "clippy", "--", chr(45) + "A", "warnings"])"#));
         assert!(has_non_literal_arguments(r#"subprocess.run(["cargo"] + arguments)"#));
         assert!(has_non_literal_arguments(r#"subprocess.run([f"{tool}", "clippy"])"#));
+        assert!(has_non_literal_arguments(r#"subprocess.run(["car" + "go", "clippy"])"#));
+        assert!(has_non_literal_arguments(r#"subprocess.run([sys.executable.replace("python", "cargo"), "clippy"])"#));
         assert!(has_non_literal_arguments("subprocess.run(arguments)"));
         assert!(has_non_literal_arguments("from subprocess import run\nrun(arguments)"));
+        assert!(has_non_literal_arguments(r#"os.system(bytes.fromhex("636172676f"))"#));
+        assert!(has_non_literal_arguments(r#"os.system("printf safe; " + command)"#));
+        assert!(has_non_literal_arguments(r#"subprocess.run(bytes.fromhex("2f7573722f62696e2f636172676f"))"#));
     }
 }

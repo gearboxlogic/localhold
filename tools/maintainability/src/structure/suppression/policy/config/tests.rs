@@ -245,6 +245,10 @@ fn python_command_arrays_cannot_split_lint_arguments_from_cargo() {
         "script/check.py",
         "import ctypes\nctypes.CDLL(None).system(bytes.fromhex(\"636172676f20636c69707079202d2d202d41207761726e696e6773\"))\n"
     ));
+    assert!(weakening_token_for_surface(
+        "script/check.py",
+        "import os\nos.system(bytes.fromhex(\"636172676f20636c69707079202d2d202d41207761726e696e6773\"))\n"
+    ));
 }
 
 #[test]
@@ -722,6 +726,8 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
         ("setarch --uname-2.6 sh quality/lint.txt\n", "opaque interpreter program"),
         ("cat <(sh quality/lint.txt)\n", "lint-weakening argument"),
         ("coproc sh quality/lint.txt\n", "opaque interpreter program"),
+        ("mapfile -C 'sh quality/lint.txt' -c 1 </etc/hosts\n", "opaque interpreter program"),
+        ("readarray -tC 'sh quality/lint.txt' -c 1 </etc/hosts\n", "opaque interpreter program"),
         ("cat <<DOC\n$(sh quality/lint.txt)\nDOC\n", "opaque interpreter program"),
     ] {
         fs::write(workspace.path().join("script/check.sh"), command).expect("opaque shell dispatcher");

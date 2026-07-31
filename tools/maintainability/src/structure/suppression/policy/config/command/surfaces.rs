@@ -48,7 +48,8 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
     let mut pending = surfaces.iter().cloned().collect::<Vec<_>>();
     while let Some(surface) = pending.pop() {
         let source = fs::read_to_string(workspace.join(&surface)).with_context(|| format!("read command execution surface {surface}"))?;
-        let (referenced_inputs, unresolved_input) = execution_inputs_for_surface(&surface, &source);
+        let reviewed_source = without_reviewed_protected_dispatch(&surface, &source);
+        let (referenced_inputs, unresolved_input) = execution_inputs_for_surface(&surface, &reviewed_source);
         if unresolved_input {
             bail!("command execution surface {surface:?} uses an opaque interpreter program or makefile selection");
         }
@@ -74,6 +75,39 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
         paths: surfaces.into_iter().collect(),
         tracked_paths,
     })
+}
+
+const TRUSTED_WORKFLOW: &str = ".github/workflows/trusted-maintainability.yml";
+const TRUSTED_DISPATCH_LINE: &str = "          /usr/bin/bash \"$trusted_bootstrap\" --root \"$candidate_root\" --maintainability";
+const TRUSTED_DISPATCH_AUTHENTICATION: &[&str] = &[
+    "          trusted_root=$(/usr/bin/realpath -- ../.trusted-gate)",
+    "          candidate_root=$(/usr/bin/realpath -- .)",
+    "          if [[ \"$trusted_root\" != \"$workspace_root/.trusted-gate\" || \"$candidate_root\" != \"$workspace_root/.candidate\" ]]; then",
+    "          trusted_bootstrap=\"$trusted_root/script/check-maintainability-bootstrap.sh\"",
+    "          if [[ ! -f \"$trusted_bootstrap\" || -L \"$trusted_bootstrap\" ]]; then",
+    TRUSTED_DISPATCH_LINE,
+];
+
+fn without_reviewed_protected_dispatch(surface: &str, source: &str) -> String {
+    if surface != TRUSTED_WORKFLOW
+        || !TRUSTED_DISPATCH_AUTHENTICATION
+            .iter()
+            .all(|expected| source.lines().filter(|line| line == expected).count() == 1)
+    {
+        return source.to_owned();
+    }
+    let protected_references_are_closed = source
+        .lines()
+        .filter(|line| line.contains("trusted_bootstrap"))
+        .all(|line| TRUSTED_DISPATCH_AUTHENTICATION.contains(&line));
+    if !protected_references_are_closed {
+        return source.to_owned();
+    }
+    source
+        .lines()
+        .map(|line| if line == TRUSTED_DISPATCH_LINE { "          :" } else { line })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn reviewed_generated_program(surface: &str, source: &str, input: &str) -> bool {
@@ -166,7 +200,23 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use super::execution_surfaces;
+    use super::{TRUSTED_DISPATCH_AUTHENTICATION, TRUSTED_DISPATCH_LINE, TRUSTED_WORKFLOW, execution_surfaces, without_reviewed_protected_dispatch};
+
+    #[test]
+    fn protected_dispatch_requires_the_complete_canonical_authentication_sequence() {
+        let reviewed = TRUSTED_DISPATCH_AUTHENTICATION.join("\n");
+        let sanitized = without_reviewed_protected_dispatch(TRUSTED_WORKFLOW, &reviewed);
+        assert!(!sanitized.contains(TRUSTED_DISPATCH_LINE));
+        assert!(sanitized.lines().any(|line| line.trim() == ":"));
+
+        for changed in [
+            reviewed.replacen("../.trusted-gate", "../.candidate", 1),
+            reviewed.replacen("--maintainability", "--test-environment", 1),
+            format!("{reviewed}\n          printf '%s\\n' \"$trusted_bootstrap\""),
+        ] {
+            assert_eq!(without_reviewed_protected_dispatch(TRUSTED_WORKFLOW, &changed), changed);
+        }
+    }
 
     #[test]
     fn unrelated_symlinks_are_not_command_surfaces() {

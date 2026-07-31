@@ -1,11 +1,11 @@
-pub(super) enum Selection<'a> {
+pub(in crate::structure::suppression::policy::config::command::arguments) enum Selection<'a> {
     NotWrapper,
     NoCommand,
     Nested(&'a [String]),
     Opaque,
 }
 
-pub(super) fn select<'a>(raw_command_word: &str, command: &str, arguments: &'a [String]) -> Selection<'a> {
+pub(in crate::structure::suppression::policy::config::command::arguments) fn select<'a>(raw_command_word: &str, command: &str, arguments: &'a [String]) -> Selection<'a> {
     if !is_exact_command_word(raw_command_word, command) {
         return Selection::NotWrapper;
     }

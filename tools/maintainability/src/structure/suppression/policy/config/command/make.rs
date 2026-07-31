@@ -16,6 +16,9 @@ pub(super) fn validate_surface(path: &Path, source: &str) -> Result<()> {
     if changes_recipe_prefix(source) || recipe_uses_expansion(source) {
         bail!("checked-in Make command surface {display:?} uses unsupported dynamic recipe expansion");
     }
+    if ignores_quality_recipe_failure(source) {
+        bail!("checked-in Make command surface {display:?} ignores a required quality command failure");
+    }
     Ok(())
 }
 
@@ -83,14 +86,23 @@ fn changes_recipe_prefix(source: &str) -> bool {
 }
 
 fn recipe_uses_expansion(source: &str) -> bool {
-    source.lines().any(|line| {
-        let recipe = line.strip_prefix('\t').or_else(|| {
-            make_control_line(line)
-                .and_then(|line| line.split_once(';'))
-                .filter(|(rule, _)| rule.contains(':'))
-                .map(|(_, recipe)| recipe)
-        });
-        recipe.is_some_and(|recipe| recipe.contains('$'))
+    source.lines().filter_map(recipe_on_line).any(|recipe| recipe.contains('$'))
+}
+
+fn ignores_quality_recipe_failure(source: &str) -> bool {
+    source.lines().filter_map(recipe_on_line).any(|recipe| {
+        let command = recipe.trim_start();
+        let sigil_end = command.find(|character| !matches!(character, '@' | '-' | '+')).unwrap_or(command.len());
+        command[..sigil_end].contains('-') && super::arguments::contains_quality_command(command[sigil_end..].trim_start(), false)
+    })
+}
+
+fn recipe_on_line(line: &str) -> Option<&str> {
+    line.strip_prefix('\t').or_else(|| {
+        make_control_line(line)
+            .and_then(|line| line.split_once(';'))
+            .filter(|(rule, _)| rule.contains(':'))
+            .map(|(_, recipe)| recipe)
     })
 }
 
@@ -107,6 +119,9 @@ mod tests {
             "load quality/lint.so\n",
             "lint:\n\t$(LINT_COMMAND)\n",
             ".RECIPEPREFIX := >\n",
+            "lint:\n\t-just check-quality\n",
+            "lint:\n\t-env -u RUSTFLAGS just check-quality\n",
+            "lint: ; @-cargo clippy -- -D warnings\n",
         ] {
             assert!(validate_surface(Path::new("Makefile"), source).is_err(), "accepted {source:?}");
         }
@@ -115,6 +130,7 @@ mod tests {
     #[test]
     fn static_make_recipes_remain_supported() {
         validate_surface(Path::new("Makefile"), "lint:\n\tcargo clippy -- -D warnings\n").expect("static Make recipe");
+        validate_surface(Path::new("Makefile"), "lint:\n\t@cargo clippy -- -D warnings\n").expect("non-ignored static Make recipe");
         validate_surface(Path::new("Makefile"), "# $(shell ignored)\nlint:\n\ttest one != two\n").expect("non-executing Make text");
         validate_surface(Path::new("script/check.sh"), "lint:\n\t$(LINT_COMMAND)\n").expect("non-Make command surface");
     }

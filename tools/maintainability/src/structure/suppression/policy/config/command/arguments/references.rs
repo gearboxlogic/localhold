@@ -9,7 +9,7 @@ use super::{
 mod git;
 mod path;
 mod trap;
-mod wrapper;
+pub(super) mod wrapper;
 
 pub(in crate::structure::suppression::policy::config::command) fn cargo_manifest_paths_for_surface(path: &str, source: &str) -> (BTreeSet<String>, bool) {
     let case_insensitive_tools = has_case_insensitive_tool_names(path);

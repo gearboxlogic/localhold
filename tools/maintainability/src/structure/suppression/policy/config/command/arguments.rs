@@ -13,6 +13,7 @@ mod python;
 mod references;
 mod tokens;
 use analysis::Options as AnalysisOptions;
+pub(super) use integrity::contains_quality_command;
 pub(super) use references::{cargo_manifest_paths_for_surface, execution_inputs_for_surface};
 use tokens::{command_tokens, command_without_comment};
 
@@ -37,6 +38,9 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
     }
     if is_powershell(path) {
         options = options.allow_backticks();
+    }
+    if is_just(path) && ignored_just_recipe_failure(source, options.case_insensitive_tools()) {
+        return true;
     }
     if let Some(scripts) = package_json::script_commands(path, source) {
         return scripts.map_or(true, |scripts| {
@@ -520,6 +524,18 @@ fn is_just(path: &str) -> bool {
             .extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| extension.eq_ignore_ascii_case("just"))
+}
+
+fn ignored_just_recipe_failure(source: &str, case_insensitive_tools: bool) -> bool {
+    source.lines().any(|line| {
+        let command = line.trim_start();
+        if command.len() == line.len() {
+            return false;
+        }
+        let sigil_end = command.find(|character| !matches!(character, '@' | '-' | '?')).unwrap_or(command.len());
+        let sigils = &command[..sigil_end];
+        sigils.contains('-') && contains_quality_command(command[sigil_end..].trim_start(), case_insensitive_tools)
+    })
 }
 
 fn is_powershell(path: &str) -> bool {

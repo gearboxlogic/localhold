@@ -49,7 +49,14 @@ fn shell_identifier(source: &str) -> Option<(&str, &str)> {
 }
 
 pub(super) fn failure_masks_quality_command(source: &str, case_insensitive_tools: bool) -> bool {
-    for line in tokens::without_noncommand_shell_data(source).lines() {
+    let source = tokens::without_noncommand_shell_data(source);
+    if tokens::source_command_tokens(&source)
+        .iter()
+        .any(|command| control_flow_masks_quality_command(command, case_insensitive_tools))
+    {
+        return true;
+    }
+    for line in source.lines() {
         if line_masks_quality_command(line, case_insensitive_tools) {
             return true;
         }
@@ -106,37 +113,84 @@ fn updated_quote(quote: Option<char>, character: char) -> Option<char> {
 }
 
 fn is_quality_command(command: &str, case_insensitive_tools: bool) -> bool {
-    tokens::source_command_tokens(command).iter().any(|tokens| {
-        let Some(executable_index) = executable_index(tokens) else {
-            return false;
-        };
-        let executable = &tokens[executable_index];
-        if is_rust_tool_token(executable, case_insensitive_tools) {
-            if !is_cargo_tool_token(executable, case_insensitive_tools) {
-                return true;
-            }
-            return tokens[executable_index + 1..]
-                .iter()
-                .any(|token| matches!(token.to_ascii_lowercase().as_str(), "check" | "clippy" | "deny" | "fmt" | "test"));
+    tokens::source_command_tokens(command)
+        .iter()
+        .any(|tokens| command_is_quality(tokens, case_insensitive_tools))
+}
+
+pub(in crate::structure::suppression::policy::config::command) fn contains_quality_command(source: &str, case_insensitive_tools: bool) -> bool {
+    tokens::source_command_tokens(&tokens::without_noncommand_shell_data(source))
+        .iter()
+        .any(|tokens| command_is_quality(tokens, case_insensitive_tools))
+}
+
+fn control_flow_masks_quality_command(command: &[String], case_insensitive_tools: bool) -> bool {
+    let Some(index) = quality_executable_index(command, case_insensitive_tools) else {
+        return false;
+    };
+    command_is_quality(command, case_insensitive_tools)
+        && command[..index].iter().any(|token| {
+            matches!(
+                token.trim_matches(['(', ')', '{', '}']).to_ascii_lowercase().as_str(),
+                "!" | "if" | "elif" | "while" | "until"
+            )
+        })
+}
+
+fn command_is_quality(command: &[String], case_insensitive_tools: bool) -> bool {
+    let Some(executable_index) = quality_executable_index(command, case_insensitive_tools) else {
+        return false;
+    };
+    let executable = &command[executable_index];
+    let arguments = &command[executable_index + 1..];
+    let executable_name = tool_basename(executable).to_ascii_lowercase();
+    match super::references::wrapper::select(executable, &executable_name, arguments) {
+        super::references::wrapper::Selection::NotWrapper => {}
+        super::references::wrapper::Selection::NoCommand => return false,
+        super::references::wrapper::Selection::Nested(nested) => return command_is_quality(nested, case_insensitive_tools),
+        super::references::wrapper::Selection::Opaque => return command_is_quality(arguments, case_insensitive_tools),
+    }
+    if is_rust_tool_token(executable, case_insensitive_tools) {
+        if !is_cargo_tool_token(executable, case_insensitive_tools) {
+            return true;
         }
-        tool_basename(executable).eq_ignore_ascii_case("just")
-            && tokens[executable_index + 1..].iter().any(|token| {
-                matches!(
-                    token.as_str(),
-                    "check"
-                        | "check-quality"
-                        | "clippy"
-                        | "deny"
-                        | "dependency-unsafe"
-                        | "fmt-check"
-                        | "hygiene"
-                        | "maintainability"
-                        | "production-clippy"
-                        | "test"
-                        | "time-abstraction"
-                )
-            })
+        return arguments
+            .iter()
+            .any(|token| matches!(token.to_ascii_lowercase().as_str(), "check" | "clippy" | "deny" | "fmt" | "test"));
+    }
+    tool_basename(executable).eq_ignore_ascii_case("just")
+        && arguments.iter().any(|token| {
+            matches!(
+                token.as_str(),
+                "check"
+                    | "check-quality"
+                    | "clippy"
+                    | "deny"
+                    | "dependency-unsafe"
+                    | "fmt-check"
+                    | "hygiene"
+                    | "maintainability"
+                    | "production-clippy"
+                    | "test"
+                    | "time-abstraction"
+            )
+        })
+}
+
+fn quality_executable_index(tokens: &[String], case_insensitive_tools: bool) -> Option<usize> {
+    tokens.iter().position(|token| {
+        let word = token.trim_matches(['(', ')', '{', '}']);
+        !word.is_empty() && !is_quality_command_prefix(word, case_insensitive_tools) && !is_environment_assignment(word)
     })
+}
+
+fn is_quality_command_prefix(word: &str, case_insensitive_tools: bool) -> bool {
+    is_shell_command_prefix(word)
+        || case_insensitive_tools
+            && matches!(
+                word.to_ascii_lowercase().as_str(),
+                "!" | "if" | "then" | "elif" | "while" | "until" | "do" | "command" | "exec" | "builtin" | "nohup"
+            )
 }
 
 fn executable_index(tokens: &[String]) -> Option<usize> {
@@ -165,6 +219,15 @@ mod tests {
         assert!(failure_masks_quality_command("just check-quality | true", true));
         assert!(failure_masks_quality_command("just check-quality || true", true));
         assert!(failure_masks_quality_command("just check-quality &", true));
+        assert!(failure_masks_quality_command("! just check-quality", true));
+        assert!(failure_masks_quality_command("if just check-quality; then echo accepted; fi", true));
+        assert!(failure_masks_quality_command("while cargo clippy --locked; do echo retrying; done", true));
+        assert!(failure_masks_quality_command("until cargo test --locked; do echo retrying; done", true));
+        assert!(failure_masks_quality_command("env -u RUSTFLAGS just check-quality | true", true));
+        assert!(failure_masks_quality_command("timeout 5 just check-quality &", true));
+        assert!(failure_masks_quality_command("nice -n 5 cargo clippy --locked || true", true));
+        assert!(failure_masks_quality_command("time -p cargo test --locked | cat", true));
+        assert!(failure_masks_quality_command("IF (CARGO.EXE clippy --locked) { Write-Output accepted }", true));
         assert!(failure_masks_quality_command("just check-quality && echo completed || true", true));
         assert!(failure_masks_quality_command("cargo clippy --locked | cat", true));
         assert!(failure_masks_quality_command("cargo clippy --locked || true", true));
@@ -173,6 +236,7 @@ mod tests {
         assert!(!failure_masks_quality_command("cargo clippy --locked 2>&1", true));
         assert!(!failure_masks_quality_command("cargo build | grep warning", true));
         assert!(!failure_masks_quality_command("echo cargo || true", true));
+        assert!(!failure_masks_quality_command("if echo just check-quality; then echo informational; fi", true));
         assert!(!failure_masks_quality_command("printf '%s\n' 'just check | true'", true));
         assert!(!failure_masks_quality_command("printf '%s\n' 'just check || true'", true));
         assert!(!failure_masks_quality_command("case \"$name\" in\n    CARGO | RUSTC | RUSTDOC) return ;;\nesac", true));

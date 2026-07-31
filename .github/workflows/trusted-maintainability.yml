@@ -44,4 +44,4 @@ jobs:
             printf 'maintainability bootstrap differs from the repository-approved digest\n' >&2
             exit 1
           fi
-          /usr/bin/bash script/check-maintainability-bootstrap.sh --maintainability
+          /usr/bin/bash script/check-maintainability-bootstrap.sh -- just maintainability

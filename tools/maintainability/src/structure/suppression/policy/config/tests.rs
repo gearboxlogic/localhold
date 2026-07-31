@@ -711,15 +711,30 @@ fn command_policy_rejects_find_and_xargs_command_indirection() {
 fn command_policy_rejects_unparsed_shell_dispatchers() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
     fs::write(workspace.path().join("quality/lint.txt"), "cargo clippy -- -A warnings\n").expect("opaque command payload");
+    fs::write(workspace.path().join("script/check.sh"), "coproc sh quality/lint.txt\n").expect("initial shell dispatcher");
     git(workspace.path(), &["init", "-q"]);
     git(workspace.path(), &["add", "."]);
 
-    for command in ["trap 'sh quality/lint.txt' EXIT", "setarch --uname-2.6 sh quality/lint.txt"] {
-        fs::write(workspace.path().join("Justfile"), format!("lint:\n    {command}\n")).expect("opaque shell dispatcher");
+    for (command, reason) in [
+        ("trap 'sh quality/lint.txt' EXIT\n", "opaque interpreter program"),
+        ("setarch --uname-2.6 sh quality/lint.txt\n", "opaque interpreter program"),
+        ("cat <(sh quality/lint.txt)\n", "lint-weakening argument"),
+        ("coproc sh quality/lint.txt\n", "opaque interpreter program"),
+        ("cat <<DOC\n$(sh quality/lint.txt)\nDOC\n", "opaque interpreter program"),
+    ] {
+        fs::write(workspace.path().join("script/check.sh"), command).expect("opaque shell dispatcher");
         let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-        assert!(error.to_string().contains("opaque interpreter program"), "{command}: {error:#}");
+        assert!(error.to_string().contains(reason), "{command}: {error:#}");
     }
+
+    fs::write(
+        workspace.path().join("script/check.sh"),
+        "printf '%s\\n' '<(sh quality/lint.txt)'\ncat <<'DOC'\n$(sh quality/lint.txt)\nDOC\n",
+    )
+    .expect("inert shell examples");
+    reject_checked_in_weakening(workspace.path()).expect("quoted shell examples are inert");
 }
 
 #[test]

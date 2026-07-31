@@ -1,3 +1,9 @@
+mod substitution;
+
+pub(super) fn process_substitution_commands(source: &str) -> (Vec<String>, bool) {
+    substitution::process_commands(source)
+}
+
 pub(super) fn normalized_shell_tokens(source: &str) -> Vec<String> {
     normalized_shell_commands(source).into_iter().flatten().collect()
 }
@@ -58,13 +64,13 @@ fn shell_command_segments(source: &str) -> Vec<&str> {
 
 pub(super) fn without_noncommand_shell_data(source: &str) -> String {
     let mut output = String::with_capacity(source.len());
-    let mut pending = std::collections::VecDeque::new();
+    let mut pending = std::collections::VecDeque::<Heredoc>::new();
     let mut array_assignment = false;
     let mut case_pattern_expected = Vec::new();
     for line in source.lines() {
-        if let Some((delimiter, strip_tabs)) = pending.front() {
-            let candidate = if *strip_tabs { line.trim_start_matches('\t') } else { line };
-            if candidate == delimiter {
+        if let Some(heredoc) = pending.front() {
+            let candidate = if heredoc.strip_tabs { line.trim_start_matches('\t') } else { line };
+            if candidate == heredoc.delimiter {
                 pending.pop_front();
             }
             output.push('\n');
@@ -111,6 +117,38 @@ pub(super) fn without_noncommand_shell_data(source: &str) -> String {
         }
     }
     output
+}
+
+pub(super) fn has_executable_unquoted_heredoc(source: &str) -> bool {
+    let mut pending = std::collections::VecDeque::<Heredoc>::new();
+    for line in source.lines() {
+        if let Some(heredoc) = pending.front() {
+            let candidate = if heredoc.strip_tabs { line.trim_start_matches('\t') } else { line };
+            if candidate == heredoc.delimiter {
+                pending.pop_front();
+            } else if heredoc.allows_expansion && active_heredoc_substitution(line) {
+                return true;
+            }
+            continue;
+        }
+        pending.extend(heredocs_on_line(line));
+    }
+    false
+}
+
+fn active_heredoc_substitution(source: &str) -> bool {
+    let mut escaped = false;
+    let mut characters = source.chars().peekable();
+    while let Some(character) = characters.next() {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '`' || character == '$' && characters.peek() == Some(&'(') {
+            return true;
+        }
+    }
+    false
 }
 
 fn starts_case_statement(line: &str) -> bool {
@@ -182,7 +220,13 @@ fn array_assignment_closes(line: &str) -> bool {
     false
 }
 
-fn heredocs_on_line(line: &str) -> Vec<(String, bool)> {
+struct Heredoc {
+    delimiter: String,
+    strip_tabs: bool,
+    allows_expansion: bool,
+}
+
+fn heredocs_on_line(line: &str) -> Vec<Heredoc> {
     let characters = line.chars().collect::<Vec<_>>();
     let mut heredocs = Vec::new();
     let mut index = 0;
@@ -209,8 +253,12 @@ fn heredocs_on_line(line: &str) -> Vec<(String, bool)> {
             while characters.get(index).is_some_and(|character| character.is_whitespace()) {
                 index += 1;
             }
-            if let Some((delimiter, end)) = heredoc_delimiter(&characters, index) {
-                heredocs.push((delimiter, strip_tabs));
+            if let Some((delimiter, end, allows_expansion)) = heredoc_delimiter(&characters, index) {
+                heredocs.push(Heredoc {
+                    delimiter,
+                    strip_tabs,
+                    allows_expansion,
+                });
                 index = end;
                 continue;
             }
@@ -220,20 +268,29 @@ fn heredocs_on_line(line: &str) -> Vec<(String, bool)> {
     heredocs
 }
 
-fn heredoc_delimiter(characters: &[char], start: usize) -> Option<(String, usize)> {
+fn heredoc_delimiter(characters: &[char], start: usize) -> Option<(String, usize, bool)> {
     let mut index = start;
-    let quote = characters.get(index).copied().filter(|character| matches!(character, '\'' | '"'));
-    index += usize::from(quote.is_some());
+    let mut quote = None;
     let mut delimiter = String::new();
     let mut escaped = false;
+    let mut quoted = false;
     while let Some(character) = characters.get(index).copied() {
         if escaped {
             delimiter.push(character);
             escaped = false;
         } else if character == '\\' && quote != Some('\'') {
             escaped = true;
-        } else if quote == Some(character) {
-            return (!delimiter.is_empty()).then_some((delimiter, index + 1));
+            quoted = true;
+        } else if matches!(character, '\'' | '"') {
+            if quote == Some(character) {
+                quote = None;
+                quoted = true;
+            } else if quote.is_none() {
+                quote = Some(character);
+                quoted = true;
+            } else {
+                delimiter.push(character);
+            }
         } else if quote.is_none() && (character.is_whitespace() || matches!(character, ';' | '|' | '&' | '<' | '>' | '(' | ')')) {
             break;
         } else {
@@ -241,7 +298,7 @@ fn heredoc_delimiter(characters: &[char], start: usize) -> Option<(String, usize
         }
         index += 1;
     }
-    (quote.is_none() && !delimiter.is_empty()).then_some((delimiter, index))
+    (quote.is_none() && !escaped && !delimiter.is_empty()).then_some((delimiter, index, !quoted))
 }
 
 pub(super) fn command_without_comment(segment: &str) -> &str {
@@ -317,7 +374,7 @@ fn shell_tokens(command: &str, split_equals: bool) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{source_command_tokens, without_noncommand_shell_data};
+    use super::{has_executable_unquoted_heredoc, source_command_tokens, without_noncommand_shell_data};
 
     #[test]
     fn quoted_program_text_does_not_create_command_fragments() {
@@ -340,6 +397,16 @@ mod tests {
         assert!(!normalized.contains("PREFIX/bin/hold"));
         assert!(!normalized.contains("./generated-command"));
         assert!(normalized.contains("quality/run-lints"));
+    }
+
+    #[test]
+    fn executable_unquoted_heredoc_substitutions_fail_closed() {
+        assert!(has_executable_unquoted_heredoc("cat <<DOC\n$(sh quality/lint.txt)\nDOC\n"));
+        assert!(has_executable_unquoted_heredoc("cat <<DOC\n'$(sh quality/lint.txt)'\nDOC\n"));
+        assert!(has_executable_unquoted_heredoc("cat <<-DOC\n\t`sh quality/lint.txt`\n\tDOC\n"));
+        assert!(!has_executable_unquoted_heredoc("cat <<'DOC'\n$(sh quality/lint.txt)\nDOC\n"));
+        assert!(!has_executable_unquoted_heredoc("cat <<D\"OC\"\n$(sh quality/lint.txt)\nDOC\n"));
+        assert!(!has_executable_unquoted_heredoc("cat <<DOC\n\\$(sh quality/lint.txt)\nDOC\n"));
     }
 
     #[test]

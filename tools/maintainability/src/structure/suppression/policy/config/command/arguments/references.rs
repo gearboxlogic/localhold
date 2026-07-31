@@ -101,23 +101,33 @@ fn collect_execution_inputs<'a>(sources: impl IntoIterator<Item = &'a str>, dire
         unresolved |= super::dynamic::has_opaque_command_assignment_flow(path, source);
         let normalized;
         let source = if direct_program_paths {
+            unresolved |= tokens::has_executable_unquoted_heredoc(source);
             normalized = tokens::without_noncommand_shell_data(source);
+            let (process_commands, opaque) = tokens::process_substitution_commands(&normalized);
+            unresolved |= opaque;
+            for command in process_commands {
+                record_shell_source_inputs(&command, direct_program_paths, &mut inputs, &mut unresolved);
+            }
             normalized.as_str()
         } else {
             source
         };
-        for tokens in tokens::source_command_tokens(source) {
-            for nested_tokens in tokens
-                .iter()
-                .filter(|token| token.chars().any(char::is_whitespace) && (token.contains("$(") || token.contains('`')))
-                .flat_map(|nested| tokens::source_command_tokens(nested))
-            {
-                record_execution_inputs_from_tokens(&nested_tokens, direct_program_paths, &mut inputs, &mut unresolved);
-            }
-            record_execution_inputs_from_tokens(&tokens, direct_program_paths, &mut inputs, &mut unresolved);
-        }
+        record_shell_source_inputs(source, direct_program_paths, &mut inputs, &mut unresolved);
     }
     (inputs, unresolved)
+}
+
+fn record_shell_source_inputs(source: &str, direct_program_paths: bool, inputs: &mut BTreeSet<String>, unresolved: &mut bool) {
+    for tokens in tokens::source_command_tokens(source) {
+        for nested_tokens in tokens
+            .iter()
+            .filter(|token| token.chars().any(char::is_whitespace) && (token.contains("$(") || token.contains('`')))
+            .flat_map(|nested| tokens::source_command_tokens(nested))
+        {
+            record_execution_inputs_from_tokens(&nested_tokens, direct_program_paths, inputs, unresolved);
+        }
+        record_execution_inputs_from_tokens(&tokens, direct_program_paths, inputs, unresolved);
+    }
 }
 
 fn record_execution_inputs_from_tokens(tokens: &[String], direct_program_paths: bool, inputs: &mut BTreeSet<String>, unresolved: &mut bool) {
@@ -160,7 +170,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
     }
     let selected = match command.as_str() {
         "trap" if !command_word.contains(['/', '\\']) => return (Vec::new(), trap::action_is_opaque(arguments, direct_program_paths)),
-        "eval" | "iex" | "invoke-expression" | "parallel" | "parallel.exe" | "trap" | "xargs" | "xargs.exe" => SelectedInput::Opaque,
+        "coproc" | "eval" | "iex" | "invoke-expression" | "parallel" | "parallel.exe" | "trap" | "xargs" | "xargs.exe" => SelectedInput::Opaque,
         "bash" | "bash.exe" | "dash" | "dash.exe" | "fish" | "fish.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe" => shell_input(arguments),
         "python" | "python.exe" | "python3" | "python3.exe" => python_input(arguments),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),
@@ -212,7 +222,7 @@ fn supports_direct_program_paths(path: &str) -> bool {
         || path.extension().and_then(|extension| extension.to_str()).is_none_or(|extension| {
             matches!(
                 extension.to_ascii_lowercase().as_str(),
-                "sh" | "bash" | "zsh" | "fish" | "ps1" | "cmd" | "bat" | "just" | "toml"
+                "sh" | "bash" | "zsh" | "fish" | "ps1" | "cmd" | "bat" | "just" | "toml" | "txt"
             )
         })
 }
@@ -558,5 +568,14 @@ mod tests {
         assert_eq!(inputs("make MAKEFILES=quality/lint.rules"), (Vec::new(), true));
         assert_eq!(inputs("MAKEFILES=quality/lint.rules make"), (Vec::new(), true));
         assert_eq!(inputs("command=$(cat quality/lint.txt); $command"), (Vec::new(), true));
+    }
+
+    #[test]
+    fn shell_dispatch_inputs_fail_closed_without_matching_inert_text() {
+        assert_eq!(inputs("cat <(sh quality/lint.txt)"), (vec!["quality/lint.txt".to_owned()], false));
+        assert_eq!(inputs("cat <(printf ok;# )\nsh quality/lint.txt\n)"), (vec!["quality/lint.txt".to_owned()], false));
+        assert_eq!(inputs("coproc sh quality/lint.txt"), (Vec::new(), true));
+        assert_eq!(inputs("printf '%s' '<(sh quality/lint.txt)'"), (Vec::new(), false));
+        assert_eq!(inputs("printf ok # <(sh quality/lint.txt)"), (Vec::new(), false));
     }
 }

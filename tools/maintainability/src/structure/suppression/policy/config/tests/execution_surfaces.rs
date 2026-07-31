@@ -271,6 +271,13 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
         ),
         ("cmake -P quality/lint.txt\n", "opaque interpreter program"),
         ("rustup run 1.97.0 sh quality/lint.txt\n", "lint-weakening argument"),
+        ("history -s 'sh quality/lint.txt'\nfc -s sh\n", "opaque interpreter program"),
+        ("awk 'BEGIN { system(\"sh quality/lint.txt\") }'\n", "opaque interpreter program"),
+        ("sed -n -e '1e sh quality/lint.txt' /etc/hosts\n", "opaque interpreter program"),
+        (
+            "ssh -o BatchMode=yes -o 'ProxyCommand=sh quality/lint.txt' example.invalid || true\n",
+            "opaque interpreter program",
+        ),
         ("setarch --uname-2.6 sh quality/lint.txt\n", "opaque interpreter program"),
         ("sg \"$(id -gn)\" -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
         ("su \"$(id -un)\" -c 'sh quality/lint.txt'\n", "opaque interpreter program"),

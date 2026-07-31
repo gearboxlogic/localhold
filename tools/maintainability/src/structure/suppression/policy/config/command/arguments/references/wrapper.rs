@@ -208,7 +208,10 @@ fn is_unparsed_launcher(command: &str) -> bool {
             | "setarch"
             | "setpriv"
             | "setsid"
+            | "sftp"
             | "sg"
+            | "scp"
+            | "ssh"
             | "start-stop-daemon"
             | "stdbuf"
             | "strace"
@@ -245,6 +248,8 @@ mod tests {
         assert!(matches!(select("/usr/sbin/runuser", "runuser", &arguments), Selection::Opaque));
         assert!(matches!(select("start-stop-daemon", "start-stop-daemon", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/sbin/start-stop-daemon", "start-stop-daemon", &arguments), Selection::Opaque));
+        assert!(matches!(select("ssh", "ssh", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/bin/ssh", "ssh", &arguments), Selection::Opaque));
     }
 
     #[test]

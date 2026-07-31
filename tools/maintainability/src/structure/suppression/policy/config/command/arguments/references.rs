@@ -8,6 +8,7 @@ use super::{
 
 mod git;
 mod path;
+mod sed;
 mod trap;
 pub(super) mod wrapper;
 
@@ -173,23 +174,19 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
     }
     let selected = match command.as_str() {
         "trap" if !command_word.contains(['/', '\\']) => return (Vec::new(), trap::action_is_opaque(arguments, direct_program_paths)),
-        "alias" | "coproc" | "eval" | "iex" | "invoke-expression" | "parallel" | "parallel.exe" | "trap" | "xargs" | "xargs.exe" => SelectedInput::Opaque,
+        "alias" | "coproc" | "eval" | "fc" | "fc.exe" | "iex" | "invoke-expression" | "parallel" | "parallel.exe" | "trap" | "xargs" | "xargs.exe" => SelectedInput::Opaque,
         "enable" if bash_enable_loads_builtin(arguments) => SelectedInput::Opaque,
         "mapfile" | "readarray" if mapfile_callback_is_opaque(arguments) => SelectedInput::Opaque,
         "bash" | "bash.exe" | "dash" | "dash.exe" | "fish" | "fish.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe" => shell_input(arguments),
         "python" | "python.exe" | "python3" | "python3.exe" => python_input(arguments),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),
         _ if dynamic_program::is_unanalyzed_interpreter(&command) => SelectedInput::Opaque,
-        "awk" | "awk.exe" | "gawk" | "gawk.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe" => {
-            let (inputs, opaque) = program_file_inputs(arguments, &AWK_PROGRAM_FILES);
-            return (Vec::new(), opaque || !inputs.is_empty());
-        }
+        "awk" | "awk.exe" | "gawk" | "gawk.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe" => SelectedInput::Opaque,
         "find" | "find.exe" => {
             return (Vec::new(), find_command_action_is_opaque(arguments));
         }
         "sed" | "sed.exe" => {
-            let (inputs, opaque) = program_file_inputs(arguments, &SED_PROGRAM_FILES);
-            return (Vec::new(), opaque || !inputs.is_empty());
+            return (Vec::new(), sed::program_is_opaque(arguments));
         }
         "tar" | "tar.exe" if tar_checkpoint_action_is_opaque(arguments) => SelectedInput::Opaque,
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
@@ -378,99 +375,6 @@ fn mapfile_callback_is_opaque(arguments: &[String]) -> bool {
     })
 }
 
-const AWK_PROGRAM_FILES: ProgramFileSyntax = ProgramFileSyntax::new(&["--exec", "--file"], &['E', 'f'], &['F', 'e', 'v'], &['W']);
-const SED_PROGRAM_FILES: ProgramFileSyntax = ProgramFileSyntax::new(&["--file"], &['f'], &['e', 'i'], &[]);
-
-struct ProgramFileSyntax {
-    long: &'static [&'static str],
-    short: &'static [char],
-    short_with_operand: &'static [char],
-    opaque_short: &'static [char],
-}
-
-impl ProgramFileSyntax {
-    const fn new(long: &'static [&'static str], short: &'static [char], short_with_operand: &'static [char], opaque_short: &'static [char]) -> Self {
-        Self {
-            long,
-            short,
-            short_with_operand,
-            opaque_short,
-        }
-    }
-}
-
-fn program_file_inputs<'a>(arguments: &'a [String], syntax: &ProgramFileSyntax) -> (Vec<&'a str>, bool) {
-    let mut inputs = Vec::new();
-    let mut opaque = false;
-    let mut index = 0;
-    while let Some(argument) = arguments.get(index) {
-        if argument == "--" {
-            break;
-        }
-        let matched_long_option = syntax.long.iter().find(|option| argument == **option);
-        let selected = if matched_long_option.is_some() {
-            index += 1;
-            program_file_input(arguments.get(index).map(String::as_str))
-        } else if let Some(candidate) = syntax
-            .long
-            .iter()
-            .find_map(|option| argument.strip_prefix(option).and_then(|candidate| candidate.strip_prefix('=')))
-        {
-            program_file_input(Some(candidate))
-        } else if abbreviated_long_program_file_option(argument, syntax) {
-            SelectedInput::Opaque
-        } else {
-            let (selected, consumes_following) = short_program_file_input(argument, arguments.get(index + 1).map(String::as_str), syntax);
-            if consumes_following {
-                index += 1;
-            }
-            selected
-        };
-        match selected {
-            SelectedInput::None => {}
-            SelectedInput::Literal(candidate) => inputs.push(candidate),
-            SelectedInput::Opaque => opaque = true,
-        }
-        index += 1;
-    }
-    (inputs, opaque)
-}
-
-fn abbreviated_long_program_file_option(argument: &str, syntax: &ProgramFileSyntax) -> bool {
-    let name = argument.split_once('=').map_or(argument, |(name, _)| name);
-    name.len() > 2 && name.starts_with("--") && syntax.long.iter().any(|option| option.starts_with(name))
-}
-
-fn program_file_input(candidate: Option<&str>) -> SelectedInput<'_> {
-    match candidate {
-        Some(candidate) if !candidate.is_empty() && candidate != "-" => SelectedInput::Literal(candidate),
-        Some(_) | None => SelectedInput::Opaque,
-    }
-}
-
-fn short_program_file_input<'a>(argument: &'a str, following: Option<&'a str>, syntax: &ProgramFileSyntax) -> (SelectedInput<'a>, bool) {
-    let Some(options) = argument.strip_prefix('-').filter(|options| !options.starts_with('-')) else {
-        return (SelectedInput::None, false);
-    };
-    for (index, option) in options.char_indices() {
-        if syntax.opaque_short.contains(&option) {
-            return (SelectedInput::Opaque, false);
-        }
-        if syntax.short_with_operand.contains(&option) {
-            return (SelectedInput::None, false);
-        }
-        if syntax.short.contains(&option) {
-            let candidate = &options[index + option.len_utf8()..];
-            return if candidate.is_empty() {
-                (program_file_input(following), following.is_some())
-            } else {
-                (program_file_input(Some(candidate)), false)
-            };
-        }
-    }
-    (SelectedInput::None, false)
-}
-
 fn makefile_inputs(arguments: &[String]) -> (Vec<&str>, bool) {
     let mut inputs = Vec::new();
     let mut opaque = false;
@@ -574,27 +478,6 @@ mod tests {
         assert_eq!(inputs("time -o report sh quality/lint.txt"), (Vec::new(), true));
         assert_eq!(inputs("ionice -c 3 sh quality/lint.txt"), (Vec::new(), true));
         assert_eq!(inputs(r"pattern='tokio::time::(sleep|sleep_until|interval|timeout)\('"), (Vec::new(), false));
-        assert_eq!(inputs("awk -f quality/lint.awk /etc/hosts"), (Vec::new(), true));
-        assert_eq!(inputs("gawk --file=quality/lint.awk /etc/hosts"), (Vec::new(), true));
-        assert_eq!(inputs("gawk --exec quality/lint.awk /etc/hosts"), (Vec::new(), true));
-        assert_eq!(inputs("gawk --fil=quality/lint.awk /etc/hosts"), (Vec::new(), true));
-        assert_eq!(inputs("gawk -W exec=quality/lint.awk /etc/hosts"), (Vec::new(), true));
-        assert_eq!(inputs("awk -f $SCRIPT /etc/hosts"), (Vec::new(), true));
-        assert_eq!(inputs(r"find /tmp -maxdepth 0 -exec sh quality/lint.txt \;"), (Vec::new(), true));
-        assert_eq!(inputs("find /tmp -maxdepth 0 -print"), (Vec::new(), false));
-        assert_eq!(inputs("xargs -a quality/args.txt sh"), (Vec::new(), true));
-        assert_eq!(inputs("parallel sh :::: quality/args.txt"), (Vec::new(), true));
-        assert_eq!(
-            inputs("tar --checkpoint=1 --checkpoint-action=exec='sh quality/lint.txt' -cf archive.tar ."),
-            (Vec::new(), true)
-        );
-        assert_eq!(inputs("tar --checkpoint-a=exec='sh quality/lint.txt' -cf archive.tar ."), (Vec::new(), true));
-        assert_eq!(inputs("tar --checkpoint-action exec='sh quality/lint.txt' -cf archive.tar ."), (Vec::new(), true));
-        assert_eq!(inputs("tar --checkpoint=1 -cf archive.tar ."), (Vec::new(), false));
-        assert_eq!(inputs("tar -cf archive.tar ."), (Vec::new(), false));
-        assert_eq!(inputs("sed -nf quality/lint.sed /etc/hosts"), (Vec::new(), true));
-        assert_eq!(inputs("sed --file=quality/lint.sed /etc/hosts"), (Vec::new(), true));
-        assert_eq!(inputs("sed -f $SCRIPT /etc/hosts"), (Vec::new(), true));
         assert_eq!(
             inputs("make -f quality/lint.rules --file=quality/common.rules"),
             (vec!["quality/common.rules".to_owned(), "quality/lint.rules".to_owned()], false)
@@ -604,8 +487,45 @@ mod tests {
         assert_eq!(inputs("make MAKEFILES=quality/lint.rules"), (Vec::new(), true));
         assert_eq!(inputs("MAKEFILES=quality/lint.rules make"), (Vec::new(), true));
         assert_eq!(inputs("command=$(cat quality/lint.txt); $command"), (Vec::new(), true));
+        assert_eq!(inputs("history -s 'sh quality/lint.txt'; fc -s sh"), (Vec::new(), true));
         assert_eq!(inputs("$'\\x73\\x68' quality/lint.txt"), (Vec::new(), true));
         assert_eq!(inputs("printf '%s' \"$'\\x73\\x68' quality/lint.txt\""), (Vec::new(), false));
+    }
+
+    #[test]
+    fn indirect_text_processor_and_archive_execution_fails_closed() {
+        for command in [
+            "awk -f quality/lint.awk /etc/hosts",
+            "gawk --file=quality/lint.awk /etc/hosts",
+            "gawk --exec quality/lint.awk /etc/hosts",
+            "gawk --fil=quality/lint.awk /etc/hosts",
+            "gawk -W exec=quality/lint.awk /etc/hosts",
+            "awk -f $SCRIPT /etc/hosts",
+            "awk 'BEGIN { system(\"sh quality/lint.txt\") }'",
+            r"find /tmp -maxdepth 0 -exec sh quality/lint.txt \;",
+            "xargs -a quality/args.txt sh",
+            "parallel sh :::: quality/args.txt",
+            "tar --checkpoint=1 --checkpoint-action=exec='sh quality/lint.txt' -cf archive.tar .",
+            "tar --checkpoint-a=exec='sh quality/lint.txt' -cf archive.tar .",
+            "tar --checkpoint-action exec='sh quality/lint.txt' -cf archive.tar .",
+            "sed -nf quality/lint.sed /etc/hosts",
+            "sed --file=quality/lint.sed /etc/hosts",
+            "sed -f $SCRIPT /etc/hosts",
+            "sed -n -e '1e sh quality/lint.txt' /etc/hosts",
+            "sed --exp='1e sh quality/lint.txt' /etc/hosts",
+            "sed 's/.*/sh quality\\/lint.txt/e' /etc/hosts",
+        ] {
+            assert_eq!(inputs(command), (Vec::new(), true), "{command}");
+        }
+        for command in [
+            "find /tmp -maxdepth 0 -print",
+            "tar --checkpoint=1 -cf archive.tar .",
+            "tar -cf archive.tar .",
+            "sed -n -e '1p' /etc/hosts",
+            "sed 's/../\\\\x&/g' /etc/hosts",
+        ] {
+            assert_eq!(inputs(command), (Vec::new(), false), "{command}");
+        }
     }
 
     #[test]

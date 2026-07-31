@@ -186,6 +186,14 @@ These paths are not contacted by a default running `hold` process:
 
 - Cargo, rustup, mise, GitHub Actions, and dependency automation contact their
   normal registries and GitHub during development or CI.
+- The organization ruleset runs `.github/workflows/trusted-maintainability.yml`
+  from the protected default branch, rather than from the proposed pull-request
+  tree. That workflow accepts a candidate maintainability bootstrap only when
+  its SHA-256 matches the administrator-controlled
+  `LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256` repository variable. Updating
+  the bootstrap therefore requires both normal code review and a separate
+  repository-setting update; changing a pull-request workflow or an in-tree
+  digest cannot approve different bootstrap code.
 - The first-party source-safety gate parses Rust under `src/`, `tests/`, and
   `benches/` (and `examples/` when present) and compares executable unsafe
   sites, mutable statics, unsafe attributes, unsafe global assembly, and direct

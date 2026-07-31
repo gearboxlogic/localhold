@@ -1,4 +1,4 @@
-use super::{command_without_comment, is_environment_assignment, is_rust_tool_token, is_shell_command_prefix, tokens, tool_basename};
+use super::{command_without_comment, is_cargo_tool_token, is_environment_assignment, is_rust_tool_token, is_shell_command_prefix, tokens, tool_basename};
 
 pub(super) fn declares_rust_tool_function(source: &str, case_insensitive_tools: bool) -> bool {
     let commands = source
@@ -36,7 +36,7 @@ fn shell_identifier(source: &str) -> Option<(&str, &str)> {
 }
 
 pub(super) fn failure_masks_quality_command(source: &str, case_insensitive_tools: bool) -> bool {
-    for line in source.lines() {
+    for line in tokens::without_noncommand_shell_data(source).lines() {
         if line_masks_quality_command(line, case_insensitive_tools) {
             return true;
         }
@@ -47,8 +47,7 @@ pub(super) fn failure_masks_quality_command(source: &str, case_insensitive_tools
 fn line_masks_quality_command(line: &str, case_insensitive_tools: bool) -> bool {
     let mut quote = None;
     let mut escaped = false;
-    let mut characters = line.char_indices().peekable();
-    while let Some((index, character)) = characters.next() {
+    for (index, character) in line.char_indices() {
         if escaped {
             escaped = false;
             continue;
@@ -64,7 +63,7 @@ fn line_masks_quality_command(line: &str, case_insensitive_tools: bool) -> bool 
         if quote.is_none() && character == '#' {
             return false;
         }
-        if quote.is_none() && character == '|' && characters.peek().is_some_and(|(_, next)| *next == '|') && is_quality_command(&line[..index], case_insensitive_tools) {
+        if quote.is_none() && character == '|' && is_quality_command(&line[..index], case_insensitive_tools) {
             return true;
         }
     }
@@ -89,10 +88,16 @@ fn is_quality_command(command: &str, case_insensitive_tools: bool) -> bool {
         }) else {
             return false;
         };
-        if is_rust_tool_token(&tokens[executable_index], case_insensitive_tools) {
-            return true;
+        let executable = &tokens[executable_index];
+        if is_rust_tool_token(executable, case_insensitive_tools) {
+            if !is_cargo_tool_token(executable, case_insensitive_tools) {
+                return true;
+            }
+            return tokens[executable_index + 1..]
+                .iter()
+                .any(|token| matches!(token.to_ascii_lowercase().as_str(), "check" | "clippy" | "deny" | "fmt" | "test"));
         }
-        tool_basename(&tokens[executable_index]).eq_ignore_ascii_case("just")
+        tool_basename(executable).eq_ignore_ascii_case("just")
             && tokens[executable_index + 1..].iter().any(|token| {
                 matches!(
                     token.as_str(),
@@ -128,10 +133,15 @@ mod tests {
 
     #[test]
     fn required_quality_command_failures_cannot_be_masked() {
+        assert!(failure_masks_quality_command("just check-quality | true", true));
         assert!(failure_masks_quality_command("just check-quality || true", true));
         assert!(failure_masks_quality_command("just check-quality && echo completed || true", true));
+        assert!(failure_masks_quality_command("cargo clippy --locked | cat", true));
         assert!(failure_masks_quality_command("cargo clippy --locked || true", true));
+        assert!(!failure_masks_quality_command("cargo build | grep warning", true));
         assert!(!failure_masks_quality_command("echo cargo || true", true));
+        assert!(!failure_masks_quality_command("printf '%s\n' 'just check | true'", true));
         assert!(!failure_masks_quality_command("printf '%s\n' 'just check || true'", true));
+        assert!(!failure_masks_quality_command("case \"$name\" in\n    CARGO | RUSTC | RUSTDOC) return ;;\nesac", true));
     }
 }

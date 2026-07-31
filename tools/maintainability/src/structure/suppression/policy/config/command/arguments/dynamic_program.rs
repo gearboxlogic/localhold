@@ -1,10 +1,12 @@
 use std::path::Path;
 
 pub(super) fn is_unanalyzed_path(path: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "jsx" | "lua" | "pl" | "pm" | "php" | "rb" | "tcl" | "ts" | "tsx"))
+    Path::new(path).extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
+        matches!(
+            extension.to_ascii_lowercase().as_str(),
+            "cjs" | "js" | "jsx" | "lua" | "mjs" | "pl" | "pm" | "php" | "rb" | "tcl" | "ts" | "tsx"
+        )
+    })
 }
 
 pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
@@ -26,7 +28,15 @@ fn is_tcl_interpreter(command: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_unanalyzed_interpreter;
+    use super::{is_unanalyzed_interpreter, is_unanalyzed_path};
+
+    #[test]
+    fn javascript_programs_fail_closed() {
+        for path in ["quality/lint.js", "quality/lint.CJS", "quality/lint.mjs"] {
+            assert!(is_unanalyzed_path(path), "{path}");
+        }
+        assert!(!is_unanalyzed_path("quality/lint.json"));
+    }
 
     #[test]
     fn tcl_interpreters_and_versioned_names_fail_closed() {

@@ -179,6 +179,7 @@ fn is_unparsed_launcher(command: &str) -> bool {
             | "numactl"
             | "perf"
             | "prlimit"
+            | "runuser"
             | "sandbox-exec"
             | "script"
             | "setarch"
@@ -188,6 +189,7 @@ fn is_unparsed_launcher(command: &str) -> bool {
             | "start-stop-daemon"
             | "stdbuf"
             | "strace"
+            | "su"
             | "systemd-run"
             | "taskset"
             | "unshare"
@@ -212,6 +214,10 @@ mod tests {
         assert!(matches!(select("/usr/bin/setarch", "setarch", &arguments), Selection::Opaque));
         assert!(matches!(select("sg", "sg", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/sg", "sg", &arguments), Selection::Opaque));
+        assert!(matches!(select("su", "su", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/bin/su", "su", &arguments), Selection::Opaque));
+        assert!(matches!(select("runuser", "runuser", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/sbin/runuser", "runuser", &arguments), Selection::Opaque));
         assert!(matches!(select("start-stop-daemon", "start-stop-daemon", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/sbin/start-stop-daemon", "start-stop-daemon", &arguments), Selection::Opaque));
     }

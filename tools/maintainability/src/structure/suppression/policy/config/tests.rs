@@ -749,6 +749,8 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
         ("trap 'sh quality/lint.txt' EXIT\n", "opaque interpreter program"),
         ("setarch --uname-2.6 sh quality/lint.txt\n", "opaque interpreter program"),
         ("sg \"$(id -gn)\" -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
+        ("su \"$(id -un)\" -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
+        ("runuser \"$(id -un)\" -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
         (
             "start-stop-daemon --start --name localhold --startas /bin/sh --chdir . -- quality/lint.txt\n",
             "opaque interpreter program",
@@ -813,18 +815,23 @@ fn command_policy_governs_opaque_shell_programs_and_selected_makefiles() {
 
 #[test]
 fn javascript_command_surfaces_fail_closed_instead_of_using_shell_parsing() {
-    let workspace = tempfile::tempdir().expect("temporary workspace");
-    fs::create_dir_all(workspace.path().join("tools/ci")).expect("command directory");
-    fs::write(
-        workspace.path().join("tools/ci/check.js"),
-        "execFileSync(\"cargo\", [\n  \"clippy\",\n  \"--\",\n  \"-A\",\n  \"warnings\",\n]);\n",
-    )
-    .expect("JavaScript command surface");
-    git(workspace.path(), &["init", "-q"]);
-    git(workspace.path(), &["add", "."]);
+    for extension in ["js", "cjs", "mjs"] {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        fs::create_dir_all(workspace.path().join("quality")).expect("command directory");
+        let program = format!("quality/check.{extension}");
+        fs::write(workspace.path().join("Justfile"), format!("lint:\n    ./{program}\n")).expect("relative JavaScript invocation");
+        fs::write(
+            workspace.path().join(&program),
+            "execFileSync(\"cargo\", [\n  \"clippy\",\n  \"--\",\n  \"-A\",\n  \"warnings\",\n]);\n",
+        )
+        .expect("JavaScript command surface");
+        git(workspace.path(), &["init", "-q"]);
+        git(workspace.path(), &["add", "."]);
+        git(workspace.path(), &["update-index", "--chmod=+x", &program]);
 
-    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("JavaScript command surface"));
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("JavaScript command surface"), "{extension}: {error:#}");
+    }
 }
 
 #[test]

@@ -3,19 +3,22 @@ use std::path::Path;
 
 use anyhow::Result;
 
+mod analysis;
 mod dynamic;
 mod dynamic_program;
+mod integrity;
 mod package_json;
 mod powershell;
 mod python;
 mod references;
 mod tokens;
+use analysis::Options as AnalysisOptions;
 pub(super) use references::{cargo_manifest_paths_for_surface, execution_inputs_for_surface};
 use tokens::{command_tokens, command_without_comment};
 
 #[cfg(test)]
 pub(in crate::structure::suppression::policy::config) fn weakening_token(source: &str) -> bool {
-    weakening_token_with_case(source, false, true)
+    weakening_token_with_options(source, AnalysisOptions::strict())
 }
 
 pub(in crate::structure::suppression::policy::config) fn weakening_token_for_surface(path: &str, source: &str) -> bool {
@@ -28,11 +31,16 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
     if is_powershell(path) && powershell::has_constructed_rust_arguments(source) {
         return true;
     }
-    let case_insensitive_tools = has_case_insensitive_tool_names(path);
-    let reject_backticks = !is_powershell(path);
+    let mut options = AnalysisOptions::strict();
+    if has_case_insensitive_tool_names(path) {
+        options = options.with_case_insensitive_tools();
+    }
+    if is_powershell(path) {
+        options = options.allow_backticks();
+    }
     if let Some(scripts) = package_json::script_commands(path, source) {
         return scripts.map_or(true, |scripts| {
-            scripts.iter().any(|script| weakening_token_with_case(script, case_insensitive_tools, reject_backticks))
+            scripts.iter().any(|script| weakening_token_with_options(script, options.allow_just_interpolation()))
         });
     }
     let source = normalized_source_for_surface(path, source);
@@ -40,12 +48,12 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
     if is_yaml(path) {
         return embedded_commands
             .iter()
-            .any(|command| weakening_token_with_case(command, case_insensitive_tools, reject_backticks) || powershell::has_constructed_rust_arguments(command));
+            .any(|command| weakening_token_with_options(command, options.allow_just_interpolation()) || powershell::has_constructed_rust_arguments(command));
     }
-    weakening_token_with_case(&source, case_insensitive_tools, reject_backticks)
+    weakening_token_with_options(&source, if is_just(path) { options } else { options.allow_just_interpolation() })
         || embedded_commands
             .iter()
-            .any(|command| weakening_token_with_case(command, case_insensitive_tools, reject_backticks))
+            .any(|command| weakening_token_with_options(command, options.allow_just_interpolation()))
 }
 
 pub(super) fn direct_rust_sources_for_surface(path: &str, source: &str) -> (BTreeSet<String>, bool) {
@@ -159,23 +167,29 @@ fn normalized_source_for_surface(path: &str, source: &str) -> String {
     }
 }
 
-fn weakening_token_with_case(source: &str, case_insensitive_tools: bool, reject_backticks: bool) -> bool {
-    if dynamic::has_rust_tool_assignment_flow(source, case_insensitive_tools) {
+fn weakening_token_with_options(source: &str, options: AnalysisOptions) -> bool {
+    if dynamic::has_rust_tool_assignment_flow(source, options.case_insensitive_tools()) {
         return true;
     }
     let logical = join_command_continuations(source);
+    if options.inspects_integrity()
+        && (integrity::declares_rust_tool_function(&logical, options.case_insensitive_tools())
+            || integrity::failure_masks_quality_command(&logical, options.case_insensitive_tools()))
+    {
+        return true;
+    }
     if logical
         .split(['\n', ';', '&', '|'])
         .map(command_without_comment)
         .map(command_tokens)
-        .any(|tokens| argument_feeder_invokes_rust_tool(&tokens, case_insensitive_tools))
+        .any(|tokens| argument_feeder_invokes_rust_tool(&tokens, options.case_insensitive_tools()))
     {
         return true;
     }
     logical
         .split(['\n', ';', '&', '|'])
         .map(command_without_comment)
-        .any(|command| weakening_rust_command(command, case_insensitive_tools, reject_backticks))
+        .any(|command| weakening_rust_command(command, options))
 }
 
 fn join_command_continuations(source: &str) -> String {
@@ -188,37 +202,37 @@ fn join_command_continuations(source: &str) -> String {
         .replace("^\n", "")
 }
 
-fn weakening_rust_command(command: &str, case_insensitive_tools: bool, reject_backticks: bool) -> bool {
+fn weakening_rust_command(command: &str, options: AnalysisOptions) -> bool {
     if is_non_executing_assignment(command) {
         return false;
     }
     let tokens = command_tokens(command);
     if tokens
         .iter()
-        .any(|token| token.chars().any(char::is_whitespace) && weakening_token_with_case(token, case_insensitive_tools, reject_backticks))
+        .any(|token| token.chars().any(char::is_whitespace) && weakening_token_with_options(token, options.nested()))
     {
         return true;
     }
     let lint_option = tokens.iter().any(|token| is_lint_option(token));
     if !tokens
         .iter()
-        .any(|token| is_rust_tool_token(token, case_insensitive_tools) && !is_variable_assignment_target(command, token))
+        .any(|token| is_rust_tool_token(token, options.case_insensitive_tools()) && !is_variable_assignment_target(command, token))
     {
-        return has_dynamic_command_name(command, &tokens, reject_backticks) && (lint_option || tokens.iter().any(|token| is_rust_subcommand(token)));
+        return has_dynamic_command_name(command, &tokens, options.rejects_backticks()) && (lint_option || tokens.iter().any(|token| is_rust_subcommand(token)));
     }
-    forwards_dynamic_arguments(&tokens, case_insensitive_tools, reject_backticks)
+    forwards_dynamic_arguments(&tokens, options)
         || declares_rust_tool_alias(&tokens)
-        || cargo_changes_directory_before_compiler_arguments(&tokens, case_insensitive_tools)
-        || cargo_manifest_path_is_opaque(&tokens, case_insensitive_tools)
-        || rust_response_file(&tokens, case_insensitive_tools)
-        || has_pathname_expansion_arguments(&tokens, case_insensitive_tools)
-        || has_brace_expansion_arguments(&tokens, case_insensitive_tools)
+        || cargo_changes_directory_before_compiler_arguments(&tokens, options.case_insensitive_tools())
+        || cargo_manifest_path_is_opaque(&tokens, options.case_insensitive_tools())
+        || rust_response_file(&tokens, options.case_insensitive_tools())
+        || has_pathname_expansion_arguments(&tokens, options.case_insensitive_tools())
+        || has_brace_expansion_arguments(&tokens, options.case_insensitive_tools())
         || injects_crate_attribute(&tokens)
         || lint_option
         || tokens
             .iter()
             .enumerate()
-            .any(|(index, token)| token.starts_with("--config") && !is_cargo_deny_config_argument(&tokens, index, case_insensitive_tools))
+            .any(|(index, token)| token.starts_with("--config") && !is_cargo_deny_config_argument(&tokens, index, options.case_insensitive_tools()))
 }
 
 fn is_non_executing_assignment(command: &str) -> bool {
@@ -309,19 +323,40 @@ fn is_lint_option(token: &str) -> bool {
     token == "-A" || token.starts_with("-A") && token.len() > 2 || token == "-W" || token.starts_with("-W") && token.len() > 2 || is_long_lint_option(token)
 }
 
-fn forwards_dynamic_arguments(tokens: &[String], case_insensitive_tools: bool, reject_backticks: bool) -> bool {
-    let Some(tool_index) = tokens.iter().position(|token| is_rust_tool_token(token, case_insensitive_tools)) else {
+fn forwards_dynamic_arguments(tokens: &[String], options: AnalysisOptions) -> bool {
+    let Some(tool_index) = tokens.iter().position(|token| is_rust_tool_token(token, options.case_insensitive_tools())) else {
         return false;
     };
     tokens[tool_index..].iter().enumerate().any(|(relative_index, token)| {
         let index = tool_index + relative_index;
         token.contains('$')
-            || reject_backticks && token.contains('`')
+            || options.rejects_backticks() && token.contains('`')
+            || options.rejects_just_interpolation()
+                && (token.contains("{{") || token.contains("}}"))
+                && template_interpolation_reaches_compiler(tokens, tool_index, index, options.case_insensitive_tools())
             || contains_cmd_delayed_expansion(token)
-            || token.starts_with('@') && opaque_splat_reaches_compiler(tokens, tool_index, index, case_insensitive_tools)
+            || token.starts_with('@') && opaque_splat_reaches_compiler(tokens, tool_index, index, options.case_insensitive_tools())
             || token == "%*"
             || token.split_once('%').is_some_and(|(_, suffix)| !suffix.is_empty() && suffix.contains('%'))
     })
+}
+
+fn template_interpolation_reaches_compiler(tokens: &[String], tool_index: usize, interpolation_index: usize, case_insensitive_tools: bool) -> bool {
+    if interpolation_index <= tool_index {
+        return true;
+    }
+    if is_direct_compiler_token(&tokens[tool_index], case_insensitive_tools) {
+        return true;
+    }
+    if !is_cargo_tool_token(&tokens[tool_index], case_insensitive_tools) {
+        return false;
+    }
+    let preceding = &tokens[tool_index.saturating_add(1)..interpolation_index];
+    preceding
+        .iter()
+        .take_while(|argument| argument.as_str() != "--")
+        .any(|argument| matches!(argument.as_str(), "clippy" | "rustc" | "rustdoc"))
+        || preceding.iter().all(|argument| argument.starts_with('-'))
 }
 
 fn contains_cmd_delayed_expansion(token: &str) -> bool {
@@ -474,6 +509,16 @@ fn is_python(path: &str) -> bool {
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
+}
+
+fn is_just(path: &str) -> bool {
+    let path = Path::new(path);
+    let basename = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    matches!(basename.to_ascii_lowercase().as_str(), "justfile" | ".justfile")
+        || path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("just"))
 }
 
 fn is_powershell(path: &str) -> bool {

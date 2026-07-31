@@ -121,7 +121,7 @@ fn record_shell_source_inputs(source: &str, direct_program_paths: bool, inputs: 
     for tokens in tokens::source_command_tokens(source) {
         for nested_tokens in tokens
             .iter()
-            .filter(|token| token.chars().any(char::is_whitespace) && (token.contains("$(") || token.contains('`')))
+            .filter(|token| token.contains("$(") || token.contains('`'))
             .flat_map(|nested| tokens::source_command_tokens(nested))
         {
             record_execution_inputs_from_tokens(&nested_tokens, direct_program_paths, inputs, unresolved);
@@ -171,6 +171,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
     let selected = match command.as_str() {
         "trap" if !command_word.contains(['/', '\\']) => return (Vec::new(), trap::action_is_opaque(arguments, direct_program_paths)),
         "alias" | "coproc" | "eval" | "iex" | "invoke-expression" | "parallel" | "parallel.exe" | "trap" | "xargs" | "xargs.exe" => SelectedInput::Opaque,
+        "enable" if bash_enable_loads_builtin(arguments) => SelectedInput::Opaque,
         "mapfile" | "readarray" if mapfile_callback_is_opaque(arguments) => SelectedInput::Opaque,
         "bash" | "bash.exe" | "dash" | "dash.exe" | "fish" | "fish.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe" => shell_input(arguments),
         "python" | "python.exe" | "python3" | "python3.exe" => python_input(arguments),
@@ -205,6 +206,10 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         SelectedInput::Literal(candidate) => (vec![candidate], false),
         SelectedInput::Opaque => (Vec::new(), true),
     }
+}
+
+fn bash_enable_loads_builtin(arguments: &[String]) -> bool {
+    arguments.iter().any(|argument| argument == "-f" || argument.starts_with("-f") && argument.len() > 2)
 }
 
 fn is_execution_input_prefix(word: &str) -> bool {
@@ -581,6 +586,12 @@ mod tests {
         assert_eq!(inputs("make MAKEFILES=quality/lint.rules"), (Vec::new(), true));
         assert_eq!(inputs("MAKEFILES=quality/lint.rules make"), (Vec::new(), true));
         assert_eq!(inputs("command=$(cat quality/lint.txt); $command"), (Vec::new(), true));
+    }
+
+    #[test]
+    fn compact_substitutions_and_dynamic_builtins_are_opaque() {
+        assert_eq!(inputs("printf '%s' \"$(/tmp/lint)\""), (Vec::new(), true));
+        assert_eq!(inputs("enable -f /tmp/helper.so helper"), (Vec::new(), true));
     }
 
     #[test]

@@ -699,6 +699,25 @@ fn command_policy_scans_awk_program_files() {
 }
 
 #[test]
+fn just_templates_cannot_construct_compiler_invocations() {
+    assert!(weakening_token_for_surface(
+        "Justfile",
+        "lint_level := \"A\"\ncheck:\n    cargo clippy -- -{{ lint_level }} warnings\n"
+    ));
+    assert!(weakening_token_for_surface(
+        "Justfile",
+        "compiler := \"clippy\"\nlint_level := \"A\"\ncheck:\n    cargo {{ compiler }} -- -{{ lint_level }} warnings\n"
+    ));
+    assert!(weakening_token_for_surface("Justfile", "check:\n    {{ cargo }} clippy -- -D warnings\n"));
+    assert!(weakening_token_for_surface("Justfile", "check:\n    {{cargo}} clippy -- -D warnings\n"));
+    assert!(!weakening_token_for_surface("Justfile", "check:\n    cargo nextest run {{ ARGS }}\n"));
+    assert!(!weakening_token_for_surface(
+        "mise.toml",
+        "CARGO_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME) }}/localhold/cargo\"\n"
+    ));
+}
+
+#[test]
 fn command_policy_rejects_find_and_xargs_command_indirection() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");

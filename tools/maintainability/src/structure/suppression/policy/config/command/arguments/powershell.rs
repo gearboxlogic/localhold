@@ -61,7 +61,58 @@ pub(super) fn normalize_escapes(source: &str) -> String {
 
 pub(super) fn has_constructed_rust_arguments(source: &str) -> bool {
     let source = normalize_escapes(source);
-    source.split(['\n', ';', '|']).any(|command| has_rust_tool(command) && has_argument_expression(command))
+    has_opaque_process_api(&source) || source.split(['\n', ';', '|']).any(|command| has_rust_tool(command) && has_argument_expression(command))
+}
+
+fn has_opaque_process_api(source: &str) -> bool {
+    let mut characters = source.chars().peekable();
+    let mut state = State::Code;
+    let mut line_prefix_is_whitespace = true;
+    let mut word = String::new();
+    while let Some(character) = characters.next() {
+        if matches!(state, State::Code) && (character.is_alphanumeric() || matches!(character, '-' | '_')) {
+            word.push(character.to_ascii_lowercase());
+            update_line_prefix(character, &mut line_prefix_is_whitespace);
+            continue;
+        }
+        if matches!(state, State::Code) && process_api_word(&word) {
+            return true;
+        }
+        word.clear();
+        match state {
+            State::Code => match character {
+                '#' => state = State::LineComment,
+                '<' if characters.peek() == Some(&'#') => state = State::BlockComment,
+                '\'' => state = State::SingleQuoted,
+                '"' => state = State::DoubleQuoted,
+                '@' => state = here_string_quote(&mut characters).map_or(State::Code, here_string_state),
+                _ => {}
+            },
+            State::SingleQuoted if character == '\'' => {
+                if characters.peek() == Some(&'\'') {
+                    characters.next();
+                    continue;
+                }
+                state = State::Code;
+            }
+            State::DoubleQuoted if character == '"' => state = State::Code,
+            State::SingleHereString if line_prefix_is_whitespace && character == '\'' && characters.peek() == Some(&'@') => {
+                state = State::Code;
+            }
+            State::DoubleHereString if line_prefix_is_whitespace && character == '"' && characters.peek() == Some(&'@') => {
+                state = State::Code;
+            }
+            State::LineComment if character == '\n' => state = State::Code,
+            State::BlockComment if character == '#' && characters.peek() == Some(&'>') => state = State::Code,
+            _ => {}
+        }
+        update_line_prefix(character, &mut line_prefix_is_whitespace);
+    }
+    matches!(state, State::Code) && process_api_word(&word)
+}
+
+fn process_api_word(word: &str) -> bool {
+    matches!(word, "start-process" | "saps")
 }
 
 fn has_rust_tool(command: &str) -> bool {
@@ -169,8 +220,14 @@ mod tests {
     fn constructed_rust_arguments_fail_closed() {
         assert!(has_constructed_rust_arguments("cargo clippy -- ('-' + 'A') warnings"));
         assert!(has_constructed_rust_arguments("cargo clippy -- \"$(Get-LintLevel)\" warnings"));
+        assert!(has_constructed_rust_arguments(
+            "Start-Process -FilePath ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('Y2FyZ28='))) -ArgumentList 'clippy','--','-A','warnings' -Wait"
+        ));
         assert!(!has_constructed_rust_arguments("cargo clippy -- '-A' warnings"));
         assert!(!has_constructed_rust_arguments("Write-Output '(cargo clippy -- -A warnings)'"));
+        assert!(!has_constructed_rust_arguments("Write-Output 'Start-Process cargo'"));
+        assert!(!has_constructed_rust_arguments("# Start-Process cargo"));
+        assert!(!has_constructed_rust_arguments("@'\nStart-Process cargo\n'@"));
         assert!(!has_constructed_rust_arguments("$actual = (Get-FileHash -Algorithm SHA256 $path).Hash"));
     }
 }

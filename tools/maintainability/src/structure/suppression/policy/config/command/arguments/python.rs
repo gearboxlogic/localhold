@@ -15,6 +15,9 @@ pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
     if references_command_capable_ffi(&normalized) {
         return true;
     }
+    if imports_command_capable_api(&normalized) {
+        return true;
+    }
     if has_dynamic_process_resolution(&normalized) && references_rust_tool(&normalized) {
         return true;
     }
@@ -28,6 +31,36 @@ pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
         has_adjacent_string_literals_in(line) && (references_process_api(line) || references_rust_tool(line))
             || references_process_api(line) && AdjacentLiteralScanner::new(line).has_decoded_escape()
     })
+}
+
+fn imports_command_capable_api(source: &str) -> bool {
+    source.lines().any(|line| {
+        let compact = line.chars().filter(|character| !character.is_whitespace()).collect::<String>().to_ascii_lowercase();
+        if compact.starts_with("importosas") || compact.starts_with("importsubprocessas") {
+            return true;
+        }
+        let Some((module, imports)) = compact.strip_prefix("from").and_then(|line| line.split_once("import")) else {
+            return false;
+        };
+        let imports = imports.trim_matches(['(', ')']);
+        imports.split(',').any(|binding| {
+            let binding = binding.trim_matches(['(', ')']);
+            let name = binding.split_once("as").map_or(binding, |(name, _)| name);
+            match module {
+                "os" => is_os_process_api(name),
+                "subprocess" => is_subprocess_process_api(name),
+                _ => false,
+            }
+        })
+    })
+}
+
+fn is_os_process_api(name: &str) -> bool {
+    matches!(name, "system" | "popen") || name.starts_with("exec") || name.starts_with("spawn")
+}
+
+fn is_subprocess_process_api(name: &str) -> bool {
+    matches!(name, "call" | "check_call" | "check_output" | "getoutput" | "getstatusoutput" | "popen" | "run")
 }
 
 fn references_command_capable_ffi(source: &str) -> bool {
@@ -319,6 +352,14 @@ mod tests {
 execvpe("cargo", ["cargo", "clippy", "--", "-" + "A", "warnings"], environment)"#
         ));
         assert!(has_opaque_process_arguments(
+            r#"from os import system as run
+run(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
+        ));
+        assert!(has_opaque_process_arguments(
+            r#"from os import system
+system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
+        ));
+        assert!(has_opaque_process_arguments(
             r#"runner = __import__("sub" + "process")
 runner.run(["cargo", "clippy", "--", chr(45) + "A", "warnings"])"#
         ));
@@ -346,6 +387,7 @@ FFI().dlopen(None).system(bytes.fromhex("636172676f20636c69707079202d2d202d41207
         ));
         assert!(!has_opaque_process_arguments(r#"subprocess.run(["git", "show", f"{reference}:{source}"], check=False)"#));
         assert!(!has_opaque_process_arguments(r#"subprocess.run([sys.executable, "script/check.py", value], check=True)"#));
+        assert!(!has_opaque_process_arguments("from os import path\nprint(path.basename('/tmp/report'))"));
         assert!(!has_opaque_process_arguments("head = (f'<svg viewBox=\"0 0 64 64\" ' f'role=\"img\">')\n"));
         assert!(!has_opaque_process_arguments(
             "PATTERN = (r'^v[0-9]+' r'(?:-dev)?$')\nimport subprocess\nsubprocess.run(['git', 'status'])\n"

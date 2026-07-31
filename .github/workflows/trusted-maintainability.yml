@@ -1,0 +1,101 @@
+name: Trusted Maintainability
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  trusted-maintainability:
+    name: Trusted Maintainability Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+    steps:
+      - name: Install reviewed Rust toolchain
+        env:
+          RUSTUP_DIST_SERVER: https://static.rust-lang.org
+          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup
+          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+        run: rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
+
+      - name: Check out protected gate from main
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.workflow_sha }}
+          path: .trusted-gate
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out proposed changes
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: .candidate
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Enforce protected maintainability policy
+        working-directory: .candidate
+        env:
+          BASE_REVISION_INPUT: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_ref }}
+          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup
+          RUSTUP_TOOLCHAIN: 1.97.0
+        run: |
+          workspace_root=$(/usr/bin/realpath -- "$GITHUB_WORKSPACE")
+          trusted_root=$(/usr/bin/realpath -- ../.trusted-gate)
+          candidate_root=$(/usr/bin/realpath -- .)
+          if [[ "$trusted_root" != "$workspace_root/.trusted-gate" || "$candidate_root" != "$workspace_root/.candidate" ]]; then
+            printf 'trusted maintainability checkout paths are not canonical\n' >&2
+            exit 1
+          fi
+
+          for relative_path in \
+            tools/maintainability \
+            tools/dependency-unsafe \
+            script/check-maintainability-bootstrap.sh \
+            script/tests/test_maintainability_bootstrap.sh
+          do
+            source_path="$trusted_root/$relative_path"
+            destination_path="$candidate_root/$relative_path"
+            destination_parent=$(/usr/bin/dirname -- "$destination_path")
+            if [[ (! -f "$source_path" && ! -d "$source_path") || -L "$source_path" || ! -d "$destination_parent" || -L "$destination_parent" ]]; then
+              printf 'protected maintainability gate path is missing or unsafe: %s\n' "$relative_path" >&2
+              exit 1
+            fi
+            /usr/bin/rm -rf -- "$destination_path"
+            /usr/bin/cp -a -- "$source_path" "$destination_path"
+          done
+
+          base_revision=$BASE_REVISION_INPUT
+          if [[ "$base_revision" == refs/heads/* ]]; then
+            remote_ref="refs/remotes/origin/${base_revision#refs/heads/}"
+            base_revision=$(/usr/bin/git rev-parse --verify "${remote_ref}^{commit}")
+          fi
+          if [[ ! "$base_revision" =~ ^[[:xdigit:]]{40}$ ]]; then
+            printf 'maintainability base revision is missing or malformed\n' >&2
+            exit 1
+          fi
+          export LOCALHOLD_MAINTAINABILITY_BASE_REV=${base_revision,,}
+
+          /usr/bin/bash script/tests/test_maintainability_bootstrap.sh
+          run_reviewed() {
+            /usr/bin/bash script/check-maintainability-bootstrap.sh --root "$candidate_root" -- "$@"
+          }
+
+          run_reviewed cargo fetch --manifest-path tools/maintainability/Cargo.toml --locked
+          run_reviewed cargo fmt --manifest-path tools/maintainability/Cargo.toml -- --check
+          run_reviewed cargo test --manifest-path tools/maintainability/Cargo.toml --locked
+          run_reviewed cargo clippy --manifest-path tools/maintainability/Cargo.toml --all-targets --locked -- -D warnings
+          run_reviewed cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- check
+          run_reviewed cargo fetch --locked
+          run_reviewed cargo fetch --manifest-path tools/dependency-unsafe/Cargo.toml --locked
+          run_reviewed cargo fmt --manifest-path tools/dependency-unsafe/Cargo.toml -- --check
+          run_reviewed cargo test --manifest-path tools/dependency-unsafe/Cargo.toml --locked
+          run_reviewed cargo clippy --manifest-path tools/dependency-unsafe/Cargo.toml --all-targets --locked -- -D warnings
+          run_reviewed cargo run --manifest-path tools/dependency-unsafe/Cargo.toml --locked -- check

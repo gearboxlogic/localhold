@@ -18,8 +18,8 @@ pub(super) use command::reject_checked_in_weakening;
 #[cfg(test)]
 use command::{
     BOOTSTRAP_ENVIRONMENT_LINES, BOOTSTRAP_TEST_ENVIRONMENT_LINES, CI_TRUST_ENVIRONMENT_LINES, GATE_RUNNER_COMMAND_LINES, GATE_RUNNER_ENVIRONMENT_LINES,
-    GPU_RELEASE_REVISION_ENVIRONMENT_LINES, MISE_ENVIRONMENT_LINES, RUNNER_COMMAND_LINES, RUNNER_ENVIRONMENT_LINES, has_sourced_file_indirection, is_execution_surface,
-    scrubber_environment_references_are_exact, weakening_environment, weakening_environment_for_surface, weakening_token, weakening_token_for_surface,
+    GPU_RELEASE_REVISION_ENVIRONMENT_LINES, MISE_ENVIRONMENT_LINES, RUNNER_COMMAND_LINES, RUNNER_ENVIRONMENT_LINES, TRUSTED_GATE_ENVIRONMENT_LINES, has_sourced_file_indirection,
+    is_execution_surface, scrubber_environment_references_are_exact, weakening_environment, weakening_environment_for_surface, weakening_token, weakening_token_for_surface,
 };
 
 pub(super) fn validate_cargo_allowances(entries: &[CargoAllowance]) -> Result<()> {

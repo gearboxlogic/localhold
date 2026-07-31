@@ -386,6 +386,10 @@ fn weakening_environment_channels_are_detected() {
         "rustflags='-A warnings'\nexport rustflags\ncargo clippy"
     ));
     assert!(!weakening_environment("rustc --version"));
+}
+
+#[test]
+fn reviewed_environment_scrubbers_are_exact() {
     let scrubber = format!("{}\n", BOOTSTRAP_ENVIRONMENT_LINES.join("\n"));
     assert!(scrubber_environment_references_are_exact("script/check-maintainability-bootstrap.sh", &scrubber));
     assert!(scrubber_environment_references_are_exact(
@@ -417,6 +421,10 @@ fn weakening_environment_channels_are_detected() {
         ".github/workflows/ci.yml",
         &CI_TRUST_ENVIRONMENT_LINES.join("\n"),
     ));
+    assert!(scrubber_environment_references_are_exact(
+        ".github/workflows/trusted-maintainability.yml",
+        &TRUSTED_GATE_ENVIRONMENT_LINES.join("\n"),
+    ));
     assert!(!scrubber_environment_references_are_exact(
         ".github/workflows/ci.yml",
         &CI_TRUST_ENVIRONMENT_LINES[..1].join("\n"),
@@ -429,9 +437,24 @@ fn weakening_environment_channels_are_detected() {
 }
 
 #[test]
+fn trusted_gate_environment_allowance_is_closed() {
+    let reviewed = TRUSTED_GATE_ENVIRONMENT_LINES.join("\n");
+    for changed in [
+        reviewed.replacen("RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup", "RUSTUP_HOME: quality/rustup", 1),
+        reviewed.replacen("RUSTUP_TOOLCHAIN: 1.97.0", "RUSTUP_TOOLCHAIN: fake", 1),
+        format!("{reviewed}\n          RUSTUP_HOME: quality/rustup"),
+    ] {
+        assert!(!scrubber_environment_references_are_exact(".github/workflows/trusted-maintainability.yml", &changed,));
+    }
+}
+
+#[test]
 fn rustup_mirror_overrides_are_governed_environment_channels() {
     assert!(weakening_environment("RUSTUP_DIST_SERVER=https://example.invalid"));
     assert!(weakening_environment("RUSTUP_UPDATE_ROOT=https://example.invalid"));
+    assert!(weakening_environment(
+        "RUSTUP_HOME=quality/rustup RUSTUP_TOOLCHAIN=fake cargo clippy --locked -- -D warnings"
+    ));
     assert!(weakening_environment_for_surface(
         ".github/workflows/ci.yml",
         "jobs:\n  dependency-unsafe-linux:\n    env:\n      RUSTUP_DIST_SERVER: https://example.invalid\n"

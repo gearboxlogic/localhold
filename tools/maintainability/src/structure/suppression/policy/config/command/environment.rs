@@ -29,6 +29,8 @@ pub(super) fn is_weakening_environment_name(name: &str) -> bool {
             | "RUSTC_WRAPPER"
             | "RUSTC_WORKSPACE_WRAPPER"
             | "RUSTUP_DIST_SERVER"
+            | "RUSTUP_HOME"
+            | "RUSTUP_TOOLCHAIN"
             | "RUSTUP_UPDATE_ROOT"
             | "TAR_OPTIONS"
             | "CARGO_HOME"
@@ -121,5 +123,13 @@ mod tests {
     fn inherited_shell_options_are_weakening() {
         assert!(is_weakening_environment_name("SHELLOPTS"));
         assert!(is_weakening_environment_name("shellopts"));
+    }
+
+    #[test]
+    fn rustup_toolchain_selectors_are_weakening() {
+        for name in ["RUSTUP_HOME", "RUSTUP_TOOLCHAIN"] {
+            assert!(is_weakening_environment_name(name), "{name}");
+            assert!(is_weakening_environment_name(&name.to_ascii_lowercase()), "{name}");
+        }
     }
 }

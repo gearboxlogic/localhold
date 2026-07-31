@@ -48,7 +48,7 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
             continue;
         }
         block_indentation = None;
-        if contains_working_directory_key(line) {
+        if contains_working_directory_key(line) && !is_reviewed_working_directory(path, line) {
             bail!("checked-in GitHub YAML {path:?} uses an unsupported working-directory override");
         }
         if starts_unsupported_key_property(line) {
@@ -63,7 +63,7 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
         let Some((key, value)) = yaml_key_value(line) else {
             continue;
         };
-        if key == "working-directory" {
+        if key == "working-directory" && !is_reviewed_working_directory(path, line) {
             bail!("checked-in GitHub YAML {path:?} uses an unsupported working-directory override");
         }
         let value = value.trim_start();
@@ -131,6 +131,10 @@ fn contains_github_expression(value: &str) -> bool {
 fn contains_working_directory_key(line: &str) -> bool {
     let content = line.split_once(" #").map_or(line, |(content, _)| content);
     content.contains("working-directory:") || content.contains("working-directory':") || content.contains("working-directory\":")
+}
+
+fn is_reviewed_working_directory(path: &str, line: &str) -> bool {
+    path == ".github/workflows/trusted-maintainability.yml" && line == "        working-directory: .candidate"
 }
 
 fn starts_unsupported_key_property(line: &str) -> bool {
@@ -409,4 +413,29 @@ fn is_github_yaml(path: &str) -> bool {
                 path.file_name().and_then(|name| name.to_str()).map(str::to_ascii_lowercase).as_deref(),
                 Some("action.yml" | "action.yaml")
             ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_execution_metadata;
+
+    #[test]
+    fn only_the_protected_gate_may_select_the_candidate_checkout() {
+        let reviewed = "steps:\n      - name: Gate\n        working-directory: .candidate\n        run: cargo check\n";
+        validate_execution_metadata(".github/workflows/trusted-maintainability.yml", reviewed).expect("reviewed candidate checkout");
+
+        for (path, source) in [
+            (".github/workflows/ci.yml", reviewed),
+            (
+                ".github/workflows/trusted-maintainability.yml",
+                "steps:\n      - name: Gate\n        working-directory: .other\n        run: cargo check\n",
+            ),
+            (
+                ".github/workflows/trusted-maintainability.yml",
+                "steps:\n      - name: Gate\n        'working-directory': .candidate\n        run: cargo check\n",
+            ),
+        ] {
+            assert!(validate_execution_metadata(path, source).is_err(), "{path}: {source}");
+        }
+    }
 }

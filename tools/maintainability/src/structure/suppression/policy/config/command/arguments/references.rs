@@ -6,6 +6,7 @@ use super::{
     normalized_source_for_surface, package_json, tokens, tool_basename,
 };
 
+mod compiler;
 mod git;
 mod path;
 mod sed;
@@ -184,6 +185,9 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         wrapper::Selection::NoCommand => return (Vec::new(), false),
         wrapper::Selection::Nested(command) => return execution_input_candidates(command, direct_program_paths),
         wrapper::Selection::Opaque => return (Vec::new(), true),
+    }
+    if compiler::dispatch_is_opaque(&command, arguments) {
+        return (Vec::new(), true);
     }
     let selected = match command.as_str() {
         "trap" if !command_word.contains(['/', '\\']) => return (Vec::new(), trap::action_is_opaque(arguments, direct_program_paths)),
@@ -576,6 +580,8 @@ mod tests {
             "dpkg --pre-invoke='sh quality/lint.txt' --unpack quality/missing.deb",
             "wget --use-askpass=/tmp/askpass https://example.invalid/archive",
             "run-parts quality/hooks",
+            "gcc -wrapper sh,quality/lint.txt -c quality/input.c",
+            "clang -fplugin=quality/lint.so -c quality/input.c",
         ] {
             assert_eq!(inputs(command), (Vec::new(), true), "{command}");
         }

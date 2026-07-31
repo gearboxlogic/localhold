@@ -55,9 +55,12 @@ pub(super) const GATE_RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "GIT_CONFIG_GLOBAL=/dev/null",
     "readonly GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL",
     "export GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL",
+    "rustup_home=${RUSTUP_HOME:-${HOME:?maintainability gate requires RUSTUP_HOME or HOME}/.rustup}",
+    "    rustup_home=$(\"$cygpath_command\" -u \"$rustup_home\")",
     "rustup_executable=${LOCALHOLD_MAINTAINABILITY_RUSTUP:-}",
     "LOCALHOLD_MAINTAINABILITY_RUSTUP=$rustup_executable",
     "export LOCALHOLD_MAINTAINABILITY_RUSTUP",
+    "resolved_cargo=$(RUSTUP_HOME=$rustup_environment \"$rustup_executable\" which --toolchain 1.97.0 cargo) || {",
     "trusted_path=\"/usr/bin:/bin\"",
     "    trusted_path=\"$trusted_linker_bin:/usr/bin:/mingw64/bin:/c/Windows/System32\"",
     "compatibility_bin=\"$target_directory/b\"",
@@ -148,12 +151,20 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "if run_check --test-environment >/dev/null 2>&1; then",
     "unset -f inherited_cargo_function",
     "trusted_rustup_command=${LOCALHOLD_MAINTAINABILITY_RUSTUP:-rustup}",
+    "trusted_rustup_environment=${RUSTUP_HOME:-${HOME:?}/.rustup}",
+    "trusted_cargo=$(RUSTUP_HOME=$trusted_rustup_environment \"$trusted_rustup_command\" which --toolchain 1.97.0 cargo)",
+    "if RUSTUP_HOME=$fake_rustup_home run_check --test-environment >/dev/null 2>&1; then",
+    "RUSTUP_HOME=$fake_rustup_environment run_check --test-environment >/dev/null",
+    "if RUSTUP_HOME=$fake_rustup_environment run_check --test-environment >/dev/null 2>&1; then",
     "BASH_ENV=$bash_env GITHUB_PATH=untrusted LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CARGO_HOME=\"$fixture/untrusted-cargo-home\" CARGO_TARGET_DIR=\"$fixture/untrusted-target\" CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \\",
     "    RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \\",
     "    CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \\",
     "    run_check --test-environment >/dev/null",
 ];
-pub(super) const MISE_ENVIRONMENT_LINES: &[&str] = &["CARGO_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/cargo\""];
+pub(super) const MISE_ENVIRONMENT_LINES: &[&str] = &[
+    "CARGO_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/cargo\"",
+    "RUSTUP_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/rustup\"",
+];
 pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "        shell: /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
     "        shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:ENV = $null; $env:SHELLOPTS = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\\Program Files\\Git\\bin\\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE\"'",
@@ -185,6 +196,15 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
     "          if [[ \"$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256\" != \"$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256\" ]]; then",
     "          if [[ \"$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256\" != \"$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256\" ]]; then",
+];
+pub(super) const TRUSTED_GATE_ENVIRONMENT_LINES: &[&str] = &[
+    "        shell: /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
+    "          RUSTUP_DIST_SERVER: https://static.rust-lang.org",
+    "          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup",
+    "          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup",
+    "          RUSTUP_TOOLCHAIN: 1.97.0",
+    "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
+    "          export LOCALHOLD_MAINTAINABILITY_BASE_REV=${base_revision,,}",
 ];
 pub(super) const GPU_RELEASE_REVISION_ENVIRONMENT_LINES: &[&str] = &[
     "          test \"$(git rev-parse HEAD)\" = \"$GITHUB_SHA\"",
@@ -353,6 +373,7 @@ pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str
         "script/tests/test_maintainability_bootstrap.sh" => BOOTSTRAP_TEST_ENVIRONMENT_LINES,
         "mise.toml" => MISE_ENVIRONMENT_LINES,
         ".github/workflows/ci.yml" => CI_TRUST_ENVIRONMENT_LINES,
+        ".github/workflows/trusted-maintainability.yml" => TRUSTED_GATE_ENVIRONMENT_LINES,
         ".github/workflows/gpu-release-gate.yml" => GPU_RELEASE_REVISION_ENVIRONMENT_LINES,
         _ => return false,
     };

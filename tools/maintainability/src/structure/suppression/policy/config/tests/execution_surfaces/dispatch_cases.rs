@@ -70,5 +70,6 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("npx -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
     ("java quality/Lint.java\n", "opaque interpreter program"),
     ("just --justfile quality/lint.data check-quality\n", "opaque interpreter program"),
+    ("gcc -wrapper sh,quality/lint.txt -c quality/input.c\n", "opaque interpreter program"),
     ("$'\\x73\\x68' quality/lint.txt\n", "opaque interpreter program"),
 ];

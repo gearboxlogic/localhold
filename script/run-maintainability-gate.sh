@@ -15,10 +15,12 @@ readonly git_command=${LOCALHOLD_MAINTAINABILITY_GIT:?maintainability bootstrap 
 readonly sha256_command=/usr/bin/sha256sum
 readonly uname_command=/usr/bin/uname
 readonly bash_command=/usr/bin/bash
+readonly cp_command=/usr/bin/cp
+readonly ln_command=/usr/bin/ln
 readonly mkdir_command=/usr/bin/mkdir
 readonly mktemp_command=/usr/bin/mktemp
 readonly rm_command=/usr/bin/rm
-for system_command in "$sha256_command" "$uname_command" "$bash_command" "$mkdir_command" "$mktemp_command" "$rm_command"; do
+for system_command in "$sha256_command" "$uname_command" "$bash_command" "$cp_command" "$ln_command" "$mkdir_command" "$mktemp_command" "$rm_command"; do
     if [[ ! -f $system_command || ! -x $system_command ]]; then
         printf 'maintainability gate requires an OS-owned executable: %s\n' "$system_command" >&2
         exit 1
@@ -183,7 +185,7 @@ cargo_executable=$(authenticated_tool "$toolchain_bin/cargo$tool_extension" "$ex
 rustc_executable=$(authenticated_tool "$toolchain_bin/rustc$tool_extension" "$expected_rustc_sha256")
 rustdoc_executable=$(authenticated_tool "$toolchain_bin/rustdoc$tool_extension" "$expected_rustdoc_sha256")
 cargo_clippy_executable=$(authenticated_tool "$toolchain_bin/cargo-clippy$tool_extension" "$expected_cargo_clippy_sha256")
-authenticated_tool "$toolchain_bin/clippy-driver$tool_extension" "$expected_clippy_driver_sha256" >/dev/null
+clippy_driver_executable=$(authenticated_tool "$toolchain_bin/clippy-driver$tool_extension" "$expected_clippy_driver_sha256")
 cargo_fmt_executable=$(authenticated_tool "$toolchain_bin/cargo-fmt$tool_extension" "$expected_cargo_fmt_sha256")
 rustfmt_executable=$(authenticated_tool "$toolchain_bin/rustfmt$tool_extension" "$expected_rustfmt_sha256")
 authenticated_runtime_library "$toolchain_root/$runtime_library_one" "$expected_runtime_library_one_sha256"
@@ -241,8 +243,6 @@ if $windows_toolchain; then
     fi
     trusted_path="$trusted_linker_bin:/usr/bin:/mingw64/bin:/c/Windows/System32"
 fi
-PATH=$trusted_path
-readonly PATH
 CARGO=$native_cargo
 RUSTC=$native_rustc
 RUSTDOC=$native_rustdoc
@@ -283,6 +283,26 @@ if [[ ! -d $fresh_cargo_home || -L $fresh_cargo_home ]]; then
     printf 'maintainability gate could not create a fresh isolated Cargo home\n' >&2
     exit 1
 fi
+compatibility_bin="$target_directory/b"
+"$mkdir_command" -- "$compatibility_bin"
+rustc_name=${rustc_executable##*/}
+cargo_clippy_name=${cargo_clippy_executable##*/}
+clippy_driver_name=${clippy_driver_executable##*/}
+compatibility_rustc="$compatibility_bin/$rustc_name"
+compatibility_cargo_clippy="$compatibility_bin/$cargo_clippy_name"
+compatibility_clippy_driver="$compatibility_bin/$clippy_driver_name"
+"$cp_command" -- "$rustup_executable" "$compatibility_rustc"
+"$ln_command" -- "$compatibility_rustc" "$compatibility_cargo_clippy"
+"$ln_command" -- "$compatibility_rustc" "$compatibility_clippy_driver"
+compatibility_rustc=$(authenticated_tool "$compatibility_rustc" "$expected_rustup_sha256")
+compatibility_cargo_clippy=$(authenticated_tool "$compatibility_cargo_clippy" "$expected_rustup_sha256")
+compatibility_clippy_driver=$(authenticated_tool "$compatibility_clippy_driver" "$expected_rustup_sha256")
+trusted_path="$compatibility_bin:$trusted_path"
+PATH=$trusted_path
+readonly PATH
+RUSTUP_HOME=$rustup_environment
+RUSTUP_TOOLCHAIN=1.97.0
+readonly RUSTUP_HOME RUSTUP_TOOLCHAIN
 native_cargo_home=$fresh_cargo_home
 if $windows_toolchain; then
     native_target_directory=$("$cygpath_command" -w "$target_directory")
@@ -291,7 +311,7 @@ fi
 CARGO_HOME=$native_cargo_home
 CARGO_TARGET_DIR=$native_target_directory
 readonly CARGO_HOME CARGO_TARGET_DIR
-export PATH CARGO RUSTC RUSTDOC RUSTFMT CARGO_HOME CARGO_TARGET_DIR LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY LOCALHOLD_MAINTAINABILITY_CARGO_FMT LOCALHOLD_MAINTAINABILITY_RUSTC LOCALHOLD_MAINTAINABILITY_RUSTUP
+export PATH CARGO RUSTC RUSTDOC RUSTFMT RUSTUP_HOME RUSTUP_TOOLCHAIN CARGO_HOME CARGO_TARGET_DIR LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY LOCALHOLD_MAINTAINABILITY_CARGO_FMT LOCALHOLD_MAINTAINABILITY_RUSTC LOCALHOLD_MAINTAINABILITY_RUSTUP
 
 run_source_safety() {
     "$bash_command" "$repository_root/script/tests/test_maintainability_bootstrap.sh"
@@ -324,6 +344,21 @@ verify_test_environment() {
     fi
     if [[ ! -d $fresh_cargo_home || -L $fresh_cargo_home || ${fresh_cargo_home%/*} != "$target_directory" || $CARGO_HOME != "$native_cargo_home" ]]; then
         printf 'maintainability bootstrap did not provide a fresh isolated Cargo home\n' >&2
+        exit 1
+    fi
+    if [[ ! -d $compatibility_bin || -L $compatibility_bin || ${compatibility_bin%/*} != "$target_directory" ]]; then
+        printf 'maintainability bootstrap did not provide a private authenticated compiler compatibility proxy\n' >&2
+        exit 1
+    fi
+    local compatibility_tool
+    for compatibility_tool in "$compatibility_rustc" "$compatibility_cargo_clippy" "$compatibility_clippy_driver"; do
+        if [[ ! -f $compatibility_tool || -L $compatibility_tool || ! -x $compatibility_tool || $(sha256_file "$compatibility_tool") != "$expected_rustup_sha256" ]]; then
+            printf 'maintainability bootstrap compiler compatibility proxy is not pinned\n' >&2
+            exit 1
+        fi
+    done
+    if [[ $RUSTUP_HOME != "$rustup_environment" || $RUSTUP_TOOLCHAIN != 1.97.0 ]]; then
+        printf 'maintainability bootstrap compiler compatibility proxy is not pinned\n' >&2
         exit 1
     fi
     if [[ $PATH != "$trusted_path" ]]; then

@@ -178,10 +178,12 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "enable" if bash_enable_loads_builtin(arguments) => SelectedInput::Opaque,
         "mapfile" | "readarray" if mapfile_callback_is_opaque(arguments) => SelectedInput::Opaque,
         "bash" | "bash.exe" | "dash" | "dash.exe" | "fish" | "fish.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe" => shell_input(arguments),
-        "python" | "python.exe" | "python3" | "python3.exe" => python_input(arguments),
+        _ if dynamic_program::is_python_interpreter(&command) => python_input(arguments),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),
         _ if dynamic_program::is_unanalyzed_interpreter(&command) => SelectedInput::Opaque,
-        "awk" | "awk.exe" | "gawk" | "gawk.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe" | "rsync" | "rsync.exe" => SelectedInput::Opaque,
+        "awk" | "awk.exe" | "dpkg" | "dpkg.exe" | "gawk" | "gawk.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe" | "rsync" | "rsync.exe" | "sqlite3" | "sqlite3.exe" => {
+            SelectedInput::Opaque
+        }
         "find" | "find.exe" => {
             return (Vec::new(), find_command_action_is_opaque(arguments));
         }
@@ -514,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn indirect_text_processor_and_archive_execution_fails_closed() {
+    fn indirect_command_execution_fails_closed() {
         for command in [
             "awk -f quality/lint.awk /etc/hosts",
             "gawk --file=quality/lint.awk /etc/hosts",
@@ -539,6 +541,8 @@ mod tests {
             "sed -n -e '1e sh quality/lint.txt' /etc/hosts",
             "sed --exp='1e sh quality/lint.txt' /etc/hosts",
             "sed 's/.*/sh quality\\/lint.txt/e' /etc/hosts",
+            "sqlite3 :memory: '.shell sh quality/lint.txt'",
+            "dpkg --pre-invoke='sh quality/lint.txt' --unpack quality/missing.deb",
         ] {
             assert_eq!(inputs(command), (Vec::new(), true), "{command}");
         }
@@ -557,6 +561,7 @@ mod tests {
     fn language_and_git_dispatch_inputs_fail_closed() {
         assert_eq!(inputs(r#"tag="$(python3 script/release.py tag)""#), (vec!["script/release.py".to_owned()], false));
         assert_eq!(inputs("python3 quality/lint.txt"), (Vec::new(), true));
+        assert_eq!(inputs("/usr/bin/python3.12 quality/lint.py"), (vec!["quality/lint.py".to_owned()], false));
         assert_eq!(inputs("python -m quality.lint"), (Vec::new(), false));
         assert_eq!(inputs("python -m $MODULE"), (Vec::new(), true));
         assert_eq!(inputs("pwsh -File quality/lint.ps1"), (vec!["quality/lint.ps1".to_owned()], false));

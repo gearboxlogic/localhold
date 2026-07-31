@@ -1,5 +1,7 @@
 use super::*;
 
+mod dispatch_cases;
+
 #[test]
 fn command_surfaces_include_scripts_outside_the_legacy_script_directory() {
     for path in [
@@ -257,63 +259,7 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
     git(workspace.path(), &["init", "-q"]);
     git(workspace.path(), &["add", "."]);
 
-    for (command, reason) in [
-        ("trap 'sh quality/lint.txt' EXIT\n", "opaque interpreter program"),
-        ("just check-quality &\n", "lint-weakening argument"),
-        ("! just check-quality\n", "lint-weakening argument"),
-        ("if just check-quality; then echo accepted; fi\n", "lint-weakening argument"),
-        ("hash -p /tmp/fake cargo\ncargo clippy -- -D warnings\n", "lint-weakening argument"),
-        ("just() { :; }\njust check-quality\n", "lint-weakening argument"),
-        ("gate() {\n    just check-quality\n    true\n}\ngate || true\n", "lint-weakening argument"),
-        ("chroot --skip-chdir / sh quality/lint.txt\n", "opaque interpreter program"),
-        ("git -c core.fsmonitor='sh quality/lint.txt' status\n", "opaque interpreter program"),
-        (
-            "git difftool --no-prompt --extcmd='sh quality/lint.txt' --no-index /etc/hosts /etc/passwd || true\n",
-            "opaque interpreter program",
-        ),
-        ("git bisect run sh quality/lint.txt\n", "opaque interpreter program"),
-        ("git filter-branch --tree-filter 'sh quality/lint.txt' -- HEAD\n", "opaque interpreter program"),
-        ("PATH=/tmp:$PATH just clippy\n", "lint-weakening environment channel"),
-        ("rsync -e 'sh quality/lint.txt' localhost:/missing . || true\n", "opaque interpreter program"),
-        ("cmake -P quality/lint.txt\n", "opaque interpreter program"),
-        ("ctest -S quality/lint.txt || true\n", "opaque interpreter program"),
-        ("ninja -f quality/lint.txt\n", "opaque interpreter program"),
-        ("rustup run 1.97.0 sh quality/lint.txt\n", "lint-weakening argument"),
-        ("rustup run fake cargo clippy --locked -- -D warnings\n", "opaque interpreter program"),
-        ("history -s 'sh quality/lint.txt'\nfc -s sh\n", "opaque interpreter program"),
-        ("awk 'BEGIN { system(\"sh quality/lint.txt\") }'\n", "opaque interpreter program"),
-        ("sed -n -e '1e sh quality/lint.txt' /etc/hosts\n", "opaque interpreter program"),
-        (
-            "ssh -o BatchMode=yes -o 'ProxyCommand=sh quality/lint.txt' example.invalid || true\n",
-            "opaque interpreter program",
-        ),
-        ("ssh-agent sh quality/lint.txt\n", "opaque interpreter program"),
-        ("setarch --uname-2.6 sh quality/lint.txt\n", "opaque interpreter program"),
-        ("sg \"$(id -gn)\" -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
-        ("su \"$(id -un)\" -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
-        ("runuser \"$(id -un)\" -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
-        (
-            "start-stop-daemon --start --name localhold --startas /bin/sh --chdir . -- quality/lint.txt\n",
-            "opaque interpreter program",
-        ),
-        ("shopt -s expand_aliases\nalias lint='sh quality/lint.txt'\nlint\n", "opaque interpreter program"),
-        ("cat <(sh quality/lint.txt)\n", "lint-weakening argument"),
-        ("coproc sh quality/lint.txt\n", "opaque interpreter program"),
-        ("mapfile -C 'sh quality/lint.txt' -c 1 </etc/hosts\n", "opaque interpreter program"),
-        ("readarray -tC 'sh quality/lint.txt' -c 1 </etc/hosts\n", "opaque interpreter program"),
-        ("cat <<DOC\n$(sh quality/lint.txt)\nDOC\n", "opaque interpreter program"),
-        (
-            "tar --checkpoint=1 --checkpoint-action=exec='sh quality/lint.txt' -cf archive.tar .\n",
-            "opaque interpreter program",
-        ),
-        ("sort --compress-program=quality/lint.txt /etc/hosts\n", "opaque interpreter program"),
-        ("zip -q -T -TT 'sh quality/lint.txt' archive.zip /etc/hosts\n", "opaque interpreter program"),
-        ("printf '%s\\n' \"$(just check-quality)\"\n", "lint-weakening argument"),
-        ("set +e; just check-quality; true\n", "lint-weakening argument"),
-        ("{\n just check-quality\n true\n} || true\n", "lint-weakening argument"),
-        ("(\n cargo test --locked\n true\n) || true\n", "lint-weakening argument"),
-        ("$'\\x73\\x68' quality/lint.txt\n", "opaque interpreter program"),
-    ] {
+    for &(command, reason) in dispatch_cases::SHELL_DISPATCH_CASES {
         fs::write(workspace.path().join("script/check.sh"), command).expect("opaque shell dispatcher");
         let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
         assert!(error.to_string().contains(reason), "{command}: {error:#}");

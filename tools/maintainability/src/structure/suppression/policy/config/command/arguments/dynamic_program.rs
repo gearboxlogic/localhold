@@ -35,6 +35,18 @@ pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
     ) || is_tcl_interpreter(command)
 }
 
+pub(super) fn is_python_interpreter(command: &str) -> bool {
+    let command = command.strip_suffix(".exe").unwrap_or(command);
+    if command == "python" {
+        return true;
+    }
+    command.strip_prefix("python").is_some_and(|version| {
+        version.bytes().next().is_some_and(|byte| byte.is_ascii_digit())
+            && version.bytes().next_back().is_some_and(|byte| byte.is_ascii_digit())
+            && version.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.')
+    })
+}
+
 fn is_tcl_interpreter(command: &str) -> bool {
     let command = command.strip_suffix(".exe").unwrap_or(command);
     ["tclsh", "wish"].iter().any(|name| {
@@ -47,7 +59,7 @@ fn is_tcl_interpreter(command: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_unanalyzed_interpreter, is_unanalyzed_path};
+    use super::{is_python_interpreter, is_unanalyzed_interpreter, is_unanalyzed_path};
 
     #[test]
     fn javascript_programs_fail_closed() {
@@ -70,6 +82,16 @@ mod tests {
     fn build_language_execution_fails_closed() {
         for command in ["cmake", "cmake.exe", "ctest", "ctest.exe", "ninja", "ninja.exe"] {
             assert!(is_unanalyzed_interpreter(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn versioned_python_interpreters_are_recognized_without_prefix_collisions() {
+        for command in ["python", "python.exe", "python3", "python3.12", "python3.12.exe", "python312.exe"] {
+            assert!(is_python_interpreter(command), "{command}");
+        }
+        for command in ["python-preview", "python3.", "pythonic"] {
+            assert!(!is_python_interpreter(command), "{command}");
         }
     }
 }

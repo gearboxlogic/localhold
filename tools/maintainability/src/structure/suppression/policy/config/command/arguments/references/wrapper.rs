@@ -185,6 +185,7 @@ fn is_unparsed_launcher(command: &str) -> bool {
             | "setpriv"
             | "setsid"
             | "sg"
+            | "start-stop-daemon"
             | "stdbuf"
             | "strace"
             | "systemd-run"
@@ -211,5 +212,7 @@ mod tests {
         assert!(matches!(select("/usr/bin/setarch", "setarch", &arguments), Selection::Opaque));
         assert!(matches!(select("sg", "sg", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/sg", "sg", &arguments), Selection::Opaque));
+        assert!(matches!(select("start-stop-daemon", "start-stop-daemon", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/sbin/start-stop-daemon", "start-stop-daemon", &arguments), Selection::Opaque));
     }
 }

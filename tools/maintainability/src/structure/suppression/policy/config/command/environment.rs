@@ -71,9 +71,13 @@ pub(super) fn is_weakening_environment_name(name: &str) -> bool {
         || name.starts_with("GIT_")
 }
 
+pub(super) fn is_weakening_environment_assignment_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("CARGO") || is_weakening_environment_name(name)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_weakening_environment_name;
+    use super::{is_weakening_environment_assignment_name, is_weakening_environment_name};
 
     #[test]
     fn python_code_loading_environment_is_weakening() {
@@ -94,5 +98,12 @@ mod tests {
         }
         assert!(!is_weakening_environment_name("PYTHONSAFEPATH"));
         assert!(!is_weakening_environment_name("PYTHONUNBUFFERED"));
+    }
+
+    #[test]
+    fn cargo_is_weakening_only_in_environment_assignment_positions() {
+        assert!(is_weakening_environment_assignment_name("CARGO"));
+        assert!(is_weakening_environment_assignment_name("cargo"));
+        assert!(!is_weakening_environment_name("Cargo"));
     }
 }

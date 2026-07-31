@@ -68,7 +68,7 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=f9ead9aeff6aae855040ce3aea2e8901119071beef46061332dc3526378a9de6
-readonly reviewed_bootstrap_tests_sha256=8216bc5b96f8fd49b1ce493926154344d3cfd79cbdd0e4f5083c44e9ff9c3d9e
+readonly reviewed_bootstrap_tests_sha256=5303cad34955f4cbc2e0ab9d2d3b6c0959d3c9306d466d9021c7844929fd5be3
 readonly reviewed_gate_runner_sha256=dcf8335f2f2ed61dd49001060e27b15655368c1dcd5be021271e5b0b41a91cdd
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
@@ -424,14 +424,37 @@ sha256_file() {
     printf '%s\n' "${output%%[[:space:]]*}"
 }
 
+sha256_revision_file() {
+    local revision=$1
+    local relative_path=$2
+    local output
+    output=$(git_at "$repository_root" show "$revision:$relative_path" | "$sha256_command") || {
+        printf 'cannot hash trusted checker input: %s\n' "$relative_path" >&2
+        return 1
+    }
+    printf '%s\n' "${output%%[[:space:]]*}"
+}
+
+expected_manifest_sha256=$reviewed_manifest_sha256
+expected_lockfile_sha256=$reviewed_lockfile_sha256
+if $using_test_root && $github_context_present; then
+    checked_head=$(git_checked rev-parse --verify 'HEAD^{commit}') || {
+        printf 'cannot read the checked-out revision before verifying the checker dependency graph\n' >&2
+        exit 1
+    }
+    trusted_checker_revision=$(trusted_github_base_revision "$checked_head")
+    expected_manifest_sha256=$(sha256_revision_file "$trusted_checker_revision" tools/maintainability/Cargo.toml)
+    expected_lockfile_sha256=$(sha256_revision_file "$trusted_checker_revision" tools/maintainability/Cargo.lock)
+fi
+
 actual_manifest_sha256=$(sha256_file "$manifest")
-if [[ $actual_manifest_sha256 != "$reviewed_manifest_sha256" ]]; then
+if [[ $actual_manifest_sha256 != "$expected_manifest_sha256" ]]; then
     printf 'maintainability checker Cargo.toml does not match the reviewed dependency graph\n' >&2
     exit 1
 fi
 
 actual_lockfile_sha256=$(sha256_file "$lockfile")
-if [[ $actual_lockfile_sha256 != "$reviewed_lockfile_sha256" ]]; then
+if [[ $actual_lockfile_sha256 != "$expected_lockfile_sha256" ]]; then
     printf 'maintainability checker Cargo.lock does not match the reviewed dependency graph\n' >&2
     exit 1
 fi

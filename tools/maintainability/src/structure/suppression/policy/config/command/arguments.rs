@@ -40,7 +40,7 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
     if is_yaml(path) {
         return embedded_commands
             .iter()
-            .any(|command| weakening_token_with_case(command, case_insensitive_tools, reject_backticks));
+            .any(|command| weakening_token_with_case(command, case_insensitive_tools, reject_backticks) || powershell::has_constructed_rust_arguments(command));
     }
     weakening_token_with_case(&source, case_insensitive_tools, reject_backticks)
         || embedded_commands

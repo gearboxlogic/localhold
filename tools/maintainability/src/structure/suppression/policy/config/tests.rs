@@ -213,6 +213,10 @@ fn shell_continuations_cannot_split_lint_arguments_from_cargo() {
         "steps:\n  - shell: cmd\n    run: |\n      cargo clippy -- ^\n        -A warnings\n"
     ));
     assert!(weakening_token_for_surface(
+        ".github/workflows/ci.yml",
+        "steps:\n  - shell: pwsh\n    run: cargo clippy -- ('-' + 'A') warnings\n"
+    ));
+    assert!(weakening_token_for_surface(
         "script/check.ps1",
         "$lintArgs = @('-' + 'A', 'warnings')\ncargo clippy -- @lintArgs\n"
     ));
@@ -343,6 +347,7 @@ fn weakening_environment_channels_are_detected() {
     assert!(weakening_environment("GIT_DIR=untrusted"));
     assert!(weakening_environment("CARGO_TARGET_TEST_RUSTFLAGS=unreviewed"));
     assert!(weakening_environment("CARGO_HOME=unreviewed"));
+    assert!(weakening_environment_for_surface("script/check.sh", "CARGO=/tmp/fake cargo-clippy clippy -- -D warnings"));
     assert!(weakening_environment("unset GITHUB_ACTIONS"));
     assert!(weakening_environment("unset GITHUB_EVENT_PATH"));
     assert!(weakening_environment("GITHUB_PATH=untrusted"));
@@ -725,6 +730,10 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
         ("trap 'sh quality/lint.txt' EXIT\n", "opaque interpreter program"),
         ("setarch --uname-2.6 sh quality/lint.txt\n", "opaque interpreter program"),
         ("sg \"$(id -gn)\" -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
+        (
+            "start-stop-daemon --start --name localhold --startas /bin/sh --chdir . -- quality/lint.txt\n",
+            "opaque interpreter program",
+        ),
         ("shopt -s expand_aliases\nalias lint='sh quality/lint.txt'\nlint\n", "opaque interpreter program"),
         ("cat <(sh quality/lint.txt)\n", "lint-weakening argument"),
         ("coproc sh quality/lint.txt\n", "opaque interpreter program"),

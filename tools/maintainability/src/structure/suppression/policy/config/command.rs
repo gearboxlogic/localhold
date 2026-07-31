@@ -16,7 +16,7 @@ pub(super) use arguments::has_sourced_file_indirection;
 pub(super) use arguments::weakening_token;
 pub(super) use arguments::weakening_token_for_surface;
 use arguments::{cargo_manifest_paths_for_surface, direct_rust_sources_for_surface, normalized_shell_tokens, normalized_shell_words, package_script_commands};
-use environment::is_weakening_environment_name;
+use environment::{is_weakening_environment_assignment_name, is_weakening_environment_name};
 use surfaces::execution_surfaces;
 
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
@@ -70,6 +70,7 @@ pub(super) const GATE_RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "RUSTUP_HOME=$rustup_environment",
     "RUSTUP_TOOLCHAIN=1.97.0",
     "readonly RUSTUP_HOME RUSTUP_TOOLCHAIN",
+    "CARGO=$native_cargo",
     "RUSTC=$native_rustc",
     "RUSTDOC=$native_rustdoc",
     "LOCALHOLD_MAINTAINABILITY_CARGO=$native_cargo",
@@ -125,11 +126,11 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment >/dev/null",
     "GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_push_head \\",
     "    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment >/dev/null",
-    "if graph_failure=$(GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_graph_head \\",
+    "if ! GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_graph_head \\",
     "    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base UNTRUSTED_BUILD_MARKER=$untrusted_build_marker \\",
-    "    run_local_check --test-environment 2>&1); then",
-    "if lock_failure=$(GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_lock_head \\",
-    "    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment 2>&1); then",
+    "    run_local_check --test-environment >/dev/null; then",
+    "if ! GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_lock_head \\",
+    "    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment >/dev/null; then",
     "bash_env=$fixture/bash-env",
     "cargo_home=\"$fixture/cargo-home\"",
     "export CARGO_HOME=$cargo_home",
@@ -170,7 +171,7 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
-    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: d507461f4ab80d09a4bb1792fd441769f6f0d138034d8f27af0f31d597dd6b75",
+    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: fcfd59d3d14e21e2d80412303f9c036d3472db233f38271922424576bfd07a2d",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
@@ -241,12 +242,14 @@ pub(super) fn weakening_environment_for_surface(path: &str, source: &str) -> boo
     }
     weakening_environment(source)
         || case_insensitive_environment_assignment(source)
-        || yaml::environment_variables(path, source).iter().any(|(name, _)| is_weakening_environment_name(name))
+        || yaml::environment_variables(path, source)
+            .iter()
+            .any(|(name, _)| is_weakening_environment_assignment_name(name))
         || rust_tool_referenced(source) && path_environment_assignment(path, source)
 }
 
 fn case_insensitive_environment_assignment(source: &str) -> bool {
-    environment_assignment_matches(source, is_weakening_environment_name)
+    environment_assignment_matches(source, is_weakening_environment_assignment_name)
 }
 
 fn path_environment_assignment(path: &str, source: &str) -> bool {
@@ -345,7 +348,7 @@ pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str
     let rust_tools_are_referenced = rust_tool_referenced(source);
     let yaml_environment_lines = yaml::environment_variables(path, source)
         .into_iter()
-        .filter(|(name, _)| is_weakening_environment_name(name) || rust_tools_are_referenced && is_path_environment_name(name))
+        .filter(|(name, _)| is_weakening_environment_assignment_name(name) || rust_tools_are_referenced && is_path_environment_name(name))
         .map(|(_, line)| line)
         .collect::<Vec<_>>();
     allowed.iter().all(|expected| {

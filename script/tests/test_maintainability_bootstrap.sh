@@ -238,15 +238,10 @@ git -C "$test_repository" -c core.autocrlf=false -c user.name=LocalHold -c user.
 git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example.invalid commit -qm 'untrusted checker dependency graph'
 test_graph_head=$(git -C "$test_repository" rev-parse HEAD)
 untrusted_build_marker="$fixture/untrusted-build-ran"
-graph_failure=
-if graph_failure=$(GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_graph_head \
+if ! GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_graph_head \
     LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base UNTRUSTED_BUILD_MARKER=$untrusted_build_marker \
-    run_local_check --test-environment 2>&1); then
-    printf 'maintainability bootstrap accepted an untrusted checker dependency graph\n' >&2
-    exit 1
-fi
-if [[ $graph_failure != *'maintainability checker Cargo.toml does not match the reviewed dependency graph'* ]]; then
-    printf 'maintainability bootstrap did not reject the overlaid checker dependency graph at its trust check\n' >&2
+    run_local_check --test-environment >/dev/null; then
+    printf 'maintainability bootstrap did not preserve the trusted base checker dependency graph\n' >&2
     exit 1
 fi
 if [[ -e $untrusted_build_marker ]]; then
@@ -263,14 +258,9 @@ git -C "$test_repository" -c core.autocrlf=false -c user.name=LocalHold -c user.
     script/check-maintainability-bootstrap.sh tools/maintainability/Cargo.toml
 git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example.invalid commit -qm 'untrusted checker lock graph'
 test_lock_head=$(git -C "$test_repository" rev-parse HEAD)
-lock_failure=
-if lock_failure=$(GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_lock_head \
-    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment 2>&1); then
-    printf 'maintainability bootstrap accepted an untrusted checker lock graph\n' >&2
-    exit 1
-fi
-if [[ $lock_failure != *'maintainability checker Cargo.lock does not match the reviewed dependency graph'* ]]; then
-    printf 'maintainability bootstrap did not reject the overlaid checker lock graph at its trust check\n' >&2
+if ! GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_lock_head \
+    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment >/dev/null; then
+    printf 'maintainability bootstrap did not preserve the trusted base checker lock graph\n' >&2
     exit 1
 fi
 git -C "$test_repository" checkout -q --detach "$test_base"

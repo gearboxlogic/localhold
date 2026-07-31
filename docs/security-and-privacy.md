@@ -208,9 +208,12 @@ These paths are not contacted by a default running `hold` process:
   or removal of that setting and pins the exact reviewed checker manifest and
   lockfile before any Cargo command can execute dependency build scripts.
   Checker dependency updates therefore require an intentional bootstrap digest
-  update in the same review. The bootstrap also rejects repository, ancestor,
-  and Cargo-home configuration and removes compiler, wrapper, linker, and
-  runner override environment variables before executing Cargo. It exposes only
+  update in the same review. Pull-request CI executes the trusted base checker
+  graph while auditing the proposed head, and binds that overlay to the exact
+  base-revision Git blobs; the proposed checker graph activates only after
+  merge. The bootstrap also rejects repository, ancestor, and Cargo-home
+  configuration and removes compiler, wrapper, linker, and runner override
+  environment variables before executing Cargo. It exposes only
   fixed gate modes rather than arbitrary command delegation, requires Git and
   core utilities from OS-owned directories, and authenticates Rustup 1.29.0
   plus the complete Cargo/rustc/rustdoc/Clippy/rustfmt executable set against

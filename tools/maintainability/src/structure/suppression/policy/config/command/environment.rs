@@ -46,6 +46,7 @@ pub(super) fn is_weakening_environment_name(name: &str) -> bool {
             | "GITHUB_EVENT_PATH"
             | "GITHUB_PATH"
             | "GITHUB_SHA"
+            | "LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT"
             | "LOCALHOLD_MAINTAINABILITY_BASE_REV"
             | "LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256"
             | "LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256"
@@ -131,5 +132,10 @@ mod tests {
             assert!(is_weakening_environment_name(name), "{name}");
             assert!(is_weakening_environment_name(&name.to_ascii_lowercase()), "{name}");
         }
+    }
+
+    #[test]
+    fn maintainability_audit_root_is_weakening() {
+        assert!(is_weakening_environment_name("LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT"));
     }
 }

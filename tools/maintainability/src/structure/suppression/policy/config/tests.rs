@@ -249,6 +249,7 @@ fn shell_substitution_syntax_is_not_applied_to_other_command_languages() {
 #[test]
 fn python_command_arrays_cannot_split_lint_arguments_from_cargo() {
     assert!(weakening_token_for_surface("script/check.py", "exec(bytes.fromhex(\"696d706f7274206f73\"))\n"));
+    assert!(weakening_token_for_surface("script/check.py", "import pickle\npickle.loads(bytes.fromhex(payload))\n"));
     assert!(weakening_token_for_surface(
         "script/check.py",
         "subprocess.run([\n    \"cargo\", # tool\n    \"clippy\",\n    \"--\",\n    \"-A\",\n    \"warnings\",\n])\n"
@@ -491,6 +492,10 @@ fn authenticated_dynamic_commands_require_the_exact_reviewed_lines() {
     assert!(super::command::reviewed_dynamic_command_references_are_exact(
         "script/run-source-safety.sh",
         &RUNNER_COMMAND_LINES.join("\n"),
+    ));
+    assert!(super::command::reviewed_dynamic_command_references_are_exact(
+        ".github/workflows/trusted-maintainability.yml",
+        &TRUSTED_GATE_COMMAND_LINES.join("\n"),
     ));
     assert!(!super::command::reviewed_dynamic_command_references_are_exact(
         "script/run-source-safety.sh",

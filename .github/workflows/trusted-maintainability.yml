@@ -23,7 +23,7 @@ jobs:
           RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
         run: rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
 
-      - name: Check out protected gate from main
+      - name: Check out protected gate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: ${{ github.repository }}
@@ -32,7 +32,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Check out proposed changes
+      - name: Check out candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.sha }}
@@ -55,23 +55,6 @@ jobs:
             exit 1
           fi
 
-          for relative_path in \
-            tools/maintainability \
-            tools/dependency-unsafe \
-            script/check-maintainability-bootstrap.sh \
-            script/tests/test_maintainability_bootstrap.sh
-          do
-            source_path="$trusted_root/$relative_path"
-            destination_path="$candidate_root/$relative_path"
-            destination_parent=$(/usr/bin/dirname -- "$destination_path")
-            if [[ (! -f "$source_path" && ! -d "$source_path") || -L "$source_path" || ! -d "$destination_parent" || -L "$destination_parent" ]]; then
-              printf 'protected maintainability gate path is missing or unsafe: %s\n' "$relative_path" >&2
-              exit 1
-            fi
-            /usr/bin/rm -rf -- "$destination_path"
-            /usr/bin/cp -a -- "$source_path" "$destination_path"
-          done
-
           base_revision=$BASE_REVISION_INPUT
           if [[ "$base_revision" == refs/heads/* ]]; then
             remote_ref="refs/remotes/origin/${base_revision#refs/heads/}"
@@ -83,19 +66,9 @@ jobs:
           fi
           export LOCALHOLD_MAINTAINABILITY_BASE_REV=${base_revision,,}
 
-          /usr/bin/bash script/tests/test_maintainability_bootstrap.sh
-          run_reviewed() {
-            /usr/bin/bash script/check-maintainability-bootstrap.sh --root "$candidate_root" -- "$@"
-          }
-
-          run_reviewed cargo fetch --manifest-path tools/maintainability/Cargo.toml --locked
-          run_reviewed cargo fmt --manifest-path tools/maintainability/Cargo.toml -- --check
-          run_reviewed cargo test --manifest-path tools/maintainability/Cargo.toml --locked
-          run_reviewed cargo clippy --manifest-path tools/maintainability/Cargo.toml --all-targets --locked -- -D warnings
-          run_reviewed cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- check
-          run_reviewed cargo fetch --locked
-          run_reviewed cargo fetch --manifest-path tools/dependency-unsafe/Cargo.toml --locked
-          run_reviewed cargo fmt --manifest-path tools/dependency-unsafe/Cargo.toml -- --check
-          run_reviewed cargo test --manifest-path tools/dependency-unsafe/Cargo.toml --locked
-          run_reviewed cargo clippy --manifest-path tools/dependency-unsafe/Cargo.toml --all-targets --locked -- -D warnings
-          run_reviewed cargo run --manifest-path tools/dependency-unsafe/Cargo.toml --locked -- check
+          trusted_bootstrap="$trusted_root/script/check-maintainability-bootstrap.sh"
+          if [[ ! -f "$trusted_bootstrap" || -L "$trusted_bootstrap" ]]; then
+            printf 'protected maintainability bootstrap is missing or unsafe\n' >&2
+            exit 1
+          fi
+          /usr/bin/bash "$trusted_bootstrap" --root "$candidate_root" --maintainability

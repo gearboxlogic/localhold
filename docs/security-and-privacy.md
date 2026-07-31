@@ -189,12 +189,12 @@ These paths are not contacted by a default running `hold` process:
 - The organization ruleset runs `.github/workflows/trusted-maintainability.yml`
   from the protected default branch, rather than from the proposed pull-request
   tree. The workflow checks out the exact commit that supplied its definition
-  as a separate trusted tree, installs that tree's maintainability and
-  dependency-audit implementations into the candidate workspace, and invokes
-  the reviewed command sequence directly. It never dispatches through the
-  candidate `Justfile` or candidate gate scripts. Changes to a gate
-  implementation are therefore evaluated by the previously protected version
-  and take effect only after normal review and merge.
+  as a separate trusted tree and runs its fixed dispatcher against a read-only
+  snapshot of the candidate. The trusted tools can inspect candidate changes to
+  gate and audit sources, but the workflow never executes the candidate
+  `Justfile`, audit binaries, or gate scripts. Changes to a gate implementation
+  are therefore evaluated by the previously protected version and take effect
+  only after normal review and merge.
 - The first-party source-safety gate parses Rust under `src/`, `tests/`, and
   `benches/` (and `examples/` when present) and compares executable unsafe
   sites, mutable statics, unsafe attributes, unsafe global assembly, and direct

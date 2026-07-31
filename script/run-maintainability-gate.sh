@@ -7,8 +7,16 @@ if (( $# != 1 )) || [[ $mode != source-safety && $mode != dependency-unsafe && $
     exit 1
 fi
 
-repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-readonly repository_root
+implementation_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+repository_root=${LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT:-$implementation_root}
+if [[ $repository_root != /* && ! $repository_root =~ ^[[:alpha:]]:[/\\] ]] || [[ ! -d $repository_root || -L $repository_root ]]; then
+    printf 'maintainability audit root must be an absolute regular directory\n' >&2
+    exit 1
+fi
+repository_root=$(cd -- "$repository_root" && pwd -P)
+LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT=$repository_root
+readonly implementation_root repository_root LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT
+export LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT
 cd -- "$repository_root"
 
 readonly git_command=${LOCALHOLD_MAINTAINABILITY_GIT:?maintainability bootstrap did not provide an absolute Git command}
@@ -321,17 +329,18 @@ readonly CARGO_HOME CARGO_TARGET_DIR
 export PATH CARGO RUSTC RUSTDOC RUSTFMT RUSTUP_HOME RUSTUP_TOOLCHAIN CARGO_HOME CARGO_TARGET_DIR GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY LOCALHOLD_MAINTAINABILITY_CARGO_FMT LOCALHOLD_MAINTAINABILITY_RUSTC LOCALHOLD_MAINTAINABILITY_RUSTUP
 
 run_source_safety() {
-    "$bash_command" "$repository_root/script/tests/test_maintainability_bootstrap.sh"
-    "$bash_command" "$repository_root/script/run-source-safety.sh"
+    "$bash_command" "$implementation_root/script/tests/test_maintainability_bootstrap.sh"
+    "$bash_command" "$implementation_root/script/run-source-safety.sh"
 }
 
 run_dependency_unsafe() {
+    local audit_manifest="$implementation_root/tools/dependency-unsafe/Cargo.toml"
     "$cargo_executable" fetch --locked
-    "$cargo_executable" fetch --manifest-path tools/dependency-unsafe/Cargo.toml --locked
-    "$cargo_fmt_executable" --manifest-path tools/dependency-unsafe/Cargo.toml -- --check
-    "$cargo_executable" test --manifest-path tools/dependency-unsafe/Cargo.toml --locked
-    "$cargo_clippy_executable" clippy --manifest-path tools/dependency-unsafe/Cargo.toml --all-targets --locked -- -D warnings
-    "$cargo_executable" run --manifest-path tools/dependency-unsafe/Cargo.toml --locked -- check
+    "$cargo_executable" fetch --manifest-path "$audit_manifest" --locked
+    "$cargo_fmt_executable" --manifest-path "$audit_manifest" -- --check
+    "$cargo_executable" test --manifest-path "$audit_manifest" --locked
+    "$cargo_clippy_executable" clippy --manifest-path "$audit_manifest" --all-targets --locked -- -D warnings
+    "$cargo_executable" run --manifest-path "$audit_manifest" --locked -- check
 }
 
 verify_test_environment() {
@@ -374,6 +383,10 @@ verify_test_environment() {
     fi
     if [[ $PATH != "$trusted_path" ]]; then
         printf 'maintainability bootstrap retained an untrusted executable search path\n' >&2
+        exit 1
+    fi
+    if [[ $LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT != "$repository_root" ]]; then
+        printf 'maintainability bootstrap retained an untrusted audit root\n' >&2
         exit 1
     fi
     printf 'maintainability bootstrap environment test passed\n'

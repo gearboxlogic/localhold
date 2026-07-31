@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 set -euo pipefail
 
-unset GITHUB_ACTIONS GITHUB_EVENT_PATH GITHUB_SHA LOCALHOLD_MAINTAINABILITY_BASE_REV
+unset GITHUB_ACTIONS GITHUB_EVENT_PATH GITHUB_SHA LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT LOCALHOLD_MAINTAINABILITY_BASE_REV
 
 repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 check="$repository_root/script/check-maintainability-bootstrap.sh"
@@ -113,6 +113,9 @@ git -C "$test_repository" -c core.autocrlf=false -c user.name=LocalHold -c user.
 git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example.invalid commit -qm 'reviewed fixture'
 test_base=$(git -C "$test_repository" rev-parse HEAD)
 run_check >/dev/null
+trusted_repository="$fixture/trusted-implementation"
+git -c core.autocrlf=false clone -q --no-hardlinks "$test_repository" "$trusted_repository"
+trusted_check="$trusted_repository/script/check-maintainability-bootstrap.sh"
 
 inherited_config_marker="$fixture/global-git-config-ran"
 inherited_config_helper="$fixture/global-git-config-helper"
@@ -206,6 +209,23 @@ if GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head \
 fi
 GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head \
     LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment >/dev/null
+GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head \
+    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base /usr/bin/bash "$trusted_check" --root "$test_repository" --test-environment >/dev/null
+
+gate_candidate="$fixture/gate-candidate"
+git -c core.autocrlf=false clone -q --no-hardlinks "$test_repository" "$gate_candidate"
+candidate_gate_marker="$fixture/candidate-gate-ran"
+printf '%s\n' '#!/usr/bin/bash' 'touch "$CANDIDATE_GATE_MARKER"' >"$gate_candidate/script/run-maintainability-gate.sh"
+git -C "$gate_candidate" -c core.autocrlf=false -c user.name=LocalHold -c user.email=localhold@example.invalid add script/run-maintainability-gate.sh
+git -C "$gate_candidate" -c user.name=LocalHold -c user.email=localhold@example.invalid commit -qm 'untrusted candidate gate'
+gate_candidate_head=$(git -C "$gate_candidate" rev-parse HEAD)
+GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$gate_candidate_head \
+    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base CANDIDATE_GATE_MARKER=$candidate_gate_marker \
+    /usr/bin/bash "$trusted_check" --root "$gate_candidate" --test-environment >/dev/null
+if [[ -e $candidate_gate_marker ]]; then
+    printf 'protected maintainability workflow executed a candidate gate script\n' >&2
+    exit 1
+fi
 
 printf 'pub fn second_pushed_commit() {}\n' >"$test_repository/src/lib.rs"
 git -C "$test_repository" -c core.autocrlf=false -c user.name=LocalHold -c user.email=localhold@example.invalid add src/lib.rs

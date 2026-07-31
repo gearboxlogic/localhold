@@ -15,14 +15,16 @@ script_path=${BASH_SOURCE[0]}
 script_directory=${script_path%/*}
 [[ $script_directory != "$script_path" ]] || script_directory=.
 script_directory=$(cd -- "$script_directory" && pwd -P)
-repository_root=$(cd -- "$script_directory/.." && pwd -P)
-using_test_root=false
+script_path="$script_directory/${script_path##*/}"
+implementation_root=$(cd -- "$script_directory/.." && pwd -P)
+repository_root=$implementation_root
+using_alternate_root=false
 if [[ ${1:-} == --root ]]; then
     if (( $# < 2 )); then
         usage
     fi
     repository_root=$2
-    using_test_root=true
+    using_alternate_root=true
     shift 2
 fi
 repository_root=$(cd -- "$repository_root" && pwd -P)
@@ -39,37 +41,45 @@ if (( $# > 0 )); then
     shift
 fi
 (( $# == 0 )) || usage
-if $using_test_root && [[ $mode != verify && $mode != test-environment ]]; then
-    printf 'alternate roots may only verify the bootstrap or its environment\n' >&2
-    exit 1
-fi
 github_context_present=false
 if [[ -v GITHUB_ACTIONS || -v GITHUB_EVENT_PATH || -v GITHUB_SHA ]]; then
     github_context_present=true
 fi
-governed_snapshot=$using_test_root
+trusted_github_audit=false
+if $using_alternate_root && $github_context_present && [[ $implementation_root != "$repository_root" ]]; then
+    trusted_github_audit=true
+fi
+if $using_alternate_root && [[ $mode != verify && $mode != test-environment ]] && ! $trusted_github_audit; then
+    printf 'alternate roots may run operational modes only from the protected GitHub workflow\n' >&2
+    exit 1
+fi
+governed_snapshot=$using_alternate_root
 if $github_context_present; then
     governed_snapshot=true
 fi
 
-tool_root="$repository_root/tools/maintainability"
+reviewed_root=$repository_root
+if $trusted_github_audit; then
+    reviewed_root=$implementation_root
+fi
+tool_root="$reviewed_root/tools/maintainability"
 source_root="$tool_root/src"
 manifest="$tool_root/Cargo.toml"
 lockfile="$tool_root/Cargo.lock"
-justfile="$repository_root/Justfile"
-mise_config="$repository_root/mise.toml"
-mise_lockfile="$repository_root/mise.lock"
-runner="$repository_root/script/run-source-safety.sh"
-bootstrap_tests="$repository_root/script/tests/test_maintainability_bootstrap.sh"
-gate_runner="$repository_root/script/run-maintainability-gate.sh"
+justfile="$reviewed_root/Justfile"
+mise_config="$reviewed_root/mise.toml"
+mise_lockfile="$reviewed_root/mise.lock"
+runner="$reviewed_root/script/run-source-safety.sh"
+bootstrap_tests="$reviewed_root/script/tests/test_maintainability_bootstrap.sh"
+gate_runner="$reviewed_root/script/run-maintainability-gate.sh"
 readonly reviewed_manifest_sha256=cca207767614bd2c1d46bc06092b69e90157aeb450797fcc7cad4e1ed67c89b9
 readonly reviewed_lockfile_sha256=825c6448351761aa5c4c6e1ce6b3696c927c4f46c5d43642846380d24f10467c
 readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d1b3fd69aa74c0df6f1
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
-readonly reviewed_runner_sha256=f9ead9aeff6aae855040ce3aea2e8901119071beef46061332dc3526378a9de6
-readonly reviewed_bootstrap_tests_sha256=5303cad34955f4cbc2e0ab9d2d3b6c0959d3c9306d466d9021c7844929fd5be3
-readonly reviewed_gate_runner_sha256=dcf8335f2f2ed61dd49001060e27b15655368c1dcd5be021271e5b0b41a91cdd
+readonly reviewed_runner_sha256=45be2afee1b5e38a5da6b824b55236e1640fe57c2f399a22e29b665ec3f8ee76
+readonly reviewed_bootstrap_tests_sha256=360521666182a54d7c251ff038bd2f02cb4e172efe93153dd7ff27dcc7573286
+readonly reviewed_gate_runner_sha256=ad22c7c698a09e21ef3dcd4d59c30c45a12c968be98750413daaa78dd6f554bc
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then
@@ -150,7 +160,7 @@ scrub_untrusted_environment() {
             BASH_ENV | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
                 RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \
                 CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \
-                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_* | TAR_OPTIONS)
+                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_* | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | TAR_OPTIONS)
                 unset "$name"
                 ;;
         esac
@@ -234,8 +244,17 @@ verify_checker_sources() {
         fi
     fi
 
+    local checker_root=$repository_root
+    local checker_git_root=$repository_root
     local checker_revision=$checked_head
-    if $using_test_root && $github_context_present; then
+    if $trusted_github_audit; then
+        checker_root=$implementation_root
+        checker_git_root=$implementation_root
+        checker_revision=$(git_at "$implementation_root" rev-parse --verify 'HEAD^{commit}') || {
+            printf 'cannot authenticate the protected maintainability implementation revision\n' >&2
+            exit 1
+        }
+    elif $using_alternate_root && $github_context_present; then
         checker_revision=$(trusted_github_base_revision "$checked_head")
     fi
 
@@ -256,11 +275,11 @@ verify_checker_sources() {
             printf 'maintainability checker source revision contains an unsupported entry: %s\n' "$relative_path" >&2
             exit 1
         fi
-        if [[ ! -f "$repository_root/$relative_path" || -L "$repository_root/$relative_path" ]]; then
+        if [[ ! -f "$checker_root/$relative_path" || -L "$checker_root/$relative_path" ]]; then
             printf 'maintainability checker source must be a regular non-symlink file: %s\n' "$relative_path" >&2
             exit 1
         fi
-        actual_hash=$(git_checked hash-object --no-filters -- "$repository_root/$relative_path") || {
+        actual_hash=$(git_at "$checker_git_root" hash-object --no-filters -- "$checker_root/$relative_path") || {
             printf 'cannot hash maintainability checker source: %s\n' "$relative_path" >&2
             exit 1
         }
@@ -270,7 +289,7 @@ verify_checker_sources() {
         fi
         expected_paths["$relative_path"]=1
         ((expected_count += 1))
-    done < <(git_checked ls-tree -r -z --full-tree "$checker_revision" -- tools/maintainability/src)
+    done < <(git_at "$checker_git_root" ls-tree -r -z --full-tree "$checker_revision" -- tools/maintainability/src)
     if (( expected_count == 0 )); then
         printf 'checked-out revision contains no maintainability checker sources\n' >&2
         exit 1
@@ -279,7 +298,7 @@ verify_checker_sources() {
     local observed_count=0
     local observed_path
     while IFS= read -r -d '' observed_path; do
-        relative_path=${observed_path#"$repository_root/"}
+        relative_path=${observed_path#"$checker_root/"}
         if [[ -z ${expected_paths["$relative_path"]+present} ]]; then
             printf 'maintainability checker source is absent from the checked-out revision: %s\n' "$relative_path" >&2
             exit 1
@@ -300,7 +319,7 @@ verify_reviewed_tracked_tree() {
     }
 
     local checker_inputs_are_overlaid=false
-    if $using_test_root && $github_context_present; then
+    if $using_alternate_root && $github_context_present && ! $trusted_github_audit; then
         checker_inputs_are_overlaid=true
     fi
 
@@ -437,7 +456,7 @@ sha256_revision_file() {
 
 expected_manifest_sha256=$reviewed_manifest_sha256
 expected_lockfile_sha256=$reviewed_lockfile_sha256
-if $using_test_root && $github_context_present; then
+if $using_alternate_root && $github_context_present && ! $trusted_github_audit; then
     checked_head=$(git_checked rev-parse --verify 'HEAD^{commit}') || {
         printf 'cannot read the checked-out revision before verifying the checker dependency graph\n' >&2
         exit 1
@@ -591,7 +610,7 @@ if [[ $mode != verify ]]; then
     git_at "$snapshot_root" update-ref --no-deref HEAD "$checked_head"
     git_at "$snapshot_root" read-tree "$checked_head"
     git_at "$snapshot_root" archive --format=tar "$checked_head" | "$tar_command" -xf - -C "$snapshot_root"
-    if $github_context_present; then
+    if $github_context_present && ! $trusted_github_audit; then
         # Checker changes activate only after this revision lands. The trusted
         # event-base checker graph audits the head tree without executing head code.
         trusted_checker_revision=$(trusted_github_base_revision "$checked_head")
@@ -610,17 +629,28 @@ if [[ $mode != verify ]]; then
     # The dependency audit owns .cache/dependency-unsafe for confined scratch
     # space; all durable evidence remains under the separately writable target.
     "$chmod_command" u+rwx -- "$snapshot_root/target" "$audit_scratch_root"
-    if has_write_mode_bits "$snapshot_root/tools/maintainability/src/main.rs" ||
+    isolation_probe="$snapshot_root/src/lib.rs"
+    if [[ ! -f $isolation_probe || -L $isolation_probe ]] ||
+        has_write_mode_bits "$isolation_probe" ||
         ! has_write_mode_bits "$snapshot_root/target" ||
         ! has_write_mode_bits "$audit_scratch_root"; then
         printf 'maintainability source snapshot has invalid isolation permissions\n' >&2
         exit 1
     fi
     snapshot_bootstrap="$snapshot_root/script/check-maintainability-bootstrap.sh"
+    snapshot_gate_runner="$snapshot_root/script/run-maintainability-gate.sh"
+    if $trusted_github_audit; then
+        snapshot_bootstrap=$script_path
+        snapshot_gate_runner=$gate_runner
+    fi
     "$bash_command" "$snapshot_bootstrap" --root "$snapshot_root"
 
     status=0
-    "$bash_command" "$snapshot_root/script/run-maintainability-gate.sh" "$mode" || status=$?
+    if $trusted_github_audit; then
+        LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT=$snapshot_root "$bash_command" "$snapshot_gate_runner" "$mode" || status=$?
+    else
+        "$bash_command" "$snapshot_gate_runner" "$mode" || status=$?
+    fi
     if (( status == 0 )); then
         "$bash_command" "$snapshot_bootstrap" --root "$snapshot_root" || status=$?
     fi

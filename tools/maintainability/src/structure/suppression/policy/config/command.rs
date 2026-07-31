@@ -43,13 +43,18 @@ pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "            BASH_ENV | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
     "                RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \\",
     "                CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \\",
-    "                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_* | TAR_OPTIONS)",
+    "                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_* | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | TAR_OPTIONS)",
     "if [[ -v GITHUB_ACTIONS || -v GITHUB_EVENT_PATH || -v GITHUB_SHA ]]; then",
     "        if [[ ${GITHUB_ACTIONS:-} != true || -z ${GITHUB_EVENT_PATH:-} || -z ${GITHUB_SHA:-} ]]; then",
     "        if [[ ! $GITHUB_SHA =~ ^[[:xdigit:]]{40}$ || ${checked_head,,} != \"${GITHUB_SHA,,}\" ]]; then",
     "            printf 'checked-out Git head revision differs from GITHUB_SHA before checker compilation\\n' >&2",
+    "        LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT=$snapshot_root \"$bash_command\" \"$snapshot_gate_runner\" \"$mode\" || status=$?",
 ];
 pub(super) const GATE_RUNNER_ENVIRONMENT_LINES: &[&str] = &[
+    "repository_root=${LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT:-$implementation_root}",
+    "LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT=$repository_root",
+    "readonly implementation_root repository_root LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT",
+    "export LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT",
     "readonly git_command=${LOCALHOLD_MAINTAINABILITY_GIT:?maintainability bootstrap did not provide an absolute Git command}",
     "GIT_CONFIG_NOSYSTEM=1",
     "GIT_CONFIG_GLOBAL=/dev/null",
@@ -96,30 +101,32 @@ pub(super) const GATE_RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "    if [[ ! -d $compatibility_bin || -L $compatibility_bin || ${compatibility_bin%/*} != \"$target_directory\" ]]; then",
     "    if [[ $RUSTUP_HOME != \"$rustup_environment\" || $RUSTUP_TOOLCHAIN != 1.97.0 ]]; then",
     "    if [[ $GIT_CONFIG_NOSYSTEM != 1 || $GIT_CONFIG_GLOBAL != /dev/null ]]; then",
+    "    if [[ $LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT != \"$repository_root\" ]]; then",
 ];
 pub(super) const GATE_RUNNER_COMMAND_LINES: &[&str] = &[
     "    \"$cargo_executable\" fetch --locked",
-    "    \"$cargo_executable\" fetch --manifest-path tools/dependency-unsafe/Cargo.toml --locked",
-    "    \"$cargo_fmt_executable\" --manifest-path tools/dependency-unsafe/Cargo.toml -- --check",
-    "    \"$cargo_executable\" test --manifest-path tools/dependency-unsafe/Cargo.toml --locked",
-    "    \"$cargo_clippy_executable\" clippy --manifest-path tools/dependency-unsafe/Cargo.toml --all-targets --locked -- -D warnings",
-    "    \"$cargo_executable\" run --manifest-path tools/dependency-unsafe/Cargo.toml --locked -- check",
+    "    \"$cargo_executable\" fetch --manifest-path \"$audit_manifest\" --locked",
+    "    \"$cargo_fmt_executable\" --manifest-path \"$audit_manifest\" -- --check",
+    "    \"$cargo_executable\" test --manifest-path \"$audit_manifest\" --locked",
+    "    \"$cargo_clippy_executable\" clippy --manifest-path \"$audit_manifest\" --all-targets --locked -- -D warnings",
+    "    \"$cargo_executable\" run --manifest-path \"$audit_manifest\" --locked -- check",
 ];
 pub(super) const RUNNER_ENVIRONMENT_LINES: &[&str] = &[
+    "audit_root=${LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT:-$implementation_root}",
     "readonly cargo_command=${LOCALHOLD_MAINTAINABILITY_CARGO:?maintainability bootstrap did not provide an absolute Cargo command}",
     "readonly cargo_clippy_command=${LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY:?maintainability bootstrap did not provide an absolute Cargo Clippy command}",
     "readonly cargo_fmt_command=${LOCALHOLD_MAINTAINABILITY_CARGO_FMT:?maintainability bootstrap did not provide an absolute Cargo fmt command}",
     "readonly git_command=${LOCALHOLD_MAINTAINABILITY_GIT:?maintainability bootstrap did not provide an absolute Git command}",
 ];
 pub(super) const RUNNER_COMMAND_LINES: &[&str] = &[
-    "\"$cargo_command\" fetch --manifest-path tools/maintainability/Cargo.toml --locked",
-    "\"$cargo_fmt_command\" --manifest-path tools/maintainability/Cargo.toml -- --check",
-    "\"$cargo_command\" test --manifest-path tools/maintainability/Cargo.toml --locked",
-    "\"$cargo_clippy_command\" clippy --manifest-path tools/maintainability/Cargo.toml --all-targets --locked -- -D warnings",
-    "\"$cargo_command\" run --manifest-path tools/maintainability/Cargo.toml --locked -- check",
+    "\"$cargo_command\" fetch --manifest-path \"$maintainability_manifest\" --locked",
+    "\"$cargo_fmt_command\" --manifest-path \"$maintainability_manifest\" -- --check",
+    "\"$cargo_command\" test --manifest-path \"$maintainability_manifest\" --locked",
+    "\"$cargo_clippy_command\" clippy --manifest-path \"$maintainability_manifest\" --all-targets --locked -- -D warnings",
+    "\"$cargo_command\" run --manifest-path \"$maintainability_manifest\" --locked -- check",
 ];
 pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
-    "unset GITHUB_ACTIONS GITHUB_EVENT_PATH GITHUB_SHA LOCALHOLD_MAINTAINABILITY_BASE_REV",
+    "unset GITHUB_ACTIONS GITHUB_EVENT_PATH GITHUB_SHA LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT LOCALHOLD_MAINTAINABILITY_BASE_REV",
     "fixture_parent=\"$repository_root/target/bootstrap-tests\"",
     "workflow_sha256=$(sed -n 's/^[[:space:]]*LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: //p' \"$ci_workflow\")",
     "guard_count=$(grep -Fc 'if [[ \"$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256\" != \"$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256\" ]]; then' \"$ci_workflow\" || true)",
@@ -189,7 +196,7 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
-    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: fcfd59d3d14e21e2d80412303f9c036d3472db233f38271922424576bfd07a2d",
+    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 5f14d1bc87a4ebf78198919cf003770a9e5cc0fdc0a1be6f0e719822ff00f890",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
@@ -206,6 +213,7 @@ pub(super) const TRUSTED_GATE_ENVIRONMENT_LINES: &[&str] = &[
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
     "          export LOCALHOLD_MAINTAINABILITY_BASE_REV=${base_revision,,}",
 ];
+pub(super) const TRUSTED_GATE_COMMAND_LINES: &[&str] = &["          /usr/bin/bash \"$trusted_bootstrap\" --root \"$candidate_root\" --maintainability"];
 pub(super) const GPU_RELEASE_REVISION_ENVIRONMENT_LINES: &[&str] = &[
     "          test \"$(git rev-parse HEAD)\" = \"$GITHUB_SHA\"",
     "          printf 'CUDA_RELEASE_ROOT=%s\\n' \"$root\" >>\"$GITHUB_ENV\"",
@@ -399,6 +407,7 @@ pub(super) fn reviewed_dynamic_command_references_are_exact(path: &str, source: 
     let expected = match path {
         "script/run-maintainability-gate.sh" => GATE_RUNNER_COMMAND_LINES,
         "script/run-source-safety.sh" => RUNNER_COMMAND_LINES,
+        ".github/workflows/trusted-maintainability.yml" => TRUSTED_GATE_COMMAND_LINES,
         _ => return false,
     };
     let lines = source.lines().collect::<Vec<_>>();

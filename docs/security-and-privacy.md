@@ -188,12 +188,13 @@ These paths are not contacted by a default running `hold` process:
   normal registries and GitHub during development or CI.
 - The organization ruleset runs `.github/workflows/trusted-maintainability.yml`
   from the protected default branch, rather than from the proposed pull-request
-  tree. That workflow accepts a candidate maintainability bootstrap only when
-  its SHA-256 matches the administrator-controlled
-  `LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256` repository variable. Updating
-  the bootstrap therefore requires both normal code review and a separate
-  repository-setting update; changing a pull-request workflow or an in-tree
-  digest cannot approve different bootstrap code.
+  tree. The workflow checks out the exact commit that supplied its definition
+  as a separate trusted tree, installs that tree's maintainability and
+  dependency-audit implementations into the candidate workspace, and invokes
+  the reviewed command sequence directly. It never dispatches through the
+  candidate `Justfile` or candidate gate scripts. Changes to a gate
+  implementation are therefore evaluated by the previously protected version
+  and take effect only after normal review and merge.
 - The first-party source-safety gate parses Rust under `src/`, `tests/`, and
   `benches/` (and `examples/` when present) and compares executable unsafe
   sites, mutable statics, unsafe attributes, unsafe global assembly, and direct

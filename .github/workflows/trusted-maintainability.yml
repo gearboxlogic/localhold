@@ -23,25 +23,75 @@ jobs:
           RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
         run: rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Check out protected gate implementation
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.workflow_sha }}
+          path: .trusted-gate
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: .candidate
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Run approved maintainability bootstrap
+      - name: Run protected maintainability implementation
+        working-directory: .candidate
         env:
-          APPROVED_BOOTSTRAP_SHA256: ${{ vars.LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256 }}
-          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}
+          BASE_REVISION_INPUT: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_ref }}
           RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup
+          RUSTUP_TOOLCHAIN: 1.97.0
         run: |
-          if [[ ! "$APPROVED_BOOTSTRAP_SHA256" =~ ^[[:xdigit:]]{64}$ ]]; then
-            printf 'repository maintainability bootstrap approval is missing or malformed\n' >&2
+          workspace_root=$(/usr/bin/realpath -- "$GITHUB_WORKSPACE")
+          trusted_root=$(/usr/bin/realpath -- ../.trusted-gate)
+          candidate_root=$(/usr/bin/realpath -- .)
+          if [[ "$trusted_root" != "$workspace_root/.trusted-gate" || "$candidate_root" != "$workspace_root/.candidate" ]]; then
+            printf 'trusted maintainability checkout paths are not canonical\n' >&2
             exit 1
           fi
-          actual_bootstrap_sha256=$(/usr/bin/sha256sum -- script/check-maintainability-bootstrap.sh)
-          actual_bootstrap_sha256=${actual_bootstrap_sha256%%[[:space:]]*}
-          if [[ "${actual_bootstrap_sha256,,}" != "${APPROVED_BOOTSTRAP_SHA256,,}" ]]; then
-            printf 'maintainability bootstrap differs from the repository-approved digest\n' >&2
+
+          for relative_path in tools/maintainability tools/dependency-unsafe; do
+            source_path="$trusted_root/$relative_path"
+            destination_path="$candidate_root/$relative_path"
+            destination_parent=$(/usr/bin/dirname -- "$destination_path")
+            if [[ ! -d "$source_path" || -L "$source_path" || ! -d "$destination_parent" || -L "$destination_parent" ]]; then
+              printf 'trusted maintainability implementation path is missing or unsafe: %s\n' "$relative_path" >&2
+              exit 1
+            fi
+            /usr/bin/rm -rf -- "$destination_path"
+            /usr/bin/cp -a -- "$source_path" "$destination_path"
+          done
+
+          base_revision=$BASE_REVISION_INPUT
+          if [[ "$base_revision" == refs/heads/* ]]; then
+            remote_ref="refs/remotes/origin/${base_revision#refs/heads/}"
+            base_revision=$(/usr/bin/git rev-parse --verify "${remote_ref}^{commit}")
+          fi
+          if [[ ! "$base_revision" =~ ^[[:xdigit:]]{40}$ ]]; then
+            printf 'maintainability base revision is missing or malformed\n' >&2
             exit 1
           fi
-          /usr/bin/bash script/check-maintainability-bootstrap.sh -- just maintainability
+          export LOCALHOLD_MAINTAINABILITY_BASE_REV=${base_revision,,}
+
+          trusted_bootstrap="$trusted_root/script/check-maintainability-bootstrap.sh"
+          /usr/bin/bash "$trusted_root/script/tests/test_maintainability_bootstrap.sh"
+          run_reviewed() {
+            /usr/bin/bash "$trusted_bootstrap" --root "$candidate_root" -- "$@"
+          }
+
+          run_reviewed cargo fetch --manifest-path tools/maintainability/Cargo.toml --locked
+          run_reviewed cargo fmt --manifest-path tools/maintainability/Cargo.toml -- --check
+          run_reviewed cargo test --manifest-path tools/maintainability/Cargo.toml --locked
+          run_reviewed cargo clippy --manifest-path tools/maintainability/Cargo.toml --all-targets --locked -- -D warnings
+          run_reviewed cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- check
+          run_reviewed cargo fetch --locked
+          run_reviewed cargo fetch --manifest-path tools/dependency-unsafe/Cargo.toml --locked
+          run_reviewed cargo fmt --manifest-path tools/dependency-unsafe/Cargo.toml -- --check
+          run_reviewed cargo test --manifest-path tools/dependency-unsafe/Cargo.toml --locked
+          run_reviewed cargo clippy --manifest-path tools/dependency-unsafe/Cargo.toml --all-targets --locked -- -D warnings
+          run_reviewed cargo run --manifest-path tools/dependency-unsafe/Cargo.toml --locked -- check

@@ -113,9 +113,6 @@ git -C "$test_repository" -c core.autocrlf=false -c user.name=LocalHold -c user.
 git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example.invalid commit -qm 'reviewed fixture'
 test_base=$(git -C "$test_repository" rev-parse HEAD)
 run_check >/dev/null
-trusted_repository="$fixture/trusted-implementation"
-git -c core.autocrlf=false clone -q --no-hardlinks "$test_repository" "$trusted_repository"
-trusted_check="$trusted_repository/script/check-maintainability-bootstrap.sh"
 
 inherited_config_marker="$fixture/global-git-config-ran"
 inherited_config_helper="$fixture/global-git-config-helper"
@@ -210,7 +207,7 @@ fi
 GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head \
     LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment >/dev/null
 GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head \
-    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base /usr/bin/bash "$trusted_check" --root "$test_repository" --test-environment >/dev/null
+    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base "$check" --root "$test_repository" --test-environment >/dev/null
 
 gate_candidate="$fixture/gate-candidate"
 git -c core.autocrlf=false clone -q --no-hardlinks "$test_repository" "$gate_candidate"
@@ -221,7 +218,7 @@ git -C "$gate_candidate" -c user.name=LocalHold -c user.email=localhold@example.
 gate_candidate_head=$(git -C "$gate_candidate" rev-parse HEAD)
 GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$gate_candidate_head \
     LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base CANDIDATE_GATE_MARKER=$candidate_gate_marker \
-    /usr/bin/bash "$trusted_check" --root "$gate_candidate" --test-environment >/dev/null
+    "$check" --root "$gate_candidate" --test-environment >/dev/null
 if [[ -e $candidate_gate_marker ]]; then
     printf 'protected maintainability workflow executed a candidate gate script\n' >&2
     exit 1

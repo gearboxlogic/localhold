@@ -137,7 +137,7 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_head run_local_check --test-environment >/dev/null 2>&1; then",
     "GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head \\",
     "    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment >/dev/null",
-    "    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base /usr/bin/bash \"$trusted_check\" --root \"$test_repository\" --test-environment >/dev/null",
+    "    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base \"$check\" --root \"$test_repository\" --test-environment >/dev/null",
     "    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base CANDIDATE_GATE_MARKER=$candidate_gate_marker \\",
     "GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_push_head \\",
     "    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment >/dev/null",
@@ -170,10 +170,6 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "    CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \\",
     "    run_check --test-environment >/dev/null",
 ];
-pub(super) const BOOTSTRAP_TEST_COMMAND_LINES: &[&str] = &[
-    "    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base /usr/bin/bash \"$trusted_check\" --root \"$test_repository\" --test-environment >/dev/null",
-    "    /usr/bin/bash \"$trusted_check\" --root \"$gate_candidate\" --test-environment >/dev/null",
-];
 pub(super) const MISE_ENVIRONMENT_LINES: &[&str] = &[
     "CARGO_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/cargo\"",
     "RUSTUP_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/rustup\"",
@@ -202,7 +198,7 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
-    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 5f14d1bc87a4ebf78198919cf003770a9e5cc0fdc0a1be6f0e719822ff00f890",
+    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 8893d12c9ee0b9ae940c86e1bde8122abf2acc83a07703084fa9619f45f79f34",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
@@ -413,7 +409,6 @@ pub(super) fn reviewed_dynamic_command_references_are_exact(path: &str, source: 
     let expected = match path {
         "script/run-maintainability-gate.sh" => GATE_RUNNER_COMMAND_LINES,
         "script/run-source-safety.sh" => RUNNER_COMMAND_LINES,
-        "script/tests/test_maintainability_bootstrap.sh" => BOOTSTRAP_TEST_COMMAND_LINES,
         ".github/workflows/trusted-maintainability.yml" => TRUSTED_GATE_COMMAND_LINES,
         _ => return false,
     };

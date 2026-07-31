@@ -486,10 +486,6 @@ fn bootstrap_digest_overrides_require_the_exact_reviewed_bindings() {
 #[test]
 fn authenticated_dynamic_commands_require_the_exact_reviewed_lines() {
     assert!(super::command::reviewed_dynamic_command_references_are_exact(
-        "script/tests/test_maintainability_bootstrap.sh",
-        &BOOTSTRAP_TEST_COMMAND_LINES.join("\n"),
-    ));
-    assert!(super::command::reviewed_dynamic_command_references_are_exact(
         "script/run-maintainability-gate.sh",
         &GATE_RUNNER_COMMAND_LINES.join("\n"),
     ));

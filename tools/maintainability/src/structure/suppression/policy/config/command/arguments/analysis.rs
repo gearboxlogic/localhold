@@ -2,6 +2,7 @@
 pub(super) struct Options {
     tool_case: ToolCase,
     backticks: BacktickPolicy,
+    command_substitutions: CommandSubstitutionPolicy,
     just_interpolation: JustInterpolationPolicy,
     integrity: IntegrityInspection,
 }
@@ -16,6 +17,12 @@ enum ToolCase {
 enum BacktickPolicy {
     Allow,
     Reject,
+}
+
+#[derive(Clone, Copy)]
+enum CommandSubstitutionPolicy {
+    Inspect,
+    Ignore,
 }
 
 #[derive(Clone, Copy)]
@@ -35,6 +42,7 @@ impl Options {
         Self {
             tool_case: ToolCase::Sensitive,
             backticks: BacktickPolicy::Reject,
+            command_substitutions: CommandSubstitutionPolicy::Inspect,
             just_interpolation: JustInterpolationPolicy::Reject,
             integrity: IntegrityInspection::TopLevel,
         }
@@ -47,6 +55,11 @@ impl Options {
 
     pub(super) const fn allow_backticks(mut self) -> Self {
         self.backticks = BacktickPolicy::Allow;
+        self
+    }
+
+    pub(super) const fn ignore_command_substitutions(mut self) -> Self {
+        self.command_substitutions = CommandSubstitutionPolicy::Ignore;
         self
     }
 
@@ -66,6 +79,13 @@ impl Options {
 
     pub(super) const fn rejects_backticks(self) -> bool {
         matches!(self.backticks, BacktickPolicy::Reject)
+    }
+
+    pub(super) const fn command_substitution_backticks(self) -> Option<bool> {
+        match self.command_substitutions {
+            CommandSubstitutionPolicy::Inspect => Some(self.rejects_backticks()),
+            CommandSubstitutionPolicy::Ignore => None,
+        }
     }
 
     pub(super) const fn rejects_just_interpolation(self) -> bool {

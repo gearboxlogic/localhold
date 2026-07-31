@@ -48,8 +48,14 @@ fn shell_identifier(source: &str) -> Option<(&str, &str)> {
     (end > 0 && !source.as_bytes()[0].is_ascii_digit()).then(|| source.split_at(end))
 }
 
-pub(super) fn failure_masks_quality_command(source: &str, case_insensitive_tools: bool) -> bool {
+pub(super) fn failure_masks_quality_command(source: &str, case_insensitive_tools: bool, command_backticks: Option<bool>) -> bool {
     let source = tokens::without_noncommand_shell_data(source);
+    if let Some(command_backticks) = command_backticks {
+        let (substitutions, malformed) = tokens::command_substitution_commands(&source, command_backticks);
+        if malformed || substitutions.iter().any(|command| contains_quality_command(command, case_insensitive_tools)) {
+            return true;
+        }
+    }
     if tokens::source_command_tokens(&source)
         .iter()
         .any(|command| control_flow_masks_quality_command(command, case_insensitive_tools))
@@ -216,30 +222,36 @@ mod tests {
 
     #[test]
     fn required_quality_command_failures_cannot_be_masked() {
-        assert!(failure_masks_quality_command("just check-quality | true", true));
-        assert!(failure_masks_quality_command("just check-quality || true", true));
-        assert!(failure_masks_quality_command("just check-quality &", true));
-        assert!(failure_masks_quality_command("! just check-quality", true));
-        assert!(failure_masks_quality_command("if just check-quality; then echo accepted; fi", true));
-        assert!(failure_masks_quality_command("while cargo clippy --locked; do echo retrying; done", true));
-        assert!(failure_masks_quality_command("until cargo test --locked; do echo retrying; done", true));
-        assert!(failure_masks_quality_command("env -u RUSTFLAGS just check-quality | true", true));
-        assert!(failure_masks_quality_command("timeout 5 just check-quality &", true));
-        assert!(failure_masks_quality_command("nice -n 5 cargo clippy --locked || true", true));
-        assert!(failure_masks_quality_command("time -p cargo test --locked | cat", true));
-        assert!(failure_masks_quality_command("IF (CARGO.EXE clippy --locked) { Write-Output accepted }", true));
-        assert!(failure_masks_quality_command("just check-quality && echo completed || true", true));
-        assert!(failure_masks_quality_command("cargo clippy --locked | cat", true));
-        assert!(failure_masks_quality_command("cargo clippy --locked || true", true));
-        assert!(!failure_masks_quality_command("cargo clippy --locked && echo completed", true));
-        assert!(!failure_masks_quality_command("cargo clippy --locked &>clippy.log", true));
-        assert!(!failure_masks_quality_command("cargo clippy --locked 2>&1", true));
-        assert!(!failure_masks_quality_command("cargo build | grep warning", true));
-        assert!(!failure_masks_quality_command("echo cargo || true", true));
-        assert!(!failure_masks_quality_command("if echo just check-quality; then echo informational; fi", true));
-        assert!(!failure_masks_quality_command("printf '%s\n' 'just check | true'", true));
-        assert!(!failure_masks_quality_command("printf '%s\n' 'just check || true'", true));
-        assert!(!failure_masks_quality_command("case \"$name\" in\n    CARGO | RUSTC | RUSTDOC) return ;;\nesac", true));
+        let masks = |source| failure_masks_quality_command(source, true, Some(true));
+        assert!(masks("just check-quality | true"));
+        assert!(masks("just check-quality || true"));
+        assert!(masks("just check-quality &"));
+        assert!(masks("! just check-quality"));
+        assert!(masks("if just check-quality; then echo accepted; fi"));
+        assert!(masks("while cargo clippy --locked; do echo retrying; done"));
+        assert!(masks("until cargo test --locked; do echo retrying; done"));
+        assert!(masks("env -u RUSTFLAGS just check-quality | true"));
+        assert!(masks("timeout 5 just check-quality &"));
+        assert!(masks("nice -n 5 cargo clippy --locked || true"));
+        assert!(masks("time -p cargo test --locked | cat"));
+        assert!(masks(r#"printf '%s\n' "$(just check-quality)""#));
+        assert!(masks("printf '%s' `cargo clippy`"));
+        assert!(masks(r#"printf '%s\n' "$(( $(cargo test) + 1 ))""#));
+        assert!(masks("IF (CARGO.EXE clippy --locked) { Write-Output accepted }"));
+        assert!(masks("just check-quality && echo completed || true"));
+        assert!(masks("cargo clippy --locked | cat"));
+        assert!(masks("cargo clippy --locked || true"));
+        assert!(!masks("cargo clippy --locked && echo completed"));
+        assert!(!masks("cargo clippy --locked &>clippy.log"));
+        assert!(!masks("cargo clippy --locked 2>&1"));
+        assert!(!masks("cargo build | grep warning"));
+        assert!(!masks("echo cargo || true"));
+        assert!(!masks("if echo just check-quality; then echo informational; fi"));
+        assert!(!masks("printf '%s\n' 'just check | true'"));
+        assert!(!masks("printf '%s\n' 'just check || true'"));
+        assert!(!masks("printf '%s\n' '$(just check-quality)'"));
+        assert!(!masks(r#"printf '%s\n' "$(printf 'just check-quality')""#));
+        assert!(!masks("case \"$name\" in\n    CARGO | RUSTC | RUSTDOC) return ;;\nesac"));
     }
 
     #[test]

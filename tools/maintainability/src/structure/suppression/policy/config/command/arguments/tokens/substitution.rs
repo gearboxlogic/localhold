@@ -1,11 +1,25 @@
 pub(super) fn process_commands(source: &str) -> (Vec<String>, bool) {
+    substitution_commands(source, SubstitutionKind::Process, true)
+}
+
+pub(super) fn command_commands(source: &str, include_backticks: bool) -> (Vec<String>, bool) {
+    substitution_commands(source, SubstitutionKind::Command, include_backticks)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubstitutionKind {
+    Process,
+    Command,
+}
+
+fn substitution_commands(source: &str, target: SubstitutionKind, include_backticks: bool) -> (Vec<String>, bool) {
     let characters = source.chars().collect::<Vec<_>>();
     let mut commands = Vec::new();
-    let complete = collect_process_commands(&characters, &mut commands);
+    let complete = collect_commands(&characters, &mut commands, target, include_backticks);
     (commands, !complete)
 }
 
-fn collect_process_commands(characters: &[char], commands: &mut Vec<String>) -> bool {
+fn collect_commands(characters: &[char], commands: &mut Vec<String>, target: SubstitutionKind, include_backticks: bool) -> bool {
     let mut index = 0;
     let mut quote = None;
     let mut escaped = false;
@@ -29,31 +43,41 @@ fn collect_process_commands(characters: &[char], commands: &mut Vec<String>) -> 
             quote = Some(character);
         } else if quote.is_none() && character == '#' && comment_can_start_after(previous) {
             comment = true;
-        } else if quote != Some('\'') && character == '`' {
+        } else if include_backticks && quote != Some('\'') && character == '`' {
             let Some(end) = backtick_end(characters, index + 1) else {
                 return false;
             };
-            if !collect_process_commands(&characters[index + 1..end], commands) {
+            let command = &characters[index + 1..end];
+            if !collect_commands(command, commands, target, include_backticks) {
                 return false;
+            }
+            if target == SubstitutionKind::Command {
+                commands.push(command.iter().collect());
             }
             index = end;
         } else if quote != Some('\'') && character == '$' && characters.get(index + 1) == Some(&'(') {
             let Some(end) = parenthesized_end(characters, index + 2) else {
                 return false;
             };
-            if !collect_process_commands(&characters[index + 2..end], commands) {
+            let command = &characters[index + 2..end];
+            if !collect_commands(command, commands, target, include_backticks) {
                 return false;
+            }
+            if target == SubstitutionKind::Command && characters.get(index + 2) != Some(&'(') {
+                commands.push(command.iter().collect());
             }
             index = end;
         } else if quote.is_none() && matches!(character, '<' | '>') && characters.get(index + 1) == Some(&'(') {
             let Some(end) = parenthesized_end(characters, index + 2) else {
                 return false;
             };
-            let command = characters[index + 2..end].iter().collect::<String>();
-            if !collect_process_commands(&characters[index + 2..end], commands) {
+            let command = &characters[index + 2..end];
+            if !collect_commands(command, commands, target, include_backticks) {
                 return false;
             }
-            commands.push(command);
+            if target == SubstitutionKind::Process {
+                commands.push(command.iter().collect());
+            }
             index = end;
         }
         previous = Some(character);
@@ -118,7 +142,7 @@ fn backtick_end(characters: &[char], start: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::process_commands;
+    use super::{command_commands, process_commands};
 
     #[test]
     fn executable_process_substitutions_are_extracted_without_inert_text() {
@@ -142,5 +166,26 @@ mod tests {
             (vec!["printf ok;# )\nsh quality/lint.txt\n".to_owned()], false)
         );
         assert_eq!(process_commands("cat <(sh quality/lint.txt"), (Vec::new(), true));
+    }
+
+    #[test]
+    fn command_substitutions_are_extracted_without_inert_or_arithmetic_text() {
+        assert_eq!(
+            command_commands(r#"printf '%s' "$(just check-quality)""#, true),
+            (vec!["just check-quality".to_owned()], false)
+        );
+        assert_eq!(
+            command_commands(r#"printf '%s' "$(printf '%s' "$(cargo clippy)")""#, true),
+            (vec!["cargo clippy".to_owned(), r#"printf '%s' "$(cargo clippy)""#.to_owned(),], false,)
+        );
+        assert_eq!(command_commands("printf '%s' '$(just check-quality)'", true), (Vec::new(), false));
+        assert_eq!(command_commands(r#"printf '%s' "$((1 + 2))""#, true), (Vec::new(), false));
+        assert_eq!(
+            command_commands(r#"printf '%s' "$(( $(cargo check) + 1 ))""#, true),
+            (vec!["cargo check".to_owned()], false)
+        );
+        assert_eq!(command_commands("printf `%s`", true), (vec!["%s".to_owned()], false));
+        assert_eq!(command_commands("Write-Output \"build``stamp\"", false), (Vec::new(), false));
+        assert_eq!(command_commands("printf \"$(just check-quality\"", true), (Vec::new(), true));
     }
 }

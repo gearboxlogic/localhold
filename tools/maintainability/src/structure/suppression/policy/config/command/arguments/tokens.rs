@@ -4,6 +4,10 @@ pub(super) fn process_substitution_commands(source: &str) -> (Vec<String>, bool)
     substitution::process_commands(source)
 }
 
+pub(super) fn command_substitution_commands(source: &str, include_backticks: bool) -> (Vec<String>, bool) {
+    substitution::command_commands(source, include_backticks)
+}
+
 pub(super) fn normalized_shell_tokens(source: &str) -> Vec<String> {
     normalized_shell_commands(source).into_iter().flatten().collect()
 }

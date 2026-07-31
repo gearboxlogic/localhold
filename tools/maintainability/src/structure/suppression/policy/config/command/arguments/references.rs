@@ -188,6 +188,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "sed" | "sed.exe" => {
             return (Vec::new(), sed::program_is_opaque(arguments));
         }
+        "sort" | "sort.exe" if sort_compression_program_is_opaque(arguments) => SelectedInput::Opaque,
         "tar" | "tar.exe" if tar_checkpoint_action_is_opaque(arguments) => SelectedInput::Opaque,
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
             let (inputs, opaque) = makefile_inputs(arguments);
@@ -217,6 +218,13 @@ fn tar_checkpoint_action_is_opaque(arguments: &[String]) -> bool {
     arguments.iter().any(|argument| {
         let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
         option.len() >= "--checkpoint-a".len() && "--checkpoint-action".starts_with(option)
+    })
+}
+
+fn sort_compression_program_is_opaque(arguments: &[String]) -> bool {
+    arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
+        let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
+        option.len() >= "--co".len() && "--compress-program".starts_with(option)
     })
 }
 
@@ -465,6 +473,8 @@ mod tests {
         assert_eq!(inputs("env -u RUSTFLAGS sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
         assert_eq!(inputs("env -i HOME=/tmp sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
         assert_eq!(inputs("env | sort"), (Vec::new(), false));
+        assert_eq!(inputs("sort -Vu input.txt"), (Vec::new(), false));
+        assert_eq!(inputs("sort -- --compress-program=payload"), (Vec::new(), false));
         assert_eq!(inputs("nohup sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
         assert_eq!(inputs("command -p sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
         assert_eq!(inputs("command -v cargo"), (Vec::new(), false));
@@ -511,6 +521,8 @@ mod tests {
             "tar --checkpoint=1 --checkpoint-action=exec='sh quality/lint.txt' -cf archive.tar .",
             "tar --checkpoint-a=exec='sh quality/lint.txt' -cf archive.tar .",
             "tar --checkpoint-action exec='sh quality/lint.txt' -cf archive.tar .",
+            "sort --compress-program=quality/lint.txt input.txt",
+            "sort --co quality/lint.txt input.txt",
             "sed -nf quality/lint.sed /etc/hosts",
             "sed --file=quality/lint.sed /etc/hosts",
             "sed -f $SCRIPT /etc/hosts",

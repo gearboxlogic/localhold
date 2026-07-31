@@ -299,6 +299,8 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
             "tar --checkpoint=1 --checkpoint-action=exec='sh quality/lint.txt' -cf archive.tar .\n",
             "opaque interpreter program",
         ),
+        ("sort --compress-program=quality/lint.txt /etc/hosts\n", "opaque interpreter program"),
+        ("printf '%s\\n' \"$(just check-quality)\"\n", "lint-weakening argument"),
         ("$'\\x73\\x68' quality/lint.txt\n", "opaque interpreter program"),
     ] {
         fs::write(workspace.path().join("script/check.sh"), command).expect("opaque shell dispatcher");

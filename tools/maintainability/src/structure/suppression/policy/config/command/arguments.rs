@@ -39,6 +39,9 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
     if is_powershell(path) {
         options = options.allow_backticks();
     }
+    if is_python(path) || is_windows_command(path) {
+        options = options.ignore_command_substitutions();
+    }
     if is_just(path) && ignored_just_recipe_failure(source, options.case_insensitive_tools()) {
         return true;
     }
@@ -179,7 +182,7 @@ fn weakening_token_with_options(source: &str, options: AnalysisOptions) -> bool 
     if options.inspects_integrity()
         && (integrity::declares_rust_tool_function(&logical, options.case_insensitive_tools())
             || integrity::has_command_hash_override(&logical)
-            || integrity::failure_masks_quality_command(&logical, options.case_insensitive_tools()))
+            || integrity::failure_masks_quality_command(&logical, options.case_insensitive_tools(), options.command_substitution_backticks()))
     {
         return true;
     }
@@ -514,6 +517,13 @@ fn is_python(path: &str) -> bool {
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
+}
+
+fn is_windows_command(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "cmd" | "bat"))
 }
 
 fn is_just(path: &str) -> bool {

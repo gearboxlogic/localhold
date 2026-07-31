@@ -224,6 +224,14 @@ fn shell_continuations_cannot_split_lint_arguments_from_cargo() {
 }
 
 #[test]
+fn shell_substitution_syntax_is_not_applied_to_other_command_languages() {
+    assert!(!weakening_token_for_surface("script/check.py", r#"print("$(just check-quality)")"#));
+    assert!(!weakening_token_for_surface("script/check.cmd", "echo $(just check-quality)"));
+    assert!(!weakening_token_for_surface("script/check.ps1", "Write-Output \"build``stamp\""));
+    assert!(weakening_token_for_surface("script/check.ps1", "Write-Output \"$(just check-quality)\""));
+}
+
+#[test]
 fn python_command_arrays_cannot_split_lint_arguments_from_cargo() {
     assert!(weakening_token_for_surface(
         "script/check.py",

@@ -31,15 +31,17 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
     let mut surfaces = BTreeSet::new();
     for path in paths {
         let absolute = workspace.join(&path);
+        let classified = is_execution_surface(&path) || executables.contains(&path);
         match fs::symlink_metadata(&absolute) {
             Ok(metadata) if metadata.is_dir() => continue,
-            Ok(metadata) if metadata.file_type().is_symlink() => bail!("command execution surface cannot be a symlink: {path:?}"),
+            Ok(metadata) if metadata.file_type().is_symlink() && classified => bail!("command execution surface cannot be a symlink: {path:?}"),
+            Ok(metadata) if metadata.file_type().is_symlink() => continue,
             Ok(metadata) if metadata.is_file() => {}
             Ok(_) => continue,
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(error) => return Err(error).with_context(|| format!("inspect possible command execution surface {}", absolute.display())),
         }
-        if is_execution_surface(&path) || executables.contains(&path) || has_shebang(&absolute)? {
+        if classified || has_shebang(&absolute)? {
             surfaces.insert(path);
         }
     }
@@ -119,4 +121,45 @@ fn has_shebang(path: &Path) -> Result<bool> {
         .with_context(|| format!("read possible command execution surface {}", path.display()))?
         == prefix.len()
         && prefix == *b"#!")
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::path::Path;
+    use std::process::Command;
+
+    use super::execution_surfaces;
+
+    #[test]
+    fn unrelated_symlinks_are_not_command_surfaces() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        fs::create_dir(repository.path().join("docs")).expect("create docs directory");
+        fs::create_dir(repository.path().join("script")).expect("create script directory");
+        fs::write(repository.path().join("docs/guide.md"), "guide\n").expect("write guide");
+        symlink("guide.md", repository.path().join("docs/latest.md")).expect("create documentation symlink");
+        fs::write(repository.path().join("script/check.sh"), "#!/bin/sh\nexit 0\n").expect("write command surface");
+        git(repository.path(), &["init", "--quiet"]);
+        git(repository.path(), &["add", "."]);
+
+        let surfaces = execution_surfaces(repository.path()).expect("classify execution surfaces");
+        assert!(surfaces.paths.contains(&"script/check.sh".to_owned()));
+        assert!(!surfaces.paths.contains(&"docs/latest.md".to_owned()));
+
+        symlink("check.sh", repository.path().join("script/linked.sh")).expect("create command symlink");
+        git(repository.path(), &["add", "script/linked.sh"]);
+        let error = execution_surfaces(repository.path()).err().expect("reject command surface symlink");
+        assert!(error.to_string().contains("command execution surface cannot be a symlink"));
+    }
+
+    fn git(repository: &Path, arguments: &[&str]) {
+        let status = Command::new("git")
+            .current_dir(repository)
+            .args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"])
+            .args(arguments)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {arguments:?}");
+    }
 }

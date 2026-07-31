@@ -322,6 +322,7 @@ fn weakening_environment_channels_are_detected() {
     assert!(weakening_environment("LD_AUDIT=untrusted.so"));
     assert!(weakening_environment("LD_LIBRARY_PATH=untrusted"));
     assert!(weakening_environment("LD_PRELOAD=untrusted.so"));
+    assert!(weakening_environment("PYTHONPATH=/tmp/injected python3 quality/safe.py"));
     assert!(weakening_environment("export RUSTFLAGS='-A warnings'\nexec \"$CHECK\""));
     assert!(weakening_environment("export RUST''FLAGS='--cap-lints allow'"));
     assert!(weakening_environment("CARGO_ENCODED_RUSTFLAGS=dynamic"));

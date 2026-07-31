@@ -6,6 +6,7 @@ use anyhow::{Context, Result, bail};
 
 mod actions;
 mod arguments;
+mod environment;
 mod make;
 mod surfaces;
 mod yaml;
@@ -15,6 +16,7 @@ pub(super) use arguments::has_sourced_file_indirection;
 pub(super) use arguments::weakening_token;
 pub(super) use arguments::weakening_token_for_surface;
 use arguments::{cargo_manifest_paths_for_surface, direct_rust_sources_for_surface, normalized_shell_tokens, normalized_shell_words, package_script_commands};
+use environment::is_weakening_environment_name;
 use surfaces::execution_surfaces;
 
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
@@ -318,69 +320,6 @@ fn weakening_environment_names(source: &str) -> bool {
         .filter(|name| !name.is_empty())
         .filter(|name| name.bytes().any(|byte| byte.is_ascii_uppercase()))
         .any(is_weakening_environment_name)
-}
-
-fn is_weakening_environment_name(name: &str) -> bool {
-    let name = name.to_ascii_uppercase();
-    matches!(
-        name.as_str(),
-        "BASH_ENV"
-            | "LD_AUDIT"
-            | "LD_LIBRARY_PATH"
-            | "LD_PRELOAD"
-            | "RUSTFLAGS"
-            | "CARGO_ENCODED_RUSTFLAGS"
-            | "RUSTDOCFLAGS"
-            | "CARGO_ENCODED_RUSTDOCFLAGS"
-            | "CLIPPY_ARGS"
-            | "CLIPPY_CONF_DIR"
-            | "RUSTC"
-            | "RUSTDOC"
-            | "RUSTC_BOOTSTRAP"
-            | "RUSTC_WRAPPER"
-            | "RUSTC_WORKSPACE_WRAPPER"
-            | "RUSTUP_DIST_SERVER"
-            | "RUSTUP_UPDATE_ROOT"
-            | "TAR_OPTIONS"
-            | "CARGO_HOME"
-            | "CARGO_BUILD_TARGET"
-            | "CARGO_BUILD_RUSTFLAGS"
-            | "CARGO_BUILD_RUSTDOCFLAGS"
-            | "CARGO_BUILD_RUSTC"
-            | "CARGO_BUILD_RUSTDOC"
-            | "CARGO_BUILD_RUSTC_WRAPPER"
-            | "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"
-            | "GITHUB_ACTIONS"
-            | "GITHUB_EVENT_PATH"
-            | "GITHUB_PATH"
-            | "GITHUB_SHA"
-            | "LOCALHOLD_MAINTAINABILITY_BASE_REV"
-            | "LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256"
-            | "LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256"
-            | "LOCALHOLD_MAINTAINABILITY_CARGO"
-            | "LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY"
-            | "LOCALHOLD_MAINTAINABILITY_CARGO_FMT"
-            | "LOCALHOLD_MAINTAINABILITY_GIT"
-            | "LOCALHOLD_MAINTAINABILITY_RUSTC"
-            | "LOCALHOLD_MAINTAINABILITY_RUSTUP"
-            | "GNUMAKEFLAGS"
-            | "MAKEFILES"
-            | "MAKEFLAGS"
-            | "MFLAGS"
-            | "MISE_CONFIG_DIR"
-            | "MISE_CONFIG_FILE"
-            | "MISE_CEILING_PATHS"
-            | "MISE_DEFAULT_CONFIG_FILENAME"
-            | "MISE_ENV_FILE"
-            | "MISE_GLOBAL_CONFIG_FILE"
-            | "MISE_GLOBAL_CONFIG_ROOT"
-            | "MISE_OVERRIDE_CONFIG_FILENAMES"
-            | "MISE_SYSTEM_CONFIG_DIR"
-            | "MISE_SYSTEM_CONFIG_FILE"
-            | "MISE_SYSTEM_DIR"
-    ) || name.starts_with("CARGO_ALIAS_")
-        || name.starts_with("CARGO_TARGET_") && (name.ends_with("_RUSTFLAGS") || name.ends_with("_RUSTDOCFLAGS") || name.ends_with("_LINKER") || name.ends_with("_RUNNER"))
-        || name.starts_with("GIT_")
 }
 
 const fn is_path_environment_name(name: &str) -> bool {

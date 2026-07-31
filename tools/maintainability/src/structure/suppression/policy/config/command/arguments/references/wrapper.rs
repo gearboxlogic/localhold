@@ -166,6 +166,7 @@ fn is_unparsed_launcher(command: &str) -> bool {
         command.trim_end_matches(".exe"),
         "bwrap"
             | "chrt"
+            | "choom"
             | "cpulimit"
             | "daemonize"
             | "firejail"
@@ -197,10 +198,12 @@ mod tests {
     use super::{Selection, select};
 
     #[test]
-    fn unparsed_flock_launchers_are_opaque() {
+    fn unparsed_launchers_are_opaque() {
         let arguments = vec!["/tmp/lock".to_owned(), "sh".to_owned(), "quality/lint.txt".to_owned()];
 
         assert!(matches!(select("flock", "flock", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/flock", "flock", &arguments), Selection::Opaque));
+        assert!(matches!(select("choom", "choom", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/bin/choom", "choom", &arguments), Selection::Opaque));
     }
 }

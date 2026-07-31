@@ -68,7 +68,7 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=f9ead9aeff6aae855040ce3aea2e8901119071beef46061332dc3526378a9de6
-readonly reviewed_bootstrap_tests_sha256=d666773a0b4c4d2fa2829539848315f617624f2287e0336f9d9098ed37681ecc
+readonly reviewed_bootstrap_tests_sha256=8216bc5b96f8fd49b1ce493926154344d3cfd79cbdd0e4f5083c44e9ff9c3d9e
 readonly reviewed_gate_runner_sha256=dcf8335f2f2ed61dd49001060e27b15655368c1dcd5be021271e5b0b41a91cdd
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
@@ -172,6 +172,11 @@ mv_command=$(trusted_system_command mv)
 chmod_command=$(trusted_system_command chmod)
 tar_command=$(trusted_system_command tar)
 bash_command=$(trusted_system_command bash)
+
+has_write_mode_bits() {
+    local path=$1
+    [[ -n $("$find_command" "$path" -prune -perm /222 -print) ]]
+}
 
 git_at() {
     local root=$1
@@ -582,7 +587,9 @@ if [[ $mode != verify ]]; then
     # The dependency audit owns .cache/dependency-unsafe for confined scratch
     # space; all durable evidence remains under the separately writable target.
     "$chmod_command" u+rwx -- "$snapshot_root/target" "$audit_scratch_root"
-    if [[ -w "$snapshot_root/tools/maintainability/src/main.rs" || ! -w "$snapshot_root/target" || ! -w "$audit_scratch_root" ]]; then
+    if has_write_mode_bits "$snapshot_root/tools/maintainability/src/main.rs" ||
+        ! has_write_mode_bits "$snapshot_root/target" ||
+        ! has_write_mode_bits "$audit_scratch_root"; then
         printf 'maintainability source snapshot has invalid isolation permissions\n' >&2
         exit 1
     fi

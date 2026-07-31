@@ -34,6 +34,10 @@ sha256_stream() {
     fi
 }
 
+has_write_mode_bits() {
+    [[ -n $(find "$1" -prune -perm /222 -print) ]]
+}
+
 bootstrap_file_sha256=$(sha256_stream <"$check")
 bootstrap_file_sha256=${bootstrap_file_sha256%%[[:space:]]*}
 bootstrap_digest_bytes=$(printf '%s\n' "$bootstrap_file_sha256" | sed 's/../\\x&/g')
@@ -131,7 +135,9 @@ restore_reviewed_graph
     for _ in {1..1000}; do
         snapshot_candidates=("$test_repository"/target/s.*)
         snapshot=${snapshot_candidates[0]}
-        if [[ -d $snapshot/target && -w $snapshot/target && ! -w $snapshot/tools/maintainability/src/main.rs ]]; then
+        if [[ -d $snapshot/target ]] &&
+            has_write_mode_bits "$snapshot/target" &&
+            ! has_write_mode_bits "$snapshot/tools/maintainability/src/main.rs"; then
             if mkdir -p "$snapshot/target/dependency-unsafe/actual-test" 2>/dev/null; then
                 printf 'preserved evidence\n' >"$snapshot/target/dependency-unsafe/actual-test/evidence.txt"
                 printf '#![allow(warnings)]\npub fn changed_after_verification() {}\n' >"$test_repository/src/lib.rs"

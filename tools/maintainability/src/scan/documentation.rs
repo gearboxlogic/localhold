@@ -61,7 +61,6 @@ fn doc_comment_source(attribute: &Attribute) -> Option<String> {
 struct DocCommentScanner {
     block_doc: bool,
     fence: Option<Fence>,
-    previous_was_blank: Option<bool>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -87,12 +86,10 @@ impl DocCommentScanner {
         let content = content.strip_prefix(' ').unwrap_or(content);
         let content = strip_markdown_container_prefixes(content);
         let trimmed = content.trim_start();
-        let runnable = match fence_delimiter(trimmed) {
+        match fence_delimiter(trimmed) {
             Some((delimiter, rest)) => update_fence(&mut self.fence, delimiter, rest),
-            None => self.fence.is_none() && self.previous_was_blank != Some(false) && is_indented_code(content),
-        };
-        self.previous_was_blank = Some(trimmed.is_empty());
-        runnable
+            None => false,
+        }
     }
 }
 
@@ -134,18 +131,6 @@ fn strip_footnote_definition(content: &str) -> Option<&str> {
 
 fn strip_container_separator(content: &str) -> &str {
     content.strip_prefix(' ').or_else(|| content.strip_prefix('\t')).unwrap_or(content)
-}
-
-fn is_indented_code(content: &str) -> bool {
-    let mut columns = 0_usize;
-    for character in content.chars() {
-        match character {
-            ' ' => columns += 1,
-            '\t' => columns += 4 - columns % 4,
-            _ => return columns >= 4,
-        }
-    }
-    false
 }
 
 fn fence_delimiter(content: &str) -> Option<(Fence, &str)> {

@@ -1,4 +1,4 @@
-use super::validate;
+use super::{WINDOWS_SHELL, validate};
 
 const JOB: &str = r#"  dependency-unsafe-linux:
     runs-on: ubuntu-latest
@@ -48,7 +48,7 @@ fn workflow() -> String {
         .replace("ubuntu-latest", "windows-latest")
         .replace(
             "shell: /usr/bin/env -u BASH_ENV -u ENV -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
-            "shell: '\"C:\\Program Files\\Git\\usr\\bin\\env.exe\" -u BASH_ENV -u ENV -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD \"C:\\Program Files\\Git\\bin\\bash.exe\" --noprofile --norc -e -o pipefail {0}'",
+            "shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:ENV = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\\Program Files\\Git\\bin\\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE\"'",
         )
         .replace("target/dependency-unsafe/actual-linux", "target/dependency-unsafe/actual-windows")
         .replacen(
@@ -57,6 +57,13 @@ fn workflow() -> String {
             1,
         );
     format!("name: CI\non: push\njobs:\n{JOB}{windows_job}")
+}
+
+#[test]
+fn windows_shell_uses_a_whitespace_free_runner_command() {
+    let (command, arguments) = WINDOWS_SHELL.split_once(' ').expect("custom shell command and arguments");
+    assert_eq!(command, r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
+    assert!(arguments.contains("'{0}'"));
 }
 
 fn assert_rejected(source: &str) {
@@ -119,6 +126,9 @@ fn governed_shell_clears_startup_channels_before_bash_starts() {
 
     let unsanitized_loader = accepted.replacen("-u LD_PRELOAD ", "", 1);
     assert_rejected(&unsanitized_loader);
+
+    let unsanitized_windows = accepted.replacen("$env:BASH_ENV = $null; ", "", 1);
+    assert_rejected(&unsanitized_windows);
 
     let step_override = accepted.replacen("        id: audit", "        id: audit\n        shell: bash", 1);
     assert_rejected(&step_override);

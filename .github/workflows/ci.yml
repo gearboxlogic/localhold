@@ -247,7 +247,7 @@ jobs:
     timeout-minutes: 45
     defaults:
       run:
-        shell: '"C:\Program Files\Git\usr\bin\env.exe" -u BASH_ENV -u ENV -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD "C:\Program Files\Git\bin\bash.exe" --noprofile --norc -e -o pipefail {0}'
+        shell: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:ENV = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\Program Files\Git\bin\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE"'
     steps:
       - name: Install reviewed Rust toolchain
         env:

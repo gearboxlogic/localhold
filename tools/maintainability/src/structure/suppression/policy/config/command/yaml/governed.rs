@@ -12,7 +12,7 @@ const UPLOAD_NAME: &str = "Upload dependency audit evidence on failure";
 const UPLOAD_CONDITION: &str = "failure() && steps.audit.outcome == 'failure'";
 const TOOLCHAIN_RUN_SOURCE: &str = "rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt";
 const LINUX_SHELL: &str = "/usr/bin/env -u BASH_ENV -u ENV -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}";
-const WINDOWS_SHELL: &str = r#""C:\Program Files\Git\usr\bin\env.exe" -u BASH_ENV -u ENV -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD "C:\Program Files\Git\bin\bash.exe" --noprofile --norc -e -o pipefail {0}"#;
+const WINDOWS_SHELL: &str = r#"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $env:BASH_ENV = $null; $env:ENV = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & 'C:\Program Files\Git\bin\bash.exe' --noprofile --norc -e -o pipefail '{0}'; exit $LASTEXITCODE""#;
 const GATE_RUN_SOURCE: &str = r#"if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
   printf 'maintainability bootstrap differs from the workflow-reviewed digest\n' >&2
   exit 1

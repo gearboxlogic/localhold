@@ -4,6 +4,7 @@ use std::path::Path;
 use anyhow::Result;
 
 mod dynamic;
+mod dynamic_program;
 mod package_json;
 mod powershell;
 mod python;
@@ -18,7 +19,7 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token(source:
 }
 
 pub(in crate::structure::suppression::policy::config) fn weakening_token_for_surface(path: &str, source: &str) -> bool {
-    if is_unanalyzed_dynamic_program(path) {
+    if dynamic_program::is_unanalyzed_path(path) {
         return true;
     }
     if is_python(path) && python::has_opaque_process_arguments(source) {
@@ -470,20 +471,6 @@ fn is_python(path: &str) -> bool {
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
-}
-
-fn is_unanalyzed_dynamic_program(path: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "jsx" | "lua" | "pl" | "pm" | "php" | "rb" | "ts" | "tsx"))
-}
-
-fn is_unanalyzed_dynamic_interpreter(command: &str) -> bool {
-    matches!(
-        command,
-        "bun" | "bun.exe" | "deno" | "deno.exe" | "lua" | "lua.exe" | "node" | "node.exe" | "perl" | "perl.exe" | "php" | "php.exe" | "ruby" | "ruby.exe"
-    )
 }
 
 fn is_powershell(path: &str) -> bool {

@@ -253,6 +253,7 @@ fn unanalyzed_dynamic_programs_fail_closed() {
         ("quality/lint.rb", "system(\"cargo\", \"clippy\", \"--\", \"-\" + \"A\", \"warnings\")\n"),
         ("quality/lint.lua", "os.execute(\"cargo clippy -- -\" .. \"A warnings\")\n"),
         ("quality/lint.php", "exec(\"cargo clippy -- -\" . \"A warnings\");\n"),
+        ("quality/lint.tcl", "exec cargo clippy -- [format %cA 45] warnings\n"),
     ] {
         assert!(weakening_token_for_surface(path, source), "dynamic program was not rejected: {path}");
     }
@@ -582,6 +583,7 @@ fn command_policy_rejects_unanalyzed_interpreter_programs() {
     for (interpreter, program, source) in [
         ("perl", "quality/lint.pl", "system(\"cargo\", \"clippy\", \"--\", \"-\" . \"A\", \"warnings\")\n"),
         ("ruby", "quality/lint.rb", "system(\"cargo\", \"clippy\", \"--\", \"-\" + \"A\", \"warnings\")\n"),
+        ("tclsh", "quality/lint.tcl", "exec cargo clippy -- [format %cA 45] warnings\n"),
     ] {
         let workspace = tempfile::tempdir().expect("temporary workspace");
         fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
@@ -661,7 +663,7 @@ fn command_policy_rejects_setpriv_command_indirection() {
 }
 
 #[test]
-fn command_policy_scans_sed_program_files() {
+fn command_policy_rejects_sed_program_files() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
     fs::write(workspace.path().join("Justfile"), "lint:\n    sed -f quality/lint.sed /etc/hosts\n").expect("sed invocation");
@@ -670,7 +672,7 @@ fn command_policy_scans_sed_program_files() {
     git(workspace.path(), &["add", "."]);
 
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+    assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
 }
 
 #[test]

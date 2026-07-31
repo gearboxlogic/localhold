@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
 use super::{
-    has_case_insensitive_tool_names, is_cargo_tool_token, is_environment_assignment, is_normalized_manifest_path, is_unanalyzed_dynamic_interpreter, is_yaml, matches_tool_name,
+    dynamic_program, has_case_insensitive_tool_names, is_cargo_tool_token, is_environment_assignment, is_normalized_manifest_path, is_yaml, matches_tool_name,
     normalized_source_for_surface, package_json, tokens, tool_basename,
 };
 
@@ -161,7 +161,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "bash" | "bash.exe" | "dash" | "dash.exe" | "fish" | "fish.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe" => shell_input(arguments),
         "python" | "python.exe" | "python3" | "python3.exe" => python_input(arguments),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),
-        _ if is_unanalyzed_dynamic_interpreter(&command) => SelectedInput::Opaque,
+        _ if dynamic_program::is_unanalyzed_interpreter(&command) => SelectedInput::Opaque,
         "awk" | "awk.exe" | "gawk" | "gawk.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe" => {
             let (inputs, opaque) = program_file_inputs(arguments, &AWK_PROGRAM_FILES);
             return (Vec::new(), opaque || !inputs.is_empty());
@@ -171,7 +171,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         }
         "sed" | "sed.exe" => {
             let (inputs, opaque) = program_file_inputs(arguments, &SED_PROGRAM_FILES);
-            return (inputs, opaque);
+            return (Vec::new(), opaque || !inputs.is_empty());
         }
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
             let (inputs, opaque) = makefile_inputs(arguments);
@@ -530,6 +530,8 @@ mod tests {
         assert_eq!(inputs("pwsh -File quality/lint.ps1"), (vec!["quality/lint.ps1".to_owned()], false));
         assert_eq!(inputs("perl quality/lint.pl"), (Vec::new(), true));
         assert_eq!(inputs("ruby -- quality/lint.rb"), (Vec::new(), true));
+        assert_eq!(inputs("tclsh quality/lint.tcl"), (Vec::new(), true));
+        assert_eq!(inputs("/usr/bin/tclsh8.6 quality/lint.tcl"), (Vec::new(), true));
         assert_eq!(inputs("perl -e 'system q(cargo clippy)'"), (Vec::new(), true));
         assert_eq!(inputs("timeout 10 sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
         assert_eq!(
@@ -566,8 +568,8 @@ mod tests {
         assert_eq!(inputs("find /tmp -maxdepth 0 -print"), (Vec::new(), false));
         assert_eq!(inputs("xargs -a quality/args.txt sh"), (Vec::new(), true));
         assert_eq!(inputs("parallel sh :::: quality/args.txt"), (Vec::new(), true));
-        assert_eq!(inputs("sed -nf quality/lint.sed /etc/hosts"), (vec!["quality/lint.sed".to_owned()], false));
-        assert_eq!(inputs("sed --file=quality/lint.sed /etc/hosts"), (vec!["quality/lint.sed".to_owned()], false));
+        assert_eq!(inputs("sed -nf quality/lint.sed /etc/hosts"), (Vec::new(), true));
+        assert_eq!(inputs("sed --file=quality/lint.sed /etc/hosts"), (Vec::new(), true));
         assert_eq!(inputs("sed -f $SCRIPT /etc/hosts"), (Vec::new(), true));
         assert_eq!(
             inputs("make -f quality/lint.rules --file=quality/common.rules"),

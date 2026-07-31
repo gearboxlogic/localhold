@@ -9,9 +9,11 @@ struct Scanner<'a> {
     case_insensitive_tools: bool,
     quality_functions: &'a BTreeSet<String>,
     groups: Vec<(char, usize)>,
+    cases: Vec<usize>,
+    word_start: Option<usize>,
+    command_start: bool,
     quote: Option<char>,
-    escaped: bool,
-    comment: bool,
+    lexical_mode: LexicalMode,
 }
 
 impl<'a> Scanner<'a> {
@@ -21,16 +23,27 @@ impl<'a> Scanner<'a> {
             case_insensitive_tools,
             quality_functions,
             groups: Vec::new(),
+            cases: Vec::new(),
+            word_start: None,
+            command_start: true,
             quote: None,
-            escaped: false,
-            comment: false,
+            lexical_mode: LexicalMode::Plain,
         }
     }
 
     fn has_masked_group(mut self) -> bool {
         for (index, character) in self.source.char_indices() {
+            if self.collects_word(index, character) {
+                continue;
+            }
+            if self.word_end_masks_group(index, character) {
+                return true;
+            }
             if self.advance_lexical_state(index, character) {
                 continue;
+            }
+            if matches!(character, '\n' | ';' | '|' | '&' | '{' | '(' | ')') {
+                self.command_start = true;
             }
             if matches!(character, '{' | '(') {
                 self.groups.push((character, index));
@@ -48,20 +61,54 @@ impl<'a> Scanner<'a> {
                 return true;
             }
         }
-        false
+        self.finish_word(self.source.len())
+    }
+
+    fn collects_word(&mut self, index: usize, character: char) -> bool {
+        let collects = self.quote.is_none() && self.lexical_mode == LexicalMode::Plain && is_shell_word_character(character);
+        if collects {
+            self.word_start.get_or_insert(index);
+        }
+        collects
+    }
+
+    fn word_end_masks_group(&mut self, index: usize, character: char) -> bool {
+        self.quote.is_none() && self.lexical_mode == LexicalMode::Plain && !is_shell_word_character(character) && self.finish_word(index)
+    }
+
+    fn finish_word(&mut self, end: usize) -> bool {
+        let Some(start) = self.word_start.take() else {
+            return false;
+        };
+        let word = &self.source[start..end];
+        let starts_command = self.command_start;
+        if starts_command && word == "case" {
+            self.cases.push(start);
+        }
+        let masked = starts_command
+            && word == "esac"
+            && self
+                .cases
+                .pop()
+                .is_some_and(|open| self.contains_quality(&self.source[open + "case".len()..start]) && group_context_masks_failure(self.source, open, end));
+        self.command_start = matches!(word, "do" | "elif" | "else" | "if" | "then" | "until" | "while");
+        masked
     }
 
     fn advance_lexical_state(&mut self, index: usize, character: char) -> bool {
-        if self.comment {
-            self.comment = character != '\n';
+        if self.lexical_mode == LexicalMode::Comment {
+            if character == '\n' {
+                self.lexical_mode = LexicalMode::Plain;
+                self.command_start = true;
+            }
             return true;
         }
-        if self.escaped {
-            self.escaped = false;
+        if self.lexical_mode == LexicalMode::Escaped {
+            self.lexical_mode = LexicalMode::Plain;
             return true;
         }
         if character == '\\' && self.quote != Some('\'') {
-            self.escaped = true;
+            self.lexical_mode = LexicalMode::Escaped;
             return true;
         }
         if matches!(character, '\'' | '"' | '`') {
@@ -69,7 +116,7 @@ impl<'a> Scanner<'a> {
             return true;
         }
         if self.quote.is_none() && character == '#' && starts_comment(self.source, index) {
-            self.comment = true;
+            self.lexical_mode = LexicalMode::Comment;
             return true;
         }
         self.quote.is_some()
@@ -78,6 +125,17 @@ impl<'a> Scanner<'a> {
     fn contains_quality(&self, body: &str) -> bool {
         super::contains_quality_or_function_command(body, self.case_insensitive_tools, self.quality_functions)
     }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LexicalMode {
+    Plain,
+    Escaped,
+    Comment,
+}
+
+const fn is_shell_word_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_'
 }
 
 const fn matching_open(character: char) -> Option<char> {
@@ -151,6 +209,8 @@ mod tests {
         assert!(masks("if (\n cargo test --locked\n true\n)\nthen echo accepted; fi"));
         assert!(masks("! {\n just check-quality\n true\n}"));
         assert!(masks("if ! {\n just check-quality\n true\n}; then echo rejected; fi"));
+        assert!(masks("case \"$mode\" in\n checked)\n just check-quality; true ;;\nesac || true"));
+        assert!(masks("if case \"$mode\" in\n checked)\n cargo test --locked ;;\nesac; then echo accepted; fi"));
     }
 
     #[test]
@@ -159,5 +219,7 @@ mod tests {
         assert!(!masks("(\n cargo test --locked\n)"));
         assert!(!masks("printf '%s\n' '{ just check-quality; } || true'"));
         assert!(!masks("# { just check-quality; } || true\nprintf accepted"));
+        assert!(!masks("case \"$mode\" in\n checked)\n just check-quality ;;\nesac"));
+        assert!(!masks("printf '%s\n' 'case mode in checked) just check-quality ;; esac || true'"));
     }
 }

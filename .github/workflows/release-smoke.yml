@@ -144,10 +144,11 @@ jobs:
           $archive = "release/localhold-$env:RELEASE_TAG-x86_64-pc-windows-msvc.zip"
           Expand-Archive -Path $archive -DestinationPath extracted
           $binary = "$PWD/extracted/localhold-$env:RELEASE_TAG-x86_64-pc-windows-msvc/bin/hold.exe"
+          Copy-Item -LiteralPath $binary -Destination ./hold-smoke.exe
 
-          $actualVersion = & $binary --version
+          $actualVersion = ./hold-smoke.exe --version
           if ($actualVersion -ne "hold $version") { throw "unexpected version: $actualVersion" }
-          & $binary --help | Out-Null
+          ./hold-smoke.exe --help | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "help command failed" }
 
           $env:APPDATA = "$env:RUNNER_TEMP/mcp-config"
@@ -155,7 +156,7 @@ jobs:
           $env:LOCALHOLD_TRANSPORT = "stdio"
           $env:LOCALHOLD_LOG_LEVEL = "error"
           $request = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1"}}}'
-          $responseLines = @($request | & $binary 2>"$env:RUNNER_TEMP/mcp-stderr.log")
+          $responseLines = @($request | ./hold-smoke.exe 2>"$env:RUNNER_TEMP/mcp-stderr.log")
           $response = $responseLines | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object id -eq 1 | Select-Object -First 1
           if ($null -eq $response) { throw "missing MCP initialize response" }
           if ($response.result.serverInfo.name -ne "localhold") { throw "unexpected MCP server name" }

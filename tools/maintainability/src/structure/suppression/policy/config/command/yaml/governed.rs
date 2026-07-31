@@ -11,6 +11,8 @@ const TOOLCHAIN_NAME: &str = "Install reviewed Rust toolchain";
 const UPLOAD_NAME: &str = "Upload dependency audit evidence on failure";
 const UPLOAD_CONDITION: &str = "failure() && steps.audit.outcome == 'failure'";
 const TOOLCHAIN_RUN_SOURCE: &str = "rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt";
+const LINUX_SHELL: &str = "/usr/bin/env -u BASH_ENV -u ENV -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}";
+const WINDOWS_SHELL: &str = r#""C:\Program Files\Git\usr\bin\env.exe" -u BASH_ENV -u ENV -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD "C:\Program Files\Git\bin\bash.exe" --noprofile --norc -e -o pipefail {0}"#;
 const GATE_RUN_SOURCE: &str = r#"if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
   printf 'maintainability bootstrap differs from the workflow-reviewed digest\n' >&2
   exit 1
@@ -55,6 +57,10 @@ const WINDOWS_UPLOAD_INPUTS: [(&str, &str); 4] = [
     ("retention-days", "7"),
 ];
 
+pub(super) fn is_startup_isolated_shell(shell: &str) -> bool {
+    matches!(shell, LINUX_SHELL | WINDOWS_SHELL)
+}
+
 pub(super) fn validate(path: &str, source: &str) -> Result<()> {
     if path != WORKFLOW_PATH {
         return Ok(());
@@ -78,12 +84,6 @@ pub(super) fn validate(path: &str, source: &str) -> Result<()> {
             continue;
         };
         active_job.observe_shell_default(indentation, line);
-        if let Some((key, value)) = yaml_key_value(line)
-            && key == "shell"
-            && literal_scalar(value).as_deref() != Some("bash")
-        {
-            active_job.violations.insert(JobViolation::NonBashShell);
-        }
         if indentation == 4
             && let Some((key, value)) = yaml_key_value(line)
         {
@@ -258,14 +258,15 @@ fn finish_job(job: Option<&Job>) -> Result<()> {
     let Some(job) = job.filter(|job| governed_job(&job.name).is_some()) else {
         return Ok(());
     };
-    if !job.has_bash_shell_default
+    let expected_shell = if job.name == "dependency-unsafe-windows" { WINDOWS_SHELL } else { LINUX_SHELL };
+    if job.shell_default.as_deref() != Some(expected_shell)
         || job.violations.contains(&JobViolation::HasDependencies)
         || job.violations.contains(&JobViolation::HasServices)
-        || job.violations.contains(&JobViolation::NonBashShell)
+        || job.violations.contains(&JobViolation::UnexpectedShell)
         || job.completed_steps != GOVERNED_STEP_COUNT
     {
         bail!(
-            "checked-in GitHub YAML {WORKFLOW_PATH:?} must keep the reviewed dependency-free Bash-isolated step sequence in governed dependency-unsafe job {:?}",
+            "checked-in GitHub YAML {WORKFLOW_PATH:?} must keep the reviewed dependency-free startup-isolated step sequence in governed dependency-unsafe job {:?}",
             job.name
         );
     }
@@ -287,7 +288,7 @@ struct Job {
     steps_indentation: Option<usize>,
     defaults_indentation: Option<usize>,
     run_defaults_indentation: Option<usize>,
-    has_bash_shell_default: bool,
+    shell_default: Option<String>,
     violations: BTreeSet<JobViolation>,
 }
 
@@ -300,7 +301,7 @@ impl Job {
             steps_indentation: None,
             defaults_indentation: None,
             run_defaults_indentation: None,
-            has_bash_shell_default: false,
+            shell_default: None,
             violations: BTreeSet::new(),
         }
     }
@@ -321,7 +322,9 @@ impl Job {
         } else if self.defaults_indentation.is_some() && indentation == 6 && key == "run" && value.trim().is_empty() {
             self.run_defaults_indentation = Some(indentation);
         } else if self.run_defaults_indentation.is_some() && indentation == 8 && key == "shell" {
-            self.has_bash_shell_default = literal_scalar(value).as_deref() == Some("bash");
+            self.shell_default = literal_scalar(value);
+        } else if key == "shell" {
+            self.violations.insert(JobViolation::UnexpectedShell);
         }
     }
 }
@@ -332,7 +335,7 @@ enum JobViolation {
     ContinuesOnError,
     HasDependencies,
     HasServices,
-    NonBashShell,
+    UnexpectedShell,
 }
 
 #[derive(Default)]

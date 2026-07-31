@@ -71,7 +71,7 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
         }
         if key == "shell" {
             let shell = literal_scalar(value).ok_or_else(|| anyhow::anyhow!("checked-in GitHub YAML {path:?} uses an unsupported shell template"))?;
-            if !matches!(shell.as_str(), "bash" | "sh" | "pwsh" | "powershell" | "cmd") {
+            if !matches!(shell.as_str(), "bash" | "sh" | "pwsh" | "powershell" | "cmd") && !governed::is_startup_isolated_shell(&shell) {
                 bail!("checked-in GitHub YAML {path:?} uses an unsupported shell template");
             }
         } else if key == "run" && value.starts_with('>') && is_block_scalar(value) {

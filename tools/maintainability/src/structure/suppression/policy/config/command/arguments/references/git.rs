@@ -5,6 +5,9 @@ pub(super) fn dispatch_is_opaque(arguments: &[String]) -> bool {
 fn configuration_is_opaque(arguments: &[String]) -> bool {
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
+        if argument == "--exec-path" || argument.starts_with("--exec-path=") {
+            return true;
+        }
         if argument == "--config-env" || argument.starts_with("--config-env=") {
             return true;
         }
@@ -121,5 +124,11 @@ mod tests {
         assert!(dispatch_is_opaque(&arguments(&["filter-branch", "--tree-filter", "sh quality/lint.txt", "--", "HEAD",])));
         assert!(!dispatch_is_opaque(&arguments(&["bisect", "start", "--", "run"])));
         assert!(!dispatch_is_opaque(&arguments(&["diff", "--", "difftool"])));
+    }
+
+    #[test]
+    fn alternate_git_exec_paths_fail_closed() {
+        assert!(dispatch_is_opaque(&arguments(&["--exec-path", "/tmp", "lint"])));
+        assert!(dispatch_is_opaque(&arguments(&["--exec-path=/tmp", "lint"])));
     }
 }

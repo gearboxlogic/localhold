@@ -250,7 +250,12 @@ fn heredocs_on_line(line: &str) -> Vec<Heredoc> {
             } else {
                 quote
             };
-        } else if quote.is_none() && character == '<' && characters[index + 1] == '<' && characters.get(index + 2) != Some(&'<') {
+        } else if quote.is_none()
+            && character == '<'
+            && characters[index + 1] == '<'
+            && characters.get(index + 2) != Some(&'<')
+            && index.checked_sub(1).is_none_or(|previous| characters[previous] != '<')
+        {
             index += 2;
             let strip_tabs = characters.get(index) == Some(&'-');
             index += usize::from(strip_tabs);
@@ -438,5 +443,11 @@ mod tests {
         assert!(!normalized.contains("script/retired-command.sh"));
         assert!(normalized.contains("quality/run-lints"));
         assert!(normalized.contains("quality/check-format"));
+    }
+
+    #[test]
+    fn here_strings_do_not_hide_following_commands_as_heredoc_payloads() {
+        let source = "read -r value <<<\"$metadata\"\njust check-quality\n";
+        assert_eq!(without_noncommand_shell_data(source), source);
     }
 }

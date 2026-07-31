@@ -15,7 +15,10 @@ pub(super) use arguments::has_sourced_file_indirection;
 #[cfg(test)]
 pub(super) use arguments::weakening_token;
 pub(super) use arguments::weakening_token_for_surface;
-use arguments::{cargo_manifest_paths_for_surface, direct_rust_sources_for_surface, normalized_shell_tokens, normalized_shell_words, package_script_commands};
+use arguments::{
+    cargo_manifest_paths_for_surface, direct_rust_sources_for_surface, normalized_shell_tokens, normalized_shell_words, package_script_commands,
+    weakening_token_in_reviewed_shell_remainder,
+};
 use environment::{is_weakening_environment_assignment_name, is_weakening_environment_name};
 use surfaces::execution_surfaces;
 
@@ -152,6 +155,8 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
 ];
 pub(super) const MISE_ENVIRONMENT_LINES: &[&str] = &["CARGO_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/cargo\""];
 pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
+    "        shell: /usr/bin/env -u BASH_ENV -u ENV -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
+    "        shell: '\"C:\\Program Files\\Git\\usr\\bin\\env.exe\" -u BASH_ENV -u ENV -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD \"C:\\Program Files\\Git\\bin\\bash.exe\" --noprofile --norc -e -o pipefail {0}'",
     "          BASH_ENV: ''",
     "          BASH_ENV: ''",
     "          GIT_CONFIG_COUNT: '1'",
@@ -373,8 +378,21 @@ pub(super) fn reviewed_dynamic_command_references_are_exact(path: &str, source: 
         _ => return false,
     };
     let lines = source.lines().collect::<Vec<_>>();
-    expected.iter().all(|line| lines.iter().filter(|candidate| *candidate == line).count() == 1)
-        && lines.iter().filter(|line| weakening_token_for_surface("", line)).all(|line| expected.contains(line))
+    if !expected.iter().all(|line| lines.iter().filter(|candidate| *candidate == line).count() == 1) {
+        return false;
+    }
+    let remaining = lines
+        .iter()
+        .map(|line| {
+            if expected.contains(line) {
+                format!("{}:", &line[..line.len() - line.trim_start().len()])
+            } else {
+                (*line).to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    !weakening_token_in_reviewed_shell_remainder(&remaining)
 }
 
 pub(super) fn is_execution_surface(path: &str) -> bool {

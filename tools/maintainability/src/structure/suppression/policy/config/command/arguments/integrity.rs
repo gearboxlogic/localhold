@@ -22,13 +22,17 @@ pub(super) fn has_command_hash_override(source: &str) -> bool {
     })
 }
 
-pub(super) fn failure_masks_quality_command(source: &str, case_insensitive_tools: bool, command_backticks: Option<bool>) -> bool {
+pub(super) fn failure_masks_quality_command(source: &str, case_insensitive_tools: bool, command_backticks: Option<bool>, inspect_function_definitions: bool) -> bool {
     let source = tokens::without_noncommand_shell_data(source);
-    if functions::has_unparsed_definition(&source) {
+    if inspect_function_definitions && functions::has_unparsed_definition(&source) {
         return true;
     }
-    let quality_functions = functions::quality_function_names(&source, case_insensitive_tools);
-    if groups::masked_quality_group(&source, case_insensitive_tools, &quality_functions) {
+    let quality_functions = if inspect_function_definitions {
+        functions::quality_function_names(&source, case_insensitive_tools)
+    } else {
+        BTreeSet::new()
+    };
+    if inspect_function_definitions && groups::masked_quality_group(&source, case_insensitive_tools, &quality_functions) {
         return true;
     }
     if let Some(command_backticks) = command_backticks {
@@ -263,7 +267,7 @@ mod tests {
 
     #[test]
     fn required_quality_command_failures_cannot_be_masked() {
-        let masks = |source| failure_masks_quality_command(source, true, Some(true));
+        let masks = |source| failure_masks_quality_command(source, true, Some(true), true);
         assert!(masks("just check-quality | true"));
         assert!(masks("just check-quality || true"));
         assert!(masks("just check-quality &"));

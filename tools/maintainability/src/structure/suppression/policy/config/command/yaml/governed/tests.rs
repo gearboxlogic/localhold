@@ -4,7 +4,7 @@ const JOB: &str = r#"  dependency-unsafe-linux:
     runs-on: ubuntu-latest
     defaults:
       run:
-        shell: bash
+        shell: /usr/bin/env -u BASH_ENV -u ENV -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}
     steps:
       - name: Install reviewed Rust toolchain
         env:
@@ -46,6 +46,10 @@ fn workflow() -> String {
     let windows_job = JOB
         .replace("dependency-unsafe-linux", "dependency-unsafe-windows")
         .replace("ubuntu-latest", "windows-latest")
+        .replace(
+            "shell: /usr/bin/env -u BASH_ENV -u ENV -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
+            "shell: '\"C:\\Program Files\\Git\\usr\\bin\\env.exe\" -u BASH_ENV -u ENV -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD \"C:\\Program Files\\Git\\bin\\bash.exe\" --noprofile --norc -e -o pipefail {0}'",
+        )
         .replace("target/dependency-unsafe/actual-linux", "target/dependency-unsafe/actual-windows")
         .replacen(
             "      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
@@ -92,11 +96,32 @@ fn governed_gate_steps_are_unconditional_and_platform_bound() {
     );
     assert_rejected(&service_container);
 
-    let sh_default = accepted.replacen("        shell: bash", "        shell: sh", 1);
+    let sh_default = accepted.replacen(
+        "        shell: /usr/bin/env -u BASH_ENV -u ENV -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
+        "        shell: bash",
+        1,
+    );
     assert_rejected(&sh_default);
 
-    let missing_default = accepted.replacen("    defaults:\n      run:\n        shell: bash\n", "", 1);
+    let missing_default = accepted.replacen(
+        "    defaults:\n      run:\n        shell: /usr/bin/env -u BASH_ENV -u ENV -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}\n",
+        "",
+        1,
+    );
     assert_rejected(&missing_default);
+}
+
+#[test]
+fn governed_shell_clears_startup_channels_before_bash_starts() {
+    let accepted = workflow();
+    let unsanitized = accepted.replacen("-u BASH_ENV -u ENV ", "", 1);
+    assert_rejected(&unsanitized);
+
+    let unsanitized_loader = accepted.replacen("-u LD_PRELOAD ", "", 1);
+    assert_rejected(&unsanitized_loader);
+
+    let step_override = accepted.replacen("        id: audit", "        id: audit\n        shell: bash", 1);
+    assert_rejected(&step_override);
 }
 
 #[test]

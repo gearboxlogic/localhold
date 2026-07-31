@@ -57,9 +57,22 @@ fn collect_cargo_manifest_paths<'a>(sources: impl IntoIterator<Item = &'a str>, 
 }
 
 fn collect_cargo_manifest_paths_from_source(source: &str, case_insensitive_tools: bool, paths: &mut BTreeSet<String>, unresolved: &mut bool) {
+    collect_cargo_manifest_paths_from_source_at_depth(source, case_insensitive_tools, paths, unresolved, 0);
+}
+
+fn collect_cargo_manifest_paths_from_source_at_depth(source: &str, case_insensitive_tools: bool, paths: &mut BTreeSet<String>, unresolved: &mut bool, depth: usize) {
+    const MAX_NESTED_COMMAND_DEPTH: usize = 32;
+    if depth == MAX_NESTED_COMMAND_DEPTH {
+        *unresolved = true;
+        return;
+    }
     for tokens in tokens::normalized_shell_commands(source) {
-        for nested in tokens.iter().filter(|token| token.chars().any(char::is_whitespace)) {
-            collect_cargo_manifest_paths_from_source(nested, case_insensitive_tools, paths, unresolved);
+        for nested in tokens.iter().filter(|token| token.chars().any(char::is_whitespace) && token.contains("--manifest-path")) {
+            if nested == source {
+                *unresolved = true;
+            } else {
+                collect_cargo_manifest_paths_from_source_at_depth(nested, case_insensitive_tools, paths, unresolved, depth + 1);
+            }
         }
         let Some(tool_index) = tokens.iter().position(|token| is_manifest_capable_tool_token(token, case_insensitive_tools)) else {
             continue;
@@ -181,9 +194,8 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         _ if dynamic_program::is_python_interpreter(&command) => python_input(arguments),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),
         _ if dynamic_program::is_unanalyzed_interpreter(&command) => SelectedInput::Opaque,
-        "awk" | "awk.exe" | "dpkg" | "dpkg.exe" | "gawk" | "gawk.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe" | "rsync" | "rsync.exe" | "sqlite3" | "sqlite3.exe" => {
-            SelectedInput::Opaque
-        }
+        "awk" | "awk.exe" | "dpkg" | "dpkg.exe" | "gawk" | "gawk.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe" | "rsync" | "rsync.exe" | "sqlite3" | "sqlite3.exe" | "wget"
+        | "wget.exe" => SelectedInput::Opaque,
         "find" | "find.exe" => {
             return (Vec::new(), find_command_action_is_opaque(arguments));
         }
@@ -295,7 +307,7 @@ fn shell_input(arguments: &[String]) -> SelectedInput<'_> {
 
 fn python_input(arguments: &[String]) -> SelectedInput<'_> {
     let mut after_options = false;
-    for (index, argument) in arguments.iter().enumerate() {
+    for argument in arguments {
         if !after_options && matches!(argument.as_str(), "-h" | "--help" | "-V" | "--version") {
             return SelectedInput::None;
         }
@@ -303,10 +315,7 @@ fn python_input(arguments: &[String]) -> SelectedInput<'_> {
             return SelectedInput::Opaque;
         }
         if !after_options && argument == "-m" {
-            return arguments
-                .get(index + 1)
-                .filter(|module| is_literal_python_module(module))
-                .map_or(SelectedInput::Opaque, |_| SelectedInput::None);
+            return SelectedInput::Opaque;
         }
         if !after_options && argument == "--" {
             after_options = true;
@@ -331,13 +340,6 @@ fn python_input(arguments: &[String]) -> SelectedInput<'_> {
         };
     }
     SelectedInput::Opaque
-}
-
-fn is_literal_python_module(module: &str) -> bool {
-    !module.is_empty()
-        && module
-            .split('.')
-            .all(|segment| !segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
 }
 
 fn is_python_flag_without_operand(argument: &str) -> bool {
@@ -445,11 +447,26 @@ fn is_make_environment_selection(token: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::collect_execution_inputs;
+    use super::{collect_cargo_manifest_paths, collect_execution_inputs};
 
     fn inputs(command: &str) -> (Vec<String>, bool) {
         let (candidates, opaque) = collect_execution_inputs(std::iter::once(command), true, "script/check.sh");
         (candidates.into_iter().collect(), opaque)
+    }
+
+    fn manifests(command: &str) -> (Vec<String>, bool) {
+        let (candidates, opaque) = collect_cargo_manifest_paths(std::iter::once(command), true);
+        (candidates.into_iter().collect(), opaque)
+    }
+
+    #[test]
+    fn manifest_discovery_descends_only_into_relevant_command_text() {
+        assert_eq!(
+            manifests(r#"bash -c "cargo clippy --manifest-path tools/checker/Cargo.toml""#),
+            (vec!["tools/checker/Cargo.toml".to_owned()], false)
+        );
+        assert_eq!(manifests(r#"write_manifest $'[package]\nname = "checker"'"#), (Vec::new(), false));
+        assert_eq!(manifests(r"bash -c $'cargo clippy --manifest-path tools/checker/Cargo.toml'"), (Vec::new(), true));
     }
 
     #[test]
@@ -543,6 +560,7 @@ mod tests {
             "sed 's/.*/sh quality\\/lint.txt/e' /etc/hosts",
             "sqlite3 :memory: '.shell sh quality/lint.txt'",
             "dpkg --pre-invoke='sh quality/lint.txt' --unpack quality/missing.deb",
+            "wget --use-askpass=/tmp/askpass https://example.invalid/archive",
         ] {
             assert_eq!(inputs(command), (Vec::new(), true), "{command}");
         }
@@ -562,7 +580,8 @@ mod tests {
         assert_eq!(inputs(r#"tag="$(python3 script/release.py tag)""#), (vec!["script/release.py".to_owned()], false));
         assert_eq!(inputs("python3 quality/lint.txt"), (Vec::new(), true));
         assert_eq!(inputs("/usr/bin/python3.12 quality/lint.py"), (vec!["quality/lint.py".to_owned()], false));
-        assert_eq!(inputs("python -m quality.lint"), (Vec::new(), false));
+        assert_eq!(inputs("python -m quality.lint"), (Vec::new(), true));
+        assert_eq!(inputs("python3 -m timeit 'import os; os.system(\"sh quality/lint.txt\")'"), (Vec::new(), true));
         assert_eq!(inputs("python -m $MODULE"), (Vec::new(), true));
         assert_eq!(inputs("pwsh -File quality/lint.ps1"), (vec!["quality/lint.ps1".to_owned()], false));
         assert_eq!(inputs("perl quality/lint.pl"), (Vec::new(), true));
@@ -572,6 +591,8 @@ mod tests {
         assert_eq!(inputs("perl -e 'system q(cargo clippy)'"), (Vec::new(), true));
         assert_eq!(inputs("git -c alias.lint='!sh quality/lint.txt' lint"), (Vec::new(), true));
         assert_eq!(inputs("git -c core.fsmonitor='sh quality/lint.txt' status"), (Vec::new(), true));
+        assert_eq!(inputs("git --exec-path=/tmp lint"), (Vec::new(), true));
+        assert_eq!(inputs("git --exec-path /tmp lint"), (Vec::new(), true));
         assert_eq!(inputs("git -c core.autocrlf=false status"), (Vec::new(), false));
     }
 

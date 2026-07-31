@@ -9,7 +9,7 @@ while IFS= read -r file; do
         src/clock.rs|src/config/tests.rs) continue ;;
     esac
 
-    production=$(awk '/^mod tests \{/{exit} {print}' "$file")
+    production=$(sed '/^mod tests {/,$d' "$file")
     if matches=$(rg -n "$pattern" <<<"$production"); then
         printf 'direct time access bypasses Clock in %s:\n%s\n' "$file" "$matches" >&2
         failed=1

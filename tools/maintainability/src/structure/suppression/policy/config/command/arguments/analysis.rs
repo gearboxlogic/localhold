@@ -5,6 +5,7 @@ pub(super) struct Options {
     command_substitutions: CommandSubstitutionPolicy,
     just_interpolation: JustInterpolationPolicy,
     integrity: IntegrityInspection,
+    nesting_depth: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -34,6 +35,7 @@ enum JustInterpolationPolicy {
 #[derive(Clone, Copy)]
 enum IntegrityInspection {
     Nested,
+    CommandsOnly,
     TopLevel,
 }
 
@@ -45,6 +47,7 @@ impl Options {
             command_substitutions: CommandSubstitutionPolicy::Inspect,
             just_interpolation: JustInterpolationPolicy::Reject,
             integrity: IntegrityInspection::TopLevel,
+            nesting_depth: 0,
         }
     }
 
@@ -68,9 +71,21 @@ impl Options {
         self
     }
 
+    pub(super) const fn ignore_function_definitions(mut self) -> Self {
+        if matches!(self.integrity, IntegrityInspection::TopLevel) {
+            self.integrity = IntegrityInspection::CommandsOnly;
+        }
+        self
+    }
+
     pub(super) const fn nested(mut self) -> Self {
         self.integrity = IntegrityInspection::Nested;
+        self.nesting_depth = self.nesting_depth.saturating_add(1);
         self
+    }
+
+    pub(super) const fn can_descend(self) -> bool {
+        self.nesting_depth < 32
     }
 
     pub(super) const fn case_insensitive_tools(self) -> bool {
@@ -93,6 +108,10 @@ impl Options {
     }
 
     pub(super) const fn inspects_integrity(self) -> bool {
+        matches!(self.integrity, IntegrityInspection::CommandsOnly | IntegrityInspection::TopLevel)
+    }
+
+    pub(super) const fn inspects_function_definitions(self) -> bool {
         matches!(self.integrity, IntegrityInspection::TopLevel)
     }
 }

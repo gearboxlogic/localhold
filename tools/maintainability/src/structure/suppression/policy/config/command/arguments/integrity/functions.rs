@@ -191,6 +191,7 @@ fn previous_command(source: &str, before: usize) -> Option<&str> {
 
 fn matching_brace(source: &str, open: usize) -> Option<usize> {
     let mut depth = 1_u32;
+    let mut parameter_depth = 0_u32;
     let mut quote = None;
     let mut escaped = false;
     let mut comment = false;
@@ -213,6 +214,19 @@ fn matching_brace(source: &str, open: usize) -> Option<usize> {
             continue;
         }
         if quote.is_some() {
+            continue;
+        }
+        let starts_parameter = character == '{' && source.as_bytes().get(index.wrapping_sub(1)) == Some(&b'$');
+        if parameter_depth > 0 {
+            if starts_parameter {
+                parameter_depth += 1;
+            } else if character == '}' {
+                parameter_depth -= 1;
+            }
+            continue;
+        }
+        if starts_parameter {
+            parameter_depth = 1;
             continue;
         }
         match character {
@@ -281,6 +295,7 @@ mod tests {
     fn non_brace_function_bodies_fail_closed() {
         assert!(has_unparsed_definition("gate()\n(\n just check-quality\n)\n"));
         assert!(!has_unparsed_definition("gate()\n{\n just check-quality\n}\n"));
+        assert!(!has_unparsed_definition("gate() {\n count=${#values[@]}\n value=${name#prefix}\n just check-quality\n}\n"));
     }
 
     #[test]

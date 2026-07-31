@@ -224,8 +224,23 @@ fn shell_continuations_cannot_split_lint_arguments_from_cargo() {
 }
 
 #[test]
+fn inert_ansi_c_data_cannot_recurse_as_a_rust_command() {
+    assert!(!weakening_token(r#"write_manifest $'[package]\nname = "checker"'"#));
+    assert!(weakening_token(r"$'cargo clippy -- -A warnings'"));
+}
+
+#[test]
 fn shell_substitution_syntax_is_not_applied_to_other_command_languages() {
     assert!(!weakening_token_for_surface("script/check.py", r#"print("$(just check-quality)")"#));
+    assert!(!weakening_token_for_surface(
+        "script/check.py",
+        "CARGO_MANIFEST_PATH = REPO_ROOT / \"Cargo.toml\"\n\
+         def git_bytes(reference, source):\n\
+             return subprocess.run(\n\
+                 [\"git\", \"show\", f\"{reference}:{source}\"],\n\
+                 check=False,\n\
+             )\n"
+    ));
     assert!(!weakening_token_for_surface("script/check.cmd", "echo $(just check-quality)"));
     assert!(!weakening_token_for_surface("script/check.ps1", "Write-Output \"build``stamp\""));
     assert!(weakening_token_for_surface("script/check.ps1", "Write-Output \"$(just check-quality)\""));
@@ -457,6 +472,14 @@ fn authenticated_dynamic_commands_require_the_exact_reviewed_lines() {
     assert!(!super::command::reviewed_dynamic_command_references_are_exact(
         "script/run-source-safety.sh",
         &format!("{}\n\"$cargo_command\" clippy -- -A warnings", RUNNER_COMMAND_LINES.join("\n")),
+    ));
+    assert!(!super::command::reviewed_dynamic_command_references_are_exact(
+        "script/run-source-safety.sh",
+        &format!("{}\n\"$cargo_command\" clippy -- \\\n+            -A warnings", RUNNER_COMMAND_LINES.join("\n")),
+    ));
+    assert!(!super::command::reviewed_dynamic_command_references_are_exact(
+        "script/run-source-safety.sh",
+        &format!("{}\ngate() {{\n    cargo test\n    true\n}}\ngate || true", RUNNER_COMMAND_LINES.join("\n")),
     ));
 }
 

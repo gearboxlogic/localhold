@@ -53,7 +53,11 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
             bail!("command execution surface {surface:?} uses an opaque interpreter program or makefile selection");
         }
         for input in referenced_inputs {
-            if !tracked_paths.contains(&input) {
+            let tracked = tracked_paths.contains(&input);
+            if !tracked && reviewed_generated_program(&surface, &source, &input) {
+                continue;
+            }
+            if !tracked {
                 bail!("command execution surface {surface:?} references an execution input outside the tracked path inventory: {input:?}");
             }
             let absolute = workspace.join(&input);
@@ -70,6 +74,28 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
         paths: surfaces.into_iter().collect(),
         tracked_paths,
     })
+}
+
+fn reviewed_generated_program(surface: &str, source: &str, input: &str) -> bool {
+    if input != "hold-smoke.exe" {
+        return false;
+    }
+    let expected: &[&str] = match surface {
+        ".github/workflows/release.yml" => &[
+            "Copy-Item -LiteralPath $binary -Destination ./hold-smoke.exe",
+            "$actual = ./hold-smoke.exe --version",
+            "./hold-smoke.exe --help | Out-Null",
+        ],
+        ".github/workflows/release-smoke.yml" => &[
+            "Copy-Item -LiteralPath $binary -Destination ./hold-smoke.exe",
+            "$actualVersion = ./hold-smoke.exe --version",
+            "./hold-smoke.exe --help | Out-Null",
+            "$responseLines = @($request | ./hold-smoke.exe 2>\"$env:RUNNER_TEMP/mcp-stderr.log\")",
+        ],
+        _ => return false,
+    };
+    let observed = source.lines().map(str::trim).filter(|line| line.contains("hold-smoke.exe")).collect::<Vec<_>>();
+    observed.len() == expected.len() && expected.iter().all(|line| observed.iter().filter(|candidate| *candidate == line).count() == 1)
 }
 
 fn tracked_paths(workspace: &Path) -> Result<BTreeSet<String>> {
@@ -114,13 +140,23 @@ fn has_shebang(path: &Path) -> Result<bool> {
     if !metadata.is_file() {
         return Ok(false);
     }
-    let mut prefix = [0_u8; 2];
+    let mut prefix = [0_u8; 256];
     let mut file = fs::File::open(path).with_context(|| format!("inspect possible command execution surface {}", path.display()))?;
-    Ok(file
+    let length = file
         .read(&mut prefix)
-        .with_context(|| format!("read possible command execution surface {}", path.display()))?
-        == prefix.len()
-        && prefix == *b"#!")
+        .with_context(|| format!("read possible command execution surface {}", path.display()))?;
+    let Some(directive) = prefix[..length].strip_prefix(b"#!") else {
+        return Ok(false);
+    };
+    let directive = directive
+        .split(|byte| matches!(byte, b'\n' | b'\r'))
+        .next()
+        .unwrap_or_default()
+        .iter()
+        .copied()
+        .skip_while(u8::is_ascii_whitespace)
+        .collect::<Vec<_>>();
+    Ok(directive.first().is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.')))
 }
 
 #[cfg(all(test, unix))]
@@ -137,7 +173,9 @@ mod tests {
         let repository = tempfile::tempdir().expect("temporary repository");
         fs::create_dir(repository.path().join("docs")).expect("create docs directory");
         fs::create_dir(repository.path().join("script")).expect("create script directory");
+        fs::create_dir(repository.path().join("src")).expect("create source directory");
         fs::write(repository.path().join("docs/guide.md"), "guide\n").expect("write guide");
+        fs::write(repository.path().join("src/lib.rs"), "#![expect(missing_docs)]\npub fn value() {}\n").expect("write Rust inner attribute");
         symlink("guide.md", repository.path().join("docs/latest.md")).expect("create documentation symlink");
         fs::write(repository.path().join("script/check.sh"), "#!/bin/sh\nexit 0\n").expect("write command surface");
         git(repository.path(), &["init", "--quiet"]);
@@ -146,11 +184,38 @@ mod tests {
         let surfaces = execution_surfaces(repository.path()).expect("classify execution surfaces");
         assert!(surfaces.paths.contains(&"script/check.sh".to_owned()));
         assert!(!surfaces.paths.contains(&"docs/latest.md".to_owned()));
+        assert!(!surfaces.paths.contains(&"src/lib.rs".to_owned()));
 
         symlink("check.sh", repository.path().join("script/linked.sh")).expect("create command symlink");
         git(repository.path(), &["add", "script/linked.sh"]);
         let error = execution_surfaces(repository.path()).err().expect("reject command surface symlink");
         assert!(error.to_string().contains("command execution surface cannot be a symlink"));
+    }
+
+    #[test]
+    fn generated_release_smoke_programs_have_a_closed_invocation_set() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        fs::create_dir_all(repository.path().join(".github/workflows")).expect("create workflow directory");
+        let workflow = repository.path().join(".github/workflows/release.yml");
+        let reviewed = r"name: release
+jobs:
+  smoke:
+    runs-on: windows-latest
+    steps:
+      - shell: pwsh
+        run: |
+          Copy-Item -LiteralPath $binary -Destination ./hold-smoke.exe
+          $actual = ./hold-smoke.exe --version
+          ./hold-smoke.exe --help | Out-Null
+";
+        fs::write(&workflow, reviewed).expect("write reviewed workflow");
+        git(repository.path(), &["init", "--quiet"]);
+        git(repository.path(), &["add", "."]);
+        execution_surfaces(repository.path()).expect("accept exact generated smoke program");
+
+        fs::write(&workflow, format!("{reviewed}          ./hold-smoke.exe --version\n")).expect("add unreviewed invocation");
+        let error = execution_surfaces(repository.path()).err().expect("reject added invocation");
+        assert!(error.to_string().contains("outside the tracked path inventory"));
     }
 
     fn git(repository: &Path, arguments: &[&str]) {

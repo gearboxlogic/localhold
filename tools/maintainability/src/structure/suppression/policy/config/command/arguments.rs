@@ -12,6 +12,7 @@ mod powershell;
 mod python;
 mod references;
 mod tokens;
+mod toolchain;
 use analysis::Options as AnalysisOptions;
 pub(super) use integrity::contains_quality_command;
 pub(super) use references::{cargo_manifest_paths_for_surface, execution_inputs_for_surface};
@@ -42,6 +43,9 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
     if is_python(path) || is_windows_command(path) {
         options = options.ignore_command_substitutions();
     }
+    if is_python(path) {
+        options = options.ignore_function_definitions();
+    }
     if is_just(path) && ignored_just_recipe_failure(source, options.case_insensitive_tools()) {
         return true;
     }
@@ -61,6 +65,21 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
         || embedded_commands
             .iter()
             .any(|command| weakening_token_with_options(command, options.allow_just_interpolation()))
+}
+
+pub(super) fn weakening_token_in_reviewed_shell_remainder(source: &str) -> bool {
+    let options = AnalysisOptions::strict().with_case_insensitive_tools();
+    if dynamic::has_rust_tool_assignment_flow(source, true) {
+        return true;
+    }
+    let logical = join_command_continuations(source);
+    if integrity::declares_required_command_override(&logical, true)
+        || integrity::has_command_hash_override(&logical)
+        || integrity::failure_masks_quality_command(&logical, true, Some(true), true)
+    {
+        return true;
+    }
+    logical.lines().any(|line| weakening_token_with_options(line, options.nested()))
 }
 
 pub(super) fn direct_rust_sources_for_surface(path: &str, source: &str) -> (BTreeSet<String>, bool) {
@@ -182,7 +201,12 @@ fn weakening_token_with_options(source: &str, options: AnalysisOptions) -> bool 
     if options.inspects_integrity()
         && (integrity::declares_required_command_override(&logical, options.case_insensitive_tools())
             || integrity::has_command_hash_override(&logical)
-            || integrity::failure_masks_quality_command(&logical, options.case_insensitive_tools(), options.command_substitution_backticks()))
+            || integrity::failure_masks_quality_command(
+                &logical,
+                options.case_insensitive_tools(),
+                options.command_substitution_backticks(),
+                options.inspects_function_definitions(),
+            ))
     {
         return true;
     }
@@ -215,10 +239,10 @@ fn weakening_rust_command(command: &str, options: AnalysisOptions) -> bool {
         return false;
     }
     let tokens = command_tokens(command);
-    if tokens
-        .iter()
-        .any(|token| token.chars().any(char::is_whitespace) && weakening_token_with_options(token, options.nested()))
-    {
+    if toolchain::uses_unreviewed_selector(&tokens, options.case_insensitive_tools()) || toolchain::registers_custom_toolchain(&tokens, options.case_insensitive_tools()) {
+        return true;
+    }
+    if tokens.iter().any(|token| nested_rust_command_is_weakening(command, token, options)) {
         return true;
     }
     let lint_option = tokens.iter().any(|token| is_lint_option(token));
@@ -241,6 +265,18 @@ fn weakening_rust_command(command: &str, options: AnalysisOptions) -> bool {
             .iter()
             .enumerate()
             .any(|(index, token)| token.starts_with("--config") && !is_cargo_deny_config_argument(&tokens, index, options.case_insensitive_tools()))
+}
+
+fn nested_rust_command_is_weakening(command: &str, token: &str, options: AnalysisOptions) -> bool {
+    if !token.chars().any(char::is_whitespace) || !nested_text_may_reference_rust_tool(token) {
+        return false;
+    }
+    token == command || !options.can_descend() || weakening_token_with_options(token, options.nested())
+}
+
+fn nested_text_may_reference_rust_tool(source: &str) -> bool {
+    let source = source.to_ascii_lowercase();
+    ["cargo", "rustc", "rustdoc", "clippy-driver", "clippy"].iter().any(|tool| source.contains(tool))
 }
 
 fn is_non_executing_assignment(command: &str) -> bool {
@@ -431,13 +467,21 @@ fn injects_crate_attribute(tokens: &[String]) -> bool {
 }
 
 fn collect_direct_rust_sources(source: &str, case_insensitive_tools: bool, sources: &mut BTreeSet<String>) -> bool {
+    collect_direct_rust_sources_at_depth(source, case_insensitive_tools, sources, 0)
+}
+
+fn collect_direct_rust_sources_at_depth(source: &str, case_insensitive_tools: bool, sources: &mut BTreeSet<String>, depth: usize) -> bool {
+    const MAX_NESTED_COMMAND_DEPTH: usize = 32;
+    if depth == MAX_NESTED_COMMAND_DEPTH {
+        return true;
+    }
     let logical = join_command_continuations(source);
     let mut unresolved = false;
     for command in logical.split(['\n', ';', '&', '|']).map(command_without_comment) {
         let tokens = command_tokens(command);
         for token in &tokens {
-            if token.chars().any(char::is_whitespace) {
-                unresolved |= collect_direct_rust_sources(token, case_insensitive_tools, sources);
+            if token.chars().any(char::is_whitespace) && nested_text_may_reference_rust_tool(token) {
+                unresolved |= token == source || collect_direct_rust_sources_at_depth(token, case_insensitive_tools, sources, depth + 1);
             }
         }
         for compiler_index in tokens.iter().enumerate().filter_map(|(index, token)| {
@@ -667,4 +711,19 @@ fn is_cargo_deny_config_argument(tokens: &[String], config_index: usize, case_in
 
 pub(super) const fn has_case_insensitive_tool_names(_path: &str) -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::collect_direct_rust_sources;
+
+    #[test]
+    fn direct_source_discovery_bounds_nested_ansi_c_text() {
+        let mut sources = BTreeSet::new();
+        assert!(!collect_direct_rust_sources(r#"write_manifest $'[package]\nname = "checker"'"#, true, &mut sources));
+        assert!(sources.is_empty());
+        assert!(collect_direct_rust_sources(r"$'rustc source.rs'", true, &mut sources));
+    }
 }

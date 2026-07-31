@@ -20,12 +20,20 @@ pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
             | "ctest.exe"
             | "deno"
             | "deno.exe"
+            | "java"
+            | "java.exe"
+            | "javaw"
+            | "javaw.exe"
             | "lua"
             | "lua.exe"
             | "ninja"
             | "ninja.exe"
             | "node"
             | "node.exe"
+            | "npm"
+            | "npm.exe"
+            | "npx"
+            | "npx.exe"
             | "perl"
             | "perl.exe"
             | "php"
@@ -81,6 +89,13 @@ mod tests {
     #[test]
     fn build_language_execution_fails_closed() {
         for command in ["cmake", "cmake.exe", "ctest", "ctest.exe", "ninja", "ninja.exe"] {
+            assert!(is_unanalyzed_interpreter(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn package_and_java_launchers_fail_closed() {
+        for command in ["npm", "npm.exe", "npx", "npx.exe", "java", "java.exe", "javaw", "javaw.exe"] {
             assert!(is_unanalyzed_interpreter(command), "{command}");
         }
     }

@@ -507,6 +507,26 @@ fn yaml_environment_channels_are_distinguished_from_action_inputs() {
         ".github/workflows/ci.yml",
         "steps:\n  - uses: actions/cache@example\n    with:\n      path: target\n"
     ));
+    assert!(weakening_environment_for_surface(
+        ".github/workflows/ci.yml",
+        "steps:\n  - shell: bash\n    run: printf '%s\\n' \"UkVTVENfV1JBUFBFUj0vdG1wL2ZpbHRlcg==\" >> \"$GITHUB_ENV\"\n  - run: just check-quality\n"
+    ));
+}
+
+#[test]
+fn powershell_quality_steps_enforce_native_exit_status() {
+    assert!(weakening_token_for_surface(
+        ".github/workflows/ci.yml",
+        "steps:\n  - shell: pwsh\n    run: |\n      cargo clippy --locked -- -D warnings\n      exit 0\n"
+    ));
+    assert!(!weakening_token_for_surface(
+        ".github/workflows/ci.yml",
+        "steps:\n  - run: |\n      cargo clippy --locked -- -D warnings\n      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n    shell: powershell\n"
+    ));
+    assert!(!weakening_token_for_surface(
+        ".github/workflows/ci.yml",
+        "steps:\n  - shell: bash\n    run: |\n      cargo clippy --locked -- -D warnings\n      exit 0\n"
+    ));
 }
 
 #[test]

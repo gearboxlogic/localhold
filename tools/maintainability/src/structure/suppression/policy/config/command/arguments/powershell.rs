@@ -64,6 +64,100 @@ pub(super) fn has_constructed_rust_arguments(source: &str) -> bool {
     has_opaque_dispatch(&source) || source.split(['\n', ';', '|']).any(|command| has_rust_tool(command) && has_argument_expression(command))
 }
 
+pub(super) fn has_unchecked_native_quality_command(source: &str) -> bool {
+    let normalized = normalize_escapes(source);
+    let statements = native_statements(&normalized);
+    let mut index = 0;
+    while let Some(statement) = statements.get(index) {
+        if !super::integrity::contains_quality_command(statement, true) {
+            index += 1;
+            continue;
+        }
+        let Some(check) = statements.get(index + 1) else {
+            return true;
+        };
+        let check = check.chars().filter(|character| !character.is_whitespace()).collect::<String>().to_ascii_lowercase();
+        if check == "exit$lastexitcode" {
+            return false;
+        }
+        if !matches!(check.as_str(), "if($lastexitcode-ne0){exit$lastexitcode}" | "if($lastexitcode){exit$lastexitcode}") {
+            return true;
+        }
+        index += 2;
+    }
+    false
+}
+
+fn native_statements(source: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut statement = String::new();
+    let mut characters = source.chars().peekable();
+    let mut state = State::Code;
+    let mut line_prefix_is_whitespace = true;
+    while let Some(character) = characters.next() {
+        match state {
+            State::Code => match character {
+                '#' => state = State::LineComment,
+                '<' if characters.peek() == Some(&'#') => {
+                    characters.next();
+                    state = State::BlockComment;
+                }
+                '\'' => {
+                    statement.push(character);
+                    state = State::SingleQuoted;
+                }
+                '"' => {
+                    statement.push(character);
+                    state = State::DoubleQuoted;
+                }
+                '@' => {
+                    statement.push(character);
+                    if let Some(quote) = here_string_quote(&mut characters) {
+                        state = here_string_state(quote);
+                    }
+                }
+                ';' | '\n' => push_statement(&mut statements, &mut statement),
+                _ => statement.push(character),
+            },
+            State::SingleQuoted if single_quoted_value_ends(character, &mut characters, &mut statement) => state = State::Code,
+            State::DoubleQuoted => {
+                statement.push(character);
+                if character == '"' {
+                    state = State::Code;
+                }
+            }
+            State::SingleHereString | State::DoubleHereString => {
+                statement.push(character);
+                let closing_quote = if matches!(state, State::SingleHereString) { '\'' } else { '"' };
+                if line_prefix_is_whitespace && character == closing_quote && characters.peek() == Some(&'@') {
+                    statement.push(characters.next().expect("peeked here-string terminator"));
+                    state = State::Code;
+                }
+            }
+            State::LineComment if character == '\n' => {
+                state = State::Code;
+                push_statement(&mut statements, &mut statement);
+            }
+            State::BlockComment if character == '#' && characters.peek() == Some(&'>') => {
+                characters.next();
+                state = State::Code;
+            }
+            State::SingleQuoted | State::LineComment | State::BlockComment => {}
+        }
+        update_line_prefix(character, &mut line_prefix_is_whitespace);
+    }
+    push_statement(&mut statements, &mut statement);
+    statements
+}
+
+fn push_statement(statements: &mut Vec<String>, statement: &mut String) {
+    let trimmed = statement.trim();
+    if !trimmed.is_empty() {
+        statements.push(trimmed.to_owned());
+    }
+    statement.clear();
+}
+
 fn has_opaque_dispatch(source: &str) -> bool {
     let mut characters = source.chars().peekable();
     let mut state = State::Code;
@@ -264,7 +358,7 @@ const fn update_line_prefix(character: char, line_prefix_is_whitespace: &mut boo
 
 #[cfg(test)]
 mod tests {
-    use super::{has_constructed_rust_arguments, normalize_escapes};
+    use super::{has_constructed_rust_arguments, has_unchecked_native_quality_command, normalize_escapes};
 
     #[test]
     fn escapes_are_normalized_only_where_powershell_expands_them() {
@@ -310,5 +404,18 @@ mod tests {
         assert!(!has_constructed_rust_arguments("Write-Output '& $tool $flag'"));
         assert!(!has_constructed_rust_arguments("# & $tool $flag"));
         assert!(!has_constructed_rust_arguments("@'\n& $tool $flag\n'@"));
+    }
+
+    #[test]
+    fn native_quality_commands_require_immediate_exit_status_enforcement() {
+        assert!(has_unchecked_native_quality_command("cargo clippy --locked -- -D warnings\nexit 0"));
+        assert!(has_unchecked_native_quality_command("cargo test --locked\nWrite-Output accepted"));
+        assert!(has_unchecked_native_quality_command("cargo test --locked"));
+        assert!(!has_unchecked_native_quality_command(
+            "cargo clippy --locked -- -D warnings\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\nWrite-Output accepted"
+        ));
+        assert!(!has_unchecked_native_quality_command("cargo test --locked; exit $LASTEXITCODE"));
+        assert!(!has_unchecked_native_quality_command("Write-Output 'cargo test --locked; exit 0'"));
+        assert!(!has_unchecked_native_quality_command("# cargo test --locked\nWrite-Output accepted"));
     }
 }

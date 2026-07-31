@@ -10,6 +10,7 @@ struct Scanner<'a> {
     quality_functions: &'a BTreeSet<String>,
     groups: Vec<(char, usize)>,
     cases: Vec<usize>,
+    ifs: Vec<usize>,
     word_start: Option<usize>,
     command_start: bool,
     quote: Option<char>,
@@ -24,6 +25,7 @@ impl<'a> Scanner<'a> {
             quality_functions,
             groups: Vec::new(),
             cases: Vec::new(),
+            ifs: Vec::new(),
             word_start: None,
             command_start: true,
             quote: None,
@@ -85,14 +87,23 @@ impl<'a> Scanner<'a> {
         if starts_command && word == "case" {
             self.cases.push(start);
         }
-        let masked = starts_command
+        if starts_command && word == "if" {
+            self.ifs.push(start);
+        }
+        let case_masked = starts_command
             && word == "esac"
             && self
                 .cases
                 .pop()
                 .is_some_and(|open| self.contains_quality(&self.source[open + "case".len()..start]) && group_context_masks_failure(self.source, open, end));
+        let if_masked = starts_command
+            && word == "fi"
+            && self
+                .ifs
+                .pop()
+                .is_some_and(|open| self.contains_quality(&self.source[open + "if".len()..start]) && group_context_masks_failure(self.source, open, end));
         self.command_start = matches!(word, "do" | "elif" | "else" | "if" | "then" | "until" | "while");
-        masked
+        case_masked || if_masked
     }
 
     fn advance_lexical_state(&mut self, index: usize, character: char) -> bool {
@@ -211,6 +222,10 @@ mod tests {
         assert!(masks("if ! {\n just check-quality\n true\n}; then echo rejected; fi"));
         assert!(masks("case \"$mode\" in\n checked)\n just check-quality; true ;;\nesac || true"));
         assert!(masks("if case \"$mode\" in\n checked)\n cargo test --locked ;;\nesac; then echo accepted; fi"));
+        assert!(masks("if test -f Cargo.toml; then\n just check-quality\n true\nfi || true"));
+        assert!(masks(
+            "if test -f Cargo.toml; then\n if test -f Cargo.lock; then\n cargo test --locked\n true\n fi\nfi && echo accepted"
+        ));
     }
 
     #[test]
@@ -220,6 +235,7 @@ mod tests {
         assert!(!masks("printf '%s\n' '{ just check-quality; } || true'"));
         assert!(!masks("# { just check-quality; } || true\nprintf accepted"));
         assert!(!masks("case \"$mode\" in\n checked)\n just check-quality ;;\nesac"));
+        assert!(!masks("if test -f Cargo.toml; then\n just check-quality\nfi"));
         assert!(!masks("printf '%s\n' 'case mode in checked) just check-quality ;; esac || true'"));
     }
 }

@@ -14,6 +14,12 @@ struct BlockScalar {
     rejects_expressions: bool,
 }
 
+struct RunCommand {
+    source: String,
+    line_index: usize,
+    indentation: usize,
+}
+
 pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()> {
     if !is_github_yaml(path) {
         return Ok(());
@@ -21,7 +27,8 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
     governed::validate(path, source)?;
     let mut block_indentation: Option<BlockScalar> = None;
     let mut inline_run_indentation = None;
-    for line in source.lines() {
+    let lines = source.lines().collect::<Vec<_>>();
+    for (line_index, line) in lines.iter().copied().enumerate() {
         let indentation = leading_spaces(line);
         if let Some(header) = inline_run_indentation {
             if line.trim().is_empty() {
@@ -70,10 +77,7 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
             bail!("checked-in GitHub YAML {path:?} uses an unsupported flow mapping or complex sequence");
         }
         if key == "shell" {
-            let shell = literal_scalar(value).ok_or_else(|| anyhow::anyhow!("checked-in GitHub YAML {path:?} uses an unsupported shell template"))?;
-            if !matches!(shell.as_str(), "bash" | "sh" | "pwsh" | "powershell" | "cmd") && !governed::is_startup_isolated_shell(&shell) {
-                bail!("checked-in GitHub YAML {path:?} uses an unsupported shell template");
-            }
+            validate_shell(path, value, &lines, line_index)?;
         } else if key == "run" && value.starts_with('>') && is_block_scalar(value) {
             bail!("checked-in GitHub YAML {path:?} uses an unsupported folded run scalar");
         } else if is_block_scalar(value) {
@@ -90,6 +94,34 @@ pub(super) fn validate_execution_metadata(path: &str, source: &str) -> Result<()
         }
     }
     Ok(())
+}
+
+fn validate_shell(path: &str, value: &str, lines: &[&str], line_index: usize) -> Result<()> {
+    let shell = literal_scalar(value).ok_or_else(|| anyhow::anyhow!("checked-in GitHub YAML {path:?} uses an unsupported shell template"))?;
+    if !matches!(shell.as_str(), "bash" | "sh" | "pwsh" | "powershell" | "cmd") && !governed::is_startup_isolated_shell(&shell) {
+        bail!("checked-in GitHub YAML {path:?} uses an unsupported shell template");
+    }
+    if matches!(shell.as_str(), "pwsh" | "powershell") && !shell_is_step_local(lines, line_index) {
+        bail!("checked-in GitHub YAML {path:?} uses an unsupported default PowerShell shell; select PowerShell on each audited step");
+    }
+    Ok(())
+}
+
+fn shell_is_step_local(lines: &[&str], line_index: usize) -> bool {
+    let shell_line = lines[line_index];
+    if shell_line.trim_start().starts_with("- ") {
+        return true;
+    }
+    let shell_indentation = leading_spaces(shell_line);
+    for line in lines[..line_index].iter().rev().copied() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        if leading_spaces(line) < shell_indentation {
+            return line.trim_start().starts_with("- ");
+        }
+    }
+    false
 }
 
 fn contains_github_expression(value: &str) -> bool {
@@ -152,6 +184,22 @@ pub(super) fn run_commands(path: &str, source: &str) -> Vec<String> {
     if !is_github_yaml(path) {
         return Vec::new();
     }
+    parsed_run_commands(source).into_iter().map(|command| command.source).collect()
+}
+
+pub(super) fn powershell_run_commands(path: &str, source: &str) -> Vec<String> {
+    if !is_github_yaml(path) {
+        return Vec::new();
+    }
+    let lines = source.lines().collect::<Vec<_>>();
+    parsed_run_commands(source)
+        .into_iter()
+        .filter(|command| run_uses_powershell(&lines, command))
+        .map(|command| command.source)
+        .collect()
+}
+
+fn parsed_run_commands(source: &str) -> Vec<RunCommand> {
     let lines = source.lines().collect::<Vec<_>>();
     let mut commands = Vec::new();
     let mut index = 0;
@@ -160,9 +208,15 @@ pub(super) fn run_commands(path: &str, source: &str) -> Vec<String> {
             index += 1;
             continue;
         };
+        let line_index = index;
+        let indentation = leading_spaces(lines[index]);
         let (header_indentation, folded) = match value {
             RunValue::Inline(command) => {
-                commands.push(command);
+                commands.push(RunCommand {
+                    source: command,
+                    line_index,
+                    indentation,
+                });
                 index += 1;
                 continue;
             }
@@ -190,9 +244,47 @@ pub(super) fn run_commands(path: &str, source: &str) -> Vec<String> {
             previous_was_content = true;
             index += 1;
         }
-        commands.push(command);
+        commands.push(RunCommand {
+            source: command,
+            line_index,
+            indentation,
+        });
     }
     commands
+}
+
+fn run_uses_powershell(lines: &[&str], command: &RunCommand) -> bool {
+    let Some(step_start) = (0..=command.line_index).rev().find(|index| {
+        let line = lines[*index];
+        line.trim_start().starts_with("- ") && leading_spaces(line) <= command.indentation
+    }) else {
+        return false;
+    };
+    let step_indentation = leading_spaces(lines[step_start]);
+    let property_indentation = if step_start == command.line_index {
+        step_indentation.saturating_add(2)
+    } else {
+        command.indentation
+    };
+    let step_end = (step_start + 1..lines.len())
+        .find(|index| {
+            let line = lines[*index];
+            if line.trim().is_empty() {
+                return false;
+            }
+            let indentation = leading_spaces(line);
+            indentation < step_indentation || indentation == step_indentation && line.trim_start().starts_with("- ")
+        })
+        .unwrap_or(lines.len());
+    lines[step_start..step_end].iter().enumerate().any(|(offset, line)| {
+        let absolute = step_start + offset;
+        let property = absolute == step_start || leading_spaces(line) == property_indentation;
+        property
+            && yaml_key_value(line)
+                .filter(|(key, _)| *key == "shell")
+                .and_then(|(_, value)| literal_scalar(value))
+                .is_some_and(|shell| matches!(shell.to_ascii_lowercase().as_str(), "pwsh" | "powershell"))
+    })
 }
 
 pub(super) fn environment_variables<'a>(path: &str, source: &'a str) -> Vec<(&'a str, &'a str)> {

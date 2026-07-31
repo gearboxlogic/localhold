@@ -296,8 +296,12 @@ fn command_policy_rejects_dynamic_powershell_call_dispatch() {
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
 
-    fs::write(workspace.path().join("script/check.ps1"), "& cargo clippy -- -D warnings\n").expect("static PowerShell call");
-    reject_checked_in_weakening(workspace.path()).expect("static PowerShell call is analyzable");
+    fs::write(
+        workspace.path().join("script/check.ps1"),
+        "& cargo clippy -- -D warnings\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
+    )
+    .expect("checked static PowerShell call");
+    reject_checked_in_weakening(workspace.path()).expect("status-checked static PowerShell call is analyzable");
 }
 
 #[test]
@@ -508,6 +512,7 @@ fn github_yaml_rejects_unsupported_execution_metadata() {
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - { run: \"cargo clippy -- -A warnings\" }\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -c 'cargo clippy -- -A warnings' -- {0}\n        run: just maintainability\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: |\n          bash -c 'cargo clippy -- -A warnings' -- {0}\n        run: just maintainability\n",
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: windows-latest\n    defaults:\n      run:\n        shell: pwsh\n    steps:\n      - run: cargo clippy --locked -- -D warnings\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: >\n          # hidden by incorrect folding\n            cargo clippy -- -A warnings\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - working-directory: misc\n        run: rustc check.rs\n",
         "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - 'working-directory' : misc\n        run: rustc check.rs\n",
@@ -530,6 +535,7 @@ fn github_yaml_rejects_unsupported_execution_metadata() {
         assert!(
             error.to_string().contains("anchors or aliases")
                 || error.to_string().contains("unsupported shell template")
+                || error.to_string().contains("unsupported default PowerShell shell")
                 || error.to_string().contains("folded run scalar")
                 || error.to_string().contains("working-directory")
                 || error.to_string().contains("flow mapping or complex sequence")

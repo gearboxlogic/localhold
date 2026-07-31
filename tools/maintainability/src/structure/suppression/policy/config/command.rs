@@ -186,6 +186,7 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
 ];
 pub(super) const GPU_RELEASE_REVISION_ENVIRONMENT_LINES: &[&str] = &[
     "          test \"$(git rev-parse HEAD)\" = \"$GITHUB_SHA\"",
+    "          printf 'CUDA_RELEASE_ROOT=%s\\n' \"$root\" >>\"$GITHUB_ENV\"",
     "          unset ORT_DYLIB_PATH LD_LIBRARY_PATH LD_PRELOAD",
     "          unset ORT_DYLIB_PATH LD_LIBRARY_PATH LD_PRELOAD",
     "          unset ORT_DYLIB_PATH LD_LIBRARY_PATH LD_PRELOAD",

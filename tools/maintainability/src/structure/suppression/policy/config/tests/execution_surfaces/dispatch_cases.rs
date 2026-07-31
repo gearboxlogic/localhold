@@ -65,5 +65,10 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("{\n just check-quality\n true\n} || true\n", "lint-weakening argument"),
     ("(\n cargo test --locked\n true\n) || true\n", "lint-weakening argument"),
     ("case \"$mode\" in\n checked) just check-quality; true ;;\nesac || true\n", "lint-weakening argument"),
+    ("if test -f Cargo.toml; then\n just check-quality\n true\nfi || true\n", "lint-weakening argument"),
+    ("npm exec -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
+    ("npx -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
+    ("java quality/Lint.java\n", "opaque interpreter program"),
+    ("just --justfile quality/lint.data check-quality\n", "opaque interpreter program"),
     ("$'\\x73\\x68' quality/lint.txt\n", "opaque interpreter program"),
 ];

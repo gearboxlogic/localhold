@@ -39,6 +39,7 @@ pub(super) fn is_weakening_environment_name(name: &str) -> bool {
             | "CARGO_BUILD_RUSTC_WRAPPER"
             | "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"
             | "GITHUB_ACTIONS"
+            | "GITHUB_ENV"
             | "GITHUB_EVENT_PATH"
             | "GITHUB_PATH"
             | "GITHUB_SHA"
@@ -105,5 +106,13 @@ mod tests {
         assert!(is_weakening_environment_assignment_name("CARGO"));
         assert!(is_weakening_environment_assignment_name("cargo"));
         assert!(!is_weakening_environment_name("Cargo"));
+    }
+
+    #[test]
+    fn github_cross_step_mutation_files_are_weakening() {
+        for name in ["GITHUB_ENV", "GITHUB_PATH"] {
+            assert!(is_weakening_environment_name(name), "{name}");
+            assert!(is_weakening_environment_name(&name.to_ascii_lowercase()), "{name}");
+        }
     }
 }

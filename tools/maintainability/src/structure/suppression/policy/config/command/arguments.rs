@@ -33,6 +33,9 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
     if is_powershell(path) && powershell::has_constructed_rust_arguments(source) {
         return true;
     }
+    if is_powershell(path) && powershell::has_unchecked_native_quality_command(source) {
+        return true;
+    }
     let mut options = AnalysisOptions::strict();
     if has_case_insensitive_tool_names(path) {
         options = options.with_case_insensitive_tools();
@@ -57,6 +60,12 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
     let source = normalized_source_for_surface(path, source);
     let embedded_commands = super::yaml::run_commands(path, &source);
     if is_yaml(path) {
+        if super::yaml::powershell_run_commands(path, &source)
+            .iter()
+            .any(|command| powershell::has_unchecked_native_quality_command(command))
+        {
+            return true;
+        }
         return embedded_commands
             .iter()
             .any(|command| weakening_token_with_options(command, options.allow_just_interpolation()) || powershell::has_constructed_rust_arguments(command));

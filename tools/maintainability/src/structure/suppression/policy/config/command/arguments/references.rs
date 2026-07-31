@@ -205,6 +205,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "sort" | "sort.exe" if sort_compression_program_is_opaque(arguments) => SelectedInput::Opaque,
         "tar" | "tar.exe" if tar_checkpoint_action_is_opaque(arguments) => SelectedInput::Opaque,
         "zip" | "zip.exe" if zip_test_command_is_opaque(arguments) => SelectedInput::Opaque,
+        "just" | "just.exe" if just_source_selection_is_opaque(arguments) => SelectedInput::Opaque,
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
             let (inputs, opaque) = makefile_inputs(arguments);
             return (inputs, opaque || make_environment_selection_is_opaque(&tokens[..command_index]));
@@ -248,6 +249,15 @@ fn zip_test_command_is_opaque(arguments: &[String]) -> bool {
         .iter()
         .take_while(|argument| argument.as_str() != "--")
         .any(|argument| argument.starts_with("-TT"))
+}
+
+fn just_source_selection_is_opaque(arguments: &[String]) -> bool {
+    arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
+        matches!(argument.as_str(), "-d" | "-f" | "-s" | "--justfile" | "--search" | "--working-directory")
+            || argument.starts_with("--justfile=")
+            || argument.starts_with("--working-directory=")
+            || matches!(argument.as_bytes(), [b'-', b'd' | b'f', ..] if argument.len() > 2)
+    })
 }
 
 fn is_execution_input_prefix(word: &str) -> bool {
@@ -525,6 +535,10 @@ mod tests {
         assert_eq!(inputs("MAKEFILES=quality/lint.rules make"), (Vec::new(), true));
         assert_eq!(inputs("make SHELL=/bin/true check"), (Vec::new(), true));
         assert_eq!(inputs("make .SHELLFLAGS=-c check"), (Vec::new(), true));
+        assert_eq!(inputs("just --justfile quality/lint.data check-quality"), (Vec::new(), true));
+        assert_eq!(inputs("just -fquality/lint.data check-quality"), (Vec::new(), true));
+        assert_eq!(inputs("just --working-directory quality check-quality"), (Vec::new(), true));
+        assert_eq!(inputs("just check-quality"), (Vec::new(), false));
         assert_eq!(inputs("rsync -e 'sh quality/lint.txt' localhost:/missing ."), (Vec::new(), true));
         assert_eq!(inputs("command=$(cat quality/lint.txt); $command"), (Vec::new(), true));
         assert_eq!(inputs("history -s 'sh quality/lint.txt'; fc -s sh"), (Vec::new(), true));

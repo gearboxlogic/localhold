@@ -184,6 +184,7 @@ fn is_unparsed_launcher(command: &str) -> bool {
             | "setarch"
             | "setpriv"
             | "setsid"
+            | "sg"
             | "stdbuf"
             | "strace"
             | "systemd-run"
@@ -208,5 +209,7 @@ mod tests {
         assert!(matches!(select("/usr/bin/choom", "choom", &arguments), Selection::Opaque));
         assert!(matches!(select("setarch", "setarch", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/setarch", "setarch", &arguments), Selection::Opaque));
+        assert!(matches!(select("sg", "sg", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/bin/sg", "sg", &arguments), Selection::Opaque));
     }
 }

@@ -177,6 +177,33 @@ class ValidateCudaRuntimeTests(unittest.TestCase):
 
 
 class PackageReleaseTests(unittest.TestCase):
+    def test_streamed_tar_zst_preserves_failed_command_details(self) -> None:
+        compressor = mock.Mock()
+        compressor.stdin = mock.Mock()
+        compressor.wait.return_value = 23
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "not-created.tar.zst"
+            with (
+                mock.patch.object(PACKAGE, "write_tar"),
+                mock.patch.object(PACKAGE.subprocess, "Popen", return_value=compressor) as popen,
+                self.assertRaises(subprocess.CalledProcessError) as raised,
+            ):
+                PACKAGE.write_tar_zst(Path(temporary) / "stage", destination, 1_700_000_000)
+
+            expected = [
+                "zstd",
+                "-19",
+                "--threads=1",
+                "--no-progress",
+                "--quiet",
+                "--force",
+                "-o",
+                str(destination),
+            ]
+            popen.assert_called_once_with(expected, stdin=subprocess.PIPE)
+            self.assertEqual(raised.exception.returncode, 23)
+            self.assertEqual(raised.exception.cmd, expected)
+
     def test_streamed_tar_zst_is_reproducible(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

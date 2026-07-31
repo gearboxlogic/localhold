@@ -724,6 +724,7 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
     for (command, reason) in [
         ("trap 'sh quality/lint.txt' EXIT\n", "opaque interpreter program"),
         ("setarch --uname-2.6 sh quality/lint.txt\n", "opaque interpreter program"),
+        ("sg \"$(id -gn)\" -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
         ("cat <(sh quality/lint.txt)\n", "lint-weakening argument"),
         ("coproc sh quality/lint.txt\n", "opaque interpreter program"),
         ("mapfile -C 'sh quality/lint.txt' -c 1 </etc/hosts\n", "opaque interpreter program"),

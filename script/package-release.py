@@ -119,17 +119,18 @@ def write_tar(stage_root: Path, output: BinaryIO, epoch: int) -> None:
 
 def write_tar_zst(stage_root: Path, destination: Path, epoch: int) -> None:
     """Stream a deterministic tar archive through reproducible high-ratio zstd."""
+    arguments = [
+        "-19",
+        "--threads=1",
+        "--no-progress",
+        "--quiet",
+        "--force",
+        "-o",
+        str(destination),
+    ]
+    command = ["zstd", *arguments]
     compressor = subprocess.Popen(
-        [
-            "zstd",
-            "-19",
-            "--threads=1",
-            "--no-progress",
-            "--quiet",
-            "--force",
-            "-o",
-            str(destination),
-        ],
+        ["zstd", *arguments],
         stdin=subprocess.PIPE,
     )
     assert compressor.stdin is not None

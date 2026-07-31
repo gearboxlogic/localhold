@@ -194,8 +194,8 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         _ if dynamic_program::is_python_interpreter(&command) => python_input(arguments),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),
         _ if dynamic_program::is_unanalyzed_interpreter(&command) => SelectedInput::Opaque,
-        "awk" | "awk.exe" | "dpkg" | "dpkg.exe" | "gawk" | "gawk.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe" | "rsync" | "rsync.exe" | "sqlite3" | "sqlite3.exe" | "wget"
-        | "wget.exe" => SelectedInput::Opaque,
+        "awk" | "awk.exe" | "dpkg" | "dpkg.exe" | "gawk" | "gawk.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe" | "rsync" | "rsync.exe" | "run-parts" | "run-parts.exe"
+        | "sqlite3" | "sqlite3.exe" | "wget" | "wget.exe" => SelectedInput::Opaque,
         "find" | "find.exe" => {
             return (Vec::new(), find_command_action_is_opaque(arguments));
         }
@@ -575,6 +575,7 @@ mod tests {
             "sqlite3 :memory: '.shell sh quality/lint.txt'",
             "dpkg --pre-invoke='sh quality/lint.txt' --unpack quality/missing.deb",
             "wget --use-askpass=/tmp/askpass https://example.invalid/archive",
+            "run-parts quality/hooks",
         ] {
             assert_eq!(inputs(command), (Vec::new(), true), "{command}");
         }

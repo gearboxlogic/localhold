@@ -696,7 +696,8 @@ fn command_policy_rejects_directly_compiled_rust_helpers() {
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("without auditable repository-relative .rs inputs"));
 
-    let reviewed_root = r#"repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+    let reviewed_root = r#"set -e
+repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 readonly repository_root
 cd -- "$repository_root"
 cargo clippy -- -D warnings

@@ -53,9 +53,13 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
         return true;
     }
     if let Some(scripts) = package_json::script_commands(path, source) {
+        let options = options.without_initial_errexit();
         return scripts.map_or(true, |scripts| {
             scripts.iter().any(|script| weakening_token_with_options(script, options.allow_just_interpolation()))
         });
+    }
+    if is_standalone_shell_surface(path) && !shebang_enables_errexit(source) {
+        options = options.without_initial_errexit();
     }
     let source = normalized_source_for_surface(path, source);
     let embedded_commands = super::yaml::run_commands(path, &source);
@@ -84,7 +88,7 @@ pub(super) fn weakening_token_in_reviewed_shell_remainder(source: &str) -> bool 
     let logical = join_command_continuations(source);
     if integrity::declares_required_command_override(&logical, true)
         || integrity::has_command_hash_override(&logical)
-        || integrity::failure_masks_quality_command(&logical, true, Some(true), true)
+        || integrity::failure_masks_quality_command(&logical, true, Some(true), true, true)
     {
         return true;
     }
@@ -193,6 +197,35 @@ fn is_yaml(path: &str) -> bool {
         .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "yml" | "yaml"))
 }
 
+fn is_standalone_shell_surface(path: &str) -> bool {
+    let path = Path::new(path);
+    let basename = path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_ascii_lowercase();
+    if matches!(basename.as_str(), "justfile" | ".justfile" | "makefile" | "gnumakefile" | "package.json") {
+        return false;
+    }
+    path.extension().and_then(|extension| extension.to_str()).is_none_or(|extension| {
+        !matches!(
+            extension.to_ascii_lowercase().as_str(),
+            "bat" | "cmd" | "json" | "just" | "make" | "mk" | "ps1" | "py" | "rs" | "toml" | "yml" | "yaml"
+        )
+    })
+}
+
+fn shebang_enables_errexit(source: &str) -> bool {
+    let Some(interpreter) = source.lines().next().and_then(|line| line.strip_prefix("#!")) else {
+        return false;
+    };
+    let words = interpreter.split_whitespace().collect::<Vec<_>>();
+    let Some(shell_index) = words.iter().position(|word| matches!(tool_basename(word), "bash" | "dash" | "sh" | "zsh")) else {
+        return false;
+    };
+    let arguments = &words[shell_index + 1..];
+    arguments.iter().take_while(|word| **word != "--").any(|word| {
+        word.strip_prefix('-')
+            .is_some_and(|options| !options.starts_with('-') && !options.starts_with('o') && options.contains('e'))
+    }) || arguments.windows(2).any(|pair| pair[0] == "-o" && pair[1].eq_ignore_ascii_case("errexit"))
+}
+
 fn normalized_source_for_surface(path: &str, source: &str) -> String {
     match Path::new(path).extension().and_then(|extension| extension.to_str()) {
         Some(extension) if extension.eq_ignore_ascii_case("ps1") => powershell::normalize_escapes(source),
@@ -215,6 +248,7 @@ fn weakening_token_with_options(source: &str, options: AnalysisOptions) -> bool 
                 options.case_insensitive_tools(),
                 options.command_substitution_backticks(),
                 options.inspects_function_definitions(),
+                options.initial_errexit(),
             ))
     {
         return true;
@@ -726,7 +760,7 @@ pub(super) const fn has_case_insensitive_tool_names(_path: &str) -> bool {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::collect_direct_rust_sources;
+    use super::{collect_direct_rust_sources, weakening_token_for_surface};
 
     #[test]
     fn direct_source_discovery_bounds_nested_ansi_c_text() {
@@ -734,5 +768,24 @@ mod tests {
         assert!(!collect_direct_rust_sources(r#"write_manifest $'[package]\nname = "checker"'"#, true, &mut sources));
         assert!(sources.is_empty());
         assert!(collect_direct_rust_sources(r"$'rustc source.rs'", true, &mut sources));
+    }
+
+    #[test]
+    fn standalone_shells_cannot_assume_parent_errexit() {
+        let masked = "#!/usr/bin/bash\ncargo clippy --locked -- -D warnings\ntrue\n";
+        assert!(weakening_token_for_surface("quality/lint.data", masked));
+        assert!(!weakening_token_for_surface("quality/lint.data", &masked.replace("#!/usr/bin/bash", "#!/usr/bin/bash -e")));
+        assert!(!weakening_token_for_surface(
+            "quality/lint.data",
+            &masked.replace("#!/usr/bin/bash", "#!/usr/bin/bash\nset -e")
+        ));
+        assert!(!weakening_token_for_surface(
+            "quality/lint.data",
+            &masked.replace("#!/usr/bin/bash", "#!/usr/bin/env -S bash -euo pipefail")
+        ));
+        assert!(weakening_token_for_surface(
+            "quality/lint.data",
+            &masked.replace("#!/usr/bin/bash", "#!/usr/bin/pwsh -NoProfile")
+        ));
     }
 }

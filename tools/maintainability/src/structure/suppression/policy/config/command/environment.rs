@@ -3,6 +3,7 @@ pub(super) fn is_weakening_environment_name(name: &str) -> bool {
     matches!(
         name.as_str(),
         "BASH_ENV"
+            | "SHELLOPTS"
             | "LD_AUDIT"
             | "LD_LIBRARY_PATH"
             | "LD_PRELOAD"
@@ -114,5 +115,11 @@ mod tests {
             assert!(is_weakening_environment_name(name), "{name}");
             assert!(is_weakening_environment_name(&name.to_ascii_lowercase()), "{name}");
         }
+    }
+
+    #[test]
+    fn inherited_shell_options_are_weakening() {
+        assert!(is_weakening_environment_name("SHELLOPTS"));
+        assert!(is_weakening_environment_name("shellopts"));
     }
 }

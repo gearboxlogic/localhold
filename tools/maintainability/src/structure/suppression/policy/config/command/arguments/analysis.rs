@@ -5,6 +5,7 @@ pub(super) struct Options {
     command_substitutions: CommandSubstitutionPolicy,
     just_interpolation: JustInterpolationPolicy,
     integrity: IntegrityInspection,
+    initial_errexit: bool,
     nesting_depth: u8,
 }
 
@@ -47,6 +48,7 @@ impl Options {
             command_substitutions: CommandSubstitutionPolicy::Inspect,
             just_interpolation: JustInterpolationPolicy::Reject,
             integrity: IntegrityInspection::TopLevel,
+            initial_errexit: true,
             nesting_depth: 0,
         }
     }
@@ -75,6 +77,11 @@ impl Options {
         if matches!(self.integrity, IntegrityInspection::TopLevel) {
             self.integrity = IntegrityInspection::CommandsOnly;
         }
+        self
+    }
+
+    pub(super) const fn without_initial_errexit(mut self) -> Self {
+        self.initial_errexit = false;
         self
     }
 
@@ -113,5 +120,9 @@ impl Options {
 
     pub(super) const fn inspects_function_definitions(self) -> bool {
         matches!(self.integrity, IntegrityInspection::TopLevel)
+    }
+
+    pub(super) const fn initial_errexit(self) -> bool {
+        self.initial_errexit
     }
 }

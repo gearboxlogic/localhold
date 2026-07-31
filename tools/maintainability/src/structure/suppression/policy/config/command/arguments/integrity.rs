@@ -22,7 +22,13 @@ pub(super) fn has_command_hash_override(source: &str) -> bool {
     })
 }
 
-pub(super) fn failure_masks_quality_command(source: &str, case_insensitive_tools: bool, command_backticks: Option<bool>, inspect_function_definitions: bool) -> bool {
+pub(super) fn failure_masks_quality_command(
+    source: &str,
+    case_insensitive_tools: bool,
+    command_backticks: Option<bool>,
+    inspect_function_definitions: bool,
+    initial_errexit: bool,
+) -> bool {
     let source = tokens::without_noncommand_shell_data(source);
     if inspect_function_definitions && functions::has_unparsed_definition(&source) {
         return true;
@@ -45,7 +51,7 @@ pub(super) fn failure_masks_quality_command(source: &str, case_insensitive_tools
             return true;
         }
     }
-    if quality_command_runs_without_errexit(&source, case_insensitive_tools, &quality_functions) {
+    if quality_command_runs_without_errexit(&source, case_insensitive_tools, &quality_functions, initial_errexit) {
         return true;
     }
     if tokens::source_command_tokens(&source)
@@ -62,15 +68,92 @@ pub(super) fn failure_masks_quality_command(source: &str, case_insensitive_tools
     false
 }
 
-fn quality_command_runs_without_errexit(source: &str, case_insensitive_tools: bool, quality_functions: &BTreeSet<String>) -> bool {
-    let mut errexit = true;
-    for command in tokens::source_command_tokens(source) {
-        if !errexit && command_is_quality_or_function(&command, case_insensitive_tools, quality_functions) {
+fn quality_command_runs_without_errexit(source: &str, case_insensitive_tools: bool, quality_functions: &BTreeSet<String>, initial_errexit: bool) -> bool {
+    let mut errexit = initial_errexit;
+    let commands = tokens::source_command_tokens(source);
+    let separators = command_separators(source);
+    for (index, command) in commands.iter().enumerate() {
+        if !errexit
+            && command_is_quality_or_function(command, case_insensitive_tools, quality_functions)
+            && (initial_errexit || failure_can_fall_through(index, &commands, &separators))
+        {
             return true;
         }
-        update_errexit(&command, &mut errexit);
+        update_errexit(command, &mut errexit);
     }
     false
+}
+
+fn failure_can_fall_through(mut index: usize, commands: &[Vec<String>], separators: &[CommandSeparator]) -> bool {
+    loop {
+        match separators.get(index).copied().unwrap_or(CommandSeparator::End) {
+            CommandSeparator::End => return false,
+            CommandSeparator::Or | CommandSeparator::Pipeline | CommandSeparator::Background => return true,
+            CommandSeparator::And => {
+                index += 1;
+            }
+            CommandSeparator::Sequential => {
+                return commands[index + 1..].iter().any(|following| executable_index(following).is_some());
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CommandSeparator {
+    Sequential,
+    And,
+    Or,
+    Pipeline,
+    Background,
+    End,
+}
+
+fn command_separators(source: &str) -> Vec<CommandSeparator> {
+    let source = source.replace("\\\r\n", "").replace("\\\n", "");
+    let mut separators = Vec::new();
+    let mut characters = source.chars().peekable();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut comment = false;
+    let mut previous = None;
+    while let Some(character) = characters.next() {
+        if comment {
+            if character == '\n' {
+                separators.push(CommandSeparator::Sequential);
+                comment = false;
+            }
+        } else if escaped {
+            escaped = false;
+        } else if character == '\\' && quote != Some('\'') {
+            escaped = true;
+        } else if matches!(character, '\'' | '"') {
+            quote = updated_quote(quote, character);
+        } else if quote.is_none() && character == '#' && previous.is_none_or(|value: char| value.is_whitespace() || matches!(value, ';' | '&' | '|')) {
+            comment = true;
+        } else if quote.is_none() {
+            let separator = match character {
+                '\n' | ';' => Some(CommandSeparator::Sequential),
+                '&' if characters.peek() == Some(&'&') => {
+                    characters.next();
+                    separators.push(CommandSeparator::And);
+                    Some(CommandSeparator::And)
+                }
+                '&' => Some(CommandSeparator::Background),
+                '|' if characters.peek() == Some(&'|') => {
+                    characters.next();
+                    separators.push(CommandSeparator::Or);
+                    Some(CommandSeparator::Or)
+                }
+                '|' => Some(CommandSeparator::Pipeline),
+                _ => None,
+            };
+            separators.extend(separator);
+        }
+        previous = Some(character);
+    }
+    separators.push(CommandSeparator::End);
+    separators
 }
 
 fn update_errexit(command: &[String], errexit: &mut bool) {
@@ -267,7 +350,7 @@ mod tests {
 
     #[test]
     fn required_quality_command_failures_cannot_be_masked() {
-        let masks = |source| failure_masks_quality_command(source, true, Some(true), true);
+        let masks = |source| failure_masks_quality_command(source, true, Some(true), true, true);
         assert!(masks("just check-quality | true"));
         assert!(masks("just check-quality || true"));
         assert!(masks("just check-quality &"));
@@ -313,6 +396,14 @@ mod tests {
         assert!(!masks("set +o errexit; set -o errexit; cargo clippy --locked"));
         assert!(!masks("set +x; cargo test --locked"));
         assert!(!masks("case \"$name\" in\n    CARGO | RUSTC | RUSTDOC) return ;;\nesac"));
+    }
+
+    #[test]
+    fn independently_launched_scripts_must_enable_errexit_before_quality_commands() {
+        assert!(failure_masks_quality_command("cargo clippy --locked\ntrue", true, Some(true), true, false));
+        assert!(!failure_masks_quality_command("set -e\ncargo clippy --locked\ntrue", true, Some(true), true, false));
+        assert!(!failure_masks_quality_command("cargo clippy --locked && echo passed", true, Some(true), true, false));
+        assert!(failure_masks_quality_command("cargo clippy --locked && echo passed\ntrue", true, Some(true), true, false));
     }
 
     #[test]

@@ -11,6 +11,7 @@ struct Scanner<'a> {
     groups: Vec<(char, usize)>,
     cases: Vec<usize>,
     ifs: Vec<usize>,
+    loops: Vec<usize>,
     word_start: Option<usize>,
     command_start: bool,
     quote: Option<char>,
@@ -26,6 +27,7 @@ impl<'a> Scanner<'a> {
             groups: Vec::new(),
             cases: Vec::new(),
             ifs: Vec::new(),
+            loops: Vec::new(),
             word_start: None,
             command_start: true,
             quote: None,
@@ -90,6 +92,9 @@ impl<'a> Scanner<'a> {
         if starts_command && word == "if" {
             self.ifs.push(start);
         }
+        if starts_command && matches!(word, "for" | "select" | "while" | "until") {
+            self.loops.push(start);
+        }
         let case_masked = starts_command
             && word == "esac"
             && self
@@ -102,8 +107,14 @@ impl<'a> Scanner<'a> {
                 .ifs
                 .pop()
                 .is_some_and(|open| self.contains_quality(&self.source[open + "if".len()..start]) && group_context_masks_failure(self.source, open, end));
+        let loop_masked = starts_command
+            && word == "done"
+            && self
+                .loops
+                .pop()
+                .is_some_and(|open| self.contains_quality(&self.source[open..start]) && group_context_masks_failure(self.source, open, end));
         self.command_start = matches!(word, "do" | "elif" | "else" | "if" | "then" | "until" | "while");
-        case_masked || if_masked
+        case_masked || if_masked || loop_masked
     }
 
     fn advance_lexical_state(&mut self, index: usize, character: char) -> bool {
@@ -226,6 +237,9 @@ mod tests {
         assert!(masks(
             "if test -f Cargo.toml; then\n if test -f Cargo.lock; then\n cargo test --locked\n true\n fi\nfi && echo accepted"
         ));
+        assert!(masks("while :; do\n just check-quality\n true\n break\ndone || true"));
+        assert!(masks("until false; do\n cargo test --locked\n true\n break\ndone | cat"));
+        assert!(masks("for mode in checked; do\n cargo clippy --locked\n true\ndone || true"));
     }
 
     #[test]
@@ -236,6 +250,7 @@ mod tests {
         assert!(!masks("# { just check-quality; } || true\nprintf accepted"));
         assert!(!masks("case \"$mode\" in\n checked)\n just check-quality ;;\nesac"));
         assert!(!masks("if test -f Cargo.toml; then\n just check-quality\nfi"));
+        assert!(!masks("while :; do\n just check-quality\n break\ndone"));
         assert!(!masks("printf '%s\n' 'case mode in checked) just check-quality ;; esac || true'"));
     }
 }

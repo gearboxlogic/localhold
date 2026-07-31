@@ -32,19 +32,21 @@ pub(in crate::structure::suppression) fn reject_direct_source_suppressions(works
         if relative != Path::new(candidate) {
             bail!("directly compiled Rust source cannot traverse symlinked path components: {candidate:?}");
         }
-        roots.insert(candidate.clone(), SourceCategory::Production, format!("direct-rustc:{candidate}"))?;
+        roots.insert(candidate.clone(), SourceCategory::Production, format!("direct-rustc:{candidate}"));
     }
     let sources = modules::expand_target_sources(workspace, roots, |_| false)?;
-    for (path, category) in sources.categories {
+    for (path, categories) in sources.categories {
         let absolute = workspace.join(&path);
         let source = fs::read_to_string(&absolute).with_context(|| format!("read directly compiled Rust source {}", absolute.display()))?;
         let syntax = syn::parse_file(&source).with_context(|| format!("parse directly compiled Rust source {path}"))?;
-        if let Some(site) = SourceScanner::scan(&path, "direct-rustc", category, &syntax)?.first() {
-            bail!(
-                "directly compiled Rust must remain suppression-free; remove source suppression {} from {:?}",
-                site.id,
-                site.path
-            );
+        for category in categories {
+            if let Some(site) = SourceScanner::scan(&path, "direct-rustc", category, &syntax)?.first() {
+                bail!(
+                    "directly compiled Rust must remain suppression-free; remove source suppression {} from {:?}",
+                    site.id,
+                    site.path
+                );
+            }
         }
     }
     Ok(())

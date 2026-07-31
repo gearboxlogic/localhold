@@ -181,6 +181,7 @@ fn is_unparsed_launcher(command: &str) -> bool {
             | "prlimit"
             | "sandbox-exec"
             | "script"
+            | "setarch"
             | "setpriv"
             | "setsid"
             | "stdbuf"
@@ -205,5 +206,7 @@ mod tests {
         assert!(matches!(select("/usr/bin/flock", "flock", &arguments), Selection::Opaque));
         assert!(matches!(select("choom", "choom", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/choom", "choom", &arguments), Selection::Opaque));
+        assert!(matches!(select("setarch", "setarch", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/bin/setarch", "setarch", &arguments), Selection::Opaque));
     }
 }

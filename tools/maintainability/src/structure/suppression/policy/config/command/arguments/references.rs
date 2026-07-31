@@ -8,6 +8,7 @@ use super::{
 
 mod git;
 mod path;
+mod trap;
 mod wrapper;
 
 pub(in crate::structure::suppression::policy::config::command) fn cargo_manifest_paths_for_surface(path: &str, source: &str) -> (BTreeSet<String>, bool) {
@@ -158,7 +159,8 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         wrapper::Selection::Opaque => return (Vec::new(), true),
     }
     let selected = match command.as_str() {
-        "eval" | "iex" | "invoke-expression" | "parallel" | "parallel.exe" | "xargs" | "xargs.exe" => SelectedInput::Opaque,
+        "trap" if !command_word.contains(['/', '\\']) => return (Vec::new(), trap::action_is_opaque(arguments, direct_program_paths)),
+        "eval" | "iex" | "invoke-expression" | "parallel" | "parallel.exe" | "trap" | "xargs" | "xargs.exe" => SelectedInput::Opaque,
         "bash" | "bash.exe" | "dash" | "dash.exe" | "fish" | "fish.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe" => shell_input(arguments),
         "python" | "python.exe" | "python3" | "python3.exe" => python_input(arguments),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),

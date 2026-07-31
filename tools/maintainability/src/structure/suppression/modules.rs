@@ -9,8 +9,8 @@ use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{Meta, Token};
 
-use super::SourceCategory;
 use super::targets::TargetRoots;
+use super::{SourceCategory, merge_source_category};
 use crate::structure::syntax::{ProductionCfgContext, cfg_attributes_can_be_enabled, production_cfg_context};
 
 mod identities;
@@ -18,7 +18,7 @@ mod revision;
 pub(super) use revision::expand_revision_target_sources;
 
 pub(super) struct ExpandedSources {
-    pub(super) categories: BTreeMap<String, SourceCategory>,
+    pub(super) categories: BTreeMap<String, BTreeSet<SourceCategory>>,
     pub(super) relations: BTreeMap<(String, String), String>,
     pub(super) target_identities: BTreeMap<String, BTreeSet<String>>,
 }
@@ -64,14 +64,17 @@ fn expand_sources(
         identities: root_identities,
     } = roots;
     let mut relations = BTreeMap::new();
-    let mut pending = sources
-        .iter()
-        .map(|(path, &category)| {
-            let base = Path::new(path).parent().unwrap_or_else(|| Path::new("")).to_path_buf();
-            (path.clone(), base, category)
-        })
-        .collect::<VecDeque<_>>();
+    let mut pending = VecDeque::new();
+    for (path, categories) in &sources {
+        let base = Path::new(path).parent().unwrap_or_else(|| Path::new("")).to_path_buf();
+        for &category in categories {
+            pending.push_back((path.clone(), base.clone(), category));
+        }
+    }
     while let Some((path, module_base, category)) = pending.pop_front() {
+        if !sources.get(&path).is_some_and(|categories| categories.contains(&category)) {
+            continue;
+        }
         let source = read_source(&path)?;
         let syntax = syn::parse_file(&source).with_context(|| format!("parse Cargo target module source {path}"))?;
         let explicit_path_base = Path::new(&path).parent().unwrap_or_else(|| Path::new("")).to_path_buf();
@@ -86,7 +89,7 @@ fn expand_sources(
             if relations.insert(relation_key.clone(), module.clone()).is_some_and(|existing| existing != module) {
                 bail!("Cargo target module relation {relation_key:?} resolves ambiguously");
             }
-            if !register_source(&mut sources, &module, discovered.category)? {
+            if !register_source(&mut sources, &module, discovered.category) {
                 continue;
             }
             pending.push_back((module, discovered.child_base, discovered.category));
@@ -100,19 +103,8 @@ fn expand_sources(
     })
 }
 
-fn register_source(sources: &mut BTreeMap<String, SourceCategory>, module: &str, category: SourceCategory) -> Result<bool> {
-    match sources.get(module).copied() {
-        None => {
-            sources.insert(module.to_owned(), category);
-            Ok(true)
-        }
-        Some(existing) if existing == category || existing == SourceCategory::Production => Ok(false),
-        Some(_) if category == SourceCategory::Production => {
-            sources.insert(module.to_owned(), category);
-            Ok(true)
-        }
-        Some(_) => bail!("Cargo target module source {module:?} has conflicting governance categories"),
-    }
+fn register_source(sources: &mut BTreeMap<String, BTreeSet<SourceCategory>>, module: &str, category: SourceCategory) -> bool {
+    merge_source_category(sources.entry(module.to_owned()).or_default(), category)
 }
 
 struct ModuleCollector {

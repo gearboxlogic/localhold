@@ -80,6 +80,18 @@ impl SourceCategory {
     }
 }
 
+fn merge_source_category(categories: &mut BTreeSet<SourceCategory>, category: SourceCategory) -> bool {
+    if categories.contains(&SourceCategory::Production) {
+        return false;
+    }
+    if category == SourceCategory::Production {
+        categories.clear();
+        categories.insert(SourceCategory::Production);
+        return true;
+    }
+    categories.insert(category)
+}
+
 pub fn scan_workspace(workspace: &Path, inventory: &Inventory, component_paths: &BTreeMap<&str, &str>) -> Result<Vec<SourceSuppression>> {
     let target_sources = modules::expand_target_sources(workspace, targets::root_package_target_sources(workspace)?, |path| component_paths.contains_key(path))?;
     scan_with(inventory, component_paths, &target_sources, |path| {
@@ -180,27 +192,32 @@ fn scan_with(
         let measurement = measurements
             .get(path)
             .with_context(|| format!("suppression inventory path {path:?} has no structural measurement"))?;
-        let category = target_sources.categories.get(path).copied().unwrap_or_else(|| {
-            if path.starts_with("benches/") {
+        let categories = target_sources.categories.get(path).cloned().unwrap_or_else(|| {
+            let category = if path.starts_with("benches/") {
                 SourceCategory::Benchmark
             } else if path.starts_with("tests/") || measurement.physical_lines > 0 && measurement.production_lines == 0 {
                 SourceCategory::Test
             } else {
                 SourceCategory::Production
-            }
+            };
+            BTreeSet::from([category])
         });
         let parsed = syntax.get(path).with_context(|| format!("suppression source cache is missing {path:?}"))?;
         let targets = external_targets.get(path).cloned().unwrap_or_default();
-        sites.extend(SourceScanner::scan_with_external_targets(path, component, category, parsed, &targets)?);
+        for category in categories {
+            sites.extend(SourceScanner::scan_with_external_targets(path, component, category, parsed, &targets)?);
+        }
     }
-    for (path, &category) in &target_sources.categories {
+    for (path, categories) in &target_sources.categories {
         if component_paths.contains_key(path.as_str()) {
             continue;
         }
         let parsed = syntax.get(path).with_context(|| format!("Cargo target suppression source cache is missing {path:?}"))?;
         let targets = external_targets.get(path).cloned().unwrap_or_default();
         let component = target_sources.target_component(path)?;
-        sites.extend(SourceScanner::scan_with_external_targets(path, &component, category, parsed, &targets)?);
+        for &category in categories {
+            sites.extend(SourceScanner::scan_with_external_targets(path, &component, category, parsed, &targets)?);
+        }
     }
     sites.sort();
     Ok(sites)

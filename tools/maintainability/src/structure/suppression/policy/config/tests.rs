@@ -708,6 +708,21 @@ fn command_policy_rejects_find_and_xargs_command_indirection() {
 }
 
 #[test]
+fn command_policy_rejects_unparsed_shell_dispatchers() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::write(workspace.path().join("quality/lint.txt"), "cargo clippy -- -A warnings\n").expect("opaque command payload");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    for command in ["trap 'sh quality/lint.txt' EXIT", "setarch --uname-2.6 sh quality/lint.txt"] {
+        fs::write(workspace.path().join("Justfile"), format!("lint:\n    {command}\n")).expect("opaque shell dispatcher");
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("opaque interpreter program"), "{command}: {error:#}");
+    }
+}
+
+#[test]
 fn command_policy_governs_opaque_shell_programs_and_selected_makefiles() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");

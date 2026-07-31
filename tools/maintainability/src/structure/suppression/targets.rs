@@ -5,31 +5,21 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use super::SourceCategory;
+use super::{SourceCategory, merge_source_category};
 
 mod revision;
 pub(super) use revision::{RevisionTargets, revision_root_package_target_sources};
 
 #[derive(Default)]
 pub(super) struct TargetRoots {
-    pub(super) categories: BTreeMap<String, SourceCategory>,
+    pub(super) categories: BTreeMap<String, BTreeSet<SourceCategory>>,
     pub(super) identities: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl TargetRoots {
-    pub(super) fn insert(&mut self, path: String, category: SourceCategory, identity: String) -> Result<()> {
-        match self.categories.get(&path).copied() {
-            None => {
-                self.categories.insert(path.clone(), category);
-            }
-            Some(existing) if existing == category || existing == SourceCategory::Production => {}
-            Some(_) if category == SourceCategory::Production => {
-                self.categories.insert(path.clone(), category);
-            }
-            Some(_) => bail!("Cargo target source {path:?} has conflicting governance categories"),
-        }
+    pub(super) fn insert(&mut self, path: String, category: SourceCategory, identity: String) {
+        merge_source_category(self.categories.entry(path.clone()).or_default(), category);
         self.identities.entry(path).or_default().insert(identity);
-        Ok(())
     }
 }
 
@@ -44,7 +34,7 @@ pub(super) fn root_package_target_sources(workspace: &Path) -> Result<TargetRoot
         let path = checked_target_path(&workspace, Path::new(source))?;
         let kind = target_kind(target)?;
         let category = target_category(target, kind)?;
-        sources.insert(path.clone(), category, format!("{kind}:{path}"))?;
+        sources.insert(path.clone(), category, format!("{kind}:{path}"));
     }
     Ok(sources)
 }
@@ -80,7 +70,7 @@ pub(super) fn tooling_target_sources(workspace: &Path, manifests: &[String]) -> 
                 bail!("maintainer Cargo target source path is not normalized: {}", relative.display());
             }
             let relative = relative.to_str().context("maintainer Cargo target source path is not UTF-8")?.replace('\\', "/");
-            sources.insert(relative.clone(), SourceCategory::Production, format!("maintainer:{relative}"))?;
+            sources.insert(relative.clone(), SourceCategory::Production, format!("maintainer:{relative}"));
         }
     }
     Ok(sources)

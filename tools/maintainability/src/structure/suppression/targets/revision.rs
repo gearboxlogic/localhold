@@ -258,7 +258,8 @@ fn insert_target(roots: &mut TargetRoots, known: &BTreeSet<String>, path: &str, 
     if !known.contains(&path) {
         bail!("suppression comparison Cargo target source is missing: {path:?}");
     }
-    roots.insert(path.clone(), category, format!("{kind}:{path}"))
+    roots.insert(path.clone(), category, format!("{kind}:{path}"));
+    Ok(())
 }
 
 fn normalized_manifest_target_path(path: &str) -> Result<String> {

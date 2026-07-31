@@ -175,29 +175,47 @@ fn root_package_target_roots_outside_the_structure_map_are_scanned() {
     .expect("test-only example module");
     fs::write(
         workspace.path().join("quality/custom_test.rs"),
-        "#![allow(clippy::panic, reason = \"legacy test\")]\nfn main() {}\n",
+        "#![allow(clippy::panic, reason = \"legacy test\")]\nmod shared;\nfn main() {}\n",
     )
     .expect("custom test target");
     fs::write(
         workspace.path().join("quality/custom_bench.rs"),
-        "#![allow(clippy::panic, reason = \"legacy benchmark\")]\nfn main() {}\n",
+        "#![allow(clippy::panic, reason = \"legacy benchmark\")]\nmod shared;\nfn main() {}\n",
     )
     .expect("custom benchmark target");
+    fs::write(
+        workspace.path().join("quality/shared.rs"),
+        "#![allow(clippy::panic, reason = \"legacy shared test and benchmark helper\")]\n",
+    )
+    .expect("shared test and benchmark module");
 
-    let sites = scan_workspace(workspace.path(), &Inventory { files: Vec::new() }, &BTreeMap::new()).expect("scan every Cargo target root");
-    let mut observed = sites.iter().map(|site| (site.path.as_str(), site.category)).collect::<Vec<_>>();
-    observed.sort_unstable();
-    assert_eq!(
-        observed,
-        [
-            ("build.rs", SourceCategory::Production),
-            ("examples/demo.rs", SourceCategory::Production),
-            ("examples/helper.rs", SourceCategory::Production),
-            ("examples/test_helper.rs", SourceCategory::Test),
-            ("quality/custom_bench.rs", SourceCategory::Benchmark),
-            ("quality/custom_test.rs", SourceCategory::Test),
-        ]
+    let current = scan_workspace(workspace.path(), &Inventory { files: Vec::new() }, &BTreeMap::new()).expect("scan every Cargo target root");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+    git(
+        workspace.path(),
+        &["-c", "user.name=LocalHold", "-c", "user.email=localhold@example.invalid", "commit", "-qm", "shared module"],
     );
+    let revision = git_output(workspace.path(), &["rev-parse", "HEAD"]);
+    let historical = scan_revision(workspace.path(), revision.trim(), &Inventory { files: Vec::new() }, &BTreeMap::new()).expect("scan historical Cargo target roots");
+
+    for sites in [&current, &historical] {
+        let mut observed = sites.iter().map(|site| (site.path.as_str(), site.category)).collect::<Vec<_>>();
+        observed.sort_unstable();
+        assert_eq!(
+            observed,
+            [
+                ("build.rs", SourceCategory::Production),
+                ("examples/demo.rs", SourceCategory::Production),
+                ("examples/helper.rs", SourceCategory::Production),
+                ("examples/test_helper.rs", SourceCategory::Test),
+                ("quality/custom_bench.rs", SourceCategory::Benchmark),
+                ("quality/custom_test.rs", SourceCategory::Test),
+                ("quality/shared.rs", SourceCategory::Test),
+                ("quality/shared.rs", SourceCategory::Benchmark),
+            ]
+        );
+    }
 }
 
 #[test]

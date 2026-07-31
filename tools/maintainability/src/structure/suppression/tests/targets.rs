@@ -50,9 +50,7 @@ fn structural_explicit_modules_participate_in_external_fingerprints() {
     let child = workspace.path().join("src/alternate/child.rs");
     fs::write(&child, "fn first() {}\n").expect("explicit child source");
     let mut roots = targets::TargetRoots::default();
-    roots
-        .insert("src/lib.rs".to_owned(), SourceCategory::Production, "lib:src/lib.rs".to_owned())
-        .expect("target root");
+    roots.insert("src/lib.rs".to_owned(), SourceCategory::Production, "lib:src/lib.rs".to_owned());
     let expanded = modules::expand_target_sources(workspace.path(), roots, |_| true).expect("expand explicit module");
     assert_eq!(
         expanded.relations.get(&("src/lib.rs".to_owned(), "child".to_owned())).map(String::as_str),
@@ -79,9 +77,7 @@ fn raw_module_path_attributes_cannot_select_an_unaudited_source() {
     fs::write(workspace.path().join("src/selected.rs"), "#![allow(dead_code, reason = \"decoy debt\")]\n").expect("decoy module");
     fs::write(workspace.path().join("src/alternate/selected.rs"), "fn audited() {}\n").expect("selected module");
     let mut roots = targets::TargetRoots::default();
-    roots
-        .insert("src/lib.rs".to_owned(), SourceCategory::Production, "lib:src/lib.rs".to_owned())
-        .expect("target root");
+    roots.insert("src/lib.rs".to_owned(), SourceCategory::Production, "lib:src/lib.rs".to_owned());
 
     let expanded = modules::expand_target_sources(workspace.path(), roots, |_| true).expect("expand raw explicit module");
     assert_eq!(
@@ -95,9 +91,7 @@ fn raw_module_path_attributes_cannot_select_an_unaudited_source() {
     )
     .expect("raw conditional explicit path");
     let mut roots = targets::TargetRoots::default();
-    roots
-        .insert("src/lib.rs".to_owned(), SourceCategory::Production, "lib:src/lib.rs".to_owned())
-        .expect("target root");
+    roots.insert("src/lib.rs".to_owned(), SourceCategory::Production, "lib:src/lib.rs".to_owned());
     let error = modules::expand_target_sources(workspace.path(), roots, |_| true)
         .err()
         .expect("raw conditional module path must be rejected");
@@ -112,9 +106,7 @@ fn explicit_paths_in_external_modules_resolve_from_the_source_directory() {
     fs::write(workspace.path().join("src/artifact.rs"), "#[path = \"tests/artifact.rs\"]\nmod tests;\n").expect("external module");
     fs::write(workspace.path().join("src/tests/artifact.rs"), "fn verifies_artifact() {}\n").expect("explicit nested module");
     let mut roots = targets::TargetRoots::default();
-    roots
-        .insert("src/lib.rs".to_owned(), SourceCategory::Production, "lib:src/lib.rs".to_owned())
-        .expect("target root");
+    roots.insert("src/lib.rs".to_owned(), SourceCategory::Production, "lib:src/lib.rs".to_owned());
 
     let expanded = modules::expand_target_sources(workspace.path(), roots, |_| true).expect("expand explicit module");
     assert_eq!(

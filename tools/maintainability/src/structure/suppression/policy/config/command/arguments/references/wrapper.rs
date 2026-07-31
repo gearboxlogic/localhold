@@ -169,6 +169,7 @@ fn is_unparsed_launcher(command: &str) -> bool {
             | "cpulimit"
             | "daemonize"
             | "firejail"
+            | "flock"
             | "gdb"
             | "ionice"
             | "lldb"
@@ -189,4 +190,17 @@ fn is_unparsed_launcher(command: &str) -> bool {
             | "valgrind"
             | "watch"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Selection, select};
+
+    #[test]
+    fn unparsed_flock_launchers_are_opaque() {
+        let arguments = vec!["/tmp/lock".to_owned(), "sh".to_owned(), "quality/lint.txt".to_owned()];
+
+        assert!(matches!(select("flock", "flock", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/bin/flock", "flock", &arguments), Selection::Opaque));
+    }
 }

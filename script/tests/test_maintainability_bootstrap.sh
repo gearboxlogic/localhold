@@ -188,6 +188,73 @@ if GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head \
 fi
 GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head \
     LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment >/dev/null
+
+printf 'pub fn second_pushed_commit() {}\n' >"$test_repository/src/lib.rs"
+git -C "$test_repository" -c core.autocrlf=false -c user.name=LocalHold -c user.email=localhold@example.invalid add src/lib.rs
+git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example.invalid commit -qm 'second pushed commit'
+test_push_head=$(git -C "$test_repository" rev-parse HEAD)
+GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_push_head \
+    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment >/dev/null
+
+mkdir -p "$test_repository/tools/untrusted/src"
+printf '%s\n' '[package]' 'name = "untrusted"' 'version = "0.1.0"' 'edition = "2024"' >"$test_repository/tools/untrusted/Cargo.toml"
+printf 'pub fn untrusted() {}\n' >"$test_repository/tools/untrusted/src/lib.rs"
+printf '%s\n' \
+    'fn main() {' \
+    '    std::fs::write(std::env::var("UNTRUSTED_BUILD_MARKER").unwrap(), "executed").unwrap();' \
+    '}' >"$test_repository/tools/untrusted/build.rs"
+printf '\nuntrusted = { path = "../untrusted" }\n' >>"$test_tool/Cargo.toml"
+sed -i '/^name = "localhold-maintainability"$/,/^]$/ { /^dependencies = \[$/a\ "untrusted",
+}' "$test_tool/Cargo.lock"
+printf '\n[[package]]\nname = "untrusted"\nversion = "0.1.0"\n' >>"$test_tool/Cargo.lock"
+untrusted_manifest_sha256=$(sha256_stream <"$test_tool/Cargo.toml")
+untrusted_manifest_sha256=${untrusted_manifest_sha256%%[[:space:]]*}
+untrusted_lockfile_sha256=$(sha256_stream <"$test_tool/Cargo.lock")
+untrusted_lockfile_sha256=${untrusted_lockfile_sha256%%[[:space:]]*}
+sed -i "s/^readonly reviewed_manifest_sha256=.*/readonly reviewed_manifest_sha256=$untrusted_manifest_sha256/" \
+    "$test_repository/script/check-maintainability-bootstrap.sh"
+sed -i "s/^readonly reviewed_lockfile_sha256=.*/readonly reviewed_lockfile_sha256=$untrusted_lockfile_sha256/" \
+    "$test_repository/script/check-maintainability-bootstrap.sh"
+git -C "$test_repository" -c core.autocrlf=false -c user.name=LocalHold -c user.email=localhold@example.invalid add \
+    script/check-maintainability-bootstrap.sh tools/maintainability/Cargo.lock tools/maintainability/Cargo.toml tools/untrusted
+git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example.invalid commit -qm 'untrusted checker dependency graph'
+test_graph_head=$(git -C "$test_repository" rev-parse HEAD)
+untrusted_build_marker="$fixture/untrusted-build-ran"
+graph_failure=
+if graph_failure=$(GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_graph_head \
+    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base UNTRUSTED_BUILD_MARKER=$untrusted_build_marker \
+    run_local_check --test-environment 2>&1); then
+    printf 'maintainability bootstrap accepted an untrusted checker dependency graph\n' >&2
+    exit 1
+fi
+if [[ $graph_failure != *'maintainability checker Cargo.toml does not match the reviewed dependency graph'* ]]; then
+    printf 'maintainability bootstrap did not reject the overlaid checker dependency graph at its trust check\n' >&2
+    exit 1
+fi
+if [[ -e $untrusted_build_marker ]]; then
+    printf 'maintainability bootstrap executed an untrusted checker dependency build script\n' >&2
+    exit 1
+fi
+
+git -C "$test_repository" show "$test_base:tools/maintainability/Cargo.toml" >"$test_tool/Cargo.toml"
+trusted_manifest_sha256=$(sha256_stream <"$test_tool/Cargo.toml")
+trusted_manifest_sha256=${trusted_manifest_sha256%%[[:space:]]*}
+sed -i "s/^readonly reviewed_manifest_sha256=.*/readonly reviewed_manifest_sha256=$trusted_manifest_sha256/" \
+    "$test_repository/script/check-maintainability-bootstrap.sh"
+git -C "$test_repository" -c core.autocrlf=false -c user.name=LocalHold -c user.email=localhold@example.invalid add \
+    script/check-maintainability-bootstrap.sh tools/maintainability/Cargo.toml
+git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example.invalid commit -qm 'untrusted checker lock graph'
+test_lock_head=$(git -C "$test_repository" rev-parse HEAD)
+lock_failure=
+if lock_failure=$(GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_lock_head \
+    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment 2>&1); then
+    printf 'maintainability bootstrap accepted an untrusted checker lock graph\n' >&2
+    exit 1
+fi
+if [[ $lock_failure != *'maintainability checker Cargo.lock does not match the reviewed dependency graph'* ]]; then
+    printf 'maintainability bootstrap did not reject the overlaid checker lock graph at its trust check\n' >&2
+    exit 1
+fi
 git -C "$test_repository" checkout -q --detach "$test_base"
 restore_reviewed_graph
 

@@ -68,7 +68,7 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=f9ead9aeff6aae855040ce3aea2e8901119071beef46061332dc3526378a9de6
-readonly reviewed_bootstrap_tests_sha256=52ea4c035437422f778509e419598eec8843e087f9de730974630bc514ab6bfb
+readonly reviewed_bootstrap_tests_sha256=a58509d8550227a40007f531047f1f6be9ae155a59c28e99394bd1cc6c8a278c
 readonly reviewed_gate_runner_sha256=4283f980f6e785f50b52a6ce8c6968c2ceae2a5a9c61203f4a319df46b65d9d1
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
@@ -187,16 +187,20 @@ trusted_github_base_revision() {
         exit 1
     fi
 
-    local first_parent
-    first_parent=$(git_checked rev-parse --verify "${checked_head}^1^{commit}") || {
-        printf 'GitHub checked revision has no trusted first parent\n' >&2
+    local trusted_base
+    trusted_base=$(git_checked rev-parse --verify "${configured_base}^{commit}") || {
+        printf 'GitHub maintainability base revision is unavailable\n' >&2
         exit 1
     }
-    if [[ ${configured_base,,} != "${first_parent,,}" ]]; then
-        printf 'configured maintainability base differs from the checked revision first parent\n' >&2
+    if [[ ${configured_base,,} != "${trusted_base,,}" || ${trusted_base,,} == "${checked_head,,}" ]]; then
+        printf 'configured maintainability base must be a proper ancestor of the checked revision\n' >&2
         exit 1
     fi
-    printf '%s\n' "$first_parent"
+    if ! git_checked merge-base --is-ancestor "$trusted_base" "$checked_head"; then
+        printf 'configured maintainability base is not an ancestor of the checked revision\n' >&2
+        exit 1
+    fi
+    printf '%s\n' "$trusted_base"
 }
 
 verify_checker_sources() {
@@ -286,9 +290,9 @@ verify_reviewed_tracked_tree() {
         exit 1
     }
 
-    local checker_sources_are_overlaid=false
+    local checker_inputs_are_overlaid=false
     if $using_test_root && $github_context_present; then
-        checker_sources_are_overlaid=true
+        checker_inputs_are_overlaid=true
     fi
 
     local -A expected_index_entries=()
@@ -308,7 +312,10 @@ verify_reviewed_tracked_tree() {
             printf 'checked-out revision contains an unsupported tracked entry: %s\n' "$relative_path" >&2
             exit 1
         fi
-        if $checker_sources_are_overlaid && [[ $relative_path == tools/maintainability/src/* ]]; then
+        if $checker_inputs_are_overlaid &&
+            [[ $relative_path == tools/maintainability/src/* ||
+                $relative_path == tools/maintainability/Cargo.toml ||
+                $relative_path == tools/maintainability/Cargo.lock ]]; then
             :
         else
             if [[ ! -f "$repository_root/$relative_path" || -L "$repository_root/$relative_path" ]]; then
@@ -554,10 +561,12 @@ if [[ $mode != verify ]]; then
     git_at "$snapshot_root" archive --format=tar "$checked_head" | "$tar_command" -xf - -C "$snapshot_root"
     if $github_context_present; then
         # Checker changes activate only after this revision lands. The trusted
-        # first-parent checker audits the head tree without executing head code.
+        # event-base checker graph audits the head tree without executing head code.
         trusted_checker_revision=$(trusted_github_base_revision "$checked_head")
-        "$rm_command" -rf -- "$snapshot_root/tools/maintainability/src"
-        git_at "$snapshot_root" archive --format=tar "$trusted_checker_revision" -- tools/maintainability/src |
+        "$rm_command" -rf -- "$snapshot_root/tools/maintainability/Cargo.toml" "$snapshot_root/tools/maintainability/Cargo.lock" \
+            "$snapshot_root/tools/maintainability/src"
+        git_at "$snapshot_root" archive --format=tar "$trusted_checker_revision" -- tools/maintainability/Cargo.toml \
+            tools/maintainability/Cargo.lock tools/maintainability/src |
             "$tar_command" -xf - -C "$snapshot_root"
     fi
     audit_scratch_root="$snapshot_root/.cache"

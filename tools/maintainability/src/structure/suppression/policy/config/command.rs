@@ -137,6 +137,8 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_head run_local_check --test-environment >/dev/null 2>&1; then",
     "GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head \\",
     "    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment >/dev/null",
+    "    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base /usr/bin/bash \"$trusted_check\" --root \"$test_repository\" --test-environment >/dev/null",
+    "    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base CANDIDATE_GATE_MARKER=$candidate_gate_marker \\",
     "GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_push_head \\",
     "    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment >/dev/null",
     "if ! GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_graph_head \\",
@@ -167,6 +169,10 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "    RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \\",
     "    CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \\",
     "    run_check --test-environment >/dev/null",
+];
+pub(super) const BOOTSTRAP_TEST_COMMAND_LINES: &[&str] = &[
+    "    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base /usr/bin/bash \"$trusted_check\" --root \"$test_repository\" --test-environment >/dev/null",
+    "    /usr/bin/bash \"$trusted_check\" --root \"$gate_candidate\" --test-environment >/dev/null",
 ];
 pub(super) const MISE_ENVIRONMENT_LINES: &[&str] = &[
     "CARGO_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/cargo\"",
@@ -407,6 +413,7 @@ pub(super) fn reviewed_dynamic_command_references_are_exact(path: &str, source: 
     let expected = match path {
         "script/run-maintainability-gate.sh" => GATE_RUNNER_COMMAND_LINES,
         "script/run-source-safety.sh" => RUNNER_COMMAND_LINES,
+        "script/tests/test_maintainability_bootstrap.sh" => BOOTSTRAP_TEST_COMMAND_LINES,
         ".github/workflows/trusted-maintainability.yml" => TRUSTED_GATE_COMMAND_LINES,
         _ => return false,
     };

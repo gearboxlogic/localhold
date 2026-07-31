@@ -272,6 +272,7 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
             "opaque interpreter program",
         ),
         ("git bisect run sh quality/lint.txt\n", "opaque interpreter program"),
+        ("git filter-branch --tree-filter 'sh quality/lint.txt' -- HEAD\n", "opaque interpreter program"),
         ("PATH=/tmp:$PATH just clippy\n", "lint-weakening environment channel"),
         ("rsync -e 'sh quality/lint.txt' localhost:/missing . || true\n", "opaque interpreter program"),
         ("cmake -P quality/lint.txt\n", "opaque interpreter program"),
@@ -286,6 +287,7 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
             "ssh -o BatchMode=yes -o 'ProxyCommand=sh quality/lint.txt' example.invalid || true\n",
             "opaque interpreter program",
         ),
+        ("ssh-agent sh quality/lint.txt\n", "opaque interpreter program"),
         ("setarch --uname-2.6 sh quality/lint.txt\n", "opaque interpreter program"),
         ("sg \"$(id -gn)\" -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
         ("su \"$(id -un)\" -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
@@ -308,6 +310,8 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
         ("zip -q -T -TT 'sh quality/lint.txt' archive.zip /etc/hosts\n", "opaque interpreter program"),
         ("printf '%s\\n' \"$(just check-quality)\"\n", "lint-weakening argument"),
         ("set +e; just check-quality; true\n", "lint-weakening argument"),
+        ("{\n just check-quality\n true\n} || true\n", "lint-weakening argument"),
+        ("(\n cargo test --locked\n true\n) || true\n", "lint-weakening argument"),
         ("$'\\x73\\x68' quality/lint.txt\n", "opaque interpreter program"),
     ] {
         fs::write(workspace.path().join("script/check.sh"), command).expect("opaque shell dispatcher");
@@ -335,6 +339,14 @@ fn command_policy_rejects_dynamic_powershell_call_dispatch() {
     git(workspace.path(), &["init", "-q"]);
     git(workspace.path(), &["add", "."]);
 
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+
+    fs::write(
+        workspace.path().join("script/check.ps1"),
+        "[System.Diagnostics.Process]::Start($tool, $arguments).WaitForExit()\n",
+    )
+    .expect(".NET process dispatch");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
 

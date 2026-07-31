@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use super::{is_cargo_tool_token, is_environment_assignment, is_rust_tool_token, is_shell_command_prefix, tokens, tool_basename};
 
 mod functions;
+mod groups;
 
 pub(super) fn declares_required_command_override(source: &str, case_insensitive_tools: bool) -> bool {
     functions::declares_required_command_override(source, case_insensitive_tools)
@@ -27,6 +28,9 @@ pub(super) fn failure_masks_quality_command(source: &str, case_insensitive_tools
         return true;
     }
     let quality_functions = functions::quality_function_names(&source, case_insensitive_tools);
+    if groups::masked_quality_group(&source, case_insensitive_tools, &quality_functions) {
+        return true;
+    }
     if let Some(command_backticks) = command_backticks {
         let (substitutions, malformed) = tokens::command_substitution_commands(&source, command_backticks);
         if malformed
@@ -276,6 +280,10 @@ mod tests {
         assert!(masks(r#"printf '%s\n' "$(( $(cargo test) + 1 ))""#));
         assert!(masks("set +e; just check-quality; true"));
         assert!(masks("gate() {\n just check-quality\n true\n}\ngate || true"));
+        assert!(masks("{\n just check-quality\n true\n} || true"));
+        assert!(masks("(\n cargo test --locked\n true\n) || true"));
+        assert!(masks("if {\n just check-quality\n true\n}; then echo accepted; fi"));
+        assert!(masks("! {\n cargo clippy --locked\n true\n}"));
         assert!(masks("gate() { just check-quality; true; }\ntime gate && echo accepted"));
         assert!(masks("inner() { cargo test; }\nouter() { inner; true; }\nif outer; then :; fi"));
         assert!(masks("set +o errexit\ncargo clippy --locked"));
@@ -296,6 +304,8 @@ mod tests {
         assert!(!masks(r#"printf '%s\n' "$(printf 'just check-quality')""#));
         assert!(!masks("set +e; set -e; just check-quality"));
         assert!(!masks("gate() {\n just check-quality\n}\ngate"));
+        assert!(!masks("{\n just check-quality\n}"));
+        assert!(!masks("printf '%s\n' '{ just check-quality; } || true'"));
         assert!(!masks("set +o errexit; set -o errexit; cargo clippy --locked"));
         assert!(!masks("set +x; cargo test --locked"));
         assert!(!masks("case \"$name\" in\n    CARGO | RUSTC | RUSTDOC) return ;;\nesac"));

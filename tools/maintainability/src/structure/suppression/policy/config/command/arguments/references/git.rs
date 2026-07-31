@@ -30,7 +30,7 @@ fn command_producing_subcommand(arguments: &[String]) -> bool {
         return false;
     };
     match subcommand.to_ascii_lowercase().as_str() {
-        "difftool" | "mergetool" => true,
+        "difftool" | "filter-branch" | "mergetool" => true,
         "bisect" => arguments[index + 1..]
             .iter()
             .take_while(|argument| argument.as_str() != "--")
@@ -118,6 +118,7 @@ mod tests {
         assert!(dispatch_is_opaque(&arguments(&["mergetool", "--tool=custom"])));
         assert!(dispatch_is_opaque(&arguments(&["bisect", "run", "sh", "quality/lint.txt"])));
         assert!(dispatch_is_opaque(&arguments(&["bisect", "--no-checkout", "run", "sh", "quality/lint.txt"])));
+        assert!(dispatch_is_opaque(&arguments(&["filter-branch", "--tree-filter", "sh quality/lint.txt", "--", "HEAD",])));
         assert!(!dispatch_is_opaque(&arguments(&["bisect", "start", "--", "run"])));
         assert!(!dispatch_is_opaque(&arguments(&["diff", "--", "difftool"])));
     }

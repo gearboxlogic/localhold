@@ -215,6 +215,7 @@ fn is_unparsed_launcher(command: &str) -> bool {
             | "sg"
             | "scp"
             | "ssh"
+            | "ssh-agent"
             | "start-stop-daemon"
             | "stdbuf"
             | "strace"
@@ -260,6 +261,8 @@ mod tests {
         assert!(matches!(select("/usr/sbin/start-stop-daemon", "start-stop-daemon", &arguments), Selection::Opaque));
         assert!(matches!(select("ssh", "ssh", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/ssh", "ssh", &arguments), Selection::Opaque));
+        assert!(matches!(select("ssh-agent", "ssh-agent", &arguments), Selection::Opaque));
+        assert!(matches!(select("ssh-agent.exe", "ssh-agent.exe", &arguments), Selection::Opaque));
         assert!(is_command_launcher("env"));
         assert!(is_command_launcher("env.exe"));
         assert!(is_command_launcher("ssh"));

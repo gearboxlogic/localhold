@@ -70,7 +70,7 @@ fn has_opaque_dispatch(source: &str) -> bool {
     let mut line_prefix_is_whitespace = true;
     let mut word = String::new();
     while let Some(character) = characters.next() {
-        if matches!(state, State::Code) && (character.is_alphanumeric() || matches!(character, '-' | '_')) {
+        if matches!(state, State::Code) && (character.is_alphanumeric() || matches!(character, '-' | '_' | '.')) {
             word.push(character.to_ascii_lowercase());
             update_line_prefix(character, &mut line_prefix_is_whitespace);
             continue;
@@ -116,7 +116,7 @@ fn has_opaque_dispatch(source: &str) -> bool {
 }
 
 fn process_api_word(word: &str) -> bool {
-    matches!(word, "start-process" | "saps")
+    matches!(word, "start-process" | "saps" | "system.diagnostics.process" | "diagnostics.process")
 }
 
 fn dynamic_call_operator(characters: Peekable<Chars<'_>>) -> bool {
@@ -288,11 +288,16 @@ mod tests {
         assert!(has_constructed_rust_arguments(
             "Start-Process -FilePath ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('Y2FyZ28='))) -ArgumentList 'clippy','--','-A','warnings' -Wait"
         ));
+        assert!(has_constructed_rust_arguments("[System.Diagnostics.Process]::Start($tool, $arguments).WaitForExit()"));
+        assert!(has_constructed_rust_arguments("[Diagnostics.Process]::new()"));
         assert!(!has_constructed_rust_arguments("cargo clippy -- '-A' warnings"));
         assert!(!has_constructed_rust_arguments("Write-Output '(cargo clippy -- -A warnings)'"));
         assert!(!has_constructed_rust_arguments("Write-Output 'Start-Process cargo'"));
+        assert!(!has_constructed_rust_arguments("Write-Output '[System.Diagnostics.Process]::Start($tool)'"));
         assert!(!has_constructed_rust_arguments("# Start-Process cargo"));
+        assert!(!has_constructed_rust_arguments("# [System.Diagnostics.Process]::Start($tool)"));
         assert!(!has_constructed_rust_arguments("@'\nStart-Process cargo\n'@"));
+        assert!(!has_constructed_rust_arguments("@'\n[System.Diagnostics.Process]::Start($tool)\n'@"));
         assert!(!has_constructed_rust_arguments("$actual = (Get-FileHash -Algorithm SHA256 $path).Hash"));
     }
 

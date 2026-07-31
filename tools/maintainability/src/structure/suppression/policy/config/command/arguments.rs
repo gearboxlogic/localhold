@@ -589,14 +589,36 @@ fn is_audited_repository_root_change(tokens: &[String], source: &str) -> bool {
         return false;
     }
     let target = words.find(|word| *word != "--");
-    if target != Some("$repository_root") || words.next().is_some() {
+    if !matches!(target, Some("$repository_root" | "$audit_root")) || words.next().is_some() {
         return false;
     }
     let lines = source.lines().map(str::trim).collect::<Vec<_>>();
     let assignment = r#"repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"#;
-    lines.windows(2).filter(|lines| lines[0] == assignment && lines[1] == "readonly repository_root").count() == 1
+    let local_root_is_reviewed = lines.windows(2).filter(|lines| lines[0] == assignment && lines[1] == "readonly repository_root").count() == 1
         && lines.iter().filter(|line| line.starts_with("repository_root=")).count() == 1
-        && lines.iter().filter(|line| **line == "readonly repository_root").count() == 1
+        && lines.iter().filter(|line| **line == "readonly repository_root").count() == 1;
+    local_root_is_reviewed || reviewed_external_audit_root(target, &lines)
+}
+
+fn reviewed_external_audit_root(target: Option<&str>, lines: &[&str]) -> bool {
+    let expected: &[&str] = match target {
+        Some("$repository_root") => &[
+            "repository_root=${LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT:-$implementation_root}",
+            "if [[ $repository_root != /* && ! $repository_root =~ ^[[:alpha:]]:[/\\\\] ]] || [[ ! -d $repository_root || -L $repository_root ]]; then",
+            "repository_root=$(cd -- \"$repository_root\" && pwd -P)",
+            "LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT=$repository_root",
+            "readonly implementation_root repository_root LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT",
+            "export LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT",
+        ],
+        Some("$audit_root") => &[
+            "audit_root=${LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT:-$implementation_root}",
+            "if [[ $audit_root != /* && ! $audit_root =~ ^[[:alpha:]]:[/\\\\] ]]; then",
+            "audit_root=$(cd -- \"$audit_root\" && pwd -P)",
+            "readonly implementation_root audit_root",
+        ],
+        _ => return false,
+    };
+    expected.iter().all(|expected| lines.iter().filter(|line| *line == expected).count() == 1)
 }
 
 fn is_python(path: &str) -> bool {
@@ -760,7 +782,28 @@ pub(super) const fn has_case_insensitive_tool_names(_path: &str) -> bool {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{collect_direct_rust_sources, weakening_token_for_surface};
+    use super::{collect_direct_rust_sources, untrusted_directory_change_with_rust_tool, weakening_token_for_surface};
+
+    #[test]
+    fn protected_external_audit_roots_require_complete_validation() {
+        let reviewed = r#"implementation_root=/trusted
+repository_root=${LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT:-$implementation_root}
+if [[ $repository_root != /* && ! $repository_root =~ ^[[:alpha:]]:[/\\] ]] || [[ ! -d $repository_root || -L $repository_root ]]; then
+    exit 1
+fi
+repository_root=$(cd -- "$repository_root" && pwd -P)
+LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT=$repository_root
+readonly implementation_root repository_root LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT
+export LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT
+cd -- "$repository_root"
+cargo test --locked
+"#;
+        assert!(!untrusted_directory_change_with_rust_tool(reviewed, false));
+        assert!(untrusted_directory_change_with_rust_tool(
+            &reviewed.replace("[[ ! -d $repository_root || -L $repository_root ]]", "[[ ! -d $repository_root ]]"),
+            false
+        ));
+    }
 
     #[test]
     fn direct_source_discovery_bounds_nested_ansi_c_text() {

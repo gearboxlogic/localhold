@@ -26,10 +26,20 @@ fn configuration_is_opaque(arguments: &[String]) -> bool {
 }
 
 fn command_producing_subcommand(arguments: &[String]) -> bool {
-    git_subcommand(arguments).is_some_and(|subcommand| matches!(subcommand.to_ascii_lowercase().as_str(), "difftool" | "mergetool"))
+    let Some((index, subcommand)) = git_subcommand(arguments) else {
+        return false;
+    };
+    match subcommand.to_ascii_lowercase().as_str() {
+        "difftool" | "mergetool" => true,
+        "bisect" => arguments[index + 1..]
+            .iter()
+            .take_while(|argument| argument.as_str() != "--")
+            .any(|argument| argument.eq_ignore_ascii_case("run")),
+        _ => false,
+    }
 }
 
-fn git_subcommand(arguments: &[String]) -> Option<&str> {
+fn git_subcommand(arguments: &[String]) -> Option<(usize, &str)> {
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
         if argument == "--" {
@@ -46,7 +56,7 @@ fn git_subcommand(arguments: &[String]) -> Option<&str> {
             index += 1;
             continue;
         }
-        return Some(argument);
+        return Some((index, argument));
     }
     None
 }
@@ -95,7 +105,7 @@ mod tests {
     }
 
     #[test]
-    fn command_producing_diff_tools_fail_closed() {
+    fn command_producing_git_dispatch_fails_closed() {
         assert!(dispatch_is_opaque(&arguments(&[
             "difftool",
             "--no-prompt",
@@ -106,6 +116,9 @@ mod tests {
         ])));
         assert!(dispatch_is_opaque(&arguments(&["-C", "repository", "difftool", "--tool", "custom"])));
         assert!(dispatch_is_opaque(&arguments(&["mergetool", "--tool=custom"])));
+        assert!(dispatch_is_opaque(&arguments(&["bisect", "run", "sh", "quality/lint.txt"])));
+        assert!(dispatch_is_opaque(&arguments(&["bisect", "--no-checkout", "run", "sh", "quality/lint.txt"])));
+        assert!(!dispatch_is_opaque(&arguments(&["bisect", "start", "--", "run"])));
         assert!(!dispatch_is_opaque(&arguments(&["diff", "--", "difftool"])));
     }
 }

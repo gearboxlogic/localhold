@@ -181,7 +181,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "python" | "python.exe" | "python3" | "python3.exe" => python_input(arguments),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),
         _ if dynamic_program::is_unanalyzed_interpreter(&command) => SelectedInput::Opaque,
-        "awk" | "awk.exe" | "gawk" | "gawk.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe" => SelectedInput::Opaque,
+        "awk" | "awk.exe" | "gawk" | "gawk.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe" | "rsync" | "rsync.exe" => SelectedInput::Opaque,
         "find" | "find.exe" => {
             return (Vec::new(), find_command_action_is_opaque(arguments));
         }
@@ -422,7 +422,7 @@ fn is_make_environment_selection(token: &str) -> bool {
     token
         .split_once('=')
         .map(|(name, _)| name)
-        .is_some_and(|name| matches!(name, "GNUMAKEFLAGS" | "MAKEFILES" | "MAKEFLAGS" | "MFLAGS"))
+        .is_some_and(|name| matches!(name, ".SHELLFLAGS" | "GNUMAKEFLAGS" | "MAKEFILES" | "MAKEFLAGS" | "MFLAGS" | "SHELL"))
 }
 
 #[cfg(test)]
@@ -486,6 +486,9 @@ mod tests {
         assert_eq!(inputs("make -C quality -f lint.rules"), (vec!["lint.rules".to_owned()], true));
         assert_eq!(inputs("make MAKEFILES=quality/lint.rules"), (Vec::new(), true));
         assert_eq!(inputs("MAKEFILES=quality/lint.rules make"), (Vec::new(), true));
+        assert_eq!(inputs("make SHELL=/bin/true check"), (Vec::new(), true));
+        assert_eq!(inputs("make .SHELLFLAGS=-c check"), (Vec::new(), true));
+        assert_eq!(inputs("rsync -e 'sh quality/lint.txt' localhost:/missing ."), (Vec::new(), true));
         assert_eq!(inputs("command=$(cat quality/lint.txt); $command"), (Vec::new(), true));
         assert_eq!(inputs("history -s 'sh quality/lint.txt'; fc -s sh"), (Vec::new(), true));
         assert_eq!(inputs("$'\\x73\\x68' quality/lint.txt"), (Vec::new(), true));

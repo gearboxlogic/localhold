@@ -269,6 +269,9 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
             "git difftool --no-prompt --extcmd='sh quality/lint.txt' --no-index /etc/hosts /etc/passwd || true\n",
             "opaque interpreter program",
         ),
+        ("git bisect run sh quality/lint.txt\n", "opaque interpreter program"),
+        ("PATH=/tmp:$PATH just clippy\n", "lint-weakening environment channel"),
+        ("rsync -e 'sh quality/lint.txt' localhost:/missing . || true\n", "opaque interpreter program"),
         ("cmake -P quality/lint.txt\n", "opaque interpreter program"),
         ("rustup run 1.97.0 sh quality/lint.txt\n", "lint-weakening argument"),
         ("history -s 'sh quality/lint.txt'\nfc -s sh\n", "opaque interpreter program"),
@@ -623,6 +626,17 @@ fn make_command_producing_expansions_are_rejected() {
 
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("command-producing expansion"), "{error:#}");
+}
+
+#[test]
+fn make_recipe_shell_selection_is_rejected() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::write(workspace.path().join("Makefile"), "SHELL := /bin/true\nlint:\n\tcargo clippy -- -D warnings\n").expect("Makefile");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("recipe shell selection"), "{error:#}");
 }
 
 #[test]

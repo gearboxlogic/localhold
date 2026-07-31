@@ -13,6 +13,9 @@ pub(super) fn validate_surface(path: &Path, source: &str) -> Result<()> {
     if has_directive(source, &["load"]) || has_assignment_operator(source, "!=") || has_make_function(source, &["eval", "file", "guile", "shell"]) {
         bail!("checked-in Make command surface {display:?} uses an unsupported command-producing expansion");
     }
+    if changes_recipe_shell(source) {
+        bail!("checked-in Make command surface {display:?} uses unsupported recipe shell selection");
+    }
     if changes_recipe_prefix(source) || recipe_uses_expansion(source) {
         bail!("checked-in Make command surface {display:?} uses unsupported dynamic recipe expansion");
     }
@@ -85,6 +88,18 @@ fn changes_recipe_prefix(source: &str) -> bool {
         .any(|line| line.starts_with(".RECIPEPREFIX") && line[".RECIPEPREFIX".len()..].trim_start().starts_with([':', '?', '+', '=']))
 }
 
+fn changes_recipe_shell(source: &str) -> bool {
+    source.lines().filter_map(make_control_line).any(|line| {
+        let line = line.split_once('#').map_or(line, |(code, _)| code);
+        ["::=", ":=", "?=", "+=", "="].iter().any(|operator| {
+            line.split_once(operator)
+                .and_then(|(left, _)| left.split_ascii_whitespace().next_back())
+                .and_then(|name| name.rsplit(':').next())
+                .is_some_and(|name| matches!(name, ".SHELLFLAGS" | "SHELL"))
+        })
+    })
+}
+
 fn recipe_uses_expansion(source: &str) -> bool {
     source.lines().filter_map(recipe_on_line).any(|recipe| recipe.contains('$'))
 }
@@ -119,6 +134,10 @@ mod tests {
             "load quality/lint.so\n",
             "lint:\n\t$(LINT_COMMAND)\n",
             ".RECIPEPREFIX := >\n",
+            "SHELL := /bin/true\nlint:\n\tcargo clippy -- -D warnings\n",
+            ".SHELLFLAGS ?= -c\nlint:\n\tcargo clippy -- -D warnings\n",
+            "lint: private SHELL = /bin/true\n\tcargo clippy -- -D warnings\n",
+            "lint:SHELL=/bin/true\nlint:\n\tcargo clippy -- -D warnings\n",
             "lint:\n\t-just check-quality\n",
             "lint:\n\t-env -u RUSTFLAGS just check-quality\n",
             "lint: ; @-cargo clippy -- -D warnings\n",

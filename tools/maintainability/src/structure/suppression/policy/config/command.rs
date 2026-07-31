@@ -245,7 +245,7 @@ pub(super) fn weakening_environment_for_surface(path: &str, source: &str) -> boo
         || yaml::environment_variables(path, source)
             .iter()
             .any(|(name, _)| is_weakening_environment_assignment_name(name))
-        || rust_tool_referenced(source) && path_environment_assignment(path, source)
+        || quality_command_referenced(path, source) && path_environment_assignment(path, source)
 }
 
 fn case_insensitive_environment_assignment(source: &str) -> bool {
@@ -309,6 +309,10 @@ fn rust_tool_referenced(source: &str) -> bool {
     })
 }
 
+fn quality_command_referenced(path: &str, source: &str) -> bool {
+    rust_tool_referenced(source) || arguments::contains_quality_command(source, arguments::has_case_insensitive_tool_names(path))
+}
+
 fn normalized_environment_name(name: &str) -> &str {
     let name = name.trim_matches(|character: char| matches!(character, '$' | '{' | '}' | '(' | ')' | ':' | '"' | '\''));
     match name.split_once(':') {
@@ -345,10 +349,10 @@ pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str
         _ => return false,
     };
     let lines = source.lines().collect::<Vec<_>>();
-    let rust_tools_are_referenced = rust_tool_referenced(source);
+    let quality_commands_are_referenced = quality_command_referenced(path, source);
     let yaml_environment_lines = yaml::environment_variables(path, source)
         .into_iter()
-        .filter(|(name, _)| is_weakening_environment_assignment_name(name) || rust_tools_are_referenced && is_path_environment_name(name))
+        .filter(|(name, _)| is_weakening_environment_assignment_name(name) || quality_commands_are_referenced && is_path_environment_name(name))
         .map(|(_, line)| line)
         .collect::<Vec<_>>();
     allowed.iter().all(|expected| {
@@ -356,7 +360,9 @@ pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str
         lines.iter().filter(|line| *line == expected).count() == expected_count
     }) && lines
         .iter()
-        .filter(|line| weakening_environment_for_surface("", line) || rust_tools_are_referenced && path_environment_assignment("", line) || yaml_environment_lines.contains(line))
+        .filter(|line| {
+            weakening_environment_for_surface("", line) || quality_commands_are_referenced && path_environment_assignment("", line) || yaml_environment_lines.contains(line)
+        })
         .all(|line| allowed.contains(line))
 }
 

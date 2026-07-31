@@ -1,0 +1,88 @@
+use std::path::{Component, Path};
+
+pub(super) enum ProgramPath<'a> {
+    NotPath,
+    Literal(&'a str),
+    Opaque,
+}
+
+pub(super) fn select_program(command: &str, direct_program_paths: bool) -> ProgramPath<'_> {
+    if !direct_program_paths {
+        return ProgramPath::NotPath;
+    }
+    if trusted_system_program(command) {
+        return ProgramPath::NotPath;
+    }
+    if Path::new(command).is_absolute() || windows_absolute(command) {
+        return ProgramPath::Opaque;
+    }
+    let explicit_relative = ["./", "../", r".\", r"..\"].iter().any(|prefix| command.starts_with(prefix));
+    if explicit_relative {
+        return if contains_dynamic_value(command) {
+            ProgramPath::Opaque
+        } else {
+            ProgramPath::Literal(command)
+        };
+    }
+    if contains_dynamic_value(command) || !command.contains(['/', '\\']) {
+        return ProgramPath::NotPath;
+    }
+    ProgramPath::Literal(command)
+}
+
+pub(super) fn normalize_literal(candidate: &str) -> Option<String> {
+    if contains_dynamic_value(candidate) || candidate.contains(['\\', ':']) {
+        return None;
+    }
+    let path = Path::new(candidate);
+    if path.is_absolute() {
+        return None;
+    }
+    let mut normalized = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(value) => normalized.push(value.to_str()?.to_owned()),
+            _ => return None,
+        }
+    }
+    (!normalized.is_empty()).then(|| normalized.join("/"))
+}
+
+pub(super) fn contains_dynamic_value(value: &str) -> bool {
+    value.contains(['$', '`', '%', '!', '*', '?', '[', '{', '~'])
+}
+
+fn trusted_system_program(command: &str) -> bool {
+    ["/bin/", "/usr/bin/", "/mingw64/bin/"].iter().any(|prefix| {
+        command
+            .strip_prefix(prefix)
+            .is_some_and(|name| !name.is_empty() && !name.contains('/') && !contains_dynamic_value(name))
+    })
+}
+
+fn windows_absolute(command: &str) -> bool {
+    let bytes = command.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProgramPath, select_program};
+
+    #[test]
+    fn runtime_absolute_programs_fail_closed() {
+        assert!(matches!(select_program("/tmp/lint", true), ProgramPath::Opaque));
+        assert!(matches!(select_program("/opt/local/bin/lint", true), ProgramPath::Opaque));
+        assert!(matches!(select_program(r"C:\Temp\lint.exe", true), ProgramPath::Opaque));
+        assert!(matches!(select_program("./$PROGRAM", true), ProgramPath::Opaque));
+    }
+
+    #[test]
+    fn static_system_and_repository_programs_are_distinguished() {
+        assert!(matches!(select_program("/usr/bin/uname", true), ProgramPath::NotPath));
+        assert!(matches!(select_program("/usr/bin/../tmp/lint", true), ProgramPath::Opaque));
+        assert!(matches!(select_program("quality/lint", true), ProgramPath::Literal("quality/lint")));
+        assert!(matches!(select_program("/tmp/lint", false), ProgramPath::NotPath));
+    }
+}

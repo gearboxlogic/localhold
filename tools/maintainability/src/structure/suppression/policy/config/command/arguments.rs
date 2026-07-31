@@ -25,6 +25,9 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
     if is_python(path) && python::has_opaque_process_arguments(source) {
         return true;
     }
+    if is_powershell(path) && powershell::has_constructed_rust_arguments(source) {
+        return true;
+    }
     let case_insensitive_tools = has_case_insensitive_tool_names(path);
     let reject_backticks = !is_powershell(path);
     if let Some(scripts) = package_json::script_commands(path, source) {

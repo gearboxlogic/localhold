@@ -4,18 +4,56 @@ pub(super) fn normalized_shell_tokens(source: &str) -> Vec<String> {
 
 pub(super) fn normalized_shell_commands(source: &str) -> Vec<Vec<String>> {
     let logical = source.replace("\\\r\n", "").replace("\\\n", "");
-    logical
-        .split(['\n', ';', '&', '|'])
+    shell_command_segments(&logical)
+        .into_iter()
         .map(|segment| command_tokens(command_without_comment(segment)))
         .collect()
 }
 
 pub(super) fn source_command_tokens(source: &str) -> Vec<Vec<String>> {
     let logical = source.replace("\\\r\n", "").replace("\\\n", "");
-    logical
-        .split(['\n', ';', '&', '|'])
+    shell_command_segments(&logical)
+        .into_iter()
         .map(|segment| shell_tokens(command_without_comment(segment), false))
         .collect()
+}
+
+fn shell_command_segments(source: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut comment = false;
+    let mut previous: Option<char> = None;
+    for (index, character) in source.char_indices() {
+        if comment {
+            if character == '\n' {
+                segments.push(&source[start..index]);
+                start = index + character.len_utf8();
+                comment = false;
+            }
+        } else if escaped {
+            escaped = false;
+        } else if character == '\\' && quote != Some('\'') {
+            escaped = true;
+        } else if matches!(character, '\'' | '"') {
+            quote = if quote == Some(character) {
+                None
+            } else if quote.is_none() {
+                Some(character)
+            } else {
+                quote
+            };
+        } else if quote.is_none() && character == '#' && previous.is_none_or(|value| value.is_whitespace() || matches!(value, ';' | '&' | '|')) {
+            comment = true;
+        } else if quote.is_none() && matches!(character, '\n' | ';' | '&' | '|') {
+            segments.push(&source[start..index]);
+            start = index + character.len_utf8();
+        }
+        previous = Some(character);
+    }
+    segments.push(&source[start..]);
+    segments
 }
 
 pub(super) fn without_noncommand_shell_data(source: &str) -> String {
@@ -279,7 +317,21 @@ fn shell_tokens(command: &str, split_equals: bool) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::without_noncommand_shell_data;
+    use super::{source_command_tokens, without_noncommand_shell_data};
+
+    #[test]
+    fn quoted_program_text_does_not_create_command_fragments() {
+        let commands = source_command_tokens("digest=$(printf '%s' value | sed 's/../\\\\x&/g')\n/tmp/lint");
+        assert!(!commands.iter().flatten().any(|token| token == "/g)"));
+        assert!(commands.iter().any(|tokens| tokens.first().is_some_and(|token| token == "/tmp/lint")));
+    }
+
+    #[test]
+    fn separators_in_comments_are_not_commands() {
+        let commands = source_command_tokens("printf ok # /tmp/ignored & /tmp/also-ignored\nprintf done");
+        assert_eq!(commands.len(), 2);
+        assert!(!commands.iter().flatten().any(|token| token.starts_with("/tmp/")));
+    }
 
     #[test]
     fn heredoc_payloads_are_not_parsed_as_shell_commands() {

@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::{Component, Path};
+use std::path::Path;
 
 use super::{
     dynamic_program, has_case_insensitive_tool_names, is_cargo_tool_token, is_environment_assignment, is_normalized_manifest_path, is_yaml, matches_tool_name,
@@ -7,6 +7,7 @@ use super::{
 };
 
 mod git;
+mod path;
 mod wrapper;
 
 pub(in crate::structure::suppression::policy::config::command) fn cargo_manifest_paths_for_surface(path: &str, source: &str) -> (BTreeSet<String>, bool) {
@@ -81,7 +82,7 @@ fn collect_cargo_manifest_paths_from_source(source: &str, case_insensitive_tools
 }
 
 fn record_manifest_path(manifest: &str, paths: &mut BTreeSet<String>, unresolved: &mut bool) {
-    if is_normalized_manifest_path(manifest) && !contains_dynamic_value(manifest) {
+    if is_normalized_manifest_path(manifest) && !path::contains_dynamic_value(manifest) {
         paths.insert(manifest.to_owned());
     } else {
         *unresolved = true;
@@ -126,7 +127,7 @@ fn record_execution_inputs_from_tokens(tokens: &[String], direct_program_paths: 
 
 fn record_execution_inputs(candidates: Vec<&str>, inputs: &mut BTreeSet<String>, unresolved: &mut bool) {
     for candidate in candidates {
-        if let Some(input) = normalized_literal_input(candidate) {
+        if let Some(input) = path::normalize_literal(candidate) {
             inputs.insert(input);
         } else {
             *unresolved = true;
@@ -180,8 +181,11 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "git" | "git.exe" => {
             return (Vec::new(), git::alias_configuration_is_opaque(arguments));
         }
-        _ if direct_program_paths && is_relative_program_path(command_token) => SelectedInput::Literal(command_token),
-        _ => return (Vec::new(), false),
+        _ => match path::select_program(command_token, direct_program_paths) {
+            path::ProgramPath::NotPath => return (Vec::new(), false),
+            path::ProgramPath::Literal(candidate) => SelectedInput::Literal(candidate),
+            path::ProgramPath::Opaque => SelectedInput::Opaque,
+        },
     };
     match selected {
         SelectedInput::None => (Vec::new(), false),
@@ -197,13 +201,6 @@ fn is_execution_input_prefix(word: &str) -> bool {
 fn nested_command_token(token: &str) -> &str {
     let token = token.rsplit_once("$(").map_or(token, |(_, command)| command);
     token.rsplit_once('`').map_or(token, |(_, command)| command)
-}
-
-fn is_relative_program_path(command: &str) -> bool {
-    if ["./", "../", r".\", r"..\"].iter().any(|prefix| command.starts_with(prefix)) {
-        return true;
-    }
-    !command.starts_with('/') && !contains_dynamic_value(command) && command.contains(['/', '\\'])
 }
 
 fn supports_direct_program_paths(path: &str) -> bool {
@@ -475,29 +472,6 @@ fn is_make_environment_selection(token: &str) -> bool {
         .is_some_and(|name| matches!(name, "GNUMAKEFLAGS" | "MAKEFILES" | "MAKEFLAGS" | "MFLAGS"))
 }
 
-fn normalized_literal_input(candidate: &str) -> Option<String> {
-    if contains_dynamic_value(candidate) || candidate.contains(['\\', ':']) {
-        return None;
-    }
-    let path = Path::new(candidate);
-    if path.is_absolute() {
-        return None;
-    }
-    let mut normalized = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::Normal(value) => normalized.push(value.to_str()?.to_owned()),
-            _ => return None,
-        }
-    }
-    (!normalized.is_empty()).then(|| normalized.join("/"))
-}
-
-fn contains_dynamic_value(value: &str) -> bool {
-    value.contains(['$', '`', '%', '!', '*', '?', '[', '{', '~'])
-}
-
 #[cfg(test)]
 mod tests {
     use super::collect_execution_inputs;
@@ -518,6 +492,8 @@ mod tests {
         assert_eq!(inputs("./quality/run-lints"), (vec!["quality/run-lints".to_owned()], false));
         assert_eq!(inputs("quality/run-lints"), (vec!["quality/run-lints".to_owned()], false));
         assert_eq!(inputs("./$PROGRAM"), (Vec::new(), true));
+        assert_eq!(inputs("/tmp/lint"), (Vec::new(), true));
+        assert_eq!(inputs("/usr/bin/uname -s"), (Vec::new(), false));
         assert_eq!(inputs("../quality/run-lints"), (Vec::new(), true));
         assert_eq!(inputs(r"'.\quality\run-lints.cmd'"), (Vec::new(), true));
         assert_eq!(inputs("status=$(./quality/run-lints)"), (vec!["quality/run-lints".to_owned()], false));

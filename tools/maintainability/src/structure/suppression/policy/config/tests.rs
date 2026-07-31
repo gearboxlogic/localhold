@@ -216,6 +216,7 @@ fn shell_continuations_cannot_split_lint_arguments_from_cargo() {
         "script/check.ps1",
         "$lintArgs = @('-' + 'A', 'warnings')\ncargo clippy -- @lintArgs\n"
     ));
+    assert!(weakening_token_for_surface("script/check.ps1", "cargo clippy -- ('-' + 'A') warnings"));
 }
 
 #[test]

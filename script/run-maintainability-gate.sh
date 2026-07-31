@@ -276,7 +276,11 @@ cleanup_target_directory() {
     "$rm_command" -rf -- "$target_directory"
 }
 trap cleanup_target_directory EXIT
-native_target_directory=$target_directory
+relative_target_directory=${target_directory#"$repository_root/"}
+if [[ $relative_target_directory == "$target_directory" || "$repository_root/$relative_target_directory" != "$target_directory" ]]; then
+    printf 'maintainability gate could not derive its repository-relative target directory\n' >&2
+    exit 1
+fi
 fresh_cargo_home="$target_directory/c"
 "$mkdir_command" -- "$fresh_cargo_home"
 if [[ ! -d $fresh_cargo_home || -L $fresh_cargo_home ]]; then
@@ -305,11 +309,10 @@ RUSTUP_TOOLCHAIN=1.97.0
 readonly RUSTUP_HOME RUSTUP_TOOLCHAIN
 native_cargo_home=$fresh_cargo_home
 if $windows_toolchain; then
-    native_target_directory=$("$cygpath_command" -w "$target_directory")
     native_cargo_home=$("$cygpath_command" -w "$fresh_cargo_home")
 fi
 CARGO_HOME=$native_cargo_home
-CARGO_TARGET_DIR=$native_target_directory
+CARGO_TARGET_DIR=$relative_target_directory
 readonly CARGO_HOME CARGO_TARGET_DIR
 export PATH CARGO RUSTC RUSTDOC RUSTFMT RUSTUP_HOME RUSTUP_TOOLCHAIN CARGO_HOME CARGO_TARGET_DIR LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY LOCALHOLD_MAINTAINABILITY_CARGO_FMT LOCALHOLD_MAINTAINABILITY_RUSTC LOCALHOLD_MAINTAINABILITY_RUSTUP
 
@@ -338,7 +341,7 @@ verify_test_environment() {
         fi
     done
     [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY && -n $LOCALHOLD_MAINTAINABILITY_CARGO_FMT && -n $LOCALHOLD_MAINTAINABILITY_RUSTC && -n $LOCALHOLD_MAINTAINABILITY_RUSTUP && -n $git_command ]]
-    if [[ ! -d $target_directory || -L $target_directory || ${target_directory%/*} != "$target_parent" || $CARGO_TARGET_DIR != "$native_target_directory" ]]; then
+    if [[ ! -d $target_directory || -L $target_directory || ${target_directory%/*} != "$target_parent" || $CARGO_TARGET_DIR != "$relative_target_directory" || "$repository_root/$CARGO_TARGET_DIR" != "$target_directory" ]]; then
         printf 'maintainability bootstrap did not provide a fresh isolated Cargo target directory\n' >&2
         exit 1
     fi

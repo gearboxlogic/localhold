@@ -352,6 +352,9 @@ fn shell_tokens(command: &str, split_equals: bool) -> Vec<String> {
                 token.push(character);
             }
         } else if matches!(character, '\'' | '"') {
+            if character == '\'' && token.ends_with('$') {
+                token.push(character);
+            }
             quote = Some(character);
         } else if character == '\\' {
             escaped = true;
@@ -374,7 +377,13 @@ fn shell_tokens(command: &str, split_equals: bool) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_executable_unquoted_heredoc, source_command_tokens, without_noncommand_shell_data};
+    use super::{command_tokens, has_executable_unquoted_heredoc, source_command_tokens, without_noncommand_shell_data};
+
+    #[test]
+    fn ansi_c_quoted_words_retain_an_execution_marker() {
+        assert_eq!(command_tokens("$'\\x73\\x68' quality/lint.txt"), vec!["$'\\x73\\x68", "quality/lint.txt"]);
+        assert_eq!(command_tokens("printf '%s' \"$'\\x73'\""), vec!["printf", "%s", "$'x73'"]);
+    }
 
     #[test]
     fn quoted_program_text_does_not_create_command_fragments() {

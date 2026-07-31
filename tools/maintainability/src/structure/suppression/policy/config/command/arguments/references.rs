@@ -159,6 +159,9 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
     if command_word.chars().any(char::is_whitespace) && (command_word.contains("$(") || command_word.contains('`')) {
         return (Vec::new(), false);
     }
+    if command_word.contains("$'") {
+        return (Vec::new(), true);
+    }
     let command_token = nested_command_token(command_word);
     let command = tool_basename(command_token).to_ascii_lowercase();
     let arguments = &tokens[command_index.saturating_add(1)..];
@@ -188,6 +191,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
             let (inputs, opaque) = program_file_inputs(arguments, &SED_PROGRAM_FILES);
             return (Vec::new(), opaque || !inputs.is_empty());
         }
+        "tar" | "tar.exe" if tar_checkpoint_action_is_opaque(arguments) => SelectedInput::Opaque,
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
             let (inputs, opaque) = makefile_inputs(arguments);
             return (inputs, opaque || make_environment_selection_is_opaque(&tokens[..command_index]));
@@ -210,6 +214,13 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
 
 fn bash_enable_loads_builtin(arguments: &[String]) -> bool {
     arguments.iter().any(|argument| argument == "-f" || argument.starts_with("-f") && argument.len() > 2)
+}
+
+fn tar_checkpoint_action_is_opaque(arguments: &[String]) -> bool {
+    arguments.iter().any(|argument| {
+        let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
+        option.len() >= "--checkpoint-a".len() && "--checkpoint-action".starts_with(option)
+    })
 }
 
 fn is_execution_input_prefix(word: &str) -> bool {
@@ -573,6 +584,14 @@ mod tests {
         assert_eq!(inputs("find /tmp -maxdepth 0 -print"), (Vec::new(), false));
         assert_eq!(inputs("xargs -a quality/args.txt sh"), (Vec::new(), true));
         assert_eq!(inputs("parallel sh :::: quality/args.txt"), (Vec::new(), true));
+        assert_eq!(
+            inputs("tar --checkpoint=1 --checkpoint-action=exec='sh quality/lint.txt' -cf archive.tar ."),
+            (Vec::new(), true)
+        );
+        assert_eq!(inputs("tar --checkpoint-a=exec='sh quality/lint.txt' -cf archive.tar ."), (Vec::new(), true));
+        assert_eq!(inputs("tar --checkpoint-action exec='sh quality/lint.txt' -cf archive.tar ."), (Vec::new(), true));
+        assert_eq!(inputs("tar --checkpoint=1 -cf archive.tar ."), (Vec::new(), false));
+        assert_eq!(inputs("tar -cf archive.tar ."), (Vec::new(), false));
         assert_eq!(inputs("sed -nf quality/lint.sed /etc/hosts"), (Vec::new(), true));
         assert_eq!(inputs("sed --file=quality/lint.sed /etc/hosts"), (Vec::new(), true));
         assert_eq!(inputs("sed -f $SCRIPT /etc/hosts"), (Vec::new(), true));
@@ -585,6 +604,8 @@ mod tests {
         assert_eq!(inputs("make MAKEFILES=quality/lint.rules"), (Vec::new(), true));
         assert_eq!(inputs("MAKEFILES=quality/lint.rules make"), (Vec::new(), true));
         assert_eq!(inputs("command=$(cat quality/lint.txt); $command"), (Vec::new(), true));
+        assert_eq!(inputs("$'\\x73\\x68' quality/lint.txt"), (Vec::new(), true));
+        assert_eq!(inputs("printf '%s' \"$'\\x73\\x68' quality/lint.txt\""), (Vec::new(), false));
     }
 
     #[test]

@@ -279,6 +279,11 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
         ("mapfile -C 'sh quality/lint.txt' -c 1 </etc/hosts\n", "opaque interpreter program"),
         ("readarray -tC 'sh quality/lint.txt' -c 1 </etc/hosts\n", "opaque interpreter program"),
         ("cat <<DOC\n$(sh quality/lint.txt)\nDOC\n", "opaque interpreter program"),
+        (
+            "tar --checkpoint=1 --checkpoint-action=exec='sh quality/lint.txt' -cf archive.tar .\n",
+            "opaque interpreter program",
+        ),
+        ("$'\\x73\\x68' quality/lint.txt\n", "opaque interpreter program"),
     ] {
         fs::write(workspace.path().join("script/check.sh"), command).expect("opaque shell dispatcher");
         let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
@@ -291,6 +296,25 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
     )
     .expect("inert shell examples");
     reject_checked_in_weakening(workspace.path()).expect("quoted shell examples are inert");
+}
+
+#[test]
+fn command_policy_rejects_dynamic_powershell_call_dispatch() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    fs::write(
+        workspace.path().join("script/check.ps1"),
+        "$tool = 'cargo'\n$subcommand = 'clippy'\n$flag = '-A'\n& $tool $subcommand -- $flag warnings\n",
+    )
+    .expect("dynamic PowerShell call");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+
+    fs::write(workspace.path().join("script/check.ps1"), "& cargo clippy -- -D warnings\n").expect("static PowerShell call");
+    reject_checked_in_weakening(workspace.path()).expect("static PowerShell call is analyzable");
 }
 
 #[test]

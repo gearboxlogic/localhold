@@ -61,10 +61,10 @@ pub(super) fn normalize_escapes(source: &str) -> String {
 
 pub(super) fn has_constructed_rust_arguments(source: &str) -> bool {
     let source = normalize_escapes(source);
-    has_opaque_process_api(&source) || source.split(['\n', ';', '|']).any(|command| has_rust_tool(command) && has_argument_expression(command))
+    has_opaque_dispatch(&source) || source.split(['\n', ';', '|']).any(|command| has_rust_tool(command) && has_argument_expression(command))
 }
 
-fn has_opaque_process_api(source: &str) -> bool {
+fn has_opaque_dispatch(source: &str) -> bool {
     let mut characters = source.chars().peekable();
     let mut state = State::Code;
     let mut line_prefix_is_whitespace = true;
@@ -86,6 +86,10 @@ fn has_opaque_process_api(source: &str) -> bool {
                 '\'' => state = State::SingleQuoted,
                 '"' => state = State::DoubleQuoted,
                 '@' => state = here_string_quote(&mut characters).map_or(State::Code, here_string_state),
+                '&' if characters.peek() == Some(&'&') => {
+                    characters.next();
+                }
+                '&' if dynamic_call_operator(characters.clone()) => return true,
                 _ => {}
             },
             State::SingleQuoted if character == '\'' => {
@@ -113,6 +117,67 @@ fn has_opaque_process_api(source: &str) -> bool {
 
 fn process_api_word(word: &str) -> bool {
     matches!(word, "start-process" | "saps")
+}
+
+fn dynamic_call_operator(characters: Peekable<Chars<'_>>) -> bool {
+    let command = call_operator_command(characters);
+    let command = super::tokens::command_without_comment(&command);
+    let tokens = super::tokens::command_tokens(command);
+    let Some(command) = tokens.first() else {
+        return false;
+    };
+    if dynamic_call_operand(command) {
+        return true;
+    }
+    let Some(tool_index) = tokens.iter().position(|token| super::is_rust_tool_token(token, true)) else {
+        return false;
+    };
+    tokens.iter().skip(tool_index + 1).any(|token| dynamic_call_operand(token))
+}
+
+fn call_operator_command(mut characters: Peekable<Chars<'_>>) -> String {
+    let mut command = String::new();
+    let mut quote = None;
+    while let Some(character) = characters.next() {
+        if quote == Some('\'') {
+            if single_quoted_value_ends(character, &mut characters, &mut command) {
+                quote = None;
+            }
+            continue;
+        }
+        if quote == Some('"') {
+            command.push(character);
+            if character == '"' {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quote = Some(character);
+            command.push(character);
+        } else if character == '#' || matches!(character, '\n' | ';' | '|' | '&') {
+            break;
+        } else {
+            command.push(character);
+        }
+    }
+    command
+}
+
+fn single_quoted_value_ends(character: char, characters: &mut Peekable<Chars<'_>>, command: &mut String) -> bool {
+    command.push(character);
+    if character != '\'' {
+        return false;
+    }
+    if characters.next_if_eq(&'\'').is_none() {
+        return true;
+    }
+    command.push('\'');
+    false
+}
+
+fn dynamic_call_operand(token: &str) -> bool {
+    token.contains('$') || token.starts_with('@') || token.contains(['(', '{', '['])
 }
 
 fn has_rust_tool(command: &str) -> bool {
@@ -229,5 +294,16 @@ mod tests {
         assert!(!has_constructed_rust_arguments("# Start-Process cargo"));
         assert!(!has_constructed_rust_arguments("@'\nStart-Process cargo\n'@"));
         assert!(!has_constructed_rust_arguments("$actual = (Get-FileHash -Algorithm SHA256 $path).Hash"));
+    }
+
+    #[test]
+    fn dynamic_call_operator_dispatch_fails_closed() {
+        assert!(has_constructed_rust_arguments("& $tool $subcommand -- $flag warnings"));
+        assert!(has_constructed_rust_arguments("& cargo $subcommand -- $flag warnings"));
+        assert!(has_constructed_rust_arguments("& (Get-Command cargo) clippy -- -D warnings"));
+        assert!(!has_constructed_rust_arguments("& cargo clippy -- -D warnings"));
+        assert!(!has_constructed_rust_arguments("Write-Output '& $tool $flag'"));
+        assert!(!has_constructed_rust_arguments("# & $tool $flag"));
+        assert!(!has_constructed_rust_arguments("@'\n& $tool $flag\n'@"));
     }
 }

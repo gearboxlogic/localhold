@@ -213,10 +213,14 @@ struct ExpressionToken {
 
 fn dynamic_path(path: &[String]) -> bool {
     match path {
-        [name] => matches!(name.as_str(), "builtins" | "compile" | "eval" | "exec" | "__builtins__"),
+        [name] => matches!(
+            name.as_str(),
+            "builtins" | "compile" | "eval" | "exec" | "import_module" | "importlib" | "__builtins__" | "__import__"
+        ),
         [module, name] if matches!(module.as_str(), "builtins" | "__builtins__") => {
             matches!(name.as_str(), "compile" | "eval" | "exec")
         }
+        [module, name] if module == "importlib" => name == "import_module",
         [module, name] if module == "marshal" => name == "loads",
         [module, name] if module == "types" => matches!(name.as_str(), "CodeType" | "FunctionType"),
         _ => false,
@@ -241,6 +245,9 @@ mod tests {
         assert!(has_dynamic_code("runner = eval\nrunner(source)"));
         assert!(has_dynamic_code("builtins.compile(source, name, 'exec')"));
         assert!(has_dynamic_code("getattr(builtins, name)(source)"));
+        assert!(has_dynamic_code("__import__('os').system(payload)"));
+        assert!(has_dynamic_code("importlib.import_module(name)"));
+        assert!(has_dynamic_code("from importlib import import_module as load"));
         assert!(has_dynamic_code("f'{exec(payload)}'"));
         assert!(has_dynamic_code("f'''{(\n# an inert } brace\nexec(payload)\n)}'''"));
         assert!(has_dynamic_code("types.FunctionType(marshal.loads(payload), globals())"));

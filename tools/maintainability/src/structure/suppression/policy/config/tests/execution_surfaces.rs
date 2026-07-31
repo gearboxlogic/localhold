@@ -263,6 +263,8 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
         ("! just check-quality\n", "lint-weakening argument"),
         ("if just check-quality; then echo accepted; fi\n", "lint-weakening argument"),
         ("hash -p /tmp/fake cargo\ncargo clippy -- -D warnings\n", "lint-weakening argument"),
+        ("just() { :; }\njust check-quality\n", "lint-weakening argument"),
+        ("gate() {\n    just check-quality\n    true\n}\ngate || true\n", "lint-weakening argument"),
         ("chroot --skip-chdir / sh quality/lint.txt\n", "opaque interpreter program"),
         ("git -c core.fsmonitor='sh quality/lint.txt' status\n", "opaque interpreter program"),
         (
@@ -273,6 +275,8 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
         ("PATH=/tmp:$PATH just clippy\n", "lint-weakening environment channel"),
         ("rsync -e 'sh quality/lint.txt' localhost:/missing . || true\n", "opaque interpreter program"),
         ("cmake -P quality/lint.txt\n", "opaque interpreter program"),
+        ("ctest -S quality/lint.txt || true\n", "opaque interpreter program"),
+        ("ninja -f quality/lint.txt\n", "opaque interpreter program"),
         ("rustup run 1.97.0 sh quality/lint.txt\n", "lint-weakening argument"),
         ("rustup run fake cargo clippy --locked -- -D warnings\n", "opaque interpreter program"),
         ("history -s 'sh quality/lint.txt'\nfc -s sh\n", "opaque interpreter program"),
@@ -358,6 +362,14 @@ fn command_policy_rejects_python_command_wrapper_dispatch() {
         "exec(bytes.fromhex(\"696d706f7274206f733b206f732e73797374656d2827636172676f20636c69707079202d2d202d41207761726e696e67732729\"))\n",
     )
     .expect("Python dynamic code evaluation");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+
+    fs::write(
+        workspace.path().join("script/check.py"),
+        "__import__(\"os\").system(bytes.fromhex(\"636172676f20636c69707079202d2d202d41207761726e696e6773\").decode())\n",
+    )
+    .expect("Python dynamic import");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
 }

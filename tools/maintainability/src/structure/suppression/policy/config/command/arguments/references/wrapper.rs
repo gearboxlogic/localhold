@@ -224,9 +224,16 @@ fn is_unparsed_launcher(command: &str) -> bool {
     )
 }
 
+pub(in crate::structure::suppression::policy::config::command::arguments) fn is_command_launcher(command: &str) -> bool {
+    matches!(
+        command.trim_end_matches(".exe"),
+        "builtin" | "command" | "env" | "exec" | "nice" | "nohup" | "rustup" | "sudo" | "time" | "timeout"
+    ) || is_unparsed_launcher(command)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Selection, select};
+    use super::{Selection, is_command_launcher, select};
 
     #[test]
     fn unparsed_launchers_are_opaque() {
@@ -250,6 +257,10 @@ mod tests {
         assert!(matches!(select("/usr/sbin/start-stop-daemon", "start-stop-daemon", &arguments), Selection::Opaque));
         assert!(matches!(select("ssh", "ssh", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/ssh", "ssh", &arguments), Selection::Opaque));
+        assert!(is_command_launcher("env"));
+        assert!(is_command_launcher("env.exe"));
+        assert!(is_command_launcher("ssh"));
+        assert!(!is_command_launcher("git"));
     }
 
     #[test]

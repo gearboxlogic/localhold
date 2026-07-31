@@ -76,7 +76,7 @@ impl ProcessCallScanner {
         if kind == ProcessKind::Shell {
             return self.argument_ends_at(first_literal_end);
         }
-        if self.literal_is_command_interpreter(first_literal, first_literal_end) {
+        if self.literal_can_dispatch_command(first_literal, first_literal_end) {
             return false;
         }
         if !self.literal_references_rust_tool(first_literal, first_literal_end) {
@@ -121,7 +121,7 @@ impl ProcessCallScanner {
         ["cargo", "rustc", "rustdoc", "clippy-driver"].iter().any(|tool| literal.contains(tool))
     }
 
-    fn literal_is_command_interpreter(&self, start: usize, end: usize) -> bool {
+    fn literal_can_dispatch_command(&self, start: usize, end: usize) -> bool {
         let Some(value) = self.literal_value(start, end) else {
             return true;
         };
@@ -130,6 +130,7 @@ impl ProcessCallScanner {
         matches!(command, "bash" | "cmake" | "dash" | "fish" | "powershell" | "pwsh" | "sh" | "zsh")
             || versioned_interpreter(command, "python")
             || super::super::dynamic_program::is_unanalyzed_interpreter(command)
+            || super::super::references::wrapper::is_command_launcher(command)
     }
 
     fn literal_value(&self, start: usize, end: usize) -> Option<String> {
@@ -259,6 +260,10 @@ mod tests {
         assert!(has_non_literal_arguments(
             r#"subprocess.run(["sh", "-c", bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773").decode()])"#
         ));
+        assert!(has_non_literal_arguments(
+            r#"subprocess.run(["env", "sh", "-c", bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773").decode()])"#
+        ));
+        assert!(has_non_literal_arguments(r#"subprocess.run([r"C:\Windows\System32\timeout.exe", command])"#));
         assert!(has_non_literal_arguments(r#"subprocess.run(["sh", "quality/lint.txt"])"#));
         assert!(has_non_literal_arguments(r#"subprocess.run([r"C:\Tools\pwsh.exe", "-File", "quality/lint.ps1"])"#));
         assert!(has_non_literal_arguments(r#"subprocess.run(["python3.13", "quality/lint.py"])"#));

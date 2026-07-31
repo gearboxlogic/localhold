@@ -331,14 +331,14 @@ fn command_policy_rejects_dynamic_powershell_call_dispatch() {
 }
 
 #[test]
-fn command_policy_rejects_python_shell_argv_dispatch() {
+fn command_policy_rejects_python_command_wrapper_dispatch() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join("script")).expect("script directory");
     fs::write(
         workspace.path().join("script/check.py"),
-        "import subprocess\nsubprocess.run([\"sh\", \"-c\", bytes.fromhex(\"636172676f20636c69707079202d2d202d41207761726e696e6773\").decode()])\n",
+        "import subprocess\nsubprocess.run([\"env\", \"sh\", \"-c\", bytes.fromhex(\"636172676f20636c69707079202d2d202d41207761726e696e6773\").decode()])\n",
     )
-    .expect("Python shell argv call");
+    .expect("Python command-wrapper argv call");
     git(workspace.path(), &["init", "-q"]);
     git(workspace.path(), &["add", "."]);
 

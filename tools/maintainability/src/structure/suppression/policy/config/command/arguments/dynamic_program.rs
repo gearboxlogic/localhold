@@ -12,7 +12,7 @@ pub(super) fn is_unanalyzed_path(path: &str) -> bool {
 pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
     matches!(
         command,
-        "bun" | "bun.exe" | "deno" | "deno.exe" | "lua" | "lua.exe" | "node" | "node.exe" | "perl" | "perl.exe" | "php" | "php.exe" | "ruby" | "ruby.exe"
+        "bun" | "bun.exe" | "cmake" | "cmake.exe" | "deno" | "deno.exe" | "lua" | "lua.exe" | "node" | "node.exe" | "perl" | "perl.exe" | "php" | "php.exe" | "ruby" | "ruby.exe"
     ) || is_tcl_interpreter(command)
 }
 
@@ -45,5 +45,11 @@ mod tests {
         }
         assert!(!is_unanalyzed_interpreter("wishful"));
         assert!(!is_unanalyzed_interpreter("tclsh-preview"));
+    }
+
+    #[test]
+    fn cmake_language_execution_fails_closed() {
+        assert!(is_unanalyzed_interpreter("cmake"));
+        assert!(is_unanalyzed_interpreter("cmake.exe"));
     }
 }

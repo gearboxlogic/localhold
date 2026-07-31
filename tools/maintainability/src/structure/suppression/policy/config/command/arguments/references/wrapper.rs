@@ -15,6 +15,7 @@ pub(in crate::structure::suppression::policy::config::command::arguments) fn sel
         "exec" | "exec.exe" => exec_builtin(arguments),
         "nice" | "nice.exe" => nice_command(arguments),
         "nohup" | "nohup.exe" => nohup_command(arguments),
+        "rustup" | "rustup.exe" => rustup_command(arguments),
         "timeout" | "timeout.exe" => timeout_command(arguments),
         "builtin" | "builtin.exe" | "sudo" | "sudo.exe" | "time" | "time.exe" => Selection::Opaque,
         _ if is_unparsed_launcher(command) => Selection::Opaque,
@@ -147,6 +148,27 @@ fn timeout_command(arguments: &[String]) -> Selection<'_> {
     nested_after(arguments, index + 1)
 }
 
+fn rustup_command(arguments: &[String]) -> Selection<'_> {
+    if arguments.first().is_none_or(|argument| !argument.eq_ignore_ascii_case("run")) {
+        return Selection::NotWrapper;
+    }
+    let mut index = 1;
+    while matches!(arguments.get(index).map(String::as_str), Some("--install")) {
+        index += 1;
+    }
+    if matches!(arguments.get(index).map(String::as_str), None | Some("-h" | "--help")) {
+        return Selection::NoCommand;
+    }
+    if arguments.get(index).is_some_and(|argument| argument.starts_with('-')) {
+        return Selection::Opaque;
+    }
+    index += 1;
+    if arguments.get(index).is_some_and(|argument| argument == "--") {
+        index += 1;
+    }
+    nested_after(arguments, index)
+}
+
 fn nested_after(arguments: &[String], index: usize) -> Selection<'_> {
     arguments.get(index).map_or(Selection::NoCommand, |_| Selection::Nested(&arguments[index..]))
 }
@@ -223,5 +245,22 @@ mod tests {
         assert!(matches!(select("/usr/sbin/runuser", "runuser", &arguments), Selection::Opaque));
         assert!(matches!(select("start-stop-daemon", "start-stop-daemon", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/sbin/start-stop-daemon", "start-stop-daemon", &arguments), Selection::Opaque));
+    }
+
+    #[test]
+    fn rustup_run_selects_the_nested_command() {
+        let arguments = vec![
+            "run".to_owned(),
+            "--install".to_owned(),
+            "1.97.0".to_owned(),
+            "sh".to_owned(),
+            "quality/lint.txt".to_owned(),
+        ];
+        let Selection::Nested(command) = select("rustup", "rustup", &arguments) else {
+            panic!("rustup run should select its nested command");
+        };
+        assert_eq!(command, ["sh", "quality/lint.txt"]);
+        assert!(matches!(select("rustup", "rustup", &["show".to_owned()]), Selection::NotWrapper));
+        assert!(matches!(select("rustup", "rustup", &["run".to_owned(), "--help".to_owned()]), Selection::NoCommand));
     }
 }

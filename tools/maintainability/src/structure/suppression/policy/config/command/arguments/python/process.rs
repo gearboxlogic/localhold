@@ -76,6 +76,9 @@ impl ProcessCallScanner {
         if kind == ProcessKind::Shell {
             return self.argument_ends_at(first_literal_end);
         }
+        if self.literal_is_command_interpreter(first_literal, first_literal_end) {
+            return false;
+        }
         if !self.literal_references_rust_tool(first_literal, first_literal_end) {
             return self.first_argv_element_ends_at(first_literal_end, *character);
         }
@@ -116,6 +119,29 @@ impl ProcessCallScanner {
     fn literal_references_rust_tool(&self, start: usize, end: usize) -> bool {
         let literal = self.characters[start..end].iter().collect::<String>().to_ascii_lowercase();
         ["cargo", "rustc", "rustdoc", "clippy-driver"].iter().any(|tool| literal.contains(tool))
+    }
+
+    fn literal_is_command_interpreter(&self, start: usize, end: usize) -> bool {
+        let Some(value) = self.literal_value(start, end) else {
+            return true;
+        };
+        let command = value.rsplit(['/', '\\']).next().unwrap_or(&value).to_ascii_lowercase();
+        let command = command.strip_suffix(".exe").unwrap_or(&command);
+        matches!(command, "bash" | "cmake" | "dash" | "fish" | "powershell" | "pwsh" | "sh" | "zsh")
+            || versioned_interpreter(command, "python")
+            || super::super::dynamic_program::is_unanalyzed_interpreter(command)
+    }
+
+    fn literal_value(&self, start: usize, end: usize) -> Option<String> {
+        let quote = (start..end).take(4).find(|index| matches!(self.characters.get(*index), Some('\'' | '"')))?;
+        let delimiter = self.characters[quote];
+        let width = if self.characters.get(quote + 1) == Some(&delimiter) && self.characters.get(quote + 2) == Some(&delimiter) {
+            3
+        } else {
+            1
+        };
+        let value_end = end.checked_sub(width)?;
+        (quote + width <= value_end).then(|| self.characters[quote + width..value_end].iter().collect())
     }
 
     fn static_string_sequence_end(&self, start: usize, closing: char) -> Option<usize> {
@@ -203,12 +229,19 @@ fn is_identifier_character(character: char) -> bool {
     character == '_' || character.is_alphanumeric()
 }
 
+fn versioned_interpreter(command: &str, name: &str) -> bool {
+    command == name
+        || command
+            .strip_prefix(name)
+            .is_some_and(|version| !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::has_non_literal_arguments;
 
     #[test]
-    fn process_executables_and_shell_commands_must_be_static() {
+    fn process_executables_and_command_interpreters_fail_closed() {
         assert!(!has_non_literal_arguments(
             r#"subprocess.run(["cargo", "metadata", "--locked"], cwd=repository, check=True)"#
         ));
@@ -223,6 +256,12 @@ mod tests {
         assert!(has_non_literal_arguments(r#"subprocess.run([f"{tool}", "clippy"])"#));
         assert!(has_non_literal_arguments(r#"subprocess.run(["car" + "go", "clippy"])"#));
         assert!(has_non_literal_arguments(r#"subprocess.run([sys.executable.replace("python", "cargo"), "clippy"])"#));
+        assert!(has_non_literal_arguments(
+            r#"subprocess.run(["sh", "-c", bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773").decode()])"#
+        ));
+        assert!(has_non_literal_arguments(r#"subprocess.run(["sh", "quality/lint.txt"])"#));
+        assert!(has_non_literal_arguments(r#"subprocess.run([r"C:\Tools\pwsh.exe", "-File", "quality/lint.ps1"])"#));
+        assert!(has_non_literal_arguments(r#"subprocess.run(["python3.13", "quality/lint.py"])"#));
         assert!(has_non_literal_arguments("subprocess.run(arguments)"));
         assert!(has_non_literal_arguments("from subprocess import run\nrun(arguments)"));
         assert!(has_non_literal_arguments(r#"os.system(bytes.fromhex("636172676f"))"#));

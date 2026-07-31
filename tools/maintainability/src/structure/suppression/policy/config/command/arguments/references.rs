@@ -197,7 +197,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
             return (inputs, opaque || make_environment_selection_is_opaque(&tokens[..command_index]));
         }
         "git" | "git.exe" => {
-            return (Vec::new(), git::configuration_is_opaque(arguments));
+            return (Vec::new(), git::dispatch_is_opaque(arguments));
         }
         _ => match path::select_program(command_token, direct_program_paths) {
             path::ProgramPath::NotPath => return (Vec::new(), false),

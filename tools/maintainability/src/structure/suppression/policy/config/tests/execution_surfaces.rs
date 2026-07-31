@@ -265,6 +265,12 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
         ("hash -p /tmp/fake cargo\ncargo clippy -- -D warnings\n", "lint-weakening argument"),
         ("chroot --skip-chdir / sh quality/lint.txt\n", "opaque interpreter program"),
         ("git -c core.fsmonitor='sh quality/lint.txt' status\n", "opaque interpreter program"),
+        (
+            "git difftool --no-prompt --extcmd='sh quality/lint.txt' --no-index /etc/hosts /etc/passwd || true\n",
+            "opaque interpreter program",
+        ),
+        ("cmake -P quality/lint.txt\n", "opaque interpreter program"),
+        ("rustup run 1.97.0 sh quality/lint.txt\n", "lint-weakening argument"),
         ("setarch --uname-2.6 sh quality/lint.txt\n", "opaque interpreter program"),
         ("sg \"$(id -gn)\" -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
         ("su \"$(id -un)\" -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
@@ -315,6 +321,22 @@ fn command_policy_rejects_dynamic_powershell_call_dispatch() {
 
     fs::write(workspace.path().join("script/check.ps1"), "& cargo clippy -- -D warnings\n").expect("static PowerShell call");
     reject_checked_in_weakening(workspace.path()).expect("static PowerShell call is analyzable");
+}
+
+#[test]
+fn command_policy_rejects_python_shell_argv_dispatch() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    fs::write(
+        workspace.path().join("script/check.py"),
+        "import subprocess\nsubprocess.run([\"sh\", \"-c\", bytes.fromhex(\"636172676f20636c69707079202d2d202d41207761726e696e6773\").decode()])\n",
+    )
+    .expect("Python shell argv call");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
 }
 
 #[test]

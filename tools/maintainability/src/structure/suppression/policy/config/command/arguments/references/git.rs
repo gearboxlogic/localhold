@@ -1,4 +1,8 @@
-pub(super) fn configuration_is_opaque(arguments: &[String]) -> bool {
+pub(super) fn dispatch_is_opaque(arguments: &[String]) -> bool {
+    command_producing_subcommand(arguments) || configuration_is_opaque(arguments)
+}
+
+fn configuration_is_opaque(arguments: &[String]) -> bool {
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
         if argument == "--config-env" || argument.starts_with("--config-env=") {
@@ -19,6 +23,32 @@ pub(super) fn configuration_is_opaque(arguments: &[String]) -> bool {
         index += 1;
     }
     false
+}
+
+fn command_producing_subcommand(arguments: &[String]) -> bool {
+    git_subcommand(arguments).is_some_and(|subcommand| matches!(subcommand.to_ascii_lowercase().as_str(), "difftool" | "mergetool"))
+}
+
+fn git_subcommand(arguments: &[String]) -> Option<&str> {
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        if argument == "--" {
+            return None;
+        }
+        if matches!(
+            argument.as_str(),
+            "-C" | "-c" | "--config-env" | "--exec-path" | "--git-dir" | "--namespace" | "--super-prefix" | "--work-tree"
+        ) {
+            index += 2;
+            continue;
+        }
+        if argument.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return Some(argument);
+    }
+    None
 }
 
 fn is_safe_configuration(configuration: &str) -> bool {
@@ -42,7 +72,7 @@ fn is_boolean(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::configuration_is_opaque;
+    use super::dispatch_is_opaque;
 
     fn arguments(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -50,17 +80,32 @@ mod tests {
 
     #[test]
     fn only_reviewed_non_executing_configuration_is_allowed() {
-        assert!(configuration_is_opaque(&arguments(&["-c", "alias.lint=!sh quality/lint.txt", "lint"])));
-        assert!(configuration_is_opaque(&arguments(&["-cALIAS.lint=!sh quality/lint.txt", "lint"])));
-        assert!(configuration_is_opaque(&arguments(&["-c", "core.fsmonitor=sh quality/lint.txt", "status"])));
-        assert!(configuration_is_opaque(&arguments(&["-c", "core.hooksPath=quality/hooks", "commit"])));
-        assert!(configuration_is_opaque(&arguments(&["--config-env=core.fsmonitor=FSMONITOR", "status"])));
-        assert!(configuration_is_opaque(&arguments(&["--config-env", "alias.lint=LINT_ALIAS", "lint"])));
-        assert!(configuration_is_opaque(&arguments(&["-c", "safe.directory=.", "status"])));
-        assert!(configuration_is_opaque(&arguments(&["-c"])));
-        assert!(!configuration_is_opaque(&arguments(&["-c", "core.autocrlf=false", "status"])));
-        assert!(!configuration_is_opaque(&arguments(&["-ccore.fsmonitor=false", "status"])));
-        assert!(!configuration_is_opaque(&arguments(&["-c", "core.hooksPath=/dev/null", "status"])));
-        assert!(!configuration_is_opaque(&arguments(&["-c", "user.name=LocalHold", "status"])));
+        assert!(dispatch_is_opaque(&arguments(&["-c", "alias.lint=!sh quality/lint.txt", "lint"])));
+        assert!(dispatch_is_opaque(&arguments(&["-cALIAS.lint=!sh quality/lint.txt", "lint"])));
+        assert!(dispatch_is_opaque(&arguments(&["-c", "core.fsmonitor=sh quality/lint.txt", "status"])));
+        assert!(dispatch_is_opaque(&arguments(&["-c", "core.hooksPath=quality/hooks", "commit"])));
+        assert!(dispatch_is_opaque(&arguments(&["--config-env=core.fsmonitor=FSMONITOR", "status"])));
+        assert!(dispatch_is_opaque(&arguments(&["--config-env", "alias.lint=LINT_ALIAS", "lint"])));
+        assert!(dispatch_is_opaque(&arguments(&["-c", "safe.directory=.", "status"])));
+        assert!(dispatch_is_opaque(&arguments(&["-c"])));
+        assert!(!dispatch_is_opaque(&arguments(&["-c", "core.autocrlf=false", "status"])));
+        assert!(!dispatch_is_opaque(&arguments(&["-ccore.fsmonitor=false", "status"])));
+        assert!(!dispatch_is_opaque(&arguments(&["-c", "core.hooksPath=/dev/null", "status"])));
+        assert!(!dispatch_is_opaque(&arguments(&["-c", "user.name=LocalHold", "status"])));
+    }
+
+    #[test]
+    fn command_producing_diff_tools_fail_closed() {
+        assert!(dispatch_is_opaque(&arguments(&[
+            "difftool",
+            "--no-prompt",
+            "--extcmd=sh quality/lint.txt",
+            "--no-index",
+            "/etc/hosts",
+            "/etc/passwd",
+        ])));
+        assert!(dispatch_is_opaque(&arguments(&["-C", "repository", "difftool", "--tool", "custom"])));
+        assert!(dispatch_is_opaque(&arguments(&["mergetool", "--tool=custom"])));
+        assert!(!dispatch_is_opaque(&arguments(&["diff", "--", "difftool"])));
     }
 }

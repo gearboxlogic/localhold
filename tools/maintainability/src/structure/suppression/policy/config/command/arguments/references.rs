@@ -491,9 +491,10 @@ fn makefile_inputs(arguments: &[String]) -> (Vec<&str>, bool) {
 }
 
 fn make_argument_is_opaque(argument: &str) -> bool {
-    matches!(argument, "-C" | "--directory" | "--eval")
+    matches!(argument, "-C" | "-E" | "--directory" | "--eval")
         || argument.starts_with("--directory=")
         || argument.starts_with("-C") && argument.len() > 2
+        || argument.starts_with("-E") && argument.len() > 2
         || argument.starts_with("--eval=")
         || is_make_environment_selection(argument)
 }
@@ -590,6 +591,8 @@ mod tests {
         );
         assert_eq!(inputs("make -f $MAKEFILE"), (Vec::new(), true));
         assert_eq!(inputs("make -C quality -f lint.rules"), (vec!["lint.rules".to_owned()], true));
+        assert_eq!(inputs("make -E 'all:; sh quality/lint.txt' all"), (Vec::new(), true));
+        assert_eq!(inputs("make -E'all:; sh quality/lint.txt' all"), (Vec::new(), true));
         assert_eq!(inputs("make MAKEFILES=quality/lint.rules"), (Vec::new(), true));
         assert_eq!(inputs("MAKEFILES=quality/lint.rules make"), (Vec::new(), true));
         assert_eq!(inputs("make SHELL=/bin/true check"), (Vec::new(), true));

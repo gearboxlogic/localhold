@@ -1,11 +1,33 @@
 pub(super) fn dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
     is_compiler_driver(command) && arguments.iter().any(|argument| is_dispatch_override(argument))
+        || is_rust_compiler(command) && rust_compiler_dispatch_is_opaque(arguments)
         || is_linker_tool(command) && arguments.iter().any(|argument| linker_dispatch_override(argument))
         || is_archive_tool(command)
             && arguments
                 .iter()
                 .take_while(|argument| argument.as_str() != "--")
                 .any(|argument| archive_plugin_option(argument))
+}
+
+pub(super) fn rust_compiler_dispatch_is_opaque(arguments: &[String]) -> bool {
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        let option = if matches!(argument.as_str(), "-C" | "--codegen") {
+            index += 1;
+            arguments.get(index).map(String::as_str)
+        } else {
+            argument.strip_prefix("-C").or_else(|| argument.strip_prefix("--codegen="))
+        };
+        if option.is_some_and(|option| option.trim_start_matches('=').starts_with("linker=")) {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn is_rust_compiler(command: &str) -> bool {
+    matches!(command.strip_suffix(".exe").unwrap_or(command), "rustc" | "rustdoc")
 }
 
 fn is_archive_tool(command: &str) -> bool {
@@ -172,5 +194,13 @@ mod tests {
             assert!(dispatch_is_opaque("gcc", &arguments(values)), "{values:?}");
         }
         assert!(!dispatch_is_opaque("gcc", &arguments(&["-Wall", "-c", "quality/input.c"])));
+    }
+
+    #[test]
+    fn rust_linker_selection_is_opaque() {
+        for values in [&["-C", "linker=quality/lint"][..], &["-Clinker=quality/lint"], &["--codegen=linker=quality/lint"]] {
+            assert!(dispatch_is_opaque("rustc", &arguments(values)), "{values:?}");
+        }
+        assert!(!dispatch_is_opaque("rustc", &arguments(&["-C", "opt-level=2"])));
     }
 }

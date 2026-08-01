@@ -22,6 +22,9 @@ pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
     if imports_command_capable_api(&normalized) {
         return true;
     }
+    if has_direct_dynamic_process_resolution(&normalized) {
+        return true;
+    }
     if has_dynamic_process_resolution(&normalized) && references_rust_tool(&normalized) {
         return true;
     }
@@ -128,6 +131,18 @@ fn has_dynamic_process_resolution(source: &str) -> bool {
     ]
     .iter()
     .any(|name| compact.contains(name))
+}
+
+fn has_direct_dynamic_process_resolution(source: &str) -> bool {
+    let compact = AdjacentLiteralScanner::new(source)
+        .without_literals()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    ["os", "posix", "subprocess"]
+        .iter()
+        .any(|module| compact.contains(&format!("{module}.__dict__")) || compact.contains(&format!("getattr({module},")) || compact.contains(&format!("vars({module})")))
 }
 
 fn references_rust_tool(source: &str) -> bool {
@@ -444,5 +459,13 @@ run(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
         assert!(!has_opaque_process_arguments(
             "\"\"\"getattr(importlib, 'run') and cargo are documentation only\"\"\"\nprint('safe')\n"
         ));
+    }
+
+    #[test]
+    fn dynamic_process_module_lookup_fails_closed_without_matching_unrelated_reflection() {
+        assert!(has_opaque_process_arguments("import os\nos.__dict__[\"sy\" + \"stem\"](bytes.fromhex(payload).decode())\n"));
+        assert!(has_opaque_process_arguments("import os\ngetattr(os, name)(payload)\n"));
+        assert!(has_opaque_process_arguments("import subprocess\nvars(subprocess)[name](payload)\n"));
+        assert!(!has_opaque_process_arguments("import os\nclose = getattr(self.container, 'close')\nprint(os.name)\n"));
     }
 }

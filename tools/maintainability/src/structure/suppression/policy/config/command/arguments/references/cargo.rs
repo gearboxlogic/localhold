@@ -12,12 +12,22 @@ pub(super) fn dispatch_is_opaque(arguments: &[String]) -> bool {
     if !is_execution_capable(subcommand) {
         return false;
     }
+    if matches!(subcommand, "rustc" | "rustdoc") && rust_compiler_arguments_are_opaque(arguments) {
+        return true;
+    }
 
     let manifest = selected_manifest(arguments);
     if matches!(subcommand, "run" | "r") {
         return !matches!(manifest, ManifestSelection::Selected(path) if is_reviewed_tool_manifest(path));
     }
     matches!(manifest, ManifestSelection::Opaque) || matches!(manifest, ManifestSelection::Selected(path) if !is_reviewed_execution_manifest(path))
+}
+
+fn rust_compiler_arguments_are_opaque(arguments: &[String]) -> bool {
+    arguments
+        .iter()
+        .position(|argument| argument == "--")
+        .is_some_and(|separator| super::compiler::rust_compiler_dispatch_is_opaque(&arguments[separator + 1..]))
 }
 
 fn subcommand(arguments: &[String]) -> Option<&str> {
@@ -116,5 +126,12 @@ mod tests {
         assert!(dispatch_is_opaque(&arguments(&["run"])));
         assert!(dispatch_is_opaque(&arguments(&["run", "--manifest-path", "Cargo.toml"])));
         assert!(!dispatch_is_opaque(&arguments(&["run", "--manifest-path", "tools/maintainability/Cargo.toml"])));
+    }
+
+    #[test]
+    fn custom_rust_linkers_fail_closed() {
+        assert!(dispatch_is_opaque(&arguments(&["rustc", "--", "-C", "linker=quality/lint"])));
+        assert!(dispatch_is_opaque(&arguments(&["rustdoc", "--", "-Clinker=quality/lint"])));
+        assert!(!dispatch_is_opaque(&arguments(&["rustc", "--", "-C", "opt-level=2"])));
     }
 }

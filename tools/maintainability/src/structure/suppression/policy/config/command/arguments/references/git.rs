@@ -38,6 +38,8 @@ fn command_producing_subcommand(arguments: &[String]) -> bool {
     match subcommand.to_ascii_lowercase().as_str() {
         "config" => config_dispatch_is_opaque(&arguments[index + 1..]),
         "grep" => grep_dispatch_is_opaque(&arguments[index + 1..]),
+        "clone" => clone_dispatch_is_opaque(&arguments[index + 1..]),
+        "fetch" => upload_pack_selection_is_opaque(&arguments[index + 1..]),
         "difftool" | "filter-branch" | "mergetool" => true,
         "bisect" => arguments[index + 1..]
             .iter()
@@ -45,6 +47,21 @@ fn command_producing_subcommand(arguments: &[String]) -> bool {
             .any(|argument| argument.eq_ignore_ascii_case("run")),
         subcommand => !is_builtin_subcommand(subcommand),
     }
+}
+
+fn clone_dispatch_is_opaque(arguments: &[String]) -> bool {
+    upload_pack_selection_is_opaque(arguments)
+        || arguments
+            .iter()
+            .take_while(|argument| argument.as_str() != "--")
+            .any(|argument| argument == "-u" || argument.starts_with("-u") && argument.len() > 2)
+}
+
+fn upload_pack_selection_is_opaque(arguments: &[String]) -> bool {
+    arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
+        let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
+        option.len() >= "--upload".len() && "--upload-pack".starts_with(option)
+    })
 }
 
 fn grep_dispatch_is_opaque(arguments: &[String]) -> bool {
@@ -194,5 +211,15 @@ mod tests {
         assert!(dispatch_is_opaque(&arguments(&["--paginate", "status"])));
         assert!(dispatch_is_opaque(&arguments(&["-p", "log"])));
         assert!(!dispatch_is_opaque(&arguments(&["--no-pager", "grep", "lint"])));
+    }
+
+    #[test]
+    fn transport_program_overrides_fail_closed() {
+        assert!(dispatch_is_opaque(&arguments(
+            &["clone", "--no-local", "--upload-pack=sh quality/lint.txt", ".", "target",]
+        )));
+        assert!(dispatch_is_opaque(&arguments(&["clone", "-ush quality/lint.txt", ".", "target"])));
+        assert!(dispatch_is_opaque(&arguments(&["fetch", "--upload-pack", "quality/lint", "origin"])));
+        assert!(!dispatch_is_opaque(&arguments(&["clone", "--no-local", ".", "target"])));
     }
 }

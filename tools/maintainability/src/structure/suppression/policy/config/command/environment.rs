@@ -73,6 +73,8 @@ fn is_runtime_code_loading_environment_name(name: &str) -> bool {
         name,
         "BASH_ENV"
             | "GCONV_PATH"
+            | "JAVA_TOOL_OPTIONS"
+            | "JDK_JAVA_OPTIONS"
             | "SHELLOPTS"
             | "LD_AUDIT"
             | "LD_LIBRARY_PATH"
@@ -95,6 +97,7 @@ fn is_runtime_code_loading_environment_name(name: &str) -> bool {
             | "PYTHONWARNINGS"
             | "RIPGREP_CONFIG_PATH"
             | "RUBYOPT"
+            | "_JAVA_OPTIONS"
     )
 }
 
@@ -135,6 +138,14 @@ mod tests {
     fn node_code_loading_environment_is_weakening() {
         assert!(is_weakening_environment_name("NODE_OPTIONS"));
         assert!(is_weakening_environment_name("node_options"));
+    }
+
+    #[test]
+    fn jvm_code_loading_environment_is_weakening() {
+        for name in ["JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS"] {
+            assert!(is_weakening_environment_name(name), "{name}");
+            assert!(is_weakening_environment_name(&name.to_ascii_lowercase()), "{name}");
+        }
     }
 
     #[test]

@@ -206,8 +206,13 @@ if GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head \
 fi
 GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head \
     LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment >/dev/null
+
+trusted_gate="$fixture/trusted-gate"
+git -c core.autocrlf=false clone -q --no-hardlinks "$test_repository" "$trusted_gate"
+git -C "$trusted_gate" -c core.autocrlf=false checkout -q --detach "$test_base"
+trusted_check="$trusted_gate/script/check-maintainability-bootstrap.sh"
 GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head \
-    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base "$check" --root "$test_repository" --test-environment >/dev/null
+    LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base "$trusted_check" --root "$test_repository" --test-environment >/dev/null
 
 gate_candidate="$fixture/gate-candidate"
 git -c core.autocrlf=false clone -q --no-hardlinks "$test_repository" "$gate_candidate"
@@ -218,7 +223,7 @@ git -C "$gate_candidate" -c user.name=LocalHold -c user.email=localhold@example.
 gate_candidate_head=$(git -C "$gate_candidate" rev-parse HEAD)
 GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$gate_candidate_head \
     LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base CANDIDATE_GATE_MARKER=$candidate_gate_marker \
-    "$check" --root "$gate_candidate" --test-environment >/dev/null
+    "$trusted_check" --root "$gate_candidate" --test-environment >/dev/null
 if [[ -e $candidate_gate_marker ]]; then
     printf 'protected maintainability workflow executed a candidate gate script\n' >&2
     exit 1

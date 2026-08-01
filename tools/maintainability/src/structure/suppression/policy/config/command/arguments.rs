@@ -541,6 +541,14 @@ fn untrusted_directory_change_with_rust_tool(source: &str, case_insensitive_tool
             .any(|tokens| is_directory_change_command(tokens) && !is_audited_repository_root_change(tokens, source))
 }
 
+fn untrusted_directory_change_with_quality_dispatcher(source: &str, case_insensitive_tools: bool) -> bool {
+    let commands = tokens::normalized_shell_commands(source);
+    integrity::contains_quality_dispatcher(source, case_insensitive_tools)
+        && commands
+            .iter()
+            .any(|tokens| is_directory_change_command(tokens) && !is_audited_repository_root_change(tokens, source))
+}
+
 fn is_directory_change_command(tokens: &[String]) -> bool {
     if env_changes_directory(tokens) {
         return true;
@@ -763,7 +771,7 @@ fn is_cargo_deny_config_argument(tokens: &[String], config_index: usize, case_in
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{collect_direct_rust_sources, untrusted_directory_change_with_rust_tool, weakening_token_for_surface};
+    use super::{collect_direct_rust_sources, untrusted_directory_change_with_quality_dispatcher, untrusted_directory_change_with_rust_tool, weakening_token_for_surface};
 
     #[test]
     fn protected_external_audit_roots_require_complete_validation() {
@@ -784,6 +792,18 @@ cargo test --locked
             &reviewed.replace("[[ ! -d $repository_root || -L $repository_root ]]", "[[ ! -d $repository_root ]]"),
             false
         ));
+    }
+
+    #[test]
+    fn quality_dispatchers_cannot_run_after_untrusted_directory_changes() {
+        for source in [
+            "cd quality/decoy; just check-quality",
+            "pushd quality/decoy; make check-quality",
+            "env --chdir=quality/decoy just maintainability",
+        ] {
+            assert!(untrusted_directory_change_with_quality_dispatcher(source, false), "{source}");
+        }
+        assert!(!untrusted_directory_change_with_quality_dispatcher("cd quality/decoy; just --version", false));
     }
 
     #[test]

@@ -1,10 +1,12 @@
+use std::path::Path;
+
 use super::path;
 
-pub(super) fn dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
+pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]) -> bool {
     output_redirection_targets_surface(arguments)
         || match command {
             "cp" | "cp.exe" | "install" | "install.exe" | "ln" | "ln.exe" | "mv" | "mv.exe" | "tee" | "tee.exe" | "truncate" | "truncate.exe" => {
-                arguments_reference_surface(arguments)
+                arguments_reference_surface(arguments) || final_destination_is_opaque(path, arguments)
             }
             "copy" | "copy-item" | "move" | "move-item" | "set-content" | "add-content" | "out-file" => arguments_reference_surface(arguments),
             "curl" | "curl.exe" => curl_output_targets_surface(arguments),
@@ -20,6 +22,61 @@ pub(super) fn dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
             }
             _ => false,
         }
+}
+
+fn final_destination_is_opaque(path: &str, arguments: &[String]) -> bool {
+    if arguments.iter().any(|argument| matches!(argument.as_str(), "--help" | "--version")) {
+        return false;
+    }
+    explicit_target_directories(arguments)
+        .chain(arguments.last().map(String::as_str))
+        .any(|destination| !is_safe_literal_destination(destination) && !is_reviewed_dynamic_destination(path, destination))
+}
+
+fn explicit_target_directories(arguments: &[String]) -> impl Iterator<Item = &str> {
+    arguments.iter().enumerate().filter_map(|(index, argument)| {
+        if argument == "-t" {
+            return Some(arguments.get(index + 1).map_or("", String::as_str));
+        }
+        if let Some(option) = argument.strip_prefix("--") {
+            let (option, attached) = option.split_once('=').map_or((option, None), |(option, target)| (option, Some(target)));
+            if !option.is_empty() && "target-directory".starts_with(option) {
+                return Some(attached.unwrap_or_else(|| arguments.get(index + 1).map_or("", String::as_str)));
+            }
+        }
+        argument.strip_prefix("-t").filter(|target| !target.is_empty())
+    })
+}
+
+fn is_reviewed_dynamic_destination(path: &str, destination: &str) -> bool {
+    // The bootstrap authenticates this complete test driver by SHA-256 before
+    // executing it, so its isolated fixture destinations are reviewed as a set.
+    (path == "script/tests/test_maintainability_bootstrap.sh" && path::contains_dynamic_value(destination)) || REVIEWED_DYNAMIC_DESTINATIONS.contains(&(path, destination))
+}
+
+// These surfaces intentionally mutate installation or isolated test/runtime
+// trees. Keep each destination token exact so the exception cannot be reused
+// by another surface or silently widened to a different target.
+const REVIEWED_DYNAMIC_DESTINATIONS: &[(&str, &str)] = &[
+    ("script/install.sh", "$bin_dir/hold"),
+    ("script/install.sh", "$share_dir/localhold.example.toml"),
+    ("script/install.sh", "$doc_dir/"),
+    ("script/tests/test_claude_review.sh", "$test_root/bin/claude"),
+    (".github/workflows/gpu-release-gate.yml", "$RUNNER_TEMP/hold-cuda"),
+    (".github/workflows/gpu-release-gate.yml", "$moved"),
+    (".github/workflows/gpu-release-gate.yml", "$dependency"),
+];
+
+fn is_safe_literal_destination(candidate: &str) -> bool {
+    if let Some(path) = path::normalize_literal(candidate) {
+        return !super::super::super::is_execution_surface(&path);
+    }
+    !path::contains_dynamic_value(candidate) && (Path::new(candidate).is_absolute() || is_windows_absolute(candidate))
+}
+
+fn is_windows_absolute(candidate: &str) -> bool {
+    let bytes = candidate.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\')
 }
 
 fn curl_output_targets_surface(arguments: &[String]) -> bool {
@@ -81,10 +138,10 @@ fn is_literal_execution_surface(candidate: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::dispatch_is_opaque;
+    use super::{REVIEWED_DYNAMIC_DESTINATIONS, dispatch_is_opaque};
 
     fn opaque(command: &str, arguments: &[&str]) -> bool {
-        dispatch_is_opaque(command, &arguments.iter().map(|argument| (*argument).to_owned()).collect::<Vec<_>>())
+        dispatch_is_opaque("script/check.sh", command, &arguments.iter().map(|argument| (*argument).to_owned()).collect::<Vec<_>>())
     }
 
     #[test]
@@ -96,7 +153,27 @@ mod tests {
         assert!(opaque("dd", &["if=quality/lint.data", "of=.github/workflows/ci.yml"]));
         assert!(opaque("patch", &["Justfile", "quality/lint.patch"]));
         assert!(opaque("patch", &["<", "quality/lint.patch"]));
+        assert!(opaque("cp", &["quality/lint.data", "$destination"]));
+        assert!(opaque("cp", &["--target-directory", "$destination", "quality/lint.data"]));
+        assert!(opaque("cp", &["--target-directory=$destination", "quality/lint.data"]));
+        assert!(opaque("cp", &["--t=$destination", "quality/lint.data"]));
+        assert!(opaque("cp", &["-t$destination", "quality/lint.data"]));
+        assert!(opaque("cp", &["quality/lint.data", "../Justfile"]));
         assert!(!opaque("cp", &["input.txt", "output.txt"]));
+        assert!(!opaque("cp", &["-ttarget/output", "input.txt"]));
+        assert!(!opaque("cp", &["input.txt", "/tmp/output.txt"]));
+    }
+
+    #[test]
+    fn reviewed_dynamic_destinations_are_path_specific() {
+        for (path, destination) in REVIEWED_DYNAMIC_DESTINATIONS {
+            let arguments = ["quality/lint.data".to_owned(), (*destination).to_owned()];
+            assert!(!dispatch_is_opaque(path, "cp", &arguments), "{path}: {destination}");
+            assert!(dispatch_is_opaque("script/check.sh", "cp", &arguments), "{path}: {destination}");
+        }
+
+        let changed = ["quality/lint.data".to_owned(), "$test_root/bin/Justfile".to_owned()];
+        assert!(dispatch_is_opaque("script/tests/test_claude_review.sh", "ln", &changed));
     }
 
     #[test]

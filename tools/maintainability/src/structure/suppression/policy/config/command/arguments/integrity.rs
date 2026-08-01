@@ -264,6 +264,12 @@ pub(in crate::structure::suppression::policy::config::command) fn contains_quali
         .any(|tokens| command_is_quality(tokens, case_insensitive_tools))
 }
 
+pub(in crate::structure::suppression::policy::config::command) fn contains_quality_dispatcher(source: &str, case_insensitive_tools: bool) -> bool {
+    tokens::source_command_tokens(&tokens::without_noncommand_shell_data(source))
+        .iter()
+        .any(|tokens| command_is_quality_dispatcher(tokens, case_insensitive_tools))
+}
+
 fn control_flow_masks_quality_command(command: &[String], case_insensitive_tools: bool, quality_functions: &BTreeSet<String>) -> bool {
     let Some(index) = quality_executable_index(command, case_insensitive_tools) else {
         return false;
@@ -305,23 +311,35 @@ fn command_is_quality(command: &[String], case_insensitive_tools: bool) -> bool 
             .iter()
             .any(|token| matches!(token.to_ascii_lowercase().as_str(), "check" | "clippy" | "deny" | "fmt" | "test"));
     }
-    tool_basename(executable).eq_ignore_ascii_case("just")
-        && arguments.iter().any(|token| {
-            matches!(
-                token.as_str(),
-                "check"
-                    | "check-quality"
-                    | "clippy"
-                    | "deny"
-                    | "dependency-unsafe"
-                    | "fmt-check"
-                    | "hygiene"
-                    | "maintainability"
-                    | "production-clippy"
-                    | "test"
-                    | "time-abstraction"
-            )
-        })
+    is_quality_dispatcher(executable, arguments)
+}
+
+fn command_is_quality_dispatcher(command: &[String], case_insensitive_tools: bool) -> bool {
+    let Some(executable_index) = quality_executable_index(command, case_insensitive_tools) else {
+        return false;
+    };
+    let executable = &command[executable_index];
+    let arguments = &command[executable_index + 1..];
+    let executable_name = tool_basename(executable).to_ascii_lowercase();
+    match super::references::wrapper::select(executable, &executable_name, arguments) {
+        super::references::wrapper::Selection::NotWrapper => {}
+        super::references::wrapper::Selection::NoCommand => return false,
+        super::references::wrapper::Selection::Nested(nested) => return command_is_quality_dispatcher(nested, case_insensitive_tools),
+        super::references::wrapper::Selection::Opaque => return command_is_quality_dispatcher(arguments, case_insensitive_tools),
+    }
+    is_quality_dispatcher(executable, arguments)
+}
+
+fn is_quality_dispatcher(executable: &str, arguments: &[String]) -> bool {
+    matches!(
+        tool_basename(executable).to_ascii_lowercase().as_str(),
+        "just" | "just.exe" | "make" | "make.exe" | "gmake" | "gmake.exe"
+    ) && arguments.iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "check" | "check-quality" | "clippy" | "deny" | "dependency-unsafe" | "fmt-check" | "hygiene" | "maintainability" | "production-clippy" | "test" | "time-abstraction"
+        )
+    })
 }
 
 fn quality_executable_index(tokens: &[String], case_insensitive_tools: bool) -> Option<usize> {

@@ -43,6 +43,7 @@ fn command_producing_subcommand(arguments: &[String]) -> bool {
         "grep" => grep_dispatch_is_opaque(&arguments[index + 1..]),
         "clone" => clone_dispatch_is_opaque(&arguments[index + 1..]),
         "fetch" => upload_pack_selection_is_opaque(&arguments[index + 1..]),
+        "init" => init_dispatch_is_opaque(&arguments[index + 1..]),
         "difftool" | "filter-branch" | "mergetool" => true,
         "bisect" => arguments[index + 1..]
             .iter()
@@ -50,6 +51,13 @@ fn command_producing_subcommand(arguments: &[String]) -> bool {
             .any(|argument| argument.eq_ignore_ascii_case("run")),
         subcommand => !is_builtin_subcommand(subcommand),
     }
+}
+
+fn init_dispatch_is_opaque(arguments: &[String]) -> bool {
+    arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
+        let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
+        argument == "-t" || argument.starts_with("-t") && argument.len() > 2 || option.len() >= "--t".len() && "--template".starts_with(option)
+    })
 }
 
 fn clone_dispatch_is_opaque(arguments: &[String]) -> bool {
@@ -214,6 +222,21 @@ mod tests {
     fn alternate_git_exec_paths_fail_closed() {
         assert!(dispatch_is_opaque(&arguments(&["--exec-path", "/tmp", "lint"])));
         assert!(dispatch_is_opaque(&arguments(&["--exec-path=/tmp", "lint"])));
+    }
+
+    #[test]
+    fn repository_templates_fail_closed() {
+        for values in [
+            &["init", "--template", "quality/template", "target"][..],
+            &["init", "--template=quality/template", "target"],
+            &["init", "--t=quality/template", "target"],
+            &["init", "--templ=quality/template", "target"],
+            &["init", "-t", "quality/template", "target"],
+            &["init", "-tquality/template", "target"],
+        ] {
+            assert!(dispatch_is_opaque(&arguments(values)), "{values:?}");
+        }
+        assert!(!dispatch_is_opaque(&arguments(&["init", "--bare", "target"])));
     }
 
     #[test]

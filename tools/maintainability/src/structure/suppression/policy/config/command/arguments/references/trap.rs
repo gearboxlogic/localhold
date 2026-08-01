@@ -1,6 +1,6 @@
 use super::super::tokens;
 
-pub(super) fn action_is_opaque(arguments: &[String], direct_program_paths: bool) -> bool {
+pub(super) fn action_is_opaque(path: &str, arguments: &[String], direct_program_paths: bool) -> bool {
     let Some(first) = arguments.first().map(String::as_str) else {
         return false;
     };
@@ -20,10 +20,10 @@ pub(super) fn action_is_opaque(arguments: &[String], direct_program_paths: bool)
     if commands.is_empty() {
         return !action.trim().is_empty();
     }
-    commands.into_iter().any(|command| command_tree_is_opaque(&command, direct_program_paths))
+    commands.into_iter().any(|command| command_tree_is_opaque(path, &command, direct_program_paths))
 }
 
-fn command_tree_is_opaque(command: &[String], direct_program_paths: bool) -> bool {
+fn command_tree_is_opaque(path: &str, command: &[String], direct_program_paths: bool) -> bool {
     let word = command.iter().find_map(|token| {
         let word = token.trim_matches(['(', ')', '{', '}']);
         (!word.is_empty() && !super::is_execution_input_prefix(word) && (!super::super::is_environment_assignment(word) || word.contains("$(") || word.contains('`')))
@@ -36,7 +36,7 @@ fn command_tree_is_opaque(command: &[String], direct_program_paths: bool) -> boo
     {
         return true;
     }
-    let (inputs, opaque) = super::execution_input_candidates(command, direct_program_paths);
+    let (inputs, opaque) = super::execution_input_candidates(path, command, direct_program_paths);
     opaque || !inputs.is_empty()
 }
 
@@ -50,14 +50,14 @@ mod tests {
 
     #[test]
     fn static_cleanup_actions_are_distinct_from_command_dispatch() {
-        assert!(!action_is_opaque(&arguments(&["cleanup", "EXIT"]), true));
-        assert!(!action_is_opaque(&arguments(&["rm -f \"$temporary\"", "EXIT"]), true));
-        assert!(!action_is_opaque(&arguments(&["-", "EXIT"]), true));
-        assert!(!action_is_opaque(&arguments(&["-p", "EXIT"]), true));
-        assert!(action_is_opaque(&arguments(&["sh quality/lint.txt", "EXIT"]), true));
-        assert!(action_is_opaque(&arguments(&["source quality/lint.txt", "EXIT"]), true));
-        assert!(action_is_opaque(&arguments(&["cleanup \"$(sh quality/lint.txt)\"", "EXIT"]), true));
-        assert!(action_is_opaque(&arguments(&["$cleanup_command", "EXIT"]), true));
-        assert!(action_is_opaque(&arguments(&["--unknown", "EXIT"]), true));
+        assert!(!action_is_opaque("script/check.sh", &arguments(&["cleanup", "EXIT"]), true));
+        assert!(!action_is_opaque("script/check.sh", &arguments(&["rm -f \"$temporary\"", "EXIT"]), true));
+        assert!(!action_is_opaque("script/check.sh", &arguments(&["-", "EXIT"]), true));
+        assert!(!action_is_opaque("script/check.sh", &arguments(&["-p", "EXIT"]), true));
+        assert!(action_is_opaque("script/check.sh", &arguments(&["sh quality/lint.txt", "EXIT"]), true));
+        assert!(action_is_opaque("script/check.sh", &arguments(&["source quality/lint.txt", "EXIT"]), true));
+        assert!(action_is_opaque("script/check.sh", &arguments(&["cleanup \"$(sh quality/lint.txt)\"", "EXIT"]), true));
+        assert!(action_is_opaque("script/check.sh", &arguments(&["$cleanup_command", "EXIT"]), true));
+        assert!(action_is_opaque("script/check.sh", &arguments(&["--unknown", "EXIT"]), true));
     }
 }

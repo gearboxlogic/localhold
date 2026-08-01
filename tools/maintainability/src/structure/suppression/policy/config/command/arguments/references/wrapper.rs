@@ -211,6 +211,7 @@ fn is_unparsed_launcher(command: &str) -> bool {
         "buildcache"
             | "bwrap"
             | "cachepot"
+            | "capsh"
             | "ccache"
             | "chrt"
             | "chroot"
@@ -277,6 +278,8 @@ mod tests {
         assert!(matches!(select("/usr/bin/flock", "flock", &arguments), Selection::Opaque));
         assert!(matches!(select("choom", "choom", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/choom", "choom", &arguments), Selection::Opaque));
+        assert!(matches!(select("capsh", "capsh", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/sbin/capsh", "capsh", &arguments), Selection::Opaque));
         assert!(matches!(select("chroot", "chroot", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/sbin/chroot", "chroot", &arguments), Selection::Opaque));
         assert!(matches!(select("setarch", "setarch", &arguments), Selection::Opaque));
@@ -298,6 +301,7 @@ mod tests {
         assert!(is_command_launcher("env"));
         assert!(is_command_launcher("env.exe"));
         assert!(is_command_launcher("ssh"));
+        assert!(is_command_launcher("capsh"));
         assert!(!is_command_launcher("git"));
     }
 

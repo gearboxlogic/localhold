@@ -119,8 +119,15 @@ fn collect_execution_inputs<'a>(sources: impl IntoIterator<Item = &'a str>, dire
         Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or_default().to_ascii_lowercase().as_str(),
         "makefile" | "gnumakefile"
     );
+    let surface = ShellSurface {
+        path,
+        direct_program_paths,
+        make_surface,
+    };
+    let nested_surface = ShellSurface { make_surface: false, ..surface };
     for source in sources {
         unresolved |= super::dynamic::has_opaque_command_assignment_flow(path, source);
+        unresolved |= super::untrusted_directory_change_with_quality_dispatcher(source, true);
         let normalized;
         let source = if direct_program_paths {
             unresolved |= tokens::has_executable_unquoted_heredoc(source);
@@ -128,30 +135,35 @@ fn collect_execution_inputs<'a>(sources: impl IntoIterator<Item = &'a str>, dire
             let (process_commands, opaque) = tokens::process_substitution_commands(&normalized);
             unresolved |= opaque;
             for command in process_commands {
-                record_shell_source_inputs(&command, direct_program_paths, false, &mut inputs, &mut unresolved);
+                record_shell_source_inputs(nested_surface, &command, &mut inputs, &mut unresolved);
+            }
+            let (command_substitutions, opaque) = tokens::command_substitution_commands(&normalized, true);
+            unresolved |= opaque;
+            for command in command_substitutions {
+                record_shell_source_inputs(nested_surface, &command, &mut inputs, &mut unresolved);
             }
             normalized.as_str()
         } else {
             source
         };
-        record_shell_source_inputs(source, direct_program_paths, make_surface, &mut inputs, &mut unresolved);
+        record_shell_source_inputs(surface, source, &mut inputs, &mut unresolved);
     }
     (inputs, unresolved)
 }
 
-fn record_shell_source_inputs(source: &str, direct_program_paths: bool, make_surface: bool, inputs: &mut BTreeSet<String>, unresolved: &mut bool) {
+#[derive(Clone, Copy)]
+struct ShellSurface<'a> {
+    path: &'a str,
+    direct_program_paths: bool,
+    make_surface: bool,
+}
+
+fn record_shell_source_inputs(surface: ShellSurface<'_>, source: &str, inputs: &mut BTreeSet<String>, unresolved: &mut bool) {
     for tokens in tokens::source_command_tokens(source) {
-        if direct_program_paths && !make_surface && substitution_is_command_program(&tokens) {
+        if surface.direct_program_paths && !surface.make_surface && substitution_is_command_program(&tokens) {
             *unresolved = true;
         }
-        for nested_tokens in tokens
-            .iter()
-            .filter(|token| token.contains("$(") || token.contains('`'))
-            .flat_map(|nested| tokens::source_command_tokens(nested))
-        {
-            record_execution_inputs_from_tokens(&nested_tokens, direct_program_paths, inputs, unresolved);
-        }
-        record_execution_inputs_from_tokens(&tokens, direct_program_paths, inputs, unresolved);
+        record_execution_inputs_from_tokens(surface.path, &tokens, surface.direct_program_paths, inputs, unresolved);
     }
 }
 
@@ -188,8 +200,8 @@ fn command_position(tokens: &[String]) -> Option<CommandPosition<'_>> {
     })
 }
 
-fn record_execution_inputs_from_tokens(tokens: &[String], direct_program_paths: bool, inputs: &mut BTreeSet<String>, unresolved: &mut bool) {
-    let (candidates, opaque) = execution_input_candidates(tokens, direct_program_paths);
+fn record_execution_inputs_from_tokens(path: &str, tokens: &[String], direct_program_paths: bool, inputs: &mut BTreeSet<String>, unresolved: &mut bool) {
+    let (candidates, opaque) = execution_input_candidates(path, tokens, direct_program_paths);
     *unresolved |= opaque;
     record_execution_inputs(candidates, inputs, unresolved);
 }
@@ -204,7 +216,7 @@ fn record_execution_inputs(candidates: Vec<&str>, inputs: &mut BTreeSet<String>,
     }
 }
 
-fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> (Vec<&str>, bool) {
+fn execution_input_candidates<'a>(path: &str, tokens: &'a [String], direct_program_paths: bool) -> (Vec<&'a str>, bool) {
     let Some(position) = command_position(tokens) else {
         return (Vec::new(), false);
     };
@@ -223,14 +235,14 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
     match wrapper::select(raw_command_word, &command, arguments) {
         wrapper::Selection::NotWrapper => {}
         wrapper::Selection::NoCommand => return (Vec::new(), false),
-        wrapper::Selection::Nested(command) => return execution_input_candidates(command, direct_program_paths),
+        wrapper::Selection::Nested(command) => return execution_input_candidates(path, command, direct_program_paths),
         wrapper::Selection::Opaque => return (Vec::new(), true),
     }
-    if mutation::dispatch_is_opaque(&command, arguments) || compiler::dispatch_is_opaque(&command, arguments) || native::dispatch_is_opaque(&command, arguments) {
+    if mutation::dispatch_is_opaque(path, &command, arguments) || compiler::dispatch_is_opaque(&command, arguments) || native::dispatch_is_opaque(&command, arguments) {
         return (Vec::new(), true);
     }
     let selected = match command.as_str() {
-        "trap" if !command_word.contains(['/', '\\']) => return (Vec::new(), trap::action_is_opaque(arguments, direct_program_paths)),
+        "trap" if !command_word.contains(['/', '\\']) => return (Vec::new(), trap::action_is_opaque(path, arguments, direct_program_paths)),
         "alias" | "coproc" | "eval" | "fc" | "fc.exe" | "iex" | "invoke-expression" | "parallel" | "parallel.exe" | "trap" | "xargs" | "xargs.exe" => SelectedInput::Opaque,
         "enable" if bash_enable_loads_builtin(arguments) => SelectedInput::Opaque,
         "mapfile" | "readarray" if mapfile_callback_is_opaque(arguments) => SelectedInput::Opaque,
@@ -917,6 +929,7 @@ mod tests {
     #[test]
     fn compact_substitutions_and_dynamic_builtins_are_opaque() {
         assert_eq!(inputs("printf '%s' \"$(/tmp/lint)\""), (Vec::new(), true));
+        assert_eq!(inputs("printf '%s' 'install pinned tools with `mise install`'"), (Vec::new(), false));
         assert_eq!(inputs("enable -f /tmp/helper.so helper"), (Vec::new(), true));
     }
 

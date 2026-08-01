@@ -1,6 +1,7 @@
 pub(super) fn dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
     is_compiler_driver(command) && arguments.iter().any(|argument| is_dispatch_override(argument))
         || is_rust_compiler(command) && rust_compiler_dispatch_is_opaque(arguments)
+        || is_rustdoc(command) && rustdoc_dispatch_is_opaque(arguments)
         || is_linker_tool(command) && arguments.iter().any(|argument| linker_dispatch_override(argument))
         || is_archive_tool(command) && archive_dispatch_is_opaque(arguments)
         || is_binutils_plugin_tool(command)
@@ -68,8 +69,19 @@ pub(super) fn rust_compiler_dispatch_is_opaque(arguments: &[String]) -> bool {
     false
 }
 
+fn rustdoc_dispatch_is_opaque(arguments: &[String]) -> bool {
+    arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
+        let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
+        matches!(option, "--test-builder" | "--test-builder-wrapper" | "--test-runtool" | "--test-runtool-arg")
+    })
+}
+
 fn is_rust_compiler(command: &str) -> bool {
     matches!(command.strip_suffix(".exe").unwrap_or(command), "rustc" | "rustdoc")
+}
+
+fn is_rustdoc(command: &str) -> bool {
+    command.strip_suffix(".exe").unwrap_or(command) == "rustdoc"
 }
 
 fn is_binutils_plugin_tool(command: &str) -> bool {
@@ -290,5 +302,19 @@ mod tests {
             assert!(dispatch_is_opaque("rustc", &arguments(values)), "{values:?}");
             assert!(dispatch_is_opaque("rustdoc", &arguments(values)), "{values:?}");
         }
+    }
+
+    #[test]
+    fn rustdoc_test_program_overrides_fail_closed() {
+        for values in [
+            &["--test", "quality/doc.rs", "--test-runtool", "sh", "--test-runtool-arg", "quality/lint.txt"][..],
+            &["--test", "quality/doc.rs", "--test-runtool=sh"],
+            &["--test", "quality/doc.rs", "--test-builder", "quality/builder"],
+            &["--test", "quality/doc.rs", "--test-builder-wrapper=quality/wrapper"],
+        ] {
+            assert!(dispatch_is_opaque("rustdoc", &arguments(values)), "{values:?}");
+            assert!(dispatch_is_opaque("rustdoc.exe", &arguments(values)), "{values:?}");
+        }
+        assert!(!dispatch_is_opaque("rustdoc", &arguments(&["--test", "quality/doc.rs", "--no-run"])));
     }
 }

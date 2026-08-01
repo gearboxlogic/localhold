@@ -356,6 +356,14 @@ fn command_policy_rejects_dynamic_powershell_call_dispatch() {
     .expect("dynamic PowerShell alias dispatch");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+
+    fs::write(
+        workspace.path().join("script/check.ps1"),
+        "[System.IO.File]::Copy('quality/Justfile', 'Justfile', $true)\njust check-quality\nexit $LASTEXITCODE\n",
+    )
+    .expect("PowerShell filesystem mutation");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
 }
 
 #[test]

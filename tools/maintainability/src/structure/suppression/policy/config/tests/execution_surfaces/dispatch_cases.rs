@@ -147,6 +147,14 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("rustc quality/benign.rs --extern serde=quality/libserde.so\n", "opaque interpreter program"),
     ("objcopy -I binary -O binary quality/Justfile Justfile\n", "opaque interpreter program"),
     ("ar r quality/payload.a quality/Justfile; ar x quality/payload.a\n", "opaque interpreter program"),
+    (
+        "jar --create --file target/payload.jar -C quality Justfile; jar --extract --file target/payload.jar\n",
+        "opaque interpreter program",
+    ),
+    (
+        "rustdoc --test quality/doc.rs --test-runtool sh --test-runtool-arg quality/lint.txt\n",
+        "opaque interpreter program",
+    ),
     ("nm --plugin quality/lint.so /bin/true\n", "opaque interpreter program"),
     ("ranlib --plugin=quality/lint.so quality/archive.a\n", "opaque interpreter program"),
     ("rake --rakefile quality/lint.txt\n", "opaque interpreter program"),

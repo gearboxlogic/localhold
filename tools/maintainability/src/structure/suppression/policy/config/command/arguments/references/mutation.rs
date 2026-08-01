@@ -13,6 +13,7 @@ pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]
             "curl" | "curl.exe" => curl_output_targets_surface(arguments) || curl_remote_name_is_opaque(arguments),
             "dd" | "dd.exe" => arguments.iter().filter_map(|argument| argument.strip_prefix("of=")).any(is_literal_execution_surface),
             "iconv" | "iconv.exe" => iconv_output_is_opaque(path, arguments),
+            "jar" | "jar.exe" => jar_dispatch_is_opaque(arguments),
             "openssl" | "openssl.exe" => openssl_output_is_opaque(path, arguments),
             "patch" | "patch.exe" => true,
             "unzip" | "unzip.exe" => unzip_dispatch_is_opaque(arguments),
@@ -26,6 +27,46 @@ pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]
             }
             _ => false,
         }
+}
+
+fn jar_dispatch_is_opaque(arguments: &[String]) -> bool {
+    let mut consumes_operand = false;
+    for argument in arguments {
+        if consumes_operand {
+            consumes_operand = false;
+            continue;
+        }
+        if matches!(argument.as_str(), "--file" | "--main-class" | "--manifest" | "--module-version" | "--release") {
+            consumes_operand = true;
+            continue;
+        }
+        if argument == "--extract" {
+            return true;
+        }
+        if argument == "--" || argument.starts_with("--") {
+            continue;
+        }
+        if argument == "-f" {
+            consumes_operand = true;
+            continue;
+        }
+        if path::contains_dynamic_value(argument) {
+            return true;
+        }
+        let options = argument.strip_prefix('-').unwrap_or(argument);
+        if options.chars().all(is_jar_option) && options.chars().any(is_jar_operation) {
+            return options.contains('x');
+        }
+    }
+    false
+}
+
+const fn is_jar_operation(option: char) -> bool {
+    matches!(option, 'c' | 'i' | 't' | 'u' | 'x')
+}
+
+const fn is_jar_option(option: char) -> bool {
+    is_jar_operation(option) || matches!(option, '0' | 'C' | 'e' | 'f' | 'm' | 'M' | 'P' | 'v')
 }
 
 fn final_destination_is_opaque(path: &str, arguments: &[String]) -> bool {
@@ -373,6 +414,21 @@ mod tests {
             assert!(opaque(command, &["$input", "$output"]), "{command}");
             assert!(!opaque(command, &["input.bin", "target/output.bin"]), "{command}");
         }
+    }
+
+    #[test]
+    fn jar_extraction_and_dynamic_operations_fail_closed() {
+        for arguments in [
+            &["--extract", "--file", "target/payload.jar"][..],
+            &["-xf", "target/payload.jar"],
+            &["xvf", "target/payload.jar"],
+            &["$operation", "target/payload.jar"],
+        ] {
+            assert!(opaque("jar", arguments), "{arguments:?}");
+            assert!(opaque("jar.exe", arguments), "{arguments:?}");
+        }
+        assert!(!opaque("jar", &["--list", "--file", "$archive"]));
+        assert!(!opaque("jar", &["tf", "$archive"]));
     }
 
     #[test]

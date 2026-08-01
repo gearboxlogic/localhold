@@ -164,6 +164,7 @@ fn has_opaque_dispatch(source: &str) -> bool {
     let mut line_prefix_is_whitespace = true;
     let mut word = String::new();
     let mut saw_script_block_type = false;
+    let mut saw_io_type = false;
     while let Some(character) = characters.next() {
         if matches!(state, State::Code) && (character.is_alphanumeric() || matches!(character, '-' | '_' | '.')) {
             word.push(character.to_ascii_lowercase());
@@ -171,10 +172,11 @@ fn has_opaque_dispatch(source: &str) -> bool {
             continue;
         }
         if matches!(state, State::Code) && !word.is_empty() {
-            if process_api_word(&word) || saw_script_block_type && word == "create" {
+            if process_api_word(&word) || saw_script_block_type && word == "create" || saw_io_type {
                 return true;
             }
             saw_script_block_type = script_block_type_word(&word);
+            saw_io_type = opaque_io_type_word(&word);
         }
         word.clear();
         match state {
@@ -188,7 +190,10 @@ fn has_opaque_dispatch(source: &str) -> bool {
                     characters.next();
                 }
                 '&' if dynamic_call_operator(characters.clone()) => return true,
-                ';' | '\n' | '|' => saw_script_block_type = false,
+                ';' | '\n' | '|' => {
+                    saw_script_block_type = false;
+                    saw_io_type = false;
+                }
                 _ => {}
             },
             State::SingleQuoted if character == '\'' => {
@@ -211,7 +216,12 @@ fn has_opaque_dispatch(source: &str) -> bool {
         }
         update_line_prefix(character, &mut line_prefix_is_whitespace);
     }
-    matches!(state, State::Code) && (process_api_word(&word) || saw_script_block_type && word == "create")
+    matches!(state, State::Code) && (process_api_word(&word) || saw_script_block_type && word == "create" || saw_io_type && !word.is_empty())
+}
+
+fn opaque_io_type_word(word: &str) -> bool {
+    let word = word.strip_prefix("system.").unwrap_or(word);
+    word.starts_with("io.") && word != "io.path"
 }
 
 fn process_api_word(word: &str) -> bool {
@@ -416,6 +426,8 @@ mod tests {
         assert!(has_constructed_rust_arguments("[Diagnostics.Process]::new()"));
         assert!(has_constructed_rust_arguments("[scriptblock]::Create($source).Invoke()"));
         assert!(has_constructed_rust_arguments("[System.Management.Automation.ScriptBlock]::Create($source).Invoke()"));
+        assert!(has_constructed_rust_arguments("[System.IO.File]::Copy('quality/Justfile', 'Justfile', $true)"));
+        assert!(has_constructed_rust_arguments("[IO.Compression.ZipFile]::ExtractToDirectory($archive, '.')"));
         assert!(has_constructed_rust_arguments("New-Alias x ('Invoke-' + 'Expression'); x $decoded"));
         assert!(has_constructed_rust_arguments("Set-Alias x Invoke-Expression; x $decoded"));
         assert!(!has_constructed_rust_arguments("$scriptblock = 'inert'; Write-Output $scriptblock"));
@@ -430,6 +442,9 @@ mod tests {
         assert!(!has_constructed_rust_arguments("@'\nStart-Process cargo\n'@"));
         assert!(!has_constructed_rust_arguments("@'\n[System.Diagnostics.Process]::Start($tool)\n'@"));
         assert!(!has_constructed_rust_arguments("$actual = (Get-FileHash -Algorithm SHA256 $path).Hash"));
+        assert!(!has_constructed_rust_arguments("$name = [IO.Path]::GetFileNameWithoutExtension($archive.Name)"));
+        assert!(!has_constructed_rust_arguments("Write-Output '[System.IO.File]::Copy($source, $destination)'"));
+        assert!(!has_constructed_rust_arguments("# [System.IO.File]::Copy($source, $destination)"));
     }
 
     #[test]

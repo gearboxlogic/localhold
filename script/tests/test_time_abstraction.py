@@ -91,6 +91,18 @@ class TimeAbstractionTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_ignores_time_patterns_inside_production_literals_and_comments(self) -> None:
+        result = self._run_check(
+            "const NORMAL: &str = \"Utc::now( and std::thread::sleep(\";\n"
+            "const RAW: &str = r###\"SystemTime::now( and tokio::time::timeout(\"###;\n"
+            "// Instant::now(\n"
+            "/* tokio::time::sleep(\n"
+            "   std::thread::sleep( */\n"
+            "fn production() {}\n"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_all_cfg_requires_test_before_skipping_module(self) -> None:
         skipped = self._run_check(
             "#[cfg(all(feature = \"reranker\", test))]\n"

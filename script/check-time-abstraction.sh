@@ -9,12 +9,13 @@ normal_string=0
 raw_string=0
 raw_hashes=
 
-rust_brace_delta() {
+lex_rust_line() {
     local text=$1
     local index=0
     local length=${#text}
     local character next pair raw_index cursor closing
     brace_delta=0
+    rust_code=
 
     while (( index < length )); do
         character=${text:index:1}
@@ -123,6 +124,7 @@ rust_brace_delta() {
         elif [[ $character == '}' ]]; then
             brace_delta=$(( brace_delta - 1 ))
         fi
+        rust_code+=$character
         index=$(( index + 1 ))
     done
 }
@@ -170,7 +172,7 @@ for file in "${source_files[@]}"; do
     while IFS= read -r line || [[ -n "$line" ]]; do
         (( ++line_number ))
         if (( in_tests == 1 )); then
-            rust_brace_delta "$line"
+            lex_rust_line "$line"
             test_depth=$(( test_depth + brace_delta ))
             if (( test_depth < 0 )); then
                 in_tests=2
@@ -194,11 +196,13 @@ for file in "${source_files[@]}"; do
                 pending_test_cfg=0
             fi
         fi
-        if [[ $line =~ $pattern ]]; then
-            printf -v matches '%s%s:%s\n' "$matches" "$line_number" "$line"
+        if (( block_comment_depth > 0 || normal_string != 0 || raw_string != 0 )) || [[ $line == *'/*'* || $line == *'//'* || $line == *'"'* ]]; then
+            lex_rust_line "$line"
+        else
+            rust_code=$line
         fi
-        if (( block_comment_depth > 0 || normal_string != 0 || raw_string != 0 )) || [[ $line == *'/*'* || $line == *'"'* ]]; then
-            rust_brace_delta "$line"
+        if [[ $rust_code =~ $pattern ]]; then
+            printf -v matches '%s%s:%s\n' "$matches" "$line_number" "$line"
         fi
     done <"$file"
     if (( in_tests != 0 )); then

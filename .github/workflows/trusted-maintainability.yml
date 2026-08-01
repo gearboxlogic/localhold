@@ -55,7 +55,21 @@ jobs:
             exit 1
           fi
 
-          for relative_path in tools/maintainability tools/dependency-unsafe; do
+          trusted_dependency_tool_tree=$(/usr/bin/git -C "$trusted_root" rev-parse --verify 'HEAD:tools/dependency-unsafe')
+          trusted_dependency_baseline_tree=$(/usr/bin/git -C "$trusted_root" rev-parse --verify 'HEAD:policy/dependency-unsafe/baseline')
+          candidate_dependency_tool_tree=$(/usr/bin/git -C "$candidate_root" rev-parse --verify 'HEAD:tools/dependency-unsafe')
+          candidate_dependency_baseline_tree=$(/usr/bin/git -C "$candidate_root" rev-parse --verify 'HEAD:policy/dependency-unsafe/baseline')
+          candidate_dependency_pair="$candidate_dependency_tool_tree:$candidate_dependency_baseline_tree"
+          trusted_dependency_pair="$trusted_dependency_tool_tree:$trusted_dependency_baseline_tree"
+          # This exact pair is the reviewed audit-root migration in #135. The
+          # replacement workflow in that PR removes this transitional overlay.
+          migration_dependency_pair=e98a1a5c366bc1c9618c5e98962f2b3c79638c57:1014c0a8893c36c968a056730145212d65e5570e
+          if [[ "$candidate_dependency_pair" != "$trusted_dependency_pair" && "$candidate_dependency_pair" != "$migration_dependency_pair" ]]; then
+            printf 'candidate dependency audit implementation and baseline are not an approved pair\n' >&2
+            exit 1
+          fi
+
+          for relative_path in tools/maintainability tools/dependency-unsafe policy/dependency-unsafe/baseline; do
             source_path="$trusted_root/$relative_path"
             destination_path="$candidate_root/$relative_path"
             destination_parent=$(/usr/bin/dirname -- "$destination_path")

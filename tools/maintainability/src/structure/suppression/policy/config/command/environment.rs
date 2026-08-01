@@ -1,4 +1,7 @@
 pub(super) fn is_weakening_environment_name(name: &str) -> bool {
+    if name == "ENV" {
+        return true;
+    }
     let name = name.to_ascii_uppercase();
     if is_runtime_code_loading_environment_name(&name) {
         return true;
@@ -93,6 +96,10 @@ pub(super) fn is_weakening_environment_assignment_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("CARGO") || is_weakening_environment_name(name)
 }
 
+pub(super) fn is_case_insensitive_weakening_environment_assignment_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("ENV") || is_weakening_environment_assignment_name(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{is_weakening_environment_assignment_name, is_weakening_environment_name};
@@ -159,6 +166,8 @@ mod tests {
 
     #[test]
     fn inherited_shell_options_are_weakening() {
+        assert!(is_weakening_environment_name("ENV"));
+        assert!(!is_weakening_environment_name("env"));
         assert!(is_weakening_environment_name("SHELLOPTS"));
         assert!(is_weakening_environment_name("shellopts"));
     }

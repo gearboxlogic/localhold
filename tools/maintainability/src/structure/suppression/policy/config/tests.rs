@@ -313,18 +313,22 @@ fn command_policy_requires_manifest_membership_in_the_audited_inventory() {
         "[package]\nname='generated'\nversion='0.1.0'\n",
     )
     .expect("ignored generated manifest");
-    fs::write(
-        workspace.path().join("script/check.sh"),
-        "cargo clippy --manifest-path tools/checker/Cargo.toml -- -D warnings\n",
-    )
-    .expect("audited manifest command");
+    fs::write(workspace.path().join("script/check.sh"), "cargo test --manifest-path tools/checker/Cargo.toml\n").expect("standalone manifest execution command");
     git(workspace.path(), &["init", "-q"]);
     git(workspace.path(), &["add", "."]);
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("opaque interpreter"), "{error:#}");
+
+    fs::write(
+        workspace.path().join("script/check.sh"),
+        "cargo metadata --manifest-path tools/checker/Cargo.toml --no-deps\n",
+    )
+    .expect("audited manifest metadata command");
     reject_checked_in_weakening(workspace.path()).expect("audited manifest selection");
 
     fs::write(
         workspace.path().join("script/check.sh"),
-        "cargo clippy --manifest-path=tools/checker/target/generated/Cargo.toml -- -D warnings\n",
+        "cargo metadata --manifest-path=tools/checker/target/generated/Cargo.toml --no-deps\n",
     )
     .expect("ignored manifest command");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
@@ -354,6 +358,9 @@ fn folded_yaml_commands_are_scanned_as_executed() {
 #[test]
 fn weakening_environment_channels_are_detected() {
     assert!(weakening_environment("BASH_ENV=script/ci-startup.sh"));
+    assert!(weakening_environment("ENV=quality/dash-startup.sh dash -i quality/reviewed.sh"));
+    assert!(!weakening_environment_for_surface("script/check.py", "subprocess.run(command, env=environment)"));
+    assert!(weakening_environment_for_surface("script/check.ps1", "$env:env = 'quality/dash-startup.sh'"));
     assert!(weakening_environment("LD_AUDIT=untrusted.so"));
     assert!(weakening_environment("LD_LIBRARY_PATH=untrusted"));
     assert!(weakening_environment("LD_PRELOAD=untrusted.so"));

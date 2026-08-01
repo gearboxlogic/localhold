@@ -6,8 +6,10 @@ use super::{
     tool_basename,
 };
 
+mod cargo;
 mod compiler;
 mod git;
+mod native;
 mod path;
 mod sed;
 mod trap;
@@ -186,7 +188,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         wrapper::Selection::Nested(command) => return execution_input_candidates(command, direct_program_paths),
         wrapper::Selection::Opaque => return (Vec::new(), true),
     }
-    if compiler::dispatch_is_opaque(&command, arguments) {
+    if compiler::dispatch_is_opaque(&command, arguments) || native::dispatch_is_opaque(&command, arguments) {
         return (Vec::new(), true);
     }
     let selected = match command.as_str() {
@@ -213,7 +215,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "tar" | "tar.exe" if tar_checkpoint_action_is_opaque(arguments) => SelectedInput::Opaque,
         "zip" | "zip.exe" if zip_test_command_is_opaque(arguments) => SelectedInput::Opaque,
         "openssl" | "openssl.exe" if openssl_module_selection_is_opaque(arguments) => SelectedInput::Opaque,
-        "cargo" | "cargo.exe" if cargo_run_is_opaque(arguments) => SelectedInput::Opaque,
+        "cargo" | "cargo.exe" if cargo::dispatch_is_opaque(arguments) => SelectedInput::Opaque,
         "go" | "go.exe" if go_run_is_opaque(arguments) => SelectedInput::Opaque,
         "just" | "just.exe" if just_source_selection_is_opaque(arguments) => SelectedInput::Opaque,
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
@@ -272,34 +274,6 @@ fn openssl_module_selection_is_opaque(arguments: &[String]) -> bool {
     })
 }
 
-fn cargo_run_is_opaque(arguments: &[String]) -> bool {
-    let mut index = 0;
-    while let Some(argument) = arguments.get(index) {
-        if matches!(argument.as_str(), "run" | "r") {
-            return !reviewed_cargo_run_manifest(arguments);
-        }
-        if matches!(argument.as_str(), "--explain" | "--version" | "-V" | "--list" | "--help" | "-h") {
-            return false;
-        }
-        let consumes_operand = matches!(argument.as_str(), "--color" | "--config" | "--change-directory" | "-C" | "-Z");
-        if consumes_operand {
-            index += 2;
-            continue;
-        }
-        if argument.starts_with('+')
-            || argument.starts_with('-')
-            || argument.starts_with("--color=")
-            || argument.starts_with("--config=")
-            || argument.starts_with("--change-directory=")
-        {
-            index += 1;
-            continue;
-        }
-        return false;
-    }
-    false
-}
-
 fn go_run_is_opaque(arguments: &[String]) -> bool {
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
@@ -317,28 +291,6 @@ fn go_run_is_opaque(arguments: &[String]) -> bool {
         return false;
     }
     false
-}
-
-fn reviewed_cargo_run_manifest(arguments: &[String]) -> bool {
-    let mut manifest = None;
-    let mut index = 0;
-    while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
-        let candidate = if argument == "--manifest-path" {
-            index += 1;
-            arguments.get(index).map(String::as_str)
-        } else {
-            argument.strip_prefix("--manifest-path=")
-        };
-        if let Some(candidate) = candidate {
-            if manifest.replace(candidate).is_some() {
-                return false;
-            }
-        } else if argument == "--manifest-path" {
-            return false;
-        }
-        index += 1;
-    }
-    matches!(manifest, Some("tools/maintainability/Cargo.toml" | "tools/dependency-unsafe/Cargo.toml"))
 }
 
 fn just_source_selection_is_opaque(arguments: &[String]) -> bool {
@@ -700,6 +652,8 @@ mod tests {
             "openssl version",
             "openssl dgst quality/input.txt",
             "cargo metadata --manifest-path quality/helper/Cargo.toml",
+            "cargo test --manifest-path Cargo.toml",
+            "cargo test --manifest-path tools/maintainability/Cargo.toml",
             "cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- check",
             "cargo run --manifest-path=tools/dependency-unsafe/Cargo.toml --locked -- check",
             "ld --version",
@@ -709,6 +663,28 @@ mod tests {
             "sed 's/../\\\\x&/g' /etc/hosts",
         ] {
             assert_eq!(inputs(command), (Vec::new(), false), "{command}");
+        }
+    }
+
+    #[test]
+    fn standalone_cargo_execution_fails_closed() {
+        for command in [
+            "cargo test --manifest-path quality/helper/Cargo.toml",
+            "cargo build --manifest-path=quality/helper/Cargo.toml",
+            "cargo nextest run --manifest-path quality/helper/Cargo.toml",
+        ] {
+            assert_eq!(inputs(command), (Vec::new(), true), "{command}");
+        }
+    }
+
+    #[test]
+    fn native_plugin_loading_fails_closed() {
+        for command in [
+            "ar --plugin=quality/lint.so rc quality/archive.a quality/input.o",
+            "gcc-ar --plugin quality/lint.so rc quality/archive.a quality/input.o",
+            "ssh-keygen -D quality/lint.so",
+        ] {
+            assert_eq!(inputs(command), (Vec::new(), true), "{command}");
         }
     }
 
@@ -731,7 +707,10 @@ mod tests {
         assert_eq!(inputs("git -c core.fsmonitor='sh quality/lint.txt' status"), (Vec::new(), true));
         assert_eq!(inputs("git --exec-path=/tmp lint"), (Vec::new(), true));
         assert_eq!(inputs("git --exec-path /tmp lint"), (Vec::new(), true));
+        assert_eq!(inputs("git config --global alias.lint '!sh quality/lint.txt'"), (Vec::new(), true));
+        assert_eq!(inputs("git lint"), (Vec::new(), true));
         assert_eq!(inputs("git -c core.autocrlf=false status"), (Vec::new(), false));
+        assert_eq!(inputs("git config --global core.autocrlf false"), (Vec::new(), false));
     }
 
     #[test]

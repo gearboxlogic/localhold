@@ -33,13 +33,51 @@ fn command_producing_subcommand(arguments: &[String]) -> bool {
         return false;
     };
     match subcommand.to_ascii_lowercase().as_str() {
+        "config" => config_dispatch_is_opaque(&arguments[index + 1..]),
         "difftool" | "filter-branch" | "mergetool" => true,
         "bisect" => arguments[index + 1..]
             .iter()
             .take_while(|argument| argument.as_str() != "--")
             .any(|argument| argument.eq_ignore_ascii_case("run")),
-        _ => false,
+        subcommand => !is_builtin_subcommand(subcommand),
     }
+}
+
+fn config_dispatch_is_opaque(arguments: &[String]) -> bool {
+    arguments != ["--global", "core.autocrlf", "false"]
+}
+
+fn is_builtin_subcommand(subcommand: &str) -> bool {
+    matches!(
+        subcommand,
+        "add"
+            | "bisect"
+            | "branch"
+            | "cat-file"
+            | "check-ignore"
+            | "checkout"
+            | "clone"
+            | "commit"
+            | "diff"
+            | "difftool"
+            | "fetch"
+            | "filter-branch"
+            | "for-each-ref"
+            | "grep"
+            | "init"
+            | "log"
+            | "ls-files"
+            | "merge-base"
+            | "mergetool"
+            | "restore"
+            | "rev-list"
+            | "rev-parse"
+            | "show"
+            | "status"
+            | "switch"
+            | "tag"
+            | "worktree"
+    )
 }
 
 fn git_subcommand(arguments: &[String]) -> Option<(usize, &str)> {
@@ -122,8 +160,13 @@ mod tests {
         assert!(dispatch_is_opaque(&arguments(&["bisect", "run", "sh", "quality/lint.txt"])));
         assert!(dispatch_is_opaque(&arguments(&["bisect", "--no-checkout", "run", "sh", "quality/lint.txt"])));
         assert!(dispatch_is_opaque(&arguments(&["filter-branch", "--tree-filter", "sh quality/lint.txt", "--", "HEAD",])));
+        assert!(dispatch_is_opaque(&arguments(&["config", "--global", "alias.lint", "!sh quality/lint.txt"])));
+        assert!(dispatch_is_opaque(&arguments(&["config", "--local", "core.hooksPath", "quality/hooks"])));
+        assert!(dispatch_is_opaque(&arguments(&["lint"])));
         assert!(!dispatch_is_opaque(&arguments(&["bisect", "start", "--", "run"])));
         assert!(!dispatch_is_opaque(&arguments(&["diff", "--", "difftool"])));
+        assert!(!dispatch_is_opaque(&arguments(&["config", "--global", "core.autocrlf", "false"])));
+        assert!(!dispatch_is_opaque(&arguments(&["status", "--short"])));
     }
 
     #[test]

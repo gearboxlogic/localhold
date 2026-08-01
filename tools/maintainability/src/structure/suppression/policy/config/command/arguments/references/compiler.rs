@@ -1,5 +1,24 @@
 pub(super) fn dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
     is_compiler_driver(command) && arguments.iter().any(|argument| is_dispatch_override(argument))
+        || is_archive_tool(command)
+            && arguments
+                .iter()
+                .take_while(|argument| argument.as_str() != "--")
+                .any(|argument| archive_plugin_option(argument))
+}
+
+fn is_archive_tool(command: &str) -> bool {
+    let stem = command.strip_suffix(".exe").unwrap_or(command);
+    let unversioned = stem
+        .rsplit_once('-')
+        .filter(|(_, suffix)| suffix.chars().all(|character| character.is_ascii_digit() || character == '.'))
+        .map_or(stem, |(prefix, _)| prefix);
+    unversioned == "ar" || unversioned.ends_with("-ar")
+}
+
+fn archive_plugin_option(argument: &str) -> bool {
+    let option = argument.split_once('=').map_or(argument, |(option, _)| option);
+    option.len() >= "--pl".len() && "--plugin".starts_with(option)
 }
 
 fn is_compiler_driver(command: &str) -> bool {
@@ -66,6 +85,23 @@ mod tests {
         for command in ["cargo", "gcc-ar", "llvm-ar"] {
             assert!(!dispatch_is_opaque(command, &arguments(&["-fplugin=quality/lint.so"])), "{command}");
         }
+    }
+
+    #[test]
+    fn archive_plugin_loading_is_opaque() {
+        for command in ["ar", "ar.exe", "gcc-ar", "llvm-ar-19", "x86_64-linux-gnu-ar"] {
+            assert!(
+                dispatch_is_opaque(command, &arguments(&["--plugin=quality/lint.so", "rc", "quality/archive.a"])),
+                "{command}"
+            );
+            assert!(
+                dispatch_is_opaque(command, &arguments(&["--plugin", "quality/lint.so", "rc", "quality/archive.a"])),
+                "{command}"
+            );
+            assert!(dispatch_is_opaque(command, &arguments(&["--pl=quality/lint.so", "rc", "quality/archive.a"])), "{command}");
+        }
+        assert!(!dispatch_is_opaque("ar", &arguments(&["rc", "quality/archive.a", "quality/input.o"])));
+        assert!(!dispatch_is_opaque("jar", &arguments(&["--plugin=quality/lint.so"])));
     }
 
     #[test]

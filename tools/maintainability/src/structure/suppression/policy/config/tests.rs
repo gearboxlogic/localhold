@@ -445,6 +445,14 @@ fn reviewed_environment_scrubbers_are_exact() {
         ".github/workflows/gpu-release-gate.yml",
         &GPU_RELEASE_REVISION_ENVIRONMENT_LINES.join("\n"),
     ));
+    assert!(scrubber_environment_references_are_exact(
+        "script/claude-review.sh",
+        &CLAUDE_REVIEW_ENVIRONMENT_LINES.join("\n"),
+    ));
+    assert!(scrubber_environment_references_are_exact(
+        "script/tests/test_claude_review.sh",
+        &CLAUDE_REVIEW_TEST_ENVIRONMENT_LINES.join("\n"),
+    ));
     assert!(!scrubber_environment_references_are_exact("script/tests/new-command.sh", &scrubber));
 }
 
@@ -531,13 +539,14 @@ fn authenticated_dynamic_commands_require_the_exact_reviewed_lines() {
 }
 
 #[test]
-fn executable_path_changes_are_governed_only_when_rust_tools_can_use_them() {
+fn executable_path_changes_are_governed_on_every_command_surface() {
     assert!(weakening_environment_for_surface("script/check.sh", "PATH=/tmp cargo clippy"));
     assert!(weakening_environment_for_surface("script/check.sh", "TOKEN=value PATH=/tmp cargo clippy"));
     assert!(weakening_environment_for_surface("package.json", r#"{"scripts":{"lint":"P\u0041TH=/tmp cargo clippy"}}"#));
     assert!(weakening_environment_for_surface("script/check.ps1", "$env:Path = 'C:\\untrusted'; cargo clippy"));
     assert!(!weakening_environment_for_surface("script/check.sh", "path=/tmp cargo clippy"));
-    assert!(!weakening_environment_for_surface("script/check.sh", "PATH=/tmp node application.js"));
+    assert!(!weakening_environment_for_surface("script/check.ps1", "$path = Join-Path release artifact.zip"));
+    assert!(weakening_environment_for_surface("script/check.sh", "PATH=/tmp node application.js"));
 }
 
 #[test]

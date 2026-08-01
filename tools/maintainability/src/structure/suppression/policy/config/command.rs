@@ -254,6 +254,12 @@ pub(super) const GPU_RELEASE_REVISION_ENVIRONMENT_LINES: &[&str] = &[
     "          unset ORT_DYLIB_PATH LD_LIBRARY_PATH LD_PRELOAD",
     "            PATH=/usr/bin:/bin \\",
 ];
+pub(super) const CLAUDE_REVIEW_ENVIRONMENT_LINES: &[&str] = &["    \"PATH=$PATH\""];
+pub(super) const CLAUDE_REVIEW_TEST_ENVIRONMENT_LINES: &[&str] = &[
+    "PATH=\"$test_root/bin:$PATH\" \\",
+    "if PATH=\"$test_root/bin:$PATH\" \\",
+    "PATH=\"$test_root/bin:$PATH\" \\",
+];
 
 pub fn reject_checked_in_weakening(workspace: &Path) -> Result<()> {
     let surfaces = execution_surfaces(workspace)?;
@@ -313,21 +319,32 @@ pub(super) fn weakening_environment_for_surface(path: &str, source: &str) -> boo
         || yaml::environment_variables(path, source)
             .iter()
             .any(|(name, _)| is_case_insensitive_weakening_environment_assignment_name(name))
-        || quality_command_referenced(source) && path_environment_assignment(path, source)
+        || path_environment_assignment(path, source)
 }
 
 fn case_insensitive_environment_assignment(path: &str, source: &str) -> bool {
-    environment_assignment_matches(source, is_weakening_environment_assignment_name)
-        || has_case_insensitive_environment_names(path) && environment_assignment_matches(source, is_case_insensitive_weakening_environment_assignment_name)
+    environment_assignment_matches(source, |name| is_weakening_environment_assignment_name(normalized_environment_name(name)))
+        || has_case_insensitive_environment_names(path)
+            && environment_assignment_matches(source, |name| is_case_insensitive_weakening_environment_assignment_name(normalized_environment_name(name)))
 }
 
 fn path_environment_assignment(path: &str, source: &str) -> bool {
-    let assignment_predicate: fn(&str) -> bool = if has_case_insensitive_environment_names(path) {
-        is_path_environment_name
+    let case_insensitive = has_case_insensitive_environment_names(path);
+    environment_assignment_matches(source, |name| path_assignment_name(name, case_insensitive))
+        || yaml::environment_variables(path, source).iter().any(|(name, _)| is_path_environment_name(name))
+}
+
+fn path_assignment_name(name: &str, case_insensitive: bool) -> bool {
+    let unquoted = name.trim_matches(|character: char| matches!(character, '(' | ')' | ':' | '"' | '\''));
+    if unquoted.starts_with('$') && !unquoted[1..].to_ascii_lowercase().starts_with("env:") {
+        return false;
+    }
+    let name = normalized_environment_name(name);
+    if case_insensitive {
+        is_path_environment_name(name)
     } else {
-        is_exact_path_environment_name
-    };
-    environment_assignment_matches(source, assignment_predicate) || yaml::environment_variables(path, source).iter().any(|(name, _)| is_path_environment_name(name))
+        is_exact_path_environment_name(name)
+    }
 }
 
 fn has_case_insensitive_environment_names(path: &str) -> bool {
@@ -338,48 +355,15 @@ fn has_case_insensitive_environment_names(path: &str) -> bool {
         || path.file_name().and_then(|name| name.to_str()) == Some("package.json")
 }
 
-fn environment_assignment_matches(source: &str, predicate: fn(&str) -> bool) -> bool {
+fn environment_assignment_matches(source: &str, predicate: impl Fn(&str) -> bool + Copy) -> bool {
     source.split(['\n', ';', '&', '|']).any(|segment| {
         let words = normalized_shell_words(segment);
-        words
-            .iter()
-            .any(|word| word.split_once('=').map(|(name, _)| normalized_environment_name(name)).is_some_and(predicate))
-            || words.windows(2).any(|tokens| tokens[1] == "=" && predicate(normalized_environment_name(&tokens[0])))
+        words.iter().any(|word| word.split_once('=').map(|(name, _)| name).is_some_and(predicate))
+            || words.windows(2).any(|tokens| tokens[1] == "=" && predicate(&tokens[0]))
             || normalized_shell_tokens(segment)
                 .windows(2)
-                .any(|tokens| matches!(tokens[0].to_ascii_lowercase().as_str(), "export" | "unset" | "set" | "setenv") && predicate(normalized_environment_name(&tokens[1])))
+                .any(|tokens| matches!(tokens[0].to_ascii_lowercase().as_str(), "export" | "unset" | "set" | "setenv") && predicate(&tokens[1]))
     })
-}
-
-fn rust_tool_referenced(source: &str) -> bool {
-    normalized_shell_tokens(source).iter().any(|token| {
-        let token = normalized_environment_name(token).trim_matches(|character: char| matches!(character, '/' | '\\'));
-        let basename = token.rsplit(['/', '\\']).next().unwrap_or(token).to_ascii_lowercase();
-        matches!(
-            basename.as_str(),
-            "cargo"
-                | "cargo.exe"
-                | "cargo_executable"
-                | "cargo-clippy"
-                | "cargo-clippy.exe"
-                | "cargo_clippy_executable"
-                | "native_cargo"
-                | "rustc"
-                | "rustc.exe"
-                | "rustc_executable"
-                | "native_rustc"
-                | "rustdoc"
-                | "rustdoc.exe"
-                | "rustdoc_executable"
-                | "native_rustdoc"
-                | "clippy-driver"
-                | "clippy-driver.exe"
-        )
-    })
-}
-
-fn quality_command_referenced(source: &str) -> bool {
-    rust_tool_referenced(source) || arguments::contains_quality_command(source, true)
 }
 
 fn normalized_environment_name(name: &str) -> &str {
@@ -416,13 +400,14 @@ pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str
         ".github/workflows/ci.yml" => CI_TRUST_ENVIRONMENT_LINES,
         ".github/workflows/trusted-maintainability.yml" => TRUSTED_GATE_ENVIRONMENT_LINES,
         ".github/workflows/gpu-release-gate.yml" => GPU_RELEASE_REVISION_ENVIRONMENT_LINES,
+        "script/claude-review.sh" => CLAUDE_REVIEW_ENVIRONMENT_LINES,
+        "script/tests/test_claude_review.sh" => CLAUDE_REVIEW_TEST_ENVIRONMENT_LINES,
         _ => return false,
     };
     let lines = source.lines().collect::<Vec<_>>();
-    let quality_commands_are_referenced = quality_command_referenced(source);
     let yaml_environment_lines = yaml::environment_variables(path, source)
         .into_iter()
-        .filter(|(name, _)| is_weakening_environment_assignment_name(name) || quality_commands_are_referenced && is_path_environment_name(name))
+        .filter(|(name, _)| is_weakening_environment_assignment_name(name) || is_path_environment_name(name))
         .map(|(_, line)| line)
         .collect::<Vec<_>>();
     allowed.iter().all(|expected| {
@@ -430,9 +415,7 @@ pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str
         lines.iter().filter(|line| *line == expected).count() == expected_count
     }) && lines
         .iter()
-        .filter(|line| {
-            weakening_environment_for_surface("", line) || quality_commands_are_referenced && path_environment_assignment("", line) || yaml_environment_lines.contains(line)
-        })
+        .filter(|line| weakening_environment_for_surface("", line) || yaml_environment_lines.contains(line))
         .all(|line| allowed.contains(line))
 }
 

@@ -2,11 +2,11 @@ pub(super) fn dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
     is_compiler_driver(command) && arguments.iter().any(|argument| is_dispatch_override(argument))
         || is_rust_compiler(command) && rust_compiler_dispatch_is_opaque(arguments)
         || is_linker_tool(command) && arguments.iter().any(|argument| linker_dispatch_override(argument))
-        || is_archive_tool(command)
+        || is_binutils_plugin_tool(command)
             && arguments
                 .iter()
                 .take_while(|argument| argument.as_str() != "--")
-                .any(|argument| archive_plugin_option(argument))
+                .any(|argument| binutils_plugin_option(argument))
 }
 
 pub(super) fn rust_compiler_dispatch_is_opaque(arguments: &[String]) -> bool {
@@ -30,12 +30,14 @@ fn is_rust_compiler(command: &str) -> bool {
     matches!(command.strip_suffix(".exe").unwrap_or(command), "rustc" | "rustdoc")
 }
 
-fn is_archive_tool(command: &str) -> bool {
+fn is_binutils_plugin_tool(command: &str) -> bool {
     let unversioned = unversioned_tool_name(command);
-    unversioned == "ar" || unversioned.ends_with("-ar")
+    ["ar", "nm", "ranlib"]
+        .iter()
+        .any(|tool| unversioned == *tool || unversioned.strip_suffix(tool).is_some_and(|prefix| prefix.ends_with('-')))
 }
 
-fn archive_plugin_option(argument: &str) -> bool {
+fn binutils_plugin_option(argument: &str) -> bool {
     let option = argument.split_once('=').map_or(argument, |(option, _)| option);
     option.len() >= "--pl".len() && "--plugin".starts_with(option)
 }
@@ -135,8 +137,24 @@ mod tests {
     }
 
     #[test]
-    fn archive_plugin_loading_is_opaque() {
-        for command in ["ar", "ar.exe", "gcc-ar", "llvm-ar-19", "x86_64-linux-gnu-ar"] {
+    fn binutils_plugin_loading_is_opaque() {
+        for command in [
+            "ar",
+            "ar.exe",
+            "gcc-ar",
+            "llvm-ar-19",
+            "x86_64-linux-gnu-ar",
+            "nm",
+            "nm.exe",
+            "gcc-nm",
+            "llvm-nm-19",
+            "x86_64-linux-gnu-nm",
+            "ranlib",
+            "ranlib.exe",
+            "gcc-ranlib",
+            "llvm-ranlib-19",
+            "x86_64-linux-gnu-ranlib",
+        ] {
             assert!(
                 dispatch_is_opaque(command, &arguments(&["--plugin=quality/lint.so", "rc", "quality/archive.a"])),
                 "{command}"
@@ -148,6 +166,8 @@ mod tests {
             assert!(dispatch_is_opaque(command, &arguments(&["--pl=quality/lint.so", "rc", "quality/archive.a"])), "{command}");
         }
         assert!(!dispatch_is_opaque("ar", &arguments(&["rc", "quality/archive.a", "quality/input.o"])));
+        assert!(!dispatch_is_opaque("nm", &arguments(&["--defined-only", "quality/input.o"])));
+        assert!(!dispatch_is_opaque("ranlib", &arguments(&["quality/archive.a"])));
         assert!(!dispatch_is_opaque("jar", &arguments(&["--plugin=quality/lint.so"])));
     }
 

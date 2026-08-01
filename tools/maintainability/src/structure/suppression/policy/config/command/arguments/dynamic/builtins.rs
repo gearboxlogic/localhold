@@ -10,9 +10,10 @@ pub(super) fn assigned_variables(source: &str) -> (BTreeSet<String>, bool) {
             continue;
         };
         let arguments = &command[index.saturating_add(1)..];
-        match command[index].trim_matches(['(', ')', '{', '}']).to_ascii_lowercase().as_str() {
+        let command_word = command[index].trim_matches(['(', ')', '{', '}']).to_ascii_lowercase();
+        match command_word.as_str() {
             "printf" => collect_printf_target(arguments, &mut names, &mut opaque_target),
-            "read" | "readarray" | "mapfile" => collect_read_targets(&command[index], arguments, &mut names, &mut opaque_target),
+            "read" | "readarray" | "mapfile" => collect_read_targets(&command_word, arguments, &mut names, &mut opaque_target),
             "getopts" => collect_getopts_target(arguments, &mut names, &mut opaque_target),
             _ => {}
         }
@@ -92,6 +93,10 @@ mod tests {
     fn mutating_builtins_expose_their_assignment_targets() {
         let (names, opaque) = assigned_variables("printf -v tool %b payload; IFS= read -r sub option; mapfile -t commands; getopts ab flag");
         assert_eq!(names.into_iter().collect::<Vec<_>>(), ["commands", "flag", "option", "sub", "tool"]);
+        assert!(!opaque);
+
+        let (names, opaque) = assigned_variables("{read < input; (mapfile) < input");
+        assert_eq!(names.into_iter().collect::<Vec<_>>(), ["MAPFILE", "REPLY"]);
         assert!(!opaque);
 
         let (names, opaque) = assigned_variables("printf -v \"$target\" %s cargo");

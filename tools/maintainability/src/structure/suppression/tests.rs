@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::process::Command;
 
 use super::{SourceCategory, reject_direct_source_suppressions, reject_tooling_suppressions, scan_revision, scan_workspace};
 use crate::structure::classify::Inventory;
@@ -236,7 +235,7 @@ fn external_module_contents_participate_in_suppression_identity() {
     fs::write(workspace.path().join("src/lib.rs"), "pub fn library() {}\n").expect("library target");
     fs::write(
         workspace.path().join("tests/integration/main.rs"),
-        "#[expect(dead_code, reason = \"shared integration helpers\")]\nmod helpers;\nfn main() {}\n",
+        "#![expect(dead_code, reason = \"shared integration helpers\")]\nmod helpers;\nfn main() {}\n",
     )
     .expect("integration target");
     let helper = workspace.path().join("tests/integration/helpers.rs");
@@ -377,12 +376,24 @@ fn maintainer_cargo_targets_cannot_escape_the_tools_root() {
 }
 
 fn git(workspace: &std::path::Path, arguments: &[&str]) {
-    let status = Command::new("git").current_dir(workspace).args(arguments).status().expect("run git");
+    let status = crate::structure::revision::git_command()
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .current_dir(workspace)
+        .args(arguments)
+        .status()
+        .expect("run git");
     assert!(status.success());
 }
 
 fn git_output(workspace: &std::path::Path, arguments: &[&str]) -> String {
-    let output = Command::new("git").current_dir(workspace).args(arguments).output().expect("run git");
+    let output = crate::structure::revision::git_command()
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .current_dir(workspace)
+        .args(arguments)
+        .output()
+        .expect("run git");
     assert!(output.status.success());
     String::from_utf8(output.stdout).expect("Git output is UTF-8")
 }

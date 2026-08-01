@@ -403,6 +403,20 @@ mod tests {
         assert!(failure_masks_quality_command("cargo clippy --locked\ntrue", true, Some(true), true, false));
         assert!(!failure_masks_quality_command("set -e\ncargo clippy --locked\ntrue", true, Some(true), true, false));
         assert!(!failure_masks_quality_command("cargo clippy --locked && echo passed", true, Some(true), true, false));
+        assert!(!failure_masks_quality_command(
+            "cargo clippy --locked && echo passed && true",
+            true,
+            Some(true),
+            true,
+            false
+        ));
+        assert!(failure_masks_quality_command(
+            "cargo clippy --locked && echo passed && true; echo done",
+            true,
+            Some(true),
+            true,
+            false,
+        ));
         assert!(failure_masks_quality_command("cargo clippy --locked && echo passed\ntrue", true, Some(true), true, false));
     }
 

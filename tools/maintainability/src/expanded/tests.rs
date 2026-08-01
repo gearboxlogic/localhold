@@ -11,7 +11,7 @@ use crate::scan::{SiteKind, SourceRange, UnsafeSite, scan_workspace};
 use super::dep_info::{is_audited_compiler_input, parse as parse_dep_info, parse_make_words};
 use super::{
     AuditLane, AuditOutput, Diagnostic, audit_environment_override, compare_diagnostics, is_root_manifest, parse_cargo_output, sanitize_compiler_environment_with_rustc,
-    subtract_diagnostics, verify_with_target_directory,
+    subtract_diagnostics, validate_authenticated_override, verify_with_target_directory,
 };
 
 fn site(range: SourceRange) -> UnsafeSite {
@@ -101,6 +101,19 @@ fn compiler_environment_restores_only_the_authenticated_rustc_handoff() {
     sanitize_compiler_environment_with_rustc(&mut command, Some(OsStr::new("/trusted/rustc")));
     let rustc = command.get_envs().find(|(name, _)| *name == OsStr::new("RUSTC"));
     assert_eq!(rustc, Some((OsStr::new("RUSTC"), Some(OsStr::new("/trusted/rustc")))));
+}
+
+#[test]
+fn compiler_overrides_must_match_the_authenticated_build_environment() {
+    let executable = std::env::current_exe().expect("current test executable");
+    let authenticated = executable.as_os_str();
+
+    assert!(validate_authenticated_override("TEST_COMPILER", None, None).is_ok());
+    assert!(validate_authenticated_override("TEST_COMPILER", Some(authenticated), Some(authenticated)).is_ok());
+    assert!(validate_authenticated_override("TEST_COMPILER", Some(OsStr::new("relative")), Some(OsStr::new("relative"))).is_err());
+    assert!(validate_authenticated_override("TEST_COMPILER", Some(authenticated), None).is_err());
+    assert!(validate_authenticated_override("TEST_COMPILER", None, Some(authenticated)).is_err());
+    assert!(validate_authenticated_override("TEST_COMPILER", Some(OsStr::new("different")), Some(authenticated)).is_err());
 }
 
 #[test]

@@ -438,6 +438,14 @@ fn reviewed_environment_scrubbers_are_exact() {
 }
 
 #[test]
+fn checked_in_bootstrap_matches_its_reviewed_environment_contract() {
+    let bootstrap = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../script/check-maintainability-bootstrap.sh");
+    let source = fs::read_to_string(bootstrap).expect("read checked-in maintainability bootstrap");
+
+    assert!(scrubber_environment_references_are_exact("script/check-maintainability-bootstrap.sh", &source));
+}
+
+#[test]
 fn trusted_gate_environment_allowance_is_closed() {
     let reviewed = TRUSTED_GATE_ENVIRONMENT_LINES.join("\n");
     for changed in [

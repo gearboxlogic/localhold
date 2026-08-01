@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::manifest::{DependencyPin, RootDependencySpec, UnsafeManifest};
-use crate::scan::{RESERVED_LOCAL_MACROS, REVIEWED_EXPANSION_PACKAGES};
+use crate::scan::{RESERVED_LOCAL_MACROS, REVIEWED_EXPANSION_PACKAGES, REVIEWED_MAINTAINER_EXPANSION_PACKAGES};
 use crate::{expanded, scan};
 
 mod dependency_graph;
@@ -144,28 +144,36 @@ fn verify_local_dependency_table(value: Option<&toml::Value>, label: &str, root_
     Ok(())
 }
 
-pub fn verify_expansion_dependency_routes(cargo: &toml::Value) -> Result<()> {
+fn verify_expansion_dependency_routes(cargo: &toml::Value) -> Result<()> {
+    verify_expansion_dependency_routes_for(cargo, false)
+}
+
+pub fn verify_maintainer_expansion_dependency_routes(cargo: &toml::Value) -> Result<()> {
+    verify_expansion_dependency_routes_for(cargo, true)
+}
+
+fn verify_expansion_dependency_routes_for(cargo: &toml::Value, maintainer: bool) -> Result<()> {
     for replacement in ["patch", "replace"] {
         if cargo.get(replacement).is_some() {
             bail!("Cargo.toml [{replacement}] dependency replacement is not supported by the reviewed expansion-path contract");
         }
     }
-    verify_expansion_dependency_table(cargo.get("dependencies"), "dependencies")?;
+    verify_expansion_dependency_table(cargo.get("dependencies"), "dependencies", maintainer)?;
     for section in ["build-dependencies", "dev-dependencies"] {
-        verify_expansion_dependency_table(cargo.get(section), section)?;
+        verify_expansion_dependency_table(cargo.get(section), section, maintainer)?;
     }
     if let Some(targets) = cargo.get("target") {
         for (selector, target) in targets.as_table().context("Cargo.toml target must be a table")? {
             let target = target.as_table().with_context(|| format!("Cargo.toml target {selector:?} must be a table"))?;
             for section in ["dependencies", "build-dependencies", "dev-dependencies"] {
-                verify_expansion_dependency_table(target.get(section), &format!("target.{selector:?}.{section}"))?;
+                verify_expansion_dependency_table(target.get(section), &format!("target.{selector:?}.{section}"), maintainer)?;
             }
         }
     }
     Ok(())
 }
 
-fn verify_expansion_dependency_table(value: Option<&toml::Value>, label: &str) -> Result<()> {
+fn verify_expansion_dependency_table(value: Option<&toml::Value>, label: &str, maintainer: bool) -> Result<()> {
     let Some(value) = value else {
         return Ok(());
     };
@@ -176,8 +184,15 @@ fn verify_expansion_dependency_table(value: Option<&toml::Value>, label: &str) -
         if RESERVED_LOCAL_MACROS.contains(&crate_name.as_str()) || RESERVED_LOCAL_MACROS.contains(&package_crate_name.as_str()) {
             bail!("Cargo.toml {label}.{key} collides with reserved local macro name {package}");
         }
+        let maintainer_crate = REVIEWED_MAINTAINER_EXPANSION_PACKAGES.contains(&crate_name.as_str());
+        let maintainer_package = REVIEWED_MAINTAINER_EXPANSION_PACKAGES.contains(&package_crate_name.as_str());
+        if !maintainer && (maintainer_crate || maintainer_package) {
+            bail!("Cargo.toml {label}.{key} uses maintainer-only expansion dependency {package}");
+        }
         let reviewed_crate = REVIEWED_EXPANSION_PACKAGES.contains(&crate_name.as_str());
         let reviewed_package = REVIEWED_EXPANSION_PACKAGES.contains(&package_crate_name.as_str());
+        let reviewed_crate = reviewed_crate || maintainer && maintainer_crate;
+        let reviewed_package = reviewed_package || maintainer && maintainer_package;
         if reviewed_crate && package != crate_name || reviewed_package && key != package {
             bail!("Cargo.toml {label}.{key} renames expansion dependency {package}; reviewed macro and attribute paths require an unrenamed package identity");
         }

@@ -6,7 +6,7 @@ use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
 use syn::{Attribute, ItemUse, Macro, Path, Token, UseTree};
 
-use super::{RESERVED_LOCAL_MACROS, REVIEWED_EXPANSION_PACKAGES};
+use super::{RESERVED_LOCAL_MACROS, REVIEWED_EXPANSION_PACKAGES, REVIEWED_MAINTAINER_EXPANSION_PACKAGES};
 
 const ASSEMBLY_MACROS: [&str; 4] = ["asm", "global_asm", "llvm_asm", "naked_asm"];
 const STANDALONE_ASSEMBLY_MACROS: [&str; 2] = ["core::arch::global_asm", "core::arch::naked_asm"];
@@ -116,6 +116,7 @@ fn is_trusted_macro_path(path: &str) -> bool {
             | "macro_rules"
             | "matches"
             | "ort::inputs"
+            | "option_env"
             | "panic"
             | "params"
             | "println"
@@ -247,7 +248,7 @@ pub(super) fn is_trusted_attribute(attribute: &Attribute) -> bool {
 }
 
 pub(super) fn is_reserved_expansion_root(name: &str) -> bool {
-    REVIEWED_EXPANSION_PACKAGES.contains(&name)
+    REVIEWED_EXPANSION_PACKAGES.contains(&name) || REVIEWED_MAINTAINER_EXPANSION_PACKAGES.contains(&name)
 }
 
 pub(super) fn untrusted_import(item: &ItemUse) -> Option<String> {

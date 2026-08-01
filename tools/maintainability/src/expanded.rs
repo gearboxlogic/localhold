@@ -12,6 +12,8 @@ use serde_json::Value;
 
 const AUTHENTICATED_RUSTC_ENV: &str = "LOCALHOLD_MAINTAINABILITY_RUSTC";
 const AUTHENTICATED_CARGO_CLIPPY_ENV: &str = "LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY";
+const AUTHENTICATED_RUSTC_BUILD: Option<&str> = option_env!("LOCALHOLD_MAINTAINABILITY_RUSTC");
+const AUTHENTICATED_CARGO_CLIPPY_BUILD: Option<&str> = option_env!("LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY");
 
 use crate::scan::{SiteKind, UnsafeSite};
 
@@ -259,6 +261,29 @@ pub fn cargo_clippy_command() -> Command {
     let mut command = Command::new(executable);
     command.arg("clippy");
     command
+}
+
+pub fn validate_authenticated_compiler_environment() -> Result<()> {
+    validate_authenticated_override(
+        AUTHENTICATED_RUSTC_ENV,
+        env::var_os(AUTHENTICATED_RUSTC_ENV).as_deref(),
+        AUTHENTICATED_RUSTC_BUILD.map(OsStr::new),
+    )?;
+    validate_authenticated_override(
+        AUTHENTICATED_CARGO_CLIPPY_ENV,
+        env::var_os(AUTHENTICATED_CARGO_CLIPPY_ENV).as_deref(),
+        AUTHENTICATED_CARGO_CLIPPY_BUILD.map(OsStr::new),
+    )
+}
+
+fn validate_authenticated_override(name: &str, runtime: Option<&OsStr>, compiled: Option<&OsStr>) -> Result<()> {
+    match (runtime, compiled) {
+        (None, None) => Ok(()),
+        (Some(runtime), Some(compiled)) if runtime == compiled && Path::new(runtime).is_absolute() => Ok(()),
+        (Some(_), Some(_)) => bail!("{name} differs from the compiler override authenticated when the checker was built"),
+        (Some(_), None) => bail!("{name} was not authenticated when the checker was built"),
+        (None, Some(_)) => bail!("{name} authenticated at build time is missing at runtime"),
+    }
 }
 
 pub fn sanitize_compiler_environment(command: &mut Command) {

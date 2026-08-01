@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use super::{
-    dynamic_program, has_case_insensitive_tool_names, is_cargo_tool_token, is_environment_assignment, is_normalized_manifest_path, is_yaml, matches_tool_name,
-    normalized_source_for_surface, package_json, tokens, tool_basename,
+    dynamic_program, is_cargo_tool_token, is_environment_assignment, is_normalized_manifest_path, is_yaml, matches_tool_name, normalized_source_for_surface, package_json, tokens,
+    tool_basename,
 };
 
 mod compiler;
@@ -14,7 +14,7 @@ mod trap;
 pub(super) mod wrapper;
 
 pub(in crate::structure::suppression::policy::config::command) fn cargo_manifest_paths_for_surface(path: &str, source: &str) -> (BTreeSet<String>, bool) {
-    let case_insensitive_tools = has_case_insensitive_tool_names(path);
+    let case_insensitive_tools = true;
     if let Some(scripts) = package_json::script_commands(path, source) {
         let Ok(scripts) = scripts else {
             return (BTreeSet::new(), true);
@@ -210,6 +210,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "tar" | "tar.exe" if tar_checkpoint_action_is_opaque(arguments) => SelectedInput::Opaque,
         "zip" | "zip.exe" if zip_test_command_is_opaque(arguments) => SelectedInput::Opaque,
         "openssl" | "openssl.exe" if openssl_module_selection_is_opaque(arguments) => SelectedInput::Opaque,
+        "cargo" | "cargo.exe" if cargo_run_is_opaque(arguments) => SelectedInput::Opaque,
         "just" | "just.exe" if just_source_selection_is_opaque(arguments) => SelectedInput::Opaque,
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
             let (inputs, opaque) = makefile_inputs(arguments);
@@ -261,6 +262,56 @@ fn openssl_module_selection_is_opaque(arguments: &[String]) -> bool {
         let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
         matches!(option, "-engine" | "-provider" | "-provider-path")
     })
+}
+
+fn cargo_run_is_opaque(arguments: &[String]) -> bool {
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        if matches!(argument.as_str(), "run" | "r") {
+            return !reviewed_cargo_run_manifest(arguments);
+        }
+        if matches!(argument.as_str(), "--explain" | "--version" | "-V" | "--list" | "--help" | "-h") {
+            return false;
+        }
+        let consumes_operand = matches!(argument.as_str(), "--color" | "--config" | "--change-directory" | "-C" | "-Z");
+        if consumes_operand {
+            index += 2;
+            continue;
+        }
+        if argument.starts_with('+')
+            || argument.starts_with('-')
+            || argument.starts_with("--color=")
+            || argument.starts_with("--config=")
+            || argument.starts_with("--change-directory=")
+        {
+            index += 1;
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
+fn reviewed_cargo_run_manifest(arguments: &[String]) -> bool {
+    let mut manifest = None;
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
+        let candidate = if argument == "--manifest-path" {
+            index += 1;
+            arguments.get(index).map(String::as_str)
+        } else {
+            argument.strip_prefix("--manifest-path=")
+        };
+        if let Some(candidate) = candidate {
+            if manifest.replace(candidate).is_some() {
+                return false;
+            }
+        } else if argument == "--manifest-path" {
+            return false;
+        }
+        index += 1;
+    }
+    matches!(manifest, Some("tools/maintainability/Cargo.toml" | "tools/dependency-unsafe/Cargo.toml"))
 }
 
 fn just_source_selection_is_opaque(arguments: &[String]) -> bool {
@@ -580,6 +631,9 @@ mod tests {
             "zip -T -TTquality/lint.txt archive.zip input.txt",
             "openssl list -provider-path quality -provider lint",
             "openssl.exe req -engine lint -new",
+            "cargo run --manifest-path quality/helper/Cargo.toml",
+            "cargo.exe --locked run --manifest-path quality/helper/Cargo.toml",
+            "cargo +1.97.0 r --manifest-path quality/helper/Cargo.toml",
             "sed -nf quality/lint.sed /etc/hosts",
             "sed --file=quality/lint.sed /etc/hosts",
             "sed -f $SCRIPT /etc/hosts",
@@ -608,6 +662,9 @@ mod tests {
             "tar -cf archive.tar .",
             "openssl version",
             "openssl dgst quality/input.txt",
+            "cargo metadata --manifest-path quality/helper/Cargo.toml",
+            "cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- check",
+            "cargo run --manifest-path=tools/dependency-unsafe/Cargo.toml --locked -- check",
             "sed -n -e '1p' /etc/hosts",
             "sed 's/../\\\\x&/g' /etc/hosts",
         ] {

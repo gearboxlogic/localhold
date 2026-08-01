@@ -31,6 +31,7 @@ fn main() {
 
 fn run() -> Result<()> {
     let command = parse_args(env::args().skip(1))?;
+    expanded::validate_authenticated_compiler_environment()?;
     let workspace = workspace_root()?;
     match command {
         Command::Check => {

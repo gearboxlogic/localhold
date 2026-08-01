@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 
@@ -40,9 +40,13 @@ pub(in crate::structure::suppression) fn external_target_maps(relations: &BTreeM
 
 fn reachable_sources(root_item: &str, root_path: &str, adjacency: &ModuleAdjacency<'_>) -> Result<LogicalSources> {
     let mut reachable = LogicalSources::new();
+    let mut expanded_paths = BTreeSet::new();
     let mut pending = vec![(root_item.to_owned(), root_path)];
     while let Some((logical, path)) = pending.pop() {
         if !insert_logical_source(&mut reachable, logical.clone(), path)? {
+            continue;
+        }
+        if !expanded_paths.insert(path) {
             continue;
         }
         if let Some(children) = adjacency.get(path) {

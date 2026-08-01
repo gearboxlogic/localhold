@@ -118,6 +118,34 @@ fn command_policy_rejects_unanalyzed_interpreter_programs() {
 }
 
 #[test]
+fn command_policy_rejects_cargo_run_helpers() {
+    for cargo in ["cargo", "cargo.exe"] {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        fs::create_dir_all(workspace.path().join("quality/helper/src")).expect("helper source directory");
+        fs::write(
+            workspace.path().join("Justfile"),
+            format!("lint:\n    {cargo} run --manifest-path quality/helper/Cargo.toml\n"),
+        )
+        .expect("Cargo helper invocation");
+        fs::write(
+            workspace.path().join("quality/helper/Cargo.toml"),
+            "[package]\nname = \"lint-helper\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )
+        .expect("helper manifest");
+        fs::write(
+            workspace.path().join("quality/helper/src/main.rs"),
+            "fn main() { std::process::Command::new(\"cargo\").args([\"clippy\", \"--\", \"-A\", \"warnings\"]).status().unwrap(); }\n",
+        )
+        .expect("helper source");
+        git(workspace.path(), &["init", "-q"]);
+        git(workspace.path(), &["add", "."]);
+
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
+    }
+}
+
+#[test]
 fn command_policy_scans_timeout_wrapped_programs() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
@@ -693,7 +721,7 @@ fn command_policy_rejects_directly_compiled_rust_helpers() {
     assert!(error.to_string().contains("opaque command helper"));
 
     fs::write(workspace.path().join("script/check.sh"), "rustc --version\n").expect("compiler version command");
-    assert!(reject_checked_in_weakening(workspace.path()).expect("informational compiler command").is_empty());
+    reject_checked_in_weakening(workspace.path()).expect("informational compiler command");
 
     fs::write(workspace.path().join("script/check.sh"), "rustc \"$DIRECT_SOURCE\"\n").expect("opaque direct compiler command");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
@@ -703,7 +731,7 @@ fn command_policy_rejects_directly_compiled_rust_helpers() {
     fs::write(workspace.path().join("check.rs"), "fn main() {}\n").expect("root Rust source");
     fs::write(workspace.path().join("misc/check.rs"), "fn main() {}\n").expect("alternate Rust source");
     fs::write(workspace.path().join("script/check.sh"), "cd misc && rustc --version\n").expect("relocated informational command");
-    assert!(reject_checked_in_weakening(workspace.path()).expect("relocated informational compiler command").is_empty());
+    reject_checked_in_weakening(workspace.path()).expect("relocated informational compiler command");
 
     fs::write(workspace.path().join("script/check.sh"), "cd misc && rustc check.rs\n").expect("relocated compiler command");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
@@ -729,7 +757,7 @@ cd -- "$repository_root"
 cargo clippy -- -D warnings
 "#;
     fs::write(workspace.path().join("script/check.sh"), reviewed_root).expect("audited repository-root command");
-    assert!(reject_checked_in_weakening(workspace.path()).expect("audited repository-root Cargo command").is_empty());
+    reject_checked_in_weakening(workspace.path()).expect("audited repository-root Cargo command");
 
     fs::write(
         workspace.path().join("script/check.sh"),

@@ -78,36 +78,86 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
 }
 
 const TRUSTED_WORKFLOW: &str = ".github/workflows/trusted-maintainability.yml";
-const TRUSTED_DISPATCH_LINE: &str = "          /usr/bin/bash \"$trusted_bootstrap\" --root \"$candidate_root\" --maintainability";
-const TRUSTED_DISPATCH_AUTHENTICATION: &[&str] = &[
+const TRUSTED_MAINTAINABILITY_DISPATCH_LINE: &str = "          /usr/bin/bash \"$trusted_bootstrap\" --root \"$candidate_root\" --maintainability";
+const TRUSTED_MAINTAINABILITY_AUTHENTICATION: &[&str] = &[
     "          trusted_root=$(/usr/bin/realpath -- ../.trusted-gate)",
     "          candidate_root=$(/usr/bin/realpath -- .)",
     "          if [[ \"$trusted_root\" != \"$workspace_root/.trusted-gate\" || \"$candidate_root\" != \"$workspace_root/.candidate\" ]]; then",
     "          trusted_bootstrap=\"$trusted_root/script/check-maintainability-bootstrap.sh\"",
     "          if [[ ! -f \"$trusted_bootstrap\" || -L \"$trusted_bootstrap\" ]]; then",
-    TRUSTED_DISPATCH_LINE,
+    TRUSTED_MAINTAINABILITY_DISPATCH_LINE,
+];
+const TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE: &str = "          /usr/bin/bash \"$protected_bootstrap\" --root \"$audit_root\" --dependency-unsafe";
+const TRUSTED_WINDOWS_DEPENDENCY_AUTHENTICATION: &[&str] = &[
+    "          protected_root=$(/usr/bin/realpath -- ../.trusted-gate)",
+    "          audit_root=$(/usr/bin/realpath -- .)",
+    "          if [[ \"$protected_root\" != \"$workspace_root/.trusted-gate\" || \"$audit_root\" != \"$workspace_root/.candidate\" ]]; then",
+    "          protected_bootstrap=\"$protected_root/script/check-maintainability-bootstrap.sh\"",
+    "          if [[ ! -f \"$protected_bootstrap\" || -L \"$protected_bootstrap\" ]]; then",
+    TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE,
+];
+struct TrustedDispatchJob {
+    header: &'static str,
+    runner: &'static str,
+    authentication: &'static [&'static str],
+}
+
+const TRUSTED_DISPATCH_JOBS: &[TrustedDispatchJob] = &[
+    TrustedDispatchJob {
+        header: "  trusted-maintainability:",
+        runner: "    runs-on: ubuntu-latest",
+        authentication: TRUSTED_MAINTAINABILITY_AUTHENTICATION,
+    },
+    TrustedDispatchJob {
+        header: "  trusted-dependency-unsafe-windows:",
+        runner: "    runs-on: windows-latest",
+        authentication: TRUSTED_WINDOWS_DEPENDENCY_AUTHENTICATION,
+    },
 ];
 
 fn without_reviewed_protected_dispatch(surface: &str, source: &str) -> String {
     if surface != TRUSTED_WORKFLOW
-        || !TRUSTED_DISPATCH_AUTHENTICATION
+        || !TRUSTED_DISPATCH_JOBS
             .iter()
-            .all(|expected| source.lines().filter(|line| line == expected).count() == 1)
+            .all(|job| reviewed_dispatch_job(source, job.header, job.runner, job.authentication))
     {
         return source.to_owned();
     }
     let protected_references_are_closed = source
         .lines()
-        .filter(|line| line.contains("trusted_bootstrap"))
-        .all(|line| TRUSTED_DISPATCH_AUTHENTICATION.contains(&line));
+        .filter(|line| line.contains("trusted_bootstrap") || line.contains("protected_bootstrap"))
+        .all(|line| TRUSTED_DISPATCH_JOBS.iter().any(|job| job.authentication.contains(&line)));
     if !protected_references_are_closed {
         return source.to_owned();
     }
     source
         .lines()
-        .map(|line| if line == TRUSTED_DISPATCH_LINE { "          :" } else { line })
+        .map(|line| {
+            if matches!(line, TRUSTED_MAINTAINABILITY_DISPATCH_LINE | TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE) {
+                "          :"
+            } else {
+                line
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn reviewed_dispatch_job(source: &str, job: &str, runner: &str, authentication: &[&str]) -> bool {
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut starts = lines.iter().enumerate().filter(|(_, line)| **line == job).map(|(index, _)| index);
+    let Some(start) = starts.next() else {
+        return false;
+    };
+    if starts.next().is_some() {
+        return false;
+    }
+    let end = lines[start + 1..]
+        .iter()
+        .position(|line| line.starts_with("  ") && !line.starts_with("    ") && !line.trim().is_empty())
+        .map_or(lines.len(), |offset| start + 1 + offset);
+    let body = &lines[start..end];
+    body.iter().filter(|line| **line == runner).count() == 1 && authentication.iter().all(|expected| body.iter().filter(|line| *line == expected).count() == 1)
 }
 
 fn reviewed_generated_program(surface: &str, source: &str, input: &str) -> bool {
@@ -200,19 +250,31 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use super::{TRUSTED_DISPATCH_AUTHENTICATION, TRUSTED_DISPATCH_LINE, TRUSTED_WORKFLOW, execution_surfaces, without_reviewed_protected_dispatch};
+    use super::{
+        TRUSTED_MAINTAINABILITY_AUTHENTICATION, TRUSTED_MAINTAINABILITY_DISPATCH_LINE, TRUSTED_WINDOWS_DEPENDENCY_AUTHENTICATION, TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE,
+        TRUSTED_WORKFLOW, execution_surfaces, without_reviewed_protected_dispatch,
+    };
 
     #[test]
     fn protected_dispatch_requires_the_complete_canonical_authentication_sequence() {
-        let reviewed = TRUSTED_DISPATCH_AUTHENTICATION.join("\n");
+        let reviewed = format!(
+            "jobs:\n  trusted-maintainability:\n    runs-on: ubuntu-latest\n{}\n\n  trusted-dependency-unsafe-windows:\n    runs-on: windows-latest\n{}",
+            TRUSTED_MAINTAINABILITY_AUTHENTICATION.join("\n"),
+            TRUSTED_WINDOWS_DEPENDENCY_AUTHENTICATION.join("\n")
+        );
         let sanitized = without_reviewed_protected_dispatch(TRUSTED_WORKFLOW, &reviewed);
-        assert!(!sanitized.contains(TRUSTED_DISPATCH_LINE));
-        assert!(sanitized.lines().any(|line| line.trim() == ":"));
+        assert!(!sanitized.contains(TRUSTED_MAINTAINABILITY_DISPATCH_LINE));
+        assert!(!sanitized.contains(TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE));
+        assert_eq!(sanitized.lines().filter(|line| line.trim() == ":").count(), 2);
 
         for changed in [
             reviewed.replacen("../.trusted-gate", "../.candidate", 1),
             reviewed.replacen("--maintainability", "--test-environment", 1),
+            reviewed.replacen("$protected_root", "$audit_root", 1),
+            reviewed.replacen("--dependency-unsafe", "--test-environment", 1),
+            reviewed.replacen("runs-on: windows-latest", "runs-on: ubuntu-latest", 1),
             format!("{reviewed}\n          printf '%s\\n' \"$trusted_bootstrap\""),
+            format!("{reviewed}\n          printf '%s\\n' \"$protected_bootstrap\""),
         ] {
             assert_eq!(without_reviewed_protected_dispatch(TRUSTED_WORKFLOW, &changed), changed);
         }

@@ -1,6 +1,7 @@
 use super::{is_environment_assignment, is_rust_tool_token, is_shell_command_prefix, tool_basename};
 
-const REVIEWED_SELECTORS: [&str; 2] = ["+1.97.0", "+nightly"];
+const PINNED_TOOLCHAIN: &str = "1.97.0";
+const REVIEWED_TOOLCHAINS: [&str; 2] = [PINNED_TOOLCHAIN, "nightly"];
 
 pub(super) fn uses_unreviewed_selector(tokens: &[String], case_insensitive_tools: bool) -> bool {
     let Some(tool_index) = tokens.iter().position(|token| is_rust_tool_token(token, case_insensitive_tools)) else {
@@ -9,19 +10,32 @@ pub(super) fn uses_unreviewed_selector(tokens: &[String], case_insensitive_tools
     tokens
         .get(tool_index + 1)
         .filter(|argument| argument.starts_with('+'))
-        .is_some_and(|selector| !REVIEWED_SELECTORS.contains(&selector.as_str()))
+        .is_some_and(|selector| !is_reviewed_toolchain(selector))
 }
 
-pub(super) fn registers_custom_toolchain(tokens: &[String], case_insensitive_tools: bool) -> bool {
+pub(super) fn uses_unreviewed_rustup_configuration(tokens: &[String], case_insensitive_tools: bool) -> bool {
     let Some(command_index) = executable_index(tokens) else {
         return false;
     };
     let command = tool_basename(&tokens[command_index]);
     let is_rustup = command == "rustup" || command == "rustup.exe" || case_insensitive_tools && matches!(command.to_ascii_lowercase().as_str(), "rustup" | "rustup.exe");
-    is_rustup
-        && tokens[command_index + 1..]
+    if !is_rustup {
+        return false;
+    }
+    let arguments = &tokens[command_index + 1..];
+    arguments
+        .windows(2)
+        .any(|arguments| arguments[0].eq_ignore_ascii_case("toolchain") && arguments[1].eq_ignore_ascii_case("link"))
+        || arguments
             .windows(2)
-            .any(|arguments| arguments[0].eq_ignore_ascii_case("toolchain") && arguments[1].eq_ignore_ascii_case("link"))
+            .any(|arguments| arguments[0].eq_ignore_ascii_case("default") && !is_reviewed_toolchain(&arguments[1]))
+        || arguments
+            .windows(3)
+            .any(|arguments| arguments[0].eq_ignore_ascii_case("override") && arguments[1].eq_ignore_ascii_case("set") && !is_reviewed_toolchain(&arguments[2]))
+}
+
+fn is_reviewed_toolchain(toolchain: &str) -> bool {
+    REVIEWED_TOOLCHAINS.contains(&toolchain.trim_start_matches('+'))
 }
 
 fn executable_index(tokens: &[String]) -> Option<usize> {
@@ -33,7 +47,7 @@ fn executable_index(tokens: &[String]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{registers_custom_toolchain, uses_unreviewed_selector};
+    use super::{uses_unreviewed_rustup_configuration, uses_unreviewed_selector};
 
     fn tokens(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -50,12 +64,23 @@ mod tests {
 
     #[test]
     fn rustup_toolchain_link_is_a_custom_registration() {
-        assert!(registers_custom_toolchain(&tokens(&["rustup", "toolchain", "link", "fake", "/tmp/toolchain"]), true));
-        assert!(registers_custom_toolchain(
+        assert!(uses_unreviewed_rustup_configuration(
+            &tokens(&["rustup", "toolchain", "link", "fake", "/tmp/toolchain"]),
+            true
+        ));
+        assert!(uses_unreviewed_rustup_configuration(
             &tokens(&["command", "RUSTUP.EXE", "-v", "toolchain", "link", "fake", "C:\\toolchain"]),
             true
         ));
-        assert!(!registers_custom_toolchain(&tokens(&["rustup", "toolchain", "install", "1.97.0"]), true));
-        assert!(!registers_custom_toolchain(&tokens(&["echo", "rustup", "toolchain", "link"]), true));
+        assert!(!uses_unreviewed_rustup_configuration(&tokens(&["rustup", "toolchain", "install", "1.97.0"]), true));
+        assert!(!uses_unreviewed_rustup_configuration(&tokens(&["echo", "rustup", "toolchain", "link"]), true));
+    }
+
+    #[test]
+    fn persistent_rustup_selection_requires_a_reviewed_toolchain() {
+        assert!(uses_unreviewed_rustup_configuration(&tokens(&["rustup", "default", "stable"]), true));
+        assert!(uses_unreviewed_rustup_configuration(&tokens(&["rustup", "override", "set", "fake"]), true));
+        assert!(!uses_unreviewed_rustup_configuration(&tokens(&["rustup", "default", "1.97.0"]), true));
+        assert!(!uses_unreviewed_rustup_configuration(&tokens(&["rustup", "override", "set", "nightly"]), true));
     }
 }

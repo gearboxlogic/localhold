@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{BufRead, Cursor, Read, Write};
 use std::path::{Component, Path};
+use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -103,18 +105,76 @@ pub fn scan_workspace(workspace: &Path, inventory: &Inventory, component_paths: 
 pub fn scan_revision(workspace: &Path, revision: &str, inventory: &Inventory, component_paths: &BTreeMap<&str, &str>) -> Result<Vec<SourceSuppression>> {
     let targets::RevisionTargets { roots, rust_sources } = targets::revision_root_package_target_sources(workspace, revision)?;
     let target_sources = modules::expand_revision_target_sources(workspace, revision, roots, &rust_sources, |path| component_paths.contains_key(path))?;
+    let sources = read_revision_sources(workspace, revision, &scan_paths(component_paths, &target_sources))?;
     scan_with(inventory, component_paths, &target_sources, |path| {
-        let object = format!("{revision}:{path}");
-        let output = crate::structure::revision::git_command()
-            .current_dir(workspace)
-            .args(["show", "--no-ext-diff", &object])
-            .output()
-            .with_context(|| format!("read suppression source {path:?} from revision"))?;
-        if !output.status.success() {
-            anyhow::bail!("cannot read suppression source {path:?} from revision {revision}");
-        }
-        String::from_utf8(output.stdout).with_context(|| format!("suppression source {path:?} from revision is not UTF-8"))
+        sources
+            .get(path)
+            .cloned()
+            .with_context(|| format!("suppression source cache is missing revision path {path:?}"))
     })
+}
+
+fn read_revision_sources(workspace: &Path, revision: &str, paths: &BTreeSet<String>) -> Result<BTreeMap<String, String>> {
+    if revision.bytes().any(|byte| matches!(byte, b'\r' | b'\n')) || paths.iter().any(|path| path.bytes().any(|byte| matches!(byte, b'\r' | b'\n'))) {
+        bail!("suppression revision object names cannot contain line breaks");
+    }
+    let mut child = crate::structure::revision::git_command()
+        .current_dir(workspace)
+        .args(["cat-file", "--batch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("start suppression revision source reader")?;
+    {
+        let mut input = child.stdin.take().context("suppression revision source reader has no input")?;
+        for path in paths {
+            writeln!(input, "{revision}:{path}").with_context(|| format!("request suppression source {path:?} from revision"))?;
+        }
+    }
+    let output = child.wait_with_output().context("wait for suppression revision source reader")?;
+    if !output.status.success() {
+        bail!("git cat-file failed while reading suppression revision sources");
+    }
+    parse_revision_sources(&output.stdout, revision, paths)
+}
+
+fn parse_revision_sources(output: &[u8], revision: &str, paths: &BTreeSet<String>) -> Result<BTreeMap<String, String>> {
+    let mut cursor = Cursor::new(output);
+    let mut sources = BTreeMap::new();
+    for path in paths {
+        let mut header = String::new();
+        cursor
+            .read_line(&mut header)
+            .with_context(|| format!("read suppression source header for {path:?} from revision"))?;
+        let fields = header.trim_end_matches('\n').split(' ').collect::<Vec<_>>();
+        let valid_object_id = fields
+            .first()
+            .is_some_and(|object_id| matches!(object_id.len(), 40 | 64) && object_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        if fields.len() != 3 || !valid_object_id || fields.get(1) != Some(&"blob") {
+            bail!("cannot read suppression source {path:?} from revision {revision}");
+        }
+        let size = fields[2]
+            .parse::<usize>()
+            .with_context(|| format!("parse suppression source size for {path:?} from revision"))?;
+        let mut bytes = vec![0; size];
+        cursor.read_exact(&mut bytes).with_context(|| format!("read suppression source {path:?} from revision"))?;
+        let mut terminator = [0];
+        cursor
+            .read_exact(&mut terminator)
+            .with_context(|| format!("read suppression source terminator for {path:?} from revision"))?;
+        if terminator != *b"\n" {
+            bail!("suppression source {path:?} from revision has an invalid batch terminator");
+        }
+        let source = String::from_utf8(bytes).with_context(|| format!("suppression source {path:?} from revision is not UTF-8"))?;
+        if sources.insert(path.clone(), source).is_some() {
+            bail!("suppression revision source listing repeats {path:?}");
+        }
+    }
+    if cursor.position() != output.len() as u64 {
+        bail!("suppression revision source reader returned unexpected trailing data");
+    }
+    Ok(sources)
 }
 
 pub(super) fn reject_tooling_suppressions(workspace: &Path) -> Result<()> {
@@ -162,7 +222,8 @@ fn verify_tooling_expansion_dependencies(workspace: &Path, manifests: &[String])
         let path = workspace.join(manifest);
         let source = fs::read_to_string(&path).with_context(|| format!("read maintainer manifest {}", path.display()))?;
         let cargo = toml::from_str(&source).with_context(|| format!("parse maintainer manifest {}", path.display()))?;
-        crate::check::verify_expansion_dependency_routes(&cargo).with_context(|| format!("validate reviewed expansion dependencies in maintainer manifest {}", path.display()))?;
+        crate::check::verify_maintainer_expansion_dependency_routes(&cargo)
+            .with_context(|| format!("validate reviewed expansion dependencies in maintainer manifest {}", path.display()))?;
     }
     Ok(())
 }
@@ -174,14 +235,8 @@ fn scan_with(
     mut read_source: impl FnMut(&str) -> Result<String>,
 ) -> Result<Vec<SourceSuppression>> {
     let measurements = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
-    let paths = component_paths
-        .keys()
-        .copied()
-        .map(str::to_owned)
-        .chain(target_sources.categories.keys().cloned())
-        .collect::<BTreeSet<_>>();
     let mut syntax = BTreeMap::new();
-    for path in paths {
+    for path in scan_paths(component_paths, target_sources) {
         let source = read_source(&path)?;
         let parsed = syn::parse_file(&source).with_context(|| format!("parse suppression source {path}"))?;
         syntax.insert(path, parsed);
@@ -221,6 +276,15 @@ fn scan_with(
     }
     sites.sort();
     Ok(sites)
+}
+
+fn scan_paths(component_paths: &BTreeMap<&str, &str>, target_sources: &modules::ExpandedSources) -> BTreeSet<String> {
+    component_paths
+        .keys()
+        .copied()
+        .map(str::to_owned)
+        .chain(target_sources.categories.keys().cloned())
+        .collect()
 }
 
 fn tooling_paths(workspace: &Path) -> Result<Vec<String>> {

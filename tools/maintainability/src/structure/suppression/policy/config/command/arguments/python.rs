@@ -68,7 +68,12 @@ fn is_subprocess_process_api(name: &str) -> bool {
 }
 
 fn references_command_capable_ffi(source: &str) -> bool {
-    let compact = source.chars().filter(|character| !character.is_whitespace()).collect::<String>().to_ascii_lowercase();
+    let compact = AdjacentLiteralScanner::new(source)
+        .without_literals()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
     [
         "importctypes",
         "fromctypesimport",
@@ -105,7 +110,12 @@ fn references_exec_or_spawn_api(source: &str) -> bool {
 }
 
 fn has_dynamic_process_resolution(source: &str) -> bool {
-    let compact = source.chars().filter(|character| !character.is_whitespace()).collect::<String>().to_ascii_lowercase();
+    let compact = AdjacentLiteralScanner::new(source)
+        .without_literals()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
     [
         "__import__(",
         "getattr(",
@@ -280,6 +290,20 @@ impl AdjacentLiteralScanner {
         false
     }
 
+    fn without_literals(mut self) -> String {
+        let mut executable = String::with_capacity(self.characters.len());
+        while self.index < self.characters.len() {
+            if let Some(end) = self.literal_end(self.index) {
+                executable.push(' ');
+                self.index = end;
+            } else {
+                executable.push(self.characters[self.index]);
+                self.index += 1;
+            }
+        }
+        executable
+    }
+
     fn literal_end(&self, start: usize) -> Option<usize> {
         let quote = self.quote_start(start)?;
         let delimiter = self.characters[quote];
@@ -343,6 +367,10 @@ mod tests {
         assert!(!has_adjacent_string_literals("\"module doc\"\n\"second statement\"\n"));
         assert!(!has_adjacent_string_literals("subprocess.run([\"cargo\", \"clippy\"])\n"));
         assert!(!has_adjacent_string_literals("identifier\"invalid but not concatenated\"\n"));
+    }
+
+    #[test]
+    fn opaque_process_arguments_detect_executable_code_without_matching_inert_text() {
         assert!(has_opaque_process_arguments("subprocess.run([\"-\" \"A\"])\n"));
         assert!(has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", "\x2dA", "warnings"])"#));
         assert!(has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", b"\u002dA", "warnings"])"#));
@@ -408,6 +436,10 @@ run(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
         assert!(!has_opaque_process_arguments("head = (f'<svg viewBox=\"0 0 64 64\" ' f'role=\"img\">')\n"));
         assert!(!has_opaque_process_arguments(
             "PATTERN = (r'^v[0-9]+' r'(?:-dev)?$')\nimport subprocess\nsubprocess.run(['git', 'status'])\n"
+        ));
+        assert!(!has_opaque_process_arguments("# import ctypes and run cargo\nprint('safe')\n"));
+        assert!(!has_opaque_process_arguments(
+            "\"\"\"getattr(importlib, 'run') and cargo are documentation only\"\"\"\nprint('safe')\n"
         ));
     }
 }

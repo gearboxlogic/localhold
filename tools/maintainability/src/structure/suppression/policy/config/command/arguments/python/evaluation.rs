@@ -213,18 +213,17 @@ struct ExpressionToken {
 
 fn dynamic_path(path: &[String]) -> bool {
     match path {
-        [name] => matches!(
-            name.as_str(),
-            "builtins" | "compile" | "eval" | "exec" | "import_module" | "importlib" | "runpy" | "__builtins__" | "__import__"
-        ),
-        [module, name] if matches!(module.as_str(), "builtins" | "__builtins__") => {
-            matches!(name.as_str(), "compile" | "eval" | "exec")
+        [name, ..]
+            if matches!(
+                name.as_str(),
+                "builtins" | "compile" | "eval" | "exec" | "import_module" | "importlib" | "runpy" | "__builtins__" | "__import__"
+            ) =>
+        {
+            true
         }
-        [module, name] if module == "importlib" => name == "import_module",
-        [module, name] if module == "runpy" => matches!(name.as_str(), "run_module" | "run_path"),
-        [module, name] if matches!(module.as_str(), "pickle" | "_pickle") => matches!(name.as_str(), "load" | "loads"),
-        [module, name] if module == "marshal" => name == "loads",
-        [module, name] if module == "types" => matches!(name.as_str(), "CodeType" | "FunctionType"),
+        [module, name, ..] if matches!(module.as_str(), "pickle" | "_pickle") => matches!(name.as_str(), "load" | "loads"),
+        [module, name, ..] if module == "marshal" => name == "loads",
+        [module, name, ..] if module == "types" => matches!(name.as_str(), "CodeType" | "FunctionType"),
         _ => false,
     }
 }
@@ -246,9 +245,11 @@ mod tests {
         assert!(has_dynamic_code("exec(bytes.fromhex(payload))"));
         assert!(has_dynamic_code("runner = eval\nrunner(source)"));
         assert!(has_dynamic_code("builtins.compile(source, name, 'exec')"));
+        assert!(has_dynamic_code("builtins.__dict__['exec'](payload)"));
         assert!(has_dynamic_code("getattr(builtins, name)(source)"));
         assert!(has_dynamic_code("__import__('os').system(payload)"));
         assert!(has_dynamic_code("importlib.import_module(name)"));
+        assert!(has_dynamic_code("importlib.machinery.SourceFileLoader('m', path).load_module()"));
         assert!(has_dynamic_code("from importlib import import_module as load"));
         assert!(has_dynamic_code("runpy.run_path('quality/lint.txt')"));
         assert!(has_dynamic_code("runpy.run_module(module_name)"));

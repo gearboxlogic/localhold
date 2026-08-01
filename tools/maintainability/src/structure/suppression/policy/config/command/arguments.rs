@@ -37,9 +37,7 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
         return true;
     }
     let mut options = AnalysisOptions::strict();
-    if has_case_insensitive_tool_names(path) {
-        options = options.with_case_insensitive_tools();
-    }
+    options = options.with_case_insensitive_tools();
     if is_powershell(path) {
         options = options.allow_backticks();
     }
@@ -96,7 +94,7 @@ pub(super) fn weakening_token_in_reviewed_shell_remainder(source: &str) -> bool 
 }
 
 pub(super) fn direct_rust_sources_for_surface(path: &str, source: &str) -> (BTreeSet<String>, bool) {
-    let case_insensitive_tools = has_case_insensitive_tool_names(path);
+    let case_insensitive_tools = true;
     if let Some(scripts) = package_json::script_commands(path, source) {
         let Ok(scripts) = scripts else {
             return (BTreeSet::new(), true);
@@ -282,7 +280,8 @@ fn weakening_rust_command(command: &str, options: AnalysisOptions) -> bool {
         return false;
     }
     let tokens = command_tokens(command);
-    if toolchain::uses_unreviewed_selector(&tokens, options.case_insensitive_tools()) || toolchain::registers_custom_toolchain(&tokens, options.case_insensitive_tools()) {
+    if toolchain::uses_unreviewed_selector(&tokens, options.case_insensitive_tools()) || toolchain::uses_unreviewed_rustup_configuration(&tokens, options.case_insensitive_tools())
+    {
         return true;
     }
     if tokens.iter().any(|token| nested_rust_command_is_weakening(command, token, options)) {
@@ -772,10 +771,6 @@ fn is_cargo_deny_config_argument(tokens: &[String], config_index: usize, case_in
         return false;
     };
     is_cargo_tool_token(&tokens[invocation_index], case_insensitive_tools) && tokens.get(invocation_index + 1).is_some_and(|subcommand| subcommand == "deny")
-}
-
-pub(super) const fn has_case_insensitive_tool_names(_path: &str) -> bool {
-    true
 }
 
 #[cfg(test)]

@@ -132,7 +132,8 @@ run_local_check --test-environment >/dev/null
 restore_reviewed_graph
 
 (
-    for _ in {1..1000}; do
+    deadline=$((SECONDS + 300))
+    while (( SECONDS < deadline )); do
         snapshot_candidates=("$test_repository"/target/s.*)
         snapshot=${snapshot_candidates[0]}
         if [[ -d $snapshot/target ]] &&

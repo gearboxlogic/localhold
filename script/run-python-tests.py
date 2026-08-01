@@ -6,7 +6,10 @@ import unittest
 from pathlib import Path
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-suite = unittest.defaultTestLoader.discover("script/tests")
+repository_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(repository_root))
+suite = unittest.defaultTestLoader.discover(str(repository_root / "script/tests"))
+if suite.countTestCases() == 0:
+    raise SystemExit("no Python release-tooling tests were discovered")
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 raise SystemExit(not result.wasSuccessful())

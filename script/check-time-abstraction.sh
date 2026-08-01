@@ -9,7 +9,30 @@ while IFS= read -r file; do
         src/clock.rs|src/config/tests.rs) continue ;;
     esac
 
-    production=$(sed '/^mod tests {/,$d' "$file")
+    production=
+    in_tests=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == 'mod tests {' ]]; then
+            if (( in_tests != 0 )); then
+                in_tests=2
+                break
+            fi
+            in_tests=1
+            continue
+        fi
+        if (( in_tests == 1 )) && [[ "$line" == '}' ]]; then
+            in_tests=0
+            continue
+        fi
+        if (( in_tests == 0 )); then
+            printf -v production '%s%s\n' "$production" "$line"
+        fi
+    done <"$file"
+    if (( in_tests != 0 )); then
+        printf 'time abstraction check could not identify the inline test-module boundary in %s\n' "$file" >&2
+        failed=1
+        continue
+    fi
     if matches=$(rg -n "$pattern" <<<"$production"); then
         printf 'direct time access bypasses Clock in %s:\n%s\n' "$file" "$matches" >&2
         failed=1

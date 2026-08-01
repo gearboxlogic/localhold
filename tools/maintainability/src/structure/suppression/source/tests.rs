@@ -181,6 +181,22 @@ fn raw_identifiers_cannot_hide_lint_attributes() -> Result<()> {
 }
 
 #[test]
+fn raw_attribute_identifiers_have_canonical_fingerprints() -> Result<()> {
+    let plain = scan(
+        "#[cfg_attr(test, allow(clippy::panic, reason = \"legacy panic\"), derive(Clone))]\nstruct Guarded;\n",
+        SourceCategory::Production,
+    )?;
+    let raw = scan(
+        "#[r#cfg_attr(test, r#allow(clippy::panic, reason = \"legacy panic\"), derive(Clone))]\nstruct Guarded;\n",
+        SourceCategory::Production,
+    )?;
+    assert_eq!(plain[0].fingerprint, raw[0].fingerprint);
+    assert_eq!(plain[0].target, raw[0].target);
+    assert_eq!(plain[0].id, raw[0].id);
+    Ok(())
+}
+
+#[test]
 fn runnable_doctests_and_explicit_doc_inputs_fail_closed() {
     let doctest = scan(
         "/// ```\n/// #![allow(unused_variables)]\n/// let hidden = 1;\n/// ```\nfn documented() {}\n",

@@ -23,8 +23,11 @@ use environment::{is_weakening_environment_assignment_name, is_weakening_environ
 use surfaces::execution_surfaces;
 
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
+    "CDPATH=",
+    "IFS=$' \\t\\n'",
+    "export -n CDPATH IFS",
     "if /usr/bin/env | /usr/bin/grep '^BASH_FUNC_' >/dev/null; then",
-    "    /usr/bin/false",
+    "    exit 1 # inherited exported functions are unsupported",
     "cargo_home=${CARGO_HOME:-}",
     "        cargo_home=\"$HOME/.cargo\"",
     "        cargo_home=\"$USERPROFILE/.cargo\"",
@@ -40,7 +43,7 @@ pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "        git_executable=$(\"$cygpath_command\" -w \"$git_executable\")",
     "    LOCALHOLD_MAINTAINABILITY_GIT=$git_executable",
     "    export LOCALHOLD_MAINTAINABILITY_GIT",
-    "            BASH_ENV | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
+    "            BASH_ENV | CDPATH | IFS | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
     "                RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \\",
     "                CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \\",
     "                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_* | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | TAR_OPTIONS)",
@@ -203,7 +206,7 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
-    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: edd67b0f23cd78c9db725f7534579c44b5215b1fe0ca554fd206dd2ad8e8a7fd",
+    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: bae06bf4619444274142250d88f66ca2b861d2b9296666280487b8f95db98f9a",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
@@ -213,14 +216,30 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
 ];
 pub(super) const TRUSTED_GATE_ENVIRONMENT_LINES: &[&str] = &[
     "        shell: /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
+    "        shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:ENV = $null; $env:SHELLOPTS = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\\Program Files\\Git\\bin\\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE\"'",
+    "          GIT_CONFIG_COUNT: '1'",
+    "          GIT_CONFIG_COUNT: '1'",
+    "          GIT_CONFIG_KEY_0: core.autocrlf",
+    "          GIT_CONFIG_KEY_0: core.autocrlf",
+    "          GIT_CONFIG_VALUE_0: 'false'",
+    "          GIT_CONFIG_VALUE_0: 'false'",
+    "          RUSTUP_DIST_SERVER: https://static.rust-lang.org",
     "          RUSTUP_DIST_SERVER: https://static.rust-lang.org",
     "          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup",
     "          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup",
+    "          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup",
+    "          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup",
+    "          RUSTUP_TOOLCHAIN: 1.97.0",
     "          RUSTUP_TOOLCHAIN: 1.97.0",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
+    "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
     "          export LOCALHOLD_MAINTAINABILITY_BASE_REV=${base_revision,,}",
+    "          export LOCALHOLD_MAINTAINABILITY_BASE_REV=${windows_base_revision,,}",
 ];
-pub(super) const TRUSTED_GATE_COMMAND_LINES: &[&str] = &["          /usr/bin/bash \"$trusted_bootstrap\" --root \"$candidate_root\" --maintainability"];
+pub(super) const TRUSTED_GATE_COMMAND_LINES: &[&str] = &[
+    "          /usr/bin/bash \"$trusted_bootstrap\" --root \"$candidate_root\" --maintainability",
+    "          /usr/bin/bash \"$protected_bootstrap\" --root \"$audit_root\" --dependency-unsafe",
+];
 pub(super) const GPU_RELEASE_REVISION_ENVIRONMENT_LINES: &[&str] = &[
     "          test \"$(git rev-parse HEAD)\" = \"$GITHUB_SHA\"",
     "          printf 'CUDA_RELEASE_ROOT=%s\\n' \"$root\" >>\"$GITHUB_ENV\"",
@@ -231,7 +250,7 @@ pub(super) const GPU_RELEASE_REVISION_ENVIRONMENT_LINES: &[&str] = &[
     "            PATH=/usr/bin:/bin \\",
 ];
 
-pub fn reject_checked_in_weakening(workspace: &Path) -> Result<BTreeSet<String>> {
+pub fn reject_checked_in_weakening(workspace: &Path) -> Result<()> {
     let surfaces = execution_surfaces(workspace)?;
     let audited_manifests = tracked_manifests(workspace)?.into_iter().collect::<BTreeSet<_>>();
     for path in surfaces.paths {
@@ -263,10 +282,11 @@ pub fn reject_checked_in_weakening(workspace: &Path) -> Result<BTreeSet<String>>
             bail!("checked-in Rust command surface {path:?} contains a direct compiler invocation without auditable repository-relative .rs inputs");
         }
         if !sources.is_empty() {
+            crate::structure::suppression::reject_direct_source_suppressions(workspace, &sources)?;
             bail!("checked-in Rust command surface {path:?} directly compiles an opaque command helper; use an audited Cargo target instead");
         }
     }
-    Ok(BTreeSet::new())
+    Ok(())
 }
 
 fn is_javascript(path: &Path) -> bool {
@@ -288,7 +308,7 @@ pub(super) fn weakening_environment_for_surface(path: &str, source: &str) -> boo
         || yaml::environment_variables(path, source)
             .iter()
             .any(|(name, _)| is_weakening_environment_assignment_name(name))
-        || quality_command_referenced(path, source) && path_environment_assignment(path, source)
+        || quality_command_referenced(source) && path_environment_assignment(path, source)
 }
 
 fn case_insensitive_environment_assignment(source: &str) -> bool {
@@ -352,8 +372,8 @@ fn rust_tool_referenced(source: &str) -> bool {
     })
 }
 
-fn quality_command_referenced(path: &str, source: &str) -> bool {
-    rust_tool_referenced(source) || arguments::contains_quality_command(source, arguments::has_case_insensitive_tool_names(path))
+fn quality_command_referenced(source: &str) -> bool {
+    rust_tool_referenced(source) || arguments::contains_quality_command(source, true)
 }
 
 fn normalized_environment_name(name: &str) -> &str {
@@ -393,7 +413,7 @@ pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str
         _ => return false,
     };
     let lines = source.lines().collect::<Vec<_>>();
-    let quality_commands_are_referenced = quality_command_referenced(path, source);
+    let quality_commands_are_referenced = quality_command_referenced(source);
     let yaml_environment_lines = yaml::environment_variables(path, source)
         .into_iter()
         .filter(|(name, _)| is_weakening_environment_assignment_name(name) || quality_commands_are_referenced && is_path_environment_name(name))

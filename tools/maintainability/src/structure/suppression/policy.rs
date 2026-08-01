@@ -61,8 +61,7 @@ impl SuppressionPolicy {
         let observed = compare_current(sites, &self.source_baseline, &self.model.source_exceptions, false)?;
         compare_cargo_allows(workspace, &self.cargo_allowances.entries)?;
         compare_clippy_configuration(workspace, &self.clippy_configuration.entries)?;
-        let direct_sources = reject_checked_in_weakening(workspace)?;
-        super::reject_direct_source_suppressions(workspace, &direct_sources)?;
+        reject_checked_in_weakening(workspace)?;
         Ok(observed)
     }
 }

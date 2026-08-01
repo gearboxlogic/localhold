@@ -6,7 +6,7 @@ readonly repository_root
 prefix="${LOCALHOLD_PREFIX:-$HOME/.local}"
 destdir="${DESTDIR:-}"
 profile="cpu"
-build_dir="${LOCALHOLD_BUILD_DIR:-${CARGO_TARGET_DIR:-$repository_root/target}}"
+build_dir="$repository_root/target"
 
 usage() {
   cat <<'EOF'
@@ -20,8 +20,6 @@ Builds LocalHold from the locked source tree and installs:
 Environment:
   DESTDIR           Optional packaging root prepended to installed paths.
   LOCALHOLD_PREFIX  Default prefix when --prefix is omitted (~/.local).
-  CARGO             Cargo executable to use (cargo).
-  LOCALHOLD_BUILD_DIR  Build output directory (defaults to CARGO_TARGET_DIR or ./target).
 EOF
 }
 
@@ -50,8 +48,7 @@ while (($# > 0)); do
 done
 
 case "$profile" in
-  cpu) features="reranker" ;;
-  cuda) features="reranker-cuda" ;;
+  cpu|cuda) ;;
   *) printf 'error: unsupported profile: %s\n' "$profile" >&2; exit 2 ;;
 esac
 
@@ -73,7 +70,7 @@ need_one_of() {
   exit 1
 }
 
-need_command "${CARGO:-cargo}"
+need_command cargo
 need_command cmake
 need_one_of "a C compiler" cc gcc clang
 need_one_of "a C++ compiler" c++ g++ clang++
@@ -88,7 +85,10 @@ if [[ "$(uname -s)" == "Linux" ]]; then
 fi
 
 cd -- "$repository_root"
-"${CARGO:-cargo}" build --release --locked --features "$features" --target-dir "$build_dir"
+case "$profile" in
+  cpu) cargo build --release --locked --features reranker --target-dir target ;;
+  cuda) cargo build --release --locked --features reranker-cuda --target-dir target ;;
+esac
 
 bin_dir="${destdir}${prefix}/bin"
 share_dir="${destdir}${prefix}/share/localhold"
@@ -99,7 +99,3 @@ install -m 0644 localhold.example.toml "$share_dir/localhold.example.toml"
 install -m 0644 LICENSE NOTICE THIRD_PARTY_NOTICES.md "$doc_dir/"
 
 printf 'Installed LocalHold (%s) to %s\n' "$profile" "$bin_dir/hold"
-case ":${PATH}:" in
-  *":${prefix}/bin:"*) ;;
-  *) printf 'Add %s/bin to PATH before invoking hold by name.\n' "$prefix" ;;
-esac

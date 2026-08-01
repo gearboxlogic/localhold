@@ -72,3 +72,76 @@ jobs:
             exit 1
           fi
           /usr/bin/bash "$trusted_bootstrap" --root "$candidate_root" --maintainability
+
+  trusted-dependency-unsafe-windows:
+    name: Trusted Dependency Unsafe (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:ENV = $null; $env:SHELLOPTS = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\Program Files\Git\bin\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE"'
+    steps:
+      - name: Install reviewed Rust toolchain
+        env:
+          RUSTUP_DIST_SERVER: https://static.rust-lang.org
+          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup
+          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+        run: rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
+
+      - name: Check out protected gate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.workflow_sha }}
+          path: .trusted-gate
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          path: .candidate
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Enforce protected Windows dependency policy
+        working-directory: .candidate
+        env:
+          BASE_REVISION_INPUT: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup
+          RUSTUP_TOOLCHAIN: 1.97.0
+        run: |
+          workspace_root=$(/usr/bin/realpath -- "$GITHUB_WORKSPACE")
+          protected_root=$(/usr/bin/realpath -- ../.trusted-gate)
+          audit_root=$(/usr/bin/realpath -- .)
+          if [[ "$protected_root" != "$workspace_root/.trusted-gate" || "$audit_root" != "$workspace_root/.candidate" ]]; then
+            printf 'trusted Windows dependency-audit checkout paths are not canonical\n' >&2
+            exit 1
+          fi
+
+          windows_base_revision=$BASE_REVISION_INPUT
+          if [[ "$windows_base_revision" == refs/heads/* ]]; then
+            remote_ref="refs/remotes/origin/${windows_base_revision#refs/heads/}"
+            windows_base_revision=$(/usr/bin/git rev-parse --verify "${remote_ref}^{commit}")
+          fi
+          if [[ ! "$windows_base_revision" =~ ^[[:xdigit:]]{40}$ ]]; then
+            printf 'Windows dependency-audit base revision is missing or malformed\n' >&2
+            exit 1
+          fi
+          export LOCALHOLD_MAINTAINABILITY_BASE_REV=${windows_base_revision,,}
+
+          protected_bootstrap="$protected_root/script/check-maintainability-bootstrap.sh"
+          if [[ ! -f "$protected_bootstrap" || -L "$protected_bootstrap" ]]; then
+            printf 'protected Windows dependency-audit bootstrap is missing or unsafe\n' >&2
+            exit 1
+          fi
+          /usr/bin/bash "$protected_bootstrap" --root "$audit_root" --dependency-unsafe

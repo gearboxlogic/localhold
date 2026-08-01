@@ -23,6 +23,7 @@ pub(super) fn is_weakening_environment_name(name: &str) -> bool {
             | "TAR_OPTIONS"
             | "CARGO_HOME"
             | "CARGO_BUILD_TARGET"
+            | "CARGO_TARGET_DIR"
             | "CARGO_BUILD_RUSTFLAGS"
             | "CARGO_BUILD_RUSTDOCFLAGS"
             | "CARGO_BUILD_RUSTC"
@@ -126,6 +127,12 @@ mod tests {
         assert!(is_weakening_environment_assignment_name("CARGO"));
         assert!(is_weakening_environment_assignment_name("cargo"));
         assert!(!is_weakening_environment_name("Cargo"));
+    }
+
+    #[test]
+    fn cargo_target_directory_is_a_weakening_environment_channel() {
+        assert!(is_weakening_environment_name("CARGO_TARGET_DIR"));
+        assert!(is_weakening_environment_name("cargo_target_dir"));
     }
 
     #[test]

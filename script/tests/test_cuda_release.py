@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import shutil
 import subprocess
@@ -12,27 +11,15 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from types import ModuleType
 from unittest import mock
+
+from script import package_release as PACKAGE
+from script import prepare_cuda_runtime as PREPARE
+from script import validate_cuda_runtime as VALIDATE
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 REPOSITORY_ROOT = SCRIPT_DIR.parent
-
-
-def load_script(name: str) -> ModuleType:
-    """Load a hyphenated release script as a module."""
-    path = SCRIPT_DIR / name
-    spec = importlib.util.spec_from_file_location(name.removesuffix(".py").replace("-", "_"), path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-PREPARE = load_script("prepare-cuda-runtime.py")
-VALIDATE = load_script("validate-cuda-runtime.py")
-PACKAGE = load_script("package-release.py")
 
 
 class PrepareCudaRuntimeTests(unittest.TestCase):
@@ -178,18 +165,8 @@ class ValidateCudaRuntimeTests(unittest.TestCase):
 
 class PackageReleaseTests(unittest.TestCase):
     def test_streamed_tar_zst_preserves_failed_command_details(self) -> None:
-        compressor = mock.Mock()
-        compressor.stdin = mock.Mock()
-        compressor.wait.return_value = 23
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary) / "not-created.tar.zst"
-            with (
-                mock.patch.object(PACKAGE, "write_tar"),
-                mock.patch.object(PACKAGE.subprocess, "Popen", return_value=compressor) as popen,
-                self.assertRaises(subprocess.CalledProcessError) as raised,
-            ):
-                PACKAGE.write_tar_zst(Path(temporary) / "stage", destination, 1_700_000_000)
-
             expected = [
                 "zstd",
                 "-19",
@@ -200,6 +177,16 @@ class PackageReleaseTests(unittest.TestCase):
                 "-o",
                 str(destination),
             ]
+            compressor = mock.Mock(args=expected)
+            compressor.stdin = mock.Mock()
+            compressor.wait.return_value = 23
+            with (
+                mock.patch.object(PACKAGE, "write_tar"),
+                mock.patch.object(PACKAGE.subprocess, "Popen", return_value=compressor) as popen,
+                self.assertRaises(subprocess.CalledProcessError) as raised,
+            ):
+                PACKAGE.write_tar_zst(Path(temporary) / "stage", destination, 1_700_000_000)
+
             popen.assert_called_once_with(expected, stdin=subprocess.PIPE)
             self.assertEqual(raised.exception.returncode, 23)
             self.assertEqual(raised.exception.cmd, expected)

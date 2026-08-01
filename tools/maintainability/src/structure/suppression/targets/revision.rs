@@ -12,6 +12,31 @@ struct DeclaredTargetKind {
     category: SourceCategory,
 }
 
+const BIN_TARGET_KIND: DeclaredTargetKind = DeclaredTargetKind {
+    name: "bin",
+    directory: "src/bin",
+    category: SourceCategory::Production,
+};
+
+const DECLARED_TARGET_KINDS: [DeclaredTargetKind; 4] = [
+    BIN_TARGET_KIND,
+    DeclaredTargetKind {
+        name: "example",
+        directory: "examples",
+        category: SourceCategory::Production,
+    },
+    DeclaredTargetKind {
+        name: "test",
+        directory: "tests",
+        category: SourceCategory::Test,
+    },
+    DeclaredTargetKind {
+        name: "bench",
+        directory: "benches",
+        category: SourceCategory::Benchmark,
+    },
+];
+
 pub(in crate::structure::suppression) struct RevisionTargets {
     pub(in crate::structure::suppression) roots: TargetRoots,
     pub(in crate::structure::suppression) rust_sources: BTreeSet<String>,
@@ -80,29 +105,9 @@ fn manifest_target_sources(manifest: &str, known: &BTreeSet<String>) -> Result<T
         .context("suppression comparison package must have a string name")?;
     let mut roots = TargetRoots::default();
     add_library_target(&manifest, package, known, &mut roots)?;
-    add_automatic_targets(package, known, &mut roots)?;
-    for kind in [
-        DeclaredTargetKind {
-            name: "bin",
-            directory: "src/bin",
-            category: SourceCategory::Production,
-        },
-        DeclaredTargetKind {
-            name: "example",
-            directory: "examples",
-            category: SourceCategory::Production,
-        },
-        DeclaredTargetKind {
-            name: "test",
-            directory: "tests",
-            category: SourceCategory::Test,
-        },
-        DeclaredTargetKind {
-            name: "bench",
-            directory: "benches",
-            category: SourceCategory::Benchmark,
-        },
-    ] {
+    let declared_paths = declared_target_paths(&manifest, package_name, known)?;
+    add_automatic_targets(package, known, &declared_paths, &mut roots)?;
+    for kind in DECLARED_TARGET_KINDS {
         add_declared_targets(&manifest, kind, package_name, known, &mut roots)?;
     }
     add_build_target(package, known, &mut roots)?;
@@ -145,12 +150,12 @@ fn add_library_target(manifest: &toml::Value, package: &toml::map::Map<String, t
     Ok(())
 }
 
-fn add_automatic_targets(package: &toml::map::Map<String, toml::Value>, known: &BTreeSet<String>, roots: &mut TargetRoots) -> Result<()> {
+fn add_automatic_targets(package: &toml::map::Map<String, toml::Value>, known: &BTreeSet<String>, declared: &BTreeSet<String>, roots: &mut TargetRoots) -> Result<()> {
     if package_auto_target(package, "autobins")? {
-        if known.contains("src/main.rs") {
+        if known.contains("src/main.rs") && !declared.contains("src/main.rs") {
             insert_target(roots, known, "src/main.rs", SourceCategory::Production, "bin")?;
         }
-        add_conventional_targets(roots, known, "src/bin", SourceCategory::Production, "bin")?;
+        add_conventional_targets(roots, known, declared, BIN_TARGET_KIND)?;
     }
     for (setting, directory, category, kind) in [
         ("autoexamples", "examples", SourceCategory::Production, "example"),
@@ -158,15 +163,15 @@ fn add_automatic_targets(package: &toml::map::Map<String, toml::Value>, known: &
         ("autobenches", "benches", SourceCategory::Benchmark, "bench"),
     ] {
         if package_auto_target(package, setting)? {
-            add_conventional_targets(roots, known, directory, category, kind)?;
+            add_conventional_targets(roots, known, declared, DeclaredTargetKind { name: kind, directory, category })?;
         }
     }
     Ok(())
 }
 
-fn add_conventional_targets(roots: &mut TargetRoots, known: &BTreeSet<String>, directory: &str, category: SourceCategory, kind: &str) -> Result<()> {
-    for path in known.iter().filter(|path| is_conventional_target(path, directory)) {
-        insert_target(roots, known, path, category, kind)?;
+fn add_conventional_targets(roots: &mut TargetRoots, known: &BTreeSet<String>, declared: &BTreeSet<String>, kind: DeclaredTargetKind) -> Result<()> {
+    for path in known.iter().filter(|path| !declared.contains(*path) && is_conventional_target(path, kind.directory)) {
+        insert_target(roots, known, path, kind.category, kind.name)?;
     }
     Ok(())
 }
@@ -178,6 +183,24 @@ fn is_conventional_target(path: &str, directory: &str) -> bool {
     let components = relative.components().collect::<Vec<_>>();
     matches!(components.as_slice(), [Component::Normal(file)] if Path::new(file).extension().is_some_and(|extension| extension == "rs"))
         || matches!(components.as_slice(), [Component::Normal(_), Component::Normal(file)] if *file == "main.rs")
+}
+
+fn declared_target_paths(manifest: &toml::Value, package_name: &str, known: &BTreeSet<String>) -> Result<BTreeSet<String>> {
+    let mut paths = BTreeSet::new();
+    for kind in DECLARED_TARGET_KINDS {
+        let Some(targets) = manifest.get(kind.name) else {
+            continue;
+        };
+        let targets = targets
+            .as_array()
+            .with_context(|| format!("suppression comparison {} targets must be an array", kind.name))?;
+        for target in targets {
+            let target = target.as_table().with_context(|| format!("suppression comparison {} target must be a table", kind.name))?;
+            let path = declared_target_path(target, kind, package_name, known)?;
+            paths.insert(normalized_manifest_target_path(&path)?);
+        }
+    }
+    Ok(paths)
 }
 
 fn add_declared_targets(manifest: &toml::Value, kind: DeclaredTargetKind, package_name: &str, known: &BTreeSet<String>, roots: &mut TargetRoots) -> Result<()> {

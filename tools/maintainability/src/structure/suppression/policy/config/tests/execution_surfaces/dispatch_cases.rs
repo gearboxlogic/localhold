@@ -22,6 +22,8 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("ninja -f quality/lint.txt\n", "opaque interpreter program"),
     ("rustup run 1.97.0 sh quality/lint.txt\n", "lint-weakening argument"),
     ("rustup run fake cargo clippy --locked -- -D warnings\n", "opaque interpreter program"),
+    ("rustup default stable\n", "lint-weakening argument"),
+    ("rustup override set fake\n", "lint-weakening argument"),
     ("history -s 'sh quality/lint.txt'\nfc -s sh\n", "opaque interpreter program"),
     ("awk 'BEGIN { system(\"sh quality/lint.txt\") }'\n", "opaque interpreter program"),
     ("sed -n -e '1e sh quality/lint.txt' /etc/hosts\n", "opaque interpreter program"),

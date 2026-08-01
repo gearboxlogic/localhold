@@ -23,25 +23,23 @@ use self::policy::{
     is_unsafe_attribute, macro_name, untrusted_generated_attribute, untrusted_import, untrusted_nested_macro,
 };
 
-pub const REVIEWED_EXPANSION_PACKAGES: [&str; 17] = [
-    "anyhow",
+pub const REVIEWED_EXPANSION_PACKAGES: [&str; 14] = [
     "criterion",
     "futures",
     "insta",
     "ort",
     "proptest",
-    "quote",
     "rand",
     "rmcp",
     "rusqlite",
     "schemars",
     "serde",
     "serde_json",
-    "syn",
     "thiserror",
     "tokio",
     "tracing",
 ];
+pub const REVIEWED_MAINTAINER_EXPANSION_PACKAGES: [&str; 3] = ["anyhow", "quote", "syn"];
 pub const RESERVED_LOCAL_MACROS: [&str; 7] = [
     "concat_placeholders",
     "concat_with_sep",

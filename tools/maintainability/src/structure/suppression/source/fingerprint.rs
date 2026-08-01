@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use proc_macro2::{Delimiter, Group, TokenStream, TokenTree};
 use quote::{ToTokens, quote};
 use sha2::{Digest, Sha256};
+use syn::ext::IdentExt as _;
 use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
 use syn::{Meta, Token};
@@ -53,14 +54,14 @@ fn normalized_suppression_meta(meta: &Meta) -> Result<TokenStream> {
     let Meta::List(list) = meta else {
         return Ok(meta.to_token_stream());
     };
-    if !list.path.is_ident("allow") && !list.path.is_ident("expect") && !list.path.is_ident("warn") {
+    if !path_is_ident(&list.path, "allow") && !path_is_ident(&list.path, "expect") && !path_is_ident(&list.path, "warn") {
         return Ok(meta.to_token_stream());
     }
     let arguments = Punctuated::<Meta, Token![,]>::parse_terminated
         .parse2(list.tokens.clone())
         .context("parse lint suppression context")?;
     let retained = arguments.into_iter().filter(|argument| !matches!(argument, Meta::Path(_)));
-    let path = &list.path;
+    let path = list.path.get_ident().context("lint suppression path must be a single identifier")?.unraw();
     Ok(quote!(#path(#(#retained),*)))
 }
 
@@ -99,10 +100,10 @@ fn normalized_attribute(group: &Group) -> Option<TokenStream> {
 }
 
 fn normalized_meta_without_suppressions(meta: &Meta) -> Option<TokenStream> {
-    if meta.path().is_ident("allow") || meta.path().is_ident("expect") || meta.path().is_ident("warn") {
+    if path_is_ident(meta.path(), "allow") || path_is_ident(meta.path(), "expect") || path_is_ident(meta.path(), "warn") {
         return None;
     }
-    if !meta.path().is_ident("cfg_attr") {
+    if !path_is_ident(meta.path(), "cfg_attr") {
         return Some(meta.to_token_stream());
     }
     let Meta::List(list) = meta else {
@@ -115,8 +116,12 @@ fn normalized_meta_without_suppressions(meta: &Meta) -> Option<TokenStream> {
     if nested.is_empty() {
         return None;
     }
-    let path = &list.path;
+    let path = list.path.get_ident()?.unraw();
     Some(quote!(#path(#condition, #(#nested),*)))
+}
+
+fn path_is_ident(path: &syn::Path, expected: &str) -> bool {
+    path.get_ident().is_some_and(|ident| ident.unraw() == expected)
 }
 
 fn attribute_group(tokens: &[TokenTree], index: usize) -> Option<(usize, &Group)> {
@@ -132,5 +137,27 @@ fn attribute_group(tokens: &[TokenTree], index: usize) -> Option<(usize, &Group)
     match tokens.get(attribute_index) {
         Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Bracket => Some((attribute_index, group)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalized_meta_without_suppressions, normalized_suppression_meta};
+
+    #[test]
+    fn raw_attribute_paths_normalize_to_ordinary_identifiers() {
+        let plain: syn::Meta = syn::parse_quote!(allow(clippy::panic, reason = "legacy panic"));
+        let raw: syn::Meta = syn::parse_quote!(r#allow(clippy::panic, reason = "legacy panic"));
+        assert_eq!(
+            normalized_suppression_meta(&plain).expect("normalize plain suppression").to_string(),
+            normalized_suppression_meta(&raw).expect("normalize raw suppression").to_string()
+        );
+
+        let plain: syn::Meta = syn::parse_quote!(cfg_attr(test, allow(clippy::panic), derive(Clone)));
+        let raw: syn::Meta = syn::parse_quote!(r#cfg_attr(test, r#allow(clippy::panic), derive(Clone)));
+        assert_eq!(
+            normalized_meta_without_suppressions(&plain).expect("normalize plain attribute").to_string(),
+            normalized_meta_without_suppressions(&raw).expect("normalize raw attribute").to_string()
+        );
     }
 }

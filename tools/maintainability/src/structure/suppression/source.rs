@@ -69,10 +69,12 @@ impl SourceScanner {
         if let Some(reason) = unsupported_runnable_doctest(syntax) {
             bail!("{path}: {reason}");
         }
-        let target = external_targets.get("<module>").map(|external| {
-            let intrinsic = suppression_free_fingerprint(syntax);
-            external_target_fingerprint(&intrinsic, external)
-        });
+        let intrinsic = suppression_free_fingerprint(syntax);
+        let target = Some(
+            external_targets
+                .get("<module>")
+                .map_or_else(|| intrinsic.clone(), |external| external_target_fingerprint(&intrinsic, external)),
+        );
         let mut scanner = Self {
             category,
             cfg_context: ProductionCfgContext::default(),
@@ -335,7 +337,7 @@ fn category_for_branch(category: SourceCategory, production_reachable: bool) -> 
 
 impl<'ast> Visit<'ast> for SourceScanner {
     fn visit_file(&mut self, node: &'ast syn::File) {
-        self.visit_anonymous_scope(Ok(&node.attrs), "module", node, visit::visit_file);
+        self.visit_classified(Ok(&node.attrs), None, node, visit::visit_file);
     }
 
     fn visit_item(&mut self, node: &'ast Item) {

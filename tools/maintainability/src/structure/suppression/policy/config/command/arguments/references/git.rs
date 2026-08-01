@@ -14,16 +14,19 @@ fn configuration_is_opaque(arguments: &[String]) -> bool {
         if argument == "--config-env" || argument.starts_with("--config-env=") {
             return true;
         }
-        let configuration = if argument == "-c" {
+        let consumes_configuration = matches!(argument.as_str(), "-c" | "--config");
+        let configuration = if consumes_configuration {
             index += 1;
             arguments.get(index).map(String::as_str)
+        } else if let Some(configuration) = argument.strip_prefix("--config=") {
+            Some(configuration)
         } else {
             argument.strip_prefix("-c").filter(|configuration| !configuration.is_empty())
         };
         if configuration.is_some_and(|configuration| !is_safe_configuration(configuration)) {
             return true;
         }
-        if argument == "-c" && configuration.is_none() {
+        if consumes_configuration && configuration.is_none() {
             return true;
         }
         index += 1;
@@ -51,10 +54,18 @@ fn command_producing_subcommand(arguments: &[String]) -> bool {
 
 fn clone_dispatch_is_opaque(arguments: &[String]) -> bool {
     upload_pack_selection_is_opaque(arguments)
+        || abbreviated_clone_configuration_is_opaque(arguments)
         || arguments
             .iter()
             .take_while(|argument| argument.as_str() != "--")
             .any(|argument| argument == "-u" || argument.starts_with("-u") && argument.len() > 2)
+}
+
+fn abbreviated_clone_configuration_is_opaque(arguments: &[String]) -> bool {
+    arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
+        let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
+        option != "--config" && option.len() >= "--co".len() && "--config".starts_with(option)
+    })
 }
 
 fn upload_pack_selection_is_opaque(arguments: &[String]) -> bool {
@@ -165,10 +176,12 @@ mod tests {
         assert!(dispatch_is_opaque(&arguments(&["--config-env", "alias.lint=LINT_ALIAS", "lint"])));
         assert!(dispatch_is_opaque(&arguments(&["-c", "safe.directory=.", "status"])));
         assert!(dispatch_is_opaque(&arguments(&["-c"])));
+        assert!(dispatch_is_opaque(&arguments(&["clone", "--config"])));
         assert!(!dispatch_is_opaque(&arguments(&["-c", "core.autocrlf=false", "status"])));
         assert!(!dispatch_is_opaque(&arguments(&["-ccore.fsmonitor=false", "status"])));
         assert!(!dispatch_is_opaque(&arguments(&["-c", "core.hooksPath=/dev/null", "status"])));
         assert!(!dispatch_is_opaque(&arguments(&["-c", "user.name=LocalHold", "status"])));
+        assert!(!dispatch_is_opaque(&arguments(&["clone", "--config=core.autocrlf=false", ".", "target"])));
     }
 
     #[test]
@@ -221,5 +234,22 @@ mod tests {
         assert!(dispatch_is_opaque(&arguments(&["clone", "-ush quality/lint.txt", ".", "target"])));
         assert!(dispatch_is_opaque(&arguments(&["fetch", "--upload-pack", "quality/lint", "origin"])));
         assert!(!dispatch_is_opaque(&arguments(&["clone", "--no-local", ".", "target"])));
+    }
+
+    #[test]
+    fn clone_time_filter_configuration_fails_closed() {
+        assert!(dispatch_is_opaque(&arguments(&["clone", "-c", "filter.lint.smudge=sh quality/lint.txt", ".", "target",])));
+        assert!(dispatch_is_opaque(&arguments(&[
+            "clone",
+            "--config",
+            "filter.lint.smudge=sh quality/lint.txt",
+            ".",
+            "target",
+        ])));
+        assert!(dispatch_is_opaque(&arguments(
+            &["clone", "--config=filter.lint.smudge=sh quality/lint.txt", ".", "target",]
+        )));
+        assert!(dispatch_is_opaque(&arguments(&["clone", "--co", "filter.lint.smudge=sh quality/lint.txt", ".", "target",])));
+        assert!(dispatch_is_opaque(&arguments(&["clone", "--conf=filter.lint.smudge=sh quality/lint.txt", ".", "target",])));
     }
 }

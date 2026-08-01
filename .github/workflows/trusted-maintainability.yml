@@ -55,7 +55,7 @@ jobs:
             exit 1
           fi
 
-          for relative_path in tools/maintainability tools/dependency-unsafe; do
+          for relative_path in tools/maintainability tools/dependency-unsafe policy/dependency-unsafe/baseline; do
             source_path="$trusted_root/$relative_path"
             destination_path="$candidate_root/$relative_path"
             destination_parent=$(/usr/bin/dirname -- "$destination_path")

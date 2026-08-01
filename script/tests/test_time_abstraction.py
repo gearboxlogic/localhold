@@ -70,6 +70,45 @@ class TimeAbstractionTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_scans_an_unconditional_module_named_tests(self) -> None:
+        result = self._run_check(
+            "mod tests {\n"
+            "    pub fn production() { std::thread::sleep(std::time::Duration::ZERO); }\n"
+            "}\n"
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("direct time access bypasses Clock", result.stderr)
+
+    def test_test_cfg_remains_active_across_other_attributes(self) -> None:
+        result = self._run_check(
+            "#[cfg(test)]\n"
+            "#[expect(dead_code, reason = \"test helper\")]\n"
+            "mod tests {\n"
+            "    fn helper() { std::thread::sleep(std::time::Duration::ZERO); }\n"
+            "}\n"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_all_cfg_requires_test_before_skipping_module(self) -> None:
+        skipped = self._run_check(
+            "#[cfg(all(feature = \"reranker\", test))]\n"
+            "mod tests {\n"
+            "    fn helper() { std::thread::sleep(std::time::Duration::ZERO); }\n"
+            "}\n"
+        )
+        scanned = self._run_check(
+            "#[cfg(any(feature = \"testing\", test))]\n"
+            "mod tests {\n"
+            "    pub fn production() { std::thread::sleep(std::time::Duration::ZERO); }\n"
+            "}\n"
+        )
+
+        self.assertEqual(skipped.returncode, 0, skipped.stderr)
+        self.assertNotEqual(scanned.returncode, 0)
+        self.assertIn("direct time access bypasses Clock", scanned.stderr)
+
     def test_tracks_multiline_test_function_braces(self) -> None:
         result = self._run_check(
             "#[cfg(test)]\n"

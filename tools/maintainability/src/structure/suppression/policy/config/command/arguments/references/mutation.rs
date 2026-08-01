@@ -13,6 +13,7 @@ pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]
             "curl" | "curl.exe" => curl_output_targets_surface(arguments) || curl_remote_name_is_opaque(arguments),
             "dd" | "dd.exe" => arguments.iter().filter_map(|argument| argument.strip_prefix("of=")).any(is_literal_execution_surface),
             "iconv" | "iconv.exe" => iconv_output_is_opaque(path, arguments),
+            "openssl" | "openssl.exe" => openssl_output_is_opaque(path, arguments),
             "patch" | "patch.exe" => true,
             "unzip" | "unzip.exe" => unzip_dispatch_is_opaque(arguments),
             "perl" | "perl.exe" if arguments.iter().any(|argument| argument.starts_with("-i")) => arguments_reference_surface(arguments),
@@ -102,6 +103,20 @@ fn iconv_output_is_opaque(path: &str, arguments: &[String]) -> bool {
         };
         if target.is_some_and(|target| destination_is_opaque(path, target)) {
             return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn openssl_output_is_opaque(path: &str, arguments: &[String]) -> bool {
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
+        if matches!(argument.as_str(), "-out" | "-keyout" | "-writerand" | "-CAserial") {
+            index += 1;
+            if destination_is_opaque(path, arguments.get(index).map_or("", String::as_str)) {
+                return true;
+            }
         }
         index += 1;
     }
@@ -324,6 +339,20 @@ mod tests {
             assert!(opaque("iconv", arguments), "{arguments:?}");
         }
         assert!(!opaque("iconv", &["-o", "target/output.txt", "quality/lint.data"]));
+    }
+
+    #[test]
+    fn openssl_output_to_execution_surfaces_fails_closed() {
+        for arguments in [
+            &["base64", "-d", "-in", "quality/Justfile.b64", "-out", "Justfile"][..],
+            &["req", "-new", "-keyout", "script/check.sh"],
+            &["rand", "-writerand", "$destination"],
+            &["ca", "-CAserial", ".github/workflows/ci.yml"],
+        ] {
+            assert!(opaque("openssl", arguments), "{arguments:?}");
+            assert!(opaque("openssl.exe", arguments), "{arguments:?}");
+        }
+        assert!(!opaque("openssl", &["base64", "-out", "target/output.txt", "-in", "input.txt"]));
     }
 
     #[test]

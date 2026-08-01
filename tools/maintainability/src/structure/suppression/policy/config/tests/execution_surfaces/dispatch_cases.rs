@@ -133,6 +133,7 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("curl -O \"file://$PWD/quality/Justfile\"\n", "opaque interpreter program"),
     ("cat quality/lint.data > Justfile\n", "opaque interpreter program"),
     ("openssl list -provider-path quality -provider lint\n", "opaque interpreter program"),
+    ("openssl base64 -d -in quality/Justfile.b64 -out Justfile\n", "opaque interpreter program"),
     ("openssl req -engine lint -new\n", "opaque interpreter program"),
     ("OPENSSL_CONF=quality/openssl.cnf openssl version\n", "lint-weakening environment channel"),
     ("OPENSSL_CONF_INCLUDE=quality openssl version\n", "lint-weakening environment channel"),

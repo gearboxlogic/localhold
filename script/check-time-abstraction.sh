@@ -127,6 +127,18 @@ rust_brace_delta() {
     done
 }
 
+test_only_cfg_attribute() {
+    local compact=${1//[[:space:]]/}
+    if [[ $compact == '#[cfg(test)]' ]]; then
+        return 0
+    fi
+    if [[ ! $compact =~ ^#\[cfg\(all\((.*)\)\)\]$ ]]; then
+        return 1
+    fi
+    local predicates=${BASH_REMATCH[1]}
+    [[ $predicates != *'any('* && $predicates != *'not('* && ",$predicates," == *',test,'* ]]
+}
+
 source_files=()
 while IFS= read -r -d '' file; do
     source_files+=("$file")
@@ -149,6 +161,7 @@ for file in "${source_files[@]}"; do
     matches=
     in_tests=0
     test_depth=0
+    pending_test_cfg=0
     line_number=0
     block_comment_depth=0
     normal_string=0
@@ -168,10 +181,18 @@ for file in "${source_files[@]}"; do
             fi
             continue
         fi
-        if (( block_comment_depth == 0 && normal_string == 0 && raw_string == 0 )) && [[ "$line" == 'mod tests {' ]]; then
-            in_tests=1
-            test_depth=1
-            continue
+        if (( block_comment_depth == 0 && normal_string == 0 && raw_string == 0 )); then
+            compact=${line//[[:space:]]/}
+            if test_only_cfg_attribute "$line"; then
+                pending_test_cfg=1
+            elif [[ $line == 'mod tests {' ]] && (( pending_test_cfg == 1 )); then
+                in_tests=1
+                test_depth=1
+                pending_test_cfg=0
+                continue
+            elif [[ -n $compact && ! $compact =~ ^#\[.*\]$ && $compact != //* ]]; then
+                pending_test_cfg=0
+            fi
         fi
         if [[ $line =~ $pattern ]]; then
             printf -v matches '%s%s:%s\n' "$matches" "$line_number" "$line"

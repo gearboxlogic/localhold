@@ -375,6 +375,14 @@ fn command_policy_rejects_python_command_wrapper_dispatch() {
 
     fs::write(
         workspace.path().join("script/check.py"),
+        "import shutil\nshutil.copyfile(\"quality/lint.data\", \"Justfile\")\n",
+    )
+    .expect("Python execution-surface mutation");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+
+    fs::write(
+        workspace.path().join("script/check.py"),
         "import subprocess\nsubprocess.run([\"git\", \"status\"])\nrunner = subprocess.run\nrunner(bytes.fromhex(\"636172676f\").decode(), shell=True)\n",
     )
     .expect("assigned Python process callable");

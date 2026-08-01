@@ -795,6 +795,18 @@ mod tests {
     }
 
     #[test]
+    fn python_documentation_launchers_fail_closed() {
+        for command in [
+            "pydoc quality/lint.py",
+            "pydoc.exe quality/lint.py",
+            "pydoc3 quality/lint.py",
+            "/usr/bin/pydoc3.12 quality/lint.py",
+        ] {
+            assert_eq!(inputs(command), (Vec::new(), true), "{command}");
+        }
+    }
+
+    #[test]
     fn go_dispatch_fails_closed() {
         for command in [
             "go version",

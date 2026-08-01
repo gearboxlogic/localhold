@@ -1,4 +1,5 @@
 mod evaluation;
+mod filesystem;
 mod process;
 
 pub(super) fn join_implicit_continuations(source: &str) -> String {
@@ -38,6 +39,10 @@ pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
         has_adjacent_string_literals_in(line) && (references_process_api(line) || references_rust_tool(line))
             || references_process_api(line) && AdjacentLiteralScanner::new(line).has_decoded_escape()
     })
+}
+
+pub(super) fn mutates_literal_execution_surface(source: &str) -> bool {
+    filesystem::mutates_literal_execution_surface(&join_implicit_continuations(source))
 }
 
 fn imports_command_capable_api(source: &str) -> bool {

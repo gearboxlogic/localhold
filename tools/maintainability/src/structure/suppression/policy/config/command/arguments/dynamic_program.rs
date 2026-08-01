@@ -79,6 +79,7 @@ pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
             | "yarn.exe"
             | "yarn.ps1"
     ) || is_python_package_installer(command)
+        || is_python_documentation_launcher(command)
         || is_tcl_interpreter(command)
 }
 
@@ -90,6 +91,11 @@ pub(super) fn is_python_interpreter(command: &str) -> bool {
 fn is_python_package_installer(command: &str) -> bool {
     let command = command.strip_suffix(".exe").unwrap_or(command);
     is_versioned_name(command, "pip")
+}
+
+fn is_python_documentation_launcher(command: &str) -> bool {
+    let command = command.strip_suffix(".exe").unwrap_or(command);
+    is_versioned_name(command, "pydoc")
 }
 
 fn is_versioned_name(command: &str, name: &str) -> bool {
@@ -179,6 +185,11 @@ mod tests {
             "pip3",
             "pip3.12",
             "pip3.12.exe",
+            "pydoc",
+            "pydoc.exe",
+            "pydoc3",
+            "pydoc3.12",
+            "pydoc3.12.exe",
             "yarn",
             "yarn.cmd",
             "yarn.exe",
@@ -192,7 +203,7 @@ mod tests {
         ] {
             assert!(is_unanalyzed_interpreter(command), "{command}");
         }
-        for command in ["pipeline", "pip-preview", "pip3."] {
+        for command in ["pipeline", "pip-preview", "pip3.", "pydoc-preview", "pydoc3."] {
             assert!(!is_unanalyzed_interpreter(command), "{command}");
         }
     }

@@ -5,6 +5,9 @@ pub(super) fn dispatch_is_opaque(arguments: &[String]) -> bool {
 fn configuration_is_opaque(arguments: &[String]) -> bool {
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
+        if matches!(argument.as_str(), "-p" | "--paginate") {
+            return true;
+        }
         if argument == "--exec-path" || argument.starts_with("--exec-path=") {
             return true;
         }
@@ -34,6 +37,7 @@ fn command_producing_subcommand(arguments: &[String]) -> bool {
     };
     match subcommand.to_ascii_lowercase().as_str() {
         "config" => config_dispatch_is_opaque(&arguments[index + 1..]),
+        "grep" => grep_dispatch_is_opaque(&arguments[index + 1..]),
         "difftool" | "filter-branch" | "mergetool" => true,
         "bisect" => arguments[index + 1..]
             .iter()
@@ -41,6 +45,13 @@ fn command_producing_subcommand(arguments: &[String]) -> bool {
             .any(|argument| argument.eq_ignore_ascii_case("run")),
         subcommand => !is_builtin_subcommand(subcommand),
     }
+}
+
+fn grep_dispatch_is_opaque(arguments: &[String]) -> bool {
+    arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
+        let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
+        argument == "-O" || argument.starts_with("-O") && argument.len() > 2 || option.len() >= "--open".len() && "--open-files-in-pager".starts_with(option)
+    })
 }
 
 fn config_dispatch_is_opaque(arguments: &[String]) -> bool {
@@ -173,5 +184,15 @@ mod tests {
     fn alternate_git_exec_paths_fail_closed() {
         assert!(dispatch_is_opaque(&arguments(&["--exec-path", "/tmp", "lint"])));
         assert!(dispatch_is_opaque(&arguments(&["--exec-path=/tmp", "lint"])));
+    }
+
+    #[test]
+    fn pager_dispatch_fails_closed() {
+        assert!(dispatch_is_opaque(&arguments(&["grep", "--open-files-in-pager=sh quality/lint.txt", "lint"])));
+        assert!(dispatch_is_opaque(&arguments(&["grep", "--open-files", "lint"])));
+        assert!(dispatch_is_opaque(&arguments(&["grep", "-Osh quality/lint.txt", "lint"])));
+        assert!(dispatch_is_opaque(&arguments(&["--paginate", "status"])));
+        assert!(dispatch_is_opaque(&arguments(&["-p", "log"])));
+        assert!(!dispatch_is_opaque(&arguments(&["--no-pager", "grep", "lint"])));
     }
 }

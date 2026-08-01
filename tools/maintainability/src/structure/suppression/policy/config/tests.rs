@@ -362,6 +362,7 @@ fn weakening_environment_channels_are_detected() {
     assert!(weakening_environment("GCONV_PATH=quality iconv -f UTF-8 -t PWN"));
     assert!(weakening_environment("OPENSSL_CONF=quality/openssl.cnf openssl version"));
     assert!(weakening_environment("OPENSSL_MODULES=quality openssl version"));
+    assert!(weakening_environment("RIPGREP_CONFIG_PATH=quality/ripgrep.conf rg lint ."));
     assert!(!weakening_environment_for_surface("script/check.py", "subprocess.run(command, env=environment)"));
     assert!(weakening_environment_for_surface("script/check.ps1", "$env:env = 'quality/dash-startup.sh'"));
     assert!(weakening_environment("LD_AUDIT=untrusted.so"));
@@ -548,6 +549,10 @@ fn yaml_environment_channels_are_distinguished_from_action_inputs() {
     assert!(weakening_environment_for_surface(
         ".github/workflows/ci.yml",
         "env:\n  rustflags: -A warnings\njobs:\n  lint:\n    steps:\n      - run: cargo clippy\n"
+    ));
+    assert!(weakening_environment_for_surface(
+        ".github/workflows/ci.yml",
+        "jobs:\n  lint:\n    env:\n      BASH_FUNC_just%%: '() { :; }'\n    steps:\n      - run: just check-quality\n"
     ));
     assert!(!weakening_environment_for_surface(
         ".github/workflows/ci.yml",

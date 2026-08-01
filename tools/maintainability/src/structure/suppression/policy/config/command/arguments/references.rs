@@ -9,6 +9,7 @@ use super::{
 mod cargo;
 mod compiler;
 mod git;
+mod mutation;
 mod native;
 mod path;
 mod sed;
@@ -188,7 +189,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         wrapper::Selection::Nested(command) => return execution_input_candidates(command, direct_program_paths),
         wrapper::Selection::Opaque => return (Vec::new(), true),
     }
-    if compiler::dispatch_is_opaque(&command, arguments) || native::dispatch_is_opaque(&command, arguments) {
+    if mutation::dispatch_is_opaque(&command, arguments) || compiler::dispatch_is_opaque(&command, arguments) || native::dispatch_is_opaque(&command, arguments) {
         return (Vec::new(), true);
     }
     let selected = match command.as_str() {
@@ -196,7 +197,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "alias" | "coproc" | "eval" | "fc" | "fc.exe" | "iex" | "invoke-expression" | "parallel" | "parallel.exe" | "trap" | "xargs" | "xargs.exe" => SelectedInput::Opaque,
         "enable" if bash_enable_loads_builtin(arguments) => SelectedInput::Opaque,
         "mapfile" | "readarray" if mapfile_callback_is_opaque(arguments) => SelectedInput::Opaque,
-        "bash" | "bash.exe" | "dash" | "dash.exe" | "fish" | "fish.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe" => shell_input(arguments),
+        "bash" | "bash.exe" | "dash" | "dash.exe" | "fish" | "fish.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe" => shell_input(&command, arguments),
         _ if dynamic_program::is_python_interpreter(&command) => python_input(arguments),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),
         _ if dynamic_program::is_unanalyzed_interpreter(&command) => SelectedInput::Opaque,
@@ -215,6 +216,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "tar" | "tar.exe" if tar_checkpoint_action_is_opaque(arguments) => SelectedInput::Opaque,
         "zip" | "zip.exe" if zip_test_command_is_opaque(arguments) => SelectedInput::Opaque,
         "openssl" | "openssl.exe" if openssl_module_selection_is_opaque(arguments) => SelectedInput::Opaque,
+        "rg" | "rg.exe" | "ripgrep" | "ripgrep.exe" if ripgrep_preprocessor_is_opaque(arguments) => SelectedInput::Opaque,
         "cargo" | "cargo.exe" if cargo::dispatch_is_opaque(arguments) => SelectedInput::Opaque,
         "go" | "go.exe" if go_run_is_opaque(arguments) => SelectedInput::Opaque,
         "just" | "just.exe" if just_source_selection_is_opaque(arguments) => SelectedInput::Opaque,
@@ -274,6 +276,13 @@ fn openssl_module_selection_is_opaque(arguments: &[String]) -> bool {
     })
 }
 
+fn ripgrep_preprocessor_is_opaque(arguments: &[String]) -> bool {
+    arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--")
+        .any(|argument| argument == "--pre" || argument.starts_with("--pre="))
+}
+
 fn go_run_is_opaque(arguments: &[String]) -> bool {
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
@@ -329,14 +338,17 @@ enum SelectedInput<'a> {
     Opaque,
 }
 
-fn shell_input(arguments: &[String]) -> SelectedInput<'_> {
+fn shell_input<'a>(command: &str, arguments: &'a [String]) -> SelectedInput<'a> {
+    if matches!(command, "fish" | "fish.exe" | "zsh" | "zsh.exe") {
+        return SelectedInput::Opaque;
+    }
     for (index, argument) in arguments.iter().enumerate() {
         let lowercase = argument.to_ascii_lowercase();
         if matches!(lowercase.as_str(), "--help" | "--version") {
             return SelectedInput::None;
         }
-        if matches!(lowercase.as_str(), "-c" | "--command" | "-s" | "--stdin")
-            || (argument.starts_with('-') || argument.starts_with('+')) && !argument.starts_with("--") && argument[1..].contains(['c', 'C', 's', 'o', 'O'])
+        if matches!(lowercase.as_str(), "-c" | "--command" | "-i" | "--interactive" | "-l" | "--login" | "-s" | "--stdin")
+            || (argument.starts_with('-') || argument.starts_with('+')) && !argument.starts_with("--") && argument[1..].contains(['c', 'C', 'i', 'l', 's', 'o', 'O'])
             || matches!(lowercase.as_str(), "--init-file" | "--rcfile")
             || lowercase.starts_with("--init-file=")
             || lowercase.starts_with("--rcfile=")
@@ -526,6 +538,11 @@ mod tests {
         assert_eq!(inputs("bash quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
         assert_eq!(inputs("/usr/bin/env -i bash -e ./quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
         assert_eq!(inputs("bash -lc 'cargo clippy'"), (Vec::new(), true));
+        assert_eq!(inputs("HOME=quality bash -i quality/lint.txt"), (Vec::new(), true));
+        assert_eq!(inputs("bash --login quality/lint.txt"), (Vec::new(), true));
+        assert_eq!(inputs("dash -il quality/lint.txt"), (Vec::new(), true));
+        assert_eq!(inputs("fish quality/lint.txt"), (Vec::new(), true));
+        assert_eq!(inputs("zsh quality/lint.txt"), (Vec::new(), true));
         assert_eq!(inputs(r#"bash -c "$(cat quality/lint.txt)""#), (Vec::new(), true));
         assert_eq!(inputs(r#"command eval "$(printf '\143\141\162\147\157')""#), (Vec::new(), true));
         assert_eq!(inputs("Invoke-Expression $encoded"), (Vec::new(), true));
@@ -664,6 +681,14 @@ mod tests {
         ] {
             assert_eq!(inputs(command), (Vec::new(), false), "{command}");
         }
+    }
+
+    #[test]
+    fn ripgrep_preprocessors_fail_closed() {
+        for command in ["rg --pre='sh quality/lint.txt' pattern .", "ripgrep --pre quality/lint.txt pattern ."] {
+            assert_eq!(inputs(command), (Vec::new(), true), "{command}");
+        }
+        assert_eq!(inputs("rg pattern ."), (Vec::new(), false));
     }
 
     #[test]

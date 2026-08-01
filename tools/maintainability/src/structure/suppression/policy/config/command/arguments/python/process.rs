@@ -2,6 +2,9 @@ pub(super) fn has_non_literal_arguments(source: &str) -> bool {
     let mut found_call = false;
     for line in source.lines() {
         let mut scanner = ProcessCallScanner::new(line);
+        if scanner.has_process_callable_reference() {
+            return true;
+        }
         while let Some((opening_parenthesis, kind)) = scanner.next_call() {
             found_call = true;
             if !scanner.process_argument_is_static(opening_parenthesis + 1, kind) {
@@ -57,6 +60,40 @@ impl ProcessCallScanner {
             }
         }
         None
+    }
+
+    fn has_process_callable_reference(&self) -> bool {
+        let mut scanner = Self {
+            characters: self.characters.clone(),
+            index: 0,
+        };
+        while scanner.index < scanner.characters.len() {
+            if scanner.characters[scanner.index] == '#' {
+                return false;
+            }
+            if let Some(end) = scanner.string_literal_end(scanner.index) {
+                scanner.index = end;
+                continue;
+            }
+            if !is_identifier_start(scanner.characters[scanner.index]) {
+                scanner.index += 1;
+                continue;
+            }
+            let name_start = scanner.index;
+            scanner.index += 1;
+            while scanner
+                .characters
+                .get(scanner.index)
+                .is_some_and(|character| is_identifier_character(*character) || *character == '.')
+            {
+                scanner.index += 1;
+            }
+            let name = scanner.characters[name_start..scanner.index].iter().collect::<String>();
+            if name.contains('.') && process_kind(&name).is_some() && scanner.characters.get(scanner.skip_whitespace(scanner.index)) != Some(&'(') {
+                return true;
+            }
+        }
+        false
     }
 
     fn process_argument_is_static(&self, start: usize, kind: ProcessKind) -> bool {
@@ -272,5 +309,11 @@ mod tests {
         assert!(has_non_literal_arguments(r#"os.system(bytes.fromhex("636172676f"))"#));
         assert!(has_non_literal_arguments(r#"os.system("printf safe; " + command)"#));
         assert!(has_non_literal_arguments(r#"subprocess.run(bytes.fromhex("2f7573722f62696e2f636172676f"))"#));
+        assert!(has_non_literal_arguments(
+            "subprocess.run([\"git\", \"status\"])\nrunner = subprocess.run\nrunner(bytes.fromhex(\"636172676f\").decode(), shell=True)\n"
+        ));
+        assert!(!has_non_literal_arguments(
+            "subprocess.run([\"git\", \"status\"])\nmessage = \"runner = subprocess.run\"\n# callback = subprocess.run\n"
+        ));
     }
 }

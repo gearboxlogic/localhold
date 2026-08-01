@@ -426,6 +426,9 @@ run(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
         assert!(has_opaque_process_arguments(r#"os.system("printf safe; " + command)"#));
         assert!(has_opaque_process_arguments(r#"subprocess.run(bytes.fromhex("2f7573722f62696e2f636172676f"))"#));
         assert!(has_opaque_process_arguments("subprocess.Popen(command)"));
+        assert!(has_opaque_process_arguments(
+            "import subprocess\nsubprocess.run([\"git\", \"status\"])\nrunner = subprocess.run\nrunner(bytes.fromhex(\"636172676f\").decode(), shell=True)\n"
+        ));
         assert!(!has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", r"\x2dA", "warnings"])"#));
         assert!(!has_opaque_process_arguments(
             r#"subprocess.run(["cargo", "metadata", "--locked"], cwd=repository, check=True)"#

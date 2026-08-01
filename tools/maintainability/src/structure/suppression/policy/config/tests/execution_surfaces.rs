@@ -367,6 +367,14 @@ fn command_policy_rejects_python_command_wrapper_dispatch() {
 
     fs::write(
         workspace.path().join("script/check.py"),
+        "import subprocess\nsubprocess.run([\"git\", \"status\"])\nrunner = subprocess.run\nrunner(bytes.fromhex(\"636172676f\").decode(), shell=True)\n",
+    )
+    .expect("assigned Python process callable");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+
+    fs::write(
+        workspace.path().join("script/check.py"),
         "exec(bytes.fromhex(\"696d706f7274206f733b206f732e73797374656d2827636172676f20636c69707079202d2d202d41207761726e696e67732729\"))\n",
     )
     .expect("Python dynamic code evaluation");

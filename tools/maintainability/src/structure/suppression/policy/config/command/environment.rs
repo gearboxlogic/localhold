@@ -3,7 +3,7 @@ pub(super) fn is_weakening_environment_name(name: &str) -> bool {
         return true;
     }
     let name = name.to_ascii_uppercase();
-    if is_runtime_code_loading_environment_name(&name) {
+    if name.starts_with("BASH_FUNC_") || is_runtime_code_loading_environment_name(&name) {
         return true;
     }
     matches!(
@@ -93,6 +93,7 @@ fn is_runtime_code_loading_environment_name(name: &str) -> bool {
             | "PYTHONSTARTUP"
             | "PYTHONUSERBASE"
             | "PYTHONWARNINGS"
+            | "RIPGREP_CONFIG_PATH"
             | "RUBYOPT"
     )
 }
@@ -189,6 +190,18 @@ mod tests {
         assert!(!is_weakening_environment_name("env"));
         assert!(is_weakening_environment_name("SHELLOPTS"));
         assert!(is_weakening_environment_name("shellopts"));
+    }
+
+    #[test]
+    fn exported_shell_functions_are_weakening() {
+        assert!(is_weakening_environment_name("BASH_FUNC_just%%"));
+        assert!(is_weakening_environment_name("bash_func_just%%"));
+    }
+
+    #[test]
+    fn ripgrep_configuration_is_weakening() {
+        assert!(is_weakening_environment_name("RIPGREP_CONFIG_PATH"));
+        assert!(is_weakening_environment_name("ripgrep_config_path"));
     }
 
     #[test]

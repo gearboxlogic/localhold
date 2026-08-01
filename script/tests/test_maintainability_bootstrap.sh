@@ -209,8 +209,7 @@ GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head \
     LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base run_local_check --test-environment >/dev/null
 
 trusted_gate="$fixture/trusted-gate"
-git -c core.autocrlf=false clone -q --no-hardlinks "$test_repository" "$trusted_gate"
-git -C "$trusted_gate" -c core.autocrlf=false checkout -q --detach "$test_base"
+git -C "$test_repository" -c core.autocrlf=false worktree add -q --detach "$trusted_gate" "$test_base"
 trusted_check="$trusted_gate/script/check-maintainability-bootstrap.sh"
 GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_head \
     LOCALHOLD_MAINTAINABILITY_BASE_REV=$test_base "$trusted_check" --root "$test_repository" --test-environment >/dev/null
@@ -286,7 +285,10 @@ if ! GITHUB_ACTIONS=true GITHUB_EVENT_PATH=$event_path GITHUB_SHA=$test_lock_hea
     printf 'maintainability bootstrap did not preserve the trusted base checker lock graph\n' >&2
     exit 1
 fi
-git -C "$test_repository" checkout -q --detach "$test_base"
+historical_repository="$fixture/historical-repository"
+git -C "$test_repository" worktree add -q --detach "$historical_repository" "$test_base"
+test_repository=$historical_repository
+test_tool="$test_repository/tools/maintainability"
 restore_reviewed_graph
 
 touch "$test_tool/build.rs"

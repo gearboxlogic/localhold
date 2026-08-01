@@ -359,6 +359,7 @@ fn folded_yaml_commands_are_scanned_as_executed() {
 fn weakening_environment_channels_are_detected() {
     assert!(weakening_environment("BASH_ENV=script/ci-startup.sh"));
     assert!(weakening_environment("ENV=quality/dash-startup.sh dash -i quality/reviewed.sh"));
+    assert!(weakening_environment("GCONV_PATH=quality iconv -f UTF-8 -t PWN"));
     assert!(!weakening_environment_for_surface("script/check.py", "subprocess.run(command, env=environment)"));
     assert!(weakening_environment_for_surface("script/check.ps1", "$env:env = 'quality/dash-startup.sh'"));
     assert!(weakening_environment("LD_AUDIT=untrusted.so"));

@@ -11,6 +11,7 @@ mod package_json;
 mod powershell;
 mod python;
 mod references;
+mod source;
 mod tokens;
 mod toolchain;
 use analysis::Options as AnalysisOptions;
@@ -137,29 +138,14 @@ pub(in crate::structure::suppression::policy::config) fn has_sourced_file_indire
         return false;
     }
     if let Some(scripts) = package_json::script_commands(path, source) {
-        return scripts.map_or(true, |scripts| scripts.iter().any(|script| contains_source_command(script)));
+        return scripts.map_or(true, |scripts| scripts.iter().any(|script| source::contains_command(script)));
     }
     let source = normalized_source_for_surface(path, source);
     let embedded_commands = super::yaml::run_commands(path, &source);
     if is_yaml(path) {
-        return embedded_commands.iter().any(|command| contains_source_command(command));
+        return embedded_commands.iter().any(|command| source::contains_command(command));
     }
-    contains_source_command(&source) || embedded_commands.iter().any(|command| contains_source_command(command))
-}
-
-fn contains_source_command(source: &str) -> bool {
-    tokens::source_command_tokens(source).iter().any(|command| {
-        let mut words = command.iter().map(|word| word.trim_matches(['(', ')', '{', '}'])).filter(|word| !word.is_empty());
-        loop {
-            let Some(word) = words.next() else {
-                return false;
-            };
-            if is_shell_command_prefix(word) || is_environment_assignment(word) {
-                continue;
-            }
-            return matches!(word, "." | "source") && words.next().is_some();
-        }
-    })
+    source::contains_command(&source) || embedded_commands.iter().any(|command| source::contains_command(command))
 }
 
 fn is_shell_command_prefix(word: &str) -> bool {

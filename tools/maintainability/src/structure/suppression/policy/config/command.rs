@@ -23,6 +23,7 @@ use environment::{is_case_insensitive_weakening_environment_assignment_name, is_
 use surfaces::execution_surfaces;
 
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
+    "unset GCONV_PATH",
     "CDPATH=",
     "IFS=$' \\t\\n'",
     "export -n CDPATH IFS",
@@ -43,7 +44,7 @@ pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "        git_executable=$(\"$cygpath_command\" -w \"$git_executable\")",
     "    LOCALHOLD_MAINTAINABILITY_GIT=$git_executable",
     "    export LOCALHOLD_MAINTAINABILITY_GIT",
-    "            BASH_ENV | ENV | CDPATH | IFS | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
+    "            BASH_ENV | ENV | CDPATH | IFS | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
     "                RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \\",
     "                CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \\",
     "                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_* | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | TAR_OPTIONS)",
@@ -96,7 +97,7 @@ pub(super) const GATE_RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "CARGO_TARGET_DIR=$relative_target_directory",
     "readonly CARGO_HOME CARGO_TARGET_DIR",
     "export PATH CARGO RUSTC RUSTDOC RUSTFMT RUSTUP_HOME RUSTUP_TOOLCHAIN CARGO_HOME CARGO_TARGET_DIR GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY LOCALHOLD_MAINTAINABILITY_CARGO_FMT LOCALHOLD_MAINTAINABILITY_RUSTC LOCALHOLD_MAINTAINABILITY_RUSTUP",
-    "    for name in BASH_ENV ENV GITHUB_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER \\",
+    "    for name in BASH_ENV ENV GCONV_PATH GITHUB_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER \\",
     "        RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS \\",
     "        CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do",
     "    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY && -n $LOCALHOLD_MAINTAINABILITY_CARGO_FMT && -n $LOCALHOLD_MAINTAINABILITY_RUSTC && -n $LOCALHOLD_MAINTAINABILITY_RUSTUP && -n $git_command ]]",
@@ -158,7 +159,7 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "cargo_home=\"$fixture/cargo-home\"",
     "export CARGO_HOME=$cargo_home",
     "unset CARGO_HOME",
-    "for loader_variable in LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD; do",
+    "for loader_variable in GCONV_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD; do",
     "FAKE_JUST_MARKER=$fake_just_marker FAKE_CARGO_MARKER=$fake_cargo_marker FAKE_RUSTUP_MARKER=$fake_rustup_marker PATH=\"$fake_bin:$PATH\" run_check --test-environment >/dev/null",
     "if LOCALHOLD_MAINTAINABILITY_RUSTUP=\"$fake_bin/rustup\" run_check --test-environment >/dev/null 2>&1; then",
     "if PATH=\"$fake_system_bin:$PATH\" run_check >/dev/null 2>&1; then",
@@ -173,7 +174,7 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "if RUSTUP_HOME=$fake_rustup_home run_check --test-environment >/dev/null 2>&1; then",
     "RUSTUP_HOME=$fake_rustup_environment run_check --test-environment >/dev/null",
     "if RUSTUP_HOME=$fake_rustup_environment run_check --test-environment >/dev/null 2>&1; then",
-    "BASH_ENV=$bash_env ENV=$bash_env GITHUB_PATH=untrusted LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CARGO_HOME=\"$fixture/untrusted-cargo-home\" CARGO_TARGET_DIR=\"$fixture/untrusted-target\" CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \\",
+    "BASH_ENV=$bash_env ENV=$bash_env GCONV_PATH=untrusted GITHUB_PATH=untrusted LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CARGO_HOME=\"$fixture/untrusted-cargo-home\" CARGO_TARGET_DIR=\"$fixture/untrusted-target\" CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \\",
     "    RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \\",
     "    CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \\",
     "    run_check --test-environment >/dev/null",
@@ -183,10 +184,12 @@ pub(super) const MISE_ENVIRONMENT_LINES: &[&str] = &[
     "RUSTUP_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/rustup\"",
 ];
 pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
-    "        shell: /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
-    "        shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:ENV = $null; $env:SHELLOPTS = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\\Program Files\\Git\\bin\\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE\"'",
+    "        shell: /usr/bin/env -u BASH_ENV -u ENV -u GCONV_PATH -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
+    "        shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:ENV = $null; $env:GCONV_PATH = $null; $env:SHELLOPTS = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\\Program Files\\Git\\bin\\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE\"'",
     "          BASH_ENV: ''",
     "          BASH_ENV: ''",
+    "          GCONV_PATH: ''",
+    "          GCONV_PATH: ''",
     "          SHELLOPTS: ''",
     "          SHELLOPTS: ''",
     "          GIT_CONFIG_COUNT: '1'",
@@ -206,7 +209,7 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
-    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 2ce55035379689d334d70282c4279795db3397e5443588af80d0740fb252b138",
+    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: f39f9c3f10ff04f562362c6a5e9b1b85c783be88bc38ae741b72e46ffb384318",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
@@ -215,8 +218,8 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          if [[ \"$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256\" != \"$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256\" ]]; then",
 ];
 pub(super) const TRUSTED_GATE_ENVIRONMENT_LINES: &[&str] = &[
-    "        shell: /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
-    "        shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:ENV = $null; $env:SHELLOPTS = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\\Program Files\\Git\\bin\\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE\"'",
+    "        shell: /usr/bin/env -u BASH_ENV -u ENV -u GCONV_PATH -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
+    "        shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:ENV = $null; $env:GCONV_PATH = $null; $env:SHELLOPTS = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\\Program Files\\Git\\bin\\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE\"'",
     "          GIT_CONFIG_COUNT: '1'",
     "          GIT_CONFIG_COUNT: '1'",
     "          GIT_CONFIG_KEY_0: core.autocrlf",

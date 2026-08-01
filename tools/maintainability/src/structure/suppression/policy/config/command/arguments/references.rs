@@ -682,6 +682,8 @@ mod tests {
         for command in [
             "ar --plugin=quality/lint.so rc quality/archive.a quality/input.o",
             "gcc-ar --plugin quality/lint.so rc quality/archive.a quality/input.o",
+            "ld -plugin quality/lint.so -o quality/output quality/input.o",
+            "x86_64-linux-gnu-ld @quality/link.args",
             "ssh-keygen -D quality/lint.so",
         ] {
             assert_eq!(inputs(command), (Vec::new(), true), "{command}");

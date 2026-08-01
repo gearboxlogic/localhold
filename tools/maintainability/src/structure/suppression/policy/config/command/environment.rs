@@ -72,6 +72,7 @@ fn is_runtime_code_loading_environment_name(name: &str) -> bool {
     matches!(
         name,
         "BASH_ENV"
+            | "GCONV_PATH"
             | "SHELLOPTS"
             | "LD_AUDIT"
             | "LD_LIBRARY_PATH"
@@ -141,6 +142,12 @@ mod tests {
     fn perl_code_loading_environment_is_weakening() {
         assert!(is_weakening_environment_name("PERL5OPT"));
         assert!(is_weakening_environment_name("perl5opt"));
+    }
+
+    #[test]
+    fn glibc_conversion_module_path_is_weakening() {
+        assert!(is_weakening_environment_name("GCONV_PATH"));
+        assert!(is_weakening_environment_name("gconv_path"));
     }
 
     #[test]

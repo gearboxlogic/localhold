@@ -637,14 +637,33 @@ fn github_yaml_rejects_unaudited_python_run_bodies() {
 #[test]
 fn command_policy_rejects_sourced_environment_files() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
     fs::create_dir_all(workspace.path().join("policy")).expect("policy directory");
-    fs::write(workspace.path().join("Justfile"), "check:\n    . policy/lints.env; cargo clippy -- -D warnings\n").expect("sourced lint environment");
     fs::write(workspace.path().join("policy/lints.env"), "export RUSTFLAGS=--cap-lints=allow\n").expect("lint environment");
+    fs::write(workspace.path().join("script/check.sh"), ". policy/lints.env\ncargo clippy -- -D warnings\n").expect("dot-sourced lint environment");
     git(workspace.path(), &["init", "-q"]);
     git(workspace.path(), &["add", "."]);
 
-    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("sourced-file indirection"));
+    for command in [
+        ". policy/lints.env",
+        "source policy/lints.env",
+        "time -p source policy/lints.env",
+        ">source.log source policy/lints.env",
+        "load() { source policy/lints.env; }; load",
+        "load () { source policy/lints.env; }; load",
+        "case yes in yes) source policy/lints.env;; esac",
+        "case yes in no|yes) source policy/lints.env;; esac",
+        "case yes in no) :;; yes) source policy/lints.env;; esac",
+        "case yes in\n  yes) . policy/lints.env ;;\nesac",
+        "noglob source policy/lints.env",
+        "nocorrect . policy/lints.env",
+    ] {
+        fs::write(workspace.path().join("script/check.sh"), format!("{command}\ncargo clippy -- -D warnings\n")).expect("sourced lint environment");
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        if matches!(command, ". policy/lints.env" | "source policy/lints.env") {
+            assert!(error.to_string().contains("sourced-file indirection"), "{command}: {error:#}");
+        }
+    }
 }
 
 #[test]

@@ -1,5 +1,6 @@
 pub(super) fn dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
     is_compiler_driver(command) && arguments.iter().any(|argument| is_dispatch_override(argument))
+        || is_linker_tool(command) && arguments.iter().any(|argument| linker_dispatch_override(argument))
         || is_archive_tool(command)
             && arguments
                 .iter()
@@ -8,11 +9,7 @@ pub(super) fn dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
 }
 
 fn is_archive_tool(command: &str) -> bool {
-    let stem = command.strip_suffix(".exe").unwrap_or(command);
-    let unversioned = stem
-        .rsplit_once('-')
-        .filter(|(_, suffix)| suffix.chars().all(|character| character.is_ascii_digit() || character == '.'))
-        .map_or(stem, |(prefix, _)| prefix);
+    let unversioned = unversioned_tool_name(command);
     unversioned == "ar" || unversioned.ends_with("-ar")
 }
 
@@ -22,16 +19,44 @@ fn archive_plugin_option(argument: &str) -> bool {
 }
 
 fn is_compiler_driver(command: &str) -> bool {
-    let stem = command.strip_suffix(".exe").unwrap_or(command);
-    let unversioned = stem
-        .rsplit_once('-')
-        .filter(|(_, suffix)| suffix.chars().all(|character| character.is_ascii_digit() || character == '.'))
-        .map_or(stem, |(prefix, _)| prefix);
+    let unversioned = unversioned_tool_name(command);
     is_driver_name(unversioned) || unversioned.rsplit('-').next().is_some_and(is_driver_name)
+}
+
+fn unversioned_tool_name(command: &str) -> &str {
+    let stem = command.strip_suffix(".exe").unwrap_or(command);
+    stem.rsplit_once('-')
+        .filter(|(_, suffix)| suffix.chars().all(|character| character.is_ascii_digit() || character == '.'))
+        .map_or(stem, |(prefix, _)| prefix)
 }
 
 fn is_driver_name(name: &str) -> bool {
     matches!(name, "c++" | "cc" | "clang" | "clang++" | "clang-cl" | "g++" | "gcc")
+}
+
+fn is_linker_tool(command: &str) -> bool {
+    if command == "link.exe" {
+        return true;
+    }
+    let name = unversioned_tool_name(command);
+    matches!(name, "ld" | "ld.bfd" | "ld.gold" | "ld.lld" | "ld64.lld" | "lld" | "lld-link" | "mold")
+        || name.rsplit('-').next().is_some_and(|suffix| matches!(suffix, "ld" | "ld.bfd" | "ld.gold" | "ld.lld"))
+}
+
+fn linker_dispatch_override(argument: &str) -> bool {
+    argument.starts_with('@') && argument.len() > 1 || direct_linker_plugin_option(argument)
+}
+
+fn direct_linker_plugin_option(argument: &str) -> bool {
+    let option = argument.split_once('=').map_or(argument, |(option, _)| option);
+    [
+        ("-plugin", "-pl"),
+        ("--plugin", "--pl"),
+        ("-load-pass-plugin", "-load-pass-pl"),
+        ("--load-pass-plugin", "--load-pass-pl"),
+    ]
+    .iter()
+    .any(|(full, minimum)| option.len() >= minimum.len() && full.starts_with(option))
 }
 
 fn is_dispatch_override(argument: &str) -> bool {
@@ -102,6 +127,33 @@ mod tests {
         }
         assert!(!dispatch_is_opaque("ar", &arguments(&["rc", "quality/archive.a", "quality/input.o"])));
         assert!(!dispatch_is_opaque("jar", &arguments(&["--plugin=quality/lint.so"])));
+    }
+
+    #[test]
+    fn direct_linker_plugins_and_response_files_are_opaque() {
+        for command in [
+            "ld",
+            "ld.exe",
+            "ld-2.44",
+            "x86_64-linux-gnu-ld",
+            "ld.bfd",
+            "ld.gold",
+            "ld.lld-19",
+            "lld",
+            "lld-link.exe",
+            "wasm-ld",
+            "mold",
+            "link.exe",
+        ] {
+            assert!(dispatch_is_opaque(command, &arguments(&["@quality/link.args"])), "{command}");
+            assert!(dispatch_is_opaque(command, &arguments(&["-plugin", "quality/lint.so"])), "{command}");
+            assert!(dispatch_is_opaque(command, &arguments(&["--plugin=quality/lint.so"])), "{command}");
+        }
+        assert!(dispatch_is_opaque("ld", &arguments(&["--pl=quality/lint.so"])));
+        assert!(dispatch_is_opaque("ld.lld", &arguments(&["--load-pass-plugin=quality/lint.so"])));
+        assert!(!dispatch_is_opaque("ld", &arguments(&["-o", "quality/output", "quality/input.o"])));
+        assert!(!dispatch_is_opaque("fold", &arguments(&["@quality/link.args"])));
+        assert!(!dispatch_is_opaque("link", &arguments(&["@quality/link.args"])));
     }
 
     #[test]

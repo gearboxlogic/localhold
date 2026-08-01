@@ -4,7 +4,7 @@ const JOB: &str = r#"  dependency-unsafe-linux:
     runs-on: ubuntu-latest
     defaults:
       run:
-        shell: /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+        shell: /usr/bin/env -u BASH_ENV -u ENV -u GCONV_PATH -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}
     steps:
       - name: Install reviewed Rust toolchain
         env:
@@ -20,6 +20,7 @@ const JOB: &str = r#"  dependency-unsafe-linux:
         id: audit
         env:
           BASH_ENV: ''
+          GCONV_PATH: ''
           SHELLOPTS: ''
           LD_AUDIT: ''
           LD_LIBRARY_PATH: ''
@@ -48,8 +49,8 @@ fn workflow() -> String {
         .replace("dependency-unsafe-linux", "dependency-unsafe-windows")
         .replace("ubuntu-latest", "windows-latest")
         .replace(
-            "shell: /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
-            "shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:ENV = $null; $env:SHELLOPTS = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\\Program Files\\Git\\bin\\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE\"'",
+            "shell: /usr/bin/env -u BASH_ENV -u ENV -u GCONV_PATH -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
+            "shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:ENV = $null; $env:GCONV_PATH = $null; $env:SHELLOPTS = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\\Program Files\\Git\\bin\\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE\"'",
         )
         .replace("target/dependency-unsafe/actual-linux", "target/dependency-unsafe/actual-windows")
         .replacen(
@@ -105,14 +106,14 @@ fn governed_gate_steps_are_unconditional_and_platform_bound() {
     assert_rejected(&service_container);
 
     let sh_default = accepted.replacen(
-        "        shell: /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
+        "        shell: /usr/bin/env -u BASH_ENV -u ENV -u GCONV_PATH -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
         "        shell: bash",
         1,
     );
     assert_rejected(&sh_default);
 
     let missing_default = accepted.replacen(
-        "    defaults:\n      run:\n        shell: /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}\n",
+        "    defaults:\n      run:\n        shell: /usr/bin/env -u BASH_ENV -u ENV -u GCONV_PATH -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}\n",
         "",
         1,
     );
@@ -128,11 +129,17 @@ fn governed_shell_clears_startup_channels_before_bash_starts() {
     let unsanitized_loader = accepted.replacen("-u LD_PRELOAD ", "", 1);
     assert_rejected(&unsanitized_loader);
 
+    let unsanitized_conversion_loader = accepted.replacen("-u GCONV_PATH ", "", 1);
+    assert_rejected(&unsanitized_conversion_loader);
+
     let inherited_shell_options = accepted.replacen("-u SHELLOPTS ", "", 1);
     assert_rejected(&inherited_shell_options);
 
     let unsanitized_windows = accepted.replacen("$env:BASH_ENV = $null; ", "", 1);
     assert_rejected(&unsanitized_windows);
+
+    let unsanitized_windows_conversion_loader = accepted.replacen("$env:GCONV_PATH = $null; ", "", 1);
+    assert_rejected(&unsanitized_windows_conversion_loader);
 
     let inherited_windows_shell_options = accepted.replacen("$env:SHELLOPTS = $null; ", "", 1);
     assert_rejected(&inherited_windows_shell_options);

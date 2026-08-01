@@ -10,6 +10,7 @@ use super::{POLICY_ROOT, checked_policy_path};
 use crate::structure::suppression::{SourceCategory, SourceSuppression};
 
 const SOURCE_ID: &str = "source.0000000000000000000000000000000000000000000000000000000000000000";
+const REPLACEMENT_SOURCE_ID: &str = "source.1111111111111111111111111111111111111111111111111111111111111111";
 
 #[test]
 fn exact_source_baseline_is_a_downward_only_multiset() {
@@ -20,6 +21,28 @@ fn exact_source_baseline_is_a_downward_only_multiset() {
 
     let growth = [site.clone(), site];
     assert!(compare_current(&growth, &baseline, &[], false).unwrap_err().to_string().contains("new, moved"));
+}
+
+#[test]
+fn initial_adoption_accepts_only_exact_active_exception_capacity() {
+    let mut replacement = site();
+    replacement.id = REPLACEMENT_SOURCE_ID.to_owned();
+    let baseline = BTreeMap::from([((SourceCategory::Production, SOURCE_ID.to_owned()), 1)]);
+    let mut exception = source_exception();
+    exception.source_id = REPLACEMENT_SOURCE_ID.to_owned();
+    let expected = BTreeMap::from([((SourceCategory::Production, REPLACEMENT_SOURCE_ID.to_owned()), 1)]);
+    assert_eq!(
+        compare_current(std::slice::from_ref(&replacement), &baseline, std::slice::from_ref(&exception), true).expect("downward baseline with exact reviewed exception"),
+        expected
+    );
+
+    let mut excessive = exception.clone();
+    excessive.max_occurrences = 2;
+    assert!(compare_current(std::slice::from_ref(&replacement), &baseline, &[excessive], true).is_err());
+
+    let mut retired = exception;
+    retired.status = Status::Retired;
+    assert!(compare_current(&[], &baseline, &[retired], true).is_err());
 }
 
 #[test]

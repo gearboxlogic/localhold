@@ -67,6 +67,42 @@ class TimeAbstractionTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_tracks_multiline_test_function_braces(self) -> None:
+        result = self._run_check(
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    #[test]\n"
+            "    fn first() {\n"
+            "        std::time::SystemTime::now();\n"
+            "    }\n"
+            "    #[test]\n"
+            "    fn second() {\n"
+            "        std::thread::sleep(std::time::Duration::ZERO);\n"
+            "    }\n"
+            "}\n"
+            "fn production() {}\n"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_ignores_braces_inside_test_literals_and_comments(self) -> None:
+        result = self._run_check(
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    /* nested { comment /* } */ remains ignored } */\n"
+            "    #[test]\n"
+            "    fn literals() {\n"
+            "        let _ = \"}\"; // }\n"
+            "        let _ = r###\"{ raw }\"###;\n"
+            "        let _ = '}';\n"
+            "        std::time::SystemTime::now();\n"
+            "    }\n"
+            "}\n"
+            "fn production() {}\n"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_rejects_an_unclosed_inline_test_module(self) -> None:
         result = self._run_check("#[cfg(test)]\nmod tests {\n    fn unfinished() {}\n")
 

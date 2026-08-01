@@ -250,11 +250,11 @@ fn bash_enable_loads_builtin(arguments: &[String]) -> bool {
 }
 
 fn tar_dispatch_is_opaque(arguments: &[String]) -> bool {
-    tar_extracts_files(arguments)
-        || arguments.iter().any(|argument| {
-            let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
-            option.len() >= "--checkpoint-a".len() && "--checkpoint-action".starts_with(option)
-        })
+    let command_option = arguments.iter().any(|argument| {
+        let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
+        option.len() >= "--checkpoint-a".len() && "--checkpoint-action".starts_with(option) || matches!(option, "-I" | "--rsh-command" | "--to-command" | "--use-compress-program")
+    });
+    command_option || tar_extracts_files(arguments) && !tar_extracts_into_isolated_directory(arguments)
 }
 
 fn tar_extracts_files(arguments: &[String]) -> bool {
@@ -266,6 +266,45 @@ fn tar_extracts_files(arguments: &[String]) -> bool {
         let old_style_extract = index == 0 && option.chars().all(|character| character.is_ascii_alphabetic()) && option.contains('x');
         abbreviated_long_extract || abbreviated_long_get || short_extract || old_style_extract
     })
+}
+
+fn tar_extracts_into_isolated_directory(arguments: &[String]) -> bool {
+    if arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
+        let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
+        matches!(option, "-P" | "--absolute-names" | "--transform" | "--xform")
+    }) {
+        return false;
+    }
+
+    let mut isolated = false;
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
+        let destination = if matches!(argument.as_str(), "-C" | "--directory") {
+            index += 1;
+            arguments.get(index).map(String::as_str)
+        } else {
+            argument
+                .strip_prefix("--directory=")
+                .or_else(|| argument.strip_prefix("-C").filter(|value| !value.is_empty()))
+        };
+        if let Some(destination) = destination {
+            if !isolated_tar_directory(destination) {
+                return false;
+            }
+            isolated = true;
+        }
+        index += 1;
+    }
+    isolated
+}
+
+fn isolated_tar_directory(destination: &str) -> bool {
+    if path::normalize_literal(destination).as_deref() == Some("extracted") {
+        return true;
+    }
+    ["$RUNNER_TEMP/", "${RUNNER_TEMP}/"]
+        .iter()
+        .any(|prefix| destination.strip_prefix(prefix).is_some_and(|suffix| path::normalize_literal(suffix).is_some()))
 }
 
 fn sort_compression_program_is_opaque(arguments: &[String]) -> bool {
@@ -682,6 +721,8 @@ mod tests {
             "find /tmp -maxdepth 0 -print",
             "tar --checkpoint=1 -cf archive.tar .",
             "tar -cf archive.tar .",
+            "tar --zstd -xf dist/archive.tar.zst -C extracted",
+            "tar --zstd -xf dist/archive.tar.zst -C \"$RUNNER_TEMP/archive-extracted\"",
             "openssl version",
             "openssl dgst quality/input.txt",
             "cargo metadata --manifest-path quality/helper/Cargo.toml",
@@ -708,6 +749,9 @@ mod tests {
             "tar --get --file=payload.tar",
             "tar --extr --file=payload.tar",
             "tar --ge --file=payload.tar",
+            "tar -xf payload.tar -C extracted --transform='s|payload|../Justfile|'",
+            "tar -xf payload.tar -C extracted --to-command='sh quality/lint.txt'",
+            "tar -I quality/lint.txt -xf payload.tar -C extracted",
             "go generate ./quality/helper",
             "go.exe -C quality generate ./helper",
             "go -C=quality generate ./helper",

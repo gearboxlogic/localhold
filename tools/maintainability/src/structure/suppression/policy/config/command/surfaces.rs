@@ -168,6 +168,11 @@ fn reviewed_generated_program(surface: &str, source: &str, input: &str) -> bool 
         return false;
     }
     let expected: &[&str] = match surface {
+        ".github/workflows/ci.yml" => &[
+            "Copy-Item -LiteralPath $binary -Destination ./hold-smoke.exe",
+            "./hold-smoke.exe --version",
+            "./hold-smoke.exe --help | Out-Null",
+        ],
         ".github/workflows/release.yml" => &[
             "Copy-Item -LiteralPath $binary -Destination ./hold-smoke.exe",
             "$actual = ./hold-smoke.exe --version",
@@ -333,6 +338,20 @@ jobs:
         fs::write(&workflow, format!("{reviewed}          ./hold-smoke.exe --version\n")).expect("add unreviewed invocation");
         let error = execution_surfaces(repository.path()).err().expect("reject added invocation");
         assert!(error.to_string().contains("outside the tracked path inventory"));
+    }
+
+    #[test]
+    fn generated_ci_smoke_program_has_a_closed_invocation_set() {
+        let reviewed = r"Copy-Item -LiteralPath $binary -Destination ./hold-smoke.exe
+./hold-smoke.exe --version
+./hold-smoke.exe --help | Out-Null
+";
+        assert!(super::reviewed_generated_program(".github/workflows/ci.yml", reviewed, "hold-smoke.exe"));
+        assert!(!super::reviewed_generated_program(
+            ".github/workflows/ci.yml",
+            &format!("{reviewed}./hold-smoke.exe --version\n"),
+            "hold-smoke.exe"
+        ));
     }
 
     fn git(repository: &Path, arguments: &[&str]) {

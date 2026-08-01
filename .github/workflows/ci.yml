@@ -242,6 +242,11 @@ jobs:
           if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
             throw "Windows preview archive is missing bin/hold.exe"
           }
+          Copy-Item -LiteralPath $binary -Destination ./hold-smoke.exe
+          ./hold-smoke.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "archived Windows binary version command failed" }
+          ./hold-smoke.exe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "archived Windows binary help command failed" }
 
   dependency-unsafe-windows:
     name: Dependency Unsafe (Windows)

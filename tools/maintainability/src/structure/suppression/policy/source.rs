@@ -102,11 +102,23 @@ pub(super) fn compare_current(sites: &[SourceSuppression], baseline: &SourceCoun
         *count = count.checked_add(exception.max_occurrences).context("lint-suppression source exception count overflow")?;
     }
     if initial_adoption {
-        if !exceptions.is_empty() {
-            bail!("initial lint-suppression policy adoption cannot add source exceptions");
+        if exceptions.iter().any(|entry| entry.status != Status::Active) {
+            bail!("initial lint-suppression policy adoption requires active source exceptions");
         }
-        if observed != *baseline {
-            bail!("initial lint-suppression source baseline must exactly match the adopted source inventory");
+        require_count_subset("initial adoption policy", &observed, &allowed)?;
+        for exception in exceptions {
+            let site = (exception.category, exception.source_id.clone());
+            let baseline_count = baseline.get(&site).copied().unwrap_or_default();
+            let expected_count = baseline_count
+                .checked_add(exception.max_occurrences)
+                .context("initial lint-suppression source exception count overflow")?;
+            let observed_count = observed.get(&site).copied().unwrap_or_default();
+            if observed_count != expected_count {
+                bail!(
+                    "initial lint-suppression source exception capacity must exactly match the adopted source inventory: site={site:?}, baseline={baseline_count}, observed={observed_count}, added={}",
+                    exception.max_occurrences
+                );
+            }
         }
         return Ok(observed);
     }

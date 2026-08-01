@@ -83,7 +83,6 @@ fn is_builtin_subcommand(subcommand: &str) -> bool {
             | "branch"
             | "cat-file"
             | "check-ignore"
-            | "checkout"
             | "clone"
             | "commit"
             | "diff"
@@ -97,7 +96,6 @@ fn is_builtin_subcommand(subcommand: &str) -> bool {
             | "ls-files"
             | "merge-base"
             | "mergetool"
-            | "restore"
             | "rev-list"
             | "rev-parse"
             | "show"
@@ -190,6 +188,8 @@ mod tests {
         assert!(dispatch_is_opaque(&arguments(&["filter-branch", "--tree-filter", "sh quality/lint.txt", "--", "HEAD",])));
         assert!(dispatch_is_opaque(&arguments(&["config", "--global", "alias.lint", "!sh quality/lint.txt"])));
         assert!(dispatch_is_opaque(&arguments(&["config", "--local", "core.hooksPath", "quality/hooks"])));
+        assert!(dispatch_is_opaque(&arguments(&["checkout", "HEAD^", "--", "Justfile"])));
+        assert!(dispatch_is_opaque(&arguments(&["restore", "--source", "HEAD^", "--", "Justfile"])));
         assert!(dispatch_is_opaque(&arguments(&["lint"])));
         assert!(!dispatch_is_opaque(&arguments(&["bisect", "start", "--", "run"])));
         assert!(!dispatch_is_opaque(&arguments(&["diff", "--", "difftool"])));

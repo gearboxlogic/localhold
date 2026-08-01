@@ -18,6 +18,8 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("git grep --open-files-in-pager='sh quality/lint.txt' lint\n", "opaque interpreter program"),
     ("git --paginate status\n", "opaque interpreter program"),
     ("git clone --no-local --upload-pack='sh quality/lint.txt' . target\n", "opaque interpreter program"),
+    ("git checkout HEAD^ -- Justfile\n", "opaque interpreter program"),
+    ("git restore --source HEAD^ -- Justfile\n", "opaque interpreter program"),
     ("patch Justfile quality/lint.patch\n", "opaque interpreter program"),
     (
         "tar -cf payload.tar quality/lint.data; tar -xf payload.tar --transform='s|quality/lint.data|Justfile|'\n",

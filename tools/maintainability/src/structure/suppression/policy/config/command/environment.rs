@@ -74,6 +74,8 @@ fn is_runtime_code_loading_environment_name(name: &str) -> bool {
     matches!(
         name,
         "BASH_ENV"
+            | "BROWSER"
+            | "CARGO_DOC_BROWSER"
             | "GCONV_PATH"
             | "JAVA_TOOL_OPTIONS"
             | "JDK_JAVA_OPTIONS"
@@ -141,6 +143,14 @@ mod tests {
     fn node_code_loading_environment_is_weakening() {
         assert!(is_weakening_environment_name("NODE_OPTIONS"));
         assert!(is_weakening_environment_name("node_options"));
+    }
+
+    #[test]
+    fn browser_selection_environment_is_weakening() {
+        for name in ["BROWSER", "CARGO_DOC_BROWSER"] {
+            assert!(is_weakening_environment_name(name), "{name}");
+            assert!(is_weakening_environment_name(&name.to_ascii_lowercase()), "{name}");
+        }
     }
 
     #[test]

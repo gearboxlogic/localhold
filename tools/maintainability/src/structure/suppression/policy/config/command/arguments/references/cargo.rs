@@ -12,6 +12,9 @@ pub(super) fn dispatch_is_opaque(arguments: &[String]) -> bool {
     if !is_execution_capable(subcommand) {
         return false;
     }
+    if matches!(subcommand, "doc" | "d") && arguments.iter().any(|argument| argument == "--open") {
+        return true;
+    }
     if subcommand == "install" {
         return true;
     }
@@ -142,5 +145,13 @@ mod tests {
     fn install_sources_fail_closed() {
         assert!(dispatch_is_opaque(&arguments(&["install", "--path", "quality/helper"])));
         assert!(dispatch_is_opaque(&arguments(&["install", "ripgrep", "--locked"])));
+    }
+
+    #[test]
+    fn browser_launches_fail_closed() {
+        for values in [&["doc", "--open"][..], &["d", "--open"], &["+1.97.0", "doc", "--open"]] {
+            assert!(dispatch_is_opaque(&arguments(values)), "{values:?}");
+        }
+        assert!(!dispatch_is_opaque(&arguments(&["doc", "--no-deps"])));
     }
 }

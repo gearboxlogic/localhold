@@ -1,5 +1,6 @@
 """Tests for the time-abstraction source gate."""
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -11,18 +12,29 @@ CHECK = Path(__file__).resolve().parents[1] / "check-time-abstraction.sh"
 
 
 class TimeAbstractionTests(unittest.TestCase):
-    def _run_check(self, source: str) -> subprocess.CompletedProcess[str]:
+    def _run_check(
+        self,
+        source: str,
+        ripgrep_config: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "src").mkdir()
             (root / "script").mkdir()
             (root / "src/example.rs").write_text(source, encoding="utf-8")
             shutil.copy2(CHECK, root / "script/check-time-abstraction.sh")
+            environment = None
+            if ripgrep_config is not None:
+                config = root / "ripgrep.conf"
+                config.write_text(ripgrep_config, encoding="utf-8")
+                environment = os.environ.copy()
+                environment["RIPGREP_CONFIG_PATH"] = str(config)
             return subprocess.run(
                 ["script/check-time-abstraction.sh"],
                 cwd=root,
                 check=False,
                 capture_output=True,
+                env=environment,
                 text=True,
             )
 
@@ -57,6 +69,15 @@ class TimeAbstractionTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("could not identify the inline test-module boundary", result.stderr)
+
+    def test_ignores_user_ripgrep_configuration(self) -> None:
+        result = self._run_check(
+            "fn production() { std::time::SystemTime::now(); }\n",
+            "--invalid-localhold-test-option\n",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("direct time access bypasses Clock", result.stderr)
 
 
 if __name__ == "__main__":

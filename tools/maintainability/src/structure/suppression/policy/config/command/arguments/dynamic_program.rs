@@ -20,6 +20,14 @@ pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
             | "ctest.exe"
             | "deno"
             | "deno.exe"
+            | "gradle"
+            | "gradle.bat"
+            | "gradle.cmd"
+            | "gradle.exe"
+            | "gradlew"
+            | "gradlew.bat"
+            | "gradlew.cmd"
+            | "gradlew.exe"
             | "java"
             | "java.exe"
             | "javaw"
@@ -92,7 +100,22 @@ mod tests {
 
     #[test]
     fn build_language_execution_fails_closed() {
-        for command in ["cmake", "cmake.exe", "ctest", "ctest.exe", "ninja", "ninja.exe"] {
+        for command in [
+            "cmake",
+            "cmake.exe",
+            "ctest",
+            "ctest.exe",
+            "gradle",
+            "gradle.bat",
+            "gradle.cmd",
+            "gradle.exe",
+            "gradlew",
+            "gradlew.bat",
+            "gradlew.cmd",
+            "gradlew.exe",
+            "ninja",
+            "ninja.exe",
+        ] {
             assert!(is_unanalyzed_interpreter(command), "{command}");
         }
     }

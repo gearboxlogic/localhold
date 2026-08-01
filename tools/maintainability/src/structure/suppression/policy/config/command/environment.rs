@@ -1,23 +1,11 @@
 pub(super) fn is_weakening_environment_name(name: &str) -> bool {
     let name = name.to_ascii_uppercase();
+    if is_runtime_code_loading_environment_name(&name) {
+        return true;
+    }
     matches!(
         name.as_str(),
-        "BASH_ENV"
-            | "SHELLOPTS"
-            | "LD_AUDIT"
-            | "LD_LIBRARY_PATH"
-            | "LD_PRELOAD"
-            | "PYTHONBREAKPOINT"
-            | "PYTHONCASEOK"
-            | "PYTHONEXECUTABLE"
-            | "PYTHONHOME"
-            | "PYTHONINSPECT"
-            | "PYTHONPATH"
-            | "PYTHONPLATLIBDIR"
-            | "PYTHONSTARTUP"
-            | "PYTHONUSERBASE"
-            | "PYTHONWARNINGS"
-            | "RUSTFLAGS"
+        "RUSTFLAGS"
             | "CARGO_ENCODED_RUSTFLAGS"
             | "RUSTDOCFLAGS"
             | "CARGO_ENCODED_RUSTDOCFLAGS"
@@ -76,6 +64,28 @@ pub(super) fn is_weakening_environment_name(name: &str) -> bool {
         || name.starts_with("GIT_")
 }
 
+fn is_runtime_code_loading_environment_name(name: &str) -> bool {
+    matches!(
+        name,
+        "BASH_ENV"
+            | "SHELLOPTS"
+            | "LD_AUDIT"
+            | "LD_LIBRARY_PATH"
+            | "LD_PRELOAD"
+            | "NODE_OPTIONS"
+            | "PYTHONBREAKPOINT"
+            | "PYTHONCASEOK"
+            | "PYTHONEXECUTABLE"
+            | "PYTHONHOME"
+            | "PYTHONINSPECT"
+            | "PYTHONPATH"
+            | "PYTHONPLATLIBDIR"
+            | "PYTHONSTARTUP"
+            | "PYTHONUSERBASE"
+            | "PYTHONWARNINGS"
+    )
+}
+
 pub(super) fn is_weakening_environment_assignment_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("CARGO") || is_weakening_environment_name(name)
 }
@@ -103,6 +113,12 @@ mod tests {
         }
         assert!(!is_weakening_environment_name("PYTHONSAFEPATH"));
         assert!(!is_weakening_environment_name("PYTHONUNBUFFERED"));
+    }
+
+    #[test]
+    fn node_code_loading_environment_is_weakening() {
+        assert!(is_weakening_environment_name("NODE_OPTIONS"));
+        assert!(is_weakening_environment_name("node_options"));
     }
 
     #[test]

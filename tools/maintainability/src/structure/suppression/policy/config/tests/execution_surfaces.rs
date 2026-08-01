@@ -334,6 +334,10 @@ fn command_policy_rejects_python_command_wrapper_dispatch() {
     .expect("Python dynamic import");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+
+    fs::write(workspace.path().join("script/check.py"), "import runpy\nrunpy.run_path('quality/lint.txt')\n").expect("Python runpy execution");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
 }
 
 #[test]
@@ -546,6 +550,28 @@ fn github_yaml_rejects_unsupported_execution_metadata() {
             "{error:#}"
         );
     }
+}
+
+#[test]
+fn github_yaml_rejects_node_preload_environment_options() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join(".github/workflows")).expect("workflow directory");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::write(
+        workspace.path().join(".github/workflows/lint.yml"),
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    env:\n      NODE_OPTIONS: --require=${{ github.workspace }}/quality/lint.data\n    steps:\n      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0\n      - run: just check-quality\n",
+    )
+    .expect("workflow");
+    fs::write(
+        workspace.path().join("quality/lint.data"),
+        "require('node:fs').writeFileSync('Justfile', 'check-quality:; @true');\n",
+    )
+    .expect("Node preload");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening environment channel"), "{error:#}");
 }
 
 #[test]

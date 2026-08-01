@@ -215,12 +215,13 @@ fn dynamic_path(path: &[String]) -> bool {
     match path {
         [name] => matches!(
             name.as_str(),
-            "builtins" | "compile" | "eval" | "exec" | "import_module" | "importlib" | "__builtins__" | "__import__"
+            "builtins" | "compile" | "eval" | "exec" | "import_module" | "importlib" | "runpy" | "__builtins__" | "__import__"
         ),
         [module, name] if matches!(module.as_str(), "builtins" | "__builtins__") => {
             matches!(name.as_str(), "compile" | "eval" | "exec")
         }
         [module, name] if module == "importlib" => name == "import_module",
+        [module, name] if module == "runpy" => matches!(name.as_str(), "run_module" | "run_path"),
         [module, name] if matches!(module.as_str(), "pickle" | "_pickle") => matches!(name.as_str(), "load" | "loads"),
         [module, name] if module == "marshal" => name == "loads",
         [module, name] if module == "types" => matches!(name.as_str(), "CodeType" | "FunctionType"),
@@ -249,6 +250,9 @@ mod tests {
         assert!(has_dynamic_code("__import__('os').system(payload)"));
         assert!(has_dynamic_code("importlib.import_module(name)"));
         assert!(has_dynamic_code("from importlib import import_module as load"));
+        assert!(has_dynamic_code("runpy.run_path('quality/lint.txt')"));
+        assert!(has_dynamic_code("runpy.run_module(module_name)"));
+        assert!(has_dynamic_code("from runpy import run_path as execute"));
         assert!(has_dynamic_code("f'{exec(payload)}'"));
         assert!(has_dynamic_code("f'''{(\n# an inert } brace\nexec(payload)\n)}'''"));
         assert!(has_dynamic_code("types.FunctionType(marshal.loads(payload), globals())"));
@@ -258,6 +262,7 @@ mod tests {
         assert!(!has_dynamic_code("f'exec is a built-in: {name}'"));
         assert!(!has_dynamic_code("f'{{exec}}: {name}'"));
         assert!(!has_dynamic_code("# exec(payload)\nprint('eval(source)')"));
+        assert!(!has_dynamic_code("print('runpy.run_path(payload)')"));
         assert!(!has_dynamic_code("ast.literal_eval(source)"));
     }
 }

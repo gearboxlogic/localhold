@@ -209,6 +209,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "sort" | "sort.exe" if sort_compression_program_is_opaque(arguments) => SelectedInput::Opaque,
         "tar" | "tar.exe" if tar_checkpoint_action_is_opaque(arguments) => SelectedInput::Opaque,
         "zip" | "zip.exe" if zip_test_command_is_opaque(arguments) => SelectedInput::Opaque,
+        "openssl" | "openssl.exe" if openssl_module_selection_is_opaque(arguments) => SelectedInput::Opaque,
         "just" | "just.exe" if just_source_selection_is_opaque(arguments) => SelectedInput::Opaque,
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
             let (inputs, opaque) = makefile_inputs(arguments);
@@ -253,6 +254,13 @@ fn zip_test_command_is_opaque(arguments: &[String]) -> bool {
         .iter()
         .take_while(|argument| argument.as_str() != "--")
         .any(|argument| argument.starts_with("-TT"))
+}
+
+fn openssl_module_selection_is_opaque(arguments: &[String]) -> bool {
+    arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
+        let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
+        matches!(option, "-engine" | "-provider" | "-provider-path")
+    })
 }
 
 fn just_source_selection_is_opaque(arguments: &[String]) -> bool {
@@ -570,6 +578,8 @@ mod tests {
             "sort --co quality/lint.txt input.txt",
             "zip -q -T -TT 'sh quality/lint.txt' archive.zip input.txt",
             "zip -T -TTquality/lint.txt archive.zip input.txt",
+            "openssl list -provider-path quality -provider lint",
+            "openssl.exe req -engine lint -new",
             "sed -nf quality/lint.sed /etc/hosts",
             "sed --file=quality/lint.sed /etc/hosts",
             "sed -f $SCRIPT /etc/hosts",
@@ -596,6 +606,8 @@ mod tests {
             "find /tmp -maxdepth 0 -print",
             "tar --checkpoint=1 -cf archive.tar .",
             "tar -cf archive.tar .",
+            "openssl version",
+            "openssl dgst quality/input.txt",
             "sed -n -e '1p' /etc/hosts",
             "sed 's/../\\\\x&/g' /etc/hosts",
         ] {

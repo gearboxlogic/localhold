@@ -121,6 +121,36 @@ class TimeAbstractionTests(unittest.TestCase):
         self.assertNotEqual(scanned.returncode, 0)
         self.assertIn("direct time access bypasses Clock", scanned.stderr)
 
+    def test_multiline_all_cfg_skips_only_a_test_module(self) -> None:
+        skipped = self._run_check(
+            "#[cfg(all(\n"
+            "    feature = \"reranker\",\n"
+            "    test,\n"
+            "))]\n"
+            "mod tests {\n"
+            "    fn helper() { std::thread::sleep(std::time::Duration::ZERO); }\n"
+            "}\n"
+        )
+        scanned = self._run_check(
+            "#[cfg(any(\n"
+            "    feature = \"testing\",\n"
+            "    test,\n"
+            "))]\n"
+            "mod tests {\n"
+            "    pub fn production() { std::thread::sleep(std::time::Duration::ZERO); }\n"
+            "}\n"
+        )
+
+        self.assertEqual(skipped.returncode, 0, skipped.stderr)
+        self.assertNotEqual(scanned.returncode, 0)
+        self.assertIn("direct time access bypasses Clock", scanned.stderr)
+
+    def test_rejects_an_unterminated_multiline_cfg_attribute(self) -> None:
+        result = self._run_check("#[cfg(all(\n    feature = \"testing\",\n    test,\n")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unterminated cfg attribute", result.stderr)
+
     def test_tracks_multiline_test_function_braces(self) -> None:
         result = self._run_check(
             "#[cfg(test)]\n"

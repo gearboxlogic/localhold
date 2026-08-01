@@ -6,20 +6,24 @@ use anyhow::{Context, Result, bail};
 
 use super::yaml::{leading_spaces, literal_scalar, yaml_key_value};
 
+mod cache;
+mod guarded;
+
 const DOWNLOAD_ACTION: &str = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c";
 const CHECKOUT_ACTION: &str = "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0";
-const CACHE_ACTION: &str = "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
 const REVIEWED_REMOTE_ACTIONS: &[&str] = &[
-    CACHE_ACTION,
+    cache::ACTION,
     CHECKOUT_ACTION,
-    "actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294",
+    guarded::DEPENDENCY_REVIEW_ACTION,
     DOWNLOAD_ACTION,
     "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-    "jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d",
+    guarded::MISE_ACTION,
 ];
 const REVIEWED_DOWNLOAD_DESTINATIONS: &[&str] = &["dist"];
-const CARGO_CACHE_PATHS: &[&str] = &[".cache/localhold/cargo/registry", ".cache/localhold/cargo/git", "target"];
-const CUDA_CACHE_PATH: &str = "${{ runner.temp }}/localhold-cuda-source-cache";
+
+pub(super) fn validate_guarded_configuration(workspace: &Path, tracked_paths: &BTreeSet<String>) -> Result<()> {
+    guarded::validate_configuration(workspace, tracked_paths)
+}
 
 pub(super) fn validate_local_actions(workspace: &Path, paths: &BTreeSet<String>) -> Result<()> {
     for metadata_path in paths.iter().filter(|path| is_action_metadata(path)) {
@@ -56,9 +60,11 @@ pub(super) fn validate_action_references(workspace: &Path, tracked_paths: &BTree
         }
         if REVIEWED_REMOTE_ACTIONS.contains(&reference.as_str()) {
             match reference.as_str() {
-                CACHE_ACTION => validate_cache_inputs(path, &lines, line_index)?,
+                cache::ACTION => cache::validate_inputs(path, &lines, line_index)?,
                 DOWNLOAD_ACTION => validate_download_destination(path, &lines, line_index)?,
                 CHECKOUT_ACTION => validate_checkout_inputs(path, &lines, line_index)?,
+                guarded::DEPENDENCY_REVIEW_ACTION => guarded::validate_dependency_review_reference(path)?,
+                guarded::MISE_ACTION => guarded::validate_mise_action(path, &lines, line_index)?,
                 _ => {}
             }
             continue;
@@ -66,43 +72,6 @@ pub(super) fn validate_action_references(workspace: &Path, tracked_paths: &BTree
         bail!("GitHub action reference {reference:?} in {path:?} is not in the reviewed exact-revision allowlist");
     }
     Ok(())
-}
-
-fn validate_cache_inputs(path: &str, lines: &[&str], uses_index: usize) -> Result<()> {
-    let mut cache_paths = None;
-    let mut key = None;
-    let mut restore_keys = None;
-    for input in action_inputs(path, lines, uses_index)? {
-        let slot = match input.key {
-            "path" => &mut cache_paths,
-            "key" => &mut key,
-            "restore-keys" => &mut restore_keys,
-            _ => bail!("cache input {:?} in {path:?} is not reviewed", input.key),
-        };
-        if slot.replace(input.lines(path)?).is_some() {
-            bail!("cache input {:?} in {path:?} must not be repeated", input.key);
-        }
-    }
-    let cache_paths = cache_paths.with_context(|| format!("cache in {path:?} must declare one reviewed path set"))?;
-    let key = key.with_context(|| format!("cache in {path:?} must declare one reviewed key"))?;
-    if key.len() != 1 {
-        bail!("cache key in {path:?} must be one literal line");
-    }
-    let restore_keys = restore_keys.unwrap_or_default();
-    if !reviewed_cache_profile(&cache_paths, &key[0], &restore_keys) {
-        bail!("cache in {path:?} must use one exact reviewed path, key, and restore-key profile");
-    }
-    Ok(())
-}
-
-fn reviewed_cache_profile(paths: &[String], key: &str, restore_keys: &[String]) -> bool {
-    let cargo_paths = paths.iter().map(String::as_str).eq(CARGO_CACHE_PATHS.iter().copied());
-    let cargo_profile = cargo_paths
-        && (key == "ubuntu-22.04-rust-${{ hashFiles('Cargo.lock', 'mise.lock') }}" && restore_keys == ["ubuntu-22.04-rust-"]
-            || key == "${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'mise.lock') }}" && restore_keys == ["${{ runner.os }}-rust-"]
-            || key == "${{ runner.os }}-rust-outdated-${{ hashFiles('Cargo.lock', 'mise.lock') }}"
-                && restore_keys == ["${{ runner.os }}-rust-outdated-", "${{ runner.os }}-rust-"]);
-    cargo_profile || paths == [CUDA_CACHE_PATH] && key == "localhold-cuda12-${{ hashFiles('release/cuda-linux-x86_64.json') }}" && restore_keys.is_empty()
 }
 
 fn validate_download_destination(path: &str, lines: &[&str], uses_index: usize) -> Result<()> {
@@ -342,28 +311,6 @@ mod tests {
     fn artifact_download_destination_cannot_be_overridden() {
         let source = format!("steps:\n  - uses: {DOWNLOAD}\n    with:\n      path: dist\n      path: .\n");
         assert!(validate(&source).is_err());
-    }
-
-    #[test]
-    fn caches_require_exact_confined_profiles() {
-        let cargo = "path: |\n        .cache/localhold/cargo/registry\n        .cache/localhold/cargo/git\n        target\n      key: ${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'mise.lock') }}\n      restore-keys: ${{ runner.os }}-rust-";
-        let outdated = "path: |\n        .cache/localhold/cargo/registry\n        .cache/localhold/cargo/git\n        target\n      key: ${{ runner.os }}-rust-outdated-${{ hashFiles('Cargo.lock', 'mise.lock') }}\n      restore-keys: |\n        ${{ runner.os }}-rust-outdated-\n        ${{ runner.os }}-rust-";
-        let cuda = "path: ${{ runner.temp }}/localhold-cuda-source-cache\n      key: localhold-cuda12-${{ hashFiles('release/cuda-linux-x86_64.json') }}";
-        for inputs in [cargo, outdated, cuda] {
-            validate(&format!("steps:\n  - uses: {CACHE_ACTION}\n    with:\n      {inputs}\n")).expect("reviewed cache profile");
-        }
-
-        for inputs in [
-            cargo.replace("        target", "        Justfile"),
-            cargo.replace("${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'mise.lock') }}", "attacker-controlled"),
-            cargo.replace("path: |", "path: Justfile\n      path: |"),
-            cuda.replace("${{ runner.temp }}/localhold-cuda-source-cache", "${{ github.workspace }}"),
-        ] {
-            assert!(
-                validate(&format!("steps:\n  - uses: {CACHE_ACTION}\n    with:\n      {inputs}\n")).is_err(),
-                "accepted {inputs:?}"
-            );
-        }
     }
 
     #[test]

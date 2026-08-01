@@ -164,6 +164,7 @@ for file in "${source_files[@]}"; do
     in_tests=0
     test_depth=0
     pending_test_cfg=0
+    pending_cfg_attribute=
     line_number=0
     block_comment_depth=0
     normal_string=0
@@ -185,7 +186,20 @@ for file in "${source_files[@]}"; do
         fi
         if (( block_comment_depth == 0 && normal_string == 0 && raw_string == 0 )); then
             compact=${line//[[:space:]]/}
-            if test_only_cfg_attribute "$line"; then
+            if [[ -n $pending_cfg_attribute ]]; then
+                pending_cfg_attribute="$pending_cfg_attribute $line"
+                if [[ $compact == *')]'* ]]; then
+                    if test_only_cfg_attribute "$pending_cfg_attribute"; then
+                        pending_test_cfg=1
+                    else
+                        pending_test_cfg=0
+                    fi
+                    pending_cfg_attribute=
+                fi
+            elif [[ $compact =~ ^#\[cfg\( && $compact != *')]'* ]]; then
+                pending_cfg_attribute=$line
+                pending_test_cfg=0
+            elif test_only_cfg_attribute "$line"; then
                 pending_test_cfg=1
             elif [[ $line == 'mod tests {' ]] && (( pending_test_cfg == 1 )); then
                 in_tests=1
@@ -205,6 +219,11 @@ for file in "${source_files[@]}"; do
             printf -v matches '%s%s:%s\n' "$matches" "$line_number" "$line"
         fi
     done <"$file"
+    if [[ -n $pending_cfg_attribute ]]; then
+        printf 'time abstraction check found an unterminated cfg attribute in %s\n' "$file" >&2
+        failed=1
+        continue
+    fi
     if (( in_tests != 0 )); then
         printf 'time abstraction check could not identify the inline test-module boundary in %s\n' "$file" >&2
         failed=1

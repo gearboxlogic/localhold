@@ -311,6 +311,11 @@ pub fn reject_checked_in_weakening(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(in crate::structure::suppression::policy) fn validate_guarded_configuration(workspace: &Path) -> Result<()> {
+    let surfaces = execution_surfaces(workspace)?;
+    actions::validate_guarded_configuration(workspace, &surfaces.tracked_paths)
+}
+
 fn is_javascript(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -481,6 +486,24 @@ pub(super) fn is_execution_surface(path: &str) -> bool {
             "sh" | "bash" | "zsh" | "fish" | "ps1" | "cmd" | "bat" | "py" | "js" | "cjs" | "mjs" | "mk"
         )
     })
+}
+
+pub(super) fn is_protected_check_input(path: &str) -> bool {
+    if is_execution_surface(path) {
+        return true;
+    }
+    let path = Path::new(path);
+    let basename = path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_ascii_lowercase();
+    matches!(
+        basename.as_str(),
+        "cargo.toml" | "cargo.lock" | "clippy.toml" | ".clippy.toml" | "deny.toml" | "rust-toolchain" | "rust-toolchain.toml" | "rustfmt.toml" | ".rustfmt.toml" | "mise.lock"
+    ) || path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+        || path.starts_with("migrations")
+        || path.starts_with("policy/maintainability")
+        || path.starts_with("policy/dependency-unsafe")
 }
 
 fn is_mise_config(path: &Path) -> bool {

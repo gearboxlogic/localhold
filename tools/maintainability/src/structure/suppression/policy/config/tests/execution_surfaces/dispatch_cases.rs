@@ -81,9 +81,13 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("gcc -wrapper sh,quality/lint.txt -c quality/input.c\n", "opaque interpreter program"),
     ("rake --rakefile quality/lint.txt\n", "opaque interpreter program"),
     ("RUBYOPT=-r./quality/lint gem --version\n", "lint-weakening environment channel"),
+    ("PERL5OPT='-Iquality -Mlint' prove --version\n", "lint-weakening environment channel"),
     ("ld.so quality/lint\n", "opaque interpreter program"),
     ("/lib64/ld-linux-x86-64.so.2 quality/lint\n", "opaque interpreter program"),
     ("go run quality/lint.go\n", "opaque interpreter program"),
     ("go.exe -C quality run lint.go\n", "opaque interpreter program"),
     ("$'\\x73\\x68' quality/lint.txt\n", "opaque interpreter program"),
+    ("runner=sh\n\"$runner\" quality/lint.txt\n", "opaque interpreter program"),
+    ("swift quality/lint.swift\n", "opaque interpreter program"),
+    ("m4 quality/lint.m4\n", "opaque interpreter program"),
 ];

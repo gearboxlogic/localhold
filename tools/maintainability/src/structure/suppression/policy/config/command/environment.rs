@@ -74,6 +74,7 @@ fn is_runtime_code_loading_environment_name(name: &str) -> bool {
             | "LD_LIBRARY_PATH"
             | "LD_PRELOAD"
             | "NODE_OPTIONS"
+            | "PERL5OPT"
             | "PYTHONBREAKPOINT"
             | "PYTHONCASEOK"
             | "PYTHONEXECUTABLE"
@@ -127,6 +128,12 @@ mod tests {
     fn ruby_code_loading_environment_is_weakening() {
         assert!(is_weakening_environment_name("RUBYOPT"));
         assert!(is_weakening_environment_name("rubyopt"));
+    }
+
+    #[test]
+    fn perl_code_loading_environment_is_weakening() {
+        assert!(is_weakening_environment_name("PERL5OPT"));
+        assert!(is_weakening_environment_name("perl5opt"));
     }
 
     #[test]

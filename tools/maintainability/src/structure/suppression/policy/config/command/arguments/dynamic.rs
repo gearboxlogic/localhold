@@ -28,10 +28,32 @@ fn assigned_opaque_command_variables(path: &str, source: &str) -> BTreeSet<Strin
         .filter_map(|command| {
             command.iter().find_map(|word| {
                 let (name, value) = assignment(word)?;
-                opaque_command_substitution(path, value, &command).then_some(name.to_owned())
+                opaque_command_assignment(path, name, value, &command).then_some(name.to_owned())
             })
         })
         .collect()
+}
+
+fn opaque_command_assignment(path: &str, name: &str, value: &str, command: &[String]) -> bool {
+    let value = value.trim_matches(['\'', '"']);
+    opaque_command_substitution(path, value, command) || !value.contains(['$', '`', '%', '!']) && !is_reviewed_literal_program_assignment(path, name, value)
+}
+
+fn is_reviewed_literal_program_assignment(path: &str, name: &str, value: &str) -> bool {
+    matches!(
+        (path, name, value),
+        ("script/run-maintainability-gate.sh", "sha256_command", "/usr/bin/sha256sum")
+            | ("script/run-maintainability-gate.sh", "uname_command", "/usr/bin/uname")
+            | ("script/run-maintainability-gate.sh", "bash_command", "/usr/bin/bash")
+            | ("script/run-maintainability-gate.sh", "chmod_command", "/usr/bin/chmod")
+            | ("script/run-maintainability-gate.sh", "cp_command", "/usr/bin/cp")
+            | ("script/run-maintainability-gate.sh", "ln_command", "/usr/bin/ln")
+            | ("script/run-maintainability-gate.sh", "mkdir_command", "/usr/bin/mkdir")
+            | ("script/run-maintainability-gate.sh", "mktemp_command", "/usr/bin/mktemp")
+            | ("script/run-maintainability-gate.sh", "rm_command", "/usr/bin/rm")
+            | ("script/run-maintainability-gate.sh", "curl_command", "/usr/bin/curl" | "/mingw64/bin/curl.exe")
+            | (".github/workflows/ci.yml", "binary", "target/x86_64-pc-windows-msvc/release/hold.exe")
+    )
 }
 
 fn opaque_command_substitution(path: &str, value: &str, command: &[String]) -> bool {
@@ -230,6 +252,8 @@ mod tests {
             "script/check.sh",
             "runner=$(cat quality/lint.txt); if [[ -n $PATH ]]; then $runner; fi"
         ));
+        assert!(has_opaque_command_assignment_flow("script/check.sh", "runner=sh; \"$runner\" quality/lint.txt"));
+        assert!(has_opaque_command_assignment_flow("script/check.sh", "tool=node; $tool application.js"));
         assert!(!has_opaque_command_assignment_flow(
             "script/check.sh",
             "kernel=$(/usr/bin/uname -s); if [[ $kernel == Linux || $kernel == MINGW* ]]; then true; fi"
@@ -241,6 +265,26 @@ mod tests {
         assert!(!has_opaque_command_assignment_flow(
             "script/check-maintainability-bootstrap.sh",
             "bash_command=$(trusted_system_command bash); \"$bash_command\" --version"
+        ));
+        assert!(!has_opaque_command_assignment_flow(
+            "script/run-maintainability-gate.sh",
+            "readonly bash_command=/usr/bin/bash; \"$bash_command\" --version"
+        ));
+        assert!(!has_opaque_command_assignment_flow(
+            ".github/workflows/ci.yml",
+            "binary=target/x86_64-pc-windows-msvc/release/hold.exe; \"$binary\" --version"
+        ));
+        assert!(has_opaque_command_assignment_flow(
+            "script/run-maintainability-gate.sh",
+            "runner=/usr/bin/bash; \"$runner\" quality/lint.txt"
+        ));
+        assert!(has_opaque_command_assignment_flow(
+            ".github/workflows/ci.yml",
+            "binary=target/x86_64-pc-windows-msvc/release/unreviewed.exe; \"$binary\" --version"
+        ));
+        assert!(!has_opaque_command_assignment_flow(
+            "script/tests/test_maintainability_bootstrap.sh",
+            "repository_root=/reviewed; check=\"$repository_root/script/check.sh\"; \"$check\""
         ));
     }
 }

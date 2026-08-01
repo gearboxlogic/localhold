@@ -49,20 +49,20 @@ if [[ -v GITHUB_ACTIONS || -v GITHUB_EVENT_PATH || -v GITHUB_SHA ]]; then
     github_context_present=true
 fi
 trusted_github_audit=false
-if $using_alternate_root && $github_context_present && [[ $implementation_root != "$repository_root" ]]; then
+if [[ $using_alternate_root == true && $github_context_present == true && $implementation_root != "$repository_root" ]]; then
     trusted_github_audit=true
 fi
-if $using_alternate_root && [[ $mode != verify && $mode != test-environment ]] && ! $trusted_github_audit; then
+if [[ $using_alternate_root == true && $mode != verify && $mode != test-environment && $trusted_github_audit != true ]]; then
     printf 'alternate roots may run operational modes only from the protected GitHub workflow\n' >&2
     exit 1
 fi
 governed_snapshot=$using_alternate_root
-if $github_context_present; then
+if [[ $github_context_present == true ]]; then
     governed_snapshot=true
 fi
 
 reviewed_root=$repository_root
-if $trusted_github_audit; then
+if [[ $trusted_github_audit == true ]]; then
     reviewed_root=$implementation_root
 fi
 tool_root="$reviewed_root/tools/maintainability"
@@ -82,7 +82,7 @@ readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834b
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=cd756b8a6039e1192bb0c95e7c42e66148f7b883f3b12662b31c70269165a468
 readonly reviewed_bootstrap_tests_sha256=86cd6f3576fcb452803b1557896dd79b789dd3772110bcdafe3ec5d8e8353000
-readonly reviewed_gate_runner_sha256=f999d22182db084a266718157c7e20614d690d297912ae9eb3882da817d06180
+readonly reviewed_gate_runner_sha256=d232156255ed5c02b2da7e7d6bfd68695880be502a381273d34930ba2b43eb09
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then
@@ -236,7 +236,7 @@ verify_checker_sources() {
         printf 'cannot read the checked-out revision before compiling the maintainability checker\n' >&2
         exit 1
     }
-    if $github_context_present; then
+    if [[ $github_context_present == true ]]; then
         if [[ ${GITHUB_ACTIONS:-} != true || -z ${GITHUB_EVENT_PATH:-} || -z ${GITHUB_SHA:-} ]]; then
             printf 'incomplete or invalid GitHub Actions environment cannot select a different checker revision\n' >&2
             exit 1
@@ -250,14 +250,14 @@ verify_checker_sources() {
     local checker_root=$repository_root
     local checker_git_root=$repository_root
     local checker_revision=$checked_head
-    if $trusted_github_audit; then
+    if [[ $trusted_github_audit == true ]]; then
         checker_root=$implementation_root
         checker_git_root=$implementation_root
         checker_revision=$(git_at "$implementation_root" rev-parse --verify 'HEAD^{commit}') || {
             printf 'cannot authenticate the protected maintainability implementation revision\n' >&2
             exit 1
         }
-    elif $using_alternate_root && $github_context_present; then
+    elif [[ $using_alternate_root == true && $github_context_present == true ]]; then
         checker_revision=$(trusted_github_base_revision "$checked_head")
     fi
 
@@ -322,7 +322,7 @@ verify_reviewed_tracked_tree() {
     }
 
     local checker_inputs_are_overlaid=false
-    if $using_alternate_root && $github_context_present && ! $trusted_github_audit; then
+    if [[ $using_alternate_root == true && $github_context_present == true && $trusted_github_audit != true ]]; then
         checker_inputs_are_overlaid=true
     fi
 
@@ -343,10 +343,10 @@ verify_reviewed_tracked_tree() {
             printf 'checked-out revision contains an unsupported tracked entry: %s\n' "$relative_path" >&2
             exit 1
         fi
-        if $checker_inputs_are_overlaid &&
-            [[ $relative_path == tools/maintainability/src/* ||
+        if [[ $checker_inputs_are_overlaid == true &&
+            ( $relative_path == tools/maintainability/src/* ||
                 $relative_path == tools/maintainability/Cargo.toml ||
-                $relative_path == tools/maintainability/Cargo.lock ]]; then
+                $relative_path == tools/maintainability/Cargo.lock ) ]]; then
             :
         else
             if [[ ! -f "$repository_root/$relative_path" || -L "$repository_root/$relative_path" ]]; then
@@ -459,7 +459,7 @@ sha256_revision_file() {
 
 expected_manifest_sha256=$reviewed_manifest_sha256
 expected_lockfile_sha256=$reviewed_lockfile_sha256
-if $using_alternate_root && $github_context_present && ! $trusted_github_audit; then
+if [[ $using_alternate_root == true && $github_context_present == true && $trusted_github_audit != true ]]; then
     checked_head=$(git_checked rev-parse --verify 'HEAD^{commit}') || {
         printf 'cannot read the checked-out revision before verifying the checker dependency graph\n' >&2
         exit 1
@@ -517,7 +517,7 @@ if [[ $actual_gate_runner_sha256 != "$reviewed_gate_runner_sha256" ]]; then
     exit 1
 fi
 
-if $governed_snapshot; then
+if [[ $governed_snapshot == true ]]; then
     verify_checker_sources
     verify_reviewed_tracked_tree
 fi
@@ -533,7 +533,7 @@ if [[ $mode != verify ]]; then
     LOCALHOLD_MAINTAINABILITY_GIT=$git_executable
     export LOCALHOLD_MAINTAINABILITY_GIT
 
-    if ! $governed_snapshot; then
+    if [[ $governed_snapshot != true ]]; then
         "$bash_command" "$gate_runner" "$mode"
         exit
     fi
@@ -613,7 +613,7 @@ if [[ $mode != verify ]]; then
     git_at "$snapshot_root" update-ref --no-deref HEAD "$checked_head"
     git_at "$snapshot_root" read-tree "$checked_head"
     git_at "$snapshot_root" archive --format=tar "$checked_head" | "$tar_command" -xf - -C "$snapshot_root"
-    if $github_context_present && ! $trusted_github_audit; then
+    if [[ $github_context_present == true && $trusted_github_audit != true ]]; then
         # Checker changes activate only after this revision lands. The trusted
         # event-base checker graph audits the head tree without executing head code.
         trusted_checker_revision=$(trusted_github_base_revision "$checked_head")
@@ -642,14 +642,14 @@ if [[ $mode != verify ]]; then
     fi
     snapshot_bootstrap="$snapshot_root/script/check-maintainability-bootstrap.sh"
     snapshot_gate_runner="$snapshot_root/script/run-maintainability-gate.sh"
-    if $trusted_github_audit; then
+    if [[ $trusted_github_audit == true ]]; then
         snapshot_bootstrap=$script_path
         snapshot_gate_runner=$gate_runner
     fi
     "$bash_command" "$snapshot_bootstrap" --root "$snapshot_root"
 
     status=0
-    if $trusted_github_audit; then
+    if [[ $trusted_github_audit == true ]]; then
         LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT=$snapshot_root "$bash_command" "$snapshot_gate_runner" "$mode" || status=$?
     else
         "$bash_command" "$snapshot_gate_runner" "$mode" || status=$?

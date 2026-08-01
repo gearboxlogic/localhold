@@ -4,7 +4,7 @@ pub(super) fn is_unanalyzed_path(path: &str) -> bool {
     Path::new(path).extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
         matches!(
             extension.to_ascii_lowercase().as_str(),
-            "cjs" | "js" | "jsx" | "lua" | "mjs" | "pl" | "pm" | "php" | "rb" | "tcl" | "ts" | "tsx"
+            "cjs" | "js" | "jsx" | "lua" | "mjs" | "pl" | "pm" | "php" | "rb" | "swift" | "tcl" | "ts" | "tsx"
         )
     })
 }
@@ -48,6 +48,8 @@ pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
             | "php.exe"
             | "ruby"
             | "ruby.exe"
+            | "swift"
+            | "swift.exe"
             | "yarn"
             | "yarn.cmd"
             | "yarn.exe"
@@ -116,6 +118,14 @@ mod tests {
             "ninja",
             "ninja.exe",
         ] {
+            assert!(is_unanalyzed_interpreter(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn swift_execution_fails_closed() {
+        assert!(is_unanalyzed_path("quality/lint.swift"));
+        for command in ["swift", "swift.exe"] {
             assert!(is_unanalyzed_interpreter(command), "{command}");
         }
     }

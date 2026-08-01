@@ -199,8 +199,10 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),
         _ if dynamic_program::is_unanalyzed_interpreter(&command) => SelectedInput::Opaque,
         _ if dynamic_loader_is_opaque(&command) => SelectedInput::Opaque,
-        "awk" | "awk.exe" | "dbus-run-session" | "dpkg" | "dpkg.exe" | "gawk" | "gawk.exe" | "gio" | "gio.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe" | "protoc"
-        | "protoc.exe" | "rake" | "rake.exe" | "rsync" | "rsync.exe" | "run-parts" | "run-parts.exe" | "sqlite3" | "sqlite3.exe" | "wget" | "wget.exe" => SelectedInput::Opaque,
+        "awk" | "awk.exe" | "dbus-run-session" | "dpkg" | "dpkg.exe" | "gawk" | "gawk.exe" | "gio" | "gio.exe" | "m4" | "m4.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe"
+        | "protoc" | "protoc.exe" | "rake" | "rake.exe" | "rsync" | "rsync.exe" | "run-parts" | "run-parts.exe" | "sqlite3" | "sqlite3.exe" | "wget" | "wget.exe" => {
+            SelectedInput::Opaque
+        }
         "find" | "find.exe" => {
             return (Vec::new(), find_command_action_is_opaque(arguments));
         }
@@ -628,6 +630,7 @@ mod tests {
         assert_eq!(inputs("just --working-directory quality check-quality"), (Vec::new(), true));
         assert_eq!(inputs("just check-quality"), (Vec::new(), false));
         assert_eq!(inputs("rsync -e 'sh quality/lint.txt' localhost:/missing ."), (Vec::new(), true));
+        assert_eq!(inputs("runner=sh; \"$runner\" quality/lint.txt"), (Vec::new(), true));
         assert_eq!(inputs("command=$(cat quality/lint.txt); $command"), (Vec::new(), true));
         assert_eq!(inputs("history -s 'sh quality/lint.txt'; fc -s sh"), (Vec::new(), true));
         assert_eq!(inputs("$'\\x73\\x68' quality/lint.txt"), (Vec::new(), true));
@@ -675,6 +678,8 @@ mod tests {
             "sqlite3 :memory: '.shell sh quality/lint.txt'",
             "dbus-run-session -- sh quality/lint.txt",
             "gio launch quality/lint.desktop",
+            "m4 quality/lint.m4",
+            "m4.exe quality/lint.m4",
             "dpkg --pre-invoke='sh quality/lint.txt' --unpack quality/missing.deb",
             "wget --use-askpass=/tmp/askpass https://example.invalid/archive",
             "yarn exec \"sh quality/lint.txt\"",
@@ -718,6 +723,7 @@ mod tests {
         assert_eq!(inputs("pwsh -File quality/lint.ps1"), (vec!["quality/lint.ps1".to_owned()], false));
         assert_eq!(inputs("perl quality/lint.pl"), (Vec::new(), true));
         assert_eq!(inputs("ruby -- quality/lint.rb"), (Vec::new(), true));
+        assert_eq!(inputs("swift quality/lint.swift"), (Vec::new(), true));
         assert_eq!(inputs("tclsh quality/lint.tcl"), (Vec::new(), true));
         assert_eq!(inputs("/usr/bin/tclsh8.6 quality/lint.tcl"), (Vec::new(), true));
         assert_eq!(inputs("perl -e 'system q(cargo clippy)'"), (Vec::new(), true));

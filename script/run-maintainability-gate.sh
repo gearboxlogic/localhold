@@ -159,7 +159,7 @@ if [[ $relative_target_directory == "$target_directory" || "$repository_root/$re
     exit 1
 fi
 
-if $windows_toolchain; then
+if [[ $windows_toolchain == true ]]; then
     readonly cygpath_command=/usr/bin/cygpath
     [[ -f $cygpath_command && -x $cygpath_command ]] || {
         printf 'maintainability gate requires an OS-owned cygpath\n' >&2
@@ -175,7 +175,7 @@ elif [[ $rustup_home != /* ]]; then
     exit 1
 fi
 rustup_environment=$rustup_home
-if $windows_toolchain; then
+if [[ $windows_toolchain == true ]]; then
     rustup_environment=$("$cygpath_command" -w "$rustup_home")
 fi
 
@@ -220,7 +220,7 @@ if [[ -z $resolved_cargo || $resolved_cargo == *$'\n'* ]]; then
     printf 'authenticated Rustup returned an invalid Cargo path\n' >&2
     exit 1
 fi
-if $windows_toolchain; then
+if [[ $windows_toolchain == true ]]; then
     resolved_cargo=$("$cygpath_command" -u "$resolved_cargo")
 elif [[ $resolved_cargo != /* ]]; then
     printf 'authenticated Rustup returned a non-absolute Cargo path\n' >&2
@@ -254,7 +254,7 @@ native_cargo_fmt=$cargo_fmt_executable
 native_rustc=$rustc_executable
 native_rustdoc=$rustdoc_executable
 native_rustfmt=$rustfmt_executable
-if $windows_toolchain; then
+if [[ $windows_toolchain == true ]]; then
     native_cargo=$("$cygpath_command" -w "$native_cargo")
     native_cargo_clippy=$("$cygpath_command" -w "$native_cargo_clippy")
     native_cargo_fmt=$("$cygpath_command" -w "$native_cargo_fmt")
@@ -263,7 +263,7 @@ if $windows_toolchain; then
     native_rustfmt=$("$cygpath_command" -w "$native_rustfmt")
 fi
 trusted_path="/usr/bin:/bin"
-if $windows_toolchain; then
+if [[ $windows_toolchain == true ]]; then
     readonly vswhere_command="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
     if [[ ! -f $vswhere_command || -L $vswhere_command || ! -x $vswhere_command ]]; then
         printf 'maintainability gate requires the Visual Studio-owned installation locator\n' >&2
@@ -335,7 +335,7 @@ RUSTUP_HOME=$rustup_environment
 RUSTUP_TOOLCHAIN=1.97.0
 readonly RUSTUP_HOME RUSTUP_TOOLCHAIN
 native_cargo_home=$fresh_cargo_home
-if $windows_toolchain; then
+if [[ $windows_toolchain == true ]]; then
     native_cargo_home=$("$cygpath_command" -w "$fresh_cargo_home")
 fi
 CARGO_HOME=$native_cargo_home

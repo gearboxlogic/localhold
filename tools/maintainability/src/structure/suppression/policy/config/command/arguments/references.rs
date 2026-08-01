@@ -198,8 +198,8 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         _ if dynamic_program::is_python_interpreter(&command) => python_input(arguments),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),
         _ if dynamic_program::is_unanalyzed_interpreter(&command) => SelectedInput::Opaque,
-        "awk" | "awk.exe" | "dbus-run-session" | "dpkg" | "dpkg.exe" | "gawk" | "gawk.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe" | "protoc" | "protoc.exe" | "rake"
-        | "rake.exe" | "rsync" | "rsync.exe" | "run-parts" | "run-parts.exe" | "sqlite3" | "sqlite3.exe" | "wget" | "wget.exe" => SelectedInput::Opaque,
+        "awk" | "awk.exe" | "dbus-run-session" | "dpkg" | "dpkg.exe" | "gawk" | "gawk.exe" | "gio" | "gio.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe" | "protoc"
+        | "protoc.exe" | "rake" | "rake.exe" | "rsync" | "rsync.exe" | "run-parts" | "run-parts.exe" | "sqlite3" | "sqlite3.exe" | "wget" | "wget.exe" => SelectedInput::Opaque,
         "find" | "find.exe" => {
             return (Vec::new(), find_command_action_is_opaque(arguments));
         }
@@ -578,6 +578,7 @@ mod tests {
             "sed 's/.*/sh quality\\/lint.txt/e' /etc/hosts",
             "sqlite3 :memory: '.shell sh quality/lint.txt'",
             "dbus-run-session -- sh quality/lint.txt",
+            "gio launch quality/lint.desktop",
             "dpkg --pre-invoke='sh quality/lint.txt' --unpack quality/missing.deb",
             "wget --use-askpass=/tmp/askpass https://example.invalid/archive",
             "yarn exec \"sh quality/lint.txt\"",

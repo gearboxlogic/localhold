@@ -40,6 +40,10 @@ pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
             | "php.exe"
             | "ruby"
             | "ruby.exe"
+            | "yarn"
+            | "yarn.cmd"
+            | "yarn.exe"
+            | "yarn.ps1"
     ) || is_tcl_interpreter(command)
 }
 
@@ -95,7 +99,20 @@ mod tests {
 
     #[test]
     fn package_and_java_launchers_fail_closed() {
-        for command in ["npm", "npm.exe", "npx", "npx.exe", "java", "java.exe", "javaw", "javaw.exe"] {
+        for command in [
+            "npm",
+            "npm.exe",
+            "npx",
+            "npx.exe",
+            "yarn",
+            "yarn.cmd",
+            "yarn.exe",
+            "yarn.ps1",
+            "java",
+            "java.exe",
+            "javaw",
+            "javaw.exe",
+        ] {
             assert!(is_unanalyzed_interpreter(command), "{command}");
         }
     }

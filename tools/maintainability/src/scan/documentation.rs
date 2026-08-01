@@ -61,6 +61,7 @@ fn doc_comment_source(attribute: &Attribute) -> Option<String> {
 struct DocCommentScanner {
     block_doc: bool,
     fence: Option<Fence>,
+    paragraph_open: bool,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -84,13 +85,34 @@ impl DocCommentScanner {
 
     fn scan_content(&mut self, content: &str) -> bool {
         let content = content.strip_prefix(' ').unwrap_or(content);
+        if self.fence.is_none() && !self.paragraph_open && markdown_indented_code(content) {
+            return true;
+        }
         let content = strip_markdown_container_prefixes(content);
+        if self.fence.is_none() && !self.paragraph_open && markdown_indented_code(content) {
+            return true;
+        }
         let trimmed = content.trim_start();
-        match fence_delimiter(trimmed) {
-            Some((delimiter, rest)) => update_fence(&mut self.fence, delimiter, rest),
-            None => false,
+        if trimmed.is_empty() {
+            if self.fence.is_none() {
+                self.paragraph_open = false;
+            }
+            return false;
+        }
+        if let Some((delimiter, rest)) = fence_delimiter(trimmed) {
+            self.paragraph_open = false;
+            update_fence(&mut self.fence, delimiter, rest)
+        } else {
+            if self.fence.is_none() {
+                self.paragraph_open = true;
+            }
+            false
         }
     }
+}
+
+fn markdown_indented_code(content: &str) -> bool {
+    content.starts_with('\t') || content.as_bytes().iter().take_while(|byte| **byte == b' ').count() >= 4
 }
 
 fn strip_markdown_container_prefixes(mut content: &str) -> &str {

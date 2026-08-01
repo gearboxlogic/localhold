@@ -91,8 +91,9 @@ fn event_base_revision(event: &Value) -> Result<&str> {
     let revision = event
         .pointer("/pull_request/base/sha")
         .and_then(Value::as_str)
+        .or_else(|| event.pointer("/merge_group/base_sha").and_then(Value::as_str))
         .or_else(|| event.get("before").and_then(Value::as_str))
-        .context("GitHub event has no pull-request base or previous push revision")?;
+        .context("GitHub event has no pull-request, merge-group, or previous push revision")?;
     if revision == ZERO_REVISION {
         bail!("GitHub event has no usable previous revision for maintainability comparison");
     }
@@ -155,8 +156,9 @@ mod tests {
     }
 
     #[test]
-    fn pull_request_and_push_events_supply_exact_bases() {
+    fn pull_request_merge_group_and_push_events_supply_exact_bases() {
         assert_eq!(event_base_revision(&json!({"pull_request": {"base": {"sha": BASE}}})).unwrap(), BASE);
+        assert_eq!(event_base_revision(&json!({"merge_group": {"base_sha": BASE}})).unwrap(), BASE);
         assert_eq!(event_base_revision(&json!({"before": BASE})).unwrap(), BASE);
         assert!(event_base_revision(&json!({"before": ZERO_REVISION})).is_err());
         assert!(event_base_revision(&json!({})).is_err());

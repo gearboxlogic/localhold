@@ -51,7 +51,7 @@ fn imports_command_capable_api(source: &str) -> bool {
             let binding = binding.trim_matches(['(', ')']);
             let name = binding.split_once("as").map_or(binding, |(name, _)| name);
             match module {
-                "os" => is_os_process_api(name),
+                "os" | "posix" => is_os_process_api(name),
                 "subprocess" => is_subprocess_process_api(name),
                 _ => false,
             }
@@ -93,7 +93,10 @@ fn has_adjacent_string_literals_in(source: &str) -> bool {
 
 fn references_process_api(source: &str) -> bool {
     let source = source.to_ascii_lowercase();
-    ["subprocess", "os.system", "os.popen", "popen("].iter().any(|name| source.contains(name)) || references_exec_or_spawn_api(&source)
+    ["subprocess", "os.system", "os.popen", "posix.system", "posix.popen", "popen("]
+        .iter()
+        .any(|name| source.contains(name))
+        || references_exec_or_spawn_api(&source)
 }
 
 fn references_exec_or_spawn_api(source: &str) -> bool {
@@ -381,6 +384,16 @@ FFI().dlopen(None).system(bytes.fromhex("636172676f20636c69707079202d2d202d41207
         ));
         assert!(has_opaque_process_arguments(
             r#"os.system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
+        ));
+        assert!(has_opaque_process_arguments(
+            r#"posix.system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
+        ));
+        assert!(has_opaque_process_arguments(
+            r#"posix.popen(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
+        ));
+        assert!(has_opaque_process_arguments(
+            r#"from posix import system as run
+run(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
         ));
         assert!(has_opaque_process_arguments(r#"os.system("printf safe; " + command)"#));
         assert!(has_opaque_process_arguments(r#"subprocess.run(bytes.fromhex("2f7573722f62696e2f636172676f"))"#));

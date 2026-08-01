@@ -27,12 +27,13 @@ export GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL
 readonly sha256_command=/usr/bin/sha256sum
 readonly uname_command=/usr/bin/uname
 readonly bash_command=/usr/bin/bash
+readonly chmod_command=/usr/bin/chmod
 readonly cp_command=/usr/bin/cp
 readonly ln_command=/usr/bin/ln
 readonly mkdir_command=/usr/bin/mkdir
 readonly mktemp_command=/usr/bin/mktemp
 readonly rm_command=/usr/bin/rm
-for system_command in "$sha256_command" "$uname_command" "$bash_command" "$cp_command" "$ln_command" "$mkdir_command" "$mktemp_command" "$rm_command"; do
+for system_command in "$sha256_command" "$uname_command" "$bash_command" "$chmod_command" "$cp_command" "$ln_command" "$mkdir_command" "$mktemp_command" "$rm_command"; do
     if [[ ! -f $system_command || ! -x $system_command ]]; then
         printf 'maintainability gate requires an OS-owned executable: %s\n' "$system_command" >&2
         exit 1
@@ -85,6 +86,8 @@ machine=$("$uname_command" -m)
 # and the official Rustup 1.29.0 archive.
 if [[ $kernel == Linux && $machine == x86_64 ]]; then
     tool_extension=
+    curl_command=/usr/bin/curl
+    rustup_archive_url=https://static.rust-lang.org/rustup/archive/1.29.0/x86_64-unknown-linux-gnu/rustup-init
     expected_rustup_sha256=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
     expected_cargo_sha256=eff12bab37b9d9e01324db4583eaf55b2cd82ac3008a7e59876e4cd2e9a028f5
     expected_rustc_sha256=df13f58759c0662831983e3a6501c63c1fc12ea60ec4e1d1ac35e5fe43c500c0
@@ -100,6 +103,8 @@ if [[ $kernel == Linux && $machine == x86_64 ]]; then
     windows_toolchain=false
 elif [[ $kernel == MINGW* || $kernel == MSYS* || $kernel == CYGWIN* ]] && [[ $machine == x86_64 ]]; then
     tool_extension=.exe
+    curl_command=/mingw64/bin/curl.exe
+    rustup_archive_url=https://static.rust-lang.org/rustup/archive/1.29.0/x86_64-pc-windows-msvc/rustup-init.exe
     expected_rustup_sha256=86478e53f769379d7f0ebfa7c9aa97cb76ca92233f79aa2cc0dbee2efaac73c7
     expected_cargo_sha256=3cd119fe81dfedb9dce4573696bf65058f16b57c9e5babe415b71624315cbb7d
     expected_rustc_sha256=6d1c5543ed3a45cfbc1c1332d42d6550d883c14d3c2e323427e631c331cebeeb
@@ -115,6 +120,42 @@ elif [[ $kernel == MINGW* || $kernel == MSYS* || $kernel == CYGWIN* ]] && [[ $ma
     windows_toolchain=true
 else
     printf 'maintainability evidence requires Linux or Windows x86_64, not %s %s\n' "$kernel" "$machine" >&2
+    exit 1
+fi
+
+if [[ ! -f $curl_command || -L $curl_command || ! -x $curl_command ]]; then
+    printf 'maintainability gate requires an OS-owned curl executable: %s\n' "$curl_command" >&2
+    exit 1
+fi
+
+target_parent="$repository_root/target"
+if [[ -L $target_parent || -e $target_parent && ! -d $target_parent ]]; then
+    printf 'maintainability target parent must be a regular non-symlink directory\n' >&2
+    exit 1
+fi
+if [[ ! -d $target_parent ]]; then
+    "$mkdir_command" -- "$target_parent"
+fi
+target_parent=$(cd -- "$target_parent" && pwd -P)
+if [[ $target_parent != "$repository_root/target" ]]; then
+    printf 'maintainability target parent resolves outside the repository target directory\n' >&2
+    exit 1
+fi
+umask 077
+# These private names stay deliberately short because some MSVC dependency
+# builds resolve relative includes before collapsing `..` path components.
+target_directory=$("$mktemp_command" -d "$target_parent/g.XXXXXXXX")
+if [[ ! -d $target_directory || -L $target_directory ]]; then
+    printf 'maintainability gate could not create a fresh target directory\n' >&2
+    exit 1
+fi
+cleanup_target_directory() {
+    "$rm_command" -rf -- "$target_directory"
+}
+trap cleanup_target_directory EXIT
+relative_target_directory=${target_directory#"$repository_root/"}
+if [[ $relative_target_directory == "$target_directory" || "$repository_root/$relative_target_directory" != "$target_directory" ]]; then
+    printf 'maintainability gate could not derive its repository-relative target directory\n' >&2
     exit 1
 fi
 
@@ -139,11 +180,13 @@ if $windows_toolchain; then
 fi
 
 rustup_executable=${LOCALHOLD_MAINTAINABILITY_RUSTUP:-}
-if [[ -n $rustup_executable && $rustup_executable != /* ]]; then
+if [[ -n $rustup_executable && $rustup_executable =~ ^[[:alpha:]]:[/\\] ]]; then
+    rustup_executable=$("$cygpath_command" -u "$rustup_executable")
+elif [[ -n $rustup_executable && $rustup_executable != /* ]]; then
     printf 'maintainability gate requires an absolute authenticated Rustup handoff\n' >&2
     exit 1
 fi
-if [[ -z $rustup_executable ]]; then
+if [[ -z $rustup_executable && ( ${GITHUB_ACTIONS:-} != true || $mode == test-environment ) ]]; then
     IFS=: read -r -a path_directories <<<"$PATH"
     for rustup_directory in "${path_directories[@]}"; do
         [[ -n $rustup_directory ]] || rustup_directory=.
@@ -160,8 +203,10 @@ if [[ -z $rustup_executable ]]; then
     done
 fi
 if [[ -z $rustup_executable ]]; then
-    printf 'maintainability gate requires Rustup 1.29.0 on PATH\n' >&2
-    exit 1
+    downloaded_rustup="$target_directory/rustup$tool_extension"
+    "$curl_command" --fail --location --proto '=https' --tlsv1.2 --output "$downloaded_rustup" "$rustup_archive_url"
+    "$chmod_command" 0700 -- "$downloaded_rustup"
+    rustup_executable=$downloaded_rustup
 fi
 rustup_executable=$(authenticated_tool "$rustup_executable" "$expected_rustup_sha256")
 LOCALHOLD_MAINTAINABILITY_RUSTUP=$rustup_executable
@@ -263,36 +308,6 @@ LOCALHOLD_MAINTAINABILITY_CARGO=$native_cargo
 LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY=$native_cargo_clippy
 LOCALHOLD_MAINTAINABILITY_CARGO_FMT=$native_cargo_fmt
 LOCALHOLD_MAINTAINABILITY_RUSTC=$native_rustc
-target_parent="$repository_root/target"
-if [[ -L $target_parent || -e $target_parent && ! -d $target_parent ]]; then
-    printf 'maintainability target parent must be a regular non-symlink directory\n' >&2
-    exit 1
-fi
-if [[ ! -d $target_parent ]]; then
-    "$mkdir_command" -- "$target_parent"
-fi
-target_parent=$(cd -- "$target_parent" && pwd -P)
-if [[ $target_parent != "$repository_root/target" ]]; then
-    printf 'maintainability target parent resolves outside the repository target directory\n' >&2
-    exit 1
-fi
-umask 077
-# These private names stay deliberately short because some MSVC dependency
-# builds resolve relative includes before collapsing `..` path components.
-target_directory=$("$mktemp_command" -d "$target_parent/g.XXXXXXXX")
-if [[ ! -d $target_directory || -L $target_directory ]]; then
-    printf 'maintainability gate could not create a fresh target directory\n' >&2
-    exit 1
-fi
-cleanup_target_directory() {
-    "$rm_command" -rf -- "$target_directory"
-}
-trap cleanup_target_directory EXIT
-relative_target_directory=${target_directory#"$repository_root/"}
-if [[ $relative_target_directory == "$target_directory" || "$repository_root/$relative_target_directory" != "$target_directory" ]]; then
-    printf 'maintainability gate could not derive its repository-relative target directory\n' >&2
-    exit 1
-fi
 fresh_cargo_home="$target_directory/c"
 "$mkdir_command" -- "$fresh_cargo_home"
 if [[ ! -d $fresh_cargo_home || -L $fresh_cargo_home ]]; then

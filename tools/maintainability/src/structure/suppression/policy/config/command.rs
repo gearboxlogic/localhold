@@ -63,6 +63,7 @@ pub(super) const GATE_RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "rustup_home=${RUSTUP_HOME:-${HOME:?maintainability gate requires RUSTUP_HOME or HOME}/.rustup}",
     "    rustup_home=$(\"$cygpath_command\" -u \"$rustup_home\")",
     "rustup_executable=${LOCALHOLD_MAINTAINABILITY_RUSTUP:-}",
+    "if [[ -z $rustup_executable && ( ${GITHUB_ACTIONS:-} != true || $mode == test-environment ) ]]; then",
     "LOCALHOLD_MAINTAINABILITY_RUSTUP=$rustup_executable",
     "export LOCALHOLD_MAINTAINABILITY_RUSTUP",
     "resolved_cargo=$(RUSTUP_HOME=$rustup_environment \"$rustup_executable\" which --toolchain 1.97.0 cargo) || {",
@@ -104,6 +105,8 @@ pub(super) const GATE_RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "    if [[ $LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT != \"$repository_root\" ]]; then",
 ];
 pub(super) const GATE_RUNNER_COMMAND_LINES: &[&str] = &[
+    "    \"$curl_command\" --fail --location --proto '=https' --tlsv1.2 --output \"$downloaded_rustup\" \"$rustup_archive_url\"",
+    "    \"$chmod_command\" 0700 -- \"$downloaded_rustup\"",
     "    \"$cargo_executable\" fetch --locked",
     "    \"$cargo_executable\" fetch --manifest-path \"$audit_manifest\" --locked",
     "    \"$cargo_fmt_executable\" --manifest-path \"$audit_manifest\" -- --check",
@@ -200,7 +203,7 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
-    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: a0f331b9ceff9a0d0bf20cd340e569f247d9727a171dccf5b47f5e7b993b6acf",
+    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: edd67b0f23cd78c9db725f7534579c44b5215b1fe0ca554fd206dd2ad8e8a7fd",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",

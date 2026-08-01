@@ -79,7 +79,7 @@ readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834b
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=45be2afee1b5e38a5da6b824b55236e1640fe57c2f399a22e29b665ec3f8ee76
 readonly reviewed_bootstrap_tests_sha256=f9d5d2fe02a18934c4bfdd63936d8920773716775877f741266b3353a19b6eee
-readonly reviewed_gate_runner_sha256=ad22c7c698a09e21ef3dcd4d59c30c45a12c968be98750413daaa78dd6f554bc
+readonly reviewed_gate_runner_sha256=f999d22182db084a266718157c7e20614d690d297912ae9eb3882da817d06180
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then

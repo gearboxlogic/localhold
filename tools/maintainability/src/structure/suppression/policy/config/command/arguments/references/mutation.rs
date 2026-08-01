@@ -4,15 +4,17 @@ use super::path;
 
 pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]) -> bool {
     output_redirection_targets_surface(arguments)
+        || is_objcopy_command(command) && (arguments_reference_surface(arguments) || final_destination_is_opaque(path, arguments))
         || match command {
             "cp" | "cp.exe" | "install" | "install.exe" | "ln" | "ln.exe" | "mv" | "mv.exe" | "tee" | "tee.exe" | "truncate" | "truncate.exe" => {
                 arguments_reference_surface(arguments) || final_destination_is_opaque(path, arguments)
             }
             "copy" | "copy-item" | "move" | "move-item" | "set-content" | "add-content" | "out-file" => arguments_reference_surface(arguments),
-            "curl" | "curl.exe" => curl_output_targets_surface(arguments),
+            "curl" | "curl.exe" => curl_output_targets_surface(arguments) || curl_remote_name_is_opaque(arguments),
             "dd" | "dd.exe" => arguments.iter().filter_map(|argument| argument.strip_prefix("of=")).any(is_literal_execution_surface),
             "iconv" | "iconv.exe" => iconv_output_is_opaque(path, arguments),
             "patch" | "patch.exe" => true,
+            "unzip" | "unzip.exe" => unzip_dispatch_is_opaque(arguments),
             "perl" | "perl.exe" if arguments.iter().any(|argument| argument.starts_with("-i")) => arguments_reference_surface(arguments),
             "sed" | "sed.exe"
                 if arguments
@@ -104,6 +106,99 @@ fn iconv_output_is_opaque(path: &str, arguments: &[String]) -> bool {
         index += 1;
     }
     false
+}
+
+fn is_objcopy_command(command: &str) -> bool {
+    let stem = command.strip_suffix(".exe").unwrap_or(command);
+    let unversioned = stem
+        .rsplit_once('-')
+        .filter(|(_, suffix)| suffix.chars().all(|character| character.is_ascii_digit() || character == '.'))
+        .map_or(stem, |(prefix, _)| prefix);
+    unversioned == "objcopy" || unversioned.ends_with("-objcopy")
+}
+
+fn unzip_dispatch_is_opaque(arguments: &[String]) -> bool {
+    unzip_sets_archive_timestamp(arguments) || unzip_extracts_files(arguments) && !unzip_extracts_into_isolated_directory(arguments)
+}
+
+fn unzip_sets_archive_timestamp(arguments: &[String]) -> bool {
+    unzip_short_options(arguments).any(|options| options.contains('T'))
+}
+
+fn unzip_extracts_files(arguments: &[String]) -> bool {
+    !arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
+        matches!(argument.as_str(), "--help" | "--version")
+            || unzip_short_option_flags(argument).is_some_and(|options| options.chars().any(|option| matches!(option, 'c' | 'h' | 'l' | 'p' | 't' | 'v' | 'z' | 'Z')))
+    })
+}
+
+fn unzip_extracts_into_isolated_directory(arguments: &[String]) -> bool {
+    if unzip_short_options(arguments).any(|options| options.contains(':')) {
+        return false;
+    }
+    let mut isolated = false;
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
+        let destination = unzip_directory_option(argument).and_then(|attached| {
+            if attached.is_empty() {
+                index += 1;
+                arguments.get(index).map(String::as_str)
+            } else {
+                Some(attached)
+            }
+        });
+        if let Some(destination) = destination {
+            if !isolated_unzip_directory(destination) {
+                return false;
+            }
+            isolated = true;
+        }
+        index += 1;
+    }
+    isolated
+}
+
+fn unzip_short_options(arguments: &[String]) -> impl Iterator<Item = &str> {
+    arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--")
+        .filter_map(|argument| unzip_short_option_flags(argument))
+}
+
+fn unzip_short_option_flags(argument: &str) -> Option<&str> {
+    let options = argument.strip_prefix('-').filter(|options| !options.starts_with('-'))?;
+    let end = options.find(['P', 'd']).unwrap_or(options.len());
+    Some(&options[..end])
+}
+
+fn unzip_directory_option(argument: &str) -> Option<&str> {
+    let options = argument.strip_prefix('-').filter(|options| !options.starts_with('-'))?;
+    let directory = options.find('d')?;
+    if options.find('P').is_some_and(|password| password < directory) {
+        return None;
+    }
+    options.get(directory + 1..)
+}
+
+fn isolated_unzip_directory(destination: &str) -> bool {
+    if path::normalize_literal(destination).as_deref() == Some("extracted") {
+        return true;
+    }
+    ["$RUNNER_TEMP/", "${RUNNER_TEMP}/"]
+        .iter()
+        .any(|prefix| destination.strip_prefix(prefix).is_some_and(|suffix| path::normalize_literal(suffix).is_some()))
+}
+
+fn curl_remote_name_is_opaque(arguments: &[String]) -> bool {
+    arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
+        if let Some(options) = argument.strip_prefix('-').filter(|options| !options.starts_with('-')) {
+            return options.contains('O');
+        }
+        let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
+        ["--remote-name", "--remote-name-all"]
+            .iter()
+            .any(|full| option.len() >= "--remote-n".len() && full.starts_with(option))
+    })
 }
 
 fn curl_output_targets_surface(arguments: &[String]) -> bool {
@@ -229,6 +324,26 @@ mod tests {
             assert!(opaque("iconv", arguments), "{arguments:?}");
         }
         assert!(!opaque("iconv", &["-o", "target/output.txt", "quality/lint.data"]));
+    }
+
+    #[test]
+    fn curl_remote_names_and_objcopy_outputs_fail_closed() {
+        for arguments in [
+            &["-O", "file:///tmp/Justfile"][..],
+            &["-sSO", "file:///tmp/Justfile"],
+            &["--remote-name", "file:///tmp/Justfile"],
+            &["--remote-n", "file:///tmp/Justfile"],
+            &["-J", "-O", "https://example.invalid/payload"],
+        ] {
+            assert!(opaque("curl", arguments), "{arguments:?}");
+        }
+        assert!(!opaque("curl", &["-J", "https://example.invalid/payload"]));
+
+        for command in ["objcopy", "objcopy.exe", "llvm-objcopy", "llvm-objcopy-19", "x86_64-linux-gnu-objcopy"] {
+            assert!(opaque(command, &["-I", "binary", "-O", "binary", "quality/Justfile", "Justfile"]), "{command}");
+            assert!(opaque(command, &["$input", "$output"]), "{command}");
+            assert!(!opaque(command, &["input.bin", "target/output.bin"]), "{command}");
+        }
     }
 
     #[test]

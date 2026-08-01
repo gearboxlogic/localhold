@@ -874,8 +874,23 @@ mod tests {
             "command.com /c echo accepted",
             "printf 'x\\n' | split -l 1 --filter='sh quality/lint.txt'",
             "split --f 'sh quality/lint.txt' input",
+            "unzip -oq target/payload.zip",
+            "unzip -oqd . target/payload.zip",
+            "unzip -oq -d extracted -: target/payload.zip",
+            "unzip -T target/payload.zip -d extracted",
         ] {
             assert_eq!(inputs(command), (Vec::new(), true), "{command}");
+        }
+        for command in [
+            "unzip -l target/payload.zip",
+            "unzip -p target/payload.zip Justfile",
+            "unzip -oq target/payload.zip -d extracted",
+            "unzip -oqd extracted target/payload.zip",
+            "unzip -oqdextracted target/payload.zip",
+            "unzip -Ppassword -oq target/payload.zip -d extracted",
+            "unzip -oq target/payload.zip -d $RUNNER_TEMP/extracted",
+        ] {
+            assert_eq!(inputs(command), (Vec::new(), false), "{command}");
         }
     }
 

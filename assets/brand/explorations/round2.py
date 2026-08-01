@@ -7,6 +7,7 @@ CX = CY = 32.0
 NIGHT = "#10161E"
 LINE = "#3D639C"
 GOLD = "#C89B3C"
+
 OUT = "round2"
 
 
@@ -109,12 +110,12 @@ def ravelins(n, theta0, rc, rt, f, s, d1=2.0, d2=6.0, b=2.8):
     return " ".join(out)
 
 
-def svg(name, body, label):
+def svg(output, name, body, label):
     head = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" '
             f'role="img" aria-label="Plan of the Hold — {label}">\n'
             f'  <rect width="64" height="64" fill="{NIGHT}"/>\n')
-    with open(os.path.join(OUT, name), "w") as fh:
-        fh.write(head + body + "</svg>\n")
+    with output:
+        output.write(head + body + "</svg>\n")
     print(name)
 
 
@@ -134,18 +135,20 @@ P5 = dict(n=5, theta0=90.0)
 
 # B — reference (round 1 geometry)
 tp = trace_points(rc=16.0, rt=26.0, f=0.22, s=3.2, **P5)
-svg("b0-reference.svg", stroke(closed(tp), 2.2) + stroke(ward(5, 90, 9.2, 2), 1.5) + dot(),
+svg(open(os.path.join(OUT, "b0-reference.svg"), "w"), "b0-reference.svg",
+    stroke(closed(tp), 2.2) + stroke(ward(5, 90, 9.2, 2), 1.5) + dot(),
     "pentagon reference")
 
 # B1 — bolder: heavier trace, larger gold, slightly deeper ward
 tp = trace_points(rc=16.0, rt=26.5, f=0.22, s=3.2, **P5)
-svg("b1-bolder.svg", stroke(closed(tp), 2.7) + stroke(ward(5, 90, 9.6, 2), 1.8) + dot(3.6),
+svg(open(os.path.join(OUT, "b1-bolder.svg"), "w"), "b1-bolder.svg",
+    stroke(closed(tp), 2.7) + stroke(ward(5, 90, 9.6, 2), 1.8) + dot(3.6),
     "pentagon bolder")
 
 # B2 — counterscarp fragments: quiet detached walls opposite each curtain
 geom = dict(rc=15.0, rt=24.5, f=0.22, s=3.0)
 tp = trace_points(**geom, **P5)
-svg("b2-counterscarp.svg",
+svg(open(os.path.join(OUT, "b2-counterscarp.svg"), "w"), "b2-counterscarp.svg",
     stroke(closed(tp), 2.2) + stroke(counterscarp(**geom, **P5, d=3.4, trim=0.12), 1.0)
     + stroke(ward(5, 90, 8.8, 2), 1.5) + dot(2.9),
     "pentagon with counterscarp")
@@ -153,7 +156,7 @@ svg("b2-counterscarp.svg",
 # B3 — pentagon with ravelins
 geom = dict(rc=15.0, rt=24.0, f=0.22, s=3.0)
 tp = trace_points(**geom, **P5)
-svg("b3-ravelins.svg",
+svg(open(os.path.join(OUT, "b3-ravelins.svg"), "w"), "b3-ravelins.svg",
     stroke(closed(tp), 2.0) + stroke(ravelins(**geom, **P5, d1=2.2, d2=6.4, b=2.9), 1.2)
     + stroke(ward(5, 90, 8.6, 2), 1.4) + dot(2.8),
     "pentagon with ravelins")
@@ -161,13 +164,14 @@ svg("b3-ravelins.svg",
 # F0 — reference (round 1 moat, uniform scale)
 d_in = closed(trace_points(rc=14.5, rt=23.5, f=0.22, s=3.0, **P5))
 d_moat = closed(trace_points(rc=14.5 * 1.24, rt=23.5 * 1.24, f=0.22, s=3.0 * 1.24, **P5))
-svg("f0-reference.svg", stroke(d_moat, 0.8) + stroke(d_in, 2.0) + stroke(ward(5, 90, 8.4, 2), 1.4) + dot(2.8),
+svg(open(os.path.join(OUT, "f0-reference.svg"), "w"), "f0-reference.svg",
+    stroke(d_moat, 0.8) + stroke(d_in, 2.0) + stroke(ward(5, 90, 8.4, 2), 1.4) + dot(2.8),
     "pentagon moat reference")
 
 # F1 — causeway moat: true offset (constant gap), thinner, opened at the gate
 d_in = closed(trace_points(rc=14.0, rt=22.5, f=0.22, s=3.0, **P5))
 moat_pts = trace_points(rc=17.4, rt=25.9, f=0.22, s=3.0, **P5)
-svg("f1-causeway.svg",
+svg(open(os.path.join(OUT, "f1-causeway.svg"), "w"), "f1-causeway.svg",
     stroke(with_causeway(moat_pts, 5, 2, gapw=4.6), 0.9)
     + stroke(d_in, 2.1) + stroke(ward(5, 90, 8.2, 2), 1.4) + dot(2.8),
     "pentagon moat with causeway")

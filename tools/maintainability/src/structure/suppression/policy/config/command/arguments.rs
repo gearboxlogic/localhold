@@ -28,7 +28,7 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
     if dynamic_program::is_unanalyzed_path(path) {
         return true;
     }
-    if is_python(path) && (python::has_opaque_process_arguments(source) || python::mutates_literal_execution_surface(source)) {
+    if is_python(path) && (python::has_opaque_process_arguments(source) || python::has_opaque_filesystem_write(source)) {
         return true;
     }
     if is_powershell(path) && powershell::has_constructed_rust_arguments(source) {
@@ -214,7 +214,7 @@ fn normalized_source_for_surface(path: &str, source: &str) -> String {
     match Path::new(path).extension().and_then(|extension| extension.to_str()) {
         Some(extension) if extension.eq_ignore_ascii_case("ps1") => powershell::normalize_escapes(source),
         Some(extension) if matches!(extension.to_ascii_lowercase().as_str(), "cmd" | "bat") => join_command_continuations(source),
-        Some(extension) if extension.eq_ignore_ascii_case("py") => python::join_implicit_continuations(source),
+        Some(extension) if extension.eq_ignore_ascii_case("py") => python::normalize_continuations(source),
         _ => source.to_owned(),
     }
 }

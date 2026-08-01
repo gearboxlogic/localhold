@@ -389,6 +389,16 @@ fn command_policy_rejects_python_command_wrapper_dispatch() {
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
 
+    for source in [
+        "from pathlib import Path\nPath(\"Justfile\").write_text(Path(\"quality/Justfile\").read_text())\n",
+        "with open(file=\"Justfile\", mode=\"w\") as output:\n    output.write(\"lint:\\n    true\\n\")\n",
+        "import os\nos.write(descriptor, payload)\n",
+    ] {
+        fs::write(workspace.path().join("script/check.py"), source).expect("Python filesystem writer");
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("lint-weakening argument"), "{source}: {error:#}");
+    }
+
     fs::write(
         workspace.path().join("script/check.py"),
         "import subprocess\nsubprocess.run([\"git\", \"status\"])\nrunner = subprocess.run\nrunner(bytes.fromhex(\"636172676f\").decode(), shell=True)\n",

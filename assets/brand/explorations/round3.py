@@ -35,14 +35,14 @@ geom = dict(rc=15.0, rt=24.5, f=0.22, s=3.0)
 trace = r2.closed(r2.trace_points(**geom, **P5))
 
 # B2C — counterscarp with causeway, round-2 weight
-r2.svg("b2c-causeway.svg",
+r2.svg(open(os.path.join(OUT, "b2c-causeway.svg"), "w"), "b2c-causeway.svg",
        r2.stroke(trace, 2.2)
        + r2.stroke(counterscarp_causeway(**geom), 1.0)
        + r2.stroke(r2.ward(5, 90, 8.8, 2), 1.5) + r2.dot(2.9),
        "counterscarp with causeway")
 
 # B2C-bold — same, at B1's confidence: heavier trace and ward, larger gold
-r2.svg("b2c-bold.svg",
+r2.svg(open(os.path.join(OUT, "b2c-bold.svg"), "w"), "b2c-bold.svg",
        r2.stroke(trace, 2.6)
        + r2.stroke(counterscarp_causeway(**geom), 1.1)
        + r2.stroke(r2.ward(5, 90, 9.0, 2), 1.7) + r2.dot(3.4),
@@ -61,7 +61,7 @@ for j in range(5):
     c1 = r2.add(r2.lerp(a, b, 0.12), nrm, 3.4)
     c2 = r2.add(r2.lerp(a, b, 0.88), nrm, 3.4)
     segs.append(f"M{r2.fmt(c1)} L{r2.fmt(c2)}")
-r2.svg("b2o-open-approach.svg",
+r2.svg(open(os.path.join(OUT, "b2o-open-approach.svg"), "w"), "b2o-open-approach.svg",
        r2.stroke(trace, 2.2) + r2.stroke(" ".join(segs), 1.0)
        + r2.stroke(r2.ward(5, 90, 8.8, 2), 1.5) + r2.dot(2.9),
        "counterscarp open approach")

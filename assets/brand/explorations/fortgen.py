@@ -95,12 +95,12 @@ def scaled(d_pts_poly, factor):
     return [add((CX, CY), (p[0] - CX, p[1] - CY), factor) for p in d_pts_poly]
 
 
-def svg(name, body, label):
+def svg(output, name, body, label):
     head = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" '
             f'role="img" aria-label="Plan of the Hold — {label}">\n'
             f'  <rect width="64" height="64" fill="{NIGHT}"/>\n')
-    with open(os.path.join(OUT, name), "w") as fh:
-        fh.write(head + body + "</svg>\n")
+    with output:
+        output.write(head + body + "</svg>\n")
     print(name)
 
 
@@ -118,28 +118,32 @@ os.makedirs(OUT, exist_ok=True)
 # A — current square (baseline, as shipped on the card/banner)
 d, _ = trace_path(4, 45, 16.97, 25.46, 1 / 6, 4.0)
 ward = ward_path(4, 45, 9.9, 2)  # edge 2 = bottom
-svg("a-square-baseline.svg", stroke(d, 2.2) + stroke(ward, 1.5) + dot(), "square baseline")
+svg(open(os.path.join(OUT, "a-square-baseline.svg"), "w"), "a-square-baseline.svg",
+    stroke(d, 2.2) + stroke(ward, 1.5) + dot(), "square baseline")
 
 # B — pentagon, tip up (the canonical star-fort plan)
 d, _ = trace_path(5, 90, 16.0, 26.0, 0.22, 3.2)
 ward = ward_path(5, 90, 9.2, 2)  # edge between 234° and 306° corners = bottom
-svg("b-pentagon.svg", stroke(d, 2.2) + stroke(ward, 1.5) + dot(), "pentagon")
+svg(open(os.path.join(OUT, "b-pentagon.svg"), "w"), "b-pentagon.svg",
+    stroke(d, 2.2) + stroke(ward, 1.5) + dot(), "pentagon")
 
 # C — hexagon, flat top/bottom
 d, _ = trace_path(6, 60, 16.5, 25.0, 0.25, 2.8)
 ward = ward_path(6, 60, 9.2, 3)  # bottom edge
-svg("c-hexagon.svg", stroke(d, 2.2) + stroke(ward, 1.5) + dot(), "hexagon")
+svg(open(os.path.join(OUT, "c-hexagon.svg"), "w"), "c-hexagon.svg",
+    stroke(d, 2.2) + stroke(ward, 1.5) + dot(), "hexagon")
 
 # D — square in diamond stance
 d, _ = trace_path(4, 90, 16.97, 26.0, 1 / 6, 4.0)
 ward = ward_path(4, 90, 9.9, 2)
-svg("d-diamond.svg", stroke(d, 2.2) + stroke(ward, 1.5) + dot(), "diamond")
+svg(open(os.path.join(OUT, "d-diamond.svg"), "w"), "d-diamond.svg",
+    stroke(d, 2.2) + stroke(ward, 1.5) + dot(), "diamond")
 
 # E — square with ravelins
 d, _ = trace_path(4, 45, 15.5, 23.0, 1 / 6, 3.6)
 ward = ward_path(4, 45, 8.8, 2)
 rav = ravelins(4, 45, 15.5)
-svg("e-square-ravelins.svg",
+svg(open(os.path.join(OUT, "e-square-ravelins.svg"), "w"), "e-square-ravelins.svg",
     stroke(d, 2.0) + stroke(rav, 1.2) + stroke(ward, 1.4) + dot(2.8),
     "square with ravelins")
 
@@ -147,6 +151,6 @@ svg("e-square-ravelins.svg",
 d, _ = trace_path(5, 90, 14.5, 23.5, 0.22, 3.0)
 dm, _ = trace_path(5, 90, 14.5 * 1.24, 23.5 * 1.24, 0.22, 3.0 * 1.24)
 ward = ward_path(5, 90, 8.4, 2)
-svg("f-pentagon-moat.svg",
+svg(open(os.path.join(OUT, "f-pentagon-moat.svg"), "w"), "f-pentagon-moat.svg",
     stroke(dm, 0.8) + stroke(d, 2.0) + stroke(ward, 1.4) + dot(2.8),
     "pentagon with moat")

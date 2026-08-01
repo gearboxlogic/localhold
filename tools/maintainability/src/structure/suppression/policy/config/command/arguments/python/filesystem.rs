@@ -1,27 +1,175 @@
 use std::path::{Component, Path};
 
-pub(super) fn mutates_literal_execution_surface(source: &str) -> bool {
-    source.lines().any(|line| {
-        let mut scanner = CallScanner::new(line);
-        while let Some(call) = scanner.next() {
-            let Some(destination) = destination_argument(call.name.as_str()) else {
-                continue;
-            };
-            if scanner
-                .argument(call.opening_parenthesis, destination)
-                .is_some_and(|argument| literal_value(&argument).is_some_and(|path| is_execution_surface_path(&path)))
-            {
-                return true;
-            }
+pub(super) fn has_opaque_write(source: &str) -> bool {
+    let mut scanner = CallScanner::new(source);
+    while let Some(call) = scanner.next() {
+        if opaque_descriptor_write(call.name.as_str())
+            || chained_path_write_is_opaque(&scanner, &call)
+            || direct_path_method_is_opaque(&scanner, &call)
+            || direct_open_is_opaque(&scanner, &call)
+            || descriptor_open_is_opaque(&scanner, &call)
+            || mutation_arguments_are_opaque(&scanner, &call)
+        {
+            return true;
         }
-        false
-    })
+    }
+    false
 }
 
-fn destination_argument(name: &str) -> Option<usize> {
-    match name {
-        "shutil.copy" | "shutil.copy2" | "shutil.copyfile" | "shutil.copytree" | "shutil.move" | "os.rename" | "os.renames" | "os.replace" => Some(1),
-        _ => None,
+fn opaque_descriptor_write(name: &str) -> bool {
+    matches!(
+        name,
+        "os.copy_file_range" | "os.fchmod" | "os.fchown" | "os.ftruncate" | "os.pwrite" | "os.pwritev" | "os.sendfile" | "os.write" | "os.writev"
+    )
+}
+
+fn mutation_arguments_are_opaque(scanner: &CallScanner, call: &Call) -> bool {
+    let arguments: &[ArgumentSpec] = match call.name.as_str() {
+        "shutil.copy" | "shutil.copy2" | "shutil.copyfile" | "shutil.copytree" => &[ArgumentSpec::new(1, &["dst"])],
+        "shutil.move" | "os.link" | "os.rename" | "os.renames" | "os.replace" => &[ArgumentSpec::new(0, &["src"]), ArgumentSpec::new(1, &["dst"])],
+        "os.chmod" | "os.chown" | "os.lchown" | "os.makedirs" | "os.mkdir" | "os.remove" | "os.removedirs" | "os.rmdir" | "os.truncate" | "os.unlink" | "os.utime"
+        | "shutil.rmtree" => &[ArgumentSpec::new(0, &["path", "name"])],
+        "os.symlink" => return true,
+        _ => return false,
+    };
+    arguments
+        .iter()
+        .any(|argument| literal_argument_is_execution_surface(scanner, call.opening_parenthesis, *argument))
+}
+
+fn chained_path_write_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
+    let Some(method) = scanner.following_method(call.opening_parenthesis) else {
+        return false;
+    };
+    let receiver = ArgumentSpec::new(0, &[]);
+    match method.name.as_str() {
+        "chmod" | "lchmod" | "mkdir" | "rmdir" | "touch" | "unlink" | "write_bytes" | "write_text" => path_argument_is_opaque(scanner, call.opening_parenthesis, receiver),
+        "open" => writable_mode(scanner, method.opening_parenthesis, 0) && path_argument_is_opaque(scanner, call.opening_parenthesis, receiver),
+        "rename" | "replace" => {
+            path_argument_is_opaque(scanner, call.opening_parenthesis, receiver) || path_argument_is_opaque(scanner, method.opening_parenthesis, ArgumentSpec::new(0, &["target"]))
+        }
+        "hardlink_to" | "symlink_to" => true,
+        _ => false,
+    }
+}
+
+fn direct_open_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
+    if !matches!(call.name.as_str(), "builtins.open" | "io.open" | "open") || !writable_mode(scanner, call.opening_parenthesis, 1) {
+        return false;
+    }
+    path_argument_is_opaque(scanner, call.opening_parenthesis, ArgumentSpec::new(0, &["file"]))
+}
+
+fn direct_path_method_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
+    let Some((owner, method)) = call.name.rsplit_once('.') else {
+        return false;
+    };
+    if !matches!(owner, "Path" | "PosixPath" | "WindowsPath" | "pathlib.Path" | "pathlib.PosixPath" | "pathlib.WindowsPath") {
+        return false;
+    }
+    let receiver = ArgumentSpec::new(0, &["self"]);
+    match method {
+        "chmod" | "lchmod" | "mkdir" | "rmdir" | "touch" | "unlink" | "write_bytes" | "write_text" => path_argument_is_opaque(scanner, call.opening_parenthesis, receiver),
+        "open" => writable_mode(scanner, call.opening_parenthesis, 1) && path_argument_is_opaque(scanner, call.opening_parenthesis, receiver),
+        "rename" | "replace" => {
+            path_argument_is_opaque(scanner, call.opening_parenthesis, receiver) || path_argument_is_opaque(scanner, call.opening_parenthesis, ArgumentSpec::new(1, &["target"]))
+        }
+        "hardlink_to" | "symlink_to" => true,
+        _ => false,
+    }
+}
+
+fn descriptor_open_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
+    if call.name == "os.fdopen" {
+        return writable_mode(scanner, call.opening_parenthesis, 1);
+    }
+    if call.name != "os.open" || !writable_os_flags(scanner, call.opening_parenthesis) {
+        return false;
+    }
+    path_argument_is_opaque(scanner, call.opening_parenthesis, ArgumentSpec::new(0, &["path"]))
+}
+
+fn writable_os_flags(scanner: &CallScanner, opening_parenthesis: usize) -> bool {
+    let Some(flags) = scanner.call_argument(opening_parenthesis, ArgumentSpec::new(1, &["flags"])) else {
+        return true;
+    };
+    let flags = flags.chars().filter(|character| !character.is_whitespace()).collect::<String>();
+    !matches!(flags.as_str(), "0" | "O_RDONLY" | "os.O_RDONLY")
+}
+
+fn writable_mode(scanner: &CallScanner, opening_parenthesis: usize, position: usize) -> bool {
+    let Some(mode) = scanner.call_argument(opening_parenthesis, ArgumentSpec::new(position, &["mode"])) else {
+        return false;
+    };
+    literal_value(&mode).is_none_or(|mode| mode.contains(['a', 'w', 'x', '+']))
+}
+
+fn path_argument_is_opaque(scanner: &CallScanner, opening_parenthesis: usize, argument: ArgumentSpec) -> bool {
+    scanner
+        .call_argument(opening_parenthesis, argument)
+        .is_none_or(|argument| write_path_expression_is_opaque(&argument))
+}
+
+fn write_path_expression_is_opaque(argument: &str) -> bool {
+    if let Some(path) = literal_value(argument) {
+        return literal_write_path_is_opaque(&path);
+    }
+    !joined_literal_filename_is_safe(argument)
+}
+
+fn joined_literal_filename_is_safe(argument: &str) -> bool {
+    let argument = argument.trim();
+    let mut scanner = CallScanner::new(argument);
+    let Some(call) = scanner.next().filter(|call| call.name == "os.path.join") else {
+        return false;
+    };
+    if scanner.characters[..call.start].iter().any(|character| !character.is_whitespace()) {
+        return false;
+    }
+    let Some(closing) = scanner.closing_parenthesis(call.opening_parenthesis) else {
+        return false;
+    };
+    if scanner.characters[closing + 1..].iter().any(|character| !character.is_whitespace()) {
+        return false;
+    }
+    let mut index = 0;
+    let mut final_argument = None;
+    while let Some(argument) = scanner.argument(call.opening_parenthesis, index) {
+        final_argument = Some(argument);
+        index += 1;
+    }
+    let Some(filename) = final_argument.as_deref().and_then(literal_value) else {
+        return false;
+    };
+    let filename = filename.replace('\\', "/");
+    let path = Path::new(&filename);
+    !filename.is_empty() && path.file_name().and_then(|name| name.to_str()) == Some(filename.as_str()) && !literal_write_path_is_opaque(&filename)
+}
+
+fn literal_write_path_is_opaque(value: &str) -> bool {
+    if value.contains(['$', '%', '{', '}', '*', '?']) {
+        return true;
+    }
+    let value = value.replace('\\', "/");
+    let path = Path::new(&value);
+    path.is_absolute() || path.components().any(|component| !matches!(component, Component::CurDir | Component::Normal(_))) || is_execution_surface_path(&value)
+}
+
+fn literal_argument_is_execution_surface(scanner: &CallScanner, opening_parenthesis: usize, argument: ArgumentSpec) -> bool {
+    scanner
+        .call_argument(opening_parenthesis, argument)
+        .is_some_and(|argument| literal_value(&argument).is_some_and(|path| is_execution_surface_path(&path)))
+}
+
+#[derive(Clone, Copy)]
+struct ArgumentSpec {
+    position: usize,
+    names: &'static [&'static str],
+}
+
+impl ArgumentSpec {
+    const fn new(position: usize, names: &'static [&'static str]) -> Self {
+        Self { position, names }
     }
 }
 
@@ -46,6 +194,7 @@ fn is_execution_surface_path(value: &str) -> bool {
 }
 
 struct Call {
+    start: usize,
     name: String,
     opening_parenthesis: usize,
 }
@@ -66,7 +215,8 @@ impl CallScanner {
     fn next(&mut self) -> Option<Call> {
         while self.index < self.characters.len() {
             if self.characters[self.index] == '#' {
-                return None;
+                self.skip_comment();
+                continue;
             }
             if let Some(end) = self.string_end(self.index) {
                 self.index = end;
@@ -89,10 +239,16 @@ impl CallScanner {
             let opening_parenthesis = self.skip_whitespace(self.index);
             if self.characters.get(opening_parenthesis) == Some(&'(') {
                 self.index = opening_parenthesis + 1;
-                return Some(Call { name, opening_parenthesis });
+                return Some(Call { start, name, opening_parenthesis });
             }
         }
         None
+    }
+
+    fn skip_comment(&mut self) {
+        while self.characters.get(self.index).is_some_and(|character| *character != '\n') {
+            self.index += 1;
+        }
     }
 
     fn argument(&self, opening_parenthesis: usize, selected: usize) -> Option<String> {
@@ -121,6 +277,59 @@ impl CallScanner {
             }
             match self.characters[index] {
                 '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            index += 1;
+        }
+        None
+    }
+
+    fn call_argument(&self, opening_parenthesis: usize, selected: ArgumentSpec) -> Option<String> {
+        let mut positional = 0;
+        let mut index = 0;
+        while let Some(argument) = self.argument(opening_parenthesis, index) {
+            match keyword_argument(&argument) {
+                Some((name, value)) if selected.names.contains(&name) => return Some(value.to_owned()),
+                Some(_) => {}
+                None if positional == selected.position => return Some(argument),
+                None => positional += 1,
+            }
+            index += 1;
+        }
+        None
+    }
+
+    fn following_method(&self, opening_parenthesis: usize) -> Option<Call> {
+        let mut index = self.closing_parenthesis(opening_parenthesis)? + 1;
+        index = self.skip_whitespace(index);
+        if self.characters.get(index) != Some(&'.') {
+            return None;
+        }
+        index += 1;
+        let start = index;
+        while self.characters.get(index).is_some_and(|character| is_identifier_character(*character)) {
+            index += 1;
+        }
+        if index == start {
+            return None;
+        }
+        let name = self.characters[start..index].iter().collect::<String>();
+        let opening_parenthesis = self.skip_whitespace(index);
+        (self.characters.get(opening_parenthesis) == Some(&'(')).then_some(Call { start, name, opening_parenthesis })
+    }
+
+    fn closing_parenthesis(&self, opening_parenthesis: usize) -> Option<usize> {
+        let mut index = opening_parenthesis + 1;
+        let mut depth = 0_u32;
+        while index < self.characters.len() {
+            if let Some(end) = self.string_end(index) {
+                index = end;
+                continue;
+            }
+            match self.characters[index] {
+                '(' | '[' | '{' => depth += 1,
+                ')' if depth == 0 => return Some(index),
                 ')' | ']' | '}' => depth = depth.saturating_sub(1),
                 _ => {}
             }
@@ -159,6 +368,12 @@ impl CallScanner {
         }
         index
     }
+}
+
+fn keyword_argument(argument: &str) -> Option<(&str, &str)> {
+    let (name, value) = argument.split_once('=')?;
+    let name = name.trim();
+    (!name.is_empty() && name.chars().all(is_identifier_character)).then_some((name, value.trim()))
 }
 
 enum ArgumentBoundary {
@@ -225,26 +440,4 @@ fn is_identifier_character(character: char) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::mutates_literal_execution_surface;
-
-    #[test]
-    fn filesystem_copies_to_execution_surfaces_fail_closed() {
-        for source in [
-            r#"shutil.copyfile("quality/lint.data", "Justfile")"#,
-            r#"shutil.copy2("quality/lint.data", "script/check.sh")"#,
-            r#"shutil.copytree("quality/data", dst=".github/actions/check/action.yml")"#,
-            r#"os.replace("quality/lint.data", r".cargo\config.toml")"#,
-            r#"shutil.move("quality/lint.data", "script/check=lint.sh")"#,
-        ] {
-            assert!(mutates_literal_execution_surface(source), "{source}");
-        }
-    }
-
-    #[test]
-    fn filesystem_copies_to_data_paths_remain_allowed() {
-        assert!(!mutates_literal_execution_surface(r#"shutil.copyfile("quality/report.txt", "target/report.txt")"#));
-        assert!(!mutates_literal_execution_surface(r"shutil.copy2(source, destination)"));
-        assert!(!mutates_literal_execution_surface(r#"print('shutil.copyfile("a", "Justfile")')"#));
-    }
-}
+mod tests;

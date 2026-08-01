@@ -2,18 +2,18 @@ mod evaluation;
 mod filesystem;
 mod process;
 
-pub(super) fn join_implicit_continuations(source: &str) -> String {
+pub(super) fn normalize_continuations(source: &str) -> String {
     Scanner::new(source).scan()
 }
 
 #[cfg(test)]
 pub(super) fn has_adjacent_string_literals(source: &str) -> bool {
-    let normalized = join_implicit_continuations(source);
+    let normalized = normalize_continuations(source);
     has_adjacent_string_literals_in(&normalized)
 }
 
 pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
-    let normalized = join_implicit_continuations(source);
+    let normalized = normalize_continuations(source);
     if evaluation::has_dynamic_code(&normalized) {
         return true;
     }
@@ -41,8 +41,8 @@ pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
     })
 }
 
-pub(super) fn mutates_literal_execution_surface(source: &str) -> bool {
-    filesystem::mutates_literal_execution_surface(&join_implicit_continuations(source))
+pub(super) fn has_opaque_filesystem_write(source: &str) -> bool {
+    filesystem::has_opaque_write(&normalize_continuations(source))
 }
 
 fn imports_command_capable_api(source: &str) -> bool {
@@ -229,6 +229,14 @@ impl Scanner {
                 self.delimiter_depth = self.delimiter_depth.saturating_sub(1);
                 self.output.push(character);
             }
+            '\\' if self.characters.get(self.index + 1) == Some(&'\n') => {
+                self.output.push(' ');
+                self.index += 1;
+            }
+            '\\' if self.characters.get(self.index + 1) == Some(&'\r') && self.characters.get(self.index + 2) == Some(&'\n') => {
+                self.output.push(' ');
+                self.index += 2;
+            }
             '\n' => self.push_line_break(),
             '\r' if self.characters.get(self.index + 1) == Some(&'\n') => {}
             _ => self.output.push(character),
@@ -377,7 +385,7 @@ fn is_identifier_character(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_adjacent_string_literals, has_opaque_process_arguments};
+    use super::{has_adjacent_string_literals, has_opaque_filesystem_write, has_opaque_process_arguments};
 
     #[test]
     fn adjacent_literals_are_detected_only_within_one_python_expression() {
@@ -387,6 +395,13 @@ mod tests {
         assert!(!has_adjacent_string_literals("\"module doc\"\n\"second statement\"\n"));
         assert!(!has_adjacent_string_literals("subprocess.run([\"cargo\", \"clippy\"])\n"));
         assert!(!has_adjacent_string_literals("identifier\"invalid but not concatenated\"\n"));
+    }
+
+    #[test]
+    fn explicit_line_continuations_cannot_hide_filesystem_writes() {
+        assert!(has_opaque_filesystem_write("Path(\"Justfile\") \\\n                .write_text(payload)\n"));
+        assert!(has_opaque_filesystem_write("open(\\\n                file=\"Justfile\", \\\n                mode=\"w\")\n"));
+        assert!(has_opaque_filesystem_write("Path(\"Justfile\") \\\r\n.write_bytes(payload)\r\n"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "adoption_commit": "c818da63d10c5521362e9aeafc3b0c05e8532a01",
+  "adoption_commit": "363e7c85a17b03f6f71a41e21c4856e6fa5205da",
   "source_baselines": [
     {
       "category": "production",

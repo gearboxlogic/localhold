@@ -78,5 +78,9 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("openssl req -engine lint -new\n", "opaque interpreter program"),
     ("gcc -wrapper sh,quality/lint.txt -c quality/input.c\n", "opaque interpreter program"),
     ("rake --rakefile quality/lint.txt\n", "opaque interpreter program"),
+    ("ld.so quality/lint\n", "opaque interpreter program"),
+    ("/lib64/ld-linux-x86-64.so.2 quality/lint\n", "opaque interpreter program"),
+    ("go run quality/lint.go\n", "opaque interpreter program"),
+    ("go.exe -C quality run lint.go\n", "opaque interpreter program"),
     ("$'\\x73\\x68' quality/lint.txt\n", "opaque interpreter program"),
 ];

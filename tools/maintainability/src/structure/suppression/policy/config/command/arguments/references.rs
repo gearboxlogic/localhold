@@ -198,6 +198,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         _ if dynamic_program::is_python_interpreter(&command) => python_input(arguments),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),
         _ if dynamic_program::is_unanalyzed_interpreter(&command) => SelectedInput::Opaque,
+        _ if dynamic_loader_is_opaque(&command) => SelectedInput::Opaque,
         "awk" | "awk.exe" | "dbus-run-session" | "dpkg" | "dpkg.exe" | "gawk" | "gawk.exe" | "gio" | "gio.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe" | "protoc"
         | "protoc.exe" | "rake" | "rake.exe" | "rsync" | "rsync.exe" | "run-parts" | "run-parts.exe" | "sqlite3" | "sqlite3.exe" | "wget" | "wget.exe" => SelectedInput::Opaque,
         "find" | "find.exe" => {
@@ -211,6 +212,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "zip" | "zip.exe" if zip_test_command_is_opaque(arguments) => SelectedInput::Opaque,
         "openssl" | "openssl.exe" if openssl_module_selection_is_opaque(arguments) => SelectedInput::Opaque,
         "cargo" | "cargo.exe" if cargo_run_is_opaque(arguments) => SelectedInput::Opaque,
+        "go" | "go.exe" if go_run_is_opaque(arguments) => SelectedInput::Opaque,
         "just" | "just.exe" if just_source_selection_is_opaque(arguments) => SelectedInput::Opaque,
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
             let (inputs, opaque) = makefile_inputs(arguments);
@@ -230,6 +232,10 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         SelectedInput::Literal(candidate) => (vec![candidate], false),
         SelectedInput::Opaque => (Vec::new(), true),
     }
+}
+
+fn dynamic_loader_is_opaque(command: &str) -> bool {
+    command == "ld.so" || command.starts_with("ld.so.") || command.starts_with("ld-") && command.contains(".so")
 }
 
 fn bash_enable_loads_builtin(arguments: &[String]) -> bool {
@@ -284,6 +290,25 @@ fn cargo_run_is_opaque(arguments: &[String]) -> bool {
             || argument.starts_with("--config=")
             || argument.starts_with("--change-directory=")
         {
+            index += 1;
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
+fn go_run_is_opaque(arguments: &[String]) -> bool {
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        if argument == "run" {
+            return true;
+        }
+        if argument == "-C" {
+            index += 2;
+            continue;
+        }
+        if argument.starts_with("-C=") {
             index += 1;
             continue;
         }
@@ -634,6 +659,13 @@ mod tests {
             "cargo run --manifest-path quality/helper/Cargo.toml",
             "cargo.exe --locked run --manifest-path quality/helper/Cargo.toml",
             "cargo +1.97.0 r --manifest-path quality/helper/Cargo.toml",
+            "ld.so quality/lint",
+            "ld.so.1 quality/lint",
+            "/lib64/ld-linux-x86-64.so.2 quality/lint",
+            "/lib/ld-musl-x86_64.so.1 quality/lint",
+            "go run quality/lint.go",
+            "go.exe -C quality run lint.go",
+            "go -C=quality run lint.go",
             "sed -nf quality/lint.sed /etc/hosts",
             "sed --file=quality/lint.sed /etc/hosts",
             "sed -f $SCRIPT /etc/hosts",
@@ -665,6 +697,9 @@ mod tests {
             "cargo metadata --manifest-path quality/helper/Cargo.toml",
             "cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- check",
             "cargo run --manifest-path=tools/dependency-unsafe/Cargo.toml --locked -- check",
+            "ld --version",
+            "go version",
+            "go env GOROOT",
             "sed -n -e '1p' /etc/hosts",
             "sed 's/../\\\\x&/g' /etc/hosts",
         ] {

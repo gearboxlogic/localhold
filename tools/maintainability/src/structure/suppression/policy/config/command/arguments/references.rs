@@ -219,7 +219,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "openssl" | "openssl.exe" if openssl_module_selection_is_opaque(arguments) => SelectedInput::Opaque,
         "rg" | "rg.exe" | "ripgrep" | "ripgrep.exe" if ripgrep_preprocessor_is_opaque(arguments) => SelectedInput::Opaque,
         "cargo" | "cargo.exe" if cargo::dispatch_is_opaque(arguments) => SelectedInput::Opaque,
-        "go" | "go.exe" if go_dispatch_is_opaque(arguments) => SelectedInput::Opaque,
+        "go" | "go.exe" => SelectedInput::Opaque,
         "just" | "just.exe" if just_source_selection_is_opaque(arguments) => SelectedInput::Opaque,
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
             let (inputs, opaque) = makefile_inputs(arguments);
@@ -333,25 +333,6 @@ fn ripgrep_preprocessor_is_opaque(arguments: &[String]) -> bool {
         .iter()
         .take_while(|argument| argument.as_str() != "--")
         .any(|argument| argument == "--pre" || argument.starts_with("--pre="))
-}
-
-fn go_dispatch_is_opaque(arguments: &[String]) -> bool {
-    let mut index = 0;
-    while let Some(argument) = arguments.get(index) {
-        if matches!(argument.as_str(), "generate" | "run") {
-            return true;
-        }
-        if argument == "-C" {
-            index += 2;
-            continue;
-        }
-        if argument.starts_with("-C=") {
-            index += 1;
-            continue;
-        }
-        return false;
-    }
-    false
 }
 
 fn just_source_selection_is_opaque(arguments: &[String]) -> bool {
@@ -731,12 +712,38 @@ mod tests {
             "cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- check",
             "cargo run --manifest-path=tools/dependency-unsafe/Cargo.toml --locked -- check",
             "ld --version",
-            "go version",
-            "go env GOROOT",
             "sed -n -e '1p' /etc/hosts",
             "sed 's/../\\\\x&/g' /etc/hosts",
         ] {
             assert_eq!(inputs(command), (Vec::new(), false), "{command}");
+        }
+    }
+
+    #[test]
+    fn go_dispatch_fails_closed() {
+        for command in [
+            "go version",
+            "go env GOROOT",
+            "go test ./quality/helper",
+            "go.exe -C quality test ./helper",
+            "go build -toolexec=quality/lint ./...",
+            "go tool quality/lint",
+            "go vet -vettool=quality/lint ./...",
+        ] {
+            assert_eq!(inputs(command), (Vec::new(), true), "{command}");
+        }
+    }
+
+    #[test]
+    fn compiler_dispatch_wrappers_fail_closed() {
+        for command in [
+            "CCACHE_DISABLE=1 ccache sh quality/lint.txt",
+            "sccache sh quality/lint.txt",
+            "distcc sh quality/lint.txt",
+            "gomacc sh quality/lint.txt",
+            "pump sh quality/lint.txt",
+        ] {
+            assert_eq!(inputs(command), (Vec::new(), true), "{command}");
         }
     }
 

@@ -189,15 +189,22 @@ fn legacy_nice_adjustment(argument: &str) -> bool {
 fn is_unparsed_launcher(command: &str) -> bool {
     matches!(
         command.trim_end_matches(".exe"),
-        "bwrap"
+        "buildcache"
+            | "bwrap"
+            | "cachepot"
+            | "ccache"
             | "chrt"
             | "chroot"
             | "choom"
+            | "clcache"
             | "cpulimit"
             | "daemonize"
+            | "distcc"
             | "firejail"
             | "flock"
             | "gdb"
+            | "gomacc"
+            | "icecc"
             | "ionice"
             | "lldb"
             | "ltrace"
@@ -207,6 +214,7 @@ fn is_unparsed_launcher(command: &str) -> bool {
             | "numactl"
             | "perf"
             | "prlimit"
+            | "pump"
             | "runuser"
             | "sandbox-exec"
             | "script"
@@ -222,6 +230,7 @@ fn is_unparsed_launcher(command: &str) -> bool {
             | "stdbuf"
             | "strace"
             | "su"
+            | "sccache"
             | "systemd-run"
             | "taskset"
             | "unshare"
@@ -271,6 +280,17 @@ mod tests {
         assert!(is_command_launcher("env.exe"));
         assert!(is_command_launcher("ssh"));
         assert!(!is_command_launcher("git"));
+    }
+
+    #[test]
+    fn compiler_dispatch_launchers_are_opaque() {
+        let arguments = vec!["sh".to_owned(), "quality/lint.txt".to_owned()];
+
+        for command in ["buildcache", "cachepot", "ccache", "clcache", "distcc", "gomacc", "icecc", "pump", "sccache"] {
+            assert!(matches!(select(command, command, &arguments), Selection::Opaque), "{command}");
+        }
+        assert!(matches!(select("/usr/bin/ccache", "ccache", &arguments), Selection::Opaque));
+        assert!(matches!(select("ccache.exe", "ccache.exe", &arguments), Selection::Opaque));
     }
 
     #[test]

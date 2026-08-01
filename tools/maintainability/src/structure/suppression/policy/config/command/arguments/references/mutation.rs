@@ -3,13 +3,18 @@ use std::path::Path;
 use super::path;
 
 pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]) -> bool {
-    output_redirection_targets_surface(arguments)
+    super::editor::is_command_capable(command)
+        || output_redirection_targets_surface(arguments)
         || is_objcopy_command(command) && (arguments_reference_surface(arguments) || final_destination_is_opaque(path, arguments))
         || match command {
             "cp" | "cp.exe" | "install" | "install.exe" | "ln" | "ln.exe" | "mv" | "mv.exe" | "tee" | "tee.exe" | "truncate" | "truncate.exe" => {
                 arguments_reference_surface(arguments) || final_destination_is_opaque(path, arguments)
             }
             "copy" | "copy-item" | "move" | "move-item" | "set-content" | "add-content" | "out-file" => arguments_reference_surface(arguments),
+            "brotli" | "brotli.exe" | "bunzip2" | "bunzip2.exe" | "bzip2" | "bzip2.exe" | "gzip" | "gzip.exe" | "gunzip" | "gunzip.exe" | "lz4" | "lz4.exe" | "pigz"
+            | "pigz.exe" | "unlz4" | "unlz4.exe" | "unpigz" | "unpigz.exe" | "unxz" | "unxz.exe" | "unzstd" | "unzstd.exe" | "xz" | "xz.exe" | "zstd" | "zstd.exe" => {
+                compression_dispatch_is_opaque(command, arguments)
+            }
             "curl" | "curl.exe" => curl_output_targets_surface(arguments) || curl_remote_name_is_opaque(arguments),
             "dd" | "dd.exe" => arguments.iter().filter_map(|argument| argument.strip_prefix("of=")).any(is_literal_execution_surface),
             "iconv" | "iconv.exe" => iconv_output_is_opaque(path, arguments),
@@ -27,6 +32,31 @@ pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]
             }
             _ => false,
         }
+}
+
+fn compression_dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
+    let command = command.strip_suffix(".exe").unwrap_or(command);
+    let decompresses_by_default = matches!(command, "bunzip2" | "gunzip" | "unlz4" | "unpigz" | "unxz" | "unzstd");
+    let mut decompresses = decompresses_by_default;
+    let mut writes_to_stdout = false;
+    let mut inspects_only = false;
+    for argument in arguments.iter().take_while(|argument| argument.as_str() != "--") {
+        if let Some(options) = argument.strip_prefix('-').filter(|options| !options.starts_with('-')) {
+            decompresses |= options.contains('d');
+            writes_to_stdout |= options.contains('c');
+            inspects_only |= options.chars().any(|option| matches!(option, 'h' | 'l' | 'L' | 't' | 'V'));
+            continue;
+        }
+        let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
+        decompresses |= long_option_matches(option, "--decompress", "--d") || long_option_matches(option, "--uncompress", "--u");
+        writes_to_stdout |= long_option_matches(option, "--stdout", "--st") || long_option_matches(option, "--to-stdout", "--to-s");
+        inspects_only |= matches!(option, "--help" | "--license" | "--list" | "--test" | "--version");
+    }
+    decompresses && !writes_to_stdout && !inspects_only
+}
+
+fn long_option_matches(option: &str, full: &str, minimum: &str) -> bool {
+    option.len() >= minimum.len() && full.starts_with(option)
 }
 
 fn jar_dispatch_is_opaque(arguments: &[String]) -> bool {
@@ -429,6 +459,31 @@ mod tests {
         }
         assert!(!opaque("jar", &["--list", "--file", "$archive"]));
         assert!(!opaque("jar", &["tf", "$archive"]));
+    }
+
+    #[test]
+    fn in_place_decompression_fails_closed() {
+        for (command, arguments) in [
+            ("gzip", &["-dkf", "Justfile.gz"][..]),
+            ("gzip.exe", &["--decompress", "--force", "Justfile.gz"]),
+            ("gunzip", &["Justfile.gz"]),
+            ("bzip2", &["-d", "Justfile.bz2"]),
+            ("unxz", &["Justfile.xz"]),
+            ("zstd", &["--decompress", "Justfile.zst"]),
+            ("unlz4.exe", &["Justfile.lz4"]),
+            ("brotli", &["-d", "Justfile.br"]),
+        ] {
+            assert!(opaque(command, arguments), "{command}: {arguments:?}");
+        }
+        for (command, arguments) in [
+            ("gzip", &["-dc", "Justfile.gz"][..]),
+            ("gunzip", &["--stdout", "Justfile.gz"]),
+            ("gzip", &["--list", "Justfile.gz"]),
+            ("xz", &["--test", "Justfile.xz"]),
+            ("zstd", &["--decompress", "--to-stdout", "Justfile.zst"]),
+        ] {
+            assert!(!opaque(command, arguments), "{command}: {arguments:?}");
+        }
     }
 
     #[test]

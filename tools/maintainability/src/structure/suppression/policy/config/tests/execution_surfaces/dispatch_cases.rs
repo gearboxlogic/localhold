@@ -110,6 +110,7 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("sort --compress-program=quality/lint.txt /etc/hosts\n", "opaque interpreter program"),
     ("printf 'x\\n' | split -l 1 --filter='sh quality/lint.txt'\n", "opaque interpreter program"),
     ("unzip -oq target/payload.zip\n", "opaque interpreter program"),
+    ("gzip -c quality/Justfile > Justfile.gz; gzip -dkf Justfile.gz\n", "opaque interpreter program"),
     ("zip -q -T -TT 'sh quality/lint.txt' archive.zip /etc/hosts\n", "opaque interpreter program"),
     ("printf '%s\\n' \"$(just check-quality)\"\n", "lint-weakening argument"),
     ("set +e; just check-quality; true\n", "lint-weakening argument"),
@@ -176,5 +177,9 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("$'\\x73\\x68' quality/lint.txt\n", "opaque interpreter program"),
     ("runner=sh\n\"$runner\" quality/lint.txt\n", "opaque interpreter program"),
     ("swift quality/lint.swift\n", "opaque interpreter program"),
+    (
+        "vim -Nu NONE -n -es -c 'call writefile(readfile(\"quality/Justfile\"), \"Justfile\")' -c 'qa!'\n",
+        "opaque interpreter program",
+    ),
     ("m4 quality/lint.m4\n", "opaque interpreter program"),
 ];

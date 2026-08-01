@@ -8,6 +8,7 @@ use super::{
 
 mod cargo;
 mod compiler;
+mod editor;
 mod git;
 mod mutation;
 mod native;

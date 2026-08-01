@@ -8,8 +8,9 @@ use super::yaml::{leading_spaces, literal_scalar, yaml_key_value};
 
 const DOWNLOAD_ACTION: &str = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c";
 const CHECKOUT_ACTION: &str = "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0";
+const CACHE_ACTION: &str = "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
 const REVIEWED_REMOTE_ACTIONS: &[&str] = &[
-    "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+    CACHE_ACTION,
     CHECKOUT_ACTION,
     "actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294",
     DOWNLOAD_ACTION,
@@ -17,6 +18,8 @@ const REVIEWED_REMOTE_ACTIONS: &[&str] = &[
     "jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d",
 ];
 const REVIEWED_DOWNLOAD_DESTINATIONS: &[&str] = &["dist"];
+const CARGO_CACHE_PATHS: &[&str] = &[".cache/localhold/cargo/registry", ".cache/localhold/cargo/git", "target"];
+const CUDA_CACHE_PATH: &str = "${{ runner.temp }}/localhold-cuda-source-cache";
 
 pub(super) fn validate_local_actions(workspace: &Path, paths: &BTreeSet<String>) -> Result<()> {
     for metadata_path in paths.iter().filter(|path| is_action_metadata(path)) {
@@ -53,6 +56,7 @@ pub(super) fn validate_action_references(workspace: &Path, tracked_paths: &BTree
         }
         if REVIEWED_REMOTE_ACTIONS.contains(&reference.as_str()) {
             match reference.as_str() {
+                CACHE_ACTION => validate_cache_inputs(path, &lines, line_index)?,
                 DOWNLOAD_ACTION => validate_download_destination(path, &lines, line_index)?,
                 CHECKOUT_ACTION => validate_checkout_inputs(path, &lines, line_index)?,
                 _ => {}
@@ -62,6 +66,43 @@ pub(super) fn validate_action_references(workspace: &Path, tracked_paths: &BTree
         bail!("GitHub action reference {reference:?} in {path:?} is not in the reviewed exact-revision allowlist");
     }
     Ok(())
+}
+
+fn validate_cache_inputs(path: &str, lines: &[&str], uses_index: usize) -> Result<()> {
+    let mut cache_paths = None;
+    let mut key = None;
+    let mut restore_keys = None;
+    for input in action_inputs(path, lines, uses_index)? {
+        let slot = match input.key {
+            "path" => &mut cache_paths,
+            "key" => &mut key,
+            "restore-keys" => &mut restore_keys,
+            _ => bail!("cache input {:?} in {path:?} is not reviewed", input.key),
+        };
+        if slot.replace(input.lines(path)?).is_some() {
+            bail!("cache input {:?} in {path:?} must not be repeated", input.key);
+        }
+    }
+    let cache_paths = cache_paths.with_context(|| format!("cache in {path:?} must declare one reviewed path set"))?;
+    let key = key.with_context(|| format!("cache in {path:?} must declare one reviewed key"))?;
+    if key.len() != 1 {
+        bail!("cache key in {path:?} must be one literal line");
+    }
+    let restore_keys = restore_keys.unwrap_or_default();
+    if !reviewed_cache_profile(&cache_paths, &key[0], &restore_keys) {
+        bail!("cache in {path:?} must use one exact reviewed path, key, and restore-key profile");
+    }
+    Ok(())
+}
+
+fn reviewed_cache_profile(paths: &[String], key: &str, restore_keys: &[String]) -> bool {
+    let cargo_paths = paths.iter().map(String::as_str).eq(CARGO_CACHE_PATHS.iter().copied());
+    let cargo_profile = cargo_paths
+        && (key == "ubuntu-22.04-rust-${{ hashFiles('Cargo.lock', 'mise.lock') }}" && restore_keys == ["ubuntu-22.04-rust-"]
+            || key == "${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'mise.lock') }}" && restore_keys == ["${{ runner.os }}-rust-"]
+            || key == "${{ runner.os }}-rust-outdated-${{ hashFiles('Cargo.lock', 'mise.lock') }}"
+                && restore_keys == ["${{ runner.os }}-rust-outdated-", "${{ runner.os }}-rust-"]);
+    cargo_profile || paths == [CUDA_CACHE_PATH] && key == "localhold-cuda12-${{ hashFiles('release/cuda-linux-x86_64.json') }}" && restore_keys.is_empty()
 }
 
 fn validate_download_destination(path: &str, lines: &[&str], uses_index: usize) -> Result<()> {
@@ -77,8 +118,9 @@ fn validate_checkout_inputs(path: &str, lines: &[&str], uses_index: usize) -> Re
     let mut repository = None;
     let mut checkout_ref = None;
     let mut destination = None;
-    for ActionInput { key, value } in inputs {
-        let value = literal_scalar(value).with_context(|| format!("checkout input {key:?} in {path:?} must be a literal scalar"))?;
+    for input in inputs {
+        let key = input.key;
+        let value = input.literal(path)?;
         let slot = match key {
             "repository" => &mut repository,
             "ref" => &mut checkout_ref,
@@ -106,13 +148,40 @@ fn action_input_values(path: &str, lines: &[&str], uses_index: usize, selected_k
     action_inputs(path, lines, uses_index)?
         .into_iter()
         .filter(|input| input.key == selected_key)
-        .map(|input| literal_scalar(input.value).with_context(|| format!("action input {selected_key:?} in {path:?} must be a literal scalar")))
+        .map(|input| input.literal(path))
         .collect()
 }
 
 struct ActionInput<'a> {
     key: &'a str,
-    value: &'a str,
+    value: ActionValue<'a>,
+}
+
+enum ActionValue<'a> {
+    Inline(&'a str),
+    Block(Vec<&'a str>),
+}
+
+impl ActionInput<'_> {
+    fn literal(&self, path: &str) -> Result<String> {
+        let ActionValue::Inline(value) = &self.value else {
+            bail!("action input {:?} in {path:?} must be a literal scalar", self.key);
+        };
+        literal_scalar(value).with_context(|| format!("action input {:?} in {path:?} must be a literal scalar", self.key))
+    }
+
+    fn lines(&self, path: &str) -> Result<Vec<String>> {
+        match &self.value {
+            ActionValue::Inline(value) => literal_scalar(value)
+                .with_context(|| format!("action input {:?} in {path:?} must be a literal scalar", self.key))
+                .map(|value| vec![value]),
+            ActionValue::Block(values) if !values.is_empty() => values
+                .iter()
+                .map(|value| literal_scalar(value).with_context(|| format!("action input {:?} in {path:?} contains a non-literal value", self.key)))
+                .collect(),
+            ActionValue::Block(_) => bail!("action input {:?} in {path:?} must not be empty", self.key),
+        }
+    }
 }
 
 fn action_inputs<'a>(path: &str, lines: &'a [&str], uses_index: usize) -> Result<Vec<ActionInput<'a>>> {
@@ -121,9 +190,11 @@ fn action_inputs<'a>(path: &str, lines: &'a [&str], uses_index: usize) -> Result
     let field_indentation = sequence_indentation + usize::from(uses_line.trim_start().starts_with("- ")) * 2;
     let mut with_indentation = None;
     let mut inputs = Vec::new();
-    for line in lines.iter().copied().skip(uses_index + 1) {
+    let mut index = uses_index + 1;
+    while let Some(line) = lines.get(index).copied() {
         let content = line.trim_start();
         if content.is_empty() || content.starts_with('#') {
+            index += 1;
             continue;
         }
         let indentation = leading_spaces(line);
@@ -132,14 +203,43 @@ fn action_inputs<'a>(path: &str, lines: &'a [&str], uses_index: usize) -> Result
         }
         if indentation == field_indentation {
             with_indentation = yaml_key_value(line).filter(|(key, value)| *key == "with" && value.trim().is_empty()).map(|_| indentation);
+            index += 1;
             continue;
         }
         if with_indentation.is_some_and(|with| indentation > with) {
             let (key, value) = yaml_key_value(line).with_context(|| format!("action inputs in {path:?} must use simple key-value fields"))?;
-            inputs.push(ActionInput { key, value });
+            if value.trim() == "|" {
+                index += 1;
+                inputs.push(ActionInput {
+                    key,
+                    value: ActionValue::Block(block_scalar_lines(lines, &mut index, indentation)),
+                });
+                continue;
+            }
+            inputs.push(ActionInput {
+                key,
+                value: ActionValue::Inline(value),
+            });
         }
+        index += 1;
     }
     Ok(inputs)
+}
+
+fn block_scalar_lines<'a>(lines: &'a [&str], index: &mut usize, header_indentation: usize) -> Vec<&'a str> {
+    let mut values = Vec::new();
+    while let Some(line) = lines.get(*index).copied() {
+        if line.trim().is_empty() {
+            *index += 1;
+            continue;
+        }
+        if leading_spaces(line) <= header_indentation {
+            break;
+        }
+        values.push(line.trim());
+        *index += 1;
+    }
+    values
 }
 
 fn audited_local_reference(reference: &str) -> Option<&str> {
@@ -242,6 +342,28 @@ mod tests {
     fn artifact_download_destination_cannot_be_overridden() {
         let source = format!("steps:\n  - uses: {DOWNLOAD}\n    with:\n      path: dist\n      path: .\n");
         assert!(validate(&source).is_err());
+    }
+
+    #[test]
+    fn caches_require_exact_confined_profiles() {
+        let cargo = "path: |\n        .cache/localhold/cargo/registry\n        .cache/localhold/cargo/git\n        target\n      key: ${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'mise.lock') }}\n      restore-keys: ${{ runner.os }}-rust-";
+        let outdated = "path: |\n        .cache/localhold/cargo/registry\n        .cache/localhold/cargo/git\n        target\n      key: ${{ runner.os }}-rust-outdated-${{ hashFiles('Cargo.lock', 'mise.lock') }}\n      restore-keys: |\n        ${{ runner.os }}-rust-outdated-\n        ${{ runner.os }}-rust-";
+        let cuda = "path: ${{ runner.temp }}/localhold-cuda-source-cache\n      key: localhold-cuda12-${{ hashFiles('release/cuda-linux-x86_64.json') }}";
+        for inputs in [cargo, outdated, cuda] {
+            validate(&format!("steps:\n  - uses: {CACHE_ACTION}\n    with:\n      {inputs}\n")).expect("reviewed cache profile");
+        }
+
+        for inputs in [
+            cargo.replace("        target", "        Justfile"),
+            cargo.replace("${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'mise.lock') }}", "attacker-controlled"),
+            cargo.replace("path: |", "path: Justfile\n      path: |"),
+            cuda.replace("${{ runner.temp }}/localhold-cuda-source-cache", "${{ github.workspace }}"),
+        ] {
+            assert!(
+                validate(&format!("steps:\n  - uses: {CACHE_ACTION}\n    with:\n      {inputs}\n")).is_err(),
+                "accepted {inputs:?}"
+            );
+        }
     }
 
     #[test]

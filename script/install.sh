@@ -103,3 +103,7 @@ install -m 0644 localhold.example.toml "$share_dir/localhold.example.toml"
 install -m 0644 LICENSE NOTICE THIRD_PARTY_NOTICES.md "$doc_dir/"
 
 printf 'Installed LocalHold (%s) to %s\n' "$profile" "$bin_dir/hold"
+case ":${PATH}:" in
+  *":${prefix}/bin:"*) ;;
+  *) printf 'Add %s/bin to PATH before invoking hold by name.\n' "$prefix" ;;
+esac

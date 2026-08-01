@@ -576,6 +576,22 @@ fn checkout_actions_cannot_replace_the_candidate_revision() {
 }
 
 #[test]
+fn cache_actions_cannot_restore_over_execution_surfaces() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join(".github/workflows")).expect("workflow directory");
+    fs::write(
+        workspace.path().join(".github/workflows/lint.yml"),
+        "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9\n        with:\n          path: Justfile\n          key: attacker-controlled\n      - run: just check-quality\n",
+    )
+    .expect("workflow");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("cache"), "{error:#}");
+}
+
+#[test]
 fn reviewed_remote_and_repository_local_actions_are_accepted() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join(".github/workflows")).expect("workflow directory");
@@ -665,6 +681,7 @@ fn github_yaml_rejects_unsupported_execution_metadata() {
                 || error.to_string().contains("inline run scalar")
                 || error.to_string().contains("quoted mapping key")
                 || error.to_string().contains("dynamic run expression")
+                || error.to_string().contains("opaque interpreter program")
                 || error.to_string().contains("job container"),
             "{error:#}"
         );

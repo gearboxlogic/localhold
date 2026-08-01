@@ -12,6 +12,9 @@ pub(super) fn dispatch_is_opaque(arguments: &[String]) -> bool {
     let Some(subcommand) = subcommand(arguments) else {
         return false;
     };
+    if !is_known_subcommand(subcommand) {
+        return true;
+    }
     if !is_execution_capable(subcommand) {
         return false;
     }
@@ -30,6 +33,62 @@ pub(super) fn dispatch_is_opaque(arguments: &[String]) -> bool {
         return !matches!(manifest, ManifestSelection::Selected(path) if is_reviewed_tool_manifest(path));
     }
     matches!(manifest, ManifestSelection::Opaque) || matches!(manifest, ManifestSelection::Selected(path) if !is_reviewed_execution_manifest(path))
+}
+
+fn is_known_subcommand(subcommand: &str) -> bool {
+    matches!(
+        subcommand,
+        "add"
+            | "audit"
+            | "bench"
+            | "build"
+            | "b"
+            | "check"
+            | "c"
+            | "clean"
+            | "clippy"
+            | "deny"
+            | "doc"
+            | "d"
+            | "fetch"
+            | "fix"
+            | "fmt"
+            | "generate-lockfile"
+            | "git-checkout"
+            | "help"
+            | "info"
+            | "init"
+            | "install"
+            | "locate-project"
+            | "login"
+            | "logout"
+            | "machete"
+            | "metadata"
+            | "new"
+            | "nextest"
+            | "outdated"
+            | "owner"
+            | "package"
+            | "pkgid"
+            | "publish"
+            | "read-manifest"
+            | "remove"
+            | "report"
+            | "run"
+            | "r"
+            | "rustc"
+            | "rustdoc"
+            | "search"
+            | "test"
+            | "t"
+            | "tree"
+            | "uninstall"
+            | "update"
+            | "vendor"
+            | "verify-project"
+            | "version"
+            | "yank"
+    )
 }
 
 fn uses_script_mode(arguments: &[String]) -> bool {
@@ -178,5 +237,15 @@ mod tests {
         }
         assert!(!dispatch_is_opaque(&arguments(&["metadata", "--no-deps"])));
         assert!(!dispatch_is_opaque(&arguments(&["test", "--", "-Zscript"])));
+    }
+
+    #[test]
+    fn unknown_external_subcommands_fail_closed() {
+        for values in [&["lint"][..], &["generated-helper", "--quiet"], &["$subcommand"]] {
+            assert!(dispatch_is_opaque(&arguments(values)), "{values:?}");
+        }
+        for values in [&["metadata", "--no-deps"][..], &["fmt", "--check"], &["deny", "--version"]] {
+            assert!(!dispatch_is_opaque(&arguments(values)), "{values:?}");
+        }
     }
 }

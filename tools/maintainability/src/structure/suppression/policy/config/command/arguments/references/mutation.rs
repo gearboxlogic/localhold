@@ -25,6 +25,7 @@ pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]
             "jar" | "jar.exe" => jar_dispatch_is_opaque(arguments),
             "openssl" | "openssl.exe" => openssl_output_is_opaque(path, arguments),
             "patch" | "patch.exe" => true,
+            "shuf" | "shuf.exe" => shuf_output_is_opaque(path, arguments),
             "unzip" | "unzip.exe" => unzip_dispatch_is_opaque(arguments),
             "perl" | "perl.exe" if arguments.iter().any(|argument| argument.starts_with("-i")) => arguments_reference_surface(arguments),
             "sed" | "sed.exe"
@@ -221,6 +222,25 @@ fn openssl_output_is_opaque(path: &str, arguments: &[String]) -> bool {
     false
 }
 
+fn shuf_output_is_opaque(path: &str, arguments: &[String]) -> bool {
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
+        let target = if matches!(argument.as_str(), "-o" | "--output") {
+            index += 1;
+            arguments.get(index).map(String::as_str)
+        } else if let Some(target) = argument.strip_prefix("--output=") {
+            Some(target)
+        } else {
+            short_output_target(argument, arguments, &mut index)
+        };
+        if target.is_some_and(|target| destination_is_opaque(path, target)) {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
 fn is_objcopy_command(command: &str) -> bool {
     let stem = command.strip_suffix(".exe").unwrap_or(command);
     let unversioned = stem
@@ -323,7 +343,7 @@ fn curl_output_is_opaque(path: &str, arguments: &[String]) -> bool {
         } else if let Some(target) = argument.strip_prefix("--output=") {
             Some(target)
         } else {
-            curl_short_output_target(argument, arguments, &mut index)
+            short_output_target(argument, arguments, &mut index)
         };
         if target.is_some_and(|target| destination_is_opaque(path, target)) {
             return true;
@@ -350,7 +370,7 @@ fn tee_output_is_opaque(path: &str, arguments: &[String]) -> bool {
         })
 }
 
-fn curl_short_output_target<'a>(argument: &'a str, arguments: &'a [String], index: &mut usize) -> Option<&'a str> {
+fn short_output_target<'a>(argument: &'a str, arguments: &'a [String], index: &mut usize) -> Option<&'a str> {
     let options = argument.strip_prefix('-').filter(|options| !options.starts_with('-'))?;
     let output = options.find('o')?;
     let attached = &options[output + 1..];
@@ -496,6 +516,21 @@ mod tests {
             assert!(opaque("openssl.exe", arguments), "{arguments:?}");
         }
         assert!(!opaque("openssl", &["base64", "-out", "target/output.txt", "-in", "input.txt"]));
+    }
+
+    #[test]
+    fn shuf_output_to_execution_surfaces_fails_closed() {
+        for arguments in [
+            &["--output=Justfile", "quality/Justfile"][..],
+            &["--output", "$GITHUB_WORKSPACE/Justfile", "quality/Justfile"],
+            &["-o", "script/check.sh", "quality/check.sh"],
+            &["-o$destination", "quality/Justfile"],
+            &["-eoJustfile", "quality/Justfile"],
+        ] {
+            assert!(opaque("shuf", arguments), "{arguments:?}");
+            assert!(opaque("shuf.exe", arguments), "{arguments:?}");
+        }
+        assert!(!opaque("shuf", &["--output=target/report", "quality/report"]));
     }
 
     #[test]

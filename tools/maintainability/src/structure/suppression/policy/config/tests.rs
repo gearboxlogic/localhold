@@ -618,6 +618,7 @@ fn checked_in_installer_preserves_its_reviewed_build_directory_contract() {
     assert!(scrubber_environment_references_are_exact("script/install.sh", &source));
     assert!(!weakening_token_for_surface("script/install.sh", &source));
     assert!(super::command::reviewed_dynamic_command_references_are_exact("script/install.sh", &source));
+    assert!(source.contains("case \":${PATH}:\" in\n  *\":${prefix}/bin:\"*) ;;\n  *) printf 'Add %s/bin to PATH before invoking hold by name.\\n' \"$prefix\" ;;\nesac"));
     let reviewed = without_reviewed_dispatch("script/install.sh", &source);
     assert!(!reviewed.contains("\"$cargo_command\" build"));
 

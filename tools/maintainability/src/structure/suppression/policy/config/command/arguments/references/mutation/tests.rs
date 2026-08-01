@@ -138,8 +138,50 @@ fn curl_remote_names_and_objcopy_outputs_fail_closed() {
 
     for command in ["objcopy", "objcopy.exe", "llvm-objcopy", "llvm-objcopy-19", "x86_64-linux-gnu-objcopy"] {
         assert!(opaque(command, &["-I", "binary", "-O", "binary", "quality/Justfile", "Justfile"]), "{command}");
+        assert!(opaque(command, &["--dump-section", ".data=Justfile", "target/payload.o"]), "{command}");
+        assert!(opaque(command, &["--dump-section=.data=script/check.sh", "target/payload.o"]), "{command}");
         assert!(opaque(command, &["$input", "$output"]), "{command}");
         assert!(!opaque(command, &["input.bin", "target/output.bin"]), "{command}");
+        assert!(!opaque(command, &["--dump-section", ".data=target/payload", "target/payload.o"]), "{command}");
+    }
+}
+
+#[test]
+fn tool_output_options_cannot_replace_execution_surfaces() {
+    for arguments in [
+        &[".", "-maxdepth", "0", "-fprintf", "Justfile", "payload"][..],
+        &[".", "-fprint", "script/check.sh"],
+        &[".", "-fprint0", "$destination"],
+        &[".", "-fls", ".github/workflows/ci.yml"],
+    ] {
+        assert!(opaque("find", arguments), "{arguments:?}");
+    }
+    assert!(!opaque("find", &[".", "-fprint", "target/files"]));
+
+    for arguments in [
+        &["log", "-1", "--output=Justfile"][..],
+        &["diff", "--out", "script/check.sh", "HEAD^"],
+        &["show", "--output", "$destination", "HEAD"],
+    ] {
+        assert!(opaque("git", arguments), "{arguments:?}");
+    }
+    assert!(!opaque("git", &["log", "--output=target/log", "-1"]));
+
+    for arguments in [
+        &["--output=Justfile", "quality/lint.data"][..],
+        &["--out", "script/check.sh", "quality/lint.data"],
+        &["-o", "$destination", "quality/lint.data"],
+        &["-ro.github/workflows/ci.yml", "quality/lint.data"],
+    ] {
+        assert!(opaque("sort", arguments), "{arguments:?}");
+    }
+    assert!(!opaque("sort", &["-o", "target/sorted", "quality/lint.data"]));
+
+    for command in ["gcc", "gcc-15", "x86_64-linux-gnu-g++-14", "clang", "rustc", "ld.lld-19"] {
+        assert!(opaque(command, &["-o", "Justfile", "quality/lint.data"]), "{command}");
+        assert!(opaque(command, &["-oscript/check.sh", "quality/lint.data"]), "{command}");
+        assert!(opaque(command, &["--output=$destination", "quality/lint.data"]), "{command}");
+        assert!(!opaque(command, &["-o", "target/output", "quality/lint.data"]), "{command}");
     }
 }
 

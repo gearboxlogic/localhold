@@ -27,6 +27,7 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("git switch --detach HEAD^\n", "opaque interpreter program"),
     ("git restore --source HEAD^ -- Justfile\n", "opaque interpreter program"),
     ("git init --template=quality/template target\n", "opaque interpreter program"),
+    ("git log -1 --output=Justfile\n", "opaque interpreter program"),
     ("patch Justfile quality/lint.patch\n", "opaque interpreter program"),
     (
         "tar -cf payload.tar quality/lint.data; tar -xf payload.tar --transform='s|quality/lint.data|Justfile|'\n",
@@ -109,6 +110,8 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
         "opaque interpreter program",
     ),
     ("sort --compress-program=quality/lint.txt /etc/hosts\n", "opaque interpreter program"),
+    ("sort --output=Justfile quality/lint.data\n", "opaque interpreter program"),
+    ("find . -maxdepth 0 -fprintf Justfile payload\n", "opaque interpreter program"),
     ("printf 'x\\n' | split -l 1 --filter='sh quality/lint.txt'\n", "opaque interpreter program"),
     ("unzip -oq target/payload.zip\n", "opaque interpreter program"),
     ("gzip -c quality/Justfile > Justfile.gz; gzip -dkf Justfile.gz\n", "opaque interpreter program"),
@@ -157,8 +160,10 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("wscript quality/lint.wsf\n", "opaque interpreter program"),
     ("dotnet run --project quality/lint.csproj\n", "opaque interpreter program"),
     ("gcc -wrapper sh,quality/lint.txt -c quality/input.c\n", "opaque interpreter program"),
+    ("gcc -E -P -x c quality/lint.data -o Justfile\n", "opaque interpreter program"),
     ("rustc quality/benign.rs --extern serde=quality/libserde.so\n", "opaque interpreter program"),
     ("objcopy -I binary -O binary quality/Justfile Justfile\n", "opaque interpreter program"),
+    ("objcopy --dump-section .data=Justfile target/payload.o\n", "opaque interpreter program"),
     ("ar r quality/payload.a quality/Justfile; ar x quality/payload.a\n", "opaque interpreter program"),
     (
         "jar --create --file target/payload.jar -C quality Justfile; jar --extract --file target/payload.jar\n",

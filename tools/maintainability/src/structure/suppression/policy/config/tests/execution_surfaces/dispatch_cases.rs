@@ -27,6 +27,8 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ),
     ("PATH=/tmp:$PATH just clippy\n", "lint-weakening environment channel"),
     ("RIPGREP_CONFIG_PATH=quality/ripgrep.conf rg lint .\n", "lint-weakening environment channel"),
+    ("COMPILER_PATH=quality/bin gcc -c quality/benign.c\n", "lint-weakening environment channel"),
+    ("GCC_EXEC_PREFIX=quality/bin/ gcc -c quality/benign.c\n", "lint-weakening environment channel"),
     ("JAVA_TOOL_OPTIONS=-agentpath:quality/lint.so true\n", "lint-weakening environment channel"),
     (
         "JDK_JAVAC_OPTIONS='-processorpath quality/plugin.jar -processor AuditProcessor' true\n",

@@ -14,6 +14,8 @@ pub(super) fn is_weakening_environment_name(name: &str) -> bool {
             | "CARGO_ENCODED_RUSTDOCFLAGS"
             | "CLIPPY_ARGS"
             | "CLIPPY_CONF_DIR"
+            | "COMPILER_PATH"
+            | "GCC_EXEC_PREFIX"
             | "RUSTC"
             | "RUSTDOC"
             | "RUSTC_BOOTSTRAP"
@@ -144,6 +146,14 @@ mod tests {
     #[test]
     fn jvm_code_loading_environment_is_weakening() {
         for name in ["JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "JDK_JAVAC_OPTIONS", "_JAVA_OPTIONS"] {
+            assert!(is_weakening_environment_name(name), "{name}");
+            assert!(is_weakening_environment_name(&name.to_ascii_lowercase()), "{name}");
+        }
+    }
+
+    #[test]
+    fn compiler_executable_search_paths_are_weakening() {
+        for name in ["COMPILER_PATH", "GCC_EXEC_PREFIX"] {
             assert!(is_weakening_environment_name(name), "{name}");
             assert!(is_weakening_environment_name(&name.to_ascii_lowercase()), "{name}");
         }

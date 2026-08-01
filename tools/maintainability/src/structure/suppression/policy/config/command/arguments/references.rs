@@ -200,6 +200,7 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
         "bash" | "bash.exe" | "dash" | "dash.exe" | "fish" | "fish.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe" => shell_input(&command, arguments),
         _ if dynamic_program::is_python_interpreter(&command) => python_input(arguments),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => powershell_input(arguments),
+        "cmd" | "cmd.exe" | "command.com" => SelectedInput::Opaque,
         _ if dynamic_program::is_unanalyzed_interpreter(&command) => SelectedInput::Opaque,
         _ if dynamic_loader_is_opaque(&command) => SelectedInput::Opaque,
         "awk" | "awk.exe" | "dbus-run-session" | "dpkg" | "dpkg.exe" | "gawk" | "gawk.exe" | "gio" | "gio.exe" | "m4" | "m4.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe"
@@ -213,12 +214,12 @@ fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> 
             return (Vec::new(), sed::program_is_opaque(arguments));
         }
         "sort" | "sort.exe" if sort_compression_program_is_opaque(arguments) => SelectedInput::Opaque,
-        "tar" | "tar.exe" if tar_checkpoint_action_is_opaque(arguments) => SelectedInput::Opaque,
+        "tar" | "tar.exe" if tar_dispatch_is_opaque(arguments) => SelectedInput::Opaque,
         "zip" | "zip.exe" if zip_test_command_is_opaque(arguments) => SelectedInput::Opaque,
         "openssl" | "openssl.exe" if openssl_module_selection_is_opaque(arguments) => SelectedInput::Opaque,
         "rg" | "rg.exe" | "ripgrep" | "ripgrep.exe" if ripgrep_preprocessor_is_opaque(arguments) => SelectedInput::Opaque,
         "cargo" | "cargo.exe" if cargo::dispatch_is_opaque(arguments) => SelectedInput::Opaque,
-        "go" | "go.exe" if go_run_is_opaque(arguments) => SelectedInput::Opaque,
+        "go" | "go.exe" if go_dispatch_is_opaque(arguments) => SelectedInput::Opaque,
         "just" | "just.exe" if just_source_selection_is_opaque(arguments) => SelectedInput::Opaque,
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
             let (inputs, opaque) = makefile_inputs(arguments);
@@ -248,10 +249,22 @@ fn bash_enable_loads_builtin(arguments: &[String]) -> bool {
     arguments.iter().any(|argument| argument == "-f" || argument.starts_with("-f") && argument.len() > 2)
 }
 
-fn tar_checkpoint_action_is_opaque(arguments: &[String]) -> bool {
-    arguments.iter().any(|argument| {
+fn tar_dispatch_is_opaque(arguments: &[String]) -> bool {
+    tar_extracts_files(arguments)
+        || arguments.iter().any(|argument| {
+            let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
+            option.len() >= "--checkpoint-a".len() && "--checkpoint-action".starts_with(option)
+        })
+}
+
+fn tar_extracts_files(arguments: &[String]) -> bool {
+    arguments.iter().take_while(|argument| argument.as_str() != "--").enumerate().any(|(index, argument)| {
         let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
-        option.len() >= "--checkpoint-a".len() && "--checkpoint-action".starts_with(option)
+        let abbreviated_long_extract = option.len() >= "--ext".len() && "--extract".starts_with(option);
+        let abbreviated_long_get = option.len() >= "--ge".len() && "--get".starts_with(option);
+        let short_extract = option.strip_prefix('-').is_some_and(|flags| !flags.starts_with('-') && flags.contains('x'));
+        let old_style_extract = index == 0 && option.chars().all(|character| character.is_ascii_alphabetic()) && option.contains('x');
+        abbreviated_long_extract || abbreviated_long_get || short_extract || old_style_extract
     })
 }
 
@@ -283,10 +296,10 @@ fn ripgrep_preprocessor_is_opaque(arguments: &[String]) -> bool {
         .any(|argument| argument == "--pre" || argument.starts_with("--pre="))
 }
 
-fn go_run_is_opaque(arguments: &[String]) -> bool {
+fn go_dispatch_is_opaque(arguments: &[String]) -> bool {
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
-        if argument == "run" {
+        if matches!(argument.as_str(), "generate" | "run") {
             return true;
         }
         if argument == "-C" {
@@ -683,6 +696,26 @@ mod tests {
             "sed 's/../\\\\x&/g' /etc/hosts",
         ] {
             assert_eq!(inputs(command), (Vec::new(), false), "{command}");
+        }
+    }
+
+    #[test]
+    fn archive_and_language_dispatch_fails_closed() {
+        for command in [
+            "tar -xf payload.tar --transform='s|quality/lint.data|Justfile|'",
+            "tar xf payload.tar",
+            "tar --extract --file=payload.tar",
+            "tar --get --file=payload.tar",
+            "tar --extr --file=payload.tar",
+            "tar --ge --file=payload.tar",
+            "go generate ./quality/helper",
+            "go.exe -C quality generate ./helper",
+            "go -C=quality generate ./helper",
+            "cmd.exe /d /s /c \"powershell.exe -NoProfile -EncodedCommand payload\"",
+            "cmd /c echo accepted",
+            "command.com /c echo accepted",
+        ] {
+            assert_eq!(inputs(command), (Vec::new(), true), "{command}");
         }
     }
 

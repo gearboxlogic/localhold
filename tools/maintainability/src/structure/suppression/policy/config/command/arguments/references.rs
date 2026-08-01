@@ -262,6 +262,7 @@ fn execution_input_candidates<'a>(path: &str, tokens: &'a [String], direct_progr
         "sed" | "sed.exe" => {
             return (Vec::new(), sed::program_is_opaque(arguments));
         }
+        "split" | "split.exe" if split_filter_is_opaque(arguments) => SelectedInput::Opaque,
         "sort" | "sort.exe" if sort_compression_program_is_opaque(arguments) => SelectedInput::Opaque,
         "tar" | "tar.exe" if tar_dispatch_is_opaque(arguments) => SelectedInput::Opaque,
         "zip" | "zip.exe" if zip_test_command_is_opaque(arguments) => SelectedInput::Opaque,
@@ -296,6 +297,13 @@ fn dynamic_loader_is_opaque(command: &str) -> bool {
 
 fn bash_enable_loads_builtin(arguments: &[String]) -> bool {
     arguments.iter().any(|argument| argument == "-f" || argument.starts_with("-f") && argument.len() > 2)
+}
+
+fn split_filter_is_opaque(arguments: &[String]) -> bool {
+    arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
+        let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
+        option.len() >= "--f".len() && "--filter".starts_with(option)
+    })
 }
 
 fn tar_dispatch_is_opaque(arguments: &[String]) -> bool {
@@ -864,6 +872,8 @@ mod tests {
             "cmd.exe /d /s /c \"powershell.exe -NoProfile -EncodedCommand payload\"",
             "cmd /c echo accepted",
             "command.com /c echo accepted",
+            "printf 'x\\n' | split -l 1 --filter='sh quality/lint.txt'",
+            "split --f 'sh quality/lint.txt' input",
         ] {
             assert_eq!(inputs(command), (Vec::new(), true), "{command}");
         }

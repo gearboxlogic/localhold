@@ -11,6 +11,7 @@ pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]
             "copy" | "copy-item" | "move" | "move-item" | "set-content" | "add-content" | "out-file" => arguments_reference_surface(arguments),
             "curl" | "curl.exe" => curl_output_targets_surface(arguments),
             "dd" | "dd.exe" => arguments.iter().filter_map(|argument| argument.strip_prefix("of=")).any(is_literal_execution_surface),
+            "iconv" | "iconv.exe" => iconv_output_is_opaque(path, arguments),
             "patch" | "patch.exe" => true,
             "perl" | "perl.exe" if arguments.iter().any(|argument| argument.starts_with("-i")) => arguments_reference_surface(arguments),
             "sed" | "sed.exe"
@@ -30,7 +31,11 @@ fn final_destination_is_opaque(path: &str, arguments: &[String]) -> bool {
     }
     explicit_target_directories(arguments)
         .chain(arguments.last().map(String::as_str))
-        .any(|destination| !is_safe_literal_destination(destination) && !is_reviewed_dynamic_destination(path, destination))
+        .any(|destination| destination_is_opaque(path, destination))
+}
+
+fn destination_is_opaque(path: &str, destination: &str) -> bool {
+    !is_safe_literal_destination(destination) && !is_reviewed_dynamic_destination(path, destination)
 }
 
 fn explicit_target_directories(arguments: &[String]) -> impl Iterator<Item = &str> {
@@ -77,6 +82,28 @@ fn is_safe_literal_destination(candidate: &str) -> bool {
 fn is_windows_absolute(candidate: &str) -> bool {
     let bytes = candidate.as_bytes();
     bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\')
+}
+
+fn iconv_output_is_opaque(path: &str, arguments: &[String]) -> bool {
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
+        let target = if argument == "-o" {
+            index += 1;
+            Some(arguments.get(index).map_or("", String::as_str))
+        } else if let Some(target) = argument.strip_prefix("-o").filter(|target| !target.is_empty()) {
+            Some(target)
+        } else if let Some(option) = argument.strip_prefix("--") {
+            let (option, attached) = option.split_once('=').map_or((option, None), |(option, target)| (option, Some(target)));
+            (!option.is_empty() && "output".starts_with(option)).then(|| attached.unwrap_or_else(|| arguments.get(index + 1).map_or("", String::as_str)))
+        } else {
+            None
+        };
+        if target.is_some_and(|target| destination_is_opaque(path, target)) {
+            return true;
+        }
+        index += 1;
+    }
+    false
 }
 
 fn curl_output_targets_surface(arguments: &[String]) -> bool {
@@ -189,6 +216,19 @@ mod tests {
         }
         assert!(!opaque("curl", &["--output", "target/report.txt", "https://example.invalid/report"]));
         assert!(!opaque("curl", &["--output-dir", "Justfile", "https://example.invalid/report"]));
+    }
+
+    #[test]
+    fn iconv_output_to_execution_surfaces_fails_closed() {
+        for arguments in [
+            &["-f", "UTF-8", "-t", "UTF-8", "quality/lint.data", "-o", "Justfile"][..],
+            &["--output=script/check.sh", "quality/lint.data"],
+            &["--out", "$destination", "quality/lint.data"],
+            &["-o$destination", "quality/lint.data"],
+        ] {
+            assert!(opaque("iconv", arguments), "{arguments:?}");
+        }
+        assert!(!opaque("iconv", &["-o", "target/output.txt", "quality/lint.data"]));
     }
 
     #[test]

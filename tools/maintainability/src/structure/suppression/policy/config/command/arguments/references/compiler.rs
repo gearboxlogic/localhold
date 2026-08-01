@@ -12,6 +12,9 @@ pub(super) fn dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
 pub(super) fn rust_compiler_dispatch_is_opaque(arguments: &[String]) -> bool {
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
+        if argument == "--extern" || argument.starts_with("--extern=") {
+            return true;
+        }
         let option = if matches!(argument.as_str(), "-C" | "--codegen") {
             index += 1;
             arguments.get(index).map(String::as_str)
@@ -222,5 +225,16 @@ mod tests {
             assert!(dispatch_is_opaque("rustc", &arguments(values)), "{values:?}");
         }
         assert!(!dispatch_is_opaque("rustc", &arguments(&["-C", "opt-level=2"])));
+    }
+
+    #[test]
+    fn rust_external_crates_are_opaque() {
+        for values in [
+            &["quality/benign.rs", "--extern", "serde=quality/libserde.so"][..],
+            &["quality/benign.rs", "--extern=serde=quality/libserde.so"],
+        ] {
+            assert!(dispatch_is_opaque("rustc", &arguments(values)), "{values:?}");
+            assert!(dispatch_is_opaque("rustdoc", &arguments(values)), "{values:?}");
+        }
     }
 }

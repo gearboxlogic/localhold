@@ -115,6 +115,10 @@ fn is_manifest_capable_tool_token(token: &str, case_insensitive: bool) -> bool {
 fn collect_execution_inputs<'a>(sources: impl IntoIterator<Item = &'a str>, direct_program_paths: bool, path: &str) -> (BTreeSet<String>, bool) {
     let mut inputs = BTreeSet::new();
     let mut unresolved = false;
+    let make_surface = matches!(
+        Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or_default().to_ascii_lowercase().as_str(),
+        "makefile" | "gnumakefile"
+    );
     for source in sources {
         unresolved |= super::dynamic::has_opaque_command_assignment_flow(path, source);
         let normalized;
@@ -124,19 +128,22 @@ fn collect_execution_inputs<'a>(sources: impl IntoIterator<Item = &'a str>, dire
             let (process_commands, opaque) = tokens::process_substitution_commands(&normalized);
             unresolved |= opaque;
             for command in process_commands {
-                record_shell_source_inputs(&command, direct_program_paths, &mut inputs, &mut unresolved);
+                record_shell_source_inputs(&command, direct_program_paths, false, &mut inputs, &mut unresolved);
             }
             normalized.as_str()
         } else {
             source
         };
-        record_shell_source_inputs(source, direct_program_paths, &mut inputs, &mut unresolved);
+        record_shell_source_inputs(source, direct_program_paths, make_surface, &mut inputs, &mut unresolved);
     }
     (inputs, unresolved)
 }
 
-fn record_shell_source_inputs(source: &str, direct_program_paths: bool, inputs: &mut BTreeSet<String>, unresolved: &mut bool) {
+fn record_shell_source_inputs(source: &str, direct_program_paths: bool, make_surface: bool, inputs: &mut BTreeSet<String>, unresolved: &mut bool) {
     for tokens in tokens::source_command_tokens(source) {
+        if direct_program_paths && !make_surface && substitution_is_command_program(&tokens) {
+            *unresolved = true;
+        }
         for nested_tokens in tokens
             .iter()
             .filter(|token| token.contains("$(") || token.contains('`'))
@@ -146,6 +153,39 @@ fn record_shell_source_inputs(source: &str, direct_program_paths: bool, inputs: 
         }
         record_execution_inputs_from_tokens(&tokens, direct_program_paths, inputs, unresolved);
     }
+}
+
+fn substitution_is_command_program(tokens: &[String]) -> bool {
+    let Some(position) = command_position(tokens) else {
+        return false;
+    };
+    if !is_environment_assignment(position.word) && (position.word.contains("$(") || position.word.contains('`')) {
+        return true;
+    }
+    let command = tool_basename(nested_command_token(position.word)).to_ascii_lowercase();
+    matches!(
+        wrapper::select(position.raw, &command, &tokens[position.index.saturating_add(1)..]),
+        wrapper::Selection::Nested(nested) if substitution_is_command_program(nested)
+    )
+}
+
+struct CommandPosition<'a> {
+    index: usize,
+    raw: &'a str,
+    word: &'a str,
+}
+
+fn command_position(tokens: &[String]) -> Option<CommandPosition<'_>> {
+    let index = tokens.iter().position(|token| {
+        let word = token.trim_matches(['(', ')', '{', '}']);
+        !word.is_empty() && !is_execution_input_prefix(word) && (!is_environment_assignment(word) || word.contains("$(") || word.contains('`'))
+    })?;
+    let raw = tokens[index].as_str();
+    Some(CommandPosition {
+        index,
+        raw,
+        word: raw.trim_matches(['(', ')', '{', '}']),
+    })
 }
 
 fn record_execution_inputs_from_tokens(tokens: &[String], direct_program_paths: bool, inputs: &mut BTreeSet<String>, unresolved: &mut bool) {
@@ -165,15 +205,12 @@ fn record_execution_inputs(candidates: Vec<&str>, inputs: &mut BTreeSet<String>,
 }
 
 fn execution_input_candidates(tokens: &[String], direct_program_paths: bool) -> (Vec<&str>, bool) {
-    let command_index = tokens.iter().position(|token| {
-        let word = token.trim_matches(['(', ')', '{', '}']);
-        !word.is_empty() && !is_execution_input_prefix(word) && (!is_environment_assignment(word) || word.contains("$(") || word.contains('`'))
-    });
-    let Some(command_index) = command_index else {
+    let Some(position) = command_position(tokens) else {
         return (Vec::new(), false);
     };
-    let raw_command_word = &tokens[command_index];
-    let command_word = raw_command_word.trim_matches(['(', ')', '{', '}']);
+    let command_index = position.index;
+    let raw_command_word = position.raw;
+    let command_word = position.word;
     if command_word.chars().any(char::is_whitespace) && (command_word.contains("$(") || command_word.contains('`')) {
         return (Vec::new(), false);
     }
@@ -589,6 +626,8 @@ mod tests {
         assert_eq!(inputs(r"'.\quality\run-lints.cmd'"), (Vec::new(), true));
         assert_eq!(inputs("status=$(./quality/run-lints)"), (vec!["quality/run-lints".to_owned()], false));
         assert_eq!(inputs("kernel=$(/usr/bin/uname -s)"), (Vec::new(), false));
+        assert_eq!(inputs("$(printf sh) quality/lint.txt"), (Vec::new(), true));
+        assert_eq!(inputs("`printf sh` quality/lint.txt"), (Vec::new(), true));
         assert_eq!(inputs(r#""$repository_root/script/check.sh""#), (Vec::new(), false));
         assert_eq!(inputs("bash_command=$(trusted_system_command bash)"), (Vec::new(), false));
         assert_eq!(inputs("timeout 10 sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));

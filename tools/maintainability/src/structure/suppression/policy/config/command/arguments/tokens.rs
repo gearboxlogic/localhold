@@ -34,6 +34,7 @@ fn shell_command_segments(source: &str) -> Vec<&str> {
     let mut quote = None;
     let mut escaped = false;
     let mut comment = false;
+    let mut conditional = false;
     let mut previous: Option<char> = None;
     for (index, character) in source.char_indices() {
         if comment {
@@ -56,7 +57,11 @@ fn shell_command_segments(source: &str) -> Vec<&str> {
             };
         } else if quote.is_none() && character == '#' && previous.is_none_or(|value| value.is_whitespace() || matches!(value, ';' | '&' | '|')) {
             comment = true;
-        } else if quote.is_none() && matches!(character, '\n' | ';' | '&' | '|') {
+        } else if quote.is_none() && !conditional && shell_conditional_delimiter(source, index, previous, "[[") {
+            conditional = true;
+        } else if quote.is_none() && conditional && shell_conditional_delimiter(source, index, previous, "]]") {
+            conditional = false;
+        } else if quote.is_none() && !conditional && matches!(character, '\n' | ';' | '&' | '|') {
             segments.push(&source[start..index]);
             start = index + character.len_utf8();
         }
@@ -64,6 +69,14 @@ fn shell_command_segments(source: &str) -> Vec<&str> {
     }
     segments.push(&source[start..]);
     segments
+}
+
+fn shell_conditional_delimiter(source: &str, index: usize, previous: Option<char>, delimiter: &str) -> bool {
+    source[index..].starts_with(delimiter) && previous.is_none_or(shell_word_boundary) && source[index + delimiter.len()..].chars().next().is_none_or(shell_word_boundary)
+}
+
+const fn shell_word_boundary(character: char) -> bool {
+    character.is_whitespace() || matches!(character, ';' | '&' | '|' | '(' | ')')
 }
 
 pub(super) fn without_noncommand_shell_data(source: &str) -> String {
@@ -399,6 +412,17 @@ mod tests {
         let commands = source_command_tokens("digest=$(printf '%s' value | sed 's/../\\\\x&/g')\n/tmp/lint");
         assert!(!commands.iter().flatten().any(|token| token == "/g)"));
         assert!(commands.iter().any(|tokens| tokens.first().is_some_and(|token| token == "/tmp/lint")));
+    }
+
+    #[test]
+    fn conditional_operators_do_not_promote_substitutions_to_commands() {
+        let commands = source_command_tokens(r#"if [[ ! -f $tool || $(sha256_file "$tool") != "$expected" ]]; then exit 1; fi"#);
+        assert!(
+            commands
+                .iter()
+                .any(|tokens| tokens.first().is_some_and(|token| token == "if") && tokens.iter().any(|token| token.contains("sha256_file")))
+        );
+        assert!(!commands.iter().any(|tokens| tokens.first().is_some_and(|token| token.starts_with("$(sha256_file"))));
     }
 
     #[test]

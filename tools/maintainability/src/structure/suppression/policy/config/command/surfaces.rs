@@ -4,6 +4,7 @@ use std::io::{ErrorKind, Read};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use sha2::{Digest, Sha256};
 
 use super::super::{parse_nul_paths, validate_relative_path};
 use super::actions::validate_local_actions;
@@ -117,6 +118,8 @@ struct TrustedDispatchJob {
     header: &'static str,
     runner: &'static str,
     authentication: &'static [&'static str],
+    // Pins every job line through the protected dispatch so no candidate command can run first.
+    prefix_sha256: &'static str,
 }
 
 const TRUSTED_DISPATCH_JOBS: &[TrustedDispatchJob] = &[
@@ -124,20 +127,18 @@ const TRUSTED_DISPATCH_JOBS: &[TrustedDispatchJob] = &[
         header: "  trusted-maintainability:",
         runner: "    runs-on: ubuntu-latest",
         authentication: TRUSTED_MAINTAINABILITY_AUTHENTICATION,
+        prefix_sha256: "bb454c630156aeb850793b7967779558e95f9724c53c3afb947ccfdeefb4b0f6",
     },
     TrustedDispatchJob {
         header: "  trusted-dependency-unsafe-windows:",
         runner: "    runs-on: windows-latest",
         authentication: TRUSTED_WINDOWS_DEPENDENCY_AUTHENTICATION,
+        prefix_sha256: "4689ac5f093df5c90c713cede6584ea917eda2bf82a31b4345255ae16ee647a0",
     },
 ];
 
 fn without_reviewed_protected_dispatch(surface: &str, source: &str) -> String {
-    if surface != TRUSTED_WORKFLOW
-        || !TRUSTED_DISPATCH_JOBS
-            .iter()
-            .all(|job| reviewed_dispatch_job(source, job.header, job.runner, job.authentication))
-    {
+    if surface != TRUSTED_WORKFLOW || !TRUSTED_DISPATCH_JOBS.iter().all(|job| reviewed_dispatch_job(source, job)) {
         return source.to_owned();
     }
     let protected_references_are_closed = source
@@ -160,9 +161,9 @@ fn without_reviewed_protected_dispatch(surface: &str, source: &str) -> String {
         .join("\n")
 }
 
-fn reviewed_dispatch_job(source: &str, job: &str, runner: &str, authentication: &[&str]) -> bool {
+fn reviewed_dispatch_job(source: &str, job: &TrustedDispatchJob) -> bool {
     let lines = source.lines().collect::<Vec<_>>();
-    let mut starts = lines.iter().enumerate().filter(|(_, line)| **line == job).map(|(index, _)| index);
+    let mut starts = lines.iter().enumerate().filter(|(_, line)| **line == job.header).map(|(index, _)| index);
     let Some(start) = starts.next() else {
         return false;
     };
@@ -174,18 +175,22 @@ fn reviewed_dispatch_job(source: &str, job: &str, runner: &str, authentication: 
         .position(|line| line.starts_with("  ") && !line.starts_with("    ") && !line.trim().is_empty())
         .map_or(lines.len(), |offset| start + 1 + offset);
     let body = &lines[start..end];
-    if body.iter().filter(|line| **line == runner).count() != 1 {
+    if body.iter().filter(|line| **line == job.runner).count() != 1 {
         return false;
     }
     let mut after = 0;
-    for expected in authentication {
+    for expected in job.authentication {
         let matches = body.iter().enumerate().filter(|(_, line)| *line == expected).map(|(index, _)| index).collect::<Vec<_>>();
         if matches.len() != 1 || matches[0] < after {
             return false;
         }
         after = matches[0] + 1;
     }
-    true
+    let Some(dispatch) = job.authentication.last().and_then(|line| body.iter().position(|candidate| candidate == line)) else {
+        return false;
+    };
+    let prefix = body[..=dispatch].join("\n");
+    format!("{:x}", Sha256::digest(prefix.as_bytes())) == job.prefix_sha256
 }
 
 fn reviewed_generated_program(surface: &str, source: &str, input: &str) -> bool {
@@ -284,18 +289,14 @@ mod tests {
     use std::process::Command;
 
     use super::{
-        TRUSTED_MAINTAINABILITY_AUTHENTICATION, TRUSTED_MAINTAINABILITY_DISPATCH_LINE, TRUSTED_WINDOWS_DEPENDENCY_AUTHENTICATION, TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE,
-        TRUSTED_WORKFLOW, execution_surfaces, without_reviewed_protected_dispatch,
+        TRUSTED_MAINTAINABILITY_AUTHENTICATION, TRUSTED_MAINTAINABILITY_DISPATCH_LINE, TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE, TRUSTED_WORKFLOW, execution_surfaces,
+        without_reviewed_protected_dispatch,
     };
 
     #[test]
     fn protected_dispatch_requires_the_complete_canonical_authentication_sequence() {
-        let reviewed = format!(
-            "jobs:\n  trusted-maintainability:\n    runs-on: ubuntu-latest\n{}\n\n  trusted-dependency-unsafe-windows:\n    runs-on: windows-latest\n{}",
-            TRUSTED_MAINTAINABILITY_AUTHENTICATION.join("\n"),
-            TRUSTED_WINDOWS_DEPENDENCY_AUTHENTICATION.join("\n")
-        );
-        let sanitized = without_reviewed_protected_dispatch(TRUSTED_WORKFLOW, &reviewed);
+        let reviewed = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.github/workflows/trusted-maintainability.yml"));
+        let sanitized = without_reviewed_protected_dispatch(TRUSTED_WORKFLOW, reviewed);
         assert!(!sanitized.contains(TRUSTED_MAINTAINABILITY_DISPATCH_LINE));
         assert!(!sanitized.contains(TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE));
         assert_eq!(sanitized.lines().filter(|line| line.trim() == ":").count(), 2);
@@ -323,6 +324,16 @@ mod tests {
             reviewed.replacen(
                 &format!("{}\n{}", TRUSTED_MAINTAINABILITY_AUTHENTICATION[0], TRUSTED_MAINTAINABILITY_AUTHENTICATION[1]),
                 &format!("{}\n{}", TRUSTED_MAINTAINABILITY_AUTHENTICATION[1], TRUSTED_MAINTAINABILITY_AUTHENTICATION[0]),
+                1,
+            ),
+            reviewed.replacen(
+                TRUSTED_MAINTAINABILITY_DISPATCH_LINE,
+                &format!("          cargo test --workspace\n{TRUSTED_MAINTAINABILITY_DISPATCH_LINE}"),
+                1,
+            ),
+            reviewed.replacen(
+                TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE,
+                &format!("          cargo test --workspace\n{TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE}"),
                 1,
             ),
         ] {

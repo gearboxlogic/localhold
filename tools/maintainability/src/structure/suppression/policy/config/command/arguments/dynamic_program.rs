@@ -12,7 +12,11 @@ pub(super) fn is_unanalyzed_path(path: &str) -> bool {
 pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
     matches!(
         command,
-        "bun"
+        "ant"
+            | "ant.bat"
+            | "ant.cmd"
+            | "ant.exe"
+            | "bun"
             | "bun.exe"
             | "cmake"
             | "cmake.exe"
@@ -42,6 +46,8 @@ pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
             | "java.exe"
             | "javaw"
             | "javaw.exe"
+            | "javac"
+            | "javac.exe"
             | "lua"
             | "lua.exe"
             | "ninja"
@@ -121,6 +127,10 @@ mod tests {
     #[test]
     fn build_language_execution_fails_closed() {
         for command in [
+            "ant",
+            "ant.bat",
+            "ant.cmd",
+            "ant.exe",
             "cmake",
             "cmake.exe",
             "ctest",
@@ -163,6 +173,8 @@ mod tests {
             "java.exe",
             "javaw",
             "javaw.exe",
+            "javac",
+            "javac.exe",
         ] {
             assert!(is_unanalyzed_interpreter(command), "{command}");
         }

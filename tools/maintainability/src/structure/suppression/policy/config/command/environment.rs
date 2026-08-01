@@ -75,6 +75,7 @@ fn is_runtime_code_loading_environment_name(name: &str) -> bool {
             | "GCONV_PATH"
             | "JAVA_TOOL_OPTIONS"
             | "JDK_JAVA_OPTIONS"
+            | "JDK_JAVAC_OPTIONS"
             | "SHELLOPTS"
             | "LD_AUDIT"
             | "LD_LIBRARY_PATH"
@@ -102,7 +103,7 @@ fn is_runtime_code_loading_environment_name(name: &str) -> bool {
 }
 
 pub(super) fn is_weakening_environment_assignment_name(name: &str) -> bool {
-    name.eq_ignore_ascii_case("CARGO") || is_weakening_environment_name(name)
+    name.eq_ignore_ascii_case("CARGO") || name.eq_ignore_ascii_case("EDITOR") || name.eq_ignore_ascii_case("VISUAL") || is_weakening_environment_name(name)
 }
 
 pub(super) fn is_case_insensitive_weakening_environment_assignment_name(name: &str) -> bool {
@@ -142,9 +143,18 @@ mod tests {
 
     #[test]
     fn jvm_code_loading_environment_is_weakening() {
-        for name in ["JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS"] {
+        for name in ["JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "JDK_JAVAC_OPTIONS", "_JAVA_OPTIONS"] {
             assert!(is_weakening_environment_name(name), "{name}");
             assert!(is_weakening_environment_name(&name.to_ascii_lowercase()), "{name}");
+        }
+    }
+
+    #[test]
+    fn editor_selection_environment_is_weakening() {
+        for name in ["EDITOR", "VISUAL"] {
+            assert!(is_weakening_environment_assignment_name(name), "{name}");
+            assert!(is_weakening_environment_assignment_name(&name.to_ascii_lowercase()), "{name}");
+            assert!(!is_weakening_environment_name(name), "{name}");
         }
     }
 

@@ -25,7 +25,17 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ),
     ("PATH=/tmp:$PATH just clippy\n", "lint-weakening environment channel"),
     ("RIPGREP_CONFIG_PATH=quality/ripgrep.conf rg lint .\n", "lint-weakening environment channel"),
-    ("JAVA_TOOL_OPTIONS=-agentpath:quality/lint.so javac -version\n", "lint-weakening environment channel"),
+    ("JAVA_TOOL_OPTIONS=-agentpath:quality/lint.so true\n", "lint-weakening environment channel"),
+    (
+        "JDK_JAVAC_OPTIONS='-processorpath quality/plugin.jar -processor AuditProcessor' true\n",
+        "lint-weakening environment channel",
+    ),
+    (
+        "javac -processorpath quality/plugin.jar -processor AuditProcessor quality/Benign.java\n",
+        "opaque interpreter program",
+    ),
+    ("ant -f quality/build.xml lint\n", "opaque interpreter program"),
+    ("EDITOR='sh quality/lint.txt' git commit --allow-empty\n", "lint-weakening environment channel"),
     ("rsync -e 'sh quality/lint.txt' localhost:/missing . || true\n", "opaque interpreter program"),
     ("cmake -P quality/lint.txt\n", "opaque interpreter program"),
     ("ctest -S quality/lint.txt || true\n", "opaque interpreter program"),

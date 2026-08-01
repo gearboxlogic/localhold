@@ -12,6 +12,9 @@ pub(super) fn dispatch_is_opaque(arguments: &[String]) -> bool {
     if !is_execution_capable(subcommand) {
         return false;
     }
+    if subcommand == "install" {
+        return true;
+    }
     if matches!(subcommand, "rustc" | "rustdoc") && rust_compiler_arguments_are_opaque(arguments) {
         return true;
     }
@@ -133,5 +136,11 @@ mod tests {
         assert!(dispatch_is_opaque(&arguments(&["rustc", "--", "-C", "linker=quality/lint"])));
         assert!(dispatch_is_opaque(&arguments(&["rustdoc", "--", "-Clinker=quality/lint"])));
         assert!(!dispatch_is_opaque(&arguments(&["rustc", "--", "-C", "opt-level=2"])));
+    }
+
+    #[test]
+    fn install_sources_fail_closed() {
+        assert!(dispatch_is_opaque(&arguments(&["install", "--path", "quality/helper"])));
+        assert!(dispatch_is_opaque(&arguments(&["install", "ripgrep", "--locked"])));
     }
 }

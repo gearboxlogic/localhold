@@ -8,6 +8,7 @@ pub(super) fn dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
             }
             "copy" | "copy-item" | "move" | "move-item" | "set-content" | "add-content" | "out-file" => arguments_reference_surface(arguments),
             "dd" | "dd.exe" => arguments.iter().filter_map(|argument| argument.strip_prefix("of=")).any(is_literal_execution_surface),
+            "patch" | "patch.exe" => true,
             "perl" | "perl.exe" if arguments.iter().any(|argument| argument.starts_with("-i")) => arguments_reference_surface(arguments),
             "sed" | "sed.exe"
                 if arguments
@@ -62,6 +63,8 @@ mod tests {
         assert!(opaque("install", &["quality/lint.data", "script/check.sh"]));
         assert!(opaque("sed", &["-i", "s/check/skip/", "mise.toml"]));
         assert!(opaque("dd", &["if=quality/lint.data", "of=.github/workflows/ci.yml"]));
+        assert!(opaque("patch", &["Justfile", "quality/lint.patch"]));
+        assert!(opaque("patch", &["<", "quality/lint.patch"]));
         assert!(!opaque("cp", &["input.txt", "output.txt"]));
     }
 

@@ -348,6 +348,14 @@ fn command_policy_rejects_dynamic_powershell_call_dispatch() {
     )
     .expect("checked static PowerShell call");
     reject_checked_in_weakening(workspace.path()).expect("status-checked static PowerShell call is analyzable");
+
+    fs::write(
+        workspace.path().join("script/check.ps1"),
+        "New-Alias x ('Invoke-' + 'Expression')\nx ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)))\n",
+    )
+    .expect("dynamic PowerShell alias dispatch");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
 }
 
 #[test]

@@ -217,7 +217,11 @@ fn has_opaque_dispatch(source: &str) -> bool {
 fn process_api_word(word: &str) -> bool {
     matches!(
         word,
-        "start-process"
+        "new-alias"
+            | "nal"
+            | "set-alias"
+            | "sal"
+            | "start-process"
             | "saps"
             | "system.diagnostics.process"
             | "diagnostics.process"
@@ -412,12 +416,15 @@ mod tests {
         assert!(has_constructed_rust_arguments("[Diagnostics.Process]::new()"));
         assert!(has_constructed_rust_arguments("[scriptblock]::Create($source).Invoke()"));
         assert!(has_constructed_rust_arguments("[System.Management.Automation.ScriptBlock]::Create($source).Invoke()"));
+        assert!(has_constructed_rust_arguments("New-Alias x ('Invoke-' + 'Expression'); x $decoded"));
+        assert!(has_constructed_rust_arguments("Set-Alias x Invoke-Expression; x $decoded"));
         assert!(!has_constructed_rust_arguments("$scriptblock = 'inert'; Write-Output $scriptblock"));
         assert!(!has_constructed_rust_arguments("Write-Output '[scriptblock]::Create($source)'"));
         assert!(!has_constructed_rust_arguments("cargo clippy -- '-A' warnings"));
         assert!(!has_constructed_rust_arguments("Write-Output '(cargo clippy -- -A warnings)'"));
         assert!(!has_constructed_rust_arguments("Write-Output 'Start-Process cargo'"));
         assert!(!has_constructed_rust_arguments("Write-Output '[System.Diagnostics.Process]::Start($tool)'"));
+        assert!(!has_constructed_rust_arguments("Write-Output 'New-Alias x Invoke-Expression'"));
         assert!(!has_constructed_rust_arguments("# Start-Process cargo"));
         assert!(!has_constructed_rust_arguments("# [System.Diagnostics.Process]::Start($tool)"));
         assert!(!has_constructed_rust_arguments("@'\nStart-Process cargo\n'@"));

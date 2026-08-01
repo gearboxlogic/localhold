@@ -22,8 +22,14 @@ pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
             | "cscript.exe"
             | "deno"
             | "deno.exe"
+            | "docker"
+            | "docker-compose"
+            | "docker-compose.exe"
+            | "docker.exe"
             | "dotnet"
             | "dotnet.exe"
+            | "finch"
+            | "finch.exe"
             | "gradle"
             | "gradle.bat"
             | "gradle.cmd"
@@ -42,6 +48,8 @@ pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
             | "ninja.exe"
             | "node"
             | "node.exe"
+            | "nerdctl"
+            | "nerdctl.exe"
             | "npm"
             | "npm.exe"
             | "npx"
@@ -50,6 +58,10 @@ pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
             | "perl.exe"
             | "php"
             | "php.exe"
+            | "podman"
+            | "podman-compose"
+            | "podman-compose.exe"
+            | "podman.exe"
             | "ruby"
             | "ruby.exe"
             | "swift"
@@ -151,6 +163,23 @@ mod tests {
             "java.exe",
             "javaw",
             "javaw.exe",
+        ] {
+            assert!(is_unanalyzed_interpreter(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn container_launchers_fail_closed() {
+        for command in [
+            "docker",
+            "docker.exe",
+            "docker-compose",
+            "finch",
+            "nerdctl",
+            "nerdctl.exe",
+            "podman",
+            "podman.exe",
+            "podman-compose",
         ] {
             assert!(is_unanalyzed_interpreter(command), "{command}");
         }

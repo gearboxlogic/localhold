@@ -318,6 +318,14 @@ fn command_policy_rejects_dynamic_powershell_call_dispatch() {
 
     fs::write(
         workspace.path().join("script/check.ps1"),
+        "[scriptblock]::Create((-join (99,97,114,103,111 | ForEach-Object {[char]$_}))).Invoke()\n",
+    )
+    .expect("dynamic PowerShell script block");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+
+    fs::write(
+        workspace.path().join("script/check.ps1"),
         "[System.Diagnostics.Process]::Start($tool, $arguments).WaitForExit()\n",
     )
     .expect(".NET process dispatch");
@@ -364,6 +372,14 @@ fn command_policy_rejects_python_command_wrapper_dispatch() {
     assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
 
     fs::write(workspace.path().join("script/check.py"), "import runpy\nrunpy.run_path('quality/lint.txt')\n").expect("Python runpy execution");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+
+    fs::write(
+        workspace.path().join("script/check.py"),
+        "import io, pickle\npickle.Unpickler(io.BytesIO(bytes.fromhex(payload))).load()\n",
+    )
+    .expect("Python Unpickler execution");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
 }

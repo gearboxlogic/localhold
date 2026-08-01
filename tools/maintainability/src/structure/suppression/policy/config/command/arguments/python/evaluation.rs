@@ -221,7 +221,7 @@ fn dynamic_path(path: &[String]) -> bool {
         {
             true
         }
-        [module, name, ..] if matches!(module.as_str(), "pickle" | "_pickle") => matches!(name.as_str(), "load" | "loads"),
+        [module, name, ..] if matches!(module.as_str(), "pickle" | "_pickle") => matches!(name.as_str(), "Unpickler" | "load" | "loads"),
         [module, name, ..] if module == "marshal" => name == "loads",
         [module, name, ..] if module == "types" => matches!(name.as_str(), "CodeType" | "FunctionType"),
         _ => false,
@@ -259,6 +259,8 @@ mod tests {
         assert!(has_dynamic_code("types.FunctionType(marshal.loads(payload), globals())"));
         assert!(has_dynamic_code("pickle.loads(payload)"));
         assert!(has_dynamic_code("_pickle.load(stream)"));
+        assert!(has_dynamic_code("pickle.Unpickler(stream).load()"));
+        assert!(has_dynamic_code("_pickle.Unpickler(stream).load()"));
         assert!(!has_dynamic_code("pattern = re.compile(r'exec\\(')"));
         assert!(!has_dynamic_code("f'exec is a built-in: {name}'"));
         assert!(!has_dynamic_code("f'{{exec}}: {name}'"));

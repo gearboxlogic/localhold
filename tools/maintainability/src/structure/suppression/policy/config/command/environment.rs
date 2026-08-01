@@ -84,6 +84,7 @@ fn is_runtime_code_loading_environment_name(name: &str) -> bool {
             | "PYTHONSTARTUP"
             | "PYTHONUSERBASE"
             | "PYTHONWARNINGS"
+            | "RUBYOPT"
     )
 }
 
@@ -120,6 +121,12 @@ mod tests {
     fn node_code_loading_environment_is_weakening() {
         assert!(is_weakening_environment_name("NODE_OPTIONS"));
         assert!(is_weakening_environment_name("node_options"));
+    }
+
+    #[test]
+    fn ruby_code_loading_environment_is_weakening() {
+        assert!(is_weakening_environment_name("RUBYOPT"));
+        assert!(is_weakening_environment_name("rubyopt"));
     }
 
     #[test]

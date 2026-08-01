@@ -201,6 +201,8 @@ fn is_unparsed_launcher(command: &str) -> bool {
             | "ionice"
             | "lldb"
             | "ltrace"
+            | "linux32"
+            | "linux64"
             | "nsenter"
             | "numactl"
             | "perf"
@@ -251,6 +253,8 @@ mod tests {
         assert!(matches!(select("/usr/sbin/chroot", "chroot", &arguments), Selection::Opaque));
         assert!(matches!(select("setarch", "setarch", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/setarch", "setarch", &arguments), Selection::Opaque));
+        assert!(matches!(select("linux32", "linux32", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/bin/linux64", "linux64", &arguments), Selection::Opaque));
         assert!(matches!(select("sg", "sg", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/sg", "sg", &arguments), Selection::Opaque));
         assert!(matches!(select("su", "su", &arguments), Selection::Opaque));

@@ -163,14 +163,18 @@ fn has_opaque_dispatch(source: &str) -> bool {
     let mut state = State::Code;
     let mut line_prefix_is_whitespace = true;
     let mut word = String::new();
+    let mut saw_script_block_type = false;
     while let Some(character) = characters.next() {
         if matches!(state, State::Code) && (character.is_alphanumeric() || matches!(character, '-' | '_' | '.')) {
             word.push(character.to_ascii_lowercase());
             update_line_prefix(character, &mut line_prefix_is_whitespace);
             continue;
         }
-        if matches!(state, State::Code) && process_api_word(&word) {
-            return true;
+        if matches!(state, State::Code) && !word.is_empty() {
+            if process_api_word(&word) || saw_script_block_type && word == "create" {
+                return true;
+            }
+            saw_script_block_type = script_block_type_word(&word);
         }
         word.clear();
         match state {
@@ -184,6 +188,7 @@ fn has_opaque_dispatch(source: &str) -> bool {
                     characters.next();
                 }
                 '&' if dynamic_call_operator(characters.clone()) => return true,
+                ';' | '\n' | '|' => saw_script_block_type = false,
                 _ => {}
             },
             State::SingleQuoted if character == '\'' => {
@@ -206,11 +211,15 @@ fn has_opaque_dispatch(source: &str) -> bool {
         }
         update_line_prefix(character, &mut line_prefix_is_whitespace);
     }
-    matches!(state, State::Code) && process_api_word(&word)
+    matches!(state, State::Code) && (process_api_word(&word) || saw_script_block_type && word == "create")
 }
 
 fn process_api_word(word: &str) -> bool {
     matches!(word, "start-process" | "saps" | "system.diagnostics.process" | "diagnostics.process")
+}
+
+fn script_block_type_word(word: &str) -> bool {
+    matches!(word, "scriptblock" | "system.management.automation.scriptblock")
 }
 
 fn dynamic_call_operator(characters: Peekable<Chars<'_>>) -> bool {
@@ -384,6 +393,10 @@ mod tests {
         ));
         assert!(has_constructed_rust_arguments("[System.Diagnostics.Process]::Start($tool, $arguments).WaitForExit()"));
         assert!(has_constructed_rust_arguments("[Diagnostics.Process]::new()"));
+        assert!(has_constructed_rust_arguments("[scriptblock]::Create($source).Invoke()"));
+        assert!(has_constructed_rust_arguments("[System.Management.Automation.ScriptBlock]::Create($source).Invoke()"));
+        assert!(!has_constructed_rust_arguments("$scriptblock = 'inert'; Write-Output $scriptblock"));
+        assert!(!has_constructed_rust_arguments("Write-Output '[scriptblock]::Create($source)'"));
         assert!(!has_constructed_rust_arguments("cargo clippy -- '-A' warnings"));
         assert!(!has_constructed_rust_arguments("Write-Output '(cargo clippy -- -A warnings)'"));
         assert!(!has_constructed_rust_arguments("Write-Output 'Start-Process cargo'"));

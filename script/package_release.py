@@ -99,6 +99,13 @@ def archive_paths(stage_root: Path) -> list[Path]:
     return [stage_root, *sorted(stage_root.rglob("*"), key=lambda path: path.as_posix())]
 
 
+def archive_mode(path: Path) -> int:
+    """Return the normalized archive mode for a staged entry."""
+    if path.is_dir() or path.stat().st_mode & stat.S_IXUSR:
+        return 0o755
+    return 0o644
+
+
 def write_tar(stage_root: Path, output: BinaryIO, epoch: int) -> None:
     """Stream a deterministic POSIX tar archive to a binary output."""
     with tarfile.open(fileobj=output, mode="w|", format=tarfile.PAX_FORMAT) as archive:
@@ -110,6 +117,7 @@ def write_tar(stage_root: Path, output: BinaryIO, epoch: int) -> None:
             info.uname = "root"
             info.gname = "root"
             info.mtime = epoch
+            info.mode = archive_mode(path)
             if path.is_file():
                 with path.open("rb") as source:
                     archive.addfile(info, source)
@@ -171,7 +179,7 @@ def write_zip(stage_root: Path, destination: Path, epoch: int) -> None:
             name = f"{relative}/" if is_directory else relative
             info = zipfile.ZipInfo(name, date_time)
             info.create_system = 3
-            mode = stat.S_IMODE(path.stat().st_mode)
+            mode = archive_mode(path)
             file_type = stat.S_IFDIR if is_directory else stat.S_IFREG
             info.external_attr = (file_type | mode) << 16
             info.compress_type = zipfile.ZIP_DEFLATED

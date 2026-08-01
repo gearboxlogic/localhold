@@ -120,7 +120,8 @@ jobs:
           RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup
           RUSTUP_TOOLCHAIN: 1.97.0
         run: |
-          workspace_root=$(/usr/bin/realpath -- "$GITHUB_WORKSPACE")
+          workspace_root=$(/usr/bin/cygpath -u -- "$GITHUB_WORKSPACE")
+          workspace_root=$(/usr/bin/realpath -- "$workspace_root")
           protected_root=$(/usr/bin/realpath -- ../.trusted-gate)
           audit_root=$(/usr/bin/realpath -- .)
           if [[ "$protected_root" != "$workspace_root/.trusted-gate" || "$audit_root" != "$workspace_root/.candidate" ]]; then
@@ -131,7 +132,7 @@ jobs:
           windows_base_revision=$BASE_REVISION_INPUT
           if [[ "$windows_base_revision" == refs/heads/* ]]; then
             remote_ref="refs/remotes/origin/${windows_base_revision#refs/heads/}"
-            windows_base_revision=$(/usr/bin/git rev-parse --verify "${remote_ref}^{commit}")
+            windows_base_revision=$(git rev-parse --verify "${remote_ref}^{commit}")
           fi
           if [[ ! "$windows_base_revision" =~ ^[[:xdigit:]]{40}$ ]]; then
             printf 'Windows dependency-audit base revision is missing or malformed\n' >&2

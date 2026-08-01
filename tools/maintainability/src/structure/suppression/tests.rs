@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
-use super::{SourceCategory, reject_direct_source_suppressions, reject_tooling_suppressions, scan_revision, scan_workspace};
+use super::{SourceCategory, read_revision_sources, reject_direct_source_suppressions, reject_tooling_suppressions, scan_revision, scan_workspace};
 use crate::structure::classify::Inventory;
 
 mod targets;
@@ -351,6 +351,37 @@ fn revision_scan_uses_the_previous_cargo_targets_and_module_graph() {
     let mut paths = sites.iter().map(|site| site.path.as_str()).collect::<Vec<_>>();
     paths.sort_unstable();
     assert_eq!(paths, ["examples/old/helper.rs", "examples/old/main.rs"]);
+}
+
+#[test]
+fn revision_source_batch_drains_output_while_writing_requests() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let sources = workspace.path().join("sources");
+    fs::create_dir(&sources).expect("source directory");
+    let mut paths = BTreeSet::new();
+    for index in 0..1_000 {
+        let path = format!("sources/{index:04}-{}.rs", "x".repeat(80));
+        fs::write(workspace.path().join(&path), format!("// {}\n", "content".repeat(80))).expect("large batch source");
+        paths.insert(path);
+    }
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+    git(
+        workspace.path(),
+        &["-c", "user.name=LocalHold", "-c", "user.email=localhold@example.invalid", "commit", "-qm", "large batch"],
+    );
+    let revision = git_output(workspace.path(), &["rev-parse", "HEAD"]);
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = read_revision_sources(workspace.path(), revision.trim(), &paths).map(|sources| sources.len());
+        sender.send(result).expect("return batch result");
+    });
+    let count = receiver
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("batched revision read must not deadlock")
+        .expect("read batched revision sources");
+    assert_eq!(count, 1_000);
 }
 
 #[test]

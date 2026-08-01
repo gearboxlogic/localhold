@@ -57,6 +57,8 @@ def declared_files(manifest: dict[str, object]) -> list[dict[str, object]]:
         relative = Path(path)
         if relative.is_absolute() or ".." in relative.parts or path in seen:
             raise ValidationError(f"unsafe or duplicate CUDA runtime file path: {path}")
+        if relative.parts[0] == "lib" and len(relative.parts) != 2:
+            raise ValidationError(f"CUDA runtime library must be directly under lib/: {path}")
         seen.add(path)
         result.append(record)
     return result

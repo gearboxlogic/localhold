@@ -89,9 +89,12 @@ const TRUSTED_MAINTAINABILITY_AUTHENTICATION: &[&str] = &[
 ];
 const TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE: &str = "          /usr/bin/bash \"$protected_bootstrap\" --root \"$audit_root\" --dependency-unsafe";
 const TRUSTED_WINDOWS_DEPENDENCY_AUTHENTICATION: &[&str] = &[
+    "          workspace_root=$(/usr/bin/cygpath -u -- \"$GITHUB_WORKSPACE\")",
+    "          workspace_root=$(/usr/bin/realpath -- \"$workspace_root\")",
     "          protected_root=$(/usr/bin/realpath -- ../.trusted-gate)",
     "          audit_root=$(/usr/bin/realpath -- .)",
     "          if [[ \"$protected_root\" != \"$workspace_root/.trusted-gate\" || \"$audit_root\" != \"$workspace_root/.candidate\" ]]; then",
+    "            windows_base_revision=$(git rev-parse --verify \"${remote_ref}^{commit}\")",
     "          protected_bootstrap=\"$protected_root/script/check-maintainability-bootstrap.sh\"",
     "          if [[ ! -f \"$protected_bootstrap\" || -L \"$protected_bootstrap\" ]]; then",
     TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE,
@@ -270,6 +273,8 @@ mod tests {
         for changed in [
             reviewed.replacen("../.trusted-gate", "../.candidate", 1),
             reviewed.replacen("--maintainability", "--test-environment", 1),
+            reviewed.replacen("/usr/bin/cygpath -u -- \"$GITHUB_WORKSPACE\"", "printf '%s' \"$GITHUB_WORKSPACE\"", 1),
+            reviewed.replacen("$(git rev-parse", "$(/usr/bin/git rev-parse", 1),
             reviewed.replacen("$protected_root", "$audit_root", 1),
             reviewed.replacen("--dependency-unsafe", "--test-environment", 1),
             reviewed.replacen("runs-on: windows-latest", "runs-on: ubuntu-latest", 1),

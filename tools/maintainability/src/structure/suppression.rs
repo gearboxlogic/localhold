@@ -126,16 +126,25 @@ fn read_revision_sources(workspace: &Path, revision: &str, paths: &BTreeSet<Stri
         .stderr(Stdio::piped())
         .spawn()
         .context("start suppression revision source reader")?;
-    {
-        let mut input = child.stdin.take().context("suppression revision source reader has no input")?;
-        for path in paths {
-            writeln!(input, "{revision}:{path}").with_context(|| format!("request suppression source {path:?} from revision"))?;
-        }
+    let mut input = child.stdin.take().context("suppression revision source reader has no input")?;
+    let mut requests = String::new();
+    for path in paths {
+        requests.push_str(revision);
+        requests.push(':');
+        requests.push_str(path);
+        requests.push('\n');
     }
-    let output = child.wait_with_output().context("wait for suppression revision source reader")?;
+    let writer = std::thread::spawn(move || input.write_all(requests.as_bytes()));
+    let output = child.wait_with_output();
+    let write_result = writer.join().map_err(|_| anyhow::Error::msg("suppression revision source request writer panicked"))?;
+    let output = output.context("wait for suppression revision source reader")?;
     if !output.status.success() {
-        bail!("git cat-file failed while reading suppression revision sources");
+        bail!(
+            "git cat-file failed while reading suppression revision sources: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
+    write_result.context("request suppression sources from revision")?;
     parse_revision_sources(&output.stdout, revision, paths)
 }
 

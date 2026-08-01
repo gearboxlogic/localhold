@@ -298,6 +298,9 @@ fn command_is_quality(command: &[String], case_insensitive_tools: bool) -> bool 
         if !is_cargo_tool_token(executable, case_insensitive_tools) {
             return true;
         }
+        if arguments.iter().any(|argument| matches!(argument.as_str(), "--help" | "-h" | "--version" | "-V")) {
+            return false;
+        }
         return arguments
             .iter()
             .any(|token| matches!(token.to_ascii_lowercase().as_str(), "check" | "clippy" | "deny" | "fmt" | "test"));
@@ -383,6 +386,8 @@ mod tests {
         assert!(!masks("cargo clippy --locked &>clippy.log"));
         assert!(!masks("cargo clippy --locked 2>&1"));
         assert!(!masks("cargo build | grep warning"));
+        assert!(!masks("cargo deny --version || true"));
+        assert!(!masks("mise x -- cargo deny --version || true"));
         assert!(!masks("echo cargo || true"));
         assert!(!masks("if echo just check-quality; then echo informational; fi"));
         assert!(!masks("printf '%s\n' 'just check | true'"));

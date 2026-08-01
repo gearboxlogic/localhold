@@ -78,19 +78,28 @@ pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
             | "yarn.cmd"
             | "yarn.exe"
             | "yarn.ps1"
-    ) || is_tcl_interpreter(command)
+    ) || is_python_package_installer(command)
+        || is_tcl_interpreter(command)
 }
 
 pub(super) fn is_python_interpreter(command: &str) -> bool {
     let command = command.strip_suffix(".exe").unwrap_or(command);
-    if command == "python" {
-        return true;
-    }
-    command.strip_prefix("python").is_some_and(|version| {
-        version.bytes().next().is_some_and(|byte| byte.is_ascii_digit())
-            && version.bytes().next_back().is_some_and(|byte| byte.is_ascii_digit())
-            && version.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.')
-    })
+    matches!(command, "py" | "pyw") || ["python", "pythonw", "pypy"].iter().any(|name| is_versioned_name(command, name))
+}
+
+fn is_python_package_installer(command: &str) -> bool {
+    let command = command.strip_suffix(".exe").unwrap_or(command);
+    is_versioned_name(command, "pip")
+}
+
+fn is_versioned_name(command: &str, name: &str) -> bool {
+    command == name
+        || command.strip_prefix(name).is_some_and(|version| {
+            !version.is_empty()
+                && version.bytes().next().is_some_and(|byte| byte.is_ascii_digit())
+                && version.bytes().next_back().is_some_and(|byte| byte.is_ascii_digit())
+                && version.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.')
+        })
 }
 
 fn is_tcl_interpreter(command: &str) -> bool {
@@ -165,6 +174,11 @@ mod tests {
             "npm.exe",
             "npx",
             "npx.exe",
+            "pip",
+            "pip.exe",
+            "pip3",
+            "pip3.12",
+            "pip3.12.exe",
             "yarn",
             "yarn.cmd",
             "yarn.exe",
@@ -177,6 +191,9 @@ mod tests {
             "javac.exe",
         ] {
             assert!(is_unanalyzed_interpreter(command), "{command}");
+        }
+        for command in ["pipeline", "pip-preview", "pip3."] {
+            assert!(!is_unanalyzed_interpreter(command), "{command}");
         }
     }
 
@@ -209,10 +226,25 @@ mod tests {
 
     #[test]
     fn versioned_python_interpreters_are_recognized_without_prefix_collisions() {
-        for command in ["python", "python.exe", "python3", "python3.12", "python3.12.exe", "python312.exe"] {
+        for command in [
+            "py",
+            "py.exe",
+            "pyw.exe",
+            "python",
+            "python.exe",
+            "python3",
+            "python3.12",
+            "python3.12.exe",
+            "python312.exe",
+            "pythonw.exe",
+            "pythonw3.12.exe",
+            "pypy",
+            "pypy3",
+            "pypy3.11.exe",
+        ] {
             assert!(is_python_interpreter(command), "{command}");
         }
-        for command in ["python-preview", "python3.", "pythonic"] {
+        for command in ["python-preview", "python3.", "pythonic", "pythonw-preview", "pypical"] {
             assert!(!is_python_interpreter(command), "{command}");
         }
     }

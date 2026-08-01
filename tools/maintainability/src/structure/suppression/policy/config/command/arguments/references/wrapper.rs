@@ -13,6 +13,7 @@ pub(in crate::structure::suppression::policy::config::command::arguments) fn sel
         "command" | "command.exe" => command_builtin(arguments),
         "env" | "env.exe" => env_command(arguments),
         "exec" | "exec.exe" => exec_builtin(arguments),
+        "mise" | "mise.exe" => mise_command(arguments),
         "nice" | "nice.exe" => nice_command(arguments),
         "nohup" | "nohup.exe" => nohup_command(arguments),
         "rustup" | "rustup.exe" => rustup_command(arguments),
@@ -88,6 +89,24 @@ fn exec_builtin(arguments: &[String]) -> Selection<'_> {
         }
     }
     Selection::NoCommand
+}
+
+fn mise_command(arguments: &[String]) -> Selection<'_> {
+    let Some(subcommand_index) = arguments.iter().position(|argument| matches!(argument.as_str(), "exec" | "x")) else {
+        return Selection::NotWrapper;
+    };
+    if subcommand_index != 0 {
+        return Selection::Opaque;
+    }
+    mise_exec(&arguments[1..])
+}
+
+fn mise_exec(arguments: &[String]) -> Selection<'_> {
+    match arguments.first().map(String::as_str) {
+        None | Some("-h" | "--help") => Selection::NoCommand,
+        Some("--") => nested_after(arguments, 1),
+        Some(_) => Selection::Opaque,
+    }
 }
 
 fn nice_command(arguments: &[String]) -> Selection<'_> {
@@ -242,7 +261,7 @@ fn is_unparsed_launcher(command: &str) -> bool {
 pub(in crate::structure::suppression::policy::config::command::arguments) fn is_command_launcher(command: &str) -> bool {
     matches!(
         command.trim_end_matches(".exe"),
-        "builtin" | "command" | "env" | "exec" | "nice" | "nohup" | "rustup" | "sudo" | "time" | "timeout"
+        "builtin" | "command" | "env" | "exec" | "mise" | "nice" | "nohup" | "rustup" | "sudo" | "time" | "timeout"
     ) || is_unparsed_launcher(command)
 }
 
@@ -291,6 +310,56 @@ mod tests {
         }
         assert!(matches!(select("/usr/bin/ccache", "ccache", &arguments), Selection::Opaque));
         assert!(matches!(select("ccache.exe", "ccache.exe", &arguments), Selection::Opaque));
+    }
+
+    #[test]
+    fn mise_exec_selects_only_explicit_nested_commands() {
+        let arguments = vec!["x".to_owned(), "--".to_owned(), "sh".to_owned(), "quality/lint.txt".to_owned()];
+        let Selection::Nested(command) = select("mise", "mise", &arguments) else {
+            panic!("mise exec should select its nested command");
+        };
+        assert_eq!(command, ["sh", "quality/lint.txt"]);
+
+        assert!(matches!(
+            select("/usr/bin/mise", "mise", &["exec".to_owned(), "--".to_owned(), "cargo".to_owned(), "fetch".to_owned()]),
+            Selection::Nested(_)
+        ));
+        assert!(matches!(
+            select("mise.exe", "mise.exe", &["exec".to_owned(), "--".to_owned(), "cargo".to_owned(), "fetch".to_owned()]),
+            Selection::Nested(_)
+        ));
+        assert!(matches!(
+            select("mise.exe", "mise.exe", &["x".to_owned(), "-c".to_owned(), "sh quality/lint.txt".to_owned()]),
+            Selection::Opaque
+        ));
+        assert!(matches!(
+            select(
+                "mise",
+                "mise",
+                &[
+                    "x".to_owned(),
+                    "-C".to_owned(),
+                    "quality".to_owned(),
+                    "--".to_owned(),
+                    "sh".to_owned(),
+                    "lint.txt".to_owned()
+                ]
+            ),
+            Selection::Opaque
+        ));
+        assert!(matches!(
+            select(
+                "mise",
+                "mise",
+                &["x".to_owned(), "node@24".to_owned(), "--".to_owned(), "node".to_owned(), "quality/lint.js".to_owned()]
+            ),
+            Selection::Opaque
+        ));
+        assert!(matches!(
+            select("mise", "mise", &["--quiet".to_owned(), "x".to_owned(), "--".to_owned(), "true".to_owned()]),
+            Selection::Opaque
+        ));
+        assert!(matches!(select("mise", "mise", &["install".to_owned(), "--locked".to_owned()]), Selection::NotWrapper));
     }
 
     #[test]

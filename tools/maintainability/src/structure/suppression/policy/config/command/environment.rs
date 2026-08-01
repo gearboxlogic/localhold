@@ -35,6 +35,7 @@ pub(super) fn is_weakening_environment_name(name: &str) -> bool {
             | "CARGO_BUILD_RUSTDOC"
             | "CARGO_BUILD_RUSTC_WRAPPER"
             | "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"
+            | "CARGO_UNSTABLE_SCRIPT"
             | "GITHUB_ACTIONS"
             | "GITHUB_ENV"
             | "GITHUB_EVENT_PATH"
@@ -215,6 +216,12 @@ mod tests {
     fn cargo_target_directory_is_a_weakening_environment_channel() {
         assert!(is_weakening_environment_name("CARGO_TARGET_DIR"));
         assert!(is_weakening_environment_name("cargo_target_dir"));
+    }
+
+    #[test]
+    fn cargo_script_mode_environment_is_weakening() {
+        assert!(is_weakening_environment_name("CARGO_UNSTABLE_SCRIPT"));
+        assert!(is_weakening_environment_name("cargo_unstable_script"));
     }
 
     #[test]

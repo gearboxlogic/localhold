@@ -720,6 +720,42 @@ mod tests {
     }
 
     #[test]
+    fn cargo_script_dispatch_fails_closed() {
+        for command in [
+            "cargo +nightly -Zscript quality/lint.rs",
+            "cargo.exe -Z script quality/lint.rs",
+            "cargo +nightly -Zscript -- quality/lint.rs",
+            "rustup run nightly cargo -Z=script quality/lint.rs",
+        ] {
+            assert_eq!(inputs(command), (Vec::new(), true), "{command}");
+        }
+    }
+
+    #[test]
+    fn mise_exec_dispatch_fails_closed_unless_the_nested_command_is_explicit() {
+        assert_eq!(inputs("mise x -- sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
+        assert_eq!(inputs("mise exec -- cargo fetch"), (Vec::new(), false));
+        for command in ["mise x -c 'sh quality/lint.txt'", "mise x -C quality -- sh lint.txt", "mise --quiet x -- true"] {
+            assert_eq!(inputs(command), (Vec::new(), true), "{command}");
+        }
+    }
+
+    #[test]
+    fn python_package_installers_fail_closed() {
+        for command in [
+            "pip install quality/helper",
+            "pip3.12.exe install quality/helper.whl",
+            "/usr/bin/pip3 install quality/helper",
+            "env pip3.13 install quality/helper",
+            "py -m pip install quality/helper",
+            "pythonw.exe -m pip install quality/helper",
+            "pypy3 -m pip install quality/helper",
+        ] {
+            assert_eq!(inputs(command), (Vec::new(), true), "{command}");
+        }
+    }
+
+    #[test]
     fn go_dispatch_fails_closed() {
         for command in [
             "go version",

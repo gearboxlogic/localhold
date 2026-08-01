@@ -6,6 +6,9 @@ enum ManifestSelection<'a> {
 }
 
 pub(super) fn dispatch_is_opaque(arguments: &[String]) -> bool {
+    if uses_script_mode(arguments) {
+        return true;
+    }
     let Some(subcommand) = subcommand(arguments) else {
         return false;
     };
@@ -27,6 +30,14 @@ pub(super) fn dispatch_is_opaque(arguments: &[String]) -> bool {
         return !matches!(manifest, ManifestSelection::Selected(path) if is_reviewed_tool_manifest(path));
     }
     matches!(manifest, ManifestSelection::Opaque) || matches!(manifest, ManifestSelection::Selected(path) if !is_reviewed_execution_manifest(path))
+}
+
+fn uses_script_mode(arguments: &[String]) -> bool {
+    arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--")
+        .enumerate()
+        .any(|(index, argument)| argument == "-Zscript" || argument == "-Z=script" || argument == "-Z" && arguments.get(index + 1).is_some_and(|value| value == "script"))
 }
 
 fn rust_compiler_arguments_are_opaque(arguments: &[String]) -> bool {
@@ -153,5 +164,19 @@ mod tests {
             assert!(dispatch_is_opaque(&arguments(values)), "{values:?}");
         }
         assert!(!dispatch_is_opaque(&arguments(&["doc", "--no-deps"])));
+    }
+
+    #[test]
+    fn script_mode_fails_closed() {
+        for values in [
+            &["+nightly", "-Zscript", "quality/lint.rs"][..],
+            &["-Z", "script", "quality/lint.rs"],
+            &["-Z=script", "quality/lint.rs"],
+            &["+nightly", "-Zscript", "--", "quality/lint.rs"],
+        ] {
+            assert!(dispatch_is_opaque(&arguments(values)), "{values:?}");
+        }
+        assert!(!dispatch_is_opaque(&arguments(&["metadata", "--no-deps"])));
+        assert!(!dispatch_is_opaque(&arguments(&["test", "--", "-Zscript"])));
     }
 }

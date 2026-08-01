@@ -253,10 +253,9 @@ fn execution_input_candidates<'a>(path: &str, tokens: &'a [String], direct_progr
         "cmd" | "cmd.exe" | "command.com" => SelectedInput::Opaque,
         _ if dynamic_program::is_unanalyzed_interpreter(&command) => SelectedInput::Opaque,
         _ if dynamic_loader_is_opaque(&command) => SelectedInput::Opaque,
-        "awk" | "awk.exe" | "dbus-run-session" | "dpkg" | "dpkg.exe" | "gawk" | "gawk.exe" | "gio" | "gio.exe" | "m4" | "m4.exe" | "mawk" | "mawk.exe" | "nawk" | "nawk.exe"
-        | "protoc" | "protoc.exe" | "rake" | "rake.exe" | "rsync" | "rsync.exe" | "run-parts" | "run-parts.exe" | "sqlite3" | "sqlite3.exe" | "wget" | "wget.exe" => {
-            SelectedInput::Opaque
-        }
+        "autoconf" | "autoconf.exe" | "awk" | "awk.exe" | "dbus-run-session" | "dpkg" | "dpkg.exe" | "gawk" | "gawk.exe" | "gio" | "gio.exe" | "m4" | "m4.exe" | "mawk"
+        | "mawk.exe" | "nawk" | "nawk.exe" | "protoc" | "protoc.exe" | "rake" | "rake.exe" | "rsync" | "rsync.exe" | "run-parts" | "run-parts.exe" | "sqlite3" | "sqlite3.exe"
+        | "wget" | "wget.exe" | "go" | "go.exe" => SelectedInput::Opaque,
         "find" | "find.exe" => {
             return (Vec::new(), find_command_action_is_opaque(arguments));
         }
@@ -270,7 +269,6 @@ fn execution_input_candidates<'a>(path: &str, tokens: &'a [String], direct_progr
         "openssl" | "openssl.exe" if openssl_module_selection_is_opaque(arguments) => SelectedInput::Opaque,
         "rg" | "rg.exe" | "ripgrep" | "ripgrep.exe" if ripgrep_preprocessor_is_opaque(arguments) => SelectedInput::Opaque,
         "cargo" | "cargo.exe" if cargo::dispatch_is_opaque(arguments) => SelectedInput::Opaque,
-        "go" | "go.exe" => SelectedInput::Opaque,
         "just" | "just.exe" if just_source_selection_is_opaque(arguments) => SelectedInput::Opaque,
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
             let (inputs, opaque) = makefile_inputs(arguments);

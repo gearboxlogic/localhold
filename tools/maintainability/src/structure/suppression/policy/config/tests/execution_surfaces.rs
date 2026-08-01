@@ -551,6 +551,31 @@ fn remote_actions_require_a_reviewed_exact_revision() {
 }
 
 #[test]
+fn checkout_actions_cannot_replace_the_candidate_revision() {
+    for inputs in [
+        "ref: HEAD^",
+        "ref: ${{ github.event.before }}",
+        "path: ${{ github.workspace }}",
+        "repository: attacker/example",
+    ] {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        fs::create_dir_all(workspace.path().join(".github/workflows")).expect("workflow directory");
+        fs::write(
+            workspace.path().join(".github/workflows/lint.yml"),
+            format!(
+                "name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0\n        with:\n          {inputs}\n      - run: just check-quality\n"
+            ),
+        )
+        .expect("workflow");
+        git(workspace.path(), &["init", "-q"]);
+        git(workspace.path(), &["add", "."]);
+
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("checkout"), "{inputs}: {error:#}");
+    }
+}
+
+#[test]
 fn reviewed_remote_and_repository_local_actions_are_accepted() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join(".github/workflows")).expect("workflow directory");

@@ -7,15 +7,16 @@ pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]
         || output_redirection_is_opaque(path, arguments)
         || is_objcopy_command(command) && (arguments_reference_surface(arguments) || final_destination_is_opaque(path, arguments))
         || match command {
-            "cp" | "cp.exe" | "install" | "install.exe" | "ln" | "ln.exe" | "mv" | "mv.exe" | "tee" | "tee.exe" | "truncate" | "truncate.exe" => {
+            "cp" | "cp.exe" | "install" | "install.exe" | "ln" | "ln.exe" | "mv" | "mv.exe" | "truncate" | "truncate.exe" => {
                 arguments_reference_surface(arguments) || final_destination_is_opaque(path, arguments)
             }
+            "tee" | "tee.exe" => tee_output_is_opaque(path, arguments),
             "copy" | "copy-item" | "move" | "move-item" | "set-content" | "add-content" | "out-file" => arguments_reference_surface(arguments),
             "brotli" | "brotli.exe" | "bunzip2" | "bunzip2.exe" | "bzip2" | "bzip2.exe" | "gzip" | "gzip.exe" | "gunzip" | "gunzip.exe" | "lz4" | "lz4.exe" | "pigz"
             | "pigz.exe" | "unlz4" | "unlz4.exe" | "unpigz" | "unpigz.exe" | "unxz" | "unxz.exe" | "unzstd" | "unzstd.exe" | "xz" | "xz.exe" | "zstd" | "zstd.exe" => {
                 compression_dispatch_is_opaque(command, arguments)
             }
-            "curl" | "curl.exe" => curl_output_targets_surface(arguments) || curl_remote_name_is_opaque(arguments),
+            "curl" | "curl.exe" => curl_output_is_opaque(path, arguments) || curl_remote_name_is_opaque(arguments),
             "dd" | "dd.exe" => arguments
                 .iter()
                 .filter_map(|argument| argument.strip_prefix("of="))
@@ -313,7 +314,7 @@ fn curl_remote_name_is_opaque(arguments: &[String]) -> bool {
     })
 }
 
-fn curl_output_targets_surface(arguments: &[String]) -> bool {
+fn curl_output_is_opaque(path: &str, arguments: &[String]) -> bool {
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
         let target = if matches!(argument.as_str(), "-o" | "--output") {
@@ -324,12 +325,29 @@ fn curl_output_targets_surface(arguments: &[String]) -> bool {
         } else {
             curl_short_output_target(argument, arguments, &mut index)
         };
-        if target.is_some_and(is_literal_execution_surface) {
+        if target.is_some_and(|target| destination_is_opaque(path, target)) {
             return true;
         }
         index += 1;
     }
     false
+}
+
+fn tee_output_is_opaque(path: &str, arguments: &[String]) -> bool {
+    let mut options_ended = false;
+    arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--help" && argument.as_str() != "--version")
+        .any(|argument| {
+            if argument == "--" {
+                options_ended = true;
+                return false;
+            }
+            if !options_ended && argument.starts_with('-') && argument != "-" {
+                return false;
+            }
+            destination_is_opaque(path, argument)
+        })
 }
 
 fn curl_short_output_target<'a>(argument: &'a str, arguments: &'a [String], index: &mut usize) -> Option<&'a str> {
@@ -430,12 +448,27 @@ mod tests {
             &["--output=script/check.sh", "file:///tmp/payload"],
             &["-o", ".github/workflows/ci.yml", "file:///tmp/payload"],
             &["-sSomise.toml", "file:///tmp/payload"],
+            &["--output", "$GITHUB_WORKSPACE/Justfile", "file:///tmp/payload"],
         ] {
             assert!(opaque("curl", arguments), "{arguments:?}");
             assert!(opaque("curl.exe", arguments), "{arguments:?}");
         }
         assert!(!opaque("curl", &["--output", "target/report.txt", "https://example.invalid/report"]));
         assert!(!opaque("curl", &["--output-dir", "Justfile", "https://example.invalid/report"]));
+    }
+
+    #[test]
+    fn every_tee_output_destination_fails_closed() {
+        for arguments in [
+            &["$GITHUB_WORKSPACE/Justfile", "target/report"][..],
+            &["target/report", "$destination"],
+            &["--append", "target/report", "Justfile"],
+            &["--", "-dynamic", "$GITHUB_WORKSPACE/Justfile"],
+        ] {
+            assert!(opaque("tee", arguments), "{arguments:?}");
+            assert!(opaque("tee.exe", arguments), "{arguments:?}");
+        }
+        assert!(!opaque("tee", &["--append", "target/report", "target/summary"]));
     }
 
     #[test]

@@ -60,8 +60,6 @@ pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
             | "npm.exe"
             | "npx"
             | "npx.exe"
-            | "perl"
-            | "perl.exe"
             | "php"
             | "php.exe"
             | "podman"
@@ -78,9 +76,15 @@ pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
             | "yarn.cmd"
             | "yarn.exe"
             | "yarn.ps1"
-    ) || is_python_package_installer(command)
+    ) || is_perl_interpreter(command)
+        || is_python_package_installer(command)
         || is_python_documentation_launcher(command)
         || is_tcl_interpreter(command)
+}
+
+fn is_perl_interpreter(command: &str) -> bool {
+    let command = command.strip_suffix(".exe").unwrap_or(command);
+    is_versioned_name(command, "perl")
 }
 
 pub(super) fn is_python_interpreter(command: &str) -> bool {
@@ -204,6 +208,16 @@ mod tests {
             assert!(is_unanalyzed_interpreter(command), "{command}");
         }
         for command in ["pipeline", "pip-preview", "pip3.", "pydoc-preview", "pydoc3."] {
+            assert!(!is_unanalyzed_interpreter(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn versioned_perl_interpreters_fail_closed_without_prefix_collisions() {
+        for command in ["perl", "perl.exe", "perl5", "perl5.38.2", "perl5.38.2.exe"] {
+            assert!(is_unanalyzed_interpreter(command), "{command}");
+        }
+        for command in ["perldoc", "perl-preview", "perl5."] {
             assert!(!is_unanalyzed_interpreter(command), "{command}");
         }
     }

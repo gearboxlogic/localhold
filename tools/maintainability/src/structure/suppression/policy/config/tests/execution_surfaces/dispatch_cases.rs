@@ -133,7 +133,12 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("dd if=quality/lint.data \"of=$GITHUB_WORKSPACE/Justfile\"\n", "opaque interpreter program"),
     ("iconv -f UTF-8 -t UTF-8 quality/lint.data -o Justfile\n", "opaque interpreter program"),
     ("curl --silent --output Justfile \"file://$PWD/quality/lint.data\"\n", "opaque interpreter program"),
+    (
+        "curl --output \"$GITHUB_WORKSPACE/Justfile\" \"file://$PWD/quality/lint.data\"\n",
+        "opaque interpreter program",
+    ),
     ("curl -O \"file://$PWD/quality/Justfile\"\n", "opaque interpreter program"),
+    ("cat quality/lint.data | tee \"$GITHUB_WORKSPACE/Justfile\" target/report\n", "opaque interpreter program"),
     ("cat quality/lint.data > Justfile\n", "opaque interpreter program"),
     ("cat quality/lint.data > \"$GITHUB_WORKSPACE/Justfile\"\n", "opaque interpreter program"),
     ("openssl list -provider-path quality -provider lint\n", "opaque interpreter program"),
@@ -163,6 +168,7 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("rake --rakefile quality/lint.txt\n", "opaque interpreter program"),
     ("RUBYOPT=-r./quality/lint gem --version\n", "lint-weakening environment channel"),
     ("PERL5OPT='-Iquality -Mlint' prove --version\n", "lint-weakening environment channel"),
+    ("perl5.38.2 quality/lint.pl\n", "opaque interpreter program"),
     ("ld.so quality/lint\n", "opaque interpreter program"),
     ("/lib64/ld-linux-x86-64.so.2 quality/lint\n", "opaque interpreter program"),
     ("go run quality/lint.go\n", "opaque interpreter program"),
@@ -184,4 +190,5 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
         "opaque interpreter program",
     ),
     ("m4 quality/lint.m4\n", "opaque interpreter program"),
+    ("autoconf quality/lint.m4\n", "opaque interpreter program"),
 ];

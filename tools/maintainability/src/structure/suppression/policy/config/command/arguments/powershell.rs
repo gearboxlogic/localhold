@@ -215,11 +215,28 @@ fn has_opaque_dispatch(source: &str) -> bool {
 }
 
 fn process_api_word(word: &str) -> bool {
-    matches!(word, "start-process" | "saps" | "system.diagnostics.process" | "diagnostics.process")
+    matches!(
+        word,
+        "start-process"
+            | "saps"
+            | "system.diagnostics.process"
+            | "diagnostics.process"
+            | "invoke-cimmethod"
+            | "icim"
+            | "invoke-wmimethod"
+            | "iwmi"
+            | "get-ciminstance"
+            | "gcim"
+            | "get-wmiobject"
+            | "gwmi"
+    )
 }
 
 fn script_block_type_word(word: &str) -> bool {
-    matches!(word, "scriptblock" | "system.management.automation.scriptblock")
+    matches!(
+        word,
+        "scriptblock" | "system.management.automation.scriptblock" | "wmi" | "wmiclass" | "cimclass" | "management.managementclass" | "system.management.managementclass"
+    )
 }
 
 fn dynamic_call_operator(characters: Peekable<Chars<'_>>) -> bool {
@@ -417,6 +434,29 @@ mod tests {
         assert!(!has_constructed_rust_arguments("Write-Output '& $tool $flag'"));
         assert!(!has_constructed_rust_arguments("# & $tool $flag"));
         assert!(!has_constructed_rust_arguments("@'\n& $tool $flag\n'@"));
+    }
+
+    #[test]
+    fn cim_and_wmi_process_dispatch_fail_closed() {
+        for source in [
+            "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$command}",
+            "icim -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$command}",
+            "Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList $command",
+            "iwmi -Class Win32_Process -Name Create -ArgumentList $command",
+            "(Get-CimInstance -ClassName Win32_Process).CimClass.CimClassMethods['Create']",
+            "(gwmi -Class Win32_Process).Create($command)",
+            "[wmiclass]'Win32_Process'::Create($command)",
+            "[System.Management.ManagementClass]'Win32_Process'::Create($command)",
+        ] {
+            assert!(has_constructed_rust_arguments(source), "{source}");
+        }
+        for source in [
+            "Write-Output 'Invoke-CimMethod -ClassName Win32_Process -MethodName Create'",
+            "# Invoke-WmiMethod -Class Win32_Process -Name Create",
+            "@'\n[wmiclass] Win32_Process :: Create\n'@",
+        ] {
+            assert!(!has_constructed_rust_arguments(source), "{source}");
+        }
     }
 
     #[test]

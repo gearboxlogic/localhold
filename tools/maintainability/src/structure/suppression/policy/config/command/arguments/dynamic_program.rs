@@ -4,7 +4,7 @@ pub(super) fn is_unanalyzed_path(path: &str) -> bool {
     Path::new(path).extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
         matches!(
             extension.to_ascii_lowercase().as_str(),
-            "cjs" | "js" | "jsx" | "lua" | "mjs" | "pl" | "pm" | "php" | "rb" | "swift" | "tcl" | "ts" | "tsx"
+            "cjs" | "js" | "jse" | "jsx" | "lua" | "mjs" | "pl" | "pm" | "php" | "rb" | "swift" | "tcl" | "ts" | "tsx" | "vbe" | "vbs" | "wsf" | "wsh"
         )
     })
 }
@@ -18,8 +18,12 @@ pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
             | "cmake.exe"
             | "ctest"
             | "ctest.exe"
+            | "cscript"
+            | "cscript.exe"
             | "deno"
             | "deno.exe"
+            | "dotnet"
+            | "dotnet.exe"
             | "gradle"
             | "gradle.bat"
             | "gradle.cmd"
@@ -50,6 +54,8 @@ pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
             | "ruby.exe"
             | "swift"
             | "swift.exe"
+            | "wscript"
+            | "wscript.exe"
             | "yarn"
             | "yarn.cmd"
             | "yarn.exe"
@@ -146,6 +152,16 @@ mod tests {
             "javaw",
             "javaw.exe",
         ] {
+            assert!(is_unanalyzed_interpreter(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn windows_script_host_and_dotnet_execution_fail_closed() {
+        for path in ["quality/lint.vbs", "quality/lint.VBE", "quality/lint.jse", "quality/lint.wsf", "quality/lint.wsh"] {
+            assert!(is_unanalyzed_path(path), "{path}");
+        }
+        for command in ["cscript", "cscript.exe", "wscript", "wscript.exe", "dotnet", "dotnet.exe"] {
             assert!(is_unanalyzed_interpreter(command), "{command}");
         }
     }

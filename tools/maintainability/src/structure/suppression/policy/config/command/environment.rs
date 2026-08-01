@@ -78,6 +78,10 @@ fn is_runtime_code_loading_environment_name(name: &str) -> bool {
             | "LD_LIBRARY_PATH"
             | "LD_PRELOAD"
             | "NODE_OPTIONS"
+            | "OPENSSL_CONF"
+            | "OPENSSL_CONF_INCLUDE"
+            | "OPENSSL_ENGINES"
+            | "OPENSSL_MODULES"
             | "PERL5OPT"
             | "PYTHONBREAKPOINT"
             | "PYTHONCASEOK"
@@ -148,6 +152,14 @@ mod tests {
     fn glibc_conversion_module_path_is_weakening() {
         assert!(is_weakening_environment_name("GCONV_PATH"));
         assert!(is_weakening_environment_name("gconv_path"));
+    }
+
+    #[test]
+    fn openssl_configuration_and_module_paths_are_weakening() {
+        for name in ["OPENSSL_CONF", "OPENSSL_CONF_INCLUDE", "OPENSSL_ENGINES", "OPENSSL_MODULES"] {
+            assert!(is_weakening_environment_name(name), "{name}");
+            assert!(is_weakening_environment_name(&name.to_ascii_lowercase()), "{name}");
+        }
     }
 
     #[test]

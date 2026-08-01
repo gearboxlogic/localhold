@@ -1,6 +1,7 @@
 #!/usr/bin/bash
 set -euo pipefail
 unset GCONV_PATH
+unset OPENSSL_CONF OPENSSL_CONF_INCLUDE OPENSSL_ENGINES OPENSSL_MODULES
 CDPATH=
 IFS=$' \t\n'
 export -n CDPATH IFS
@@ -82,8 +83,8 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=cd756b8a6039e1192bb0c95e7c42e66148f7b883f3b12662b31c70269165a468
-readonly reviewed_bootstrap_tests_sha256=d38a48d6a24eb3172f26775b72dfa846b1d736be7d38e9a767383db6ef51bd89
-readonly reviewed_gate_runner_sha256=9478d5e0ebbf33fbe14457d717bde5f7fd2343ed0ac6b28ff0fa64a631b79e36
+readonly reviewed_bootstrap_tests_sha256=780a316acc89c7f5f8ecdc74a1feedcc2068db73d7f386f1cc84ebf2ed1db6aa
+readonly reviewed_gate_runner_sha256=2188b73ca9b53c2b85927e6e2d61fb393da63b5c329bf07a2ced482e6e0968f8
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then
@@ -161,7 +162,7 @@ scrub_untrusted_environment() {
     while IFS= read -r name; do
         uppercase=${name^^}
         case "$uppercase" in
-            BASH_ENV | ENV | CDPATH | IFS | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
+            BASH_ENV | ENV | CDPATH | IFS | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
                 RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \
                 CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \
                 CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_* | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | TAR_OPTIONS)

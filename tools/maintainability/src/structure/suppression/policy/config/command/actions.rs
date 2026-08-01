@@ -6,14 +6,16 @@ use anyhow::{Context, Result, bail};
 
 use super::yaml::{leading_spaces, literal_scalar, yaml_key_value};
 
+const DOWNLOAD_ACTION: &str = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c";
 const REVIEWED_REMOTE_ACTIONS: &[&str] = &[
     "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
     "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
     "actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294",
-    "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+    DOWNLOAD_ACTION,
     "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     "jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d",
 ];
+const REVIEWED_DOWNLOAD_DESTINATIONS: &[&str] = &["dist"];
 
 pub(super) fn validate_local_actions(workspace: &Path, paths: &BTreeSet<String>) -> Result<()> {
     for metadata_path in paths.iter().filter(|path| is_action_metadata(path)) {
@@ -35,7 +37,8 @@ pub(super) fn validate_action_references(workspace: &Path, tracked_paths: &BTree
     if !path.starts_with(".github/workflows") && !is_action_metadata(path) {
         return Ok(());
     }
-    for line in source.lines() {
+    let lines = source.lines().collect::<Vec<_>>();
+    for (line_index, line) in lines.iter().copied().enumerate() {
         let Some((key, value)) = yaml_key_value(line) else {
             continue;
         };
@@ -48,9 +51,43 @@ pub(super) fn validate_action_references(workspace: &Path, tracked_paths: &BTree
             continue;
         }
         if REVIEWED_REMOTE_ACTIONS.contains(&reference.as_str()) {
+            if reference == DOWNLOAD_ACTION {
+                validate_download_destination(path, &lines, line_index)?;
+            }
             continue;
         }
         bail!("GitHub action reference {reference:?} in {path:?} is not in the reviewed exact-revision allowlist");
+    }
+    Ok(())
+}
+
+fn validate_download_destination(path: &str, lines: &[&str], uses_index: usize) -> Result<()> {
+    let uses_line = lines[uses_index];
+    let sequence_indentation = leading_spaces(uses_line);
+    let field_indentation = sequence_indentation + usize::from(uses_line.trim_start().starts_with("- ")) * 2;
+    let mut with_indentation = None;
+    let mut destinations = Vec::new();
+    for line in lines.iter().copied().skip(uses_index + 1) {
+        let content = line.trim_start();
+        if content.is_empty() || content.starts_with('#') {
+            continue;
+        }
+        let indentation = leading_spaces(line);
+        if indentation < field_indentation || indentation == sequence_indentation && content.starts_with("- ") {
+            break;
+        }
+        if indentation == field_indentation {
+            with_indentation = yaml_key_value(line).filter(|(key, value)| *key == "with" && value.trim().is_empty()).map(|_| indentation);
+            continue;
+        }
+        if with_indentation.is_some_and(|with| indentation > with)
+            && let Some(("path", value)) = yaml_key_value(line)
+        {
+            destinations.push(literal_scalar(value).with_context(|| format!("artifact download destination in {path:?} must be a literal scalar"))?);
+        }
+    }
+    if destinations.len() != 1 || !REVIEWED_DOWNLOAD_DESTINATIONS.contains(&destinations[0].as_str()) {
+        bail!("artifact download in {path:?} must use exactly one reviewed confined destination: {REVIEWED_DOWNLOAD_DESTINATIONS:?}");
     }
     Ok(())
 }
@@ -125,4 +162,31 @@ pub(super) fn is_action_metadata(path: &str) -> bool {
         Path::new(path).file_name().and_then(|name| name.to_str()).map(str::to_ascii_lowercase).as_deref(),
         Some("action.yml" | "action.yaml")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DOWNLOAD: &str = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c";
+
+    fn validate(source: &str) -> Result<()> {
+        validate_action_references(Path::new("."), &BTreeSet::new(), ".github/workflows/test.yml", source)
+    }
+
+    #[test]
+    fn artifact_downloads_require_the_reviewed_confined_destination() {
+        validate(&format!("steps:\n  - uses: {DOWNLOAD}\n    with:\n      name: payload\n      path: dist\n")).expect("confined artifact download");
+        for destination in [".", "./", "${{ github.workspace }}", ".github", "target"] {
+            let source = format!("steps:\n  - uses: {DOWNLOAD}\n    with:\n      name: payload\n      path: {destination}\n");
+            assert!(validate(&source).is_err(), "accepted {destination:?}");
+        }
+        assert!(validate(&format!("steps:\n  - uses: {DOWNLOAD}\n    with:\n      name: payload\n")).is_err());
+    }
+
+    #[test]
+    fn artifact_download_destination_cannot_be_overridden() {
+        let source = format!("steps:\n  - uses: {DOWNLOAD}\n    with:\n      path: dist\n      path: .\n");
+        assert!(validate(&source).is_err());
+    }
 }

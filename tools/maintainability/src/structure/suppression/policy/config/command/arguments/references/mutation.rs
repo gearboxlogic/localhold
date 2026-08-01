@@ -4,7 +4,7 @@ use super::path;
 
 pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]) -> bool {
     super::editor::is_command_capable(command)
-        || output_redirection_targets_surface(arguments)
+        || output_redirection_is_opaque(path, arguments)
         || is_objcopy_command(command) && (arguments_reference_surface(arguments) || final_destination_is_opaque(path, arguments))
         || match command {
             "cp" | "cp.exe" | "install" | "install.exe" | "ln" | "ln.exe" | "mv" | "mv.exe" | "tee" | "tee.exe" | "truncate" | "truncate.exe" => {
@@ -130,7 +130,16 @@ fn explicit_target_directories(arguments: &[String]) -> impl Iterator<Item = &st
 fn is_reviewed_dynamic_destination(path: &str, destination: &str) -> bool {
     // The bootstrap authenticates this complete test driver by SHA-256 before
     // executing it, so its isolated fixture destinations are reviewed as a set.
-    (path == "script/tests/test_maintainability_bootstrap.sh" && path::contains_dynamic_value(destination)) || REVIEWED_DYNAMIC_DESTINATIONS.contains(&(path, destination))
+    (path == "script/tests/test_maintainability_bootstrap.sh" && path::contains_dynamic_value(destination))
+        || workflow_runner_temp_destination(path, destination)
+        || REVIEWED_DYNAMIC_DESTINATIONS.contains(&(path, destination))
+}
+
+fn workflow_runner_temp_destination(path: &str, destination: &str) -> bool {
+    path.starts_with(".github/workflows/")
+        && ["$RUNNER_TEMP/", "${RUNNER_TEMP}/", "$env:RUNNER_TEMP/"]
+            .iter()
+            .any(|prefix| destination.strip_prefix(prefix).is_some_and(|suffix| path::normalize_literal(suffix).is_some()))
 }
 
 // These surfaces intentionally mutate installation or isolated test/runtime
@@ -141,7 +150,21 @@ const REVIEWED_DYNAMIC_DESTINATIONS: &[(&str, &str)] = &[
     ("script/install.sh", "$share_dir/localhold.example.toml"),
     ("script/install.sh", "$doc_dir/"),
     ("script/tests/test_claude_review.sh", "$test_root/bin/claude"),
+    ("script/tests/test_claude_review.sh", "$capture/args"),
+    ("script/tests/test_claude_review.sh", "$capture/child-pid"),
+    ("script/tests/test_claude_review.sh", "$capture/cwd"),
+    ("script/tests/test_claude_review.sh", "$capture/environment"),
+    ("script/tests/test_claude_review.sh", "$capture/ready"),
+    ("script/tests/test_claude_review.sh", "$capture/signal"),
+    ("script/tests/test_claude_review.sh", "$capture/temp-environment"),
+    ("script/tests/test_claude_review.sh", "$test_root/failure-output"),
+    ("script/tests/test_claude_review.sh", "$test_root/output"),
+    ("script/tests/test_claude_review.sh", "$test_root/signal-output"),
+    ("script/tests/test_claude_review.sh", "$timeout_marker"),
+    ("script/tests/test_claude_review.sh", "$TMPDIR/nested/payload"),
     (".github/workflows/gpu-release-gate.yml", "$RUNNER_TEMP/hold-cuda"),
+    (".github/workflows/gpu-release-gate.yml", "$GITHUB_ENV"),
+    (".github/workflows/gpu-release-gate.yml", "$GITHUB_OUTPUT"),
     (".github/workflows/gpu-release-gate.yml", "$moved"),
     (".github/workflows/gpu-release-gate.yml", "$dependency"),
 ];
@@ -321,14 +344,21 @@ fn arguments_reference_surface(arguments: &[String]) -> bool {
     arguments.iter().any(|argument| is_literal_execution_surface(argument))
 }
 
-fn output_redirection_targets_surface(arguments: &[String]) -> bool {
+fn output_redirection_is_opaque(path: &str, arguments: &[String]) -> bool {
     let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {
         let Some(target) = output_redirection_target(argument) else {
             continue;
         };
-        let target = if target.is_empty() { arguments.next().map_or("", String::as_str) } else { target };
-        if is_literal_execution_surface(target) {
+        let target = if target.is_empty() {
+            let Some(target) = arguments.next() else {
+                continue;
+            };
+            target
+        } else {
+            target
+        };
+        if destination_is_opaque(path, target) {
             return true;
         }
     }
@@ -382,6 +412,10 @@ mod tests {
 
         let changed = ["quality/lint.data".to_owned(), "$test_root/bin/Justfile".to_owned()];
         assert!(dispatch_is_opaque("script/tests/test_claude_review.sh", "ln", &changed));
+
+        let runner_temp = ["report".to_owned(), ">$RUNNER_TEMP/reports/check.txt".to_owned()];
+        assert!(!dispatch_is_opaque(".github/workflows/check.yml", "printf", &runner_temp));
+        assert!(dispatch_is_opaque("script/check.sh", "printf", &runner_temp));
     }
 
     #[test]
@@ -491,6 +525,8 @@ mod tests {
         assert!(opaque("cat", &["quality/lint.data", ">", "Justfile"]));
         assert!(opaque("printf", &["replacement", ">script/check.sh"]));
         assert!(opaque("printf", &["replacement", "2>>", "quality/check.py"]));
+        assert!(opaque("cat", &["quality/Justfile", ">", "$GITHUB_WORKSPACE/Justfile"]));
+        assert!(!opaque("printf", &["error", ">"]));
         assert!(!opaque("printf", &["report", ">", "target/report.txt"]));
     }
 }

@@ -134,6 +134,7 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("curl --silent --output Justfile \"file://$PWD/quality/lint.data\"\n", "opaque interpreter program"),
     ("curl -O \"file://$PWD/quality/Justfile\"\n", "opaque interpreter program"),
     ("cat quality/lint.data > Justfile\n", "opaque interpreter program"),
+    ("cat quality/lint.data > \"$GITHUB_WORKSPACE/Justfile\"\n", "opaque interpreter program"),
     ("openssl list -provider-path quality -provider lint\n", "opaque interpreter program"),
     ("openssl base64 -d -in quality/Justfile.b64 -out Justfile\n", "opaque interpreter program"),
     ("openssl req -engine lint -new\n", "opaque interpreter program"),

@@ -13,6 +13,7 @@ mod command;
 #[cfg(test)]
 mod tests;
 
+pub(super) use cargo::compare_cargo_lint_levels_previous_revision;
 use cargo::{scan_cargo_allows, tracked_manifests};
 pub(super) use command::reject_checked_in_weakening;
 #[cfg(test)]

@@ -4,7 +4,7 @@ use std::process::Stdio;
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
 
-use super::config::compare_clippy_previous_revision;
+use super::config::{compare_cargo_lint_levels_previous_revision, compare_clippy_previous_revision};
 use super::model::{CargoAllowance, CargoAllowanceFile, ClippyConfigurationFile, ClippySetting, Policy, SourceBaseline, SourceException, Status};
 use super::source::{added_exception_capacity, collect_baselines, compare_current, require_count_subset};
 use super::{POLICY_PATH, SuppressionPolicy, validate_model, validate_policy_relative, validate_revision};
@@ -44,7 +44,8 @@ impl SuppressionPolicy {
             *allowed_count = allowed_count.checked_add(count).context("lint-suppression previous-revision allowance overflow")?;
         }
         require_count_subset("previous revision", current_counts, &allowed)?;
-        compare_clippy_previous_revision(workspace, &revision, &previous.clippy_configuration.entries)
+        compare_clippy_previous_revision(workspace, &revision, &previous.clippy_configuration.entries)?;
+        compare_cargo_lint_levels_previous_revision(workspace, &revision)
     }
 
     fn compare_policy(&self, previous: &Self) -> Result<()> {

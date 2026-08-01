@@ -91,6 +91,72 @@ fn cargo_allow_scan_rejects_explicit_workspaces_outside_the_repository() {
 }
 
 #[test]
+fn cargo_enabled_lints_cannot_be_removed_or_weakened() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let manifest = workspace.path().join("Cargo.toml");
+    let write_manifest = |panic: Option<(&str, i64)>| {
+        let panic = panic.map_or_else(String::new, |(level, priority)| format!("panic={{level='{level}',priority={priority}}}\n"));
+        fs::write(
+            &manifest,
+            format!("[package]\nname='root'\nversion='0.1.0'\n[lints.rust]\nunsafe_code='forbid'\n[lints.clippy]\n{panic}"),
+        )
+        .expect("Cargo manifest");
+    };
+    write_manifest(Some(("warn", 1)));
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+    git(
+        workspace.path(),
+        &["-c", "user.name=LocalHold Test", "-c", "user.email=test@localhold.invalid", "commit", "-qm", "base"],
+    );
+    let output = Command::new("git")
+        .current_dir(workspace.path())
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read base revision");
+    assert!(output.status.success());
+    let revision = String::from_utf8(output.stdout).expect("UTF-8 revision");
+    let revision = revision.trim();
+
+    write_manifest(None);
+    assert!(compare_cargo_lint_levels_previous_revision(workspace.path(), revision).is_err());
+    write_manifest(Some(("allow", 1)));
+    assert!(compare_cargo_lint_levels_previous_revision(workspace.path(), revision).is_err());
+    write_manifest(Some(("deny", 0)));
+    assert!(compare_cargo_lint_levels_previous_revision(workspace.path(), revision).is_err());
+    write_manifest(Some(("deny", 1)));
+    compare_cargo_lint_levels_previous_revision(workspace.path(), revision).expect("stronger lint level with stable priority");
+}
+
+#[test]
+fn cargo_workspace_lint_inheritance_cannot_be_removed() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("member")).expect("member directory");
+    fs::write(
+        workspace.path().join("Cargo.toml"),
+        "[workspace]\nmembers=['member']\n[workspace.lints.clippy]\npanic='warn'\n",
+    )
+    .expect("workspace manifest");
+    let member = workspace.path().join("member/Cargo.toml");
+    fs::write(&member, "[package]\nname='member'\nversion='0.1.0'\n[lints]\nworkspace=true\n").expect("member manifest");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+    git(
+        workspace.path(),
+        &["-c", "user.name=LocalHold Test", "-c", "user.email=test@localhold.invalid", "commit", "-qm", "base"],
+    );
+    let output = Command::new("git")
+        .current_dir(workspace.path())
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read base revision");
+    let revision = String::from_utf8(output.stdout).expect("UTF-8 revision");
+
+    fs::write(&member, "[package]\nname='member'\nversion='0.1.0'\n").expect("weakened member manifest");
+    assert!(compare_cargo_lint_levels_previous_revision(workspace.path(), revision.trim()).is_err());
+}
+
+#[test]
 fn clippy_constraints_are_directional() {
     compare_clippy_value("threshold", &toml::Value::Integer(4), &ClippyConstraint::MaximumInteger { value: 5 }).expect("lower threshold");
     assert!(compare_clippy_value("threshold", &toml::Value::Integer(6), &ClippyConstraint::MaximumInteger { value: 5 },).is_err());

@@ -16,13 +16,16 @@ class TimeAbstractionTests(unittest.TestCase):
         self,
         source: str | None,
         with_failing_ripgrep: bool = False,
+        source_path: str = "src/example.rs",
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "src").mkdir()
             (root / "script").mkdir()
             if source is not None:
-                (root / "src/example.rs").write_text(source, encoding="utf-8")
+                path = root / source_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(source, encoding="utf-8")
             shutil.copy2(CHECK, root / "script/check-time-abstraction.sh")
             environment = os.environ.copy()
             if with_failing_ripgrep:
@@ -108,6 +111,28 @@ class TimeAbstractionTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("could not identify the inline test-module boundary", result.stderr)
+
+    def test_ignores_test_module_markers_inside_multiline_literals_and_comments(self) -> None:
+        result = self._run_check(
+            "const DOCUMENTATION: &str = r###\"\n"
+            "mod tests {\n"
+            "\"###;\n"
+            "/*\n"
+            "mod tests {\n"
+            "*/\n"
+            "fn production() {}\n"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_discovers_rust_sources_in_nested_directories(self) -> None:
+        result = self._run_check(
+            "fn production() { std::time::SystemTime::now(); }\n",
+            source_path="src/nested/example.rs",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("direct time access bypasses Clock", result.stderr)
 
     def test_rejects_workspace_without_rust_sources(self) -> None:
         result = self._run_check(None)

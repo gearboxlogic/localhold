@@ -127,8 +127,10 @@ rust_brace_delta() {
     done
 }
 
-shopt -s dotglob globstar nullglob
-source_files=(src/**/*.rs)
+source_files=()
+while IFS= read -r -d '' file; do
+    source_files+=("$file")
+done < <(/usr/bin/find src \( -type f -o -type l \) -name '*.rs' -print0)
 if (( ${#source_files[@]} == 0 )); then
     printf 'time abstraction check found no Rust sources\n' >&2
     exit 1
@@ -148,21 +150,12 @@ for file in "${source_files[@]}"; do
     in_tests=0
     test_depth=0
     line_number=0
+    block_comment_depth=0
+    normal_string=0
+    raw_string=0
+    raw_hashes=
     while IFS= read -r line || [[ -n "$line" ]]; do
         (( ++line_number ))
-        if [[ "$line" == 'mod tests {' ]]; then
-            if (( in_tests != 0 )); then
-                in_tests=2
-                break
-            fi
-            in_tests=1
-            test_depth=1
-            block_comment_depth=0
-            normal_string=0
-            raw_string=0
-            raw_hashes=
-            continue
-        fi
         if (( in_tests == 1 )); then
             rust_brace_delta "$line"
             test_depth=$(( test_depth + brace_delta ))
@@ -175,8 +168,16 @@ for file in "${source_files[@]}"; do
             fi
             continue
         fi
-        if (( in_tests == 0 )) && [[ $line =~ $pattern ]]; then
+        if (( block_comment_depth == 0 && normal_string == 0 && raw_string == 0 )) && [[ "$line" == 'mod tests {' ]]; then
+            in_tests=1
+            test_depth=1
+            continue
+        fi
+        if [[ $line =~ $pattern ]]; then
             printf -v matches '%s%s:%s\n' "$matches" "$line_number" "$line"
+        fi
+        if (( block_comment_depth > 0 || normal_string != 0 || raw_string != 0 )) || [[ $line == *'/*'* || $line == *'"'* ]]; then
+            rust_brace_delta "$line"
         fi
     done <"$file"
     if (( in_tests != 0 )); then

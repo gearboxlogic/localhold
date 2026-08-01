@@ -80,11 +80,14 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
 const TRUSTED_WORKFLOW: &str = ".github/workflows/trusted-maintainability.yml";
 const TRUSTED_MAINTAINABILITY_DISPATCH_LINE: &str = "          /usr/bin/bash \"$trusted_bootstrap\" --root \"$candidate_root\" --maintainability";
 const TRUSTED_MAINTAINABILITY_AUTHENTICATION: &[&str] = &[
+    "          workspace_root=$(/usr/bin/realpath -- \"$GITHUB_WORKSPACE\")",
     "          trusted_root=$(/usr/bin/realpath -- ../.trusted-gate)",
     "          candidate_root=$(/usr/bin/realpath -- .)",
     "          if [[ \"$trusted_root\" != \"$workspace_root/.trusted-gate\" || \"$candidate_root\" != \"$workspace_root/.candidate\" ]]; then",
+    "          readonly workspace_root trusted_root candidate_root",
     "          trusted_bootstrap=\"$trusted_root/script/check-maintainability-bootstrap.sh\"",
     "          if [[ ! -f \"$trusted_bootstrap\" || -L \"$trusted_bootstrap\" ]]; then",
+    "          readonly trusted_bootstrap",
     TRUSTED_MAINTAINABILITY_DISPATCH_LINE,
 ];
 const TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE: &str = "          /usr/bin/bash \"$protected_bootstrap\" --root \"$audit_root\" --dependency-unsafe";
@@ -94,10 +97,21 @@ const TRUSTED_WINDOWS_DEPENDENCY_AUTHENTICATION: &[&str] = &[
     "          protected_root=$(/usr/bin/realpath -- ../.trusted-gate)",
     "          audit_root=$(/usr/bin/realpath -- .)",
     "          if [[ \"$protected_root\" != \"$workspace_root/.trusted-gate\" || \"$audit_root\" != \"$workspace_root/.candidate\" ]]; then",
+    "          readonly workspace_root protected_root audit_root",
     "            windows_base_revision=$(git rev-parse --verify \"${remote_ref}^{commit}\")",
     "          protected_bootstrap=\"$protected_root/script/check-maintainability-bootstrap.sh\"",
     "          if [[ ! -f \"$protected_bootstrap\" || -L \"$protected_bootstrap\" ]]; then",
+    "          readonly protected_bootstrap",
     TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE,
+];
+const PROTECTED_DISPATCH_REFERENCES: &[&str] = &[
+    "workspace_root",
+    "trusted_root",
+    "candidate_root",
+    "trusted_bootstrap",
+    "protected_root",
+    "audit_root",
+    "protected_bootstrap",
 ];
 struct TrustedDispatchJob {
     header: &'static str,
@@ -128,7 +142,7 @@ fn without_reviewed_protected_dispatch(surface: &str, source: &str) -> String {
     }
     let protected_references_are_closed = source
         .lines()
-        .filter(|line| line.contains("trusted_bootstrap") || line.contains("protected_bootstrap"))
+        .filter(|line| PROTECTED_DISPATCH_REFERENCES.iter().any(|reference| line.contains(reference)))
         .all(|line| TRUSTED_DISPATCH_JOBS.iter().any(|job| job.authentication.contains(&line)));
     if !protected_references_are_closed {
         return source.to_owned();
@@ -160,7 +174,18 @@ fn reviewed_dispatch_job(source: &str, job: &str, runner: &str, authentication: 
         .position(|line| line.starts_with("  ") && !line.starts_with("    ") && !line.trim().is_empty())
         .map_or(lines.len(), |offset| start + 1 + offset);
     let body = &lines[start..end];
-    body.iter().filter(|line| **line == runner).count() == 1 && authentication.iter().all(|expected| body.iter().filter(|line| *line == expected).count() == 1)
+    if body.iter().filter(|line| **line == runner).count() != 1 {
+        return false;
+    }
+    let mut after = 0;
+    for expected in authentication {
+        let matches = body.iter().enumerate().filter(|(_, line)| *line == expected).map(|(index, _)| index).collect::<Vec<_>>();
+        if matches.len() != 1 || matches[0] < after {
+            return false;
+        }
+        after = matches[0] + 1;
+    }
+    true
 }
 
 fn reviewed_generated_program(surface: &str, source: &str, input: &str) -> bool {
@@ -285,6 +310,21 @@ mod tests {
             reviewed.replacen("runs-on: windows-latest", "runs-on: ubuntu-latest", 1),
             format!("{reviewed}\n          printf '%s\\n' \"$trusted_bootstrap\""),
             format!("{reviewed}\n          printf '%s\\n' \"$protected_bootstrap\""),
+            reviewed.replacen(
+                TRUSTED_MAINTAINABILITY_DISPATCH_LINE,
+                &format!("          candidate_root=$workspace_root/decoy\n{TRUSTED_MAINTAINABILITY_DISPATCH_LINE}"),
+                1,
+            ),
+            reviewed.replacen(
+                TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE,
+                &format!("          audit_root=$workspace_root/decoy\n{TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE}"),
+                1,
+            ),
+            reviewed.replacen(
+                &format!("{}\n{}", TRUSTED_MAINTAINABILITY_AUTHENTICATION[0], TRUSTED_MAINTAINABILITY_AUTHENTICATION[1]),
+                &format!("{}\n{}", TRUSTED_MAINTAINABILITY_AUTHENTICATION[1], TRUSTED_MAINTAINABILITY_AUTHENTICATION[0]),
+                1,
+            ),
         ] {
             assert_eq!(without_reviewed_protected_dispatch(TRUSTED_WORKFLOW, &changed), changed);
         }

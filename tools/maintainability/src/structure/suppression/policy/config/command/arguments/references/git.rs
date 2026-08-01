@@ -44,7 +44,7 @@ fn command_producing_subcommand(arguments: &[String]) -> bool {
         "clone" => clone_dispatch_is_opaque(&arguments[index + 1..]),
         "fetch" => upload_pack_selection_is_opaque(&arguments[index + 1..]),
         "init" => init_dispatch_is_opaque(&arguments[index + 1..]),
-        "difftool" | "filter-branch" | "mergetool" => true,
+        "checkout" | "difftool" | "filter-branch" | "mergetool" | "restore" | "switch" => true,
         "bisect" => arguments[index + 1..]
             .iter()
             .take_while(|argument| argument.as_str() != "--")
@@ -119,7 +119,6 @@ fn is_builtin_subcommand(subcommand: &str) -> bool {
             | "rev-parse"
             | "show"
             | "status"
-            | "switch"
             | "tag"
             | "worktree"
     )
@@ -211,6 +210,7 @@ mod tests {
         assert!(dispatch_is_opaque(&arguments(&["config", "--local", "core.hooksPath", "quality/hooks"])));
         assert!(dispatch_is_opaque(&arguments(&["checkout", "HEAD^", "--", "Justfile"])));
         assert!(dispatch_is_opaque(&arguments(&["restore", "--source", "HEAD^", "--", "Justfile"])));
+        assert!(dispatch_is_opaque(&arguments(&["switch", "--detach", "HEAD^"])));
         assert!(dispatch_is_opaque(&arguments(&["lint"])));
         assert!(!dispatch_is_opaque(&arguments(&["bisect", "start", "--", "run"])));
         assert!(!dispatch_is_opaque(&arguments(&["diff", "--", "difftool"])));

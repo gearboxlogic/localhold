@@ -2,11 +2,50 @@ pub(super) fn dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
     is_compiler_driver(command) && arguments.iter().any(|argument| is_dispatch_override(argument))
         || is_rust_compiler(command) && rust_compiler_dispatch_is_opaque(arguments)
         || is_linker_tool(command) && arguments.iter().any(|argument| linker_dispatch_override(argument))
+        || is_archive_tool(command) && archive_dispatch_is_opaque(arguments)
         || is_binutils_plugin_tool(command)
             && arguments
                 .iter()
                 .take_while(|argument| argument.as_str() != "--")
                 .any(|argument| binutils_plugin_option(argument))
+}
+
+fn is_archive_tool(command: &str) -> bool {
+    let unversioned = unversioned_tool_name(command);
+    unversioned == "ar" || unversioned.strip_suffix("ar").is_some_and(|prefix| prefix.ends_with('-'))
+}
+
+fn archive_dispatch_is_opaque(arguments: &[String]) -> bool {
+    let mut consumes_operand = false;
+    for argument in arguments {
+        if consumes_operand {
+            consumes_operand = false;
+            continue;
+        }
+        if matches!(argument.as_str(), "--output" | "--plugin" | "--target") {
+            consumes_operand = true;
+            continue;
+        }
+        if argument == "--" || argument.starts_with("--") {
+            continue;
+        }
+        if super::path::contains_dynamic_value(argument) {
+            return true;
+        }
+        let options = argument.strip_prefix('-').unwrap_or(argument);
+        if options.chars().all(is_archive_option) && options.chars().any(is_archive_operation) {
+            return options.contains('x');
+        }
+    }
+    false
+}
+
+const fn is_archive_operation(option: char) -> bool {
+    matches!(option, 'd' | 'm' | 'p' | 'q' | 'r' | 's' | 't' | 'x')
+}
+
+const fn is_archive_option(option: char) -> bool {
+    is_archive_operation(option) || matches!(option, 'a' | 'b' | 'c' | 'D' | 'f' | 'i' | 'l' | 'M' | 'N' | 'o' | 'O' | 'P' | 'S' | 'T' | 'u' | 'v' | 'V')
 }
 
 pub(super) fn rust_compiler_dispatch_is_opaque(arguments: &[String]) -> bool {
@@ -172,6 +211,21 @@ mod tests {
         assert!(!dispatch_is_opaque("nm", &arguments(&["--defined-only", "quality/input.o"])));
         assert!(!dispatch_is_opaque("ranlib", &arguments(&["quality/archive.a"])));
         assert!(!dispatch_is_opaque("jar", &arguments(&["--plugin=quality/lint.so"])));
+    }
+
+    #[test]
+    fn archive_extraction_and_dynamic_operations_fail_closed() {
+        for (command, values) in [
+            ("ar", &["x", "quality/payload.a"][..]),
+            ("ar.exe", &["-xv", "quality/payload.a"]),
+            ("llvm-ar-19", &["--output", "extracted", "x", "quality/payload.a"]),
+            ("x86_64-linux-gnu-ar", &["-X32_64", "x", "quality/payload.a"]),
+            ("gcc-ar", &["$operation", "quality/payload.a"]),
+        ] {
+            assert!(dispatch_is_opaque(command, &arguments(values)), "{command}: {values:?}");
+        }
+        assert!(!dispatch_is_opaque("ar", &arguments(&["t", "quality/payload.a"])));
+        assert!(!dispatch_is_opaque("ar", &arguments(&["p", "quality/payload.a", "member"])));
     }
 
     #[test]

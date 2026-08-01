@@ -878,6 +878,9 @@ mod tests {
             "unzip -oqd . target/payload.zip",
             "unzip -oq -d extracted -: target/payload.zip",
             "unzip -T target/payload.zip -d extracted",
+            "ar x quality/payload.a",
+            "llvm-ar --output extracted -xv quality/payload.a",
+            "gcc-ar $operation quality/payload.a",
         ] {
             assert_eq!(inputs(command), (Vec::new(), true), "{command}");
         }
@@ -889,6 +892,8 @@ mod tests {
             "unzip -oqdextracted target/payload.zip",
             "unzip -Ppassword -oq target/payload.zip -d extracted",
             "unzip -oq target/payload.zip -d $RUNNER_TEMP/extracted",
+            "ar t quality/payload.a",
+            "ar p quality/payload.a member",
         ] {
             assert_eq!(inputs(command), (Vec::new(), false), "{command}");
         }

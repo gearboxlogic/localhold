@@ -134,6 +134,14 @@ pub(super) const RUNNER_COMMAND_LINES: &[&str] = &[
     "\"$cargo_clippy_command\" clippy --manifest-path \"$maintainability_manifest\" --all-targets --locked -- -D warnings",
     "\"$cargo_command\" run --manifest-path \"$maintainability_manifest\" --locked -- check",
 ];
+pub(super) const INSTALL_ENVIRONMENT_LINES: &[&str] = &[
+    "build_dir=\"${LOCALHOLD_BUILD_DIR:-${CARGO_TARGET_DIR:-$repository_root/target}}\"",
+    "  LOCALHOLD_BUILD_DIR  Build output directory (defaults to CARGO_TARGET_DIR or ./target).",
+];
+pub(super) const INSTALL_COMMAND_LINES: &[&str] = &[
+    "  cpu) cargo build --release --locked --features reranker --target-dir \"$build_dir\" ;;",
+    "  cuda) cargo build --release --locked --features reranker-cuda --target-dir \"$build_dir\" ;;",
+];
 pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "unset GITHUB_ACTIONS GITHUB_EVENT_PATH GITHUB_SHA LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT LOCALHOLD_MAINTAINABILITY_BASE_REV",
     "fixture_parent=\"$repository_root/target/bootstrap-tests\"",
@@ -395,6 +403,7 @@ pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str
         "script/check-maintainability-bootstrap.sh" => BOOTSTRAP_ENVIRONMENT_LINES,
         "script/run-maintainability-gate.sh" => GATE_RUNNER_ENVIRONMENT_LINES,
         "script/run-source-safety.sh" => RUNNER_ENVIRONMENT_LINES,
+        "script/install.sh" => INSTALL_ENVIRONMENT_LINES,
         "script/tests/test_maintainability_bootstrap.sh" => BOOTSTRAP_TEST_ENVIRONMENT_LINES,
         "mise.toml" => MISE_ENVIRONMENT_LINES,
         ".github/workflows/ci.yml" => CI_TRUST_ENVIRONMENT_LINES,
@@ -423,6 +432,7 @@ pub(super) fn reviewed_dynamic_command_references_are_exact(path: &str, source: 
     let expected = match path {
         "script/run-maintainability-gate.sh" => GATE_RUNNER_COMMAND_LINES,
         "script/run-source-safety.sh" => RUNNER_COMMAND_LINES,
+        "script/install.sh" => INSTALL_COMMAND_LINES,
         ".github/workflows/trusted-maintainability.yml" => TRUSTED_GATE_COMMAND_LINES,
         _ => return false,
     };

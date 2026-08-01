@@ -412,6 +412,7 @@ fn reviewed_environment_scrubbers_are_exact() {
         "script/run-source-safety.sh",
         &RUNNER_ENVIRONMENT_LINES.join("\n")
     ));
+    assert!(scrubber_environment_references_are_exact("script/install.sh", &INSTALL_ENVIRONMENT_LINES.join("\n")));
     assert!(!scrubber_environment_references_are_exact(
         "script/check-maintainability-bootstrap.sh",
         &format!("{scrubber}RUSTFLAGS='-A warnings'\n"),
@@ -521,6 +522,10 @@ fn authenticated_dynamic_commands_require_the_exact_reviewed_lines() {
         &RUNNER_COMMAND_LINES.join("\n"),
     ));
     assert!(super::command::reviewed_dynamic_command_references_are_exact(
+        "script/install.sh",
+        &INSTALL_COMMAND_LINES.join("\n"),
+    ));
+    assert!(super::command::reviewed_dynamic_command_references_are_exact(
         ".github/workflows/trusted-maintainability.yml",
         &TRUSTED_GATE_COMMAND_LINES.join("\n"),
     ));
@@ -536,6 +541,17 @@ fn authenticated_dynamic_commands_require_the_exact_reviewed_lines() {
         "script/run-source-safety.sh",
         &format!("{}\ngate() {{\n    cargo test\n    true\n}}\ngate || true", RUNNER_COMMAND_LINES.join("\n")),
     ));
+}
+
+#[test]
+fn checked_in_installer_preserves_its_reviewed_build_directory_contract() {
+    let installer = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../script/install.sh");
+    let source = fs::read_to_string(installer).expect("read checked-in installer");
+
+    assert!(weakening_environment_for_surface("script/install.sh", &source));
+    assert!(scrubber_environment_references_are_exact("script/install.sh", &source));
+    assert!(weakening_token_for_surface("script/install.sh", &source));
+    assert!(super::command::reviewed_dynamic_command_references_are_exact("script/install.sh", &source));
 }
 
 #[test]

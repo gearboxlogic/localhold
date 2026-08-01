@@ -16,7 +16,10 @@ pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]
                 compression_dispatch_is_opaque(command, arguments)
             }
             "curl" | "curl.exe" => curl_output_targets_surface(arguments) || curl_remote_name_is_opaque(arguments),
-            "dd" | "dd.exe" => arguments.iter().filter_map(|argument| argument.strip_prefix("of=")).any(is_literal_execution_surface),
+            "dd" | "dd.exe" => arguments
+                .iter()
+                .filter_map(|argument| argument.strip_prefix("of="))
+                .any(|destination| destination_is_opaque(path, destination)),
             "iconv" | "iconv.exe" => iconv_output_is_opaque(path, arguments),
             "jar" | "jar.exe" => jar_dispatch_is_opaque(arguments),
             "openssl" | "openssl.exe" => openssl_output_is_opaque(path, arguments),
@@ -389,6 +392,7 @@ mod tests {
         assert!(opaque("install", &["quality/lint.data", "script/check.sh"]));
         assert!(opaque("sed", &["-i", "s/check/skip/", "mise.toml"]));
         assert!(opaque("dd", &["if=quality/lint.data", "of=.github/workflows/ci.yml"]));
+        assert!(opaque("dd", &["if=quality/lint.data", "of=$GITHUB_WORKSPACE/Justfile"]));
         assert!(opaque("patch", &["Justfile", "quality/lint.patch"]));
         assert!(opaque("patch", &["<", "quality/lint.patch"]));
         assert!(opaque("cp", &["quality/lint.data", "$destination"]));
@@ -400,6 +404,7 @@ mod tests {
         assert!(!opaque("cp", &["input.txt", "output.txt"]));
         assert!(!opaque("cp", &["-ttarget/output", "input.txt"]));
         assert!(!opaque("cp", &["input.txt", "/tmp/output.txt"]));
+        assert!(!opaque("dd", &["if=quality/lint.data", "of=target/output.txt"]));
     }
 
     #[test]

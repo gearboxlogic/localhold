@@ -49,7 +49,7 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
     let mut pending = surfaces.iter().cloned().collect::<Vec<_>>();
     while let Some(surface) = pending.pop() {
         let source = fs::read_to_string(workspace.join(&surface)).with_context(|| format!("read command execution surface {surface}"))?;
-        let reviewed_source = without_reviewed_protected_dispatch(&surface, &source);
+        let reviewed_source = without_reviewed_dispatch(&surface, &source);
         let (referenced_inputs, unresolved_input) = execution_inputs_for_surface(&surface, &reviewed_source);
         if unresolved_input {
             bail!("command execution surface {surface:?} uses an opaque interpreter program or makefile selection");
@@ -136,6 +136,24 @@ const TRUSTED_DISPATCH_JOBS: &[TrustedDispatchJob] = &[
         prefix_sha256: "4689ac5f093df5c90c713cede6584ea917eda2bf82a31b4345255ae16ee647a0",
     },
 ];
+
+pub(in crate::structure::suppression::policy::config) fn without_reviewed_dispatch(surface: &str, source: &str) -> String {
+    let source = without_reviewed_protected_dispatch(surface, source);
+    if surface != "script/install.sh" || !super::reviewed_dynamic_command_references_are_exact(surface, &source) {
+        return source;
+    }
+    source
+        .lines()
+        .map(|line| {
+            if super::INSTALL_COMMAND_LINES.contains(&line) {
+                format!("{}:", &line[..line.len() - line.trim_start().len()])
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 fn without_reviewed_protected_dispatch(surface: &str, source: &str) -> String {
     if surface != TRUSTED_WORKFLOW || !TRUSTED_DISPATCH_JOBS.iter().all(|job| reviewed_dispatch_job(source, job)) {

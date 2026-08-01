@@ -130,6 +130,7 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("rg --pre='sh quality/lint.txt' lint .\n", "opaque interpreter program"),
     ("cp quality/lint.data Justfile\n", "opaque interpreter program"),
     ("destination=Justfile; cp quality/lint.data \"$destination\"\n", "opaque interpreter program"),
+    ("dd if=quality/lint.data \"of=$GITHUB_WORKSPACE/Justfile\"\n", "opaque interpreter program"),
     ("iconv -f UTF-8 -t UTF-8 quality/lint.data -o Justfile\n", "opaque interpreter program"),
     ("curl --silent --output Justfile \"file://$PWD/quality/lint.data\"\n", "opaque interpreter program"),
     ("curl -O \"file://$PWD/quality/Justfile\"\n", "opaque interpreter program"),

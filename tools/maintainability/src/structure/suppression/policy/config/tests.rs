@@ -616,8 +616,13 @@ fn checked_in_installer_preserves_its_reviewed_build_directory_contract() {
 
     assert!(weakening_environment_for_surface("script/install.sh", &source));
     assert!(scrubber_environment_references_are_exact("script/install.sh", &source));
-    assert!(weakening_token_for_surface("script/install.sh", &source));
+    assert!(!weakening_token_for_surface("script/install.sh", &source));
     assert!(super::command::reviewed_dynamic_command_references_are_exact("script/install.sh", &source));
+    let reviewed = without_reviewed_dispatch("script/install.sh", &source);
+    assert!(!reviewed.contains("\"$cargo_command\" build"));
+
+    let tampered = source.replace("--features reranker --target-dir", "--features reranker --quiet --target-dir");
+    assert_eq!(without_reviewed_dispatch("script/install.sh", &tampered), tampered);
 }
 
 #[test]

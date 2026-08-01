@@ -21,6 +21,8 @@ use arguments::{
 };
 use environment::{is_case_insensitive_weakening_environment_assignment_name, is_weakening_environment_assignment_name, is_weakening_environment_name};
 use surfaces::execution_surfaces;
+#[cfg(test)]
+pub(super) use surfaces::without_reviewed_dispatch;
 
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "unset GCONV_PATH",
@@ -136,11 +138,12 @@ pub(super) const RUNNER_COMMAND_LINES: &[&str] = &[
 ];
 pub(super) const INSTALL_ENVIRONMENT_LINES: &[&str] = &[
     "build_dir=\"${LOCALHOLD_BUILD_DIR:-${CARGO_TARGET_DIR:-$repository_root/target}}\"",
+    "cargo_command=\"${CARGO:-cargo}\"",
     "  LOCALHOLD_BUILD_DIR  Build output directory (defaults to CARGO_TARGET_DIR or ./target).",
 ];
 pub(super) const INSTALL_COMMAND_LINES: &[&str] = &[
-    "  cpu) cargo build --release --locked --features reranker --target-dir \"$build_dir\" ;;",
-    "  cuda) cargo build --release --locked --features reranker-cuda --target-dir \"$build_dir\" ;;",
+    "  cpu) \"$cargo_command\" build --release --locked --features reranker --target-dir \"$build_dir\" ;;",
+    "  cuda) \"$cargo_command\" build --release --locked --features reranker-cuda --target-dir \"$build_dir\" ;;",
 ];
 pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "unset GITHUB_ACTIONS GITHUB_EVENT_PATH GITHUB_SHA LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT LOCALHOLD_MAINTAINABILITY_BASE_REV",

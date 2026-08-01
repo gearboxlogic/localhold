@@ -7,7 +7,8 @@ prefix="${LOCALHOLD_PREFIX:-$HOME/.local}"
 destdir="${DESTDIR:-}"
 profile="cpu"
 build_dir="${LOCALHOLD_BUILD_DIR:-${CARGO_TARGET_DIR:-$repository_root/target}}"
-readonly build_dir
+cargo_command="${CARGO:-cargo}"
+readonly build_dir cargo_command
 
 usage() {
   cat <<'EOF'
@@ -21,6 +22,7 @@ Builds LocalHold from the locked source tree and installs:
 Environment:
   DESTDIR           Optional packaging root prepended to installed paths.
   LOCALHOLD_PREFIX  Default prefix when --prefix is omitted (~/.local).
+  CARGO             Cargo executable to use (cargo).
   LOCALHOLD_BUILD_DIR  Build output directory (defaults to CARGO_TARGET_DIR or ./target).
 EOF
 }
@@ -72,7 +74,7 @@ need_one_of() {
   exit 1
 }
 
-need_command cargo
+need_command "$cargo_command"
 need_command cmake
 need_one_of "a C compiler" cc gcc clang
 need_one_of "a C++ compiler" c++ g++ clang++
@@ -88,8 +90,8 @@ fi
 
 cd -- "$repository_root"
 case "$profile" in
-  cpu) cargo build --release --locked --features reranker --target-dir "$build_dir" ;;
-  cuda) cargo build --release --locked --features reranker-cuda --target-dir "$build_dir" ;;
+  cpu) "$cargo_command" build --release --locked --features reranker --target-dir "$build_dir" ;;
+  cuda) "$cargo_command" build --release --locked --features reranker-cuda --target-dir "$build_dir" ;;
 esac
 
 bin_dir="${destdir}${prefix}/bin"

@@ -44,6 +44,13 @@ const JOB: &str = r#"  dependency-unsafe-linux:
           retention-days: 7
 "#;
 
+const QUALITY_JOB: &str = r"  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run CI gate
+        run: just check-quality
+";
+
 fn workflow() -> String {
     let windows_job = JOB
         .replace("dependency-unsafe-linux", "dependency-unsafe-windows")
@@ -58,7 +65,7 @@ fn workflow() -> String {
             "      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0\n        env:\n          GIT_CONFIG_COUNT: '1'\n          GIT_CONFIG_KEY_0: core.autocrlf\n          GIT_CONFIG_VALUE_0: 'false'",
             1,
         );
-    format!("name: CI\non: push\njobs:\n{JOB}{windows_job}")
+    format!("name: CI\non: push\njobs:\n{JOB}{windows_job}{QUALITY_JOB}")
 }
 
 #[test]
@@ -118,6 +125,25 @@ fn governed_gate_steps_are_unconditional_and_platform_bound() {
         1,
     );
     assert_rejected(&missing_default);
+}
+
+#[test]
+fn required_quality_gate_is_present_unconditional_and_failing() {
+    let accepted = workflow();
+    validate(".github/workflows/ci.yml", &accepted).expect("unconditional quality gate");
+
+    for altered in [
+        accepted.replacen("        run: just check-quality", "        if: false\n        run: just check-quality", 1),
+        accepted.replacen("        run: just check-quality", "        continue-on-error: true\n        run: just check-quality", 1),
+        accepted.replacen("  check:\n    runs-on:", "  check:\n    if: false\n    runs-on:", 1),
+        accepted.replacen("  check:\n    runs-on:", "  check:\n    continue-on-error: true\n    runs-on:", 1),
+        accepted.replacen("  check:\n    runs-on:", "  check:\n    needs: skipped-setup\n    runs-on:", 1),
+        accepted.replacen("      - name: Run CI gate\n        run: just check-quality\n", "", 1),
+        accepted.replacen("run: just check-quality", "run: true", 1),
+        accepted.replacen("name: Run CI gate", "name: Optional CI gate", 1),
+    ] {
+        assert_rejected(&altered);
+    }
 }
 
 #[test]

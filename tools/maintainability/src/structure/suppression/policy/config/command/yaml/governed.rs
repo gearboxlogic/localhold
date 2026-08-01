@@ -4,6 +4,8 @@ use anyhow::{Result, bail};
 
 use super::{is_block_scalar, leading_spaces, literal_scalar, yaml_key_value};
 
+mod quality;
+
 const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 const GATE_NAME: &str = "Run dependency unsafe gate";
 const GATE_ID: &str = "audit";
@@ -71,6 +73,7 @@ pub(super) fn validate(path: &str, source: &str) -> Result<()> {
     let mut job = None;
     let mut step = None;
     let mut governed_jobs = BTreeSet::new();
+    let mut quality_gate = quality::Tracker::default();
     for line in source.lines() {
         let indentation = leading_spaces(line);
         let content = line.trim_start();
@@ -78,7 +81,7 @@ pub(super) fn validate(path: &str, source: &str) -> Result<()> {
             continue;
         }
         if indentation == 2 && !is_sequence_item(content) {
-            finish_step(job.as_mut(), step.take(), &mut governed_jobs)?;
+            finish_step(job.as_mut(), step.take(), &mut governed_jobs, &mut quality_gate)?;
             finish_job(job.as_ref())?;
             job = yaml_key_value(line).map(|(name, _)| Job::new(name));
             continue;
@@ -110,19 +113,20 @@ pub(super) fn validate(path: &str, source: &str) -> Result<()> {
         };
         if indentation <= steps_indentation {
             active_job.steps_indentation = None;
-            finish_step(job.as_mut(), step.take(), &mut governed_jobs)?;
+            finish_step(job.as_mut(), step.take(), &mut governed_jobs, &mut quality_gate)?;
             continue;
         }
         if is_sequence_item(content) {
-            finish_step(job.as_mut(), step.take(), &mut governed_jobs)?;
+            finish_step(job.as_mut(), step.take(), &mut governed_jobs, &mut quality_gate)?;
             step = Some(Step::default());
         }
         if let Some(active_step) = &mut step {
             active_step.observe(line);
         }
     }
-    finish_step(job.as_mut(), step, &mut governed_jobs)?;
+    finish_step(job.as_mut(), step, &mut governed_jobs, &mut quality_gate)?;
     finish_job(job.as_ref())?;
+    quality_gate.finish()?;
     let expected_jobs = GOVERNED_JOBS.iter().map(|(name, _)| *name).collect::<BTreeSet<_>>();
     if governed_jobs != expected_jobs {
         bail!("checked-in GitHub YAML {WORKFLOW_PATH:?} must contain exactly one unconditional governed dependency-unsafe gate step in each reviewed platform job");
@@ -130,11 +134,12 @@ pub(super) fn validate(path: &str, source: &str) -> Result<()> {
     Ok(())
 }
 
-fn finish_step(job: Option<&mut Job>, step: Option<Step>, governed_jobs: &mut BTreeSet<&'static str>) -> Result<()> {
+fn finish_step(job: Option<&mut Job>, step: Option<Step>, governed_jobs: &mut BTreeSet<&'static str>, quality_gate: &mut quality::Tracker) -> Result<()> {
     let Some(step) = step else {
         return Ok(());
     };
     let job = job.expect("workflow step belongs to a job");
+    quality_gate.observe(job, &step)?;
     if governed_job(&job.name).is_some() {
         validate_governed_step(job, &step)?;
         job.completed_steps += 1;

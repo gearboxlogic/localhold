@@ -25,6 +25,8 @@ fn mutation_of_protected_check_inputs_fails_closed() {
     }
     assert!(opaque("sed", &["-i", "s/warn/allow/", "clippy.toml"]));
     assert!(opaque("link", &["quality/Justfile", "Justfile"]));
+    assert!(opaque("ln", &["-sf", "../Justfile", "quality/output"]));
+    assert!(opaque("ln", &["--symbolic", "../Justfile", "quality/output"]));
     assert!(opaque("unlink", &["Justfile"]));
     assert!(opaque("unlink", &["$destination"]));
     assert!(!opaque("link", &["--help"]));
@@ -33,6 +35,7 @@ fn mutation_of_protected_check_inputs_fails_closed() {
     assert!(!opaque("cp", &["-ttarget/output", "input.txt"]));
     assert!(!opaque("cp", &["input.txt", "/tmp/output.txt"]));
     assert!(!opaque("dd", &["if=quality/lint.data", "of=target/output.txt"]));
+    assert!(!opaque("ln", &["input.txt", "target/output.txt"]));
 }
 
 #[test]
@@ -46,9 +49,28 @@ fn reviewed_dynamic_destinations_are_path_specific() {
     let changed = ["quality/lint.data".to_owned(), "$test_root/bin/Justfile".to_owned()];
     assert!(dispatch_is_opaque("script/tests/test_claude_review.sh", "ln", &changed));
 
+    let reviewed = ["-s", "--", "$script_dir/test_claude_review.sh", "$test_root/bin/claude"].map(str::to_owned);
+    assert!(!dispatch_is_opaque("script/tests/test_claude_review.sh", "ln", &reviewed));
+    assert!(dispatch_is_opaque("script/check.sh", "ln", &reviewed));
+
     let runner_temp = ["report".to_owned(), ">$RUNNER_TEMP/reports/check.txt".to_owned()];
     assert!(!dispatch_is_opaque(".github/workflows/check.yml", "printf", &runner_temp));
     assert!(dispatch_is_opaque("script/check.sh", "printf", &runner_temp));
+}
+
+#[test]
+fn sponge_outputs_cannot_replace_execution_surfaces() {
+    for arguments in [
+        &["Justfile"][..],
+        &["-a", "script/check.sh"],
+        &["--append", "$destination"],
+        &["--", ".github/workflows/ci.yml"],
+    ] {
+        assert!(opaque("sponge", arguments), "{arguments:?}");
+        assert!(opaque("sponge.exe", arguments), "{arguments:?}");
+    }
+    assert!(!opaque("sponge", &["target/report"]));
+    assert!(!opaque("sponge", &[]));
 }
 
 #[test]

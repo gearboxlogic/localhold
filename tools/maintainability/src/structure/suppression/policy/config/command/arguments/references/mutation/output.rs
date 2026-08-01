@@ -5,10 +5,27 @@ pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]
         "find" | "find.exe" => find_output_is_opaque(path, arguments),
         "git" | "git.exe" => long_output_is_opaque(path, arguments, "--output", "--out"),
         "sort" | "sort.exe" => sort_output_is_opaque(path, arguments),
+        "sponge" | "sponge.exe" => sponge_output_is_opaque(path, arguments),
         _ if is_objcopy_command(command) => objcopy_section_output_is_opaque(path, arguments),
         _ if super::super::compiler::accepts_output_path(command) => compiler_output_is_opaque(path, arguments),
         _ => false,
     }
+}
+
+fn sponge_output_is_opaque(path: &str, arguments: &[String]) -> bool {
+    let mut accepts_options = true;
+    let mut destination = None;
+    for argument in arguments {
+        if accepts_options && argument == "--" {
+            accepts_options = false;
+        } else if accepts_options && matches!(argument.as_str(), "-a" | "--append") {
+        } else if accepts_options && matches!(argument.as_str(), "--help" | "--version") {
+            return false;
+        } else if accepts_options && argument.starts_with('-') || destination.replace(argument.as_str()).is_some() {
+            return true;
+        }
+    }
+    destination.is_some_and(|destination| destination_is_opaque(path, destination))
 }
 
 fn find_output_is_opaque(path: &str, arguments: &[String]) -> bool {

@@ -10,9 +10,10 @@ pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]
         || output::dispatch_is_opaque(path, command, arguments)
         || is_objcopy_command(command) && (arguments_reference_protected_inputs(arguments) || final_destination_is_opaque(path, arguments))
         || match command {
-            "cp" | "cp.exe" | "install" | "install.exe" | "ln" | "ln.exe" | "mv" | "mv.exe" | "truncate" | "truncate.exe" => {
+            "cp" | "cp.exe" | "install" | "install.exe" | "mv" | "mv.exe" | "truncate" | "truncate.exe" => {
                 arguments_reference_protected_inputs(arguments) || final_destination_is_opaque(path, arguments)
             }
+            "ln" | "ln.exe" => symbolic_link_is_opaque(path, command, arguments) || arguments_reference_protected_inputs(arguments) || final_destination_is_opaque(path, arguments),
             "link" | "unlink" => arguments_reference_protected_inputs(arguments) || final_destination_is_opaque(path, arguments),
             "tee" | "tee.exe" => tee_output_is_opaque(path, arguments),
             "copy" | "copy-item" | "move" | "move-item" | "set-content" | "add-content" | "out-file" => arguments_reference_protected_inputs(arguments),
@@ -41,6 +42,25 @@ pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]
             }
             _ => false,
         }
+}
+
+fn symbolic_link_is_opaque(path: &str, command: &str, arguments: &[String]) -> bool {
+    let creates_symbolic_link = arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
+        argument
+            .strip_prefix('-')
+            .filter(|options| !options.starts_with('-'))
+            .is_some_and(|options| options.contains('s'))
+            || argument
+                .split_once('=')
+                .map_or(argument.as_str(), |(option, _)| option)
+                .strip_prefix("--")
+                .is_some_and(|option| option.len() >= 2 && "symbolic".starts_with(option))
+    });
+    creates_symbolic_link && !is_reviewed_symbolic_link(path, command, arguments)
+}
+
+fn is_reviewed_symbolic_link(path: &str, command: &str, arguments: &[String]) -> bool {
+    path == "script/tests/test_claude_review.sh" && command == "ln" && arguments == ["-s", "--", "$script_dir/test_claude_review.sh", "$test_root/bin/claude"]
 }
 
 fn compression_dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {

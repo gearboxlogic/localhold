@@ -84,7 +84,7 @@ jobs:
       - name: Materialize and validate pinned CUDA runtime
         shell: bash
         run: |
-          available_kib="$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 {print $4}')"
+          read -r _ _ _ available_kib _ < <(df -Pk "$RUNNER_TEMP" | tail -n1)
           test "$available_kib" -ge 10485760
           python3 script/prepare-cuda-runtime.py \
             --cache-dir "$RUNNER_TEMP/localhold-cuda-source-cache" \
@@ -147,7 +147,7 @@ jobs:
           command -v zstd >/dev/null
           driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1)"
           test "$(printf '%s\n' 570.26 "$driver" | sort -V | head -n1)" = 570.26
-          available_kib="$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 {print $4}')"
+          read -r _ _ _ available_kib _ < <(df -Pk "$RUNNER_TEMP" | tail -n1)
           test "$available_kib" -ge 8388608
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

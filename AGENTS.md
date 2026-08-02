@@ -89,6 +89,8 @@ policy documentation.
   checks and push the fixes to the same pull request. The push requires another
   Codex review, even if an earlier commit received a thumbs-up. Do not request
   another Greptile review.
+- Use paginated review-thread reads. A first-page-only result is not evidence
+  that a pull request has no unresolved threads.
 - Reply to every review comment before resolving its thread. When addressed,
   summarize the fix and validation in the reply. When intentionally not
   addressed, explain the technical rationale in the reply. Resolve the thread

@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+readonly repository_root
 prefix="${LOCALHOLD_PREFIX:-$HOME/.local}"
 destdir="${DESTDIR:-}"
 profile="cpu"
-build_dir="${LOCALHOLD_BUILD_DIR:-${CARGO_TARGET_DIR:-$repo_root/target}}"
+build_dir="${LOCALHOLD_BUILD_DIR:-${CARGO_TARGET_DIR:-$repository_root/target}}"
+cargo_command="${CARGO:-cargo}"
+readonly build_dir cargo_command
 
 usage() {
   cat <<'EOF'
@@ -49,8 +52,7 @@ while (($# > 0)); do
 done
 
 case "$profile" in
-  cpu) features="reranker" ;;
-  cuda) features="reranker-cuda" ;;
+  cpu|cuda) ;;
   *) printf 'error: unsupported profile: %s\n' "$profile" >&2; exit 2 ;;
 esac
 
@@ -72,7 +74,7 @@ need_one_of() {
   exit 1
 }
 
-need_command "${CARGO:-cargo}"
+need_command "$cargo_command"
 need_command cmake
 need_one_of "a C compiler" cc gcc clang
 need_one_of "a C++ compiler" c++ g++ clang++
@@ -86,8 +88,11 @@ if [[ "$(uname -s)" == "Linux" ]]; then
   }
 fi
 
-cd "$repo_root"
-"${CARGO:-cargo}" build --release --locked --features "$features" --target-dir "$build_dir"
+cd -- "$repository_root"
+case "$profile" in
+  cpu) "$cargo_command" build --release --locked --features reranker --target-dir "$build_dir" ;;
+  cuda) "$cargo_command" build --release --locked --features reranker-cuda --target-dir "$build_dir" ;;
+esac
 
 bin_dir="${destdir}${prefix}/bin"
 share_dir="${destdir}${prefix}/share/localhold"

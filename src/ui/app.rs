@@ -2555,7 +2555,7 @@ mod tests {
         edit.content.value = "revised memory".into();
         edit.tags.value = r#"["alpha","beta"]"#.into();
         edit.importance.value = "0.90".into();
-        edit.expiry.value = "2026-08-01T12:00:00Z".into();
+        edit.expiry.value = (app.engine.now() + chrono::Duration::days(1_i64)).to_rfc3339();
         edit.metadata.value = r#"{"summary":"revised summary","agent_label":"operator"}"#.into();
         app.on_event(press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
         assert!(app.pending);

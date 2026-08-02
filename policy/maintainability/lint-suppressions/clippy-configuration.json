@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "id": "clippy.cognitive-complexity",
+      "key": "cognitive-complexity-threshold",
+      "constraint": {"kind": "maximum-integer", "value": 1},
+      "owner": "maintainers",
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "pull_request": "initial lint-suppression policy adoption",
+      "rationale": "A threshold of one intentionally makes every nontrivial exception visible and locally reasoned.",
+      "safety_invariant": "The threshold can only decrease; complexity may be exempted only at an exact governed source site.",
+      "alternatives_considered": "Using Clippy's default would hide widespread recovery debt instead of inventorying it.",
+      "sentinel": "strict Clippy and exact source-expectation inventory",
+      "evidence": "clippy.toml and the production, test, and benchmark source baselines",
+      "re_review_phase": "Phase 1 suppression audit"
+    },
+    {
+      "id": "clippy.doc-valid-idents",
+      "key": "doc-valid-idents",
+      "constraint": {"kind": "string-subset", "values": ["SQLite", "MCP", "ULID"]},
+      "owner": "maintainers",
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "pull_request": "initial lint-suppression policy adoption",
+      "rationale": "These are canonical project and protocol identifiers whose casing is part of their public spelling.",
+      "safety_invariant": "The allowlist may shrink but cannot gain a new identifier without a separately reviewed policy entry.",
+      "alternatives_considered": "Rewriting the identifiers would make documentation less accurate.",
+      "sentinel": "Clippy documentation linting",
+      "evidence": "Current maintained documentation and public API terminology",
+      "re_review_phase": "Phase 1 documentation and suppression audit"
+    },
+    {
+      "id": "clippy.excessive-nesting",
+      "key": "excessive-nesting-threshold",
+      "constraint": {"kind": "maximum-integer", "value": 4},
+      "owner": "maintainers",
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "pull_request": "initial lint-suppression policy adoption",
+      "rationale": "Four nested control levels is the reviewed maximum before a local exception must explain the invariant.",
+      "safety_invariant": "The threshold cannot rise and every remaining deeper site is governed explicitly.",
+      "alternatives_considered": "The default threshold would conceal known nesting debt.",
+      "sentinel": "strict Clippy and exact source-expectation inventory",
+      "evidence": "clippy.toml and source suppression baseline",
+      "re_review_phase": "Phase 1 suppression audit"
+    },
+    {
+      "id": "clippy.too-many-arguments",
+      "key": "too-many-arguments-threshold",
+      "constraint": {"kind": "maximum-integer", "value": 5},
+      "owner": "maintainers",
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "pull_request": "initial lint-suppression policy adoption",
+      "rationale": "Five parameters is the reviewed default boundary; larger APIs must carry exact evidence until redesigned.",
+      "safety_invariant": "The threshold cannot rise and broad signature suppression is never implicit.",
+      "alternatives_considered": "A higher global threshold would hide store-trait and handler coupling that the recovery plan must address.",
+      "sentinel": "strict Clippy and exact source-expectation inventory",
+      "evidence": "clippy.toml and source suppression baseline",
+      "re_review_phase": "Phase 1 API and suppression audit"
+    },
+    {
+      "id": "clippy.too-many-lines",
+      "key": "too-many-lines-threshold",
+      "constraint": {"kind": "maximum-integer", "value": 75},
+      "owner": "maintainers",
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "pull_request": "initial lint-suppression policy adoption",
+      "rationale": "Seventy-five lines keeps function-sized debt visible while structural file limits govern a separate concern.",
+      "safety_invariant": "The threshold cannot rise and each longer function must remain at its exact reviewed expectation.",
+      "alternatives_considered": "Relying only on file length would permit oversized functions inside smaller modules.",
+      "sentinel": "strict Clippy and exact source-expectation inventory",
+      "evidence": "clippy.toml and source suppression baseline",
+      "re_review_phase": "Phase 1 function decomposition"
+    },
+    {
+      "id": "clippy.type-complexity",
+      "key": "type-complexity-threshold",
+      "constraint": {"kind": "maximum-integer", "value": 120},
+      "owner": "maintainers",
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "pull_request": "initial lint-suppression policy adoption",
+      "rationale": "The reviewed ceiling keeps complex types visible without masking them at the crate level.",
+      "safety_invariant": "The threshold cannot rise and remaining exceptions must identify the exact type boundary.",
+      "alternatives_considered": "A broad allow or default threshold would obscure aliases that should be simplified.",
+      "sentinel": "strict Clippy and exact source-expectation inventory",
+      "evidence": "clippy.toml and source suppression baseline",
+      "re_review_phase": "Phase 1 type-boundary audit"
+    }
+  ]
+}

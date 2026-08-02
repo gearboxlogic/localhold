@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$repo_root"
+repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+readonly repository_root
+cd -- "$repository_root"
 
 say() { printf "\n==> %s\n" "$*"; }
 die() { printf "\nERROR: %s\n" "$*" >&2; exit 1; }
@@ -44,7 +45,7 @@ install_mise_tools() {
 
 sanity() {
   say "Sanity check"
-  # Use `mise x` to evaluate mise.toml env (CARGO_HOME, _.path, etc.)
+  # Use `mise x` to evaluate the tool-cache home and path from mise.toml.
   mise x -- rustc --version
   mise x -- cargo --version
   mise x -- just --version

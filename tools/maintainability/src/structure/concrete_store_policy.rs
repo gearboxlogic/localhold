@@ -1,14 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::env;
 use std::fs;
 use std::path::{Component, Path};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use super::classify::{FileMeasurement, Inventory};
 use super::manifest::PreviousRevision;
+use super::revision::maintainability_base_revision;
 use super::syntax::{ConcreteStoreSignatureSite, ProductionCfgContext};
 use crate::scan::syntax_fingerprint;
 
@@ -16,7 +16,6 @@ mod exposure;
 use exposure::{TraitExposureEvidence, public_reexport_evidence, trait_exposure_evidence, type_declaration_evidence};
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
-const BASE_REVISION_ENV: &str = "LOCALHOLD_MAINTAINABILITY_BASE_REV";
 const POLICY_PATH: &str = "policy/maintainability/concrete-stores.json";
 const UNRESTRICTED_COMPONENTS: [&str; 8] = [
     "composition",
@@ -249,15 +248,12 @@ impl ConcreteStorePolicy {
         current_paths: PathAttribution<'_>,
         previous_structure: Option<&PreviousRevision>,
     ) -> Result<()> {
-        let Ok(revision) = env::var(BASE_REVISION_ENV) else {
+        let Some(revision) = maintainability_base_revision()? else {
             return Ok(());
         };
-        if revision.is_empty() || revision.len() == 40 && revision.bytes().all(|byte| byte == b'0') {
-            return Ok(());
-        }
         validate_revision(&revision)?;
         let object = format!("{revision}:{POLICY_PATH}");
-        let output = Command::new("git")
+        let output = crate::structure::revision::git_command()
             .current_dir(workspace)
             .args(["show", "--no-ext-diff", &object])
             .output()
@@ -819,7 +815,7 @@ fn require_text(id: &str, label: &str, value: &str) -> Result<()> {
 }
 
 fn verify_initial_policy_revision(workspace: &Path, revision: &str, object: &str) -> Result<()> {
-    let status = Command::new("git")
+    let status = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["cat-file", "-e", &format!("{revision}^{{commit}}")])
         .stdout(Stdio::null())
@@ -829,7 +825,7 @@ fn verify_initial_policy_revision(workspace: &Path, revision: &str, object: &str
     if !status.success() {
         bail!("maintainability base revision {revision:?} is not a commit");
     }
-    let object_status = Command::new("git")
+    let object_status = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["cat-file", "-e", object])
         .stdout(Stdio::null())

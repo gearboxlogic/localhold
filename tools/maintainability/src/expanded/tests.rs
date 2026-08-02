@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs;
 use std::io::Cursor;
 use std::path::Path;
@@ -8,7 +9,10 @@ use tempfile::{TempDir, tempdir};
 use crate::scan::{SiteKind, SourceRange, UnsafeSite, scan_workspace};
 
 use super::dep_info::{is_audited_compiler_input, parse as parse_dep_info, parse_make_words};
-use super::{AuditLane, AuditOutput, Diagnostic, audit_environment_override, compare_diagnostics, is_root_manifest, parse_cargo_output, subtract_diagnostics, verify};
+use super::{
+    AuditLane, AuditOutput, Diagnostic, audit_environment_override, compare_diagnostics, is_root_manifest, parse_cargo_output, sanitize_compiler_environment_with_rustc,
+    subtract_diagnostics, validate_authenticated_override, verify_with_target_directory,
+};
 
 fn site(range: SourceRange) -> UnsafeSite {
     UnsafeSite {
@@ -70,9 +74,16 @@ fn compiler_environment_rejects_cargo_aliases_and_override_channels() {
         "cargo_alias_check",
         "RUSTFLAGS",
         "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTDOCFLAGS",
+        "CARGO_ENCODED_RUSTDOCFLAGS",
         "CARGO_BUILD_TARGET",
+        "CLIPPY_CONF_DIR",
+        "RUSTDOC",
         "RUSTC_WRAPPER",
+        "CARGO_BUILD_RUSTDOC",
+        "CARGO_BUILD_RUSTDOCFLAGS",
         "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
+        "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTDOCFLAGS",
         "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
         "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER",
     ] {
@@ -81,6 +92,28 @@ fn compiler_environment_rejects_cargo_aliases_and_override_channels() {
     for accepted in ["CARGO_BUILD_JOBS", "CARGO_TERM_COLOR", "RUST_BACKTRACE"] {
         assert!(!audit_environment_override(accepted.as_ref()), "{accepted}");
     }
+}
+
+#[test]
+fn compiler_environment_restores_only_the_authenticated_rustc_handoff() {
+    let mut command = Command::new("cargo");
+    command.env("RUSTC", "untrusted");
+    sanitize_compiler_environment_with_rustc(&mut command, Some(OsStr::new("/trusted/rustc")));
+    let rustc = command.get_envs().find(|(name, _)| *name == OsStr::new("RUSTC"));
+    assert_eq!(rustc, Some((OsStr::new("RUSTC"), Some(OsStr::new("/trusted/rustc")))));
+}
+
+#[test]
+fn compiler_overrides_must_match_the_authenticated_build_environment() {
+    let executable = std::env::current_exe().expect("current test executable");
+    let authenticated = executable.as_os_str();
+
+    assert!(validate_authenticated_override("TEST_COMPILER", None, None).is_ok());
+    assert!(validate_authenticated_override("TEST_COMPILER", Some(authenticated), Some(authenticated)).is_ok());
+    assert!(validate_authenticated_override("TEST_COMPILER", Some(OsStr::new("relative")), Some(OsStr::new("relative"))).is_err());
+    assert!(validate_authenticated_override("TEST_COMPILER", Some(authenticated), None).is_err());
+    assert!(validate_authenticated_override("TEST_COMPILER", None, Some(authenticated)).is_err());
+    assert!(validate_authenticated_override("TEST_COMPILER", Some(OsStr::new("different")), Some(authenticated)).is_err());
 }
 
 #[test]
@@ -297,13 +330,15 @@ fn benchmark_enabled_non_bench_target_diagnostics_are_audited() {
 }
 
 fn verify_fixture(fixture: &TempDir, sites: &[UnsafeSite]) -> anyhow::Result<()> {
+    let target_directory = fixture.path().join("target");
     let output = Command::new(env!("CARGO"))
         .current_dir(fixture.path())
+        .env("CARGO_TARGET_DIR", &target_directory)
         .args(["metadata", "--format-version=1", "--no-deps", "--locked"])
         .output()
         .expect("fixture Cargo metadata");
     assert!(output.status.success(), "fixture Cargo metadata failed: {}", String::from_utf8_lossy(&output.stderr));
-    verify(fixture.path(), sites, &output.stdout)
+    verify_with_target_directory(fixture.path(), sites, &output.stdout, Some(&target_directory))
 }
 
 fn append_root_manifest(fixture: &TempDir, source: &str) {

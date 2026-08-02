@@ -3,7 +3,7 @@ use syn::ext::IdentExt as _;
 use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 
-pub(super) fn unsupported_runnable_doctest(syntax: &syn::File) -> Option<&'static str> {
+pub fn unsupported_runnable_doctest(syntax: &syn::File) -> Option<&'static str> {
     let mut collector = DocCommentCollector::default();
     collector.visit_file(syntax);
 
@@ -21,7 +21,7 @@ pub(super) fn unsupported_runnable_doctest(syntax: &syn::File) -> Option<&'stati
     None
 }
 
-pub(super) fn is_doc_comment(attribute: &Attribute) -> bool {
+pub fn is_doc_comment(attribute: &Attribute) -> bool {
     doc_comment_source(attribute).is_some()
 }
 
@@ -61,6 +61,7 @@ fn doc_comment_source(attribute: &Attribute) -> Option<String> {
 struct DocCommentScanner {
     block_doc: bool,
     fence: Option<Fence>,
+    paragraph_open: bool,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -84,20 +85,41 @@ impl DocCommentScanner {
 
     fn scan_content(&mut self, content: &str) -> bool {
         let content = content.strip_prefix(' ').unwrap_or(content);
+        if self.fence.is_none() && !self.paragraph_open && markdown_indented_code(content) {
+            return true;
+        }
         let content = strip_markdown_container_prefixes(content);
+        if self.fence.is_none() && !self.paragraph_open && markdown_indented_code(content) {
+            return true;
+        }
         let trimmed = content.trim_start();
-        match fence_delimiter(trimmed) {
-            Some((delimiter, rest)) => update_fence(&mut self.fence, delimiter, rest),
-            None => false,
+        if trimmed.is_empty() {
+            if self.fence.is_none() {
+                self.paragraph_open = false;
+            }
+            return false;
+        }
+        if let Some((delimiter, rest)) = fence_delimiter(trimmed) {
+            self.paragraph_open = false;
+            update_fence(&mut self.fence, delimiter, rest)
+        } else {
+            if self.fence.is_none() {
+                self.paragraph_open = true;
+            }
+            false
         }
     }
+}
+
+fn markdown_indented_code(content: &str) -> bool {
+    content.starts_with('\t') || content.as_bytes().iter().take_while(|byte| **byte == b' ').count() >= 4
 }
 
 fn strip_markdown_container_prefixes(mut content: &str) -> &str {
     loop {
         let candidate = content.trim_start();
         if let Some(rest) = candidate.strip_prefix('>') {
-            content = rest.strip_prefix(' ').unwrap_or(rest);
+            content = strip_container_separator(rest);
         } else if let Some(rest) = strip_list_marker(candidate) {
             content = rest;
         } else if let Some(rest) = strip_footnote_definition(candidate) {
@@ -120,13 +142,17 @@ fn strip_list_marker(content: &str) -> Option<&str> {
             digits + 1
         }
     };
-    Some(content[marker_length..].trim_start())
+    Some(strip_container_separator(&content[marker_length..]))
 }
 
 fn strip_footnote_definition(content: &str) -> Option<&str> {
     let rest = content.strip_prefix("[^")?;
     let (label, content) = rest.split_once("]:")?;
-    (!label.is_empty() && !label.contains('[') && !label.contains(']')).then(|| content.trim_start())
+    (!label.is_empty() && !label.contains('[') && !label.contains(']')).then(|| strip_container_separator(content))
+}
+
+fn strip_container_separator(content: &str) -> &str {
+    content.strip_prefix(' ').or_else(|| content.strip_prefix('\t')).unwrap_or(content)
 }
 
 fn fence_delimiter(content: &str) -> Option<(Fence, &str)> {

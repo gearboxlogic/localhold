@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
+import io
 import json
 import shutil
 import subprocess
@@ -12,27 +12,15 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from types import ModuleType
 from unittest import mock
+
+from script import package_release as PACKAGE
+from script import prepare_cuda_runtime as PREPARE
+from script import validate_cuda_runtime as VALIDATE
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 REPOSITORY_ROOT = SCRIPT_DIR.parent
-
-
-def load_script(name: str) -> ModuleType:
-    """Load a hyphenated release script as a module."""
-    path = SCRIPT_DIR / name
-    spec = importlib.util.spec_from_file_location(name.removesuffix(".py").replace("-", "_"), path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-PREPARE = load_script("prepare-cuda-runtime.py")
-VALIDATE = load_script("validate-cuda-runtime.py")
-PACKAGE = load_script("package-release.py")
 
 
 class PrepareCudaRuntimeTests(unittest.TestCase):
@@ -146,6 +134,19 @@ class ValidateCudaRuntimeTests(unittest.TestCase):
         self.assertFalse(VALIDATE.is_accelerator_runtime_library("libcuda.so.1"))
         self.assertFalse(VALIDATE.is_accelerator_runtime_library("libc.so.6"))
 
+    def test_rejects_nested_runtime_libraries(self) -> None:
+        manifest = {
+            "files": [
+                {
+                    "path": "lib/nested/libfixture.so",
+                    "size": 1,
+                    "sha256": "0" * 64,
+                }
+            ]
+        }
+        with self.assertRaisesRegex(VALIDATE.ValidationError, "directly under lib"):
+            VALIDATE.declared_files(manifest)
+
     def test_validates_exact_inventory_and_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -177,6 +178,77 @@ class ValidateCudaRuntimeTests(unittest.TestCase):
 
 
 class PackageReleaseTests(unittest.TestCase):
+    def test_archive_permissions_are_normalized(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage = root / "localhold-v1-test"
+            (stage / "bin").mkdir(parents=True)
+            (stage / "docs").mkdir()
+            executable = stage / "bin/hold"
+            regular = stage / "docs/guide.md"
+            executable.write_bytes(b"fixture binary")
+            regular.write_text("guide\n", encoding="utf-8")
+            stage.chmod(0o700)
+            (stage / "bin").chmod(0o700)
+            (stage / "docs").chmod(0o700)
+            executable.chmod(0o700)
+            regular.chmod(0o600)
+
+            first_tar = io.BytesIO()
+            PACKAGE.write_tar(stage, first_tar, 1_700_000_000)
+            first_zip = root / "first.zip"
+            PACKAGE.write_zip(stage, first_zip, 1_700_000_000)
+
+            stage.chmod(0o755)
+            (stage / "bin").chmod(0o777)
+            (stage / "docs").chmod(0o755)
+            executable.chmod(0o755)
+            regular.chmod(0o666)
+            second_tar = io.BytesIO()
+            PACKAGE.write_tar(stage, second_tar, 1_700_000_000)
+            second_zip = root / "second.zip"
+            PACKAGE.write_zip(stage, second_zip, 1_700_000_000)
+
+            self.assertEqual(first_tar.getvalue(), second_tar.getvalue())
+            self.assertEqual(first_zip.read_bytes(), second_zip.read_bytes())
+            with tarfile.open(fileobj=io.BytesIO(first_tar.getvalue()), mode="r:") as archive:
+                modes = {member.name: member.mode for member in archive.getmembers()}
+            self.assertEqual(modes["localhold-v1-test"], 0o755)
+            self.assertEqual(modes["localhold-v1-test/bin/hold"], 0o755)
+            self.assertEqual(modes["localhold-v1-test/docs/guide.md"], 0o644)
+            with zipfile.ZipFile(first_zip) as archive:
+                modes = {info.filename: (info.external_attr >> 16) & 0o777 for info in archive.infolist()}
+            self.assertEqual(modes["localhold-v1-test/"], 0o755)
+            self.assertEqual(modes["localhold-v1-test/bin/hold"], 0o755)
+            self.assertEqual(modes["localhold-v1-test/docs/guide.md"], 0o644)
+
+    def test_streamed_tar_zst_preserves_failed_command_details(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "not-created.tar.zst"
+            expected = [
+                "zstd",
+                "-19",
+                "--threads=1",
+                "--no-progress",
+                "--quiet",
+                "--force",
+                "-o",
+                str(destination),
+            ]
+            compressor = mock.Mock(args=expected)
+            compressor.stdin = mock.Mock()
+            compressor.wait.return_value = 23
+            with (
+                mock.patch.object(PACKAGE, "write_tar"),
+                mock.patch.object(PACKAGE.subprocess, "Popen", return_value=compressor) as popen,
+                self.assertRaises(subprocess.CalledProcessError) as raised,
+            ):
+                PACKAGE.write_tar_zst(Path(temporary) / "stage", destination, 1_700_000_000)
+
+            popen.assert_called_once_with(expected, stdin=subprocess.PIPE)
+            self.assertEqual(raised.exception.returncode, 23)
+            self.assertEqual(raised.exception.cmd, expected)
+
     def test_streamed_tar_zst_is_reproducible(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -6,8 +6,8 @@ use tempfile::tempdir;
 
 use super::{
     LockedPackage, compare_dependency_packages, lint_setting, parse_root_dependency, verify_audited_target_path, verify_cargo_metadata_workspace, verify_cargo_target_paths,
-    verify_dependency_routes, verify_expansion_dependency_routes, verify_first_party_package_routes, verify_lint, verify_lint_precedence, verify_no_cargo_config,
-    verify_no_cargo_config_with_home,
+    verify_dependency_routes, verify_expansion_dependency_routes, verify_first_party_package_routes, verify_lint, verify_lint_precedence,
+    verify_maintainer_expansion_dependency_routes, verify_no_cargo_config, verify_no_cargo_config_with_home,
 };
 
 fn cargo(source: &str) -> toml::Value {
@@ -290,6 +290,8 @@ fn expansion_dependencies_cannot_be_renamed_or_impersonated() {
         ",
     );
     assert!(verify_expansion_dependency_routes(&accepted).is_ok());
+    assert!(verify_expansion_dependency_routes(&cargo("[dependencies]\nquote = '1'\n")).is_err());
+    assert!(verify_maintainer_expansion_dependency_routes(&cargo("[dependencies]\nanyhow = '1'\nquote = '1'\nsyn = '2'\n")).is_ok());
 
     for rejected in [
         "

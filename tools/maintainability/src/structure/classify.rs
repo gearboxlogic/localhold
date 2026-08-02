@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -76,7 +76,7 @@ pub fn scan_workspace(workspace: &Path, roots: &[String]) -> Result<Inventory> {
 
 pub fn scan_revision(workspace: &Path, revision: &str, roots: &[String]) -> Result<Inventory> {
     validate_revision(revision)?;
-    let output = Command::new("git")
+    let output = crate::structure::revision::git_command()
         .current_dir(workspace)
         .arg("ls-tree")
         .arg("-r")
@@ -98,7 +98,7 @@ pub fn scan_revision(workspace: &Path, revision: &str, roots: &[String]) -> Resu
 
 fn read_revision_manifest(workspace: &Path, revision: &str) -> Result<String> {
     let object = format!("{revision}:Cargo.toml");
-    let output = Command::new("git")
+    let output = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["show", "--no-ext-diff", &object])
         .output()
@@ -135,7 +135,7 @@ fn parse_tree_entries(listing: &[u8]) -> Result<Vec<TreeEntry>> {
 }
 
 fn read_tree_sources(workspace: &Path, entries: &[TreeEntry]) -> Result<BTreeMap<String, String>> {
-    let mut child = Command::new("git")
+    let mut child = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["cat-file", "--batch"])
         .stdin(Stdio::piped())

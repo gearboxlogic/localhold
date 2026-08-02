@@ -15,7 +15,7 @@ use syn::{
     ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemTraitAlias, ItemType, ItemUnion, ItemUse, Macro, StaticMutability, TraitItemConst, TraitItemFn, TraitItemType,
 };
 
-use self::documentation::{is_doc_comment, unsupported_runnable_doctest};
+pub use self::documentation::{is_doc_comment, unsupported_runnable_doctest};
 use self::files::{collect_optional as collect_optional_rust_files, collect_required as collect_rust_files};
 use self::policy::{
     contains_include_macro, contains_opaque_attribute, contains_path_attribute, contains_structural_ident, contains_unaudited_macro_syntax, generated_name_binding,
@@ -39,7 +39,16 @@ pub const REVIEWED_EXPANSION_PACKAGES: [&str; 14] = [
     "tokio",
     "tracing",
 ];
-pub const RESERVED_LOCAL_MACROS: [&str; 5] = ["concat_placeholders", "concat_with_sep", "define_memory_columns", "numbered_placeholders", "transport_test"];
+pub const REVIEWED_MAINTAINER_EXPANSION_PACKAGES: [&str; 3] = ["anyhow", "quote", "syn"];
+pub const RESERVED_LOCAL_MACROS: [&str; 7] = [
+    "concat_placeholders",
+    "concat_with_sep",
+    "define_memory_columns",
+    "numbered_placeholders",
+    "transport_test",
+    "visit_classified_node",
+    "visit_production_node",
+];
 
 pub fn reviewed_macro_expansion(macro_invocation: &Macro) -> bool {
     is_trusted_macro(macro_invocation)
@@ -47,6 +56,14 @@ pub fn reviewed_macro_expansion(macro_invocation: &Macro) -> bool {
 
 pub fn reviewed_attribute_expansion(attribute: &Attribute) -> bool {
     is_trusted_attribute(attribute)
+}
+
+pub fn untrusted_reviewed_expansion_import(item: &ItemUse) -> Option<String> {
+    untrusted_import(item)
+}
+
+pub fn is_reviewed_expansion_root(name: &str) -> bool {
+    is_reserved_expansion_root(name)
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]

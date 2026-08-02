@@ -6,19 +6,21 @@ use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
 use syn::{Attribute, ItemUse, Macro, Path, Token, UseTree};
 
-use super::{RESERVED_LOCAL_MACROS, REVIEWED_EXPANSION_PACKAGES};
+use super::{RESERVED_LOCAL_MACROS, REVIEWED_EXPANSION_PACKAGES, REVIEWED_MAINTAINER_EXPANSION_PACKAGES};
 
 const ASSEMBLY_MACROS: [&str; 4] = ["asm", "global_asm", "llvm_asm", "naked_asm"];
 const STANDALONE_ASSEMBLY_MACROS: [&str; 2] = ["core::arch::global_asm", "core::arch::naked_asm"];
-const BUILTIN_MACROS: [&str; 19] = [
+const BUILTIN_MACROS: [&str; 22] = [
     "assert",
     "assert_eq",
     "assert_ne",
     "cfg",
     "concat",
+    "compile_error",
     "debug_assert",
     "debug_assert_eq",
     "env",
+    "eprintln",
     "format",
     "format_args",
     "include_str",
@@ -27,6 +29,7 @@ const BUILTIN_MACROS: [&str; 19] = [
     "panic",
     "println",
     "stringify",
+    "unreachable",
     "vec",
     "write",
     "writeln",
@@ -81,21 +84,27 @@ pub(super) fn is_trusted_macro(macro_invocation: &Macro) -> bool {
 }
 
 fn is_trusted_macro_path(path: &str) -> bool {
+    if RESERVED_LOCAL_MACROS.contains(&path) {
+        return true;
+    }
     matches!(
         path,
-        "assert"
+        "Token"
+            | "assert"
             | "assert_eq"
             | "assert_ne"
+            | "anyhow::anyhow"
+            | "anyhow::bail"
+            | "bail"
             | "cfg"
             | "concat"
-            | "concat_placeholders"
-            | "concat_with_sep"
+            | "compile_error"
             | "criterion_group"
             | "criterion_main"
             | "debug_assert"
             | "debug_assert_eq"
-            | "define_memory_columns"
             | "env"
+            | "eprintln"
             | "format"
             | "format_args"
             | "futures::poll"
@@ -106,18 +115,23 @@ fn is_trusted_macro_path(path: &str) -> bool {
             | "json_schema"
             | "macro_rules"
             | "matches"
-            | "numbered_placeholders"
             | "ort::inputs"
+            | "option_env"
             | "panic"
             | "params"
             | "println"
+            | "parse_quote"
             | "prop_oneof"
             | "proptest"
+            | "quote"
+            | "quote::quote"
             | "rusqlite::params"
             | "schemars::json_schema"
             | "schemars::schema_for"
             | "serde_json::json"
             | "stringify"
+            | "syn::Token"
+            | "syn::parse_quote"
             | "tokio::join"
             | "tokio::pin"
             | "tokio::select"
@@ -126,7 +140,7 @@ fn is_trusted_macro_path(path: &str) -> bool {
             | "tracing::error"
             | "tracing::info"
             | "tracing::warn"
-            | "transport_test"
+            | "unreachable"
             | "vec"
             | "warn"
             | "write"
@@ -234,7 +248,7 @@ pub(super) fn is_trusted_attribute(attribute: &Attribute) -> bool {
 }
 
 pub(super) fn is_reserved_expansion_root(name: &str) -> bool {
-    REVIEWED_EXPANSION_PACKAGES.contains(&name)
+    REVIEWED_EXPANSION_PACKAGES.contains(&name) || REVIEWED_MAINTAINER_EXPANSION_PACKAGES.contains(&name)
 }
 
 pub(super) fn untrusted_import(item: &ItemUse) -> Option<String> {
@@ -253,7 +267,11 @@ pub(super) fn untrusted_import(item: &ItemUse) -> Option<String> {
 fn untrusted_named_import(source: &[String], binding: &str) -> Option<String> {
     let root = source.first().map(String::as_str).unwrap_or_default();
     let preserves_name = source.last().is_some_and(|name| name == binding);
-    if is_reserved_expansion_root(binding) && (source.len() != 1 || root != binding) {
+    if source == ["std", "env"] && binding == "env" {
+        return None;
+    }
+    let macro_named_for_its_package = source.len() == 2 && root == binding && preserves_name;
+    if is_reserved_expansion_root(binding) && (source.len() != 1 || root != binding) && !macro_named_for_its_package {
         return Some(format!("import {} as {binding} can shadow reviewed expansion package {binding}", source.join("::")));
     }
     let local = matches!(root, "crate" | "self" | "super" | "localhold");
@@ -262,16 +280,19 @@ fn untrusted_named_import(source: &[String], binding: &str) -> Option<String> {
         return (!(local && preserves_name || direct_local)).then(|| format!("import {} as {binding} impersonates a reviewed local macro", source.join("::")));
     }
     let expected = match binding {
+        "anyhow" | "bail" => Some("anyhow"),
         "criterion_group" | "criterion_main" => Some("criterion"),
         "poll" => Some("futures"),
         "assert_json_snapshot" => Some("insta"),
         "inputs" => Some("ort"),
         "prop_oneof" | "proptest" => Some("proptest"),
+        "quote" => Some("quote"),
         "tool" | "tool_router" => Some("rmcp"),
         "params" => Some("rusqlite"),
         "JsonSchema" | "json_schema" => Some("schemars"),
         "Deserialize" | "Serialize" => Some("serde"),
         "json" => Some("serde_json"),
+        "Token" | "parse_quote" => Some("syn"),
         "debug" | "error" | "info" | "warn" => Some("tracing"),
         name if BUILTIN_MACROS.contains(&name) => Some(""),
         name if BUILTIN_DERIVES.contains(&name) => Some(""),

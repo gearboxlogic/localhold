@@ -12,6 +12,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: b5eec7cdace44b80740b67b0a5f6696dd3f74be39fa8949a4349010dbfd99c93
   XDG_CACHE_HOME: ${{ github.workspace }}/.cache
 
 permissions:
@@ -77,7 +78,7 @@ jobs:
 
       - name: Validate release metadata and archive tooling
         run: |
-          python3 -m unittest discover -s script/tests
+          python3 script/run-python-tests.py
           python3 script/release.py validate
           tag="$(python3 script/release.py tag)"
           python3 script/package-release.py \
@@ -106,35 +107,40 @@ jobs:
     name: Dependency Unsafe (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    defaults:
+      run:
+        shell: /usr/bin/env -u BASH_ENV -u ENV -u GCONV_PATH -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}
     steps:
+      - name: Install reviewed Rust toolchain
+        env:
+          RUSTUP_DIST_SERVER: https://static.rust-lang.org
+          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup
+          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+        run: rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Cache Cargo registry and audit tool
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            .cache/localhold/cargo/registry
-            .cache/localhold/cargo/git
-            tools/dependency-unsafe/target
-            tools/maintainability/target
-          key: ${{ runner.os }}-dependency-unsafe-${{ hashFiles('Cargo.lock', 'tools/dependency-unsafe/Cargo.lock', 'tools/maintainability/Cargo.lock', 'mise.lock') }}
-          restore-keys: ${{ runner.os }}-dependency-unsafe-
-
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
-        with:
-          version: 2026.7.5
-
-      - name: Clear cached dependency audit evidence
-        run: rm -rf target/dependency-unsafe/actual-linux
-
       - name: Run dependency unsafe gate
         id: audit
         env:
+          BASH_ENV: ''
+          GCONV_PATH: ''
+          SHELLOPTS: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          LD_PRELOAD: ''
+          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}
           LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}
-        run: just maintainability
+          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup
+        run: |
+          if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
+            printf 'maintainability bootstrap differs from the workflow-reviewed digest\n' >&2
+            exit 1
+          fi
+          ./script/check-maintainability-bootstrap.sh --maintainability
 
       - name: Upload dependency audit evidence on failure
         if: failure() && steps.audit.outcome == 'failure'
@@ -214,24 +220,33 @@ jobs:
       - name: Build and package Windows preview archive
         run: |
           cargo build --release --locked --features reranker --target x86_64-pc-windows-msvc
+          binary=target/x86_64-pc-windows-msvc/release/hold.exe
+          "$binary" --version
+          "$binary" --help >/dev/null
           python script/release.py validate
           tag="$(python script/release.py tag)"
           python script/package-release.py \
             --tag "$tag" \
             --target x86_64-pc-windows-msvc \
-            --binary target/x86_64-pc-windows-msvc/release/hold.exe \
+            --binary "$binary" \
             --format zip \
             --output-dir "$RUNNER_TEMP/release"
 
-      - name: Smoke Windows preview archive
+      - name: Validate Windows preview archive layout
         shell: pwsh
         run: |
           $archive = Get-ChildItem "$env:RUNNER_TEMP/release/*.zip" | Select-Object -First 1
           Expand-Archive -Path $archive.FullName -DestinationPath "$env:RUNNER_TEMP/extracted"
           $archiveRoot = [IO.Path]::GetFileNameWithoutExtension($archive.Name)
           $binary = "$env:RUNNER_TEMP/extracted/$archiveRoot/bin/hold.exe"
-          & $binary --version
-          & $binary --help | Out-Null
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+            throw "Windows preview archive is missing bin/hold.exe"
+          }
+          Copy-Item -LiteralPath $binary -Destination ./hold-smoke.exe
+          ./hold-smoke.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "archived Windows binary version command failed" }
+          ./hold-smoke.exe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "archived Windows binary help command failed" }
 
   dependency-unsafe-windows:
     name: Dependency Unsafe (Windows)
@@ -239,53 +254,42 @@ jobs:
     timeout-minutes: 45
     defaults:
       run:
-        shell: bash
+        shell: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:ENV = $null; $env:GCONV_PATH = $null; $env:SHELLOPTS = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\Program Files\Git\bin\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE"'
     steps:
-      - name: Preserve LF line endings
-        run: git config --global core.autocrlf false
+      - name: Install reviewed Rust toolchain
+        env:
+          RUSTUP_DIST_SERVER: https://static.rust-lang.org
+          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup
+          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+        run: rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Cache Cargo registry and audit tool
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            .cache/localhold/cargo/registry
-            .cache/localhold/cargo/git
-            tools/dependency-unsafe/target
-            tools/maintainability/target
-          key: ${{ runner.os }}-dependency-unsafe-${{ hashFiles('Cargo.lock', 'tools/dependency-unsafe/Cargo.lock', 'tools/maintainability/Cargo.lock', 'mise.lock') }}
-          restore-keys: ${{ runner.os }}-dependency-unsafe-
-
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
-        with:
-          version: 2026.7.5
-
-      - name: Clear cached dependency audit evidence
-        run: rm -rf target/dependency-unsafe/actual-windows
-
       - name: Run dependency unsafe gate
         id: audit
         env:
+          BASH_ENV: ''
+          GCONV_PATH: ''
+          SHELLOPTS: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          LD_PRELOAD: ''
+          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}
           LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}
+          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup
         run: |
-          diagnostic_log="$RUNNER_TEMP/dependency-unsafe.log"
-          trap 'rm -f -- "$diagnostic_log"' EXIT
-          set +e
-          just maintainability 2>&1 | tee "$diagnostic_log"
-          status=${PIPESTATUS[0]}
-          set -e
-          if (( status != 0 )); then
-            diagnostic=$(tail -n 40 "$diagnostic_log")
-            diagnostic=${diagnostic//'%'/'%25'}
-            diagnostic=${diagnostic//$'\r'/'%0D'}
-            diagnostic=${diagnostic//$'\n'/'%0A'}
-            printf '::error title=Dependency unsafe gate failed::%s\n' "$diagnostic"
-            exit "$status"
+          if [[ "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256" != "$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256" ]]; then
+            printf 'maintainability bootstrap differs from the workflow-reviewed digest\n' >&2
+            exit 1
           fi
+          ./script/check-maintainability-bootstrap.sh --maintainability
 
       - name: Upload dependency audit evidence on failure
         if: failure() && steps.audit.outcome == 'failure'

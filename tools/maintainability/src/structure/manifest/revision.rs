@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
-use std::env;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+#[cfg(test)]
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -9,8 +11,7 @@ use super::model::StructureManifest;
 use super::validate::{validate_relative_rust_path, validate_revision};
 use crate::structure::MANIFEST_PATH;
 use crate::structure::classify::{self, Inventory};
-
-const BASE_REVISION_ENV: &str = "LOCALHOLD_MAINTAINABILITY_BASE_REV";
+use crate::structure::revision::maintainability_base_revision;
 
 #[derive(Debug)]
 pub(in crate::structure) struct PreviousRevision {
@@ -20,7 +21,8 @@ pub(in crate::structure) struct PreviousRevision {
 
 impl StructureManifest {
     pub fn compare_previous_revision(&self, workspace: &Path, current_inventory: &Inventory) -> Result<Option<PreviousRevision>> {
-        self.compare_previous_revision_from(workspace, env::var(BASE_REVISION_ENV).ok().as_deref(), current_inventory)
+        let revision = maintainability_base_revision()?;
+        self.compare_previous_revision_from(workspace, revision.as_deref(), current_inventory)
     }
 
     pub(super) fn compare_previous_revision_from(&self, workspace: &Path, revision: Option<&str>, current_inventory: &Inventory) -> Result<Option<PreviousRevision>> {
@@ -32,7 +34,7 @@ impl StructureManifest {
         }
         validate_revision(revision).context("validate maintainability base revision")?;
         let object = format!("{revision}:{MANIFEST_PATH}");
-        let output = Command::new("git")
+        let output = crate::structure::revision::git_command()
             .current_dir(workspace)
             .args(["show", "--no-ext-diff", &object])
             .output()
@@ -58,7 +60,7 @@ impl StructureManifest {
 }
 
 fn changed_rust_paths(workspace: &Path, revision: &str, roots: &[String]) -> Result<BTreeSet<String>> {
-    let diff = Command::new("git")
+    let diff = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["diff", "--no-ext-diff", "--no-renames", "--name-only", "-z", revision, "--"])
         .args(roots)
@@ -67,7 +69,7 @@ fn changed_rust_paths(workspace: &Path, revision: &str, roots: &[String]) -> Res
     if !diff.status.success() {
         bail!("git diff failed while listing changed structural paths");
     }
-    let untracked = Command::new("git")
+    let untracked = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["ls-files", "--others", "--exclude-standard", "-z", "--"])
         .args(roots)
@@ -95,7 +97,7 @@ fn collect_rust_paths(output: &[u8], paths: &mut BTreeSet<String>) -> Result<()>
 }
 
 fn verify_initial_policy_revision(workspace: &Path, revision: &str, object: &str) -> Result<()> {
-    let status = Command::new("git")
+    let status = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["cat-file", "-e", &format!("{revision}^{{commit}}")])
         .stdout(Stdio::null())
@@ -105,7 +107,7 @@ fn verify_initial_policy_revision(workspace: &Path, revision: &str, object: &str
     if !status.success() {
         bail!("maintainability base revision {revision} is not available");
     }
-    let status = Command::new("git")
+    let status = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["cat-file", "-e", object])
         .stdout(Stdio::null())

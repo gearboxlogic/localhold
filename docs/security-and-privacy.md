@@ -189,12 +189,12 @@ These paths are not contacted by a default running `hold` process:
 - The organization ruleset runs `.github/workflows/trusted-maintainability.yml`
   from the protected default branch, rather than from the proposed pull-request
   tree. The workflow checks out the exact commit that supplied its definition
-  as a separate trusted tree, installs that tree's maintainability and
-  dependency-audit implementations into the candidate workspace, and invokes
-  the reviewed command sequence directly. It never dispatches through the
-  candidate `Justfile` or candidate gate scripts. Changes to a gate
-  implementation are therefore evaluated by the previously protected version
-  and take effect only after normal review and merge.
+  as a separate trusted tree and runs its fixed dispatcher against a read-only
+  snapshot of the candidate. The trusted tools can inspect candidate changes to
+  gate and audit sources, but the workflow never executes the candidate
+  `Justfile`, audit binaries, or gate scripts. Changes to a gate implementation
+  are therefore evaluated by the previously protected version and take effect
+  only after normal review and merge.
 - The first-party source-safety gate parses Rust under `src/`, `tests/`, and
   `benches/` (and `examples/` when present) and compares executable unsafe
   sites, mutable statics, unsafe attributes, unsafe global assembly, and direct
@@ -217,9 +217,18 @@ These paths are not contacted by a default running `hold` process:
   or removal of that setting and pins the exact reviewed checker manifest and
   lockfile before any Cargo command can execute dependency build scripts.
   Checker dependency updates therefore require an intentional bootstrap digest
-  update in the same review. The bootstrap also rejects repository, ancestor,
-  and Cargo-home configuration and removes compiler, wrapper, linker, and
-  runner override environment variables before executing Cargo. Runnable rustdoc
+  update in the same review. Pull-request CI executes the trusted base checker
+  graph while auditing the proposed head, and binds that overlay to the exact
+  base-revision Git blobs; the proposed checker graph activates only after
+  merge. The bootstrap also rejects repository, ancestor, and Cargo-home
+  configuration and removes compiler, wrapper, linker, and runner override
+  environment variables before executing Cargo. It exposes only
+  fixed gate modes rather than arbitrary command delegation, requires Git and
+  core utilities from OS-owned directories, and authenticates Rustup 1.29.0
+  plus the complete Cargo/rustc/rustdoc/Clippy/rustfmt executable set against
+  official pinned Linux x86_64 or Windows x86_64 release digests. The separately
+  hash-pinned dispatcher, source runner, and bootstrap tests are all verified
+  before delegation. Runnable rustdoc
   modifiers, target-specific ignores, and class-only Rust fences are rejected
   unless the block is globally ignored or explicitly marked as a non-Rust
   language or `custom`; fences inside blockquotes, list items, and footnote

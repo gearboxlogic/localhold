@@ -10,6 +10,11 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::Value;
 
+const AUTHENTICATED_RUSTC_ENV: &str = "LOCALHOLD_MAINTAINABILITY_RUSTC";
+const AUTHENTICATED_CARGO_CLIPPY_ENV: &str = "LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY";
+const AUTHENTICATED_RUSTC_BUILD: Option<&str> = option_env!("LOCALHOLD_MAINTAINABILITY_RUSTC");
+const AUTHENTICATED_CARGO_CLIPPY_BUILD: Option<&str> = option_env!("LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY");
+
 use crate::scan::{SiteKind, UnsafeSite};
 
 use self::dep_info::{collect as collect_dep_info, verify as verify_dep_info};
@@ -42,6 +47,10 @@ struct AuditLane<'a> {
 }
 
 pub fn verify(workspace: &Path, sites: &[UnsafeSite], cargo_metadata: &[u8]) -> Result<()> {
+    verify_with_target_directory(workspace, sites, cargo_metadata, None)
+}
+
+fn verify_with_target_directory(workspace: &Path, sites: &[UnsafeSite], cargo_metadata: &[u8], target_directory: Option<&Path>) -> Result<()> {
     let workspace = fs::canonicalize(workspace).with_context(|| format!("resolve workspace {}", workspace.display()))?;
     let manifest_path = workspace.join("Cargo.toml");
     let manifest = fs::canonicalize(&manifest_path).with_context(|| format!("resolve workspace manifest {}", manifest_path.display()))?;
@@ -77,7 +86,7 @@ pub fn verify(workspace: &Path, sites: &[UnsafeSite], cargo_metadata: &[u8]) -> 
         {
             continue;
         }
-        let audit = run_audit_lane(&workspace, &manifest, &lane)?;
+        let audit = run_audit_lane(&workspace, &manifest, &lane, target_directory)?;
         let diagnostics = if matches!(lane.label, "unit-test" | "benchmark") {
             subtract_diagnostics(&audit.diagnostics, &normal_diagnostics)
         } else {
@@ -99,6 +108,7 @@ pub fn verify(workspace: &Path, sites: &[UnsafeSite], cargo_metadata: &[u8]) -> 
                 cargo_args: &["--examples"],
                 target_kinds: &["example"],
             },
+            target_directory,
         )?;
         compare_target_diagnostics(sites, &audit.diagnostics)?;
         dep_info.extend(audit.dep_info);
@@ -151,11 +161,10 @@ struct CargoTarget {
     kind: Vec<String>,
 }
 
-fn run_audit_lane(workspace: &Path, manifest: &Path, lane: &AuditLane<'_>) -> Result<AuditOutput> {
-    let mut command = Command::new(env!("CARGO"));
+fn run_audit_lane(workspace: &Path, manifest: &Path, lane: &AuditLane<'_>, target_directory: Option<&Path>) -> Result<AuditOutput> {
+    let mut command = cargo_clippy_command();
     command
         .current_dir(workspace)
-        .arg("clippy")
         .args(lane.cargo_args)
         .args(["--all-features", "--locked", "--message-format=json", "--"])
         .args([
@@ -166,6 +175,9 @@ fn run_audit_lane(workspace: &Path, manifest: &Path, lane: &AuditLane<'_>) -> Re
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
     sanitize_compiler_environment(&mut command);
+    if let Some(target_directory) = target_directory {
+        command.env("CARGO_TARGET_DIR", target_directory);
+    }
 
     let mut child = command.spawn().with_context(|| format!("start compiler-expanded {} audit", lane.label))?;
     let stdout = child
@@ -244,11 +256,49 @@ fn is_root_manifest(manifest: &Path, message: &Value) -> Result<bool> {
     Ok(reported == manifest)
 }
 
+pub fn cargo_clippy_command() -> Command {
+    let executable = env::var_os(AUTHENTICATED_CARGO_CLIPPY_ENV).unwrap_or_else(|| env!("CARGO").into());
+    let mut command = Command::new(executable);
+    command.arg("clippy");
+    command
+}
+
+pub fn validate_authenticated_compiler_environment() -> Result<()> {
+    validate_authenticated_override(
+        AUTHENTICATED_RUSTC_ENV,
+        env::var_os(AUTHENTICATED_RUSTC_ENV).as_deref(),
+        AUTHENTICATED_RUSTC_BUILD.map(OsStr::new),
+    )?;
+    validate_authenticated_override(
+        AUTHENTICATED_CARGO_CLIPPY_ENV,
+        env::var_os(AUTHENTICATED_CARGO_CLIPPY_ENV).as_deref(),
+        AUTHENTICATED_CARGO_CLIPPY_BUILD.map(OsStr::new),
+    )
+}
+
+fn validate_authenticated_override(name: &str, runtime: Option<&OsStr>, compiled: Option<&OsStr>) -> Result<()> {
+    match (runtime, compiled) {
+        (None, None) => Ok(()),
+        (Some(runtime), Some(compiled)) if runtime == compiled && Path::new(runtime).is_absolute() => Ok(()),
+        (Some(_), Some(_)) => bail!("{name} differs from the compiler override authenticated when the checker was built"),
+        (Some(_), None) => bail!("{name} was not authenticated when the checker was built"),
+        (None, Some(_)) => bail!("{name} authenticated at build time is missing at runtime"),
+    }
+}
+
 pub fn sanitize_compiler_environment(command: &mut Command) {
+    let authenticated_rustc = env::var_os(AUTHENTICATED_RUSTC_ENV);
+    sanitize_compiler_environment_with_rustc(command, authenticated_rustc.as_deref());
+}
+
+fn sanitize_compiler_environment_with_rustc(command: &mut Command, authenticated_rustc: Option<&OsStr>) {
     for (name, _) in env::vars_os() {
         if audit_environment_override(&name) {
             command.env_remove(name);
         }
+    }
+    if let Some(rustc) = authenticated_rustc {
+        command.env("RUSTC", rustc);
     }
 }
 
@@ -258,17 +308,23 @@ fn audit_environment_override(name: &OsStr) -> bool {
             name.as_str(),
             "RUSTFLAGS"
                 | "CARGO_ENCODED_RUSTFLAGS"
+                | "RUSTDOCFLAGS"
+                | "CARGO_ENCODED_RUSTDOCFLAGS"
                 | "CARGO_BUILD_TARGET"
                 | "CLIPPY_ARGS"
+                | "CLIPPY_CONF_DIR"
                 | "RUSTC"
+                | "RUSTDOC"
                 | "RUSTC_WRAPPER"
                 | "RUSTC_WORKSPACE_WRAPPER"
                 | "CARGO_BUILD_RUSTFLAGS"
+                | "CARGO_BUILD_RUSTDOCFLAGS"
                 | "CARGO_BUILD_RUSTC"
+                | "CARGO_BUILD_RUSTDOC"
                 | "CARGO_BUILD_RUSTC_WRAPPER"
                 | "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"
         ) || name.starts_with("CARGO_ALIAS_")
-            || name.starts_with("CARGO_TARGET_") && (name.ends_with("_RUSTFLAGS") || name.ends_with("_LINKER") || name.ends_with("_RUNNER"))
+            || name.starts_with("CARGO_TARGET_") && (name.ends_with("_RUSTFLAGS") || name.ends_with("_RUSTDOCFLAGS") || name.ends_with("_LINKER") || name.ends_with("_RUNNER"))
     })
 }
 

@@ -31,10 +31,10 @@ development archive, not this repository.
 
 First install the standard source-build requirements from
 [Installation](docs/installation.md). To run the repository's complete local
-check suite, also install [mise](https://mise.jdx.dev/); the bootstrap script
-uses it to install tools including the pinned Rust toolchain, `just`, nextest,
-cargo-deny, cargo-audit, cargo-machete, gitleaks, and the nightly rustfmt
-component used by the formatting gate.
+check suite, also install Python 3 and [mise](https://mise.jdx.dev/); the
+bootstrap script uses mise to install tools including the pinned Rust toolchain,
+`just`, nextest, cargo-deny, cargo-audit, cargo-machete, gitleaks, and the
+nightly rustfmt component used by the formatting gate.
 
 ```sh
 ./script/bootstrap.sh
@@ -57,7 +57,8 @@ Additional tools are workflow-specific:
   `just test-postgres-smoke`.
 - NVIDIA/CUDA dependencies are required only when validating the CUDA reranker
   profile.
-- Python 3 is required only for release validation and archive packaging.
+- Python 3 is required by `just check-quality` for the linear-time Rust source
+  scanner, and by release validation and archive packaging.
 
 Windows support is preview and is validated in GitHub Actions.
 macOS source builds are best-effort and are not release-gated; the complete
@@ -102,7 +103,18 @@ itself sets `build = false`, and an independent bootstrap check runs before
 Cargo to reject a physical checker `build.rs`, removal of that setting, and
 repository, ancestor, or Cargo-home configuration. The bootstrap also removes
 compiler, wrapper, linker, and runner override environment variables from the
-Cargo process.
+Cargo process. Required CI records the reviewed bootstrap `hashFiles` digest
+outside the script and compares it with the runner-computed value immediately
+before every validation or delegated gate execution. A bootstrap change
+therefore requires an explicit workflow digest update in the same reviewed
+diff. Delegation uses fixed source-safety, dependency-audit, and combined modes;
+the bootstrap cannot execute an arbitrary command or a PATH-selected task
+dispatcher. Its separate hash-pinned gate runner verifies Rustup 1.29.0 plus
+the Cargo, rustc, rustdoc, Clippy, and rustfmt executables against the official
+Linux x86_64 or Windows x86_64 release bytes before use. Git and core bootstrap
+utilities must resolve from OS-owned directories. On Windows, the bootstrap
+converts trusted native tool paths from the Git Bash namespace before passing
+them to maintainer binaries.
 Runnable Rust doctests are likewise rejected, including rustdoc-only modifiers,
 target-specific ignores, fences inside blockquotes or list items, and class-only
 fences that remain Rust unless marked `custom`; `custom` takes precedence over
@@ -255,6 +267,82 @@ fails while ordinary test-only unwraps remain governed by the separate test
 policy. Cargo metadata supplies the closed feature set, including implicit
 optional-dependency features, so adding or changing a Cargo feature must update
 the production matrix in the same pull request.
+
+Lint suppression is governed as explicit recovery debt, not as a convenient
+way to make a warning disappear. The checker inventories every source
+`expect` or `allow` attribute after the same cfg-aware production
+classification used by the structural audit. Source `allow` attributes, empty
+reasons, and macro-carried lint levels are rejected. Each existing
+`expect` is bound to its logical component, item hierarchy, scope, category,
+lint, reason, attribute syntax, and the complete normalized syntax of the item,
+file, argument, pattern, or anonymous target governed by that attribute.
+Byte-equivalent scopes share one ID with an exact occurrence ceiling. Moving
+an unchanged item during a same-component file split preserves that identity;
+changing its body, API, containing implementation, or target, moving it between
+components, broadening its level, or reusing a retired occurrence does not.
+Rust in maintainer tools has a zero-suppression policy: attribute-like fixture
+text is supported, but an actual `allow` or `expect` in tool source is rejected.
+
+The exact production, test, and benchmark recovery multisets live in the
+small, category-specific fragments under
+`policy/maintainability/lint-suppressions/`. Counts may only fall. A genuinely
+required new source exception must name its exact computed source ID and carry
+an owner, issue, pull request, rationale, safety invariant, alternatives,
+evidence, and re-review phase. Temporary exceptions additionally require a
+removal issue and phase. Existing exception evidence is append-only, retirement
+is irreversible, and a new exception authorizes only its stated occurrence
+count.
+
+Cargo-level `allow` settings are exhaustively matched against the reviewed
+allowance fragments in the same directory, including tool fixtures. Every
+allowance documents its substitute enforcement and sentinel. Existing fragment
+paths are immutable, while a new fragment may be appended before an existing
+fragment approaches the repository's file-size rail. `clippy.toml`
+keys are closed: numeric thresholds can only decrease, and string allowlists
+can only shrink. The root `clippy.toml` is the only supported Clippy
+configuration; nested alternatives and `CLIPPY_CONF_DIR` are rejected.
+Checked-in Cargo, rustc, rustdoc, and Clippy command surfaces reject `-A`, `-W`,
+`--allow`, `--warn`, `--force-warn`, `--cap-lints`, command-line Cargo
+configuration, injected crate attributes, and compiler or lint override
+environment channels. The
+bootstrap scrubber and its exact self-test may name those environment channels
+so they can remove and verify them, but they remain subject to the argument
+scan; no directory-wide command-surface exemption exists. In GitHub Actions,
+local actions must use the composite runtime so their commands remain directly
+auditable; Node and Docker action entrypoints and checked-in JavaScript command
+surfaces are unsupported. Workflow and action YAML may not use anchors,
+aliases, node tags, custom shell templates, or working-directory overrides to
+redirect an audited `run` command; multiline inline `run` scalars are
+unsupported. Audited `run` steps support Bash, `sh`, PowerShell, `pwsh`, and
+`cmd`; Python run bodies are unsupported until they have a language-aware
+command audit. Python filesystem writes require a statically safe literal
+destination. Existing release staging, temporary-fixture, and brand-generator
+writers are classified by exact whole-file digests in the protected checker;
+any change invalidates that classification and must first land as a reviewed
+checker ratchet. Shell continuations are normalized before command arguments are
+audited, and shell alias declarations or a dynamic command name may not hide
+command dispatch. Make
+include directives are unsupported; checked-in `.mk` command surfaces are
+audited directly. Unreviewed procedural attributes, derives, and function-like
+macros are also rejected because their expansions could emit hidden lint policy.
+The dependency jobs validate the reviewed mise configuration, lockfile,
+`Justfile`, bootstrap tests, and fixed gate runner before tool activation. They
+then use only the bootstrap's fixed dispatcher and digest-authenticated Rust
+tools; a PATH-selected `just`, Rustup, Cargo, compiler, Clippy, or rustfmt
+executable cannot satisfy the gate. The checker source set must match the
+checked-out revision immediately before compilation. The comparison base is
+derived from the runner
+event, the checkout must match the event head, and any configured base must
+match the event base, so versioned workflow changes cannot select the checked
+head or silently omit previous-revision enforcement.
+Ordinary agent changes must fix the warning or remove stale suppression debt;
+they must not edit policy evidence merely to make the gate pass.
+
+Inspect the cfg-classified source inventory without writing files:
+
+```bash
+cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- suppression-inventory
+```
 
 During the feature freeze:
 

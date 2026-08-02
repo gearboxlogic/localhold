@@ -151,6 +151,13 @@ fn current_platform() -> Result<&'static str> {
 }
 
 fn workspace_root() -> Result<PathBuf> {
+    if let Some(workspace) = env::var_os("LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT").filter(|value| !value.is_empty()) {
+        let workspace = PathBuf::from(workspace);
+        if !workspace.is_absolute() {
+            bail!("dependency unsafe audit root must be absolute");
+        }
+        return fs::canonicalize(&workspace).with_context(|| format!("resolve audit workspace {}", workspace.display()));
+    }
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace = manifest
         .parent()

@@ -1,0 +1,251 @@
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ManifestSelection<'a> {
+    None,
+    Selected(&'a str),
+    Opaque,
+}
+
+pub(super) fn dispatch_is_opaque(arguments: &[String]) -> bool {
+    if uses_script_mode(arguments) {
+        return true;
+    }
+    let Some(subcommand) = subcommand(arguments) else {
+        return false;
+    };
+    if !is_known_subcommand(subcommand) {
+        return true;
+    }
+    if !is_execution_capable(subcommand) {
+        return false;
+    }
+    if matches!(subcommand, "doc" | "d") && arguments.iter().any(|argument| argument == "--open") {
+        return true;
+    }
+    if subcommand == "install" {
+        return true;
+    }
+    if matches!(subcommand, "rustc" | "rustdoc") && rust_compiler_arguments_are_opaque(arguments) {
+        return true;
+    }
+
+    let manifest = selected_manifest(arguments);
+    if matches!(subcommand, "run" | "r") {
+        return !matches!(manifest, ManifestSelection::Selected(path) if is_reviewed_tool_manifest(path));
+    }
+    matches!(manifest, ManifestSelection::Opaque) || matches!(manifest, ManifestSelection::Selected(path) if !is_reviewed_execution_manifest(path))
+}
+
+fn is_known_subcommand(subcommand: &str) -> bool {
+    matches!(
+        subcommand,
+        "add"
+            | "audit"
+            | "bench"
+            | "build"
+            | "b"
+            | "check"
+            | "c"
+            | "clean"
+            | "clippy"
+            | "deny"
+            | "doc"
+            | "d"
+            | "fetch"
+            | "fix"
+            | "fmt"
+            | "generate-lockfile"
+            | "git-checkout"
+            | "help"
+            | "info"
+            | "init"
+            | "install"
+            | "locate-project"
+            | "login"
+            | "logout"
+            | "machete"
+            | "metadata"
+            | "new"
+            | "nextest"
+            | "outdated"
+            | "owner"
+            | "package"
+            | "pkgid"
+            | "publish"
+            | "read-manifest"
+            | "remove"
+            | "report"
+            | "run"
+            | "r"
+            | "rustc"
+            | "rustdoc"
+            | "search"
+            | "test"
+            | "t"
+            | "tree"
+            | "uninstall"
+            | "update"
+            | "vendor"
+            | "verify-project"
+            | "version"
+            | "yank"
+    )
+}
+
+fn uses_script_mode(arguments: &[String]) -> bool {
+    arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--")
+        .enumerate()
+        .any(|(index, argument)| argument == "-Zscript" || argument == "-Z=script" || argument == "-Z" && arguments.get(index + 1).is_some_and(|value| value == "script"))
+}
+
+fn rust_compiler_arguments_are_opaque(arguments: &[String]) -> bool {
+    arguments
+        .iter()
+        .position(|argument| argument == "--")
+        .is_some_and(|separator| super::compiler::rust_compiler_dispatch_is_opaque(&arguments[separator + 1..]))
+}
+
+fn subcommand(arguments: &[String]) -> Option<&str> {
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        if matches!(argument.as_str(), "--explain" | "--version" | "-V" | "--list" | "--help" | "-h") {
+            return None;
+        }
+        let consumes_operand = matches!(argument.as_str(), "--color" | "--config" | "--change-directory" | "-C" | "-Z");
+        if consumes_operand {
+            index += 2;
+            continue;
+        }
+        if argument.starts_with("--change-directory=") || argument.starts_with("-C") && argument.len() > 2 {
+            index += 1;
+            continue;
+        }
+        if argument.starts_with('+') || argument.starts_with('-') || argument.starts_with("--color=") || argument.starts_with("--config=") {
+            index += 1;
+            continue;
+        }
+        return Some(argument);
+    }
+    None
+}
+
+fn is_execution_capable(subcommand: &str) -> bool {
+    matches!(
+        subcommand,
+        "bench" | "build" | "b" | "check" | "c" | "clippy" | "doc" | "d" | "fix" | "install" | "nextest" | "package" | "publish" | "run" | "r" | "rustc" | "rustdoc" | "test" | "t"
+    )
+}
+
+fn selected_manifest(arguments: &[String]) -> ManifestSelection<'_> {
+    let mut manifest = ManifestSelection::None;
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
+        let candidate = if argument == "--manifest-path" {
+            index += 1;
+            arguments.get(index).map(String::as_str)
+        } else {
+            argument.strip_prefix("--manifest-path=")
+        };
+        if let Some(candidate) = candidate {
+            if !matches!(manifest, ManifestSelection::None) || candidate.is_empty() {
+                return ManifestSelection::Opaque;
+            }
+            manifest = ManifestSelection::Selected(candidate);
+        } else if argument == "--manifest-path" {
+            return ManifestSelection::Opaque;
+        }
+        index += 1;
+    }
+    manifest
+}
+
+fn is_reviewed_execution_manifest(path: &str) -> bool {
+    path == "Cargo.toml" || is_reviewed_tool_manifest(path)
+}
+
+fn is_reviewed_tool_manifest(path: &str) -> bool {
+    matches!(path, "tools/maintainability/Cargo.toml" | "tools/dependency-unsafe/Cargo.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dispatch_is_opaque;
+
+    fn arguments(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn standalone_manifest_execution_fails_closed() {
+        for values in [
+            &["test", "--manifest-path", "quality/helper/Cargo.toml"][..],
+            &["build", "--manifest-path=quality/helper/Cargo.toml"],
+            &["bench", "--manifest-path", "$MANIFEST"],
+            &["nextest", "run", "--manifest-path", "quality/helper/Cargo.toml"],
+        ] {
+            assert!(dispatch_is_opaque(&arguments(values)), "{values:?}");
+        }
+    }
+
+    #[test]
+    fn repository_and_reviewed_tool_manifests_remain_auditable() {
+        for values in [
+            &["test", "--workspace", "--locked"][..],
+            &["test", "--manifest-path", "Cargo.toml"],
+            &["clippy", "--manifest-path", "tools/maintainability/Cargo.toml"],
+            &["build", "--manifest-path=tools/dependency-unsafe/Cargo.toml"],
+            &["metadata", "--manifest-path", "quality/helper/Cargo.toml"],
+        ] {
+            assert!(!dispatch_is_opaque(&arguments(values)), "{values:?}");
+        }
+        assert!(dispatch_is_opaque(&arguments(&["run"])));
+        assert!(dispatch_is_opaque(&arguments(&["run", "--manifest-path", "Cargo.toml"])));
+        assert!(!dispatch_is_opaque(&arguments(&["run", "--manifest-path", "tools/maintainability/Cargo.toml"])));
+    }
+
+    #[test]
+    fn custom_rust_linkers_fail_closed() {
+        assert!(dispatch_is_opaque(&arguments(&["rustc", "--", "-C", "linker=quality/lint"])));
+        assert!(dispatch_is_opaque(&arguments(&["rustdoc", "--", "-Clinker=quality/lint"])));
+        assert!(!dispatch_is_opaque(&arguments(&["rustc", "--", "-C", "opt-level=2"])));
+    }
+
+    #[test]
+    fn install_sources_fail_closed() {
+        assert!(dispatch_is_opaque(&arguments(&["install", "--path", "quality/helper"])));
+        assert!(dispatch_is_opaque(&arguments(&["install", "ripgrep", "--locked"])));
+    }
+
+    #[test]
+    fn browser_launches_fail_closed() {
+        for values in [&["doc", "--open"][..], &["d", "--open"], &["+1.97.0", "doc", "--open"]] {
+            assert!(dispatch_is_opaque(&arguments(values)), "{values:?}");
+        }
+        assert!(!dispatch_is_opaque(&arguments(&["doc", "--no-deps"])));
+    }
+
+    #[test]
+    fn script_mode_fails_closed() {
+        for values in [
+            &["+nightly", "-Zscript", "quality/lint.rs"][..],
+            &["-Z", "script", "quality/lint.rs"],
+            &["-Z=script", "quality/lint.rs"],
+            &["+nightly", "-Zscript", "--", "quality/lint.rs"],
+        ] {
+            assert!(dispatch_is_opaque(&arguments(values)), "{values:?}");
+        }
+        assert!(!dispatch_is_opaque(&arguments(&["metadata", "--no-deps"])));
+        assert!(!dispatch_is_opaque(&arguments(&["test", "--", "-Zscript"])));
+    }
+
+    #[test]
+    fn unknown_external_subcommands_fail_closed() {
+        for values in [&["lint"][..], &["generated-helper", "--quiet"], &["$subcommand"]] {
+            assert!(dispatch_is_opaque(&arguments(values)), "{values:?}");
+        }
+        for values in [&["metadata", "--no-deps"][..], &["fmt", "--check"], &["deny", "--version"]] {
+            assert!(!dispatch_is_opaque(&arguments(values)), "{values:?}");
+        }
+    }
+}

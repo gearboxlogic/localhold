@@ -1,0 +1,320 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io::{BufRead, Cursor, Read, Write};
+use std::path::{Component, Path};
+use std::process::Stdio;
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use self::source::SourceScanner;
+use super::classify::Inventory;
+
+mod direct;
+mod modules;
+mod policy;
+mod source;
+mod targets;
+#[cfg(test)]
+mod tests;
+pub(in crate::structure::suppression) use direct::reject_direct_source_suppressions;
+pub(super) use policy::SuppressionPolicy;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceCategory {
+    Production,
+    Test,
+    Benchmark,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct SourceSuppression {
+    pub id: String,
+    pub path: String,
+    pub component: String,
+    pub item: String,
+    pub scope: String,
+    pub signature: Option<String>,
+    pub target: Option<String>,
+    pub category: SourceCategory,
+    pub level: String,
+    pub lint: String,
+    pub reason: String,
+    pub macro_carried: bool,
+    pub occurrence: usize,
+    pub fingerprint: String,
+}
+
+impl SourceSuppression {
+    fn stable_id(&self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"localhold-lint-suppression-v2");
+        for field in [
+            self.component.as_str(),
+            self.item.as_str(),
+            self.scope.as_str(),
+            self.signature.as_deref().unwrap_or("<no-signature>"),
+            self.target.as_deref().unwrap_or("<no-target>"),
+            self.category.as_str(),
+            self.level.as_str(),
+            self.lint.as_str(),
+            self.reason.as_str(),
+            self.fingerprint.as_str(),
+        ] {
+            digest.update(field.len().to_string().as_bytes());
+            digest.update(b":");
+            digest.update(field.as_bytes());
+        }
+        digest.update([u8::from(self.macro_carried)]);
+        format!("source.{:x}", digest.finalize())
+    }
+}
+
+impl SourceCategory {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Production => "production",
+            Self::Test => "test",
+            Self::Benchmark => "benchmark",
+        }
+    }
+}
+
+fn merge_source_category(categories: &mut BTreeSet<SourceCategory>, category: SourceCategory) -> bool {
+    if categories.contains(&SourceCategory::Production) {
+        return false;
+    }
+    if category == SourceCategory::Production {
+        categories.clear();
+        categories.insert(SourceCategory::Production);
+        return true;
+    }
+    categories.insert(category)
+}
+
+pub fn scan_workspace(workspace: &Path, inventory: &Inventory, component_paths: &BTreeMap<&str, &str>) -> Result<Vec<SourceSuppression>> {
+    let target_sources = modules::expand_target_sources(workspace, targets::root_package_target_sources(workspace)?, |path| component_paths.contains_key(path))?;
+    scan_with(inventory, component_paths, &target_sources, |path| {
+        let source_path = workspace.join(path);
+        fs::read_to_string(&source_path).with_context(|| format!("read suppression source {}", source_path.display()))
+    })
+}
+
+pub fn scan_revision(workspace: &Path, revision: &str, inventory: &Inventory, component_paths: &BTreeMap<&str, &str>) -> Result<Vec<SourceSuppression>> {
+    let targets::RevisionTargets { roots, rust_sources } = targets::revision_root_package_target_sources(workspace, revision)?;
+    let target_sources = modules::expand_revision_target_sources(workspace, revision, roots, &rust_sources, |path| component_paths.contains_key(path))?;
+    let sources = read_revision_sources(workspace, revision, &scan_paths(component_paths, &target_sources))?;
+    scan_with(inventory, component_paths, &target_sources, |path| {
+        sources
+            .get(path)
+            .cloned()
+            .with_context(|| format!("suppression source cache is missing revision path {path:?}"))
+    })
+}
+
+fn read_revision_sources(workspace: &Path, revision: &str, paths: &BTreeSet<String>) -> Result<BTreeMap<String, String>> {
+    if revision.bytes().any(|byte| matches!(byte, b'\r' | b'\n')) || paths.iter().any(|path| path.bytes().any(|byte| matches!(byte, b'\r' | b'\n'))) {
+        bail!("suppression revision object names cannot contain line breaks");
+    }
+    let mut child = crate::structure::revision::git_command()
+        .current_dir(workspace)
+        .args(["cat-file", "--batch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("start suppression revision source reader")?;
+    let mut input = child.stdin.take().context("suppression revision source reader has no input")?;
+    let mut requests = String::new();
+    for path in paths {
+        requests.push_str(revision);
+        requests.push(':');
+        requests.push_str(path);
+        requests.push('\n');
+    }
+    let writer = std::thread::spawn(move || input.write_all(requests.as_bytes()));
+    let output = child.wait_with_output();
+    let write_result = writer.join().map_err(|_| anyhow::Error::msg("suppression revision source request writer panicked"))?;
+    let output = output.context("wait for suppression revision source reader")?;
+    if !output.status.success() {
+        bail!(
+            "git cat-file failed while reading suppression revision sources: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    write_result.context("request suppression sources from revision")?;
+    parse_revision_sources(&output.stdout, revision, paths)
+}
+
+fn parse_revision_sources(output: &[u8], revision: &str, paths: &BTreeSet<String>) -> Result<BTreeMap<String, String>> {
+    let mut cursor = Cursor::new(output);
+    let mut sources = BTreeMap::new();
+    for path in paths {
+        let mut header = String::new();
+        cursor
+            .read_line(&mut header)
+            .with_context(|| format!("read suppression source header for {path:?} from revision"))?;
+        let fields = header.trim_end_matches('\n').split(' ').collect::<Vec<_>>();
+        let valid_object_id = fields
+            .first()
+            .is_some_and(|object_id| matches!(object_id.len(), 40 | 64) && object_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        if fields.len() != 3 || !valid_object_id || fields.get(1) != Some(&"blob") {
+            bail!("cannot read suppression source {path:?} from revision {revision}");
+        }
+        let size = fields[2]
+            .parse::<usize>()
+            .with_context(|| format!("parse suppression source size for {path:?} from revision"))?;
+        let mut bytes = vec![0; size];
+        cursor.read_exact(&mut bytes).with_context(|| format!("read suppression source {path:?} from revision"))?;
+        let mut terminator = [0];
+        cursor
+            .read_exact(&mut terminator)
+            .with_context(|| format!("read suppression source terminator for {path:?} from revision"))?;
+        if terminator != *b"\n" {
+            bail!("suppression source {path:?} from revision has an invalid batch terminator");
+        }
+        let source = String::from_utf8(bytes).with_context(|| format!("suppression source {path:?} from revision is not UTF-8"))?;
+        if sources.insert(path.clone(), source).is_some() {
+            bail!("suppression revision source listing repeats {path:?}");
+        }
+    }
+    if cursor.position() != output.len() as u64 {
+        bail!("suppression revision source reader returned unexpected trailing data");
+    }
+    Ok(sources)
+}
+
+pub(super) fn reject_tooling_suppressions(workspace: &Path) -> Result<()> {
+    let tools_root = fs::canonicalize(workspace.join("tools")).context("resolve maintainer-tool source root")?;
+    let tooling_paths = tooling_paths(workspace)?;
+    let manifests = tooling_paths
+        .iter()
+        .filter(|path| Path::new(path).file_name().and_then(|name| name.to_str()) == Some("Cargo.toml"))
+        .cloned()
+        .collect::<Vec<_>>();
+    verify_tooling_expansion_dependencies(workspace, &manifests)?;
+    let target_roots = targets::tooling_target_sources(workspace, &manifests)?;
+    let target_sources = modules::expand_target_sources(workspace, target_roots, |_| true)?;
+    let scan_paths = tooling_paths
+        .into_iter()
+        .filter(|path| Path::new(path).extension().and_then(|extension| extension.to_str()) == Some("rs"))
+        .chain(target_sources.categories.into_keys())
+        .collect::<BTreeSet<_>>();
+    for path in scan_paths {
+        let absolute = workspace.join(&path);
+        let metadata = fs::symlink_metadata(&absolute).with_context(|| format!("inspect maintainer-tool source {}", absolute.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("maintainer-tool Rust source must be a regular non-symlink file: {path:?}");
+        }
+        let canonical = fs::canonicalize(&absolute).with_context(|| format!("resolve maintainer-tool source {}", absolute.display()))?;
+        if !canonical.starts_with(&tools_root) {
+            bail!("maintainer-tool Rust source escapes the tools root: {path:?}");
+        }
+        let source = fs::read_to_string(&absolute).with_context(|| format!("read maintainer-tool source {}", absolute.display()))?;
+        let syntax = syn::parse_file(&source).with_context(|| format!("parse maintainer-tool source {path}"))?;
+        let sites = SourceScanner::scan(&path, "maintainer-tooling", SourceCategory::Production, &syntax)?;
+        if let Some(site) = sites.first() {
+            bail!(
+                "maintainer-tool Rust must remain suppression-free; remove source suppression {} from {:?}",
+                site.id,
+                site.path
+            );
+        }
+    }
+    Ok(())
+}
+
+fn verify_tooling_expansion_dependencies(workspace: &Path, manifests: &[String]) -> Result<()> {
+    for manifest in manifests {
+        let path = workspace.join(manifest);
+        let source = fs::read_to_string(&path).with_context(|| format!("read maintainer manifest {}", path.display()))?;
+        let cargo = toml::from_str(&source).with_context(|| format!("parse maintainer manifest {}", path.display()))?;
+        crate::check::verify_maintainer_expansion_dependency_routes(&cargo)
+            .with_context(|| format!("validate reviewed expansion dependencies in maintainer manifest {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn scan_with(
+    inventory: &Inventory,
+    component_paths: &BTreeMap<&str, &str>,
+    target_sources: &modules::ExpandedSources,
+    mut read_source: impl FnMut(&str) -> Result<String>,
+) -> Result<Vec<SourceSuppression>> {
+    let measurements = inventory.files.iter().map(|file| (file.path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    let mut syntax = BTreeMap::new();
+    for path in scan_paths(component_paths, target_sources) {
+        let source = read_source(&path)?;
+        let parsed = syn::parse_file(&source).with_context(|| format!("parse suppression source {path}"))?;
+        syntax.insert(path, parsed);
+    }
+    let external_targets = source::external_target_maps(&target_sources.relations, &syntax)?;
+    let mut sites = Vec::new();
+    for (&path, &component) in component_paths {
+        let measurement = measurements
+            .get(path)
+            .with_context(|| format!("suppression inventory path {path:?} has no structural measurement"))?;
+        let categories = target_sources.categories.get(path).cloned().unwrap_or_else(|| {
+            let category = if path.starts_with("benches/") {
+                SourceCategory::Benchmark
+            } else if path.starts_with("tests/") || measurement.physical_lines > 0 && measurement.production_lines == 0 {
+                SourceCategory::Test
+            } else {
+                SourceCategory::Production
+            };
+            BTreeSet::from([category])
+        });
+        let parsed = syntax.get(path).with_context(|| format!("suppression source cache is missing {path:?}"))?;
+        let targets = external_targets.get(path).cloned().unwrap_or_default();
+        for category in categories {
+            sites.extend(SourceScanner::scan_with_external_targets(path, component, category, parsed, &targets)?);
+        }
+    }
+    for (path, categories) in &target_sources.categories {
+        if component_paths.contains_key(path.as_str()) {
+            continue;
+        }
+        let parsed = syntax.get(path).with_context(|| format!("Cargo target suppression source cache is missing {path:?}"))?;
+        let targets = external_targets.get(path).cloned().unwrap_or_default();
+        let component = target_sources.target_component(path)?;
+        for &category in categories {
+            sites.extend(SourceScanner::scan_with_external_targets(path, &component, category, parsed, &targets)?);
+        }
+    }
+    sites.sort();
+    Ok(sites)
+}
+
+fn scan_paths(component_paths: &BTreeMap<&str, &str>, target_sources: &modules::ExpandedSources) -> BTreeSet<String> {
+    component_paths
+        .keys()
+        .copied()
+        .map(str::to_owned)
+        .chain(target_sources.categories.keys().cloned())
+        .collect()
+}
+
+fn tooling_paths(workspace: &Path) -> Result<Vec<String>> {
+    let output = crate::structure::revision::git_command()
+        .current_dir(workspace)
+        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "tools"])
+        .output()
+        .context("list maintainer-tool Rust sources")?;
+    if !output.status.success() {
+        bail!("git ls-files failed while listing maintainer-tool Rust sources");
+    }
+    let mut paths = Vec::new();
+    for raw in output.stdout.split(|byte| *byte == b'\0').filter(|path| !path.is_empty()) {
+        let path = std::str::from_utf8(raw).context("maintainer-tool source path is not UTF-8")?;
+        let relative = Path::new(path);
+        if relative.is_absolute() || !relative.starts_with("tools") || relative.components().any(|component| !matches!(component, Component::Normal(_))) {
+            bail!("maintainer-tool path must be normalized under tools/: {path:?}");
+        }
+        paths.push(path.to_owned());
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}

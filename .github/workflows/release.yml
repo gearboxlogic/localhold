@@ -110,10 +110,11 @@ jobs:
           $archive = Get-ChildItem dist/*.zip | Select-Object -First 1
           Expand-Archive -Path $archive.FullName -DestinationPath extracted
           $binary = "extracted/localhold-$env:GITHUB_REF_NAME-x86_64-pc-windows-msvc/bin/hold.exe"
-          $actual = & $binary --version
+          Copy-Item -LiteralPath $binary -Destination ./hold-smoke.exe
+          $actual = ./hold-smoke.exe --version
           $expected = "hold " + $env:GITHUB_REF_NAME.Substring(1)
           if ($actual -ne $expected) { throw "unexpected version: $actual" }
-          & $binary --help | Out-Null
+          ./hold-smoke.exe --help | Out-Null
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

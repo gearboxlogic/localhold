@@ -125,7 +125,7 @@ if grep -Fqx -- max "$args"; then
     exit 1
 fi
 
-mapfile -t temp_environment < "$test_root/capture/temp-environment"
+mapfile -t -- temp_environment < "$test_root/capture/temp-environment"
 if (( ${#temp_environment[@]} != 3 )); then
     printf 'Claude review wrapper did not set all temporary environment variables\n' >&2
     exit 1

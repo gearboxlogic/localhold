@@ -6,12 +6,15 @@ use self::classify::Inventory;
 use self::concrete_store_policy::{ConcreteStorePolicy, PathAttribution};
 use self::import_policy::ImportPolicy;
 use self::manifest::StructureManifest;
+use self::suppression::SuppressionPolicy;
 use self::visibility_policy::VisibilityPolicy;
 
 mod classify;
 mod concrete_store_policy;
 mod import_policy;
 mod manifest;
+mod revision;
+mod suppression;
 mod syntax;
 mod visibility_policy;
 
@@ -25,6 +28,7 @@ pub fn check(workspace: &Path) -> Result<()> {
     let manifest = StructureManifest::load(&workspace.join(MANIFEST_PATH))?;
     let import_policy = ImportPolicy::load(&workspace.join(IMPORT_POLICY_PATH))?;
     let concrete_store_policy = ConcreteStorePolicy::load(&workspace.join(CONCRETE_STORE_POLICY_PATH))?;
+    let suppression_policy = SuppressionPolicy::load(workspace)?;
     let visibility_policy = VisibilityPolicy::load(&workspace.join(VISIBILITY_POLICY_PATH))?;
     import_policy.require_baseline_commit(&manifest.baseline_commit)?;
     concrete_store_policy.require_baseline_commit(&manifest.baseline_commit)?;
@@ -35,6 +39,8 @@ pub fn check(workspace: &Path) -> Result<()> {
     let current_component_paths = manifest.current_component_paths()?;
     let canonical_current_paths = manifest.canonical_current_paths()?;
     let current_site_paths = manifest.current_site_paths()?;
+    let current_suppressions = suppression::scan_workspace(workspace, &current, &current_component_paths)?;
+    let current_suppression_counts = suppression_policy.compare_current(workspace, &current_suppressions)?;
     concrete_store_policy.compare_current(
         &current,
         PathAttribution::with_lineage(&current_component_paths, &canonical_current_paths, &current_site_paths),
@@ -67,7 +73,8 @@ pub fn check(workspace: &Path) -> Result<()> {
         PathAttribution::with_lineage(&current_component_paths, &canonical_current_paths, &current_site_paths),
         previous.as_ref(),
     )?;
-    visibility_policy.compare_previous_revision(workspace, &current, &current_component_paths, previous.as_ref())
+    visibility_policy.compare_previous_revision(workspace, &current, &current_component_paths, previous.as_ref())?;
+    suppression_policy.compare_previous_revision(workspace, &current_suppressions, &current_suppression_counts, previous.as_ref())
 }
 
 pub fn scan_workspace(workspace: &Path) -> Result<Inventory> {
@@ -78,6 +85,12 @@ pub fn scan_workspace(workspace: &Path) -> Result<Inventory> {
 pub fn scan_revision(workspace: &Path, revision: &str) -> Result<Inventory> {
     let roots = TRACKED_ROOTS.into_iter().map(str::to_owned).collect::<Vec<_>>();
     classify::scan_revision(workspace, revision, &roots)
+}
+
+pub fn suppression_inventory(workspace: &Path) -> Result<Vec<suppression::SourceSuppression>> {
+    let manifest = StructureManifest::load(&workspace.join(MANIFEST_PATH))?;
+    let inventory = classify::scan_workspace(workspace, &manifest.tracked_roots)?;
+    suppression::scan_workspace(workspace, &inventory, &manifest.current_component_paths()?)
 }
 
 #[cfg(test)]

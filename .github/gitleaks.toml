@@ -19,3 +19,12 @@ regexes = [
   '''^\s*let unresolved_scope = scope_key == UNRESOLVED_SCOPE;\s*$''',
 ]
 paths = ['''^src/store/(admin|postgres)\.rs$''']
+
+[[rules.allowlists]]
+description = "The exact reviewed PR-classifier source digest is not a credential"
+condition = "AND"
+regexTarget = "line"
+regexes = [
+  '''^\s*ReviewedFile::new\("script/pr_classification/github_api\.py", "efa4a07f861cbb97534fd8c8615edd85c4fd[a]8729b015e785666ab414b733aa0"\),\s*$''',
+]
+paths = ['''^tools/maintainability/src/structure/suppression/policy/config/command/actions/guarded\.rs$''']

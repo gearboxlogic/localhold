@@ -44,6 +44,7 @@ fn removal_of_protected_or_unresolved_inputs_fails_closed() {
         assert!(opaque(command, &["--", "clippy.toml"]), "{command}");
         assert!(opaque(command, &["$target"]), "{command}");
         assert!(!opaque(command, &["-f", "target/report.txt"]), "{command}");
+        assert!(!opaque(command, &["/tmp/report.txt"]), "{command}");
     }
     assert!(opaque("remove-item", &["-Path:Justfile"]));
     assert!(opaque("remove-item", &["-LiteralPath:$target"]));
@@ -209,6 +210,7 @@ fn strip_outputs_and_in_place_targets_cannot_replace_protected_inputs() {
         assert!(opaque(command, &["$input"]), "{command}");
         assert!(!opaque(command, &["-o", "target/stripped", "clippy.toml"]), "{command}");
         assert!(!opaque(command, &["target/payload"]), "{command}");
+        assert!(!opaque(command, &["/tmp/payload"]), "{command}");
         assert!(!opaque(command, &["-I", "Justfile", "target/payload"]), "{command}");
     }
     assert!(!opaque("strip", &["--help", "clippy.toml"]));

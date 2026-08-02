@@ -1,6 +1,4 @@
-use std::path::Path;
-
-use super::{destination_is_opaque, is_windows_absolute, path};
+use super::{destination_is_opaque, path};
 
 pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]) -> bool {
     if !is_strip_command(command) {
@@ -76,5 +74,5 @@ fn in_place_target_is_opaque(target: &str) -> bool {
     if let Some(target) = path::normalize_literal(target) {
         return super::super::super::super::is_protected_check_input(&target);
     }
-    path::contains_dynamic_value(target) || !(Path::new(target).is_absolute() || is_windows_absolute(target))
+    path::contains_dynamic_value(target) || !path::is_absolute(target)
 }

@@ -172,8 +172,10 @@ fn explicit_workspace_manifest(manifest: &str, parsed: &toml::Table) -> Result<O
     let root = resolve_repository_relative(parent, Path::new(explicit)).with_context(|| format!("resolve Cargo package.workspace {explicit:?} in {manifest}"))?;
     let workspace_manifest = root.join("Cargo.toml");
     workspace_manifest
-        .to_str()
-        .map(str::to_owned)
+        .iter()
+        .map(|component| component.to_str())
+        .collect::<Option<Vec<_>>>()
+        .map(|components| components.join("/"))
         .map(Some)
         .with_context(|| format!("explicit Cargo workspace path in {manifest} is not UTF-8"))
 }

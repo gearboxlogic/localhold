@@ -76,10 +76,20 @@ pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
             | "yarn.cmd"
             | "yarn.exe"
             | "yarn.ps1"
-    ) || is_perl_interpreter(command)
+    ) || is_bundler_launcher(command)
+        || is_perl_interpreter(command)
         || is_python_package_installer(command)
         || is_python_documentation_launcher(command)
         || is_tcl_interpreter(command)
+}
+
+fn is_bundler_launcher(command: &str) -> bool {
+    let command = command
+        .strip_suffix(".bat")
+        .or_else(|| command.strip_suffix(".cmd"))
+        .or_else(|| command.strip_suffix(".exe"))
+        .unwrap_or(command);
+    matches!(command, "bundle" | "bundler")
 }
 
 fn is_perl_interpreter(command: &str) -> bool {
@@ -185,6 +195,14 @@ mod tests {
     #[test]
     fn package_and_java_launchers_fail_closed() {
         for command in [
+            "bundle",
+            "bundle.bat",
+            "bundle.cmd",
+            "bundle.exe",
+            "bundler",
+            "bundler.bat",
+            "bundler.cmd",
+            "bundler.exe",
             "npm",
             "npm.exe",
             "npx",

@@ -31,10 +31,10 @@ development archive, not this repository.
 
 First install the standard source-build requirements from
 [Installation](docs/installation.md). To run the repository's complete local
-check suite, also install [mise](https://mise.jdx.dev/); the bootstrap script
-uses it to install tools including the pinned Rust toolchain, `just`, nextest,
-cargo-deny, cargo-audit, cargo-machete, gitleaks, and the nightly rustfmt
-component used by the formatting gate.
+check suite, also install Python 3 and [mise](https://mise.jdx.dev/); the
+bootstrap script uses mise to install tools including the pinned Rust toolchain,
+`just`, nextest, cargo-deny, cargo-audit, cargo-machete, gitleaks, and the
+nightly rustfmt component used by the formatting gate.
 
 ```sh
 ./script/bootstrap.sh
@@ -57,7 +57,8 @@ Additional tools are workflow-specific:
   `just test-postgres-smoke`.
 - NVIDIA/CUDA dependencies are required only when validating the CUDA reranker
   profile.
-- Python 3 is required only for release validation and archive packaging.
+- Python 3 is required by `just check-quality` for the linear-time Rust source
+  scanner, and by release validation and archive packaging.
 
 Windows support is preview and is validated in GitHub Actions.
 macOS source builds are best-effort and are not release-gated; the complete

@@ -123,6 +123,7 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("case \"$mode\" in\n checked) just check-quality; true ;;\nesac || true\n", "lint-weakening argument"),
     ("if test -f Cargo.toml; then\n just check-quality\n true\nfi || true\n", "lint-weakening argument"),
     ("npm exec -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
+    ("bundle exec sh quality/lint.txt\n", "opaque interpreter program"),
     ("docker run --rm -v \"$PWD:/repo\" -w /repo rust:latest sh quality/lint.txt\n", "opaque interpreter program"),
     ("npx -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
     ("java quality/Lint.java\n", "opaque interpreter program"),
@@ -167,6 +168,7 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("rustc quality/benign.rs --extern serde=quality/libserde.so\n", "opaque interpreter program"),
     ("objcopy -I binary -O binary quality/Justfile Justfile\n", "opaque interpreter program"),
     ("objcopy --dump-section .data=Justfile target/payload.o\n", "opaque interpreter program"),
+    ("strip -o script/check-time-abstraction.sh target/payload\n", "opaque interpreter program"),
     ("ar r quality/payload.a quality/Justfile; ar x quality/payload.a\n", "opaque interpreter program"),
     (
         "jar --create --file target/payload.jar -C quality Justfile; jar --extract --file target/payload.jar\n",

@@ -201,6 +201,20 @@ fn curl_remote_names_and_objcopy_outputs_fail_closed() {
 }
 
 #[test]
+fn strip_outputs_and_in_place_targets_cannot_replace_protected_inputs() {
+    for command in ["strip", "strip.exe", "llvm-strip", "llvm-strip-19", "x86_64-linux-gnu-strip"] {
+        assert!(opaque(command, &["-o", "script/check-time-abstraction.sh", "target/payload"]), "{command}");
+        assert!(opaque(command, &["-o$target", "target/payload"]), "{command}");
+        assert!(opaque(command, &["clippy.toml"]), "{command}");
+        assert!(opaque(command, &["$input"]), "{command}");
+        assert!(!opaque(command, &["-o", "target/stripped", "clippy.toml"]), "{command}");
+        assert!(!opaque(command, &["target/payload"]), "{command}");
+        assert!(!opaque(command, &["-I", "Justfile", "target/payload"]), "{command}");
+    }
+    assert!(!opaque("strip", &["--help", "clippy.toml"]));
+}
+
+#[test]
 fn tool_output_options_cannot_replace_execution_surfaces() {
     for arguments in [
         &[".", "-maxdepth", "0", "-fprintf", "Justfile", "payload"][..],

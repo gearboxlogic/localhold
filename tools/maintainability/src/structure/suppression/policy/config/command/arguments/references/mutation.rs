@@ -4,11 +4,13 @@ use super::path;
 
 mod output;
 mod removal;
+mod strip;
 
 pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]) -> bool {
     super::editor::is_command_capable(command)
         || output_redirection_is_opaque(path, arguments)
         || output::dispatch_is_opaque(path, command, arguments)
+        || strip::dispatch_is_opaque(path, command, arguments)
         || is_objcopy_command(command) && (arguments_reference_protected_inputs(arguments) || final_destination_is_opaque(path, arguments))
         || match command {
             "cp" | "cp.exe" | "install" | "install.exe" | "mv" | "mv.exe" | "truncate" | "truncate.exe" => {

@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 CHECK = Path(__file__).resolve().parents[1] / "check-time-abstraction.sh"
+SCANNER = CHECK.with_suffix(".py")
 
 
 class TimeAbstractionTests(unittest.TestCase):
@@ -27,6 +28,7 @@ class TimeAbstractionTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(source, encoding="utf-8")
             shutil.copy2(CHECK, root / "script/check-time-abstraction.sh")
+            shutil.copy2(SCANNER, root / "script/check-time-abstraction.py")
             environment = os.environ.copy()
             if with_failing_ripgrep:
                 fake_bin = root / "fake-bin"
@@ -96,6 +98,17 @@ class TimeAbstractionTests(unittest.TestCase):
             "#[cfg(test)]\n"
             "mod tests\n"
             "{\n"
+            "    fn helper() { std::thread::sleep(std::time::Duration::ZERO); }\n"
+            "}\n"
+            "fn production() {}\n"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_test_cfg_accepts_trailing_content_on_the_module_opening(self) -> None:
+        result = self._run_check(
+            "#[cfg(test)]\n"
+            "mod tests { // test helpers\n"
             "    fn helper() { std::thread::sleep(std::time::Duration::ZERO); }\n"
             "}\n"
             "fn production() {}\n"

@@ -13,7 +13,7 @@ const REVIEWED_DYNAMIC_WRITE_SURFACES: &[(&str, &str)] = &[
     ("script/release.py", "81490a55ea69c1119411621a9d1da558bae8b574d16ac9e57e069e73f3c284ea"),
     ("script/tests/test_cuda_release.py", "850414f812aeddcf692d47b9cff1a820959aafea2fc25443161739010b6b850f"),
     ("script/tests/test_database_fixtures.py", "616df3e8d2f444fcd24a0b668eb3e492100fc465f53f041e7a0ca41555247b57"),
-    ("script/tests/test_time_abstraction.py", "5318a3c2d7c4c23326e2f02ab0bb4a9f3d4bcf8c3ae6b64fb2a06804883268c8"),
+    ("script/tests/test_time_abstraction.py", "b797b46d0f6c1ebe3ef8496dfa7e1e6e81d02190430dd62b8b3ae83282e07c40"),
 ];
 
 pub(super) fn is_reviewed_dynamic_write_surface(path: &str, source: &str) -> bool {

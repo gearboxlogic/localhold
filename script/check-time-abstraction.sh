@@ -165,6 +165,7 @@ for file in "${source_files[@]}"; do
     test_depth=0
     pending_test_cfg=0
     pending_cfg_attribute=
+    pending_test_module=
     line_number=0
     block_comment_depth=0
     normal_string=0
@@ -186,7 +187,21 @@ for file in "${source_files[@]}"; do
         fi
         if (( block_comment_depth == 0 && normal_string == 0 && raw_string == 0 )); then
             compact=${line//[[:space:]]/}
-            if [[ -n $pending_cfg_attribute ]]; then
+            if [[ -n $pending_test_module ]]; then
+                if [[ -n $compact && $compact != //* ]]; then
+                    pending_test_module="$pending_test_module$compact"
+                fi
+                if [[ $pending_test_module == 'modtests{' ]]; then
+                    in_tests=1
+                    test_depth=1
+                    pending_test_cfg=0
+                    pending_test_module=
+                    continue
+                elif [[ 'modtests{' != "$pending_test_module"* ]]; then
+                    pending_test_cfg=0
+                    pending_test_module=
+                fi
+            elif [[ -n $pending_cfg_attribute ]]; then
                 pending_cfg_attribute="$pending_cfg_attribute $line"
                 if [[ $compact == *')]'* ]]; then
                     if test_only_cfg_attribute "$pending_cfg_attribute"; then
@@ -201,11 +216,15 @@ for file in "${source_files[@]}"; do
                 pending_test_cfg=0
             elif test_only_cfg_attribute "$line"; then
                 pending_test_cfg=1
-            elif [[ $line == 'mod tests {' ]] && (( pending_test_cfg == 1 )); then
-                in_tests=1
-                test_depth=1
-                pending_test_cfg=0
-                continue
+            elif (( pending_test_cfg == 1 )) && [[ -n $compact && 'modtests{' == "$compact"* ]]; then
+                pending_test_module=$compact
+                if [[ $pending_test_module == 'modtests{' ]]; then
+                    in_tests=1
+                    test_depth=1
+                    pending_test_cfg=0
+                    pending_test_module=
+                    continue
+                fi
             elif [[ -n $compact && ! $compact =~ ^#\[.*\]$ && $compact != //* ]]; then
                 pending_test_cfg=0
             fi
@@ -221,6 +240,11 @@ for file in "${source_files[@]}"; do
     done <"$file"
     if [[ -n $pending_cfg_attribute ]]; then
         printf 'time abstraction check found an unterminated cfg attribute in %s\n' "$file" >&2
+        failed=1
+        continue
+    fi
+    if [[ -n $pending_test_module ]]; then
+        printf 'time abstraction check found an unterminated inline test-module declaration in %s\n' "$file" >&2
         failed=1
         continue
     fi

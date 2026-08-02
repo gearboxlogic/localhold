@@ -314,7 +314,11 @@ aliases, node tags, custom shell templates, or working-directory overrides to
 redirect an audited `run` command; multiline inline `run` scalars are
 unsupported. Audited `run` steps support Bash, `sh`, PowerShell, `pwsh`, and
 `cmd`; Python run bodies are unsupported until they have a language-aware
-command audit. Shell continuations are normalized before command arguments are
+command audit. Python filesystem writes require a statically safe literal
+destination. Existing release staging, temporary-fixture, and brand-generator
+writers are classified by exact whole-file digests in the protected checker;
+any change invalidates that classification and must first land as a reviewed
+checker ratchet. Shell continuations are normalized before command arguments are
 audited, and shell alias declarations or a dynamic command name may not hide
 command dispatch. Make
 include directives are unsupported; checked-in `.mk` command surfaces are

@@ -41,8 +41,8 @@ pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
     })
 }
 
-pub(super) fn has_opaque_filesystem_write(source: &str) -> bool {
-    filesystem::has_opaque_write(&normalize_continuations(source))
+pub(super) fn has_opaque_filesystem_write(path: &str, source: &str) -> bool {
+    filesystem::has_opaque_write(&normalize_continuations(source)) && !filesystem::is_reviewed_dynamic_write_surface(path, source)
 }
 
 fn imports_command_capable_api(source: &str) -> bool {
@@ -399,9 +399,15 @@ mod tests {
 
     #[test]
     fn explicit_line_continuations_cannot_hide_filesystem_writes() {
-        assert!(has_opaque_filesystem_write("Path(\"Justfile\") \\\n                .write_text(payload)\n"));
-        assert!(has_opaque_filesystem_write("open(\\\n                file=\"Justfile\", \\\n                mode=\"w\")\n"));
-        assert!(has_opaque_filesystem_write("Path(\"Justfile\") \\\r\n.write_bytes(payload)\r\n"));
+        assert!(has_opaque_filesystem_write(
+            "script/check.py",
+            "Path(\"Justfile\") \\\n                .write_text(payload)\n"
+        ));
+        assert!(has_opaque_filesystem_write(
+            "script/check.py",
+            "open(\\\n                file=\"Justfile\", \\\n                mode=\"w\")\n"
+        ));
+        assert!(has_opaque_filesystem_write("script/check.py", "Path(\"Justfile\") \\\r\n.write_bytes(payload)\r\n"));
     }
 
     #[test]

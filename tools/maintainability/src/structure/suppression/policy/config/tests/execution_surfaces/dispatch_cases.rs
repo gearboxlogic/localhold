@@ -181,6 +181,7 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("RUBYOPT=-r./quality/lint gem --version\n", "lint-weakening environment channel"),
     ("PERL5OPT='-Iquality -Mlint' prove --version\n", "lint-weakening environment channel"),
     ("perl5.38.2 quality/lint.pl\n", "opaque interpreter program"),
+    ("/usr/bin/perl5.38-x86_64-linux-gnu quality/lint.pl\n", "opaque interpreter program"),
     ("ld.so quality/lint\n", "opaque interpreter program"),
     ("/lib64/ld-linux-x86-64.so.2 quality/lint\n", "opaque interpreter program"),
     ("go run quality/lint.go\n", "opaque interpreter program"),

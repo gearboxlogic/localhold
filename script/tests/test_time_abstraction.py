@@ -91,6 +91,18 @@ class TimeAbstractionTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_test_cfg_accepts_a_module_opening_split_across_lines(self) -> None:
+        result = self._run_check(
+            "#[cfg(test)]\n"
+            "mod tests\n"
+            "{\n"
+            "    fn helper() { std::thread::sleep(std::time::Duration::ZERO); }\n"
+            "}\n"
+            "fn production() {}\n"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_ignores_time_patterns_inside_production_literals_and_comments(self) -> None:
         result = self._run_check(
             "const NORMAL: &str = \"Utc::now( and std::thread::sleep(\";\n"

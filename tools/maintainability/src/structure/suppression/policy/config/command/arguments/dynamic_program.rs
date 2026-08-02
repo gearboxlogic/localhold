@@ -84,7 +84,12 @@ pub(super) fn is_unanalyzed_interpreter(command: &str) -> bool {
 
 fn is_perl_interpreter(command: &str) -> bool {
     let command = command.strip_suffix(".exe").unwrap_or(command);
-    is_versioned_name(command, "perl")
+    command == "perl"
+        || command.strip_prefix("perl").is_some_and(|suffix| {
+            suffix.bytes().next().is_some_and(|byte| byte.is_ascii_digit())
+                && suffix.bytes().next_back().is_some_and(|byte| byte.is_ascii_alphanumeric())
+                && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        })
 }
 
 pub(super) fn is_python_interpreter(command: &str) -> bool {
@@ -214,10 +219,18 @@ mod tests {
 
     #[test]
     fn versioned_perl_interpreters_fail_closed_without_prefix_collisions() {
-        for command in ["perl", "perl.exe", "perl5", "perl5.38.2", "perl5.38.2.exe"] {
+        for command in [
+            "perl",
+            "perl.exe",
+            "perl5",
+            "perl5.38.2",
+            "perl5.38.2.exe",
+            "perl5.38-x86_64-linux-gnu",
+            "perl5.38-x86_64-linux-gnu.exe",
+        ] {
             assert!(is_unanalyzed_interpreter(command), "{command}");
         }
-        for command in ["perldoc", "perl-preview", "perl5."] {
+        for command in ["perldoc", "perl-preview", "perl5.", "perl5.38-"] {
             assert!(!is_unanalyzed_interpreter(command), "{command}");
         }
     }

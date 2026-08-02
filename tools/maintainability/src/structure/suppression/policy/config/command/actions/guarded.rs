@@ -12,7 +12,23 @@ pub(super) const MISE_ACTION: &str = "jdx/mise-action@e6a8b3978addb5a52f2b4cd9d9
 
 const DEPENDENCY_REVIEW_PATH: &str = ".github/workflows/dependency-review.yml";
 const PR_CLASSIFICATION_PATH: &str = ".github/workflows/pr-classification.yml";
-const PR_CLASSIFICATION_SHA256: &str = "63a8a0a43170256ccecf81757b5844c97c320e063cdb6865ae7e9dd9f4b26e8b";
+const PR_CLASSIFICATION_PACKAGE_PREFIX: &str = "script/pr_classification/";
+const PR_CLASSIFICATION_MODULE_ALIAS: &str = "script/pr_classification.py";
+const PR_CLASSIFICATION_PROFILE: &[ReviewedFile] = &[
+    ReviewedFile::new(PR_CLASSIFICATION_PATH, "25c11bb0bd514363df2a539d9ceb88d8c954b0c92ec0d9d9e70b9bde32f8b6dd"),
+    ReviewedFile::new(
+        "policy/maintainability/feature-freeze.json",
+        "50119661e8bfead163fe4051784505777ae80daef33c5578de0395563e9997e8",
+    ),
+    ReviewedFile::new("script/check_pr_classification.py", "06237f917338fbc1731bc5c7f3500d0dc877247e113e16c44e31ca37f1b0e8b0"),
+    ReviewedFile::new("script/pr_classification/__init__.py", "5747c2761b8e185b156423da746b2e7a6b84c1d6f221949e0a5554f6d4d2a24a"),
+    ReviewedFile::new("script/pr_classification/github_api.py", "efa4a07f861cbb97534fd8c8615edd85c4fda8729b015e785666ab414b733aa0"),
+    ReviewedFile::new("script/pr_classification/markdown.py", "ecfc33f63804491d99bfce35dc440bade7bf84bb9cca68753e1dfa865a99b822"),
+    ReviewedFile::new("script/pr_classification/model.py", "89e9ad2aca63bf5521cf7b31247f1ac7cceb53d20cff888799f042ef57cb66fe"),
+    ReviewedFile::new("script/pr_classification/policy.py", "c0e816e57ad638b42a92bcb67f40169a7d6fc16b09e214af731483a64b61218e"),
+    ReviewedFile::new("script/pr_classification/reviews.py", "ff9687dab05e4c5244af0a074cf21d83d2301b44ac406aa80da94ac8e9960bd5"),
+    ReviewedFile::new("script/pr_classification/validation.py", "d9ddf69a1378b3d7d27e9b4dc9b9968d88b44bf713bcb22cda6ce6aed35bec7b"),
+];
 const MISE_VERSION: &str = "2026.7.5";
 const REVIEWED_MISE_PROFILES: &[(&str, &str)] = &[(
     "627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529",
@@ -42,6 +58,17 @@ jobs:
 
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0"];
 
+struct ReviewedFile {
+    path: &'static str,
+    sha256: &'static str,
+}
+
+impl ReviewedFile {
+    const fn new(path: &'static str, sha256: &'static str) -> Self {
+        Self { path, sha256 }
+    }
+}
+
 pub(super) fn validate_configuration(workspace: &Path, tracked_paths: &BTreeSet<String>) -> Result<()> {
     let mise_toml = reviewed_file(workspace, tracked_paths, "mise.toml")?;
     let mise_lock = reviewed_file(workspace, tracked_paths, "mise.lock")?;
@@ -55,12 +82,28 @@ pub(super) fn validate_configuration(workspace: &Path, tracked_paths: &BTreeSet<
     if !REVIEWED_DEPENDENCY_REVIEW_WORKFLOWS.contains(&dependency_review.trim_end()) {
         bail!("{DEPENDENCY_REVIEW_PATH:?} must retain its exact reviewed trigger, permissions, job controls, checkout, and dependency-review step");
     }
-    // The bridge permits introduction only at this exact digest. The feature
-    // slice makes the file mandatory as it lands, closing the absence window.
-    if tracked_paths.contains(PR_CLASSIFICATION_PATH) {
-        let classification = reviewed_file(workspace, tracked_paths, PR_CLASSIFICATION_PATH)?;
-        if digest(&classification) != PR_CLASSIFICATION_SHA256 {
-            bail!("{PR_CLASSIFICATION_PATH:?} must match the reviewed required-check workflow before it can be introduced");
+    validate_staged_classification_profile(workspace, tracked_paths)?;
+    Ok(())
+}
+
+fn validate_staged_classification_profile(workspace: &Path, tracked_paths: &BTreeSet<String>) -> Result<()> {
+    let profile_present = tracked_paths.iter().any(|path| {
+        PR_CLASSIFICATION_PROFILE.iter().any(|reviewed| path == reviewed.path) || path.starts_with(PR_CLASSIFICATION_PACKAGE_PREFIX) || path == PR_CLASSIFICATION_MODULE_ALIAS
+    });
+    if !profile_present {
+        return Ok(());
+    }
+    let reviewed_paths = PR_CLASSIFICATION_PROFILE.iter().map(|reviewed| reviewed.path).collect::<BTreeSet<_>>();
+    if tracked_paths
+        .iter()
+        .any(|path| path.starts_with(PR_CLASSIFICATION_PACKAGE_PREFIX) && !reviewed_paths.contains(path.as_str()) || path == PR_CLASSIFICATION_MODULE_ALIAS)
+    {
+        bail!("PR-classification package inventory contains an unreviewed module");
+    }
+    for reviewed in PR_CLASSIFICATION_PROFILE {
+        let contents = reviewed_file(workspace, tracked_paths, reviewed.path)?;
+        if digest(&contents) != reviewed.sha256 {
+            bail!("PR-classification runtime input {:?} does not match the reviewed atomic profile", reviewed.path);
         }
     }
     Ok(())
@@ -146,12 +189,18 @@ mod tests {
     }
 
     #[test]
-    fn staged_classification_workflow_rejects_an_unreviewed_profile() {
-        let fixture = fixture();
-        fs::write(fixture.path().join(PR_CLASSIFICATION_PATH), b"unreviewed\n").expect("classification workflow fixture");
+    fn staged_classification_runtime_rejects_partial_or_extra_profiles() {
+        let partial_fixture = fixture();
+        fs::write(partial_fixture.path().join(PR_CLASSIFICATION_PATH), b"unreviewed\n").expect("classification workflow fixture");
         let mut paths = tracked_paths();
         paths.insert(PR_CLASSIFICATION_PATH.to_owned());
-        assert!(validate_configuration(fixture.path(), &paths).is_err());
+        assert!(validate_configuration(partial_fixture.path(), &paths).is_err());
+
+        let extra_fixture = fixture();
+        let unexpected = format!("{PR_CLASSIFICATION_PACKAGE_PREFIX}shadow.py");
+        let mut paths = tracked_paths();
+        paths.insert(unexpected);
+        assert!(validate_configuration(extra_fixture.path(), &paths).is_err());
     }
 
     #[test]

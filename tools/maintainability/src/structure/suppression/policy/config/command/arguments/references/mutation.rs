@@ -3,6 +3,7 @@ use std::path::Path;
 use super::path;
 
 mod output;
+mod removal;
 
 pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]) -> bool {
     super::editor::is_command_capable(command)
@@ -13,6 +14,7 @@ pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]
             "cp" | "cp.exe" | "install" | "install.exe" | "mv" | "mv.exe" | "truncate" | "truncate.exe" => {
                 arguments_reference_protected_inputs(arguments) || final_destination_is_opaque(path, arguments)
             }
+            "del" | "del.exe" | "erase" | "erase.exe" | "remove-item" | "rm" | "rm.exe" => removal::dispatch_is_opaque(path, arguments),
             "ln" | "ln.exe" => symbolic_link_is_opaque(path, command, arguments) || arguments_reference_protected_inputs(arguments) || final_destination_is_opaque(path, arguments),
             "link" | "unlink" => arguments_reference_protected_inputs(arguments) || final_destination_is_opaque(path, arguments),
             "tee" | "tee.exe" => tee_output_is_opaque(path, arguments),

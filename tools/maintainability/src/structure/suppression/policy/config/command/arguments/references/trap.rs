@@ -51,9 +51,10 @@ mod tests {
     #[test]
     fn static_cleanup_actions_are_distinct_from_command_dispatch() {
         assert!(!action_is_opaque("script/check.sh", &arguments(&["cleanup", "EXIT"]), true));
-        assert!(!action_is_opaque("script/check.sh", &arguments(&["rm -f \"$temporary\"", "EXIT"]), true));
+        assert!(!action_is_opaque("script/check.sh", &arguments(&["rm -f target/temporary", "EXIT"]), true));
         assert!(!action_is_opaque("script/check.sh", &arguments(&["-", "EXIT"]), true));
         assert!(!action_is_opaque("script/check.sh", &arguments(&["-p", "EXIT"]), true));
+        assert!(action_is_opaque("script/check.sh", &arguments(&["rm -f \"$temporary\"", "EXIT"]), true));
         assert!(action_is_opaque("script/check.sh", &arguments(&["sh quality/lint.txt", "EXIT"]), true));
         assert!(action_is_opaque("script/check.sh", &arguments(&["source quality/lint.txt", "EXIT"]), true));
         assert!(action_is_opaque("script/check.sh", &arguments(&["cleanup \"$(sh quality/lint.txt)\"", "EXIT"]), true));

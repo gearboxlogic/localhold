@@ -39,6 +39,38 @@ fn mutation_of_protected_check_inputs_fails_closed() {
 }
 
 #[test]
+fn removal_of_protected_or_unresolved_inputs_fails_closed() {
+    for command in ["del", "del.exe", "erase", "erase.exe", "remove-item", "rm", "rm.exe"] {
+        assert!(opaque(command, &["--", "clippy.toml"]), "{command}");
+        assert!(opaque(command, &["$target"]), "{command}");
+        assert!(!opaque(command, &["-f", "target/report.txt"]), "{command}");
+    }
+    assert!(opaque("remove-item", &["-Path:Justfile"]));
+    assert!(opaque("remove-item", &["-LiteralPath:$target"]));
+    assert!(!opaque("rm", &["--help", "Justfile"]));
+    assert!(!opaque("rm.exe", &["--version", "Justfile"]));
+}
+
+#[test]
+fn reviewed_dynamic_removals_are_path_specific() {
+    for (path, target) in [
+        ("script/check-maintainability-bootstrap.sh", "$snapshot_root"),
+        ("script/claude-review.sh", "$scratch_directory"),
+        ("script/run-maintainability-gate.sh", "$target_directory"),
+        ("script/tests/test_claude_review.sh", "$test_root/capture"),
+    ] {
+        let arguments = ["-rf".to_owned(), "--".to_owned(), target.to_owned()];
+        assert!(!dispatch_is_opaque(path, "rm", &arguments), "{path}: {target}");
+        assert!(dispatch_is_opaque("script/check.sh", "rm", &arguments), "{path}: {target}");
+    }
+    assert!(!dispatch_is_opaque(
+        "script/tests/test_maintainability_bootstrap.sh",
+        "rm",
+        &["$authenticated_fixture_path".to_owned()],
+    ));
+}
+
+#[test]
 fn reviewed_dynamic_destinations_are_path_specific() {
     for (path, destination) in REVIEWED_DYNAMIC_DESTINATIONS {
         let arguments = ["quality/lint.data".to_owned(), (*destination).to_owned()];

@@ -135,6 +135,7 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("cp quality/lint.data Justfile\n", "opaque interpreter program"),
     ("cp quality/lint.data clippy.toml\n", "opaque interpreter program"),
     ("cp quality/lint.data src/lib.rs\n", "opaque interpreter program"),
+    ("rm -- clippy.toml; just check-quality\n", "opaque interpreter program"),
     ("unlink Justfile; link quality/Justfile Justfile\n", "opaque interpreter program"),
     ("ln -sf ../Justfile quality/output\n", "opaque interpreter program"),
     ("destination=Justfile; cp quality/lint.data \"$destination\"\n", "opaque interpreter program"),

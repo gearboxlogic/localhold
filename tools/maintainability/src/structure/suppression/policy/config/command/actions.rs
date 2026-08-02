@@ -118,6 +118,9 @@ fn validate_checkout_inputs(path: &str, lines: &[&str], uses_index: usize) -> Re
         )
         && fetch_depth.is_none()
         && persist_credentials.as_deref() == Some("false");
+    if path == PR_CLASSIFICATION_WORKFLOW && !classification_checkout {
+        bail!("checkout in {path:?} must select only the pull-request base revision with credential persistence disabled");
+    }
     if !protected_gate_checkout && !classification_checkout && (repository.is_some() || checkout_ref.is_some() || destination.is_some()) {
         bail!("checkout in {path:?} may select only the triggering repository and revision at the workspace root");
     }
@@ -362,6 +365,17 @@ mod tests {
     fn classification_workflow_may_check_out_only_the_pull_request_base() {
         let reviewed = format!("steps:\n  - uses: {CHECKOUT_ACTION}\n    with:\n      ref: {PR_BASE_REVISION}\n      persist-credentials: false\n");
         validate_at(PR_CLASSIFICATION_WORKFLOW, &reviewed).expect("reviewed pull-request base checkout");
+
+        for source in [
+            format!("steps:\n  - uses: {CHECKOUT_ACTION}\n"),
+            format!("steps:\n  - uses: {CHECKOUT_ACTION}\n    with:\n"),
+            format!("steps:\n  - uses: {CHECKOUT_ACTION}\n    with:\n      persist-credentials: false\n"),
+        ] {
+            assert!(
+                validate_at(PR_CLASSIFICATION_WORKFLOW, &source).is_err(),
+                "accepted checkout without the reviewed base ref: {source:?}"
+            );
+        }
 
         for inputs in [
             format!("ref: {PR_BASE_REVISION}"),

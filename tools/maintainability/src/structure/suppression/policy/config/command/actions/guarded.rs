@@ -11,6 +11,8 @@ pub(super) const DEPENDENCY_REVIEW_ACTION: &str = "actions/dependency-review-act
 pub(super) const MISE_ACTION: &str = "jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d";
 
 const DEPENDENCY_REVIEW_PATH: &str = ".github/workflows/dependency-review.yml";
+const PR_CLASSIFICATION_PATH: &str = ".github/workflows/pr-classification.yml";
+const PR_CLASSIFICATION_SHA256: &str = "63a8a0a43170256ccecf81757b5844c97c320e063cdb6865ae7e9dd9f4b26e8b";
 const MISE_VERSION: &str = "2026.7.5";
 const REVIEWED_MISE_PROFILES: &[(&str, &str)] = &[(
     "627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529",
@@ -52,6 +54,14 @@ pub(super) fn validate_configuration(workspace: &Path, tracked_paths: &BTreeSet<
     let dependency_review = std::str::from_utf8(&dependency_review).context("dependency-review workflow must be UTF-8")?;
     if !REVIEWED_DEPENDENCY_REVIEW_WORKFLOWS.contains(&dependency_review.trim_end()) {
         bail!("{DEPENDENCY_REVIEW_PATH:?} must retain its exact reviewed trigger, permissions, job controls, checkout, and dependency-review step");
+    }
+    // The bridge permits introduction only at this exact digest. The feature
+    // slice makes the file mandatory as it lands, closing the absence window.
+    if tracked_paths.contains(PR_CLASSIFICATION_PATH) {
+        let classification = reviewed_file(workspace, tracked_paths, PR_CLASSIFICATION_PATH)?;
+        if digest(&classification) != PR_CLASSIFICATION_SHA256 {
+            bail!("{PR_CLASSIFICATION_PATH:?} must match the reviewed required-check workflow before it can be introduced");
+        }
     }
     Ok(())
 }
@@ -132,6 +142,15 @@ mod tests {
             fs::write(&path, source.replace("      - uses: actions/dependency-review-action", alteration)).expect("alter workflow");
             assert!(validate_configuration(fixture.path(), &tracked_paths()).is_err(), "accepted {alteration:?}");
         }
+    }
+
+    #[test]
+    fn staged_classification_workflow_rejects_an_unreviewed_profile() {
+        let fixture = fixture();
+        fs::write(fixture.path().join(PR_CLASSIFICATION_PATH), b"unreviewed\n").expect("classification workflow fixture");
+        let mut paths = tracked_paths();
+        paths.insert(PR_CLASSIFICATION_PATH.to_owned());
+        assert!(validate_configuration(fixture.path(), &paths).is_err());
     }
 
     #[test]

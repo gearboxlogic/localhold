@@ -109,7 +109,8 @@ mod tests {
         let fixture = tempfile::tempdir().expect("temp fixture");
         fs::create_dir_all(fixture.path().join(".github/workflows")).expect("workflow directory");
         for path in ["mise.toml", "mise.lock", DEPENDENCY_REVIEW_PATH] {
-            fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(path), fixture.path().join(path)).expect("copy guarded input");
+            let contents = fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(path)).expect("read guarded input");
+            fs::write(fixture.path().join(path), contents).expect("write guarded input fixture");
         }
         fixture
     }

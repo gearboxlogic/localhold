@@ -152,11 +152,17 @@ fn ambient_process_resolution_mutations_are_distinguished_from_reads() {
     assert!(mutates_process_working_directory("os.chdir('quality')\n"));
     assert!(mutates_process_working_directory("posix.fchdir(descriptor)\n"));
     assert!(mutates_process_environment("os.environ['Path'] = 'quality'\n"));
+    assert!(mutates_process_environment("os.environ['PATH']: str = 'target/bin'\n"));
+    assert!(mutates_process_environment("os.environ['PATH']: list[str] = ['target/bin']\n"));
+    assert!(mutates_process_environment("os.environ[keys[0]]: str = 'target/bin'\n"));
+    assert!(mutates_process_environment("os.environ[keys[0]] = 'target/bin'\n"));
+    assert!(mutates_process_environment("os.environ['PATH']: list[str)\n"));
     assert!(mutates_process_environment("os.environ.update({'PATH': 'quality'})\n"));
     assert!(mutates_process_environment("del os.environ['PATH']\n"));
     assert!(mutates_process_environment("environment = os.environ\n"));
     assert!(mutates_process_environment("os . environ['Path'] = 'quality'\n"));
     assert!(!mutates_process_environment("value = os.environ.get('PATH')\nenvironment = os.environ.copy()\n"));
+    assert!(!mutates_process_environment("os.environ['PATH']: type[Literal[1 == 1]]\n"));
     assert!(!has_opaque_process_arguments("value = os . environ.get('PATH')\n"));
 }
 

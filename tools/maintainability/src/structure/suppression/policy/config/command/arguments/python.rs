@@ -126,10 +126,10 @@ fn environment_reference_is_opaque(line: &str) -> bool {
     while let Some((head, tail)) = remainder.split_once("os.environ") {
         let tail = tail.trim_start();
         if let Some(indexed) = tail.strip_prefix('[') {
-            let Some(closing) = indexed.find(']') else {
+            let Some(after_subscript) = after_matching_subscript(indexed) else {
                 return true;
             };
-            if head.trim_end().ends_with("del") || starts_assignment(indexed[closing + 1..].trim_start()) {
+            if head.trim_end().ends_with("del") || starts_assignment(after_subscript.trim_start()) {
                 return true;
             }
         } else if ![".get(", ".copy(", ".keys(", ".items(", ".values("].iter().any(|prefix| tail.starts_with(prefix)) {
@@ -140,11 +140,59 @@ fn environment_reference_is_opaque(line: &str) -> bool {
     false
 }
 
+fn after_matching_subscript(source: &str) -> Option<&str> {
+    let mut expected = vec![']'];
+    for (index, character) in source.char_indices() {
+        if let Some(closing) = closing_delimiter(character) {
+            expected.push(closing);
+        } else if matches!(character, ')' | ']' | '}') {
+            if expected.pop() != Some(character) {
+                return None;
+            }
+            if expected.is_empty() {
+                return Some(&source[index + character.len_utf8()..]);
+            }
+        }
+    }
+    None
+}
+
 fn starts_assignment(source: &str) -> bool {
     source.starts_with('=') && !source.starts_with("==")
         || ["+=", "-=", "*=", "/=", "//=", "%=", "**=", "&=", "|=", "^=", ">>=", "<<="]
             .iter()
             .any(|operator| source.starts_with(operator))
+        || source.strip_prefix(':').is_some_and(annotation_has_assignment)
+}
+
+fn annotation_has_assignment(annotation: &str) -> bool {
+    let mut expected = Vec::new();
+    let characters = annotation.chars().collect::<Vec<_>>();
+    for (index, character) in characters.iter().copied().enumerate() {
+        if let Some(closing) = closing_delimiter(character) {
+            expected.push(closing);
+        } else if matches!(character, ')' | ']' | '}') {
+            if expected.pop() != Some(character) {
+                return true;
+            }
+        } else if character == '=' && expected.is_empty() {
+            let before = index.checked_sub(1).and_then(|previous| characters.get(previous)).copied();
+            let after = characters.get(index + 1).copied();
+            if after != Some('=') && !matches!(before, Some('=' | '!' | '<' | '>' | ':')) {
+                return true;
+            }
+        }
+    }
+    !expected.is_empty()
+}
+
+const fn closing_delimiter(character: char) -> Option<char> {
+    match character {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        _ => None,
+    }
 }
 
 pub(super) fn has_opaque_filesystem_write(path: &str, source: &str) -> bool {

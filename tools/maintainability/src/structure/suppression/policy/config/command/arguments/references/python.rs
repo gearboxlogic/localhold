@@ -90,6 +90,13 @@ os.environ.update(load_configuration())
 subprocess.run([sys.executable, "script/child.py"], check=True)
 "#;
         assert!(execution_inputs("script/reviews.py", source).unresolved);
+
+        let source = r#"
+keys = ["PATH"]
+os.environ[keys[0]]: str = "target/bin"
+subprocess.run(["git", "status"], check=True)
+"#;
+        assert!(execution_inputs("script/reviews.py", source).unresolved);
     }
 
     #[test]

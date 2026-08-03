@@ -229,8 +229,24 @@ mod tests {
     }
 
     fn stage_fixture_input(source: &Path, destination: &Path) {
+        if destination.exists() {
+            make_fixture_writable(destination);
+        }
         let contents = fs::read(source).expect("read guarded input");
         fs::write(destination, contents).expect("write guarded input fixture");
+        make_fixture_writable(destination);
+    }
+
+    fn make_fixture_writable(path: &Path) {
+        let mut permissions = path.metadata().expect("fixture metadata").permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            permissions.set_mode(permissions.mode() | 0o600);
+        }
+        #[cfg(windows)]
+        permissions.set_readonly(false);
+        fs::set_permissions(path, permissions).expect("make fixture owner-writable");
     }
 
     fn git(workspace: &Path, arguments: &[&str]) -> String {
@@ -273,6 +289,9 @@ mod tests {
         fs::set_permissions(source.path(), read_only_permissions).expect("make source read-only");
 
         let destination = tempfile::NamedTempFile::new().expect("destination fixture");
+        let mut destination_permissions = destination.path().metadata().expect("destination metadata").permissions();
+        destination_permissions.set_readonly(true);
+        fs::set_permissions(destination.path(), destination_permissions).expect("make destination read-only");
         stage_fixture_input(source.path(), destination.path());
         assert_eq!(fs::read(destination.path()).expect("staged contents"), b"reviewed\n");
         assert!(!destination.path().metadata().expect("destination metadata").permissions().readonly());

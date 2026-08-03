@@ -27,5 +27,9 @@ regexTarget = "line"
 regexes = [
   '''^\s*ReviewedFile::new\("script/pr_classification/github_api\.py", "efa4a07f861cbb97534fd8c8615edd85c4fd[a]8729b015e785666ab414b733aa0"\),\s*$''',
   '''^\s*ReviewedFile::new\("script/pr_classification/github_api\.py", "f6b[b]2b19274b6c207dafba9dd18cb8eb1611dcde9f2f9ac328f3a0de3c4c76c5"\),\s*$''',
+  '''^\s*ReviewedSource::regular\("script/pr_classification/github_api\.py", "f6b[b]2b19274b6c207dafba9dd18cb8eb1611dcde9f2f9ac328f3a0de3c4c76c5"\),\s*$''',
 ]
-paths = ['''^tools/maintainability/src/structure/suppression/policy/config/command/actions/guarded\.rs$''']
+paths = [
+  '''^tools/maintainability/src/structure/suppression/policy/config/command/actions/guarded\.rs$''',
+  '''^tools/maintainability/src/structure/suppression/policy/config/python_sources\.rs$''',
+]

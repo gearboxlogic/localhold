@@ -99,15 +99,39 @@ mod tests {
         let fixture = tempfile::tempdir().expect("temp fixture");
         fs::create_dir_all(fixture.path().join(".github/workflows")).expect("workflow directory");
         for path in ["mise.toml", "mise.lock", DEPENDENCY_REVIEW_PATH] {
-            fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(path), fixture.path().join(path)).expect("copy guarded input");
+            stage_fixture_input(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(path), &fixture.path().join(path));
         }
         fixture
+    }
+
+    fn stage_fixture_input(source: &Path, destination: &Path) {
+        let contents = fs::read(source).expect("read guarded input");
+        fs::write(destination, contents).expect("write guarded input fixture");
     }
 
     #[test]
     fn guarded_configuration_accepts_the_reviewed_files() {
         let fixture = fixture();
         validate_configuration(fixture.path(), &tracked_paths()).expect("reviewed configuration");
+    }
+
+    #[test]
+    fn guarded_fixture_staging_does_not_preserve_read_only_permissions() {
+        let source = tempfile::NamedTempFile::new().expect("source fixture");
+        fs::write(source.path(), b"reviewed\n").expect("source contents");
+        let original_permissions = source.path().metadata().expect("source metadata").permissions();
+        let mut read_only_permissions = original_permissions.clone();
+        read_only_permissions.set_readonly(true);
+        fs::set_permissions(source.path(), read_only_permissions).expect("make source read-only");
+
+        let destination_directory = tempfile::tempdir().expect("destination directory");
+        let destination = destination_directory.path().join("guarded-input");
+        stage_fixture_input(source.path(), &destination);
+        assert_eq!(fs::read(&destination).expect("staged contents"), b"reviewed\n");
+        assert!(!destination.metadata().expect("destination metadata").permissions().readonly());
+        fs::write(destination, b"changed\n").expect("overwrite staged fixture");
+
+        fs::set_permissions(source.path(), original_permissions).expect("restore source permissions");
     }
 
     #[test]

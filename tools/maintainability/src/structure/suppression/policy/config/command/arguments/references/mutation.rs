@@ -5,8 +5,8 @@ mod profiles;
 mod removal;
 mod strip;
 
-pub(super) fn dispatch_is_opaque(path: &str, profile_sha256: &str, command: &str, arguments: &[String]) -> bool {
-    if profiles::accepts_dynamic_arguments(path, profile_sha256, command, arguments) {
+pub(super) fn dispatch_is_opaque(path: &str, source_is_reviewed: bool, command: &str, arguments: &[String]) -> bool {
+    if profiles::accepts_dynamic_arguments(path, source_is_reviewed, command, arguments) {
         return false;
     }
     dynamic_mutation_arguments_are_opaque(command, arguments)
@@ -56,12 +56,8 @@ fn dynamic_mutation_arguments_are_opaque(command: &str, arguments: &[String]) ->
     mutation_capable(command) && arguments.iter().any(|argument| path::contains_dynamic_value(argument)) && !dynamic_inputs_are_proven_read_only(command, arguments)
 }
 
-pub(super) fn reviewed_arguments(path: &str, profile_sha256: &str, command: &str, arguments: &[String]) -> bool {
-    profiles::accepts_dynamic_arguments(path, profile_sha256, command, arguments)
-}
-
-pub(super) fn reviewed_source(path: &str, profile_sha256: &str) -> bool {
-    profiles::accepts_source(path, profile_sha256)
+pub(super) fn reviewed_arguments(path: &str, source_is_reviewed: bool, command: &str, arguments: &[String]) -> bool {
+    profiles::accepts_dynamic_arguments(path, source_is_reviewed, command, arguments)
 }
 
 pub(super) fn reviewed_sources() -> std::collections::BTreeSet<(&'static str, &'static str)> {
@@ -181,7 +177,16 @@ fn symbolic_link_is_opaque(path: &str, command: &str, arguments: &[String]) -> b
 }
 
 fn is_reviewed_symbolic_link(path: &str, command: &str, arguments: &[String]) -> bool {
-    path == "script/tests/test_claude_review.sh" && command == "ln" && arguments == ["-s", "--", "$script_dir/test_claude_review.sh", "$test_root/bin/claude"]
+    path == "script/tests/test_claude_review.sh"
+        && command == "ln"
+        && matches!(
+            arguments,
+            [option, delimiter, source, destination]
+                if option == "-s"
+                    && delimiter == "--"
+                    && source == "$script_dir/test_claude_review.sh"
+                    && matches!(destination.as_str(), "$test_root/bin/claude" | "$test_root/bin/ps")
+        )
 }
 
 fn compression_dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {

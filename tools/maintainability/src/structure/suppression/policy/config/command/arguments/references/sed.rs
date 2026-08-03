@@ -2,8 +2,8 @@ use super::SelectedInput;
 
 const PROGRAM_FILES: ProgramFileSyntax = ProgramFileSyntax::new(&["--file"], &['f'], &['e', 'i'], &[]);
 
-pub(super) fn program_is_opaque(path: &str, profile_sha256: &str, command: &str, arguments: &[String]) -> bool {
-    if super::mutation::reviewed_arguments(path, profile_sha256, command, arguments) {
+pub(super) fn program_is_opaque(path: &str, source_is_reviewed: bool, command: &str, arguments: &[String]) -> bool {
+    if super::mutation::reviewed_arguments(path, source_is_reviewed, command, arguments) {
         return false;
     }
     let (inputs, opaque) = program_file_inputs(arguments, &PROGRAM_FILES);

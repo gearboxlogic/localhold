@@ -1,6 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ $(basename -- "$0") == ps ]]; then
+    fake_root=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
+    capture="$fake_root/capture"
+    simulated_state=
+    if [[ -e "$capture/simulate-zombie-group" ]]; then
+        simulated_state=Z
+    elif [[ -e "$capture/simulate-live-group" ]]; then
+        simulated_state=T
+    fi
+    if [[ -n $simulated_state ]]; then
+        count=0
+        if [[ -e "$capture/ps-count" ]]; then
+            count=$(< "$capture/ps-count")
+        fi
+        (( count += 1 ))
+        printf '%s\n' "$count" > "$capture/ps-count"
+        if (( count > 101 )); then
+            printf '%s %s\n' "$(< "$capture/child-pid")" "$simulated_state"
+            exit 0
+        fi
+    fi
+    exec /usr/bin/ps -A -o pgid=,stat=
+fi
+
 if [[ $(basename -- "$0") == claude ]]; then
     fake_root=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
     capture="$fake_root/capture"
@@ -20,6 +44,7 @@ if [[ $(basename -- "$0") == claude ]]; then
     pwd -P > "$capture/cwd"
     mkdir -p -- "$TMPDIR/nested"
     printf 'temporary review data\n' > "$TMPDIR/nested/payload"
+    printf '%s\n' "$BASHPID" > "$capture/child-pid"
 
     start_resistant_grandchild() {
         rm -f -- "$capture/grandchild-ready"
@@ -47,6 +72,16 @@ if [[ $(basename -- "$0") == claude ]]; then
         start_resistant_grandchild
         : > "$capture/ready"
         exit 23
+    fi
+    if [[ " $* " == *" Simulate a zombie-only descendant group. "* ]]; then
+        : > "$capture/simulate-zombie-group"
+        start_resistant_grandchild
+        : > "$capture/ready"
+    fi
+    if [[ " $* " == *" Simulate a stopped descendant group. "* ]]; then
+        : > "$capture/simulate-live-group"
+        start_resistant_grandchild
+        : > "$capture/ready"
     fi
     printf 'fake review output\n'
     if [[ " $* " == *" Fail this fake review. "* ]]; then
@@ -133,6 +168,7 @@ trap cleanup EXIT
 
 mkdir -- "$test_root/bin" "$test_root/capture"
 ln -s -- "$script_dir/test_claude_review.sh" "$test_root/bin/claude"
+ln -s -- "$script_dir/test_claude_review.sh" "$test_root/bin/ps"
 
 PATH="$test_root/bin:$PATH" \
 LOCALHOLD_SECRET="must not reach Claude" \
@@ -236,12 +272,19 @@ if [[ -e "$failure_scratch" ]]; then
     exit 1
 fi
 
+process_is_live() {
+    local pid=$1 state
+    kill -0 "$pid" 2>/dev/null || return 1
+    state=$(/usr/bin/ps -o stat= -p "$pid" 2>/dev/null) || return 1
+    [[ -n $state && $state != Z* ]]
+}
+
 assert_descendant_is_drained() {
     local prompt=$1
     local expected_status=$2
     rm -rf -- "$test_root/capture"
     mkdir -- "$test_root/capture"
-    if PATH="$test_root/bin:$PATH" "$repository_root/script/claude-review.sh" opus "$prompt" > "$test_root/descendant-output"; then
+    if PATH="$test_root/bin:$PATH" "$repository_root/script/claude-review.sh" opus "$prompt" > "$test_root/descendant-output" 2> "$test_root/descendant-error"; then
         status=0
     else
         status=$?
@@ -250,8 +293,11 @@ assert_descendant_is_drained() {
         printf 'Claude review wrapper changed descendant test status: expected=%d actual=%d\n' "$expected_status" "$status" >&2
         exit 1
     fi
+    if (( expected_status == 1 )); then
+        grep -Fq 'Claude review process group survived TERM and KILL' "$test_root/descendant-error"
+    fi
     grandchild_pid=$(< "$test_root/capture/grandchild-pid")
-    if kill -0 "$grandchild_pid" 2>/dev/null; then
+    if process_is_live "$grandchild_pid"; then
         printf 'Claude reviewer descendant survived completion: %s\n' "$grandchild_pid" >&2
         exit 1
     fi
@@ -265,6 +311,8 @@ assert_descendant_is_drained() {
 
 assert_descendant_is_drained "Leave a descendant after success." 0
 assert_descendant_is_drained "Leave a descendant after failure." 23
+assert_descendant_is_drained "Simulate a zombie-only descendant group." 0
+assert_descendant_is_drained "Simulate a stopped descendant group." 1
 
 rm -rf -- "$test_root/capture"
 mkdir -- "$test_root/capture"

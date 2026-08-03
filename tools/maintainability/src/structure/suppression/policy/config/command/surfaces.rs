@@ -10,11 +10,13 @@ use super::super::{parse_nul_paths, validate_relative_path};
 use super::actions::validate_local_actions;
 use super::arguments::execution_inputs_for_surface;
 use super::is_execution_surface;
+use super::profile_policy::ProfileManifest;
 
 pub(super) struct ExecutionSurfaceSet {
     pub(super) paths: Vec<String>,
     pub(super) checked_paths: BTreeSet<String>,
     pub(super) tracked_paths: BTreeSet<String>,
+    pub(super) command_profiles: Option<ProfileManifest>,
 }
 
 pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet> {
@@ -29,16 +31,28 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
     let paths = parse_nul_paths(&output.stdout, |_| true)?.into_iter().collect::<BTreeSet<_>>();
     let checked_paths = paths.clone();
     let tracked_paths = tracked_paths(workspace)?;
+    let command_profiles = super::command_profiles::validate(workspace, &tracked_paths)?;
     let executables = tracked_executables(workspace)?;
     validate_local_actions(workspace, &paths)?;
+    let mut surfaces = discover_surfaces(workspace, paths, &executables)?;
+    for surface in &surfaces {
+        validate_before_resolution(workspace, surface)?;
+    }
+    close_over_execution_inputs(workspace, &mut surfaces, &tracked_paths, command_profiles.as_ref())?;
+    Ok(ExecutionSurfaceSet {
+        paths: surfaces.into_iter().collect(),
+        checked_paths,
+        tracked_paths,
+        command_profiles,
+    })
+}
+
+fn discover_surfaces(workspace: &Path, paths: BTreeSet<String>, executables: &BTreeSet<String>) -> Result<BTreeSet<String>> {
     let mut surfaces = BTreeSet::new();
     for path in paths {
         reject_python_loadable_artifact(&path)?;
         let absolute = workspace.join(&path);
         let executable = executables.contains(&path);
-        if executable && is_rust_source(&path) {
-            bail!("tracked Rust source cannot be executable: {path:?}");
-        }
         let classified = is_execution_surface(&path) || executable;
         match fs::symlink_metadata(&absolute) {
             Ok(metadata) if metadata.is_dir() => continue,
@@ -49,21 +63,30 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(error) => return Err(error).with_context(|| format!("inspect possible command execution surface {}", absolute.display())),
         }
-        if classified || has_shebang(&absolute)? {
+        let shebang = has_shebang(&absolute)?;
+        if is_rust_source(&path) {
+            if executable || shebang {
+                bail!("tracked Rust source cannot be executable or have a shebang: {path:?}");
+            }
+            continue;
+        }
+        if classified || shebang {
             surfaces.insert(path);
         }
     }
-    for surface in &surfaces {
-        validate_before_resolution(workspace, surface)?;
-    }
+    Ok(surfaces)
+}
+
+fn close_over_execution_inputs(workspace: &Path, surfaces: &mut BTreeSet<String>, tracked_paths: &BTreeSet<String>, command_profiles: Option<&ProfileManifest>) -> Result<()> {
     let mut validated = surfaces.clone();
     let mut pending = surfaces.iter().cloned().collect::<Vec<_>>();
     while let Some(surface) = pending.pop() {
         let source = fs::read_to_string(workspace.join(&surface)).with_context(|| format!("read command execution surface {surface}"))?;
-        let reviewed_source = without_reviewed_dispatch(&surface, &source);
-        let execution_inputs = execution_inputs_for_surface(&surface, &reviewed_source, &source);
+        let source_is_reviewed = command_profiles.is_some_and(|profiles| profiles.source_is_current(&surface, &source));
+        let reviewed_source = without_reviewed_dispatch(&surface, &source, source_is_reviewed);
+        let execution_inputs = execution_inputs_for_surface(&surface, &reviewed_source, source_is_reviewed);
         let mut referenced_inputs = execution_inputs.paths;
-        referenced_inputs.extend(windows_bare_program_shadows(&execution_inputs.windows_bare_programs, &tracked_paths));
+        referenced_inputs.extend(windows_bare_program_shadows(&execution_inputs.windows_bare_programs, tracked_paths));
         if execution_inputs.unresolved {
             bail!("command execution surface {surface:?} uses an opaque interpreter program or makefile selection");
         }
@@ -88,11 +111,7 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
             }
         }
     }
-    Ok(ExecutionSurfaceSet {
-        paths: surfaces.into_iter().collect(),
-        checked_paths,
-        tracked_paths,
-    })
+    Ok(())
 }
 
 fn validate_before_resolution(workspace: &Path, surface: &str) -> Result<()> {
@@ -197,9 +216,9 @@ const TRUSTED_DISPATCH_JOBS: &[TrustedDispatchJob] = &[
     },
 ];
 
-pub(in crate::structure::suppression::policy::config) fn without_reviewed_dispatch(surface: &str, source: &str) -> String {
+pub(in crate::structure::suppression::policy::config) fn without_reviewed_dispatch(surface: &str, source: &str, source_is_reviewed: bool) -> String {
     let source = without_reviewed_protected_dispatch(surface, source);
-    if surface != "script/install.sh" || !super::reviewed_quality_command_exceptions_are_exact(surface, &source) {
+    if surface != "script/install.sh" || !super::reviewed_quality_command_exceptions_are_exact(surface, &source, source_is_reviewed) {
         return source;
     }
     source
@@ -490,8 +509,26 @@ mod tests {
         git(repository.path(), &["init", "--quiet"]);
         git(repository.path(), &["add", "."]);
 
-        let surfaces = execution_surfaces(repository.path()).expect("classify execution surfaces");
-        assert!(surfaces.paths.contains(&"GIT.EXE".to_owned()));
+        let error = execution_surfaces(repository.path()).err().expect("reject Windows shadow");
+        assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
+    }
+
+    #[test]
+    fn unsupported_executable_formats_fail_closed() {
+        for executable in [false, true] {
+            let repository = tempfile::tempdir().expect("temporary repository");
+            fs::create_dir(repository.path().join("quality")).expect("create quality directory");
+            let source = if executable { "cp source clippy.toml\n" } else { "#!/bin/sh\ncp source clippy.toml\n" };
+            fs::write(repository.path().join("quality/runner.json"), source).expect("write unsupported command surface");
+            git(repository.path(), &["init", "--quiet"]);
+            git(repository.path(), &["add", "."]);
+            if executable {
+                git(repository.path(), &["update-index", "--chmod=+x", "quality/runner.json"]);
+            }
+
+            let error = execution_surfaces(repository.path()).err().expect("reject unsupported command surface");
+            assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
+        }
     }
 
     #[test]
@@ -534,7 +571,6 @@ mod tests {
     #[test]
     fn generated_release_smoke_programs_have_a_closed_invocation_set() {
         const PATH: &str = ".github/workflows/release.yml";
-        let profile_source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/release.yml")).expect("read release workflow");
         let reviewed = r"name: release
 jobs:
   smoke:
@@ -546,7 +582,7 @@ jobs:
           $actual = ./hold-smoke.exe --version
           ./hold-smoke.exe --help | Out-Null
 ";
-        let inputs = execution_inputs_for_surface(PATH, reviewed, &profile_source);
+        let inputs = execution_inputs_for_surface(PATH, reviewed, true);
         assert!(!inputs.unresolved, "exact generated smoke program");
         assert_eq!(inputs.paths, BTreeSet::from(["hold-smoke.exe".to_owned()]));
         assert!(reviewed_generated_program(PATH, reviewed, "hold-smoke.exe"));

@@ -1,8 +1,7 @@
-use super::{REVIEWED_DYNAMIC_DESTINATIONS, dispatch_is_opaque, profiles};
+use super::{REVIEWED_DYNAMIC_DESTINATIONS, dispatch_is_opaque};
 
 fn dispatch(path: &str, command: &str, arguments: &[String]) -> bool {
-    let profile_sha256 = profiles::current_source_sha256(path).unwrap_or_default();
-    dispatch_is_opaque(path, profile_sha256, command, arguments)
+    dispatch_is_opaque(path, true, command, arguments)
 }
 
 fn opaque(command: &str, arguments: &[&str]) -> bool {

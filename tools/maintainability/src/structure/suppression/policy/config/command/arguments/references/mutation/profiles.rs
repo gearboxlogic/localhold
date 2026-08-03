@@ -320,6 +320,7 @@ const ARGUMENT_PROFILES: &[ArgumentProfile] = &[
         &["run", "--manifest-path", "$maintainability_manifest", "--locked", "--", "check"],
     ),
     profile("script/claude-review.sh", "rm", &["-rf", "--", "$scratch_directory"]),
+    profile("script/claude-review.sh", "ps", &["-A", "-o", "pgid=,stat="]),
     profile("script/claude-review.sh", "trap", &["HUP", "INT", "TERM"]),
     profile(
         "script/claude-review.sh",
@@ -347,6 +348,11 @@ const ARGUMENT_PROFILES: &[ArgumentProfile] = &[
         ],
     ),
     profile("script/tests/test_claude_review.sh", "cat", &[">", "$capture/stdin"]),
+    profile("script/tests/test_claude_review.sh", "printf", &["%s\\n", "$count", ">", "$capture/ps-count"]),
+    profile("script/tests/test_claude_review.sh", ":", &[">", "$capture/simulate-zombie-group"]),
+    profile("script/tests/test_claude_review.sh", ":", &[">", "$capture/simulate-live-group"]),
+    profile("script/tests/test_claude_review.sh", "ps", &["-A", "-o", "pgid=,stat="]),
+    profile("script/tests/test_claude_review.sh", "ps", &["-o", "stat=", "-p", "$pid", "2>/dev/null"]),
     profile("script/tests/test_claude_review.sh", "rm", &["-f", "--", "$capture/grandchild-ready"]),
     profile(
         "script/tests/test_claude_review.sh",
@@ -379,12 +385,17 @@ const ARGUMENT_PROFILES: &[ArgumentProfile] = &[
     profile(
         "script/tests/test_claude_review.sh",
         "claude-review.sh",
-        &["opus", "$prompt", ">", "$test_root/descendant-output"],
+        &["opus", "$prompt", ">", "$test_root/descendant-output", "2>", "$test_root/descendant-error"],
     ),
     profile(
         "script/tests/test_claude_review.sh",
         "ln",
         &["-s", "--", "$script_dir/test_claude_review.sh", "$test_root/bin/claude"],
+    ),
+    profile(
+        "script/tests/test_claude_review.sh",
+        "ln",
+        &["-s", "--", "$script_dir/test_claude_review.sh", "$test_root/bin/ps"],
     ),
     profile("script/tests/test_claude_review.sh", "rm", &["-rf", "--", "$test_root"]),
     profile("script/tests/test_claude_review.sh", "rm", &["-rf", "--", "$test_root/capture"]),
@@ -395,25 +406,12 @@ const fn profile(path: &'static str, command: &'static str, arguments: &'static 
     ArgumentProfile { path, command, arguments }
 }
 
-pub(super) fn accepts_dynamic_arguments(path: &str, profile_sha256: &str, command: &str, arguments: &[String]) -> bool {
-    matching_source_profiles(path, profile_sha256) == 1 && matching_argument_profiles(path, command, arguments) == 1
-}
-
-pub(super) fn accepts_source(path: &str, profile_sha256: &str) -> bool {
-    matching_source_profiles(path, profile_sha256) == 1
-}
-
-#[cfg(test)]
-pub(super) fn current_source_sha256(path: &str) -> Option<&'static str> {
-    SOURCE_PROFILES.iter().find(|profile| profile.path == path).map(|profile| profile.current_sha256)
+pub(super) fn accepts_dynamic_arguments(path: &str, source_is_reviewed: bool, command: &str, arguments: &[String]) -> bool {
+    source_is_reviewed && matching_argument_profiles(path, command, arguments) == 1
 }
 
 pub(super) fn reviewed_sources() -> BTreeSet<(&'static str, &'static str)> {
     SOURCE_PROFILES.iter().map(|profile| (profile.id, profile.path)).collect()
-}
-
-fn matching_source_profiles(path: &str, sha256: &str) -> usize {
-    SOURCE_PROFILES.iter().filter(|profile| profile.path == path && profile.accepts(sha256)).count()
 }
 
 fn matching_argument_profiles(path: &str, command: &str, arguments: &[String]) -> usize {
@@ -444,30 +442,29 @@ mod tests {
     #[test]
     fn every_reviewed_argument_tuple_matches_once_and_is_exact() {
         for reviewed in argument_profiles() {
-            let sha256 = current_source_sha256(reviewed.path).expect("argument profile source digest");
             let arguments = reviewed.arguments.iter().map(|argument| (*argument).to_owned()).collect::<Vec<_>>();
             assert_eq!(matching_argument_profiles(reviewed.path, reviewed.command, &arguments), 1, "{}", reviewed.path);
-            assert!(accepts_dynamic_arguments(reviewed.path, sha256, reviewed.command, &arguments));
-            assert!(!accepts_dynamic_arguments("script/other.sh", sha256, reviewed.command, &arguments));
-            assert!(!accepts_dynamic_arguments(reviewed.path, sha256, "changed-command", &arguments));
-            assert!(!accepts_dynamic_arguments(reviewed.path, "changed-digest", reviewed.command, &arguments));
+            assert!(accepts_dynamic_arguments(reviewed.path, true, reviewed.command, &arguments));
+            assert!(!accepts_dynamic_arguments("script/other.sh", true, reviewed.command, &arguments));
+            assert!(!accepts_dynamic_arguments(reviewed.path, true, "changed-command", &arguments));
+            assert!(!accepts_dynamic_arguments(reviewed.path, false, reviewed.command, &arguments));
 
             let mut appended = arguments.clone();
             appended.push("changed-argument".to_owned());
-            assert_mutation_requires_a_separate_profile(reviewed, sha256, &appended, "appended argument");
+            assert_mutation_requires_a_separate_profile(reviewed, &appended, "appended argument");
             for index in 0..arguments.len() {
                 let mut changed = arguments.clone();
                 changed[index].push_str("-changed");
-                assert_mutation_requires_a_separate_profile(reviewed, sha256, &changed, "changed argument");
+                assert_mutation_requires_a_separate_profile(reviewed, &changed, "changed argument");
 
                 let mut removed = arguments.clone();
                 removed.remove(index);
-                assert_mutation_requires_a_separate_profile(reviewed, sha256, &removed, "removed argument");
+                assert_mutation_requires_a_separate_profile(reviewed, &removed, "removed argument");
             }
         }
     }
 
-    fn assert_mutation_requires_a_separate_profile(reviewed: &ArgumentProfile, sha256: &str, arguments: &[String], mutation: &str) {
+    fn assert_mutation_requires_a_separate_profile(reviewed: &ArgumentProfile, arguments: &[String], mutation: &str) {
         let matches = matching_argument_profiles(reviewed.path, reviewed.command, arguments);
         assert!(
             matches <= 1,
@@ -476,7 +473,7 @@ mod tests {
             reviewed.command
         );
         assert_eq!(
-            accepts_dynamic_arguments(reviewed.path, sha256, reviewed.command, arguments),
+            accepts_dynamic_arguments(reviewed.path, true, reviewed.command, arguments),
             matches == 1,
             "{mutation} was accepted without its own exact reviewed tuple for {} {:?}: {arguments:?}",
             reviewed.path,
@@ -498,10 +495,8 @@ mod tests {
         for embedded in SOURCE_PROFILES {
             let profile = policy.profiles().iter().find(|profile| profile.id == embedded.id).expect("governed source profile");
             assert_eq!(profile.path, embedded.path);
-            assert_eq!(profile.current_sha256, embedded.current_sha256);
-            assert_eq!(profile.preapproved_next_sha256.as_deref(), embedded.preapproved_next_sha256);
             let source = fs::read(workspace.join(embedded.path)).expect("reviewed source");
-            assert_eq!(format!("{:x}", Sha256::digest(source)), embedded.current_sha256, "{}", embedded.path);
+            assert_eq!(format!("{:x}", Sha256::digest(source)), profile.current_sha256, "{}", embedded.path);
         }
     }
 }

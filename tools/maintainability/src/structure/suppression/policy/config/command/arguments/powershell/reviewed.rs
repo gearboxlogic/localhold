@@ -77,10 +77,6 @@ mod tests {
         let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         for path in [".github/workflows/release.yml", ".github/workflows/release-smoke.yml", ".github/workflows/ci.yml"] {
             let source = std::fs::read_to_string(repository.join(path)).expect("workflow source");
-            assert!(
-                crate::structure::suppression::policy::config::command::arguments::reviewed_command_source(path, &source),
-                "{path} source profile"
-            );
             for command in crate::structure::suppression::policy::config::command::yaml::powershell_run_commands(path, &source) {
                 let analysis = super::super::analyze_execution_commands(&command);
                 assert!(accepts(path, true, &analysis), "{path}: {:?}", analysis.unresolved_statements);

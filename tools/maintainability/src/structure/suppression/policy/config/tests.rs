@@ -591,31 +591,36 @@ fn quality_command_exceptions_require_the_exact_reviewed_lines() {
         ".github/workflows/trusted-maintainability.yml",
     ] {
         let source = fs::read_to_string(repository.join(path)).expect("read reviewed quality-command source");
-        assert!(super::command::reviewed_quality_command_exceptions_are_exact(path, &source), "{path}");
+        assert!(super::command::reviewed_quality_command_exceptions_are_exact(path, &source, true), "{path}");
     }
     assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
         "script/run-source-safety.sh",
         &format!("{}\n\"$cargo_command\" clippy -- -A warnings", RUNNER_COMMAND_LINES.join("\n")),
+        false,
     ));
     assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
         "script/run-source-safety.sh",
         &format!("{}\n\"$cargo_command\" clippy -- \\\n+            -A warnings", RUNNER_COMMAND_LINES.join("\n")),
+        false,
     ));
     assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
         "script/run-source-safety.sh",
         &format!("{}\ngate() {{\n    cargo test\n    true\n}}\ngate || true", RUNNER_COMMAND_LINES.join("\n")),
+        false,
     ));
 
     let source = fs::read_to_string(repository.join("script/dep-audit.sh")).expect("read dependency audit script");
     assert!(weakening_token_for_surface("script/dep-audit.sh", &source));
-    assert!(super::command::reviewed_quality_command_exceptions_are_exact("script/dep-audit.sh", &source));
+    assert!(super::command::reviewed_quality_command_exceptions_are_exact("script/dep-audit.sh", &source, true));
     assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
         "script/dep-audit.sh",
         &source.replace("if ! run_workspace_deny; then", "if ! run_unreviewed_deny; then"),
+        false,
     ));
     assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
         "script/dep-audit.sh",
         &source.replace("if (( failed != 0 )); then", "failed=0\nif (( failed != 0 )); then"),
+        false,
     ));
 }
 
@@ -627,13 +632,13 @@ fn checked_in_installer_preserves_its_reviewed_build_directory_contract() {
     assert!(weakening_environment_for_surface("script/install.sh", &source));
     assert!(scrubber_environment_references_are_exact("script/install.sh", &source));
     assert!(!weakening_token_for_surface("script/install.sh", &source));
-    assert!(super::command::reviewed_quality_command_exceptions_are_exact("script/install.sh", &source));
+    assert!(super::command::reviewed_quality_command_exceptions_are_exact("script/install.sh", &source, true));
     assert!(source.contains("case \":${PATH}:\" in\n  *\":${prefix}/bin:\"*) ;;\n  *) printf 'Add %s/bin to PATH before invoking hold by name.\\n' \"$prefix\" ;;\nesac"));
-    let reviewed = without_reviewed_dispatch("script/install.sh", &source);
+    let reviewed = without_reviewed_dispatch("script/install.sh", &source, true);
     assert!(!reviewed.contains("\"$cargo_command\" build"));
 
     let tampered = source.replace("--features reranker --target-dir", "--features reranker --quiet --target-dir");
-    assert_eq!(without_reviewed_dispatch("script/install.sh", &tampered), tampered);
+    assert_eq!(without_reviewed_dispatch("script/install.sh", &tampered, false), tampered);
 }
 
 #[test]

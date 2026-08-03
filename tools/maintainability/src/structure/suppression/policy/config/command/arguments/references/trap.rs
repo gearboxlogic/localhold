@@ -54,11 +54,15 @@ mod tests {
         let functions = BTreeSet::from(["cleanup".to_owned()]);
         let surface = super::super::ShellSurface {
             path: "script/check.sh",
-            direct_program_paths: true,
-            make_surface: false,
+            mode: super::super::ShellMode {
+                direct_program_paths: true,
+                make_surface: false,
+            },
             functions: &functions,
-            reviewed_git_wrappers: false,
-            profile_sha256: "",
+            review: super::super::ReviewState {
+                git_wrappers: false,
+                source: false,
+            },
         };
         action_is_opaque(surface, &arguments(values))
     }

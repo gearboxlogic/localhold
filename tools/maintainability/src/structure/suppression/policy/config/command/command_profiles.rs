@@ -9,9 +9,9 @@ use sha2::{Digest, Sha256};
 use super::arguments::reviewed_command_profiles;
 use super::profile_policy::{POLICY_PATH, ProfileManifest};
 
-pub(super) fn validate(workspace: &Path, checked_paths: &BTreeSet<String>) -> Result<()> {
+pub(super) fn validate(workspace: &Path, checked_paths: &BTreeSet<String>) -> Result<Option<ProfileManifest>> {
     if !checked_paths.contains(POLICY_PATH) {
-        return Ok(());
+        return Ok(None);
     }
     require_regular_file(workspace, POLICY_PATH, "reviewed command profile policy")?;
     let bytes = fs::read(workspace.join(POLICY_PATH)).context("read reviewed command profile policy")?;
@@ -39,7 +39,8 @@ pub(super) fn validate(workspace: &Path, checked_paths: &BTreeSet<String>) -> Re
             );
         }
     }
-    compare_previous(workspace, &policy)
+    compare_previous(workspace, &policy)?;
+    Ok(Some(policy))
 }
 
 fn require_regular_file(workspace: &Path, path: &str, label: &str) -> Result<()> {

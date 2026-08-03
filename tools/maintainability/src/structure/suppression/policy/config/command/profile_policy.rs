@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 pub(super) const POLICY_PATH: &str = "policy/maintainability/reviewed-command-profiles.json";
 
@@ -34,6 +35,11 @@ impl ProfileManifest {
 
     pub(super) fn profiles(&self) -> &[SourceProfile] {
         &self.profiles
+    }
+
+    pub(super) fn source_is_current(&self, path: &str, source: &str) -> bool {
+        let observed = format!("{:x}", Sha256::digest(source.as_bytes()));
+        self.profiles.iter().filter(|profile| profile.path == path && profile.current_sha256 == observed).count() == 1
     }
 
     pub(super) fn compare_previous(&self, previous: &Self) -> Result<()> {
@@ -194,5 +200,26 @@ mod tests {
         current.compare_previous(&staged).expect("cancel successor");
         assert!(manifest(A, Some(C), &[]).compare_previous(&staged).is_err());
         assert!(manifest(B, Some(C), &[A]).compare_previous(&staged).is_err());
+    }
+
+    #[test]
+    fn validated_transition_authorizes_only_the_current_source() {
+        let old_source = "old source\n";
+        let new_source = "new source\n";
+        let old = format!("{:x}", Sha256::digest(old_source));
+        let new = format!("{:x}", Sha256::digest(new_source));
+
+        let initial = manifest(&old, None, &[]);
+        let staged = manifest(&old, Some(&new), &[]);
+        staged.compare_previous(&initial).expect("stage successor");
+        assert!(staged.source_is_current("script/reviewed.sh", old_source));
+        assert!(!staged.source_is_current("script/reviewed.sh", new_source));
+
+        let promoted = manifest(&new, None, &[&old]);
+        promoted.compare_previous(&staged).expect("promote successor");
+        assert!(promoted.source_is_current("script/reviewed.sh", new_source));
+        assert!(!promoted.source_is_current("script/reviewed.sh", old_source));
+        assert!(manifest(&new, None, &[]).compare_previous(&initial).is_err());
+        assert!(manifest(&old, Some(A), &[]).compare_previous(&staged).is_err());
     }
 }

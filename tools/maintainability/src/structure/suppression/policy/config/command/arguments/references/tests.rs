@@ -1,13 +1,11 @@
 use std::fs;
 use std::path::Path;
 
-use sha2::{Digest, Sha256};
-
-use super::{ShellSurface, collect_cargo_manifest_paths, collect_execution_inputs, execution_input_candidates, git};
+use super::{ReviewState, ShellMode, ShellSurface, collect_cargo_manifest_paths, collect_execution_inputs, execution_input_candidates, git};
 use crate::structure::suppression::policy::config::command::arguments::tokens;
 
 fn inputs(command: &str) -> (Vec<String>, bool) {
-    let (candidates, opaque) = collect_execution_inputs(std::iter::once(command), true, "script/check.sh", command);
+    let (candidates, opaque) = collect_execution_inputs(std::iter::once(command), true, "script/check.sh", false);
     (candidates.into_iter().collect(), opaque)
 }
 
@@ -76,8 +74,8 @@ fn trusted_maintainability_workflow_is_closed() {
     let path = ".github/workflows/trusted-maintainability.yml";
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = fs::read_to_string(workspace.join(path)).expect("trusted workflow");
-    let reviewed_source = super::super::super::surfaces::without_reviewed_dispatch(path, &source);
-    assert_reviewed_yaml_surface_is_closed(path, &reviewed_source, &source);
+    let reviewed_source = super::super::super::surfaces::without_reviewed_dispatch(path, &source, true);
+    assert_reviewed_yaml_surface_is_closed(path, &reviewed_source);
 }
 
 #[test]
@@ -85,7 +83,7 @@ fn release_workflow_is_closed() {
     let path = ".github/workflows/release.yml";
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = fs::read_to_string(workspace.join(path)).expect("release workflow");
-    assert_reviewed_yaml_surface_is_closed(path, &source, &source);
+    assert_reviewed_yaml_surface_is_closed(path, &source);
 }
 
 #[test]
@@ -93,7 +91,7 @@ fn release_smoke_workflow_is_closed() {
     let path = ".github/workflows/release-smoke.yml";
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = fs::read_to_string(workspace.join(path)).expect("release smoke workflow");
-    assert_reviewed_yaml_surface_is_closed(path, &source, &source);
+    assert_reviewed_yaml_surface_is_closed(path, &source);
 }
 
 #[test]
@@ -101,7 +99,7 @@ fn gpu_release_workflow_is_closed() {
     let path = ".github/workflows/gpu-release-gate.yml";
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = fs::read_to_string(workspace.join(path)).expect("GPU release workflow");
-    assert_reviewed_yaml_surface_is_closed(path, &source, &source);
+    assert_reviewed_yaml_surface_is_closed(path, &source);
 }
 
 #[test]
@@ -109,11 +107,10 @@ fn ci_workflow_is_closed() {
     let path = ".github/workflows/ci.yml";
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = fs::read_to_string(workspace.join(path)).expect("CI workflow");
-    assert_reviewed_yaml_surface_is_closed(path, &source, &source);
+    assert_reviewed_yaml_surface_is_closed(path, &source);
 }
 
-fn assert_reviewed_yaml_surface_is_closed(path: &str, analyzed_source: &str, profile_source: &str) {
-    let profile_sha256 = format!("{:x}", Sha256::digest(profile_source.as_bytes()));
+fn assert_reviewed_yaml_surface_is_closed(path: &str, analyzed_source: &str) {
     let mut opaque_commands = Vec::new();
     let mut opaque_substitutions = Vec::new();
     let mut opaque_runs = Vec::new();
@@ -128,18 +125,22 @@ fn assert_reviewed_yaml_surface_is_closed(path: &str, analyzed_source: &str, pro
         let functions = tokens::declared_shell_functions(&normalized);
         let surface = ShellSurface {
             path,
-            direct_program_paths: true,
-            make_surface: false,
+            mode: ShellMode {
+                direct_program_paths: true,
+                make_surface: false,
+            },
             functions: &functions,
-            reviewed_git_wrappers: false,
-            profile_sha256: &profile_sha256,
+            review: ReviewState {
+                git_wrappers: false,
+                source: true,
+            },
         };
         opaque_commands.extend(opaque_source_commands(surface, &normalized));
         for substitution in tokens::command_substitution_commands(&normalized, true).0 {
             opaque_substitutions.extend(opaque_source_commands(surface, &substitution));
         }
         let opaque_assignments = super::super::dynamic::opaque_command_assignment_names(path, &analysis_run);
-        let (_, opaque) = collect_execution_inputs(std::iter::once(analysis_run.as_str()), true, path, profile_source);
+        let (_, opaque) = collect_execution_inputs(std::iter::once(analysis_run.as_str()), true, path, true);
         if opaque {
             opaque_runs.push((
                 analysis_run.clone(),
@@ -151,7 +152,7 @@ fn assert_reviewed_yaml_surface_is_closed(path: &str, analyzed_source: &str, pro
             ));
         }
     }
-    let inputs = super::execution_inputs_for_surface(path, analyzed_source, profile_source);
+    let inputs = super::execution_inputs_for_surface(path, analyzed_source, true);
     assert!(
         !inputs.unresolved,
         "opaque workflow commands: {opaque_commands:#?}; substitutions: {opaque_substitutions:#?}; opaque runs: {opaque_runs:#?}; powershell runs: {powershell_runs:#?}"
@@ -167,19 +168,19 @@ fn opaque_source_commands(surface: ShellSurface<'_>, source: &str) -> Vec<Vec<St
 
 #[test]
 fn mise_execution_inputs_are_limited_to_executable_fields() {
-    let inert = super::execution_inputs_for_surface("mise.toml", "[env]\nCARGO_HOME = '{{ env.HOME }}/cargo'\n_.path = ['{{ env.HOME }}/bin']\n", "profile");
+    let inert = super::execution_inputs_for_surface("mise.toml", "[env]\nCARGO_HOME = '{{ env.HOME }}/cargo'\n_.path = ['{{ env.HOME }}/bin']\n", false);
     assert!(!inert.unresolved);
     assert!(inert.paths.is_empty());
 
-    let task = super::execution_inputs_for_surface("mise.toml", "[tasks.check]\nrun = './quality/check.sh'\n", "profile");
+    let task = super::execution_inputs_for_surface("mise.toml", "[tasks.check]\nrun = './quality/check.sh'\n", false);
     assert!(!task.unresolved, "task command must resolve");
     assert_eq!(task.paths.into_iter().collect::<Vec<_>>(), ["quality/check.sh"]);
 
-    let environment = super::execution_inputs_for_surface("mise.toml", "[env]\n_.source = 'script/environment.sh'\n", "profile");
+    let environment = super::execution_inputs_for_surface("mise.toml", "[env]\n_.source = 'script/environment.sh'\n", false);
     assert!(!environment.unresolved, "environment source must resolve");
     assert_eq!(environment.paths.into_iter().collect::<Vec<_>>(), ["script/environment.sh"]);
 
-    let dynamic = super::execution_inputs_for_surface("mise.toml", "[tasks.check]\nrun = '{{ env.RUNNER }} quality/check.sh'\n", "profile");
+    let dynamic = super::execution_inputs_for_surface("mise.toml", "[tasks.check]\nrun = '{{ env.RUNNER }} quality/check.sh'\n", false);
     assert!(dynamic.unresolved);
 }
 
@@ -190,7 +191,7 @@ fn static_background_process_cleanup_commands_are_analyzable() {
         "terminate_grandchild() {\n  if [[ -z \"$grandchild_pid\" ]] || ! kill -0 \"$grandchild_pid\"; then return; fi\n  kill -TERM \"$grandchild_pid\" || true\n}\n",
         "grandchild_pid=$(< capture/grandchild-pid)\nfor _ in {1..100}; do\n  if ! kill -0 \"$grandchild_pid\"; then break; fi\n  sleep 0.01\ndone\n",
     ] {
-        let inputs = super::execution_inputs_for_surface("script/process-test.sh", source, source);
+        let inputs = super::execution_inputs_for_surface("script/process-test.sh", source, false);
         assert!(!inputs.unresolved, "{source}");
     }
 }
@@ -201,14 +202,17 @@ fn assert_reviewed_shell_surface_is_closed(surface_path: &str) {
     let command_source = super::direct_command_source(surface_path, &source);
     let normalized = assert_reviewed_shell_preamble_is_closed(surface_path, &command_source);
     let functions = tokens::declared_shell_functions(&normalized);
-    let profile_sha256 = format!("{:x}", Sha256::digest(source.as_bytes()));
     let surface = ShellSurface {
         path: surface_path,
-        direct_program_paths: true,
-        make_surface: false,
+        mode: ShellMode {
+            direct_program_paths: true,
+            make_surface: false,
+        },
         functions: &functions,
-        reviewed_git_wrappers: git::reviewed_shell_wrappers(surface_path, &source),
-        profile_sha256: &profile_sha256,
+        review: ReviewState {
+            git_wrappers: git::reviewed_shell_wrappers(surface_path, &source),
+            source: true,
+        },
     };
     let opaque_commands = tokens::source_command_tokens(&normalized)
         .into_iter()
@@ -219,7 +223,13 @@ fn assert_reviewed_shell_surface_is_closed(surface_path: &str) {
         opaque_commands.is_empty(),
         "reviewed shell surface {surface_path:?} has opaque commands: {opaque_commands:#?}"
     );
-    let nested_surface = ShellSurface { make_surface: false, ..surface };
+    let nested_surface = ShellSurface {
+        mode: ShellMode {
+            make_surface: false,
+            ..surface.mode
+        },
+        ..surface
+    };
     let mut opaque_substitutions = Vec::new();
     for substitution in tokens::process_substitution_commands(&normalized)
         .0
@@ -236,7 +246,7 @@ fn assert_reviewed_shell_surface_is_closed(surface_path: &str) {
         opaque_substitutions.is_empty(),
         "reviewed shell surface {surface_path:?} has opaque substitutions: {opaque_substitutions:#?}"
     );
-    let (_, opaque) = collect_execution_inputs(std::iter::once(command_source.as_str()), true, surface_path, &source);
+    let (_, opaque) = collect_execution_inputs(std::iter::once(command_source.as_str()), true, surface_path, true);
     assert!(!opaque, "reviewed shell surface {surface_path:?} became opaque");
 }
 

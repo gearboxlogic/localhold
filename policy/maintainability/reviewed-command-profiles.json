@@ -94,7 +94,7 @@
     {
       "id": "claude-review",
       "path": "script/claude-review.sh",
-      "current_sha256": "88f24ff35d6c30eb4feb74be4fdb4c8039e873bcbede88015ebef779d0dc6c70",
+      "current_sha256": "7a0b509574ded78ba3c0589bae798b4e6d7d7658e5bebe48515a3ae73fafbc78",
       "preapproved_next_sha256": null,
       "retired_sha256": [],
       "issue": "https://github.com/gearboxlogic/localhold/issues/124",
@@ -104,12 +104,12 @@
     {
       "id": "claude-review-tests",
       "path": "script/tests/test_claude_review.sh",
-      "current_sha256": "e75b1d8db0dd62e5fe4fa93fc3e28ebc54545feeba8149c4198d3e996871ecbd",
+      "current_sha256": "381cebcd73c079aea2d14525c5d212505c7569d5d3c6a4b2db733ff5d7eec8a2",
       "preapproved_next_sha256": null,
       "retired_sha256": [],
       "issue": "https://github.com/gearboxlogic/localhold/issues/124",
-      "rationale": "The wrapper tests create a fake executable and TERM-resistant descendants, then clean only their isolated temporary fixture paths.",
-      "safety_invariant": "Only exact fixture process, symlink, and cleanup tuples are accepted; success, failure, and signal paths prove descendants and scratch data are gone, and the complete test source matches the current reviewed digest."
+      "rationale": "The wrapper tests create fake Claude and process-listing executables, exercise TERM-resistant, zombie-only, and stopped descendants, then clean only their isolated temporary fixture paths.",
+      "safety_invariant": "Only exact fixture process, symlink, and cleanup tuples are accepted; success, failure, signal, zombie-only, and stopped-group paths prove descendants and scratch data are gone or fail closed, and the complete test source matches the current reviewed digest."
     },
     {
       "id": "gpu-release-gate",

@@ -450,7 +450,8 @@ fn command_policy_governs_opaque_shell_programs_and_selected_makefiles() {
     git(workspace.path(), &["add", "."]);
 
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+    let message = format!("{error:#}");
+    assert!(message.contains("opaque interpreter program"), "{message}");
 }
 
 #[test]

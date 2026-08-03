@@ -19,7 +19,7 @@ mod toolchain;
 use analysis::Options as AnalysisOptions;
 use formats::{is_just, is_mise, is_powershell, is_python, is_standalone_shell_surface, is_windows_command, is_yaml, supports_shell_source};
 pub(super) use integrity::contains_quality_command;
-pub(super) use references::{cargo_manifest_paths_for_surface, execution_inputs_for_surface, reviewed_command_profiles, reviewed_command_source};
+pub(super) use references::{cargo_manifest_paths_for_surface, execution_inputs_for_surface, reviewed_command_profiles};
 use tokens::{command_tokens, command_without_comment};
 
 pub(super) fn weakening_mise_environment(path: &str, source: &str) -> bool {
@@ -39,7 +39,12 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token(source:
     weakening_token_with_options(source, AnalysisOptions::strict())
 }
 
+#[cfg(test)]
 pub(in crate::structure::suppression::policy::config) fn weakening_token_for_surface(path: &str, source: &str) -> bool {
+    weakening_token_for_surface_with_reviewed_source(path, source, false)
+}
+
+pub(super) fn weakening_token_for_surface_with_reviewed_source(path: &str, source: &str, source_is_reviewed: bool) -> bool {
     if mise::file_task_metadata_is_unresolved(source) {
         return true;
     }
@@ -57,7 +62,7 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
     }
     if is_powershell(path) {
         let analysis = powershell::analyze_execution_commands(source);
-        if !powershell::unresolved_is_reviewed(path, reviewed_command_source(path, source), &analysis) {
+        if !powershell::unresolved_is_reviewed(path, source_is_reviewed, &analysis) {
             return true;
         }
     }
@@ -99,7 +104,7 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
     if is_yaml(path) {
         if super::yaml::powershell_run_commands(path, &source).iter().any(|command| {
             let analysis = powershell::analyze_execution_commands(command);
-            powershell::has_unchecked_native_quality_command(command) || !powershell::unresolved_is_reviewed(path, reviewed_command_source(path, &source), &analysis)
+            powershell::has_unchecked_native_quality_command(command) || !powershell::unresolved_is_reviewed(path, source_is_reviewed, &analysis)
         }) {
             return true;
         }

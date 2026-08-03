@@ -136,7 +136,7 @@ mod tests {
     use super::{execution_inputs, is_preclassified_command};
 
     fn inputs(command: &str) -> (Vec<String>, bool) {
-        let (candidates, opaque) = super::super::collect_execution_inputs(std::iter::once(command), true, "script/check.sh", command);
+        let (candidates, opaque) = super::super::collect_execution_inputs(std::iter::once(command), true, "script/check.sh", false);
         (candidates.into_iter().collect(), opaque)
     }
 

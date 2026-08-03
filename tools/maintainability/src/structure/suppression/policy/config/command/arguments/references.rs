@@ -1,8 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use sha2::{Digest, Sha256};
-
 use super::{
     dynamic_program, is_cargo_tool_token, is_environment_assignment, is_mise, is_normalized_manifest_path, is_python, is_yaml, matches_tool_name, normalized_source_for_surface,
     package_json, tokens, tool_basename,
@@ -45,15 +43,11 @@ pub(in crate::structure::suppression::policy::config::command) fn reviewed_comma
     mutation::reviewed_sources()
 }
 
-pub(in crate::structure::suppression::policy::config::command) fn reviewed_command_source(path: &str, source: &str) -> bool {
-    mutation::reviewed_source(path, &format!("{:x}", Sha256::digest(source.as_bytes())))
-}
-
-pub(in crate::structure::suppression::policy::config::command) fn execution_inputs_for_surface(path: &str, source: &str, profile_source: &str) -> model::ExecutionInputs {
+pub(in crate::structure::suppression::policy::config::command) fn execution_inputs_for_surface(path: &str, source: &str, source_is_reviewed: bool) -> model::ExecutionInputs {
     if let Some(scripts) = package_json::script_commands(path, source) {
         return scripts.map_or_else(
             |_| model::ExecutionInputs::from_paths((BTreeSet::new(), true)),
-            |scripts| model::ExecutionInputs::from_paths(collect_execution_inputs(scripts.iter().map(String::as_str), true, path, profile_source)),
+            |scripts| model::ExecutionInputs::from_paths(collect_execution_inputs(scripts.iter().map(String::as_str), true, path, source_is_reviewed)),
         );
     }
     if is_python(path) {
@@ -63,7 +57,7 @@ pub(in crate::structure::suppression::policy::config::command) fn execution_inpu
         let Ok(analysis) = super::mise::analyze(source) else {
             return model::ExecutionInputs::from_paths((BTreeSet::new(), true));
         };
-        let (paths, unresolved) = collect_execution_inputs(analysis.commands.iter().map(String::as_str), true, path, profile_source);
+        let (paths, unresolved) = collect_execution_inputs(analysis.commands.iter().map(String::as_str), true, path, source_is_reviewed);
         return model::ExecutionInputs::from_paths((paths, unresolved || analysis.unresolved));
     }
     if Path::new(path)
@@ -72,15 +66,14 @@ pub(in crate::structure::suppression::policy::config::command) fn execution_inpu
         .is_some_and(|extension| extension.eq_ignore_ascii_case("ps1"))
     {
         let analysis = super::powershell::analyze_execution_commands(source);
-        let mut inputs = model::ExecutionInputs::from_paths(collect_execution_inputs(std::iter::once(analysis.commands.as_str()), true, path, profile_source));
-        inputs.unresolved |= !super::powershell::unresolved_is_reviewed(path, reviewed_command_source(path, profile_source), &analysis);
+        let mut inputs = model::ExecutionInputs::from_paths(collect_execution_inputs(std::iter::once(analysis.commands.as_str()), true, path, source_is_reviewed));
+        inputs.unresolved |= !super::powershell::unresolved_is_reviewed(path, source_is_reviewed, &analysis);
         return inputs;
     }
     let source = normalized_source_for_surface(path, source);
     let embedded_commands = super::super::yaml::run_commands(path, &source);
     if is_yaml(path) {
         let powershell_commands = super::super::yaml::powershell_run_commands(path, &source);
-        let source_is_reviewed = reviewed_command_source(path, profile_source);
         let mut powershell_unresolved = false;
         let commands = embedded_commands
             .iter()
@@ -94,15 +87,15 @@ pub(in crate::structure::suppression::policy::config::command) fn execution_inpu
                 }
             })
             .collect::<Vec<_>>();
-        let mut inputs = model::ExecutionInputs::from_paths(collect_execution_inputs(commands.iter().map(String::as_str), true, path, profile_source));
+        let mut inputs = model::ExecutionInputs::from_paths(collect_execution_inputs(commands.iter().map(String::as_str), true, path, source_is_reviewed));
         inputs.unresolved |= powershell_unresolved;
         return inputs;
     }
     if !supports_direct_program_paths(path) {
-        return model::ExecutionInputs::from_paths((BTreeSet::new(), false));
+        return model::ExecutionInputs::from_paths((BTreeSet::new(), true));
     }
     let command_source = direct_command_source(path, &source);
-    model::ExecutionInputs::from_paths(collect_execution_inputs(std::iter::once(command_source.as_str()), true, path, profile_source))
+    model::ExecutionInputs::from_paths(collect_execution_inputs(std::iter::once(command_source.as_str()), true, path, source_is_reviewed))
 }
 
 fn direct_command_source(path: &str, source: &str) -> String {
@@ -192,10 +185,9 @@ fn is_manifest_capable_tool_token(token: &str, case_insensitive: bool) -> bool {
     is_cargo_tool_token(token, case_insensitive) || matches_tool_name(tool_basename(token), case_insensitive, &["cargo-clippy", "cargo-clippy.exe"])
 }
 
-fn collect_execution_inputs<'a>(sources: impl IntoIterator<Item = &'a str>, direct_program_paths: bool, path: &str, profile_source: &str) -> (BTreeSet<String>, bool) {
+fn collect_execution_inputs<'a>(sources: impl IntoIterator<Item = &'a str>, direct_program_paths: bool, path: &str, source_is_reviewed: bool) -> (BTreeSet<String>, bool) {
     let mut inputs = BTreeSet::new();
     let mut unresolved = false;
-    let profile_sha256 = format!("{:x}", Sha256::digest(profile_source.as_bytes()));
     let make_surface = matches!(
         Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or_default().to_ascii_lowercase().as_str(),
         "makefile" | "gnumakefile"
@@ -207,13 +199,23 @@ fn collect_execution_inputs<'a>(sources: impl IntoIterator<Item = &'a str>, dire
         let reviewed_git_wrappers = git::reviewed_shell_wrappers(path, source);
         let surface = ShellSurface {
             path,
-            direct_program_paths,
-            make_surface,
+            mode: ShellMode {
+                direct_program_paths,
+                make_surface,
+            },
             functions: &functions,
-            reviewed_git_wrappers,
-            profile_sha256: &profile_sha256,
+            review: ReviewState {
+                git_wrappers: reviewed_git_wrappers,
+                source: source_is_reviewed,
+            },
         };
-        let nested_surface = ShellSurface { make_surface: false, ..surface };
+        let nested_surface = ShellSurface {
+            mode: ShellMode {
+                make_surface: false,
+                ..surface.mode
+            },
+            ..surface
+        };
         unresolved |= super::dynamic::has_opaque_command_assignment_flow(path, source);
         unresolved |= super::untrusted_directory_change_with_quality_dispatcher(source, true);
         let scrubbed_source;
@@ -241,11 +243,21 @@ fn collect_execution_inputs<'a>(sources: impl IntoIterator<Item = &'a str>, dire
 #[derive(Clone, Copy)]
 struct ShellSurface<'a> {
     path: &'a str,
+    mode: ShellMode,
+    functions: &'a BTreeSet<String>,
+    review: ReviewState,
+}
+
+#[derive(Clone, Copy)]
+struct ShellMode {
     direct_program_paths: bool,
     make_surface: bool,
-    functions: &'a BTreeSet<String>,
-    reviewed_git_wrappers: bool,
-    profile_sha256: &'a str,
+}
+
+#[derive(Clone, Copy)]
+struct ReviewState {
+    git_wrappers: bool,
+    source: bool,
 }
 
 struct DispatchInput<'a, 'surface> {
@@ -261,7 +273,7 @@ struct DispatchInput<'a, 'surface> {
 
 fn record_shell_source_inputs(surface: ShellSurface<'_>, source: &str, inputs: &mut BTreeSet<String>, unresolved: &mut bool) {
     for tokens in tokens::source_command_tokens(source) {
-        if surface.direct_program_paths && !surface.make_surface && substitution_is_command_program(&tokens) {
+        if surface.mode.direct_program_paths && !surface.mode.make_surface && substitution_is_command_program(&tokens) {
             *unresolved = true;
         }
         record_execution_inputs_from_tokens(surface, &tokens, inputs, unresolved);
@@ -368,22 +380,22 @@ fn execution_input_candidates<'a>(surface: ShellSurface<'_>, tokens: &'a [String
     }
     let command_token = nested_command_token(command_word);
     let command_basename = tool_basename(command_token);
-    let command = unknown::reviewed_dynamic_program(surface.path, command_basename, surface.reviewed_git_wrappers)
+    let command = unknown::reviewed_dynamic_program(surface.path, command_basename, surface.review.git_wrappers)
         .unwrap_or(command_basename)
         .to_ascii_lowercase();
     let arguments = &tokens[command_index.saturating_add(1)..];
     if command_token.starts_with('<') {
         return (Vec::new(), true);
     }
-    match path::select_program(command_token, surface.direct_program_paths) {
+    match path::select_program(command_token, surface.mode.direct_program_paths) {
         path::ProgramPath::Literal(candidate) => return (vec![candidate], false),
         path::ProgramPath::Opaque => {
-            return (Vec::new(), !mutation::reviewed_arguments(surface.path, surface.profile_sha256, &command, arguments));
+            return (Vec::new(), !mutation::reviewed_arguments(surface.path, surface.review.source, &command, arguments));
         }
         path::ProgramPath::NotPath => {}
     }
     if command_word == ":" {
-        return (Vec::new(), mutation::dispatch_is_opaque(surface.path, surface.profile_sha256, ":", arguments));
+        return (Vec::new(), mutation::dispatch_is_opaque(surface.path, surface.review.source, ":", arguments));
     }
     match wrapper::select(raw_command_word, &command, arguments) {
         wrapper::Selection::NotWrapper => {}
@@ -391,13 +403,13 @@ fn execution_input_candidates<'a>(surface: ShellSurface<'_>, tokens: &'a [String
         wrapper::Selection::Nested(command) => return execution_input_candidates(surface, command),
         wrapper::Selection::Opaque => return (Vec::new(), true),
     }
-    if surface.reviewed_git_wrappers && git::wrapper_body_is_exact(command_word, arguments) {
+    if surface.review.git_wrappers && git::wrapper_body_is_exact(command_word, arguments) {
         return (Vec::new(), false);
     }
-    if mutation::reviewed_arguments(surface.path, surface.profile_sha256, &command, arguments) {
+    if mutation::reviewed_arguments(surface.path, surface.review.source, &command, arguments) {
         return (Vec::new(), false);
     }
-    if mutation::dispatch_is_opaque(surface.path, surface.profile_sha256, &command, arguments)
+    if mutation::dispatch_is_opaque(surface.path, surface.review.source, &command, arguments)
         || compiler::dispatch_is_opaque(&command, arguments)
         || native::dispatch_is_opaque(&command, arguments)
     {
@@ -443,10 +455,10 @@ fn dispatch_execution_input<'a>(input: DispatchInput<'a, '_>) -> (Vec<&'a str>, 
         arguments,
     } = input;
     let selected = match command.as_str() {
-        "git_at" if surface.reviewed_git_wrappers && raw_command_word == "git_at" => {
+        "git_at" if surface.review.git_wrappers && raw_command_word == "git_at" => {
             return (Vec::new(), git::wrapper_call_is_opaque(arguments, true));
         }
-        "git_checked" if surface.reviewed_git_wrappers && raw_command_word == "git_checked" => {
+        "git_checked" if surface.review.git_wrappers && raw_command_word == "git_checked" => {
             return (Vec::new(), git::wrapper_call_is_opaque(arguments, false));
         }
         _ if raw_command_word == command && surface.functions.contains(&command) => SelectedInput::None,
@@ -468,10 +480,10 @@ fn dispatch_execution_input<'a>(input: DispatchInput<'a, '_>) -> (Vec<&'a str>, 
         | "mawk.exe" | "nawk" | "nawk.exe" | "protoc" | "protoc.exe" | "rake" | "rake.exe" | "rsync" | "rsync.exe" | "run-parts" | "run-parts.exe" | "sqlite3" | "sqlite3.exe"
         | "wget" | "wget.exe" | "go" | "go.exe" => SelectedInput::Opaque,
         "find" | "find.exe" => {
-            return (Vec::new(), find_command_action_is_opaque(surface.path, surface.profile_sha256, &command, arguments));
+            return (Vec::new(), find_command_action_is_opaque(surface.path, surface.review.source, &command, arguments));
         }
         "sed" | "sed.exe" => {
-            return (Vec::new(), sed::program_is_opaque(surface.path, surface.profile_sha256, &command, arguments));
+            return (Vec::new(), sed::program_is_opaque(surface.path, surface.review.source, &command, arguments));
         }
         "split" | "split.exe" if program::split_filter_is_opaque(arguments) => SelectedInput::Opaque,
         "sort" | "sort.exe" if program::sort_compression_program_is_opaque(arguments) => SelectedInput::Opaque,
@@ -490,7 +502,7 @@ fn dispatch_execution_input<'a>(input: DispatchInput<'a, '_>) -> (Vec<&'a str>, 
         }
         _ if compiler::is_recognized(&command) => SelectedInput::None,
         _ if unknown::is_preclassified_command(surface.path, &command) => SelectedInput::None,
-        _ => match path::select_program(command_token, surface.direct_program_paths) {
+        _ => match path::select_program(command_token, surface.mode.direct_program_paths) {
             path::ProgramPath::NotPath => return unknown::execution_inputs(surface.path, command_token, arguments),
             path::ProgramPath::Literal(candidate) => SelectedInput::Literal(candidate),
             path::ProgramPath::Opaque => SelectedInput::Opaque,
@@ -530,11 +542,11 @@ pub(super) enum SelectedInput<'a> {
     Opaque,
 }
 
-fn find_command_action_is_opaque(path: &str, profile_sha256: &str, command: &str, arguments: &[String]) -> bool {
+fn find_command_action_is_opaque(path: &str, source_is_reviewed: bool, command: &str, arguments: &[String]) -> bool {
     arguments
         .iter()
         .any(|argument| path::contains_dynamic_value(argument) || matches!(argument.as_str(), "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir"))
-        && !mutation::reviewed_arguments(path, profile_sha256, command, arguments)
+        && !mutation::reviewed_arguments(path, source_is_reviewed, command, arguments)
 }
 
 fn mapfile_callback_is_opaque(arguments: &[String]) -> bool {

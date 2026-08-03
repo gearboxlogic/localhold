@@ -50,7 +50,18 @@ ensure_private_directory "$scratch_root"
 scratch_directory=$(mktemp -d "$scratch_root/session.XXXXXXXXXX")
 
 review_group_is_alive() {
-    [[ -n "$claude_pgid" ]] && kill -0 -- "-$claude_pgid" 2>/dev/null
+    [[ -n "$claude_pgid" ]] || return 1
+
+    local process_listing member_pgid member_state
+    if ! process_listing=$(ps -A -o pgid=,stat=); then
+        return 0
+    fi
+    while read -r member_pgid member_state; do
+        if [[ $member_pgid == "$claude_pgid" && $member_state != Z* ]]; then
+            return 0
+        fi
+    done <<< "$process_listing"
+    return 1
 }
 
 wait_for_review_group_exit() {

@@ -1,6 +1,4 @@
-use std::path::Path;
-
-use super::{is_windows_absolute, path};
+use super::path;
 
 pub(super) fn dispatch_is_opaque(path: &str, arguments: &[String]) -> bool {
     let mut options_ended = false;
@@ -31,7 +29,7 @@ fn target_is_opaque(path: &str, target: &str) -> bool {
     if let Some(target) = path::normalize_literal(target) {
         return super::super::super::super::is_protected_check_input(&target);
     }
-    path::contains_dynamic_value(target) || !(Path::new(target).is_absolute() || is_windows_absolute(target))
+    path::contains_dynamic_value(target) || !path::is_absolute(target)
 }
 
 fn is_reviewed_dynamic_target(path: &str, target: &str) -> bool {

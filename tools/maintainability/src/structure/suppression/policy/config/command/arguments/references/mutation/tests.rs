@@ -35,6 +35,7 @@ fn mutation_of_protected_check_inputs_fails_closed() {
     assert!(!opaque("cp", &["-ttarget/output", "input.txt"]));
     assert!(!opaque("cp", &["input.txt", "/tmp/output.txt"]));
     assert!(!opaque("cp", &["input.txt", r"C:\tmp\output.txt"]));
+    assert!(opaque("cp", &["input.txt", r"\repo\Justfile"]));
     assert!(!opaque("dd", &["if=quality/lint.data", "of=target/output.txt"]));
     assert!(!opaque("ln", &["input.txt", "target/output.txt"]));
 }
@@ -47,6 +48,7 @@ fn removal_of_protected_or_unresolved_inputs_fails_closed() {
         assert!(!opaque(command, &["-f", "target/report.txt"]), "{command}");
         assert!(!opaque(command, &["/tmp/report.txt"]), "{command}");
         assert!(!opaque(command, &[r"C:\tmp\report.txt"]), "{command}");
+        assert!(opaque(command, &[r"\repo\Justfile"]), "{command}");
     }
     assert!(opaque("remove-item", &["-Path:Justfile"]));
     assert!(opaque("remove-item", &["-LiteralPath:$target"]));
@@ -214,6 +216,7 @@ fn strip_outputs_and_in_place_targets_cannot_replace_protected_inputs() {
         assert!(!opaque(command, &["target/payload"]), "{command}");
         assert!(!opaque(command, &["/tmp/payload"]), "{command}");
         assert!(!opaque(command, &[r"C:\tmp\payload"]), "{command}");
+        assert!(opaque(command, &[r"\repo\Justfile"]), "{command}");
         assert!(!opaque(command, &["-I", "Justfile", "target/payload"]), "{command}");
     }
     assert!(!opaque("strip", &["--help", "clippy.toml"]));

@@ -13,7 +13,7 @@ pub(super) fn select_program(command: &str, direct_program_paths: bool) -> Progr
     if trusted_system_program(command) {
         return ProgramPath::NotPath;
     }
-    if is_absolute(command) {
+    if is_absolute(command) || command.starts_with('\\') {
         return ProgramPath::Opaque;
     }
     let explicit_relative = ["./", "../", r".\", r"..\"].iter().any(|prefix| command.starts_with(prefix));
@@ -64,7 +64,7 @@ fn trusted_system_program(command: &str) -> bool {
 
 fn windows_absolute(command: &str) -> bool {
     let bytes = command.as_bytes();
-    command.starts_with('\\') || bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\')
+    command.starts_with(r"\\") || bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\')
 }
 
 #[cfg(test)]

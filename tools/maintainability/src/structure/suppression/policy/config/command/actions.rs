@@ -108,8 +108,20 @@ fn validate_checkout_inputs(path: &str, lines: &[&str], uses_index: usize) -> Re
     }
     let protected_gate_checkout = path == ".github/workflows/trusted-maintainability.yml"
         && matches!(
-            (repository.as_deref(), checkout_ref.as_deref(), destination.as_deref()),
-            (Some("${{ github.repository }}"), Some("${{ github.workflow_sha }}"), Some(".trusted-gate")) | (None, Some("${{ github.sha }}"), Some(".candidate"))
+            (
+                repository.as_deref(),
+                checkout_ref.as_deref(),
+                destination.as_deref(),
+                fetch_depth.as_deref(),
+                persist_credentials.as_deref(),
+            ),
+            (
+                Some("${{ github.repository }}"),
+                Some("${{ github.workflow_sha }}"),
+                Some(".trusted-gate"),
+                Some("1"),
+                Some("false"),
+            ) | (None, Some("${{ github.sha }}"), Some(".candidate"), Some("0"), Some("false"))
         );
     let classification_checkout = path == PR_CLASSIFICATION_WORKFLOW
         && matches!(
@@ -120,6 +132,9 @@ fn validate_checkout_inputs(path: &str, lines: &[&str], uses_index: usize) -> Re
         && persist_credentials.as_deref() == Some("false");
     if path == PR_CLASSIFICATION_WORKFLOW && !classification_checkout {
         bail!("checkout in {path:?} must select only the pull-request base revision with credential persistence disabled");
+    }
+    if path == ".github/workflows/trusted-maintainability.yml" && !protected_gate_checkout {
+        bail!("checkout in {path:?} must use one exact protected-gate or candidate profile with credential persistence disabled");
     }
     if !protected_gate_checkout && !classification_checkout && (repository.is_some() || checkout_ref.is_some() || destination.is_some()) {
         bail!("checkout in {path:?} may select only the triggering repository and revision at the workspace root");
@@ -358,6 +373,21 @@ mod tests {
         for altered in ["HEAD^", "${{ github.event.before }}", ".", "$GITHUB_WORKSPACE"] {
             let source = format!("steps:\n  - uses: {CHECKOUT_ACTION}\n    with:\n      ref: {altered}\n      path: .candidate\n");
             assert!(validate_at(".github/workflows/trusted-maintainability.yml", &source).is_err(), "accepted {altered:?}");
+        }
+
+        for inputs in [
+            "",
+            "ref: ${{ github.sha }}\n      path: .candidate\n      fetch-depth: 0",
+            "ref: ${{ github.sha }}\n      path: .candidate\n      persist-credentials: false",
+            "ref: ${{ github.sha }}\n      path: .candidate\n      fetch-depth: 1\n      persist-credentials: false",
+            "repository: ${{ github.repository }}\n      ref: ${{ github.workflow_sha }}\n      path: .trusted-gate\n      fetch-depth: 0\n      persist-credentials: false",
+        ] {
+            let with = if inputs.is_empty() { String::new() } else { format!("    with:\n      {inputs}\n") };
+            let source = format!("steps:\n  - uses: {CHECKOUT_ACTION}\n{with}");
+            assert!(
+                validate_at(".github/workflows/trusted-maintainability.yml", &source).is_err(),
+                "accepted incomplete protected checkout: {inputs:?}"
+            );
         }
     }
 

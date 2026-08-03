@@ -73,6 +73,11 @@ jobs:
       - name: Run CI gate
         run: just check-quality
 
+      - name: Test candidate maintainability checker
+        run: |
+          cargo test --manifest-path tools/maintainability/Cargo.toml --locked
+          cargo clippy --manifest-path tools/maintainability/Cargo.toml --all-targets --locked -- -D warnings
+
       - name: Stage CPU installation
         run: ./script/install.sh --profile cpu --prefix "$RUNNER_TEMP/localhold"
 
@@ -216,6 +221,11 @@ jobs:
 
       - name: Test
         run: just test
+
+      - name: Test candidate maintainability checker
+        run: |
+          cargo test --manifest-path tools/maintainability/Cargo.toml --locked
+          cargo clippy --manifest-path tools/maintainability/Cargo.toml --all-targets --locked -- -D warnings
 
       - name: Build and package Windows preview archive
         run: |

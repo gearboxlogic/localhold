@@ -144,9 +144,8 @@ fn find_workspace_lints(manifests: &CargoManifests, manifest: &str, parsed: &tom
     let manifest_path = Path::new(manifest);
     let parent = manifest_path.parent().unwrap_or_else(|| Path::new(""));
     for ancestor in parent.ancestors().skip(1) {
-        let candidate = ancestor.join("Cargo.toml");
-        let candidate = candidate.to_string_lossy();
-        let Some(parsed) = manifests.get(candidate.as_ref()) else {
+        let candidate = portable_repository_path(&ancestor.join("Cargo.toml")).with_context(|| format!("enclosing Cargo workspace path selected by {manifest} is not UTF-8"))?;
+        let Some(parsed) = manifests.get(&candidate) else {
             continue;
         };
         if let Some(lints) = workspace_lints(parsed, &candidate)? {
@@ -171,13 +170,16 @@ fn explicit_workspace_manifest(manifest: &str, parsed: &toml::Table) -> Result<O
     let parent = Path::new(manifest).parent().unwrap_or_else(|| Path::new(""));
     let root = resolve_repository_relative(parent, Path::new(explicit)).with_context(|| format!("resolve Cargo package.workspace {explicit:?} in {manifest}"))?;
     let workspace_manifest = root.join("Cargo.toml");
-    workspace_manifest
-        .iter()
+    portable_repository_path(&workspace_manifest)
+        .map(Some)
+        .with_context(|| format!("explicit Cargo workspace path in {manifest} is not UTF-8"))
+}
+
+fn portable_repository_path(path: &Path) -> Option<String> {
+    path.iter()
         .map(|component| component.to_str())
         .collect::<Option<Vec<_>>>()
         .map(|components| components.join("/"))
-        .map(Some)
-        .with_context(|| format!("explicit Cargo workspace path in {manifest} is not UTF-8"))
 }
 
 fn resolve_repository_relative(base: &Path, relative: &Path) -> Result<PathBuf> {

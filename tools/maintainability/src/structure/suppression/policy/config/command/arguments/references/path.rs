@@ -57,7 +57,7 @@ pub(super) fn is_absolute(candidate: &str) -> bool {
     candidate.starts_with('/') || Path::new(candidate).is_absolute() || windows_absolute(candidate)
 }
 
-fn trusted_system_program(command: &str) -> bool {
+pub(super) fn trusted_system_program(command: &str) -> bool {
     ["/bin/", "/usr/bin/", "/mingw64/bin/"].iter().any(|prefix| {
         command
             .strip_prefix(prefix)

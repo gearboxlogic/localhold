@@ -1,5 +1,5 @@
 pub(super) fn dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
-    matches!(command, "ssh-keygen" | "ssh-keygen.exe") && pkcs11_provider_is_selected(arguments)
+    matches!(command, "ssh-keygen" | "ssh-keygen.exe") && (arguments.iter().any(|argument| super::path::contains_dynamic_value(argument)) || pkcs11_provider_is_selected(arguments))
 }
 
 fn pkcs11_provider_is_selected(arguments: &[String]) -> bool {

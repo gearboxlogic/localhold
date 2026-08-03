@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "id": "justfile",
+      "path": "Justfile",
+      "current_sha256": "e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d1b3fd69aa74c0df6f1",
+      "preapproved_next_sha256": null,
+      "retired_sha256": [],
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "The development recipes forward two declared recipe parameters and invoke pinned toolchain and setup commands.",
+      "safety_invariant": "Only the exact parameterized test, formatting, dependency-baseline, and mise setup invocations are accepted and the complete Justfile matches the current reviewed digest."
+    },
+    {
+      "id": "fixture-bootstrap",
+      "path": "script/tests/test_maintainability_bootstrap.sh",
+      "current_sha256": "b469af64538abb9e03a251da06c93c329fee0d9b62d3347c145a45cfc1916b82",
+      "preapproved_next_sha256": null,
+      "retired_sha256": [],
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "The bootstrap security fixture must construct and mutate only its isolated temporary repositories.",
+      "safety_invariant": "Every accepted dynamic command is an exact argument tuple and the complete fixture source matches the current reviewed digest."
+    },
+    {
+      "id": "developer-bootstrap",
+      "path": "script/bootstrap.sh",
+      "current_sha256": "e0302179ecc01f9feb178b74420db156736c04e33a4e67d304fa3bc2390fdbf3",
+      "preapproved_next_sha256": null,
+      "retired_sha256": [],
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "The developer bootstrap installs the repository's pinned mise tools and writes the mise lock only when one is absent.",
+      "safety_invariant": "Only the exact mise install and lock invocations are accepted and the complete developer bootstrap source matches the current reviewed digest."
+    },
+    {
+      "id": "installer",
+      "path": "script/install.sh",
+      "current_sha256": "20388ad69f99b25bc627f77cae34eaad837da4004e5db726eaa069dba2b2b2ac",
+      "preapproved_next_sha256": null,
+      "retired_sha256": [],
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "The installer runs one caller-selected Cargo executable and copies reviewed build and documentation artifacts to caller-selected installation prefixes.",
+      "safety_invariant": "Only the two documented Cargo builds and three install operations are accepted and the complete installer source matches the current reviewed digest."
+    },
+    {
+      "id": "dependency-audit",
+      "path": "script/dep-audit.sh",
+      "current_sha256": "03b36529705c704b244dd5e128e1dd1461a66677bdda0bcceedaa582015160dc",
+      "preapproved_next_sha256": null,
+      "retired_sha256": [],
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "The dependency audit aggregates failures from six required workspace and audit-tool dependency checks.",
+      "safety_invariant": "Only the exact six failure-recording calls are accepted and the complete script, including final failure propagation, matches the current reviewed digest."
+    },
+    {
+      "id": "postgres-smoke",
+      "path": "script/test-postgres-smoke.sh",
+      "current_sha256": "88a8e659f6e4c238041d037e4a49301806361a42c48706241c39ee8ad01e9724",
+      "preapproved_next_sha256": null,
+      "retired_sha256": [],
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "The PostgreSQL smoke test redacts credentials from container logs before emitting failure diagnostics.",
+      "safety_invariant": "Only the exact three-expression stderr redaction pipeline is accepted and the complete smoke-test source matches the current reviewed digest."
+    },
+    {
+      "id": "protected-bootstrap",
+      "path": "script/check-maintainability-bootstrap.sh",
+      "current_sha256": "9443771a37693340cf16b45682f77c35c05353569c2c1aee0f23c74b49c0b4dc",
+      "preapproved_next_sha256": null,
+      "retired_sha256": [],
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "The protected bootstrap constructs an isolated snapshot with authenticated system commands, runs only reviewed gate scripts, and preserves audit evidence beneath validated roots.",
+      "safety_invariant": "Only exact snapshot setup, cleanup, archive, evidence, and gate invocation tuples are accepted and the complete bootstrap source matches the current reviewed digest."
+    },
+    {
+      "id": "gate-runner",
+      "path": "script/run-maintainability-gate.sh",
+      "current_sha256": "b15c0fe7aa61af07095bf174836269d7c3c98ee688fbab669305a6153123e257",
+      "preapproved_next_sha256": null,
+      "retired_sha256": [],
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "The gate runner uses authenticated system and Rust-tool paths while preparing and executing the isolated maintainability check.",
+      "safety_invariant": "Only exact authenticated setup, cleanup, bootstrap, Cargo, fmt, and Clippy invocations are accepted and the complete runner source matches the current reviewed digest."
+    },
+    {
+      "id": "source-safety-runner",
+      "path": "script/run-source-safety.sh",
+      "current_sha256": "cd756b8a6039e1192bb0c95e7c42e66148f7b883f3b12662b31c70269165a468",
+      "preapproved_next_sha256": null,
+      "retired_sha256": [],
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "The source-safety runner invokes only absolute tool paths supplied by the authenticated maintainability bootstrap.",
+      "safety_invariant": "Only the five exact Cargo, fmt, and Clippy invocations are accepted and the complete runner source matches the current reviewed digest."
+    },
+    {
+      "id": "claude-review",
+      "path": "script/claude-review.sh",
+      "current_sha256": "88f24ff35d6c30eb4feb74be4fdb4c8039e873bcbede88015ebef779d0dc6c70",
+      "preapproved_next_sha256": null,
+      "retired_sha256": [],
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "The local review wrapper launches Claude with a minimal environment and fixed isolation controls, drains the complete review process group with bounded TERM-to-KILL escalation, then removes its validated scratch directory.",
+      "safety_invariant": "Only the exact high-effort isolated Claude launch and validated cleanup tuple are accepted; cleanup verifies that the review process group is gone before removing scratch data, and the complete wrapper source matches the current reviewed digest."
+    },
+    {
+      "id": "claude-review-tests",
+      "path": "script/tests/test_claude_review.sh",
+      "current_sha256": "e75b1d8db0dd62e5fe4fa93fc3e28ebc54545feeba8149c4198d3e996871ecbd",
+      "preapproved_next_sha256": null,
+      "retired_sha256": [],
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "The wrapper tests create a fake executable and TERM-resistant descendants, then clean only their isolated temporary fixture paths.",
+      "safety_invariant": "Only exact fixture process, symlink, and cleanup tuples are accepted; success, failure, and signal paths prove descendants and scratch data are gone, and the complete test source matches the current reviewed digest."
+    },
+    {
+      "id": "gpu-release-gate",
+      "path": ".github/workflows/gpu-release-gate.yml",
+      "current_sha256": "0765b8c7b974ef28bbc6daf54fc8f716a548918e387961b4a23cdbedb8591e1c",
+      "preapproved_next_sha256": null,
+      "retired_sha256": [],
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "The GPU release job packages the reviewed binary and runtime, verifies the extracted artifact, exercises required CUDA success and failure modes, and records bounded evidence.",
+      "safety_invariant": "Only exact package extraction, staged-binary, CUDA gate, doctor, evidence transformation, and reversible dependency-move tuples are accepted and the complete workflow matches the current reviewed digest."
+    },
+    {
+      "id": "ci-workflow",
+      "path": ".github/workflows/ci.yml",
+      "current_sha256": "cb050701091e3ebd75c64feeed4b37ed80ad6cc08ba433697748e95b9f877e25",
+      "preapproved_next_sha256": null,
+      "retired_sha256": [],
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "CI packages and extracts the Linux and Windows preview artifacts, resolves the generated binaries, and exercises their version and help commands.",
+      "safety_invariant": "Only exact archive discovery, extraction, Git configuration, generated-binary smoke, and Windows staging tuples are accepted and the complete workflow matches the current reviewed digest."
+    },
+    {
+      "id": "release-workflow",
+      "path": ".github/workflows/release.yml",
+      "current_sha256": "3f7a599eae1c47eb617347aaf08614f704a9c640a9de3891fb87a3094a5b4426",
+      "preapproved_next_sha256": null,
+      "retired_sha256": [],
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "The release workflow verifies the annotated tag and main ancestry, extracts reviewed artifacts, smoke-tests the binaries, and publishes the exact release assets.",
+      "safety_invariant": "Only exact tag verification, main fetch, artifact extraction, Windows smoke-copy, and GitHub release tuples are accepted and the complete workflow matches the current reviewed digest."
+    },
+    {
+      "id": "release-smoke-workflow",
+      "path": ".github/workflows/release-smoke.yml",
+      "current_sha256": "1a191677f19355451057ac62501bceecf923b4d09da96c649efe87412a622092",
+      "preapproved_next_sha256": null,
+      "retired_sha256": [],
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "The reusable release smoke workflow downloads, verifies, extracts, and exercises the selected Linux and Windows release artifacts in isolated runner paths.",
+      "safety_invariant": "Only exact release download, extraction, smoke-binary, response-validation, and Windows staging tuples are accepted and the complete workflow matches the current reviewed digest."
+    },
+    {
+      "id": "trusted-maintainability-workflow",
+      "path": ".github/workflows/trusted-maintainability.yml",
+      "current_sha256": "c2a4437c282c0a68f1be6e87358e657cc737b723bdeb48fc651e28aea5915556",
+      "preapproved_next_sha256": null,
+      "retired_sha256": [],
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "The protected workflow resolves a branch-shaped merge-group base to an exact commit before invoking the authenticated gate from the protected checkout.",
+      "safety_invariant": "Only the exact Git commit-resolution tuple is accepted outside the separately pinned protected-dispatch sequence, and the complete workflow matches the current reviewed digest."
+    }
+  ]
+}

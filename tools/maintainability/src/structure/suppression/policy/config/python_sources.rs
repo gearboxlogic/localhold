@@ -7,24 +7,12 @@ use sha2::{Digest, Sha256};
 
 use super::parse_nul_paths;
 
+mod profile;
+mod revision;
+
+const POLICY_PATH: &str = "policy/maintainability/python-source-profile.json";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ReviewedSource {
-    path: &'static str,
-    mode: u32,
-    sha256: &'static str,
-}
-
-impl ReviewedSource {
-    const fn regular(path: &'static str, sha256: &'static str) -> Self {
-        Self { path, mode: 0o100_644, sha256 }
-    }
-
-    const fn executable(path: &'static str, sha256: &'static str) -> Self {
-        Self { path, mode: 0o100_755, sha256 }
-    }
-}
-
-#[derive(Debug, Eq, PartialEq)]
 struct ObservedSource {
     path: String,
     mode: u32,
@@ -36,79 +24,6 @@ struct TrackedPath {
     mode: u32,
 }
 
-struct ReviewedProfile {
-    name: &'static str,
-    sources: &'static [ReviewedSource],
-}
-
-const CURRENT_PROFILE: &[ReviewedSource] = &[
-    ReviewedSource::regular("assets/brand/explorations/fortgen.py", "87c07e9806016fd4bc348ddc6c2e7f9ade770919c4e050c7084d9e9dc64bfca7"),
-    ReviewedSource::regular("assets/brand/explorations/round2.py", "6044c0d67fcbaa66c71a547e63487ebf59c22e02fb10ca901e545141bb950459"),
-    ReviewedSource::regular("assets/brand/explorations/round3.py", "bcb3af485db2d08a6e3a0c561444c38b565bbe76a8a4b6a2dfc3f5dd71c4fab6"),
-    ReviewedSource::regular("script/check-time-abstraction.py", "b35d1da9cf7635c3ba2d12d33036674613da0cc35442cade3b5d3b1a2923c0d3"),
-    ReviewedSource::executable("script/database_fixtures.py", "698b288b56e2a16ea4878ec2f009b449fd4cd376d2e3c4358445ae4b4ed1fb3f"),
-    ReviewedSource::executable("script/package-release.py", "be1c491277336054ad29c1e3bb6f8a8dd7fb4011c0720b48750aaa7b03161ac7"),
-    ReviewedSource::regular("script/package_release.py", "163b91d31ae73bdee732512ac56a615330507a978cfa78d5cd680e008d3a87a4"),
-    ReviewedSource::regular("script/prepare-cuda-runtime.py", "77f67ac502da3438ccba06c94abe035111ecfa56616bdb8c1eeba55b0f5074be"),
-    ReviewedSource::regular("script/prepare_cuda_runtime.py", "dbad298e363fefdc0a557fa023c943337aa0d423794d78daf8fa7de9fe5dd494"),
-    ReviewedSource::executable("script/release.py", "81490a55ea69c1119411621a9d1da558bae8b574d16ac9e57e069e73f3c284ea"),
-    ReviewedSource::regular("script/run-python-tests.py", "a916b28f12fc6e6b3370bfe2f24a331f39488a2f2ce184b23a6c645cc2dec85f"),
-    ReviewedSource::regular("script/tests/test_cuda_release.py", "850414f812aeddcf692d47b9cff1a820959aafea2fc25443161739010b6b850f"),
-    ReviewedSource::regular("script/tests/test_database_fixtures.py", "616df3e8d2f444fcd24a0b668eb3e492100fc465f53f041e7a0ca41555247b57"),
-    ReviewedSource::regular("script/tests/test_release.py", "5c256b12ce05d25751b10adbcc7a3ba78bacd1b0b9f6f29b360c7c1b648438d0"),
-    ReviewedSource::regular("script/tests/test_time_abstraction.py", "b797b46d0f6c1ebe3ef8496dfa7e1e6e81d02190430dd62b8b3ae83282e07c40"),
-    ReviewedSource::regular("script/validate-cuda-runtime.py", "61d9779e09753d39e5f40fd5bdc23fa0b8deef231363a583d262857649057c15"),
-    ReviewedSource::regular("script/validate_cuda_runtime.py", "53b684a7e00c9bad1358ccd5baafa5b2039f4be706f2205a8b9bafc461623151"),
-];
-
-const FEATURE_FREEZE_DELIVERY_PROFILE: &[ReviewedSource] = &[
-    ReviewedSource::regular("assets/brand/explorations/fortgen.py", "87c07e9806016fd4bc348ddc6c2e7f9ade770919c4e050c7084d9e9dc64bfca7"),
-    ReviewedSource::regular("assets/brand/explorations/round2.py", "6044c0d67fcbaa66c71a547e63487ebf59c22e02fb10ca901e545141bb950459"),
-    ReviewedSource::regular("assets/brand/explorations/round3.py", "bcb3af485db2d08a6e3a0c561444c38b565bbe76a8a4b6a2dfc3f5dd71c4fab6"),
-    ReviewedSource::regular("script/check-time-abstraction.py", "b35d1da9cf7635c3ba2d12d33036674613da0cc35442cade3b5d3b1a2923c0d3"),
-    ReviewedSource::regular("script/check_pr_classification.py", "64f498229401c518ee377b5a74ec9f9c4c946b424316b49e979d5155469720e2"),
-    ReviewedSource::executable("script/database_fixtures.py", "c3398a1b9945165e875f457aec3d6f5e60d5c06683eed2e0a82b64644219a61d"),
-    ReviewedSource::executable("script/package-release.py", "be1c491277336054ad29c1e3bb6f8a8dd7fb4011c0720b48750aaa7b03161ac7"),
-    ReviewedSource::regular("script/package_release.py", "f3ec254d0fdf9d58b3f7f9f950e950b86af5574fefa13e02e71165af75d08c99"),
-    ReviewedSource::regular("script/pr_classification/__init__.py", "a8ee1ff16a8e133d6c930231522ca7803b69d3e81b2f9b7ad43b8841a89b3705"),
-    ReviewedSource::regular("script/pr_classification/github_api.py", "f6bb2b19274b6c207dafba9dd18cb8eb1611dcde9f2f9ac328f3a0de3c4c76c5"),
-    ReviewedSource::regular("script/pr_classification/markdown.py", "ecfc33f63804491d99bfce35dc440bade7bf84bb9cca68753e1dfa865a99b822"),
-    ReviewedSource::regular("script/pr_classification/model.py", "822d5b19e91a6691ebb26249d65d3e6381a6e016766a3c6edfe07cdff83b2d82"),
-    ReviewedSource::regular("script/pr_classification/policy.py", "6fe2900394d66e25c78bfa16de90c93275abeab5f179ba9cbf33570e89dec230"),
-    ReviewedSource::regular("script/pr_classification/reviews.py", "d26ec855a798f5b3df7ab205c620cf8bb4bb69429c150d437cf89567a4bcab19"),
-    ReviewedSource::regular("script/pr_classification/validation.py", "ff679b94f3eec0c9464166e4d160aa4f4a2a9950695d55acb2dcb5e226c9c6fc"),
-    ReviewedSource::regular("script/prepare-cuda-runtime.py", "77f67ac502da3438ccba06c94abe035111ecfa56616bdb8c1eeba55b0f5074be"),
-    ReviewedSource::regular("script/prepare_cuda_runtime.py", "b910ba9e57138f9381b02b154cae84c7c8f1ad1c4e2de510dd90fd9f3f727756"),
-    ReviewedSource::executable("script/release.py", "be6e7ba8613f8ea646043eab3c60ea352373e6d8c962361dc6e04e940ccc8e79"),
-    ReviewedSource::regular("script/run-python-tests.py", "a916b28f12fc6e6b3370bfe2f24a331f39488a2f2ce184b23a6c645cc2dec85f"),
-    ReviewedSource::regular("script/tests/test_cuda_release.py", "9b78de542a72594628965dff2d15d100463f128c93cb98dcab39ebf289a7ced3"),
-    ReviewedSource::regular("script/tests/test_database_fixtures.py", "12ee731aaeebc0c033354315ac2e4f464d97f9e1342bdad2f844e90a408d3b49"),
-    ReviewedSource::regular("script/tests/test_pr_classification.py", "f1b3899c9fc7a949213587827cefceb254f1a36d0256d6547a4dd14177bcb2af"),
-    ReviewedSource::regular(
-        "script/tests/test_pr_classification_reviews.py",
-        "8725b8c769a5a5a9a63a1def2f0f5a99905b83e6dd9624fddcc7b39345303b41",
-    ),
-    ReviewedSource::regular(
-        "script/tests/test_pr_classification_workflow.py",
-        "2a26de1bac28470c0280b10c98000e8bb5f0a5ef1f81e135e0b3b10ef890a061",
-    ),
-    ReviewedSource::regular("script/tests/test_release.py", "003d76b2c637776160ea55f7b9d89f31234e9fea4ba349092062ca04274901fd"),
-    ReviewedSource::regular("script/tests/test_time_abstraction.py", "b797b46d0f6c1ebe3ef8496dfa7e1e6e81d02190430dd62b8b3ae83282e07c40"),
-    ReviewedSource::regular("script/validate-cuda-runtime.py", "61d9779e09753d39e5f40fd5bdc23fa0b8deef231363a583d262857649057c15"),
-    ReviewedSource::regular("script/validate_cuda_runtime.py", "53b684a7e00c9bad1358ccd5baafa5b2039f4be706f2205a8b9bafc461623151"),
-];
-
-const REVIEWED_PROFILES: &[ReviewedProfile] = &[
-    ReviewedProfile {
-        name: "current",
-        sources: CURRENT_PROFILE,
-    },
-    ReviewedProfile {
-        name: "feature-freeze delivery",
-        sources: FEATURE_FREEZE_DELIVERY_PROFILE,
-    },
-];
-
 pub(in crate::structure::suppression::policy) fn validate(workspace: &Path) -> Result<()> {
     let tracked = tracked_paths(workspace)?;
     let untracked = untracked_paths(workspace)?;
@@ -117,16 +32,27 @@ pub(in crate::structure::suppression::policy) fn validate(workspace: &Path) -> R
         bail!("untracked Python source is outside every reviewed profile: {path:?}");
     }
     let observed = observed_sources(workspace, &tracked)?;
-    let matching = REVIEWED_PROFILES.iter().filter(|profile| profile_matches(profile, &observed)).collect::<Vec<_>>();
-    if matching.len() == 1 {
-        return Ok(());
+    if !tracked.iter().any(|entry| entry.path == POLICY_PATH) {
+        bail!("Python source profile policy {POLICY_PATH:?} must remain tracked");
     }
-    if matching.len() > 1 {
-        let names = matching.iter().map(|profile| profile.name).collect::<Vec<_>>().join(", ");
-        bail!("Python source tree ambiguously matches multiple reviewed profiles: {names}");
+    let policy = profile::load(workspace)?;
+    revision::compare_previous(workspace, &policy)?;
+    let observed_profile = profile_digest(&observed);
+    if !policy.matches_current(&observed_profile) {
+        bail!(
+            "Python source tree does not match the current atomic profile: expected={}, observed={observed_profile}; preauthorize the complete source profile before changing Python files",
+            policy.current_sha256
+        );
     }
-    let names = REVIEWED_PROFILES.iter().map(|profile| profile.name).collect::<Vec<_>>().join(", ");
-    bail!("Python source tree does not match an atomic reviewed profile ({names}); preauthorize the complete source profile before changing Python files")
+    Ok(())
+}
+
+fn profile_digest(observed: &[ObservedSource]) -> String {
+    let mut digest = Sha256::new();
+    for source in observed {
+        digest.update(format!("{:06o} {} {}:{}\n", source.mode, source.sha256, source.path.len(), source.path));
+    }
+    format!("{:x}", digest.finalize())
 }
 
 fn tracked_paths(workspace: &Path) -> Result<Vec<TrackedPath>> {
@@ -190,25 +116,28 @@ fn observed_sources(workspace: &Path, paths: &[TrackedPath]) -> Result<Vec<Obser
         .collect()
 }
 
-fn profile_matches(profile: &ReviewedProfile, observed: &[ObservedSource]) -> bool {
-    profile.sources.len() == observed.len()
-        && profile
-            .sources
-            .iter()
-            .zip(observed)
-            .all(|(expected, actual)| expected.path == actual.path && expected.mode == actual.mode && expected.sha256 == actual.sha256)
-}
-
 fn reject_unsupported_python_entrypoints<'a>(workspace: &Path, paths: impl Iterator<Item = &'a str>) -> Result<()> {
     for path in paths {
         if has_extension(path, "pyw") {
             bail!("Python .pyw execution sources are unsupported; use a reviewed .py source: {path:?}");
         }
-        if !has_extension(path, "py") && has_unsupported_shebang(&workspace.join(path))? {
+        let absolute = workspace.join(path);
+        if !has_extension(path, "py") && !is_regular_rust_source(path, &absolute)? && has_unsupported_shebang(&absolute)? {
             bail!("extensionless Python or dynamically selected interpreter sources are unsupported; use a reviewed .py source: {path:?}");
         }
     }
     Ok(())
+}
+
+fn is_regular_rust_source(path: &str, absolute: &Path) -> Result<bool> {
+    if !has_extension(path, "rs") {
+        return Ok(false);
+    }
+    match fs::symlink_metadata(absolute) {
+        Ok(metadata) => Ok(metadata.is_file() && !metadata.file_type().is_symlink()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("inspect possible Rust source {}", absolute.display())),
+    }
 }
 
 fn has_extension(path: &str, expected: &str) -> bool {
@@ -224,8 +153,11 @@ fn has_unsupported_shebang(path: &Path) -> Result<bool> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error).with_context(|| format!("inspect possible Python entrypoint {}", path.display())),
     };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if metadata.file_type().is_symlink() {
         return Ok(true);
+    }
+    if !metadata.is_file() {
+        return Ok(false);
     }
     if metadata.len() == 0 {
         return Ok(false);
@@ -251,7 +183,7 @@ fn shebang_requires_python_review(interpreter: &str) -> bool {
         return false;
     };
     if command.starts_with('[') {
-        return false;
+        return true;
     }
     if is_direct_shell_interpreter(command) {
         return words.len() != 1;
@@ -285,50 +217,31 @@ mod tests {
     }
 
     #[test]
-    fn profile_matching_rejects_mutation_deletion_addition_and_hybrids() {
-        let mut changed = observed(CURRENT_PROFILE);
-        changed[0].sha256 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned();
-        assert!(!REVIEWED_PROFILES.iter().any(|profile| profile_matches(profile, &changed)));
-
-        let mut deleted = observed(CURRENT_PROFILE);
-        deleted.pop();
-        assert!(!REVIEWED_PROFILES.iter().any(|profile| profile_matches(profile, &deleted)));
-
-        let mut added = observed(CURRENT_PROFILE);
-        added.push(ObservedSource {
-            path: "script/copied.py".to_owned(),
-            mode: CURRENT_PROFILE[0].mode,
-            sha256: CURRENT_PROFILE[0].sha256.to_owned(),
-        });
-        assert!(!REVIEWED_PROFILES.iter().any(|profile| profile_matches(profile, &added)));
-
-        let mut renamed = observed(CURRENT_PROFILE);
-        renamed[0].path = "assets/brand/explorations/copied.py".to_owned();
-        assert!(!REVIEWED_PROFILES.iter().any(|profile| profile_matches(profile, &renamed)));
-
-        let mut hybrid = observed(CURRENT_PROFILE);
-        let current = hybrid.iter_mut().find(|source| source.path == "script/database_fixtures.py").expect("current source");
-        current.sha256 = FEATURE_FREEZE_DELIVERY_PROFILE
-            .iter()
-            .find(|source| source.path == "script/database_fixtures.py")
-            .expect("pending source")
-            .sha256
-            .to_owned();
-        assert!(!REVIEWED_PROFILES.iter().any(|profile| profile_matches(profile, &hybrid)));
-
-        let mut wrong_mode = observed(CURRENT_PROFILE);
-        wrong_mode[0].mode = 0o100_755;
-        assert!(!REVIEWED_PROFILES.iter().any(|profile| profile_matches(profile, &wrong_mode)));
-    }
-
-    #[test]
-    fn exact_current_and_pending_profiles_are_accepted_without_cross_matching() {
-        let current = observed(CURRENT_PROFILE);
-        let pending = observed(FEATURE_FREEZE_DELIVERY_PROFILE);
-        assert!(profile_matches(&REVIEWED_PROFILES[0], &current));
-        assert!(!profile_matches(&REVIEWED_PROFILES[0], &pending));
-        assert!(!profile_matches(&REVIEWED_PROFILES[1], &current));
-        assert!(profile_matches(&REVIEWED_PROFILES[1], &pending));
+    fn atomic_profile_digest_covers_path_mode_content_and_cardinality() {
+        let source = ObservedSource {
+            path: "script/check.py".to_owned(),
+            mode: 0o100_644,
+            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+        };
+        let expected = profile_digest(std::slice::from_ref(&source));
+        for changed in [
+            ObservedSource {
+                path: "script/renamed.py".to_owned(),
+                ..source.clone()
+            },
+            ObservedSource {
+                mode: 0o100_755,
+                ..source.clone()
+            },
+            ObservedSource {
+                sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+                ..source.clone()
+            },
+        ] {
+            assert_ne!(profile_digest(&[changed]), expected);
+        }
+        assert_ne!(profile_digest(&[]), expected);
+        assert_ne!(profile_digest(&[source.clone(), source]), expected);
     }
 
     #[test]
@@ -384,9 +297,9 @@ mod tests {
             assert!(has_unsupported_shebang(&path).expect("inspect unsupported shebang"), "{name}");
         }
 
-        let rust_attribute = workspace.path().join("rust-inner-attribute");
-        fs::write(&rust_attribute, "#![expect(missing_docs)]\n").expect("Rust inner-attribute fixture");
-        assert!(!has_unsupported_shebang(&rust_attribute).expect("inspect Rust inner attribute"));
+        let bracket_prefixed = workspace.path().join("bracket-prefixed");
+        fs::write(&bracket_prefixed, "#![expect(missing_docs)]\n").expect("bracket-prefixed fixture");
+        assert!(has_unsupported_shebang(&bracket_prefixed).expect("reject bracket-prefixed first line"));
 
         let encoded = workspace.path().join("latin-1");
         fs::write(&encoded, b"#!/usr/bin/python3\n# coding: latin-1\nvalue = '\xff'\n").expect("non-UTF-8 Python fixture");
@@ -405,6 +318,28 @@ mod tests {
     }
 
     #[test]
+    fn regular_rust_inner_attributes_are_not_treated_as_entrypoint_shebangs() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let rust_source = workspace.path().join("lib.rs");
+        fs::write(&rust_source, "#![expect(missing_docs)]\npub fn value() {}\n").expect("Rust inner-attribute fixture");
+
+        reject_unsupported_python_entrypoints(workspace.path(), ["lib.rs"].into_iter()).expect("regular Rust source");
+
+        let extensionless = workspace.path().join("extensionless");
+        fs::write(&extensionless, "#![expect(missing_docs)]\n").expect("extensionless bracket-prefixed fixture");
+        let error = reject_unsupported_python_entrypoints(workspace.path(), ["extensionless"].into_iter()).unwrap_err();
+        assert!(error.to_string().contains("unsupported"), "{error:#}");
+
+        #[cfg(unix)]
+        {
+            let linked_source = workspace.path().join("linked.rs");
+            std::os::unix::fs::symlink("lib.rs", &linked_source).expect("Rust source symlink fixture");
+            let error = reject_unsupported_python_entrypoints(workspace.path(), ["linked.rs"].into_iter()).unwrap_err();
+            assert!(error.to_string().contains("unsupported"), "{error:#}");
+        }
+    }
+
+    #[test]
     fn untracked_python_source_is_rejected_before_profile_matching() {
         let workspace = tempfile::tempdir().expect("temporary workspace");
         fs::create_dir_all(workspace.path().join("script")).expect("script directory");
@@ -418,16 +353,5 @@ mod tests {
 
         let error = validate(workspace.path()).unwrap_err();
         assert!(error.to_string().contains("untracked Python source"), "{error:#}");
-    }
-
-    fn observed(profile: &[ReviewedSource]) -> Vec<ObservedSource> {
-        profile
-            .iter()
-            .map(|source| ObservedSource {
-                path: source.path.to_owned(),
-                mode: source.mode,
-                sha256: source.sha256.to_owned(),
-            })
-            .collect()
     }
 }

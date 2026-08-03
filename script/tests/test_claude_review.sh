@@ -6,18 +6,47 @@ if [[ $(basename -- "$0") == claude ]]; then
     capture="$fake_root/capture"
     mkdir -p -- "$capture"
     printf '%s\n' "$@" > "$capture/args"
+    prompt_argument=false
+    for argument in "$@"; do
+        if [[ $argument == -- ]]; then
+            prompt_argument=true
+        fi
+    done
+    if [[ $prompt_argument == false ]]; then
+        cat > "$capture/stdin"
+    fi
     printf '%s\n' "$TMPDIR" "$TMP" "$TEMP" > "$capture/temp-environment"
     env | LC_ALL=C sort > "$capture/environment"
     pwd -P > "$capture/cwd"
     mkdir -p -- "$TMPDIR/nested"
     printf 'temporary review data\n' > "$TMPDIR/nested/payload"
+
+    start_resistant_grandchild() {
+        rm -f -- "$capture/grandchild-ready"
+        bash -c 'trap "" TERM; : > "$1"; while :; do sleep 1; done' reviewer-grandchild "$capture/grandchild-ready" &
+        printf '%s\n' "$!" > "$capture/grandchild-pid"
+        while [[ ! -e "$capture/grandchild-ready" ]]; do
+            sleep 0.01
+        done
+    }
+
     if [[ " $* " == *" Wait for a termination signal. "* ]]; then
-        trap 'printf "TERM\n" > "$capture/signal"; exit 0' TERM
+        trap 'printf "TERM\n" > "$capture/signal"' TERM
+        start_resistant_grandchild
         printf '%s\n' "$BASHPID" > "$capture/child-pid"
         : > "$capture/ready"
         while :; do
             sleep 0.1
         done
+    fi
+    if [[ " $* " == *" Leave a descendant after success. "* ]]; then
+        start_resistant_grandchild
+        : > "$capture/ready"
+    fi
+    if [[ " $* " == *" Leave a descendant after failure. "* ]]; then
+        start_resistant_grandchild
+        : > "$capture/ready"
+        exit 23
     fi
     printf 'fake review output\n'
     if [[ " $* " == *" Fail this fake review. "* ]]; then
@@ -41,6 +70,7 @@ scratch_root_created=false
 wrapper_pid=
 watchdog_pid=
 child_pid=
+grandchild_pid=
 if [[ ! -d "$scratch_root" ]]; then
     mkdir -- "$scratch_root"
     scratch_root_created=true
@@ -60,6 +90,20 @@ terminate_fake_reviewer() {
     kill -KILL "$child_pid" 2>/dev/null || true
 }
 
+terminate_fake_grandchild() {
+    if [[ -z "$grandchild_pid" ]] || ! kill -0 "$grandchild_pid" 2>/dev/null; then
+        return
+    fi
+    kill -TERM "$grandchild_pid" 2>/dev/null || true
+    for _ in {1..100}; do
+        if ! kill -0 "$grandchild_pid" 2>/dev/null; then
+            return
+        fi
+        sleep 0.01
+    done
+    kill -KILL "$grandchild_pid" 2>/dev/null || true
+}
+
 cleanup() {
     local status=$?
     trap - EXIT
@@ -68,6 +112,7 @@ cleanup() {
         wait "$watchdog_pid" 2>/dev/null || true
     fi
     terminate_fake_reviewer
+    terminate_fake_grandchild
     if [[ -n "$wrapper_pid" ]] && kill -0 "$wrapper_pid" 2>/dev/null; then
         kill -TERM "$wrapper_pid" 2>/dev/null || true
         wait "$wrapper_pid" 2>/dev/null || true
@@ -164,6 +209,16 @@ fi
 
 rm -rf -- "$test_root/capture"
 mkdir -- "$test_root/capture"
+printf 'Review from standard input.\n' |
+    PATH="$test_root/bin:$PATH" \
+        "$repository_root/script/claude-review.sh" opus > "$test_root/stdin-output"
+if [[ $(< "$test_root/capture/stdin") != "Review from standard input." ]]; then
+    printf 'Claude review wrapper did not forward the standard-input prompt\n' >&2
+    exit 1
+fi
+
+rm -rf -- "$test_root/capture"
+mkdir -- "$test_root/capture"
 if PATH="$test_root/bin:$PATH" \
     "$repository_root/script/claude-review.sh" fable "Fail this fake review." > "$test_root/failure-output"
 then
@@ -181,6 +236,36 @@ if [[ -e "$failure_scratch" ]]; then
     exit 1
 fi
 
+assert_descendant_is_drained() {
+    local prompt=$1
+    local expected_status=$2
+    rm -rf -- "$test_root/capture"
+    mkdir -- "$test_root/capture"
+    if PATH="$test_root/bin:$PATH" "$repository_root/script/claude-review.sh" opus "$prompt" > "$test_root/descendant-output"; then
+        status=0
+    else
+        status=$?
+    fi
+    if (( status != expected_status )); then
+        printf 'Claude review wrapper changed descendant test status: expected=%d actual=%d\n' "$expected_status" "$status" >&2
+        exit 1
+    fi
+    grandchild_pid=$(< "$test_root/capture/grandchild-pid")
+    if kill -0 "$grandchild_pid" 2>/dev/null; then
+        printf 'Claude reviewer descendant survived completion: %s\n' "$grandchild_pid" >&2
+        exit 1
+    fi
+    grandchild_pid=
+    descendant_scratch=$(sed -n '1p' "$test_root/capture/temp-environment")
+    if [[ -e "$descendant_scratch" ]]; then
+        printf 'Claude review scratch survived descendant cleanup: %s\n' "$descendant_scratch" >&2
+        exit 1
+    fi
+}
+
+assert_descendant_is_drained "Leave a descendant after success." 0
+assert_descendant_is_drained "Leave a descendant after failure." 23
+
 rm -rf -- "$test_root/capture"
 mkdir -- "$test_root/capture"
 PATH="$test_root/bin:$PATH" \
@@ -197,7 +282,21 @@ if [[ ! -e "$test_root/capture/ready" ]]; then
     exit 1
 fi
 child_pid=$(< "$test_root/capture/child-pid")
+grandchild_pid=$(< "$test_root/capture/grandchild-pid")
 kill -TERM "$wrapper_pid"
+for _ in {1..200}; do
+    if [[ -e "$test_root/capture/signal" ]]; then
+        break
+    fi
+    sleep 0.01
+done
+if [[ ! -e "$test_root/capture/signal" ]]; then
+    printf 'fake Claude reviewer did not receive the first termination signal\n' >&2
+    exit 1
+fi
+# Repeated signals during the resistant-child grace period must not interrupt
+# the wrapper's bounded TERM-to-KILL drain or scratch cleanup.
+kill -TERM "$wrapper_pid" 2>/dev/null || true
 timeout_marker="$test_root/wrapper-timeout"
 (
     sleep 10
@@ -239,6 +338,17 @@ if kill -0 "$child_pid" 2>/dev/null; then
     exit 1
 fi
 child_pid=
+for _ in {1..100}; do
+    if ! kill -0 "$grandchild_pid" 2>/dev/null; then
+        break
+    fi
+    sleep 0.01
+done
+if kill -0 "$grandchild_pid" 2>/dev/null; then
+    printf 'Claude reviewer grandchild survived wrapper termination: %s\n' "$grandchild_pid" >&2
+    exit 1
+fi
+grandchild_pid=
 signal_scratch=$(sed -n '1p' "$test_root/capture/temp-environment")
 if [[ -e "$signal_scratch" ]]; then
     printf 'Claude review scratch survived wrapper termination: %s\n' "$signal_scratch" >&2

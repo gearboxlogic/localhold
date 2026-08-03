@@ -1,6 +1,6 @@
 use super::super::tokens;
 
-pub(super) fn action_is_opaque(path: &str, arguments: &[String], direct_program_paths: bool) -> bool {
+pub(super) fn action_is_opaque(surface: super::ShellSurface<'_>, arguments: &[String]) -> bool {
     let Some(first) = arguments.first().map(String::as_str) else {
         return false;
     };
@@ -20,10 +20,10 @@ pub(super) fn action_is_opaque(path: &str, arguments: &[String], direct_program_
     if commands.is_empty() {
         return !action.trim().is_empty();
     }
-    commands.into_iter().any(|command| command_tree_is_opaque(path, &command, direct_program_paths))
+    commands.into_iter().any(|command| command_tree_is_opaque(surface, &command))
 }
 
-fn command_tree_is_opaque(path: &str, command: &[String], direct_program_paths: bool) -> bool {
+fn command_tree_is_opaque(surface: super::ShellSurface<'_>, command: &[String]) -> bool {
     let word = command.iter().find_map(|token| {
         let word = token.trim_matches(['(', ')', '{', '}']);
         (!word.is_empty() && !super::is_execution_input_prefix(word) && (!super::super::is_environment_assignment(word) || word.contains("$(") || word.contains('`')))
@@ -36,29 +36,44 @@ fn command_tree_is_opaque(path: &str, command: &[String], direct_program_paths: 
     {
         return true;
     }
-    let (inputs, opaque) = super::execution_input_candidates(path, command, direct_program_paths);
+    let (inputs, opaque) = super::execution_input_candidates(surface, command);
     opaque || !inputs.is_empty()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::action_is_opaque;
 
     fn arguments(values: &[&str]) -> Vec<String> {
         values.iter().map(ToString::to_string).collect()
     }
 
+    fn opaque(values: &[&str]) -> bool {
+        let functions = BTreeSet::from(["cleanup".to_owned()]);
+        let surface = super::super::ShellSurface {
+            path: "script/check.sh",
+            direct_program_paths: true,
+            make_surface: false,
+            functions: &functions,
+            reviewed_git_wrappers: false,
+            profile_sha256: "",
+        };
+        action_is_opaque(surface, &arguments(values))
+    }
+
     #[test]
     fn static_cleanup_actions_are_distinct_from_command_dispatch() {
-        assert!(!action_is_opaque("script/check.sh", &arguments(&["cleanup", "EXIT"]), true));
-        assert!(!action_is_opaque("script/check.sh", &arguments(&["rm -f target/temporary", "EXIT"]), true));
-        assert!(!action_is_opaque("script/check.sh", &arguments(&["-", "EXIT"]), true));
-        assert!(!action_is_opaque("script/check.sh", &arguments(&["-p", "EXIT"]), true));
-        assert!(action_is_opaque("script/check.sh", &arguments(&["rm -f \"$temporary\"", "EXIT"]), true));
-        assert!(action_is_opaque("script/check.sh", &arguments(&["sh quality/lint.txt", "EXIT"]), true));
-        assert!(action_is_opaque("script/check.sh", &arguments(&["source quality/lint.txt", "EXIT"]), true));
-        assert!(action_is_opaque("script/check.sh", &arguments(&["cleanup \"$(sh quality/lint.txt)\"", "EXIT"]), true));
-        assert!(action_is_opaque("script/check.sh", &arguments(&["$cleanup_command", "EXIT"]), true));
-        assert!(action_is_opaque("script/check.sh", &arguments(&["--unknown", "EXIT"]), true));
+        assert!(!opaque(&["cleanup", "EXIT"]));
+        assert!(!opaque(&["rm -f target/temporary", "EXIT"]));
+        assert!(!opaque(&["-", "EXIT"]));
+        assert!(!opaque(&["-p", "EXIT"]));
+        assert!(opaque(&["rm -f \"$temporary\"", "EXIT"]));
+        assert!(opaque(&["sh quality/lint.txt", "EXIT"]));
+        assert!(opaque(&["source quality/lint.txt", "EXIT"]));
+        assert!(opaque(&["cleanup \"$(sh quality/lint.txt)\"", "EXIT"]));
+        assert!(opaque(&["$cleanup_command", "EXIT"]));
+        assert!(opaque(&["--unknown", "EXIT"]));
     }
 }

@@ -6,8 +6,10 @@ use anyhow::{Context, Result, bail};
 
 mod actions;
 mod arguments;
+mod command_profiles;
 mod environment;
 mod make;
+mod profile_policy;
 mod source_size;
 mod surfaces;
 mod yaml;
@@ -17,8 +19,8 @@ pub(super) use arguments::has_sourced_file_indirection;
 pub(super) use arguments::weakening_token;
 pub(super) use arguments::weakening_token_for_surface;
 use arguments::{
-    cargo_manifest_paths_for_surface, direct_rust_sources_for_surface, normalized_shell_tokens, normalized_shell_words, package_script_commands,
-    weakening_token_in_reviewed_shell_remainder,
+    cargo_manifest_paths_for_surface, direct_rust_sources_for_surface, mise_configuration_is_resolved, normalized_shell_tokens, normalized_shell_words, package_script_commands,
+    reviewed_command_source, weakening_mise_environment, weakening_token_in_reviewed_shell_remainder,
 };
 use environment::{is_case_insensitive_weakening_environment_assignment_name, is_weakening_environment_assignment_name, is_weakening_environment_name};
 use surfaces::execution_surfaces;
@@ -42,8 +44,9 @@ pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "git_command=$(trusted_system_command git)",
     "GIT_CONFIG_NOSYSTEM=1",
     "GIT_CONFIG_GLOBAL=/dev/null",
-    "readonly GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL",
-    "export GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL",
+    "GIT_ATTR_NOSYSTEM=1",
+    "readonly GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL GIT_ATTR_NOSYSTEM",
+    "export GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL GIT_ATTR_NOSYSTEM",
     "    local configured_base=${LOCALHOLD_MAINTAINABILITY_BASE_REV:-}",
     "    git_executable=$git_command",
     "        git_executable=$(\"$cygpath_command\" -w \"$git_executable\")",
@@ -52,7 +55,7 @@ pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "            BASH_ENV | ENV | CDPATH | IFS | COMPILER_PATH | GCC_EXEC_PREFIX | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | RIPGREP_CONFIG_PATH | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
     "                RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \\",
     "                CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \\",
-    "                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_* | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | TAR_OPTIONS)",
+    "                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | EDITOR | GIT_* | LESS | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | LV | PAGER | SSH_ASKPASS | SSH_ASKPASS_REQUIRE | TAR_OPTIONS | VISUAL)",
     "if [[ -v GITHUB_ACTIONS || -v GITHUB_EVENT_PATH || -v GITHUB_SHA ]]; then",
     "        if [[ ${GITHUB_ACTIONS:-} != true || -z ${GITHUB_EVENT_PATH:-} || -z ${GITHUB_SHA:-} ]]; then",
     "        if [[ ! $GITHUB_SHA =~ ^[[:xdigit:]]{40}$ || ${checked_head,,} != \"${GITHUB_SHA,,}\" ]]; then",
@@ -146,6 +149,14 @@ pub(super) const INSTALL_COMMAND_LINES: &[&str] = &[
     "  cpu) \"$cargo_command\" build --release --locked --features reranker --target-dir \"$build_dir\" ;;",
     "  cuda) \"$cargo_command\" build --release --locked --features reranker-cuda --target-dir \"$build_dir\" ;;",
 ];
+pub(super) const DEPENDENCY_AUDIT_COMMAND_LINES: &[&str] = &[
+    "if ! run_workspace_deny; then",
+    "if ! run_audit_tool_deny; then",
+    "if ! run_workspace_machete; then",
+    "if ! run_audit_tool_machete; then",
+    "if ! run_workspace_audit; then",
+    "if ! run_audit_tool_audit; then",
+];
 pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "unset GITHUB_ACTIONS GITHUB_EVENT_PATH GITHUB_SHA LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT LOCALHOLD_MAINTAINABILITY_BASE_REV",
     "fixture_parent=\"$repository_root/target/bootstrap-tests\"",
@@ -193,9 +204,11 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "    CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \\",
     "    run_check --test-environment >/dev/null",
 ];
+#[cfg(test)]
 pub(super) const MISE_ENVIRONMENT_LINES: &[&str] = &[
     "CARGO_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/cargo\"",
     "RUSTUP_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/rustup\"",
+    "_.path = [\"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/cargo/bin\"]",
 ];
 pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "        shell: /usr/bin/env -u BASH_ENV -u ENV -u GCONV_PATH -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
@@ -223,7 +236,7 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
-    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: b5eec7cdace44b80740b67b0a5f6696dd3f74be39fa8949a4349010dbfd99c93",
+    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 8ca8d0cb6f72f73365301335b3b02dcdcdf26c19a4584a3007f4e0eea5bc711c",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
@@ -266,49 +279,77 @@ pub(super) const GPU_RELEASE_REVISION_ENVIRONMENT_LINES: &[&str] = &[
     "          unset ORT_DYLIB_PATH LD_LIBRARY_PATH LD_PRELOAD",
     "            PATH=/usr/bin:/bin \\",
 ];
-pub(super) const CLAUDE_REVIEW_ENVIRONMENT_LINES: &[&str] = &["    \"PATH=$PATH\""];
+pub(super) const CLAUDE_REVIEW_ENVIRONMENT_LINES: &[&str] = &["        \"PATH=$PATH\" \\"];
 pub(super) const CLAUDE_REVIEW_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "PATH=\"$test_root/bin:$PATH\" \\",
     "if PATH=\"$test_root/bin:$PATH\" \\",
     "PATH=\"$test_root/bin:$PATH\" \\",
+    "    PATH=\"$test_root/bin:$PATH\" \\",
+    "    if PATH=\"$test_root/bin:$PATH\" \"$repository_root/script/claude-review.sh\" opus \"$prompt\" > \"$test_root/descendant-output\"; then",
 ];
 
 pub fn reject_checked_in_weakening(workspace: &Path) -> Result<()> {
+    reject_checked_in_weakening_with_mode(workspace, RepositoryValidation::Required)
+}
+
+#[cfg(test)]
+pub fn reject_checked_in_weakening_fixture(workspace: &Path) -> Result<()> {
+    reject_checked_in_weakening_with_mode(workspace, RepositoryValidation::Fixture)
+}
+
+#[derive(Clone, Copy)]
+enum RepositoryValidation {
+    Required,
+    #[cfg(test)]
+    Fixture,
+}
+
+fn reject_checked_in_weakening_with_mode(workspace: &Path, validation: RepositoryValidation) -> Result<()> {
     let surfaces = execution_surfaces(workspace)?;
-    source_size::validate_python_analyzer(workspace, &surfaces.tracked_paths)?;
+    command_profiles::validate(workspace, &surfaces.tracked_paths)?;
+    match validation {
+        RepositoryValidation::Required => source_size::validate_maintainability_analyzer(workspace, &surfaces.tracked_paths, &surfaces.checked_paths)?,
+        #[cfg(test)]
+        RepositoryValidation::Fixture => source_size::validate_fixture(workspace, &surfaces.checked_paths)?,
+    }
     let audited_manifests = tracked_manifests(workspace)?.into_iter().collect::<BTreeSet<_>>();
     for path in surfaces.paths {
-        if is_cargo_config(Path::new(&path)) {
-            bail!("checked-in Cargo configuration {path:?} is unsupported because it can override lint policy");
-        }
-        if is_javascript(Path::new(&path)) {
-            bail!("checked-in JavaScript command surface {path:?} is unsupported because process invocations cannot be audited as shell commands");
-        }
         let source = fs::read_to_string(workspace.join(&path)).with_context(|| format!("read lint command execution surface {path}"))?;
-        yaml::validate_execution_metadata(&path, &source)?;
+        validate_before_resolution(workspace, &path, &source)?;
         actions::validate_action_references(workspace, &surfaces.tracked_paths, &path, &source)?;
-        make::validate_surface(Path::new(&path), &source)?;
-        if has_sourced_file_indirection(&path, &source) {
-            bail!("checked-in Rust command surface {path:?} uses unsupported sourced-file indirection");
-        }
         let (selected_manifests, unresolved_manifest) = cargo_manifest_paths_for_surface(&path, &source);
         if unresolved_manifest || !selected_manifests.is_subset(&audited_manifests) {
             bail!("checked-in Rust command surface {path:?} selects a Cargo manifest outside the audited manifest inventory");
         }
-        if weakening_token_for_surface(&path, &source) && !reviewed_dynamic_command_references_are_exact(&path, &source) {
+        if weakening_token_for_surface(&path, &source) && !reviewed_quality_command_exceptions_are_exact(&path, &source) {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening argument");
         }
         if weakening_environment_for_surface(&path, &source) && !scrubber_environment_references_are_exact(&path, &source) {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening environment channel");
         }
-        let (sources, unresolved) = direct_rust_sources_for_surface(&path, &source);
-        if unresolved {
-            bail!("checked-in Rust command surface {path:?} contains a direct compiler invocation without auditable repository-relative .rs inputs");
-        }
-        if !sources.is_empty() {
-            crate::structure::suppression::reject_direct_source_suppressions(workspace, &sources)?;
-            bail!("checked-in Rust command surface {path:?} directly compiles an opaque command helper; use an audited Cargo target instead");
-        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_before_resolution(workspace: &Path, path: &str, source: &str) -> Result<()> {
+    if is_cargo_config(Path::new(path)) {
+        bail!("checked-in Cargo configuration {path:?} is unsupported because it can override lint policy");
+    }
+    if is_javascript(Path::new(path)) {
+        bail!("checked-in JavaScript command surface {path:?} is unsupported because process invocations cannot be audited as shell commands");
+    }
+    yaml::validate_execution_metadata(path, source)?;
+    make::validate_surface(Path::new(path), source)?;
+    if has_sourced_file_indirection(path, source) {
+        bail!("checked-in Rust command surface {path:?} uses unsupported sourced-file indirection");
+    }
+    let (sources, unresolved) = direct_rust_sources_for_surface(path, source);
+    if unresolved {
+        bail!("checked-in Rust command surface {path:?} contains a direct compiler invocation without auditable repository-relative .rs inputs");
+    }
+    if !sources.is_empty() {
+        crate::structure::suppression::reject_direct_source_suppressions(workspace, &sources)?;
+        bail!("checked-in Rust command surface {path:?} directly compiles an opaque command helper; use an audited Cargo target instead");
     }
     Ok(())
 }
@@ -333,6 +374,7 @@ pub(super) fn weakening_environment_for_surface(path: &str, source: &str) -> boo
         return scripts.map_or(true, |scripts| scripts.iter().any(|script| weakening_environment_for_surface("", script)));
     }
     weakening_environment(source)
+        || weakening_mise_environment(path, source)
         || case_insensitive_environment_assignment(path, source)
         || yaml::environment_variables(path, source)
             .iter()
@@ -409,13 +451,18 @@ fn is_exact_path_environment_name(name: &str) -> bool {
 }
 
 pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str) -> bool {
+    if !mise_configuration_is_resolved(path, source) {
+        return false;
+    }
+    if path == "mise.toml" {
+        return arguments::reviewed_mise_environment_is_exact(path, source);
+    }
     let allowed = match path {
         "script/check-maintainability-bootstrap.sh" => BOOTSTRAP_ENVIRONMENT_LINES,
         "script/run-maintainability-gate.sh" => GATE_RUNNER_ENVIRONMENT_LINES,
         "script/run-source-safety.sh" => RUNNER_ENVIRONMENT_LINES,
         "script/install.sh" => INSTALL_ENVIRONMENT_LINES,
         "script/tests/test_maintainability_bootstrap.sh" => BOOTSTRAP_TEST_ENVIRONMENT_LINES,
-        "mise.toml" => MISE_ENVIRONMENT_LINES,
         ".github/workflows/ci.yml" => CI_TRUST_ENVIRONMENT_LINES,
         ".github/workflows/trusted-maintainability.yml" => TRUSTED_GATE_ENVIRONMENT_LINES,
         ".github/workflows/gpu-release-gate.yml" => GPU_RELEASE_REVISION_ENVIRONMENT_LINES,
@@ -438,11 +485,15 @@ pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str
         .all(|line| allowed.contains(line))
 }
 
-pub(super) fn reviewed_dynamic_command_references_are_exact(path: &str, source: &str) -> bool {
+pub(super) fn reviewed_quality_command_exceptions_are_exact(path: &str, source: &str) -> bool {
+    if !reviewed_command_source(path, source) {
+        return false;
+    }
     let expected = match path {
         "script/run-maintainability-gate.sh" => GATE_RUNNER_COMMAND_LINES,
         "script/run-source-safety.sh" => RUNNER_COMMAND_LINES,
         "script/install.sh" => INSTALL_COMMAND_LINES,
+        "script/dep-audit.sh" => DEPENDENCY_AUDIT_COMMAND_LINES,
         ".github/workflows/trusted-maintainability.yml" => TRUSTED_GATE_COMMAND_LINES,
         _ => return false,
     };
@@ -508,7 +559,7 @@ pub(super) fn is_protected_check_input(path: &str) -> bool {
         || path.starts_with("policy/dependency-unsafe")
 }
 
-fn is_mise_config(path: &Path) -> bool {
+pub(super) fn is_mise_config(path: &Path) -> bool {
     let lowercase = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
     let path = Path::new(&lowercase);
     let basename = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
@@ -547,4 +598,27 @@ fn is_cargo_config(path: &Path) -> bool {
             .and_then(Path::file_name)
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.eq_ignore_ascii_case(".cargo"))
+}
+
+#[cfg(test)]
+mod repository_tests {
+    use std::process::Command;
+
+    use super::*;
+
+    #[test]
+    fn production_gate_rejects_deleting_its_complete_candidate_inventory() {
+        let workspace = tempfile::tempdir().expect("temporary repository");
+        let git = |arguments: &[&str]| {
+            let output = Command::new("git").current_dir(workspace.path()).args(arguments).output().expect("run Git");
+            assert!(output.status.success(), "git {arguments:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-q"]);
+        fs::write(workspace.path().join("README"), "candidate deleted the analyzer\n").expect("candidate file");
+        git(&["add", "."]);
+
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("root manifest"), "{error:#}");
+        assert!(error.to_string().contains("must remain tracked"), "{error:#}");
+    }
 }

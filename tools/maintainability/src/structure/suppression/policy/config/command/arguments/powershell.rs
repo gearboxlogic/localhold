@@ -1,6 +1,10 @@
 use std::iter::Peekable;
 use std::str::Chars;
 
+mod lexical;
+mod reviewed;
+use lexical::{has_code_semicolon, has_scriptblock_parameter_command};
+
 #[derive(Clone, Copy)]
 enum State {
     Code,
@@ -10,6 +14,21 @@ enum State {
     DoubleHereString,
     LineComment,
     BlockComment,
+}
+
+pub(super) struct Analysis {
+    pub(super) commands: String,
+    pub(super) unresolved_statements: Vec<String>,
+}
+
+impl Analysis {
+    pub(super) const fn unresolved(&self) -> bool {
+        !self.unresolved_statements.is_empty()
+    }
+}
+
+pub(super) fn unresolved_is_reviewed(path: &str, source_is_reviewed: bool, analysis: &Analysis) -> bool {
+    reviewed::accepts(path, source_is_reviewed, analysis)
 }
 
 pub(super) fn normalize_escapes(source: &str) -> String {
@@ -59,14 +78,193 @@ pub(super) fn normalize_escapes(source: &str) -> String {
     normalized
 }
 
+pub(super) fn analyze_execution_commands(source: &str) -> Analysis {
+    let mut commands = Vec::new();
+    let mut unresolved_statements = Vec::new();
+    for statement in native_statements(source) {
+        let (command, unresolved) = analyze_statement(&statement, &normalize_escapes(&statement));
+        commands.push(command);
+        if unresolved {
+            unresolved_statements.push(statement);
+        }
+    }
+    if has_code_semicolon(source) {
+        unresolved_statements.push(source.trim().to_owned());
+    }
+    Analysis {
+        commands: commands.join("\n"),
+        unresolved_statements,
+    }
+}
+
+#[cfg(test)]
+pub(super) fn normalize_execution_commands(source: &str) -> String {
+    analyze_execution_commands(source).commands
+}
+
+fn analyze_statement(raw: &str, normalized: &str) -> (String, bool) {
+    if is_native_exit_status_guard(normalized) {
+        return (":".to_owned(), false);
+    }
+    if powershell_only_control_flow(normalized) {
+        return (":".to_owned(), control_flow_requires_review(raw));
+    }
+    if let Some((_, expression)) = normalized.split_once(" = ").filter(|(target, _)| target.trim_start().starts_with('$')) {
+        let expression = expression.trim_start();
+        let raw_expression = raw.split_once(" = ").map_or(raw, |(_, expression)| expression.trim_start());
+        if let Some(native) = assigned_native_command(expression) {
+            return (
+                native.to_owned(),
+                has_structural_execution(raw_expression) || has_scriptblock_parameter_command(raw_expression),
+            );
+        }
+        return (":".to_owned(), !inert_assignment_is_proven(raw_expression));
+    }
+    if let Some(command) = literal_call_operator_command(normalized) {
+        return (
+            command.to_owned(),
+            has_structural_execution(command) || command.contains('$') || has_scriptblock_parameter_command(raw),
+        );
+    }
+    let unresolved = has_structural_execution(raw) || has_scriptblock_parameter_command(raw);
+    (if unresolved { ":".to_owned() } else { normalized.to_owned() }, unresolved)
+}
+
+fn inert_assignment_is_proven(expression: &str) -> bool {
+    if !inert_assignment_expression(expression) {
+        return false;
+    }
+    if !has_structural_execution(expression) && !has_scriptblock_parameter_command(expression) {
+        return true;
+    }
+    let expression = expression.trim();
+    !["$(", "|", ";", "&", "{", ".Invoke("].iter().any(|token| expression.contains(token))
+        && expression.matches('(').count() == 1
+        && (expression.starts_with("(Get-FileHash ") || expression.starts_with("[IO.Path]::GetFileNameWithoutExtension("))
+}
+
+fn has_structural_execution(source: &str) -> bool {
+    let mut characters = source.chars().peekable();
+    let mut state = State::Code;
+    let mut line_prefix_is_whitespace = true;
+    while let Some(character) = characters.next() {
+        if matches!(state, State::Code | State::DoubleQuoted | State::DoubleHereString) && character == '`' {
+            let escaped = characters.next();
+            if let Some(escaped) = escaped {
+                update_line_prefix(escaped, &mut line_prefix_is_whitespace);
+            }
+            continue;
+        }
+        if matches!(state, State::Code | State::DoubleQuoted | State::DoubleHereString) && character == '$' && characters.peek() == Some(&'(') {
+            return true;
+        }
+        if matches!(state, State::Code) && matches!(character, '(' | '{' | ';' | '|' | '&' | '>') {
+            return true;
+        }
+        if matches!(state, State::Code) && character == '.' && characters.peek().is_some_and(|next| next.is_whitespace()) {
+            return true;
+        }
+        match state {
+            State::Code => match character {
+                '#' => state = State::LineComment,
+                '<' if characters.peek() == Some(&'#') => state = State::BlockComment,
+                '\'' => state = State::SingleQuoted,
+                '"' => state = State::DoubleQuoted,
+                '@' => state = here_string_quote(&mut characters).map_or(State::Code, here_string_state),
+                _ => {}
+            },
+            State::SingleQuoted if character == '\'' => {
+                if characters.peek() == Some(&'\'') {
+                    characters.next();
+                    continue;
+                }
+                state = State::Code;
+            }
+            State::DoubleQuoted if character == '"' => state = State::Code,
+            State::SingleHereString if line_prefix_is_whitespace && character == '\'' && characters.peek() == Some(&'@') => state = State::Code,
+            State::DoubleHereString if line_prefix_is_whitespace && character == '"' && characters.peek() == Some(&'@') => state = State::Code,
+            State::LineComment if character == '\n' => state = State::Code,
+            State::BlockComment if character == '#' && characters.peek() == Some(&'>') => state = State::Code,
+            _ => {}
+        }
+        update_line_prefix(character, &mut line_prefix_is_whitespace);
+    }
+    false
+}
+
+fn powershell_only_control_flow(line: &str) -> bool {
+    let line = line.trim().to_ascii_lowercase();
+    line == "}"
+        || line.starts_with("throw ")
+        || (line.starts_with("if (") || line.starts_with("foreach (")) && (line.ends_with('{') || line.contains("{ throw "))
+        || line.strip_prefix('$').is_some_and(|value| {
+            value
+                .strip_suffix("++")
+                .is_some_and(|name| !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+        })
+}
+
+fn control_flow_requires_review(statement: &str) -> bool {
+    let statement = statement.trim();
+    if statement == "}"
+        || statement.strip_prefix('$').is_some_and(|value| {
+            value
+                .strip_suffix("++")
+                .is_some_and(|name| !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+        })
+    {
+        return false;
+    }
+    if statement.to_ascii_lowercase().starts_with("throw ") {
+        return has_structural_execution(statement) || has_scriptblock_parameter_command(statement);
+    }
+    true
+}
+
+fn assigned_native_command(command: &str) -> Option<&str> {
+    let command = command.trim();
+    let candidate = if command.starts_with("./") || command.starts_with(r".\") {
+        command
+    } else {
+        command.split('|').map(str::trim).find(|segment| segment.starts_with("./") || segment.starts_with(r".\"))?
+    };
+    Some(candidate.strip_suffix(')').unwrap_or(candidate).trim_end())
+}
+
+fn inert_assignment_expression(command: &str) -> bool {
+    let command = command.trim_start_matches(['(', '@']).trim_start();
+    command.starts_with(['\'', '"', '$'])
+        || command.as_bytes().first().is_some_and(u8::is_ascii_digit)
+        || command.starts_with("[IO.Path]::GetFileNameWithoutExtension(")
+        || ["ConvertFrom-Json", "Get-ChildItem", "Get-Content", "Get-FileHash", "Join-Path", "Select-Object"]
+            .iter()
+            .any(|cmdlet| command.strip_prefix(cmdlet).is_some_and(|suffix| suffix.starts_with(char::is_whitespace)))
+}
+
+fn is_native_exit_status_guard(line: &str) -> bool {
+    matches!(
+        line.chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase()
+            .as_str(),
+        "exit$lastexitcode" | "if($lastexitcode-ne0){exit$lastexitcode}" | "if($lastexitcode){exit$lastexitcode}"
+    )
+}
+
+fn literal_call_operator_command(line: &str) -> Option<&str> {
+    let command = line.trim_start().strip_prefix('&')?.trim_start();
+    let program = command.split_ascii_whitespace().next()?;
+    (!program.starts_with(['$', '(', '{', '\'', '"']) && !program.contains(['*', '?', '[', '`'])).then_some(command)
+}
+
 pub(super) fn has_constructed_rust_arguments(source: &str) -> bool {
     let source = normalize_escapes(source);
     has_opaque_dispatch(&source) || source.split(['\n', ';', '|']).any(|command| has_rust_tool(command) && has_argument_expression(command))
 }
 
 pub(super) fn has_unchecked_native_quality_command(source: &str) -> bool {
-    let normalized = normalize_escapes(source);
-    let statements = native_statements(&normalized);
+    let statements = native_statements(source).into_iter().map(|statement| normalize_escapes(&statement)).collect::<Vec<_>>();
     let mut index = 0;
     while let Some(statement) = statements.get(index) {
         if !super::integrity::contains_quality_command(statement, true) {
@@ -95,6 +293,10 @@ fn native_statements(source: &str) -> Vec<String> {
     let mut state = State::Code;
     let mut line_prefix_is_whitespace = true;
     while let Some(character) = characters.next() {
+        if matches!(state, State::Code | State::DoubleQuoted | State::DoubleHereString) && character == '`' {
+            push_raw_escape(&mut statement, &mut characters, &mut line_prefix_is_whitespace);
+            continue;
+        }
         match state {
             State::Code => match character {
                 '#' => state = State::LineComment,
@@ -148,6 +350,22 @@ fn native_statements(source: &str) -> Vec<String> {
     }
     push_statement(&mut statements, &mut statement);
     statements
+}
+
+fn push_raw_escape(statement: &mut String, characters: &mut Peekable<Chars<'_>>, line_prefix_is_whitespace: &mut bool) {
+    statement.push('`');
+    match characters.next() {
+        Some('\r') if characters.peek() == Some(&'\n') => {
+            statement.push('\r');
+            statement.push(characters.next().expect("peeked escaped line feed"));
+        }
+        Some('\n') => statement.push('\n'),
+        Some(escaped) => {
+            statement.push(escaped);
+            update_line_prefix(escaped, line_prefix_is_whitespace);
+        }
+        None => {}
+    }
 }
 
 fn push_statement(statements: &mut Vec<String>, statement: &mut String) {
@@ -233,6 +451,8 @@ fn process_api_word(word: &str) -> bool {
             | "sal"
             | "start-process"
             | "saps"
+            | "invoke-expression"
+            | "iex"
             | "system.diagnostics.process"
             | "diagnostics.process"
             | "invoke-cimmethod"
@@ -398,7 +618,91 @@ const fn update_line_prefix(character: char, line_prefix_is_whitespace: &mut boo
 
 #[cfg(test)]
 mod tests {
-    use super::{has_constructed_rust_arguments, has_unchecked_native_quality_command, normalize_escapes};
+    use super::{analyze_execution_commands, has_constructed_rust_arguments, has_unchecked_native_quality_command, normalize_escapes, normalize_execution_commands};
+
+    #[test]
+    fn nested_execution_in_discardable_forms_is_unresolved() {
+        for source in [
+            "$value = $(./quality/payload.ps1)",
+            "$value = \"prefix $(./quality/payload.ps1)\"",
+            "$value = (./quality/payload.ps1)",
+            "$value = & { ./quality/payload.ps1 }",
+            "$value = . ./quality/payload.ps1",
+            "$value = Get-Content input | ./quality/payload.ps1",
+            "$value = $items | ForEach-Object { ./quality/payload.ps1 }",
+            "$value = @($request | ./reviewed.exe | & $tool)",
+            "$block = { ./quality/payload.ps1 }; $block.Invoke()",
+            "if ($(./quality/payload.ps1)) { throw 'x' }",
+            "if (& ./quality/payload.ps1) { throw 'x' }",
+            "foreach ($item in (./quality/payload.ps1)) {}",
+            "throw $(./quality/payload.ps1)",
+            "$value = 'inert'; & $tool",
+            "throw 'x'; & $tool",
+        ] {
+            assert!(analyze_execution_commands(source).unresolved(), "{source}");
+        }
+    }
+
+    #[test]
+    fn quoted_structural_tokens_are_inert_but_expanding_subexpressions_are_not() {
+        for source in [
+            "$value = '$(./quality/payload.ps1) | & . { }'",
+            "# $(./quality/payload.ps1) | & . { }",
+            "$value = @'\n$(./quality/payload.ps1) | & . { }\n'@",
+            "$value = \"literal `$(` escaped\"",
+        ] {
+            assert!(!analyze_execution_commands(source).unresolved(), "{source}");
+        }
+        for source in ["$value = \"$(./quality/payload.ps1)\"", "$value = @\"\n$(./quality/payload.ps1)\n\"@"] {
+            assert!(analyze_execution_commands(source).unresolved(), "{source}");
+        }
+    }
+
+    #[test]
+    fn lexical_statements_do_not_invent_commands_from_comments_or_literal_here_strings() {
+        let analysis = analyze_execution_commands("$literal = @'\n./quality/literal.ps1\n'@\n<#\n./quality/comment.ps1\n#>\nWrite-Output safe\n");
+        assert!(!analysis.unresolved());
+        assert_eq!(analysis.commands, ":\nWrite-Output safe");
+
+        let expanding = analyze_execution_commands("$value = @\"\n$(./quality/payload.ps1)\n\"@");
+        assert!(expanding.unresolved());
+        assert_eq!(expanding.unresolved_statements.len(), 1);
+    }
+
+    #[test]
+    fn escaped_comment_and_quote_tokens_cannot_hide_execution() {
+        for source in [
+            "Write-Output `# | ./quality/payload.ps1",
+            "$value = \"literal `\" # $(./quality/payload.ps1)\"",
+            "Write-Output ready `\n| ./quality/payload.ps1",
+        ] {
+            let analysis = analyze_execution_commands(source);
+            assert!(analysis.unresolved(), "{source}: {}", analysis.commands);
+            assert_eq!(analysis.unresolved_statements.len(), 1, "{source}");
+        }
+    }
+
+    #[test]
+    fn literal_call_operators_and_repository_program_assignments_are_normalized() {
+        assert_eq!(normalize_execution_commands("& cargo clippy -- -D warnings"), "cargo clippy -- -D warnings");
+        assert_eq!(normalize_execution_commands("$binary = ./hold-smoke.exe --version"), "./hold-smoke.exe --version");
+        assert_eq!(normalize_execution_commands("$binary = 'dist/hold.exe'\n$expected = 'hold 1.0'"), ":\n:");
+        assert_eq!(normalize_execution_commands("if ($actual -ne $expected) { throw 'unexpected version' }"), ":");
+        assert_eq!(normalize_execution_commands("foreach ($line in Get-Content sums) {\n$verified++\n}"), ":\n:\n:");
+        assert_eq!(
+            normalize_execution_commands("$responseLines = @($request | ./hold-smoke.exe 2>error.log)"),
+            "./hold-smoke.exe 2>error.log"
+        );
+        assert_eq!(normalize_execution_commands("$value = unknown-command --flag"), ":");
+        assert!(analyze_execution_commands("$value = unknown-command --flag").unresolved());
+        assert_eq!(normalize_execution_commands("& $tool $arguments"), ":");
+        assert!(analyze_execution_commands("& $tool $arguments").unresolved());
+        assert_eq!(
+            normalize_execution_commands("& cargo clippy -- -D warnings\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"),
+            "cargo clippy -- -D warnings\n:"
+        );
+        assert_eq!(normalize_execution_commands("exit $LASTEXITCODE"), ":");
+    }
 
     #[test]
     fn escapes_are_normalized_only_where_powershell_expands_them() {

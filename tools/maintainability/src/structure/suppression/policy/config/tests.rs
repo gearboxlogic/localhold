@@ -495,7 +495,10 @@ fn reviewed_environment_scrubbers_are_exact() {
         "script/tests/test_maintainability_bootstrap.sh",
         &BOOTSTRAP_TEST_ENVIRONMENT_LINES.join("\n"),
     ));
-    assert!(scrubber_environment_references_are_exact("mise.toml", &MISE_ENVIRONMENT_LINES.join("\n")));
+    assert!(scrubber_environment_references_are_exact(
+        "mise.toml",
+        &format!("[env]\n{}\n", MISE_ENVIRONMENT_LINES.join("\n")),
+    ));
     assert!(scrubber_environment_references_are_exact(
         ".github/workflows/ci.yml",
         &CI_TRUST_ENVIRONMENT_LINES.join("\n"),
@@ -578,34 +581,41 @@ fn bootstrap_digest_overrides_require_the_exact_reviewed_bindings() {
 }
 
 #[test]
-fn authenticated_dynamic_commands_require_the_exact_reviewed_lines() {
-    assert!(super::command::reviewed_dynamic_command_references_are_exact(
+fn quality_command_exceptions_require_the_exact_reviewed_lines() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for path in [
         "script/run-maintainability-gate.sh",
-        &GATE_RUNNER_COMMAND_LINES.join("\n"),
-    ));
-    assert!(super::command::reviewed_dynamic_command_references_are_exact(
         "script/run-source-safety.sh",
-        &RUNNER_COMMAND_LINES.join("\n"),
-    ));
-    assert!(super::command::reviewed_dynamic_command_references_are_exact(
         "script/install.sh",
-        &INSTALL_COMMAND_LINES.join("\n"),
-    ));
-    assert!(super::command::reviewed_dynamic_command_references_are_exact(
+        "script/dep-audit.sh",
         ".github/workflows/trusted-maintainability.yml",
-        &TRUSTED_GATE_COMMAND_LINES.join("\n"),
-    ));
-    assert!(!super::command::reviewed_dynamic_command_references_are_exact(
+    ] {
+        let source = fs::read_to_string(repository.join(path)).expect("read reviewed quality-command source");
+        assert!(super::command::reviewed_quality_command_exceptions_are_exact(path, &source), "{path}");
+    }
+    assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
         "script/run-source-safety.sh",
         &format!("{}\n\"$cargo_command\" clippy -- -A warnings", RUNNER_COMMAND_LINES.join("\n")),
     ));
-    assert!(!super::command::reviewed_dynamic_command_references_are_exact(
+    assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
         "script/run-source-safety.sh",
         &format!("{}\n\"$cargo_command\" clippy -- \\\n+            -A warnings", RUNNER_COMMAND_LINES.join("\n")),
     ));
-    assert!(!super::command::reviewed_dynamic_command_references_are_exact(
+    assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
         "script/run-source-safety.sh",
         &format!("{}\ngate() {{\n    cargo test\n    true\n}}\ngate || true", RUNNER_COMMAND_LINES.join("\n")),
+    ));
+
+    let source = fs::read_to_string(repository.join("script/dep-audit.sh")).expect("read dependency audit script");
+    assert!(weakening_token_for_surface("script/dep-audit.sh", &source));
+    assert!(super::command::reviewed_quality_command_exceptions_are_exact("script/dep-audit.sh", &source));
+    assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
+        "script/dep-audit.sh",
+        &source.replace("if ! run_workspace_deny; then", "if ! run_unreviewed_deny; then"),
+    ));
+    assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
+        "script/dep-audit.sh",
+        &source.replace("if (( failed != 0 )); then", "failed=0\nif (( failed != 0 )); then"),
     ));
 }
 
@@ -617,7 +627,7 @@ fn checked_in_installer_preserves_its_reviewed_build_directory_contract() {
     assert!(weakening_environment_for_surface("script/install.sh", &source));
     assert!(scrubber_environment_references_are_exact("script/install.sh", &source));
     assert!(!weakening_token_for_surface("script/install.sh", &source));
-    assert!(super::command::reviewed_dynamic_command_references_are_exact("script/install.sh", &source));
+    assert!(super::command::reviewed_quality_command_exceptions_are_exact("script/install.sh", &source));
     assert!(source.contains("case \":${PATH}:\" in\n  *\":${prefix}/bin:\"*) ;;\n  *) printf 'Add %s/bin to PATH before invoking hold by name.\\n' \"$prefix\" ;;\nesac"));
     let reviewed = without_reviewed_dispatch("script/install.sh", &source);
     assert!(!reviewed.contains("\"$cargo_command\" build"));
@@ -635,6 +645,13 @@ fn executable_path_changes_are_governed_on_every_command_surface() {
     assert!(!weakening_environment_for_surface("script/check.sh", "path=/tmp cargo clippy"));
     assert!(!weakening_environment_for_surface("script/check.ps1", "$path = Join-Path release artifact.zip"));
     assert!(weakening_environment_for_surface("script/check.sh", "PATH=/tmp node application.js"));
+    assert!(weakening_environment_for_surface("mise.toml", "[env]\n_.path = ['quality/bin']\n"));
+    assert!(weakening_environment_for_surface("mise.toml", "[env]\n_.file = 'quality/environment'\n"));
+    assert!(!scrubber_environment_references_are_exact("mise.toml", "[env]\n_.path = ['quality/bin']\n"));
+    assert!(!scrubber_environment_references_are_exact(
+        "mise.toml",
+        &format!("[env]\n{}\n_.file = 'quality/environment'\n", MISE_ENVIRONMENT_LINES.join("\n"))
+    ));
 }
 
 #[test]
@@ -674,6 +691,10 @@ fn powershell_quality_steps_enforce_native_exit_status() {
     assert!(!weakening_token_for_surface(
         ".github/workflows/ci.yml",
         "steps:\n  - shell: bash\n    run: |\n      cargo clippy --locked -- -D warnings\n      exit 0\n"
+    ));
+    assert!(weakening_token_for_surface(
+        ".github/workflows/unreviewed.yml",
+        "steps:\n  - shell: pwsh\n    run: $value = $(./quality/payload.ps1)\n"
     ));
 }
 

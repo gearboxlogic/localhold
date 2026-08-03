@@ -78,7 +78,7 @@ mise_lockfile="$reviewed_root/mise.lock"
 runner="$reviewed_root/script/run-source-safety.sh"
 bootstrap_tests="$reviewed_root/script/tests/test_maintainability_bootstrap.sh"
 gate_runner="$reviewed_root/script/run-maintainability-gate.sh"
-readonly reviewed_manifest_sha256=cca207767614bd2c1d46bc06092b69e90157aeb450797fcc7cad4e1ed67c89b9
+readonly reviewed_manifest_sha256=2fb6fa0d187ccbbf380d756a95f134d3f843c93e704e3aa49c8dba375ab34e39
 readonly reviewed_lockfile_sha256=825c6448351761aa5c4c6e1ce6b3696c927c4f46c5d43642846380d24f10467c
 readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d1b3fd69aa74c0df6f1
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
@@ -166,7 +166,7 @@ scrub_untrusted_environment() {
             BASH_ENV | ENV | CDPATH | IFS | COMPILER_PATH | GCC_EXEC_PREFIX | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | RIPGREP_CONFIG_PATH | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
                 RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \
                 CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \
-                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_* | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | TAR_OPTIONS)
+                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | EDITOR | GIT_* | LESS | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | LV | PAGER | SSH_ASKPASS | SSH_ASKPASS_REQUIRE | TAR_OPTIONS | VISUAL)
                 unset "$name"
                 ;;
         esac
@@ -176,8 +176,9 @@ scrub_untrusted_environment() {
 scrub_untrusted_environment
 GIT_CONFIG_NOSYSTEM=1
 GIT_CONFIG_GLOBAL=/dev/null
-readonly GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL
-export GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL
+GIT_ATTR_NOSYSTEM=1
+readonly GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL GIT_ATTR_NOSYSTEM
+export GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL GIT_ATTR_NOSYSTEM
 git_command=$(trusted_system_command git)
 find_command=$(trusted_system_command find)
 mkdir_command=$(trusted_system_command mkdir)
@@ -197,7 +198,7 @@ has_write_mode_bits() {
 git_at() {
     local root=$1
     shift
-    "$git_command" --no-replace-objects -c core.autocrlf=false -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -C "$root" "$@"
+    "$git_command" --no-pager --no-replace-objects -c core.autocrlf=false -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.attributesFile=/dev/null -c diff.external= -C "$root" "$@"
 }
 
 git_checked() {
@@ -613,6 +614,7 @@ if [[ $mode != verify ]]; then
     trap cleanup_snapshot EXIT
 
     git_checked clone --no-hardlinks --no-checkout --quiet -- "$repository_root" "$snapshot_root"
+    printf '* -export-ignore -export-subst\n' >"$snapshot_root/.git/info/attributes"
     git_at "$snapshot_root" update-ref --no-deref HEAD "$checked_head"
     git_at "$snapshot_root" read-tree "$checked_head"
     git_at "$snapshot_root" archive --format=tar "$checked_head" | "$tar_command" -xf - -C "$snapshot_root"

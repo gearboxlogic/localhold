@@ -12,6 +12,14 @@ pub(super) fn assigned_variables(source: &str) -> (BTreeSet<String>, bool) {
         let arguments = &command[index.saturating_add(1)..];
         let command_word = command[index].trim_matches(['(', ')', '{', '}']).to_ascii_lowercase();
         match command_word.as_str() {
+            "declare" | "local" | "typeset"
+                if arguments
+                    .iter()
+                    .take_while(|argument| argument.as_str() != "--")
+                    .any(|argument| argument.strip_prefix('-').is_some_and(|options| !options.starts_with('-') && options.contains('n'))) =>
+            {
+                opaque_target = true;
+            }
             "printf" => collect_printf_target(arguments, &mut names, &mut opaque_target),
             "read" | "readarray" | "mapfile" => collect_read_targets(&command_word, arguments, &mut names, &mut opaque_target),
             "getopts" => collect_getopts_target(arguments, &mut names, &mut opaque_target),
@@ -101,6 +109,9 @@ mod tests {
 
         let (names, opaque) = assigned_variables("printf -v \"$target\" %s cargo");
         assert!(names.is_empty());
+        assert!(opaque);
+
+        let (_, opaque) = assigned_variables("local -n command_alias=container_cli");
         assert!(opaque);
     }
 }

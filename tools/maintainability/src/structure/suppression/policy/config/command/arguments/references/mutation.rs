@@ -1,11 +1,17 @@
 use super::path;
 
 mod output;
+mod profiles;
 mod removal;
 mod strip;
 
-pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]) -> bool {
-    super::editor::is_command_capable(command)
+pub(super) fn dispatch_is_opaque(path: &str, profile_sha256: &str, command: &str, arguments: &[String]) -> bool {
+    if profiles::accepts_dynamic_arguments(path, profile_sha256, command, arguments) {
+        return false;
+    }
+    dynamic_mutation_arguments_are_opaque(command, arguments)
+        || super::editor::is_command_capable(command)
+        || install_dispatch_is_opaque(command, arguments)
         || output_redirection_is_opaque(path, arguments)
         || output::dispatch_is_opaque(path, command, arguments)
         || strip::dispatch_is_opaque(path, command, arguments)
@@ -44,6 +50,119 @@ pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]
             }
             _ => false,
         }
+}
+
+fn dynamic_mutation_arguments_are_opaque(command: &str, arguments: &[String]) -> bool {
+    mutation_capable(command) && arguments.iter().any(|argument| path::contains_dynamic_value(argument)) && !dynamic_inputs_are_proven_read_only(command, arguments)
+}
+
+pub(super) fn reviewed_arguments(path: &str, profile_sha256: &str, command: &str, arguments: &[String]) -> bool {
+    profiles::accepts_dynamic_arguments(path, profile_sha256, command, arguments)
+}
+
+pub(super) fn reviewed_source(path: &str, profile_sha256: &str) -> bool {
+    profiles::accepts_source(path, profile_sha256)
+}
+
+pub(super) fn reviewed_sources() -> std::collections::BTreeSet<(&'static str, &'static str)> {
+    profiles::reviewed_sources()
+}
+
+fn dynamic_inputs_are_proven_read_only(command: &str, arguments: &[String]) -> bool {
+    matches!(command, "jar" | "jar.exe") && jar_list_is_read_only(arguments)
+}
+
+fn jar_list_is_read_only(arguments: &[String]) -> bool {
+    if let Some(options) = arguments
+        .first()
+        .filter(|options| !options.starts_with('-') && options.chars().all(|option| matches!(option, 'f' | 't' | 'v')) && options.contains('t') && !options.is_empty())
+    {
+        let required_operands = usize::from(options.contains('f'));
+        return arguments.len() == required_operands + 1;
+    }
+    let mut lists = false;
+    let mut consumes_file = false;
+    for argument in arguments {
+        if consumes_file {
+            consumes_file = false;
+            continue;
+        }
+        match argument.as_str() {
+            "--list" => lists = true,
+            "--file" => consumes_file = true,
+            "--verbose" => {}
+            _ if !argument.starts_with('-') && !path::contains_dynamic_value(argument) => {}
+            _ => return false,
+        }
+    }
+    lists && !consumes_file
+}
+
+fn mutation_capable(command: &str) -> bool {
+    let command = command.strip_suffix(".exe").unwrap_or(command);
+    matches!(
+        command,
+        "add-content"
+            | "brotli"
+            | "bunzip2"
+            | "bzip2"
+            | "copy"
+            | "copy-item"
+            | "cp"
+            | "curl"
+            | "dd"
+            | "del"
+            | "erase"
+            | "gzip"
+            | "gunzip"
+            | "iconv"
+            | "install"
+            | "jar"
+            | "link"
+            | "ln"
+            | "lz4"
+            | "move"
+            | "move-item"
+            | "mv"
+            | "objcopy"
+            | "openssl"
+            | "out-file"
+            | "patch"
+            | "perl"
+            | "pigz"
+            | "remove-item"
+            | "rm"
+            | "set-content"
+            | "shuf"
+            | "sponge"
+            | "strip"
+            | "tee"
+            | "truncate"
+            | "unlink"
+            | "unlz4"
+            | "unpigz"
+            | "unxz"
+            | "unzip"
+            | "unzstd"
+            | "xz"
+            | "zstd"
+    )
+}
+
+fn install_dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
+    if !matches!(command, "install" | "install.exe") {
+        return false;
+    }
+    arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
+        let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
+        option
+            .strip_prefix("--")
+            .is_some_and(|option| option == "strip" || option.len() >= "strip-p".len() && "strip-program".starts_with(option))
+            || option
+                .strip_prefix('-')
+                .filter(|options| !options.starts_with('-'))
+                .is_some_and(|options| options.contains('s'))
+    })
 }
 
 fn symbolic_link_is_opaque(path: &str, command: &str, arguments: &[String]) -> bool {
@@ -193,6 +312,7 @@ const REVIEWED_DYNAMIC_DESTINATIONS: &[(&str, &str)] = &[
     ("script/tests/test_claude_review.sh", "$test_root/signal-output"),
     ("script/tests/test_claude_review.sh", "$timeout_marker"),
     ("script/tests/test_claude_review.sh", "$TMPDIR/nested/payload"),
+    ("script/check-maintainability-bootstrap.sh", "$snapshot_root/.git/info/attributes"),
     (".github/workflows/gpu-release-gate.yml", "$RUNNER_TEMP/hold-cuda"),
     (".github/workflows/gpu-release-gate.yml", "$GITHUB_ENV"),
     (".github/workflows/gpu-release-gate.yml", "$GITHUB_OUTPUT"),

@@ -28,7 +28,7 @@ pub(super) fn execution_inputs(surface: &str, source: &str) -> ExecutionInputs {
     }
     unresolved |= references.ambient_mutations.working_directory && (relative_resolution || !references.shell_commands.is_empty());
     unresolved |= references.ambient_mutations.environment && references.process_invocation;
-    let (shell_inputs, shell_opaque) = collect_execution_inputs(references.shell_commands.iter().map(String::as_str), true, surface);
+    let (shell_inputs, shell_opaque) = collect_execution_inputs(references.shell_commands.iter().map(String::as_str), true, surface, source);
     inputs.extend(shell_inputs);
     ExecutionInputs {
         paths: inputs,

@@ -1,7 +1,12 @@
-use super::{REVIEWED_DYNAMIC_DESTINATIONS, dispatch_is_opaque};
+use super::{REVIEWED_DYNAMIC_DESTINATIONS, dispatch_is_opaque, profiles};
+
+fn dispatch(path: &str, command: &str, arguments: &[String]) -> bool {
+    let profile_sha256 = profiles::current_source_sha256(path).unwrap_or_default();
+    dispatch_is_opaque(path, profile_sha256, command, arguments)
+}
 
 fn opaque(command: &str, arguments: &[&str]) -> bool {
-    dispatch_is_opaque("script/check.sh", command, &arguments.iter().map(|argument| (*argument).to_owned()).collect::<Vec<_>>())
+    dispatch("script/check.sh", command, &arguments.iter().map(|argument| (*argument).to_owned()).collect::<Vec<_>>())
 }
 
 #[test]
@@ -38,6 +43,9 @@ fn mutation_of_protected_check_inputs_fails_closed() {
     assert!(opaque("cp", &["input.txt", r"\repo\Justfile"]));
     assert!(!opaque("dd", &["if=quality/lint.data", "of=target/output.txt"]));
     assert!(!opaque("ln", &["input.txt", "target/output.txt"]));
+    assert!(opaque("cp", &["$option", "quality/check", "target/missing"]));
+    assert!(opaque("dd", &["if=quality/payload", "$output"]));
+    assert!(opaque("gzip", &["$flags", "Justfile.gz"]));
 }
 
 #[test]
@@ -58,17 +66,18 @@ fn removal_of_protected_or_unresolved_inputs_fails_closed() {
 
 #[test]
 fn reviewed_dynamic_removals_are_path_specific() {
-    for (path, target) in [
-        ("script/check-maintainability-bootstrap.sh", "$snapshot_root"),
-        ("script/claude-review.sh", "$scratch_directory"),
-        ("script/run-maintainability-gate.sh", "$target_directory"),
-        ("script/tests/test_claude_review.sh", "$test_root/capture"),
+    for (path, command, target) in [
+        ("script/check-maintainability-bootstrap.sh", "rm_command", "$snapshot_root"),
+        ("script/claude-review.sh", "rm", "$scratch_directory"),
+        ("script/run-maintainability-gate.sh", "rm_command", "$target_directory"),
+        ("script/tests/test_claude_review.sh", "rm", "$test_root/capture"),
     ] {
         let arguments = ["-rf".to_owned(), "--".to_owned(), target.to_owned()];
-        assert!(!dispatch_is_opaque(path, "rm", &arguments), "{path}: {target}");
-        assert!(dispatch_is_opaque("script/check.sh", "rm", &arguments), "{path}: {target}");
+        assert!(!dispatch(path, command, &arguments), "{path}: {target}");
+        assert!(dispatch("script/check.sh", "rm", &arguments), "{path}: {target}");
     }
-    assert!(!dispatch_is_opaque(
+    assert!(!dispatch("script/tests/test_maintainability_bootstrap.sh", "rm", &["$test_tool/Cargo.lock".to_owned()],));
+    assert!(dispatch(
         "script/tests/test_maintainability_bootstrap.sh",
         "rm",
         &["$authenticated_fixture_path".to_owned()],
@@ -77,22 +86,25 @@ fn reviewed_dynamic_removals_are_path_specific() {
 
 #[test]
 fn reviewed_dynamic_destinations_are_path_specific() {
-    for (path, destination) in REVIEWED_DYNAMIC_DESTINATIONS {
-        let arguments = ["quality/lint.data".to_owned(), (*destination).to_owned()];
-        assert!(!dispatch_is_opaque(path, "cp", &arguments), "{path}: {destination}");
-        assert!(dispatch_is_opaque("script/check.sh", "cp", &arguments), "{path}: {destination}");
-    }
+    let install = ["-m", "0755", "$build_dir/release/hold", "$bin_dir/hold"].map(str::to_owned);
+    assert!(!dispatch("script/install.sh", "install", &install));
+    assert!(dispatch("script/check.sh", "install", &install));
+
+    let arbitrary_copy = ["quality/lint.data".to_owned(), "$bin_dir/hold".to_owned()];
+    assert!(dispatch("script/install.sh", "cp", &arbitrary_copy));
+
+    assert!(!REVIEWED_DYNAMIC_DESTINATIONS.is_empty());
 
     let changed = ["quality/lint.data".to_owned(), "$test_root/bin/Justfile".to_owned()];
-    assert!(dispatch_is_opaque("script/tests/test_claude_review.sh", "ln", &changed));
+    assert!(dispatch("script/tests/test_claude_review.sh", "ln", &changed));
 
     let reviewed = ["-s", "--", "$script_dir/test_claude_review.sh", "$test_root/bin/claude"].map(str::to_owned);
-    assert!(!dispatch_is_opaque("script/tests/test_claude_review.sh", "ln", &reviewed));
-    assert!(dispatch_is_opaque("script/check.sh", "ln", &reviewed));
+    assert!(!dispatch("script/tests/test_claude_review.sh", "ln", &reviewed));
+    assert!(dispatch("script/check.sh", "ln", &reviewed));
 
     let runner_temp = ["report".to_owned(), ">$RUNNER_TEMP/reports/check.txt".to_owned()];
-    assert!(!dispatch_is_opaque(".github/workflows/check.yml", "printf", &runner_temp));
-    assert!(dispatch_is_opaque("script/check.sh", "printf", &runner_temp));
+    assert!(!dispatch(".github/workflows/check.yml", "printf", &runner_temp));
+    assert!(dispatch("script/check.sh", "printf", &runner_temp));
 }
 
 #[test]
@@ -268,6 +280,7 @@ fn jar_extraction_and_dynamic_operations_fail_closed() {
         &["-xf", "target/payload.jar"],
         &["xvf", "target/payload.jar"],
         &["$operation", "target/payload.jar"],
+        &["--list", "$operation"],
     ] {
         assert!(opaque("jar", arguments), "{arguments:?}");
         assert!(opaque("jar.exe", arguments), "{arguments:?}");

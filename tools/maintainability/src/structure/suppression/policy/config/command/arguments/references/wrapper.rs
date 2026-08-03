@@ -26,7 +26,8 @@ pub(in crate::structure::suppression::policy::config::command::arguments) fn sel
 
 fn is_exact_command_word(word: &str, command: &str) -> bool {
     let word = word.trim_start_matches(['(', '{']);
-    word.rsplit(['/', '\\']).next().unwrap_or(word).eq_ignore_ascii_case(command)
+    word.eq_ignore_ascii_case(command)
+        || super::path::trusted_system_program(word) && word.rsplit(['/', '\\']).next().is_some_and(|basename| basename.eq_ignore_ascii_case(command))
 }
 
 fn command_builtin(arguments: &[String]) -> Selection<'_> {
@@ -209,6 +210,7 @@ fn is_unparsed_launcher(command: &str) -> bool {
     matches!(
         command.trim_end_matches(".exe"),
         "buildcache"
+            | "busybox"
             | "bwrap"
             | "cachepot"
             | "capsh"
@@ -253,6 +255,7 @@ fn is_unparsed_launcher(command: &str) -> bool {
             | "sccache"
             | "systemd-run"
             | "taskset"
+            | "toybox"
             | "unshare"
             | "valgrind"
             | "watch"
@@ -279,9 +282,9 @@ mod tests {
         assert!(matches!(select("choom", "choom", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/choom", "choom", &arguments), Selection::Opaque));
         assert!(matches!(select("capsh", "capsh", &arguments), Selection::Opaque));
-        assert!(matches!(select("/usr/sbin/capsh", "capsh", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/sbin/capsh", "capsh", &arguments), Selection::NotWrapper));
         assert!(matches!(select("chroot", "chroot", &arguments), Selection::Opaque));
-        assert!(matches!(select("/usr/sbin/chroot", "chroot", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/sbin/chroot", "chroot", &arguments), Selection::NotWrapper));
         assert!(matches!(select("setarch", "setarch", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/setarch", "setarch", &arguments), Selection::Opaque));
         assert!(matches!(select("linux32", "linux32", &arguments), Selection::Opaque));
@@ -291,13 +294,15 @@ mod tests {
         assert!(matches!(select("su", "su", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/su", "su", &arguments), Selection::Opaque));
         assert!(matches!(select("runuser", "runuser", &arguments), Selection::Opaque));
-        assert!(matches!(select("/usr/sbin/runuser", "runuser", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/sbin/runuser", "runuser", &arguments), Selection::NotWrapper));
         assert!(matches!(select("start-stop-daemon", "start-stop-daemon", &arguments), Selection::Opaque));
-        assert!(matches!(select("/usr/sbin/start-stop-daemon", "start-stop-daemon", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/sbin/start-stop-daemon", "start-stop-daemon", &arguments), Selection::NotWrapper));
         assert!(matches!(select("ssh", "ssh", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/ssh", "ssh", &arguments), Selection::Opaque));
         assert!(matches!(select("ssh-agent", "ssh-agent", &arguments), Selection::Opaque));
         assert!(matches!(select("ssh-agent.exe", "ssh-agent.exe", &arguments), Selection::Opaque));
+        assert!(matches!(select("busybox", "busybox", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/bin/toybox", "toybox", &arguments), Selection::Opaque));
         assert!(is_command_launcher("env"));
         assert!(is_command_launcher("env.exe"));
         assert!(is_command_launcher("ssh"));

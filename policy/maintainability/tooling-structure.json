@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "root_manifest": "tools/maintainability/Cargo.toml",
+  "source_root": "tools/maintainability/src",
+  "limits": {
+    "production_file_physical_lines": 800,
+    "test_file_physical_lines": 1000
+  },
+  "component": {
+    "id": "maintainability-analyzer",
+    "physical_ceiling": 52318
+  },
+  "source_profile": {
+    "current_sha256": "dfe90f4e28cd6b34e2bd6be4e4bf026a5348aace1c496d1c8c87bc36e11fbbdb",
+    "preapproved_next_sha256": null,
+    "retired_sha256": []
+  },
+  "hotspots": [
+    {
+      "id": "tooling.classifier",
+      "path": "tools/maintainability/src/structure/classify.rs",
+      "status": "active",
+      "physical_ceiling": 890,
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "Legacy production classifier hotspot scheduled for Phase 0 decomposition."
+    },
+    {
+      "id": "tooling.classifier-tests",
+      "path": "tools/maintainability/src/structure/classify/tests.rs",
+      "status": "active",
+      "physical_ceiling": 1189,
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "Legacy classifier test hotspot retained until replacement tests are organized by behavior."
+    },
+    {
+      "id": "tooling.concrete-store-policy",
+      "path": "tools/maintainability/src/structure/concrete_store_policy.rs",
+      "status": "active",
+      "physical_ceiling": 842,
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "Legacy concrete-store policy hotspot scheduled for Phase 0 decomposition."
+    },
+    {
+      "id": "tooling.concrete-store-policy-tests",
+      "path": "tools/maintainability/src/structure/concrete_store_policy/tests.rs",
+      "status": "active",
+      "physical_ceiling": 1048,
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "Legacy concrete-store test hotspot retained until replacement tests are organized by behavior."
+    },
+    {
+      "id": "tooling.command-arguments",
+      "path": "tools/maintainability/src/structure/suppression/policy/config/command/arguments.rs",
+      "status": "resolved",
+      "physical_ceiling": 0,
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "Legacy command-analysis coordinator hotspot scheduled for Phase 0 decomposition."
+    },
+    {
+      "id": "tooling.import-syntax",
+      "path": "tools/maintainability/src/structure/syntax/imports.rs",
+      "status": "active",
+      "physical_ceiling": 1671,
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "Legacy import syntax hotspot scheduled for Phase 0 decomposition."
+    },
+    {
+      "id": "tooling.import-syntax-tests",
+      "path": "tools/maintainability/src/structure/syntax/imports/tests.rs",
+      "status": "active",
+      "physical_ceiling": 1596,
+      "issue": "https://github.com/gearboxlogic/localhold/issues/124",
+      "rationale": "Legacy import syntax test hotspot retained until replacement tests are organized by behavior."
+    }
+  ]
+}

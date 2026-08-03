@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use super::path;
 
 mod output;
@@ -206,12 +204,7 @@ fn is_safe_literal_destination(candidate: &str) -> bool {
     if let Some(path) = path::normalize_literal(candidate) {
         return !super::super::super::is_protected_check_input(&path);
     }
-    !path::contains_dynamic_value(candidate) && (Path::new(candidate).is_absolute() || is_windows_absolute(candidate))
-}
-
-fn is_windows_absolute(candidate: &str) -> bool {
-    let bytes = candidate.as_bytes();
-    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\')
+    !path::contains_dynamic_value(candidate) && path::is_absolute(candidate)
 }
 
 fn iconv_output_is_opaque(path: &str, arguments: &[String]) -> bool {

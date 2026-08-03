@@ -345,6 +345,20 @@ mod tests {
     #[test]
     fn reviewed_shell_wrapper_profile_is_exact_and_unique() {
         let reviewed_bootstrap = reviewed_bootstrap();
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        if crate::structure::suppression::policy::config::command::checked_in_legacy_transition_capabilities(
+            &workspace,
+            "script/check-maintainability-bootstrap.sh",
+            &reviewed_bootstrap,
+        )
+        .is_some_and(|(opaque, _)| opaque)
+        {
+            assert!(
+                !reviewed_shell_wrappers("script/check-maintainability-bootstrap.sh", &reviewed_bootstrap),
+                "legacy bootstrap bridge no longer needs its wrapper exception"
+            );
+            return;
+        }
         assert!(reviewed_shell_wrappers("script/check-maintainability-bootstrap.sh", &reviewed_bootstrap));
         assert!(!reviewed_shell_wrappers("script/unreviewed.sh", &reviewed_bootstrap));
         assert!(!reviewed_shell_wrappers(

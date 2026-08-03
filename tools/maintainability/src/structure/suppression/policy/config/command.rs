@@ -28,6 +28,15 @@ use surfaces::execution_surfaces;
 #[cfg(test)]
 pub(super) use surfaces::without_reviewed_dispatch;
 
+#[cfg(test)]
+pub(super) fn checked_in_legacy_transition_capabilities(workspace: &Path, path: &str, source: &str) -> Option<(bool, bool)> {
+    let Ok(bytes) = fs::read(workspace.join(profile_policy::POLICY_PATH)) else {
+        return None;
+    };
+    let bridge = profile_policy::ProfileManifest::parse(&bytes).ok()?.legacy_transition_bridge(path, source)?;
+    Some((bridge.opaque_execution_inputs, bridge.environment_weakening))
+}
+
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "unset GCONV_PATH",
     "unset OPENSSL_CONF OPENSSL_CONF_INCLUDE OPENSSL_ENGINES OPENSSL_MODULES",
@@ -315,6 +324,7 @@ fn reject_checked_in_weakening_with_mode(workspace: &Path, validation: Repositor
     let audited_manifests = tracked_manifests(workspace)?.into_iter().collect::<BTreeSet<_>>();
     for path in surfaces.paths {
         let source = fs::read_to_string(workspace.join(&path)).with_context(|| format!("read lint command execution surface {path}"))?;
+        let legacy_transition = surfaces.command_profiles.as_ref().and_then(|profiles| profiles.legacy_transition_bridge(&path, &source));
         validate_before_resolution(workspace, &path, &source)?;
         actions::validate_action_references(workspace, &surfaces.tracked_paths, &path, &source)?;
         let (selected_manifests, unresolved_manifest) = cargo_manifest_paths_for_surface(&path, &source);
@@ -327,7 +337,10 @@ fn reject_checked_in_weakening_with_mode(workspace: &Path, validation: Repositor
         {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening argument");
         }
-        if weakening_environment_for_surface(&path, &source) && !scrubber_environment_references_are_exact(&path, &source) {
+        if weakening_environment_for_surface(&path, &source)
+            && !scrubber_environment_references_are_exact(&path, &source)
+            && !legacy_transition.is_some_and(|bridge| bridge.environment_weakening)
+        {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening environment channel");
         }
     }

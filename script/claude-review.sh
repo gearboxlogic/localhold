@@ -31,7 +31,6 @@ readonly repository_root
 cache_root="$repository_root/.cache"
 scratch_root="$cache_root/claude-reviews"
 claude_pid=
-claude_pgid=
 
 ensure_private_directory() {
     local path=$1
@@ -49,61 +48,11 @@ ensure_private_directory "$cache_root"
 ensure_private_directory "$scratch_root"
 scratch_directory=$(mktemp -d "$scratch_root/session.XXXXXXXXXX")
 
-review_group_is_alive() {
-    [[ -n "$claude_pgid" ]] || return 1
-
-    local process_listing member_pgid member_state
-    if ! process_listing=$(ps -A -o pgid=,stat=); then
-        return 0
-    fi
-    while read -r member_pgid member_state; do
-        if [[ $member_pgid == "$claude_pgid" && $member_state != Z* ]]; then
-            return 0
-        fi
-    done <<< "$process_listing"
-    return 1
-}
-
-wait_for_review_group_exit() {
-    local attempt
-    for (( attempt = 0; attempt < 100; attempt++ )); do
-        if ! review_group_is_alive; then
-            return 0
-        fi
-        sleep 0.02
-    done
-    return 1
-}
-
-drain_review_group() {
-    if ! review_group_is_alive; then
-        claude_pgid=
-        return 0
-    fi
-    kill -TERM -- "-$claude_pgid" 2>/dev/null || true
-    if wait_for_review_group_exit; then
-        claude_pgid=
-        return 0
-    fi
-    kill -KILL -- "-$claude_pgid" 2>/dev/null || true
-    if wait_for_review_group_exit; then
-        claude_pgid=
-        return 0
-    fi
-    printf 'Claude review process group survived TERM and KILL: %s\n' "$claude_pgid" >&2
-    return 1
-}
-
 cleanup() {
-    local status=$1
-    # Once teardown starts, repeated termination requests must not bypass the
-    # bounded process-group drain or scratch removal.
-    trap '' HUP INT TERM
-    trap - EXIT
-    if ! drain_review_group && (( status == 0 )); then
-        status=1
-    fi
-    if [[ -n "$claude_pid" ]]; then
+    local status=$?
+    trap - EXIT HUP INT TERM
+    if [[ -n "$claude_pid" ]] && kill -0 "$claude_pid" 2>/dev/null; then
+        kill -TERM "$claude_pid" 2>/dev/null || true
         wait "$claude_pid" 2>/dev/null || true
     fi
     case "$scratch_directory" in
@@ -126,17 +75,21 @@ cleanup() {
 }
 
 forward_signal() {
-    local status=$1
-    trap '' HUP INT TERM
-    # EXIT cleanup performs bounded process-group termination. Keeping one
-    # shutdown path prevents a signal-resistant reviewer from blocking here.
+    local signal=$1
+    local status=$2
+    trap - "$signal"
+    if [[ -n "$claude_pid" ]] && kill -0 "$claude_pid" 2>/dev/null; then
+        kill -s "$signal" "$claude_pid" 2>/dev/null || true
+        wait "$claude_pid" 2>/dev/null || true
+    fi
+    claude_pid=
     exit "$status"
 }
 
-trap 'cleanup "$?"' EXIT
-trap 'forward_signal 129' HUP
-trap 'forward_signal 130' INT
-trap 'forward_signal 143' TERM
+trap cleanup EXIT
+trap 'forward_signal HUP 129' HUP
+trap 'forward_signal INT 130' INT
+trap 'forward_signal TERM 143' TERM
 
 claude_binary=$(command -v claude || true)
 if [[ -z "$claude_binary" ]]; then
@@ -148,53 +101,45 @@ if [[ -z ${HOME:-} || -z ${PATH:-} ]]; then
     exit 1
 fi
 
-run_claude() {
-    exec env -i \
-        "HOME=$HOME" \
-        "PATH=$PATH" \
-        "USER=${USER:-}" \
-        "LOGNAME=${LOGNAME:-}" \
-        "SHELL=${SHELL:-}" \
-        "TERM=${TERM:-}" \
-        "LANG=${LANG:-}" \
-        "LC_ALL=${LC_ALL:-}" \
-        "LC_CTYPE=${LC_CTYPE:-}" \
-        "NO_COLOR=${NO_COLOR:-}" \
-        "TMPDIR=$scratch_directory" \
-        "TMP=$scratch_directory" \
-        "TEMP=$scratch_directory" \
-        "$claude_binary" \
-        --safe-mode \
-        --mcp-config '{"mcpServers":{}}' \
-        --strict-mcp-config \
-        --disable-slash-commands \
-        --no-chrome \
-        --no-session-persistence \
-        --model "$model" \
-        --effort high \
-        --permission-mode plan \
-        --tools Read,Grep,Glob,Bash \
-        --print \
-        --output-format text \
-        "$@"
-}
+review_environment=(
+    env -i
+    "HOME=$HOME"
+    "PATH=$PATH"
+)
+for name in USER LOGNAME SHELL TERM LANG LC_ALL LC_CTYPE NO_COLOR; do
+    if [[ -v $name ]]; then
+        review_environment+=("$name=${!name}")
+    fi
+done
+
+prompt=()
+if (( $# == 1 )); then
+    prompt=(-- "$1")
+fi
 
 cd -- "$repository_root"
 set +e
-# Non-interactive Bash otherwise places background children in the wrapper's
-# process group. Monitor mode gives each review its own group so every tool or
-# shell process spawned by Claude is terminated with the review.
-set -m
-if (( $# == 1 )); then
-    run_claude -- "$1" &
-else
-    run_claude <&0 &
-fi
+"${review_environment[@]}" \
+    TMPDIR="$scratch_directory" \
+    TMP="$scratch_directory" \
+    TEMP="$scratch_directory" \
+"$claude_binary" \
+    --safe-mode \
+    --mcp-config '{"mcpServers":{}}' \
+    --strict-mcp-config \
+    --disable-slash-commands \
+    --no-chrome \
+    --no-session-persistence \
+    --model "$model" \
+    --effort high \
+    --permission-mode plan \
+    --tools Read,Grep,Glob,Bash \
+    --print \
+    --output-format text \
+    "${prompt[@]}" &
 # The child is a monitored shell job so this wrapper can forward termination
 # signals. The wrapper remains synchronous to its caller and immediately waits.
 claude_pid=$!
-claude_pgid=$claude_pid
-set +m
 wait "$claude_pid"
 status=$?
 claude_pid=

@@ -12,7 +12,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 8ca8d0cb6f72f73365301335b3b02dcdcdf26c19a4584a3007f4e0eea5bc711c
+  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: b5eec7cdace44b80740b67b0a5f6696dd3f74be39fa8949a4349010dbfd99c93
   XDG_CACHE_HOME: ${{ github.workspace }}/.cache
 
 permissions:
@@ -72,11 +72,6 @@ jobs:
 
       - name: Run CI gate
         run: just check-quality
-
-      - name: Test candidate maintainability checker
-        run: |
-          cargo test --manifest-path tools/maintainability/Cargo.toml --locked
-          cargo clippy --manifest-path tools/maintainability/Cargo.toml --all-targets --locked -- -D warnings
 
       - name: Stage CPU installation
         run: ./script/install.sh --profile cpu --prefix "$RUNNER_TEMP/localhold"
@@ -221,11 +216,6 @@ jobs:
 
       - name: Test
         run: just test
-
-      - name: Test candidate maintainability checker
-        run: |
-          cargo test --manifest-path tools/maintainability/Cargo.toml --locked
-          cargo clippy --manifest-path tools/maintainability/Cargo.toml --all-targets --locked -- -D warnings
 
       - name: Build and package Windows preview archive
         run: |

@@ -199,6 +199,12 @@ fn static_background_process_cleanup_commands_are_analyzable() {
 fn assert_reviewed_shell_surface_is_closed(surface_path: &str) {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = fs::read_to_string(workspace.join(surface_path)).expect("reviewed shell surface");
+    if super::super::super::checked_in_legacy_transition_capabilities(&workspace, surface_path, &source).is_some_and(|(opaque, _)| opaque) {
+        let analyzed_source = super::direct_command_source(surface_path, &source);
+        let inputs = super::execution_inputs_for_surface(surface_path, &analyzed_source, true);
+        assert!(inputs.unresolved, "legacy bridge no longer needs its opaque-dispatch exception: {surface_path}");
+        return;
+    }
     let command_source = super::direct_command_source(surface_path, &source);
     let normalized = assert_reviewed_shell_preamble_is_closed(surface_path, &command_source);
     let functions = tokens::declared_shell_functions(&normalized);

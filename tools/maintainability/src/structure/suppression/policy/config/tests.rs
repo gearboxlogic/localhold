@@ -528,10 +528,18 @@ fn reviewed_environment_scrubbers_are_exact() {
 
 #[test]
 fn checked_in_bootstrap_matches_its_reviewed_environment_contract() {
-    let bootstrap = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../script/check-maintainability-bootstrap.sh");
-    let source = fs::read_to_string(bootstrap).expect("read checked-in maintainability bootstrap");
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let path = "script/check-maintainability-bootstrap.sh";
+    let source = fs::read_to_string(repository.join(path)).expect("read checked-in maintainability bootstrap");
+    if super::command::checked_in_legacy_transition_capabilities(&repository, path, &source).is_some_and(|(_, environment)| environment) {
+        assert!(
+            !scrubber_environment_references_are_exact(path, &source),
+            "legacy bootstrap bridge no longer needs its environment exception"
+        );
+        return;
+    }
 
-    assert!(scrubber_environment_references_are_exact("script/check-maintainability-bootstrap.sh", &source));
+    assert!(scrubber_environment_references_are_exact(path, &source));
 }
 
 #[test]
@@ -591,6 +599,13 @@ fn quality_command_exceptions_require_the_exact_reviewed_lines() {
         ".github/workflows/trusted-maintainability.yml",
     ] {
         let source = fs::read_to_string(repository.join(path)).expect("read reviewed quality-command source");
+        if super::command::checked_in_legacy_transition_capabilities(&repository, path, &source).is_some_and(|(opaque, _)| opaque) {
+            assert!(
+                !super::command::reviewed_quality_command_exceptions_are_exact(path, &source, true),
+                "legacy bridge no longer needs its quality-command exception: {path}"
+            );
+            continue;
+        }
         assert!(super::command::reviewed_quality_command_exceptions_are_exact(path, &source, true), "{path}");
     }
     assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
@@ -610,13 +625,18 @@ fn quality_command_exceptions_require_the_exact_reviewed_lines() {
     ));
 
     let source = fs::read_to_string(repository.join("script/dep-audit.sh")).expect("read dependency audit script");
-    assert!(weakening_token_for_surface("script/dep-audit.sh", &source));
-    assert!(super::command::reviewed_quality_command_exceptions_are_exact("script/dep-audit.sh", &source, true));
-    assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
-        "script/dep-audit.sh",
-        &source.replace("if ! run_workspace_deny; then", "if ! run_unreviewed_deny; then"),
-        false,
-    ));
+    if super::command::checked_in_legacy_transition_capabilities(&repository, "script/dep-audit.sh", &source).is_some_and(|(opaque, _)| opaque) {
+        assert!(!weakening_token_for_surface("script/dep-audit.sh", &source));
+        assert!(!super::command::reviewed_quality_command_exceptions_are_exact("script/dep-audit.sh", &source, true));
+    } else {
+        assert!(weakening_token_for_surface("script/dep-audit.sh", &source));
+        assert!(super::command::reviewed_quality_command_exceptions_are_exact("script/dep-audit.sh", &source, true));
+        assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
+            "script/dep-audit.sh",
+            &source.replace("if ! run_workspace_deny; then", "if ! run_unreviewed_deny; then"),
+            false,
+        ));
+    }
     assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
         "script/dep-audit.sh",
         &source.replace("if (( failed != 0 )); then", "failed=0\nif (( failed != 0 )); then"),

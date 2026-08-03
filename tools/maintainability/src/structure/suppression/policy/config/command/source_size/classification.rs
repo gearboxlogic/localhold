@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use quote::ToTokens;
+use sha2::{Digest, Sha256};
 use syn::ext::IdentExt;
 use syn::visit::{self, Visit};
 
@@ -17,6 +19,39 @@ struct ModuleParents {
 struct TargetRoots {
     production: BTreeSet<String>,
     testing: BTreeSet<String>,
+}
+
+const LEGACY_ANALYZER_MANIFEST_SHA256: &str = "cca207767614bd2c1d46bc06092b69e90157aeb450797fcc7cad4e1ed67c89b9";
+const LEGACY_AUTO_TARGET_PATHS: &[&str] = &[
+    "tools/maintainability/src/lib.rs",
+    "tools/maintainability/src/bin/",
+    "tools/maintainability/examples/",
+    "tools/maintainability/tests/",
+    "tools/maintainability/benches/",
+];
+
+pub(super) fn validate_legacy_auto_target_inventory(workspace: &Path, manifest: &str, repository_paths: &BTreeSet<String>) -> Result<()> {
+    if !legacy_analyzer_manifest_is_exact(manifest) {
+        return Ok(());
+    }
+    if let Some(path) = repository_paths.iter().find(|path| {
+        let normalized = path.to_ascii_lowercase();
+        LEGACY_AUTO_TARGET_PATHS.iter().any(|candidate| {
+            let root = candidate.strip_suffix('/').unwrap_or(candidate);
+            normalized == root || normalized.starts_with(candidate)
+        })
+    }) {
+        bail!("legacy maintainability analyzer manifest cannot authenticate auto-discovered Cargo target {path:?}");
+    }
+    for candidate in LEGACY_AUTO_TARGET_PATHS {
+        let candidate = candidate.strip_suffix('/').unwrap_or(candidate);
+        match std::fs::symlink_metadata(workspace.join(candidate)) {
+            Ok(_) => bail!("legacy maintainability analyzer manifest cannot authenticate physical auto-discovered Cargo target {candidate:?}"),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error).with_context(|| format!("inspect legacy Cargo auto-target path {candidate:?}")),
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn test_only_paths(sources: &BTreeMap<String, String>, manifest: &str) -> Result<BTreeSet<String>> {
@@ -69,9 +104,11 @@ pub(super) fn validate_compiler_inputs(sources: &BTreeMap<String, String>, manif
         .get("package")
         .and_then(toml::Value::as_table)
         .context("maintainability analyzer Cargo manifest requires a package table")?;
-    for field in ["build", "autobins", "autoexamples", "autotests", "autobenches"] {
-        if package.get(field) != Some(&toml::Value::Boolean(false)) {
-            bail!("maintainability analyzer Cargo package.{field} must be false to close the authenticated compiler-input inventory");
+    if !legacy_analyzer_manifest_is_exact(manifest) {
+        for field in ["build", "autobins", "autoexamples", "autotests", "autobenches"] {
+            if package.get(field) != Some(&toml::Value::Boolean(false)) {
+                bail!("maintainability analyzer Cargo package.{field} must be false to close the authenticated compiler-input inventory");
+            }
         }
     }
     validate_dependency_sources(&parsed, package)?;
@@ -89,6 +126,10 @@ pub(super) fn validate_compiler_inputs(sources: &BTreeMap<String, String>, manif
         }
     }
     Ok(())
+}
+
+fn legacy_analyzer_manifest_is_exact(manifest: &str) -> bool {
+    format!("{:x}", Sha256::digest(manifest.as_bytes())) == LEGACY_ANALYZER_MANIFEST_SHA256
 }
 
 fn validate_dependency_sources(manifest: &toml::Table, package: &toml::Table) -> Result<()> {
@@ -371,6 +412,72 @@ mod tests {
 
     fn closed_manifest(extra: &str) -> String {
         format!("workspace = {{}}\n[package]\nname = 'maintainability'\nbuild = false\nautobins = false\nautoexamples = false\nautotests = false\nautobenches = false\n{extra}")
+    }
+
+    #[test]
+    fn only_the_exact_legacy_analyzer_manifest_can_defer_auto_target_hardening() {
+        let manifest = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).expect("read legacy analyzer manifest");
+        let sources = BTreeMap::from([(format!("{SOURCE_ROOT}/main.rs"), "fn main() {}\n".to_owned())]);
+        assert!(legacy_analyzer_manifest_is_exact(&manifest));
+        validate_compiler_inputs(&sources, &manifest).expect("exact legacy manifest");
+
+        let changed = format!("{manifest}\n# unreviewed change\n");
+        assert!(!legacy_analyzer_manifest_is_exact(&changed));
+        let error = validate_compiler_inputs(&sources, &changed).expect_err("changed legacy manifest");
+        assert!(error.to_string().contains("package.autobins must be false"), "{error:#}");
+    }
+
+    #[test]
+    fn legacy_analyzer_manifest_rejects_every_conventional_auto_target_root() {
+        let manifest = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).expect("read legacy analyzer manifest");
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        for path in [
+            "tools/maintainability/src/lib.rs",
+            "tools/maintainability/src/bin",
+            "tools/maintainability/src/bin/escape.rs",
+            "tools/maintainability/examples",
+            "tools/maintainability/examples/escape.rs",
+            "tools/maintainability/tests",
+            "tools/maintainability/tests/escape.rs",
+            "tools/maintainability/benches",
+            "tools/maintainability/benches/escape.rs",
+            "TOOLS/MAINTAINABILITY/SRC/LIB.RS",
+            "tools/maintainability/SRC/bin",
+            "tools/maintainability/SRC/bin/escape.rs",
+            "tools/maintainability/Examples",
+            "tools/maintainability/Examples/escape.rs",
+            "tools/maintainability/Tests",
+            "tools/maintainability/Tests/escape.rs",
+            "tools/maintainability/Benches",
+            "tools/maintainability/Benches/escape.rs",
+        ] {
+            let error = validate_legacy_auto_target_inventory(workspace.path(), &manifest, &BTreeSet::from([path.to_owned()])).expect_err("legacy auto target");
+            assert!(error.to_string().contains(path), "{error:#}");
+        }
+        validate_legacy_auto_target_inventory(workspace.path(), &manifest, &BTreeSet::from([format!("{SOURCE_ROOT}/main.rs")])).expect("reviewed main target");
+    }
+
+    #[test]
+    fn legacy_analyzer_manifest_rejects_physical_auto_target_roots_outside_git_inventory() {
+        let manifest = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).expect("read legacy analyzer manifest");
+        for path in [
+            "tools/maintainability/src/lib.rs",
+            "tools/maintainability/src/bin",
+            "tools/maintainability/examples",
+            "tools/maintainability/tests",
+            "tools/maintainability/benches",
+        ] {
+            let workspace = tempfile::tempdir().expect("temporary workspace");
+            let physical = workspace.path().join(path);
+            if Path::new(path).extension().is_some() {
+                std::fs::create_dir_all(physical.parent().expect("auto-target parent")).expect("auto-target parent");
+                std::fs::write(&physical, "fn main() {}\n").expect("physical auto target");
+            } else {
+                std::fs::create_dir_all(&physical).expect("physical auto-target root");
+            }
+            let error = validate_legacy_auto_target_inventory(workspace.path(), &manifest, &BTreeSet::new()).expect_err("physical legacy auto target");
+            assert!(error.to_string().contains(path), "{error:#}");
+        }
     }
 
     #[test]

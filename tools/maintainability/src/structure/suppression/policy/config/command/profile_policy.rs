@@ -5,6 +5,68 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 pub(super) const POLICY_PATH: &str = "policy/maintainability/reviewed-command-profiles.json";
+#[derive(Clone, Copy)]
+pub(super) struct LegacyTransitionBridge {
+    pub(super) path: &'static str,
+    pub(super) current: &'static str,
+    pub(super) successor: &'static str,
+    pub(super) opaque_execution_inputs: bool,
+    pub(super) environment_weakening: bool,
+}
+
+// The protected predecessor accepts only these exact legacy bytes and staged
+// successors. Promotion retires each current digest, so the bridge stops matching.
+const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
+    LegacyTransitionBridge {
+        path: "script/bootstrap.sh",
+        current: "36982c49561af13986fc34ddeefd759010cd615980604eca34d09ef5ba0358c3",
+        successor: "e0302179ecc01f9feb178b74420db156736c04e33a4e67d304fa3bc2390fdbf3",
+        opaque_execution_inputs: true,
+        environment_weakening: false,
+    },
+    LegacyTransitionBridge {
+        path: "script/dep-audit.sh",
+        current: "5542706978c03c28159305257466a32566fd66bcae9c7502de4be91fa45ae7d1",
+        successor: "03b36529705c704b244dd5e128e1dd1461a66677bdda0bcceedaa582015160dc",
+        opaque_execution_inputs: true,
+        environment_weakening: false,
+    },
+    LegacyTransitionBridge {
+        path: "script/test-postgres-smoke.sh",
+        current: "2f54d872c4773e0ade58b2c0d70bf37e43a477ab809b5ad454195af895169066",
+        successor: "88a8e659f6e4c238041d037e4a49301806361a42c48706241c39ee8ad01e9724",
+        opaque_execution_inputs: true,
+        environment_weakening: false,
+    },
+    LegacyTransitionBridge {
+        path: "script/check-maintainability-bootstrap.sh",
+        current: "7afc737797b816c8cd2ca59f5958b4284443caa3cf9d7b90e41767d518844092",
+        successor: "9443771a37693340cf16b45682f77c35c05353569c2c1aee0f23c74b49c0b4dc",
+        opaque_execution_inputs: true,
+        environment_weakening: true,
+    },
+    LegacyTransitionBridge {
+        path: "script/claude-review.sh",
+        current: "c6c56c0212389a349b4a39e95d2578310bcc1a13bcbe8377c010ca69d1aefc8a",
+        successor: "7a0b509574ded78ba3c0589bae798b4e6d7d7658e5bebe48515a3ae73fafbc78",
+        opaque_execution_inputs: true,
+        environment_weakening: true,
+    },
+    LegacyTransitionBridge {
+        path: "script/tests/test_claude_review.sh",
+        current: "41c33e1d76f36d8c9e5050a15b24de19c3044078694170d95d672657f6f8940c",
+        successor: "c79edaaf67e69429c763d7dd3a0b3756e174147c7ac177350051e0e71c257ca5",
+        opaque_execution_inputs: false,
+        environment_weakening: true,
+    },
+    LegacyTransitionBridge {
+        path: ".github/workflows/ci.yml",
+        current: "d7b67dc9b58887448885e7225a50144db84f7b100d9fbe1e750614d4757db302",
+        successor: "cb050701091e3ebd75c64feeed4b37ed80ad6cc08ba433697748e95b9f877e25",
+        opaque_execution_inputs: false,
+        environment_weakening: true,
+    },
+];
 
 #[derive(Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -40,6 +102,19 @@ impl ProfileManifest {
     pub(super) fn source_is_current(&self, path: &str, source: &str) -> bool {
         let observed = format!("{:x}", Sha256::digest(source.as_bytes()));
         self.profiles.iter().filter(|profile| profile.path == path && profile.current_sha256 == observed).count() == 1
+    }
+
+    pub(super) fn legacy_transition_bridge(&self, path: &str, source: &str) -> Option<LegacyTransitionBridge> {
+        let observed = format!("{:x}", Sha256::digest(source.as_bytes()));
+        let profile = self
+            .profiles
+            .iter()
+            .find(|profile| profile.path == path && profile.current_sha256 == observed && profile.retired_sha256.is_empty())?;
+        let staged_transition = (profile.path.as_str(), profile.current_sha256.as_str(), profile.preapproved_next_sha256.as_deref()?);
+        LEGACY_TRANSITION_BRIDGES
+            .iter()
+            .copied()
+            .find(|bridge| (bridge.path, bridge.current, bridge.successor) == staged_transition)
     }
 
     pub(super) fn compare_previous(&self, previous: &Self) -> Result<()> {
@@ -153,7 +228,44 @@ fn validate_sha256(value: &str, label: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
+
     use super::*;
+
+    #[test]
+    fn checked_in_legacy_transition_inventory_is_exact() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = ProfileManifest::parse(&fs::read(workspace.join(POLICY_PATH)).expect("checked-in profile policy")).expect("profile policy");
+        let expected = LEGACY_TRANSITION_BRIDGES
+            .iter()
+            .map(|bridge| (bridge.path, bridge.current, bridge.successor))
+            .collect::<BTreeSet<_>>();
+        let actual = manifest
+            .profiles()
+            .iter()
+            .filter_map(|profile| {
+                let successor = profile.preapproved_next_sha256.as_deref()?;
+                let source = fs::read_to_string(workspace.join(&profile.path)).expect("checked-in bridge source");
+                manifest
+                    .legacy_transition_bridge(&profile.path, &source)
+                    .is_some()
+                    .then_some((profile.path.as_str(), profile.current_sha256.as_str(), successor))
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+
+        for bridge in LEGACY_TRANSITION_BRIDGES {
+            let source = fs::read_to_string(workspace.join(bridge.path)).expect("checked-in bridge source");
+            assert!(manifest.legacy_transition_bridge(bridge.path, &source).is_some());
+            assert!(manifest.legacy_transition_bridge(bridge.path, &format!("{source}\n# tampered")).is_none());
+
+            let mut changed = ProfileManifest::parse(&fs::read(workspace.join(POLICY_PATH)).expect("checked-in profile policy")).expect("profile policy");
+            let profile = changed.profiles.iter_mut().find(|profile| profile.path == bridge.path).expect("bridge profile");
+            profile.preapproved_next_sha256 = Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned());
+            assert!(changed.legacy_transition_bridge(bridge.path, &source).is_none());
+        }
+    }
 
     fn manifest(current: &str, next: Option<&str>, retired: &[&str]) -> ProfileManifest {
         let next = next.map_or_else(|| "null".to_owned(), |digest| format!("\"{digest}\""));
@@ -214,11 +326,15 @@ mod tests {
         staged.compare_previous(&initial).expect("stage successor");
         assert!(staged.source_is_current("script/reviewed.sh", old_source));
         assert!(!staged.source_is_current("script/reviewed.sh", new_source));
+        assert!(staged.legacy_transition_bridge("script/reviewed.sh", old_source).is_none());
+        assert!(staged.legacy_transition_bridge("script/reviewed.sh", new_source).is_none());
+        assert!(initial.legacy_transition_bridge("script/reviewed.sh", old_source).is_none());
 
         let promoted = manifest(&new, None, &[&old]);
         promoted.compare_previous(&staged).expect("promote successor");
         assert!(promoted.source_is_current("script/reviewed.sh", new_source));
         assert!(!promoted.source_is_current("script/reviewed.sh", old_source));
+        assert!(promoted.legacy_transition_bridge("script/reviewed.sh", new_source).is_none());
         assert!(manifest(&new, None, &[]).compare_previous(&initial).is_err());
         assert!(manifest(&old, Some(A), &[]).compare_previous(&staged).is_err());
     }

@@ -6,7 +6,9 @@ use anyhow::Result;
 mod analysis;
 mod dynamic;
 mod dynamic_program;
+mod formats;
 mod integrity;
+mod mise;
 mod package_json;
 mod powershell;
 mod python;
@@ -15,20 +17,41 @@ mod source;
 mod tokens;
 mod toolchain;
 use analysis::Options as AnalysisOptions;
+use formats::{is_just, is_mise, is_powershell, is_python, is_standalone_shell_surface, is_windows_command, is_yaml, supports_shell_source};
 pub(super) use integrity::contains_quality_command;
-pub(super) use references::{cargo_manifest_paths_for_surface, execution_inputs_for_surface};
+pub(super) use references::{cargo_manifest_paths_for_surface, execution_inputs_for_surface, reviewed_command_profiles};
 use tokens::{command_tokens, command_without_comment};
+
+pub(super) fn weakening_mise_environment(path: &str, source: &str) -> bool {
+    is_mise(path) && mise::analyze(source).map_or(true, |analysis| analysis.environment_weakening)
+}
+
+pub(super) fn mise_configuration_is_resolved(path: &str, source: &str) -> bool {
+    !is_mise(path) || mise::analyze(source).is_ok_and(|analysis| !analysis.unresolved)
+}
+
+pub(super) fn reviewed_mise_environment_is_exact(path: &str, source: &str) -> bool {
+    path == "mise.toml" && mise::reviewed_environment_is_exact(source)
+}
 
 #[cfg(test)]
 pub(in crate::structure::suppression::policy::config) fn weakening_token(source: &str) -> bool {
     weakening_token_with_options(source, AnalysisOptions::strict())
 }
 
+#[cfg(test)]
 pub(in crate::structure::suppression::policy::config) fn weakening_token_for_surface(path: &str, source: &str) -> bool {
+    weakening_token_for_surface_with_reviewed_source(path, source, false)
+}
+
+pub(super) fn weakening_token_for_surface_with_reviewed_source(path: &str, source: &str, source_is_reviewed: bool) -> bool {
+    if mise::file_task_metadata_is_unresolved(source) {
+        return true;
+    }
     if dynamic_program::is_unanalyzed_path(path) {
         return true;
     }
-    if is_python(path) && (python::has_opaque_process_arguments(source) || python::has_opaque_filesystem_write(path, source)) {
+    if is_python(path) && (python::has_opaque_process_arguments(path, source) || python::has_opaque_filesystem_write(path, source)) {
         return true;
     }
     if is_powershell(path) && powershell::has_constructed_rust_arguments(source) {
@@ -36,6 +59,22 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
     }
     if is_powershell(path) && powershell::has_unchecked_native_quality_command(source) {
         return true;
+    }
+    if is_powershell(path) {
+        let analysis = powershell::analyze_execution_commands(source);
+        if !powershell::unresolved_is_reviewed(path, source_is_reviewed, &analysis) {
+            return true;
+        }
+    }
+    if is_mise(path) {
+        let Ok(analysis) = mise::analyze(source) else {
+            return true;
+        };
+        return analysis.unresolved
+            || analysis
+                .commands
+                .iter()
+                .any(|command| weakening_token_with_options(command, AnalysisOptions::strict().with_case_insensitive_tools()));
     }
     let mut options = AnalysisOptions::strict();
     options = options.with_case_insensitive_tools();
@@ -63,10 +102,10 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
     let source = normalized_source_for_surface(path, source);
     let embedded_commands = super::yaml::run_commands(path, &source);
     if is_yaml(path) {
-        if super::yaml::powershell_run_commands(path, &source)
-            .iter()
-            .any(|command| powershell::has_unchecked_native_quality_command(command))
-        {
+        if super::yaml::powershell_run_commands(path, &source).iter().any(|command| {
+            let analysis = powershell::analyze_execution_commands(command);
+            powershell::has_unchecked_native_quality_command(command) || !powershell::unresolved_is_reviewed(path, source_is_reviewed, &analysis)
+        }) {
             return true;
         }
         return embedded_commands
@@ -155,44 +194,6 @@ fn is_shell_command_prefix(word: &str) -> bool {
 fn is_environment_assignment(word: &str) -> bool {
     word.split_once('=')
         .is_some_and(|(name, _)| !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') && !name.as_bytes()[0].is_ascii_digit())
-}
-
-fn supports_shell_source(path: &str) -> bool {
-    let path = Path::new(path);
-    let basename = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-    if matches!(
-        basename.to_ascii_lowercase().as_str(),
-        "justfile" | ".justfile" | "makefile" | "gnumakefile" | "package.json"
-    ) {
-        return true;
-    }
-    path.extension().and_then(|extension| extension.to_str()).is_none_or(|extension| {
-        matches!(
-            extension.to_ascii_lowercase().as_str(),
-            "sh" | "bash" | "zsh" | "fish" | "ps1" | "just" | "yml" | "yaml" | "toml"
-        )
-    })
-}
-
-fn is_yaml(path: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "yml" | "yaml"))
-}
-
-fn is_standalone_shell_surface(path: &str) -> bool {
-    let path = Path::new(path);
-    let basename = path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_ascii_lowercase();
-    if matches!(basename.as_str(), "justfile" | ".justfile" | "makefile" | "gnumakefile" | "package.json") {
-        return false;
-    }
-    path.extension().and_then(|extension| extension.to_str()).is_none_or(|extension| {
-        !matches!(
-            extension.to_ascii_lowercase().as_str(),
-            "bat" | "cmd" | "json" | "just" | "make" | "mk" | "ps1" | "py" | "rs" | "toml" | "yml" | "yaml"
-        )
-    })
 }
 
 fn shebang_enables_errexit(source: &str) -> bool {
@@ -303,8 +304,26 @@ fn nested_rust_command_is_weakening(command: &str, token: &str, options: Analysi
 }
 
 fn nested_text_may_reference_rust_tool(source: &str) -> bool {
+    if inert_parameter_expansion_diagnostic(source) {
+        return false;
+    }
     let source = source.to_ascii_lowercase();
     ["cargo", "rustc", "rustdoc", "clippy-driver", "clippy"].iter().any(|tool| source.contains(tool))
+}
+
+fn inert_parameter_expansion_diagnostic(source: &str) -> bool {
+    let Some(expansion) = source.strip_prefix("${").and_then(|source| source.strip_suffix('}')) else {
+        return false;
+    };
+    let Some((name, diagnostic)) = expansion.split_once(":?") else {
+        return false;
+    };
+    !name.is_empty()
+        && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && !name.as_bytes()[0].is_ascii_digit()
+        && !diagnostic.contains(['$', '`'])
+        && !diagnostic.contains("<(")
+        && !diagnostic.contains(">(")
 }
 
 fn is_non_executing_assignment(command: &str) -> bool {
@@ -614,30 +633,6 @@ fn reviewed_external_audit_root(target: Option<&str>, lines: &[&str]) -> bool {
     expected.iter().all(|expected| lines.iter().filter(|line| *line == expected).count() == 1)
 }
 
-fn is_python(path: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
-}
-
-fn is_windows_command(path: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "cmd" | "bat"))
-}
-
-fn is_just(path: &str) -> bool {
-    let path = Path::new(path);
-    let basename = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-    matches!(basename.to_ascii_lowercase().as_str(), "justfile" | ".justfile")
-        || path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("just"))
-}
-
 fn ignored_just_recipe_failure(source: &str, case_insensitive_tools: bool) -> bool {
     source.lines().any(|line| {
         let command = line.trim_start();
@@ -648,13 +643,6 @@ fn ignored_just_recipe_failure(source: &str, case_insensitive_tools: bool) -> bo
         let sigils = &command[..sigil_end];
         sigils.contains('-') && contains_quality_command(command[sigil_end..].trim_start(), case_insensitive_tools)
     })
-}
-
-fn is_powershell(path: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("ps1"))
 }
 
 fn is_literal_direct_compiler_token(token: &str, case_insensitive: bool) -> bool {
@@ -768,68 +756,4 @@ fn is_cargo_deny_config_argument(tokens: &[String], config_index: usize, case_in
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeSet;
-
-    use super::{collect_direct_rust_sources, untrusted_directory_change_with_quality_dispatcher, untrusted_directory_change_with_rust_tool, weakening_token_for_surface};
-
-    #[test]
-    fn protected_external_audit_roots_require_complete_validation() {
-        let reviewed = r#"implementation_root=/trusted
-repository_root=${LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT:-$implementation_root}
-if [[ $repository_root != /* && ! $repository_root =~ ^[[:alpha:]]:[/\\] ]] || [[ ! -d $repository_root || -L $repository_root ]]; then
-    exit 1
-fi
-repository_root=$(cd -- "$repository_root" && pwd -P)
-LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT=$repository_root
-readonly implementation_root repository_root LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT
-export LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT
-cd -- "$repository_root"
-cargo test --locked
-"#;
-        assert!(!untrusted_directory_change_with_rust_tool(reviewed, false));
-        assert!(untrusted_directory_change_with_rust_tool(
-            &reviewed.replace("[[ ! -d $repository_root || -L $repository_root ]]", "[[ ! -d $repository_root ]]"),
-            false
-        ));
-    }
-
-    #[test]
-    fn quality_dispatchers_cannot_run_after_untrusted_directory_changes() {
-        for source in [
-            "cd quality/decoy; just check-quality",
-            "pushd quality/decoy; make check-quality",
-            "env --chdir=quality/decoy just maintainability",
-        ] {
-            assert!(untrusted_directory_change_with_quality_dispatcher(source, false), "{source}");
-        }
-        assert!(!untrusted_directory_change_with_quality_dispatcher("cd quality/decoy; just --version", false));
-    }
-
-    #[test]
-    fn direct_source_discovery_bounds_nested_ansi_c_text() {
-        let mut sources = BTreeSet::new();
-        assert!(!collect_direct_rust_sources(r#"write_manifest $'[package]\nname = "checker"'"#, true, &mut sources));
-        assert!(sources.is_empty());
-        assert!(collect_direct_rust_sources(r"$'rustc source.rs'", true, &mut sources));
-    }
-
-    #[test]
-    fn standalone_shells_cannot_assume_parent_errexit() {
-        let masked = "#!/usr/bin/bash\ncargo clippy --locked -- -D warnings\ntrue\n";
-        assert!(weakening_token_for_surface("quality/lint.data", masked));
-        assert!(!weakening_token_for_surface("quality/lint.data", &masked.replace("#!/usr/bin/bash", "#!/usr/bin/bash -e")));
-        assert!(!weakening_token_for_surface(
-            "quality/lint.data",
-            &masked.replace("#!/usr/bin/bash", "#!/usr/bin/bash\nset -e")
-        ));
-        assert!(!weakening_token_for_surface(
-            "quality/lint.data",
-            &masked.replace("#!/usr/bin/bash", "#!/usr/bin/env -S bash -euo pipefail")
-        ));
-        assert!(weakening_token_for_surface(
-            "quality/lint.data",
-            &masked.replace("#!/usr/bin/bash", "#!/usr/bin/pwsh -NoProfile")
-        ));
-    }
-}
+mod tests;

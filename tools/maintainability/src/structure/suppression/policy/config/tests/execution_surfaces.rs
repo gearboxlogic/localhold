@@ -1,6 +1,8 @@
 use super::*;
 
 mod dispatch_cases;
+mod mise;
+mod python;
 
 #[test]
 fn command_surfaces_include_scripts_outside_the_legacy_script_directory() {
@@ -255,7 +257,7 @@ fn just_templates_cannot_construct_compiler_invocations() {
     assert!(!weakening_token_for_surface("Justfile", "check:\n    cargo nextest run {{ ARGS }}\n"));
     assert!(!weakening_token_for_surface(
         "mise.toml",
-        "CARGO_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME) }}/localhold/cargo\"\n"
+        "[env]\nDOCUMENTATION_MODE = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME) }}/localhold/docs\"\n"
     ));
 }
 
@@ -314,7 +316,7 @@ fn command_policy_rejects_dynamic_powershell_call_dispatch() {
     git(workspace.path(), &["add", "."]);
 
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+    assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
 
     fs::write(
         workspace.path().join("script/check.ps1"),
@@ -322,7 +324,7 @@ fn command_policy_rejects_dynamic_powershell_call_dispatch() {
     )
     .expect("dynamic PowerShell script block");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+    assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
 
     fs::write(
         workspace.path().join("script/check.ps1"),
@@ -330,7 +332,7 @@ fn command_policy_rejects_dynamic_powershell_call_dispatch() {
     )
     .expect(".NET process dispatch");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+    assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
 
     for source in [
         "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$command}\n",
@@ -339,7 +341,7 @@ fn command_policy_rejects_dynamic_powershell_call_dispatch() {
     ] {
         fs::write(workspace.path().join("script/check.ps1"), source).expect("CIM or WMI process dispatch");
         let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-        assert!(error.to_string().contains("lint-weakening argument"), "{source}: {error:#}");
+        assert!(error.to_string().contains("opaque interpreter program"), "{source}: {error:#}");
     }
 
     fs::write(
@@ -355,7 +357,7 @@ fn command_policy_rejects_dynamic_powershell_call_dispatch() {
     )
     .expect("dynamic PowerShell alias dispatch");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+    assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
 
     fs::write(
         workspace.path().join("script/check.ps1"),
@@ -363,87 +365,54 @@ fn command_policy_rejects_dynamic_powershell_call_dispatch() {
     )
     .expect("PowerShell filesystem mutation");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+    assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
 }
 
 #[test]
-fn command_policy_rejects_python_command_wrapper_dispatch() {
+fn command_policy_rejects_nested_powershell_execution_in_inert_forms() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join("script")).expect("script directory");
-    fs::write(
-        workspace.path().join("script/check.py"),
-        "import subprocess\nsubprocess.run([\"env\", \"sh\", \"-c\", bytes.fromhex(\"636172676f20636c69707079202d2d202d41207761726e696e6773\").decode()])\n",
-    )
-    .expect("Python command-wrapper argv call");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::write(workspace.path().join("quality/payload.ps1"), "Write-Output payload\n").expect("payload");
+    fs::write(workspace.path().join("script/check.ps1"), "Write-Output ready\n").expect("PowerShell surface");
     git(workspace.path(), &["init", "-q"]);
     git(workspace.path(), &["add", "."]);
 
-    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
-
-    fs::write(
-        workspace.path().join("script/check.py"),
-        "import shutil\nshutil.copyfile(\"quality/lint.data\", \"Justfile\")\n",
-    )
-    .expect("Python execution-surface mutation");
-    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
-
     for source in [
-        "from pathlib import Path\nPath(\"Justfile\").write_text(Path(\"quality/Justfile\").read_text())\n",
-        "from pathlib import Path\ntarget = Path(\"Justfile\")\ntarget.write_text(Path(\"quality/Justfile\").read_text())\n",
-        "import shutil\nsource = \"quality/Justfile\"\ntarget = \"Justfile\"\nshutil.copy2(source, target)\n",
-        "with open(file=\"Justfile\", mode=\"w\") as output:\n    output.write(\"lint:\\n    true\\n\")\n",
-        "import os\nos.write(descriptor, payload)\n",
+        "$value = Get-Content $(./quality/payload.ps1)\n",
+        "$value = Get-Content input | ForEach-Object { ./quality/payload.ps1 }\n",
+        "if ($(./quality/payload.ps1)) { throw 'x' }\n",
+        "$value = @($request | ./quality/payload.ps1 | & $tool)\n",
+        "Write-Output `# | ./quality/payload.ps1\n",
+        "$value = \"literal `\" # $(./quality/payload.ps1)\"\n",
     ] {
-        fs::write(workspace.path().join("script/check.py"), source).expect("Python filesystem writer");
+        fs::write(workspace.path().join("script/check.ps1"), source).expect("nested PowerShell execution");
         let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-        assert!(error.to_string().contains("lint-weakening argument"), "{source}: {error:#}");
+        assert!(error.to_string().contains("opaque interpreter program"), "{source}: {error:#}");
     }
+}
 
-    fs::write(
-        workspace.path().join("script/check.py"),
-        "import subprocess\nsubprocess.run([\"git\", \"status\"])\nrunner = subprocess.run\nrunner(bytes.fromhex(\"636172676f\").decode(), shell=True)\n",
-    )
-    .expect("assigned Python process callable");
-    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
-
-    fs::write(
-        workspace.path().join("script/check.py"),
-        "import os\nos.__dict__[\"sy\" + \"stem\"](bytes.fromhex(\"7368207175616c6974792f6c696e742e747874\").decode())\n",
-    )
-    .expect("mapping-based Python process lookup");
-    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
-
-    fs::write(
-        workspace.path().join("script/check.py"),
-        "exec(bytes.fromhex(\"696d706f7274206f733b206f732e73797374656d2827636172676f20636c69707079202d2d202d41207761726e696e67732729\"))\n",
-    )
-    .expect("Python dynamic code evaluation");
-    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
-
-    fs::write(
-        workspace.path().join("script/check.py"),
-        "__import__(\"os\").system(bytes.fromhex(\"636172676f20636c69707079202d2d202d41207761726e696e6773\").decode())\n",
-    )
-    .expect("Python dynamic import");
-    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
-
-    fs::write(workspace.path().join("script/check.py"), "import runpy\nrunpy.run_path('quality/lint.txt')\n").expect("Python runpy execution");
-    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
-
-    fs::write(
-        workspace.path().join("script/check.py"),
-        "import io, pickle\npickle.Unpickler(io.BytesIO(bytes.fromhex(payload))).load()\n",
-    )
-    .expect("Python Unpickler execution");
-    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+#[test]
+fn command_policy_rejects_nested_powershell_execution_in_workflows() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join(".github/workflows")).expect("workflow directory");
+    for command in [
+        "$value = $(./quality/payload.ps1)",
+        "$items | ForEach-Object { ./quality/payload.ps1 }",
+        "if (& ./quality/payload.ps1) { throw 'x' }",
+        "Write-Output `# | ./quality/payload.ps1",
+        "$value = \"literal `\" # $(./quality/payload.ps1)\"",
+    ] {
+        let command = command.replace('\n', "\n          ");
+        let workflow = format!("name: lint\non: push\njobs:\n  lint:\n    runs-on: windows-latest\n    steps:\n      - shell: pwsh\n        run: |\n          {command}\n");
+        fs::write(workspace.path().join(".github/workflows/lint.yml"), workflow).expect("workflow");
+        if !workspace.path().join(".git").exists() {
+            git(workspace.path(), &["init", "-q"]);
+        }
+        git(workspace.path(), &["add", "."]);
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("opaque interpreter program"), "{command}: {error:#}");
+    }
 }
 
 #[test]
@@ -481,7 +450,8 @@ fn command_policy_governs_opaque_shell_programs_and_selected_makefiles() {
     git(workspace.path(), &["add", "."]);
 
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+    let message = format!("{error:#}");
+    assert!(message.contains("opaque interpreter program"), "{message}");
 }
 
 #[test]
@@ -864,7 +834,7 @@ fn command_policy_rejects_directly_compiled_rust_helpers() {
 
     fs::write(workspace.path().join("script/check.sh"), "rustc \"$DIRECT_SOURCE\"\n").expect("opaque direct compiler command");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"));
+    assert!(error.to_string().contains("without auditable repository-relative .rs inputs"), "{error:#}");
 
     fs::create_dir(workspace.path().join("misc")).expect("alternate compiler directory");
     fs::write(workspace.path().join("check.rs"), "fn main() {}\n").expect("root Rust source");
@@ -914,5 +884,8 @@ cargo clippy -- -D warnings
     .expect("Python compiler command");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("script/check.py"));
-    assert!(error.to_string().contains("without auditable repository-relative .rs inputs"));
+    assert!(
+        error.to_string().contains("direct compiler invocation without auditable repository-relative .rs inputs"),
+        "{error:#}"
+    );
 }

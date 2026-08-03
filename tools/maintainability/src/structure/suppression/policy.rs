@@ -6,6 +6,7 @@ use serde::de::DeserializeOwned;
 
 use self::config::{
     compare_cargo_allows, compare_clippy_configuration, reject_checked_in_weakening, validate_cargo_allowances, validate_clippy_configuration, validate_guarded_configuration,
+    validate_python_sources,
 };
 use self::model::{CargoAllowanceFile, ClippyConfigurationFile, Policy};
 use self::source::{SourceCounts, compare_current, load_baselines, validate_exceptions, validate_governance};
@@ -63,6 +64,7 @@ impl SuppressionPolicy {
         let observed = compare_current(sites, &self.source_baseline, &self.model.source_exceptions, false)?;
         compare_cargo_allows(workspace, &self.cargo_allowances.entries)?;
         compare_clippy_configuration(workspace, &self.clippy_configuration.entries)?;
+        validate_python_sources(workspace)?;
         validate_guarded_configuration(workspace)?;
         reject_checked_in_weakening(workspace)?;
         Ok(observed)

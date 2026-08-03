@@ -2,7 +2,10 @@ use super::SelectedInput;
 
 const PROGRAM_FILES: ProgramFileSyntax = ProgramFileSyntax::new(&["--file"], &['f'], &['e', 'i'], &[]);
 
-pub(super) fn program_is_opaque(arguments: &[String]) -> bool {
+pub(super) fn program_is_opaque(path: &str, source_is_reviewed: bool, command: &str, arguments: &[String]) -> bool {
+    if super::mutation::reviewed_arguments(path, source_is_reviewed, command, arguments) {
+        return false;
+    }
     let (inputs, opaque) = program_file_inputs(arguments, &PROGRAM_FILES);
     opaque || !inputs.is_empty() || inline_program_is_opaque(arguments)
 }
@@ -22,22 +25,28 @@ fn inline_program_is_opaque(arguments: &[String]) -> bool {
             Expression::Following => {
                 program_selected = true;
                 index += 1;
-                if arguments.get(index).is_none_or(|program| program_can_execute(program)) {
+                if arguments.get(index).is_none_or(|program| program_is_dynamic_or_can_execute(program)) {
                     return true;
                 }
             }
             Expression::Attached(program) => {
                 program_selected = true;
-                if program_can_execute(program) {
+                if program_is_dynamic_or_can_execute(program) {
                     return true;
                 }
             }
-            Expression::Other if !argument.starts_with('-') && !program_selected => return program_can_execute(argument),
+            Expression::Other if !argument.starts_with('-') && !program_selected => {
+                return program_is_dynamic_or_can_execute(argument);
+            }
             Expression::Other => {}
         }
         index += 1;
     }
     false
+}
+
+fn program_is_dynamic_or_can_execute(program: &str) -> bool {
+    super::path::contains_dynamic_value(program) || program_can_execute(program)
 }
 
 enum Expression<'a> {
@@ -74,10 +83,10 @@ fn program_can_execute(program: &str) -> bool {
 
 fn command_can_execute(command: &str) -> bool {
     let command = command_after_addresses(command);
-    if command.starts_with('e') {
+    if command.starts_with(['e', 'w', 'W']) {
         return true;
     }
-    command.strip_prefix('s').is_some_and(substitution_has_execute_flag)
+    command.strip_prefix('s').is_some_and(substitution_has_opaque_flag)
 }
 
 fn command_after_addresses(mut command: &str) -> &str {
@@ -115,7 +124,7 @@ fn regex_address_end(command: &str) -> Option<usize> {
     None
 }
 
-fn substitution_has_execute_flag(program: &str) -> bool {
+fn substitution_has_opaque_flag(program: &str) -> bool {
     let Some(delimiter) = program.chars().next().filter(|character| !character.is_alphanumeric() && !character.is_whitespace()) else {
         return false;
     };
@@ -128,7 +137,7 @@ fn substitution_has_execute_flag(program: &str) -> bool {
             escaped = true;
         } else if character == delimiter {
             delimiters += 1;
-        } else if delimiters >= 2 && character == 'e' {
+        } else if delimiters >= 2 && matches!(character, 'e' | 'w' | 'W') {
             return true;
         }
     }

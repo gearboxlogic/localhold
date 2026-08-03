@@ -10,10 +10,13 @@ use super::super::{parse_nul_paths, validate_relative_path};
 use super::actions::validate_local_actions;
 use super::arguments::execution_inputs_for_surface;
 use super::is_execution_surface;
+use super::profile_policy::ProfileManifest;
 
 pub(super) struct ExecutionSurfaceSet {
     pub(super) paths: Vec<String>,
+    pub(super) checked_paths: BTreeSet<String>,
     pub(super) tracked_paths: BTreeSet<String>,
+    pub(super) command_profiles: Option<ProfileManifest>,
 }
 
 pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet> {
@@ -26,13 +29,31 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
         bail!("git ls-files failed while listing command execution surfaces");
     }
     let paths = parse_nul_paths(&output.stdout, |_| true)?.into_iter().collect::<BTreeSet<_>>();
+    let checked_paths = paths.clone();
     let tracked_paths = tracked_paths(workspace)?;
+    let command_profiles = super::command_profiles::validate(workspace, &tracked_paths)?;
     let executables = tracked_executables(workspace)?;
     validate_local_actions(workspace, &paths)?;
+    let mut surfaces = discover_surfaces(workspace, paths, &executables)?;
+    for surface in &surfaces {
+        validate_before_resolution(workspace, surface)?;
+    }
+    close_over_execution_inputs(workspace, &mut surfaces, &tracked_paths, command_profiles.as_ref())?;
+    Ok(ExecutionSurfaceSet {
+        paths: surfaces.into_iter().collect(),
+        checked_paths,
+        tracked_paths,
+        command_profiles,
+    })
+}
+
+fn discover_surfaces(workspace: &Path, paths: BTreeSet<String>, executables: &BTreeSet<String>) -> Result<BTreeSet<String>> {
     let mut surfaces = BTreeSet::new();
     for path in paths {
+        reject_python_loadable_artifact(&path)?;
         let absolute = workspace.join(&path);
-        let classified = is_execution_surface(&path) || executables.contains(&path);
+        let executable = executables.contains(&path);
+        let classified = is_execution_surface(&path) || executable;
         match fs::symlink_metadata(&absolute) {
             Ok(metadata) if metadata.is_dir() => continue,
             Ok(metadata) if metadata.file_type().is_symlink() && classified => bail!("command execution surface cannot be a symlink: {path:?}"),
@@ -42,16 +63,31 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(error) => return Err(error).with_context(|| format!("inspect possible command execution surface {}", absolute.display())),
         }
-        if classified || has_shebang(&absolute)? {
+        let shebang = has_shebang(&absolute)?;
+        if is_rust_source(&path) {
+            if executable || shebang {
+                bail!("tracked Rust source cannot be executable or have a shebang: {path:?}");
+            }
+            continue;
+        }
+        if classified || shebang {
             surfaces.insert(path);
         }
     }
+    Ok(surfaces)
+}
+
+fn close_over_execution_inputs(workspace: &Path, surfaces: &mut BTreeSet<String>, tracked_paths: &BTreeSet<String>, command_profiles: Option<&ProfileManifest>) -> Result<()> {
+    let mut validated = surfaces.clone();
     let mut pending = surfaces.iter().cloned().collect::<Vec<_>>();
     while let Some(surface) = pending.pop() {
         let source = fs::read_to_string(workspace.join(&surface)).with_context(|| format!("read command execution surface {surface}"))?;
-        let reviewed_source = without_reviewed_dispatch(&surface, &source);
-        let (referenced_inputs, unresolved_input) = execution_inputs_for_surface(&surface, &reviewed_source);
-        if unresolved_input {
+        let source_is_reviewed = command_profiles.is_some_and(|profiles| profiles.source_is_current(&surface, &source));
+        let reviewed_source = without_reviewed_dispatch(&surface, &source, source_is_reviewed);
+        let execution_inputs = execution_inputs_for_surface(&surface, &reviewed_source, source_is_reviewed);
+        let mut referenced_inputs = execution_inputs.paths;
+        referenced_inputs.extend(windows_bare_program_shadows(&execution_inputs.windows_bare_programs, tracked_paths));
+        if execution_inputs.unresolved {
             bail!("command execution surface {surface:?} uses an opaque interpreter program or makefile selection");
         }
         for input in referenced_inputs {
@@ -67,15 +103,58 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
             if metadata.file_type().is_symlink() || !metadata.is_file() {
                 bail!("execution input must be a regular non-symlink file: {input:?}");
             }
+            if validated.insert(input.clone()) {
+                validate_before_resolution(workspace, &input)?;
+            }
             if surfaces.insert(input.clone()) {
                 pending.push(input);
             }
         }
     }
-    Ok(ExecutionSurfaceSet {
-        paths: surfaces.into_iter().collect(),
-        tracked_paths,
-    })
+    Ok(())
+}
+
+fn validate_before_resolution(workspace: &Path, surface: &str) -> Result<()> {
+    let source = fs::read_to_string(workspace.join(surface)).with_context(|| format!("read command execution surface {surface}"))?;
+    super::validate_before_resolution(workspace, surface, &source)
+}
+
+fn reject_python_loadable_artifact(path: &str) -> Result<()> {
+    let path = Path::new(path);
+    let in_bytecode_cache = path
+        .components()
+        .any(|component| component.as_os_str().to_str().is_some_and(|component| component.eq_ignore_ascii_case("__pycache__")));
+    let loadable_extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "pyc" | "pyo" | "pyd" | "so"));
+    if in_bytecode_cache || loadable_extension {
+        bail!(
+            "Python-loadable artifact is unsupported because its executable contents cannot be audited: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn is_rust_source(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+}
+
+fn windows_bare_program_shadows(programs: &BTreeSet<String>, tracked_paths: &BTreeSet<String>) -> BTreeSet<String> {
+    const WINDOWS_EXECUTABLE_SUFFIXES: &[&str] = &["", ".exe", ".com", ".bat", ".cmd"];
+    let candidates = programs
+        .iter()
+        .flat_map(|program| WINDOWS_EXECUTABLE_SUFFIXES.iter().map(move |suffix| format!("{program}{suffix}")))
+        .collect::<BTreeSet<_>>();
+    tracked_paths
+        .iter()
+        .filter(|path| !path.contains('/') && candidates.contains(&path.to_ascii_lowercase()))
+        .cloned()
+        .collect()
 }
 
 const TRUSTED_WORKFLOW: &str = ".github/workflows/trusted-maintainability.yml";
@@ -137,9 +216,9 @@ const TRUSTED_DISPATCH_JOBS: &[TrustedDispatchJob] = &[
     },
 ];
 
-pub(in crate::structure::suppression::policy::config) fn without_reviewed_dispatch(surface: &str, source: &str) -> String {
+pub(in crate::structure::suppression::policy::config) fn without_reviewed_dispatch(surface: &str, source: &str, source_is_reviewed: bool) -> String {
     let source = without_reviewed_protected_dispatch(surface, source);
-    if surface != "script/install.sh" || !super::reviewed_dynamic_command_references_are_exact(surface, &source) {
+    if surface != "script/install.sh" || !super::reviewed_quality_command_exceptions_are_exact(surface, &source, source_is_reviewed) {
         return source;
     }
     source
@@ -301,20 +380,22 @@ fn has_shebang(path: &Path) -> Result<bool> {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::path::Path;
     use std::process::Command;
 
     use super::{
-        TRUSTED_MAINTAINABILITY_AUTHENTICATION, TRUSTED_MAINTAINABILITY_DISPATCH_LINE, TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE, TRUSTED_WORKFLOW, execution_surfaces,
-        without_reviewed_protected_dispatch,
+        TRUSTED_MAINTAINABILITY_AUTHENTICATION, TRUSTED_MAINTAINABILITY_DISPATCH_LINE, TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE, TRUSTED_WORKFLOW, execution_inputs_for_surface,
+        execution_surfaces, reviewed_generated_program, without_reviewed_protected_dispatch,
     };
 
     #[test]
     fn protected_dispatch_requires_the_complete_canonical_authentication_sequence() {
-        let reviewed = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.github/workflows/trusted-maintainability.yml"));
-        let sanitized = without_reviewed_protected_dispatch(TRUSTED_WORKFLOW, reviewed);
+        let reviewed =
+            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/trusted-maintainability.yml")).expect("read trusted maintainability workflow");
+        let sanitized = without_reviewed_protected_dispatch(TRUSTED_WORKFLOW, &reviewed);
         assert!(!sanitized.contains(TRUSTED_MAINTAINABILITY_DISPATCH_LINE));
         assert!(!sanitized.contains(TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE));
         assert_eq!(sanitized.lines().filter(|line| line.trim() == ":").count(), 2);
@@ -384,10 +465,112 @@ mod tests {
     }
 
     #[test]
-    fn generated_release_smoke_programs_have_a_closed_invocation_set() {
+    fn tracked_rust_sources_cannot_be_executable() {
         let repository = tempfile::tempdir().expect("temporary repository");
-        fs::create_dir_all(repository.path().join(".github/workflows")).expect("create workflow directory");
-        let workflow = repository.path().join(".github/workflows/release.yml");
+        fs::write(repository.path().join("runner.rs"), "#!/bin/sh\nexit 0\n").expect("write executable Rust source");
+        git(repository.path(), &["init", "--quiet"]);
+        git(repository.path(), &["add", "."]);
+        git(repository.path(), &["update-index", "--chmod=+x", "runner.rs"]);
+        let error = execution_surfaces(repository.path()).err().expect("reject executable Rust source");
+        assert!(error.to_string().contains("tracked Rust source cannot be executable"), "{error:#}");
+    }
+
+    #[test]
+    fn python_loadable_binary_and_bytecode_artifacts_are_rejected() {
+        for path in [
+            "script/helper.pyc",
+            "script/helper.pyo",
+            "script/helper.pyd",
+            "script/helper.cpython-313-x86_64-linux-gnu.so",
+            "script/__pycache__/helper.txt",
+        ] {
+            let repository = tempfile::tempdir().expect("temporary repository");
+            let target = repository.path().join(path);
+            fs::create_dir_all(target.parent().expect("artifact parent")).expect("create artifact directory");
+            fs::write(&target, b"opaque").expect("write Python-loadable artifact");
+            git(repository.path(), &["init", "--quiet"]);
+            git(repository.path(), &["add", "."]);
+
+            let error = execution_surfaces(repository.path()).err().expect("reject Python-loadable artifact");
+            assert!(error.to_string().contains("Python-loadable artifact is unsupported"), "{path}: {error:#}");
+        }
+    }
+
+    #[test]
+    fn python_bare_programs_close_over_windows_workspace_shadows() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        fs::create_dir(repository.path().join("script")).expect("create script directory");
+        fs::write(
+            repository.path().join("script/check.py"),
+            "#!/usr/bin/env python3\nimport subprocess\nsubprocess.run(['git', 'status'], check=True)\n",
+        )
+        .expect("write Python command surface");
+        fs::write(repository.path().join("GIT.EXE"), "#!/bin/sh\nexit 0\n").expect("write Windows shadow");
+        git(repository.path(), &["init", "--quiet"]);
+        git(repository.path(), &["add", "."]);
+
+        let error = execution_surfaces(repository.path()).err().expect("reject Windows shadow");
+        assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
+    }
+
+    #[test]
+    fn unsupported_executable_formats_fail_closed() {
+        for executable in [false, true] {
+            let repository = tempfile::tempdir().expect("temporary repository");
+            fs::create_dir(repository.path().join("quality")).expect("create quality directory");
+            let source = if executable { "cp source clippy.toml\n" } else { "#!/bin/sh\ncp source clippy.toml\n" };
+            fs::write(repository.path().join("quality/runner.json"), source).expect("write unsupported command surface");
+            git(repository.path(), &["init", "--quiet"]);
+            git(repository.path(), &["add", "."]);
+            if executable {
+                git(repository.path(), &["update-index", "--chmod=+x", "quality/runner.json"]);
+            }
+
+            let error = execution_surfaces(repository.path()).err().expect("reject unsupported command surface");
+            assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn python_bare_programs_reject_ambient_resolution_mutation() {
+        for mutation in [r#"os.chdir("quality")"#, r#"os.environ["Path"] = "quality"#] {
+            let repository = tempfile::tempdir().expect("temporary repository");
+            fs::create_dir_all(repository.path().join("script")).expect("create script directory");
+            fs::create_dir_all(repository.path().join("quality")).expect("create shadow directory");
+            fs::write(
+                repository.path().join("script/check.py"),
+                format!("#!/usr/bin/env python3\nimport os, subprocess\n{mutation}\nsubprocess.run(['git', 'status'], check=True)\n"),
+            )
+            .expect("write Python command surface");
+            fs::write(repository.path().join("quality/GIT.EXE"), "#!/bin/sh\nexit 0\n").expect("write Windows shadow");
+            git(repository.path(), &["init", "--quiet"]);
+            git(repository.path(), &["add", "."]);
+
+            let error = execution_surfaces(repository.path()).err().expect("reject ambient bare-program resolution");
+            assert!(error.to_string().contains("opaque interpreter program"), "{mutation}: {error:#}");
+        }
+    }
+
+    #[test]
+    fn python_interpreters_reject_ambient_environment_mutation() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        fs::create_dir_all(repository.path().join("script")).expect("create script directory");
+        fs::write(repository.path().join("script/child.py"), "print('child')\n").expect("write child script");
+        fs::write(
+            repository.path().join("script/check.py"),
+            "#!/usr/bin/env python3\nimport os, subprocess, sys\nos.environ.update(load_configuration())\nsubprocess.run([sys.executable, 'script/child.py'], check=True)\n",
+        )
+        .expect("write Python command surface");
+        git(repository.path(), &["init", "--quiet"]);
+        git(repository.path(), &["add", "."]);
+
+        let error = execution_surfaces(repository.path()).err().expect("reject ambient interpreter environment");
+        assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
+    }
+
+    #[test]
+    fn generated_release_smoke_programs_have_a_closed_invocation_set() {
+        const PATH: &str = ".github/workflows/release.yml";
         let reviewed = r"name: release
 jobs:
   smoke:
@@ -399,14 +582,13 @@ jobs:
           $actual = ./hold-smoke.exe --version
           ./hold-smoke.exe --help | Out-Null
 ";
-        fs::write(&workflow, reviewed).expect("write reviewed workflow");
-        git(repository.path(), &["init", "--quiet"]);
-        git(repository.path(), &["add", "."]);
-        execution_surfaces(repository.path()).expect("accept exact generated smoke program");
+        let inputs = execution_inputs_for_surface(PATH, reviewed, true);
+        assert!(!inputs.unresolved, "exact generated smoke program");
+        assert_eq!(inputs.paths, BTreeSet::from(["hold-smoke.exe".to_owned()]));
+        assert!(reviewed_generated_program(PATH, reviewed, "hold-smoke.exe"));
 
-        fs::write(&workflow, format!("{reviewed}          ./hold-smoke.exe --version\n")).expect("add unreviewed invocation");
-        let error = execution_surfaces(repository.path()).err().expect("reject added invocation");
-        assert!(error.to_string().contains("outside the tracked path inventory"));
+        let changed = format!("{reviewed}          ./hold-smoke.exe --version\n");
+        assert!(!reviewed_generated_program(PATH, &changed, "hold-smoke.exe"));
     }
 
     #[test]

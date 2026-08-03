@@ -5,6 +5,14 @@ edition = "2024"
 rust-version = "1.97"
 publish = false
 build = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[[bin]]
+name = "localhold-maintainability"
+path = "src/main.rs"
 
 [workspace]
 

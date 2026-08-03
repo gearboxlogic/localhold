@@ -121,6 +121,14 @@ fn recipe_on_line(line: &str) -> Option<&str> {
     })
 }
 
+pub(super) fn recipe_commands(source: &str) -> Vec<String> {
+    source
+        .lines()
+        .filter_map(recipe_on_line)
+        .map(|recipe| recipe.trim_start_matches(['@', '+']).to_owned())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::validate_surface;

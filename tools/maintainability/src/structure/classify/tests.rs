@@ -22,6 +22,13 @@ fn physical_lines_are_lf_crlf_and_final_newline_stable() {
 }
 
 #[test]
+fn bare_carriage_returns_cannot_collapse_the_structural_line_inventory() {
+    let sources = BTreeMap::from([("src/lib.rs".to_owned(), "pub fn one() {}\rpub fn two() {}\r".to_owned())]);
+    let error = measure_sources(sources).unwrap_err();
+    assert!(error.to_string().contains("bare carriage return"), "{error:#}");
+}
+
+#[test]
 fn automatic_binary_roots_exclude_nested_support_modules() {
     assert!(is_conventional_binary_root("src/main.rs"));
     assert!(is_conventional_binary_root("src/bin/worker.rs"));

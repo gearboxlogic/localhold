@@ -1,5 +1,6 @@
 pub(super) fn dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
-    is_compiler_driver(command) && arguments.iter().any(|argument| is_dispatch_override(argument))
+    compilation_tool(command) && arguments.iter().any(|argument| super::path::contains_dynamic_value(argument))
+        || is_compiler_driver(command) && arguments.iter().any(|argument| is_dispatch_override(argument))
         || is_rust_compiler(command) && rust_compiler_dispatch_is_opaque(arguments)
         || is_rustdoc(command) && rustdoc_dispatch_is_opaque(arguments)
         || is_linker_tool(command) && arguments.iter().any(|argument| linker_dispatch_override(argument))
@@ -9,6 +10,14 @@ pub(super) fn dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
                 .iter()
                 .take_while(|argument| argument.as_str() != "--")
                 .any(|argument| binutils_plugin_option(argument))
+}
+
+fn compilation_tool(command: &str) -> bool {
+    is_compiler_driver(command) || is_rust_compiler(command) || is_linker_tool(command) || is_archive_tool(command) || is_binutils_plugin_tool(command)
+}
+
+pub(super) fn is_recognized(command: &str) -> bool {
+    compilation_tool(command)
 }
 
 pub(super) fn accepts_output_path(command: &str) -> bool {

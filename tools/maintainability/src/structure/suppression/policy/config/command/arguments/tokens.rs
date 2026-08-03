@@ -1,5 +1,50 @@
 mod substitution;
 
+pub(super) fn declared_shell_functions(source: &str) -> std::collections::BTreeSet<String> {
+    shell_function_declarations(source).into_iter().collect()
+}
+
+pub(super) fn declared_shell_function_count(source: &str, expected: &str) -> usize {
+    shell_function_declarations(source).iter().filter(|name| name.as_str() == expected).count()
+}
+
+fn shell_function_declarations(source: &str) -> Vec<String> {
+    let mut declarations = Vec::new();
+    let mut pending = None;
+    for line in source.lines() {
+        let line = line.trim();
+        if let Some(name) = pending.take() {
+            if line.is_empty() || line.starts_with('#') {
+                pending = Some(name);
+                continue;
+            }
+            if line.starts_with('{') {
+                declarations.push(name);
+                continue;
+            }
+        }
+        let (declaration, has_brace) = line.find('{').map_or((line, false), |brace| (&line[..brace], true));
+        let Some(name) = shell_function_name(declaration.trim_end()) else {
+            continue;
+        };
+        if has_brace {
+            declarations.push(name.to_owned());
+        } else {
+            pending = Some(name.to_owned());
+        }
+    }
+    declarations
+}
+
+fn shell_function_name(declaration: &str) -> Option<&str> {
+    let name = if let Some(declaration) = declaration.strip_prefix("function ") {
+        declaration.trim().trim_end_matches("()").trim_end()
+    } else {
+        declaration.strip_suffix("()")?.trim_end()
+    };
+    (!name.is_empty() && !name.as_bytes()[0].is_ascii_digit() && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')).then_some(name)
+}
+
 pub(super) fn process_substitution_commands(source: &str) -> (Vec<String>, bool) {
     substitution::process_commands(source)
 }
@@ -35,12 +80,15 @@ fn shell_command_segments(source: &str) -> Vec<&str> {
     let mut escaped = false;
     let mut comment = false;
     let mut conditional = false;
+    let mut substitution_depth = 0_usize;
     let mut previous: Option<char> = None;
     for (index, character) in source.char_indices() {
         if comment {
-            if character == '\n' {
+            if character == '\n' && substitution_depth == 0 {
                 segments.push(&source[start..index]);
                 start = index + character.len_utf8();
+            }
+            if character == '\n' {
                 comment = false;
             }
         } else if escaped {
@@ -57,11 +105,23 @@ fn shell_command_segments(source: &str) -> Vec<&str> {
             };
         } else if quote.is_none() && character == '#' && previous.is_none_or(|value| value.is_whitespace() || matches!(value, ';' | '&' | '|')) {
             comment = true;
-        } else if quote.is_none() && !conditional && shell_conditional_delimiter(source, index, previous, "[[") {
+        } else if quote.is_none() && (source[index..].starts_with("$(") || substitution_depth > 0 && character == '(' && previous != Some('$')) {
+            substitution_depth += 1;
+        } else if quote.is_none() && substitution_depth > 0 && character == ')' {
+            substitution_depth -= 1;
+        } else if quote.is_none()
+            && substitution_depth == 0
+            && !conditional
+            && (shell_conditional_opener(source, index, previous, "[[") || shell_conditional_opener(source, index, previous, "(("))
+        {
             conditional = true;
-        } else if quote.is_none() && conditional && shell_conditional_delimiter(source, index, previous, "]]") {
+        } else if quote.is_none() && substitution_depth == 0 && conditional && (shell_conditional_closer(source, index, "]]") || shell_conditional_closer(source, index, "))")) {
             conditional = false;
-        } else if quote.is_none() && !conditional && matches!(character, '\n' | ';' | '&' | '|') {
+        } else if quote.is_none()
+            && substitution_depth == 0
+            && !conditional
+            && (matches!(character, '\n' | ';' | '|') || character == '&' && !matches!(previous, Some('<' | '>')) && !source[index + character.len_utf8()..].starts_with('>'))
+        {
             segments.push(&source[start..index]);
             start = index + character.len_utf8();
         }
@@ -71,8 +131,12 @@ fn shell_command_segments(source: &str) -> Vec<&str> {
     segments
 }
 
-fn shell_conditional_delimiter(source: &str, index: usize, previous: Option<char>, delimiter: &str) -> bool {
+fn shell_conditional_opener(source: &str, index: usize, previous: Option<char>, delimiter: &str) -> bool {
     source[index..].starts_with(delimiter) && previous.is_none_or(shell_word_boundary) && source[index + delimiter.len()..].chars().next().is_none_or(shell_word_boundary)
+}
+
+fn shell_conditional_closer(source: &str, index: usize, delimiter: &str) -> bool {
+    source[index..].starts_with(delimiter) && source[index + delimiter.len()..].chars().next().is_none_or(shell_word_boundary)
 }
 
 const fn shell_word_boundary(character: char) -> bool {
@@ -96,6 +160,8 @@ pub(super) fn without_noncommand_shell_data(source: &str) -> String {
         if array_assignment {
             if line.contains("$(") || line.contains('`') {
                 output.push_str(line);
+            } else if let Some(command) = after_array_assignment(line) {
+                output.push_str(command);
             }
             output.push('\n');
             array_assignment = !array_assignment_closes(line);
@@ -104,6 +170,8 @@ pub(super) fn without_noncommand_shell_data(source: &str) -> String {
         if let Some(contents) = shell_array_assignment_contents(line) {
             if line.contains("$(") || line.contains('`') {
                 output.push_str(line);
+            } else if let Some(command) = after_array_assignment(contents) {
+                output.push_str(command);
             }
             output.push('\n');
             array_assignment = !array_assignment_closes(contents);
@@ -117,6 +185,8 @@ pub(super) fn without_noncommand_shell_data(source: &str) -> String {
             } else if let Some(index) = case_pattern_end(trimmed) {
                 command = &trimmed[index..];
                 *case_pattern_expected.last_mut().expect("a case pattern is active") = false;
+            } else {
+                command = "";
             }
         } else if trimmed.starts_with("esac") {
             case_pattern_expected.pop();
@@ -237,6 +307,11 @@ fn array_assignment_closes(line: &str) -> bool {
     false
 }
 
+fn after_array_assignment(line: &str) -> Option<&str> {
+    let closing = unquoted_character_index(line, ')')?;
+    Some(&line[closing + ')'.len_utf8()..])
+}
+
 struct Heredoc {
     delimiter: String,
     strip_tabs: bool,
@@ -350,12 +425,23 @@ pub(super) fn command_tokens(command: &str) -> Vec<String> {
     shell_tokens(command, true)
 }
 
+pub(super) fn update_substitution_state(word: &str, depth: &mut usize, in_backticks: &mut bool) {
+    for character in word.chars() {
+        if character == '`' {
+            *in_backticks = !*in_backticks;
+        }
+    }
+    *depth = depth.saturating_add(word.matches("$(").count()).saturating_sub(word.matches(')').count());
+}
+
 fn shell_tokens(command: &str, split_equals: bool) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut token = String::new();
     let mut quote = None;
     let mut escaped = false;
-    for character in command.chars() {
+    let mut parameter_depth = 0_usize;
+    let characters = command.chars().collect::<Vec<_>>();
+    for (index, character) in characters.iter().copied().enumerate() {
         if escaped {
             token.push(character);
             escaped = false;
@@ -380,7 +466,13 @@ fn shell_tokens(command: &str, split_equals: bool) -> Vec<String> {
             quote = Some(character);
         } else if character == '\\' {
             escaped = true;
-        } else if character.is_whitespace() || split_equals && character == '=' {
+        } else if character == '$' && characters.get(index + 1) == Some(&'{') {
+            parameter_depth += 1;
+            token.push(character);
+        } else if character == '}' && parameter_depth > 0 {
+            parameter_depth -= 1;
+            token.push(character);
+        } else if parameter_depth == 0 && (character.is_whitespace() || split_equals && character == '=') {
             if !token.is_empty() {
                 tokens.push(std::mem::take(&mut token));
             }
@@ -399,7 +491,21 @@ fn shell_tokens(command: &str, split_equals: bool) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{command_tokens, has_executable_unquoted_heredoc, source_command_tokens, without_noncommand_shell_data};
+    use super::{
+        command_substitution_commands, command_tokens, declared_shell_function_count, declared_shell_functions, has_executable_unquoted_heredoc, source_command_tokens,
+        without_noncommand_shell_data,
+    };
+
+    #[test]
+    fn shell_function_declarations_require_valid_names_and_braces() {
+        let functions = declared_shell_functions(concat!("alpha() ", "{\n  :\n}\nfunction beta() ", "{\n  :\n}\nfunction gamma ", "{\n  :\n}\n"));
+        assert_eq!(functions.into_iter().collect::<Vec<_>>(), ["alpha", "beta", "gamma"]);
+        assert!(declared_shell_functions("9invalid() {\n}\nnot-a-name() {\n}\nname() not-a-body\nfunction\n").is_empty());
+        assert_eq!(
+            declared_shell_function_count(concat!("function alpha\n", "{\n  :\n}\nalpha()\n", "{\n  :\n}\n"), "alpha"),
+            2
+        );
+    }
 
     #[test]
     fn ansi_c_quoted_words_retain_an_execution_marker() {
@@ -415,6 +521,33 @@ mod tests {
     }
 
     #[test]
+    fn command_substitution_assignment_remains_one_command_segment() {
+        assert_eq!(
+            source_command_tokens(r#"tool=$(authenticated_tool "$tool" "$expected")"#),
+            [vec!["tool=$(authenticated_tool", "$tool", "$expected)"]]
+        );
+        let (substitutions, malformed) = command_substitution_commands(r#"tool=$(authenticated_tool "$tool" "$expected")"#, true);
+        assert!(!malformed);
+        assert_eq!(substitutions, [r#"authenticated_tool "$tool" "$expected""#]);
+        assert_eq!(source_command_tokens(&substitutions[0]), [vec!["authenticated_tool", "$tool", "$expected"]]);
+    }
+
+    #[test]
+    fn parameter_expansion_diagnostics_remain_one_shell_word() {
+        assert_eq!(
+            source_command_tokens("root=${ROOT:-${HOME:?gate requires ROOT or HOME}/root}"),
+            [vec!["root=${ROOT:-${HOME:?gate requires ROOT or HOME}/root}"]]
+        );
+    }
+
+    #[test]
+    fn file_descriptor_redirections_do_not_create_numeric_commands() {
+        assert_eq!(source_command_tokens("printf value >&2"), [vec!["printf", "value", ">&2"]]);
+        assert_eq!(source_command_tokens("command 2>&1"), [vec!["command", "2>&1"]]);
+        assert_eq!(source_command_tokens("command &>output"), [vec!["command", "&>output"]]);
+    }
+
+    #[test]
     fn conditional_operators_do_not_promote_substitutions_to_commands() {
         let commands = source_command_tokens(r#"if [[ ! -f $tool || $(sha256_file "$tool") != "$expected" ]]; then exit 1; fi"#);
         assert!(
@@ -423,6 +556,28 @@ mod tests {
                 .any(|tokens| tokens.first().is_some_and(|token| token == "if") && tokens.iter().any(|token| token.contains("sha256_file")))
         );
         assert!(!commands.iter().any(|tokens| tokens.first().is_some_and(|token| token.starts_with("$(sha256_file"))));
+
+        let arithmetic = source_command_tokens("if (( ready || fallback )); then true; fi");
+        assert!(
+            arithmetic
+                .iter()
+                .any(|tokens| tokens.first().is_some_and(|token| token == "if") && tokens.iter().any(|token| token == "fallback"))
+        );
+        assert!(!arithmetic.iter().any(|tokens| tokens.first().is_some_and(|token| token == "fallback")));
+
+        let followed = source_command_tokens("if (( ready)); then sh quality/lint.txt; fi");
+        assert!(
+            followed
+                .iter()
+                .any(|tokens| tokens.first().is_some_and(|token| token == "then") && tokens.iter().any(|token| token == "sh"))
+        );
+
+        let quoted = source_command_tokens(r#"if (( ready + \"))\" )); then sh quality/lint.txt; fi"#);
+        assert!(
+            quoted
+                .iter()
+                .any(|tokens| tokens.first().is_some_and(|token| token == "then") && tokens.iter().any(|token| token == "sh"))
+        );
     }
 
     #[test]
@@ -467,6 +622,12 @@ mod tests {
         assert!(!normalized.contains("script/retired-command.sh"));
         assert!(normalized.contains("quality/run-lints"));
         assert!(normalized.contains("quality/check-format"));
+
+        let multiline = "case \"$name\" in\n  FIRST | SECOND | \\\n    THIRD | FOURTH) quality/check-case ;;\nesac\n";
+        let normalized = without_noncommand_shell_data(multiline);
+        assert!(!normalized.contains("FIRST"));
+        assert!(!normalized.contains("THIRD"));
+        assert!(normalized.contains("quality/check-case"));
     }
 
     #[test]

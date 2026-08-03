@@ -1,3 +1,11 @@
+use super::execution::{ProcessKind, process_kind};
+
+mod reviewed;
+
+pub(super) fn is_reviewed_surface(path: &str, source: &str) -> bool {
+    reviewed::matches(path, source)
+}
+
 pub(super) fn has_non_literal_arguments(source: &str) -> bool {
     let mut found_call = false;
     for line in source.lines() {
@@ -7,7 +15,7 @@ pub(super) fn has_non_literal_arguments(source: &str) -> bool {
         }
         while let Some((opening_parenthesis, kind)) = scanner.next_call() {
             found_call = true;
-            if !scanner.process_argument_is_static(opening_parenthesis + 1, kind) {
+            if kind == ProcessKind::Unsupported || !scanner.process_argument_is_static(opening_parenthesis + 1, kind) {
                 return true;
             }
         }
@@ -235,30 +243,6 @@ impl ProcessCallScanner {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ProcessKind {
-    Argv,
-    Shell,
-}
-
-fn process_kind(name: &str) -> Option<ProcessKind> {
-    let name = name.to_ascii_lowercase();
-    let basename = name.rsplit('.').next().unwrap_or(&name);
-    if name.starts_with("subprocess.") && matches!(basename, "getoutput" | "getstatusoutput")
-        || name.starts_with("os.") && matches!(basename, "system" | "popen")
-        || !name.contains('.') && basename == "popen"
-    {
-        return Some(ProcessKind::Shell);
-    }
-    if name.starts_with("subprocess.") && matches!(basename, "run" | "call" | "check_call" | "check_output" | "popen")
-        || name.starts_with("os.") && (basename.starts_with("exec") || basename.starts_with("spawn"))
-        || !name.contains('.') && (basename.starts_with("exec") || basename.starts_with("spawn"))
-    {
-        return Some(ProcessKind::Argv);
-    }
-    None
-}
-
 fn is_identifier_start(character: char) -> bool {
     character == '_' || character.is_alphabetic()
 }
@@ -312,6 +296,19 @@ mod tests {
         assert!(has_non_literal_arguments(
             "subprocess.run([\"git\", \"status\"])\nrunner = subprocess.run\nrunner(bytes.fromhex(\"636172676f\").decode(), shell=True)\n"
         ));
+        assert!(has_non_literal_arguments(
+            "asyncio.create_subprocess_exec('quality/hidden.py')\nsubprocess.run(['git', 'status'])\n"
+        ));
+        assert!(has_non_literal_arguments(
+            "os.posix_spawn('quality/hidden.py', ['quality/hidden.py'], os.environ)\nsubprocess.run(['git', 'status'])\n"
+        ));
+        assert!(has_non_literal_arguments(
+            "posix.posix_spawnp('quality/hidden.py', ['quality/hidden.py'], {})\nsubprocess.run(['git', 'status'])\n"
+        ));
+        assert!(has_non_literal_arguments(
+            "posix_spawn('quality/hidden.py', ['quality/hidden.py'], {})\nsubprocess.run(['git', 'status'])\n"
+        ));
+        assert!(has_non_literal_arguments("pty.spawn(['quality/hidden.py'])\nsubprocess.run(['git', 'status'])\n"));
         assert!(!has_non_literal_arguments(
             "subprocess.run([\"git\", \"status\"])\nmessage = \"runner = subprocess.run\"\n# callback = subprocess.run\n"
         ));

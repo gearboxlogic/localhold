@@ -6,6 +6,9 @@ enum ManifestSelection<'a> {
 }
 
 pub(super) fn dispatch_is_opaque(arguments: &[String]) -> bool {
+    if arguments.iter().any(|argument| super::path::contains_dynamic_value(argument)) {
+        return true;
+    }
     if uses_script_mode(arguments) {
         return true;
     }

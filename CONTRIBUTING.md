@@ -188,6 +188,42 @@ the transmute.
 
 ### Source structure budgets
 
+Changes to the maintainability analyzer use a two-pull-request source-profile
+transition. The atomic fingerprint covers the path and bytes of every tracked
+`tools/maintainability/src/**/*.rs` file, plus
+`tools/maintainability/Cargo.toml` and `tools/maintainability/Cargo.lock`. A
+pending fingerprint never authorizes source changes in the pull request that
+stages it.
+
+To change those inputs:
+
+1. Prepare and test the complete intended analyzer change locally. Run the
+   maintainability gate and record the reported observed source fingerprint.
+   Keep this mixed source change out of the staging pull request.
+2. From an otherwise clean current base, open and merge a focused pull request
+   that sets only `source_profile.preapproved_next_sha256` in
+   `policy/maintainability/tooling-structure.json` to that observed value.
+3. Apply the exact prepared analyzer change on top of the merged staging pull
+   request. In the delivery pull request, promote the pending value to
+   `current_sha256`, append the former current value to `retired_sha256`, clear
+   the pending field, and ratchet the component and hotspot line ceilings to
+   the exact new measurements.
+
+Replacing a pending value or changing the prepared source after staging is
+rejected. Cancel the stale pending value in a focused pull request, then stage
+the newly observed fingerprint in another pull request.
+
+The analyzer's compiler inputs are deliberately narrower than general Cargo
+supports. Build scripts and automatic target discovery remain disabled; every
+declared non-library target has an explicit `.rs` path under the profiled
+source root. The checker is an empty standalone workspace and may use only
+registry dependency specifications. Local, Git, inherited, target-specific,
+patched, and replacement dependency sources are rejected. Rust `#[path]` and
+`include!`-family inputs, macro-generated module inputs, and external modules
+nested inside inline modules are also rejected because they would escape the
+authenticated source overlay. Move required code into an ordinary tracked
+module under the analyzer source root instead of adding an exception.
+
 The same checked-in source audit enforces the structural baseline in
 `policy/maintainability/structure.json`. Every Rust file under `src/`, `tests/`,
 and `benches/` belongs to exactly one logical component. An unlisted file, a
@@ -315,13 +351,37 @@ aliases, node tags, custom shell templates, or working-directory overrides to
 redirect an audited `run` command; multiline inline `run` scalars are
 unsupported. Audited `run` steps support Bash, `sh`, PowerShell, `pwsh`, and
 `cmd`; Python run bodies are unsupported until they have a language-aware
-command audit. Python filesystem writes require a statically safe literal
-destination. Existing release staging, temporary-fixture, and brand-generator
-writers are classified by exact whole-file digests in the protected checker;
-any change invalidates that classification and must first land as a reviewed
-checker ratchet. Shell continuations are normalized before command arguments are
-audited, and shell alias declarations or a dynamic command name may not hide
-command dispatch. Make
+command audit. The protected checker also matches the complete tracked Python
+source tree against one atomic path, Git-mode, and SHA-256 profile before
+semantic command analysis. A Python change therefore requires a checker-ratchet
+PR that stages one complete aggregate digest in
+`policy/maintainability/python-source-profile.json`, followed by a source PR
+that lands that exact tree, promotes it to current, retires the former current
+digest, and clears the pending slot. Policy transitions are compared with the
+Git base, retired profiles cannot be restored, and the source tree must always
+match the policy's current profile; a newly staged pending digest does not
+authorize source changes in the same PR. Independent per-file approvals and
+mixed current/pending trees are not accepted. `.pyw`,
+extensionless or dynamically selected interpreter entrypoints, and non-`.py`
+interpreter inputs are unsupported; extensionless scripts may use only an
+argument-free `bash` or `sh` shebang. Python
+filesystem writes still require a statically safe literal destination. Shell
+continuations are normalized before command arguments are audited, and shell
+alias declarations or a dynamic command name may not hide command dispatch.
+The few reviewed commands whose destinations or programs contain shell or
+PowerShell variables are governed by
+`policy/maintainability/reviewed-command-profiles.json`. Each exception has a
+stable identity, evidence, an exact command-argument tuple in the analyzer, a
+complete-source digest, and an append-only retired-digest history. Changing one
+of those sources requires two pull requests. The first leaves the source at its
+current digest and stages exactly one `preapproved_next_sha256`. The second
+lands that exact source, promotes the pending digest to `current_sha256`,
+appends the former current digest to `retired_sha256`, and clears the pending
+slot. An unused pending digest may instead be cancelled without changing the
+source. Direct same-PR source and digest changes fail because the protected
+checker from the pull request base authorizes only its current and already
+preapproved-next digests; retired digests cannot be restored.
+Make
 include directives are unsupported; checked-in `.mk` command surfaces are
 audited directly. Unreviewed procedural attributes, derives, and function-like
 macros are also rejected because their expansions could emit hidden lint policy.
@@ -343,6 +403,18 @@ Inspect the cfg-classified source inventory without writing files:
 ```bash
 cargo run --manifest-path tools/maintainability/Cargo.toml --locked -- suppression-inventory
 ```
+
+The analyzer is subject to its own smaller structural ratchet in
+`policy/maintainability/tooling-structure.json`. Every Rust source under
+`tools/maintainability/src` participates in an exact aggregate no-growth
+ceiling. New and already compliant production files are limited to 800 physical
+lines, and test files are limited to 1,000. Each historical oversized analyzer
+file has a stable hotspot ID, issue, rationale, and an exact ceiling that must
+be lowered whenever the file shrinks. A hotspot becomes permanently resolved
+when its path is removed or falls beneath the ordinary limit; it cannot be
+reactivated. The aggregate ceiling and ordinary per-file limits prevent a split
+from hiding growth through file proliferation or recreating a resolved large
+path.
 
 During the feature freeze:
 

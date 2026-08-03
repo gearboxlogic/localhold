@@ -1,6 +1,25 @@
+mod bindings;
 mod evaluation;
+mod execution;
 mod filesystem;
 mod process;
+
+pub(super) use execution::References as ExecutionReferences;
+
+pub(super) fn execution_references(path: &str, source: &str) -> ExecutionReferences {
+    let normalized = normalize_continuations(source);
+    let mut references = execution::collect(&normalized);
+    references.opaque |= has_opaque_process_bindings(&normalized) && !bindings::is_reviewed_surface(path, source);
+    references
+}
+
+pub(super) fn is_reviewed_dynamic_surface(path: &str, source: &str) -> bool {
+    filesystem::is_reviewed_dynamic_write_surface(path, source)
+}
+
+pub(super) fn is_reviewed_process_surface(path: &str, source: &str) -> bool {
+    process::is_reviewed_surface(path, source)
+}
 
 pub(super) fn normalize_continuations(source: &str) -> String {
     Scanner::new(source).scan()
@@ -12,18 +31,21 @@ pub(super) fn has_adjacent_string_literals(source: &str) -> bool {
     has_adjacent_string_literals_in(&normalized)
 }
 
-pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
+pub(super) fn has_opaque_process_arguments(path: &str, source: &str) -> bool {
     let normalized = normalize_continuations(source);
-    if evaluation::has_dynamic_code(&normalized) {
+    let reviewed_process_binding_surface = bindings::is_reviewed_surface(path, source);
+    let reviewed_dynamic_surface = evaluation::is_reviewed_dynamic_code_surface(path, source);
+    let reviewed_process_surface = process::is_reviewed_surface(path, source);
+    if evaluation::has_dynamic_code(&normalized) && !reviewed_dynamic_surface {
         return true;
     }
     if references_command_capable_ffi(&normalized) {
         return true;
     }
-    if imports_command_capable_api(&normalized) {
+    if has_opaque_process_bindings(&normalized) && !reviewed_process_binding_surface {
         return true;
     }
-    if has_direct_dynamic_process_resolution(&normalized) {
+    if has_direct_dynamic_process_resolution(&normalized) && !reviewed_dynamic_surface {
         return true;
     }
     if has_dynamic_process_resolution(&normalized) && references_rust_tool(&normalized) {
@@ -32,7 +54,7 @@ pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
     if references_exec_or_spawn_api(&normalized) && references_rust_tool(&normalized) {
         return true;
     }
-    if references_process_api(&normalized) && process::has_non_literal_arguments(&normalized) {
+    if references_process_api(&normalized) && process::has_non_literal_arguments(&normalized) && !reviewed_process_surface {
         return true;
     }
     normalized.lines().any(|line| {
@@ -41,14 +63,155 @@ pub(super) fn has_opaque_process_arguments(source: &str) -> bool {
     })
 }
 
+pub(super) fn has_opaque_process_bindings(source: &str) -> bool {
+    imports_command_capable_api(source) || uses_command_module_as_value(source) || uses_command_callable_as_value(source) || uses_dynamic_namespace_callable_as_value(source)
+}
+
+pub(super) fn mutates_process_working_directory(source: &str) -> bool {
+    let compact = executable_code(source).chars().filter(|character| !character.is_whitespace()).collect::<String>();
+    ["os.chdir(", "os.fchdir(", "posix.chdir(", "posix.fchdir(", "contextlib.chdir("]
+        .iter()
+        .any(|call| compact.contains(call))
+}
+
+pub(super) fn mutates_process_environment(source: &str) -> bool {
+    let executable = normalized_qualified_code(source);
+    let compact = executable.chars().filter(|character| !character.is_whitespace()).collect::<String>();
+    if [
+        "os.putenv(",
+        "os.unsetenv(",
+        "posix.putenv(",
+        "posix.unsetenv(",
+        "os.environ.update(",
+        "os.environ.clear(",
+        "os.environ.pop(",
+        "os.environ.popitem(",
+        "os.environ.setdefault(",
+        "os.environ.__setitem__(",
+        "os.environ.__delitem__(",
+    ]
+    .iter()
+    .any(|operation| compact.contains(operation))
+    {
+        return true;
+    }
+    executable.lines().any(environment_reference_is_opaque)
+}
+
+fn executable_code(source: &str) -> String {
+    AdjacentLiteralScanner::new(source).without_literals().to_ascii_lowercase()
+}
+
+fn normalized_qualified_code(source: &str) -> String {
+    let executable = executable_code(source);
+    let mut normalized = String::with_capacity(executable.len());
+    let mut whitespace = String::new();
+    for character in executable.chars() {
+        if character.is_whitespace() {
+            whitespace.push(character);
+            continue;
+        }
+        if character != '.' && !normalized.ends_with('.') {
+            normalized.push_str(&whitespace);
+        }
+        whitespace.clear();
+        normalized.push(character);
+    }
+    normalized.push_str(&whitespace);
+    normalized
+}
+
+fn environment_reference_is_opaque(line: &str) -> bool {
+    let mut remainder = line;
+    while let Some((head, tail)) = remainder.split_once("os.environ") {
+        let tail = tail.trim_start();
+        if let Some(indexed) = tail.strip_prefix('[') {
+            let Some(after_subscript) = after_matching_subscript(indexed) else {
+                return true;
+            };
+            if has_delete_keyword(head) || starts_assignment(after_subscript.trim_start()) {
+                return true;
+            }
+        } else if ![".get(", ".copy(", ".keys(", ".items(", ".values("].iter().any(|prefix| tail.starts_with(prefix)) {
+            return true;
+        }
+        remainder = tail;
+    }
+    false
+}
+
+fn has_delete_keyword(head: &str) -> bool {
+    let statement = head.rsplit(';').next().unwrap_or(head);
+    statement.match_indices("del").any(|(index, keyword)| {
+        let before = statement[..index].chars().next_back();
+        let after = statement[index + keyword.len()..].chars().next();
+        !before.is_some_and(is_identifier_character) && !after.is_some_and(is_identifier_character)
+    })
+}
+
+fn after_matching_subscript(source: &str) -> Option<&str> {
+    let mut expected = vec![']'];
+    for (index, character) in source.char_indices() {
+        if let Some(closing) = closing_delimiter(character) {
+            expected.push(closing);
+        } else if matches!(character, ')' | ']' | '}') {
+            if expected.pop() != Some(character) {
+                return None;
+            }
+            if expected.is_empty() {
+                return Some(&source[index + character.len_utf8()..]);
+            }
+        }
+    }
+    None
+}
+
+fn starts_assignment(source: &str) -> bool {
+    source.starts_with('=') && !source.starts_with("==")
+        || ["+=", "-=", "*=", "/=", "//=", "%=", "**=", "&=", "|=", "^=", ">>=", "<<="]
+            .iter()
+            .any(|operator| source.starts_with(operator))
+        || source.strip_prefix(':').is_some_and(annotation_has_assignment)
+}
+
+fn annotation_has_assignment(annotation: &str) -> bool {
+    let mut expected = Vec::new();
+    let characters = annotation.chars().collect::<Vec<_>>();
+    for (index, character) in characters.iter().copied().enumerate() {
+        if let Some(closing) = closing_delimiter(character) {
+            expected.push(closing);
+        } else if matches!(character, ')' | ']' | '}') {
+            if expected.pop() != Some(character) {
+                return true;
+            }
+        } else if character == '=' && expected.is_empty() {
+            let before = index.checked_sub(1).and_then(|previous| characters.get(previous)).copied();
+            let after = characters.get(index + 1).copied();
+            if after != Some('=') && !matches!(before, Some('=' | '!' | '<' | '>' | ':')) {
+                return true;
+            }
+        }
+    }
+    !expected.is_empty()
+}
+
+const fn closing_delimiter(character: char) -> Option<char> {
+    match character {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        _ => None,
+    }
+}
+
 pub(super) fn has_opaque_filesystem_write(path: &str, source: &str) -> bool {
     filesystem::has_opaque_write(&normalize_continuations(source)) && !filesystem::is_reviewed_dynamic_write_surface(path, source)
 }
 
 fn imports_command_capable_api(source: &str) -> bool {
-    source.lines().any(|line| {
-        let compact = line.chars().filter(|character| !character.is_whitespace()).collect::<String>().to_ascii_lowercase();
-        if compact.starts_with("importosas") || compact.starts_with("importsubprocessas") {
+    executable_code(source).lines().flat_map(|line| line.split(';')).any(|statement| {
+        let compact = statement.chars().filter(|character| !character.is_whitespace()).collect::<String>();
+        if compact.strip_prefix("import").is_some_and(|imports| imports.split(',').any(command_module_alias)) {
             return true;
         }
         let Some((module, imports)) = compact.strip_prefix("from").and_then(|line| line.split_once("import")) else {
@@ -58,17 +221,174 @@ fn imports_command_capable_api(source: &str) -> bool {
         imports.split(',').any(|binding| {
             let binding = binding.trim_matches(['(', ')']);
             let name = binding.split_once("as").map_or(binding, |(name, _)| name);
+            if is_command_module(name) {
+                return true;
+            }
             match module {
-                "os" | "posix" => is_os_process_api(name),
-                "subprocess" => is_subprocess_process_api(name),
+                "asyncio" => name == "*" || matches!(name, "create_subprocess_exec" | "create_subprocess_shell"),
+                "os" | "posix" => name == "*" || is_os_process_api(name),
+                "subprocess" => name == "*" || is_subprocess_process_api(name),
+                "pty" => matches!(name, "*" | "spawn"),
+                "contextlib" => matches!(name, "*" | "chdir"),
+                "sys" => matches!(name, "*" | "modules"),
                 _ => false,
             }
         })
     })
 }
 
+fn command_module_alias(binding: &str) -> bool {
+    ["asyncio", "contextlib", "os", "posix", "pty", "subprocess", "sys"]
+        .iter()
+        .any(|module| binding.strip_prefix(module).is_some_and(|suffix| suffix.starts_with("as") && suffix.len() > 2))
+}
+
+fn uses_command_module_as_value(source: &str) -> bool {
+    let executable = normalized_qualified_code(source);
+    executable
+        .lines()
+        .flat_map(|line| line.split(';'))
+        .filter(|statement| !starts_python_keyword(statement, "import") && !starts_python_keyword(statement, "from"))
+        .any(|statement| {
+            ["asyncio", "contextlib", "os", "posix", "pty", "subprocess", "sys"]
+                .iter()
+                .any(|module| standalone_module_value(statement, module) || nested_module_value(statement, module))
+        })
+}
+
+fn uses_command_callable_as_value(source: &str) -> bool {
+    let executable = normalized_qualified_code(source);
+    executable
+        .lines()
+        .flat_map(|line| line.split(';'))
+        .any(|statement| qualified_command_references(statement).any(|reference| reference.is_opaque()))
+}
+
+fn uses_dynamic_namespace_callable_as_value(source: &str) -> bool {
+    let executable = normalized_qualified_code(source);
+    executable.lines().flat_map(|line| line.split(';')).any(|statement| {
+        ["getattr", "globals", "locals", "vars"].iter().any(|name| callable_name_is_value(statement, name)) || callable_name_is_value(statement, "operator.attrgetter")
+    })
+}
+
+fn callable_name_is_value(statement: &str, name: &str) -> bool {
+    statement.match_indices(name).any(|(index, _)| {
+        let before = statement[..index].chars().next_back();
+        let remainder = &statement[index + name.len()..];
+        let after = remainder.chars().next();
+        !before.is_some_and(is_identifier_character) && !after.is_some_and(is_identifier_character) && !remainder.trim_start().starts_with('(')
+    })
+}
+
+struct QualifiedCommandReference<'a> {
+    remainder: &'a str,
+    kind: CommandReferenceKind,
+}
+
+impl QualifiedCommandReference<'_> {
+    fn is_opaque(&self) -> bool {
+        let remainder = self.remainder.trim_start();
+        match self.kind {
+            CommandReferenceKind::Callable => !remainder.starts_with('('),
+            CommandReferenceKind::Environment => !remainder.starts_with('['),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CommandReferenceKind {
+    Callable,
+    Environment,
+}
+
+fn qualified_command_references(statement: &str) -> impl Iterator<Item = QualifiedCommandReference<'_>> {
+    statement.match_indices('.').filter_map(|(dot, _)| {
+        let module_start = statement[..dot]
+            .char_indices()
+            .rev()
+            .take_while(|(_, character)| is_identifier_character(*character))
+            .last()
+            .map_or(dot, |(index, _)| index);
+        let module = &statement[module_start..dot];
+        if module_start > 0 && statement[..module_start].ends_with('.') {
+            return None;
+        }
+        let attribute_end = statement[dot + 1..]
+            .char_indices()
+            .take_while(|(_, character)| is_identifier_character(*character) || *character == '.')
+            .last()
+            .map_or(dot + 1, |(index, character)| dot + 1 + index + character.len_utf8());
+        let attribute = &statement[dot + 1..attribute_end];
+        let (kind, consumed) = command_attribute_prefix(module, attribute)?;
+        Some(QualifiedCommandReference {
+            remainder: &statement[dot + 1 + consumed..],
+            kind,
+        })
+    })
+}
+
+fn command_attribute_prefix(module: &str, attribute: &str) -> Option<(CommandReferenceKind, usize)> {
+    let first = attribute.split('.').next().unwrap_or_default();
+    match module {
+        "os" | "posix" => {
+            if first == "__getattribute__" {
+                return Some((CommandReferenceKind::Callable, first.len()));
+            }
+            if matches!(first, "chdir" | "fchdir" | "popen" | "putenv" | "startfile" | "system" | "unsetenv") || first.starts_with("exec") || first.starts_with("spawn") {
+                return Some((CommandReferenceKind::Callable, first.len()));
+            }
+            if let Some(method) = attribute.strip_prefix("environ.").and_then(|suffix| suffix.split('.').next()) {
+                if matches!(method, "update" | "clear" | "pop" | "popitem" | "setdefault" | "__setitem__" | "__delitem__") {
+                    return Some((CommandReferenceKind::Callable, "environ.".len() + method.len()));
+                }
+                if matches!(method, "get" | "copy" | "keys" | "items" | "values") {
+                    return None;
+                }
+            }
+            (first == "environ").then_some((CommandReferenceKind::Environment, first.len()))
+        }
+        "subprocess" if is_subprocess_process_api(first) || first == "__getattribute__" => Some((CommandReferenceKind::Callable, first.len())),
+        "asyncio" if matches!(first, "create_subprocess_exec" | "create_subprocess_shell" | "__getattribute__") => Some((CommandReferenceKind::Callable, first.len())),
+        "pty" if matches!(first, "spawn" | "__getattribute__") => Some((CommandReferenceKind::Callable, first.len())),
+        "contextlib" if matches!(first, "chdir" | "__getattribute__") => Some((CommandReferenceKind::Callable, first.len())),
+        "sys" if first == "__getattribute__" => Some((CommandReferenceKind::Callable, first.len())),
+        _ => None,
+    }
+}
+
+fn starts_python_keyword(statement: &str, keyword: &str) -> bool {
+    statement.trim_start().strip_prefix(keyword).is_some_and(|tail| tail.starts_with(char::is_whitespace))
+}
+
+fn standalone_module_value(statement: &str, module: &str) -> bool {
+    statement.match_indices(module).any(|(index, _)| {
+        let before = statement[..index].chars().next_back();
+        let after = statement[index + module.len()..].chars().next();
+        if before == Some('.') || before.is_some_and(is_identifier_character) || after.is_some_and(is_identifier_character) {
+            return false;
+        }
+        !statement[index + module.len()..].trim_start().starts_with('.')
+    })
+}
+
+fn nested_module_value(statement: &str, module: &str) -> bool {
+    let reference = format!(".{module}");
+    statement.match_indices(&reference).any(|(index, _)| {
+        let end = index + reference.len();
+        statement[..index].chars().next_back().is_some_and(is_identifier_character) && !statement[end..].chars().next().is_some_and(is_identifier_character)
+    })
+}
+
+fn is_command_module(name: &str) -> bool {
+    matches!(name, "asyncio" | "contextlib" | "os" | "posix" | "pty" | "subprocess" | "sys")
+}
+
 fn is_os_process_api(name: &str) -> bool {
-    matches!(name, "system" | "popen") || name.starts_with("exec") || name.starts_with("spawn")
+    matches!(
+        name,
+        "chdir" | "environ" | "fchdir" | "popen" | "posix_spawn" | "posix_spawnp" | "putenv" | "startfile" | "system" | "unsetenv"
+    ) || name.starts_with("exec")
+        || name.starts_with("spawn")
 }
 
 fn is_subprocess_process_api(name: &str) -> bool {
@@ -106,10 +426,27 @@ fn has_adjacent_string_literals_in(source: &str) -> bool {
 
 fn references_process_api(source: &str) -> bool {
     let source = source.to_ascii_lowercase();
-    ["subprocess", "os.system", "os.popen", "posix.system", "posix.popen", "popen("]
-        .iter()
-        .any(|name| source.contains(name))
+    [
+        "asyncio.create_subprocess_",
+        "os.system",
+        "os.popen",
+        "os.startfile",
+        "posix.system",
+        "posix.popen",
+        "pty.spawn",
+    ]
+    .iter()
+    .any(|name| source.contains(name))
+        || references_root_module(&source, "subprocess")
         || references_exec_or_spawn_api(&source)
+}
+
+fn references_root_module(source: &str, module: &str) -> bool {
+    source.match_indices(module).any(|(index, _)| {
+        let before = source[..index].chars().next_back();
+        let after = source[index + module.len()..].chars().next();
+        before != Some('.') && !before.is_some_and(is_identifier_character) && after == Some('.')
+    })
 }
 
 fn references_exec_or_spawn_api(source: &str) -> bool {
@@ -145,9 +482,19 @@ fn has_direct_dynamic_process_resolution(source: &str) -> bool {
         .filter(|character| !character.is_whitespace())
         .collect::<String>()
         .to_ascii_lowercase();
-    ["os", "posix", "subprocess"]
-        .iter()
-        .any(|module| compact.contains(&format!("{module}.__dict__")) || compact.contains(&format!("getattr({module},")) || compact.contains(&format!("vars({module})")))
+    if compact.contains("sys.modules")
+        || ["getattr(", "globals(", "locals(", "operator.attrgetter(", "vars()"]
+            .iter()
+            .any(|access| compact.contains(access))
+    {
+        return true;
+    }
+    ["asyncio", "contextlib", "os", "posix", "pty", "subprocess", "sys"].iter().any(|module| {
+        compact.contains(&format!("{module}.__dict__"))
+            || compact.contains(&format!("{module}.__getattribute__("))
+            || compact.contains(&format!("getattr({module},"))
+            || compact.contains(&format!("vars({module})"))
+    })
 }
 
 fn references_rust_tool(source: &str) -> bool {
@@ -384,114 +731,4 @@ fn is_identifier_character(character: char) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{has_adjacent_string_literals, has_opaque_filesystem_write, has_opaque_process_arguments};
-
-    #[test]
-    fn adjacent_literals_are_detected_only_within_one_python_expression() {
-        assert!(has_adjacent_string_literals("subprocess.run([\"cargo\", \"clippy\", \"--\", \"-\" \"A\", \"warnings\"])\n"));
-        assert!(has_adjacent_string_literals("VALUES = (r\"cargo\"  f\" clippy\")\n"));
-        assert!(has_adjacent_string_literals("VALUE = \"cargo\" \\\n    \" clippy\"\n"));
-        assert!(!has_adjacent_string_literals("\"module doc\"\n\"second statement\"\n"));
-        assert!(!has_adjacent_string_literals("subprocess.run([\"cargo\", \"clippy\"])\n"));
-        assert!(!has_adjacent_string_literals("identifier\"invalid but not concatenated\"\n"));
-    }
-
-    #[test]
-    fn explicit_line_continuations_cannot_hide_filesystem_writes() {
-        assert!(has_opaque_filesystem_write(
-            "script/check.py",
-            "Path(\"Justfile\") \\\n                .write_text(payload)\n"
-        ));
-        assert!(has_opaque_filesystem_write(
-            "script/check.py",
-            "open(\\\n                file=\"Justfile\", \\\n                mode=\"w\")\n"
-        ));
-        assert!(has_opaque_filesystem_write("script/check.py", "Path(\"Justfile\") \\\r\n.write_bytes(payload)\r\n"));
-    }
-
-    #[test]
-    fn opaque_process_arguments_detect_executable_code_without_matching_inert_text() {
-        assert!(has_opaque_process_arguments("subprocess.run([\"-\" \"A\"])\n"));
-        assert!(has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", "\x2dA", "warnings"])"#));
-        assert!(has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", b"\u002dA", "warnings"])"#));
-        assert!(has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", chr(45) + "A", "warnings"])"#));
-        assert!(has_opaque_process_arguments(
-            "import subprocess\narguments = ['cargo', 'clippy']\nsubprocess.run(arguments)\n"
-        ));
-        assert!(has_opaque_process_arguments(
-            "from subprocess import run\narguments = ['cargo', 'clippy']\nrun(arguments)\n"
-        ));
-        assert!(has_opaque_process_arguments(r#"os.execlp("cargo", "cargo", "clippy", "--", "-" + "A", "warnings")"#));
-        assert!(has_opaque_process_arguments(
-            r#"from os import execvpe
-execvpe("cargo", ["cargo", "clippy", "--", "-" + "A", "warnings"], environment)"#
-        ));
-        assert!(has_opaque_process_arguments(
-            r#"from os import system as run
-run(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
-        ));
-        assert!(has_opaque_process_arguments(
-            r#"from os import system
-system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
-        ));
-        assert!(has_opaque_process_arguments(
-            r#"runner = __import__("sub" + "process")
-runner.run(["cargo", "clippy", "--", chr(45) + "A", "warnings"])"#
-        ));
-        assert!(has_opaque_process_arguments(
-            r#"runner = getattr(importlib.import_module("sub" + "process"), "r" + "un")
-runner(["car" + "go", "clippy", "--", chr(45) + "A", "warnings"])"#
-        ));
-        assert!(has_opaque_process_arguments(
-            r#"import ctypes
-ctypes.CDLL(None).system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
-        ));
-        assert!(has_opaque_process_arguments(
-            r#"from cffi import FFI
-FFI().dlopen(None).system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
-        ));
-        assert!(has_opaque_process_arguments(
-            r#"os.system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
-        ));
-        assert!(has_opaque_process_arguments(
-            r#"posix.system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
-        ));
-        assert!(has_opaque_process_arguments(
-            r#"posix.popen(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
-        ));
-        assert!(has_opaque_process_arguments(
-            r#"from posix import system as run
-run(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
-        ));
-        assert!(has_opaque_process_arguments(r#"os.system("printf safe; " + command)"#));
-        assert!(has_opaque_process_arguments(r#"subprocess.run(bytes.fromhex("2f7573722f62696e2f636172676f"))"#));
-        assert!(has_opaque_process_arguments("subprocess.Popen(command)"));
-        assert!(has_opaque_process_arguments(
-            "import subprocess\nsubprocess.run([\"git\", \"status\"])\nrunner = subprocess.run\nrunner(bytes.fromhex(\"636172676f\").decode(), shell=True)\n"
-        ));
-        assert!(!has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", r"\x2dA", "warnings"])"#));
-        assert!(!has_opaque_process_arguments(
-            r#"subprocess.run(["cargo", "metadata", "--locked"], cwd=repository, check=True)"#
-        ));
-        assert!(!has_opaque_process_arguments(r#"subprocess.run(["git", "show", f"{reference}:{source}"], check=False)"#));
-        assert!(!has_opaque_process_arguments(r#"subprocess.run([sys.executable, "script/check.py", value], check=True)"#));
-        assert!(!has_opaque_process_arguments("from os import path\nprint(path.basename('/tmp/report'))"));
-        assert!(!has_opaque_process_arguments("head = (f'<svg viewBox=\"0 0 64 64\" ' f'role=\"img\">')\n"));
-        assert!(!has_opaque_process_arguments(
-            "PATTERN = (r'^v[0-9]+' r'(?:-dev)?$')\nimport subprocess\nsubprocess.run(['git', 'status'])\n"
-        ));
-        assert!(!has_opaque_process_arguments("# import ctypes and run cargo\nprint('safe')\n"));
-        assert!(!has_opaque_process_arguments(
-            "\"\"\"getattr(importlib, 'run') and cargo are documentation only\"\"\"\nprint('safe')\n"
-        ));
-    }
-
-    #[test]
-    fn dynamic_process_module_lookup_fails_closed_without_matching_unrelated_reflection() {
-        assert!(has_opaque_process_arguments("import os\nos.__dict__[\"sy\" + \"stem\"](bytes.fromhex(payload).decode())\n"));
-        assert!(has_opaque_process_arguments("import os\ngetattr(os, name)(payload)\n"));
-        assert!(has_opaque_process_arguments("import subprocess\nvars(subprocess)[name](payload)\n"));
-        assert!(!has_opaque_process_arguments("import os\nclose = getattr(self.container, 'close')\nprint(os.name)\n"));
-    }
-}
+mod tests;

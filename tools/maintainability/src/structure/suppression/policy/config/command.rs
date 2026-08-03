@@ -8,6 +8,7 @@ mod actions;
 mod arguments;
 mod environment;
 mod make;
+mod source_size;
 mod surfaces;
 mod yaml;
 use super::cargo::tracked_manifests;
@@ -274,6 +275,7 @@ pub(super) const CLAUDE_REVIEW_TEST_ENVIRONMENT_LINES: &[&str] = &[
 
 pub fn reject_checked_in_weakening(workspace: &Path) -> Result<()> {
     let surfaces = execution_surfaces(workspace)?;
+    source_size::validate_python_analyzer(workspace, &surfaces.tracked_paths)?;
     let audited_manifests = tracked_manifests(workspace)?.into_iter().collect::<BTreeSet<_>>();
     for path in surfaces.paths {
         if is_cargo_config(Path::new(&path)) {

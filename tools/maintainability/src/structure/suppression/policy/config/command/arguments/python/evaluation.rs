@@ -1,5 +1,11 @@
+mod reviewed;
+
 pub(super) fn has_dynamic_code(source: &str) -> bool {
     Scanner::new(source).has_dynamic_code()
+}
+
+pub(super) fn is_reviewed_dynamic_code_surface(path: &str, source: &str) -> bool {
+    reviewed::matches(path, source)
 }
 
 struct Scanner {
@@ -212,6 +218,14 @@ struct ExpressionToken {
 }
 
 fn dynamic_path(path: &[String]) -> bool {
+    if path.iter().any(|component| {
+        matches!(
+            component.as_str(),
+            "_getframe" | "_current_frames" | "currentframe" | "f_globals" | "__globals__" | "__subclasses__"
+        )
+    }) {
+        return true;
+    }
     match path {
         [name, ..]
             if matches!(
@@ -224,6 +238,7 @@ fn dynamic_path(path: &[String]) -> bool {
         [module, name, ..] if matches!(module.as_str(), "pickle" | "_pickle") => matches!(name.as_str(), "Unpickler" | "load" | "loads"),
         [module, name, ..] if module == "marshal" => name == "loads",
         [module, name, ..] if module == "types" => matches!(name.as_str(), "CodeType" | "FunctionType"),
+        [module, name, ..] if module == "gc" => matches!(name.as_str(), "get_objects" | "get_referrers"),
         _ => false,
     }
 }
@@ -252,6 +267,9 @@ mod tests {
         assert!(has_dynamic_code("importlib.machinery.SourceFileLoader('m', path).load_module()"));
         assert!(has_dynamic_code("from importlib import import_module as load"));
         assert!(has_dynamic_code("runpy.run_path('quality/lint.txt')"));
+        assert!(has_dynamic_code("sys._getframe().f_globals['os'].system(payload)"));
+        assert!(has_dynamic_code("function.__globals__['os'].system(payload)"));
+        assert!(has_dynamic_code("object.__subclasses__()"));
         assert!(has_dynamic_code("runpy.run_module(module_name)"));
         assert!(has_dynamic_code("from runpy import run_path as execute"));
         assert!(has_dynamic_code("f'{exec(payload)}'"));

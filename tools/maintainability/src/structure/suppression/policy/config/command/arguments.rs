@@ -28,7 +28,7 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token_for_sur
     if dynamic_program::is_unanalyzed_path(path) {
         return true;
     }
-    if is_python(path) && (python::has_opaque_process_arguments(source) || python::has_opaque_filesystem_write(path, source)) {
+    if is_python(path) && (python::has_opaque_process_arguments(path, source) || python::has_opaque_filesystem_write(path, source)) {
         return true;
     }
     if is_powershell(path) && powershell::has_constructed_rust_arguments(source) {

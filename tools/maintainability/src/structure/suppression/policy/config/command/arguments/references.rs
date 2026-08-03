@@ -2,17 +2,19 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use super::{
-    dynamic_program, is_cargo_tool_token, is_environment_assignment, is_normalized_manifest_path, is_yaml, matches_tool_name, normalized_source_for_surface, package_json, tokens,
-    tool_basename,
+    dynamic_program, is_cargo_tool_token, is_environment_assignment, is_normalized_manifest_path, is_python, is_yaml, matches_tool_name, normalized_source_for_surface,
+    package_json, tokens, tool_basename,
 };
 
 mod cargo;
 mod compiler;
 mod editor;
 mod git;
+mod model;
 mod mutation;
 mod native;
 mod path;
+mod python;
 mod sed;
 mod trap;
 pub(super) mod wrapper;
@@ -33,23 +35,29 @@ pub(in crate::structure::suppression::policy::config::command) fn cargo_manifest
     collect_cargo_manifest_paths(std::iter::once(source.as_str()).chain(embedded_commands.iter().map(String::as_str)), case_insensitive_tools)
 }
 
-pub(in crate::structure::suppression::policy::config::command) fn execution_inputs_for_surface(path: &str, source: &str) -> (BTreeSet<String>, bool) {
+pub(in crate::structure::suppression::policy::config::command) fn execution_inputs_for_surface(path: &str, source: &str) -> model::ExecutionInputs {
     if let Some(scripts) = package_json::script_commands(path, source) {
         return scripts.map_or_else(
-            |_| (BTreeSet::new(), true),
-            |scripts| collect_execution_inputs(scripts.iter().map(String::as_str), true, path),
+            |_| model::ExecutionInputs::from_paths((BTreeSet::new(), true)),
+            |scripts| model::ExecutionInputs::from_paths(collect_execution_inputs(scripts.iter().map(String::as_str), true, path)),
         );
+    }
+    if is_python(path) {
+        return python::execution_inputs(path, source);
     }
     let source = normalized_source_for_surface(path, source);
     let embedded_commands = super::super::yaml::run_commands(path, &source);
     if is_yaml(path) {
-        return collect_execution_inputs(embedded_commands.iter().map(String::as_str), true, path);
+        return model::ExecutionInputs::from_paths(collect_execution_inputs(embedded_commands.iter().map(String::as_str), true, path));
     }
-    collect_execution_inputs(
+    if !supports_direct_program_paths(path) {
+        return model::ExecutionInputs::from_paths((BTreeSet::new(), false));
+    }
+    model::ExecutionInputs::from_paths(collect_execution_inputs(
         std::iter::once(source.as_str()).chain(embedded_commands.iter().map(String::as_str)),
-        supports_direct_program_paths(path),
+        true,
         path,
-    )
+    ))
 }
 
 fn collect_cargo_manifest_paths<'a>(sources: impl IntoIterator<Item = &'a str>, case_insensitive_tools: bool) -> (BTreeSet<String>, bool) {

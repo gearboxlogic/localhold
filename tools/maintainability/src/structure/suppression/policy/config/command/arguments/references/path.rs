@@ -7,6 +7,9 @@ pub(super) enum ProgramPath<'a> {
 }
 
 pub(super) fn select_program(command: &str, direct_program_paths: bool) -> ProgramPath<'_> {
+    if windows_drive_prefix(command) {
+        return ProgramPath::Opaque;
+    }
     if !direct_program_paths {
         return ProgramPath::NotPath;
     }
@@ -64,7 +67,12 @@ fn trusted_system_program(command: &str) -> bool {
 
 fn windows_absolute(command: &str) -> bool {
     let bytes = command.as_bytes();
-    command.starts_with(r"\\") || bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\')
+    command.starts_with(r"\\") || windows_drive_prefix(command) && bytes.get(2).is_some_and(|separator| matches!(separator, b'/' | b'\\'))
+}
+
+fn windows_drive_prefix(command: &str) -> bool {
+    let bytes = command.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 #[cfg(test)]
@@ -76,6 +84,8 @@ mod tests {
         assert!(matches!(select_program("/tmp/lint", true), ProgramPath::Opaque));
         assert!(matches!(select_program("/opt/local/bin/lint", true), ProgramPath::Opaque));
         assert!(matches!(select_program(r"C:\Temp\lint.exe", true), ProgramPath::Opaque));
+        assert!(matches!(select_program(r"C:hidden.exe", true), ProgramPath::Opaque));
+        assert!(matches!(select_program(r"c:hidden.exe", false), ProgramPath::Opaque));
         assert!(matches!(select_program(r"\Temp\lint.exe", true), ProgramPath::Opaque));
         assert!(matches!(select_program(r"\\server\share\lint.exe", true), ProgramPath::Opaque));
         assert!(matches!(select_program(r"\\?\UNC\server\share\lint.exe", true), ProgramPath::Opaque));

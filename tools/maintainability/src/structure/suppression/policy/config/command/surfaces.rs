@@ -50,8 +50,10 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
     while let Some(surface) = pending.pop() {
         let source = fs::read_to_string(workspace.join(&surface)).with_context(|| format!("read command execution surface {surface}"))?;
         let reviewed_source = without_reviewed_dispatch(&surface, &source);
-        let (referenced_inputs, unresolved_input) = execution_inputs_for_surface(&surface, &reviewed_source);
-        if unresolved_input {
+        let execution_inputs = execution_inputs_for_surface(&surface, &reviewed_source);
+        let mut referenced_inputs = execution_inputs.paths;
+        referenced_inputs.extend(windows_bare_program_shadows(&execution_inputs.windows_bare_programs, &tracked_paths));
+        if execution_inputs.unresolved {
             bail!("command execution surface {surface:?} uses an opaque interpreter program or makefile selection");
         }
         for input in referenced_inputs {
@@ -76,6 +78,19 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
         paths: surfaces.into_iter().collect(),
         tracked_paths,
     })
+}
+
+fn windows_bare_program_shadows(programs: &BTreeSet<String>, tracked_paths: &BTreeSet<String>) -> BTreeSet<String> {
+    const WINDOWS_EXECUTABLE_SUFFIXES: &[&str] = &["", ".exe", ".com", ".bat", ".cmd"];
+    let candidates = programs
+        .iter()
+        .flat_map(|program| WINDOWS_EXECUTABLE_SUFFIXES.iter().map(move |suffix| format!("{program}{suffix}")))
+        .collect::<BTreeSet<_>>();
+    tracked_paths
+        .iter()
+        .filter(|path| !path.contains('/') && candidates.contains(&path.to_ascii_lowercase()))
+        .cloned()
+        .collect()
 }
 
 const TRUSTED_WORKFLOW: &str = ".github/workflows/trusted-maintainability.yml";
@@ -381,6 +396,60 @@ mod tests {
         git(repository.path(), &["add", "script/linked.sh"]);
         let error = execution_surfaces(repository.path()).err().expect("reject command surface symlink");
         assert!(error.to_string().contains("command execution surface cannot be a symlink"));
+    }
+
+    #[test]
+    fn python_bare_programs_close_over_windows_workspace_shadows() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        fs::create_dir(repository.path().join("script")).expect("create script directory");
+        fs::write(
+            repository.path().join("script/check.py"),
+            "#!/usr/bin/env python3\nimport subprocess\nsubprocess.run(['git', 'status'], check=True)\n",
+        )
+        .expect("write Python command surface");
+        fs::write(repository.path().join("GIT.EXE"), "#!/bin/sh\nexit 0\n").expect("write Windows shadow");
+        git(repository.path(), &["init", "--quiet"]);
+        git(repository.path(), &["add", "."]);
+
+        let surfaces = execution_surfaces(repository.path()).expect("classify execution surfaces");
+        assert!(surfaces.paths.contains(&"GIT.EXE".to_owned()));
+    }
+
+    #[test]
+    fn python_bare_programs_reject_ambient_resolution_mutation() {
+        for mutation in [r#"os.chdir("quality")"#, r#"os.environ["Path"] = "quality"#] {
+            let repository = tempfile::tempdir().expect("temporary repository");
+            fs::create_dir_all(repository.path().join("script")).expect("create script directory");
+            fs::create_dir_all(repository.path().join("quality")).expect("create shadow directory");
+            fs::write(
+                repository.path().join("script/check.py"),
+                format!("#!/usr/bin/env python3\nimport os, subprocess\n{mutation}\nsubprocess.run(['git', 'status'], check=True)\n"),
+            )
+            .expect("write Python command surface");
+            fs::write(repository.path().join("quality/GIT.EXE"), "#!/bin/sh\nexit 0\n").expect("write Windows shadow");
+            git(repository.path(), &["init", "--quiet"]);
+            git(repository.path(), &["add", "."]);
+
+            let error = execution_surfaces(repository.path()).err().expect("reject ambient bare-program resolution");
+            assert!(error.to_string().contains("opaque interpreter program"), "{mutation}: {error:#}");
+        }
+    }
+
+    #[test]
+    fn python_interpreters_reject_ambient_environment_mutation() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        fs::create_dir_all(repository.path().join("script")).expect("create script directory");
+        fs::write(repository.path().join("script/child.py"), "print('child')\n").expect("write child script");
+        fs::write(
+            repository.path().join("script/check.py"),
+            "#!/usr/bin/env python3\nimport os, subprocess, sys\nos.environ.update(load_configuration())\nsubprocess.run([sys.executable, 'script/child.py'], check=True)\n",
+        )
+        .expect("write Python command surface");
+        git(repository.path(), &["init", "--quiet"]);
+        git(repository.path(), &["add", "."]);
+
+        let error = execution_surfaces(repository.path()).err().expect("reject ambient interpreter environment");
+        assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
     }
 
     #[test]

@@ -14,7 +14,7 @@ const DEPENDENCY_REVIEW_PATH: &str = ".github/workflows/dependency-review.yml";
 const PR_CLASSIFICATION_PATH: &str = ".github/workflows/pr-classification.yml";
 const PR_CLASSIFICATION_PACKAGE_PREFIX: &str = "script/pr_classification/";
 const PR_CLASSIFICATION_MODULE_ALIAS: &str = "script/pr_classification.py";
-const PR_CLASSIFICATION_PROFILE: &[ReviewedFile] = &[
+const ORIGINAL_PR_CLASSIFICATION_PROFILE: &[ReviewedFile] = &[
     ReviewedFile::new(PR_CLASSIFICATION_PATH, "25c11bb0bd514363df2a539d9ceb88d8c954b0c92ec0d9d9e70b9bde32f8b6dd"),
     ReviewedFile::new(
         "policy/maintainability/feature-freeze.json",
@@ -29,6 +29,22 @@ const PR_CLASSIFICATION_PROFILE: &[ReviewedFile] = &[
     ReviewedFile::new("script/pr_classification/reviews.py", "ff9687dab05e4c5244af0a074cf21d83d2301b44ac406aa80da94ac8e9960bd5"),
     ReviewedFile::new("script/pr_classification/validation.py", "d9ddf69a1378b3d7d27e9b4dc9b9968d88b44bf713bcb22cda6ce6aed35bec7b"),
 ];
+const HARDENED_PR_CLASSIFICATION_PROFILE: &[ReviewedFile] = &[
+    ReviewedFile::new(PR_CLASSIFICATION_PATH, "25c11bb0bd514363df2a539d9ceb88d8c954b0c92ec0d9d9e70b9bde32f8b6dd"),
+    ReviewedFile::new(
+        "policy/maintainability/feature-freeze.json",
+        "13086fe757b5613bd3faec4b4f5228df6d3413da8c6474452e6a604621340048",
+    ),
+    ReviewedFile::new("script/check_pr_classification.py", "64f498229401c518ee377b5a74ec9f9c4c946b424316b49e979d5155469720e2"),
+    ReviewedFile::new("script/pr_classification/__init__.py", "a8ee1ff16a8e133d6c930231522ca7803b69d3e81b2f9b7ad43b8841a89b3705"),
+    ReviewedFile::new("script/pr_classification/github_api.py", "f6bb2b19274b6c207dafba9dd18cb8eb1611dcde9f2f9ac328f3a0de3c4c76c5"),
+    ReviewedFile::new("script/pr_classification/markdown.py", "ecfc33f63804491d99bfce35dc440bade7bf84bb9cca68753e1dfa865a99b822"),
+    ReviewedFile::new("script/pr_classification/model.py", "822d5b19e91a6691ebb26249d65d3e6381a6e016766a3c6edfe07cdff83b2d82"),
+    ReviewedFile::new("script/pr_classification/policy.py", "6fe2900394d66e25c78bfa16de90c93275abeab5f179ba9cbf33570e89dec230"),
+    ReviewedFile::new("script/pr_classification/reviews.py", "d26ec855a798f5b3df7ab205c620cf8bb4bb69429c150d437cf89567a4bcab19"),
+    ReviewedFile::new("script/pr_classification/validation.py", "ff679b94f3eec0c9464166e4d160aa4f4a2a9950695d55acb2dcb5e226c9c6fc"),
+];
+const PR_CLASSIFICATION_PROFILES: &[&[ReviewedFile]] = &[ORIGINAL_PR_CLASSIFICATION_PROFILE, HARDENED_PR_CLASSIFICATION_PROFILE];
 const MISE_VERSION: &str = "2026.7.5";
 const REVIEWED_MISE_PROFILES: &[(&str, &str)] = &[(
     "627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529",
@@ -87,30 +103,44 @@ pub(super) fn validate_configuration(workspace: &Path, tracked_paths: &BTreeSet<
 }
 
 fn validate_staged_classification_profile(workspace: &Path, tracked_paths: &BTreeSet<String>) -> Result<()> {
-    validate_staged_classification_profile_against(workspace, tracked_paths, PR_CLASSIFICATION_PROFILE)
+    validate_staged_classification_profiles_against(workspace, tracked_paths, PR_CLASSIFICATION_PROFILES)
 }
 
-fn validate_staged_classification_profile_against(workspace: &Path, tracked_paths: &BTreeSet<String>, profile: &[ReviewedFile]) -> Result<()> {
+fn validate_staged_classification_profiles_against(workspace: &Path, tracked_paths: &BTreeSet<String>, profiles: &[&[ReviewedFile]]) -> Result<()> {
+    let Some(first_profile) = profiles.first() else {
+        bail!("PR-classification reviewed profiles must not be empty");
+    };
+    let reviewed_paths = first_profile.iter().map(|reviewed| reviewed.path).collect::<BTreeSet<_>>();
+    if reviewed_paths.len() != first_profile.len()
+        || profiles
+            .iter()
+            .any(|profile| profile.iter().map(|reviewed| reviewed.path).collect::<BTreeSet<_>>() != reviewed_paths)
+    {
+        bail!("PR-classification reviewed profiles must share one unique path inventory");
+    }
     let profile_present = tracked_paths
         .iter()
-        .any(|path| profile.iter().any(|reviewed| path == reviewed.path) || path.starts_with(PR_CLASSIFICATION_PACKAGE_PREFIX) || path == PR_CLASSIFICATION_MODULE_ALIAS);
+        .any(|path| reviewed_paths.contains(path.as_str()) || path.starts_with(PR_CLASSIFICATION_PACKAGE_PREFIX) || path == PR_CLASSIFICATION_MODULE_ALIAS);
     if !profile_present {
         return Ok(());
     }
-    let reviewed_paths = profile.iter().map(|reviewed| reviewed.path).collect::<BTreeSet<_>>();
     if tracked_paths
         .iter()
         .any(|path| path.starts_with(PR_CLASSIFICATION_PACKAGE_PREFIX) && !reviewed_paths.contains(path.as_str()) || path == PR_CLASSIFICATION_MODULE_ALIAS)
     {
         bail!("PR-classification package inventory contains an unreviewed module");
     }
-    for reviewed in profile {
-        let contents = reviewed_file(workspace, tracked_paths, reviewed.path)?;
-        if digest(&contents) != reviewed.sha256 {
-            bail!("PR-classification runtime input {:?} does not match the reviewed atomic profile", reviewed.path);
+    for profile in profiles {
+        let mut matches = true;
+        for reviewed in *profile {
+            let contents = reviewed_file(workspace, tracked_paths, reviewed.path)?;
+            matches &= digest(&contents) == reviewed.sha256;
+        }
+        if matches {
+            return Ok(());
         }
     }
-    Ok(())
+    bail!("PR-classification runtime inputs do not match any reviewed atomic profile")
 }
 
 pub(super) fn validate_mise_action(path: &str, lines: &[&str], uses_index: usize) -> Result<()> {
@@ -233,7 +263,7 @@ mod tests {
     fn staged_classification_runtime_accepts_only_one_complete_profile() {
         const TEST_DIGEST: &str = "a9f2d25d1f71f8065e2119e538bde8846570fcdad320388236e99d9e225c290d";
         let workspace = tempfile::tempdir().expect("classification profile fixture");
-        let profile = PR_CLASSIFICATION_PROFILE
+        let profile = ORIGINAL_PR_CLASSIFICATION_PROFILE
             .iter()
             .map(|reviewed| ReviewedFile::new(reviewed.path, TEST_DIGEST))
             .collect::<Vec<_>>();
@@ -244,10 +274,44 @@ mod tests {
             fs::write(&path, b"reviewed\n").expect("profile input");
             paths.insert(reviewed.path.to_owned());
         }
-        validate_staged_classification_profile_against(workspace.path(), &paths, &profile).expect("complete classification profile");
+        validate_staged_classification_profiles_against(workspace.path(), &paths, &[&profile]).expect("complete classification profile");
 
         fs::write(workspace.path().join(profile[0].path), b"changed\n").expect("alter profile input");
-        assert!(validate_staged_classification_profile_against(workspace.path(), &paths, &profile).is_err());
+        assert!(validate_staged_classification_profiles_against(workspace.path(), &paths, &[&profile]).is_err());
+    }
+
+    #[test]
+    fn staged_classification_profiles_reject_hybrids() {
+        const ORIGINAL_DIGEST: &str = "a9f2d25d1f71f8065e2119e538bde8846570fcdad320388236e99d9e225c290d";
+        const NEXT_DIGEST: &str = "8a0956311647187d73d47ac672d55da73c8feae40cd9fd177414b72e75e0693f";
+        let workspace = tempfile::tempdir().expect("classification profile fixture");
+        let original = ORIGINAL_PR_CLASSIFICATION_PROFILE
+            .iter()
+            .map(|reviewed| ReviewedFile::new(reviewed.path, ORIGINAL_DIGEST))
+            .collect::<Vec<_>>();
+        let next = ORIGINAL_PR_CLASSIFICATION_PROFILE
+            .iter()
+            .enumerate()
+            .map(|(index, reviewed)| ReviewedFile::new(reviewed.path, if index < 2 { NEXT_DIGEST } else { ORIGINAL_DIGEST }))
+            .collect::<Vec<_>>();
+        let profiles = [&original[..], &next[..]];
+        let mut paths = BTreeSet::new();
+        for reviewed in &original {
+            let path = workspace.path().join(reviewed.path);
+            fs::create_dir_all(path.parent().expect("profile parent")).expect("profile directory");
+            fs::write(&path, b"reviewed\n").expect("profile input");
+            paths.insert(reviewed.path.to_owned());
+        }
+        validate_staged_classification_profiles_against(workspace.path(), &paths, &profiles).expect("original complete profile");
+
+        fs::write(workspace.path().join(original[0].path), b"next\n").expect("first next-profile input");
+        assert!(
+            validate_staged_classification_profiles_against(workspace.path(), &paths, &profiles).is_err(),
+            "accepted hybrid profile"
+        );
+
+        fs::write(workspace.path().join(original[1].path), b"next\n").expect("second next-profile input");
+        validate_staged_classification_profiles_against(workspace.path(), &paths, &profiles).expect("next complete profile");
     }
 
     #[test]

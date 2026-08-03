@@ -159,6 +159,13 @@ fn ambient_process_resolution_mutations_are_distinguished_from_reads() {
     assert!(mutates_process_environment("os.environ['PATH']: list[str)\n"));
     assert!(mutates_process_environment("os.environ.update({'PATH': 'quality'})\n"));
     assert!(mutates_process_environment("del os.environ['PATH']\n"));
+    assert!(mutates_process_environment("del (os.environ['PATH'])\n"));
+    assert!(mutates_process_environment("del ((os.environ['PATH']))\n"));
+    assert!(mutates_process_environment("del [os.environ['PATH'], os.environ['HOME']]\n"));
+    assert!(mutates_process_environment("del(os.environ['PATH'])\n"));
+    assert!(mutates_process_environment("if enabled: del (os.environ['PATH'])\n"));
+    assert!(!mutates_process_environment("model = os.environ.get('PATH')\n"));
+    assert!(!mutates_process_environment("previous = deleted; value = os.environ.get('PATH')\n"));
     assert!(mutates_process_environment("environment = os.environ\n"));
     assert!(mutates_process_environment("os . environ['Path'] = 'quality'\n"));
     assert!(!mutates_process_environment("value = os.environ.get('PATH')\nenvironment = os.environ.copy()\n"));

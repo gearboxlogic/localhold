@@ -115,6 +115,10 @@ fn collect_python_input(scanner: &CallScanner, arguments: &[Range<usize>], refer
             references.opaque = true;
             return;
         }
+        if !value.rsplit_once('.').is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("py")) {
+            references.opaque = true;
+            return;
+        }
         references.inputs.push(value);
         return;
     }
@@ -210,7 +214,7 @@ mod tests {
     fn local_programs_and_python_inputs_are_closed() {
         let references = collect(
             r#"
-subprocess.run([sys.executable, "quality/hidden.txt"], check=True)
+subprocess.run([sys.executable, "quality/hidden.py"], check=True)
 subprocess.run(["quality/helper.exe", "--check"], check=True)
 subprocess.run(
     ["script/check-time-abstraction.sh"],
@@ -221,12 +225,24 @@ os.system("sh quality/lint.txt")
 posix.system("sh quality/posix.txt")
 "#,
         );
-        assert_eq!(references.inputs, ["quality/hidden.txt"]);
+        assert_eq!(references.inputs, ["quality/hidden.py"]);
         assert_eq!(references.programs, ["quality/helper.exe", "script/check-time-abstraction.sh"]);
         assert_eq!(references.shell_commands, ["sh quality/lint.txt", "sh quality/posix.txt"]);
         assert!(references.overrides.environment);
         assert!(references.overrides.working_directory);
         assert!(!references.opaque);
+    }
+
+    #[test]
+    fn python_interpreter_inputs_require_a_python_source_extension() {
+        for source in [
+            r#"subprocess.run([sys.executable, "quality/hidden.txt"], check=True)"#,
+            r#"subprocess.run([sys.executable, "quality/hidden.pyw"], check=True)"#,
+            r#"subprocess.run([sys.executable, "quality/hidden"], check=True)"#,
+        ] {
+            assert!(collect(source).opaque, "{source}");
+        }
+        assert!(!collect(r#"subprocess.run([sys.executable, "quality/hidden.PY"], check=True)"#).opaque);
     }
 
     #[test]

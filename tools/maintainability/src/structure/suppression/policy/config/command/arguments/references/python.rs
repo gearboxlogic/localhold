@@ -97,6 +97,12 @@ os.environ[keys[0]]: str = "target/bin"
 subprocess.run(["git", "status"], check=True)
 "#;
         assert!(execution_inputs("script/reviews.py", source).unresolved);
+
+        let source = r#"
+del (os.environ["PATH"])
+subprocess.run(["git", "status"], check=True)
+"#;
+        assert!(execution_inputs("script/reviews.py", source).unresolved);
     }
 
     #[test]

@@ -120,6 +120,7 @@ fn is_python_documentation_launcher(command: &str) -> bool {
 fn is_versioned_name(command: &str, name: &str) -> bool {
     command == name
         || command.strip_prefix(name).is_some_and(|version| {
+            let version = version.strip_suffix('t').unwrap_or(version);
             !version.is_empty()
                 && version.bytes().next().is_some_and(|byte| byte.is_ascii_digit())
                 && version.bytes().next_back().is_some_and(|byte| byte.is_ascii_digit())
@@ -291,6 +292,8 @@ mod tests {
             "python3",
             "python3.12",
             "python3.12.exe",
+            "python3.13t",
+            "python3.13t.exe",
             "python312.exe",
             "pythonw.exe",
             "pythonw3.12.exe",
@@ -300,7 +303,7 @@ mod tests {
         ] {
             assert!(is_python_interpreter(command), "{command}");
         }
-        for command in ["python-preview", "python3.", "pythonic", "pythonw-preview", "pypical"] {
+        for command in ["python-preview", "python3.", "python3.13t-config", "pythonic", "pythonw-preview", "pypical"] {
             assert!(!is_python_interpreter(command), "{command}");
         }
     }

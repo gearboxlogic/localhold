@@ -129,7 +129,7 @@ fn environment_reference_is_opaque(line: &str) -> bool {
             let Some(after_subscript) = after_matching_subscript(indexed) else {
                 return true;
             };
-            if head.trim_end().ends_with("del") || starts_assignment(after_subscript.trim_start()) {
+            if has_delete_keyword(head) || starts_assignment(after_subscript.trim_start()) {
                 return true;
             }
         } else if ![".get(", ".copy(", ".keys(", ".items(", ".values("].iter().any(|prefix| tail.starts_with(prefix)) {
@@ -138,6 +138,15 @@ fn environment_reference_is_opaque(line: &str) -> bool {
         remainder = tail;
     }
     false
+}
+
+fn has_delete_keyword(head: &str) -> bool {
+    let statement = head.rsplit(';').next().unwrap_or(head);
+    statement.match_indices("del").any(|(index, keyword)| {
+        let before = statement[..index].chars().next_back();
+        let after = statement[index + keyword.len()..].chars().next();
+        !before.is_some_and(is_identifier_character) && !after.is_some_and(is_identifier_character)
+    })
 }
 
 fn after_matching_subscript(source: &str) -> Option<&str> {

@@ -943,6 +943,7 @@ mod tests {
         assert_eq!(inputs(r#"tag="$(python3 script/release.py tag)""#), (vec!["script/release.py".to_owned()], false));
         assert_eq!(inputs("python3 quality/lint.txt"), (Vec::new(), true));
         assert_eq!(inputs("/usr/bin/python3.12 quality/lint.py"), (vec!["quality/lint.py".to_owned()], false));
+        assert_eq!(inputs("/usr/bin/python3.13t quality/lint.py"), (vec!["quality/lint.py".to_owned()], false));
         assert_eq!(inputs("python -m quality.lint"), (Vec::new(), true));
         assert_eq!(inputs("python3 -m timeit 'import os; os.system(\"sh quality/lint.txt\")'"), (Vec::new(), true));
         assert_eq!(inputs("python -m $MODULE"), (Vec::new(), true));

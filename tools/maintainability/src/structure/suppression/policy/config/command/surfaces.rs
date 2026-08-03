@@ -31,6 +31,7 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
     validate_local_actions(workspace, &paths)?;
     let mut surfaces = BTreeSet::new();
     for path in paths {
+        reject_python_loadable_artifact(&path)?;
         let absolute = workspace.join(&path);
         let classified = is_execution_surface(&path) || executables.contains(&path);
         match fs::symlink_metadata(&absolute) {
@@ -78,6 +79,24 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
         paths: surfaces.into_iter().collect(),
         tracked_paths,
     })
+}
+
+fn reject_python_loadable_artifact(path: &str) -> Result<()> {
+    let path = Path::new(path);
+    let in_bytecode_cache = path
+        .components()
+        .any(|component| component.as_os_str().to_str().is_some_and(|component| component.eq_ignore_ascii_case("__pycache__")));
+    let loadable_extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "pyc" | "pyo" | "pyd" | "so"));
+    if in_bytecode_cache || loadable_extension {
+        bail!(
+            "Python-loadable artifact is unsupported because its executable contents cannot be audited: {}",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 fn windows_bare_program_shadows(programs: &BTreeSet<String>, tracked_paths: &BTreeSet<String>) -> BTreeSet<String> {
@@ -396,6 +415,27 @@ mod tests {
         git(repository.path(), &["add", "script/linked.sh"]);
         let error = execution_surfaces(repository.path()).err().expect("reject command surface symlink");
         assert!(error.to_string().contains("command execution surface cannot be a symlink"));
+    }
+
+    #[test]
+    fn python_loadable_binary_and_bytecode_artifacts_are_rejected() {
+        for path in [
+            "script/helper.pyc",
+            "script/helper.pyo",
+            "script/helper.pyd",
+            "script/helper.cpython-313-x86_64-linux-gnu.so",
+            "script/__pycache__/helper.txt",
+        ] {
+            let repository = tempfile::tempdir().expect("temporary repository");
+            let target = repository.path().join(path);
+            fs::create_dir_all(target.parent().expect("artifact parent")).expect("create artifact directory");
+            fs::write(&target, b"opaque").expect("write Python-loadable artifact");
+            git(repository.path(), &["init", "--quiet"]);
+            git(repository.path(), &["add", "."]);
+
+            let error = execution_surfaces(repository.path()).err().expect("reject Python-loadable artifact");
+            assert!(error.to_string().contains("Python-loadable artifact is unsupported"), "{path}: {error:#}");
+        }
     }
 
     #[test]

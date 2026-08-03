@@ -86,6 +86,11 @@ impl ReviewedFile {
 }
 
 pub(super) fn validate_configuration(workspace: &Path, tracked_paths: &BTreeSet<String>) -> Result<()> {
+    let base_profile_present = classification_profile_present_in_base(workspace)?;
+    validate_configuration_against(workspace, tracked_paths, base_profile_present)
+}
+
+fn validate_configuration_against(workspace: &Path, tracked_paths: &BTreeSet<String>, base_profile_present: bool) -> Result<()> {
     let mise_toml = reviewed_file(workspace, tracked_paths, "mise.toml")?;
     let mise_lock = reviewed_file(workspace, tracked_paths, "mise.lock")?;
     let profile = (digest(&mise_toml), digest(&mise_lock));
@@ -98,15 +103,42 @@ pub(super) fn validate_configuration(workspace: &Path, tracked_paths: &BTreeSet<
     if !REVIEWED_DEPENDENCY_REVIEW_WORKFLOWS.contains(&dependency_review.trim_end()) {
         bail!("{DEPENDENCY_REVIEW_PATH:?} must retain its exact reviewed trigger, permissions, job controls, checkout, and dependency-review step");
     }
-    validate_staged_classification_profile(workspace, tracked_paths)?;
+    validate_staged_classification_profiles_against(workspace, tracked_paths, PR_CLASSIFICATION_PROFILES, base_profile_present)?;
     Ok(())
 }
 
-fn validate_staged_classification_profile(workspace: &Path, tracked_paths: &BTreeSet<String>) -> Result<()> {
-    validate_staged_classification_profiles_against(workspace, tracked_paths, PR_CLASSIFICATION_PROFILES)
+fn classification_profile_present_in_base(workspace: &Path) -> Result<bool> {
+    let Some(revision) = crate::structure::revision::maintainability_base_revision()? else {
+        return Ok(false);
+    };
+    classification_profile_present_at_revision(workspace, &revision)
 }
 
-fn validate_staged_classification_profiles_against(workspace: &Path, tracked_paths: &BTreeSet<String>, profiles: &[&[ReviewedFile]]) -> Result<()> {
+fn classification_profile_present_at_revision(workspace: &Path, revision: &str) -> Result<bool> {
+    let output = crate::structure::revision::git_command()
+        .current_dir(workspace)
+        .args([
+            "ls-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            revision,
+            "--",
+            PR_CLASSIFICATION_PATH,
+            "policy/maintainability/feature-freeze.json",
+            "script/check_pr_classification.py",
+            PR_CLASSIFICATION_PACKAGE_PREFIX,
+            PR_CLASSIFICATION_MODULE_ALIAS,
+        ])
+        .output()
+        .context("inspect the PR-classification profile in a Git revision")?;
+    if !output.status.success() {
+        bail!("cannot inspect the PR-classification profile in Git revision {revision:?}");
+    }
+    Ok(!output.stdout.is_empty())
+}
+
+fn validate_staged_classification_profiles_against(workspace: &Path, tracked_paths: &BTreeSet<String>, profiles: &[&[ReviewedFile]], base_profile_present: bool) -> Result<()> {
     let Some(first_profile) = profiles.first() else {
         bail!("PR-classification reviewed profiles must not be empty");
     };
@@ -122,6 +154,9 @@ fn validate_staged_classification_profiles_against(workspace: &Path, tracked_pat
         .iter()
         .any(|path| reviewed_paths.contains(path.as_str()) || path.starts_with(PR_CLASSIFICATION_PACKAGE_PREFIX) || path == PR_CLASSIFICATION_MODULE_ALIAS);
     if !profile_present {
+        if base_profile_present {
+            bail!("PR-classification runtime cannot be removed after it is present in the protected base revision");
+        }
         return Ok(());
     }
     if tracked_paths
@@ -176,6 +211,8 @@ fn digest(contents: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
 
     fn tracked_paths() -> BTreeSet<String> {
@@ -196,10 +233,34 @@ mod tests {
         fs::write(destination, contents).expect("write guarded input fixture");
     }
 
+    fn git(workspace: &Path, arguments: &[&str]) -> String {
+        let output = Command::new("git").current_dir(workspace).args(arguments).output().expect("run fixture Git command");
+        assert!(output.status.success(), "git {arguments:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).expect("fixture Git output is UTF-8").trim().to_owned()
+    }
+
+    fn commit_fixture(workspace: &Path, message: &str) -> String {
+        git(workspace, &["add", "--all"]);
+        git(
+            workspace,
+            &[
+                "-c",
+                "user.name=LocalHold Tests",
+                "-c",
+                "user.email=tests@localhold.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                message,
+            ],
+        );
+        git(workspace, &["rev-parse", "HEAD"])
+    }
+
     #[test]
     fn guarded_configuration_accepts_the_reviewed_files() {
         let fixture = fixture();
-        validate_configuration(fixture.path(), &tracked_paths()).expect("reviewed configuration");
+        validate_configuration_against(fixture.path(), &tracked_paths(), false).expect("reviewed configuration");
     }
 
     #[test]
@@ -225,7 +286,7 @@ mod tests {
         for path in ["mise.toml", "mise.lock"] {
             let fixture = fixture();
             fs::write(fixture.path().join(path), b"unreviewed\n").expect("alter guarded input");
-            assert!(validate_configuration(fixture.path(), &tracked_paths()).is_err(), "accepted altered {path}");
+            assert!(validate_configuration_against(fixture.path(), &tracked_paths(), false).is_err(), "accepted altered {path}");
         }
     }
 
@@ -240,7 +301,7 @@ mod tests {
             let path = fixture.path().join(DEPENDENCY_REVIEW_PATH);
             let source = fs::read_to_string(&path).expect("read workflow");
             fs::write(&path, source.replace("      - uses: actions/dependency-review-action", alteration)).expect("alter workflow");
-            assert!(validate_configuration(fixture.path(), &tracked_paths()).is_err(), "accepted {alteration:?}");
+            assert!(validate_configuration_against(fixture.path(), &tracked_paths(), false).is_err(), "accepted {alteration:?}");
         }
     }
 
@@ -250,13 +311,46 @@ mod tests {
         fs::write(partial_fixture.path().join(PR_CLASSIFICATION_PATH), b"unreviewed\n").expect("classification workflow fixture");
         let mut paths = tracked_paths();
         paths.insert(PR_CLASSIFICATION_PATH.to_owned());
-        assert!(validate_configuration(partial_fixture.path(), &paths).is_err());
+        assert!(validate_configuration_against(partial_fixture.path(), &paths, false).is_err());
 
         let extra_fixture = fixture();
         let unexpected = format!("{PR_CLASSIFICATION_PACKAGE_PREFIX}shadow.py");
         let mut paths = tracked_paths();
         paths.insert(unexpected);
-        assert!(validate_configuration(extra_fixture.path(), &paths).is_err());
+        assert!(validate_configuration_against(extra_fixture.path(), &paths, false).is_err());
+    }
+
+    #[test]
+    fn staged_classification_runtime_can_be_absent_only_before_rollout() {
+        let workspace = tempfile::tempdir().expect("classification absence fixture");
+        let paths = BTreeSet::new();
+        validate_staged_classification_profiles_against(workspace.path(), &paths, PR_CLASSIFICATION_PROFILES, false).expect("pre-rollout absence");
+        assert!(
+            validate_staged_classification_profiles_against(workspace.path(), &paths, PR_CLASSIFICATION_PROFILES, true).is_err(),
+            "accepted complete removal after the base profile was deployed"
+        );
+    }
+
+    #[test]
+    fn base_revision_inventory_detects_package_alias_and_lookup_failures() {
+        let workspace = tempfile::tempdir().expect("classification base fixture");
+        git(workspace.path(), &["init", "--quiet"]);
+        fs::write(workspace.path().join("seed"), b"seed\n").expect("seed fixture repository");
+        let absent = commit_fixture(workspace.path(), "absent");
+        assert!(!classification_profile_present_at_revision(workspace.path(), &absent).expect("inspect absent profile"));
+
+        let package = workspace.path().join(PR_CLASSIFICATION_PACKAGE_PREFIX).join("runtime.py");
+        fs::create_dir_all(package.parent().expect("package parent")).expect("create classifier package");
+        fs::write(&package, b"# classifier\n").expect("write classifier package module");
+        let packaged = commit_fixture(workspace.path(), "package");
+        assert!(classification_profile_present_at_revision(workspace.path(), &packaged).expect("inspect package profile"));
+
+        fs::remove_file(package).expect("remove package module");
+        let alias = workspace.path().join(PR_CLASSIFICATION_MODULE_ALIAS);
+        fs::write(alias, b"# legacy alias\n").expect("write classifier alias");
+        let aliased = commit_fixture(workspace.path(), "alias");
+        assert!(classification_profile_present_at_revision(workspace.path(), &aliased).expect("inspect alias profile"));
+        assert!(classification_profile_present_at_revision(workspace.path(), "1111111111111111111111111111111111111111").is_err());
     }
 
     #[test]
@@ -274,10 +368,10 @@ mod tests {
             fs::write(&path, b"reviewed\n").expect("profile input");
             paths.insert(reviewed.path.to_owned());
         }
-        validate_staged_classification_profiles_against(workspace.path(), &paths, &[&profile]).expect("complete classification profile");
+        validate_staged_classification_profiles_against(workspace.path(), &paths, &[&profile], false).expect("complete classification profile");
 
         fs::write(workspace.path().join(profile[0].path), b"changed\n").expect("alter profile input");
-        assert!(validate_staged_classification_profiles_against(workspace.path(), &paths, &[&profile]).is_err());
+        assert!(validate_staged_classification_profiles_against(workspace.path(), &paths, &[&profile], false).is_err());
     }
 
     #[test]
@@ -302,16 +396,16 @@ mod tests {
             fs::write(&path, b"reviewed\n").expect("profile input");
             paths.insert(reviewed.path.to_owned());
         }
-        validate_staged_classification_profiles_against(workspace.path(), &paths, &profiles).expect("original complete profile");
+        validate_staged_classification_profiles_against(workspace.path(), &paths, &profiles, false).expect("original complete profile");
 
         fs::write(workspace.path().join(original[0].path), b"next\n").expect("first next-profile input");
         assert!(
-            validate_staged_classification_profiles_against(workspace.path(), &paths, &profiles).is_err(),
+            validate_staged_classification_profiles_against(workspace.path(), &paths, &profiles, false).is_err(),
             "accepted hybrid profile"
         );
 
         fs::write(workspace.path().join(original[1].path), b"next\n").expect("second next-profile input");
-        validate_staged_classification_profiles_against(workspace.path(), &paths, &profiles).expect("next complete profile");
+        validate_staged_classification_profiles_against(workspace.path(), &paths, &profiles, false).expect("next complete profile");
     }
 
     #[test]

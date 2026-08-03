@@ -10,6 +10,7 @@ use super::{require_id, require_text};
 
 mod cargo;
 mod command;
+mod python_sources;
 #[cfg(test)]
 mod tests;
 
@@ -23,6 +24,7 @@ use command::{
     scrubber_environment_references_are_exact, weakening_environment, weakening_environment_for_surface, weakening_token, weakening_token_for_surface, without_reviewed_dispatch,
 };
 pub(super) use command::{reject_checked_in_weakening, validate_guarded_configuration};
+pub(super) use python_sources::validate as validate_python_sources;
 
 pub(super) fn validate_cargo_allowances(entries: &[CargoAllowance]) -> Result<()> {
     let mut ids = BTreeSet::new();

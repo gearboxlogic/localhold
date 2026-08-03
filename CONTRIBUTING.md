@@ -315,13 +315,19 @@ aliases, node tags, custom shell templates, or working-directory overrides to
 redirect an audited `run` command; multiline inline `run` scalars are
 unsupported. Audited `run` steps support Bash, `sh`, PowerShell, `pwsh`, and
 `cmd`; Python run bodies are unsupported until they have a language-aware
-command audit. Python filesystem writes require a statically safe literal
-destination. Existing release staging, temporary-fixture, and brand-generator
-writers are classified by exact whole-file digests in the protected checker;
-any change invalidates that classification and must first land as a reviewed
-checker ratchet. Shell continuations are normalized before command arguments are
-audited, and shell alias declarations or a dynamic command name may not hide
-command dispatch. Make
+command audit. The protected checker also matches the complete tracked Python
+source tree against one atomic path, Git-mode, and SHA-256 profile before
+semantic command analysis. A Python change therefore requires a checker-ratchet
+PR that adds one complete pending profile, followed by a source PR that lands
+that profile, promotes it to current, and removes the old profile. Independent
+per-file hashes and mixed current/pending trees are not accepted. `.pyw`,
+extensionless or dynamically selected interpreter entrypoints, and non-`.py`
+interpreter inputs are unsupported; extensionless scripts may use only an
+argument-free `bash` or `sh` shebang. Python
+filesystem writes still require a statically safe literal destination. Shell
+continuations are normalized before command arguments are audited, and shell
+alias declarations or a dynamic command name may not hide command dispatch.
+Make
 include directives are unsupported; checked-in `.mk` command surfaces are
 audited directly. Unreviewed procedural attributes, derives, and function-like
 macros are also rejected because their expansions could emit hidden lint policy.

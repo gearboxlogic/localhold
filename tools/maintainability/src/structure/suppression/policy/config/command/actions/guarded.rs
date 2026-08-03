@@ -20,9 +20,9 @@ const PR_CLASSIFICATION_PROFILE: &[ReviewedFile] = &[
         "policy/maintainability/feature-freeze.json",
         "50119661e8bfead163fe4051784505777ae80daef33c5578de0395563e9997e8",
     ),
-    ReviewedFile::new("script/check_pr_classification.py", "06237f917338fbc1731bc5c7f3500d0dc877247e113e16c44e31ca37f1b0e8b0"),
-    ReviewedFile::new("script/pr_classification/__init__.py", "5747c2761b8e185b156423da746b2e7a6b84c1d6f221949e0a5554f6d4d2a24a"),
-    ReviewedFile::new("script/pr_classification/github_api.py", "efa4a07f861cbb97534fd8c8615edd85c4fda8729b015e785666ab414b733aa0"),
+    ReviewedFile::new("script/check_pr_classification.py", "64f498229401c518ee377b5a74ec9f9c4c946b424316b49e979d5155469720e2"),
+    ReviewedFile::new("script/pr_classification/__init__.py", "a8ee1ff16a8e133d6c930231522ca7803b69d3e81b2f9b7ad43b8841a89b3705"),
+    ReviewedFile::new("script/pr_classification/github_api.py", "f6bb2b19274b6c207dafba9dd18cb8eb1611dcde9f2f9ac328f3a0de3c4c76c5"),
     ReviewedFile::new("script/pr_classification/markdown.py", "ecfc33f63804491d99bfce35dc440bade7bf84bb9cca68753e1dfa865a99b822"),
     ReviewedFile::new("script/pr_classification/model.py", "89e9ad2aca63bf5521cf7b31247f1ac7cceb53d20cff888799f042ef57cb66fe"),
     ReviewedFile::new("script/pr_classification/policy.py", "c0e816e57ad638b42a92bcb67f40169a7d6fc16b09e214af731483a64b61218e"),
@@ -87,20 +87,24 @@ pub(super) fn validate_configuration(workspace: &Path, tracked_paths: &BTreeSet<
 }
 
 fn validate_staged_classification_profile(workspace: &Path, tracked_paths: &BTreeSet<String>) -> Result<()> {
-    let profile_present = tracked_paths.iter().any(|path| {
-        PR_CLASSIFICATION_PROFILE.iter().any(|reviewed| path == reviewed.path) || path.starts_with(PR_CLASSIFICATION_PACKAGE_PREFIX) || path == PR_CLASSIFICATION_MODULE_ALIAS
-    });
+    validate_staged_classification_profile_against(workspace, tracked_paths, PR_CLASSIFICATION_PROFILE)
+}
+
+fn validate_staged_classification_profile_against(workspace: &Path, tracked_paths: &BTreeSet<String>, profile: &[ReviewedFile]) -> Result<()> {
+    let profile_present = tracked_paths
+        .iter()
+        .any(|path| profile.iter().any(|reviewed| path == reviewed.path) || path.starts_with(PR_CLASSIFICATION_PACKAGE_PREFIX) || path == PR_CLASSIFICATION_MODULE_ALIAS);
     if !profile_present {
         return Ok(());
     }
-    let reviewed_paths = PR_CLASSIFICATION_PROFILE.iter().map(|reviewed| reviewed.path).collect::<BTreeSet<_>>();
+    let reviewed_paths = profile.iter().map(|reviewed| reviewed.path).collect::<BTreeSet<_>>();
     if tracked_paths
         .iter()
         .any(|path| path.starts_with(PR_CLASSIFICATION_PACKAGE_PREFIX) && !reviewed_paths.contains(path.as_str()) || path == PR_CLASSIFICATION_MODULE_ALIAS)
     {
         bail!("PR-classification package inventory contains an unreviewed module");
     }
-    for reviewed in PR_CLASSIFICATION_PROFILE {
+    for reviewed in profile {
         let contents = reviewed_file(workspace, tracked_paths, reviewed.path)?;
         if digest(&contents) != reviewed.sha256 {
             bail!("PR-classification runtime input {:?} does not match the reviewed atomic profile", reviewed.path);
@@ -223,6 +227,27 @@ mod tests {
         let mut paths = tracked_paths();
         paths.insert(unexpected);
         assert!(validate_configuration(extra_fixture.path(), &paths).is_err());
+    }
+
+    #[test]
+    fn staged_classification_runtime_accepts_only_one_complete_profile() {
+        const TEST_DIGEST: &str = "a9f2d25d1f71f8065e2119e538bde8846570fcdad320388236e99d9e225c290d";
+        let workspace = tempfile::tempdir().expect("classification profile fixture");
+        let profile = PR_CLASSIFICATION_PROFILE
+            .iter()
+            .map(|reviewed| ReviewedFile::new(reviewed.path, TEST_DIGEST))
+            .collect::<Vec<_>>();
+        let mut paths = BTreeSet::new();
+        for reviewed in &profile {
+            let path = workspace.path().join(reviewed.path);
+            fs::create_dir_all(path.parent().expect("profile parent")).expect("profile directory");
+            fs::write(&path, b"reviewed\n").expect("profile input");
+            paths.insert(reviewed.path.to_owned());
+        }
+        validate_staged_classification_profile_against(workspace.path(), &paths, &profile).expect("complete classification profile");
+
+        fs::write(workspace.path().join(profile[0].path), b"changed\n").expect("alter profile input");
+        assert!(validate_staged_classification_profile_against(workspace.path(), &paths, &profile).is_err());
     }
 
     #[test]

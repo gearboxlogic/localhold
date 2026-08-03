@@ -119,14 +119,24 @@ mod tests {
     }
 
     fn make_fixture_writable(path: &Path) {
-        let mut permissions = path.metadata().expect("fixture metadata").permissions();
         #[cfg(unix)]
-        {
+        let permissions = {
             use std::os::unix::fs::PermissionsExt as _;
+
+            let mut permissions = path.metadata().expect("fixture metadata").permissions();
             permissions.set_mode(permissions.mode() | 0o600);
-        }
+            permissions
+        };
         #[cfg(windows)]
-        permissions.set_readonly(false);
+        let permissions = {
+            let parent = path.parent().expect("fixture parent");
+            tempfile::NamedTempFile::new_in(parent)
+                .expect("writable permission probe")
+                .as_file()
+                .metadata()
+                .expect("writable permission probe metadata")
+                .permissions()
+        };
         fs::set_permissions(path, permissions).expect("make fixture owner-writable");
     }
 

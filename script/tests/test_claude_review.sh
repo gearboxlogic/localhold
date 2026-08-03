@@ -22,7 +22,8 @@ if [[ $(basename -- "$0") == ps ]]; then
             exit 0
         fi
     fi
-    exec /usr/bin/ps -A -o pgid=,stat=
+    command -p ps -A -o pgid=,stat=
+    exit
 fi
 
 if [[ $(basename -- "$0") == claude ]]; then
@@ -275,7 +276,7 @@ fi
 process_is_live() {
     local pid=$1 state
     kill -0 "$pid" 2>/dev/null || return 1
-    state=$(/usr/bin/ps -o stat= -p "$pid" 2>/dev/null) || return 1
+    state=$(command -p ps -o stat= -p "$pid" 2>/dev/null) || return 1
     [[ -n $state && $state != Z* ]]
 }
 

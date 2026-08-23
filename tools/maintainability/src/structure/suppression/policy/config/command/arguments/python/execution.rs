@@ -154,6 +154,9 @@ pub(super) enum ProcessKind {
 
 pub(super) fn process_kind(name: &str) -> Option<ProcessKind> {
     let name = name.to_ascii_lowercase();
+    if name.starts_with("pydoc.") {
+        return Some(ProcessKind::Unsupported);
+    }
     if matches!(
         name.as_str(),
         "os.system" | "os.popen" | "posix.system" | "posix.popen" | "subprocess.getoutput" | "subprocess.getstatusoutput"
@@ -292,7 +295,15 @@ subprocess . run(["quality/helper.exe"], check=True)
             "posix.posix_spawnp('quality/hidden.py', ['quality/hidden.py'], {})\nsubprocess.run(['git', 'status'])\n",
             "posix_spawn('quality/hidden.py', ['quality/hidden.py'], {})\nsubprocess.run(['git', 'status'])\n",
             "pty.spawn(['quality/hidden.py'])\nsubprocess.run(['git', 'status'])\n",
+            "pydoc.pipepager('', 'sh quality/hidden.txt')\nsubprocess.run(['git', 'status'])\n",
         ] {
+            assert!(collect(source).opaque, "{source}");
+        }
+    }
+
+    #[test]
+    fn pydoc_calls_fail_closed() {
+        for source in [r#"pydoc.pipepager("", "sh quality/hidden.txt")"#, r#"pydoc.render_doc("topic")"#] {
             assert!(collect(source).opaque, "{source}");
         }
     }

@@ -211,7 +211,11 @@ pub(super) fn has_opaque_filesystem_write(path: &str, source: &str) -> bool {
 fn imports_command_capable_api(source: &str) -> bool {
     executable_code(source).lines().flat_map(|line| line.split(';')).any(|statement| {
         let compact = statement.chars().filter(|character| !character.is_whitespace()).collect::<String>();
-        if compact.strip_prefix("import").is_some_and(|imports| imports.split(',').any(command_module_alias)) {
+        let compact = compact.rsplit(':').next().unwrap_or(&compact);
+        if compact
+            .strip_prefix("import")
+            .is_some_and(|imports| imports.split(',').any(|binding| binding == "pydoc" || command_module_alias(binding)))
+        {
             return true;
         }
         let Some((module, imports)) = compact.strip_prefix("from").and_then(|line| line.split_once("import")) else {
@@ -229,6 +233,7 @@ fn imports_command_capable_api(source: &str) -> bool {
                 "os" | "posix" => name == "*" || is_os_process_api(name),
                 "subprocess" => name == "*" || is_subprocess_process_api(name),
                 "pty" => matches!(name, "*" | "spawn"),
+                "pydoc" => true,
                 "contextlib" => matches!(name, "*" | "chdir"),
                 "sys" => matches!(name, "*" | "modules"),
                 _ => false,
@@ -238,7 +243,7 @@ fn imports_command_capable_api(source: &str) -> bool {
 }
 
 fn command_module_alias(binding: &str) -> bool {
-    ["asyncio", "contextlib", "os", "posix", "pty", "subprocess", "sys"]
+    ["asyncio", "contextlib", "os", "posix", "pty", "pydoc", "subprocess", "sys"]
         .iter()
         .any(|module| binding.strip_prefix(module).is_some_and(|suffix| suffix.starts_with("as") && suffix.len() > 2))
 }

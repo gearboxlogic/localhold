@@ -38,7 +38,7 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
     for surface in &surfaces {
         validate_before_resolution(workspace, surface)?;
     }
-    close_over_execution_inputs(workspace, &mut surfaces, &tracked_paths, command_profiles.as_ref())?;
+    close_over_execution_inputs(workspace, &mut surfaces, &checked_paths, &tracked_paths, command_profiles.as_ref())?;
     Ok(ExecutionSurfaceSet {
         paths: surfaces.into_iter().collect(),
         checked_paths,
@@ -77,7 +77,13 @@ fn discover_surfaces(workspace: &Path, paths: BTreeSet<String>, executables: &BT
     Ok(surfaces)
 }
 
-fn close_over_execution_inputs(workspace: &Path, surfaces: &mut BTreeSet<String>, tracked_paths: &BTreeSet<String>, command_profiles: Option<&ProfileManifest>) -> Result<()> {
+fn close_over_execution_inputs(
+    workspace: &Path,
+    surfaces: &mut BTreeSet<String>,
+    checked_paths: &BTreeSet<String>,
+    tracked_paths: &BTreeSet<String>,
+    command_profiles: Option<&ProfileManifest>,
+) -> Result<()> {
     let mut validated = surfaces.clone();
     let mut pending = surfaces.iter().cloned().collect::<Vec<_>>();
     while let Some(surface) = pending.pop() {
@@ -87,7 +93,7 @@ fn close_over_execution_inputs(workspace: &Path, surfaces: &mut BTreeSet<String>
         let reviewed_source = without_reviewed_dispatch(&surface, &source, source_is_reviewed);
         let execution_inputs = execution_inputs_for_surface(&surface, &reviewed_source, source_is_reviewed);
         let mut referenced_inputs = execution_inputs.paths;
-        referenced_inputs.extend(windows_bare_program_shadows(&execution_inputs.windows_bare_programs, tracked_paths));
+        referenced_inputs.extend(windows_bare_program_shadows(&execution_inputs.windows_bare_programs, checked_paths));
         if execution_inputs.unresolved && !legacy_transition.is_some_and(|bridge| bridge.opaque_execution_inputs) {
             bail!("command execution surface {surface:?} uses an opaque interpreter program or makefile selection");
         }
@@ -147,13 +153,13 @@ fn is_rust_source(path: &str) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
 }
 
-fn windows_bare_program_shadows(programs: &BTreeSet<String>, tracked_paths: &BTreeSet<String>) -> BTreeSet<String> {
+fn windows_bare_program_shadows(programs: &BTreeSet<String>, checked_paths: &BTreeSet<String>) -> BTreeSet<String> {
     const WINDOWS_EXECUTABLE_SUFFIXES: &[&str] = &["", ".exe", ".com", ".bat", ".cmd"];
     let candidates = programs
         .iter()
         .flat_map(|program| WINDOWS_EXECUTABLE_SUFFIXES.iter().map(move |suffix| format!("{program}{suffix}")))
         .collect::<BTreeSet<_>>();
-    tracked_paths
+    checked_paths
         .iter()
         .filter(|path| !path.contains('/') && candidates.contains(&path.to_ascii_lowercase()))
         .cloned()
@@ -418,12 +424,13 @@ mod tests {
         let tracked = BTreeSet::from([path.to_owned()]);
 
         let mut surfaces = tracked.clone();
-        let error = close_over_execution_inputs(repository.path(), &mut surfaces, &tracked, Some(&policy(None))).expect_err("reject unbridged opaque dispatch");
+        let error = close_over_execution_inputs(repository.path(), &mut surfaces, &tracked, &tracked, Some(&policy(None))).expect_err("reject unbridged opaque dispatch");
         assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
 
         let mut surfaces = tracked.clone();
         let successor = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let error = close_over_execution_inputs(repository.path(), &mut surfaces, &tracked, Some(&policy(Some(successor)))).expect_err("reject arbitrary pending successor");
+        let error =
+            close_over_execution_inputs(repository.path(), &mut surfaces, &tracked, &tracked, Some(&policy(Some(successor)))).expect_err("reject arbitrary pending successor");
         assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
     }
 
@@ -538,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn python_bare_programs_close_over_windows_workspace_shadows() {
+    fn python_bare_programs_reject_tracked_and_untracked_windows_workspace_shadows() {
         let repository = tempfile::tempdir().expect("temporary repository");
         fs::create_dir(repository.path().join("script")).expect("create script directory");
         fs::write(
@@ -546,10 +553,14 @@ mod tests {
             "#!/usr/bin/env python3\nimport subprocess\nsubprocess.run(['git', 'status'], check=True)\n",
         )
         .expect("write Python command surface");
-        fs::write(repository.path().join("GIT.EXE"), "#!/bin/sh\nexit 0\n").expect("write Windows shadow");
         git(repository.path(), &["init", "--quiet"]);
         git(repository.path(), &["add", "."]);
+        fs::write(repository.path().join("GIT.EXE"), "opaque\n").expect("write untracked Windows shadow");
 
+        let error = execution_surfaces(repository.path()).err().expect("reject untracked Windows shadow");
+        assert!(error.to_string().contains("outside the tracked path inventory"), "{error:#}");
+
+        git(repository.path(), &["add", "GIT.EXE"]);
         let error = execution_surfaces(repository.path()).err().expect("reject Windows shadow");
         assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
     }

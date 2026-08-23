@@ -125,10 +125,12 @@ fn reject_python_loadable_artifact(path: &str) -> Result<()> {
     let in_bytecode_cache = path
         .components()
         .any(|component| component.as_os_str().to_str().is_some_and(|component| component.eq_ignore_ascii_case("__pycache__")));
-    let loadable_extension = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "pyc" | "pyo" | "pyd" | "so"));
+    let loadable_extension = path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
+        matches!(
+            extension.to_ascii_lowercase().as_str(),
+            "pyc" | "pyo" | "pyd" | "so" | "zip" | "egg" | "whl" | "pyz" | "pyzw"
+        )
+    });
     if in_bytecode_cache || loadable_extension {
         bail!(
             "Python-loadable artifact is unsupported because its executable contents cannot be audited: {}",
@@ -510,12 +512,17 @@ mod tests {
     }
 
     #[test]
-    fn python_loadable_binary_and_bytecode_artifacts_are_rejected() {
+    fn python_loadable_binary_bytecode_and_archive_artifacts_are_rejected() {
         for path in [
             "script/helper.pyc",
             "script/helper.pyo",
             "script/helper.pyd",
             "script/helper.cpython-313-x86_64-linux-gnu.so",
+            "script/helper.zip",
+            "script/helper.egg",
+            "script/helper.whl",
+            "script/helper.pyz",
+            "script/helper.PyZw",
             "script/__pycache__/helper.txt",
         ] {
             let repository = tempfile::tempdir().expect("temporary repository");

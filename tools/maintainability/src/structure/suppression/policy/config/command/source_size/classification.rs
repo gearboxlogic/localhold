@@ -105,7 +105,7 @@ pub(super) fn validate_compiler_inputs(sources: &BTreeMap<String, String>, manif
         .and_then(toml::Value::as_table)
         .context("maintainability analyzer Cargo manifest requires a package table")?;
     if !legacy_analyzer_manifest_is_exact(manifest) {
-        for field in ["build", "autobins", "autoexamples", "autotests", "autobenches"] {
+        for field in ["build", "autolib", "autobins", "autoexamples", "autotests", "autobenches"] {
             if package.get(field) != Some(&toml::Value::Boolean(false)) {
                 bail!("maintainability analyzer Cargo package.{field} must be false to close the authenticated compiler-input inventory");
             }
@@ -411,7 +411,9 @@ mod tests {
     use super::*;
 
     fn closed_manifest(extra: &str) -> String {
-        format!("workspace = {{}}\n[package]\nname = 'maintainability'\nbuild = false\nautobins = false\nautoexamples = false\nautotests = false\nautobenches = false\n{extra}")
+        format!(
+            "workspace = {{}}\n[package]\nname = 'maintainability'\nbuild = false\nautolib = false\nautobins = false\nautoexamples = false\nautotests = false\nautobenches = false\n{extra}"
+        )
     }
 
     #[test]
@@ -424,7 +426,7 @@ mod tests {
         let changed = format!("{manifest}\n# unreviewed change\n");
         assert!(!legacy_analyzer_manifest_is_exact(&changed));
         let error = validate_compiler_inputs(&sources, &changed).expect_err("changed legacy manifest");
-        assert!(error.to_string().contains("package.autobins must be false"), "{error:#}");
+        assert!(error.to_string().contains("package.autolib must be false"), "{error:#}");
     }
 
     #[test]
@@ -663,7 +665,7 @@ mod tests {
     #[test]
     fn compiler_inventory_disables_implicit_cargo_target_discovery() {
         let sources = BTreeMap::from([(format!("{SOURCE_ROOT}/main.rs"), "fn main() {}\n".to_owned())]);
-        for field in ["build", "autobins", "autoexamples", "autotests", "autobenches"] {
+        for field in ["build", "autolib", "autobins", "autoexamples", "autotests", "autobenches"] {
             let manifest = closed_manifest("").replace(&format!("{field} = false\n"), "");
             let error = validate_compiler_inputs(&sources, &manifest).unwrap_err();
             assert!(error.to_string().contains(&format!("package.{field}")), "{error:#}");

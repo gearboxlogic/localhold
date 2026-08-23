@@ -54,9 +54,13 @@ pub(super) struct Candidate<'a> {
     pub(super) resolver_command: &'a [String],
     pub(super) assignment_command: &'a [String],
     pub(super) source: &'a str,
+    pub(super) source_is_reviewed: bool,
 }
 
 pub(super) fn is_reviewed(candidate: &Candidate<'_>) -> bool {
+    if !candidate.source_is_reviewed {
+        return false;
+    }
     if candidate.resolver == "trusted_system_command" && candidate.path == "script/check-maintainability-bootstrap.sh" {
         let expected_tool = candidate
             .name

@@ -27,8 +27,8 @@ pub(super) fn dispatch_is_opaque(path: &str, arguments: &[String]) -> bool {
         )
 }
 
-pub(super) fn reviewed_shell_wrappers(path: &str, source: &str) -> bool {
-    if path != "script/check-maintainability-bootstrap.sh" {
+pub(super) fn reviewed_shell_wrappers(path: &str, source: &str, source_is_reviewed: bool) -> bool {
+    if path != "script/check-maintainability-bootstrap.sh" || !source_is_reviewed {
         return false;
     }
     let lines = source.lines().collect::<Vec<_>>();
@@ -354,24 +354,28 @@ mod tests {
         .is_some_and(|(opaque, _)| opaque)
         {
             assert!(
-                !reviewed_shell_wrappers("script/check-maintainability-bootstrap.sh", &reviewed_bootstrap),
+                !reviewed_shell_wrappers("script/check-maintainability-bootstrap.sh", &reviewed_bootstrap, true),
                 "legacy bootstrap bridge no longer needs its wrapper exception"
             );
             return;
         }
-        assert!(reviewed_shell_wrappers("script/check-maintainability-bootstrap.sh", &reviewed_bootstrap));
-        assert!(!reviewed_shell_wrappers("script/unreviewed.sh", &reviewed_bootstrap));
+        assert!(reviewed_shell_wrappers("script/check-maintainability-bootstrap.sh", &reviewed_bootstrap, true));
+        assert!(!reviewed_shell_wrappers("script/check-maintainability-bootstrap.sh", &reviewed_bootstrap, false));
+        assert!(!reviewed_shell_wrappers("script/unreviewed.sh", &reviewed_bootstrap, true));
         assert!(!reviewed_shell_wrappers(
             "script/check-maintainability-bootstrap.sh",
-            &reviewed_bootstrap.replace("diff.external=", "alias.lint=!sh quality/lint.txt")
+            &reviewed_bootstrap.replace("diff.external=", "alias.lint=!sh quality/lint.txt"),
+            true
         ));
         assert!(!reviewed_shell_wrappers(
             "script/check-maintainability-bootstrap.sh",
-            &format!("{reviewed_bootstrap}\ngit_at() {{\n  printf bypass\n}}")
+            &format!("{reviewed_bootstrap}\ngit_at() {{\n  printf bypass\n}}"),
+            true
         ));
         assert!(!reviewed_shell_wrappers(
             "script/check-maintainability-bootstrap.sh",
-            &format!("{reviewed_bootstrap}\nfunction git_at\n\n# alternate declaration\n{{\n  printf bypass\n}}")
+            &format!("{reviewed_bootstrap}\nfunction git_at\n\n# alternate declaration\n{{\n  printf bypass\n}}"),
+            true
         ));
         assert!(wrapper_body_is_exact(
             "$git_command",

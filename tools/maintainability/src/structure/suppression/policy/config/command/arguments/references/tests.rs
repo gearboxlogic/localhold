@@ -216,7 +216,7 @@ fn assert_reviewed_shell_surface_is_closed(surface_path: &str) {
         },
         functions: &functions,
         review: ReviewState {
-            git_wrappers: git::reviewed_shell_wrappers(surface_path, &source),
+            git_wrappers: git::reviewed_shell_wrappers(surface_path, &source, true),
             source: true,
         },
     };
@@ -259,7 +259,7 @@ fn assert_reviewed_shell_surface_is_closed(surface_path: &str) {
 fn assert_reviewed_shell_preamble_is_closed(surface_path: &str, command_source: &str) -> String {
     let opaque_assignments = super::super::dynamic::opaque_command_assignment_names(surface_path, command_source);
     assert!(
-        opaque_assignments.is_empty() && !super::super::dynamic::has_opaque_command_assignment_flow(surface_path, command_source),
+        opaque_assignments.is_empty() && !super::super::dynamic::has_opaque_command_assignment_flow(surface_path, command_source, true),
         "reviewed shell surface {surface_path:?} has opaque command assignments: {opaque_assignments:#?}"
     );
     assert!(

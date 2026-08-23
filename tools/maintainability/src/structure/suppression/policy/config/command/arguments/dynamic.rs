@@ -14,12 +14,12 @@ pub(super) fn has_rust_tool_assignment_flow(source: &str, case_insensitive_tools
     opaque_target || computed.iter().any(|name| references_variable(source, name)) || computed_variables_reach_rust_command(source, &computed, case_insensitive_tools)
 }
 
-pub(super) fn has_opaque_command_assignment_flow(path: &str, source: &str) -> bool {
+pub(super) fn has_opaque_command_assignment_flow(path: &str, source: &str, source_is_reviewed: bool) -> bool {
     let (invoked, opaque_invocation) = invoked_dynamic_command_variables(path, source);
     if opaque_invocation {
         return true;
     }
-    let assigned = assigned_command_variables(path, source);
+    let assigned = assigned_command_variables(path, source, source_is_reviewed);
     if invoked.iter().any(|name| assigned.get(name).is_none_or(|opaque_assignment| *opaque_assignment)) {
         return true;
     }
@@ -30,7 +30,7 @@ pub(super) fn has_opaque_command_assignment_flow(path: &str, source: &str) -> bo
 #[cfg(test)]
 pub(super) fn opaque_command_assignment_names(path: &str, source: &str) -> BTreeSet<String> {
     let (mut invoked, opaque_invocation) = invoked_dynamic_command_variables(path, source);
-    let assigned = assigned_command_variables(path, source);
+    let assigned = assigned_command_variables(path, source, true);
     invoked.retain(|name| assigned.get(name).is_none_or(|opaque_assignment| *opaque_assignment));
     if opaque_invocation {
         invoked.insert("<opaque-invocation>".to_owned());
@@ -42,7 +42,7 @@ pub(super) fn has_reviewed_trusted_system_command(source: &str) -> bool {
     resolvers::has_trusted_system_command(source)
 }
 
-fn assigned_command_variables(path: &str, source: &str) -> BTreeMap<String, bool> {
+fn assigned_command_variables(path: &str, source: &str, source_is_reviewed: bool) -> BTreeMap<String, bool> {
     let mut assigned = BTreeMap::new();
     for command in tokens::source_command_tokens(source) {
         for word in &command {
@@ -53,7 +53,7 @@ fn assigned_command_variables(path: &str, source: &str) -> BTreeMap<String, bool
             let Some((name, value)) = assignment(word) else {
                 continue;
             };
-            let opaque = opaque_command_assignment(path, name, value, &command, source);
+            let opaque = opaque_command_assignment(path, (name, value), &command, source, source_is_reviewed);
             assigned.entry(name.to_owned()).and_modify(|existing| *existing |= opaque).or_insert(opaque);
         }
     }
@@ -69,13 +69,14 @@ fn compound_assignment_name(word: &str) -> Option<&str> {
     (appended || target != name).then_some(name).filter(|name| valid_variable_name(name))
 }
 
-fn opaque_command_assignment(path: &str, name: &str, value: &str, command: &[String], source: &str) -> bool {
+fn opaque_command_assignment(path: &str, assignment: (&str, &str), command: &[String], source: &str, source_is_reviewed: bool) -> bool {
+    let (name, value) = assignment;
     let value = value.trim_matches(['\'', '"']);
     if is_reviewed_literal_program_assignment(path, name, value) || is_reviewed_parameter_program_assignment(path, name, value, command) {
         return false;
     }
     if value.contains("$(") || value.contains('`') {
-        return opaque_command_substitution(path, name, command, source);
+        return opaque_command_substitution(path, name, command, source, source_is_reviewed);
     }
     true
 }
@@ -163,7 +164,7 @@ fn is_reviewed_parameter_program_assignment(path: &str, name: &str, value: &str,
     )
 }
 
-fn opaque_command_substitution(path: &str, name: &str, command: &[String], source: &str) -> bool {
+fn opaque_command_substitution(path: &str, name: &str, command: &[String], source: &str, source_is_reviewed: bool) -> bool {
     if matches!(
         (path, name, command),
         ("script/claude-review.sh", "claude_binary", [assignment, option, tool, fallback, closing])
@@ -190,6 +191,7 @@ fn opaque_command_substitution(path: &str, name: &str, command: &[String], sourc
         resolver_command,
         assignment_command: command,
         source,
+        source_is_reviewed,
     })
 }
 
@@ -413,7 +415,11 @@ fn valid_variable_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_opaque_command_assignment_flow, has_rust_tool_assignment_flow};
+    use super::{has_opaque_command_assignment_flow as production_opaque_command_assignment_flow, has_rust_tool_assignment_flow};
+
+    fn has_opaque_command_assignment_flow(path: &str, source: &str) -> bool {
+        production_opaque_command_assignment_flow(path, source, false)
+    }
 
     #[test]
     fn referenced_rust_tool_assignments_fail_closed() {
@@ -488,6 +494,25 @@ mod tests {
             ".github/workflows/release-smoke.yml",
             "binary=\"$PWD/extracted/localhold-${RELEASE_TAG}-x86_64-unknown-linux-gnu/bin/hold\"; \"$binary\" --version"
         ));
+    }
+
+    #[test]
+    fn resolver_exceptions_require_current_source_profile() {
+        let path = "script/run-maintainability-gate.sh";
+        let source = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../").join(path)).expect("reviewed gate runner");
+        assert!(!production_opaque_command_assignment_flow(path, &source, true));
+        assert!(production_opaque_command_assignment_flow(path, &source, false));
+
+        let start = source.find("authenticated_tool() {").expect("authenticated tool definition");
+        let end = start + source[start..].find("\n}\n").expect("authenticated tool definition end") + 2;
+        let definition = &source[start..end];
+        for mutation in [
+            source.replacen(definition, &format!("if false; then\n{definition}\nfi"), 1),
+            source.replacen(definition, &format!("(\n{definition}\n)"), 1),
+            format!("{}\n{definition}\n", source.replacen(definition, "", 1)),
+        ] {
+            assert!(production_opaque_command_assignment_flow(path, &mutation, false));
+        }
     }
 
     #[test]

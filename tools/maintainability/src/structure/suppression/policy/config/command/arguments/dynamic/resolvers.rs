@@ -111,7 +111,18 @@ pub(super) fn has_trusted_system_command(source: &str) -> bool {
 
 fn exact_function(source: &str, name: &str, definition: &str) -> bool {
     let command_source = tokens::without_noncommand_shell_data(source);
-    source.match_indices(definition).count() == 1 && tokens::declared_shell_function_count(&command_source, name) == 1
+    let mut definitions = source.match_indices(definition);
+    let Some((offset, _)) = definitions.next() else {
+        return false;
+    };
+    if definitions.next().is_some() {
+        return false;
+    }
+    let line_index = source[..offset].bytes().filter(|byte| *byte == b'\n').count();
+    let Some(declaration) = definition.lines().next() else {
+        return false;
+    };
+    command_source.lines().nth(line_index).is_some_and(|line| line.trim_start() == declaration) && tokens::declared_shell_function_count(&command_source, name) == 1
 }
 
 #[cfg(test)]
@@ -131,6 +142,11 @@ mod tests {
         assert!(exact_function(&gate, "authenticated_tool", AUTHENTICATED_TOOL));
         assert!(!exact_function(
             &format!("{gate}\nfunction authenticated_tool\n{{\n  printf /tmp/helper\n}}\n"),
+            "authenticated_tool",
+            AUTHENTICATED_TOOL
+        ));
+        assert!(!exact_function(
+            &format!("cat <<'PROFILE'\n{AUTHENTICATED_TOOL}\nPROFILE\nfunction authenticated_tool\n{{\n  printf /tmp/helper\n}}\n"),
             "authenticated_tool",
             AUTHENTICATED_TOOL
         ));

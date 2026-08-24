@@ -11,6 +11,10 @@ if /usr/bin/env | /usr/bin/grep '^BASH_FUNC_' >/dev/null; then
     /usr/bin/printf 'maintainability bootstrap rejects inherited exported shell functions\n' >&2
     exit 1 # inherited exported functions are unsupported
 fi
+if /usr/bin/env | /usr/bin/grep -E '^(BASHOPTS|SHELLOPTS)=' >/dev/null; then
+    /usr/bin/printf 'maintainability bootstrap rejects inherited shell option channels\n' >&2
+    exit 1
+fi
 
 usage() {
     printf 'usage: check-maintainability-bootstrap.sh [--root PATH] [--source-safety|--dependency-unsafe|--maintainability|--test-environment]\n' >&2
@@ -84,8 +88,8 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=cd756b8a6039e1192bb0c95e7c42e66148f7b883f3b12662b31c70269165a468
-readonly reviewed_bootstrap_tests_sha256=b469af64538abb9e03a251da06c93c329fee0d9b62d3347c145a45cfc1916b82
-readonly reviewed_gate_runner_sha256=b15c0fe7aa61af07095bf174836269d7c3c98ee688fbab669305a6153123e257
+readonly reviewed_bootstrap_tests_sha256=7d989a1443579f0fff92258f1929ac0f625f2353216219e98b0e7955383a1a6f
+readonly reviewed_gate_runner_sha256=7967bd6670b5d1849d290fc30447ad22a0b93497547c6dff4c90c99f32d4ff1d
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then
@@ -163,7 +167,7 @@ scrub_untrusted_environment() {
     while IFS= read -r name; do
         uppercase=${name^^}
         case "$uppercase" in
-            BASH_ENV | ENV | CDPATH | IFS | COMPILER_PATH | GCC_EXEC_PREFIX | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | RIPGREP_CONFIG_PATH | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
+            BASH_ENV | ENV | CDPATH | IFS | COMPILER_PATH | GCC_EXEC_PREFIX | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | PERL5LIB | PERL5OPT | PERLLIB | RIPGREP_CONFIG_PATH | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
                 RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \
                 CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \
                 CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | EDITOR | GIT_* | LESS | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | LV | PAGER | SSH_ASKPASS | SSH_ASKPASS_REQUIRE | TAR_OPTIONS | VISUAL)

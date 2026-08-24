@@ -235,13 +235,13 @@ const TRUSTED_DISPATCH_JOBS: &[TrustedDispatchJob] = &[
         header: "  trusted-maintainability:",
         runner: "    runs-on: ubuntu-latest",
         authentication: TRUSTED_MAINTAINABILITY_AUTHENTICATION,
-        prefix_sha256: "bb454c630156aeb850793b7967779558e95f9724c53c3afb947ccfdeefb4b0f6",
+        prefix_sha256: "c4f9dce7fc27994bfe0f719ba4f62a6daeb7ddec28fafefba5e9edf1e952aa8b",
     },
     TrustedDispatchJob {
         header: "  trusted-dependency-unsafe-windows:",
         runner: "    runs-on: windows-latest",
         authentication: TRUSTED_WINDOWS_DEPENDENCY_AUTHENTICATION,
-        prefix_sha256: "4689ac5f093df5c90c713cede6584ea917eda2bf82a31b4345255ae16ee647a0",
+        prefix_sha256: "9a2c1d5e70da60f9267108ddcf387a46ba5c17f19c10195a4509e73db54d4814",
     },
 ];
 

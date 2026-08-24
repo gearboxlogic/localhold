@@ -49,6 +49,8 @@ fn direct_filesystem_writers_fail_closed() {
         r#"(open)("Justfile", "w").write(payload)"#,
         r#"message = f"{(Path('Justfile').write_text)(payload)}""#,
         r#"message = f"{(open)('Justfile', 'w').write(payload)}""#,
+        r#"Path("Justfile").write_text.__call__(payload)"#,
+        r#"open.__call__("Justfile", "w").write(payload)"#,
         "writer = Path('Justfile').write_text\nwriter(payload)\n",
         "writer = open\nwriter('Justfile', 'w').write(payload)\n",
         "writer = (builtins.open)\nwriter(file='Justfile', mode='a')\n",
@@ -59,8 +61,89 @@ fn direct_filesystem_writers_fail_closed() {
         "writer = open\ncontainer = [writer]\n",
         "(writer := open)\n",
         "(writer := Path('Justfile').write_bytes)\n",
+        "writer: Callable[[str], int] = open\n",
+        "first = second = open\n",
+        "holder.writer = open\n",
+        "def invoke(opener=open):\n    return opener\n",
+        "container = [open]\nopener = container[0]\nopener('target/report.txt', 'w')\n",
+        "[opener] = [open]\nopener('target/report.txt', 'w')\n",
+        "opener = [open][0]\nopener('target/report.txt', 'w')\n",
+        "from functools import partial\nopener = partial(open, 'target/report.txt', 'w')\n",
+        "from functools import partial\nwriter = partial(Path('Justfile').write_text, encoding='utf-8')\n",
+        "remover = os.unlink\nremover('target/report.txt')\n",
+        "mover = shutil.move\nmover('target/input.txt', 'target/output.txt')\n",
+        "writer = Path('Justfile').unlink\nwriter()\n",
+        "writer = Path.rename\nwriter(Path('target/input.txt'), 'target/output.txt')\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='script')\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='.github/workflows', suffix='.yml')\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir=destination)\n",
+        "import tempfile\nfactory = tempfile.NamedTemporaryFile\nfactory(dir='target', suffix='.txt')\n",
     ] {
         assert!(has_opaque_write(source), "{source}");
+    }
+}
+
+#[test]
+fn modeled_mutator_capabilities_fail_closed() {
+    for capability in [
+        "open",
+        "builtins.open",
+        "io.open",
+        "os.copy_file_range",
+        "os.fchmod",
+        "os.fchown",
+        "os.ftruncate",
+        "os.pwrite",
+        "os.pwritev",
+        "os.sendfile",
+        "os.write",
+        "os.writev",
+        "os.fdopen",
+        "os.open",
+        "os.chmod",
+        "os.chown",
+        "os.lchown",
+        "os.link",
+        "os.makedirs",
+        "os.mkdir",
+        "os.remove",
+        "os.removedirs",
+        "os.rename",
+        "os.renames",
+        "os.replace",
+        "os.rmdir",
+        "os.symlink",
+        "os.truncate",
+        "os.unlink",
+        "os.utime",
+        "shutil.copy",
+        "shutil.copy2",
+        "shutil.copyfile",
+        "shutil.copytree",
+        "shutil.move",
+        "shutil.rmtree",
+        "tempfile.NamedTemporaryFile",
+    ] {
+        let source = format!("stored = {capability}\n");
+        assert!(has_opaque_write(&source), "{capability}");
+    }
+    for method in [
+        "chmod",
+        "hardlink_to",
+        "lchmod",
+        "mkdir",
+        "open",
+        "rename",
+        "replace",
+        "rmdir",
+        "symlink_to",
+        "touch",
+        "unlink",
+        "write_bytes",
+        "write_text",
+    ] {
+        let source = format!("stored = target.{method}\n");
+        assert!(has_opaque_write(&source), "{method}");
     }
 }
 
@@ -72,7 +155,11 @@ fn filesystem_copies_to_data_paths_remain_allowed() {
     assert!(!has_opaque_write(r#"open("target/report.txt", "wb")"#));
     assert!(!has_opaque_write(r#"(open)("target/report.txt", "wb")"#));
     assert!(!has_opaque_write(r#"(Path("target/report.txt").write_text)(report)"#));
+    assert!(!has_opaque_write(r#"Path("target/report.txt").write_text.__call__(report)"#));
+    assert!(!has_opaque_write(r#"open.__call__("target/report.txt", "w").write(report)"#));
     assert!(!has_opaque_write("writer = Path('target/report.txt').write_text\nwriter(report)\n"));
+    assert!(!has_opaque_write("writer: Callable[[str], int] = Path('target/report.txt').write_text\nwriter(report)\n"));
+    assert!(!has_opaque_write("container = [Path('target/report.txt').unlink]\ncontainer[0]()\n"));
     assert!(!has_opaque_write("writer = Path('target/report.txt').write_text\nmessage = f'{writer(report)}'\n"));
     assert!(!has_opaque_write("writer = formatter\nwriter('Justfile', 'w')\n"));
     assert!(!has_opaque_write("writer = open_writer\nwriter('Justfile', 'w')\n"));
@@ -83,6 +170,8 @@ fn filesystem_copies_to_data_paths_remain_allowed() {
     assert!(!has_opaque_write("print('safe')  # writer = open; writer('Justfile', 'w')\n"));
     assert!(!has_opaque_write("message = \"\"\"safe; writer = open\n# writer = builtins.open\"\"\"\n"));
     assert!(!has_opaque_write("writer = (\n    Path('target/report.txt').write_text\n)\ncontainer = [writer]\n"));
+    assert!(!has_opaque_write("import tempfile\ntempfile.NamedTemporaryFile(dir='target', suffix='.txt')\n"));
+    assert!(!has_opaque_write("import tempfile\ntempfile.NamedTemporaryFile()\n"));
     assert!(!has_opaque_write(r#"open("Justfile", "rb")"#));
     assert!(!has_opaque_write(r#"Path("Justfile").open("r")"#));
     assert!(!has_opaque_write(r#"(Path(".") / "Justfile").open("rb")"#));

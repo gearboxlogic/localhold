@@ -211,6 +211,30 @@ pub(super) fn without_noncommand_shell_data(source: &str) -> String {
     output
 }
 
+pub(super) fn shell_expansion_source(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut pending = std::collections::VecDeque::<Heredoc>::new();
+    for line in source.lines() {
+        if let Some(heredoc) = pending.front() {
+            let candidate = if heredoc.strip_tabs { line.trim_start_matches('\t') } else { line };
+            if candidate == heredoc.delimiter {
+                pending.pop_front();
+            } else if heredoc.allows_expansion {
+                output.extend(line.chars().map(|character| match character {
+                    '\'' | '"' | '#' => ' ',
+                    _ => character,
+                }));
+            }
+            output.push('\n');
+            continue;
+        }
+        output.push_str(line);
+        output.push('\n');
+        pending.extend(heredocs_on_line(line));
+    }
+    output
+}
+
 pub(super) fn has_executable_unquoted_heredoc(source: &str) -> bool {
     let mut pending = std::collections::VecDeque::<Heredoc>::new();
     for line in source.lines() {
@@ -507,8 +531,8 @@ fn shell_tokens(command: &str, split_equals: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_substitution_commands, command_tokens, declared_shell_function_count, declared_shell_functions, has_executable_unquoted_heredoc, source_command_tokens,
-        without_noncommand_shell_data,
+        command_substitution_commands, command_tokens, declared_shell_function_count, declared_shell_functions, has_executable_unquoted_heredoc, shell_expansion_source,
+        source_command_tokens, without_noncommand_shell_data,
     };
 
     #[test]
@@ -633,6 +657,25 @@ mod tests {
         assert!(!has_executable_unquoted_heredoc("cat <<'DOC'\n$(sh quality/lint.txt)\nDOC\n"));
         assert!(!has_executable_unquoted_heredoc("cat <<D\"OC\"\n$(sh quality/lint.txt)\nDOC\n"));
         assert!(!has_executable_unquoted_heredoc("cat <<DOC\n\\$(sh quality/lint.txt)\nDOC\n"));
+    }
+
+    #[test]
+    fn shell_expansion_source_removes_only_nonexpanding_heredoc_payloads() {
+        let source = concat!(
+            "cat <<'LITERAL'\n",
+            "$((ignored))\n",
+            "\\\n",
+            "LITERAL\n",
+            "cat <<ACTIVE\n",
+            "'$((checked))' # quotes and comments are data here\n",
+            "ACTIVE\n",
+            "$((outside))\n",
+        );
+        let expansion_source = shell_expansion_source(source);
+        assert!(!expansion_source.contains("ignored"));
+        assert!(expansion_source.contains("$((checked))"));
+        assert!(expansion_source.contains("$((outside))"));
+        assert!(!expansion_source.contains("'$((checked))'"));
     }
 
     #[test]

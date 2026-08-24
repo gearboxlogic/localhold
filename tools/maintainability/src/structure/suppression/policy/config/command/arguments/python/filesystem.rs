@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
+mod capability;
 mod reviewed;
+mod temporary;
 
 pub(super) fn is_reviewed_dynamic_write_surface(path: &str, source: &str) -> bool {
     reviewed::is_reviewed_dynamic_write_surface(path, source)
@@ -11,99 +13,40 @@ pub(super) fn has_opaque_write(source: &str) -> bool {
     if super::evaluation::has_non_ascii_code(source) {
         return true;
     }
-    if has_opaque_writer_binding(source) {
-        return true;
-    }
     let mut scanner = CallScanner::new(source);
     let mut handled_methods = BTreeSet::new();
+    let mut invoked_capabilities = BTreeSet::new();
     while let Some(call) = scanner.next() {
+        invoked_capabilities.insert(call.start);
         if handled_methods.contains(&call.start) {
             continue;
         }
         let chained_method = scanner.following_method(&call);
         if let Some(method) = &chained_method
-            && is_path_mutation_method(&method.name)
+            && is_path_mutation_method(called_name(&method.name))
         {
             handled_methods.insert(method.start);
+            invoked_capabilities.insert(method.start);
         }
-        if opaque_descriptor_write(call.name.as_str())
+        if opaque_descriptor_write(called_name(&call.name))
             || chained_method.as_ref().is_some_and(|method| chained_path_write_is_opaque(&scanner, &call, method))
             || direct_path_method_is_opaque(&scanner, &call)
             || direct_open_is_opaque(&scanner, &call)
             || descriptor_open_is_opaque(&scanner, &call)
+            || temporary::named_temporary_file_is_opaque(&scanner, &call)
             || mutation_arguments_are_opaque(&scanner, &call)
         {
             return true;
         }
     }
-    scanner.opaque_formatted_write_expression
+    scanner.opaque_formatted_write_expression || capability::has_opaque_reference(&scanner, &invoked_capabilities)
 }
 
-fn has_opaque_writer_binding(source: &str) -> bool {
-    executable_statements(source).iter().any(|statement| writer_binding_is_opaque(statement))
-}
-
-fn executable_statements(source: &str) -> Vec<String> {
-    CallScanner::new(source).executable_statements()
-}
-
-fn writer_binding_is_opaque(statement: &str) -> bool {
-    let statement = statement_before_comment(statement).trim().trim_end_matches(';');
-    let statement = strip_grouping_parentheses(statement);
-    let Some((name, value)) = statement.split_once('=') else {
-        return false;
-    };
-    let name = name.trim();
-    let name = name.strip_suffix(':').unwrap_or(name).trim();
-    let value = value.trim();
-    if !is_identifier(name) || value.starts_with('=') {
-        return false;
+fn called_name(mut name: &str) -> &str {
+    while let Some(callable) = name.strip_suffix(".__call__") {
+        name = callable;
     }
-    matches!(strip_grouping_parentheses(value), "open" | "builtins.open" | "io.open") || opaque_bound_path_method(value)
-}
-
-fn statement_before_comment(statement: &str) -> &str {
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, character) in statement.char_indices() {
-        if escaped {
-            escaped = false;
-        } else if character == '\\' && quote.is_some() {
-            escaped = true;
-        } else if quote == Some(character) {
-            quote = None;
-        } else if quote.is_none() && matches!(character, '\'' | '"') {
-            quote = Some(character);
-        } else if quote.is_none() && character == '#' {
-            return &statement[..index];
-        }
-    }
-    statement
-}
-
-fn strip_grouping_parentheses(mut value: &str) -> &str {
-    loop {
-        value = value.trim();
-        let Some(inner) = value.strip_prefix('(').and_then(|value| value.strip_suffix(')')) else {
-            return value;
-        };
-        value = inner;
-    }
-}
-
-fn opaque_bound_path_method(value: &str) -> bool {
-    let mut scanner = CallScanner::new(value);
-    let call = scanner.next();
-    let Some(call) = call.filter(|call| is_path_constructor(&call.name)) else {
-        return false;
-    };
-    let Some(method) = scanner.following_method_reference(&call) else {
-        return false;
-    };
-    if !matches!(method.name.as_str(), "write_bytes" | "write_text") || !scanner.only_grouping_after(method.end) {
-        return false;
-    }
-    path_argument_is_opaque(&scanner, call.opening_parenthesis, ArgumentSpec::new(0, &[]))
+    name
 }
 
 fn is_path_constructor(name: &str) -> bool {
@@ -117,8 +60,44 @@ fn opaque_descriptor_write(name: &str) -> bool {
     )
 }
 
+fn is_direct_mutator(name: &str) -> bool {
+    opaque_descriptor_write(name)
+        || matches!(
+            name,
+            "builtins.open"
+                | "io.open"
+                | "open"
+                | "os.fdopen"
+                | "os.open"
+                | "os.chmod"
+                | "os.chown"
+                | "os.lchown"
+                | "os.link"
+                | "os.makedirs"
+                | "os.mkdir"
+                | "os.remove"
+                | "os.removedirs"
+                | "os.rename"
+                | "os.renames"
+                | "os.replace"
+                | "os.rmdir"
+                | "os.symlink"
+                | "os.truncate"
+                | "os.unlink"
+                | "os.utime"
+                | "shutil.copy"
+                | "shutil.copy2"
+                | "shutil.copyfile"
+                | "shutil.copytree"
+                | "shutil.move"
+                | "shutil.rmtree"
+                | "NamedTemporaryFile"
+                | "tempfile.NamedTemporaryFile"
+        )
+}
+
 fn mutation_arguments_are_opaque(scanner: &CallScanner, call: &Call) -> bool {
-    let arguments: &[ArgumentSpec] = match call.name.as_str() {
+    let arguments: &[ArgumentSpec] = match called_name(&call.name) {
         "shutil.copy" | "shutil.copy2" | "shutil.copyfile" | "shutil.copytree" => &[ArgumentSpec::new(1, &["dst"])],
         "shutil.move" | "os.link" | "os.rename" | "os.renames" | "os.replace" => &[ArgumentSpec::new(0, &["src"]), ArgumentSpec::new(1, &["dst"])],
         "os.chmod" | "os.chown" | "os.lchown" | "os.makedirs" | "os.mkdir" | "os.remove" | "os.removedirs" | "os.rmdir" | "os.truncate" | "os.unlink" | "os.utime"
@@ -131,7 +110,7 @@ fn mutation_arguments_are_opaque(scanner: &CallScanner, call: &Call) -> bool {
 
 fn chained_path_write_is_opaque(scanner: &CallScanner, call: &Call, method: &Call) -> bool {
     let receiver = ArgumentSpec::new(0, &[]);
-    match method.name.as_str() {
+    match called_name(&method.name) {
         "chmod" | "lchmod" | "mkdir" | "rmdir" | "touch" | "unlink" | "write_bytes" | "write_text" => path_argument_is_opaque(scanner, call.opening_parenthesis, receiver),
         "open" => writable_mode(scanner, method.opening_parenthesis, 0) && path_argument_is_opaque(scanner, call.opening_parenthesis, receiver),
         "rename" | "replace" => {
@@ -143,14 +122,15 @@ fn chained_path_write_is_opaque(scanner: &CallScanner, call: &Call, method: &Cal
 }
 
 fn direct_open_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
-    if !matches!(call.name.as_str(), "builtins.open" | "io.open" | "open") || !writable_mode(scanner, call.opening_parenthesis, 1) {
+    if !matches!(called_name(&call.name), "builtins.open" | "io.open" | "open") || !writable_mode(scanner, call.opening_parenthesis, 1) {
         return false;
     }
     path_argument_is_opaque(scanner, call.opening_parenthesis, ArgumentSpec::new(0, &["file"]))
 }
 
 fn direct_path_method_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
-    let (owner, method) = call.name.rsplit_once('.').unwrap_or(("", call.name.as_str()));
+    let name = called_name(&call.name);
+    let (owner, method) = name.rsplit_once('.').unwrap_or(("", name));
     if matches!(owner, "builtins" | "io" | "os" | "shutil") || owner.is_empty() && method == "open" && !scanner.is_method_call(call.start) {
         return false;
     }
@@ -182,10 +162,11 @@ fn is_path_mutation_method(method: &str) -> bool {
 }
 
 fn descriptor_open_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
-    if call.name == "os.fdopen" {
+    let name = called_name(&call.name);
+    if name == "os.fdopen" {
         return writable_mode(scanner, call.opening_parenthesis, 1);
     }
-    if call.name != "os.open" || !writable_os_flags(scanner, call.opening_parenthesis) {
+    if name != "os.open" || !writable_os_flags(scanner, call.opening_parenthesis) {
         return false;
     }
     path_argument_is_opaque(scanner, call.opening_parenthesis, ArgumentSpec::new(0, &["path"]))
@@ -285,52 +266,6 @@ impl CallScanner {
             index: 0,
             opaque_formatted_write_expression: false,
         }
-    }
-
-    fn executable_statements(&self) -> Vec<String> {
-        let mut statements = Vec::new();
-        let mut statement = String::new();
-        let mut depth = 0_u32;
-        let mut index = 0;
-        while index < self.characters.len() {
-            if let Some(literal) = self.string_literal(index) {
-                statement.extend(&self.characters[index..literal.end]);
-                index = literal.end;
-                continue;
-            }
-            if self.characters[index] == '#' {
-                index = self.skip_statement_comment(index, depth, &mut statements, &mut statement);
-                continue;
-            }
-            let character = self.characters[index];
-            match character {
-                '(' | '[' | '{' => depth += 1,
-                ')' | ']' | '}' => depth = depth.saturating_sub(1),
-                ';' | '\n' if depth == 0 => {
-                    push_statement(&mut statements, &mut statement);
-                    index += 1;
-                    continue;
-                }
-                _ => {}
-            }
-            statement.push(character);
-            index += 1;
-        }
-        push_statement(&mut statements, &mut statement);
-        statements
-    }
-
-    fn skip_statement_comment(&self, index: usize, depth: u32, statements: &mut Vec<String>, statement: &mut String) -> usize {
-        let mut next = self.comment_end(index);
-        if depth == 0 {
-            push_statement(statements, statement);
-        } else {
-            statement.push('\n');
-        }
-        if self.characters.get(next) == Some(&'\n') {
-            next += 1;
-        }
-        next
     }
 
     fn next(&mut self) -> Option<Call> {
@@ -450,13 +385,24 @@ impl CallScanner {
         }
         index += 1;
         let start = index;
-        while self.characters.get(index).is_some_and(|character| is_identifier_character(*character)) {
-            index += 1;
+        loop {
+            while self.characters.get(index).is_some_and(|character| is_identifier_character(*character)) {
+                index += 1;
+            }
+            let dot = self.skip_whitespace(index);
+            if self.characters.get(dot) != Some(&'.') {
+                break;
+            }
+            let next = self.skip_whitespace(dot + 1);
+            if !self.characters.get(next).is_some_and(|character| is_identifier_start(*character)) {
+                break;
+            }
+            index = next;
         }
         if index == start {
             return None;
         }
-        let name = self.characters[start..index].iter().collect::<String>();
+        let name = self.characters[start..index].iter().filter(|character| !character.is_whitespace()).collect::<String>();
         Some(MethodReference { start, name, end: index })
     }
 
@@ -495,10 +441,6 @@ impl CallScanner {
             .checked_sub(1)
             .and_then(|index| self.characters.get(index))
             .is_some_and(|character| is_identifier_character(*character) || matches!(character, ')' | ']' | '}'))
-    }
-
-    fn only_grouping_after(&self, end: usize) -> bool {
-        self.characters[end..].iter().all(|character| character.is_whitespace() || *character == ')')
     }
 
     fn closing_parenthesis(&self, opening_parenthesis: usize) -> Option<usize> {
@@ -612,14 +554,6 @@ impl CallScanner {
     }
 }
 
-fn push_statement(statements: &mut Vec<String>, statement: &mut String) {
-    let trimmed = statement.trim();
-    if !trimmed.is_empty() {
-        statements.push(trimmed.to_owned());
-    }
-    statement.clear();
-}
-
 struct StringLiteral {
     end: usize,
     content_start: usize,
@@ -694,11 +628,6 @@ fn is_identifier_start(character: char) -> bool {
 
 fn is_identifier_character(character: char) -> bool {
     character == '_' || character.is_alphanumeric()
-}
-
-fn is_identifier(value: &str) -> bool {
-    let mut characters = value.chars();
-    characters.next().is_some_and(is_identifier_start) && characters.all(is_identifier_character)
 }
 
 #[cfg(test)]

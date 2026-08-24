@@ -1,8 +1,12 @@
 use super::{command_word_index, tokens};
 
 pub(super) fn has_opaque_evaluation(path: &str, source: &str, source_is_reviewed: bool) -> bool {
-    expressions(source).iter().any(|expression| expression_is_opaque(path, expression, source_is_reviewed))
-        || parameter_expansions(source)
+    let expansion_source = tokens::shell_expansion_source(source);
+    let expansion_source = expansion_source.replace("\\\r\n", "").replace("\\\n", "");
+    expressions(&expansion_source)
+        .iter()
+        .any(|expression| expression_is_opaque(path, expression, source_is_reviewed))
+        || parameter_expansions(&expansion_source)
             .iter()
             .any(|parameter| parameter_is_opaque(path, parameter, source_is_reviewed))
         || command_is_opaque(path, source, source_is_reviewed)
@@ -60,7 +64,7 @@ fn expressions(source: &str) -> Vec<&str> {
             index += 1;
             continue;
         }
-        let arithmetic_start = bytes[index..].starts_with(b"$((") || quote.is_none() && bytes[index..].starts_with(b"((");
+        let arithmetic_start = quote != Some(b'\'') && bytes[index..].starts_with(b"$((") || quote.is_none() && bytes[index..].starts_with(b"((");
         if !arithmetic_start {
             index += 1;
             continue;
@@ -145,7 +149,7 @@ fn delimited_expression_end(bytes: &[u8], start: usize, open: u8, close: u8) -> 
 fn parameter_is_opaque(path: &str, parameter: &str, source_is_reviewed: bool) -> bool {
     let parameter = parameter.strip_prefix(['#', '!']).unwrap_or(parameter);
     let Some((name, mut index)) = leading_identifier(parameter) else {
-        return false;
+        return special_parameter_prompt_transform(parameter);
     };
     if parameter.as_bytes().get(index) == Some(&b'[') {
         let start = index + 1;
@@ -159,6 +163,9 @@ fn parameter_is_opaque(path: &str, parameter: &str, source_is_reviewed: bool) ->
         index = end + 1;
     }
     let remainder = &parameter[index..];
+    if remainder == "@P" {
+        return true;
+    }
     let Some(slice) = remainder.strip_prefix(':') else {
         return false;
     };
@@ -169,6 +176,18 @@ fn parameter_is_opaque(path: &str, parameter: &str, source_is_reviewed: bool) ->
         .split(':')
         .filter(|expression| !expression.trim().is_empty())
         .any(|expression| expression_is_opaque(path, expression, source_is_reviewed))
+}
+
+fn special_parameter_prompt_transform(parameter: &str) -> bool {
+    let bytes = parameter.as_bytes();
+    let index = if bytes.first().is_some_and(u8::is_ascii_digit) {
+        bytes.iter().position(|byte| !byte.is_ascii_digit()).unwrap_or(bytes.len())
+    } else if bytes.first().is_some_and(|byte| matches!(byte, b'*' | b'@' | b'#' | b'?' | b'-' | b'$' | b'!')) {
+        1
+    } else {
+        return false;
+    };
+    &parameter[index..] == "@P"
 }
 
 fn leading_identifier(source: &str) -> Option<(&str, usize)> {
@@ -240,6 +259,9 @@ fn expression_is_opaque(path: &str, expression: &str, source_is_reviewed: bool) 
     let bytes = expression.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
+        if bytes[index] == b'$' && special_parameter_follows(bytes, index + 1) {
+            return true;
+        }
         if !(bytes[index].is_ascii_alphabetic() || bytes[index] == b'_') {
             index += 1;
             continue;
@@ -265,6 +287,19 @@ fn expression_is_opaque(path: &str, expression: &str, source_is_reviewed: bool) 
     false
 }
 
+fn special_parameter_follows(bytes: &[u8], mut index: usize) -> bool {
+    let braced = bytes.get(index) == Some(&b'{');
+    if braced {
+        index += 1;
+    }
+    if braced && bytes.get(index) == Some(&b'#') && bytes.get(index + 1).is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_') {
+        return false;
+    }
+    bytes
+        .get(index)
+        .is_some_and(|byte| byte.is_ascii_digit() || matches!(byte, b'*' | b'@' | b'#' | b'?' | b'-' | b'$' | b'!'))
+}
+
 fn reviewed_expression(path: &str, expression: &str, source_is_reviewed: bool) -> bool {
     if !source_is_reviewed {
         return false;
@@ -273,9 +308,13 @@ fn reviewed_expression(path: &str, expression: &str, source_is_reviewed: bool) -
     matches!(
         (path, expression),
         ("script/dep-audit.sh", "failed != 0")
+            | ("script/install.sh", "$# > 0" | "$# >= 2")
             | (
                 "script/check-maintainability-bootstrap.sh",
-                "expected_count += 1"
+                "$# < 2"
+                    | "$# > 0"
+                    | "$# == 0"
+                    | "expected_count += 1"
                     | "expected_count == 0"
                     | "observed_count += 1"
                     | "observed_count != expected_count"
@@ -283,7 +322,11 @@ fn reviewed_expression(path: &str, expression: &str, source_is_reviewed: bool) -
                     | "indexed_count != expected_count"
                     | "status == 0"
             )
-            | ("script/claude-review.sh", "attempt = 0; attempt < 100; attempt++" | "status == 0")
+            | (
+                "script/claude-review.sh",
+                "$# < 1 || $# > 2" | "$# == 1" | "attempt = 0; attempt < 100; attempt++" | "status == 0"
+            )
+            | ("script/run-maintainability-gate.sh", "$# != 1")
             | ("script/test-postgres-smoke.sh", "$status")
             | (
                 "script/tests/test_claude_review.sh",
@@ -320,6 +363,13 @@ mod tests {
             "(( key ))",
             "let key",
             "[[ key -eq 0 ]]",
+            "(( $1 ))",
+            "(( ${1} ))",
+            "let '$?'",
+            "[[ $@ -eq 0 ]]",
+            ": \"${value:$#:2}\"",
+            ": \"${payload@P}\"",
+            ": \"${1@P}\"",
         ] {
             assert!(has_opaque_evaluation("script/check.sh", source, false), "{source}");
         }
@@ -335,6 +385,10 @@ mod tests {
             "[[ a[0] -eq 0 ]]",
             "printf '%s' '(( a[key]++ ))'",
             "printf '%s' \"(( a[key]++ ))\"",
+            "cat <<'LITERAL'\n$((a[key]))\n${payload@P}\nLITERAL\n",
+            "(( 1 + 2 ))",
+            "[[ 1 -eq 1 ]]",
+            ": \"${value:1:2}\"",
         ] {
             assert!(!has_opaque_evaluation("script/check.sh", source, false), "{source}");
         }
@@ -350,6 +404,11 @@ mod tests {
     #[test]
     fn reviewed_scalar_arithmetic_is_bound_to_exact_sources_and_paths() {
         for (path, source) in [
+            ("script/check-maintainability-bootstrap.sh", "if (( $# < 2 )); then"),
+            ("script/check-maintainability-bootstrap.sh", "if (( $# > 0 )); then"),
+            ("script/check-maintainability-bootstrap.sh", "(( $# == 0 )) || usage"),
+            ("script/claude-review.sh", "if (( $# < 1 || $# > 2 )); then"),
+            ("script/claude-review.sh", "if (( $# == 1 )); then"),
             ("script/claude-review.sh", "for (( attempt = 0; attempt < 100; attempt++ )); do"),
             ("script/tests/test_claude_review.sh", "(( count += 1 ))"),
             ("script/tests/test_claude_review.sh", "if (( count > 101 )); then"),
@@ -366,5 +425,19 @@ mod tests {
             true
         ));
         assert!(has_opaque_evaluation("script/tests/test_claude_review.sh", "if (( expected_status == 2 )); then", true));
+    }
+
+    #[test]
+    fn continued_openers_and_expanding_heredocs_remain_visible() {
+        for source in [
+            "$\\\n((payload))",
+            "(\\\n(payload))",
+            ": \"$\\\n{value:$1}\"",
+            ": \"${payload@\\\nP}\"",
+            "cat <<ACTIVE\n'$((payload))' # shell quotes are data\nACTIVE\n",
+        ] {
+            assert!(has_opaque_evaluation("script/check.sh", source, false), "{source}");
+        }
+        assert!(!has_opaque_evaluation("script/check.sh", "cat <<'LITERAL'\n\\\nLITERAL\n(( 1 + 2 ))\n", false));
     }
 }

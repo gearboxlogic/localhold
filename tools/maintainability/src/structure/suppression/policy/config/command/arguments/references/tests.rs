@@ -712,6 +712,39 @@ fn mapfile_callbacks_fail_closed_without_rejecting_literal_array_reads() {
 }
 
 #[test]
+fn shell_arithmetic_rejects_runtime_parameters_and_integer_assignment_targets() {
+    for command in [
+        "(( $1 ))",
+        "let '$?'",
+        "[[ $@ -eq 0 ]]",
+        ": \"${value:$#:2}\"",
+        ": \"${payload@P}\"",
+        ": \"${1@P}\"",
+        "declare -i value=0; read -r value",
+        "local -i value; printf -v value %s payload",
+        "typeset -ai values; mapfile -t values",
+        "$\\\n((payload))",
+        "(\\\n(payload))",
+        ": \"$\\\n{value:$1}\"",
+    ] {
+        assert_eq!(inputs(command), (Vec::new(), true), "{command}");
+    }
+}
+
+#[test]
+fn inert_shell_arithmetic_text_does_not_make_execution_opaque() {
+    for command in [
+        "printf '%s' '(( payload ))'",
+        "cat <<'LITERAL'\n$((payload))\n${payload@P}\nLITERAL\n",
+        "local -i count=0; read -r value",
+        "local -i value=0; local +i value; printf -v value %s payload",
+        "(( 1 + 2 ))",
+    ] {
+        assert_eq!(inputs(command), (Vec::new(), false), "{command}");
+    }
+}
+
+#[test]
 fn shell_dispatch_inputs_fail_closed_without_matching_inert_text() {
     assert_eq!(inputs("cat <(sh quality/lint.txt)"), (vec!["quality/lint.txt".to_owned()], false));
     assert_eq!(inputs("cat <(printf ok;# )\nsh quality/lint.txt\n)"), (vec!["quality/lint.txt".to_owned()], false));

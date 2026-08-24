@@ -2,6 +2,8 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
 mod capability;
+mod imports;
+mod literal;
 mod reviewed;
 mod temporary;
 
@@ -13,7 +15,10 @@ pub(super) fn has_opaque_write(source: &str) -> bool {
     if super::evaluation::has_non_ascii_code(source) {
         return true;
     }
-    let mut scanner = CallScanner::new(source);
+    let Some(source) = imports::canonicalize(source) else {
+        return true;
+    };
+    let mut scanner = CallScanner::new(&source);
     let mut handled_methods = BTreeSet::new();
     let mut invoked_capabilities = BTreeSet::new();
     while let Some(call) = scanner.next() {
@@ -584,42 +589,7 @@ const fn argument_boundary(character: char, depth: u32, argument: usize, selecte
 }
 
 fn literal_value(argument: &str) -> Option<String> {
-    let argument = argument.trim();
-    let argument = argument.split_once('=').map_or(argument, |(name, value)| {
-        if !name.is_empty() && name.chars().all(is_identifier_character) {
-            value.trim()
-        } else {
-            argument
-        }
-    });
-    let quote = argument.find(['\'', '"'])?;
-    let prefix = &argument[..quote];
-    if !prefix.chars().all(|character| matches!(character.to_ascii_lowercase(), 'b' | 'r' | 'u')) {
-        return None;
-    }
-    let delimiter = argument.as_bytes()[quote] as char;
-    let triple = argument[quote..].starts_with(&delimiter.to_string().repeat(3));
-    let width = if triple { 3 } else { 1 };
-    let closing = delimiter.to_string().repeat(width);
-    let content = &argument[quote + width..];
-    let content = content.strip_suffix(&closing)?;
-    if prefix.to_ascii_lowercase().contains('r') {
-        return Some(content.to_owned());
-    }
-    let mut value = String::with_capacity(content.len());
-    let mut characters = content.chars();
-    while let Some(character) = characters.next() {
-        if character == '\\' {
-            let escaped = characters.next()?;
-            if !matches!(escaped, '\\' | '/' | '\'' | '"') {
-                return None;
-            }
-            value.push(escaped);
-        } else {
-            value.push(character);
-        }
-    }
-    Some(value)
+    literal::static_string(argument)
 }
 
 fn is_identifier_start(character: char) -> bool {

@@ -84,6 +84,34 @@ fn direct_filesystem_writers_fail_closed() {
 }
 
 #[test]
+fn aliases_and_composed_writer_paths_fail_closed() {
+    for source in [
+        "import shutil as files\nfiles.copyfile('quality/Justfile', 'Justfile')\n",
+        "from shutil import copyfile as copy\ncopy('quality/Justfile', 'Justfile')\n",
+        "from shutil import (\n    copy2 as copy,\n)\ncopy('quality/Justfile', 'Justfile')\n",
+        "import tempfile as scratch\nscratch.NamedTemporaryFile(dir='script', suffix='.sh')\n",
+        "from os import remove as erase\nerase('Justfile')\n",
+        "from os import pwrite as writer\nwriter(descriptor, payload, 0)\n",
+        "import shutil\nfiles = shutil\nfiles.copyfile('quality/Justfile', 'Justfile')\n",
+        "import shutil as files\nstored = files\n",
+        "from shutil import *\ncopyfile('quality/Justfile', 'Justfile')\n",
+        "if enabled: import shutil as files\nfiles.copyfile('quality/Justfile', 'Justfile')\n",
+        "from pathlib import Path as FilePath\nFilePath('Justfile').write_text(payload)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target', prefix='../script/check-', suffix='.sh', delete=False)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(prefix='../script/check-', suffix='.sh', delete=False)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target', prefix='../' + 'script/check-', suffix='.sh', delete=False)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(prefix=prefix, suffix='.sh', delete=False)\n",
+        "open('Just' 'file', 'w').write(payload)\n",
+        "Path('Just' 'file').write_text(payload)\n",
+        "open('Just' + 'file', 'w').write(payload)\n",
+        "Path('Just' + 'file').write_text(payload)\n",
+        "open('target/' + name, 'w').write(payload)\n",
+    ] {
+        assert!(has_opaque_write(source), "{source}");
+    }
+}
+
+#[test]
 fn modeled_mutator_capabilities_fail_closed() {
     for capability in [
         "open",
@@ -172,6 +200,20 @@ fn filesystem_copies_to_data_paths_remain_allowed() {
     assert!(!has_opaque_write("writer = (\n    Path('target/report.txt').write_text\n)\ncontainer = [writer]\n"));
     assert!(!has_opaque_write("import tempfile\ntempfile.NamedTemporaryFile(dir='target', suffix='.txt')\n"));
     assert!(!has_opaque_write("import tempfile\ntempfile.NamedTemporaryFile()\n"));
+    assert!(!has_opaque_write("import shutil as files\nfiles.copyfile('quality/report.txt', 'target/report.txt')\n"));
+    assert!(!has_opaque_write("from shutil import copyfile as copy\ncopy('quality/report.txt', 'target/report.txt')\n"));
+    assert!(!has_opaque_write("from os import remove as erase\nerase('target/report.txt')\n"));
+    assert!(!has_opaque_write("import tempfile as scratch\nscratch.NamedTemporaryFile(dir='target', suffix='.txt')\n"));
+    assert!(!has_opaque_write(
+        "from pathlib import Path as FilePath\nFilePath('target/report.txt').write_text(payload)\n"
+    ));
+    assert!(!has_opaque_write("open('target/' 'report.txt', 'w').write(payload)\n"));
+    assert!(!has_opaque_write("Path('target/' + 'report.txt').write_text(payload)\n"));
+    assert!(!has_opaque_write("import shutil as files\nprint('files.copyfile is documentation')\n"));
+    assert!(!has_opaque_write("import tempfile\ntempfile.NamedTemporaryFile(prefix='report-', suffix='.txt')\n"));
+    assert!(!has_opaque_write(
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target', prefix='report-' + 'safe-', suffix='.txt')\n"
+    ));
     assert!(!has_opaque_write(r#"open("Justfile", "rb")"#));
     assert!(!has_opaque_write(r#"Path("Justfile").open("r")"#));
     assert!(!has_opaque_write(r#"(Path(".") / "Justfile").open("rb")"#));

@@ -82,10 +82,7 @@ fn command_policy_rejects_python_command_wrapper_dispatch() {
 
 #[test]
 fn command_policy_rejects_opaque_python_process_bindings() {
-    let workspace = tempfile::tempdir().expect("temporary workspace");
-    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
-    git(workspace.path(), &["init", "-q"]);
-    for source in [
+    assert_opaque_python_process_bindings(&[
         "from os import (\n    system,\n)\nsystem('sh quality/hidden.txt')\n",
         "from posix import (\n    system,\n)\nsystem('sh quality/hidden.txt')\n",
         "from os import (\n    startfile,\n)\nstartfile('quality/hidden.txt')\n",
@@ -117,15 +114,11 @@ fn command_policy_rejects_opaque_python_process_bindings() {
         "object.__subclasses__()\n",
         "import os\ndef f(): pass\ngetattr(f, '__globals__')['os'].system('sh quality/hidden.txt')\n",
         "import operator\noperator.attrgetter('__globals__')(f)['os'].system('sh quality/hidden.txt')\n",
-        "import asyncio\nasyncio.create_subprocess_exec('quality/hidden.py')\n",
-        "import asyncio as loop\nloop.create_subprocess_shell('sh quality/hidden.txt')\n",
-        "from asyncio import create_subprocess_exec\ncreate_subprocess_exec('quality/hidden.py')\n",
         "import os\nos.posix_spawn('quality/hidden.py', ['quality/hidden.py'], os.environ)\n",
         "from posix import posix_spawnp\nposix_spawnp('quality/hidden.py', ['quality/hidden.py'], {})\n",
         "import pty\npty.spawn(['quality/hidden.py'])\n",
         "from pty import spawn\nspawn(['quality/hidden.py'])\n",
         "import pty\nlaunch = pty.spawn\nlaunch(['quality/hidden.py'])\n",
-        "import asyncio, subprocess\nasyncio.create_subprocess_exec('quality/hidden.py')\nsubprocess.run(['git', 'status'])\n",
         "import os, subprocess\nos.posix_spawn('quality/hidden.py', ['quality/hidden.py'], os.environ)\nsubprocess.run(['git', 'status'])\n",
         "from os import posix_spawn\nimport subprocess\nposix_spawn('quality/hidden.py', ['quality/hidden.py'], {})\nsubprocess.run(['git', 'status'])\n",
         "from posix import posix_spawnp\nimport subprocess\nposix_spawnp('quality/hidden.py', ['quality/hidden.py'], {})\nsubprocess.run(['git', 'status'])\n",
@@ -147,7 +140,41 @@ fn command_policy_rejects_opaque_python_process_bindings() {
         "message = f\"{sys.modules['os'].system('sh quality/hidden.txt')}\"\n",
         "message = f\"{globals()['os'].system('sh quality/hidden.txt')}\"\n",
         "message = f\"{os.__getattribute__('system')('sh quality/hidden.txt')}\"\n",
-    ] {
+    ]);
+}
+
+#[test]
+fn command_policy_rejects_asyncio_process_bindings() {
+    assert_opaque_python_process_bindings(&[
+        "import asyncio\nasyncio.create_subprocess_exec('quality/hidden.py')\n",
+        "import asyncio as loop\nloop.create_subprocess_shell('sh quality/hidden.txt')\n",
+        "from asyncio import create_subprocess_exec\ncreate_subprocess_exec('quality/hidden.py')\n",
+        "import asyncio.subprocess\nawait asyncio.subprocess.create_subprocess_exec('quality/hidden.py')\n",
+        "from asyncio.subprocess import create_subprocess_shell\nawait create_subprocess_shell('sh quality/hidden.txt')\n",
+        "from asyncio.subprocess import create_subprocess_exec as launch\nawait launch('quality/hidden.py')\n",
+        "import asyncio\nawait asyncio.get_running_loop().subprocess_shell(asyncio.SubprocessProtocol, 'sh quality/hidden.txt')\n",
+        "from asyncio import Runner, SubprocessProtocol\nawait Runner().get_loop().subprocess_exec(SubprocessProtocol, 'quality/hidden.py')\n",
+        "import asyncio\nloop = asyncio.get_running_loop()\nlaunch = loop.subprocess_shell\nawait launch(asyncio.SubprocessProtocol, 'sh quality/hidden.txt')\n",
+        "import asyncio\nloop = asyncio.get_running_loop()\nlaunch = (loop\n    .subprocess_exec)\nawait launch(asyncio.SubprocessProtocol, 'quality/hidden.py')\n",
+        "import asyncio\nloop = asyncio.get_running_loop()\nlaunch = (loop.\n    subprocess_exec)\nawait launch(asyncio.SubprocessProtocol, 'quality/hidden.py')\n",
+        "import asyncio\nloop = asyncio.get_running_loop()\nawait loop.__getattribute__('subprocess_exec')(asyncio.SubprocessProtocol, 'quality/hidden.py')\n",
+        "import asyncio\nloop = asyncio.get_running_loop()\nlaunch = asyncio.BaseEventLoop.__dict__['subprocess_exec']\nawait launch(loop, asyncio.SubprocessProtocol, 'quality/hidden.py')\n",
+        "import asyncio\nloop = asyncio.get_running_loop()\nlaunch = vars(asyncio.BaseEventLoop)['subprocess_exec']\nawait launch(loop, asyncio.SubprocessProtocol, 'quality/hidden.py')\n",
+        "import asyncio, inspect\nloop = asyncio.get_running_loop()\nlaunch = inspect.getattr_static(loop, 'subprocess_exec').__get__(loop)\nawait launch(asyncio.SubprocessProtocol, 'quality/hidden.py')\n",
+        "import asyncio\nfrom inspect import getattr_static as lookup\nloop = asyncio.get_running_loop()\nlaunch = lookup(loop, 'subprocess_exec').__get__(loop)\nawait launch(asyncio.SubprocessProtocol, 'quality/hidden.py')\n",
+        "import asyncio, inspect\nloop = asyncio.get_running_loop()\nlookup = inspect.getattr_static\nlaunch = lookup(loop, 'subprocess_exec').__get__(loop)\nawait launch(asyncio.SubprocessProtocol, 'quality/hidden.py')\n",
+        "import asyncio, inspect\nloop = asyncio.get_running_loop()\nlaunch = dict(inspect.getmembers(loop))['subprocess_exec']\nawait launch(asyncio.SubprocessProtocol, 'quality/hidden.py')\n",
+        "import asyncio, operator\nloop = asyncio.get_running_loop()\nawait operator.methodcaller('subprocess_shell', asyncio.SubprocessProtocol, 'sh quality/hidden.txt')(loop)\n",
+        "import asyncio\nfrom operator import methodcaller as invoke\nloop = asyncio.get_running_loop()\nawait invoke('subprocess_shell', asyncio.SubprocessProtocol, 'sh quality/hidden.txt')(loop)\n",
+        "import asyncio, subprocess\nasyncio.create_subprocess_exec('quality/hidden.py')\nsubprocess.run(['git', 'status'])\n",
+    ]);
+}
+
+fn assert_opaque_python_process_bindings(sources: &[&str]) {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    git(workspace.path(), &["init", "-q"]);
+    for source in sources {
         fs::write(workspace.path().join("script/check.py"), source).expect("opaque Python process binding");
         git(workspace.path(), &["add", "."]);
         let Err(error) = reject_checked_in_weakening(workspace.path()) else {

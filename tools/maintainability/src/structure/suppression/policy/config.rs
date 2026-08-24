@@ -167,6 +167,27 @@ pub(super) fn parse_nul_paths(output: &[u8], include: impl Fn(&str) -> bool) -> 
     Ok(paths)
 }
 
+pub(super) fn ignored_python_paths(workspace: &Path, inclusions: &[&str]) -> Result<Vec<String>> {
+    let mut command = crate::structure::revision::git_command();
+    command
+        .current_dir(workspace)
+        .args(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--"])
+        .args(inclusions)
+        .args([
+            ":(top,exclude,glob)target/**",
+            ":(top,exclude,glob)tools/dependency-unsafe/target/**",
+            ":(top,exclude,glob)tools/maintainability/target/**",
+            ":(top,exclude,glob).cache/**",
+            ":(top,exclude,glob).cargo/**",
+            ":(top,exclude,glob).rustup/**",
+        ]);
+    let output = command.output().context("list ignored Python-related inputs")?;
+    if !output.status.success() {
+        bail!("git ls-files failed while listing ignored Python-related inputs");
+    }
+    parse_nul_paths(&output.stdout, |_| true)
+}
+
 fn compare_clippy_value(key: &str, actual: &toml::Value, constraint: &ClippyConstraint) -> Result<()> {
     match constraint {
         ClippyConstraint::MaximumInteger { value } => {

@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
-use super::super::{parse_nul_paths, validate_relative_path};
+use super::super::{ignored_python_paths, parse_nul_paths, validate_relative_path};
 use super::actions::validate_local_actions;
 use super::arguments::execution_inputs_for_surface;
 use super::is_execution_surface;
@@ -28,8 +28,25 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
     if !output.status.success() {
         bail!("git ls-files failed while listing command execution surfaces");
     }
-    let paths = parse_nul_paths(&output.stdout, |_| true)?.into_iter().collect::<BTreeSet<_>>();
+    let mut paths = parse_nul_paths(&output.stdout, |_| true)?.into_iter().collect::<BTreeSet<_>>();
+    paths.extend(ignored_python_paths(
+        workspace,
+        &[
+            ":(top,icase,glob)**/*.pyc",
+            ":(top,icase,glob)**/*.pyo",
+            ":(top,icase,glob)**/*.pyd",
+            ":(top,icase,glob)**/*.so",
+            ":(top,icase,glob)**/*.zip",
+            ":(top,icase,glob)**/*.egg",
+            ":(top,icase,glob)**/*.whl",
+            ":(top,icase,glob)**/*.pyz",
+            ":(top,icase,glob)**/*.pyzw",
+            ":(top,icase,glob)**/__pycache__/**",
+        ],
+    )?);
     let checked_paths = paths.clone();
+    let mut shadow_paths = checked_paths.clone();
+    shadow_paths.extend(ignored_python_paths(workspace, &[":(top,glob)*"])?.into_iter().filter(|path| !path.contains('/')));
     let tracked_paths = tracked_paths(workspace)?;
     let command_profiles = super::command_profiles::validate(workspace, &tracked_paths)?;
     let executables = tracked_executables(workspace)?;
@@ -38,7 +55,7 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
     for surface in &surfaces {
         validate_before_resolution(workspace, surface)?;
     }
-    close_over_execution_inputs(workspace, &mut surfaces, &checked_paths, &tracked_paths, command_profiles.as_ref())?;
+    close_over_execution_inputs(workspace, &mut surfaces, &shadow_paths, &tracked_paths, command_profiles.as_ref())?;
     Ok(ExecutionSurfaceSet {
         paths: surfaces.into_iter().collect(),
         checked_paths,
@@ -545,6 +562,22 @@ mod tests {
     }
 
     #[test]
+    fn ignored_python_loadable_artifacts_are_rejected_outside_build_roots() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        git(repository.path(), &["init", "--quiet"]);
+        fs::create_dir_all(repository.path().join("script")).expect("create script directory");
+        fs::create_dir_all(repository.path().join("target")).expect("create build directory");
+        fs::write(repository.path().join(".git/info/exclude"), "script/helper.pyc\ntarget/\n").expect("local Git exclusions");
+        fs::write(repository.path().join("script/helper.pyc"), b"opaque").expect("ignored Python artifact");
+        fs::write(repository.path().join("target/generated.pyc"), b"generated").expect("ignored build artifact");
+
+        let error = execution_surfaces(repository.path()).err().expect("reject ignored Python-loadable artifact");
+        assert!(error.to_string().contains("script/helper.pyc"), "{error:#}");
+        fs::remove_file(repository.path().join("script/helper.pyc")).expect("remove import shadow");
+        execution_surfaces(repository.path()).expect("exclude governed build output");
+    }
+
+    #[test]
     fn python_bare_programs_reject_tracked_and_untracked_windows_workspace_shadows() {
         let repository = tempfile::tempdir().expect("temporary repository");
         fs::create_dir(repository.path().join("script")).expect("create script directory");
@@ -560,6 +593,10 @@ mod tests {
         let error = execution_surfaces(repository.path()).err().expect("reject untracked Windows shadow");
         assert!(error.to_string().contains("outside the tracked path inventory"), "{error:#}");
 
+        fs::write(repository.path().join(".git/info/exclude"), "GIT.EXE\n").expect("ignore Windows shadow");
+        let error = execution_surfaces(repository.path()).err().expect("reject ignored Windows shadow");
+        assert!(error.to_string().contains("outside the tracked path inventory"), "{error:#}");
+        fs::write(repository.path().join(".git/info/exclude"), "").expect("clear local Git exclusion");
         git(repository.path(), &["add", "GIT.EXE"]);
         let error = execution_surfaces(repository.path()).err().expect("reject Windows shadow");
         assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");

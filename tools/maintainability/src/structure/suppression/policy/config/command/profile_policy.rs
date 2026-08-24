@@ -41,7 +41,7 @@ const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
     LegacyTransitionBridge {
         path: "script/check-maintainability-bootstrap.sh",
         current: "7afc737797b816c8cd2ca59f5958b4284443caa3cf9d7b90e41767d518844092",
-        successor: "9443771a37693340cf16b45682f77c35c05353569c2c1aee0f23c74b49c0b4dc",
+        successor: "6d92c3df8afe9bc8867770dddb4911683f08c3801d9e72b006f8246d4ef80a3b",
         opaque_execution_inputs: true,
         environment_weakening: true,
     },
@@ -62,7 +62,7 @@ const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
     LegacyTransitionBridge {
         path: ".github/workflows/ci.yml",
         current: "d7b67dc9b58887448885e7225a50144db84f7b100d9fbe1e750614d4757db302",
-        successor: "cb050701091e3ebd75c64feeed4b37ed80ad6cc08ba433697748e95b9f877e25",
+        successor: "bdccdbb86979121906f3284deacc3300c8c42a3a7d9f522965ac9391115a875b",
         opaque_execution_inputs: false,
         environment_weakening: true,
     },

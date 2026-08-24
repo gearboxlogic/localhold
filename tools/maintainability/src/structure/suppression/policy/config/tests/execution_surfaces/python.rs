@@ -82,11 +82,30 @@ fn command_policy_rejects_python_filesystem_writes() {
         "(open)('Justfile', 'w').write(payload)\n",
         "message = f\"{(Path('Justfile').write_text)(payload)}\"\n",
         "message = f\"{(open)('Justfile', 'w').write(payload)}\"\n",
+        "Path('Justfile').write_text.__call__(payload)\n",
+        "open.__call__('Justfile', 'w').write(payload)\n",
         "writer = Path('Justfile').write_text\nwriter(payload)\n",
         "writer = open\nwriter('Justfile', 'w').write(payload)\n",
         "writer = Path('Justfile').write_text\nrunner = writer\nrunner(payload)\n",
         "writer = open\ncontainer = [writer]\n",
         "(writer := open)\n",
+        "writer: Callable[[str], int] = open\n",
+        "first = second = open\n",
+        "holder.writer = open\n",
+        "def invoke(opener=open):\n    return opener\n",
+        "container = [open]\nopener = container[0]\nopener('target/report.txt', 'w')\n",
+        "[opener] = [open]\nopener('target/report.txt', 'w')\n",
+        "opener = [open][0]\nopener('target/report.txt', 'w')\n",
+        "from functools import partial\nopener = partial(open, 'target/report.txt', 'w')\n",
+        "from functools import partial\nwriter = partial(Path('Justfile').write_text, encoding='utf-8')\n",
+        "import os\nremover = os.unlink\nremover('target/report.txt')\n",
+        "import shutil\nmover = shutil.move\nmover('target/input.txt', 'target/output.txt')\n",
+        "from pathlib import Path\nwriter = Path('Justfile').unlink\nwriter()\n",
+        "from pathlib import Path\nwriter = Path.rename\nwriter(Path('target/input.txt'), 'target/output.txt')\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='script')\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='.github/workflows', suffix='.yml')\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir=destination)\n",
+        "import tempfile\nfactory = tempfile.NamedTemporaryFile\nfactory(dir='target', suffix='.txt')\n",
     ]);
 }
 
@@ -100,6 +119,11 @@ fn command_policy_allows_inert_python_writer_binding_text() {
         "print(\"safe # writer = open\")\n",
         "print('safe')  # writer = open; writer('Justfile', 'w')\n",
         "writer = (\n    Path('target/report.txt').write_text\n)\ncontainer = [writer]\n",
+        "writer: Callable[[str], int] = Path('target/report.txt').write_text\nwriter('report')\n",
+        "container = [Path('target/report.txt').unlink]\ncontainer[0]()\n",
+        "Path('target/report.txt').write_text.__call__('report')\n",
+        "open.__call__('target/report.txt', 'w').write('report')\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target', suffix='.txt')\n",
     ] {
         fs::write(workspace.path().join("script/check.py"), source).expect("safe Python writer text");
         git(workspace.path(), &["add", "."]);

@@ -6,6 +6,7 @@ mod arithmetic;
 
 pub(super) fn assigned_variables(source: &str) -> (BTreeSet<String>, bool) {
     let mut names = BTreeSet::new();
+    let mut integer_names = BTreeSet::new();
     let mut opaque_target = false;
     for command in tokens::source_command_tokens(source) {
         let Some(index) = command_word_index(&command) else {
@@ -14,16 +15,62 @@ pub(super) fn assigned_variables(source: &str) -> (BTreeSet<String>, bool) {
         let arguments = &command[index.saturating_add(1)..];
         let command_word = command[index].trim_matches(['(', ')', '{', '}']).to_ascii_lowercase();
         match command_word.as_str() {
-            "declare" | "local" | "typeset" if declaration_has_opaque_target(arguments, true, true) => opaque_target = true,
-            "readonly" if declaration_has_opaque_target(arguments, false, true) => opaque_target = true,
+            "declare" | "local" | "typeset" => {
+                opaque_target |= declaration_has_opaque_target(arguments, true, true);
+                update_integer_attributes(arguments, &mut integer_names);
+            }
+            "readonly" => {
+                opaque_target |= declaration_has_opaque_target(arguments, false, true);
+                update_integer_attributes(arguments, &mut integer_names);
+            }
             "export" if declaration_has_opaque_target(arguments, false, false) => opaque_target = true,
-            "printf" => collect_printf_target(arguments, &mut names, &mut opaque_target),
-            "read" | "readarray" | "mapfile" => collect_read_targets(&command_word, arguments, &mut names, &mut opaque_target),
-            "getopts" => collect_getopts_target(arguments, &mut names, &mut opaque_target),
+            "printf" | "read" | "readarray" | "mapfile" | "getopts" => {
+                let mut assigned = BTreeSet::new();
+                match command_word.as_str() {
+                    "printf" => collect_printf_target(arguments, &mut assigned, &mut opaque_target),
+                    "read" | "readarray" | "mapfile" => collect_read_targets(&command_word, arguments, &mut assigned, &mut opaque_target),
+                    "getopts" => collect_getopts_target(arguments, &mut assigned, &mut opaque_target),
+                    _ => unreachable!("matched assignment builtin"),
+                }
+                opaque_target |= assigned.iter().any(|name| integer_names.contains(name));
+                names.extend(assigned);
+            }
             _ => {}
         }
     }
     (names, opaque_target)
+}
+
+fn update_integer_attributes(arguments: &[String], integer_names: &mut BTreeSet<String>) {
+    let mut options = true;
+    let mut integer_attribute = None;
+    for argument in arguments {
+        let word = argument.trim_matches(['\'', '"', ';']);
+        if options && word == "--" {
+            options = false;
+            continue;
+        }
+        if options && word.len() > 1 && matches!(word.as_bytes()[0], b'-' | b'+') {
+            if word[1..].contains('i') {
+                integer_attribute = Some(word.starts_with('-'));
+            }
+            continue;
+        }
+        let target = word.split_once('=').map_or(word, |(target, _)| target);
+        let target = target.strip_suffix('+').unwrap_or(target);
+        let Some(name) = identifier(target) else {
+            continue;
+        };
+        match integer_attribute {
+            Some(true) => {
+                integer_names.insert(name.to_owned());
+            }
+            Some(false) => {
+                integer_names.remove(name);
+            }
+            None => {}
+        }
+    }
 }
 
 pub(super) fn has_opaque_indexed_assignment(path: &str, source: &str, source_is_reviewed: bool) -> bool {
@@ -373,6 +420,30 @@ mod tests {
         ] {
             let (_, opaque) = assigned_variables(source);
             assert!(opaque, "{source}");
+        }
+    }
+
+    #[test]
+    fn integer_attributes_make_later_builtin_assignments_opaque() {
+        for source in [
+            "declare -i value=0; read -r value",
+            "local -i value; printf -v value %s payload",
+            "typeset -ai values; mapfile -t values",
+            "readonly -i REPLY=0; read",
+            "declare -ai MAPFILE; readarray",
+            "declare -i option=0; getopts ab option",
+        ] {
+            let (_, opaque) = assigned_variables(source);
+            assert!(opaque, "{source}");
+        }
+        for source in [
+            "declare value=0; read -r value",
+            "declare -i value=0; declare +i value; printf -v value %s payload",
+            "declare -i count=0; read -r value",
+            "printf -v value %s payload; declare -i value=0",
+        ] {
+            let (_, opaque) = assigned_variables(source);
+            assert!(!opaque, "{source}");
         }
     }
 

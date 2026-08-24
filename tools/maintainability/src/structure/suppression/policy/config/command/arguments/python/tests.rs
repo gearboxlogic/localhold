@@ -148,6 +148,29 @@ fn opaque_process_bindings_fail_closed() {
 }
 
 #[test]
+fn stdlib_code_evaluators_fail_closed_without_matching_unrelated_names() {
+    assert!(super::imports_command_capable_api("import cProfile as profiler\n"));
+    for source in [
+        "import code\ncode.InteractiveInterpreter().runsource(payload, symbol='exec')\n",
+        "import code as repl\nrepl.InteractiveConsole().push(payload)\n",
+        "from code import InteractiveInterpreter as Runner\nRunner().runcode(compiled)\n",
+        "from code import interact\ninteract(local={})\n",
+        "import site\nsite.addsitedir('quality')\n",
+        "import site as paths\npaths.addpackage('quality', 'hidden.pth', set())\n",
+        "from site import addsitedir\naddsitedir('quality')\n",
+        "import timeit\ntimeit.Timer(payload).timeit(number=1)\n",
+        "import trace\ntrace.Trace().run(payload)\n",
+        "import profile\nprofile.run(payload)\n",
+        "import cProfile as profiler\nprofiler.run(payload)\n",
+        "import pdb\npdb.run(payload)\n",
+        "import doctest\ndoctest.DocTestRunner().run(example)\n",
+    ] {
+        assert!(has_opaque_process_arguments(source), "{source}");
+    }
+    assert!(!has_opaque_process_arguments("import codecs\ncode = response.code\nprint(code)\n"));
+}
+
+#[test]
 fn ambient_process_resolution_mutations_are_distinguished_from_reads() {
     assert!(mutates_process_working_directory("os.chdir('quality')\n"));
     assert!(mutates_process_working_directory("posix.fchdir(descriptor)\n"));

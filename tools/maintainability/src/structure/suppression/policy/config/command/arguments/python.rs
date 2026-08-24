@@ -6,7 +6,24 @@ mod process;
 
 pub(super) use execution::References as ExecutionReferences;
 
-const REJECTED_PYTHON_MODULES: &[&str] = &["inspect", "logging.config", "operator", "optparse", "pkgutil", "pydoc", "unittest.mock", "webbrowser"];
+const REJECTED_PYTHON_MODULES: &[&str] = &[
+    "code",
+    "cprofile",
+    "doctest",
+    "inspect",
+    "logging.config",
+    "operator",
+    "optparse",
+    "pdb",
+    "pkgutil",
+    "profile",
+    "pydoc",
+    "site",
+    "timeit",
+    "trace",
+    "unittest.mock",
+    "webbrowser",
+];
 
 pub(super) fn execution_references(path: &str, source: &str) -> ExecutionReferences {
     let normalized = normalize_continuations(source);

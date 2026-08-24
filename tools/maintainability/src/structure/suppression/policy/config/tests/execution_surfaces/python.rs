@@ -23,18 +23,6 @@ fn command_policy_rejects_python_command_wrapper_dispatch() {
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
 
-    for source in [
-        "from pathlib import Path\nPath(\"Justfile\").write_text(Path(\"quality/Justfile\").read_text())\n",
-        "from pathlib import Path\ntarget = Path(\"Justfile\")\ntarget.write_text(Path(\"quality/Justfile\").read_text())\n",
-        "import shutil\nsource = \"quality/Justfile\"\ntarget = \"Justfile\"\nshutil.copy2(source, target)\n",
-        "with open(file=\"Justfile\", mode=\"w\") as output:\n    output.write(\"lint:\\n    true\\n\")\n",
-        "import os\nos.write(descriptor, payload)\n",
-    ] {
-        fs::write(workspace.path().join("script/check.py"), source).expect("Python filesystem writer");
-        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-        assert!(error.to_string().contains("lint-weakening argument"), "{source}: {error:#}");
-    }
-
     fs::write(
         workspace.path().join("script/check.py"),
         "import subprocess\nsubprocess.run([\"git\", \"status\"])\nrunner = subprocess.run\nrunner(bytes.fromhex(\"636172676f\").decode(), shell=True)\n",
@@ -78,6 +66,55 @@ fn command_policy_rejects_python_command_wrapper_dispatch() {
     .expect("Python Unpickler execution");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
+}
+
+#[test]
+fn command_policy_rejects_python_filesystem_writes() {
+    assert_opaque_python_filesystem_writes(&[
+        "from pathlib import Path\nPath(\"Justfile\").write_text(Path(\"quality/Justfile\").read_text())\n",
+        "from pathlib import Path\ntarget = Path(\"Justfile\")\ntarget.write_text(Path(\"quality/Justfile\").read_text())\n",
+        "import shutil\nsource = \"quality/Justfile\"\ntarget = \"Justfile\"\nshutil.copy2(source, target)\n",
+        "with open(file=\"Justfile\", mode=\"w\") as output:\n    output.write(\"lint:\\n    true\\n\")\n",
+        "import os\nos.write(descriptor, payload)\n",
+        "message = f\"{Path('Justfile').write_text(payload)}\"\n",
+        "message = f\"{open('Justfile', 'w').write(payload)}\"\n",
+        "(Path('Justfile').write_text)(payload)\n",
+        "(open)('Justfile', 'w').write(payload)\n",
+        "message = f\"{(Path('Justfile').write_text)(payload)}\"\n",
+        "message = f\"{(open)('Justfile', 'w').write(payload)}\"\n",
+        "writer = Path('Justfile').write_text\nwriter(payload)\n",
+        "writer = open\nwriter('Justfile', 'w').write(payload)\n",
+        "writer = Path('Justfile').write_text\nrunner = writer\nrunner(payload)\n",
+        "writer = open\ncontainer = [writer]\n",
+        "(writer := open)\n",
+    ]);
+}
+
+#[test]
+fn command_policy_allows_inert_python_writer_binding_text() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    git(workspace.path(), &["init", "-q"]);
+    for source in [
+        "print(\"safe; writer = open\")\n",
+        "print(\"safe # writer = open\")\n",
+        "print('safe')  # writer = open; writer('Justfile', 'w')\n",
+        "writer = (\n    Path('target/report.txt').write_text\n)\ncontainer = [writer]\n",
+    ] {
+        fs::write(workspace.path().join("script/check.py"), source).expect("safe Python writer text");
+        git(workspace.path(), &["add", "."]);
+        assert!(reject_checked_in_weakening(workspace.path()).is_ok(), "{source}");
+    }
+}
+
+#[test]
+fn command_policy_rejects_runtime_code_object_construction() {
+    assert_opaque_python_process_bindings(&[
+        "code_type = (lambda: None).__code__.__class__\ncode_type(*arguments)\n",
+        "function_type = (lambda: None).__class__\nfunction_type(code, globals())\n",
+        "generator = (value for value in ())\ncode_type = generator.gi_code.__class__\ncode_type(*arguments)\n",
+        "message = f\"{(lambda: None).__code__.__class__(*arguments)}\"\n",
+    ]);
 }
 
 #[test]
@@ -144,6 +181,12 @@ fn command_policy_rejects_opaque_python_process_bindings() {
         "import site\nsite.addsitedir('quality')\n",
         "import site as paths\npaths.addpackage('quality', 'hidden.pth', set())\n",
         "from site import addsitedir\naddsitedir('quality')\n",
+        "import shelve\nshelve.open('quality/db')['payload']\n",
+        "import os\nos.ｓｙｓｔｅｍ(bytes.fromhex(payload))\n",
+        "import os as ｐｒｏｃｅｓｓ\nprocess.system('sh quality/hidden.txt')\n",
+        "from ｏｓ import ｓｙｓｔｅｍ as run\nrun(bytes.fromhex(payload))\n",
+        "message = f\"{_＿import＿_('os')}\"\n",
+        "message = f\"{os.posix＿spawn(path, argv, env)}\"\n",
         "breakpoint()\n",
         "import sys\nsys.breakpointhook()\n",
         "import sys\nsys.__breakpointhook__()\n",
@@ -151,6 +194,11 @@ fn command_policy_rejects_opaque_python_process_bindings() {
         "message = f\"{globals()['os'].system('sh quality/hidden.txt')}\"\n",
         "message = f\"{os.__getattribute__('system')('sh quality/hidden.txt')}\"\n",
     ]);
+}
+
+#[test]
+fn command_policy_rejects_multiprocessing_deserialization() {
+    assert_opaque_python_process_bindings(&["from multiprocessing.reduction import ForkingPickler\nForkingPickler.loads(payload)\n"]);
 }
 
 #[test]
@@ -194,14 +242,32 @@ fn assert_opaque_python_process_bindings(sources: &[&str]) {
     }
 }
 
+fn assert_opaque_python_filesystem_writes(sources: &[&str]) {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    git(workspace.path(), &["init", "-q"]);
+    for source in sources {
+        fs::write(workspace.path().join("script/check.py"), source).expect("opaque Python filesystem writer");
+        git(workspace.path(), &["add", "."]);
+        let Err(error) = reject_checked_in_weakening(workspace.path()) else {
+            panic!("accepted opaque Python filesystem writer: {source}");
+        };
+        assert!(error.to_string().contains("lint-weakening argument"), "{source}: {error:#}");
+    }
+}
+
 #[test]
 fn command_policy_tracks_whitespace_qualified_python_process_calls() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join("script")).expect("script directory");
-    fs::write(workspace.path().join("script/check.py"), "import os\nos . system('sh quality/hidden.txt')\n").expect("whitespace-qualified Python process call");
     git(workspace.path(), &["init", "-q"]);
-    git(workspace.path(), &["add", "."]);
-
-    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("tracked path inventory"), "{error:#}");
+    for (source, reason) in [
+        ("import os\nos . system('sh quality/hidden.txt')\n", "opaque interpreter program"),
+        ("import os\nos.ｓｙｓｔｅｍ('sh quality/hidden.txt')\n", "opaque interpreter program"),
+    ] {
+        fs::write(workspace.path().join("script/check.py"), source).expect("qualified Python process call");
+        git(workspace.path(), &["add", "."]);
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains(reason), "{source}: {error:#}");
+    }
 }

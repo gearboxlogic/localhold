@@ -92,6 +92,8 @@ run(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
         r#"subprocess.run(["cargo", "metadata", "--locked"], cwd=repository, check=True)"#
     ));
     assert!(!has_opaque_process_arguments(r#"subprocess.run(["git", "show", f"{reference}:{source}"], check=False)"#));
+    assert!(!has_opaque_process_arguments("message = f'{value:os.system(payload)}'"));
+    assert!(!has_opaque_process_arguments(r#"message = f"{len("safe")}""#));
     assert!(!has_opaque_process_arguments(r#"subprocess.run([sys.executable, "script/check.py", value], check=True)"#));
     assert!(!has_opaque_process_arguments("from os import path\nprint(path.basename('/tmp/report'))"));
     assert!(!has_opaque_process_arguments("head = (f'<svg viewBox=\"0 0 64 64\" ' f'role=\"img\">')\n"));
@@ -164,10 +166,38 @@ fn stdlib_code_evaluators_fail_closed_without_matching_unrelated_names() {
         "import cProfile as profiler\nprofiler.run(payload)\n",
         "import pdb\npdb.run(payload)\n",
         "import doctest\ndoctest.DocTestRunner().run(example)\n",
+        "import shelve\nshelve.open('quality/db')['payload']\n",
+        "import shelve as storage\nstorage.open('quality/db')['payload']\n",
+        "from shelve import open as open_shelf\nopen_shelf('quality/db')['payload']\n",
+        "from pickle import loads as decode\ndecode(payload)\n",
+        "from marshal import loads as decode\ndecode(payload)\n",
+        "from types import FunctionType\nFunctionType(code, globals())\n",
+        "from gc import get_objects\nget_objects()\n",
+        "from multiprocessing.reduction import ForkingPickler\nForkingPickler.loads(payload)\n",
+        "import multiprocessing.reduction as reduction\nreduction.ForkingPickler.loads(payload)\n",
+        "import multiprocessing\nmultiprocessing.reduction.ForkingPickler.loads(payload)\n",
     ] {
         assert!(has_opaque_process_arguments(source), "{source}");
     }
-    assert!(!has_opaque_process_arguments("import codecs\ncode = response.code\nprint(code)\n"));
+    for source in [
+        "import codecs\ncode = response.code\nprint(code)\n",
+        "# import shelve\nprint('shelve.open is inert text')\n",
+    ] {
+        assert!(!has_opaque_process_arguments(source), "{source}");
+    }
+}
+
+#[test]
+fn python_identifier_normalization_cannot_hide_process_calls_or_aliases() {
+    for source in [
+        "import os\nos.ｓｙｓｔｅｍ(bytes.fromhex(payload))\n",
+        "import ｏｓ\nｏｓ.system(bytes.fromhex(payload))\n",
+        "import os as ｐｒｏｃｅｓｓ\nprocess.system('sh quality/hidden.txt')\n",
+        "from ｏｓ import ｓｙｓｔｅｍ as run\nrun(bytes.fromhex(payload))\n",
+    ] {
+        assert!(has_opaque_process_arguments(source), "{source}");
+    }
+    assert!(!has_opaque_process_arguments("print('ｏｓ.ｓｙｓｔｅｍ is inert text')\n"));
 }
 
 #[test]

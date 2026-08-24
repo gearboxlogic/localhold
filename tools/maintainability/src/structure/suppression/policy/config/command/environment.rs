@@ -91,7 +91,9 @@ fn is_runtime_code_loading_environment_name(name: &str) -> bool {
             | "OPENSSL_ENGINES"
             | "OPENSSL_MODULES"
             | "PS4"
+            | "PERL5LIB"
             | "PERL5OPT"
+            | "PERLLIB"
             | "PYTHONBREAKPOINT"
             | "PYTHONCASEOK"
             | "PYTHONEXECUTABLE"
@@ -188,8 +190,10 @@ mod tests {
 
     #[test]
     fn perl_code_loading_environment_is_weakening() {
-        assert!(is_weakening_environment_name("PERL5OPT"));
-        assert!(is_weakening_environment_name("perl5opt"));
+        for name in ["PERL5LIB", "PERL5OPT", "PERLLIB"] {
+            assert!(is_weakening_environment_name(name));
+            assert!(is_weakening_environment_name(&name.to_ascii_lowercase()));
+        }
     }
 
     #[test]

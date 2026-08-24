@@ -87,7 +87,7 @@ if ! gitleaks dir \
   failed=1
 fi
 
-if (( failed != 0 )); then
+if [[ "$failed" == 1 ]]; then
   exit 1
 fi
 

@@ -40,6 +40,25 @@ fn direct_filesystem_writers_fail_closed() {
         "root = Path(\".\")\n(root / \"Justfile\").open(\"wb\")\n",
         "shutil.copy2(source, destination)\n",
         "os.replace(source, destination)\n",
+        "message = f\"{Path('Justfile').write_text(payload)}\"\n",
+        "message = f\"{open('Justfile', 'w').write(payload)}\"\n",
+        "message = f\"{value:{Path('Justfile').write_text(payload)}}\"\n",
+        "message = f\"{value:{{Path('Justfile').write_text(payload)}}}\"\n",
+        r#"message = f"{Path("Justfile").write_text(payload)}"\n"#,
+        r#"(Path("Justfile").write_text)(payload)"#,
+        r#"(open)("Justfile", "w").write(payload)"#,
+        r#"message = f"{(Path('Justfile').write_text)(payload)}""#,
+        r#"message = f"{(open)('Justfile', 'w').write(payload)}""#,
+        "writer = Path('Justfile').write_text\nwriter(payload)\n",
+        "writer = open\nwriter('Justfile', 'w').write(payload)\n",
+        "writer = (builtins.open)\nwriter(file='Justfile', mode='a')\n",
+        "writer = open; writer('Justfile', 'w')\n",
+        "safe(); writer = open\n",
+        "writer = (\n    open\n)\n",
+        "writer = Path('Justfile').write_text\nrunner = writer\nrunner(payload)\n",
+        "writer = open\ncontainer = [writer]\n",
+        "(writer := open)\n",
+        "(writer := Path('Justfile').write_bytes)\n",
     ] {
         assert!(has_opaque_write(source), "{source}");
     }
@@ -51,6 +70,19 @@ fn filesystem_copies_to_data_paths_remain_allowed() {
     assert!(!has_opaque_write(r#"print('shutil.copyfile("a", "Justfile")')"#));
     assert!(!has_opaque_write(r#"Path("target/report.txt").write_text(report)"#));
     assert!(!has_opaque_write(r#"open("target/report.txt", "wb")"#));
+    assert!(!has_opaque_write(r#"(open)("target/report.txt", "wb")"#));
+    assert!(!has_opaque_write(r#"(Path("target/report.txt").write_text)(report)"#));
+    assert!(!has_opaque_write("writer = Path('target/report.txt').write_text\nwriter(report)\n"));
+    assert!(!has_opaque_write("writer = Path('target/report.txt').write_text\nmessage = f'{writer(report)}'\n"));
+    assert!(!has_opaque_write("writer = formatter\nwriter('Justfile', 'w')\n"));
+    assert!(!has_opaque_write("writer = open_writer\nwriter('Justfile', 'w')\n"));
+    assert!(!has_opaque_write("writer = Path('target/report.txt').write_bytes\ncontainer = [writer]\n"));
+    assert!(!has_opaque_write("message = 'writer = open; writer(Justfile, w)'\n"));
+    assert!(!has_opaque_write("print(\"safe; writer = open\")\n"));
+    assert!(!has_opaque_write("print(\"safe # writer = open\")\n"));
+    assert!(!has_opaque_write("print('safe')  # writer = open; writer('Justfile', 'w')\n"));
+    assert!(!has_opaque_write("message = \"\"\"safe; writer = open\n# writer = builtins.open\"\"\"\n"));
+    assert!(!has_opaque_write("writer = (\n    Path('target/report.txt').write_text\n)\ncontainer = [writer]\n"));
     assert!(!has_opaque_write(r#"open("Justfile", "rb")"#));
     assert!(!has_opaque_write(r#"Path("Justfile").open("r")"#));
     assert!(!has_opaque_write(r#"(Path(".") / "Justfile").open("rb")"#));
@@ -58,6 +90,11 @@ fn filesystem_copies_to_data_paths_remain_allowed() {
     assert!(!has_opaque_write(r#"os.open("target/report.txt", os.O_WRONLY)"#));
     assert!(!has_opaque_write("\"\"\"\nPath('Justfile').write_text(payload)\n\"\"\"\nprint('safe')\n"));
     assert!(!has_opaque_write("# Path('Justfile').write_text(payload)\nprint('safe')\n"));
+    assert!(!has_opaque_write("f\"Path('Justfile').write_text(payload) is inert text\"\n"));
+    assert!(!has_opaque_write("f\"{label + 'Path(Justfile).write_text(payload)'}\"\n"));
+    assert!(!has_opaque_write("f\"{value:─^9}\"\n"));
+    assert!(!has_opaque_write("f\"{value:Path('Justfile').write_text(payload)}\"\n"));
+    assert!(!has_opaque_write(r#"f"{len("safe")}"\n"#));
     assert!(has_opaque_write("# setup\nPath('Justfile').write_text(payload)\n"));
     assert!(has_opaque_write(r#"open(os.path.join(output_dir, filename), "w")"#));
     assert!(has_opaque_write(r#"open(os.path.join(output_dir, "report.svg"), "w")"#));

@@ -10,15 +10,15 @@ pub(super) fn assigned_variables(source: &str) -> (BTreeSet<String>, bool) {
     let functions = tokens::declared_shell_functions(source);
     let mut attributes = attributes::IntegerAttributes::default();
     let mut opaque_target = false;
-    for command in tokens::source_command_tokens(source) {
+    for command in tokens::structured_source_commands(source) {
         attributes.enter_scope(&command, &functions);
-        opaque_target |= attributes.ordinary_assignment_is_opaque(&command);
-        let Some(index) = command_word_index(&command) else {
+        opaque_target |= attributes.ordinary_assignment_is_opaque(&command.words);
+        let Some(index) = command_word_index(&command.words) else {
             attributes.leave_scope(&command);
             continue;
         };
-        let arguments = &command[index.saturating_add(1)..];
-        let command_word = command[index].trim_matches(['(', ')', '{', '}']).to_ascii_lowercase();
+        let arguments = &command.words[index.saturating_add(1)..];
+        let command_word = command.words[index].trim_matches(['(', ')', '{', '}']).to_ascii_lowercase();
         match command_word.as_str() {
             "declare" | "local" | "typeset" => {
                 opaque_target |= declaration_has_opaque_target(arguments, true, true);
@@ -26,6 +26,7 @@ pub(super) fn assigned_variables(source: &str) -> (BTreeSet<String>, bool) {
             }
             "readonly" => opaque_target |= declaration_has_opaque_target(arguments, false, false),
             "export" if declaration_has_opaque_target(arguments, false, false) => opaque_target = true,
+            "unset" => attributes.update_unset(arguments),
             "printf" | "read" | "readarray" | "mapfile" | "getopts" | "wait" => {
                 let mut assigned = BTreeSet::new();
                 match command_word.as_str() {
@@ -356,7 +357,7 @@ fn contains_dynamic_target(word: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{assigned_variables, has_opaque_indexed_assignment, has_opaque_unset_target};
+    use super::{assigned_variables, has_opaque_arithmetic_evaluation, has_opaque_indexed_assignment, has_opaque_unset_target};
 
     #[test]
     fn mutating_builtins_expose_their_assignment_targets() {
@@ -477,6 +478,67 @@ mod tests {
         let same_function = "check() {\n  local -i value=0\n  read -r value\n}\n";
         let (_, opaque) = assigned_variables(same_function);
         assert!(opaque);
+
+        let next_line_brace = "first()\n{\n  local -i value=0\n}\nvalue=payload\n";
+        let (_, opaque) = assigned_variables(next_line_brace);
+        assert!(!opaque);
+    }
+
+    #[test]
+    fn quoted_braces_do_not_end_integer_attribute_scope() {
+        for brace in ["'}'", "\\}"] {
+            let source = format!("check() {{\n  local -i value=0\n  printf '%s' {brace} >/dev/null\n  value='a[$(bash quality/hidden.txt)]'\n}}\n");
+            let (_, opaque) = assigned_variables(&source);
+            assert!(opaque, "{source}");
+        }
+    }
+
+    #[test]
+    fn timed_assignment_builtins_keep_their_assignment_semantics() {
+        for source in [
+            "check() {\n  time -p local -i value=0\n  value=payload\n}\n",
+            "declare -i value=0; time read -r value",
+            "declare -i value=0; time -p printf -v value %s payload",
+            "time wait -p 'a[$(bash quality/hidden.txt)]' 123",
+        ] {
+            let (_, opaque) = assigned_variables(source);
+            assert!(opaque, "{source}");
+        }
+    }
+
+    #[test]
+    fn inherited_integer_attributes_follow_outer_scopes() {
+        for source in [
+            "declare -i value=0\ncheck() {\n  local -I value\n  value=payload\n}\n",
+            "declare -i value=0\ncheck() {\n  declare -I value\n  value=payload\n}\n",
+            "outer() {\n  local -i value=0\n  inner() {\n    typeset -I value\n    value=payload\n  }\n}\n",
+        ] {
+            let (_, opaque) = assigned_variables(source);
+            assert!(opaque, "{source}");
+        }
+        let (_, opaque) = assigned_variables("declare value=plain\ncheck() {\n  local -I value\n  value=payload\n}\n");
+        assert!(!opaque);
+    }
+
+    #[test]
+    fn literal_unset_clears_active_integer_attributes() {
+        for source in [
+            "declare -i value=0; unset value; value=payload",
+            "declare -i value=0; unset -v value; value=payload",
+            "declare -i value=0; unset -- value; value=payload",
+            "declare -i value=0; unset -v -- value; value=payload",
+            "check() {\n  local -i value=0\n  unset -v -- value\n  value=payload\n}\n",
+        ] {
+            let (_, opaque) = assigned_variables(source);
+            assert!(!opaque, "{source}");
+        }
+        let (_, opaque) = assigned_variables("declare -i value=0; unset -f value; value=payload");
+        assert!(opaque);
+        assert!(has_opaque_unset_target("script/check.sh", "unset 'a[$(bash quality/hidden.txt)]'", false));
+        let safe = "declare -i value=0; unset value; value=payload";
+        assert!(!has_opaque_arithmetic_evaluation("script/check.sh", safe, false));
+        assert!(!has_opaque_indexed_assignment("script/check.sh", safe, false));
+        assert!(!has_opaque_unset_target("script/check.sh", safe, false));
     }
 
     #[test]

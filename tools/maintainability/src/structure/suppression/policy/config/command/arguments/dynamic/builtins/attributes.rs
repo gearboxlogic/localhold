@@ -5,6 +5,7 @@ pub(super) struct IntegerAttributes {
     global: BTreeMap<String, bool>,
     functions: Vec<FunctionAttributes>,
     brace_depth: usize,
+    pending_function: bool,
 }
 
 struct FunctionAttributes {
@@ -13,21 +14,27 @@ struct FunctionAttributes {
 }
 
 impl IntegerAttributes {
-    pub(super) fn enter_scope(&mut self, command: &[String], functions: &BTreeSet<String>) {
-        if function_opener(command, functions) {
+    pub(super) fn enter_scope(&mut self, command: &super::tokens::StructuredCommand, functions: &BTreeSet<String>) {
+        let opens_function =
+            command.open_braces > 0 && (function_opener(&command.words, functions) || self.pending_function && command.words.first().is_some_and(|word| word == "{"));
+        if opens_function {
             let closing_depth = self.brace_depth;
-            self.brace_depth += 1;
+            self.brace_depth += command.open_braces;
             self.functions.push(FunctionAttributes {
                 values: BTreeMap::new(),
                 closing_depth,
             });
+            self.pending_function = false;
         } else {
-            self.brace_depth += command.iter().filter(|word| word.as_str() == "{").count();
+            self.brace_depth += command.open_braces;
+            if !command.words.is_empty() {
+                self.pending_function = command.open_braces == 0 && function_name(&command.words, functions).is_some();
+            }
         }
     }
 
-    pub(super) fn leave_scope(&mut self, command: &[String]) {
-        for _ in 0..command.iter().filter(|word| word.as_str() == "}").count() {
+    pub(super) fn leave_scope(&mut self, command: &super::tokens::StructuredCommand) {
+        for _ in 0..command.close_braces {
             self.brace_depth = self.brace_depth.saturating_sub(1);
             while self.functions.last().is_some_and(|scope| scope.closing_depth == self.brace_depth) {
                 self.functions.pop();
@@ -57,7 +64,26 @@ impl IntegerAttributes {
             let Some(name) = super::identifier(target) else {
                 continue;
             };
-            self.set_declaration(name, options.integer_attribute, options.force_global);
+            self.set_declaration(name, options.integer_attribute, options.force_global, options.inherit);
+        }
+    }
+
+    pub(super) fn update_unset(&mut self, arguments: &[String]) {
+        let mut variables = true;
+        let mut options = true;
+        for argument in arguments {
+            let word = argument.trim_matches(['\'', '"', ';']);
+            if options && word == "--" {
+                options = false;
+                continue;
+            }
+            if options && word.starts_with('-') && word != "-" {
+                variables &= !word[1..].contains('f');
+                continue;
+            }
+            if variables && super::identifier(word).is_some() {
+                self.clear(word);
+            }
         }
     }
 
@@ -84,13 +110,14 @@ impl IntegerAttributes {
         false
     }
 
-    fn set_declaration(&mut self, name: &str, integer_attribute: Option<bool>, force_global: bool) {
+    fn set_declaration(&mut self, name: &str, integer_attribute: Option<bool>, force_global: bool, inherit: bool) {
         if force_global || self.functions.is_empty() {
             if let Some(integer) = integer_attribute {
                 self.global.insert(name.to_owned(), integer);
             }
             return;
         }
+        let integer_attribute = integer_attribute.or_else(|| inherit.then(|| self.is_integer(name)));
         let values = &mut self.functions.last_mut().expect("function scope is active").values;
         match integer_attribute {
             Some(integer) => {
@@ -101,12 +128,21 @@ impl IntegerAttributes {
             }
         }
     }
+
+    fn clear(&mut self, name: &str) {
+        if let Some(scope) = self.functions.iter_mut().rev().find(|scope| scope.values.contains_key(name)) {
+            scope.values.insert(name.to_owned(), false);
+        } else if self.global.contains_key(name) {
+            self.global.insert(name.to_owned(), false);
+        }
+    }
 }
 
 struct DeclarationOptions {
     active: bool,
     integer_attribute: Option<bool>,
     force_global: bool,
+    inherit: bool,
 }
 
 impl Default for DeclarationOptions {
@@ -115,6 +151,7 @@ impl Default for DeclarationOptions {
             active: true,
             integer_attribute: None,
             force_global: false,
+            inherit: false,
         }
     }
 }
@@ -131,6 +168,7 @@ impl DeclarationOptions {
         if word[1..].contains('i') {
             self.integer_attribute = Some(word.starts_with('-'));
         }
+        self.inherit |= word.starts_with('-') && word[1..].contains('I');
         self.force_global |= command != "local" && word.starts_with('-') && word[1..].contains('g');
         true
     }
@@ -140,7 +178,11 @@ fn function_opener(command: &[String], functions: &BTreeSet<String>) -> bool {
     let Some(brace) = command.iter().position(|word| word == "{") else {
         return false;
     };
-    let name = match &command[..brace] {
+    function_name(&command[..brace], functions).is_some()
+}
+
+fn function_name<'a>(command: &'a [String], functions: &BTreeSet<String>) -> Option<&'a str> {
+    let name = match command {
         [name] => name.strip_suffix("()"),
         [name, parentheses] if parentheses == "()" => Some(name.as_str()),
         [name, open, close] if open == "(" && close == ")" => Some(name.as_str()),
@@ -148,7 +190,7 @@ fn function_opener(command: &[String], functions: &BTreeSet<String>) -> bool {
         [keyword, name, parentheses] if keyword == "function" && parentheses == "()" => Some(name.as_str()),
         _ => None,
     };
-    name.is_some_and(|name| functions.contains(name))
+    name.filter(|name| functions.contains(*name))
 }
 
 fn assignment(word: &str) -> Option<(&str, &str)> {

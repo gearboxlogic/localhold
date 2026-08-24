@@ -15,10 +15,23 @@ pub(super) fn has_opaque_write(source: &str) -> bool {
     if super::evaluation::has_non_ascii_code(source) {
         return true;
     }
-    let Some(source) = imports::canonicalize(source) else {
+    let Some(canonicalized) = imports::canonicalize(source) else {
         return true;
     };
-    let mut scanner = CallScanner::new(&source);
+    has_opaque_canonical_write(&canonicalized.source, canonicalized.aliases)
+}
+
+fn has_opaque_write_with_aliases(source: &str, aliases: &imports::Aliases) -> bool {
+    if super::evaluation::has_non_ascii_code(source) {
+        return true;
+    }
+    aliases
+        .canonicalize_expression(source)
+        .is_none_or(|source| has_opaque_canonical_write(&source, aliases.clone()))
+}
+
+fn has_opaque_canonical_write(source: &str, aliases: imports::Aliases) -> bool {
+    let mut scanner = CallScanner::with_aliases(source, aliases);
     let mut handled_methods = BTreeSet::new();
     let mut invoked_capabilities = BTreeSet::new();
     while let Some(call) = scanner.next() {
@@ -262,14 +275,20 @@ struct CallScanner {
     characters: Vec<char>,
     index: usize,
     opaque_formatted_write_expression: bool,
+    aliases: imports::Aliases,
 }
 
 impl CallScanner {
     fn new(source: &str) -> Self {
+        Self::with_aliases(source, imports::Aliases::default())
+    }
+
+    fn with_aliases(source: &str, aliases: imports::Aliases) -> Self {
         Self {
             characters: source.chars().collect(),
             index: 0,
             opaque_formatted_write_expression: false,
+            aliases,
         }
     }
 
@@ -514,7 +533,8 @@ impl CallScanner {
 
     fn formatted_string_has_opaque_write(&self, literal: &StringLiteral) -> bool {
         let content = self.characters[literal.content_start..literal.content_end].iter().collect::<String>();
-        super::evaluation::formatted_code_expressions(&content).is_none_or(|expressions| expressions.iter().any(|expression| has_opaque_write(expression)))
+        super::evaluation::formatted_code_expressions(&content)
+            .is_none_or(|expressions| expressions.iter().any(|expression| has_opaque_write_with_aliases(expression, &self.aliases)))
     }
 
     fn f_expression_end(&self, start: usize, end: usize) -> Option<usize> {

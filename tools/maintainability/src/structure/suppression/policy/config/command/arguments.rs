@@ -188,7 +188,10 @@ pub(in crate::structure::suppression::policy::config) fn has_sourced_file_indire
 }
 
 fn is_shell_command_prefix(word: &str) -> bool {
-    matches!(word, "!" | "if" | "then" | "elif" | "while" | "until" | "do" | "command" | "exec" | "builtin" | "nohup") || word.starts_with('-')
+    matches!(
+        word,
+        "!" | "if" | "then" | "elif" | "while" | "until" | "do" | "command" | "exec" | "builtin" | "nohup" | "time"
+    ) || word.starts_with('-')
 }
 
 fn is_environment_assignment(word: &str) -> bool {

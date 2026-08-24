@@ -29,6 +29,7 @@ use surfaces::execution_surfaces;
 pub(super) use surfaces::without_reviewed_dispatch;
 
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
+    "#!/usr/bin/env -S -u BASH_ENV -u BASHOPTS -u ENV -u SHELLOPTS /usr/bin/bash --noprofile --norc",
     "unset GCONV_PATH",
     "unset OPENSSL_CONF OPENSSL_CONF_INCLUDE OPENSSL_ENGINES OPENSSL_MODULES",
     "unset RIPGREP_CONFIG_PATH",

@@ -11,6 +11,7 @@ mod profile;
 mod revision;
 
 const POLICY_PATH: &str = "policy/maintainability/python-source-profile.json";
+const SANITIZED_BASH_SHEBANG: &str = "/usr/bin/env -S -u BASH_ENV -u BASHOPTS -u ENV -u SHELLOPTS /usr/bin/bash --noprofile --norc";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObservedSource {
@@ -182,6 +183,9 @@ fn has_unsupported_shebang(path: &Path) -> Result<bool> {
 }
 
 fn shebang_requires_python_review(interpreter: &str) -> bool {
+    if interpreter == SANITIZED_BASH_SHEBANG {
+        return false;
+    }
     let words = interpreter.split_whitespace().collect::<Vec<_>>();
     let Some(command) = words.first() else {
         return false;
@@ -286,7 +290,14 @@ mod tests {
             fs::write(&path, shebang).expect("Python shebang fixture");
             assert!(has_unsupported_shebang(&path).expect("inspect Python shebang"), "{name}");
         }
-        for (name, shebang) in [("shell", "#!/bin/sh\n"), ("env-shell", "#!/usr/bin/env bash\n")] {
+        for (name, shebang) in [
+            ("shell", "#!/bin/sh\n"),
+            ("env-shell", "#!/usr/bin/env bash\n"),
+            (
+                "sanitized-env-shell",
+                "#!/usr/bin/env -S -u BASH_ENV -u BASHOPTS -u ENV -u SHELLOPTS /usr/bin/bash --noprofile --norc\n",
+            ),
+        ] {
             let path = workspace.path().join(name);
             fs::write(&path, shebang).expect("shell shebang fixture");
             assert!(!has_unsupported_shebang(&path).expect("inspect shell shebang"), "{name}");

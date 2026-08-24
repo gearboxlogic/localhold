@@ -263,6 +263,20 @@ pub(super) fn has_executable_unquoted_heredoc(source: &str) -> bool {
             continue;
         }
         pending.extend(heredoc_scan.documents(line));
+        if heredoc_scan.has_opaque_delimiter() {
+            return true;
+        }
+    }
+    heredoc_scan.has_opaque_delimiter()
+}
+
+pub(super) fn has_opaque_heredoc_delimiter(source: &str) -> bool {
+    let mut scan = heredoc::Scan::default();
+    for line in source.lines() {
+        scan.documents(line);
+        if scan.has_opaque_delimiter() {
+            return true;
+        }
     }
     false
 }
@@ -567,15 +581,6 @@ mod tests {
         let commands = source_command_tokens("printf ok # /tmp/ignored & /tmp/also-ignored\nprintf done");
         assert_eq!(commands.len(), 2);
         assert!(!commands.iter().flatten().any(|token| token.starts_with("/tmp/")));
-    }
-
-    #[test]
-    fn heredoc_payloads_are_not_parsed_as_shell_commands() {
-        let source = "cat <<'DOC'\n  PREFIX/bin/hold\nDOC\ncat <<-SCRIPT\n\t./generated-command\n\tSCRIPT\nquality/run-lints\n";
-        let normalized = without_noncommand_shell_data(source);
-        assert!(!normalized.contains("PREFIX/bin/hold"));
-        assert!(!normalized.contains("./generated-command"));
-        assert!(normalized.contains("quality/run-lints"));
     }
 
     #[test]

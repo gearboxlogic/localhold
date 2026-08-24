@@ -1,6 +1,9 @@
 use super::{command_word_index, tokens};
 
 pub(super) fn has_opaque_evaluation(path: &str, source: &str, source_is_reviewed: bool) -> bool {
+    if tokens::has_opaque_heredoc_delimiter(source) {
+        return true;
+    }
     let expansion_source = tokens::shell_expansion_source(source);
     let expansion_source = expansion_source.replace("\\\r\n", "").replace("\\\n", "");
     has_legacy_arithmetic_expansion(&expansion_source)
@@ -495,6 +498,13 @@ mod tests {
             "cat <<'LITERAL'\n$[payload]\nLITERAL\n",
         ] {
             assert!(!has_opaque_evaluation("script/check.sh", source, false), "{source}");
+        }
+        for source in [
+            "cat <<$'EOF' >/dev/null\nsafe\nEOF\n: $[payload]\n",
+            "cat <<$'E\\x4fF' >/dev/null\nsafe\nEOF\n: $[payload]\n",
+            "cat <<$\"EOF\" >/dev/null\nsafe\nEOF\n: $[payload]\n",
+        ] {
+            assert!(has_opaque_evaluation("script/check.sh", source, false), "{source}");
         }
     }
 }

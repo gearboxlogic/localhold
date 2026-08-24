@@ -106,6 +106,17 @@ fn aliases_and_composed_writer_paths_fail_closed() {
         "open('Just' + 'file', 'w').write(payload)\n",
         "Path('Just' + 'file').write_text(payload)\n",
         "open('target/' + name, 'w').write(payload)\n",
+        "import shutil as files\nmessage = f\"{files.copyfile('quality/Justfile', 'Justfile')}\"\n",
+        "from shutil import copyfile as copy\nmessage = f\"{copy('quality/Justfile', 'Justfile')!s}\"\n",
+        "from shutil import copyfile as copy\nmessage = f\"{value:{copy('quality/Justfile', 'Justfile')}}\"\n",
+        "from shutil import copyfile as copy\nmessage = f\"{f'{copy(\"quality/Justfile\", \"Justfile\")}'}\"\n",
+        "import tempfile as scratch\nmessage = f\"{scratch.NamedTemporaryFile(dir='script', suffix='.sh')}\"\n",
+        "import shutil as files\nmessage = f\"{files}\"\n",
+        "import shutil as files\nmessage = f\"{(files := helper).copyfile('quality/Justfile', 'Justfile')}\"\n",
+        "import _io as streams\nstreams.open('Justfile', 'w').write(payload)\n",
+        "from _io import open as writer\nwriter('Justfile', 'w').write(payload)\n",
+        "from posix import remove as erase\nerase('Justfile')\n",
+        "import nt as backend\nbackend.remove('Justfile')\n",
     ] {
         assert!(has_opaque_write(source), "{source}");
     }
@@ -211,6 +222,24 @@ fn filesystem_copies_to_data_paths_remain_allowed() {
     assert!(!has_opaque_write("Path('target/' + 'report.txt').write_text(payload)\n"));
     assert!(!has_opaque_write("import shutil as files\nprint('files.copyfile is documentation')\n"));
     assert!(!has_opaque_write("import tempfile\ntempfile.NamedTemporaryFile(prefix='report-', suffix='.txt')\n"));
+    assert!(!has_opaque_write(
+        "import shutil as files\nmessage = f\"{files.copyfile('quality/report.txt', 'target/report.txt')}\"\n"
+    ));
+    assert!(!has_opaque_write(
+        "from shutil import copyfile as copy\nmessage = f\"{copy('quality/report.txt', 'target/report.txt')!s}\"\n"
+    ));
+    assert!(!has_opaque_write(
+        "from shutil import copyfile as copy\nmessage = f\"{value:{copy('quality/report.txt', 'target/report.txt')}}\"\n"
+    ));
+    assert!(!has_opaque_write(
+        "from shutil import copyfile as copy\nmessage = f\"{f'{copy(\"quality/report.txt\", \"target/report.txt\")}'}\"\n"
+    ));
+    assert!(!has_opaque_write(
+        "import tempfile as scratch\nmessage = f\"{scratch.NamedTemporaryFile(dir='target', suffix='.txt')}\"\n"
+    ));
+    assert!(!has_opaque_write("from _io import open as writer\nmessage = f\"{writer('target/report.txt', 'w')}\"\n"));
+    assert!(!has_opaque_write("from posix import remove as erase\nmessage = f\"{erase('target/report.txt')}\"\n"));
+    assert!(!has_opaque_write("import shutil as files\nmessage = f\"files.copyfile is inert text\"\n"));
     assert!(!has_opaque_write(
         "import tempfile\ntempfile.NamedTemporaryFile(dir='target', prefix='report-' + 'safe-', suffix='.txt')\n"
     ));

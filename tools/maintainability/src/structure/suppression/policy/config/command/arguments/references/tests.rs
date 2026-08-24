@@ -755,8 +755,25 @@ fn inert_shell_arithmetic_text_does_not_make_execution_opaque() {
         "(( 1 << 2 ))\nprintf ok",
         "value=$((1 << 2))\nprintf ok",
         "first() {\n  local -i value=0\n}\nsecond() {\n  read -r value\n}\nsecond",
+        "check() {\n  local -i value=0\n  unset value\n  value=payload\n}\ncheck",
+        "check() {\n  local -i value=0\n  unset -v -- value\n  value=payload\n}\ncheck",
+        "# ((1 <<\ncat <<'DOC'\n$(sh quality/lint.txt)\nDOC\nprintf ok",
     ] {
         assert_eq!(inputs(command), (Vec::new(), false), "{command}");
+    }
+}
+
+#[test]
+fn shell_scope_and_prefix_variants_cannot_hide_dynamic_execution() {
+    assert_eq!(inputs("# <<NEVER\nsh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
+    for command in [
+        "check() {\n  local -i value=0\n  printf '%s' '}' >/dev/null\n  value='a[$(sh quality/lint.txt)]'\n}\ncheck",
+        "check() {\n  time -p local -i value=0\n  value='a[$(sh quality/lint.txt)]'\n}\ncheck",
+        "sleep 0.01 & pid=$!; time wait -p 'a[$(sh quality/lint.txt)]' \"$pid\"",
+        "outer() {\n  local -i value=0\n  inner() {\n    local -I value\n    value='a[$(sh quality/lint.txt)]'\n  }\n  inner\n}\nouter",
+        "unset 'a[$(sh quality/lint.txt)]'",
+    ] {
+        assert!(inputs(command).1, "{command}");
     }
 }
 

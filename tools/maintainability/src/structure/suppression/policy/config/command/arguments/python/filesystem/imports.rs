@@ -3,7 +3,12 @@ use std::ops::Range;
 
 use super::{CallScanner, is_direct_mutator, is_identifier_character, is_identifier_start, is_path_constructor};
 
-pub(super) fn canonicalize(source: &str) -> Option<String> {
+pub(super) struct Canonicalized {
+    pub(super) source: String,
+    pub(super) aliases: Aliases,
+}
+
+pub(super) fn canonicalize(source: &str) -> Option<Canonicalized> {
     let scanner = CallScanner::new(source);
     let statements = statement_ranges(&scanner);
     let mut aliases = BTreeMap::new();
@@ -27,7 +32,20 @@ pub(super) fn canonicalize(source: &str) -> Option<String> {
         }
         ignored[range].fill(true);
     }
-    rewrite_aliases(&scanner, &aliases, &ignored)
+    let aliases = Aliases(aliases);
+    let source = rewrite_aliases(&scanner, &aliases, &ignored)?;
+    Some(Canonicalized { source, aliases })
+}
+
+#[derive(Clone, Default)]
+pub(super) struct Aliases(BTreeMap<String, Alias>);
+
+impl Aliases {
+    pub(super) fn canonicalize_expression(&self, source: &str) -> Option<String> {
+        let scanner = CallScanner::new(source);
+        let ignored = vec![false; scanner.characters.len()];
+        rewrite_aliases(&scanner, self, &ignored)
+    }
 }
 
 fn statement_ranges(scanner: &CallScanner) -> Vec<Range<usize>> {
@@ -146,7 +164,7 @@ fn parse_from_import(tokens: &[Token]) -> Option<ParsedAliases> {
     (index == tokens.len()).then_some(parsed)
 }
 
-fn rewrite_aliases(scanner: &CallScanner, aliases: &BTreeMap<String, Alias>, ignored: &[bool]) -> Option<String> {
+fn rewrite_aliases(scanner: &CallScanner, aliases: &Aliases, ignored: &[bool]) -> Option<String> {
     let mut output = String::with_capacity(scanner.characters.len());
     let mut index = 0;
     while index < scanner.characters.len() {
@@ -178,7 +196,7 @@ fn rewrite_aliases(scanner: &CallScanner, aliases: &BTreeMap<String, Alias>, ign
         }
         let name = scanner.characters[start..index].iter().collect::<String>();
         let root_reference = scanner.characters[..start].iter().rfind(|character| !character.is_whitespace()) != Some(&'.');
-        let Some(alias) = root_reference.then(|| aliases.get(&name)).flatten() else {
+        let Some(alias) = root_reference.then(|| aliases.0.get(&name)).flatten() else {
             output.push_str(&name);
             continue;
         };
@@ -199,8 +217,8 @@ fn rewrite_aliases(scanner: &CallScanner, aliases: &BTreeMap<String, Alias>, ign
 fn canonical_module(module: &str) -> Option<&'static str> {
     match module {
         "builtins" => Some("builtins"),
-        "io" => Some("io"),
-        "os" => Some("os"),
+        "_io" | "io" => Some("io"),
+        "nt" | "os" | "posix" => Some("os"),
         "pathlib" => Some("pathlib"),
         "shutil" => Some("shutil"),
         "tempfile" => Some("tempfile"),

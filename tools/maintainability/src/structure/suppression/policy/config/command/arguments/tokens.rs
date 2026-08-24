@@ -1,5 +1,12 @@
 mod heredoc;
+mod structure;
 mod substitution;
+
+pub(super) struct StructuredCommand {
+    pub(super) words: Vec<String>,
+    pub(super) open_braces: usize,
+    pub(super) close_braces: usize,
+}
 
 pub(super) fn declared_shell_functions(source: &str) -> std::collections::BTreeSet<String> {
     shell_function_declarations(source).into_iter().collect()
@@ -72,6 +79,10 @@ pub(super) fn source_command_tokens(source: &str) -> Vec<Vec<String>> {
         .into_iter()
         .map(|segment| shell_tokens(command_without_comment(segment), false))
         .collect()
+}
+
+pub(super) fn structured_source_commands(source: &str) -> Vec<StructuredCommand> {
+    structure::commands(source)
 }
 
 fn shell_command_segments(source: &str) -> Vec<&str> {
@@ -450,7 +461,7 @@ fn shell_tokens(command: &str, split_equals: bool) -> Vec<String> {
 mod tests {
     use super::{
         command_substitution_commands, command_tokens, declared_shell_function_count, declared_shell_functions, has_executable_unquoted_heredoc, shell_expansion_source,
-        source_command_tokens, without_noncommand_shell_data,
+        source_command_tokens, structured_source_commands, without_noncommand_shell_data,
     };
 
     #[test]
@@ -587,6 +598,25 @@ mod tests {
         let normalized = without_noncommand_shell_data(source);
         assert!(!normalized.contains("quality/ignored"));
         assert!(normalized.contains("quality/run-lints"));
+    }
+
+    #[test]
+    fn comments_cannot_open_heredocs_or_poison_later_arithmetic_state() {
+        let fake_heredoc = "# <<NEVER\nquality/run-lints\n";
+        assert!(without_noncommand_shell_data(fake_heredoc).contains("quality/run-lints"));
+
+        let fake_arithmetic = "# ((1 <<\ncat <<'DOC'\n$(quality/ignored)\nDOC\nquality/run-lints\n";
+        let normalized = without_noncommand_shell_data(fake_arithmetic);
+        assert!(!normalized.contains("quality/ignored"));
+        assert!(normalized.contains("quality/run-lints"));
+        assert!(!has_executable_unquoted_heredoc(fake_arithmetic));
+    }
+
+    #[test]
+    fn structured_commands_count_only_shell_syntax_braces() {
+        let commands = structured_source_commands("check() {\n  printf '%s' '}'\n}\n");
+        assert_eq!(commands.iter().map(|command| command.open_braces).sum::<usize>(), 1);
+        assert_eq!(commands.iter().map(|command| command.close_braces).sum::<usize>(), 1);
     }
 
     #[test]

@@ -27,6 +27,8 @@ impl Scan {
                 escaped = true;
             } else if matches!(character, '\'' | '"') {
                 self.shell_quote = updated_quote(self.shell_quote, character);
+            } else if comment_opener(&characters, index, self.shell_quote) {
+                break;
             } else if arithmetic_opener(&characters, index, self.shell_quote) {
                 self.arithmetic_depth = 2;
                 self.arithmetic_quote = None;
@@ -61,6 +63,14 @@ impl Scan {
             _ => {}
         }
     }
+}
+
+fn comment_opener(characters: &[char], index: usize, quote: Option<char>) -> bool {
+    quote.is_none()
+        && characters[index] == '#'
+        && index
+            .checked_sub(1)
+            .is_none_or(|previous| characters[previous].is_whitespace() || matches!(characters[previous], ';' | '&' | '|' | '(' | ')'))
 }
 
 fn document_after_opener(characters: &[char], start: usize) -> (Option<Document>, usize) {

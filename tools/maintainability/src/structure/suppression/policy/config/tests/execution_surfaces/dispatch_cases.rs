@@ -115,6 +115,16 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
         "opaque interpreter program",
     ),
     ("sleep 0.01 & pid=$!; wait -pa[$(sh quality/lint.txt)] \"$pid\"\n", "opaque interpreter program"),
+    ("# <<NEVER\nsh quality/lint.txt\n", "lint-weakening argument"),
+    (
+        "check() { local -i value=0; printf '%s' '}' >/dev/null; value='a[$(sh quality/lint.txt)]'; }; check\n",
+        "opaque interpreter program",
+    ),
+    ("sleep 0.01 & pid=$!; time -p wait -p 'a[$(sh quality/lint.txt)]' \"$pid\"\n", "opaque interpreter program"),
+    (
+        "outer() {\n    local -i value=0\n    inner() {\n        local -I value\n        value='a[$(sh quality/lint.txt)]'\n    }\n    inner\n}\nouter\n",
+        "opaque interpreter program",
+    ),
     (
         "tar --checkpoint=1 --checkpoint-action=exec='sh quality/lint.txt' -cf archive.tar .\n",
         "opaque interpreter program",

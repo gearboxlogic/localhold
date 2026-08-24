@@ -2,9 +2,11 @@ mod bindings;
 mod evaluation;
 mod execution;
 mod filesystem;
+mod filesystem_write;
 mod process;
 
 pub(super) use execution::References as ExecutionReferences;
+pub(super) use filesystem_write::{has_opaque_filesystem_write, has_opaque_filesystem_write_in_workspace};
 
 const REJECTED_PYTHON_MODULES: &[&str] = &[
     "_pickle",
@@ -236,10 +238,6 @@ const fn closing_delimiter(character: char) -> Option<char> {
         '{' => Some('}'),
         _ => None,
     }
-}
-
-pub(super) fn has_opaque_filesystem_write(path: &str, source: &str) -> bool {
-    filesystem::has_opaque_write(&normalize_continuations(source)) && !filesystem::is_reviewed_dynamic_write_surface(path, source)
 }
 
 fn imports_command_capable_api(source: &str) -> bool {

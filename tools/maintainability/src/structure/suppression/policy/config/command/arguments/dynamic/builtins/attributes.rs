@@ -68,22 +68,52 @@ impl IntegerAttributes {
         }
     }
 
+    pub(super) fn declaration_initializer_is_opaque(&self, command: &str, arguments: &[String]) -> bool {
+        let mut options = DeclarationOptions::default();
+        for argument in arguments {
+            let word = argument.trim_matches(['\'', '"', ';']);
+            if options.consume(command, word) {
+                continue;
+            }
+            let Some((target, value)) = word.split_once('=') else {
+                continue;
+            };
+            let target = target.strip_suffix('+').unwrap_or(target);
+            let Some(name) = super::identifier(target) else {
+                continue;
+            };
+            if self.declared_integer(name, &options) && super::integer_value_is_opaque(value) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub(super) fn update_unset(&mut self, arguments: &[String]) {
         let mut variables = true;
         let mut options = true;
+        let mut targets = Vec::new();
         for argument in arguments {
             let word = argument.trim_matches(['\'', '"', ';']);
             if options && word == "--" {
                 options = false;
                 continue;
             }
-            if options && word.starts_with('-') && word != "-" {
+            let option = options && word.starts_with('-') && word != "-";
+            if option && !word[1..].bytes().all(|flag| matches!(flag, b'f' | b'n' | b'v')) {
+                return;
+            }
+            if option {
                 variables &= !word[1..].contains('f');
                 continue;
             }
+            options = false;
             if variables && super::identifier(word).is_some() {
-                self.clear(word);
+                targets.push(word);
             }
+        }
+        for target in targets {
+            self.clear(target);
         }
     }
 
@@ -127,6 +157,13 @@ impl IntegerAttributes {
                 values.entry(name.to_owned()).or_insert(false);
             }
         }
+    }
+
+    fn declared_integer(&self, name: &str, options: &DeclarationOptions) -> bool {
+        if options.force_global || self.functions.is_empty() {
+            return options.integer_attribute.unwrap_or(false);
+        }
+        options.integer_attribute.or_else(|| options.inherit.then(|| self.is_integer(name))).unwrap_or(false)
     }
 
     fn clear(&mut self, name: &str) {

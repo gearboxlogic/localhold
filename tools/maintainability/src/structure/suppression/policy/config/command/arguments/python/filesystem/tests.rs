@@ -115,8 +115,17 @@ fn aliases_and_composed_writer_paths_fail_closed() {
         "import shutil as files\nmessage = f\"{(files := helper).copyfile('quality/Justfile', 'Justfile')}\"\n",
         "import _io as streams\nstreams.open('Justfile', 'w').write(payload)\n",
         "from _io import open as writer\nwriter('Justfile', 'w').write(payload)\n",
+        "import _pyio as streams\nstreams.open('Justfile', 'w').write(payload)\n",
+        "from _pyio import open as writer\nwriter('Justfile', 'w').write(payload)\n",
         "from posix import remove as erase\nerase('Justfile')\n",
         "import nt as backend\nbackend.remove('Justfile')\n",
+        "open('MAKEFILE', 'w').write(payload)\n",
+        "open('PACKAGE.JSON', 'w').write(payload)\n",
+        "open('.GITHUB/workflows/ci.yml', 'w').write(payload)\n",
+        "open('Justfile.', 'w').write(payload)\n",
+        "open('Justfile ', 'w').write(payload)\n",
+        "open('Justfile:$DATA', 'w').write(payload)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='.GITHUB/workflows', suffix='.yml', delete=False)\n",
     ] {
         assert!(has_opaque_write(source), "{source}");
     }
@@ -260,4 +269,12 @@ fn filesystem_copies_to_data_paths_remain_allowed() {
     assert!(has_opaque_write(r#"open(os.path.join(output_dir, "report.svg"), "w")"#));
     assert!(has_opaque_write(r#"open(os.path.join(output_dir, "Justfile"), "w")"#));
     assert!(has_opaque_write(r#"open(prefix or os.path.join(output_dir, "report.svg"), "w")"#));
+}
+
+#[test]
+fn platform_writer_alias_controls_remain_allowed() {
+    assert!(!has_opaque_write("from _pyio import open as writer\nmessage = f\"{writer('target/report.txt', 'w')}\"\n"));
+    assert!(!has_opaque_write(r#"open("target/MAKEFILE.txt", "w")"#));
+    assert!(!has_opaque_write(r#"open(".github/workflow/ci.yml", "w")"#));
+    assert!(!has_opaque_write("import tempfile\ntempfile.NamedTemporaryFile(dir='.GITHUB/artifacts', suffix='.yml')\n"));
 }

@@ -313,21 +313,21 @@ fn reject_checked_in_weakening_with_mode(workspace: &Path, validation: Repositor
         RepositoryValidation::Fixture => source_size::validate_fixture(workspace, &surfaces.checked_paths)?,
     }
     let audited_manifests = tracked_manifests(workspace)?.into_iter().collect::<BTreeSet<_>>();
-    for path in surfaces.paths {
-        let source = fs::read_to_string(workspace.join(&path)).with_context(|| format!("read lint command execution surface {path}"))?;
-        validate_before_resolution(workspace, &path, &source)?;
-        actions::validate_action_references(workspace, &surfaces.tracked_paths, &path, &source)?;
-        let (selected_manifests, unresolved_manifest) = cargo_manifest_paths_for_surface(&path, &source);
+    for path in &surfaces.paths {
+        let source = fs::read_to_string(workspace.join(path)).with_context(|| format!("read lint command execution surface {path}"))?;
+        validate_before_resolution(workspace, path, &source)?;
+        actions::validate_action_references(workspace, &surfaces.tracked_paths, path, &source)?;
+        let (selected_manifests, unresolved_manifest) = cargo_manifest_paths_for_surface(path, &source);
         if unresolved_manifest || !selected_manifests.is_subset(&audited_manifests) {
             bail!("checked-in Rust command surface {path:?} selects a Cargo manifest outside the audited manifest inventory");
         }
-        let source_is_reviewed = surfaces.command_profiles.as_ref().is_some_and(|profiles| profiles.source_is_current(&path, &source));
-        if weakening_token_for_surface_with_reviewed_source(&path, &source, source_is_reviewed)
-            && !reviewed_quality_command_exceptions_are_exact(&path, &source, source_is_reviewed)
+        let source_is_reviewed = surfaces.command_profiles.as_ref().is_some_and(|profiles| profiles.source_is_current(path, &source));
+        if weakening_token_for_surface_with_reviewed_source(workspace, &surfaces.paths, path, &source, source_is_reviewed)
+            && !reviewed_quality_command_exceptions_are_exact(path, &source, source_is_reviewed)
         {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening argument");
         }
-        if weakening_environment_for_surface(&path, &source) && !scrubber_environment_references_are_exact(&path, &source) {
+        if weakening_environment_for_surface(path, &source) && !scrubber_environment_references_are_exact(path, &source) {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening environment channel");
         }
     }

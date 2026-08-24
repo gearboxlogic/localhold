@@ -217,7 +217,7 @@ fn rewrite_aliases(scanner: &CallScanner, aliases: &Aliases, ignored: &[bool]) -
 fn canonical_module(module: &str) -> Option<&'static str> {
     match module {
         "builtins" => Some("builtins"),
-        "_io" | "io" => Some("io"),
+        "_io" | "_pyio" | "io" => Some("io"),
         "nt" | "os" | "posix" => Some("os"),
         "pathlib" => Some("pathlib"),
         "shutil" => Some("shutil"),

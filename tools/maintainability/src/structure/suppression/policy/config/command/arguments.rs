@@ -41,17 +41,23 @@ pub(in crate::structure::suppression::policy::config) fn weakening_token(source:
 
 #[cfg(test)]
 pub(in crate::structure::suppression::policy::config) fn weakening_token_for_surface(path: &str, source: &str) -> bool {
-    weakening_token_for_surface_with_reviewed_source(path, source, false)
+    weakening_token_for_surface_with_context(None, path, source, false)
 }
 
-pub(super) fn weakening_token_for_surface_with_reviewed_source(path: &str, source: &str, source_is_reviewed: bool) -> bool {
+pub(super) fn weakening_token_for_surface_with_reviewed_source(workspace: &Path, execution_surfaces: &[String], path: &str, source: &str, source_is_reviewed: bool) -> bool {
+    weakening_token_for_surface_with_context(Some((workspace, execution_surfaces)), path, source, source_is_reviewed)
+}
+
+type FilesystemContext<'a> = (&'a Path, &'a [String]);
+
+fn weakening_token_for_surface_with_context(filesystem_context: Option<FilesystemContext<'_>>, path: &str, source: &str, source_is_reviewed: bool) -> bool {
     if mise::file_task_metadata_is_unresolved(source) {
         return true;
     }
     if dynamic_program::is_unanalyzed_path(path) {
         return true;
     }
-    if is_python(path) && (python::has_opaque_process_arguments(path, source) || python::has_opaque_filesystem_write(path, source)) {
+    if is_python(path) && (python::has_opaque_process_arguments(path, source) || python_filesystem_write_is_opaque(filesystem_context, path, source)) {
         return true;
     }
     if is_powershell(path) && powershell::has_constructed_rust_arguments(source) {
@@ -116,6 +122,13 @@ pub(super) fn weakening_token_for_surface_with_reviewed_source(path: &str, sourc
         || embedded_commands
             .iter()
             .any(|command| weakening_token_with_options(command, options.allow_just_interpolation()))
+}
+
+fn python_filesystem_write_is_opaque(filesystem_context: Option<FilesystemContext<'_>>, path: &str, source: &str) -> bool {
+    filesystem_context.map_or_else(
+        || python::has_opaque_filesystem_write(path, source),
+        |(workspace, execution_surfaces)| python::has_opaque_filesystem_write_in_workspace(workspace, execution_surfaces, path, source),
+    )
 }
 
 pub(super) fn weakening_token_in_reviewed_shell_remainder(source: &str) -> bool {

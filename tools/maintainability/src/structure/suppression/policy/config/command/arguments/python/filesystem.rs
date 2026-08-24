@@ -1,37 +1,46 @@
 use std::collections::BTreeSet;
-use std::path::{Component, Path};
+use std::path::Path;
 
 mod capability;
 mod imports;
 mod literal;
 mod reviewed;
 mod temporary;
+mod write_path;
 
 pub(super) fn is_reviewed_dynamic_write_surface(path: &str, source: &str) -> bool {
     reviewed::is_reviewed_dynamic_write_surface(path, source)
 }
 
 pub(super) fn has_opaque_write(source: &str) -> bool {
+    has_opaque_write_with_policy(source, write_path::Policy::default())
+}
+
+pub(super) fn has_opaque_write_in_workspace(workspace: &Path, execution_surfaces: &[String], source: &str) -> bool {
+    has_opaque_write_with_policy(source, write_path::Policy::for_workspace(workspace, execution_surfaces))
+}
+
+fn has_opaque_write_with_policy(source: &str, write_policy: write_path::Policy) -> bool {
     if super::evaluation::has_non_ascii_code(source) {
         return true;
     }
     let Some(canonicalized) = imports::canonicalize(source) else {
         return true;
     };
-    has_opaque_canonical_write(&canonicalized.source, canonicalized.aliases)
+    has_opaque_canonical_write(&canonicalized.source, canonicalized.aliases, write_policy)
 }
 
-fn has_opaque_write_with_aliases(source: &str, aliases: &imports::Aliases) -> bool {
+fn has_opaque_write_with_aliases(source: &str, aliases: &imports::Aliases, write_policy: &write_path::Policy) -> bool {
     if super::evaluation::has_non_ascii_code(source) {
         return true;
     }
     aliases
         .canonicalize_expression(source)
-        .is_none_or(|source| has_opaque_canonical_write(&source, aliases.clone()))
+        .is_none_or(|source| has_opaque_canonical_write(&source, aliases.clone(), write_policy.clone()))
 }
 
-fn has_opaque_canonical_write(source: &str, aliases: imports::Aliases) -> bool {
-    let mut scanner = CallScanner::with_aliases(source, aliases);
+fn has_opaque_canonical_write(source: &str, aliases: imports::Aliases, write_policy: write_path::Policy) -> bool {
+    let mut scanner = CallScanner::with_aliases(source, aliases, write_policy);
     let mut handled_methods = BTreeSet::new();
     let mut invoked_capabilities = BTreeSet::new();
     while let Some(call) = scanner.next() {
@@ -208,23 +217,14 @@ fn writable_mode(scanner: &CallScanner, opening_parenthesis: usize, position: us
 fn path_argument_is_opaque(scanner: &CallScanner, opening_parenthesis: usize, argument: ArgumentSpec) -> bool {
     scanner
         .call_argument(opening_parenthesis, argument)
-        .is_none_or(|argument| write_path_expression_is_opaque(&argument))
+        .is_none_or(|argument| write_path_expression_is_opaque(scanner, &argument))
 }
 
-fn write_path_expression_is_opaque(argument: &str) -> bool {
+fn write_path_expression_is_opaque(scanner: &CallScanner, argument: &str) -> bool {
     if let Some(path) = literal_value(argument) {
-        return literal_write_path_is_opaque(&path);
+        return scanner.write_policy.is_opaque(&path);
     }
     true
-}
-
-fn literal_write_path_is_opaque(value: &str) -> bool {
-    if value.contains(['$', '%', '{', '}', '*', '?']) {
-        return true;
-    }
-    let value = value.replace('\\', "/");
-    let path = Path::new(&value);
-    path.is_absolute() || path.components().any(|component| !matches!(component, Component::CurDir | Component::Normal(_))) || is_execution_surface_path(&value)
 }
 
 #[derive(Clone, Copy)]
@@ -237,26 +237,6 @@ impl ArgumentSpec {
     const fn new(position: usize, names: &'static [&'static str]) -> Self {
         Self { position, names }
     }
-}
-
-fn is_execution_surface_path(value: &str) -> bool {
-    if value.contains(['$', '%', '{', '}', '*', '?']) {
-        return false;
-    }
-    let value = value.replace('\\', "/");
-    let path = Path::new(&value);
-    if path.is_absolute() || path.components().any(|component| !matches!(component, Component::CurDir | Component::Normal(_))) {
-        return false;
-    }
-    let normalized = path
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => value.to_str(),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/");
-    !normalized.is_empty() && super::super::super::is_execution_surface(&normalized)
 }
 
 struct Call {
@@ -276,19 +256,21 @@ struct CallScanner {
     index: usize,
     opaque_formatted_write_expression: bool,
     aliases: imports::Aliases,
+    write_policy: write_path::Policy,
 }
 
 impl CallScanner {
     fn new(source: &str) -> Self {
-        Self::with_aliases(source, imports::Aliases::default())
+        Self::with_aliases(source, imports::Aliases::default(), write_path::Policy::default())
     }
 
-    fn with_aliases(source: &str, aliases: imports::Aliases) -> Self {
+    fn with_aliases(source: &str, aliases: imports::Aliases, write_policy: write_path::Policy) -> Self {
         Self {
             characters: source.chars().collect(),
             index: 0,
             opaque_formatted_write_expression: false,
             aliases,
+            write_policy,
         }
     }
 
@@ -533,8 +515,11 @@ impl CallScanner {
 
     fn formatted_string_has_opaque_write(&self, literal: &StringLiteral) -> bool {
         let content = self.characters[literal.content_start..literal.content_end].iter().collect::<String>();
-        super::evaluation::formatted_code_expressions(&content)
-            .is_none_or(|expressions| expressions.iter().any(|expression| has_opaque_write_with_aliases(expression, &self.aliases)))
+        super::evaluation::formatted_code_expressions(&content).is_none_or(|expressions| {
+            expressions
+                .iter()
+                .any(|expression| has_opaque_write_with_aliases(expression, &self.aliases, &self.write_policy))
+        })
     }
 
     fn f_expression_end(&self, start: usize, end: usize) -> Option<usize> {

@@ -4,11 +4,15 @@ pub(super) struct Document {
     pub(super) allows_expansion: bool,
 }
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Default)]
 pub(super) struct Scan {
     shell_quote: Option<char>,
     arithmetic_quote: Option<char>,
     arithmetic_depth: usize,
+    opaque_delimiter: bool,
 }
 
 impl Scan {
@@ -36,13 +40,20 @@ impl Scan {
                 continue;
             } else if heredoc_opener(&characters, index, self.shell_quote) {
                 let (document, end) = document_after_opener(&characters, index);
-                documents.extend(document);
+                match document {
+                    Some(document) => documents.push(document),
+                    None => self.opaque_delimiter = true,
+                }
                 index = end;
                 continue;
             }
             index += 1;
         }
         documents
+    }
+
+    pub(super) const fn has_opaque_delimiter(&self) -> bool {
+        self.opaque_delimiter
     }
 
     fn update_arithmetic(&mut self, character: char, escaped: &mut bool) {
@@ -117,12 +128,19 @@ fn delimiter(characters: &[char], start: usize) -> Option<(String, usize, bool)>
     let mut escaped = false;
     let mut quoted = false;
     while let Some(character) = characters.get(index).copied() {
+        if quote.is_none() && character == '$' && matches!(characters.get(index + 1), Some('\'' | '"')) {
+            return None;
+        }
         if escaped {
             value.push(character);
             escaped = false;
         } else if character == '\\' && quote != Some('\'') {
-            escaped = true;
             quoted = true;
+            if quote != Some('"') || matches!(characters.get(index + 1), Some('$' | '`' | '"' | '\\')) {
+                escaped = true;
+            } else {
+                value.push(character);
+            }
         } else if matches!(character, '\'' | '"') {
             if quote == Some(character) {
                 quote = None;
@@ -140,5 +158,5 @@ fn delimiter(characters: &[char], start: usize) -> Option<(String, usize, bool)>
         }
         index += 1;
     }
-    (quote.is_none() && !escaped && !value.is_empty()).then_some((value, index, !quoted))
+    (quote.is_none() && !escaped && (!value.is_empty() || quoted)).then_some((value, index, !quoted))
 }

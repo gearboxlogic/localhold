@@ -168,6 +168,54 @@ fn command_policy_allows_inert_python_writer_binding_text() {
     }
 }
 
+#[test]
+fn command_policy_rejects_python_execution_surface_ancestor_mutations() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::create_dir_all(workspace.path().join("payload")).expect("payload directory");
+    fs::write(workspace.path().join("quality/check"), "#!/bin/sh\ntrue\n").expect("shebang-discovered command surface");
+    fs::write(workspace.path().join("payload/report.txt"), "report\n").expect("copytree source");
+    fs::write(workspace.path().join("script/check.py"), "print('initial')\n").expect("initial Python source");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    for source in [
+        "import shutil\nshutil.rmtree('quality')\n",
+        "import shutil\nshutil.copytree('payload', 'quality', dirs_exist_ok=True)\n",
+        "import os\nos.rename('quality', 'moved')\n",
+        "import shutil\nshutil.move('quality', 'moved')\n",
+        "import os\nos.replace('quality', 'moved')\n",
+    ] {
+        fs::write(workspace.path().join("script/check.py"), source).expect("Python ancestor mutation");
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("lint-weakening argument"), "{source}: {error:#}");
+    }
+}
+
+#[test]
+fn command_policy_allows_python_mutations_of_safe_siblings() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::create_dir_all(workspace.path().join("quality-data")).expect("safe sibling directory");
+    fs::write(workspace.path().join("quality/check"), "#!/bin/sh\ntrue\n").expect("shebang-discovered command surface");
+    fs::write(workspace.path().join("quality-data/report.txt"), "report\n").expect("safe sibling content");
+    fs::write(workspace.path().join("script/check.py"), "print('initial')\n").expect("initial Python source");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    for source in [
+        "import shutil\nshutil.rmtree('quality-data')\n",
+        "import os\nos.rename('quality-data', 'notes')\n",
+        "import shutil\nshutil.move('quality-data', 'notes')\n",
+        "import os\nos.replace('quality-data', 'notes')\n",
+    ] {
+        fs::write(workspace.path().join("script/check.py"), source).expect("safe Python sibling mutation");
+        reject_checked_in_weakening(workspace.path()).unwrap_or_else(|error| panic!("{source}: {error:#}"));
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn command_policy_resolves_python_writer_symlink_parents() {
@@ -180,6 +228,7 @@ fn command_policy_resolves_python_writer_symlink_parents() {
     fs::write(workspace.path().join("script/check"), "#!/bin/sh\ntrue\n").expect("safe command surface");
     fs::write(workspace.path().join("quality/check"), "#!/bin/sh\ntrue\n").expect("shebang-discovered command surface");
     symlink("..", workspace.path().join("docs/root")).expect("repository-relative directory symlink");
+    symlink("../quality", workspace.path().join("docs/bridge")).expect("relocatable internal directory symlink");
     fs::write(workspace.path().join("script/check.py"), "open('docs/root/script/check', 'w').write(payload)\n").expect("redirected Python writer");
     git(workspace.path(), &["init", "-q"]);
     git(workspace.path(), &["add", "."]);
@@ -191,9 +240,51 @@ fn command_policy_resolves_python_writer_symlink_parents() {
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
 
+    fs::write(
+        workspace.path().join("script/check.py"),
+        "import os\nos.rename('docs/bridge', 'docs/moved')\nopen('docs/moved/check', 'w').write(payload)\n",
+    )
+    .expect("relocated internal symlink writer");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+
     fs::write(workspace.path().join("script/check.py"), "open('docs/report.txt', 'w').write(payload)\n").expect("safe Python writer");
     git(workspace.path(), &["add", "."]);
     reject_checked_in_weakening(workspace.path()).expect("unrelated tracked symlink remains allowed");
+}
+
+#[test]
+fn command_policy_rejects_dos_short_name_write_paths() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::create_dir_all(workspace.path().join("maintenance-tools")).expect("long command directory");
+    fs::write(workspace.path().join("quality/maintenance-check"), "#!/bin/sh\ntrue\n").expect("long command surface");
+    fs::write(workspace.path().join("maintenance-tools/check"), "#!/bin/sh\ntrue\n").expect("command in long directory");
+    fs::write(workspace.path().join("script/check.py"), "print('initial')\n").expect("initial Python source");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    for source in [
+        "open('quality/MAINTE~1', 'w').write(payload)\n",
+        "open('MAINTE~1/check', 'w').write(payload)\n",
+        "open('target/REPORT~1.TXT', 'w').write(payload)\n",
+        "open('target/report~1.txt', 'w').write(payload)\n",
+    ] {
+        fs::write(workspace.path().join("script/check.py"), source).expect("DOS short-name writer");
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("lint-weakening argument"), "{source}: {error:#}");
+    }
+
+    for source in [
+        "open('target/report~notes.txt', 'w').write(payload)\n",
+        "open('target/verylong~1.txt', 'w').write(payload)\n",
+        "open('target/report~1.long', 'w').write(payload)\n",
+        "open('target/rep ort~1.txt', 'w').write(payload)\n",
+    ] {
+        fs::write(workspace.path().join("script/check.py"), source).expect("safe tilde writer");
+        reject_checked_in_weakening(workspace.path()).unwrap_or_else(|error| panic!("{source}: {error:#}"));
+    }
 }
 
 #[test]

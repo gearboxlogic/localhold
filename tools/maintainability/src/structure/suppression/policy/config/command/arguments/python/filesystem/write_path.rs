@@ -24,13 +24,17 @@ impl Policy {
         }
         let value = value.replace('\\', "/");
         let path = Path::new(&value);
-        if value.contains(':') || path.is_absolute() || path.components().any(|component| !matches!(component, Component::CurDir | Component::Normal(_))) {
+        if value.contains(':')
+            || path.is_absolute()
+            || path.components().any(|component| !matches!(component, Component::CurDir | Component::Normal(_)))
+            || has_dos_short_name_component(path)
+        {
             return true;
         }
         let Some(normalized) = windows_equivalent(&value) else {
             return true;
         };
-        if is_execution_surface(&normalized) || self.execution_surfaces.contains(&normalized) {
+        if is_execution_surface(&normalized) || self.is_execution_surface_or_ancestor(&normalized) {
             return true;
         }
         self.workspace.as_deref().is_some_and(|workspace| self.redirected_path_is_opaque(workspace, path))
@@ -51,7 +55,7 @@ impl Policy {
             .peekable();
         let mut remaining = components;
         while let Some(component) = remaining.next() {
-            match resolve_component(&mut resolved, component, &root) {
+            match resolve_component(&mut resolved, component) {
                 ResolvedComponent::Existing => {}
                 ResolvedComponent::Missing => {
                     resolved.extend(remaining);
@@ -66,7 +70,13 @@ impl Policy {
         let Some(relative) = relative.to_str().and_then(windows_equivalent) else {
             return true;
         };
-        is_execution_surface(&relative) || self.execution_surfaces.contains(&relative)
+        is_execution_surface(&relative) || self.is_execution_surface_or_ancestor(&relative)
+    }
+
+    fn is_execution_surface_or_ancestor(&self, path: &str) -> bool {
+        self.execution_surfaces
+            .iter()
+            .any(|surface| surface == path || surface.strip_prefix(path).is_some_and(|descendant| descendant.starts_with('/')))
     }
 }
 
@@ -76,23 +86,45 @@ enum ResolvedComponent {
     Opaque,
 }
 
-fn resolve_component(resolved: &mut PathBuf, component: &OsStr, root: &Path) -> ResolvedComponent {
+fn resolve_component(resolved: &mut PathBuf, component: &OsStr) -> ResolvedComponent {
     resolved.push(component);
     match fs::symlink_metadata(&resolved) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            let Ok(target) = fs::canonicalize(&resolved) else {
-                return ResolvedComponent::Opaque;
-            };
-            if !target.starts_with(root) {
-                return ResolvedComponent::Opaque;
-            }
-            *resolved = target;
-            ResolvedComponent::Existing
-        }
+        // A script can relocate a symlink after analysis, so its current canonical target is not a stable write boundary.
+        Ok(metadata) if metadata.file_type().is_symlink() => ResolvedComponent::Opaque,
         Ok(_) => ResolvedComponent::Existing,
         Err(error) if error.kind() == ErrorKind::NotFound => ResolvedComponent::Missing,
         Err(_) => ResolvedComponent::Opaque,
     }
+}
+
+fn has_dos_short_name_component(path: &Path) -> bool {
+    path.components().any(|component| match component {
+        Component::Normal(component) => component.to_str().is_some_and(dos_short_name_form),
+        _ => false,
+    })
+}
+
+fn dos_short_name_form(component: &str) -> bool {
+    let component = component.trim_end_matches([' ', '.']);
+    let mut name = component.split('.');
+    let stem = name.next().unwrap_or_default();
+    let extension = name.next();
+    if name.next().is_some() || extension.is_some_and(|extension| extension.is_empty() || extension.len() > 3 || !extension.chars().all(valid_dos_character)) {
+        return false;
+    }
+    let Some((prefix, generation)) = stem.rsplit_once('~') else {
+        return false;
+    };
+    !prefix.is_empty()
+        && !prefix.contains('~')
+        && prefix.chars().all(valid_dos_character)
+        && stem.len() <= 8
+        && generation.as_bytes().first().is_some_and(|digit| matches!(digit, b'1'..=b'9'))
+        && generation.chars().all(|digit| digit.is_ascii_digit())
+}
+
+const fn valid_dos_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '$' | '%' | '\'' | '-' | '_' | '@' | '`' | '!' | '(' | ')' | '{' | '}' | '^' | '#' | '&')
 }
 
 fn windows_equivalent(value: &str) -> Option<String> {

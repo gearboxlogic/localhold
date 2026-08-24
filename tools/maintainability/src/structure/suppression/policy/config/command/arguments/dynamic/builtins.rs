@@ -9,7 +9,7 @@ pub(super) fn assigned_variables(source: &str) -> (BTreeSet<String>, bool) {
     let mut names = BTreeSet::new();
     let functions = tokens::declared_shell_functions(source);
     let mut attributes = attributes::IntegerAttributes::default();
-    let mut opaque_target = false;
+    let mut opaque_target = tokens::has_opaque_heredoc_delimiter(source);
     for command in tokens::structured_source_commands(source) {
         attributes.enter_scope(&command, &functions);
         opaque_target |= attributes.ordinary_assignment_is_opaque(&command.words);
@@ -495,6 +495,18 @@ mod tests {
         let heredoc = "check() {\n  local -i value=0\n  cat >/dev/null <<'DOC'\n}\nDOC\n  value=payload\n}\n";
         let (_, opaque) = assigned_variables(heredoc);
         assert!(opaque);
+
+        let empty_delimiter = "check() {\n  local -i value=0\n  cat >/dev/null <<''\n}\n\n  value=payload\n}\n";
+        let (_, opaque) = assigned_variables(empty_delimiter);
+        assert!(opaque);
+
+        for source in [
+            "check() {\n  local -i value=0\n  cat <<$'EOF' >/dev/null\n}\nEOF\n  value=payload\n}\n",
+            "check() {\n  local -i value=0\n  cat <<$\"EOF\" >/dev/null\n}\nEOF\n  value=payload\n}\n",
+        ] {
+            let (_, opaque) = assigned_variables(source);
+            assert!(opaque, "{source}");
+        }
     }
 
     #[test]

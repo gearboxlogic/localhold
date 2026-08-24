@@ -113,8 +113,17 @@ git -C "$test_repository" -c core.autocrlf=false -c user.name=LocalHold -c user.
 git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example.invalid commit -qm 'reviewed fixture'
 test_base=$(git -C "$test_repository" rev-parse HEAD)
 run_check >/dev/null
-if env BASHOPTS=localvar_inherit "$check" --root "$test_repository" --test-environment >/dev/null 2>&1; then
-    printf 'maintainability bootstrap accepted inherited BASHOPTS\n' >&2
+shell_option_marker="$fixture/inherited-shell-option"
+shell_startup_file="$fixture/inherited-shell-startup"
+printf '%s\n' 'printf executed >"$INHERITED_SHELL_OPTION_MARKER"' >"$shell_startup_file"
+if ! env BASH_ENV=$shell_startup_file ENV=$shell_startup_file BASHOPTS=localvar_inherit SHELLOPTS=xtrace \
+    INHERITED_SHELL_OPTION_MARKER=$shell_option_marker PS4='$(printf executed >"$INHERITED_SHELL_OPTION_MARKER")' \
+    "$check" --root "$test_repository" --test-environment >/dev/null 2>&1; then
+    printf 'maintainability bootstrap failed to sanitize inherited shell options\n' >&2
+    exit 1
+fi
+if [[ -e $shell_option_marker ]]; then
+    printf 'maintainability bootstrap executed inherited SHELLOPTS before sanitizing\n' >&2
     exit 1
 fi
 

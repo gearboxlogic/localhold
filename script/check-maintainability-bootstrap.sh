@@ -1,4 +1,4 @@
-#!/usr/bin/bash
+#!/usr/bin/env -S -u BASH_ENV -u BASHOPTS -u ENV -u SHELLOPTS /usr/bin/bash --noprofile --norc
 set -euo pipefail
 unset GCONV_PATH
 unset OPENSSL_CONF OPENSSL_CONF_INCLUDE OPENSSL_ENGINES OPENSSL_MODULES
@@ -88,7 +88,7 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=cd756b8a6039e1192bb0c95e7c42e66148f7b883f3b12662b31c70269165a468
-readonly reviewed_bootstrap_tests_sha256=7d989a1443579f0fff92258f1929ac0f625f2353216219e98b0e7955383a1a6f
+readonly reviewed_bootstrap_tests_sha256=531c7e0db8f31538e8cdb6528c5765f5e930f3404b4f92642fe9943f26abc142
 readonly reviewed_gate_runner_sha256=7967bd6670b5d1849d290fc30447ad22a0b93497547c6dff4c90c99f32d4ff1d
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do

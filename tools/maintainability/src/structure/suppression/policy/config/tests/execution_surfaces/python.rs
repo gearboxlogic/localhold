@@ -106,6 +106,13 @@ fn command_policy_rejects_python_filesystem_writes() {
         "import tempfile\ntempfile.NamedTemporaryFile(dir='.github/workflows', suffix='.yml')\n",
         "import tempfile\ntempfile.NamedTemporaryFile(dir=destination)\n",
         "import tempfile\nfactory = tempfile.NamedTemporaryFile\nfactory(dir='target', suffix='.txt')\n",
+        "import shutil as files\nfiles.copyfile('quality/Justfile', 'Justfile')\n",
+        "from shutil import copyfile as copy\ncopy('quality/Justfile', 'Justfile')\n",
+        "import tempfile as scratch\nscratch.NamedTemporaryFile(dir='script', suffix='.sh')\n",
+        "from os import remove as erase\nerase('Justfile')\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target', prefix='../script/check-', suffix='.sh', delete=False)\n",
+        "open('Just' 'file', 'w').write(payload)\n",
+        "from pathlib import Path\nPath('Just' + 'file').write_text(payload)\n",
     ]);
 }
 
@@ -124,6 +131,11 @@ fn command_policy_allows_inert_python_writer_binding_text() {
         "Path('target/report.txt').write_text.__call__('report')\n",
         "open.__call__('target/report.txt', 'w').write('report')\n",
         "import tempfile\ntempfile.NamedTemporaryFile(dir='target', suffix='.txt')\n",
+        "import shutil as files\nfiles.copyfile('quality/report.txt', 'target/report.txt')\n",
+        "from shutil import copyfile as copy\ncopy('quality/report.txt', 'target/report.txt')\n",
+        "from os import remove as erase\nerase('target/report.txt')\n",
+        "import tempfile as scratch\nscratch.NamedTemporaryFile(dir='target', suffix='.txt')\n",
+        "open('target/' 'report.txt', 'w').write('report')\n",
     ] {
         fs::write(workspace.path().join("script/check.py"), source).expect("safe Python writer text");
         git(workspace.path(), &["add", "."]);

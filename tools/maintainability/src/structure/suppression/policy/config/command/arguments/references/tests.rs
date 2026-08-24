@@ -729,11 +729,18 @@ fn shell_arithmetic_rejects_runtime_parameters_and_integer_assignment_targets() 
         "declare -i value=0; read -r value",
         "local -i value; printf -v value %s payload",
         "typeset -ai values; mapfile -t values",
+        "check() {\n  local -i value=0\n  value='a[$(sh quality/lint.txt)]'\n}\ncheck",
         "$\\\n((payload))",
         "(\\\n(payload))",
         ": \"$\\\n{value:$1}\"",
     ] {
         assert_eq!(inputs(command), (Vec::new(), true), "{command}");
+    }
+    for command in [
+        "sleep 0.01 & pid=$!; wait -p 'a[$(sh quality/lint.txt)]' \"$pid\"",
+        "sleep 0.01 & pid=$!; wait -pa[$(sh quality/lint.txt)] \"$pid\"",
+    ] {
+        assert!(inputs(command).1, "{command}");
     }
 }
 
@@ -745,6 +752,9 @@ fn inert_shell_arithmetic_text_does_not_make_execution_opaque() {
         "local -i count=0; read -r value",
         "local -i value=0; local +i value; printf -v value %s payload",
         "(( 1 + 2 ))",
+        "(( 1 << 2 ))\nprintf ok",
+        "value=$((1 << 2))\nprintf ok",
+        "first() {\n  local -i value=0\n}\nsecond() {\n  read -r value\n}\nsecond",
     ] {
         assert_eq!(inputs(command), (Vec::new(), false), "{command}");
     }

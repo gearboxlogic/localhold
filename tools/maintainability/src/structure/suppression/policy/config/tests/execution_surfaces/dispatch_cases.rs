@@ -109,6 +109,12 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("mapfile -C 'sh quality/lint.txt' -c 1 </etc/hosts\n", "opaque interpreter program"),
     ("readarray -tC 'sh quality/lint.txt' -c 1 </etc/hosts\n", "opaque interpreter program"),
     ("cat <<DOC\n$(sh quality/lint.txt)\nDOC\n", "opaque interpreter program"),
+    ("(( 1 << 2 ))\nsh -c 'sh quality/lint.txt'\n", "opaque interpreter program"),
+    (
+        "check() {\n    local -i value=0\n    value='a[$(sh quality/lint.txt)]'\n}\ncheck\n",
+        "opaque interpreter program",
+    ),
+    ("sleep 0.01 & pid=$!; wait -pa[$(sh quality/lint.txt)] \"$pid\"\n", "opaque interpreter program"),
     (
         "tar --checkpoint=1 --checkpoint-action=exec='sh quality/lint.txt' -cf archive.tar .\n",
         "opaque interpreter program",

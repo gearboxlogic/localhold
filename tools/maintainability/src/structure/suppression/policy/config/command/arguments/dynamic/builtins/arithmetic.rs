@@ -3,13 +3,55 @@ use super::{command_word_index, tokens};
 pub(super) fn has_opaque_evaluation(path: &str, source: &str, source_is_reviewed: bool) -> bool {
     let expansion_source = tokens::shell_expansion_source(source);
     let expansion_source = expansion_source.replace("\\\r\n", "").replace("\\\n", "");
-    expressions(&expansion_source)
-        .iter()
-        .any(|expression| expression_is_opaque(path, expression, source_is_reviewed))
+    has_legacy_arithmetic_expansion(&expansion_source)
+        || expressions(&expansion_source)
+            .iter()
+            .any(|expression| expression_is_opaque(path, expression, source_is_reviewed))
         || parameter_expansions(&expansion_source)
             .iter()
             .any(|parameter| parameter_is_opaque(path, parameter, source_is_reviewed))
         || command_is_opaque(path, source, source_is_reviewed)
+}
+
+fn has_legacy_arithmetic_expansion(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut comment = false;
+    for index in 0..bytes.len().saturating_sub(1) {
+        let byte = bytes[index];
+        if comment {
+            comment = byte != b'\n';
+            continue;
+        }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if byte == b'\\' && quote != Some(b'\'') {
+            escaped = true;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"') {
+            quote = if quote == Some(byte) { None } else { quote.or(Some(byte)) };
+            continue;
+        }
+        if quote.is_none() && shell_comment_opener(bytes, index) {
+            comment = true;
+            continue;
+        }
+        if quote != Some(b'\'') && bytes[index..].starts_with(b"$[") {
+            return true;
+        }
+    }
+    false
+}
+
+fn shell_comment_opener(bytes: &[u8], index: usize) -> bool {
+    bytes[index] == b'#'
+        && index
+            .checked_sub(1)
+            .is_none_or(|previous| bytes[previous].is_ascii_whitespace() || matches!(bytes[previous], b';' | b'&' | b'|' | b'(' | b')'))
 }
 
 pub(super) fn reviewed_associative_subscript(path: &str, source_is_reviewed: bool, name: &str, subscript: &str) -> bool {
@@ -404,5 +446,20 @@ mod tests {
             assert!(has_opaque_evaluation("script/check.sh", source, false), "{source}");
         }
         assert!(!has_opaque_evaluation("script/check.sh", "cat <<'LITERAL'\n\\\nLITERAL\n(( 1 + 2 ))\n", false));
+    }
+
+    #[test]
+    fn legacy_arithmetic_expansions_fail_closed_without_matching_inert_text() {
+        for source in [": $[payload]", ": \"$[payload + 1]\"", ": ${value:-$[payload]}"] {
+            assert!(has_opaque_evaluation("script/check.sh", source, false), "{source}");
+        }
+        for source in [
+            "printf '%s' '$[payload]'",
+            "printf '%s' \"\\$[payload]\"",
+            "printf ok;# $[payload]",
+            "cat <<'LITERAL'\n$[payload]\nLITERAL\n",
+        ] {
+            assert!(!has_opaque_evaluation("script/check.sh", source, false), "{source}");
+        }
     }
 }

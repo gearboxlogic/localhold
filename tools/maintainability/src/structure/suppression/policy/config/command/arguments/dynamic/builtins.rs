@@ -22,6 +22,7 @@ pub(super) fn assigned_variables(source: &str) -> (BTreeSet<String>, bool) {
         match command_word.as_str() {
             "declare" | "local" | "typeset" => {
                 opaque_target |= declaration_has_opaque_target(arguments, true, true);
+                opaque_target |= attributes.declaration_initializer_is_opaque(&command_word, arguments);
                 attributes.update_declaration(&command_word, arguments);
             }
             "readonly" => opaque_target |= declaration_has_opaque_target(arguments, false, false),
@@ -491,6 +492,9 @@ mod tests {
             let (_, opaque) = assigned_variables(&source);
             assert!(opaque, "{source}");
         }
+        let heredoc = "check() {\n  local -i value=0\n  cat >/dev/null <<'DOC'\n}\nDOC\n  value=payload\n}\n";
+        let (_, opaque) = assigned_variables(heredoc);
+        assert!(opaque);
     }
 
     #[test]
@@ -521,6 +525,26 @@ mod tests {
     }
 
     #[test]
+    fn inherited_integer_attributes_apply_to_declaration_initializers() {
+        for source in [
+            "declare -i value=0\ncheck() {\n  local -I value=payload\n}\n",
+            "declare -i value=0\ncheck() {\n  declare -I value+=payload\n}\n",
+            "outer() {\n  local -i value=0\n  inner() {\n    typeset -I value=payload\n  }\n}\n",
+        ] {
+            let (_, opaque) = assigned_variables(source);
+            assert!(opaque, "{source}");
+        }
+        for source in [
+            "declare -i value=0\ncheck() {\n  local -I value=-12\n}\n",
+            "declare value=plain\ncheck() {\n  local -I value=payload\n}\n",
+            "declare -i value=0\ncheck() {\n  local +i -I value=payload\n}\n",
+        ] {
+            let (_, opaque) = assigned_variables(source);
+            assert!(!opaque, "{source}");
+        }
+    }
+
+    #[test]
     fn literal_unset_clears_active_integer_attributes() {
         for source in [
             "declare -i value=0; unset value; value=payload",
@@ -534,6 +558,15 @@ mod tests {
         }
         let (_, opaque) = assigned_variables("declare -i value=0; unset -f value; value=payload");
         assert!(opaque);
+        for source in [
+            "declare -i value=0; unset -z value 2>/dev/null || :; value=payload",
+            "declare -i value=0; unset --unknown value 2>/dev/null || :; value=payload",
+        ] {
+            let (_, opaque) = assigned_variables(source);
+            assert!(opaque, "{source}");
+        }
+        let (_, opaque) = assigned_variables("declare -i value=0; unset value -z; value=payload");
+        assert!(!opaque);
         assert!(has_opaque_unset_target("script/check.sh", "unset 'a[$(bash quality/hidden.txt)]'", false));
         let safe = "declare -i value=0; unset value; value=payload";
         assert!(!has_opaque_arithmetic_evaluation("script/check.sh", safe, false));

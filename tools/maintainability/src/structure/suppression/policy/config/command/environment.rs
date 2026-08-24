@@ -74,7 +74,8 @@ pub(super) fn is_weakening_environment_name(name: &str) -> bool {
 fn is_runtime_code_loading_environment_name(name: &str) -> bool {
     matches!(
         name,
-        "BASH_ENV"
+        "BASHOPTS"
+            | "BASH_ENV"
             | "BROWSER"
             | "CARGO_DOC_BROWSER"
             | "GCONV_PATH"
@@ -194,6 +195,12 @@ mod tests {
             assert!(is_weakening_environment_name(name));
             assert!(is_weakening_environment_name(&name.to_ascii_lowercase()));
         }
+    }
+
+    #[test]
+    fn inherited_bash_options_are_weakening() {
+        assert!(is_weakening_environment_name("BASHOPTS"));
+        assert!(is_weakening_environment_name("bashopts"));
     }
 
     #[test]

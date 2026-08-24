@@ -118,8 +118,17 @@ fn command_policy_rejects_python_filesystem_writes() {
         "import tempfile as scratch\nmessage = f\"{scratch.NamedTemporaryFile(dir='script', suffix='.sh')}\"\n",
         "import _io as streams\nstreams.open('Justfile', 'w').write(payload)\n",
         "from _io import open as writer\nwriter('Justfile', 'w').write(payload)\n",
+        "import _pyio as streams\nstreams.open('Justfile', 'w').write(payload)\n",
+        "from _pyio import open as writer\nwriter('Justfile', 'w').write(payload)\n",
         "from posix import remove as erase\nerase('Justfile')\n",
         "import nt as backend\nbackend.remove('Justfile')\n",
+        "open('MAKEFILE', 'w').write(payload)\n",
+        "open('PACKAGE.JSON', 'w').write(payload)\n",
+        "open('.GITHUB/workflows/ci.yml', 'w').write(payload)\n",
+        "open('Justfile.', 'w').write(payload)\n",
+        "open('Justfile ', 'w').write(payload)\n",
+        "open('Justfile:$DATA', 'w').write(payload)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='.GITHUB/workflows', suffix='.yml', delete=False)\n",
     ]);
 }
 
@@ -147,12 +156,44 @@ fn command_policy_allows_inert_python_writer_binding_text() {
         "from shutil import copyfile as copy\nmessage = f\"{copy('quality/report.txt', 'target/report.txt')!s}\"\n",
         "import tempfile as scratch\nmessage = f\"{scratch.NamedTemporaryFile(dir='target', suffix='.txt')}\"\n",
         "from _io import open as writer\nmessage = f\"{writer('target/report.txt', 'w')}\"\n",
+        "from _pyio import open as writer\nmessage = f\"{writer('target/report.txt', 'w')}\"\n",
         "from posix import remove as erase\nmessage = f\"{erase('target/report.txt')}\"\n",
+        "open('target/MAKEFILE.txt', 'w').write('report')\n",
+        "open('.github/workflow/ci.yml', 'w').write('report')\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='.GITHUB/artifacts', suffix='.yml')\n",
     ] {
         fs::write(workspace.path().join("script/check.py"), source).expect("safe Python writer text");
         git(workspace.path(), &["add", "."]);
         assert!(reject_checked_in_weakening(workspace.path()).is_ok(), "{source}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn command_policy_resolves_python_writer_symlink_parents() {
+    use std::os::unix::fs::symlink;
+
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    fs::create_dir_all(workspace.path().join("docs")).expect("documentation directory");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::write(workspace.path().join("script/check"), "#!/bin/sh\ntrue\n").expect("safe command surface");
+    fs::write(workspace.path().join("quality/check"), "#!/bin/sh\ntrue\n").expect("shebang-discovered command surface");
+    symlink("..", workspace.path().join("docs/root")).expect("repository-relative directory symlink");
+    fs::write(workspace.path().join("script/check.py"), "open('docs/root/script/check', 'w').write(payload)\n").expect("redirected Python writer");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+
+    fs::write(workspace.path().join("script/check.py"), "open('docs/root/quality/check', 'w').write(payload)\n").expect("redirected Python writer to discovered surface");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+
+    fs::write(workspace.path().join("script/check.py"), "open('docs/report.txt', 'w').write(payload)\n").expect("safe Python writer");
+    git(workspace.path(), &["add", "."]);
+    reject_checked_in_weakening(workspace.path()).expect("unrelated tracked symlink remains allowed");
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use std::path::{Component, Path};
 
-use super::{ArgumentSpec, Call, CallScanner, called_name, literal_value, literal_write_path_is_opaque};
+use super::{ArgumentSpec, Call, CallScanner, called_name, literal_value};
 
 pub(super) fn named_temporary_file_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
     if !matches!(called_name(&call.name), "NamedTemporaryFile" | "tempfile.NamedTemporaryFile") {
@@ -28,7 +28,7 @@ pub(super) fn named_temporary_file_is_opaque(scanner: &CallScanner, call: &Call)
     }
     let temporary_name = format!("{prefix}maintainability-check{suffix}");
     let candidate = path.join(temporary_name).to_string_lossy().replace('\\', "/");
-    literal_write_path_is_opaque(&candidate)
+    scanner.write_policy.is_opaque(&candidate)
 }
 
 fn path_fragment_is_opaque(value: &str) -> bool {

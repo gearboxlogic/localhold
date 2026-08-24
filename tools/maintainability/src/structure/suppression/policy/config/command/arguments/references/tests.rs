@@ -758,6 +758,10 @@ fn inert_shell_arithmetic_text_does_not_make_execution_opaque() {
         "check() {\n  local -i value=0\n  unset value\n  value=payload\n}\ncheck",
         "check() {\n  local -i value=0\n  unset -v -- value\n  value=payload\n}\ncheck",
         "# ((1 <<\ncat <<'DOC'\n$(sh quality/lint.txt)\nDOC\nprintf ok",
+        "printf '%s' '$[payload]'",
+        "printf ok;# $[payload]",
+        "cat <<'DOC'\n$[payload]\nDOC\nprintf ok",
+        "check() {\n  local -i value=0\n  unset value -z\n  value=payload\n}\ncheck",
     ] {
         assert_eq!(inputs(command), (Vec::new(), false), "{command}");
     }
@@ -771,6 +775,10 @@ fn shell_scope_and_prefix_variants_cannot_hide_dynamic_execution() {
         "check() {\n  time -p local -i value=0\n  value='a[$(sh quality/lint.txt)]'\n}\ncheck",
         "sleep 0.01 & pid=$!; time wait -p 'a[$(sh quality/lint.txt)]' \"$pid\"",
         "outer() {\n  local -i value=0\n  inner() {\n    local -I value\n    value='a[$(sh quality/lint.txt)]'\n  }\n  inner\n}\nouter",
+        "payload='a[$(sh quality/lint.txt)]'\nouter() {\n  local -i value=0\n  inner() {\n    local -I value=payload\n  }\n  inner\n}\nouter",
+        "payload='a[$(sh quality/lint.txt)]'\ncheck() {\n  local -i value=0\n  cat >/dev/null <<'DOC'\n}\nDOC\n  value=payload\n}\ncheck",
+        "payload='a[$(sh quality/lint.txt)]'; declare -i value=0; unset -z value 2>/dev/null || :; value=payload",
+        "payload='a[$(sh quality/lint.txt)]'; : $[payload]",
         "unset 'a[$(sh quality/lint.txt)]'",
     ] {
         assert!(inputs(command).1, "{command}");

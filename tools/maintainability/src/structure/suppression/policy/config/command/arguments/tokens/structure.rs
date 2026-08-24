@@ -1,5 +1,6 @@
 pub(super) fn commands(source: &str) -> Vec<super::StructuredCommand> {
-    let logical = source.replace("\\\r\n", "").replace("\\\n", "");
+    let commands_only = super::without_noncommand_shell_data(source);
+    let logical = commands_only.replace("\\\r\n", "").replace("\\\n", "");
     super::shell_command_segments(&logical)
         .into_iter()
         .map(|segment| {

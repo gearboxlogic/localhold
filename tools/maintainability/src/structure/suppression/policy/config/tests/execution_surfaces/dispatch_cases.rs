@@ -254,6 +254,7 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("PERL5OPT='-Iquality -Mlint' prove --version\n", "opaque interpreter program"),
     ("PERL5LIB=quality shasum input\n", "lint-weakening environment channel"),
     ("PERLLIB=quality shasum input\n", "lint-weakening environment channel"),
+    ("BASHOPTS=localvar_inherit bash --version\n", "lint-weakening environment channel"),
     ("perl5.38.2 quality/lint.pl\n", "opaque interpreter program"),
     ("/usr/bin/perl5.38-x86_64-linux-gnu quality/lint.pl\n", "opaque interpreter program"),
     ("ld.so quality/lint\n", "opaque interpreter program"),

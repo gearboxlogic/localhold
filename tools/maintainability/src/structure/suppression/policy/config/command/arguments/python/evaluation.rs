@@ -221,7 +221,20 @@ fn dynamic_path(path: &[String]) -> bool {
     if path.iter().any(|component| {
         matches!(
             component.as_str(),
-            "_getframe" | "_current_frames" | "currentframe" | "f_globals" | "__globals__" | "__subclasses__"
+            "_getframe"
+                | "_current_frames"
+                | "currentframe"
+                | "exec_module"
+                | "f_globals"
+                | "import_module"
+                | "load_module"
+                | "meta_path"
+                | "path_hooks"
+                | "path_importer_cache"
+                | "read_module"
+                | "__globals__"
+                | "__import__"
+                | "__subclasses__"
         )
     }) {
         return true;
@@ -230,11 +243,12 @@ fn dynamic_path(path: &[String]) -> bool {
         [name, ..]
             if matches!(
                 name.as_str(),
-                "builtins" | "compile" | "eval" | "exec" | "import_module" | "importlib" | "runpy" | "__builtins__" | "__import__"
+                "builtins" | "compile" | "eval" | "exec" | "import_module" | "importlib" | "optparse" | "pkgutil" | "runpy" | "__builtins__" | "__import__"
             ) =>
         {
             true
         }
+        [module, submodule, ..] if matches!((module.as_str(), submodule.as_str()), ("logging", "config") | ("unittest", "mock")) => true,
         [module, name, ..] if matches!(module.as_str(), "pickle" | "_pickle") => matches!(name.as_str(), "Unpickler" | "load" | "loads"),
         [module, name, ..] if module == "marshal" => name == "loads",
         [module, name, ..] if module == "types" => matches!(name.as_str(), "CodeType" | "FunctionType"),
@@ -272,6 +286,12 @@ mod tests {
         assert!(has_dynamic_code("object.__subclasses__()"));
         assert!(has_dynamic_code("runpy.run_module(module_name)"));
         assert!(has_dynamic_code("from runpy import run_path as execute"));
+        assert!(has_dynamic_code("pkgutil.resolve_name('webbrowser:BackgroundBrowser')"));
+        assert!(has_dynamic_code("print.__self__.__import__('webbrowser')"));
+        assert!(has_dynamic_code(
+            "spec = next(spec for finder in sys.meta_path if (spec := finder.find_spec('webbrowser')) is not None)\nspec.loader.load_module('webbrowser')"
+        ));
+        assert!(has_dynamic_code("optparse.Values().read_module('webbrowser')"));
         assert!(has_dynamic_code("f'{exec(payload)}'"));
         assert!(has_dynamic_code("f'''{(\n# an inert } brace\nexec(payload)\n)}'''"));
         assert!(has_dynamic_code("types.FunctionType(marshal.loads(payload), globals())"));

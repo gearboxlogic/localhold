@@ -69,7 +69,7 @@ pub(super) fn validate_compiler_inputs(sources: &BTreeMap<String, String>, manif
         .get("package")
         .and_then(toml::Value::as_table)
         .context("maintainability analyzer Cargo manifest requires a package table")?;
-    for field in ["build", "autobins", "autoexamples", "autotests", "autobenches"] {
+    for field in ["build", "autolib", "autobins", "autoexamples", "autotests", "autobenches"] {
         if package.get(field) != Some(&toml::Value::Boolean(false)) {
             bail!("maintainability analyzer Cargo package.{field} must be false to close the authenticated compiler-input inventory");
         }
@@ -370,7 +370,7 @@ mod tests {
     use super::*;
 
     fn closed_manifest(extra: &str) -> String {
-        format!("workspace = {{}}\n[package]\nname = 'maintainability'\nbuild = false\nautobins = false\nautoexamples = false\nautotests = false\nautobenches = false\n{extra}")
+        format!("workspace={{}}\n[package]\nname='m'\nbuild=false\nautolib=false\nautobins=false\nautoexamples=false\nautotests=false\nautobenches=false\n{extra}")
     }
 
     #[test]
@@ -556,8 +556,8 @@ mod tests {
     #[test]
     fn compiler_inventory_disables_implicit_cargo_target_discovery() {
         let sources = BTreeMap::from([(format!("{SOURCE_ROOT}/main.rs"), "fn main() {}\n".to_owned())]);
-        for field in ["build", "autobins", "autoexamples", "autotests", "autobenches"] {
-            let manifest = closed_manifest("").replace(&format!("{field} = false\n"), "");
+        for field in ["build", "autolib", "autobins", "autoexamples", "autotests", "autobenches"] {
+            let manifest = closed_manifest("").replace(&format!("{field}=false\n"), "");
             let error = validate_compiler_inputs(&sources, &manifest).unwrap_err();
             assert!(error.to_string().contains(&format!("package.{field}")), "{error:#}");
         }
@@ -580,7 +580,7 @@ mod tests {
                 "{declaration}: {error:#}"
             );
         }
-        let inherited = closed_manifest("").replace("workspace = {}", "[workspace.dependencies]\nhelper = { path = '../helper' }");
+        let inherited = closed_manifest("").replace("workspace={}", "[workspace.dependencies]\nhelper = { path = '../helper' }");
         let error = validate_compiler_inputs(&sources, &inherited).unwrap_err();
         assert!(error.to_string().contains("workspace must remain an empty standalone workspace"), "{error:#}");
     }

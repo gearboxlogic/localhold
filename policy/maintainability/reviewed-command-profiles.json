@@ -26,7 +26,9 @@
       "path": "script/bootstrap.sh",
       "current_sha256": "e0302179ecc01f9feb178b74420db156736c04e33a4e67d304fa3bc2390fdbf3",
       "preapproved_next_sha256": null,
-      "retired_sha256": [],
+      "retired_sha256": [
+        "36982c49561af13986fc34ddeefd759010cd615980604eca34d09ef5ba0358c3"
+      ],
       "issue": "https://github.com/gearboxlogic/localhold/issues/124",
       "rationale": "The developer bootstrap installs the repository's pinned mise tools and writes the mise lock only when one is absent.",
       "safety_invariant": "Only the exact mise install and lock invocations are accepted and the complete developer bootstrap source matches the current reviewed digest."
@@ -46,7 +48,9 @@
       "path": "script/dep-audit.sh",
       "current_sha256": "03b36529705c704b244dd5e128e1dd1461a66677bdda0bcceedaa582015160dc",
       "preapproved_next_sha256": null,
-      "retired_sha256": [],
+      "retired_sha256": [
+        "5542706978c03c28159305257466a32566fd66bcae9c7502de4be91fa45ae7d1"
+      ],
       "issue": "https://github.com/gearboxlogic/localhold/issues/124",
       "rationale": "The dependency audit aggregates failures from six required workspace and audit-tool dependency checks.",
       "safety_invariant": "Only the exact six failure-recording calls are accepted and the complete script, including final failure propagation, matches the current reviewed digest."
@@ -56,7 +60,9 @@
       "path": "script/test-postgres-smoke.sh",
       "current_sha256": "88a8e659f6e4c238041d037e4a49301806361a42c48706241c39ee8ad01e9724",
       "preapproved_next_sha256": null,
-      "retired_sha256": [],
+      "retired_sha256": [
+        "2f54d872c4773e0ade58b2c0d70bf37e43a477ab809b5ad454195af895169066"
+      ],
       "issue": "https://github.com/gearboxlogic/localhold/issues/124",
       "rationale": "The PostgreSQL smoke test redacts credentials from container logs before emitting failure diagnostics.",
       "safety_invariant": "Only the exact three-expression stderr redaction pipeline is accepted and the complete smoke-test source matches the current reviewed digest."
@@ -66,7 +72,9 @@
       "path": "script/check-maintainability-bootstrap.sh",
       "current_sha256": "9443771a37693340cf16b45682f77c35c05353569c2c1aee0f23c74b49c0b4dc",
       "preapproved_next_sha256": null,
-      "retired_sha256": [],
+      "retired_sha256": [
+        "7afc737797b816c8cd2ca59f5958b4284443caa3cf9d7b90e41767d518844092"
+      ],
       "issue": "https://github.com/gearboxlogic/localhold/issues/124",
       "rationale": "The protected bootstrap constructs an isolated snapshot with authenticated system commands, runs only reviewed gate scripts, and preserves audit evidence beneath validated roots.",
       "safety_invariant": "Only exact snapshot setup, cleanup, archive, evidence, and gate invocation tuples are accepted and the complete bootstrap source matches the current reviewed digest."
@@ -96,7 +104,7 @@
       "path": "script/claude-review.sh",
       "current_sha256": "7a0b509574ded78ba3c0589bae798b4e6d7d7658e5bebe48515a3ae73fafbc78",
       "preapproved_next_sha256": null,
-      "retired_sha256": ["88f24ff35d6c30eb4feb74be4fdb4c8039e873bcbede88015ebef779d0dc6c70"],
+      "retired_sha256": ["c6c56c0212389a349b4a39e95d2578310bcc1a13bcbe8377c010ca69d1aefc8a"],
       "issue": "https://github.com/gearboxlogic/localhold/issues/124",
       "rationale": "The local review wrapper launches Claude with a minimal environment and fixed isolation controls, drains the complete review process group with bounded TERM-to-KILL escalation, then removes its validated scratch directory.",
       "safety_invariant": "Only the exact high-effort isolated Claude launch and validated cleanup tuple are accepted; cleanup verifies that the review process group is gone before removing scratch data, and the complete wrapper source matches the current reviewed digest."
@@ -106,7 +114,7 @@
       "path": "script/tests/test_claude_review.sh",
       "current_sha256": "c79edaaf67e69429c763d7dd3a0b3756e174147c7ac177350051e0e71c257ca5",
       "preapproved_next_sha256": null,
-      "retired_sha256": ["e75b1d8db0dd62e5fe4fa93fc3e28ebc54545feeba8149c4198d3e996871ecbd"],
+      "retired_sha256": ["41c33e1d76f36d8c9e5050a15b24de19c3044078694170d95d672657f6f8940c"],
       "issue": "https://github.com/gearboxlogic/localhold/issues/124",
       "rationale": "The wrapper tests create fake Claude and process-listing executables, exercise TERM-resistant, zombie-only, and stopped descendants, then clean only their isolated temporary fixture paths.",
       "safety_invariant": "Only exact fixture process, symlink, and cleanup tuples are accepted; success, failure, signal, zombie-only, and stopped-group paths prove descendants and scratch data are gone or fail closed, and the complete test source matches the current reviewed digest."
@@ -126,7 +134,9 @@
       "path": ".github/workflows/ci.yml",
       "current_sha256": "cb050701091e3ebd75c64feeed4b37ed80ad6cc08ba433697748e95b9f877e25",
       "preapproved_next_sha256": null,
-      "retired_sha256": [],
+      "retired_sha256": [
+        "d7b67dc9b58887448885e7225a50144db84f7b100d9fbe1e750614d4757db302"
+      ],
       "issue": "https://github.com/gearboxlogic/localhold/issues/124",
       "rationale": "CI packages and extracts the Linux and Windows preview artifacts, resolves the generated binaries, and exercises their version and help commands.",
       "safety_invariant": "Only exact archive discovery, extraction, Git configuration, generated-binary smoke, and Windows staging tuples are accepted and the complete workflow matches the current reviewed digest."

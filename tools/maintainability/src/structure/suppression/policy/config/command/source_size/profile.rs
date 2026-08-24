@@ -165,7 +165,7 @@ mod tests {
         let external = "tools/maintainability/quality/helper.rs";
         let manifest = concat!(
             "[package]\nname = 'maintainability'\nbuild = false\n",
-            "autobins = false\nautoexamples = false\nautotests = false\nautobenches = false\n",
+            "autolib = false\nautobins = false\nautoexamples = false\nautotests = false\nautobenches = false\n",
             "[workspace]\n",
             "[[bin]]\nname = 'helper'\npath = 'quality/helper.rs'\n",
         );
@@ -196,7 +196,7 @@ mod tests {
         let external = "tools/helper/src/lib.rs";
         let manifest = concat!(
             "[package]\nname = 'maintainability'\nbuild = false\n",
-            "autobins = false\nautoexamples = false\nautotests = false\nautobenches = false\n",
+            "autolib = false\nautobins = false\nautoexamples = false\nautotests = false\nautobenches = false\n",
             "[workspace]\n[dependencies.helper]\npath = '../../helper'\n",
         );
         for (path, bytes) in [

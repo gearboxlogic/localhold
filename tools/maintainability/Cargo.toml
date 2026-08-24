@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.97"
 publish = false
 build = false
+autolib = false
 autobins = false
 autoexamples = false
 autotests = false

@@ -7,12 +7,12 @@ pub(super) fn is_reviewed_surface(path: &str, source: &str) -> bool {
 }
 
 pub(super) fn has_non_literal_arguments(source: &str) -> bool {
+    if has_callable_reference(source) {
+        return true;
+    }
     let mut found_call = false;
     for line in source.lines() {
         let mut scanner = ProcessCallScanner::new(line);
-        if scanner.has_process_callable_reference() {
-            return true;
-        }
         while let Some((opening_parenthesis, kind)) = scanner.next_call() {
             found_call = true;
             if kind == ProcessKind::Unsupported || !scanner.process_argument_is_static(opening_parenthesis + 1, kind) {
@@ -21,6 +21,12 @@ pub(super) fn has_non_literal_arguments(source: &str) -> bool {
         }
     }
     !found_call
+}
+
+pub(super) fn has_callable_reference(source: &str) -> bool {
+    super::normalized_qualified_code(source)
+        .lines()
+        .any(|line| ProcessCallScanner::new(line).has_process_callable_reference())
 }
 
 struct ProcessCallScanner {
@@ -272,6 +278,12 @@ mod tests {
         assert!(!has_non_literal_arguments(r#"subprocess.run([sys.executable, "script/check.py", value])"#));
         assert!(!has_non_literal_arguments(
             "def inspect():\n    \"\"\"Inspect one file.\"\"\"\n    subprocess.run([\"readelf\", \"-d\", str(path)], check=False)\n"
+        ));
+        assert!(!has_non_literal_arguments(
+            "raise ValidationError(f\"readelf could not inspect {library}\")\nsubprocess.run([\"git\", \"status\"], check=True)\n"
+        ));
+        assert!(!has_non_literal_arguments(
+            "raise ValidationError(f\"subprocess_exec failed for {library}\")\nsubprocess.run([\"git\", \"status\"], check=True)\n"
         ));
         assert!(has_non_literal_arguments(r#"subprocess.run(["cargo", "clippy", "--", chr(45) + "A", "warnings"])"#));
         assert!(has_non_literal_arguments(r#"subprocess.run(["cargo"] + arguments)"#));

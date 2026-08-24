@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
-use super::parse_nul_paths;
+use super::{ignored_python_paths, parse_nul_paths};
 
 mod profile;
 mod revision;
@@ -85,15 +85,19 @@ fn tracked_paths(workspace: &Path) -> Result<Vec<TrackedPath>> {
 }
 
 fn untracked_paths(workspace: &Path) -> Result<Vec<String>> {
-    let output = crate::structure::revision::git_command()
+    let ordinary = crate::structure::revision::git_command()
         .current_dir(workspace)
         .args(["ls-files", "-z", "--others", "--exclude-standard"])
         .output()
         .context("list untracked Python source profile inputs")?;
-    if !output.status.success() {
+    if !ordinary.status.success() {
         bail!("git ls-files failed while listing untracked Python source profile inputs");
     }
-    parse_nul_paths(&output.stdout, |_| true)
+    let mut paths = parse_nul_paths(&ordinary.stdout, |_| true)?;
+    paths.extend(ignored_python_paths(workspace, &[":(top,icase,glob)**/*.py", ":(top,icase,glob)**/*.pyw"])?);
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 fn observed_sources(workspace: &Path, paths: &[TrackedPath]) -> Result<Vec<ObservedSource>> {
@@ -353,5 +357,62 @@ mod tests {
 
         let error = validate(workspace.path()).unwrap_err();
         assert!(error.to_string().contains("untracked Python source"), "{error:#}");
+    }
+
+    #[test]
+    fn ignored_python_source_is_rejected_before_profile_matching() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+        let status = std::process::Command::new("git")
+            .current_dir(workspace.path())
+            .args(["init", "--quiet"])
+            .status()
+            .expect("initialize repository");
+        assert!(status.success());
+        fs::write(
+            workspace.path().join(".git/info/exclude"),
+            "script/generated/\nscript/direct.pyw\nscript/target/\ntarget/\n.CACHE/\n",
+        )
+        .expect("local Git exclusion");
+        fs::write(workspace.path().join("script/release.py"), "import json\n").expect("tracked Python importer");
+        fs::create_dir_all(workspace.path().join("script/generated")).expect("ignored Python directory");
+        fs::write(workspace.path().join("script/generated/json.PY"), "print('ignored shadow')\n").expect("ignored Python shadow");
+        fs::write(workspace.path().join("script/direct.pyw"), "print('ignored entrypoint')\n").expect("ignored Python entrypoint");
+        fs::create_dir_all(workspace.path().join("script/target")).expect("importable target-named directory");
+        fs::write(workspace.path().join("script/target/json.py"), "print('importable target shadow')\n").expect("target-named Python shadow");
+        fs::create_dir_all(workspace.path().join("target")).expect("build output directory");
+        fs::write(workspace.path().join("target/generated.py"), "print('generated build output')\n").expect("generated Python build output");
+        fs::create_dir_all(workspace.path().join(".CACHE")).expect("case-sensitive cache-named directory");
+        fs::write(workspace.path().join(".CACHE/helper.py"), "print('case-sensitive cache source')\n").expect("case-sensitive cache source");
+        let status = std::process::Command::new("git")
+            .current_dir(workspace.path())
+            .args(["add", "script/release.py"])
+            .status()
+            .expect("track Python importer");
+        assert!(status.success());
+
+        let untracked = untracked_paths(workspace.path()).expect("untracked Python inventory");
+        assert!(untracked.contains(&"script/generated/json.PY".to_owned()), "{untracked:?}");
+        assert!(untracked.contains(&"script/direct.pyw".to_owned()), "{untracked:?}");
+        assert!(untracked.contains(&"script/target/json.py".to_owned()), "{untracked:?}");
+        assert!(untracked.contains(&".CACHE/helper.py".to_owned()), "{untracked:?}");
+        assert!(!untracked.contains(&"target/generated.py".to_owned()), "{untracked:?}");
+        fs::remove_file(workspace.path().join("script/direct.pyw")).expect("remove ignored Python entrypoint fixture");
+        let error = validate(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("untracked Python source"), "{error:#}");
+        assert!(error.to_string().contains(".CACHE/helper.py"), "{error:#}");
+
+        let case_variant_workspace = tempfile::tempdir().expect("temporary case-variant workspace");
+        let status = std::process::Command::new("git")
+            .current_dir(case_variant_workspace.path())
+            .args(["init", "--quiet"])
+            .status()
+            .expect("initialize case-variant repository");
+        assert!(status.success());
+        fs::write(case_variant_workspace.path().join(".git/info/exclude"), "TARGET/\n").expect("case-variant Git exclusion");
+        fs::create_dir_all(case_variant_workspace.path().join("TARGET")).expect("case-variant target-named directory");
+        fs::write(case_variant_workspace.path().join("TARGET/json.py"), "print('case-variant target shadow')\n").expect("case-variant target shadow");
+        let untracked = untracked_paths(case_variant_workspace.path()).expect("case-variant Python inventory");
+        assert!(untracked.contains(&"TARGET/json.py".to_owned()), "{untracked:?}");
     }
 }

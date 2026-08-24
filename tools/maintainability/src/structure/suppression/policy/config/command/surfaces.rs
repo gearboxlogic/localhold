@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
-use super::super::{parse_nul_paths, validate_relative_path};
+use super::super::{ignored_python_paths, parse_nul_paths, validate_relative_path};
 use super::actions::validate_local_actions;
 use super::arguments::execution_inputs_for_surface;
 use super::is_execution_surface;
@@ -28,8 +28,25 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
     if !output.status.success() {
         bail!("git ls-files failed while listing command execution surfaces");
     }
-    let paths = parse_nul_paths(&output.stdout, |_| true)?.into_iter().collect::<BTreeSet<_>>();
+    let mut paths = parse_nul_paths(&output.stdout, |_| true)?.into_iter().collect::<BTreeSet<_>>();
+    paths.extend(ignored_python_paths(
+        workspace,
+        &[
+            ":(top,icase,glob)**/*.pyc",
+            ":(top,icase,glob)**/*.pyo",
+            ":(top,icase,glob)**/*.pyd",
+            ":(top,icase,glob)**/*.so",
+            ":(top,icase,glob)**/*.zip",
+            ":(top,icase,glob)**/*.egg",
+            ":(top,icase,glob)**/*.whl",
+            ":(top,icase,glob)**/*.pyz",
+            ":(top,icase,glob)**/*.pyzw",
+            ":(top,icase,glob)**/__pycache__/**",
+        ],
+    )?);
     let checked_paths = paths.clone();
+    let mut shadow_paths = checked_paths.clone();
+    shadow_paths.extend(ignored_python_paths(workspace, &[":(top,glob)*"])?.into_iter().filter(|path| !path.contains('/')));
     let tracked_paths = tracked_paths(workspace)?;
     let command_profiles = super::command_profiles::validate(workspace, &tracked_paths)?;
     let executables = tracked_executables(workspace)?;
@@ -38,7 +55,7 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
     for surface in &surfaces {
         validate_before_resolution(workspace, surface)?;
     }
-    close_over_execution_inputs(workspace, &mut surfaces, &tracked_paths, command_profiles.as_ref())?;
+    close_over_execution_inputs(workspace, &mut surfaces, &shadow_paths, &tracked_paths, command_profiles.as_ref())?;
     Ok(ExecutionSurfaceSet {
         paths: surfaces.into_iter().collect(),
         checked_paths,
@@ -77,7 +94,13 @@ fn discover_surfaces(workspace: &Path, paths: BTreeSet<String>, executables: &BT
     Ok(surfaces)
 }
 
-fn close_over_execution_inputs(workspace: &Path, surfaces: &mut BTreeSet<String>, tracked_paths: &BTreeSet<String>, command_profiles: Option<&ProfileManifest>) -> Result<()> {
+fn close_over_execution_inputs(
+    workspace: &Path,
+    surfaces: &mut BTreeSet<String>,
+    checked_paths: &BTreeSet<String>,
+    tracked_paths: &BTreeSet<String>,
+    command_profiles: Option<&ProfileManifest>,
+) -> Result<()> {
     let mut validated = surfaces.clone();
     let mut pending = surfaces.iter().cloned().collect::<Vec<_>>();
     while let Some(surface) = pending.pop() {
@@ -86,7 +109,7 @@ fn close_over_execution_inputs(workspace: &Path, surfaces: &mut BTreeSet<String>
         let reviewed_source = without_reviewed_dispatch(&surface, &source, source_is_reviewed);
         let execution_inputs = execution_inputs_for_surface(&surface, &reviewed_source, source_is_reviewed);
         let mut referenced_inputs = execution_inputs.paths;
-        referenced_inputs.extend(windows_bare_program_shadows(&execution_inputs.windows_bare_programs, tracked_paths));
+        referenced_inputs.extend(windows_bare_program_shadows(&execution_inputs.windows_bare_programs, checked_paths));
         if execution_inputs.unresolved {
             bail!("command execution surface {surface:?} uses an opaque interpreter program or makefile selection");
         }
@@ -124,10 +147,12 @@ fn reject_python_loadable_artifact(path: &str) -> Result<()> {
     let in_bytecode_cache = path
         .components()
         .any(|component| component.as_os_str().to_str().is_some_and(|component| component.eq_ignore_ascii_case("__pycache__")));
-    let loadable_extension = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "pyc" | "pyo" | "pyd" | "so"));
+    let loadable_extension = path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
+        matches!(
+            extension.to_ascii_lowercase().as_str(),
+            "pyc" | "pyo" | "pyd" | "so" | "zip" | "egg" | "whl" | "pyz" | "pyzw"
+        )
+    });
     if in_bytecode_cache || loadable_extension {
         bail!(
             "Python-loadable artifact is unsupported because its executable contents cannot be audited: {}",
@@ -144,13 +169,13 @@ fn is_rust_source(path: &str) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
 }
 
-fn windows_bare_program_shadows(programs: &BTreeSet<String>, tracked_paths: &BTreeSet<String>) -> BTreeSet<String> {
+fn windows_bare_program_shadows(programs: &BTreeSet<String>, checked_paths: &BTreeSet<String>) -> BTreeSet<String> {
     const WINDOWS_EXECUTABLE_SUFFIXES: &[&str] = &["", ".exe", ".com", ".bat", ".cmd"];
     let candidates = programs
         .iter()
         .flat_map(|program| WINDOWS_EXECUTABLE_SUFFIXES.iter().map(move |suffix| format!("{program}{suffix}")))
         .collect::<BTreeSet<_>>();
-    tracked_paths
+    checked_paths
         .iter()
         .filter(|path| !path.contains('/') && candidates.contains(&path.to_ascii_lowercase()))
         .cloned()
@@ -476,12 +501,17 @@ mod tests {
     }
 
     #[test]
-    fn python_loadable_binary_and_bytecode_artifacts_are_rejected() {
+    fn python_loadable_binary_bytecode_and_archive_artifacts_are_rejected() {
         for path in [
             "script/helper.pyc",
             "script/helper.pyo",
             "script/helper.pyd",
             "script/helper.cpython-313-x86_64-linux-gnu.so",
+            "script/helper.zip",
+            "script/helper.egg",
+            "script/helper.whl",
+            "script/helper.pyz",
+            "script/helper.PyZw",
             "script/__pycache__/helper.txt",
         ] {
             let repository = tempfile::tempdir().expect("temporary repository");
@@ -497,7 +527,23 @@ mod tests {
     }
 
     #[test]
-    fn python_bare_programs_close_over_windows_workspace_shadows() {
+    fn ignored_python_loadable_artifacts_are_rejected_outside_build_roots() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        git(repository.path(), &["init", "--quiet"]);
+        fs::create_dir_all(repository.path().join("script")).expect("create script directory");
+        fs::create_dir_all(repository.path().join("target")).expect("create build directory");
+        fs::write(repository.path().join(".git/info/exclude"), "script/helper.pyc\ntarget/\n").expect("local Git exclusions");
+        fs::write(repository.path().join("script/helper.pyc"), b"opaque").expect("ignored Python artifact");
+        fs::write(repository.path().join("target/generated.pyc"), b"generated").expect("ignored build artifact");
+
+        let error = execution_surfaces(repository.path()).err().expect("reject ignored Python-loadable artifact");
+        assert!(error.to_string().contains("script/helper.pyc"), "{error:#}");
+        fs::remove_file(repository.path().join("script/helper.pyc")).expect("remove import shadow");
+        execution_surfaces(repository.path()).expect("exclude governed build output");
+    }
+
+    #[test]
+    fn python_bare_programs_reject_tracked_and_untracked_windows_workspace_shadows() {
         let repository = tempfile::tempdir().expect("temporary repository");
         fs::create_dir(repository.path().join("script")).expect("create script directory");
         fs::write(
@@ -505,10 +551,18 @@ mod tests {
             "#!/usr/bin/env python3\nimport subprocess\nsubprocess.run(['git', 'status'], check=True)\n",
         )
         .expect("write Python command surface");
-        fs::write(repository.path().join("GIT.EXE"), "#!/bin/sh\nexit 0\n").expect("write Windows shadow");
         git(repository.path(), &["init", "--quiet"]);
         git(repository.path(), &["add", "."]);
+        fs::write(repository.path().join("GIT.EXE"), "opaque\n").expect("write untracked Windows shadow");
 
+        let error = execution_surfaces(repository.path()).err().expect("reject untracked Windows shadow");
+        assert!(error.to_string().contains("outside the tracked path inventory"), "{error:#}");
+
+        fs::write(repository.path().join(".git/info/exclude"), "GIT.EXE\n").expect("ignore Windows shadow");
+        let error = execution_surfaces(repository.path()).err().expect("reject ignored Windows shadow");
+        assert!(error.to_string().contains("outside the tracked path inventory"), "{error:#}");
+        fs::write(repository.path().join(".git/info/exclude"), "").expect("clear local Git exclusion");
+        git(repository.path(), &["add", "GIT.EXE"]);
         let error = execution_surfaces(repository.path()).err().expect("reject Windows shadow");
         assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
     }

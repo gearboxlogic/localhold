@@ -196,7 +196,7 @@ fn collect_execution_inputs<'a>(sources: impl IntoIterator<Item = &'a str>, dire
         let normalized = direct_program_paths.then(|| tokens::without_noncommand_shell_data(source));
         let analyzed_source = normalized.as_deref().unwrap_or(source);
         let functions = tokens::declared_shell_functions(analyzed_source);
-        let reviewed_git_wrappers = git::reviewed_shell_wrappers(path, source);
+        let reviewed_git_wrappers = git::reviewed_shell_wrappers(path, source, source_is_reviewed);
         let surface = ShellSurface {
             path,
             mode: ShellMode {
@@ -216,7 +216,7 @@ fn collect_execution_inputs<'a>(sources: impl IntoIterator<Item = &'a str>, dire
             },
             ..surface
         };
-        unresolved |= super::dynamic::has_opaque_command_assignment_flow(path, source);
+        unresolved |= super::dynamic::has_opaque_command_assignment_flow(path, source, source_is_reviewed);
         unresolved |= super::untrusted_directory_change_with_quality_dispatcher(source, true);
         let scrubbed_source;
         let source = if direct_program_paths {

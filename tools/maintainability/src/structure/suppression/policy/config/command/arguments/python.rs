@@ -6,6 +6,8 @@ mod process;
 
 pub(super) use execution::References as ExecutionReferences;
 
+const REJECTED_PYTHON_MODULES: &[&str] = &["inspect", "logging.config", "operator", "optparse", "pkgutil", "pydoc", "unittest.mock", "webbrowser"];
+
 pub(super) fn execution_references(path: &str, source: &str) -> ExecutionReferences {
     let normalized = normalize_continuations(source);
     let mut references = execution::collect(&normalized);
@@ -64,7 +66,11 @@ pub(super) fn has_opaque_process_arguments(path: &str, source: &str) -> bool {
 }
 
 pub(super) fn has_opaque_process_bindings(source: &str) -> bool {
-    imports_command_capable_api(source) || uses_command_module_as_value(source) || uses_command_callable_as_value(source) || uses_dynamic_namespace_callable_as_value(source)
+    imports_command_capable_api(source)
+        || uses_command_module_as_value(source)
+        || uses_command_callable_as_value(source)
+        || uses_dynamic_namespace_callable_as_value(source)
+        || process::has_callable_reference(source)
 }
 
 pub(super) fn mutates_process_working_directory(source: &str) -> bool {
@@ -211,12 +217,19 @@ pub(super) fn has_opaque_filesystem_write(path: &str, source: &str) -> bool {
 fn imports_command_capable_api(source: &str) -> bool {
     executable_code(source).lines().flat_map(|line| line.split(';')).any(|statement| {
         let compact = statement.chars().filter(|character| !character.is_whitespace()).collect::<String>();
-        if compact.strip_prefix("import").is_some_and(|imports| imports.split(',').any(command_module_alias)) {
+        let compact = compact.rsplit(':').next().unwrap_or(&compact);
+        if compact
+            .strip_prefix("import")
+            .is_some_and(|imports| imports.split(',').any(|binding| rejected_module_binding(binding) || command_module_alias(binding)))
+        {
             return true;
         }
         let Some((module, imports)) = compact.strip_prefix("from").and_then(|line| line.split_once("import")) else {
             return false;
         };
+        if rejected_python_module(module) {
+            return true;
+        }
         let imports = imports.trim_matches(['(', ')']);
         imports.split(',').any(|binding| {
             let binding = binding.trim_matches(['(', ')']);
@@ -225,12 +238,14 @@ fn imports_command_capable_api(source: &str) -> bool {
                 return true;
             }
             match module {
-                "asyncio" => name == "*" || matches!(name, "create_subprocess_exec" | "create_subprocess_shell"),
+                "asyncio" | "asyncio.subprocess" => name == "*" || matches!(name, "create_subprocess_exec" | "create_subprocess_shell"),
                 "os" | "posix" => name == "*" || is_os_process_api(name),
                 "subprocess" => name == "*" || is_subprocess_process_api(name),
                 "pty" => matches!(name, "*" | "spawn"),
                 "contextlib" => matches!(name, "*" | "chdir"),
-                "sys" => matches!(name, "*" | "modules"),
+                "logging" => name == "config",
+                "sys" => matches!(name, "*" | "meta_path" | "modules" | "path_hooks" | "path_importer_cache"),
+                "unittest" => name == "mock",
                 _ => false,
             }
         })
@@ -241,6 +256,18 @@ fn command_module_alias(binding: &str) -> bool {
     ["asyncio", "contextlib", "os", "posix", "pty", "subprocess", "sys"]
         .iter()
         .any(|module| binding.strip_prefix(module).is_some_and(|suffix| suffix.starts_with("as") && suffix.len() > 2))
+}
+
+fn rejected_module_binding(binding: &str) -> bool {
+    REJECTED_PYTHON_MODULES
+        .iter()
+        .any(|module| binding == *module || binding.strip_prefix(module).is_some_and(|suffix| suffix.starts_with("as") && suffix.len() > 2))
+}
+
+pub(super) fn rejected_python_module(name: &str) -> bool {
+    REJECTED_PYTHON_MODULES
+        .iter()
+        .any(|module| name == *module || name.strip_prefix(module).is_some_and(|suffix| suffix.starts_with('.')))
 }
 
 fn uses_command_module_as_value(source: &str) -> bool {
@@ -468,6 +495,7 @@ fn has_dynamic_process_resolution(source: &str) -> bool {
         "importlib.",
         "locals(",
         "operator.attrgetter(",
+        "operator.methodcaller(",
         "sys.modules",
         "vars(",
     ]
@@ -483,9 +511,18 @@ fn has_direct_dynamic_process_resolution(source: &str) -> bool {
         .collect::<String>()
         .to_ascii_lowercase();
     if compact.contains("sys.modules")
-        || ["getattr(", "globals(", "locals(", "operator.attrgetter(", "vars()"]
-            .iter()
-            .any(|access| compact.contains(access))
+        || [
+            ".__dict__",
+            ".__getattribute__(",
+            "getattr(",
+            "globals(",
+            "locals(",
+            "operator.attrgetter(",
+            "operator.methodcaller(",
+            "vars(",
+        ]
+        .iter()
+        .any(|access| compact.contains(access))
     {
         return true;
     }

@@ -82,7 +82,7 @@ fn maintainer_tooling_scans_ignored_modules_reachable_from_cargo_targets() {
     .expect("ignored tool module");
     fs::write(workspace.path().join(".gitignore"), "tools/checker/src/generated.rs\n").expect("ignore rule");
     git(workspace.path(), &["init", "-q"]);
-    git(workspace.path(), &["add", "."]);
+    git(workspace.path(), &["add", "-f", "."]);
 
     let error = reject_tooling_suppressions(workspace.path()).unwrap_err();
     assert!(format!("{error:#}").contains("must remain suppression-free"));

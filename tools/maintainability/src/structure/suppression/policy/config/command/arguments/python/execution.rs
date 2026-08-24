@@ -154,6 +154,15 @@ pub(super) enum ProcessKind {
 
 pub(super) fn process_kind(name: &str) -> Option<ProcessKind> {
     let name = name.to_ascii_lowercase();
+    if name
+        .split('.')
+        .any(|component| matches!(component, "create_subprocess_exec" | "create_subprocess_shell" | "subprocess_exec" | "subprocess_shell"))
+    {
+        return Some(ProcessKind::Unsupported);
+    }
+    if name.contains('.') && super::rejected_python_module(&name) {
+        return Some(ProcessKind::Unsupported);
+    }
     if matches!(
         name.as_str(),
         "os.system" | "os.popen" | "posix.system" | "posix.popen" | "subprocess.getoutput" | "subprocess.getstatusoutput"
@@ -292,9 +301,32 @@ subprocess . run(["quality/helper.exe"], check=True)
             "posix.posix_spawnp('quality/hidden.py', ['quality/hidden.py'], {})\nsubprocess.run(['git', 'status'])\n",
             "posix_spawn('quality/hidden.py', ['quality/hidden.py'], {})\nsubprocess.run(['git', 'status'])\n",
             "pty.spawn(['quality/hidden.py'])\nsubprocess.run(['git', 'status'])\n",
+            "pydoc.pipepager('', 'sh quality/hidden.txt')\nsubprocess.run(['git', 'status'])\n",
+            "webbrowser.BackgroundBrowser('sh').open('quality/hidden.txt')\nsubprocess.run(['git', 'status'])\n",
         ] {
             assert!(collect(source).opaque, "{source}");
         }
+    }
+
+    #[test]
+    fn rejected_module_calls_fail_closed() {
+        for source in [
+            r#"asyncio.get_running_loop().subprocess_shell(asyncio.SubprocessProtocol, "sh quality/hidden.txt")"#,
+            r#"asyncio.get_event_loop_policy().new_event_loop().subprocess_exec(asyncio.SubprocessProtocol, "quality/hidden.py")"#,
+            r#"asyncio.Runner().get_loop().subprocess_shell(asyncio.SubprocessProtocol, "sh quality/hidden.txt")"#,
+            r#"loop.subprocess_exec(protocol, "quality/hidden.py")"#,
+            r#"subprocess_shell(protocol, "sh quality/hidden.txt")"#,
+            r#"loop.subprocess_exec.__call__(protocol, "quality/hidden.py")"#,
+            "inspect.signature(callback)",
+            "operator.itemgetter(0)",
+            r#"pydoc.pipepager("", "sh quality/hidden.txt")"#,
+            r#"pydoc.render_doc("topic")"#,
+            r#"webbrowser.BackgroundBrowser("sh").open("quality/hidden.txt")"#,
+            r#"webbrowser.open("https://example.com")"#,
+        ] {
+            assert!(collect(source).opaque, "{source}");
+        }
+        assert!(!collect("await asyncio.sleep(1)").opaque);
     }
 
     #[test]

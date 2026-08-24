@@ -169,10 +169,30 @@ fn timeout_command(arguments: &[String]) -> Selection<'_> {
 }
 
 fn rustup_command(arguments: &[String]) -> Selection<'_> {
-    if arguments.first().is_none_or(|argument| !argument.eq_ignore_ascii_case("run")) {
+    let mut index = 0;
+    let mut selector = false;
+    while let Some(argument) = arguments.get(index) {
+        match argument.as_str() {
+            "-h" | "--help" | "-V" | "--version" => return Selection::NoCommand,
+            "-v" | "--verbose" | "-q" | "--quiet" => index += 1,
+            "+1.97.0" | "+nightly" if !selector => {
+                selector = true;
+                index += 1;
+            }
+            _ if argument.starts_with(['-', '+']) => return Selection::Opaque,
+            _ => break,
+        }
+    }
+    let Some(subcommand) = arguments.get(index) else {
+        return Selection::NoCommand;
+    };
+    if !subcommand.eq_ignore_ascii_case("run") {
+        if subcommand.eq_ignore_ascii_case("man") || subcommand.eq_ignore_ascii_case("doc") && !arguments[index + 1..].iter().any(|argument| argument == "--path") {
+            return Selection::Opaque;
+        }
         return Selection::NotWrapper;
     }
-    let mut index = 1;
+    index += 1;
     while matches!(arguments.get(index).map(String::as_str), Some("--install")) {
         index += 1;
     }
@@ -393,6 +413,25 @@ mod tests {
             Selection::Opaque
         ));
         assert!(matches!(select("rustup", "rustup", &["show".to_owned()]), Selection::NotWrapper));
+        assert!(matches!(select("rustup", "rustup", &["doc".to_owned()]), Selection::Opaque));
+        assert!(matches!(select("rustup", "rustup", &["man".to_owned(), "cargo".to_owned()]), Selection::Opaque));
+        assert!(matches!(select("rustup", "rustup", &["doc".to_owned(), "--path".to_owned()]), Selection::NotWrapper));
         assert!(matches!(select("rustup", "rustup", &["run".to_owned(), "--help".to_owned()]), Selection::NoCommand));
+        for prefix in [&["--verbose"][..], &["-q"][..], &["+1.97.0"][..], &["-v", "+nightly"][..]] {
+            let mut arguments = prefix.iter().map(|argument| (*argument).to_owned()).collect::<Vec<_>>();
+            arguments.extend(["run", "1.97.0", "sh", "quality/lint.txt"].map(str::to_owned));
+            let Selection::Nested(command) = select("rustup", "rustup", &arguments) else {
+                panic!("reviewed rustup prefix should preserve nested-command selection: {arguments:?}");
+            };
+            assert_eq!(command, ["sh", "quality/lint.txt"]);
+        }
+        for prefix in ["--unknown", "+stable", "+1.97.0"] {
+            let arguments = if prefix == "+1.97.0" {
+                vec![prefix.to_owned(), "+nightly".to_owned(), "run".to_owned(), "1.97.0".to_owned(), "true".to_owned()]
+            } else {
+                vec![prefix.to_owned(), "run".to_owned(), "1.97.0".to_owned(), "true".to_owned()]
+            };
+            assert!(matches!(select("rustup", "rustup", &arguments), Selection::Opaque), "{arguments:?}");
+        }
     }
 }

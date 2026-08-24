@@ -6,6 +6,8 @@ mod process;
 
 pub(super) use execution::References as ExecutionReferences;
 
+const REJECTED_PYTHON_MODULES: &[&str] = &["logging.config", "optparse", "pkgutil", "pydoc", "unittest.mock", "webbrowser"];
+
 pub(super) fn execution_references(path: &str, source: &str) -> ExecutionReferences {
     let normalized = normalize_continuations(source);
     let mut references = execution::collect(&normalized);
@@ -214,13 +216,16 @@ fn imports_command_capable_api(source: &str) -> bool {
         let compact = compact.rsplit(':').next().unwrap_or(&compact);
         if compact
             .strip_prefix("import")
-            .is_some_and(|imports| imports.split(',').any(|binding| binding == "pydoc" || command_module_alias(binding)))
+            .is_some_and(|imports| imports.split(',').any(|binding| rejected_module_binding(binding) || command_module_alias(binding)))
         {
             return true;
         }
         let Some((module, imports)) = compact.strip_prefix("from").and_then(|line| line.split_once("import")) else {
             return false;
         };
+        if rejected_python_module(module) {
+            return true;
+        }
         let imports = imports.trim_matches(['(', ')']);
         imports.split(',').any(|binding| {
             let binding = binding.trim_matches(['(', ')']);
@@ -233,9 +238,10 @@ fn imports_command_capable_api(source: &str) -> bool {
                 "os" | "posix" => name == "*" || is_os_process_api(name),
                 "subprocess" => name == "*" || is_subprocess_process_api(name),
                 "pty" => matches!(name, "*" | "spawn"),
-                "pydoc" => true,
                 "contextlib" => matches!(name, "*" | "chdir"),
-                "sys" => matches!(name, "*" | "modules"),
+                "logging" => name == "config",
+                "sys" => matches!(name, "*" | "meta_path" | "modules" | "path_hooks" | "path_importer_cache"),
+                "unittest" => name == "mock",
                 _ => false,
             }
         })
@@ -243,9 +249,21 @@ fn imports_command_capable_api(source: &str) -> bool {
 }
 
 fn command_module_alias(binding: &str) -> bool {
-    ["asyncio", "contextlib", "os", "posix", "pty", "pydoc", "subprocess", "sys"]
+    ["asyncio", "contextlib", "os", "posix", "pty", "subprocess", "sys"]
         .iter()
         .any(|module| binding.strip_prefix(module).is_some_and(|suffix| suffix.starts_with("as") && suffix.len() > 2))
+}
+
+fn rejected_module_binding(binding: &str) -> bool {
+    REJECTED_PYTHON_MODULES
+        .iter()
+        .any(|module| binding == *module || binding.strip_prefix(module).is_some_and(|suffix| suffix.starts_with("as") && suffix.len() > 2))
+}
+
+pub(super) fn rejected_python_module(name: &str) -> bool {
+    REJECTED_PYTHON_MODULES
+        .iter()
+        .any(|module| name == *module || name.strip_prefix(module).is_some_and(|suffix| suffix.starts_with('.')))
 }
 
 fn uses_command_module_as_value(source: &str) -> bool {

@@ -154,7 +154,7 @@ pub(super) enum ProcessKind {
 
 pub(super) fn process_kind(name: &str) -> Option<ProcessKind> {
     let name = name.to_ascii_lowercase();
-    if name.starts_with("pydoc.") {
+    if super::rejected_python_module(&name) {
         return Some(ProcessKind::Unsupported);
     }
     if matches!(
@@ -296,14 +296,20 @@ subprocess . run(["quality/helper.exe"], check=True)
             "posix_spawn('quality/hidden.py', ['quality/hidden.py'], {})\nsubprocess.run(['git', 'status'])\n",
             "pty.spawn(['quality/hidden.py'])\nsubprocess.run(['git', 'status'])\n",
             "pydoc.pipepager('', 'sh quality/hidden.txt')\nsubprocess.run(['git', 'status'])\n",
+            "webbrowser.BackgroundBrowser('sh').open('quality/hidden.txt')\nsubprocess.run(['git', 'status'])\n",
         ] {
             assert!(collect(source).opaque, "{source}");
         }
     }
 
     #[test]
-    fn pydoc_calls_fail_closed() {
-        for source in [r#"pydoc.pipepager("", "sh quality/hidden.txt")"#, r#"pydoc.render_doc("topic")"#] {
+    fn rejected_module_calls_fail_closed() {
+        for source in [
+            r#"pydoc.pipepager("", "sh quality/hidden.txt")"#,
+            r#"pydoc.render_doc("topic")"#,
+            r#"webbrowser.BackgroundBrowser("sh").open("quality/hidden.txt")"#,
+            r#"webbrowser.open("https://example.com")"#,
+        ] {
             assert!(collect(source).opaque, "{source}");
         }
     }

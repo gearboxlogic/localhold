@@ -221,7 +221,10 @@ fn dynamic_path(path: &[String]) -> bool {
     if path.iter().any(|component| {
         matches!(
             component.as_str(),
-            "_getframe"
+            "breakpoint"
+                | "breakpointhook"
+                | "__breakpointhook__"
+                | "_getframe"
                 | "_current_frames"
                 | "currentframe"
                 | "exec_module"
@@ -273,6 +276,9 @@ mod tests {
     fn executable_code_construction_is_rejected_without_matching_inert_text() {
         assert!(has_dynamic_code("exec(bytes.fromhex(payload))"));
         assert!(has_dynamic_code("runner = eval\nrunner(source)"));
+        assert!(has_dynamic_code("breakpoint()"));
+        assert!(has_dynamic_code("sys.breakpointhook()"));
+        assert!(has_dynamic_code("sys.__breakpointhook__()"));
         assert!(has_dynamic_code("builtins.compile(source, name, 'exec')"));
         assert!(has_dynamic_code("builtins.__dict__['exec'](payload)"));
         assert!(has_dynamic_code("getattr(builtins, name)(source)"));

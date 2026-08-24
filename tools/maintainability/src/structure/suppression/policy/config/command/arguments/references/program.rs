@@ -111,9 +111,24 @@ pub(super) fn zip_test_command_is_opaque(arguments: &[String]) -> bool {
 
 pub(super) fn openssl_module_selection_is_opaque(arguments: &[String]) -> bool {
     dynamic_arguments_are_opaque(arguments)
+        || arguments.first().is_some_and(|argument| argument == "engine")
         || arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
             let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
-            matches!(option, "-engine" | "-provider" | "-provider-path")
+            matches!(
+                option,
+                "-config"
+                    | "--config"
+                    | "-engine"
+                    | "--engine"
+                    | "-keygen_engine"
+                    | "--keygen_engine"
+                    | "-provider"
+                    | "--provider"
+                    | "-provider-path"
+                    | "--provider-path"
+                    | "-ssl_client_engine"
+                    | "--ssl_client_engine"
+            )
         })
 }
 

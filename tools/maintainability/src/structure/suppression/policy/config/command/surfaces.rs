@@ -34,6 +34,7 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
         &[
             ":(top,icase,glob)**/*.pyc",
             ":(top,icase,glob)**/*.pyo",
+            ":(top,icase,glob)**/*.pth",
             ":(top,icase,glob)**/*.pyd",
             ":(top,icase,glob)**/*.so",
             ":(top,icase,glob)**/*.zip",
@@ -42,6 +43,8 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
             ":(top,icase,glob)**/*.pyz",
             ":(top,icase,glob)**/*.pyzw",
             ":(top,icase,glob)**/__pycache__/**",
+            ":(top,icase).pdbrc",
+            ":(top,icase,glob)**/.pdbrc",
         ],
     )?);
     let checked_paths = paths.clone();
@@ -145,16 +148,17 @@ fn validate_before_resolution(workspace: &Path, surface: &str) -> Result<()> {
 
 fn reject_python_loadable_artifact(path: &str) -> Result<()> {
     let path = Path::new(path);
+    let debugger_commands = path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.eq_ignore_ascii_case(".pdbrc"));
     let in_bytecode_cache = path
         .components()
         .any(|component| component.as_os_str().to_str().is_some_and(|component| component.eq_ignore_ascii_case("__pycache__")));
     let loadable_extension = path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
         matches!(
             extension.to_ascii_lowercase().as_str(),
-            "pyc" | "pyo" | "pyd" | "so" | "zip" | "egg" | "whl" | "pyz" | "pyzw"
+            "pyc" | "pyo" | "pth" | "pyd" | "so" | "zip" | "egg" | "whl" | "pyz" | "pyzw"
         )
     });
-    if in_bytecode_cache || loadable_extension {
+    if debugger_commands || in_bytecode_cache || loadable_extension {
         bail!(
             "Python-loadable artifact is unsupported because its executable contents cannot be audited: {}",
             path.display()
@@ -540,6 +544,7 @@ mod tests {
         for path in [
             "script/helper.pyc",
             "script/helper.pyo",
+            "script/helper.PTH",
             "script/helper.pyd",
             "script/helper.cpython-313-x86_64-linux-gnu.so",
             "script/helper.zip",
@@ -567,14 +572,47 @@ mod tests {
         git(repository.path(), &["init", "--quiet"]);
         fs::create_dir_all(repository.path().join("script")).expect("create script directory");
         fs::create_dir_all(repository.path().join("target")).expect("create build directory");
-        fs::write(repository.path().join(".git/info/exclude"), "script/helper.pyc\ntarget/\n").expect("local Git exclusions");
+        fs::write(repository.path().join(".git/info/exclude"), "script/helper.pyc\nscript/helper.pth\ntarget/\n").expect("local Git exclusions");
         fs::write(repository.path().join("script/helper.pyc"), b"opaque").expect("ignored Python artifact");
+        fs::write(repository.path().join("script/helper.pth"), b"import subprocess").expect("ignored Python path configuration");
         fs::write(repository.path().join("target/generated.pyc"), b"generated").expect("ignored build artifact");
 
         let error = execution_surfaces(repository.path()).err().expect("reject ignored Python-loadable artifact");
+        assert!(error.to_string().contains("script/helper.pth"), "{error:#}");
+        fs::remove_file(repository.path().join("script/helper.pth")).expect("remove Python path configuration");
+        let error = execution_surfaces(repository.path()).err().expect("reject ignored Python bytecode");
         assert!(error.to_string().contains("script/helper.pyc"), "{error:#}");
-        fs::remove_file(repository.path().join("script/helper.pyc")).expect("remove import shadow");
+        fs::remove_file(repository.path().join("script/helper.pyc")).expect("remove Python bytecode");
         execution_surfaces(repository.path()).expect("exclude governed build output");
+    }
+
+    #[test]
+    fn untracked_python_path_configuration_is_rejected() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        git(repository.path(), &["init", "--quiet"]);
+        fs::create_dir_all(repository.path().join("quality")).expect("create quality directory");
+        fs::write(repository.path().join("quality/paths.pth"), b"quality/vendor\n").expect("untracked Python path configuration");
+
+        let error = execution_surfaces(repository.path()).err().expect("reject untracked Python path configuration");
+        assert!(error.to_string().contains("quality/paths.pth"), "{error:#}");
+    }
+
+    #[test]
+    fn python_debugger_commands_are_rejected_across_git_states() {
+        for state in ["tracked", "untracked", "ignored"] {
+            let repository = tempfile::tempdir().expect("temporary repository");
+            git(repository.path(), &["init", "--quiet"]);
+            if state == "ignored" {
+                fs::write(repository.path().join(".git/info/exclude"), ".pdbrc\n").expect("ignore debugger commands");
+            }
+            fs::write(repository.path().join(".pdbrc"), b"!exec(payload)\ncontinue\n").expect("Python debugger commands");
+            if state == "tracked" {
+                git(repository.path(), &["add", ".pdbrc"]);
+            }
+
+            let error = execution_surfaces(repository.path()).err().expect("reject Python debugger commands");
+            assert!(error.to_string().contains(".pdbrc"), "{state}: {error:#}");
+        }
     }
 
     #[test]

@@ -90,6 +90,7 @@ fn is_runtime_code_loading_environment_name(name: &str) -> bool {
             | "OPENSSL_CONF_INCLUDE"
             | "OPENSSL_ENGINES"
             | "OPENSSL_MODULES"
+            | "PS4"
             | "PERL5OPT"
             | "PYTHONBREAKPOINT"
             | "PYTHONCASEOK"
@@ -238,6 +239,12 @@ mod tests {
         assert!(!is_weakening_environment_name("env"));
         assert!(is_weakening_environment_name("SHELLOPTS"));
         assert!(is_weakening_environment_name("shellopts"));
+    }
+
+    #[test]
+    fn xtrace_prompt_is_weakening() {
+        assert!(is_weakening_environment_name("PS4"));
+        assert!(is_weakening_environment_name("ps4"));
     }
 
     #[test]

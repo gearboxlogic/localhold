@@ -5,7 +5,6 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 pub(super) const POLICY_PATH: &str = "policy/maintainability/reviewed-command-profiles.json";
-
 #[derive(Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ProfileManifest {

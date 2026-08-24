@@ -415,10 +415,44 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
+    use sha2::{Digest, Sha256};
+
+    use super::{super::profile_policy::ProfileManifest, close_over_execution_inputs};
     use super::{
         TRUSTED_MAINTAINABILITY_AUTHENTICATION, TRUSTED_MAINTAINABILITY_DISPATCH_LINE, TRUSTED_WINDOWS_DEPENDENCY_DISPATCH_LINE, TRUSTED_WORKFLOW, execution_inputs_for_surface,
         execution_surfaces, reviewed_generated_program, without_reviewed_protected_dispatch,
     };
+
+    #[test]
+    fn arbitrary_pending_successors_do_not_bridge_opaque_dispatch() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        let path = "script/reviewed.sh";
+        let source = "#!/bin/sh\nrunner=sh\n\"$runner\" --version\n";
+        fs::create_dir(repository.path().join("script")).expect("create script directory");
+        fs::write(repository.path().join(path), source).expect("write reviewed source");
+        let current = format!("{:x}", Sha256::digest(source));
+        let policy = |next: Option<&str>| {
+            let next = next.map_or_else(|| "null".to_owned(), |digest| format!("\"{digest}\""));
+            ProfileManifest::parse(
+                format!(
+                    r#"{{"schema_version":1,"profiles":[{{"id":"reviewed","path":"{path}","current_sha256":"{current}","preapproved_next_sha256":{next},"retired_sha256":[],"issue":"https://example.invalid/1","rationale":"Replace legacy opaque dispatch.","safety_invariant":"Only the pinned current source may bridge to its exact successor."}}]}}"#
+                )
+                .as_bytes(),
+            )
+            .expect("profile manifest")
+        };
+        let tracked = BTreeSet::from([path.to_owned()]);
+
+        let mut surfaces = tracked.clone();
+        let error = close_over_execution_inputs(repository.path(), &mut surfaces, &tracked, &tracked, Some(&policy(None))).expect_err("reject unbridged opaque dispatch");
+        assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
+
+        let mut surfaces = tracked.clone();
+        let successor = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let error =
+            close_over_execution_inputs(repository.path(), &mut surfaces, &tracked, &tracked, Some(&policy(Some(successor)))).expect_err("reject arbitrary pending successor");
+        assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
+    }
 
     #[test]
     fn protected_dispatch_requires_the_complete_canonical_authentication_sequence() {

@@ -51,7 +51,14 @@ fn claude_review_wrapper_is_closed() {
 
 #[test]
 fn publication_hygiene_surface_is_closed() {
-    assert_reviewed_shell_surface_is_closed("script/check-publication-hygiene.sh");
+    let path = "script/check-publication-hygiene.sh";
+    assert_reviewed_shell_surface_is_closed(path);
+
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = fs::read_to_string(workspace.join(path)).expect("publication hygiene script");
+    let command_source = super::direct_command_source(path, &source);
+    let inputs = super::execution_inputs_for_surface(path, &command_source, false);
+    assert!(!inputs.unresolved, "unprofiled publication hygiene surface became opaque");
 }
 
 #[test]
@@ -331,10 +338,12 @@ fn execution_inputs_distinguish_files_from_opaque_programs() {
     assert_eq!(inputs(r"'.\quality\run-lints.cmd'"), (Vec::new(), true));
     assert_eq!(inputs("status=$(./quality/run-lints)"), (vec!["quality/run-lints".to_owned()], false));
     assert_eq!(inputs("kernel=$(/usr/bin/uname -s)"), (Vec::new(), false));
-    assert_eq!(inputs("values[$key]=1"), (Vec::new(), false));
+    assert_eq!(inputs("values[$key]=1"), (Vec::new(), true));
+    assert_eq!(inputs("values[0]=1"), (Vec::new(), false));
     assert_eq!(inputs("flags+=(--prerelease)"), (Vec::new(), false));
     assert_eq!(inputs("flags+=($(sh quality/lint.txt))"), (vec!["quality/lint.txt".to_owned()], false));
-    assert_eq!(inputs("((count += 1))"), (Vec::new(), false));
+    assert_eq!(inputs("((count += 1))"), (Vec::new(), true));
+    assert_eq!(inputs("((1 + 1))"), (Vec::new(), false));
     assert_eq!(inputs("values[$(sh quality/lint.txt)]=1"), (vec!["quality/lint.txt".to_owned()], false));
     assert_eq!(inputs("value=$(<\"$reviewed_input\")"), (Vec::new(), false));
     assert_eq!(inputs("value=$(>\"$dynamic_output\")"), (Vec::new(), true));
@@ -694,6 +703,12 @@ fn mapfile_callbacks_fail_closed_without_rejecting_literal_array_reads() {
     assert_eq!(inputs("readarray -tC 'sh quality/lint.txt' -c 1 </etc/hosts"), (Vec::new(), true));
     assert_eq!(inputs("mapfile $OPTIONS lines </etc/hosts"), (Vec::new(), true));
     assert_eq!(inputs("mapfile -t lines </etc/hosts"), (Vec::new(), false));
+    assert_eq!(inputs("read < /etc/hosts answer"), (Vec::new(), false));
+    assert_eq!(inputs("mapfile 3< /etc/hosts lines"), (Vec::new(), false));
+    assert_eq!(inputs("readarray >/dev/null values"), (Vec::new(), false));
+    assert_eq!(inputs("read -r first < <(printf '%s\\n' value) second"), (Vec::new(), false));
+    assert_eq!(inputs("payload='a[$(sh quality/lint.txt)]'; read < /etc/hosts 'a[payload]'"), (Vec::new(), true));
+    assert_eq!(inputs("payload='a[$(sh quality/lint.txt)]'; mapfile 3< /etc/hosts 'a[payload]'"), (Vec::new(), true));
 }
 
 #[test]

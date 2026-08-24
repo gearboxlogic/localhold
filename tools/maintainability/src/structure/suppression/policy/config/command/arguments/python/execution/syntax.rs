@@ -167,28 +167,8 @@ impl CallScanner {
     }
 
     fn formatted_string_has_process_expression(&self, literal: &StringLiteral) -> bool {
-        let mut index = literal.content.start;
-        while let Some(expression_start) = self.next_f_expression(index, literal.content.end) {
-            let Some(expression_end) = self.f_expression_end(expression_start, literal.content.end) else {
-                return self.expression_has_process_call(expression_start..literal.content.end);
-            };
-            if self.expression_has_process_call(expression_start..expression_end) {
-                return true;
-            }
-            index = expression_end + 1;
-        }
-        false
-    }
-
-    fn next_f_expression(&self, mut index: usize, end: usize) -> Option<usize> {
-        while index < end {
-            match (self.characters[index], self.characters.get(index + 1)) {
-                ('{', Some('{')) => index += 2,
-                ('{', _) => return Some(index + 1),
-                _ => index += 1,
-            }
-        }
-        None
+        let content = self.characters[literal.content.clone()].iter().collect::<String>();
+        super::super::evaluation::formatted_code_expressions(&content).is_none_or(|expressions| expressions.iter().any(|expression| Self::source_has_process_call(expression)))
     }
 
     fn f_expression_end(&self, start: usize, end: usize) -> Option<usize> {
@@ -214,12 +194,11 @@ impl CallScanner {
         None
     }
 
-    fn expression_has_process_call(&self, expression: Range<usize>) -> bool {
-        let source = self.characters[expression].iter().collect::<String>();
-        if super::super::has_opaque_process_bindings(&source) || super::super::has_direct_dynamic_process_resolution(&source) {
+    fn source_has_process_call(source: &str) -> bool {
+        if super::super::has_opaque_process_bindings(source) || super::super::has_direct_dynamic_process_resolution(source) {
             return true;
         }
-        let mut scanner = Self::new(&source);
+        let mut scanner = Self::new(source);
         while let Some(call) = scanner.next() {
             if process_call(&call.name) {
                 return true;
@@ -349,6 +328,9 @@ subprocess.run(["script/check-time-abstraction.sh"], check=True)
     fn formatted_process_and_resolution_expressions_fail_closed() {
         for source in [
             r#"message = f"{posix.system('sh quality/hidden.txt')}""#,
+            r#"message = f"{os.system("sh quality/hidden.txt")}""#,
+            r#"message = f"{value:{os.system('sh quality/hidden.txt')}}""#,
+            r#"message = f"{value:{{os.system('sh quality/hidden.txt')}}}""#,
             r#"message = f"{os.chdir('quality')}""#,
             r#"message = f"{os.environ.update({'PATH': 'quality'})}""#,
             r#"message = f"{(process := os)}""#,

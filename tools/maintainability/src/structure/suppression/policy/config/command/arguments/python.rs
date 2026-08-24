@@ -7,20 +7,27 @@ mod process;
 pub(super) use execution::References as ExecutionReferences;
 
 const REJECTED_PYTHON_MODULES: &[&str] = &[
+    "_pickle",
     "code",
     "cprofile",
     "doctest",
+    "gc",
     "inspect",
     "logging.config",
+    "marshal",
+    "multiprocessing",
     "operator",
     "optparse",
     "pdb",
+    "pickle",
     "pkgutil",
     "profile",
     "pydoc",
+    "shelve",
     "site",
     "timeit",
     "trace",
+    "types",
     "unittest.mock",
     "webbrowser",
 ];
@@ -28,6 +35,7 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
 pub(super) fn execution_references(path: &str, source: &str) -> ExecutionReferences {
     let normalized = normalize_continuations(source);
     let mut references = execution::collect(&normalized);
+    references.opaque |= evaluation::has_non_ascii_code(&normalized);
     references.opaque |= has_opaque_process_bindings(&normalized) && !bindings::is_reviewed_surface(path, source);
     references
 }
@@ -52,6 +60,9 @@ pub(super) fn has_adjacent_string_literals(source: &str) -> bool {
 
 pub(super) fn has_opaque_process_arguments(path: &str, source: &str) -> bool {
     let normalized = normalize_continuations(source);
+    if evaluation::has_non_ascii_code(&normalized) {
+        return true;
+    }
     let reviewed_process_binding_surface = bindings::is_reviewed_surface(path, source);
     let reviewed_dynamic_surface = evaluation::is_reviewed_dynamic_code_surface(path, source);
     let reviewed_process_surface = process::is_reviewed_surface(path, source);
@@ -276,9 +287,12 @@ fn command_module_alias(binding: &str) -> bool {
 }
 
 fn rejected_module_binding(binding: &str) -> bool {
-    REJECTED_PYTHON_MODULES
-        .iter()
-        .any(|module| binding == *module || binding.strip_prefix(module).is_some_and(|suffix| suffix.starts_with("as") && suffix.len() > 2))
+    REJECTED_PYTHON_MODULES.iter().any(|module| {
+        binding == *module
+            || binding
+                .strip_prefix(module)
+                .is_some_and(|suffix| suffix.starts_with('.') || suffix.starts_with("as") && suffix.len() > 2)
+    })
 }
 
 pub(super) fn rejected_python_module(name: &str) -> bool {
@@ -469,7 +483,7 @@ fn has_adjacent_string_literals_in(source: &str) -> bool {
 }
 
 fn references_process_api(source: &str) -> bool {
-    let source = source.to_ascii_lowercase();
+    let source = normalized_qualified_code(source).to_ascii_lowercase();
     [
         "asyncio.create_subprocess_",
         "os.system",
@@ -494,7 +508,7 @@ fn references_root_module(source: &str, module: &str) -> bool {
 }
 
 fn references_exec_or_spawn_api(source: &str) -> bool {
-    let source = source.to_ascii_lowercase();
+    let source = normalized_qualified_code(source).to_ascii_lowercase();
     ["execl", "execv", "spawn"].iter().any(|name| source.contains(name))
 }
 
@@ -779,10 +793,8 @@ impl AdjacentLiteralScanner {
         }
     }
 }
-
 fn is_identifier_character(character: char) -> bool {
     character == '_' || character.is_alphanumeric()
 }
-
 #[cfg(test)]
 mod tests;

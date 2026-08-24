@@ -26,7 +26,7 @@ const REPOSITORY_SENTINELS: &[(&str, &str)] = &[
 pub(super) fn validate_maintainability_analyzer(workspace: &Path, tracked_paths: &BTreeSet<String>, checked_paths: &BTreeSet<String>) -> Result<()> {
     require_repository_sentinels(workspace, tracked_paths)?;
     require_tracked_sources(tracked_paths, checked_paths)?;
-    validate_inventory(workspace, checked_paths)
+    validate_inventory(workspace, checked_paths, checked_paths)
 }
 
 #[cfg(test)]
@@ -35,7 +35,7 @@ pub(super) fn validate_fixture(workspace: &Path, checked_paths: &BTreeSet<String
         return Ok(());
     }
     require_repository_sentinels(workspace, checked_paths)?;
-    validate_inventory(workspace, checked_paths)
+    validate_inventory(workspace, checked_paths, checked_paths)
 }
 
 fn require_repository_sentinels(workspace: &Path, tracked_paths: &BTreeSet<String>) -> Result<()> {
@@ -48,11 +48,12 @@ fn require_repository_sentinels(workspace: &Path, tracked_paths: &BTreeSet<Strin
     Ok(())
 }
 
-fn validate_inventory(workspace: &Path, checked_paths: &BTreeSet<String>) -> Result<()> {
+fn validate_inventory(workspace: &Path, checked_paths: &BTreeSet<String>, repository_paths: &BTreeSet<String>) -> Result<()> {
     let analyzer_sources = checked_paths.iter().filter(|path| is_source(path)).cloned().collect::<BTreeSet<_>>();
     let policy_bytes = fs::read(workspace.join(POLICY_PATH)).with_context(|| format!("read maintainability tooling structure policy {POLICY_PATH:?}"))?;
     let policy = ToolingStructureManifest::parse(&policy_bytes)?;
     let manifest_source = fs::read_to_string(workspace.join(ROOT_MANIFEST)).with_context(|| format!("read maintainability analyzer manifest {ROOT_MANIFEST:?}"))?;
+    classification::validate_legacy_auto_target_inventory(workspace, &manifest_source, repository_paths)?;
     let mut observed = BTreeMap::new();
     let mut sources = BTreeMap::new();
     for path in &analyzer_sources {

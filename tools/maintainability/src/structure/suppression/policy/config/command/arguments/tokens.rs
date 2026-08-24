@@ -105,7 +105,12 @@ fn shell_command_segments(source: &str) -> Vec<&str> {
             };
         } else if quote.is_none() && character == '#' && previous.is_none_or(|value| value.is_whitespace() || matches!(value, ';' | '&' | '|')) {
             comment = true;
-        } else if quote.is_none() && (source[index..].starts_with("$(") || substitution_depth > 0 && character == '(' && previous != Some('$')) {
+        } else if quote.is_none()
+            && (source[index..].starts_with("$(")
+                || source[index..].starts_with("<(")
+                || source[index..].starts_with(">(")
+                || substitution_depth > 0 && character == '(' && !matches!(previous, Some('$' | '<' | '>')))
+        {
             substitution_depth += 1;
         } else if quote.is_none() && substitution_depth > 0 && character == ')' {
             substitution_depth -= 1;
@@ -439,17 +444,20 @@ fn shell_tokens(command: &str, split_equals: bool) -> Vec<String> {
     let mut token = String::new();
     let mut quote = None;
     let mut escaped = false;
+    let mut token_started = false;
     let mut parameter_depth = 0_usize;
     let characters = command.chars().collect::<Vec<_>>();
     for (index, character) in characters.iter().copied().enumerate() {
         if escaped {
             token.push(character);
+            token_started = true;
             escaped = false;
         } else if quote == Some('\'') {
             if character == '\'' {
                 quote = None;
             } else {
                 token.push(character);
+                token_started = true;
             }
         } else if quote == Some('"') {
             if character == '"' {
@@ -458,8 +466,10 @@ fn shell_tokens(command: &str, split_equals: bool) -> Vec<String> {
                 escaped = true;
             } else {
                 token.push(character);
+                token_started = true;
             }
         } else if matches!(character, '\'' | '"') {
+            token_started = true;
             if character == '\'' && token.ends_with('$') {
                 token.push(character);
             }
@@ -469,21 +479,26 @@ fn shell_tokens(command: &str, split_equals: bool) -> Vec<String> {
         } else if character == '$' && characters.get(index + 1) == Some(&'{') {
             parameter_depth += 1;
             token.push(character);
+            token_started = true;
         } else if character == '}' && parameter_depth > 0 {
             parameter_depth -= 1;
             token.push(character);
+            token_started = true;
         } else if parameter_depth == 0 && (character.is_whitespace() || split_equals && character == '=') {
-            if !token.is_empty() {
+            if token_started {
                 tokens.push(std::mem::take(&mut token));
+                token_started = false;
             }
         } else {
             token.push(character);
+            token_started = true;
         }
     }
     if escaped {
         token.push('\\');
+        token_started = true;
     }
-    if !token.is_empty() {
+    if token_started {
         tokens.push(token);
     }
     tokens
@@ -511,6 +526,12 @@ mod tests {
     fn ansi_c_quoted_words_retain_an_execution_marker() {
         assert_eq!(command_tokens("$'\\x73\\x68' quality/lint.txt"), vec!["$'\\x73\\x68", "quality/lint.txt"]);
         assert_eq!(command_tokens("printf '%s' \"$'\\x73'\""), vec!["printf", "%s", "$'x73'"]);
+    }
+
+    #[test]
+    fn quoted_empty_arguments_keep_their_position() {
+        assert_eq!(source_command_tokens("read -r -d '' value"), [vec!["read", "-r", "-d", "", "value"]]);
+        assert_eq!(source_command_tokens("command \"\" tail"), [vec!["command", "", "tail"]]);
     }
 
     #[test]
@@ -545,6 +566,14 @@ mod tests {
         assert_eq!(source_command_tokens("printf value >&2"), [vec!["printf", "value", ">&2"]]);
         assert_eq!(source_command_tokens("command 2>&1"), [vec!["command", "2>&1"]]);
         assert_eq!(source_command_tokens("command &>output"), [vec!["command", "&>output"]]);
+    }
+
+    #[test]
+    fn process_substitution_pipelines_remain_in_the_containing_command() {
+        assert_eq!(
+            source_command_tokens("read -r first < <(printf '%s\\n' value | tail -n1) second"),
+            [vec!["read", "-r", "first", "<", "<(printf", "%s\\n", "value", "|", "tail", "-n1)", "second"]]
+        );
     }
 
     #[test]

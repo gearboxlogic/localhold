@@ -24,7 +24,11 @@ pub(super) fn has_opaque_command_assignment_flow(path: &str, source: &str, sourc
         return true;
     }
     let (computed, opaque_target) = builtins::assigned_variables(source);
-    opaque_target || computed.iter().any(|name| references_variable(source, name))
+    opaque_target
+        || builtins::has_opaque_indexed_assignment(path, source, source_is_reviewed)
+        || builtins::has_opaque_arithmetic_evaluation(path, source, source_is_reviewed)
+        || builtins::has_opaque_unset_target(path, source, source_is_reviewed)
+        || computed.iter().any(|name| references_variable(source, name))
 }
 
 #[cfg(test)]

@@ -97,6 +97,11 @@ run(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
 }
 
 #[test]
+fn private_zipfile_modules_fail_closed() {
+    assert!(has_opaque_process_arguments("import zipfile._path\n"));
+}
+
+#[test]
 fn opaque_process_bindings_fail_closed() {
     for source in [
         "from os import (\n    system,\n)\nsystem('sh quality/hidden.txt')\n",

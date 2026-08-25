@@ -371,7 +371,8 @@ verify_test_environment() {
                 CC | CC_* | HOST_CC | TARGET_CC | CFLAGS | CFLAGS_* | HOST_CFLAGS | TARGET_CFLAGS | CROSS_COMPILE | \
                 CXX | CXX_* | HOST_CXX | TARGET_CXX | CXXFLAGS | CXXFLAGS_* | HOST_CXXFLAGS | TARGET_CXXFLAGS | \
                 NVCC | NVCC_* | HOST_NVCC | TARGET_NVCC | RANLIB | RANLIB_* | HOST_RANLIB | TARGET_RANLIB | \
-                RANLIBFLAGS | RANLIBFLAGS_* | HOST_RANLIBFLAGS | TARGET_RANLIBFLAGS)
+                RANLIBFLAGS | RANLIBFLAGS_* | HOST_RANLIBFLAGS | TARGET_RANLIBFLAGS | CMAKE_TOOLCHAIN_FILE | \
+                CMAKE_TOOLCHAIN_FILE_* | *_CMAKE_TOOLCHAIN_FILE | *_CMAKE_TOOLCHAIN_FILE_*)
                 printf 'maintainability bootstrap retained an untrusted native build environment channel: %s\n' "$name" >&2
                 exit 1
                 ;;

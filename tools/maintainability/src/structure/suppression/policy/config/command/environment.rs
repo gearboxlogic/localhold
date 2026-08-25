@@ -74,7 +74,8 @@ pub(super) fn is_weakening_environment_name(name: &str) -> bool {
 
 fn is_native_build_environment_name(name: &str) -> bool {
     const SELECTORS: &[&str] = &["AR", "ARFLAGS", "CC", "CFLAGS", "CXX", "CXXFLAGS", "NVCC", "RANLIB", "RANLIBFLAGS"];
-    name == "CROSS_COMPILE"
+    is_cmake_toolchain_environment_name(name)
+        || name == "CROSS_COMPILE"
         || SELECTORS.iter().any(|selector| {
             name == *selector
                 || name
@@ -84,6 +85,10 @@ fn is_native_build_environment_name(name: &str) -> bool {
                 || name.strip_prefix("HOST_") == Some(*selector)
                 || name.strip_prefix("TARGET_") == Some(*selector)
         })
+}
+
+fn is_cmake_toolchain_environment_name(name: &str) -> bool {
+    name == "CMAKE_TOOLCHAIN_FILE" || name.starts_with("CMAKE_TOOLCHAIN_FILE_") || name.ends_with("_CMAKE_TOOLCHAIN_FILE") || name.contains("_CMAKE_TOOLCHAIN_FILE_")
 }
 
 fn is_runtime_code_loading_environment_name(name: &str) -> bool {
@@ -217,11 +222,27 @@ mod tests {
             "ARFLAGS_x86_64_unknown_linux_gnu",
             "TARGET_RANLIBFLAGS",
             "CROSS_COMPILE",
+            "CMAKE_TOOLCHAIN_FILE",
+            "CMAKE_TOOLCHAIN_FILE_x86_64-unknown-linux-gnu",
+            "CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu",
+            "HOST_CMAKE_TOOLCHAIN_FILE",
+            "TARGET_CMAKE_TOOLCHAIN_FILE",
+            "AWS_LC_SYS_CMAKE_TOOLCHAIN_FILE",
+            "AWS_LC_SYS_CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu",
         ] {
             assert!(is_weakening_environment_name(name), "{name}");
             assert!(is_weakening_environment_name(&name.to_ascii_lowercase()), "{name}");
         }
-        for name in ["CCACHE", "CCACHE_DIR", "ACCOUNT", "SUCCESS", "CXX_STANDARD", "HOST_CCACHE"] {
+        for name in [
+            "CCACHE",
+            "CCACHE_DIR",
+            "ACCOUNT",
+            "SUCCESS",
+            "CXX_STANDARD",
+            "HOST_CCACHE",
+            "CMAKE_TOOLCHAINS_FILE",
+            "CMAKE_TOOLCHAIN_FILENAME",
+        ] {
             assert!(!is_weakening_environment_name(name), "{name}");
         }
     }

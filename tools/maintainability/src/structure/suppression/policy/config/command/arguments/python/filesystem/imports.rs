@@ -236,6 +236,7 @@ fn canonical_module(module: &str) -> Option<&'static str> {
         "shutil" => Some("shutil"),
         "tarfile" => Some("tarfile"),
         "tempfile" => Some("tempfile"),
+        "zipapp" => Some("zipapp"),
         "zipfile" => Some("zipfile"),
         _ => None,
     }

@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+mod archive;
 mod call_arguments;
 mod capability;
 mod imports;
@@ -111,7 +112,8 @@ fn opaque_descriptor_write(name: &str) -> bool {
 }
 
 fn is_direct_mutator(name: &str) -> bool {
-    opaque_descriptor_write(name)
+    archive::is_mutator(name)
+        || opaque_descriptor_write(name)
         || matches!(
             name,
             "builtins.open"
@@ -151,6 +153,9 @@ fn is_direct_mutator(name: &str) -> bool {
 
 fn mutation_arguments_are_opaque(scanner: &CallScanner, call: &Call) -> bool {
     let name = called_name(&call.name);
+    if archive::mutation_arguments_are_opaque(scanner, call) {
+        return true;
+    }
     // A tree copy or archive extraction can materialize arbitrarily named
     // protected inputs below an otherwise safe destination. Proving the complete
     // tree stable would require modeling earlier mutations, so this fails closed.

@@ -218,7 +218,10 @@ fn is_dispatch_override(argument: &str) -> bool {
         || argument == "-wrapper"
         || argument.starts_with("-fplugin=")
         || argument.starts_with("-fpass-plugin=")
+        || argument == "-specs"
+        || argument == "--specs"
         || argument.starts_with("-specs=")
+        || argument.starts_with("--specs=")
         || argument == "--config"
         || argument.starts_with("--config=")
         || argument == "-Xclang"
@@ -350,6 +353,9 @@ mod tests {
             &["-fplugin=quality/lint.so"],
             &["-fpass-plugin=quality/lint.so"],
             &["-specs=quality/lint.specs"],
+            &["-specs", "quality/lint.specs"],
+            &["--specs=quality/lint.specs"],
+            &["--specs", "quality/lint.specs"],
             &["@quality/lint.args"],
             &["-Xclang", "-load", "-Xclang", "quality/lint.so"],
             &["-Wl,--plugin=quality/lint.so"],
@@ -358,7 +364,13 @@ mod tests {
         ] {
             assert!(dispatch_is_opaque("gcc", &arguments(values)), "{values:?}");
         }
+        for command in ["g++", "gcc-16", "x86_64-linux-gnu-gcc"] {
+            assert!(dispatch_is_opaque(command, &arguments(&["-specs", "quality/lint.specs"])), "{command}");
+        }
         assert!(!dispatch_is_opaque("gcc", &arguments(&["-Wall", "-c", "quality/input.c"])));
+        for values in [&["-specs/quality/lint.specs"][..], &["-spec"], &["--specification=quality/lint.specs"]] {
+            assert!(!dispatch_is_opaque("gcc", &arguments(values)), "{values:?}");
+        }
     }
 
     #[test]

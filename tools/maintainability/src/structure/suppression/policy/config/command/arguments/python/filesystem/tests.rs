@@ -205,6 +205,39 @@ fn archive_extraction_fails_closed() {
 }
 
 #[test]
+fn application_archive_creation_obeys_the_write_policy() {
+    for source in [
+        "import zipapp\nzipapp.create_archive('quality/payload', 'script/check.py')\n",
+        "import zipapp as apps\napps.create_archive('quality/payload', target='Justfile')\n",
+        "from zipapp import create_archive as pack\npack('script/check', None)\n",
+        "import zipfile\nzipfile.ZipFile('script/check.py', 'w').writestr('__main__.py', payload)\n",
+        "import zipfile as archives\narchives.ZipFile(file='Justfile', mode='x')\n",
+        "from zipfile import PyZipFile as Archive\nArchive('script/check.py', 'a')\n",
+        "import zipfile\nfactory = zipfile.ZipFile\nfactory('script/check.py', mode)\n",
+        "import zipapp\nzipapp.main(arguments)\n",
+        "import zipfile\nzipfile.main(arguments)\n",
+        "import shutil\nshutil.make_archive('script/check', 'zip', 'quality')\n",
+        "from zipfile import _path as private\nprivate.CompleteDirs('script/check.py', 'w')\n",
+        "import zipapp\ngetattr(zipapp, operation)('quality/payload', 'script/check.py')\n",
+    ] {
+        assert!(has_opaque_write(source), "{source}");
+    }
+
+    for source in [
+        "import zipfile\nzipfile.ZipFile('script/check.py')\n",
+        "import zipfile\nzipfile.ZipFile('script/check.py', 'r').namelist()\n",
+        "import zipfile\nzipfile.PyZipFile('script/check.py', mode='r').testzip()\n",
+        "import zipfile\nzipfile.ZipFile('target/report.zip', 'w').writestr('report.txt', payload)\n",
+        "import zipapp\nzipapp.create_archive('quality/payload', 'target/app.pyz')\n",
+        "import zipapp\nzipapp.get_interpreter('script/check.py')\n",
+        "import zipapp_helper\nzipapp_helper.create_archives('target')\n",
+        "class ZipFiles:\n    pass\nprint(ZipFiles())\n",
+    ] {
+        assert!(!has_opaque_write(source), "{source}");
+    }
+}
+
+#[test]
 fn fileinput_inplace_writes_fail_closed() {
     for source in [
         "import fileinput\nfileinput.input('Justfile', inplace=True)\n",

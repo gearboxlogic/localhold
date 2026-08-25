@@ -86,6 +86,7 @@ fn command_policy_applies_direct_dispatch_rules_to_python_argv() {
         "import subprocess\nsubprocess.run(['rustc', '@quality/rustc.args'])\n",
         "import subprocess\nsubprocess.run(['rustc', '-C', '@quality/codegen.args'])\n",
         "import subprocess\nsubprocess.run(['gcc', '-fplugin=quality/lint.so', '-c', 'quality/input.c'])\n",
+        "import subprocess\nsubprocess.run(['gcc', '-specs', 'quality/lint.specs', '-c', 'quality/input.c'])\n",
         "import subprocess\nsubprocess.run(['ssh-keygen', '-D', 'quality/lint.so'])\n",
         "import subprocess\nsubprocess.run(['ld.so', 'quality/lint'])\n",
         "import subprocess\nsubprocess.run(['tar', '--to-command=quality/lint', '-xf', 'payload.tar', '-C', 'extracted'])\n",
@@ -535,6 +536,8 @@ fn command_policy_rejects_python_protected_input_mutations() {
         "from pathlib import Path\nPath('payload/report.txt').move_into('src')\n",
         "from pathlib import Path\nwriter = Path('payload/report.txt').copy\nwriter('src/lib.rs')\n",
         "open('src/lib.rs', 'w').write(payload)\n",
+        "import zipapp\nzipapp.create_archive('quality/payload', 'script/check.py')\n",
+        "import zipfile\nzipfile.ZipFile('script/check.py', 'w').writestr('__main__.py', payload)\n",
     ] {
         fs::write(workspace.path().join("script/check.py"), source).expect("protected-input mutation");
         let error = reject_checked_in_weakening(workspace.path()).unwrap_err();

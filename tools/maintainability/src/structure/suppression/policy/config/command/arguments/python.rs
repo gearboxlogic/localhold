@@ -51,6 +51,7 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "types",
     "unittest.mock",
     "webbrowser",
+    "zipfile._path",
 ];
 
 const UNCONDITIONAL_EXECUTION_MODULES: &[&str] = &[

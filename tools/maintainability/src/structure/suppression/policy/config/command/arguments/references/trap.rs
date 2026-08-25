@@ -1,9 +1,15 @@
 use super::super::tokens;
 
 pub(super) fn action_is_opaque(surface: super::ShellSurface<'_>, arguments: &[String]) -> bool {
+    if super::super::is_directory_change_command(arguments) {
+        return true;
+    }
     let Some(first) = arguments.first().map(String::as_str) else {
         return false;
     };
+    if first == "{" {
+        return true;
+    }
     let action = match first {
         "" | "-" | "-l" | "-p" => return false,
         "--" => match arguments.get(1).map(String::as_str) {
@@ -29,7 +35,8 @@ fn command_tree_is_opaque(surface: super::ShellSurface<'_>, command: &[String]) 
         (!word.is_empty() && !super::is_execution_input_prefix(word) && (!super::super::is_environment_assignment(word) || word.contains("$(") || word.contains('`')))
             .then_some(word)
     });
-    if word.is_some_and(super::path::contains_dynamic_value)
+    if super::super::is_directory_change_command(command)
+        || word.is_some_and(super::path::contains_dynamic_value)
         || command
             .iter()
             .any(|token| matches!(token.trim_matches(['(', ')', '{', '}']).to_ascii_lowercase().as_str(), "." | "source" | "source.exe"))
@@ -78,6 +85,9 @@ mod tests {
         assert!(opaque(&["rm -f \"$temporary\"", "EXIT"]));
         assert!(opaque(&["sh quality/lint.txt", "EXIT"]));
         assert!(opaque(&["source quality/lint.txt", "EXIT"]));
+        assert!(opaque(&["cd quality", "DEBUG"]));
+        assert!(opaque(&["{", "Set-Location", "quality", ";", "continue", "}"]));
+        assert!(opaque(&["{", "if", "($true)", "{", "Set-Location", "quality", "}", ";", "continue", "}"]));
         assert!(opaque(&["cleanup \"$(sh quality/lint.txt)\"", "EXIT"]));
         assert!(opaque(&["$cleanup_command", "EXIT"]));
         assert!(opaque(&["--unknown", "EXIT"]));

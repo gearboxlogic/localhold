@@ -11,13 +11,24 @@ pub(super) use filesystem_write::{has_opaque_filesystem_write, has_opaque_filesy
 use lexical::{executable_code, normalized_qualified_code};
 
 const REJECTED_PYTHON_MODULES: &[&str] = &[
+    "_interpreters",
     "_operator",
     "_pickle",
+    "_sqlite3",
+    "_testcapi",
+    "_testinternalcapi",
+    "_testlimitedcapi",
+    "_tkinter",
+    "_xxsubinterpreters",
     "code",
+    "concurrent.interpreters",
     "cprofile",
+    "dbm.sqlite3",
     "doctest",
     "gc",
+    "idlelib",
     "inspect",
+    "interpreters",
     "logging.config",
     "marshal",
     "multiprocessing",
@@ -30,8 +41,13 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "pydoc",
     "shelve",
     "site",
+    "sqlite3",
+    "test",
     "timeit",
+    "tkinter",
     "trace",
+    "turtle",
+    "turtledemo",
     "types",
     "unittest.mock",
     "webbrowser",
@@ -41,6 +57,7 @@ pub(super) fn execution_references(path: &str, source: &str) -> ExecutionReferen
     let normalized = normalize_continuations(source);
     let mut references = execution::collect(&normalized);
     references.opaque |= evaluation::has_non_ascii_code(&normalized);
+    references.opaque |= references_native_extension_loading(&normalized);
     references.opaque |= has_opaque_process_bindings(&normalized) && !bindings::is_reviewed_surface(path, source);
     references
 }
@@ -60,6 +77,9 @@ pub(super) fn normalize_continuations(source: &str) -> String {
 pub(super) fn has_opaque_process_arguments(path: &str, source: &str) -> bool {
     let normalized = normalize_continuations(source);
     if evaluation::has_non_ascii_code(&normalized) {
+        return true;
+    }
+    if references_native_extension_loading(&normalized) {
         return true;
     }
     let reviewed_process_binding_surface = bindings::is_reviewed_surface(path, source);
@@ -238,6 +258,8 @@ fn imports_command_capable_api(source: &str) -> bool {
             }
             match module {
                 "asyncio" | "asyncio.subprocess" => name == "*" || matches!(name, "create_subprocess_exec" | "create_subprocess_shell"),
+                "concurrent" => name == "interpreters",
+                "dbm" => name == "sqlite3",
                 "os" | "posix" => name == "*" || is_os_process_api(name),
                 "subprocess" => name == "*" || is_subprocess_process_api(name),
                 "pty" => matches!(name, "*" | "spawn"),
@@ -446,6 +468,17 @@ fn references_command_capable_ffi(source: &str) -> bool {
     ]
     .iter()
     .any(|name| compact.contains(name))
+}
+
+fn references_native_extension_loading(source: &str) -> bool {
+    let executable = executable_code(source);
+    ["enable_load_extension", "load_extension", "sqlite_dbconfig_enable_load_extension"]
+        .iter()
+        .any(|name| executable.match_indices(name).any(|(index, _)| identifier_is_exact_at(&executable, index, name.len())))
+}
+
+fn identifier_is_exact_at(source: &str, index: usize, length: usize) -> bool {
+    !source[..index].chars().next_back().is_some_and(is_identifier_character) && !source[index + length..].chars().next().is_some_and(is_identifier_character)
 }
 
 fn references_process_api(source: &str) -> bool {

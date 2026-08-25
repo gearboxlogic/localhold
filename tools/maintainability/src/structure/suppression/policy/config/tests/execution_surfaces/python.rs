@@ -804,6 +804,34 @@ fn command_policy_rejects_opaque_python_process_bindings() {
 }
 
 #[test]
+fn command_policy_rejects_native_stdlib_execution_escape_hatches() {
+    assert_opaque_python_process_bindings(&[
+        "import sqlite3\nsqlite3.connect(':memory:').enable_load_extension(True)\nsqlite3.connect(':memory:').load_extension('quality/payload')\n",
+        "from _sqlite3 import connect\nconnect(':memory:').load_extension('quality/payload')\n",
+        "import dbm.sqlite3\ndbm.sqlite3.open('quality/database')._cx.load_extension('quality/payload')\n",
+        "connection.load_extension('quality/payload')\n",
+        "connection.setconfig(SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, True)\nconnection.execute('select load_extension(?)', (payload,))\n",
+        "import tkinter\ntkinter.Tcl().call('exec', 'sh', 'quality/hidden.txt')\n",
+        "from tkinter import Tcl\nTcl().call('open', '|sh quality/hidden.txt')\n",
+        "import _tkinter\nprint(_tkinter.TCL_VERSION)\n",
+        "import turtle\nturtle.TK.Tcl().call('exec', 'sh', 'quality/hidden.txt')\n",
+        "import turtledemo.__main__ as demo\ndemo.Tcl().call('exec', 'sh', 'quality/hidden.txt')\n",
+        "from test import test_tcl\ntest_tcl.Tcl().call('exec', 'sh', 'quality/hidden.txt')\n",
+        "import _xxsubinterpreters\nfrom pathlib import Path\n_xxsubinterpreters.run_string(_xxsubinterpreters.create(), Path('quality/hidden.txt').read_text())\n",
+        "import _testcapi\nrunner = _testcapi.run_in_subinterp\nrunner(payload)\n",
+        "from _testinternalcapi import exec_interpreter as run\nrun(interpreter, payload)\n",
+        "import _testlimitedcapi as api\ncompiler = api.run_compilestring\nloader = api.PyImport_ExecCodeModule\ncode = compiler(payload, b'<payload>', 257)\nloader('_localhold_payload', code)\n",
+        "from _interpreters import exec as run\nrun(interpreter, payload)\n",
+        "from concurrent import interpreters\ninterpreter = interpreters.create()\ninterpreter.exec(payload)\n",
+        "from concurrent import (\n    interpreters,\n)\ninterpreter = interpreters.create()\ninterpreter.exec(payload)\n",
+        "from concurrent import (\n    interpreters,\n)\nprint(interpreters)\n",
+        "from test.support import interpreters\ninterpreter = interpreters.create()\ninterpreter.exec(payload)\n",
+        "import test.test__interpreters as tests\nrunner = tests._interpreters.run_string\nrunner(tests._interpreters.create(), payload)\n",
+        "import test.test_ttk as tests\ninterpreter = tests.tkinter.Tcl()\ninterpreter.call('exec', 'sh', 'quality/hidden.txt')\n",
+    ]);
+}
+
+#[test]
 fn command_policy_rejects_multiprocessing_deserialization() {
     assert_opaque_python_process_bindings(&["from multiprocessing.reduction import ForkingPickler\nForkingPickler.loads(payload)\n"]);
 }

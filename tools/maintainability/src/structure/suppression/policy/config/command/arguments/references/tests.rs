@@ -91,6 +91,8 @@ fn release_workflow_is_closed() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = fs::read_to_string(workspace.join(path)).expect("release workflow");
     assert_reviewed_yaml_surface_is_closed(path, &source);
+    let mutated = source.replace("cd ..\n", "cd ../..\n");
+    assert!(super::execution_inputs_for_surface(path, &mutated, true).unresolved);
 }
 
 #[test]
@@ -358,6 +360,46 @@ fn execution_inputs_distinguish_files_from_opaque_programs() {
 }
 
 #[test]
+fn relative_execution_inputs_fail_closed_after_directory_changes() {
+    for command in [
+        "cd quality; bash payload.txt",
+        "cd quality\nbash payload.txt",
+        "cd quality && bash payload.txt",
+        "{ cd quality; bash payload.txt; }",
+        "(cd quality; bash payload.txt)",
+        "relocate() {\n    cd quality\n}\nrelocate\nbash payload.txt",
+        "builtin cd quality; sh payload.txt",
+        "command cd quality; sh payload.txt",
+        "cd -- quality; sh payload.txt",
+        "cd -P quality; sh payload.txt",
+        "cd; sh payload.txt",
+        "cd \"$destination\"; sh payload.txt",
+        "pushd quality; python3 payload.py",
+        "popd; source payload.sh",
+        "push-location quality; sh payload.txt",
+        "pop-location; sh payload.txt",
+        "nextd; sh payload.txt",
+        "prevd; sh payload.txt",
+        "env -C quality sh payload.txt",
+        "env -Cquality sh payload.txt",
+        "env --chdir quality sh payload.txt",
+        "cd quality; ./payload",
+        "status=$(cd quality; bash payload.txt)",
+        "cat <(cd quality; bash payload.txt)",
+        "cd quality; false && cd ..; bash payload.txt",
+        "cd quality; (cd ..); bash payload.txt",
+    ] {
+        let (paths, opaque) = inputs(command);
+        assert!(opaque, "{command}: {paths:#?}");
+        assert!(!paths.is_empty(), "{command}");
+    }
+    assert_eq!(inputs("bash payload.txt"), (vec!["payload.txt".to_owned()], false));
+    assert_eq!(inputs("cd quality; printf safe"), (Vec::new(), false));
+    assert_eq!(inputs("status=$(cd quality; printf safe)\nbash payload.txt"), (vec!["payload.txt".to_owned()], false));
+    assert_eq!(inputs("cat <(cd quality; printf safe)\nbash payload.txt"), (vec!["payload.txt".to_owned()], false));
+}
+
+#[test]
 fn execution_inputs_distinguish_wrappers_and_build_tools() {
     assert_eq!(inputs("timeout 10 sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
     assert_eq!(
@@ -376,6 +418,7 @@ fn execution_inputs_distinguish_wrappers_and_build_tools() {
     assert_eq!(inputs("nohup sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
     assert_eq!(inputs("command -p sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
     assert_eq!(inputs("command -v cargo"), (Vec::new(), false));
+    assert_eq!(inputs("cd quality; just --version"), (Vec::new(), false));
     assert_eq!(inputs("exec -a lint sh quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
     assert_eq!(inputs("builtin eval 'cargo clippy'"), (Vec::new(), true));
     assert_eq!(inputs("alias lint='sh quality/lint.txt'"), (Vec::new(), true));

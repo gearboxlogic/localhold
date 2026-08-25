@@ -117,6 +117,7 @@ fn is_direct_mutator(name: &str) -> bool {
         || matches!(
             name,
             "builtins.open"
+                | "codecs.open"
                 | "fileinput.FileInput"
                 | "fileinput.input"
                 | "io.open"
@@ -267,19 +268,20 @@ fn chained_path_write_is_opaque(scanner: &CallScanner, call: &Call, method: &Cal
 }
 
 fn direct_open_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
-    if !matches!(called_name(&call.name), "builtins.open" | "io.open" | "open") {
+    let name = called_name(&call.name);
+    if !matches!(name, "builtins.open" | "codecs.open" | "io.open" | "open") {
         return false;
     }
     if scanner.has_argument_unpack(call.opening_parenthesis) {
         return true;
     }
-    if opener_is_opaque(scanner, call.opening_parenthesis) {
+    if name != "codecs.open" && opener_is_opaque(scanner, call.opening_parenthesis) {
         return true;
     }
     if !writable_mode(scanner, call.opening_parenthesis, 1) {
         return false;
     }
-    path_argument_is_opaque(scanner, call.opening_parenthesis, ArgumentSpec::new(0, &["file"]))
+    path_argument_is_opaque(scanner, call.opening_parenthesis, ArgumentSpec::new(0, &["file", "filename"]))
 }
 
 fn opener_is_opaque(scanner: &CallScanner, opening_parenthesis: usize) -> bool {
@@ -291,7 +293,7 @@ fn opener_is_opaque(scanner: &CallScanner, opening_parenthesis: usize) -> bool {
 fn direct_path_method_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
     let name = called_name(&call.name);
     let (owner, method) = name.rsplit_once('.').unwrap_or(("", name));
-    if matches!(owner, "builtins" | "io" | "os" | "shutil") || owner.is_empty() && method == "open" && !scanner.is_method_call(call.start) {
+    if matches!(owner, "builtins" | "codecs" | "io" | "os" | "shutil") || owner.is_empty() && method == "open" && !scanner.is_method_call(call.start) {
         return false;
     }
     let class_method = matches!(owner, "Path" | "PosixPath" | "WindowsPath" | "pathlib.Path" | "pathlib.PosixPath" | "pathlib.WindowsPath");

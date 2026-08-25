@@ -381,6 +381,8 @@ fn direct_filesystem_writers_fail_closed() {
         r#"Path("Justfile").open("w")"#,
         r#"open("Justfile", "w")"#,
         r#"open(mode="a", file=".github/workflows/ci.yml")"#,
+        r#"codecs.open("Justfile", "w").write(payload)"#,
+        r#"codecs.open(filename="script/check.sh", mode="a").write(payload)"#,
         r#"io.open("mise.toml", mode)"#,
         r#"Path("Justfile").unlink()"#,
         r#"Path("quality/lint.data").replace("Justfile")"#,
@@ -477,6 +479,8 @@ fn aliases_and_composed_writer_paths_fail_closed() {
         "from _io import open as writer\nwriter('Justfile', 'w').write(payload)\n",
         "import _pyio as streams\nstreams.open('Justfile', 'w').write(payload)\n",
         "from _pyio import open as writer\nwriter('Justfile', 'w').write(payload)\n",
+        "import codecs as streams\nstreams.open('Justfile', 'w').write(payload)\n",
+        "from codecs import open as writer\nwriter('Justfile', 'w').write(payload)\n",
         "from posix import remove as erase\nerase('Justfile')\n",
         "import nt as backend\nbackend.remove('Justfile')\n",
         "open('MAKEFILE', 'w').write(payload)\n",
@@ -524,6 +528,7 @@ fn modeled_mutator_capabilities_fail_closed() {
     for capability in [
         "open",
         "builtins.open",
+        "codecs.open",
         "io.open",
         "os.copy_file_range",
         "os.fchmod",
@@ -596,6 +601,8 @@ fn filesystem_copies_to_data_paths_remain_allowed() {
     assert!(!has_opaque_write(r#"print('shutil.copyfile("a", "Justfile")')"#));
     assert!(!has_opaque_write(r#"Path("target/report.txt").write_text(report)"#));
     assert!(!has_opaque_write(r#"open("target/report.txt", "wb")"#));
+    assert!(!has_opaque_write(r#"codecs.open("target/report.txt", "wb")"#));
+    assert!(!has_opaque_write(r#"codecs.open("Justfile", "rb")"#));
     assert!(!has_opaque_write(r#"(open)("target/report.txt", "wb")"#));
     assert!(!has_opaque_write(r#"(Path("target/report.txt").write_text)(report)"#));
     assert!(!has_opaque_write(r#"Path("target/report.txt").write_text.__call__(report)"#));

@@ -29,7 +29,7 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "idlelib",
     "inspect",
     "interpreters",
-    "logging.config",
+    "logging",
     "marshal",
     "multiprocessing",
     "operator",
@@ -59,6 +59,7 @@ const UNCONDITIONAL_EXECUTION_MODULES: &[&str] = &[
     "_frozen_importlib_external",
     "_imp",
     "_posixsubprocess",
+    "_winapi",
     "bdb",
     "ensurepip",
     "pip",
@@ -491,6 +492,9 @@ fn references_command_capable_ffi(source: &str) -> bool {
 fn references_unconditional_execution_capability(source: &str) -> bool {
     let executable = normalized_qualified_code(source);
     imports_unconditional_execution_module(&executable)
+        || executable
+            .match_indices(".createprocess")
+            .any(|(index, name)| identifier_is_exact_at(&executable, index + 1, name.len() - 1))
         || ["enable_load_extension", "load_extension", "sqlite_dbconfig_enable_load_extension"]
             .iter()
             .any(|name| executable.match_indices(name).any(|(index, _)| identifier_is_exact_at(&executable, index, name.len())))

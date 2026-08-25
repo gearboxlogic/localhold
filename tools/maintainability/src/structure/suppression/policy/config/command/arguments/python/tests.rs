@@ -275,6 +275,11 @@ fn unconditional_process_module_imports_fail_closed() {
         "import _posixsubprocess as native\nlaunch = native.fork_exec\nlaunch(*arguments)\n",
         "from _posixsubprocess import fork_exec as launch\nlaunch.__call__(*arguments)\n",
         "from _posixsubprocess import (\n    fork_exec,\n)\nfork_exec(*arguments)\n",
+        "import _winapi\n_winapi.CreateProcess(*arguments)\n",
+        "import _winapi as native\nlaunch = native.CreateProcess\nlaunch(*arguments)\n",
+        "from _winapi import CreateProcess as launch\nlaunch(*arguments)\n",
+        "from subprocess import _winapi as native\nnative.CreateProcess(*arguments)\n",
+        "import asyncio.windows_utils as windows\nwindows._winapi.CreateProcess(*arguments)\n",
         "import pip\npip.main(arguments)\n",
         "import pip._internal as internal\ninternal.main(arguments)\n",
         "import pip._internal.cli.main as cli\nrunner = cli.main\nrunner.__call__(arguments)\n",
@@ -335,6 +340,7 @@ fn subprocess_fork_exec_reexport_fails_closed() {
 fn unconditional_process_module_lookalikes_remain_inert() {
     for source in [
         "# import pip\nprint('ensurepip and _posixsubprocess are inert text')\n",
+        "# import _winapi\nprint('_winapi.CreateProcess is inert text')\n",
         "import pipeline\npipeline.main()\n",
         "from pipeline . helpers import main\nmain()\n",
         "import piper\nprint(piper)\n",
@@ -343,8 +349,33 @@ fn unconditional_process_module_lookalikes_remain_inert() {
         "import _posixsubprocess_helper\nprint(_posixsubprocess_helper)\n",
         "import _posixsubprocessashelper\nprint(_posixsubprocessashelper)\n",
         "from _posixsubprocessimporter import fork_exec\nprint(fork_exec)\n",
+        "import _winapi_helper\nprint(_winapi_helper)\n",
+        "import _winapiashelper\nprint(_winapiashelper)\n",
+        "from _winapiimporter import CreateProcess\nprint(CreateProcess)\n",
         "def pip_main(arguments): return arguments\nprint(pip_main([]))\n",
         "def fork_exec(arguments): return arguments\nprint(fork_exec([]))\n",
+        "def CreateProcess(arguments): return arguments\nprint(CreateProcess([]))\n",
+        "class Native:\n    def CreateProcesses(self, arguments): return arguments\nprint(Native().CreateProcesses([]))\n",
+    ] {
+        assert!(!has_opaque_process_arguments(source), "{source}");
+    }
+}
+
+#[test]
+fn logging_write_capabilities_fail_closed_at_the_module_boundary() {
+    for source in [
+        "import logging\nlogging.FileHandler('Justfile', mode='w')\n",
+        "import logging as log\nlog.basicConfig(filename='Justfile')\n",
+        "from logging import FileHandler\nFileHandler('Justfile')\n",
+        "from logging import handlers\nhandlers.WatchedFileHandler('Justfile')\n",
+        "import logging.handlers\nlogging.handlers.pickle.loads(payload)\n",
+    ] {
+        assert!(has_opaque_process_arguments(source), "{source}");
+    }
+    for source in [
+        "# import logging\nprint('logging.FileHandler is inert text')\n",
+        "import logging_helper\nprint(logging_helper)\n",
+        "class FileHandler:\n    pass\nprint(FileHandler())\n",
     ] {
         assert!(!has_opaque_process_arguments(source), "{source}");
     }

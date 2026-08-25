@@ -811,6 +811,7 @@ fn command_policy_rejects_opaque_python_process_bindings() {
 #[test]
 fn command_policy_rejects_native_stdlib_execution_escape_hatches() {
     assert_opaque_python_process_bindings(&[
+        "import logging\nhandler = logging.FileHandler('Justfile', mode='w')\nhandler.stream.write(payload)\n",
         "import sqlite3\nsqlite3.connect(':memory:').enable_load_extension(True)\nsqlite3.connect(':memory:').load_extension('quality/payload')\n",
         "from _sqlite3 import connect\nconnect(':memory:').load_extension('quality/payload')\n",
         "import dbm.sqlite3\ndbm.sqlite3.open('quality/database')._cx.load_extension('quality/payload')\n",
@@ -841,6 +842,9 @@ fn command_policy_rejects_native_stdlib_execution_escape_hatches() {
 fn command_policy_rejects_embedded_package_and_private_process_dispatch() {
     assert_opaque_python_process_bindings(&[
         "from _posixsubprocess import fork_exec as launch\nlaunch(*arguments)\n",
+        "import _winapi\n_winapi.CreateProcess(None, 'cmd /c sh quality/hidden.txt', None, None, False, 0, None, None, startup_info)\n",
+        "from subprocess import _winapi as native\nlaunch = native.CreateProcess\nlaunch(*arguments)\n",
+        "import asyncio.windows_utils as windows\nwindows._winapi.CreateProcess(*arguments)\n",
         "import subprocess\nlaunch = subprocess._fork_exec\nlaunch(*arguments)\n",
         "from subprocess import _fork_exec as launch\nlaunch.__call__(*arguments)\n",
         "from pip._internal.cli.main import main\nmain(['install', 'quality/payload.tar.gz'])\n",

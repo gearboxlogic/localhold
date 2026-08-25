@@ -94,8 +94,18 @@ const fn is_archive_option(option: char) -> bool {
 }
 
 pub(super) fn rust_compiler_dispatch_is_opaque(arguments: &[String]) -> bool {
+    if arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--")
+        .any(|argument| argument.starts_with('@') && argument.len() > 1)
+    {
+        return true;
+    }
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
+        if argument == "--" {
+            break;
+        }
         if argument == "--extern" || argument.starts_with("--extern=") {
             return true;
         }
@@ -103,14 +113,23 @@ pub(super) fn rust_compiler_dispatch_is_opaque(arguments: &[String]) -> bool {
             index += 1;
             arguments.get(index).map(String::as_str)
         } else {
-            argument.strip_prefix("-C").or_else(|| argument.strip_prefix("--codegen="))
+            argument
+                .strip_prefix("-C")
+                .filter(|option| !option.starts_with('='))
+                .or_else(|| argument.strip_prefix("--codegen="))
         };
-        if option.is_some_and(|option| option.trim_start_matches('=').starts_with("linker=")) {
+        if option.is_some_and(rust_codegen_dispatch_option_is_opaque) {
             return true;
         }
         index += 1;
     }
     false
+}
+
+fn rust_codegen_dispatch_option_is_opaque(option: &str) -> bool {
+    option
+        .split_once('=')
+        .is_some_and(|(name, _)| matches!(name, "linker" | "link-arg" | "link-args" | "link_arg" | "link_args"))
 }
 
 fn rustdoc_dispatch_is_opaque(arguments: &[String]) -> bool {
@@ -331,10 +350,37 @@ mod tests {
 
     #[test]
     fn rust_linker_selection_is_opaque() {
-        for values in [&["-C", "linker=quality/lint"][..], &["-Clinker=quality/lint"], &["--codegen=linker=quality/lint"]] {
+        for values in [
+            &["-C", "linker=quality/lint"][..],
+            &["-Clinker=quality/lint"],
+            &["--codegen=linker=quality/lint"],
+            &["-C", "link-arg=-Wl,--plugin=quality/payload"],
+            &["-Clink-arg=-fuse-ld=quality/ld"],
+            &["--codegen=link-args=-Wl,--plugin=quality/payload"],
+            &["-C", "link_arg=-Wl,--plugin=quality/payload"],
+            &["-Clink_args=-fuse-ld=quality/ld"],
+            &["--codegen", "link_arg=-Wl,--plugin=quality/payload"],
+            &["--codegen=link_args=-Wl,--plugin=quality/payload"],
+        ] {
             assert!(dispatch_is_opaque("rustc", &arguments(values)), "{values:?}");
         }
+        assert!(dispatch_is_opaque("rustdoc", &arguments(&["-C", "link_arg=-Wl,--plugin=quality/payload"])));
         assert!(!dispatch_is_opaque("rustc", &arguments(&["-C", "opt-level=2"])));
+        assert!(!dispatch_is_opaque("rustc", &arguments(&["-C", "link-argument=report"])));
+    }
+
+    #[test]
+    fn rust_response_files_fail_closed() {
+        for command in ["rustc", "rustc.exe", "rustdoc", "rustdoc.exe"] {
+            assert!(dispatch_is_opaque(command, &arguments(&["@quality/rustc.args"])), "{command}");
+            assert!(dispatch_is_opaque(command, &arguments(&["-C", "@quality/codegen.args"])), "{command}");
+            assert!(dispatch_is_opaque(command, &arguments(&["--codegen", "@quality/codegen.args"])), "{command}");
+            assert!(!dispatch_is_opaque(command, &arguments(&["--", "@quality/rustc.args"])), "{command}");
+            assert!(!dispatch_is_opaque(command, &arguments(&["--", "-Clink-arg=benign.rs"])), "{command}");
+            assert!(!dispatch_is_opaque(command, &arguments(&["@"])));
+            assert!(!dispatch_is_opaque(command, &arguments(&["quality/@rustc.args"])));
+            assert!(!dispatch_is_opaque(command, &arguments(&["-C=link-arg=-Wl,--plugin=quality/payload"])), "{command}");
+        }
     }
 
     #[test]

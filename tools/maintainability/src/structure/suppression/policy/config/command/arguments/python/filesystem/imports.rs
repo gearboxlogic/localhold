@@ -230,6 +230,7 @@ fn canonical_module(module: &str) -> Option<&'static str> {
     match module {
         "builtins" => Some("builtins"),
         "_io" | "_pyio" | "io" => Some("io"),
+        "fileinput" => Some("fileinput"),
         "nt" | "os" | "posix" => Some("os"),
         "pathlib" => Some("pathlib"),
         "shutil" => Some("shutil"),

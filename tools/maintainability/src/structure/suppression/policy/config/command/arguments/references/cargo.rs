@@ -258,6 +258,11 @@ mod tests {
     fn custom_rust_linkers_fail_closed() {
         assert!(dispatch_is_opaque(&arguments(&["rustc", "--", "-C", "linker=quality/lint"])));
         assert!(dispatch_is_opaque(&arguments(&["rustdoc", "--", "-Clinker=quality/lint"])));
+        assert!(dispatch_is_opaque(&arguments(&["rustc", "--", "-C", "@quality/codegen.args"])));
+        assert!(dispatch_is_opaque(&arguments(&["rustdoc", "--", "--codegen", "@quality/codegen.args"])));
+        assert!(dispatch_is_opaque(&arguments(&["rustc", "--", "@quality/rustc.args"])));
+        assert!(dispatch_is_opaque(&arguments(&["rustdoc", "--", "@quality/rustdoc.args"])));
+        assert!(!dispatch_is_opaque(&arguments(&["rustc", "--", "--", "@quality/rustc.args"])));
         assert!(!dispatch_is_opaque(&arguments(&["rustc", "--", "-C", "opt-level=2"])));
     }
 

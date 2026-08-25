@@ -115,6 +115,8 @@ fn is_direct_mutator(name: &str) -> bool {
         || matches!(
             name,
             "builtins.open"
+                | "fileinput.FileInput"
+                | "fileinput.input"
                 | "io.open"
                 | "open"
                 | "os.fdopen"
@@ -155,6 +157,9 @@ fn mutation_arguments_are_opaque(scanner: &CallScanner, call: &Call) -> bool {
     if matches!(name, "shutil.copytree" | "shutil.unpack_archive") {
         return true;
     }
+    if matches!(name, "fileinput.FileInput" | "fileinput.input") {
+        return fileinput_inplace_is_opaque(scanner, call);
+    }
     let arguments: &[ArgumentSpec] = match name {
         "shutil.copy" | "shutil.copy2" => return directory_destination_is_opaque(scanner, call, false),
         "shutil.move" => return directory_destination_is_opaque(scanner, call, true),
@@ -171,6 +176,19 @@ fn mutation_arguments_are_opaque(scanner: &CallScanner, call: &Call) -> bool {
         _ => return false,
     };
     directory_rebase_is_opaque(scanner, call.opening_parenthesis) || arguments.iter().any(|argument| path_argument_is_opaque(scanner, call.opening_parenthesis, *argument))
+}
+
+fn fileinput_inplace_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
+    if scanner.has_argument_unpack(call.opening_parenthesis) {
+        return true;
+    }
+    let Some(inplace) = scanner.call_argument(call.opening_parenthesis, ArgumentSpec::new(1, &["inplace"])) else {
+        return false;
+    };
+    match inplace.trim() {
+        "False" | "None" | "0" => false,
+        _ => path_argument_is_opaque(scanner, call.opening_parenthesis, ArgumentSpec::new(0, &["files"])),
+    }
 }
 
 fn directory_destination_is_opaque(scanner: &CallScanner, call: &Call, mutates_source: bool) -> bool {

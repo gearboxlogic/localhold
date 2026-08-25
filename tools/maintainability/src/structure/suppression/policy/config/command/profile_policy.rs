@@ -39,9 +39,23 @@ const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
     },
     LegacyTransitionBridge {
         path: "script/check-maintainability-bootstrap.sh",
-        current: "08f3aace60bc05b2a6a89806e6a0fc401b28c8e7afe444ac58bd369a5c7e1af2",
+        current: "adb17c8d29a05de989beca2be7e653310594f7e979ca4c68b72fc4f5f71489aa",
         successor: "1d74d29221aa2fc3feeeae2c7cea3a5cffef96dec7b13ac1ee08a26b1aa64898",
         opaque_execution_inputs: true,
+        weakening: true,
+    },
+    LegacyTransitionBridge {
+        path: "script/run-maintainability-gate.sh",
+        current: "82609774f45011fa7a6260a3841fb49a7304047c1ca1faa5c62869c9524819d8",
+        successor: "325e7c7931f576dab6d55b979a2114571eb0bbbb1d6920c64b175688c7c9846c",
+        opaque_execution_inputs: false,
+        weakening: true,
+    },
+    LegacyTransitionBridge {
+        path: "script/tests/test_maintainability_bootstrap.sh",
+        current: "3532c926ba6e350b6235a1408b660a34c99867af81251e3cee7f541a9da16f40",
+        successor: "9fd95497e31664308dbe18f3d1bdd7fe24d7fa3335282699482ceff89b1b2468",
+        opaque_execution_inputs: false,
         weakening: true,
     },
     LegacyTransitionBridge {
@@ -60,7 +74,7 @@ const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
     },
     LegacyTransitionBridge {
         path: ".github/workflows/ci.yml",
-        current: "9bf3c4ff9c660547b7fa6225a5176a8d12046317ceea3fa58d0485b8b024ba35",
+        current: "a3caaf8313e9aff92fafa5103a43da607eea095a63e9cb7102839a1084a0a0b5",
         successor: "f25a8436d74e7f40ecd808c78585ff95969c194f0bac236e4ba10f111b3dcfca",
         opaque_execution_inputs: false,
         weakening: true,
@@ -90,8 +104,7 @@ pub(super) struct SourceProfile {
 impl ProfileManifest {
     pub(super) fn parse(bytes: &[u8]) -> Result<Self> {
         let manifest: Self = serde_json::from_slice(bytes).context("parse reviewed command profile policy")?;
-        manifest.validate()?;
-        Ok(manifest)
+        manifest.validate().map(|()| manifest)
     }
 
     pub(super) fn profiles(&self) -> &[SourceProfile] {
@@ -120,8 +133,8 @@ impl ProfileManifest {
         if self.schema_version != previous.schema_version {
             bail!("reviewed command profile policy schema is immutable");
         }
-        let current = profile_map(&self.profiles)?;
-        let prior = profile_map(&previous.profiles)?;
+        let current = profile_map(&self.profiles);
+        let prior = profile_map(&previous.profiles);
         if current.keys().collect::<BTreeSet<_>>() != prior.keys().collect::<BTreeSet<_>>() {
             bail!("reviewed command profile IDs cannot be added or removed");
         }
@@ -183,17 +196,11 @@ fn validate_profile<'a>(profile: &'a SourceProfile, ids: &mut BTreeSet<&'a str>,
 }
 
 fn validate_transition(current: &SourceProfile, previous: &SourceProfile) -> Result<()> {
-    let unchanged = current.current_sha256 == previous.current_sha256
-        && current.preapproved_next_sha256 == previous.preapproved_next_sha256
-        && current.retired_sha256 == previous.retired_sha256;
-    let staged = current.current_sha256 == previous.current_sha256
-        && previous.preapproved_next_sha256.is_none()
-        && current.preapproved_next_sha256.is_some()
-        && current.retired_sha256 == previous.retired_sha256;
-    let cancelled = current.current_sha256 == previous.current_sha256
-        && previous.preapproved_next_sha256.is_some()
-        && current.preapproved_next_sha256.is_none()
-        && current.retired_sha256 == previous.retired_sha256;
+    let current_digest_unchanged = current.current_sha256 == previous.current_sha256;
+    let retired_digests_unchanged = current.retired_sha256 == previous.retired_sha256;
+    let unchanged = current_digest_unchanged && current.preapproved_next_sha256 == previous.preapproved_next_sha256 && retired_digests_unchanged;
+    let staged = current_digest_unchanged && previous.preapproved_next_sha256.is_none() && current.preapproved_next_sha256.is_some() && retired_digests_unchanged;
+    let cancelled = current_digest_unchanged && previous.preapproved_next_sha256.is_some() && current.preapproved_next_sha256.is_none() && retired_digests_unchanged;
     let mut promoted_retired = previous.retired_sha256.clone();
     promoted_retired.push(previous.current_sha256.clone());
     let promoted = previous.preapproved_next_sha256.as_deref() == Some(current.current_sha256.as_str())
@@ -208,14 +215,8 @@ fn validate_transition(current: &SourceProfile, previous: &SourceProfile) -> Res
     Ok(())
 }
 
-fn profile_map(profiles: &[SourceProfile]) -> Result<BTreeMap<&str, &SourceProfile>> {
-    let mut mapped = BTreeMap::new();
-    for profile in profiles {
-        if mapped.insert(profile.id.as_str(), profile).is_some() {
-            bail!("reviewed command profile IDs must be unique");
-        }
-    }
-    Ok(mapped)
+fn profile_map(profiles: &[SourceProfile]) -> BTreeMap<&str, &SourceProfile> {
+    profiles.iter().map(|profile| (profile.id.as_str(), profile)).collect()
 }
 
 fn validate_sha256(value: &str, label: &str) -> Result<()> {

@@ -55,6 +55,10 @@ pub(super) fn accepts_output_path(command: &str) -> bool {
     is_compiler_driver(command) || is_rust_compiler(command) || is_linker_tool(command)
 }
 
+pub(super) fn accepts_dependency_output_path(command: &str) -> bool {
+    is_compiler_driver(command)
+}
+
 fn is_archive_tool(command: &str) -> bool {
     let unversioned = unversioned_tool_name(command);
     unversioned == "ar" || unversioned.strip_suffix("ar").is_some_and(|prefix| prefix.ends_with('-'))

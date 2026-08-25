@@ -229,6 +229,7 @@ fn rewrite_aliases(scanner: &CallScanner, aliases: &Aliases, ignored: &[bool]) -
 fn canonical_module(module: &str) -> Option<&'static str> {
     match module {
         "builtins" => Some("builtins"),
+        "codecs" => Some("codecs"),
         "_io" | "_pyio" | "io" => Some("io"),
         "fileinput" => Some("fileinput"),
         "nt" | "os" | "posix" => Some("os"),

@@ -7,7 +7,7 @@ pub(super) fn dispatch_is_opaque(context: DispatchContext<'_>, command: &str, ar
         "sort" | "sort.exe" => sort_output_is_opaque(context, arguments),
         "sponge" | "sponge.exe" => sponge_output_is_opaque(context, arguments),
         _ if is_objcopy_command(command) => objcopy_section_output_is_opaque(context, arguments),
-        _ if super::super::compiler::accepts_output_path(command) => compiler_output_is_opaque(context, arguments),
+        _ if super::super::compiler::accepts_output_path(command) => compiler_output_is_opaque(context, command, arguments),
         _ => false,
     }
 }
@@ -73,17 +73,29 @@ fn sort_output_is_opaque(context: DispatchContext<'_>, arguments: &[String]) -> 
     false
 }
 
-fn compiler_output_is_opaque(context: DispatchContext<'_>, arguments: &[String]) -> bool {
+fn compiler_output_is_opaque(context: DispatchContext<'_>, command: &str, arguments: &[String]) -> bool {
     let mut index = 0;
     while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
-        let destination = long_output_target(argument, arguments, &mut index, "--output", "--output").or_else(|| {
-            if argument == "-o" {
-                index += 1;
-                arguments.get(index).map(String::as_str)
-            } else {
-                argument.strip_prefix("-o").filter(|destination| !destination.is_empty())
-            }
-        });
+        let destination = long_output_target(argument, arguments, &mut index, "--output", "--output")
+            .or_else(|| {
+                if argument == "-o" {
+                    index += 1;
+                    arguments.get(index).map(String::as_str)
+                } else {
+                    argument.strip_prefix("-o").filter(|destination| !destination.is_empty())
+                }
+            })
+            .or_else(|| {
+                if !super::super::compiler::accepts_dependency_output_path(command) {
+                    return None;
+                }
+                if argument == "-MF" {
+                    index += 1;
+                    arguments.get(index).map(String::as_str)
+                } else {
+                    argument.strip_prefix("-MF").filter(|destination| !destination.is_empty())
+                }
+            });
         if destination.is_some_and(|destination| destination_is_opaque(context, destination)) {
             return true;
         }

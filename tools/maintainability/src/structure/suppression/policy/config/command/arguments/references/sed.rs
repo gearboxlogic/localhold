@@ -74,8 +74,13 @@ fn expression(argument: &str) -> Expression<'_> {
 }
 
 fn program_can_execute(program: &str) -> bool {
-    program
-        .split([';', '\n', '{', '}'])
+    std::iter::once(program)
+        .chain(
+            program
+                .char_indices()
+                .filter(|&(_, character)| matches!(character, ';' | '\n' | '{' | '}'))
+                .map(|(offset, character)| &program[offset + character.len_utf8()..]),
+        )
         .map(str::trim)
         .filter(|command| !command.is_empty())
         .any(command_can_execute)
@@ -110,15 +115,31 @@ fn command_after_addresses(mut command: &str) -> &str {
 }
 
 fn regex_address_end(command: &str) -> Option<usize> {
-    let delimiter = command.strip_prefix('/').map(|_| '/')?;
+    let mut characters = command.char_indices();
+    let (_, first) = characters.next()?;
+    let (delimiter_offset, delimiter) = if first == '/' {
+        (0, first)
+    } else if first == '\\' {
+        characters.next()?
+    } else {
+        return None;
+    };
+    let content_start = delimiter_offset + delimiter.len_utf8();
     let mut escaped = false;
-    for (offset, character) in command[delimiter.len_utf8()..].char_indices() {
+    for (offset, character) in command[content_start..].char_indices() {
+        if character == delimiter && (delimiter == '\\' || !escaped) {
+            let end = content_start + offset + character.len_utf8();
+            let modifiers = command[end..]
+                .chars()
+                .take_while(|modifier| matches!(modifier, 'I' | 'M'))
+                .map(char::len_utf8)
+                .sum::<usize>();
+            return Some(end + modifiers);
+        }
         if escaped {
             escaped = false;
         } else if character == '\\' {
             escaped = true;
-        } else if character == delimiter {
-            return Some(delimiter.len_utf8() + offset + character.len_utf8());
         }
     }
     None
@@ -232,4 +253,46 @@ fn short_program_file_input<'a>(argument: &'a str, following: Option<&'a str>, s
         }
     }
     (SelectedInput::None, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::program_can_execute;
+
+    #[test]
+    fn alternate_and_modified_regex_addresses_preserve_executable_commands() {
+        for program in [
+            r"\%foo%e sh quality/hidden.txt",
+            r"\#foo#e sh quality/hidden.txt",
+            r"\#foo\#bar#e sh quality/hidden.txt",
+            r"\;foo;e sh quality/hidden.txt",
+            r"\\foo\e sh quality/hidden.txt",
+            r"1,\#foo#e sh quality/hidden.txt",
+            r"\#x#,\#foo#e sh quality/hidden.txt",
+            r"\#foo#,+2e sh quality/hidden.txt",
+            r"\#foo#,~2e sh quality/hidden.txt",
+            r"\#foo#IM! e sh quality/hidden.txt",
+            r"/foo;bar/e sh quality/hidden.txt",
+            r"/foo/Ie sh quality/hidden.txt",
+            r"p;\#foo;bar#e sh quality/hidden.txt",
+        ] {
+            assert!(program_can_execute(program), "{program}");
+        }
+    }
+
+    #[test]
+    fn benign_regex_addresses_and_substitutions_remain_non_executable() {
+        for program in [
+            r"\#foo#p",
+            r"\#foo\#bar#p",
+            r"\#foo#Ip",
+            r"1,\#foo#p",
+            r"\#x#,\#foo#p",
+            r"/foo;bar/p",
+            r"p;\#foo;bar#p",
+            r"s;a;b;g",
+        ] {
+            assert!(!program_can_execute(program), "{program}");
+        }
+    }
 }

@@ -80,7 +80,7 @@ fn is_filesystem_capability(name: &str) -> bool {
     let method = canonical.rsplit('.').next().unwrap_or(canonical);
     matches!(
         root,
-        "Path" | "PosixPath" | "WindowsPath" | "_io" | "_pyio" | "io" | "nt" | "os" | "pathlib" | "posix" | "shutil" | "tempfile"
+        "Path" | "PosixPath" | "WindowsPath" | "_io" | "_pyio" | "io" | "nt" | "os" | "pathlib" | "posix" | "shutil" | "tarfile" | "tempfile" | "zipfile"
     ) || is_direct_mutator(canonical)
         || is_path_mutation_method(method)
 }

@@ -293,7 +293,7 @@ fn reviewed_test_environment_target(path: &str, source: &str, target: &str, sour
     source_is_reviewed
         && path == "script/run-maintainability-gate.sh"
         && target == "$name"
-        && source.contains("verify_test_environment() {\n    local name\n    for name in BASH_ENV ENV COMPILER_PATH")
+        && source.contains("verify_test_environment() {\n    local name\n    for name in BASH_ENV ENV CCC_OVERRIDE_OPTIONS CL COMPILER_PATH")
         && source.contains("CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do\n        if [[ -v $name ]]; then")
 }
 

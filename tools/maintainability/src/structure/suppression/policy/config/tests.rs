@@ -570,6 +570,20 @@ fn rustup_mirror_overrides_are_governed_environment_channels() {
 #[test]
 fn archive_tool_environment_overrides_are_governed() {
     assert!(weakening_environment("TAR_OPTIONS=--checkpoint-action=exec=quality/helper"));
+    assert!(weakening_environment_for_surface("script/check.sh", "ZIP='-T -TTsh quality/helper'"));
+    assert!(weakening_environment("ZIPOPT='-T -TTsh quality/helper'"));
+    assert!(!weakening_environment("document the ZIP archive format"));
+}
+
+#[test]
+fn compiler_driver_environment_overrides_are_governed() {
+    assert!(weakening_environment("CCC_OVERRIDE_OPTIONS='+-Xclang +-load +-Xclang +quality/payload'"));
+    assert!(weakening_environment_for_surface(
+        "script/check.sh",
+        "CL='/clang:-Xclang /clang:-load /clang:quality/payload'"
+    ));
+    assert!(weakening_environment("_CL_='/clang:-Xclang /clang:-load /clang:quality/payload'"));
+    assert!(!weakening_environment("document the CL compiler mode"));
 }
 
 #[test]

@@ -141,6 +141,7 @@ fn is_direct_mutator(name: &str) -> bool {
                 | "shutil.copytree"
                 | "shutil.move"
                 | "shutil.rmtree"
+                | "shutil.unpack_archive"
                 | "NamedTemporaryFile"
                 | "tempfile.NamedTemporaryFile"
         )
@@ -148,10 +149,10 @@ fn is_direct_mutator(name: &str) -> bool {
 
 fn mutation_arguments_are_opaque(scanner: &CallScanner, call: &Call) -> bool {
     let name = called_name(&call.name);
-    // A tree copy can materialize arbitrarily named protected inputs below an
-    // otherwise safe destination. Proving the complete tree stable would
-    // require modeling earlier mutations, so ordinary agent tooling fails closed.
-    if name == "shutil.copytree" {
+    // A tree copy or archive extraction can materialize arbitrarily named
+    // protected inputs below an otherwise safe destination. Proving the complete
+    // tree stable would require modeling earlier mutations, so this fails closed.
+    if matches!(name, "shutil.copytree" | "shutil.unpack_archive") {
         return true;
     }
     let arguments: &[ArgumentSpec] = match name {
@@ -237,7 +238,7 @@ fn chained_path_write_is_opaque(scanner: &CallScanner, call: &Call, method: &Cal
         "rename" | "replace" => {
             path_argument_is_opaque(scanner, call.opening_parenthesis, receiver) || path_argument_is_opaque(scanner, method.opening_parenthesis, ArgumentSpec::new(0, &["target"]))
         }
-        "copy" | "copy_into" | "hardlink_to" | "move" | "move_into" | "symlink_to" => true,
+        "copy" | "copy_into" | "extract" | "extractall" | "hardlink_to" | "move" | "move_into" | "symlink_to" => true,
         _ => false,
     }
 }
@@ -273,8 +274,8 @@ fn direct_path_method_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
     let class_method = matches!(owner, "Path" | "PosixPath" | "WindowsPath" | "pathlib.Path" | "pathlib.PosixPath" | "pathlib.WindowsPath");
     if !class_method {
         return match method {
-            "chmod" | "copy" | "copy_into" | "hardlink_to" | "lchmod" | "mkdir" | "move" | "move_into" | "rename" | "replace" | "rmdir" | "symlink_to" | "touch" | "unlink"
-            | "write_bytes" | "write_text" => true,
+            "chmod" | "copy" | "copy_into" | "extract" | "extractall" | "hardlink_to" | "lchmod" | "mkdir" | "move" | "move_into" | "rename" | "replace" | "rmdir"
+            | "symlink_to" | "touch" | "unlink" | "write_bytes" | "write_text" => true,
             "open" => scanner.has_argument_unpack(call.opening_parenthesis) || writable_mode(scanner, call.opening_parenthesis, 0),
             _ => false,
         };
@@ -300,6 +301,8 @@ fn is_path_mutation_method(method: &str) -> bool {
         "chmod"
             | "copy"
             | "copy_into"
+            | "extract"
+            | "extractall"
             | "hardlink_to"
             | "lchmod"
             | "mkdir"

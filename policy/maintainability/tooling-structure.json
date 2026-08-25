@@ -12,7 +12,7 @@
   },
   "source_profile": {
     "current_sha256": "206b05ac1624e7fb07b5b08a34f60e1d2798ccf275df54b3eb5799ac32ff9d2e",
-    "preapproved_next_sha256": "148c73bf151736c3d7b91676773607fa18b6a021fdbcab2198de915a96071121",
+    "preapproved_next_sha256": null,
     "retired_sha256": []
   },
   "hotspots": [

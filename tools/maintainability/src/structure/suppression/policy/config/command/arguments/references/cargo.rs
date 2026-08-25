@@ -267,6 +267,13 @@ mod tests {
     }
 
     #[test]
+    fn custom_rust_llvm_plugins_fail_closed() {
+        assert!(dispatch_is_opaque(&arguments(&["rustc", "--", "-Z", "llvm-plugins=quality/payload",])));
+        assert!(dispatch_is_opaque(&arguments(&["rustdoc", "--", "-Zllvm_plugins=quality/payload",])));
+        assert!(!dispatch_is_opaque(&arguments(&["rustc", "--", "-Z", "llvm-time-trace=yes",])));
+    }
+
+    #[test]
     fn cargo_owned_configuration_and_relocation_fail_closed() {
         for values in [
             &["--config", "target.host.runner=['sh']", "build"][..],

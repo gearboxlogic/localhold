@@ -109,6 +109,15 @@ pub(super) fn rust_compiler_dispatch_is_opaque(arguments: &[String]) -> bool {
         if argument == "--extern" || argument.starts_with("--extern=") {
             return true;
         }
+        let unstable_option = if argument == "-Z" {
+            index += 1;
+            arguments.get(index).map(String::as_str)
+        } else {
+            argument.strip_prefix("-Z").filter(|option| !option.starts_with('='))
+        };
+        if unstable_option.is_some_and(rust_unstable_dispatch_option_is_opaque) {
+            return true;
+        }
         let option = if matches!(argument.as_str(), "-C" | "--codegen") {
             index += 1;
             arguments.get(index).map(String::as_str)
@@ -130,6 +139,10 @@ fn rust_codegen_dispatch_option_is_opaque(option: &str) -> bool {
     option
         .split_once('=')
         .is_some_and(|(name, _)| matches!(name, "linker" | "link-arg" | "link-args" | "link_arg" | "link_args"))
+}
+
+fn rust_unstable_dispatch_option_is_opaque(option: &str) -> bool {
+    option.split_once('=').is_some_and(|(name, _)| name.replace('_', "-") == "llvm-plugins")
 }
 
 fn rustdoc_dispatch_is_opaque(arguments: &[String]) -> bool {
@@ -367,6 +380,23 @@ mod tests {
         assert!(dispatch_is_opaque("rustdoc", &arguments(&["-C", "link_arg=-Wl,--plugin=quality/payload"])));
         assert!(!dispatch_is_opaque("rustc", &arguments(&["-C", "opt-level=2"])));
         assert!(!dispatch_is_opaque("rustc", &arguments(&["-C", "link-argument=report"])));
+    }
+
+    #[test]
+    fn rust_unstable_options_fail_closed() {
+        for values in [
+            &["-Z", "llvm-plugins=quality/payload", "quality/benign.rs"][..],
+            &["-Zllvm-plugins=quality/payload", "quality/benign.rs"],
+            &["-Z", "llvm_plugins=quality/payload", "quality/benign.rs"],
+            &["-Zllvm_plugins=quality/payload", "quality/benign.rs"],
+        ] {
+            assert!(dispatch_is_opaque("rustc", &arguments(values)), "{values:?}");
+            assert!(dispatch_is_opaque("rustdoc", &arguments(values)), "{values:?}");
+        }
+        assert!(!dispatch_is_opaque("rustc", &arguments(&["-Z", "llvm-time-trace=yes", "quality/benign.rs"])));
+        assert!(!dispatch_is_opaque("rustc", &arguments(&["-Zllvm-plugin=quality/payload", "quality/benign.rs"])));
+        assert!(!dispatch_is_opaque("rustc", &arguments(&["-Z=llvm-plugins=quality/payload", "quality/benign.rs"])));
+        assert!(!dispatch_is_opaque("rustc", &arguments(&["--", "-Zllvm-plugins=quality/payload"])));
     }
 
     #[test]

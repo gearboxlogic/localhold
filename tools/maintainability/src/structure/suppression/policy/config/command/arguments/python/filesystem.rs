@@ -118,6 +118,8 @@ fn is_direct_mutator(name: &str) -> bool {
             name,
             "builtins.open"
                 | "codecs.open"
+                | "io.FileIO"
+                | "_io.FileIO"
                 | "fileinput.FileInput"
                 | "fileinput.input"
                 | "io.open"
@@ -271,16 +273,14 @@ fn chained_path_write_is_opaque(scanner: &CallScanner, call: &Call, method: &Cal
 
 fn direct_open_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
     let name = called_name(&call.name);
-    matches!(name, "builtins.open" | "codecs.open" | "io.open" | "open")
+    let file_io = matches!(name, "io.FileIO" | "_io.FileIO");
+    (matches!(name, "builtins.open" | "codecs.open" | "io.open" | "open") || file_io)
         && (scanner.has_argument_unpack(call.opening_parenthesis)
-            || name != "codecs.open" && opener_is_opaque(scanner, call.opening_parenthesis)
+            || name != "codecs.open"
+                && scanner
+                    .call_argument(call.opening_parenthesis, ArgumentSpec::new(if file_io { 3 } else { 7 }, &["opener"]))
+                    .is_some_and(|opener| opener.trim() != "None")
             || writable_mode(scanner, call.opening_parenthesis, 1) && path_argument_is_opaque(scanner, call.opening_parenthesis, ArgumentSpec::new(0, &["file", "filename"])))
-}
-
-fn opener_is_opaque(scanner: &CallScanner, opening_parenthesis: usize) -> bool {
-    scanner
-        .call_argument(opening_parenthesis, ArgumentSpec::new(7, &["opener"]))
-        .is_some_and(|opener| opener.trim() != "None")
 }
 
 fn direct_path_method_is_opaque(scanner: &CallScanner, call: &Call) -> bool {

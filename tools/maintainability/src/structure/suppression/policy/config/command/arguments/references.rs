@@ -627,7 +627,7 @@ fn dispatch_external_input<'a>(input: DispatchInput<'a, '_>) -> (Vec<&'a str>, b
         "just" | "just.exe" if program::just_source_selection_with_semantics_is_opaque(arguments, surface.mode.value_semantics()) => SelectedInput::Opaque,
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
             let (inputs, opaque) = makefile_inputs(arguments, surface.mode.value_semantics());
-            return (inputs, opaque || make_environment_selection_is_opaque(&tokens[..command_index]));
+            return (inputs, opaque || tokens[..command_index].iter().any(|token| is_make_environment_selection(token)));
         }
         "git" | "git.exe" => {
             let opaque = if surface.mode.argv {
@@ -777,23 +777,18 @@ fn makefile_inputs(arguments: &[String], semantics: ValueSemantics) -> (Vec<&str
 
 fn make_argument_is_opaque(argument: &str, semantics: ValueSemantics) -> bool {
     semantics.contains_dynamic(argument)
-        || matches!(argument, "-C" | "-E" | "--directory" | "--eval")
+        || matches!(argument, "-C" | "-E" | "--directory")
         || argument.starts_with("--directory=")
         || argument.starts_with("-C") && argument.len() > 2
         || argument.starts_with("-E") && argument.len() > 2
-        || argument.starts_with("--eval=")
+        || argument.starts_with("--ev")
         || is_make_environment_selection(argument)
-}
-
-fn make_environment_selection_is_opaque(tokens: &[String]) -> bool {
-    tokens.iter().any(|token| is_make_environment_selection(token))
 }
 
 fn is_make_environment_selection(token: &str) -> bool {
     token
         .split_once('=')
-        .map(|(name, _)| name)
-        .is_some_and(|name| matches!(name, ".SHELLFLAGS" | "GNUMAKEFLAGS" | "MAKEFILES" | "MAKEFLAGS" | "MFLAGS" | "SHELL"))
+        .is_some_and(|(name, _)| matches!(name, ".SHELLFLAGS" | "GNUMAKEFLAGS" | "MAKEFILES" | "MAKEFLAGS" | "MFLAGS" | "SHELL"))
 }
 
 #[cfg(test)]

@@ -680,6 +680,7 @@ fn command_policy_rejects_python_directory_descriptor_rebasing() {
         "open('target/report.txt', **options)\n",
         "open(*arguments)\n",
         "import io\nio.open(*arguments)\n",
+        "import io\nfrom pathlib import Path\nio.FileIO('Justfile', 'w').write(Path('quality/hidden.txt').read_bytes())\n",
         "import os\nos.fdopen(*arguments)\n",
         "from pathlib import Path\nPath('target/report.txt').open(*arguments)\n",
         "from pathlib import Path\nPath('Justfile').open(**options)\n",

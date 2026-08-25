@@ -442,6 +442,8 @@ fn execution_inputs_distinguish_wrappers_and_build_tools() {
     assert_eq!(inputs("make -C quality -f lint.rules"), (vec!["lint.rules".to_owned()], true));
     assert_eq!(inputs("make -E 'all:; sh quality/lint.txt' all"), (Vec::new(), true));
     assert_eq!(inputs("make -E'all:; sh quality/lint.txt' all"), (Vec::new(), true));
+    assert_eq!(inputs("make '--ev=all:; sh quality/lint.txt' all"), (Vec::new(), true));
+    assert_eq!(inputs("make --eva 'all:; sh quality/lint.txt' all"), (Vec::new(), true));
     assert_eq!(inputs("make MAKEFILES=quality/lint.rules"), (Vec::new(), true));
     assert_eq!(inputs("MAKEFILES=quality/lint.rules make"), (Vec::new(), true));
     assert_eq!(inputs("make SHELL=/bin/true check"), (Vec::new(), true));

@@ -42,16 +42,21 @@ pub(super) fn reviewed_shell_wrappers(path: &str, source: &str, source_is_review
     if path != "script/check-maintainability-bootstrap.sh" || !source_is_reviewed {
         return false;
     }
+    let source = if super::super::super::reviewed_bootstrap_reexec_is_exact(path, source, source_is_reviewed) {
+        super::super::super::surfaces::without_reviewed_bootstrap_reexec(source)
+    } else {
+        source.to_owned()
+    };
     let lines = source.lines().collect::<Vec<_>>();
-    super::super::dynamic::has_reviewed_trusted_system_command(source)
-        && !super::super::tokens::has_unsupported_shell_function(source)
+    super::super::dynamic::has_reviewed_trusted_system_command(&source)
+        && !super::super::tokens::has_unsupported_shell_function(&source)
         && lines
             .windows(REVIEWED_WRAPPER_DEFINITION.len())
             .filter(|window| *window == REVIEWED_WRAPPER_DEFINITION)
             .count()
             == 1
-        && super::super::tokens::declared_shell_function_count(source, "git_at") == 1
-        && super::super::tokens::declared_shell_function_count(source, "git_checked") == 1
+        && super::super::tokens::declared_shell_function_count(&source, "git_at") == 1
+        && super::super::tokens::declared_shell_function_count(&source, "git_checked") == 1
         && lines.iter().filter(|line| **line == REVIEWED_WRAPPER_DEFINITION[3]).count() == 1
         && lines.iter().filter(|line| **line == REVIEWED_WRAPPER_DEFINITION[7]).count() == 1
 }

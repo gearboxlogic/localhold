@@ -293,7 +293,8 @@ fn reviewed_test_environment_target(path: &str, source: &str, target: &str, sour
     source_is_reviewed
         && path == "script/run-maintainability-gate.sh"
         && target == "$name"
-        && source.contains("verify_test_environment() {\n    local name\n    for name in BASH_ENV ENV CCC_OVERRIDE_OPTIONS CL COMPILER_PATH")
+        && source.contains("verify_test_environment() {\n    local entry\n    local name\n    local uppercase\n    while IFS= read -r -d '' entry; do")
+        && source.contains("    done < <(\"$env_command\" -0)\n    for name in BASH_ENV ENV CCC_OVERRIDE_OPTIONS CL COMPILER_PATH")
         && source.contains("CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do\n        if [[ -v $name ]]; then")
 }
 
@@ -444,6 +445,26 @@ mod tests {
         ));
         assert!(has_opaque_evaluation("script/check-maintainability-bootstrap.sh", "((unreviewed_count += 1))", true));
         assert!(has_opaque_evaluation("script/check-publication-hygiene.sh", "(( failed != 0 ))", true));
+        let reviewed_environment_scan = r#"verify_test_environment() {
+    local entry
+    local name
+    local uppercase
+    while IFS= read -r -d '' entry; do
+        :
+    done < <("$env_command" -0)
+    for name in BASH_ENV ENV CCC_OVERRIDE_OPTIONS CL COMPILER_PATH values \
+CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do
+        if [[ -v $name ]]; then
+            :
+        fi
+    done
+}"#;
+        assert!(!has_opaque_evaluation("script/run-maintainability-gate.sh", reviewed_environment_scan, true));
+        assert!(has_opaque_evaluation(
+            "script/run-maintainability-gate.sh",
+            &reviewed_environment_scan.replace("local uppercase", "local changed"),
+            true
+        ));
     }
 
     #[test]

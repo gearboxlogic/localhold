@@ -210,7 +210,8 @@ fn static_background_process_cleanup_commands_are_analyzable() {
 fn assert_reviewed_shell_surface_is_closed(surface_path: &str) {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = fs::read_to_string(workspace.join(surface_path)).expect("reviewed shell surface");
-    let command_source = super::direct_command_source(surface_path, &source);
+    let reviewed_source = super::super::super::surfaces::without_reviewed_dispatch(surface_path, &source, true);
+    let command_source = super::direct_command_source(surface_path, &reviewed_source);
     let normalized = assert_reviewed_shell_preamble_is_closed(surface_path, &command_source);
     let functions = tokens::declared_shell_functions_in_active_source(&normalized);
     let surface = ShellSurface {
@@ -326,6 +327,10 @@ fn manifest_discovery_descends_only_into_relevant_command_text() {
 fn execution_inputs_distinguish_files_from_opaque_programs() {
     assert_eq!(inputs("bash quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
     assert_eq!(inputs("/usr/bin/env -i bash -e ./quality/lint.txt"), (vec!["quality/lint.txt".to_owned()], false));
+    assert_eq!(
+        inputs("/usr/bin/env 'CC_x86_64-unknown-linux-gnu=untrusted' bash ./quality/lint.txt"),
+        (vec!["quality/lint.txt".to_owned()], false)
+    );
     assert_eq!(inputs("bash -lc 'cargo clippy'"), (Vec::new(), true));
     assert_eq!(inputs("HOME=quality bash -i quality/lint.txt"), (Vec::new(), true));
     assert_eq!(inputs("bash --login quality/lint.txt"), (Vec::new(), true));

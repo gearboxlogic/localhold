@@ -93,6 +93,7 @@ fn is_reviewed_literal_program_assignment(path: &str, name: &str, value: &str) -
             | ("script/run-maintainability-gate.sh", "bash_command", "/usr/bin/bash")
             | ("script/run-maintainability-gate.sh", "chmod_command", "/usr/bin/chmod")
             | ("script/run-maintainability-gate.sh", "cp_command", "/usr/bin/cp")
+            | ("script/run-maintainability-gate.sh", "env_command", "/usr/bin/env")
             | ("script/run-maintainability-gate.sh", "ln_command", "/usr/bin/ln")
             | ("script/run-maintainability-gate.sh", "mkdir_command", "/usr/bin/mkdir")
             | ("script/run-maintainability-gate.sh", "mktemp_command", "/usr/bin/mktemp")
@@ -446,6 +447,17 @@ mod tests {
 
     #[test]
     fn dynamic_command_assignment_profiles_are_exact() {
+        let environment_scan = r#"readonly env_command=/usr/bin/env
+verify() {
+    local entry
+    local name
+    local uppercase
+    while IFS= read -r -d '' entry; do
+        name=${entry%%=*}
+        uppercase=${name^^}
+    done < <("$env_command" -0)
+}"#;
+        assert!(!production_opaque_command_assignment_flow("script/run-maintainability-gate.sh", environment_scan, true));
         assert!(has_opaque_command_assignment_flow("script/check.sh", "runner=$(cat quality/lint.txt); $runner"));
         assert!(has_opaque_command_assignment_flow("script/check.sh", "runner=`sed -n 1p quality/lint.txt`; ${runner}"));
         assert!(has_opaque_command_assignment_flow(
@@ -473,6 +485,10 @@ mod tests {
         assert!(!has_opaque_command_assignment_flow(
             "script/run-maintainability-gate.sh",
             "readonly bash_command=/usr/bin/bash; \"$bash_command\" --version"
+        ));
+        assert!(!has_opaque_command_assignment_flow(
+            "script/run-maintainability-gate.sh",
+            "readonly env_command=/usr/bin/env; \"$env_command\" -0"
         ));
         assert!(!has_opaque_command_assignment_flow(
             "script/tests/test_maintainability_bootstrap.sh",

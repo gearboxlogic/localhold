@@ -53,6 +53,8 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "webbrowser",
 ];
 
+const NATIVE_LOADER_MODULES: &[&str] = &["_ctypes", "_frozen_importlib", "_frozen_importlib_external", "_imp"];
+
 pub(super) fn execution_references(path: &str, source: &str) -> ExecutionReferences {
     let normalized = normalize_continuations(source);
     let mut references = execution::collect(&normalized);
@@ -408,7 +410,11 @@ fn command_attribute_prefix(module: &str, attribute: &str) -> Option<(CommandRef
 }
 
 fn starts_python_keyword(statement: &str, keyword: &str) -> bool {
-    statement.trim_start().strip_prefix(keyword).is_some_and(|tail| tail.starts_with(char::is_whitespace))
+    strip_python_keyword(statement, keyword).is_some()
+}
+
+fn strip_python_keyword<'a>(statement: &'a str, keyword: &str) -> Option<&'a str> {
+    statement.trim_start().strip_prefix(keyword).filter(|tail| tail.starts_with(char::is_whitespace))
 }
 
 fn standalone_module_value(statement: &str, module: &str) -> bool {
@@ -472,9 +478,37 @@ fn references_command_capable_ffi(source: &str) -> bool {
 
 fn references_native_extension_loading(source: &str) -> bool {
     let executable = executable_code(source);
-    ["enable_load_extension", "load_extension", "sqlite_dbconfig_enable_load_extension"]
+    imports_native_loader_module(&executable)
+        || ["enable_load_extension", "load_extension", "sqlite_dbconfig_enable_load_extension"]
+            .iter()
+            .any(|name| executable.match_indices(name).any(|(index, _)| identifier_is_exact_at(&executable, index, name.len())))
+}
+
+fn imports_native_loader_module(source: &str) -> bool {
+    source.lines().flat_map(|line| line.split(';')).any(|statement| {
+        let statement = statement.rsplit(':').next().unwrap_or(statement);
+        if let Some(imports) = strip_python_keyword(statement, "import") {
+            return imports.split(',').any(native_loader_module_binding);
+        }
+        let Some(from) = strip_python_keyword(statement, "from") else {
+            return false;
+        };
+        let from = from.trim_start();
+        let Some(module) = from.split_whitespace().next() else {
+            return false;
+        };
+        native_loader_module(module) && from.strip_prefix(module).and_then(|tail| strip_python_keyword(tail, "import")).is_some()
+    })
+}
+
+fn native_loader_module_binding(binding: &str) -> bool {
+    binding.split_whitespace().next().is_some_and(native_loader_module)
+}
+
+fn native_loader_module(module: &str) -> bool {
+    NATIVE_LOADER_MODULES
         .iter()
-        .any(|name| executable.match_indices(name).any(|(index, _)| identifier_is_exact_at(&executable, index, name.len())))
+        .any(|candidate| module == *candidate || module.strip_prefix(candidate).is_some_and(|suffix| suffix.starts_with('.')))
 }
 
 fn identifier_is_exact_at(source: &str, index: usize, length: usize) -> bool {

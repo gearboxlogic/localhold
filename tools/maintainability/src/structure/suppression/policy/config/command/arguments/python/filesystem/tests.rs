@@ -205,6 +205,43 @@ fn archive_extraction_fails_closed() {
 }
 
 #[test]
+fn fileinput_inplace_writes_fail_closed() {
+    for source in [
+        "import fileinput\nfileinput.input('Justfile', inplace=True)\n",
+        "from fileinput import input as lines\nlines('Justfile', True)\n",
+        "import fileinput as fi\nfi.input('Justfile', inplace=True)\n",
+        "from fileinput import FileInput\nFileInput(files='Justfile', inplace=enabled)\n",
+        "from fileinput import FileInput as Reader\nReader(files='Justfile', inplace=True)\n",
+        "import fileinput\nfileinput.input.__call__('Justfile', True)\n",
+        "import fileinput\nfileinput.FileInput.__call__(files='Justfile', inplace=enabled)\n",
+        "import fileinput\nfileinput.input('Justfile', enabled)\n",
+        "import fileinput\nwriter = fileinput.input\nwriter('Justfile', inplace=True)\n",
+        "import fileinput\ngetattr(fileinput, 'input')('Justfile', inplace=True)\n",
+        "import fileinput\nfileinput.__dict__['input']('Justfile', inplace=True)\n",
+        "import fileinput\nfileinput.__getattribute__('input')('Justfile', inplace=True)\n",
+        "import fileinput\nvars(fileinput)['FileInput']('Justfile', inplace=True)\n",
+        "import fileinput\nfileinput.input('Justfile', **options)\n",
+        "import fileinput\nfileinput.input(*arguments)\n",
+        "import fileinput\nfileinput.input('Justfile', inplace=True\n",
+        "import fileinput as fi\nfi.input('Justfile', inplace=True\n",
+    ] {
+        assert!(has_opaque_write(source), "{source}");
+    }
+    for source in [
+        "import fileinput\nfor line in fileinput.input('input.txt'): print(line)\n",
+        "import fileinput as fi\nfor line in fi.input('input.txt'): print(line)\n",
+        "import fileinput\nfileinput.input('input.txt', inplace=False)\n",
+        "from fileinput import FileInput\nFileInput('input.txt', inplace=0)\n",
+        "from fileinput import FileInput as Reader\nReader(files='input.txt', inplace=False)\n",
+        "import fileinput\nfileinput.input.__call__('input.txt', False)\n",
+        "import fileinput\nfileinput.input('target/report.txt', inplace=True)\n",
+        "import fileinput\nfileinput.input('target/report.txt', inplace=enabled)\n",
+    ] {
+        assert!(!has_opaque_write(source), "{source}");
+    }
+}
+
+#[test]
 fn copying_symlinks_and_unpacked_writer_arguments_fail_closed() {
     for source in [
         r#"shutil.copy("payload/link", "target", follow_symlinks=False)"#,

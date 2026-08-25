@@ -495,7 +495,10 @@ fn reviewed_environment_scrubbers_are_exact() {
         "script/tests/test_maintainability_bootstrap.sh",
         &BOOTSTRAP_TEST_ENVIRONMENT_LINES.join("\n"),
     ));
-    assert!(scrubber_environment_references_are_exact("mise.toml", &MISE_ENVIRONMENT_LINES.join("\n")));
+    assert!(scrubber_environment_references_are_exact(
+        "mise.toml",
+        &format!("[env]\n{}\n", MISE_ENVIRONMENT_LINES.join("\n")),
+    ));
     assert!(scrubber_environment_references_are_exact(
         ".github/workflows/ci.yml",
         &CI_TRUST_ENVIRONMENT_LINES.join("\n"),
@@ -525,12 +528,34 @@ fn reviewed_environment_scrubbers_are_exact() {
 
 #[test]
 fn checked_in_bootstrap_matches_its_reviewed_environment_contract() {
-    let bootstrap = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../script/check-maintainability-bootstrap.sh");
-    let source = fs::read_to_string(bootstrap).expect("read checked-in maintainability bootstrap");
-
-    assert!(scrubber_environment_references_are_exact("script/check-maintainability-bootstrap.sh", &source));
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let path = "script/check-maintainability-bootstrap.sh";
+    let source = fs::read_to_string(repository.join(path)).expect("read checked-in maintainability bootstrap");
     let unreviewed = source.replacen("unset GCONV_PATH", "unset GCONV_PATH CMAKE_TOOLCHAIN_FILE", 1);
-    assert!(!scrubber_environment_references_are_exact("script/check-maintainability-bootstrap.sh", &unreviewed));
+    assert!(!scrubber_environment_references_are_exact(path, &unreviewed));
+    if super::command::checked_in_legacy_transition_capabilities(&repository, path, &source).is_some_and(|(_, environment)| environment) {
+        assert!(
+            !scrubber_environment_references_are_exact(path, &source),
+            "legacy bootstrap bridge no longer needs its environment exception"
+        );
+        return;
+    }
+
+    assert!(scrubber_environment_references_are_exact(path, &source));
+}
+
+#[test]
+fn bootstrap_fixture_raw_environment_dispatch_requires_exact_reviewed_source() {
+    let path = "script/tests/test_maintainability_bootstrap.sh";
+    let line = BOOTSTRAP_TEST_OPAQUE_COMMAND_LINES[0];
+    let reviewed = format!("#!/usr/bin/bash\n{line}\n");
+    assert_eq!(without_reviewed_dispatch(path, &reviewed, true), "#!/usr/bin/bash\n:");
+    assert_eq!(without_reviewed_dispatch(path, &reviewed, false), reviewed);
+
+    let changed = reviewed.replace("untrusted", "changed");
+    assert_eq!(without_reviewed_dispatch(path, &changed, true), changed);
+    let duplicated = format!("{reviewed}{line}\n");
+    assert_eq!(without_reviewed_dispatch(path, &duplicated, true), duplicated);
 }
 
 #[test]
@@ -561,6 +586,42 @@ fn rustup_mirror_overrides_are_governed_environment_channels() {
 #[test]
 fn archive_tool_environment_overrides_are_governed() {
     assert!(weakening_environment("TAR_OPTIONS=--checkpoint-action=exec=quality/helper"));
+    assert!(weakening_environment_for_surface("script/check.sh", "ZIP='-T -TTsh quality/helper'"));
+    assert!(weakening_environment("ZIPOPT='-T -TTsh quality/helper'"));
+    assert!(!weakening_environment("document the ZIP archive format"));
+}
+
+#[test]
+fn compiler_driver_environment_overrides_are_governed() {
+    assert!(weakening_environment("CCC_OVERRIDE_OPTIONS='+-Xclang +-load +-Xclang +quality/payload'"));
+    assert!(weakening_environment_for_surface(
+        "script/check.sh",
+        "CL='/clang:-Xclang /clang:-load /clang:quality/payload'"
+    ));
+    assert!(weakening_environment("_CL_='/clang:-Xclang /clang:-load /clang:quality/payload'"));
+    for assignment in [
+        "CC='sh quality/hidden.txt'",
+        "CC_x86_64-unknown-linux-gnu='sh quality/hidden.txt'",
+        "CC_x86_64_unknown_linux_gnu='sh quality/hidden.txt'",
+        "HOST_CC='sh quality/hidden.txt'",
+        "TARGET_CXX='sh quality/hidden.txt'",
+        "AR='sh quality/hidden.txt'",
+        "CFLAGS='-fplugin=quality/payload.so'",
+        "CROSS_COMPILE='quality/tool-'",
+        "CMAKE_TOOLCHAIN_FILE='quality/hidden.txt'",
+        "AWS_LC_SYS_CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu='quality/hidden.txt'",
+    ] {
+        assert!(weakening_environment(assignment), "{assignment}");
+    }
+    assert!(weakening_environment_for_surface(
+        ".github/workflows/ci.yml",
+        "jobs:\n  test:\n    env:\n      CC: sh quality/hidden.txt\n"
+    ));
+    assert!(weakening_environment_for_surface(
+        ".github/workflows/ci.yml",
+        "jobs:\n  test:\n    env:\n      CMAKE_TOOLCHAIN_FILE: quality/hidden.txt\n"
+    ));
+    assert!(!weakening_environment("document the CL compiler mode"));
 }
 
 #[test]
@@ -580,34 +641,58 @@ fn bootstrap_digest_overrides_require_the_exact_reviewed_bindings() {
 }
 
 #[test]
-fn authenticated_dynamic_commands_require_the_exact_reviewed_lines() {
-    assert!(super::command::reviewed_dynamic_command_references_are_exact(
+fn quality_command_exceptions_require_the_exact_reviewed_lines() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for path in [
         "script/run-maintainability-gate.sh",
-        &GATE_RUNNER_COMMAND_LINES.join("\n"),
-    ));
-    assert!(super::command::reviewed_dynamic_command_references_are_exact(
         "script/run-source-safety.sh",
-        &RUNNER_COMMAND_LINES.join("\n"),
-    ));
-    assert!(super::command::reviewed_dynamic_command_references_are_exact(
         "script/install.sh",
-        &INSTALL_COMMAND_LINES.join("\n"),
-    ));
-    assert!(super::command::reviewed_dynamic_command_references_are_exact(
+        "script/dep-audit.sh",
         ".github/workflows/trusted-maintainability.yml",
-        &TRUSTED_GATE_COMMAND_LINES.join("\n"),
-    ));
-    assert!(!super::command::reviewed_dynamic_command_references_are_exact(
+    ] {
+        let source = fs::read_to_string(repository.join(path)).expect("read reviewed quality-command source");
+        if super::command::checked_in_legacy_transition_capabilities(&repository, path, &source).is_some_and(|(opaque, _)| opaque) {
+            assert!(
+                !super::command::reviewed_quality_command_exceptions_are_exact(path, &source, true),
+                "legacy bridge no longer needs its quality-command exception: {path}"
+            );
+            continue;
+        }
+        assert!(super::command::reviewed_quality_command_exceptions_are_exact(path, &source, true), "{path}");
+    }
+    assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
         "script/run-source-safety.sh",
         &format!("{}\n\"$cargo_command\" clippy -- -A warnings", RUNNER_COMMAND_LINES.join("\n")),
+        false,
     ));
-    assert!(!super::command::reviewed_dynamic_command_references_are_exact(
+    assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
         "script/run-source-safety.sh",
         &format!("{}\n\"$cargo_command\" clippy -- \\\n+            -A warnings", RUNNER_COMMAND_LINES.join("\n")),
+        false,
     ));
-    assert!(!super::command::reviewed_dynamic_command_references_are_exact(
+    assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
         "script/run-source-safety.sh",
         &format!("{}\ngate() {{\n    cargo test\n    true\n}}\ngate || true", RUNNER_COMMAND_LINES.join("\n")),
+        false,
+    ));
+
+    let source = fs::read_to_string(repository.join("script/dep-audit.sh")).expect("read dependency audit script");
+    if super::command::checked_in_legacy_transition_capabilities(&repository, "script/dep-audit.sh", &source).is_some_and(|(opaque, _)| opaque) {
+        assert!(!weakening_token_for_surface("script/dep-audit.sh", &source));
+        assert!(!super::command::reviewed_quality_command_exceptions_are_exact("script/dep-audit.sh", &source, true));
+    } else {
+        assert!(weakening_token_for_surface("script/dep-audit.sh", &source));
+        assert!(super::command::reviewed_quality_command_exceptions_are_exact("script/dep-audit.sh", &source, true));
+        assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
+            "script/dep-audit.sh",
+            &source.replace("if ! run_workspace_deny; then", "if ! run_unreviewed_deny; then"),
+            false,
+        ));
+    }
+    assert!(!super::command::reviewed_quality_command_exceptions_are_exact(
+        "script/dep-audit.sh",
+        &source.replace("if (( failed != 0 )); then", "failed=0\nif (( failed != 0 )); then"),
+        false,
     ));
 }
 
@@ -619,13 +704,13 @@ fn checked_in_installer_preserves_its_reviewed_build_directory_contract() {
     assert!(weakening_environment_for_surface("script/install.sh", &source));
     assert!(scrubber_environment_references_are_exact("script/install.sh", &source));
     assert!(!weakening_token_for_surface("script/install.sh", &source));
-    assert!(super::command::reviewed_dynamic_command_references_are_exact("script/install.sh", &source));
+    assert!(super::command::reviewed_quality_command_exceptions_are_exact("script/install.sh", &source, true));
     assert!(source.contains("case \":${PATH}:\" in\n  *\":${prefix}/bin:\"*) ;;\n  *) printf 'Add %s/bin to PATH before invoking hold by name.\\n' \"$prefix\" ;;\nesac"));
-    let reviewed = without_reviewed_dispatch("script/install.sh", &source);
+    let reviewed = without_reviewed_dispatch("script/install.sh", &source, true);
     assert!(!reviewed.contains("\"$cargo_command\" build"));
 
     let tampered = source.replace("--features reranker --target-dir", "--features reranker --quiet --target-dir");
-    assert_eq!(without_reviewed_dispatch("script/install.sh", &tampered), tampered);
+    assert_eq!(without_reviewed_dispatch("script/install.sh", &tampered, false), tampered);
 }
 
 #[test]
@@ -637,6 +722,13 @@ fn executable_path_changes_are_governed_on_every_command_surface() {
     assert!(!weakening_environment_for_surface("script/check.sh", "path=/tmp cargo clippy"));
     assert!(!weakening_environment_for_surface("script/check.ps1", "$path = Join-Path release artifact.zip"));
     assert!(weakening_environment_for_surface("script/check.sh", "PATH=/tmp node application.js"));
+    assert!(weakening_environment_for_surface("mise.toml", "[env]\n_.path = ['quality/bin']\n"));
+    assert!(weakening_environment_for_surface("mise.toml", "[env]\n_.file = 'quality/environment'\n"));
+    assert!(!scrubber_environment_references_are_exact("mise.toml", "[env]\n_.path = ['quality/bin']\n"));
+    assert!(!scrubber_environment_references_are_exact(
+        "mise.toml",
+        &format!("[env]\n{}\n_.file = 'quality/environment'\n", MISE_ENVIRONMENT_LINES.join("\n"))
+    ));
 }
 
 #[test]
@@ -676,6 +768,14 @@ fn powershell_quality_steps_enforce_native_exit_status() {
     assert!(!weakening_token_for_surface(
         ".github/workflows/ci.yml",
         "steps:\n  - shell: bash\n    run: |\n      cargo clippy --locked -- -D warnings\n      exit 0\n"
+    ));
+    assert!(!weakening_token_for_surface(
+        ".github/workflows/ci.yml",
+        "steps:\n  - shell: pwsh\n    run: Write-Output 'cargo clippy -- --a`llow warnings'\n"
+    ));
+    assert!(weakening_token_for_surface(
+        ".github/workflows/unreviewed.yml",
+        "steps:\n  - shell: pwsh\n    run: $value = $(./quality/payload.ps1)\n"
     ));
 }
 

@@ -70,90 +70,30 @@ pub(super) fn failure_masks_quality_command(
 
 fn quality_command_runs_without_errexit(source: &str, case_insensitive_tools: bool, quality_functions: &BTreeSet<String>, initial_errexit: bool) -> bool {
     let mut errexit = initial_errexit;
-    let commands = tokens::source_command_tokens(source);
-    let separators = command_separators(source);
+    let commands = tokens::source_command_tokens_with_separators(source);
     for (index, command) in commands.iter().enumerate() {
-        if !errexit
-            && command_is_quality_or_function(command, case_insensitive_tools, quality_functions)
-            && (initial_errexit || failure_can_fall_through(index, &commands, &separators))
+        if !errexit && command_is_quality_or_function(&command.words, case_insensitive_tools, quality_functions) && (initial_errexit || failure_can_fall_through(index, &commands))
         {
             return true;
         }
-        update_errexit(command, &mut errexit);
+        update_errexit(&command.words, &mut errexit);
     }
     false
 }
 
-fn failure_can_fall_through(mut index: usize, commands: &[Vec<String>], separators: &[CommandSeparator]) -> bool {
+fn failure_can_fall_through(mut index: usize, commands: &[tokens::TokenizedCommand]) -> bool {
     loop {
-        match separators.get(index).copied().unwrap_or(CommandSeparator::End) {
-            CommandSeparator::End => return false,
-            CommandSeparator::Or | CommandSeparator::Pipeline | CommandSeparator::Background => return true,
-            CommandSeparator::And => {
+        match commands.get(index).map_or(tokens::CommandSeparator::End, |command| command.following) {
+            tokens::CommandSeparator::End => return false,
+            tokens::CommandSeparator::Or | tokens::CommandSeparator::Pipeline | tokens::CommandSeparator::Background => return true,
+            tokens::CommandSeparator::And => {
                 index += 1;
             }
-            CommandSeparator::Sequential => {
-                return commands[index + 1..].iter().any(|following| executable_index(following).is_some());
+            tokens::CommandSeparator::Sequential => {
+                return commands[index + 1..].iter().any(|following| executable_index(&following.words).is_some());
             }
         }
     }
-}
-
-#[derive(Clone, Copy)]
-enum CommandSeparator {
-    Sequential,
-    And,
-    Or,
-    Pipeline,
-    Background,
-    End,
-}
-
-fn command_separators(source: &str) -> Vec<CommandSeparator> {
-    let source = source.replace("\\\r\n", "").replace("\\\n", "");
-    let mut separators = Vec::new();
-    let mut characters = source.chars().peekable();
-    let mut quote = None;
-    let mut escaped = false;
-    let mut comment = false;
-    let mut previous = None;
-    while let Some(character) = characters.next() {
-        if comment {
-            if character == '\n' {
-                separators.push(CommandSeparator::Sequential);
-                comment = false;
-            }
-        } else if escaped {
-            escaped = false;
-        } else if character == '\\' && quote != Some('\'') {
-            escaped = true;
-        } else if matches!(character, '\'' | '"') {
-            quote = updated_quote(quote, character);
-        } else if quote.is_none() && character == '#' && previous.is_none_or(|value: char| value.is_whitespace() || matches!(value, ';' | '&' | '|')) {
-            comment = true;
-        } else if quote.is_none() {
-            let separator = match character {
-                '\n' | ';' => Some(CommandSeparator::Sequential),
-                '&' if characters.peek() == Some(&'&') => {
-                    characters.next();
-                    separators.push(CommandSeparator::And);
-                    Some(CommandSeparator::And)
-                }
-                '&' => Some(CommandSeparator::Background),
-                '|' if characters.peek() == Some(&'|') => {
-                    characters.next();
-                    separators.push(CommandSeparator::Or);
-                    Some(CommandSeparator::Or)
-                }
-                '|' => Some(CommandSeparator::Pipeline),
-                _ => None,
-            };
-            separators.extend(separator);
-        }
-        previous = Some(character);
-    }
-    separators.push(CommandSeparator::End);
-    separators
 }
 
 fn update_errexit(command: &[String], errexit: &mut bool) {
@@ -373,6 +313,7 @@ mod tests {
     fn required_quality_command_failures_cannot_be_masked() {
         let masks = |source| failure_masks_quality_command(source, true, Some(true), true, true);
         assert!(masks("just check-quality | true"));
+        assert!(masks("just check-quality |& true"));
         assert!(masks("just check-quality || true"));
         assert!(masks("just check-quality &"));
         assert!(masks("! just check-quality"));
@@ -441,6 +382,22 @@ mod tests {
             false,
         ));
         assert!(failure_masks_quality_command("cargo clippy --locked && echo passed\ntrue", true, Some(true), true, false));
+    }
+
+    #[test]
+    fn nested_shell_operators_do_not_desynchronize_fallthrough_analysis() {
+        for condition in ["[[ x || x && x ]]", "[[ $(printf '%s' 'x || y') == x ]]", "[[ -r <(printf x) ]]"] {
+            let source = format!("set +e; {condition}; cargo clippy --locked; true");
+            assert!(failure_masks_quality_command(&source, true, Some(true), true, true), "{source}");
+        }
+
+        assert!(!failure_masks_quality_command(
+            "set +e; [[ x || x && x ]]; set -e; cargo clippy --locked",
+            true,
+            Some(true),
+            true,
+            true,
+        ));
     }
 
     #[test]

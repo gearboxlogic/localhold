@@ -11,6 +11,8 @@ mod guarded;
 
 const DOWNLOAD_ACTION: &str = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c";
 const CHECKOUT_ACTION: &str = "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0";
+const PR_CLASSIFICATION_WORKFLOW: &str = ".github/workflows/pr-classification.yml";
+const PR_BASE_REVISION: &str = "${{ github.event.pull_request.base.sha }}";
 const REVIEWED_REMOTE_ACTIONS: &[&str] = &[
     cache::ACTION,
     CHECKOUT_ACTION,
@@ -87,6 +89,8 @@ fn validate_checkout_inputs(path: &str, lines: &[&str], uses_index: usize) -> Re
     let mut repository = None;
     let mut checkout_ref = None;
     let mut destination = None;
+    let mut fetch_depth = None;
+    let mut persist_credentials = None;
     for input in inputs {
         let key = input.key;
         let value = input.literal(path)?;
@@ -94,20 +98,45 @@ fn validate_checkout_inputs(path: &str, lines: &[&str], uses_index: usize) -> Re
             "repository" => &mut repository,
             "ref" => &mut checkout_ref,
             "path" => &mut destination,
-            "fetch-depth" if matches!(value.as_str(), "0" | "1") => continue,
-            "persist-credentials" if value == "false" => continue,
+            "fetch-depth" if matches!(value.as_str(), "0" | "1") => &mut fetch_depth,
+            "persist-credentials" if value == "false" => &mut persist_credentials,
             _ => bail!("checkout input {key:?}={value:?} in {path:?} is not reviewed"),
         };
         if slot.replace(value).is_some() {
             bail!("checkout input {key:?} in {path:?} must not be repeated");
         }
     }
-    let trusted_checkout = path == ".github/workflows/trusted-maintainability.yml"
+    let protected_gate_checkout = path == ".github/workflows/trusted-maintainability.yml"
+        && matches!(
+            (
+                repository.as_deref(),
+                checkout_ref.as_deref(),
+                destination.as_deref(),
+                fetch_depth.as_deref(),
+                persist_credentials.as_deref(),
+            ),
+            (
+                Some("${{ github.repository }}"),
+                Some("${{ github.workflow_sha }}"),
+                Some(".trusted-gate"),
+                Some("1"),
+                Some("false"),
+            ) | (None, Some("${{ github.sha }}"), Some(".candidate"), Some("0"), Some("false"))
+        );
+    let classification_checkout = path == PR_CLASSIFICATION_WORKFLOW
         && matches!(
             (repository.as_deref(), checkout_ref.as_deref(), destination.as_deref()),
-            (Some("${{ github.repository }}"), Some("${{ github.workflow_sha }}"), Some(".trusted-gate")) | (None, Some("${{ github.sha }}"), Some(".candidate"))
-        );
-    if !trusted_checkout && (repository.is_some() || checkout_ref.is_some() || destination.is_some()) {
+            (None, Some(PR_BASE_REVISION), None)
+        )
+        && fetch_depth.is_none()
+        && persist_credentials.as_deref() == Some("false");
+    if path == PR_CLASSIFICATION_WORKFLOW && !classification_checkout {
+        bail!("checkout in {path:?} must select only the pull-request base revision with credential persistence disabled");
+    }
+    if path == ".github/workflows/trusted-maintainability.yml" && !protected_gate_checkout {
+        bail!("checkout in {path:?} must use one exact protected-gate or candidate profile with credential persistence disabled");
+    }
+    if !protected_gate_checkout && !classification_checkout && (repository.is_some() || checkout_ref.is_some() || destination.is_some()) {
         bail!("checkout in {path:?} may select only the triggering repository and revision at the workspace root");
     }
     Ok(())
@@ -344,6 +373,56 @@ mod tests {
         for altered in ["HEAD^", "${{ github.event.before }}", ".", "$GITHUB_WORKSPACE"] {
             let source = format!("steps:\n  - uses: {CHECKOUT_ACTION}\n    with:\n      ref: {altered}\n      path: .candidate\n");
             assert!(validate_at(".github/workflows/trusted-maintainability.yml", &source).is_err(), "accepted {altered:?}");
+        }
+
+        for inputs in [
+            "",
+            "ref: ${{ github.sha }}\n      path: .candidate\n      fetch-depth: 0",
+            "ref: ${{ github.sha }}\n      path: .candidate\n      persist-credentials: false",
+            "ref: ${{ github.sha }}\n      path: .candidate\n      fetch-depth: 1\n      persist-credentials: false",
+            "repository: ${{ github.repository }}\n      ref: ${{ github.workflow_sha }}\n      path: .trusted-gate\n      fetch-depth: 0\n      persist-credentials: false",
+        ] {
+            let with = if inputs.is_empty() { String::new() } else { format!("    with:\n      {inputs}\n") };
+            let source = format!("steps:\n  - uses: {CHECKOUT_ACTION}\n{with}");
+            assert!(
+                validate_at(".github/workflows/trusted-maintainability.yml", &source).is_err(),
+                "accepted incomplete protected checkout: {inputs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn classification_workflow_may_check_out_only_the_pull_request_base() {
+        let reviewed = format!("steps:\n  - uses: {CHECKOUT_ACTION}\n    with:\n      ref: {PR_BASE_REVISION}\n      persist-credentials: false\n");
+        validate_at(PR_CLASSIFICATION_WORKFLOW, &reviewed).expect("reviewed pull-request base checkout");
+
+        for source in [
+            format!("steps:\n  - uses: {CHECKOUT_ACTION}\n"),
+            format!("steps:\n  - uses: {CHECKOUT_ACTION}\n    with:\n"),
+            format!("steps:\n  - uses: {CHECKOUT_ACTION}\n    with:\n      persist-credentials: false\n"),
+        ] {
+            assert!(
+                validate_at(PR_CLASSIFICATION_WORKFLOW, &source).is_err(),
+                "accepted checkout without the reviewed base ref: {source:?}"
+            );
+        }
+
+        for inputs in [
+            format!("ref: {PR_BASE_REVISION}"),
+            format!("ref: {PR_BASE_REVISION}\n      fetch-depth: 0\n      persist-credentials: false"),
+            format!("ref: {PR_BASE_REVISION}\n      persist-credentials: false\n      persist-credentials: false"),
+        ] {
+            let source = format!("steps:\n  - uses: {CHECKOUT_ACTION}\n    with:\n      {inputs}\n");
+            assert!(validate_at(PR_CLASSIFICATION_WORKFLOW, &source).is_err(), "accepted {inputs:?}");
+        }
+
+        for (path, checkout_ref) in [
+            (PR_CLASSIFICATION_WORKFLOW, "${{ github.sha }}"),
+            (PR_CLASSIFICATION_WORKFLOW, "${{ github.event.pull_request.head.sha }}"),
+            (".github/workflows/other.yml", PR_BASE_REVISION),
+        ] {
+            let source = format!("steps:\n  - uses: {CHECKOUT_ACTION}\n    with:\n      ref: {checkout_ref}\n      persist-credentials: false\n");
+            assert!(validate_at(path, &source).is_err(), "accepted {path:?} at {checkout_ref:?}");
         }
     }
 }

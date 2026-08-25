@@ -26,7 +26,8 @@ pub(in crate::structure::suppression::policy::config::command::arguments) fn sel
 
 fn is_exact_command_word(word: &str, command: &str) -> bool {
     let word = word.trim_start_matches(['(', '{']);
-    word.rsplit(['/', '\\']).next().unwrap_or(word).eq_ignore_ascii_case(command)
+    word.eq_ignore_ascii_case(command)
+        || super::path::trusted_system_program(word) && word.rsplit(['/', '\\']).next().is_some_and(|basename| basename.eq_ignore_ascii_case(command))
 }
 
 fn command_builtin(arguments: &[String]) -> Selection<'_> {
@@ -60,11 +61,15 @@ fn env_command(arguments: &[String]) -> Selection<'_> {
             _ if argument.starts_with("--unset=") || argument.starts_with("--chdir=") => index += 1,
             _ if attached_short_operand(argument, 'u') || attached_short_operand(argument, 'C') => index += 1,
             _ if argument.starts_with('-') => return Selection::Opaque,
-            _ if super::super::is_environment_assignment(argument) => index += 1,
+            _ if is_env_assignment(argument) => index += 1,
             _ => return Selection::Nested(&arguments[index..]),
         }
     }
     Selection::NoCommand
+}
+
+fn is_env_assignment(argument: &str) -> bool {
+    argument.split_once('=').is_some_and(|(name, _)| !name.is_empty())
 }
 
 fn exec_builtin(arguments: &[String]) -> Selection<'_> {
@@ -168,10 +173,30 @@ fn timeout_command(arguments: &[String]) -> Selection<'_> {
 }
 
 fn rustup_command(arguments: &[String]) -> Selection<'_> {
-    if arguments.first().is_none_or(|argument| !argument.eq_ignore_ascii_case("run")) {
+    let mut index = 0;
+    let mut selector = false;
+    while let Some(argument) = arguments.get(index) {
+        match argument.as_str() {
+            "-h" | "--help" | "-V" | "--version" => return Selection::NoCommand,
+            "-v" | "--verbose" | "-q" | "--quiet" => index += 1,
+            "+1.97.0" | "+nightly" if !selector => {
+                selector = true;
+                index += 1;
+            }
+            _ if argument.starts_with(['-', '+']) => return Selection::Opaque,
+            _ => break,
+        }
+    }
+    let Some(subcommand) = arguments.get(index) else {
+        return Selection::NoCommand;
+    };
+    if !subcommand.eq_ignore_ascii_case("run") {
+        if subcommand.eq_ignore_ascii_case("man") || subcommand.eq_ignore_ascii_case("doc") && !arguments[index + 1..].iter().any(|argument| argument == "--path") {
+            return Selection::Opaque;
+        }
         return Selection::NotWrapper;
     }
-    let mut index = 1;
+    index += 1;
     while matches!(arguments.get(index).map(String::as_str), Some("--install")) {
         index += 1;
     }
@@ -209,6 +234,7 @@ fn is_unparsed_launcher(command: &str) -> bool {
     matches!(
         command.trim_end_matches(".exe"),
         "buildcache"
+            | "busybox"
             | "bwrap"
             | "cachepot"
             | "capsh"
@@ -253,6 +279,7 @@ fn is_unparsed_launcher(command: &str) -> bool {
             | "sccache"
             | "systemd-run"
             | "taskset"
+            | "toybox"
             | "unshare"
             | "valgrind"
             | "watch"
@@ -279,9 +306,9 @@ mod tests {
         assert!(matches!(select("choom", "choom", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/choom", "choom", &arguments), Selection::Opaque));
         assert!(matches!(select("capsh", "capsh", &arguments), Selection::Opaque));
-        assert!(matches!(select("/usr/sbin/capsh", "capsh", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/sbin/capsh", "capsh", &arguments), Selection::NotWrapper));
         assert!(matches!(select("chroot", "chroot", &arguments), Selection::Opaque));
-        assert!(matches!(select("/usr/sbin/chroot", "chroot", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/sbin/chroot", "chroot", &arguments), Selection::NotWrapper));
         assert!(matches!(select("setarch", "setarch", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/setarch", "setarch", &arguments), Selection::Opaque));
         assert!(matches!(select("linux32", "linux32", &arguments), Selection::Opaque));
@@ -291,13 +318,15 @@ mod tests {
         assert!(matches!(select("su", "su", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/su", "su", &arguments), Selection::Opaque));
         assert!(matches!(select("runuser", "runuser", &arguments), Selection::Opaque));
-        assert!(matches!(select("/usr/sbin/runuser", "runuser", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/sbin/runuser", "runuser", &arguments), Selection::NotWrapper));
         assert!(matches!(select("start-stop-daemon", "start-stop-daemon", &arguments), Selection::Opaque));
-        assert!(matches!(select("/usr/sbin/start-stop-daemon", "start-stop-daemon", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/sbin/start-stop-daemon", "start-stop-daemon", &arguments), Selection::NotWrapper));
         assert!(matches!(select("ssh", "ssh", &arguments), Selection::Opaque));
         assert!(matches!(select("/usr/bin/ssh", "ssh", &arguments), Selection::Opaque));
         assert!(matches!(select("ssh-agent", "ssh-agent", &arguments), Selection::Opaque));
         assert!(matches!(select("ssh-agent.exe", "ssh-agent.exe", &arguments), Selection::Opaque));
+        assert!(matches!(select("busybox", "busybox", &arguments), Selection::Opaque));
+        assert!(matches!(select("/usr/bin/toybox", "toybox", &arguments), Selection::Opaque));
         assert!(is_command_launcher("env"));
         assert!(is_command_launcher("env.exe"));
         assert!(is_command_launcher("ssh"));
@@ -388,6 +417,25 @@ mod tests {
             Selection::Opaque
         ));
         assert!(matches!(select("rustup", "rustup", &["show".to_owned()]), Selection::NotWrapper));
+        assert!(matches!(select("rustup", "rustup", &["doc".to_owned()]), Selection::Opaque));
+        assert!(matches!(select("rustup", "rustup", &["man".to_owned(), "cargo".to_owned()]), Selection::Opaque));
+        assert!(matches!(select("rustup", "rustup", &["doc".to_owned(), "--path".to_owned()]), Selection::NotWrapper));
         assert!(matches!(select("rustup", "rustup", &["run".to_owned(), "--help".to_owned()]), Selection::NoCommand));
+        for prefix in [&["--verbose"][..], &["-q"][..], &["+1.97.0"][..], &["-v", "+nightly"][..]] {
+            let mut arguments = prefix.iter().map(|argument| (*argument).to_owned()).collect::<Vec<_>>();
+            arguments.extend(["run", "1.97.0", "sh", "quality/lint.txt"].map(str::to_owned));
+            let Selection::Nested(command) = select("rustup", "rustup", &arguments) else {
+                panic!("reviewed rustup prefix should preserve nested-command selection: {arguments:?}");
+            };
+            assert_eq!(command, ["sh", "quality/lint.txt"]);
+        }
+        for prefix in ["--unknown", "+stable", "+1.97.0"] {
+            let arguments = if prefix == "+1.97.0" {
+                vec![prefix.to_owned(), "+nightly".to_owned(), "run".to_owned(), "1.97.0".to_owned(), "true".to_owned()]
+            } else {
+                vec![prefix.to_owned(), "run".to_owned(), "1.97.0".to_owned(), "true".to_owned()]
+            };
+            assert!(matches!(select("rustup", "rustup", &arguments), Selection::Opaque), "{arguments:?}");
+        }
     }
 }

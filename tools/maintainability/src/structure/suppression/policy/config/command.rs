@@ -3,29 +3,40 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use sha2::{Digest, Sha256};
 
 mod actions;
 mod arguments;
+mod command_profiles;
 mod environment;
 mod make;
+mod profile_policy;
+mod source_size;
 mod surfaces;
 mod yaml;
 use super::cargo::tracked_manifests;
 pub(super) use arguments::has_sourced_file_indirection;
 #[cfg(test)]
 pub(super) use arguments::weakening_token;
+#[cfg(test)]
 pub(super) use arguments::weakening_token_for_surface;
 use arguments::{
-    cargo_manifest_paths_for_surface, direct_rust_sources_for_surface, normalized_shell_tokens, normalized_shell_words, package_script_commands,
-    weakening_token_in_reviewed_shell_remainder,
+    FilesystemContext, cargo_manifest_paths_for_surface, direct_rust_sources_for_surface, mise_configuration_is_resolved, normalized_shell_tokens, normalized_shell_words,
+    package_script_commands, weakening_mise_environment, weakening_token_for_surface_with_reviewed_source, weakening_token_in_reviewed_shell_remainder,
 };
 use environment::{is_case_insensitive_weakening_environment_assignment_name, is_weakening_environment_assignment_name, is_weakening_environment_name};
 use surfaces::execution_surfaces;
 #[cfg(test)]
 pub(super) use surfaces::without_reviewed_dispatch;
 
+#[cfg(test)]
+pub(super) fn checked_in_legacy_transition_capabilities(workspace: &Path, path: &str, source: &str) -> Option<(bool, bool)> {
+    let bytes = fs::read(workspace.join(profile_policy::POLICY_PATH)).ok()?;
+    let bridge = profile_policy::ProfileManifest::parse(&bytes).ok()?.legacy_transition_bridge(path, source)?;
+    Some((bridge.opaque_execution_inputs, bridge.weakening))
+}
+
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
+    "#!/usr/bin/env -S -u BASH_ENV -u BASHOPTS -u ENV -u SHELLOPTS /usr/bin/bash --noprofile --norc",
     "unset GCONV_PATH",
     "unset OPENSSL_CONF OPENSSL_CONF_INCLUDE OPENSSL_ENGINES OPENSSL_MODULES",
     "unset RIPGREP_CONFIG_PATH",
@@ -34,6 +45,7 @@ pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "export -n CDPATH IFS",
     "if /usr/bin/env | /usr/bin/grep '^BASH_FUNC_' >/dev/null; then",
     "    exit 1 # inherited exported functions are unsupported",
+    "if /usr/bin/env | /usr/bin/grep -E '^(BASHOPTS|SHELLOPTS)=' >/dev/null; then",
     "cargo_home=${CARGO_HOME:-}",
     "        cargo_home=\"$HOME/.cargo\"",
     "        cargo_home=\"$USERPROFILE/.cargo\"",
@@ -42,38 +54,35 @@ pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "git_command=$(trusted_system_command git)",
     "GIT_CONFIG_NOSYSTEM=1",
     "GIT_CONFIG_GLOBAL=/dev/null",
-    "readonly GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL",
-    "export GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL",
+    "GIT_ATTR_NOSYSTEM=1",
+    "readonly GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL GIT_ATTR_NOSYSTEM",
+    "export GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL GIT_ATTR_NOSYSTEM",
     "    local configured_base=${LOCALHOLD_MAINTAINABILITY_BASE_REV:-}",
     "    git_executable=$git_command",
     "        git_executable=$(\"$cygpath_command\" -w \"$git_executable\")",
     "    LOCALHOLD_MAINTAINABILITY_GIT=$git_executable",
     "    export LOCALHOLD_MAINTAINABILITY_GIT",
-    "            BASH_ENV | ENV | CDPATH | IFS | COMPILER_PATH | GCC_EXEC_PREFIX | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | RIPGREP_CONFIG_PATH | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \\",
-    "                RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \\",
-    "                CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \\",
-    "                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_* | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | TAR_OPTIONS)",
+    "            BASH_ENV | ENV | CDPATH | IFS | AR | AR_* | HOST_AR | TARGET_AR | ARFLAGS | ARFLAGS_* | HOST_ARFLAGS | TARGET_ARFLAGS | \\",
+    "                CC | CC_* | HOST_CC | TARGET_CC | CFLAGS | CFLAGS_* | HOST_CFLAGS | TARGET_CFLAGS | CROSS_COMPILE | \\",
+    "                CXX | CXX_* | HOST_CXX | TARGET_CXX | CXXFLAGS | CXXFLAGS_* | HOST_CXXFLAGS | TARGET_CXXFLAGS | \\",
+    "                NVCC | NVCC_* | HOST_NVCC | TARGET_NVCC | RANLIB | RANLIB_* | HOST_RANLIB | TARGET_RANLIB | \\",
+    "                LDFLAGS | LDFLAGS_* | HOST_LDFLAGS | TARGET_LDFLAGS | RANLIBFLAGS | RANLIBFLAGS_* | HOST_RANLIBFLAGS | TARGET_RANLIBFLAGS | CCC_OVERRIDE_OPTIONS | CL | \\",
+    "                CMAKE_TOOLCHAIN_FILE | CMAKE_TOOLCHAIN_FILE_* | *_CMAKE_TOOLCHAIN_FILE | *_CMAKE_TOOLCHAIN_FILE_* | \\",
+    "                COMPILER_PATH | CPATH | C_INCLUDE_PATH | CPLUS_INCLUDE_PATH | GCC_EXEC_PREFIX | OBJC_INCLUDE_PATH | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | \\",
+    "                OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | PERL5LIB | PERL5OPT | PERLLIB | RIPGREP_CONFIG_PATH | \\",
+    "                RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | \\",
+    "                CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | RUSTC | RUSTDOC | RUSTC_WRAPPER | \\",
+    "                RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | \\",
+    "                CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | \\",
+    "                CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | \\",
+    "                EDITOR | GIT_* | LESS | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | LV | PAGER | SSH_ASKPASS | SSH_ASKPASS_REQUIRE | \\",
+    "                TAR_OPTIONS | VISUAL | ZIP | ZIPOPT | _CL_)",
     "if [[ -v GITHUB_ACTIONS || -v GITHUB_EVENT_PATH || -v GITHUB_SHA ]]; then",
     "        if [[ ${GITHUB_ACTIONS:-} != true || -z ${GITHUB_EVENT_PATH:-} || -z ${GITHUB_SHA:-} ]]; then",
     "        if [[ ! $GITHUB_SHA =~ ^[[:xdigit:]]{40}$ || ${checked_head,,} != \"${GITHUB_SHA,,}\" ]]; then",
     "            printf 'checked-out Git head revision differs from GITHUB_SHA before checker compilation\\n' >&2",
     "        LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT=$snapshot_root \"$bash_command\" \"$snapshot_gate_runner\" \"$mode\" || status=$?",
 ];
-pub(super) fn exact_transition_capabilities(path: &str, source: &str) -> Option<(bool, bool)> {
-    let observed = format!("{:x}", Sha256::digest(source.as_bytes()));
-    match (path, observed.as_str()) {
-        ("script/bootstrap.sh", "36982c49561af13986fc34ddeefd759010cd615980604eca34d09ef5ba0358c3")
-        | ("script/dep-audit.sh", "5542706978c03c28159305257466a32566fd66bcae9c7502de4be91fa45ae7d1")
-        | ("script/test-postgres-smoke.sh", "2f54d872c4773e0ade58b2c0d70bf37e43a477ab809b5ad454195af895169066") => Some((true, false)),
-        ("script/check-maintainability-bootstrap.sh", "adb17c8d29a05de989beca2be7e653310594f7e979ca4c68b72fc4f5f71489aa")
-        | ("script/claude-review.sh", "c6c56c0212389a349b4a39e95d2578310bcc1a13bcbe8377c010ca69d1aefc8a") => Some((true, true)),
-        ("script/tests/test_claude_review.sh", "41c33e1d76f36d8c9e5050a15b24de19c3044078694170d95d672657f6f8940c")
-        | ("script/tests/test_maintainability_bootstrap.sh", "3532c926ba6e350b6235a1408b660a34c99867af81251e3cee7f541a9da16f40")
-        | ("script/run-maintainability-gate.sh", "82609774f45011fa7a6260a3841fb49a7304047c1ca1faa5c62869c9524819d8")
-        | (".github/workflows/ci.yml", "a3caaf8313e9aff92fafa5103a43da607eea095a63e9cb7102839a1084a0a0b5") => Some((false, true)),
-        _ => None,
-    }
-}
 pub(super) const GATE_RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "repository_root=${LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT:-$implementation_root}",
     "LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT=$repository_root",
@@ -117,7 +126,14 @@ pub(super) const GATE_RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "CARGO_TARGET_DIR=$relative_target_directory",
     "readonly CARGO_HOME CARGO_TARGET_DIR",
     "export PATH CARGO RUSTC RUSTDOC RUSTFMT RUSTUP_HOME RUSTUP_TOOLCHAIN CARGO_HOME CARGO_TARGET_DIR GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL LOCALHOLD_MAINTAINABILITY_CARGO LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY LOCALHOLD_MAINTAINABILITY_CARGO_FMT LOCALHOLD_MAINTAINABILITY_RUSTC LOCALHOLD_MAINTAINABILITY_RUSTUP",
-    "    for name in BASH_ENV ENV COMPILER_PATH GCC_EXEC_PREFIX GCONV_PATH GITHUB_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD OPENSSL_CONF OPENSSL_CONF_INCLUDE OPENSSL_ENGINES OPENSSL_MODULES RIPGREP_CONFIG_PATH RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER \\",
+    "    while IFS= read -r -d '' entry; do",
+    "            AR | AR_* | HOST_AR | TARGET_AR | ARFLAGS | ARFLAGS_* | HOST_ARFLAGS | TARGET_ARFLAGS | \\",
+    "                CC | CC_* | HOST_CC | TARGET_CC | CFLAGS | CFLAGS_* | HOST_CFLAGS | TARGET_CFLAGS | CROSS_COMPILE | \\",
+    "                CXX | CXX_* | HOST_CXX | TARGET_CXX | CXXFLAGS | CXXFLAGS_* | HOST_CXXFLAGS | TARGET_CXXFLAGS | \\",
+    "                NVCC | NVCC_* | HOST_NVCC | TARGET_NVCC | RANLIB | RANLIB_* | HOST_RANLIB | TARGET_RANLIB | \\",
+    "                LDFLAGS | LDFLAGS_* | HOST_LDFLAGS | TARGET_LDFLAGS | RANLIBFLAGS | RANLIBFLAGS_* | HOST_RANLIBFLAGS | TARGET_RANLIBFLAGS | CMAKE_TOOLCHAIN_FILE | \\",
+    "                CMAKE_TOOLCHAIN_FILE_* | *_CMAKE_TOOLCHAIN_FILE | *_CMAKE_TOOLCHAIN_FILE_*)",
+    "    for name in BASH_ENV ENV CCC_OVERRIDE_OPTIONS CL COMPILER_PATH CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH GCC_EXEC_PREFIX OBJC_INCLUDE_PATH GCONV_PATH GITHUB_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD OPENSSL_CONF OPENSSL_CONF_INCLUDE OPENSSL_ENGINES OPENSSL_MODULES PERL5LIB PERL5OPT PERLLIB RIPGREP_CONFIG_PATH RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER ZIP ZIPOPT _CL_ \\",
     "        RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS \\",
     "        CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do",
     "    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY && -n $LOCALHOLD_MAINTAINABILITY_CARGO_FMT && -n $LOCALHOLD_MAINTAINABILITY_RUSTC && -n $LOCALHOLD_MAINTAINABILITY_RUSTUP && -n $git_command ]]",
@@ -161,6 +177,14 @@ pub(super) const INSTALL_COMMAND_LINES: &[&str] = &[
     "  cpu) \"$cargo_command\" build --release --locked --features reranker --target-dir \"$build_dir\" ;;",
     "  cuda) \"$cargo_command\" build --release --locked --features reranker-cuda --target-dir \"$build_dir\" ;;",
 ];
+pub(super) const DEPENDENCY_AUDIT_COMMAND_LINES: &[&str] = &[
+    "if ! run_workspace_deny; then",
+    "if ! run_audit_tool_deny; then",
+    "if ! run_workspace_machete; then",
+    "if ! run_audit_tool_machete; then",
+    "if ! run_workspace_audit; then",
+    "if ! run_audit_tool_audit; then",
+];
 pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "unset GITHUB_ACTIONS GITHUB_EVENT_PATH GITHUB_SHA LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT LOCALHOLD_MAINTAINABILITY_BASE_REV",
     "fixture_parent=\"$repository_root/target/bootstrap-tests\"",
@@ -188,7 +212,10 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "cargo_home=\"$fixture/cargo-home\"",
     "export CARGO_HOME=$cargo_home",
     "unset CARGO_HOME",
-    "for loader_variable in GCONV_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD; do",
+    "for loader_variable in BASHOPTS GCONV_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD PERL5LIB PERL5OPT PERLLIB; do",
+    "if ! env BASH_ENV=$shell_startup_file ENV=$shell_startup_file BASHOPTS=localvar_inherit SHELLOPTS=xtrace \\",
+    "    INHERITED_SHELL_OPTION_MARKER=$shell_option_marker PS4='$(printf executed >\"$INHERITED_SHELL_OPTION_MARKER\")' \\",
+    "    printf 'maintainability bootstrap executed inherited SHELLOPTS before sanitizing\\n' >&2",
     "FAKE_JUST_MARKER=$fake_just_marker FAKE_CARGO_MARKER=$fake_cargo_marker FAKE_RUSTUP_MARKER=$fake_rustup_marker PATH=\"$fake_bin:$PATH\" run_check --test-environment >/dev/null",
     "if LOCALHOLD_MAINTAINABILITY_RUSTUP=\"$fake_bin/rustup\" run_check --test-environment >/dev/null 2>&1; then",
     "if PATH=\"$fake_system_bin:$PATH\" run_check >/dev/null 2>&1; then",
@@ -203,24 +230,39 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "if RUSTUP_HOME=$fake_rustup_home run_check --test-environment >/dev/null 2>&1; then",
     "RUSTUP_HOME=$fake_rustup_environment run_check --test-environment >/dev/null",
     "if RUSTUP_HOME=$fake_rustup_environment run_check --test-environment >/dev/null 2>&1; then",
-    "BASH_ENV=$bash_env ENV=$bash_env COMPILER_PATH=untrusted GCC_EXEC_PREFIX=untrusted GCONV_PATH=untrusted GITHUB_PATH=untrusted LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' OPENSSL_CONF=untrusted OPENSSL_CONF_INCLUDE=untrusted OPENSSL_ENGINES=untrusted OPENSSL_MODULES=untrusted RIPGREP_CONFIG_PATH=untrusted RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CARGO_HOME=\"$fixture/untrusted-cargo-home\" CARGO_TARGET_DIR=\"$fixture/untrusted-target\" CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \\",
+    "CMAKE_TOOLCHAIN_FILE=untrusted CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu=untrusted HOST_CMAKE_TOOLCHAIN_FILE=untrusted \\",
+    "    AWS_LC_SYS_CMAKE_TOOLCHAIN_FILE=untrusted AWS_LC_SYS_CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu=untrusted \\",
+    "BASH_ENV=$bash_env ENV=$bash_env AR=untrusted ARFLAGS=untrusted CC=untrusted CC_x86_64_unknown_linux_gnu=untrusted CFLAGS=untrusted CROSS_COMPILE=untrusted CXX=untrusted CXXFLAGS=untrusted HOST_CC=untrusted HOST_LDFLAGS=untrusted HOST_RANLIB=untrusted LDFLAGS=untrusted LDFLAGS_x86_64_unknown_linux_gnu=untrusted NVCC=untrusted RANLIBFLAGS=untrusted TARGET_CXX=untrusted TARGET_LDFLAGS=untrusted CCC_OVERRIDE_OPTIONS=untrusted CL=untrusted COMPILER_PATH=untrusted CPATH=untrusted C_INCLUDE_PATH=untrusted CPLUS_INCLUDE_PATH=untrusted GCC_EXEC_PREFIX=untrusted OBJC_INCLUDE_PATH=untrusted GCONV_PATH=untrusted GITHUB_PATH=untrusted LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' OPENSSL_CONF=untrusted OPENSSL_CONF_INCLUDE=untrusted OPENSSL_ENGINES=untrusted OPENSSL_MODULES=untrusted PERL5LIB=untrusted PERL5OPT=-MReviewMarker PERLLIB=untrusted RIPGREP_CONFIG_PATH=untrusted RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CARGO_HOME=\"$fixture/untrusted-cargo-home\" CARGO_TARGET_DIR=\"$fixture/untrusted-target\" CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted ZIP=untrusted ZIPOPT=untrusted _CL_=untrusted \\",
     "    RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \\",
     "    CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \\",
     "    run_check --test-environment >/dev/null",
+    "/usr/bin/env 'CC_x86_64-unknown-linux-gnu=untrusted' \"$check\" --root \"$test_repository\" --test-environment >/dev/null",
 ];
+pub(super) const BOOTSTRAP_TEST_OPAQUE_COMMAND_LINES: &[&str] =
+    &["/usr/bin/env 'CC_x86_64-unknown-linux-gnu=untrusted' \"$check\" --root \"$test_repository\" --test-environment >/dev/null"];
+#[cfg(test)]
 pub(super) const MISE_ENVIRONMENT_LINES: &[&str] = &[
     "CARGO_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/cargo\"",
     "RUSTUP_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/rustup\"",
+    "_.path = [\"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/cargo/bin\"]",
 ];
 pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
-    "        shell: /usr/bin/env -u BASH_ENV -u ENV -u GCONV_PATH -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
-    "        shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:ENV = $null; $env:GCONV_PATH = $null; $env:SHELLOPTS = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\\Program Files\\Git\\bin\\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE\"'",
+    "        shell: /usr/bin/env -u BASH_ENV -u BASHOPTS -u ENV -u GCONV_PATH -u SHELLOPTS -u PERL5LIB -u PERL5OPT -u PERLLIB -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
+    "        shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:BASHOPTS = $null; $env:ENV = $null; $env:GCONV_PATH = $null; $env:SHELLOPTS = $null; $env:PERL5LIB = $null; $env:PERL5OPT = $null; $env:PERLLIB = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\\Program Files\\Git\\bin\\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE\"'",
     "          BASH_ENV: ''",
     "          BASH_ENV: ''",
+    "          BASHOPTS: ''",
+    "          BASHOPTS: ''",
     "          GCONV_PATH: ''",
     "          GCONV_PATH: ''",
     "          SHELLOPTS: ''",
     "          SHELLOPTS: ''",
+    "          PERL5LIB: ''",
+    "          PERL5LIB: ''",
+    "          PERL5OPT: ''",
+    "          PERL5OPT: ''",
+    "          PERLLIB: ''",
+    "          PERLLIB: ''",
     "          GIT_CONFIG_COUNT: '1'",
     "          GIT_CONFIG_KEY_0: core.autocrlf",
     "          GIT_CONFIG_VALUE_0: 'false'",
@@ -238,7 +280,7 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
-    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: b5eec7cdace44b80740b67b0a5f6696dd3f74be39fa8949a4349010dbfd99c93",
+    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: a5ac22d33542fc44ddbfacac8eeecdf5bc8669a3e9fe1139ba043f55480de03f",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
@@ -247,8 +289,8 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          if [[ \"$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256\" != \"$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256\" ]]; then",
 ];
 pub(super) const TRUSTED_GATE_ENVIRONMENT_LINES: &[&str] = &[
-    "        shell: /usr/bin/env -u BASH_ENV -u ENV -u GCONV_PATH -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
-    "        shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:ENV = $null; $env:GCONV_PATH = $null; $env:SHELLOPTS = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\\Program Files\\Git\\bin\\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE\"'",
+    "        shell: /usr/bin/env -u BASH_ENV -u BASHOPTS -u ENV -u GCONV_PATH -u SHELLOPTS -u PERL5LIB -u PERL5OPT -u PERLLIB -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
+    "        shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:BASHOPTS = $null; $env:ENV = $null; $env:GCONV_PATH = $null; $env:SHELLOPTS = $null; $env:PERL5LIB = $null; $env:PERL5OPT = $null; $env:PERLLIB = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\\Program Files\\Git\\bin\\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE\"'",
     "          GIT_CONFIG_COUNT: '1'",
     "          GIT_CONFIG_COUNT: '1'",
     "          GIT_CONFIG_KEY_0: core.autocrlf",
@@ -281,49 +323,84 @@ pub(super) const GPU_RELEASE_REVISION_ENVIRONMENT_LINES: &[&str] = &[
     "          unset ORT_DYLIB_PATH LD_LIBRARY_PATH LD_PRELOAD",
     "            PATH=/usr/bin:/bin \\",
 ];
-pub(super) const CLAUDE_REVIEW_ENVIRONMENT_LINES: &[&str] = &["    \"PATH=$PATH\""];
+pub(super) const CLAUDE_REVIEW_ENVIRONMENT_LINES: &[&str] = &["        \"PATH=$PATH\" \\"];
 pub(super) const CLAUDE_REVIEW_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "PATH=\"$test_root/bin:$PATH\" \\",
     "if PATH=\"$test_root/bin:$PATH\" \\",
     "PATH=\"$test_root/bin:$PATH\" \\",
+    "    PATH=\"$test_root/bin:$PATH\" \\",
+    "    if PATH=\"$test_root/bin:$PATH\" \"$repository_root/script/claude-review.sh\" opus \"$prompt\" > \"$test_root/descendant-output\" 2> \"$test_root/descendant-error\"; then",
 ];
 
 pub fn reject_checked_in_weakening(workspace: &Path) -> Result<()> {
+    reject_checked_in_weakening_with_mode(workspace, RepositoryValidation::Required)
+}
+
+#[cfg(test)]
+pub fn reject_checked_in_weakening_fixture(workspace: &Path) -> Result<()> {
+    reject_checked_in_weakening_with_mode(workspace, RepositoryValidation::Fixture)
+}
+
+#[derive(Clone, Copy)]
+enum RepositoryValidation {
+    Required,
+    #[cfg(test)]
+    Fixture,
+}
+
+fn reject_checked_in_weakening_with_mode(workspace: &Path, validation: RepositoryValidation) -> Result<()> {
     let surfaces = execution_surfaces(workspace)?;
+    match validation {
+        RepositoryValidation::Required => source_size::validate_maintainability_analyzer(workspace, &surfaces.tracked_paths, &surfaces.checked_paths)?,
+        #[cfg(test)]
+        RepositoryValidation::Fixture => source_size::validate_fixture(workspace, &surfaces.checked_paths)?,
+    }
     let audited_manifests = tracked_manifests(workspace)?.into_iter().collect::<BTreeSet<_>>();
-    for path in surfaces.paths {
-        if is_cargo_config(Path::new(&path)) {
-            bail!("checked-in Cargo configuration {path:?} is unsupported because it can override lint policy");
-        }
-        if is_javascript(Path::new(&path)) {
-            bail!("checked-in JavaScript command surface {path:?} is unsupported because process invocations cannot be audited as shell commands");
-        }
-        let source = fs::read_to_string(workspace.join(&path)).with_context(|| format!("read lint command execution surface {path}"))?;
-        let transition = exact_transition_capabilities(&path, &source);
-        yaml::validate_execution_metadata(&path, &source)?;
-        actions::validate_action_references(workspace, &surfaces.tracked_paths, &path, &source)?;
-        make::validate_surface(Path::new(&path), &source)?;
-        if has_sourced_file_indirection(&path, &source) {
-            bail!("checked-in Rust command surface {path:?} uses unsupported sourced-file indirection");
-        }
-        let (selected_manifests, unresolved_manifest) = cargo_manifest_paths_for_surface(&path, &source);
+    for path in &surfaces.paths {
+        let source = fs::read_to_string(workspace.join(path)).with_context(|| format!("read lint command execution surface {path}"))?;
+        let legacy_transition = surfaces.command_profiles.as_ref().and_then(|profiles| profiles.legacy_transition_bridge(path, &source));
+        validate_before_resolution(workspace, path, &source)?;
+        actions::validate_action_references(workspace, &surfaces.tracked_paths, path, &source)?;
+        let (selected_manifests, unresolved_manifest) = cargo_manifest_paths_for_surface(path, &source);
         if unresolved_manifest || !selected_manifests.is_subset(&audited_manifests) {
             bail!("checked-in Rust command surface {path:?} selects a Cargo manifest outside the audited manifest inventory");
         }
-        if weakening_token_for_surface(&path, &source) && !reviewed_dynamic_command_references_are_exact(&path, &source) && !transition.is_some_and(|(_, weakening)| weakening) {
+        let source_is_reviewed = surfaces.command_profiles.as_ref().is_some_and(|profiles| profiles.source_is_current(path, &source));
+        let reviewed_source = surfaces::without_reviewed_dispatch(path, &source, source_is_reviewed);
+        let filesystem_context = FilesystemContext::new(workspace, &surfaces.paths, &surfaces.tracked_paths);
+        let legacy_weakening = legacy_transition.is_some_and(|bridge| bridge.weakening);
+        if weakening_token_for_surface_with_reviewed_source(filesystem_context, path, &reviewed_source, source_is_reviewed)
+            && !reviewed_quality_command_exceptions_are_exact(path, &source, source_is_reviewed)
+            && !legacy_weakening
+        {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening argument");
         }
-        if weakening_environment_for_surface(&path, &source) && !scrubber_environment_references_are_exact(&path, &source) && !transition.is_some_and(|(_, weakening)| weakening) {
+        if weakening_environment_for_surface(path, &source) && !scrubber_environment_references_are_exact(path, &source) && !legacy_weakening {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening environment channel");
         }
-        let (sources, unresolved) = direct_rust_sources_for_surface(&path, &source);
-        if unresolved {
-            bail!("checked-in Rust command surface {path:?} contains a direct compiler invocation without auditable repository-relative .rs inputs");
-        }
-        if !sources.is_empty() {
-            crate::structure::suppression::reject_direct_source_suppressions(workspace, &sources)?;
-            bail!("checked-in Rust command surface {path:?} directly compiles an opaque command helper; use an audited Cargo target instead");
-        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_before_resolution(workspace: &Path, path: &str, source: &str) -> Result<()> {
+    if is_cargo_config(Path::new(path)) {
+        bail!("checked-in Cargo configuration {path:?} is unsupported because it can override lint policy");
+    }
+    if is_javascript(Path::new(path)) {
+        bail!("checked-in JavaScript command surface {path:?} is unsupported because process invocations cannot be audited as shell commands");
+    }
+    yaml::validate_execution_metadata(path, source)?;
+    make::validate_surface(Path::new(path), source)?;
+    if has_sourced_file_indirection(path, source) {
+        bail!("checked-in Rust command surface {path:?} uses unsupported sourced-file indirection");
+    }
+    let (sources, unresolved) = direct_rust_sources_for_surface(path, source);
+    if unresolved {
+        bail!("checked-in Rust command surface {path:?} contains a direct compiler invocation without auditable repository-relative .rs inputs");
+    }
+    if !sources.is_empty() {
+        crate::structure::suppression::reject_direct_source_suppressions(workspace, &sources)?;
+        bail!("checked-in Rust command surface {path:?} directly compiles an opaque command helper; use an audited Cargo target instead");
     }
     Ok(())
 }
@@ -348,6 +425,7 @@ pub(super) fn weakening_environment_for_surface(path: &str, source: &str) -> boo
         return scripts.map_or(true, |scripts| scripts.iter().any(|script| weakening_environment_for_surface("", script)));
     }
     weakening_environment(source)
+        || weakening_mise_environment(path, source)
         || case_insensitive_environment_assignment(path, source)
         || yaml::environment_variables(path, source)
             .iter()
@@ -424,8 +502,11 @@ fn is_exact_path_environment_name(name: &str) -> bool {
 }
 
 pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str) -> bool {
-    if exact_transition_capabilities(path, source).is_some_and(|(_, weakening)| weakening) {
-        return true;
+    if !mise_configuration_is_resolved(path, source) {
+        return false;
+    }
+    if path == "mise.toml" {
+        return arguments::reviewed_mise_environment_is_exact(path, source);
     }
     let allowed = match path {
         "script/check-maintainability-bootstrap.sh" => BOOTSTRAP_ENVIRONMENT_LINES,
@@ -433,7 +514,6 @@ pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str
         "script/run-source-safety.sh" => RUNNER_ENVIRONMENT_LINES,
         "script/install.sh" => INSTALL_ENVIRONMENT_LINES,
         "script/tests/test_maintainability_bootstrap.sh" => BOOTSTRAP_TEST_ENVIRONMENT_LINES,
-        "mise.toml" => MISE_ENVIRONMENT_LINES,
         ".github/workflows/ci.yml" => CI_TRUST_ENVIRONMENT_LINES,
         ".github/workflows/trusted-maintainability.yml" => TRUSTED_GATE_ENVIRONMENT_LINES,
         ".github/workflows/gpu-release-gate.yml" => GPU_RELEASE_REVISION_ENVIRONMENT_LINES,
@@ -456,11 +536,30 @@ pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str
         .all(|line| allowed.contains(line))
 }
 
-pub(super) fn reviewed_dynamic_command_references_are_exact(path: &str, source: &str) -> bool {
+pub(super) fn reviewed_bootstrap_reexec_is_exact(path: &str, source: &str, source_is_reviewed: bool) -> bool {
+    source_is_reviewed
+        && path == "script/check-maintainability-bootstrap.sh"
+        && source.matches("scrub_untrusted_environment() {").count() == 1
+        && source.lines().filter(|line| *line == "scrub_untrusted_environment \"$@\"").count() == 1
+        && scrubber_environment_references_are_exact(path, source)
+        && source.contains(
+            "scrub_untrusted_environment() {\n    local environment_entry\n    local environment_name\n    local -a removals=()\n    while IFS= read -r -d '' environment_entry; do\n        environment_name=${environment_entry%%=*}\n        case \"${environment_name^^}\" in",
+        )
+        && source.contains("                TAR_OPTIONS | VISUAL | ZIP | ZIPOPT | _CL_)\n                removals+=(-u \"$environment_name\")\n                ;;\n        esac")
+        && source.contains(
+            "    done < <(/usr/bin/env -0)\n    if (( ${#removals[@]} > 0 )); then\n        exec /usr/bin/env \"${removals[@]}\" /usr/bin/bash \"$script_path\" \"$@\"\n    fi\n}\n\nscrub_untrusted_environment \"$@\"",
+        )
+}
+
+pub(super) fn reviewed_quality_command_exceptions_are_exact(path: &str, source: &str, source_is_reviewed: bool) -> bool {
+    if !source_is_reviewed {
+        return false;
+    }
     let expected = match path {
         "script/run-maintainability-gate.sh" => GATE_RUNNER_COMMAND_LINES,
         "script/run-source-safety.sh" => RUNNER_COMMAND_LINES,
         "script/install.sh" => INSTALL_COMMAND_LINES,
+        "script/dep-audit.sh" => DEPENDENCY_AUDIT_COMMAND_LINES,
         ".github/workflows/trusted-maintainability.yml" => TRUSTED_GATE_COMMAND_LINES,
         _ => return false,
     };
@@ -526,7 +625,7 @@ pub(super) fn is_protected_check_input(path: &str) -> bool {
         || path.starts_with("policy/dependency-unsafe")
 }
 
-fn is_mise_config(path: &Path) -> bool {
+pub(super) fn is_mise_config(path: &Path) -> bool {
     let lowercase = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
     let path = Path::new(&lowercase);
     let basename = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
@@ -565,4 +664,27 @@ fn is_cargo_config(path: &Path) -> bool {
             .and_then(Path::file_name)
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.eq_ignore_ascii_case(".cargo"))
+}
+
+#[cfg(test)]
+mod repository_tests {
+    use std::process::Command;
+
+    use super::*;
+
+    #[test]
+    fn production_gate_rejects_deleting_its_complete_candidate_inventory() {
+        let workspace = tempfile::tempdir().expect("temporary repository");
+        let git = |arguments: &[&str]| {
+            let output = Command::new("git").current_dir(workspace.path()).args(arguments).output().expect("run Git");
+            assert!(output.status.success(), "git {arguments:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-q"]);
+        fs::write(workspace.path().join("README"), "candidate deleted the analyzer\n").expect("candidate file");
+        git(&["add", "."]);
+
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("root manifest"), "{error:#}");
+        assert!(error.to_string().contains("must remain tracked"), "{error:#}");
+    }
 }

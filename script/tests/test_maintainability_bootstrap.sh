@@ -468,9 +468,13 @@ fi
 
 bash_env=$fixture/bash-env
 : >"$bash_env"
-BASH_ENV=$bash_env ENV=$bash_env COMPILER_PATH=untrusted GCC_EXEC_PREFIX=untrusted GCONV_PATH=untrusted GITHUB_PATH=untrusted LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' OPENSSL_CONF=untrusted OPENSSL_CONF_INCLUDE=untrusted OPENSSL_ENGINES=untrusted OPENSSL_MODULES=untrusted RIPGREP_CONFIG_PATH=untrusted RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CARGO_HOME="$fixture/untrusted-cargo-home" CARGO_TARGET_DIR="$fixture/untrusted-target" CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted \
+CMAKE_TOOLCHAIN_FILE=untrusted CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu=untrusted HOST_CMAKE_TOOLCHAIN_FILE=untrusted \
+    AWS_LC_SYS_CMAKE_TOOLCHAIN_FILE=untrusted AWS_LC_SYS_CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu=untrusted \
+BASH_ENV=$bash_env ENV=$bash_env AR=untrusted ARFLAGS=untrusted CC=untrusted CC_x86_64_unknown_linux_gnu=untrusted CFLAGS=untrusted CROSS_COMPILE=untrusted CXX=untrusted CXXFLAGS=untrusted HOST_CC=untrusted HOST_RANLIB=untrusted NVCC=untrusted RANLIBFLAGS=untrusted TARGET_CXX=untrusted CCC_OVERRIDE_OPTIONS=untrusted CL=untrusted COMPILER_PATH=untrusted GCC_EXEC_PREFIX=untrusted GCONV_PATH=untrusted GITHUB_PATH=untrusted LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' OPENSSL_CONF=untrusted OPENSSL_CONF_INCLUDE=untrusted OPENSSL_ENGINES=untrusted OPENSSL_MODULES=untrusted RIPGREP_CONFIG_PATH=untrusted RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CARGO_HOME="$fixture/untrusted-cargo-home" CARGO_TARGET_DIR="$fixture/untrusted-target" CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted ZIP=untrusted ZIPOPT=untrusted _CL_=untrusted \
     RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \
     CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \
     run_check --test-environment >/dev/null
+
+/usr/bin/env 'CC_x86_64-unknown-linux-gnu=untrusted' "$check" --root "$test_repository" --test-environment >/dev/null
 
 printf 'maintainability bootstrap tests passed\n'

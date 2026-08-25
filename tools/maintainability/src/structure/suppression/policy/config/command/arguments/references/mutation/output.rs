@@ -1,18 +1,18 @@
-use super::{destination_is_opaque, is_objcopy_command, short_output_target};
+use super::{DispatchContext, destination_is_opaque, is_objcopy_command, short_output_target};
 
-pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]) -> bool {
+pub(super) fn dispatch_is_opaque(context: DispatchContext<'_>, command: &str, arguments: &[String]) -> bool {
     match command {
-        "find" | "find.exe" => find_output_is_opaque(path, arguments),
-        "git" | "git.exe" => long_output_is_opaque(path, arguments, "--output", "--out"),
-        "sort" | "sort.exe" => sort_output_is_opaque(path, arguments),
-        "sponge" | "sponge.exe" => sponge_output_is_opaque(path, arguments),
-        _ if is_objcopy_command(command) => objcopy_section_output_is_opaque(path, arguments),
-        _ if super::super::compiler::accepts_output_path(command) => compiler_output_is_opaque(path, arguments),
+        "find" | "find.exe" => find_output_is_opaque(context, arguments),
+        "git" | "git.exe" => long_output_is_opaque(context, arguments, "--output", "--out"),
+        "sort" | "sort.exe" => sort_output_is_opaque(context, arguments),
+        "sponge" | "sponge.exe" => sponge_output_is_opaque(context, arguments),
+        _ if is_objcopy_command(command) => objcopy_section_output_is_opaque(context, arguments),
+        _ if super::super::compiler::accepts_output_path(command) => compiler_output_is_opaque(context, command, arguments),
         _ => false,
     }
 }
 
-fn sponge_output_is_opaque(path: &str, arguments: &[String]) -> bool {
+fn sponge_output_is_opaque(context: DispatchContext<'_>, arguments: &[String]) -> bool {
     let mut accepts_options = true;
     let mut destination = None;
     for argument in arguments {
@@ -25,15 +25,15 @@ fn sponge_output_is_opaque(path: &str, arguments: &[String]) -> bool {
             return true;
         }
     }
-    destination.is_some_and(|destination| destination_is_opaque(path, destination))
+    destination.is_some_and(|destination| destination_is_opaque(context, destination))
 }
 
-fn find_output_is_opaque(path: &str, arguments: &[String]) -> bool {
+fn find_output_is_opaque(context: DispatchContext<'_>, arguments: &[String]) -> bool {
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
         if matches!(argument.as_str(), "-fls" | "-fprint" | "-fprint0" | "-fprintf") {
             index += 1;
-            if destination_is_opaque(path, arguments.get(index).map_or("", String::as_str)) {
+            if destination_is_opaque(context, arguments.get(index).map_or("", String::as_str)) {
                 return true;
             }
         }
@@ -42,7 +42,7 @@ fn find_output_is_opaque(path: &str, arguments: &[String]) -> bool {
     false
 }
 
-fn objcopy_section_output_is_opaque(path: &str, arguments: &[String]) -> bool {
+fn objcopy_section_output_is_opaque(context: DispatchContext<'_>, arguments: &[String]) -> bool {
     let mut index = 0;
     while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
         let (option, attached) = argument.split_once('=').map_or((argument.as_str(), None), |(option, value)| (option, Some(value)));
@@ -52,7 +52,7 @@ fn objcopy_section_output_is_opaque(path: &str, arguments: &[String]) -> bool {
                 arguments.get(index).map_or("", String::as_str)
             });
             let destination = specification.split_once('=').map_or("", |(_, destination)| destination);
-            if destination_is_opaque(path, destination) {
+            if destination_is_opaque(context, destination) {
                 return true;
             }
         }
@@ -61,11 +61,11 @@ fn objcopy_section_output_is_opaque(path: &str, arguments: &[String]) -> bool {
     false
 }
 
-fn sort_output_is_opaque(path: &str, arguments: &[String]) -> bool {
+fn sort_output_is_opaque(context: DispatchContext<'_>, arguments: &[String]) -> bool {
     let mut index = 0;
     while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
         let destination = long_output_target(argument, arguments, &mut index, "--output", "--out").or_else(|| short_output_target(argument, arguments, &mut index));
-        if destination.is_some_and(|destination| destination_is_opaque(path, destination)) {
+        if destination.is_some_and(|destination| destination_is_opaque(context, destination)) {
             return true;
         }
         index += 1;
@@ -73,18 +73,19 @@ fn sort_output_is_opaque(path: &str, arguments: &[String]) -> bool {
     false
 }
 
-fn compiler_output_is_opaque(path: &str, arguments: &[String]) -> bool {
+fn compiler_output_is_opaque(context: DispatchContext<'_>, command: &str, arguments: &[String]) -> bool {
+    let accepts_dependencies = super::super::compiler::is_compiler_driver(command);
     let mut index = 0;
     while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
         let destination = long_output_target(argument, arguments, &mut index, "--output", "--output").or_else(|| {
-            if argument == "-o" {
+            let option = if accepts_dependencies && argument.starts_with("-MF") { "-MF" } else { "-o" };
+            if argument == option {
                 index += 1;
-                arguments.get(index).map(String::as_str)
-            } else {
-                argument.strip_prefix("-o").filter(|destination| !destination.is_empty())
+                return arguments.get(index).map(String::as_str);
             }
+            argument.strip_prefix(option).filter(|destination| !destination.is_empty())
         });
-        if destination.is_some_and(|destination| destination_is_opaque(path, destination)) {
+        if destination.is_some_and(|destination| destination_is_opaque(context, destination)) {
             return true;
         }
         index += 1;
@@ -92,10 +93,10 @@ fn compiler_output_is_opaque(path: &str, arguments: &[String]) -> bool {
     false
 }
 
-fn long_output_is_opaque(path: &str, arguments: &[String], full: &str, minimum: &str) -> bool {
+fn long_output_is_opaque(context: DispatchContext<'_>, arguments: &[String], full: &str, minimum: &str) -> bool {
     let mut index = 0;
     while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
-        if long_output_target(argument, arguments, &mut index, full, minimum).is_some_and(|destination| destination_is_opaque(path, destination)) {
+        if long_output_target(argument, arguments, &mut index, full, minimum).is_some_and(|destination| destination_is_opaque(context, destination)) {
             return true;
         }
         index += 1;

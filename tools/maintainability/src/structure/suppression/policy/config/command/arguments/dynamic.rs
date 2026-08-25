@@ -1,8 +1,9 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{is_environment_assignment, is_rust_subcommand, is_rust_tool_token, is_shell_command_prefix, tokens, tool_basename};
 
 mod builtins;
+mod resolvers;
 
 pub(super) fn has_rust_tool_assignment_flow(source: &str, case_insensitive_tools: bool) -> bool {
     let assigned_rust_tools = assigned_rust_tool_variables(source, case_insensitive_tools);
@@ -13,30 +14,75 @@ pub(super) fn has_rust_tool_assignment_flow(source: &str, case_insensitive_tools
     opaque_target || computed.iter().any(|name| references_variable(source, name)) || computed_variables_reach_rust_command(source, &computed, case_insensitive_tools)
 }
 
-pub(super) fn has_opaque_command_assignment_flow(path: &str, source: &str) -> bool {
-    let assigned = assigned_opaque_command_variables(path, source);
-    if assigned.iter().any(|name| references_variable(source, name)) {
+pub(super) fn has_opaque_command_assignment_flow(path: &str, source: &str, source_is_reviewed: bool) -> bool {
+    let (invoked, opaque_invocation) = invoked_dynamic_command_variables(path, source);
+    if opaque_invocation {
+        return true;
+    }
+    let assigned = assigned_command_variables(path, source, source_is_reviewed);
+    if invoked.iter().any(|name| assigned.get(name).is_none_or(|opaque_assignment| *opaque_assignment)) {
         return true;
     }
     let (computed, opaque_target) = builtins::assigned_variables(source);
-    opaque_target || computed.iter().any(|name| references_variable(source, name))
+    opaque_target
+        || builtins::has_opaque_indexed_assignment(path, source, source_is_reviewed)
+        || builtins::has_opaque_arithmetic_evaluation(path, source, source_is_reviewed)
+        || builtins::has_opaque_unset_target(path, source, source_is_reviewed)
+        || computed.iter().any(|name| references_variable(source, name))
 }
 
-fn assigned_opaque_command_variables(path: &str, source: &str) -> BTreeSet<String> {
-    tokens::source_command_tokens(source)
-        .into_iter()
-        .filter_map(|command| {
-            command.iter().find_map(|word| {
-                let (name, value) = assignment(word)?;
-                opaque_command_assignment(path, name, value, &command).then_some(name.to_owned())
-            })
-        })
-        .collect()
+#[cfg(test)]
+pub(super) fn opaque_command_assignment_names(path: &str, source: &str) -> BTreeSet<String> {
+    let (mut invoked, opaque_invocation) = invoked_dynamic_command_variables(path, source);
+    let assigned = assigned_command_variables(path, source, true);
+    invoked.retain(|name| assigned.get(name).is_none_or(|opaque_assignment| *opaque_assignment));
+    if opaque_invocation {
+        invoked.insert("<opaque-invocation>".to_owned());
+    }
+    invoked
 }
 
-fn opaque_command_assignment(path: &str, name: &str, value: &str, command: &[String]) -> bool {
+pub(super) fn has_reviewed_trusted_system_command(source: &str) -> bool {
+    resolvers::has_trusted_system_command(source)
+}
+
+fn assigned_command_variables(path: &str, source: &str, source_is_reviewed: bool) -> BTreeMap<String, bool> {
+    let mut assigned = BTreeMap::new();
+    for command in tokens::source_command_tokens(source) {
+        for word in &command {
+            if let Some(name) = compound_assignment_name(word) {
+                assigned.entry(name.to_owned()).and_modify(|existing| *existing = true).or_insert(true);
+                continue;
+            }
+            let Some((name, value)) = assignment(word) else {
+                continue;
+            };
+            let opaque = opaque_command_assignment(path, (name, value), &command, source, source_is_reviewed);
+            assigned.entry(name.to_owned()).and_modify(|existing| *existing |= opaque).or_insert(opaque);
+        }
+    }
+    assigned
+}
+
+fn compound_assignment_name(word: &str) -> Option<&str> {
+    let word = word.trim_matches(['(', ')', '{', '}', ';']);
+    let (target, _) = word.split_once('=')?;
+    let appended = target.ends_with('+');
+    let target = target.strip_suffix('+').unwrap_or(target);
+    let name = target.split_once('[').map_or(target, |(name, _)| name);
+    (appended || target != name).then_some(name).filter(|name| valid_variable_name(name))
+}
+
+fn opaque_command_assignment(path: &str, assignment: (&str, &str), command: &[String], source: &str, source_is_reviewed: bool) -> bool {
+    let (name, value) = assignment;
     let value = value.trim_matches(['\'', '"']);
-    opaque_command_substitution(path, value, command) || !value.contains(['$', '`', '%', '!']) && !is_reviewed_literal_program_assignment(path, name, value)
+    if is_reviewed_literal_program_assignment(path, name, value) || is_reviewed_parameter_program_assignment(path, name, value, command) {
+        return false;
+    }
+    if value.contains("$(") || value.contains('`') {
+        return opaque_command_substitution(path, name, command, source, source_is_reviewed);
+    }
+    true
 }
 
 fn is_reviewed_literal_program_assignment(path: &str, name: &str, value: &str) -> bool {
@@ -47,36 +93,111 @@ fn is_reviewed_literal_program_assignment(path: &str, name: &str, value: &str) -
             | ("script/run-maintainability-gate.sh", "bash_command", "/usr/bin/bash")
             | ("script/run-maintainability-gate.sh", "chmod_command", "/usr/bin/chmod")
             | ("script/run-maintainability-gate.sh", "cp_command", "/usr/bin/cp")
+            | ("script/run-maintainability-gate.sh", "env_command", "/usr/bin/env")
             | ("script/run-maintainability-gate.sh", "ln_command", "/usr/bin/ln")
             | ("script/run-maintainability-gate.sh", "mkdir_command", "/usr/bin/mkdir")
             | ("script/run-maintainability-gate.sh", "mktemp_command", "/usr/bin/mktemp")
             | ("script/run-maintainability-gate.sh", "rm_command", "/usr/bin/rm")
             | ("script/run-maintainability-gate.sh", "curl_command", "/usr/bin/curl" | "/mingw64/bin/curl.exe")
+            | ("script/run-maintainability-gate.sh", "cygpath_command", "/usr/bin/cygpath")
+            | (
+                "script/run-maintainability-gate.sh",
+                "vswhere_command",
+                "/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+            )
+            | ("script/test-postgres-smoke.sh", "container_cli", "docker" | "podman")
             | (".github/workflows/ci.yml", "binary", "target/x86_64-pc-windows-msvc/release/hold.exe")
     )
 }
 
-fn opaque_command_substitution(path: &str, value: &str, command: &[String]) -> bool {
-    let value = value.trim_matches(['\'', '"']);
-    let resolver = value
-        .split_once("$(")
-        .map(|(_, value)| value)
-        .or_else(|| value.split_once('`').map(|(_, value)| value))
-        .map(|value| value.trim_matches(['\'', '"']));
-    let Some(resolver) = resolver.filter(|resolver| !resolver.is_empty()) else {
-        return false;
-    };
-    if resolver == "command" && command.iter().any(|word| word == "-v") {
-        return false;
+fn is_reviewed_parameter_program_assignment(path: &str, name: &str, value: &str, command: &[String]) -> bool {
+    if matches!(
+        (path, name, value),
+        (
+            "script/tests/test_maintainability_bootstrap.sh",
+            "check",
+            "$repository_root/script/check-maintainability-bootstrap.sh"
+        ) | (
+            "script/tests/test_maintainability_bootstrap.sh",
+            "trusted_check",
+            "$trusted_gate/script/check-maintainability-bootstrap.sh"
+        ) | (
+            ".github/workflows/release.yml",
+            "binary",
+            "extracted/localhold-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu/bin/hold"
+        ) | (
+            ".github/workflows/release-smoke.yml",
+            "binary",
+            "$PWD/extracted/localhold-${RELEASE_TAG}-x86_64-unknown-linux-gnu/bin/hold"
+        ) | (".github/workflows/ci.yml", "archive_binary", "$RUNNER_TEMP/extracted/$archive_root/bin/hold")
+    ) {
+        return true;
     }
-    !is_reviewed_path_resolver(path, resolver)
+    let line = command.join(" ");
+    matches!(
+        (path, name, line.as_str()),
+        (
+            "script/run-source-safety.sh",
+            "cargo_command",
+            "readonly cargo_command=${LOCALHOLD_MAINTAINABILITY_CARGO:?maintainability bootstrap did not provide an absolute Cargo command}"
+        ) | ("script/install.sh", "cargo_command", "cargo_command=${CARGO:-cargo}")
+            | (
+                "script/tests/test_maintainability_bootstrap.sh",
+                "trusted_rustup_command",
+                "trusted_rustup_command=${LOCALHOLD_MAINTAINABILITY_RUSTUP:-rustup}"
+            )
+            | (
+                "script/run-maintainability-gate.sh",
+                "rustup_executable",
+                "rustup_executable=${LOCALHOLD_MAINTAINABILITY_RUSTUP:-}" | "rustup_executable=$candidate" | "rustup_executable=$downloaded_rustup"
+            )
+            | (
+                "script/run-source-safety.sh",
+                "cargo_clippy_command",
+                "readonly cargo_clippy_command=${LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY:?maintainability bootstrap did not provide an absolute Cargo Clippy command}"
+            )
+            | (
+                "script/run-source-safety.sh",
+                "cargo_fmt_command",
+                "readonly cargo_fmt_command=${LOCALHOLD_MAINTAINABILITY_CARGO_FMT:?maintainability bootstrap did not provide an absolute Cargo fmt command}"
+            )
+            | (
+                "script/run-source-safety.sh" | "script/run-maintainability-gate.sh",
+                "git_command",
+                "readonly git_command=${LOCALHOLD_MAINTAINABILITY_GIT:?maintainability bootstrap did not provide an absolute Git command}"
+            )
+    )
 }
 
-fn is_reviewed_path_resolver(path: &str, resolver: &str) -> bool {
-    matches!(
+fn opaque_command_substitution(path: &str, name: &str, command: &[String], source: &str, source_is_reviewed: bool) -> bool {
+    if matches!(
+        (path, name, command),
+        ("script/claude-review.sh", "claude_binary", [assignment, option, tool, fallback, closing])
+            if assignment == "claude_binary=$(command" && option == "-v" && tool == "claude" && fallback == "||" && closing == "true)"
+    ) {
+        return false;
+    }
+    let assignment_source = command.join(" ");
+    let (substitutions, malformed) = tokens::command_substitution_commands(&assignment_source, true);
+    let Some(substitution) = (!malformed && substitutions.len() == 1).then(|| &substitutions[0]) else {
+        return true;
+    };
+    let substitution_commands = tokens::source_command_tokens(substitution);
+    let Some(resolver_command) = (substitution_commands.len() == 1).then(|| &substitution_commands[0]) else {
+        return true;
+    };
+    let Some(resolver) = resolver_command.first().filter(|resolver| !resolver.is_empty()) else {
+        return false;
+    };
+    !resolvers::is_reviewed(&resolvers::Candidate {
         path,
-        "script/check-maintainability-bootstrap.sh" | "script/run-maintainability-gate.sh" | "script/run-source-safety.sh" | "script/tests/test_maintainability_bootstrap.sh"
-    ) && matches!(resolver, "trusted_system_command" | "authenticated_tool" | "sha256_file")
+        name,
+        resolver,
+        resolver_command,
+        assignment_command: command,
+        source,
+        source_is_reviewed,
+    })
 }
 
 fn assigned_rust_tool_variables(source: &str, case_insensitive_tools: bool) -> BTreeSet<String> {
@@ -129,84 +250,160 @@ fn assignment(word: &str) -> Option<(&str, &str)> {
 }
 
 fn references_variable(source: &str, name: &str) -> bool {
-    tokens::source_command_tokens(&without_extended_test_bodies(source))
+    tokens::source_command_tokens(source)
         .iter()
         .any(|command| dynamic_command_variable(command).is_some_and(|candidate| candidate.eq_ignore_ascii_case(name)))
 }
 
-fn without_extended_test_bodies(source: &str) -> String {
-    let mut output = String::with_capacity(source.len());
-    let mut characters = source.chars().peekable();
-    let mut quote = None;
-    let mut escaped = false;
-    let mut in_test = false;
-    while let Some(character) = characters.next() {
-        if escaped {
-            output.push(if in_test && character != '\n' { ' ' } else { character });
-            escaped = false;
-            continue;
+fn invoked_dynamic_command_variables(path: &str, source: &str) -> (BTreeSet<String>, bool) {
+    let mut invoked = BTreeSet::new();
+    let mut opaque = false;
+    collect_invoked_dynamic_commands_from_source(path, source, &mut invoked, &mut opaque);
+    (invoked, opaque)
+}
+
+fn collect_invoked_dynamic_commands_from_source(path: &str, source: &str, invoked: &mut BTreeSet<String>, opaque: &mut bool) {
+    let source = tokens::without_noncommand_shell_data(source);
+    let (command_substitutions, malformed_commands) = tokens::command_substitution_commands(&source, true);
+    let (process_substitutions, malformed_processes) = tokens::process_substitution_commands(&source);
+    *opaque |= malformed_commands || malformed_processes;
+    let substitutions = command_substitutions.iter().chain(&process_substitutions).map(String::as_str).collect::<BTreeSet<_>>();
+    for command_source in std::iter::once(source.as_str()).chain(substitutions.iter().copied()) {
+        let scrubbed = scrub_substitutions(command_source, &substitutions);
+        for command in tokens::source_command_tokens(&scrubbed) {
+            collect_invoked_dynamic_commands(path, &command, 0, invoked, opaque);
         }
-        if character == '\\' && quote != Some('\'') {
-            output.push(if in_test { ' ' } else { character });
-            escaped = true;
-            continue;
-        }
-        if matches!(character, '\'' | '"') {
-            quote = if quote == Some(character) {
-                None
-            } else if quote.is_none() {
-                Some(character)
-            } else {
-                quote
-            };
-            output.push(if in_test { ' ' } else { character });
-            continue;
-        }
-        if quote.is_none() && character == '[' && characters.peek() == Some(&'[') {
-            output.extend([' ', ' ']);
-            characters.next();
-            in_test = true;
-            continue;
-        }
-        if quote.is_none() && in_test && character == ']' && characters.peek() == Some(&']') {
-            output.extend([' ', ' ']);
-            characters.next();
-            in_test = false;
-            continue;
-        }
-        output.push(if in_test && character != '\n' { ' ' } else { character });
     }
-    output
+}
+
+pub(super) fn scrub_substitutions(source: &str, substitutions: &BTreeSet<&str>) -> String {
+    let mut scrubbed = source.to_owned();
+    let mut substitutions = substitutions.iter().copied().collect::<Vec<_>>();
+    substitutions.sort_unstable_by_key(|substitution| std::cmp::Reverse(substitution.len()));
+    for substitution in substitutions {
+        for delimited in [
+            format!("$({substitution})"),
+            format!("<({substitution})"),
+            format!(">({substitution})"),
+            format!("`{substitution}`"),
+        ] {
+            scrubbed = scrubbed.replace(&delimited, "reviewed-substitution");
+        }
+    }
+    scrubbed
+}
+
+fn collect_invoked_dynamic_commands(path: &str, command: &[String], depth: usize, invoked: &mut BTreeSet<String>, opaque: &mut bool) {
+    const MAX_WRAPPER_DEPTH: usize = 32;
+    if depth == MAX_WRAPPER_DEPTH {
+        *opaque = true;
+        return;
+    }
+    if matches!(command, [redirection] if redirection.starts_with('<') && !redirection.starts_with("<<")) || matches!(command, [operator, _] if operator == "<") {
+        return;
+    }
+    match dynamic_command(command) {
+        DynamicCommand::Named(name) => {
+            invoked.insert(name.to_owned());
+            return;
+        }
+        DynamicCommand::Opaque(word) if reviewed_dynamic_command_reference(path, word) => return,
+        DynamicCommand::Opaque(_) => {
+            *opaque = true;
+            return;
+        }
+        DynamicCommand::Static => {}
+    }
+    let Some((index, raw)) = static_command_position(command) else {
+        return;
+    };
+    let command_name = tool_basename(raw.trim_matches(['(', ')', '{', '}'])).to_ascii_lowercase();
+    match super::references::wrapper::select(raw, &command_name, &command[index + 1..]) {
+        super::references::wrapper::Selection::Nested(nested) => collect_invoked_dynamic_commands(path, nested, depth + 1, invoked, opaque),
+        super::references::wrapper::Selection::Opaque => *opaque = true,
+        super::references::wrapper::Selection::NotWrapper | super::references::wrapper::Selection::NoCommand => {}
+    }
+}
+
+fn static_command_position(command: &[String]) -> Option<(usize, &str)> {
+    command.iter().enumerate().find_map(|(index, token)| {
+        let word = token.trim_matches(['(', ')', '{', '}']);
+        (!word.is_empty() && !is_shell_command_prefix(word) && !is_environment_assignment(word) && assignment(word).is_none()).then_some((index, token.as_str()))
+    })
+}
+
+fn reviewed_dynamic_command_reference(path: &str, command: &str) -> bool {
+    matches!(
+        (path, command),
+        (
+            "script/tests/test_maintainability_bootstrap.sh",
+            "$test_repository/script/check-maintainability-bootstrap.sh"
+        ) | ("script/tests/test_claude_review.sh", "$repository_root/script/claude-review.sh")
+            | (".github/workflows/gpu-release-gate.yml", "$root/bin/hold" | "$CUDA_RELEASE_ROOT/bin/hold")
+            | (".github/workflows/ci.yml", "$RUNNER_TEMP/localhold/bin/hold")
+    )
 }
 
 fn dynamic_command_variable(command: &[String]) -> Option<&str> {
+    match dynamic_command(command) {
+        DynamicCommand::Named(name) => Some(name),
+        DynamicCommand::Static | DynamicCommand::Opaque(_) => None,
+    }
+}
+
+enum DynamicCommand<'a> {
+    Static,
+    Named(&'a str),
+    Opaque(&'a str),
+}
+
+fn dynamic_command(command: &[String]) -> DynamicCommand<'_> {
     if command.get(1).is_some_and(|token| token == "=") {
-        return None;
+        return DynamicCommand::Static;
+    }
+    if command.iter().any(|token| token == "[[" || token.starts_with("((")) {
+        return DynamicCommand::Static;
+    }
+    if command.windows(2).any(|words| words[0] == "command" && matches!(words[1].as_str(), "-v" | "-V")) {
+        return DynamicCommand::Static;
     }
     let mut substitution_depth = 0_usize;
     let mut in_backticks = false;
     for token in command {
         let word = token.trim_matches(['(', ')']);
         if substitution_depth > 0 || in_backticks {
-            update_substitution_state(token, &mut substitution_depth, &mut in_backticks);
+            tokens::update_substitution_state(token, &mut substitution_depth, &mut in_backticks);
             continue;
         }
         if word.is_empty() || is_shell_command_prefix(word) || is_environment_assignment(word) || assignment(word).is_some() {
-            update_substitution_state(token, &mut substitution_depth, &mut in_backticks);
+            tokens::update_substitution_state(token, &mut substitution_depth, &mut in_backticks);
             continue;
         }
-        return variable_name(word);
+        if array_element_assignment(word) {
+            return DynamicCommand::Static;
+        }
+        if !word.contains(['$', '%', '!', '`']) {
+            return DynamicCommand::Static;
+        }
+        return variable_name(word).map_or(DynamicCommand::Opaque(word), |name| {
+            if valid_variable_name(name) {
+                DynamicCommand::Named(name)
+            } else {
+                DynamicCommand::Opaque(word)
+            }
+        });
     }
-    None
+    DynamicCommand::Static
 }
 
-fn update_substitution_state(word: &str, depth: &mut usize, in_backticks: &mut bool) {
-    for character in word.chars() {
-        if character == '`' {
-            *in_backticks = !*in_backticks;
-        }
-    }
-    *depth = depth.saturating_add(word.matches("$(").count()).saturating_sub(word.matches(')').count());
+fn array_element_assignment(word: &str) -> bool {
+    let Some((target, _)) = word.split_once("]=") else {
+        return false;
+    };
+    let Some((name, index)) = target.split_once('[') else {
+        return false;
+    };
+    valid_variable_name(name) && !index.is_empty()
 }
 
 fn variable_name(word: &str) -> Option<&str> {
@@ -217,9 +414,17 @@ fn variable_name(word: &str) -> Option<&str> {
         .or_else(|| word.strip_prefix('!').and_then(|word| word.strip_suffix('!')))
 }
 
+fn valid_variable_name(name: &str) -> bool {
+    !name.is_empty() && !name.as_bytes()[0].is_ascii_digit() && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{has_opaque_command_assignment_flow, has_rust_tool_assignment_flow};
+    use super::{has_opaque_command_assignment_flow as production_opaque_command_assignment_flow, has_rust_tool_assignment_flow};
+
+    fn has_opaque_command_assignment_flow(path: &str, source: &str) -> bool {
+        production_opaque_command_assignment_flow(path, source, false)
+    }
 
     #[test]
     fn referenced_rust_tool_assignments_fail_closed() {
@@ -241,7 +446,18 @@ mod tests {
     }
 
     #[test]
-    fn opaque_command_assignment_flows_fail_closed() {
+    fn dynamic_command_assignment_profiles_are_exact() {
+        let environment_scan = r#"readonly env_command=/usr/bin/env
+verify() {
+    local entry
+    local name
+    local uppercase
+    while IFS= read -r -d '' entry; do
+        name=${entry%%=*}
+        uppercase=${name^^}
+    done < <("$env_command" -0)
+}"#;
+        assert!(!production_opaque_command_assignment_flow("script/run-maintainability-gate.sh", environment_scan, true));
         assert!(has_opaque_command_assignment_flow("script/check.sh", "runner=$(cat quality/lint.txt); $runner"));
         assert!(has_opaque_command_assignment_flow("script/check.sh", "runner=`sed -n 1p quality/lint.txt`; ${runner}"));
         assert!(has_opaque_command_assignment_flow(
@@ -262,7 +478,7 @@ mod tests {
             "script/claude-review.sh",
             "claude_binary=$(command -v claude || true); \"$claude_binary\""
         ));
-        assert!(!has_opaque_command_assignment_flow(
+        assert!(has_opaque_command_assignment_flow(
             "script/check-maintainability-bootstrap.sh",
             "bash_command=$(trusted_system_command bash); \"$bash_command\" --version"
         ));
@@ -271,9 +487,56 @@ mod tests {
             "readonly bash_command=/usr/bin/bash; \"$bash_command\" --version"
         ));
         assert!(!has_opaque_command_assignment_flow(
+            "script/run-maintainability-gate.sh",
+            "readonly env_command=/usr/bin/env; \"$env_command\" -0"
+        ));
+        assert!(!has_opaque_command_assignment_flow(
+            "script/tests/test_maintainability_bootstrap.sh",
+            "repository_root=/reviewed; check=\"$repository_root/script/check-maintainability-bootstrap.sh\"; \"$check\""
+        ));
+        assert!(!has_opaque_command_assignment_flow(
+            "script/tests/test_maintainability_bootstrap.sh",
+            "trusted_gate=/reviewed; trusted_check=\"$trusted_gate/script/check-maintainability-bootstrap.sh\"; \"$trusted_check\""
+        ));
+        assert!(!has_opaque_command_assignment_flow(
             ".github/workflows/ci.yml",
             "binary=target/x86_64-pc-windows-msvc/release/hold.exe; \"$binary\" --version"
         ));
+        assert!(!has_opaque_command_assignment_flow(
+            ".github/workflows/ci.yml",
+            "archive_binary=\"$RUNNER_TEMP/extracted/$archive_root/bin/hold\"; \"$archive_binary\" --version"
+        ));
+        assert!(!has_opaque_command_assignment_flow(
+            ".github/workflows/release.yml",
+            "binary=\"extracted/localhold-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu/bin/hold\"; \"$binary\" --version"
+        ));
+        assert!(!has_opaque_command_assignment_flow(
+            ".github/workflows/release-smoke.yml",
+            "binary=\"$PWD/extracted/localhold-${RELEASE_TAG}-x86_64-unknown-linux-gnu/bin/hold\"; \"$binary\" --version"
+        ));
+    }
+
+    #[test]
+    fn resolver_exceptions_require_current_source_profile() {
+        let path = "script/run-maintainability-gate.sh";
+        let source = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../").join(path)).expect("reviewed gate runner");
+        assert!(!production_opaque_command_assignment_flow(path, &source, true));
+        assert!(production_opaque_command_assignment_flow(path, &source, false));
+
+        let start = source.find("authenticated_tool() {").expect("authenticated tool definition");
+        let end = start + source[start..].find("\n}\n").expect("authenticated tool definition end") + 2;
+        let definition = &source[start..end];
+        for mutation in [
+            source.replacen(definition, &format!("if false; then\n{definition}\nfi"), 1),
+            source.replacen(definition, &format!("(\n{definition}\n)"), 1),
+            format!("{}\n{definition}\n", source.replacen(definition, "", 1)),
+        ] {
+            assert!(production_opaque_command_assignment_flow(path, &mutation, false));
+        }
+    }
+
+    #[test]
+    fn opaque_command_assignment_flows_fail_closed() {
         assert!(has_opaque_command_assignment_flow(
             "script/run-maintainability-gate.sh",
             "runner=/usr/bin/bash; \"$runner\" quality/lint.txt"
@@ -282,9 +545,51 @@ mod tests {
             ".github/workflows/ci.yml",
             "binary=target/x86_64-pc-windows-msvc/release/unreviewed.exe; \"$binary\" --version"
         ));
-        assert!(!has_opaque_command_assignment_flow(
+        assert!(has_opaque_command_assignment_flow(
+            ".github/workflows/ci.yml",
+            "archive_binary=\"$RUNNER_TEMP/extracted/$archive_root/bin/unreviewed\"; \"$archive_binary\" --version"
+        ));
+        assert!(has_opaque_command_assignment_flow(
+            ".github/workflows/release.yml",
+            "binary=\"extracted/localhold-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu/bin/unreviewed\"; \"$binary\" --version"
+        ));
+        assert!(has_opaque_command_assignment_flow(
+            ".github/workflows/release-smoke.yml",
+            "binary=\"$PWD/extracted/localhold-${RELEASE_TAG}-x86_64-unknown-linux-gnu/bin/unreviewed\"; \"$binary\" --version"
+        ));
+        assert!(has_opaque_command_assignment_flow(
+            "script/tests/test_maintainability_bootstrap.sh",
+            "repository_root=/reviewed; check=/reviewed/script/check.sh; \"$check\""
+        ));
+        assert!(has_opaque_command_assignment_flow(
             "script/tests/test_maintainability_bootstrap.sh",
             "repository_root=/reviewed; check=\"$repository_root/script/check.sh\"; \"$check\""
+        ));
+        assert!(has_opaque_command_assignment_flow("script/check.sh", "set -- ash quality/runner.rs; \"$@\""));
+        assert!(has_opaque_command_assignment_flow("script/check.sh", "args=(ash quality/runner.rs); \"${args[@]}\""));
+        assert!(!has_opaque_command_assignment_flow(
+            "script/test-postgres-smoke.sh",
+            "container_cli=docker; \"$container_cli\" --version"
+        ));
+        assert!(has_opaque_command_assignment_flow(
+            "script/test-postgres-smoke.sh",
+            concat!("container_cli=$", "{SHELL_NAME:-ash}", "; \"$container_cli\" quality/runner.$suffix")
+        ));
+        assert!(has_opaque_command_assignment_flow(
+            "script/test-postgres-smoke.sh",
+            "container_cli=docker; container_cli[0]=ash; suffix=rs; \"$container_cli\" quality/runner.$suffix"
+        ));
+        assert!(has_opaque_command_assignment_flow(
+            "script/test-postgres-smoke.sh",
+            "container_cli=docker; local -n alias=container_cli; alias=ash; \"$container_cli\" --version"
+        ));
+        assert!(has_opaque_command_assignment_flow(
+            "script/check-maintainability-bootstrap.sh",
+            concat!(
+                "git_command=$(trusted_system_command git); git_command=$",
+                "{SHELL_NAME:-ash}",
+                "; \"$git_command\" quality/runner.$suffix"
+            )
         ));
     }
 }

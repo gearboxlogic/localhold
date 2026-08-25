@@ -1,96 +1,325 @@
-use super::path;
+use super::{ValueSemantics, path};
 
+mod operands;
 mod output;
+mod path_policy;
+mod profiles;
 mod removal;
 mod strip;
+mod tar;
+mod unzip;
 
-pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]) -> bool {
-    super::editor::is_command_capable(command)
-        || output_redirection_is_opaque(path, arguments)
-        || output::dispatch_is_opaque(path, command, arguments)
-        || strip::dispatch_is_opaque(path, command, arguments)
-        || is_objcopy_command(command) && (arguments_reference_protected_inputs(arguments) || final_destination_is_opaque(path, arguments))
+pub(super) use path_policy::Policy as PathPolicy;
+
+#[derive(Clone, Copy)]
+struct DispatchContext<'a> {
+    surface: &'a str,
+    source_is_reviewed: bool,
+    semantics: ValueSemantics,
+    path_policy: Option<&'a PathPolicy>,
+}
+
+pub(super) fn dispatch_is_opaque(path: &str, source_is_reviewed: bool, command: &str, arguments: &[String]) -> bool {
+    dispatch_with_context(
+        DispatchContext {
+            surface: path,
+            source_is_reviewed,
+            semantics: ValueSemantics::Shell,
+            path_policy: None,
+        },
+        command,
+        arguments,
+    )
+}
+
+pub(super) fn argv_dispatch_is_opaque(path: &str, command: &str, arguments: &[String]) -> bool {
+    dispatch_with_context(
+        DispatchContext {
+            surface: path,
+            source_is_reviewed: false,
+            semantics: ValueSemantics::Literal,
+            path_policy: None,
+        },
+        command,
+        arguments,
+    )
+}
+
+pub(super) fn dispatch_with_path_policy(path: &str, source_is_reviewed: bool, command: &str, arguments: &[String], path_policy: &PathPolicy) -> bool {
+    dispatch_with_context(
+        DispatchContext {
+            surface: path,
+            source_is_reviewed,
+            semantics: ValueSemantics::Shell,
+            path_policy: Some(path_policy),
+        },
+        command,
+        arguments,
+    )
+}
+
+pub(super) fn argv_dispatch_with_path_policy(path: &str, command: &str, arguments: &[String], path_policy: &PathPolicy) -> bool {
+    dispatch_with_context(
+        DispatchContext {
+            surface: path,
+            source_is_reviewed: false,
+            semantics: ValueSemantics::Literal,
+            path_policy: Some(path_policy),
+        },
+        command,
+        arguments,
+    )
+}
+
+fn dispatch_with_context(context: DispatchContext<'_>, command: &str, arguments: &[String]) -> bool {
+    if profiles::accepts_dynamic_arguments(context.surface, context.source_is_reviewed, command, arguments) {
+        return false;
+    }
+    if is_compression_command(command) {
+        return true;
+    }
+    if inspection_only(command, arguments) {
+        return false;
+    }
+    dynamic_mutation_arguments_are_opaque(command, arguments, context.semantics)
+        || super::editor::is_command_capable(command)
+        || install_dispatch_is_opaque(command, arguments)
+        || context.semantics == ValueSemantics::Shell && output_redirection_is_opaque(context, arguments)
+        || output::dispatch_is_opaque(context, command, arguments)
+        || strip::dispatch_is_opaque(context, command, arguments)
+        || is_objcopy_command(command) && (arguments_reference_protected_inputs(context, arguments) || final_destination_is_opaque(context, arguments))
         || match command {
-            "cp" | "cp.exe" | "install" | "install.exe" | "mv" | "mv.exe" | "truncate" | "truncate.exe" => {
-                arguments_reference_protected_inputs(arguments) || final_destination_is_opaque(path, arguments)
+            "chmod" | "chmod.exe" => operands::chmod_is_opaque(context, arguments),
+            "cp" | "cp.exe" => copy_may_materialize_links(arguments) || arguments_reference_protected_inputs(context, arguments) || final_destination_is_opaque(context, arguments),
+            "install" | "install.exe" | "truncate" | "truncate.exe" | "unlink" => {
+                arguments_reference_protected_inputs(context, arguments) || final_destination_is_opaque(context, arguments)
             }
-            "del" | "del.exe" | "erase" | "erase.exe" | "remove-item" | "rm" | "rm.exe" => removal::dispatch_is_opaque(path, arguments),
-            "ln" | "ln.exe" => symbolic_link_is_opaque(path, command, arguments) || arguments_reference_protected_inputs(arguments) || final_destination_is_opaque(path, arguments),
-            "link" | "unlink" => arguments_reference_protected_inputs(arguments) || final_destination_is_opaque(path, arguments),
-            "tee" | "tee.exe" => tee_output_is_opaque(path, arguments),
-            "copy" | "copy-item" | "move" | "move-item" | "set-content" | "add-content" | "out-file" => arguments_reference_protected_inputs(arguments),
-            "brotli" | "brotli.exe" | "bunzip2" | "bunzip2.exe" | "bzip2" | "bzip2.exe" | "gzip" | "gzip.exe" | "gunzip" | "gunzip.exe" | "lz4" | "lz4.exe" | "pigz"
-            | "pigz.exe" | "unlz4" | "unlz4.exe" | "unpigz" | "unpigz.exe" | "unxz" | "unxz.exe" | "unzstd" | "unzstd.exe" | "xz" | "xz.exe" | "zstd" | "zstd.exe" => {
-                compression_dispatch_is_opaque(command, arguments)
-            }
-            "curl" | "curl.exe" => curl_output_is_opaque(path, arguments) || curl_remote_name_is_opaque(arguments),
+            "ln" | "ln.exe" | "link" | "mv" | "mv.exe" | "move" | "move-item" => !inspection_only(command, arguments),
+            "del" | "del.exe" | "erase" | "erase.exe" | "remove-item" | "rm" | "rm.exe" => removal::dispatch_is_opaque(context, arguments),
+            "tee" | "tee.exe" => tee_output_is_opaque(context, arguments),
+            "copy" | "copy-item" | "set-content" | "add-content" | "out-file" => arguments_reference_protected_inputs(context, arguments),
+            "curl" | "curl.exe" => curl_output_is_opaque(context, arguments) || curl_remote_name_is_opaque(arguments),
             "dd" | "dd.exe" => arguments
                 .iter()
                 .filter_map(|argument| argument.strip_prefix("of="))
-                .any(|destination| destination_is_opaque(path, destination)),
-            "iconv" | "iconv.exe" => iconv_output_is_opaque(path, arguments),
-            "jar" | "jar.exe" => jar_dispatch_is_opaque(arguments),
-            "openssl" | "openssl.exe" => openssl_output_is_opaque(path, arguments),
+                .any(|destination| destination_is_opaque(context, destination)),
+            "iconv" | "iconv.exe" => iconv_output_is_opaque(context, arguments),
+            "jar" | "jar.exe" => jar_dispatch_is_opaque(arguments, context.semantics),
+            "openssl" | "openssl.exe" => openssl_output_is_opaque(context, arguments),
             "patch" | "patch.exe" => true,
-            "shuf" | "shuf.exe" => shuf_output_is_opaque(path, arguments),
-            "unzip" | "unzip.exe" => unzip_dispatch_is_opaque(arguments),
-            "perl" | "perl.exe" if arguments.iter().any(|argument| argument.starts_with("-i")) => arguments_reference_protected_inputs(arguments),
-            "sed" | "sed.exe"
-                if arguments
-                    .iter()
-                    .any(|argument| argument == "-i" || argument.starts_with("--in-place") || argument.starts_with("-i")) =>
-            {
-                arguments_reference_protected_inputs(arguments)
-            }
+            "shuf" | "shuf.exe" => shuf_output_is_opaque(context, arguments),
+            "tar" | "tar.exe" => tar::dispatch_is_opaque(context, arguments),
+            "unzip" | "unzip.exe" => unzip::dispatch_is_opaque(arguments),
+            "perl" | "perl.exe" if operands::perl_in_place_selected(arguments) => operands::perl_targets_are_opaque(context, arguments),
+            "sed" | "sed.exe" if operands::sed_in_place_selected(arguments) => operands::sed_targets_are_opaque(context, arguments),
             _ => false,
         }
 }
 
-fn symbolic_link_is_opaque(path: &str, command: &str, arguments: &[String]) -> bool {
-    let creates_symbolic_link = arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
-        argument
-            .strip_prefix('-')
-            .filter(|options| !options.starts_with('-'))
-            .is_some_and(|options| options.contains('s'))
-            || argument
-                .split_once('=')
-                .map_or(argument.as_str(), |(option, _)| option)
-                .strip_prefix("--")
-                .is_some_and(|option| option.len() >= 2 && "symbolic".starts_with(option))
-    });
-    creates_symbolic_link && !is_reviewed_symbolic_link(path, command, arguments)
+fn dynamic_mutation_arguments_are_opaque(command: &str, arguments: &[String], semantics: ValueSemantics) -> bool {
+    is_mutation_capable(command)
+        && !inspection_only(command, arguments)
+        && arguments.iter().any(|argument| semantics.contains_dynamic(argument))
+        && !dynamic_inputs_are_proven_read_only(command, arguments)
 }
 
-fn is_reviewed_symbolic_link(path: &str, command: &str, arguments: &[String]) -> bool {
-    path == "script/tests/test_claude_review.sh" && command == "ln" && arguments == ["-s", "--", "$script_dir/test_claude_review.sh", "$test_root/bin/claude"]
+pub(super) fn reviewed_arguments(path: &str, source_is_reviewed: bool, command: &str, arguments: &[String]) -> bool {
+    profiles::accepts_dynamic_arguments(path, source_is_reviewed, command, arguments)
 }
 
-fn compression_dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
-    let command = command.strip_suffix(".exe").unwrap_or(command);
-    let decompresses_by_default = matches!(command, "bunzip2" | "gunzip" | "unlz4" | "unpigz" | "unxz" | "unzstd");
-    let mut decompresses = decompresses_by_default;
-    let mut writes_to_stdout = false;
-    let mut inspects_only = false;
-    for argument in arguments.iter().take_while(|argument| argument.as_str() != "--") {
-        if let Some(options) = argument.strip_prefix('-').filter(|options| !options.starts_with('-')) {
-            decompresses |= options.contains('d');
-            writes_to_stdout |= options.contains('c');
-            inspects_only |= options.chars().any(|option| matches!(option, 'h' | 'l' | 'L' | 't' | 'V'));
+pub(super) fn reviewed_sources() -> std::collections::BTreeSet<(&'static str, &'static str)> {
+    profiles::reviewed_sources()
+}
+
+fn dynamic_inputs_are_proven_read_only(command: &str, arguments: &[String]) -> bool {
+    matches!(command, "jar" | "jar.exe") && jar_list_is_read_only(arguments)
+}
+
+fn jar_list_is_read_only(arguments: &[String]) -> bool {
+    if let Some(options) = arguments
+        .first()
+        .filter(|options| !options.starts_with('-') && options.chars().all(|option| matches!(option, 'f' | 't' | 'v')) && options.contains('t') && !options.is_empty())
+    {
+        let required_operands = usize::from(options.contains('f'));
+        return arguments.len() == required_operands + 1;
+    }
+    let mut lists = false;
+    let mut consumes_file = false;
+    for argument in arguments {
+        if consumes_file {
+            consumes_file = false;
             continue;
         }
-        let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
-        decompresses |= long_option_matches(option, "--decompress", "--d") || long_option_matches(option, "--uncompress", "--u");
-        writes_to_stdout |= long_option_matches(option, "--stdout", "--st") || long_option_matches(option, "--to-stdout", "--to-s");
-        inspects_only |= matches!(option, "--help" | "--license" | "--list" | "--test" | "--version");
+        match argument.as_str() {
+            "--list" => lists = true,
+            "--file" => consumes_file = true,
+            "--verbose" => {}
+            _ if !argument.starts_with('-') && !path::contains_dynamic_value(argument) => {}
+            _ => return false,
+        }
     }
-    decompresses && !writes_to_stdout && !inspects_only
+    lists && !consumes_file
 }
 
-fn long_option_matches(option: &str, full: &str, minimum: &str) -> bool {
-    option.len() >= minimum.len() && full.starts_with(option)
+fn is_mutation_capable(command: &str) -> bool {
+    let command = command.strip_suffix(".exe").unwrap_or(command);
+    matches!(
+        command,
+        "add-content"
+            | "brotli"
+            | "bunzip2"
+            | "bzip2"
+            | "chmod"
+            | "copy"
+            | "copy-item"
+            | "cp"
+            | "curl"
+            | "dd"
+            | "del"
+            | "erase"
+            | "gzip"
+            | "gunzip"
+            | "iconv"
+            | "install"
+            | "jar"
+            | "link"
+            | "ln"
+            | "lz4"
+            | "move"
+            | "move-item"
+            | "mv"
+            | "objcopy"
+            | "openssl"
+            | "out-file"
+            | "patch"
+            | "perl"
+            | "pigz"
+            | "remove-item"
+            | "rm"
+            | "set-content"
+            | "shuf"
+            | "sponge"
+            | "strip"
+            | "tee"
+            | "tar"
+            | "truncate"
+            | "unlink"
+            | "unlz4"
+            | "unpigz"
+            | "unxz"
+            | "unzip"
+            | "unzstd"
+            | "xz"
+            | "zstd"
+    )
 }
 
-fn jar_dispatch_is_opaque(arguments: &[String]) -> bool {
+fn is_compression_command(command: &str) -> bool {
+    matches!(
+        command.strip_suffix(".exe").unwrap_or(command),
+        "brotli" | "bunzip2" | "bzip2" | "gzip" | "gunzip" | "lz4" | "pigz" | "unlz4" | "unpigz" | "unxz" | "unzstd" | "xz" | "zstd"
+    )
+}
+
+fn copy_may_materialize_links(arguments: &[String]) -> bool {
+    let mut preserve_operand = false;
+    for argument in arguments.iter().take_while(|argument| argument.as_str() != "--") {
+        if preserve_operand {
+            preserve_operand = false;
+            if argument.split(',').any(|attribute| matches!(attribute, "all" | "links")) {
+                return true;
+            }
+            continue;
+        }
+        if let Some(options) = argument.strip_prefix('-').filter(|options| !options.starts_with('-')) {
+            if cp_short_options_materialize_links(options) {
+                return true;
+            }
+            continue;
+        }
+        let Some(option) = argument.strip_prefix("--") else {
+            continue;
+        };
+        let (option, operand) = option.split_once('=').map_or((option, None), |(option, operand)| (option, Some(operand)));
+        if [("archive", "a"), ("link", "l"), ("no-dereference", "no-d"), ("recursive", "r"), ("symbolic-link", "sy")]
+            .iter()
+            .any(|(full, minimum)| option.len() >= minimum.len() && full.starts_with(option))
+        {
+            return true;
+        }
+        if option.len() >= "pre".len() && "preserve".starts_with(option) {
+            if operand.is_some_and(preserves_links) {
+                return true;
+            }
+            if operand.is_none() {
+                preserve_operand = true;
+            }
+        }
+    }
+    preserve_operand
+}
+
+fn preserves_links(operand: &str) -> bool {
+    operand.split(',').any(|attribute| matches!(attribute, "all" | "links"))
+}
+
+fn cp_short_options_materialize_links(options: &str) -> bool {
+    for option in options.chars() {
+        if matches!(option, 'P' | 'R' | 'a' | 'd' | 'l' | 'r' | 's') {
+            return true;
+        }
+        if matches!(option, 'S' | 't') {
+            return false;
+        }
+    }
+    false
+}
+
+fn inspection_only(command: &str, arguments: &[String]) -> bool {
+    arguments
+        .first()
+        .is_some_and(|argument| long_help_is_supported(command) && matches!(argument.as_str(), "--help" | "--version") || command == "move" && argument == "/?")
+}
+
+fn long_help_is_supported(command: &str) -> bool {
+    matches!(
+        command,
+        "chmod"
+            | "chmod.exe"
+            | "cp"
+            | "cp.exe"
+            | "install"
+            | "install.exe"
+            | "link"
+            | "ln"
+            | "ln.exe"
+            | "mv"
+            | "mv.exe"
+            | "tar"
+            | "tar.exe"
+            | "truncate"
+            | "truncate.exe"
+            | "unlink"
+    )
+}
+
+fn install_dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
+    if !matches!(command, "install" | "install.exe") {
+        return false;
+    }
+    arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
+        let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
+        option
+            .strip_prefix("--")
+            .is_some_and(|option| option == "strip" || option.len() >= "strip-p".len() && "strip-program".starts_with(option))
+            || option
+                .strip_prefix('-')
+                .filter(|options| !options.starts_with('-'))
+                .is_some_and(|options| options.contains('s'))
+    })
+}
+
+fn jar_dispatch_is_opaque(arguments: &[String], semantics: ValueSemantics) -> bool {
     let mut consumes_operand = false;
     for argument in arguments {
         if consumes_operand {
@@ -111,7 +340,7 @@ fn jar_dispatch_is_opaque(arguments: &[String]) -> bool {
             consumes_operand = true;
             continue;
         }
-        if path::contains_dynamic_value(argument) {
+        if semantics.contains_dynamic(argument) {
             return true;
         }
         let options = argument.strip_prefix('-').unwrap_or(argument);
@@ -130,17 +359,15 @@ const fn is_jar_option(option: char) -> bool {
     is_jar_operation(option) || matches!(option, '0' | 'C' | 'e' | 'f' | 'm' | 'M' | 'P' | 'v')
 }
 
-fn final_destination_is_opaque(path: &str, arguments: &[String]) -> bool {
-    if arguments.iter().any(|argument| matches!(argument.as_str(), "--help" | "--version")) {
-        return false;
-    }
+fn final_destination_is_opaque(context: DispatchContext<'_>, arguments: &[String]) -> bool {
     explicit_target_directories(arguments)
         .chain(arguments.last().map(String::as_str))
-        .any(|destination| destination_is_opaque(path, destination))
+        .any(|destination| destination_is_opaque(context, destination))
 }
 
-fn destination_is_opaque(path: &str, destination: &str) -> bool {
-    !is_safe_literal_destination(destination) && !is_reviewed_dynamic_destination(path, destination)
+fn destination_is_opaque(context: DispatchContext<'_>, destination: &str) -> bool {
+    path_policy::target_is_opaque(context.path_policy, destination, context.semantics)
+        && !(context.source_is_reviewed && context.semantics == ValueSemantics::Shell && is_reviewed_dynamic_destination(context.surface, destination))
 }
 
 fn explicit_target_directories(arguments: &[String]) -> impl Iterator<Item = &str> {
@@ -193,6 +420,7 @@ const REVIEWED_DYNAMIC_DESTINATIONS: &[(&str, &str)] = &[
     ("script/tests/test_claude_review.sh", "$test_root/signal-output"),
     ("script/tests/test_claude_review.sh", "$timeout_marker"),
     ("script/tests/test_claude_review.sh", "$TMPDIR/nested/payload"),
+    ("script/check-maintainability-bootstrap.sh", "$snapshot_root/.git/info/attributes"),
     (".github/workflows/gpu-release-gate.yml", "$RUNNER_TEMP/hold-cuda"),
     (".github/workflows/gpu-release-gate.yml", "$GITHUB_ENV"),
     (".github/workflows/gpu-release-gate.yml", "$GITHUB_OUTPUT"),
@@ -200,14 +428,7 @@ const REVIEWED_DYNAMIC_DESTINATIONS: &[(&str, &str)] = &[
     (".github/workflows/gpu-release-gate.yml", "$dependency"),
 ];
 
-fn is_safe_literal_destination(candidate: &str) -> bool {
-    if let Some(path) = path::normalize_literal(candidate) {
-        return !super::super::super::is_protected_check_input(&path);
-    }
-    !path::contains_dynamic_value(candidate) && path::is_absolute(candidate)
-}
-
-fn iconv_output_is_opaque(path: &str, arguments: &[String]) -> bool {
+fn iconv_output_is_opaque(context: DispatchContext<'_>, arguments: &[String]) -> bool {
     let mut index = 0;
     while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
         let target = if argument == "-o" {
@@ -221,7 +442,7 @@ fn iconv_output_is_opaque(path: &str, arguments: &[String]) -> bool {
         } else {
             None
         };
-        if target.is_some_and(|target| destination_is_opaque(path, target)) {
+        if target.is_some_and(|target| destination_is_opaque(context, target)) {
             return true;
         }
         index += 1;
@@ -229,12 +450,12 @@ fn iconv_output_is_opaque(path: &str, arguments: &[String]) -> bool {
     false
 }
 
-fn openssl_output_is_opaque(path: &str, arguments: &[String]) -> bool {
+fn openssl_output_is_opaque(context: DispatchContext<'_>, arguments: &[String]) -> bool {
     let mut index = 0;
     while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
         if matches!(argument.as_str(), "-out" | "-keyout" | "-writerand" | "-CAserial") {
             index += 1;
-            if destination_is_opaque(path, arguments.get(index).map_or("", String::as_str)) {
+            if destination_is_opaque(context, arguments.get(index).map_or("", String::as_str)) {
                 return true;
             }
         }
@@ -243,7 +464,7 @@ fn openssl_output_is_opaque(path: &str, arguments: &[String]) -> bool {
     false
 }
 
-fn shuf_output_is_opaque(path: &str, arguments: &[String]) -> bool {
+fn shuf_output_is_opaque(context: DispatchContext<'_>, arguments: &[String]) -> bool {
     let mut index = 0;
     while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
         let target = if matches!(argument.as_str(), "-o" | "--output") {
@@ -254,7 +475,7 @@ fn shuf_output_is_opaque(path: &str, arguments: &[String]) -> bool {
         } else {
             short_output_target(argument, arguments, &mut index)
         };
-        if target.is_some_and(|target| destination_is_opaque(path, target)) {
+        if target.is_some_and(|target| destination_is_opaque(context, target)) {
             return true;
         }
         index += 1;
@@ -271,78 +492,6 @@ fn is_objcopy_command(command: &str) -> bool {
     unversioned == "objcopy" || unversioned.ends_with("-objcopy")
 }
 
-fn unzip_dispatch_is_opaque(arguments: &[String]) -> bool {
-    unzip_sets_archive_timestamp(arguments) || unzip_extracts_files(arguments) && !unzip_extracts_into_isolated_directory(arguments)
-}
-
-fn unzip_sets_archive_timestamp(arguments: &[String]) -> bool {
-    unzip_short_options(arguments).any(|options| options.contains('T'))
-}
-
-fn unzip_extracts_files(arguments: &[String]) -> bool {
-    !arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
-        matches!(argument.as_str(), "--help" | "--version")
-            || unzip_short_option_flags(argument).is_some_and(|options| options.chars().any(|option| matches!(option, 'c' | 'h' | 'l' | 'p' | 't' | 'v' | 'z' | 'Z')))
-    })
-}
-
-fn unzip_extracts_into_isolated_directory(arguments: &[String]) -> bool {
-    if unzip_short_options(arguments).any(|options| options.contains(':')) {
-        return false;
-    }
-    let mut isolated = false;
-    let mut index = 0;
-    while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
-        let destination = unzip_directory_option(argument).and_then(|attached| {
-            if attached.is_empty() {
-                index += 1;
-                arguments.get(index).map(String::as_str)
-            } else {
-                Some(attached)
-            }
-        });
-        if let Some(destination) = destination {
-            if !isolated_unzip_directory(destination) {
-                return false;
-            }
-            isolated = true;
-        }
-        index += 1;
-    }
-    isolated
-}
-
-fn unzip_short_options(arguments: &[String]) -> impl Iterator<Item = &str> {
-    arguments
-        .iter()
-        .take_while(|argument| argument.as_str() != "--")
-        .filter_map(|argument| unzip_short_option_flags(argument))
-}
-
-fn unzip_short_option_flags(argument: &str) -> Option<&str> {
-    let options = argument.strip_prefix('-').filter(|options| !options.starts_with('-'))?;
-    let end = options.find(['P', 'd']).unwrap_or(options.len());
-    Some(&options[..end])
-}
-
-fn unzip_directory_option(argument: &str) -> Option<&str> {
-    let options = argument.strip_prefix('-').filter(|options| !options.starts_with('-'))?;
-    let directory = options.find('d')?;
-    if options.find('P').is_some_and(|password| password < directory) {
-        return None;
-    }
-    options.get(directory + 1..)
-}
-
-fn isolated_unzip_directory(destination: &str) -> bool {
-    if path::normalize_literal(destination).as_deref() == Some("extracted") {
-        return true;
-    }
-    ["$RUNNER_TEMP/", "${RUNNER_TEMP}/"]
-        .iter()
-        .any(|prefix| destination.strip_prefix(prefix).is_some_and(|suffix| path::normalize_literal(suffix).is_some()))
-}
-
 fn curl_remote_name_is_opaque(arguments: &[String]) -> bool {
     arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
         if let Some(options) = argument.strip_prefix('-').filter(|options| !options.starts_with('-')) {
@@ -355,7 +504,7 @@ fn curl_remote_name_is_opaque(arguments: &[String]) -> bool {
     })
 }
 
-fn curl_output_is_opaque(path: &str, arguments: &[String]) -> bool {
+fn curl_output_is_opaque(context: DispatchContext<'_>, arguments: &[String]) -> bool {
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
         let target = if matches!(argument.as_str(), "-o" | "--output") {
@@ -366,7 +515,7 @@ fn curl_output_is_opaque(path: &str, arguments: &[String]) -> bool {
         } else {
             short_output_target(argument, arguments, &mut index)
         };
-        if target.is_some_and(|target| destination_is_opaque(path, target)) {
+        if target.is_some_and(|target| destination_is_opaque(context, target)) {
             return true;
         }
         index += 1;
@@ -374,21 +523,24 @@ fn curl_output_is_opaque(path: &str, arguments: &[String]) -> bool {
     false
 }
 
-fn tee_output_is_opaque(path: &str, arguments: &[String]) -> bool {
+fn tee_output_is_opaque(context: DispatchContext<'_>, arguments: &[String]) -> bool {
     let mut options_ended = false;
-    arguments
-        .iter()
-        .take_while(|argument| argument.as_str() != "--help" && argument.as_str() != "--version")
-        .any(|argument| {
-            if argument == "--" {
-                options_ended = true;
-                return false;
-            }
-            if !options_ended && argument.starts_with('-') && argument != "-" {
-                return false;
-            }
-            destination_is_opaque(path, argument)
-        })
+    for argument in arguments {
+        if !options_ended && argument == "--" {
+            options_ended = true;
+            continue;
+        }
+        if !options_ended && matches!(argument.as_str(), "--help" | "--version") {
+            return false;
+        }
+        if !options_ended && argument.starts_with('-') && argument != "-" {
+            continue;
+        }
+        if destination_is_opaque(context, argument) {
+            return true;
+        }
+    }
+    false
 }
 
 fn short_output_target<'a>(argument: &'a str, arguments: &'a [String], index: &mut usize) -> Option<&'a str> {
@@ -402,11 +554,18 @@ fn short_output_target<'a>(argument: &'a str, arguments: &'a [String], index: &m
     arguments.get(*index).map(String::as_str)
 }
 
-fn arguments_reference_protected_inputs(arguments: &[String]) -> bool {
-    arguments.iter().any(|argument| is_literal_protected_input(argument))
+fn arguments_reference_protected_inputs(context: DispatchContext<'_>, arguments: &[String]) -> bool {
+    let mut options_ended = false;
+    arguments.iter().any(|argument| {
+        if argument == "--" && !options_ended {
+            options_ended = true;
+            return false;
+        }
+        (options_ended || !argument.starts_with('-')) && path_policy::target_is_opaque(context.path_policy, argument, context.semantics)
+    })
 }
 
-fn output_redirection_is_opaque(path: &str, arguments: &[String]) -> bool {
+fn output_redirection_is_opaque(context: DispatchContext<'_>, arguments: &[String]) -> bool {
     let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {
         let Some(target) = output_redirection_target(argument) else {
@@ -420,7 +579,7 @@ fn output_redirection_is_opaque(path: &str, arguments: &[String]) -> bool {
         } else {
             target
         };
-        if destination_is_opaque(path, target) {
+        if destination_is_opaque(context, target) {
             return true;
         }
     }
@@ -430,10 +589,6 @@ fn output_redirection_is_opaque(path: &str, arguments: &[String]) -> bool {
 fn output_redirection_target(argument: &str) -> Option<&str> {
     let operator = argument.trim_start_matches(|character: char| character.is_ascii_digit());
     operator.strip_prefix(">>").or_else(|| operator.strip_prefix(">|")).or_else(|| operator.strip_prefix('>'))
-}
-
-fn is_literal_protected_input(candidate: &str) -> bool {
-    path::normalize_literal(candidate).is_some_and(|path| super::super::super::is_protected_check_input(&path))
 }
 
 #[cfg(test)]

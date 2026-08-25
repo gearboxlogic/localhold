@@ -1,14 +1,54 @@
+use super::ValueSemantics;
+
+#[cfg(test)]
 pub(super) fn dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
-    is_compiler_driver(command) && arguments.iter().any(|argument| is_dispatch_override(argument))
-        || is_rust_compiler(command) && rust_compiler_dispatch_is_opaque(arguments)
-        || is_rustdoc(command) && rustdoc_dispatch_is_opaque(arguments)
+    dispatch_with_semantics(command, arguments, ValueSemantics::Shell)
+}
+
+pub(super) fn dispatch_with_semantics(command: &str, arguments: &[String], semantics: ValueSemantics) -> bool {
+    compilation_tool(command) && arguments.iter().any(|argument| semantics.contains_dynamic(argument))
+        || is_compiler_driver(command) && arguments.iter().any(|argument| is_dispatch_override(argument))
+        || is_rust_compiler(command) && (custom_target_selection_is_opaque(arguments) || rust_compiler_dispatch_is_opaque(arguments))
+        || command.strip_suffix(".exe").unwrap_or(command) == "rustdoc" && rustdoc_dispatch_is_opaque(arguments)
         || is_linker_tool(command) && arguments.iter().any(|argument| linker_dispatch_override(argument))
-        || is_archive_tool(command) && archive_dispatch_is_opaque(arguments)
+        || is_archive_tool(command) && archive_dispatch_is_opaque(arguments, semantics)
         || is_binutils_plugin_tool(command)
             && arguments
                 .iter()
                 .take_while(|argument| argument.as_str() != "--")
                 .any(|argument| binutils_plugin_option(argument))
+}
+
+pub(super) fn custom_target_selection_is_opaque(arguments: &[String]) -> bool {
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
+        let target = if argument == "--target" {
+            index += 1;
+            Some(arguments.get(index).map_or("", String::as_str))
+        } else {
+            argument.strip_prefix("--target=")
+        };
+        if target.is_some_and(custom_target_is_opaque) {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn custom_target_is_opaque(target: &str) -> bool {
+    target.is_empty()
+        || target.starts_with('.')
+        || target.contains(['/', '\\', ':'])
+        || target.rsplit_once('.').is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("json"))
+}
+
+fn compilation_tool(command: &str) -> bool {
+    is_compiler_driver(command) || is_rust_compiler(command) || is_linker_tool(command) || is_archive_tool(command) || is_binutils_plugin_tool(command)
+}
+
+pub(super) fn is_recognized(command: &str) -> bool {
+    compilation_tool(command)
 }
 
 pub(super) fn accepts_output_path(command: &str) -> bool {
@@ -20,7 +60,7 @@ fn is_archive_tool(command: &str) -> bool {
     unversioned == "ar" || unversioned.strip_suffix("ar").is_some_and(|prefix| prefix.ends_with('-'))
 }
 
-fn archive_dispatch_is_opaque(arguments: &[String]) -> bool {
+fn archive_dispatch_is_opaque(arguments: &[String], semantics: ValueSemantics) -> bool {
     let mut consumes_operand = false;
     for argument in arguments {
         if consumes_operand {
@@ -34,7 +74,7 @@ fn archive_dispatch_is_opaque(arguments: &[String]) -> bool {
         if argument == "--" || argument.starts_with("--") {
             continue;
         }
-        if super::path::contains_dynamic_value(argument) {
+        if semantics.contains_dynamic(argument) {
             return true;
         }
         let options = argument.strip_prefix('-').unwrap_or(argument);
@@ -54,23 +94,56 @@ const fn is_archive_option(option: char) -> bool {
 }
 
 pub(super) fn rust_compiler_dispatch_is_opaque(arguments: &[String]) -> bool {
+    if arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--")
+        .any(|argument| argument.starts_with('@') && argument.len() > 1)
+    {
+        return true;
+    }
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
+        if argument == "--" {
+            break;
+        }
         if argument == "--extern" || argument.starts_with("--extern=") {
+            return true;
+        }
+        let unstable_option = if argument == "-Z" {
+            index += 1;
+            arguments.get(index).map(String::as_str)
+        } else {
+            argument.strip_prefix("-Z").filter(|option| !option.starts_with('='))
+        };
+        if unstable_option.is_some_and(rust_unstable_dispatch_option_is_opaque) {
             return true;
         }
         let option = if matches!(argument.as_str(), "-C" | "--codegen") {
             index += 1;
             arguments.get(index).map(String::as_str)
         } else {
-            argument.strip_prefix("-C").or_else(|| argument.strip_prefix("--codegen="))
+            argument
+                .strip_prefix("-C")
+                .filter(|option| !option.starts_with('='))
+                .or_else(|| argument.strip_prefix("--codegen="))
         };
-        if option.is_some_and(|option| option.trim_start_matches('=').starts_with("linker=")) {
+        if option.is_some_and(rust_codegen_dispatch_option_is_opaque) {
             return true;
         }
         index += 1;
     }
     false
+}
+
+fn rust_codegen_dispatch_option_is_opaque(option: &str) -> bool {
+    option
+        .split_once('=')
+        .is_some_and(|(name, _)| matches!(name, "linker" | "link-arg" | "link-args" | "link_arg" | "link_args"))
+}
+
+fn rust_unstable_dispatch_option_is_opaque(option: &str) -> bool {
+    let name = option.split_once('=').map(|(name, _)| name.replace('_', "-"));
+    matches!(name.as_deref(), Some("llvm-plugins" | "codegen-backend"))
 }
 
 fn rustdoc_dispatch_is_opaque(arguments: &[String]) -> bool {
@@ -82,10 +155,6 @@ fn rustdoc_dispatch_is_opaque(arguments: &[String]) -> bool {
 
 fn is_rust_compiler(command: &str) -> bool {
     matches!(command.strip_suffix(".exe").unwrap_or(command), "rustc" | "rustdoc")
-}
-
-fn is_rustdoc(command: &str) -> bool {
-    command.strip_suffix(".exe").unwrap_or(command) == "rustdoc"
 }
 
 fn is_binutils_plugin_tool(command: &str) -> bool {
@@ -100,7 +169,7 @@ fn binutils_plugin_option(argument: &str) -> bool {
     option.len() >= "--pl".len() && "--plugin".starts_with(option)
 }
 
-fn is_compiler_driver(command: &str) -> bool {
+pub(super) fn is_compiler_driver(command: &str) -> bool {
     let unversioned = unversioned_tool_name(command);
     is_driver_name(unversioned) || unversioned.rsplit('-').next().is_some_and(is_driver_name)
 }
@@ -146,21 +215,19 @@ fn is_dispatch_override(argument: &str) -> bool {
         || argument == "-wrapper"
         || argument.starts_with("-fplugin=")
         || argument.starts_with("-fpass-plugin=")
-        || argument.starts_with("-specs=")
+        || matches!(argument, "-specs" | "--specs")
+        || ["-specs=", "--specs="].iter().any(|prefix| argument.starts_with(prefix))
         || argument == "--config"
         || argument.starts_with("--config=")
-        || argument == "-Xclang"
-        || argument.starts_with("-Xclang=")
-        || argument == "-Xlinker"
-        || argument.starts_with("-Xlinker=")
+        || matches!(argument, "-Xclang" | "-Xlinker")
+        || ["-Xclang=", "-Xlinker="].iter().any(|prefix| argument.starts_with(prefix))
         || argument.starts_with("--for-linker=")
         || argument == "--for-linker"
         || argument == "-B"
         || argument.starts_with("-B") && argument.len() > 2
-        || argument.starts_with("--gcc-install-dir=")
-        || argument.starts_with("--gcc-toolchain=")
-        || argument.starts_with("--ld-path=")
-        || argument.starts_with("-fuse-ld=")
+        || argument == "--ptxas-path"
+        || ["--gcc-install-dir=", "--gcc-toolchain=", "--ld-path="].iter().any(|prefix| argument.starts_with(prefix))
+        || ["--ptxas-path=", "-fuse-ld="].iter().any(|prefix| argument.starts_with(prefix))
         || linker_plugin_argument(argument)
 }
 
@@ -278,23 +345,95 @@ mod tests {
             &["-fplugin=quality/lint.so"],
             &["-fpass-plugin=quality/lint.so"],
             &["-specs=quality/lint.specs"],
+            &["-specs", "quality/lint.specs"],
+            &["--specs=quality/lint.specs"],
+            &["--specs", "quality/lint.specs"],
             &["@quality/lint.args"],
             &["-Xclang", "-load", "-Xclang", "quality/lint.so"],
             &["-Wl,--plugin=quality/lint.so"],
             &["--ld-path=quality/ld"],
+            &["--ptxas-path", "quality/ptxas"],
             &["-Bquality/toolchain"],
         ] {
             assert!(dispatch_is_opaque("gcc", &arguments(values)), "{values:?}");
         }
+        for command in ["g++", "gcc-16", "x86_64-linux-gnu-gcc"] {
+            assert!(dispatch_is_opaque(command, &arguments(&["-specs", "quality/lint.specs"])), "{command}");
+        }
         assert!(!dispatch_is_opaque("gcc", &arguments(&["-Wall", "-c", "quality/input.c"])));
+        for values in [&["-specs/quality/lint.specs"][..], &["-spec"], &["--specification=quality/lint.specs"]] {
+            assert!(!dispatch_is_opaque("gcc", &arguments(values)), "{values:?}");
+        }
     }
 
     #[test]
     fn rust_linker_selection_is_opaque() {
-        for values in [&["-C", "linker=quality/lint"][..], &["-Clinker=quality/lint"], &["--codegen=linker=quality/lint"]] {
+        for values in [
+            &["-C", "linker=quality/lint"][..],
+            &["-Clinker=quality/lint"],
+            &["--codegen=linker=quality/lint"],
+            &["-C", "link-arg=-Wl,--plugin=quality/payload"],
+            &["-Clink-arg=-fuse-ld=quality/ld"],
+            &["--codegen=link-args=-Wl,--plugin=quality/payload"],
+            &["-C", "link_arg=-Wl,--plugin=quality/payload"],
+            &["-Clink_args=-fuse-ld=quality/ld"],
+            &["--codegen", "link_arg=-Wl,--plugin=quality/payload"],
+            &["--codegen=link_args=-Wl,--plugin=quality/payload"],
+        ] {
             assert!(dispatch_is_opaque("rustc", &arguments(values)), "{values:?}");
         }
+        assert!(dispatch_is_opaque("rustdoc", &arguments(&["-C", "link_arg=-Wl,--plugin=quality/payload"])));
         assert!(!dispatch_is_opaque("rustc", &arguments(&["-C", "opt-level=2"])));
+        assert!(!dispatch_is_opaque("rustc", &arguments(&["-C", "link-argument=report"])));
+    }
+
+    #[test]
+    fn rust_unstable_options_fail_closed() {
+        for values in [
+            &["-Z", "llvm-plugins=quality/payload", "quality/benign.rs"][..],
+            &["-Zllvm-plugins=quality/payload", "quality/benign.rs"],
+            &["-Z", "llvm_plugins=quality/payload", "quality/benign.rs"],
+            &["-Zllvm_plugins=quality/payload", "quality/benign.rs"],
+            &["-Zcodegen_backend=quality/payload", "quality/benign.rs"],
+        ] {
+            assert!(dispatch_is_opaque("rustc", &arguments(values)), "{values:?}");
+            assert!(dispatch_is_opaque("rustdoc", &arguments(values)), "{values:?}");
+        }
+        assert!(!dispatch_is_opaque("rustc", &arguments(&["-Z", "llvm-time-trace=yes", "quality/benign.rs"])));
+        assert!(!dispatch_is_opaque("rustc", &arguments(&["-Zllvm-plugin=quality/payload", "quality/benign.rs"])));
+        assert!(!dispatch_is_opaque("rustc", &arguments(&["-Z=llvm-plugins=quality/payload", "quality/benign.rs"])));
+        assert!(!dispatch_is_opaque("rustc", &arguments(&["--", "-Zllvm-plugins=quality/payload"])));
+    }
+
+    #[test]
+    fn rust_response_files_fail_closed() {
+        for command in ["rustc", "rustc.exe", "rustdoc", "rustdoc.exe"] {
+            assert!(dispatch_is_opaque(command, &arguments(&["@quality/rustc.args"])), "{command}");
+            assert!(dispatch_is_opaque(command, &arguments(&["-C", "@quality/codegen.args"])), "{command}");
+            assert!(dispatch_is_opaque(command, &arguments(&["--codegen", "@quality/codegen.args"])), "{command}");
+            assert!(!dispatch_is_opaque(command, &arguments(&["--", "@quality/rustc.args"])), "{command}");
+            assert!(!dispatch_is_opaque(command, &arguments(&["--", "-Clink-arg=benign.rs"])), "{command}");
+            assert!(!dispatch_is_opaque(command, &arguments(&["@"])));
+            assert!(!dispatch_is_opaque(command, &arguments(&["quality/@rustc.args"])));
+            assert!(!dispatch_is_opaque(command, &arguments(&["-C=link-arg=-Wl,--plugin=quality/payload"])), "{command}");
+        }
+    }
+
+    #[test]
+    fn custom_rust_target_specifications_are_opaque() {
+        for command in ["rustc", "rustc.exe", "rustdoc", "rustdoc.exe"] {
+            for values in [
+                &["--target", "quality/host.json", "-"][..],
+                &["--target=quality\\host.JSON", "-"],
+                &["--target", "/tmp/host", "-"],
+                &["--target=custom.json", "-"],
+                &["--target", "", "-"],
+            ] {
+                assert!(dispatch_is_opaque(command, &arguments(values)), "{command}: {values:?}");
+            }
+            assert!(!dispatch_is_opaque(command, &arguments(&["--target", "x86_64-unknown-linux-gnu", "-"])));
+            assert!(!dispatch_is_opaque(command, &arguments(&["--target=wasm32-wasip1", "-"])));
+        }
     }
 
     #[test]

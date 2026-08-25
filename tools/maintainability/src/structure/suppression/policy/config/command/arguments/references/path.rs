@@ -1,12 +1,19 @@
 use std::path::{Component, Path};
 
+use super::ValueSemantics;
+
 pub(super) enum ProgramPath<'a> {
     NotPath,
     Literal(&'a str),
     Opaque,
 }
 
+#[cfg(test)]
 pub(super) fn select_program(command: &str, direct_program_paths: bool) -> ProgramPath<'_> {
+    select_program_with_semantics(command, direct_program_paths, ValueSemantics::Shell)
+}
+
+pub(super) fn select_program_with_semantics(command: &str, direct_program_paths: bool, semantics: ValueSemantics) -> ProgramPath<'_> {
     if windows_drive_prefix(command) {
         return ProgramPath::Opaque;
     }
@@ -21,20 +28,24 @@ pub(super) fn select_program(command: &str, direct_program_paths: bool) -> Progr
     }
     let explicit_relative = ["./", "../", r".\", r"..\"].iter().any(|prefix| command.starts_with(prefix));
     if explicit_relative {
-        return if contains_dynamic_value(command) {
+        return if semantics.contains_dynamic(command) {
             ProgramPath::Opaque
         } else {
             ProgramPath::Literal(command)
         };
     }
-    if contains_dynamic_value(command) || !command.contains(['/', '\\']) {
+    if semantics.contains_dynamic(command) || !command.contains(['/', '\\']) {
         return ProgramPath::NotPath;
     }
     ProgramPath::Literal(command)
 }
 
 pub(super) fn normalize_literal(candidate: &str) -> Option<String> {
-    if contains_dynamic_value(candidate) || candidate.contains(['\\', ':']) || is_absolute(candidate) {
+    normalize_literal_with_semantics(candidate, ValueSemantics::Shell)
+}
+
+pub(super) fn normalize_literal_with_semantics(candidate: &str, semantics: ValueSemantics) -> Option<String> {
+    if semantics.contains_dynamic(candidate) || candidate.contains(['\\', ':']) || is_absolute(candidate) {
         return None;
     }
     let path = Path::new(candidate);
@@ -57,7 +68,7 @@ pub(super) fn is_absolute(candidate: &str) -> bool {
     candidate.starts_with('/') || Path::new(candidate).is_absolute() || windows_absolute(candidate)
 }
 
-fn trusted_system_program(command: &str) -> bool {
+pub(super) fn trusted_system_program(command: &str) -> bool {
     ["/bin/", "/usr/bin/", "/mingw64/bin/"].iter().any(|prefix| {
         command
             .strip_prefix(prefix)
@@ -77,7 +88,7 @@ fn windows_drive_prefix(command: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProgramPath, select_program};
+    use super::{ProgramPath, ValueSemantics, normalize_literal_with_semantics, select_program, select_program_with_semantics};
 
     #[test]
     fn runtime_absolute_programs_fail_closed() {
@@ -99,5 +110,22 @@ mod tests {
         assert!(matches!(select_program(r"/usr/bin/..\tmp\lint", true), ProgramPath::Opaque));
         assert!(matches!(select_program("quality/lint", true), ProgramPath::Literal("quality/lint")));
         assert!(matches!(select_program("/tmp/lint", false), ProgramPath::NotPath));
+    }
+
+    #[test]
+    fn literal_argv_paths_do_not_gain_shell_expansion_semantics() {
+        assert!(matches!(
+            select_program_with_semantics("quality/$helper", true, ValueSemantics::Literal),
+            ProgramPath::Literal("quality/$helper")
+        ));
+        assert_eq!(
+            normalize_literal_with_semantics("quality/$*?[{~", ValueSemantics::Literal).as_deref(),
+            Some("quality/$*?[{~")
+        );
+        assert!(matches!(
+            select_program_with_semantics("quality/$helper", true, ValueSemantics::Shell),
+            ProgramPath::NotPath
+        ));
+        assert!(normalize_literal_with_semantics("quality/$helper", ValueSemantics::Shell).is_none());
     }
 }

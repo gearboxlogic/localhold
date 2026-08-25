@@ -342,6 +342,9 @@ fn parse_sources(sources: BTreeMap<String, String>) -> Result<BTreeMap<String, P
     sources
         .into_iter()
         .map(|(path, source)| {
+            if has_bare_carriage_return(&source) {
+                bail!("structural Rust source {path:?} uses a bare carriage return; source lines must use LF or CRLF terminators");
+            }
             let syntax = syn::parse_file(&source).with_context(|| format!("parse structural Rust source {path}"))?;
             Ok((path, ParsedSource { source, syntax }))
         })
@@ -841,6 +844,14 @@ fn module_directory(path: &str) -> Result<PathBuf> {
 
 fn physical_line_count(source: &str) -> usize {
     source.bytes().filter(|byte| *byte == b'\n').count() + usize::from(!source.is_empty() && !source.ends_with('\n'))
+}
+
+fn has_bare_carriage_return(source: &str) -> bool {
+    source
+        .as_bytes()
+        .iter()
+        .enumerate()
+        .any(|(index, byte)| *byte == b'\r' && source.as_bytes().get(index + 1) != Some(&b'\n'))
 }
 
 fn normalized_relative_path(workspace: &Path, path: &Path) -> Result<String> {

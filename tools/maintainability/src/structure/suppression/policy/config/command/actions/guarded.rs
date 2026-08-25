@@ -7,6 +7,8 @@ use sha2::{Digest, Sha256};
 
 use super::action_inputs;
 
+mod classifier;
+
 pub(super) const DEPENDENCY_REVIEW_ACTION: &str = "actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294";
 pub(super) const MISE_ACTION: &str = "jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d";
 
@@ -16,9 +18,6 @@ const REVIEWED_MISE_PROFILES: &[(&str, &str)] = &[(
     "627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529",
     "24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358",
 )];
-// Stage intentional changes by adding the next complete profile beside the
-// current one, merging that checker ratchet, and only then changing the
-// guarded files. Remove the obsolete profile in a final cleanup change.
 const REVIEWED_DEPENDENCY_REVIEW_WORKFLOWS: &[&str] = &[r"name: Dependency Review
 
 on:
@@ -41,6 +40,11 @@ jobs:
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0"];
 
 pub(super) fn validate_configuration(workspace: &Path, tracked_paths: &BTreeSet<String>) -> Result<()> {
+    let base_profile = classifier::profile_in_base(workspace)?;
+    validate_configuration_against(workspace, tracked_paths, base_profile)
+}
+
+fn validate_configuration_against(workspace: &Path, tracked_paths: &BTreeSet<String>, base_profile: classifier::BaseProfile) -> Result<()> {
     let mise_toml = reviewed_file(workspace, tracked_paths, "mise.toml")?;
     let mise_lock = reviewed_file(workspace, tracked_paths, "mise.lock")?;
     let profile = (digest(&mise_toml), digest(&mise_lock));
@@ -53,6 +57,7 @@ pub(super) fn validate_configuration(workspace: &Path, tracked_paths: &BTreeSet<
     if !REVIEWED_DEPENDENCY_REVIEW_WORKFLOWS.contains(&dependency_review.trim_end()) {
         bail!("{DEPENDENCY_REVIEW_PATH:?} must retain its exact reviewed trigger, permissions, job controls, checkout, and dependency-review step");
     }
+    classifier::validate(workspace, tracked_paths, base_profile)?;
     Ok(())
 }
 
@@ -105,14 +110,40 @@ mod tests {
     }
 
     fn stage_fixture_input(source: &Path, destination: &Path) {
+        if destination.exists() {
+            make_fixture_writable(destination);
+        }
         let contents = fs::read(source).expect("read guarded input");
         fs::write(destination, contents).expect("write guarded input fixture");
+        make_fixture_writable(destination);
+    }
+
+    fn make_fixture_writable(path: &Path) {
+        #[cfg(unix)]
+        let permissions = {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let mut permissions = path.metadata().expect("fixture metadata").permissions();
+            permissions.set_mode(permissions.mode() | 0o600);
+            permissions
+        };
+        #[cfg(windows)]
+        let permissions = {
+            let parent = path.parent().expect("fixture parent");
+            tempfile::NamedTempFile::new_in(parent)
+                .expect("writable permission probe")
+                .as_file()
+                .metadata()
+                .expect("writable permission probe metadata")
+                .permissions()
+        };
+        fs::set_permissions(path, permissions).expect("make fixture owner-writable");
     }
 
     #[test]
     fn guarded_configuration_accepts_the_reviewed_files() {
         let fixture = fixture();
-        validate_configuration(fixture.path(), &tracked_paths()).expect("reviewed configuration");
+        validate_configuration_against(fixture.path(), &tracked_paths(), classifier::BaseProfile::Absent).expect("reviewed configuration");
     }
 
     #[test]
@@ -124,12 +155,14 @@ mod tests {
         read_only_permissions.set_readonly(true);
         fs::set_permissions(source.path(), read_only_permissions).expect("make source read-only");
 
-        let destination_directory = tempfile::tempdir().expect("destination directory");
-        let destination = destination_directory.path().join("guarded-input");
-        stage_fixture_input(source.path(), &destination);
-        assert_eq!(fs::read(&destination).expect("staged contents"), b"reviewed\n");
-        assert!(!destination.metadata().expect("destination metadata").permissions().readonly());
-        fs::write(destination, b"changed\n").expect("overwrite staged fixture");
+        let destination = tempfile::NamedTempFile::new().expect("destination fixture");
+        let mut destination_permissions = destination.path().metadata().expect("destination metadata").permissions();
+        destination_permissions.set_readonly(true);
+        fs::set_permissions(destination.path(), destination_permissions).expect("make destination read-only");
+        stage_fixture_input(source.path(), destination.path());
+        assert_eq!(fs::read(destination.path()).expect("staged contents"), b"reviewed\n");
+        assert!(!destination.path().metadata().expect("destination metadata").permissions().readonly());
+        fs::write(destination.path(), b"changed\n").expect("overwrite staged fixture");
 
         fs::set_permissions(source.path(), original_permissions).expect("restore source permissions");
     }
@@ -139,7 +172,10 @@ mod tests {
         for path in ["mise.toml", "mise.lock"] {
             let fixture = fixture();
             fs::write(fixture.path().join(path), b"unreviewed\n").expect("alter guarded input");
-            assert!(validate_configuration(fixture.path(), &tracked_paths()).is_err(), "accepted altered {path}");
+            assert!(
+                validate_configuration_against(fixture.path(), &tracked_paths(), classifier::BaseProfile::Absent).is_err(),
+                "accepted altered {path}"
+            );
         }
     }
 
@@ -154,7 +190,10 @@ mod tests {
             let path = fixture.path().join(DEPENDENCY_REVIEW_PATH);
             let source = fs::read_to_string(&path).expect("read workflow");
             fs::write(&path, source.replace("      - uses: actions/dependency-review-action", alteration)).expect("alter workflow");
-            assert!(validate_configuration(fixture.path(), &tracked_paths()).is_err(), "accepted {alteration:?}");
+            assert!(
+                validate_configuration_against(fixture.path(), &tracked_paths(), classifier::BaseProfile::Absent).is_err(),
+                "accepted {alteration:?}"
+            );
         }
     }
 

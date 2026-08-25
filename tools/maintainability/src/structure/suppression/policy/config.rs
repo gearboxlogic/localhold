@@ -10,19 +10,25 @@ use super::{require_id, require_text};
 
 mod cargo;
 mod command;
+mod python_sources;
 #[cfg(test)]
 mod tests;
 
 pub(super) use cargo::compare_cargo_lint_levels_previous_revision;
 use cargo::{scan_cargo_allows, tracked_manifests};
+#[cfg(not(test))]
+pub(super) use command::reject_checked_in_weakening;
+#[cfg(test)]
+pub(super) use command::reject_checked_in_weakening_fixture as reject_checked_in_weakening;
+pub(super) use command::validate_guarded_configuration;
 #[cfg(test)]
 use command::{
-    BOOTSTRAP_ENVIRONMENT_LINES, BOOTSTRAP_TEST_ENVIRONMENT_LINES, CI_TRUST_ENVIRONMENT_LINES, CLAUDE_REVIEW_ENVIRONMENT_LINES, CLAUDE_REVIEW_TEST_ENVIRONMENT_LINES,
-    GATE_RUNNER_COMMAND_LINES, GATE_RUNNER_ENVIRONMENT_LINES, GPU_RELEASE_REVISION_ENVIRONMENT_LINES, INSTALL_COMMAND_LINES, INSTALL_ENVIRONMENT_LINES, MISE_ENVIRONMENT_LINES,
-    RUNNER_COMMAND_LINES, RUNNER_ENVIRONMENT_LINES, TRUSTED_GATE_COMMAND_LINES, TRUSTED_GATE_ENVIRONMENT_LINES, has_sourced_file_indirection, is_execution_surface,
-    scrubber_environment_references_are_exact, weakening_environment, weakening_environment_for_surface, weakening_token, weakening_token_for_surface, without_reviewed_dispatch,
+    BOOTSTRAP_ENVIRONMENT_LINES, BOOTSTRAP_TEST_ENVIRONMENT_LINES, BOOTSTRAP_TEST_OPAQUE_COMMAND_LINES, CI_TRUST_ENVIRONMENT_LINES, CLAUDE_REVIEW_ENVIRONMENT_LINES,
+    CLAUDE_REVIEW_TEST_ENVIRONMENT_LINES, GATE_RUNNER_ENVIRONMENT_LINES, GPU_RELEASE_REVISION_ENVIRONMENT_LINES, INSTALL_ENVIRONMENT_LINES, MISE_ENVIRONMENT_LINES,
+    RUNNER_COMMAND_LINES, RUNNER_ENVIRONMENT_LINES, TRUSTED_GATE_ENVIRONMENT_LINES, has_sourced_file_indirection, is_execution_surface, scrubber_environment_references_are_exact,
+    weakening_environment, weakening_environment_for_surface, weakening_token, weakening_token_for_surface, without_reviewed_dispatch,
 };
-pub(super) use command::{reject_checked_in_weakening, validate_guarded_configuration};
+pub(super) use python_sources::validate as validate_python_sources;
 
 pub(super) fn validate_cargo_allowances(entries: &[CargoAllowance]) -> Result<()> {
     let mut ids = BTreeSet::new();
@@ -159,6 +165,27 @@ pub(super) fn parse_nul_paths(output: &[u8], include: impl Fn(&str) -> bool) -> 
     paths.sort();
     paths.dedup();
     Ok(paths)
+}
+
+pub(super) fn ignored_python_paths(workspace: &Path, inclusions: &[&str]) -> Result<Vec<String>> {
+    let mut command = crate::structure::revision::git_command();
+    command
+        .current_dir(workspace)
+        .args(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--"])
+        .args(inclusions)
+        .args([
+            ":(top,exclude,glob)target/**",
+            ":(top,exclude,glob)tools/dependency-unsafe/target/**",
+            ":(top,exclude,glob)tools/maintainability/target/**",
+            ":(top,exclude,glob).cache/**",
+            ":(top,exclude,glob).cargo/**",
+            ":(top,exclude,glob).rustup/**",
+        ]);
+    let output = command.output().context("list ignored Python-related inputs")?;
+    if !output.status.success() {
+        bail!("git ls-files failed while listing ignored Python-related inputs");
+    }
+    parse_nul_paths(&output.stdout, |_| true)
 }
 
 fn compare_clippy_value(key: &str, actual: &toml::Value, constraint: &ClippyConstraint) -> Result<()> {

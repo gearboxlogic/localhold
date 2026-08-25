@@ -22,6 +22,39 @@ script_directory=${script_path%/*}
 [[ $script_directory != "$script_path" ]] || script_directory=.
 script_directory=$(cd -- "$script_directory" && pwd -P)
 script_path="$script_directory/${script_path##*/}"
+
+scrub_untrusted_environment() {
+    local environment_entry
+    local environment_name
+    local -a removals=()
+    while IFS= read -r -d '' environment_entry; do
+        environment_name=${environment_entry%%=*}
+        case "${environment_name^^}" in
+            BASH_ENV | ENV | CDPATH | IFS | AR | AR_* | HOST_AR | TARGET_AR | ARFLAGS | ARFLAGS_* | HOST_ARFLAGS | TARGET_ARFLAGS | \
+                CC | CC_* | HOST_CC | TARGET_CC | CFLAGS | CFLAGS_* | HOST_CFLAGS | TARGET_CFLAGS | CROSS_COMPILE | \
+                CXX | CXX_* | HOST_CXX | TARGET_CXX | CXXFLAGS | CXXFLAGS_* | HOST_CXXFLAGS | TARGET_CXXFLAGS | \
+                NVCC | NVCC_* | HOST_NVCC | TARGET_NVCC | RANLIB | RANLIB_* | HOST_RANLIB | TARGET_RANLIB | \
+                RANLIBFLAGS | RANLIBFLAGS_* | HOST_RANLIBFLAGS | TARGET_RANLIBFLAGS | CCC_OVERRIDE_OPTIONS | CL | \
+                CMAKE_TOOLCHAIN_FILE | CMAKE_TOOLCHAIN_FILE_* | *_CMAKE_TOOLCHAIN_FILE | *_CMAKE_TOOLCHAIN_FILE_* | \
+                COMPILER_PATH | GCC_EXEC_PREFIX | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | \
+                OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | RIPGREP_CONFIG_PATH | \
+                RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | \
+                CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | RUSTC | RUSTDOC | RUSTC_WRAPPER | \
+                RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | \
+                CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | \
+                CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | \
+                EDITOR | GIT_* | LESS | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | LV | PAGER | SSH_ASKPASS | SSH_ASKPASS_REQUIRE | \
+                TAR_OPTIONS | VISUAL | ZIP | ZIPOPT | _CL_)
+                removals+=(-u "$environment_name")
+                ;;
+        esac
+    done < <(/usr/bin/env -0)
+    if (( ${#removals[@]} > 0 )); then
+        exec /usr/bin/env "${removals[@]}" /usr/bin/bash "$script_path" "$@"
+    fi
+}
+
+scrub_untrusted_environment "$@"
 implementation_root=$(cd -- "$script_directory/.." && pwd -P)
 repository_root=$implementation_root
 using_alternate_root=false
@@ -84,8 +117,8 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=cd756b8a6039e1192bb0c95e7c42e66148f7b883f3b12662b31c70269165a468
-readonly reviewed_bootstrap_tests_sha256=b469af64538abb9e03a251da06c93c329fee0d9b62d3347c145a45cfc1916b82
-readonly reviewed_gate_runner_sha256=b15c0fe7aa61af07095bf174836269d7c3c98ee688fbab669305a6153123e257
+readonly reviewed_bootstrap_tests_sha256=3532c926ba6e350b6235a1408b660a34c99867af81251e3cee7f541a9da16f40
+readonly reviewed_gate_runner_sha256=82609774f45011fa7a6260a3841fb49a7304047c1ca1faa5c62869c9524819d8
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then
@@ -157,23 +190,6 @@ trusted_system_command() {
     printf '%s\n' "$candidate"
 }
 
-scrub_untrusted_environment() {
-    local name
-    local uppercase
-    while IFS= read -r name; do
-        uppercase=${name^^}
-        case "$uppercase" in
-            BASH_ENV | ENV | CDPATH | IFS | COMPILER_PATH | GCC_EXEC_PREFIX | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | RIPGREP_CONFIG_PATH | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
-                RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \
-                CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \
-                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_* | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | TAR_OPTIONS)
-                unset "$name"
-                ;;
-        esac
-    done < <(compgen -e)
-}
-
-scrub_untrusted_environment
 GIT_CONFIG_NOSYSTEM=1
 GIT_CONFIG_GLOBAL=/dev/null
 readonly GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL

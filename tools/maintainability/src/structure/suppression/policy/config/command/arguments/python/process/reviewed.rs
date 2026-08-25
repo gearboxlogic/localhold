@@ -1,0 +1,34 @@
+use sha2::{Digest, Sha256};
+// Exact pins temporarily permit legacy cwd or dynamic paths until delivery removes the indirection.
+const REVIEWED_PROCESS_SURFACES: &[(&str, &str)] = &[
+    ("script/database_fixtures.py", "698b288b56e2a16ea4878ec2f009b449fd4cd376d2e3c4358445ae4b4ed1fb3f"),
+    ("script/package_release.py", "163b91d31ae73bdee732512ac56a615330507a978cfa78d5cd680e008d3a87a4"),
+    ("script/validate_cuda_runtime.py", "53b684a7e00c9bad1358ccd5baafa5b2039f4be706f2205a8b9bafc461623151"),
+    ("script/tests/test_cuda_release.py", "850414f812aeddcf692d47b9cff1a820959aafea2fc25443161739010b6b850f"),
+    ("script/tests/test_database_fixtures.py", "616df3e8d2f444fcd24a0b668eb3e492100fc465f53f041e7a0ca41555247b57"),
+];
+
+pub(super) fn matches(path: &str, source: &str) -> bool {
+    REVIEWED_PROCESS_SURFACES
+        .iter()
+        .find(|(reviewed, _)| *reviewed == path)
+        .is_some_and(|(_, expected)| format!("{:x}", Sha256::digest(source.as_bytes())) == *expected)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use super::*;
+
+    #[test]
+    fn staged_process_exception_is_a_whole_file_pin() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for (path, _) in REVIEWED_PROCESS_SURFACES {
+            let source = fs::read_to_string(workspace.join(path)).expect("read reviewed Python process surface");
+            assert!(matches(path, &source), "{path}");
+            assert!(!matches(path, &(source + "\n# changed\n")), "{path}");
+        }
+    }
+}

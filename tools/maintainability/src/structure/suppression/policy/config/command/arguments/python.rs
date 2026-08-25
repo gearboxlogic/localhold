@@ -71,18 +71,6 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "zipfile._path",
 ];
 
-const UNCONDITIONAL_EXECUTION_MODULES: &[&str] = &[
-    "_ctypes",
-    "_frozen_importlib",
-    "_frozen_importlib_external",
-    "_imp",
-    "_posixsubprocess",
-    "_winapi",
-    "bdb",
-    "ensurepip",
-    "pip",
-];
-
 pub(super) fn execution_references(path: &str, source: &str) -> ExecutionReferences {
     let normalized = normalize_continuations(source);
     let mut references = execution::collect(&normalized);
@@ -320,6 +308,7 @@ fn python_import_binding_is_command_capable(binding: &str) -> bool {
 pub(super) fn rejected_python_module(name: &str) -> bool {
     REJECTED_PYTHON_MODULES
         .iter()
+        .chain(&["asyncio.unix_events", "click", "http.cookiejar", "py_compile"])
         .any(|module| name == *module || name.strip_prefix(module).is_some_and(|suffix| suffix.starts_with('.')))
 }
 
@@ -523,9 +512,10 @@ fn imports_unconditional_execution_module(source: &str) -> bool {
 }
 
 fn unconditional_execution_module(module: &str) -> bool {
-    UNCONDITIONAL_EXECUTION_MODULES
-        .iter()
-        .any(|candidate| module == *candidate || module.strip_prefix(candidate).is_some_and(|suffix| suffix.starts_with('.')))
+    matches!(
+        module.split('.').next().unwrap_or(module),
+        "_ctypes" | "_frozen_importlib" | "_frozen_importlib_external" | "_imp" | "_posixsubprocess" | "_winapi" | "bdb" | "ensurepip" | "pip"
+    )
 }
 
 fn identifier_is_exact_at(source: &str, index: usize, length: usize) -> bool {

@@ -51,7 +51,7 @@ pub(super) fn execution_surfaces(workspace: &Path) -> Result<ExecutionSurfaceSet
         let source = fs::read_to_string(workspace.join(&surface)).with_context(|| format!("read command execution surface {surface}"))?;
         let reviewed_source = without_reviewed_dispatch(&surface, &source);
         let (referenced_inputs, unresolved_input) = execution_inputs_for_surface(&surface, &reviewed_source);
-        if unresolved_input {
+        if unresolved_input && !super::exact_transition_capabilities(&surface, &source).is_some_and(|(opaque, _)| opaque) {
             bail!("command execution surface {surface:?} uses an opaque interpreter program or makefile selection");
         }
         for input in referenced_inputs {

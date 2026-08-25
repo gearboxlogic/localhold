@@ -39,8 +39,8 @@ const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
     },
     LegacyTransitionBridge {
         path: "script/check-maintainability-bootstrap.sh",
-        current: "387eb2d595de5cc457c9e741883b97bb9bf5655403f5954b4b549acfdeb02bbf",
-        successor: "c94c2e94291e7d7dfb60c2f3102c4f556c8589445c224ae564f28a9387baf670",
+        current: "adb17c8d29a05de989beca2be7e653310594f7e979ca4c68b72fc4f5f71489aa",
+        successor: "8df0b390d224efc5e4a6b1edb31d4ad432c12c83ae866464874fabca4094e52f",
         opaque_execution_inputs: true,
         weakening: true,
     },
@@ -60,8 +60,8 @@ const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
     },
     LegacyTransitionBridge {
         path: ".github/workflows/ci.yml",
-        current: "f0cd1f3e0627fcda4639187222035451481c11adf47e3d3c0ae9474e12c1000b",
-        successor: "9435aa80730fd61da7b574377bbe2c43a5186c22101f39608326abd869676a1d",
+        current: "a3caaf8313e9aff92fafa5103a43da607eea095a63e9cb7102839a1084a0a0b5",
+        successor: "79cd54624d6227c610368a075a32e19c804b63b31ca219438092de597cb5029f",
         opaque_execution_inputs: false,
         weakening: true,
     },

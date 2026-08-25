@@ -106,10 +106,14 @@ pub(super) fn sort_compression_program_with_semantics_is_opaque(arguments: &[Str
 pub(super) fn zip_test_command_with_semantics_is_opaque(arguments: &[String], semantics: ValueSemantics) -> bool {
     dynamic_arguments_are_opaque(arguments, semantics)
         || arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
-            argument
-                .strip_prefix('-')
-                .filter(|options| !options.starts_with('-'))
-                .is_some_and(|options| options.contains('T'))
+            let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
+            [("--test", "--tes"), ("--unzip-command", "--unz")]
+                .iter()
+                .any(|(full, minimum)| option.len() >= minimum.len() && full.starts_with(option))
+                || option
+                    .strip_prefix('-')
+                    .filter(|options| !options.starts_with('-'))
+                    .is_some_and(|options| options.contains('T'))
         })
 }
 

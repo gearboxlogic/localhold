@@ -606,12 +606,18 @@ fn compiler_driver_environment_overrides_are_governed() {
         "AR='sh quality/hidden.txt'",
         "CFLAGS='-fplugin=quality/payload.so'",
         "CROSS_COMPILE='quality/tool-'",
+        "CMAKE_TOOLCHAIN_FILE='quality/hidden.txt'",
+        "AWS_LC_SYS_CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu='quality/hidden.txt'",
     ] {
         assert!(weakening_environment(assignment), "{assignment}");
     }
     assert!(weakening_environment_for_surface(
         ".github/workflows/ci.yml",
         "jobs:\n  test:\n    env:\n      CC: sh quality/hidden.txt\n"
+    ));
+    assert!(weakening_environment_for_surface(
+        ".github/workflows/ci.yml",
+        "jobs:\n  test:\n    env:\n      CMAKE_TOOLCHAIN_FILE: quality/hidden.txt\n"
     ));
     assert!(!weakening_environment("document the CL compiler mode"));
 }

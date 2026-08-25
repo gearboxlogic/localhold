@@ -269,6 +269,60 @@ fn native_stdlib_execution_lookalikes_remain_inert() {
 }
 
 #[test]
+fn unconditional_process_module_imports_fail_closed() {
+    for source in [
+        "import _posixsubprocess\n_posixsubprocess.fork_exec(*arguments)\n",
+        "import _posixsubprocess as native\nlaunch = native.fork_exec\nlaunch(*arguments)\n",
+        "from _posixsubprocess import fork_exec as launch\nlaunch.__call__(*arguments)\n",
+        "from _posixsubprocess import (\n    fork_exec,\n)\nfork_exec(*arguments)\n",
+        "import pip\npip.main(arguments)\n",
+        "import pip._internal as internal\ninternal.main(arguments)\n",
+        "import pip._internal.cli.main as cli\nrunner = cli.main\nrunner.__call__(arguments)\n",
+        "from pip._internal.cli.main import main as run\nrun(arguments)\n",
+        "from pip . _internal . cli . main import main as run\nrun(arguments)\n",
+        "from pip. \\\n+_internal.cli.main import main as run\nrun(arguments)\n",
+        "from pip._internal.utils.entrypoints import _wrapper\n_wrapper(arguments)\n",
+        "from pip._internal.commands import create_command\ncreate_command('wheel').main(arguments)\n",
+        "from pip._internal.commands.wheel import WheelCommand\nWheelCommand('wheel', summary).main(arguments)\n",
+        "import ensurepip\nensurepip._run_pip(arguments)",
+        "from ensurepip import _run_pip as run\nrun(arguments)",
+    ] {
+        assert!(has_opaque_process_arguments(source), "{source}");
+    }
+}
+
+#[test]
+fn subprocess_fork_exec_reexport_fails_closed() {
+    for source in [
+        "import subprocess\nsubprocess._fork_exec(*arguments)\n",
+        "from subprocess import _fork_exec as launch\nlaunch(*arguments)\n",
+        "import subprocess\nlaunch = subprocess._fork_exec\nlaunch.__call__(*arguments)\n",
+        "import subprocess\ngetattr(subprocess, '_fork_exec')(*arguments)\n",
+    ] {
+        assert!(has_opaque_process_arguments(source), "{source}");
+    }
+}
+
+#[test]
+fn unconditional_process_module_lookalikes_remain_inert() {
+    for source in [
+        "# import pip\nprint('ensurepip and _posixsubprocess are inert text')\n",
+        "import pipeline\npipeline.main()\n",
+        "from pipeline . helpers import main\nmain()\n",
+        "import piper\nprint(piper)\n",
+        "import pipassembly\nprint(pipassembly)\n",
+        "import ensurepipeline\nprint(ensurepipeline)\n",
+        "import _posixsubprocess_helper\nprint(_posixsubprocess_helper)\n",
+        "import _posixsubprocessashelper\nprint(_posixsubprocessashelper)\n",
+        "from _posixsubprocessimporter import fork_exec\nprint(fork_exec)\n",
+        "def pip_main(arguments): return arguments\nprint(pip_main([]))\n",
+        "def fork_exec(arguments): return arguments\nprint(fork_exec([]))\n",
+    ] {
+        assert!(!has_opaque_process_arguments(source), "{source}");
+    }
+}
+
+#[test]
 fn python_identifier_normalization_cannot_hide_process_calls_or_aliases() {
     for source in [
         "import os\nos.ｓｙｓｔｅｍ(bytes.fromhex(payload))\n",

@@ -53,13 +53,13 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "webbrowser",
 ];
 
-const NATIVE_LOADER_MODULES: &[&str] = &["_ctypes", "_frozen_importlib", "_frozen_importlib_external", "_imp"];
+const UNCONDITIONAL_EXECUTION_MODULES: &[&str] = &["_ctypes", "_frozen_importlib", "_frozen_importlib_external", "_imp", "_posixsubprocess", "ensurepip", "pip"];
 
 pub(super) fn execution_references(path: &str, source: &str) -> ExecutionReferences {
     let normalized = normalize_continuations(source);
     let mut references = execution::collect(&normalized);
     references.opaque |= evaluation::has_non_ascii_code(&normalized);
-    references.opaque |= references_native_extension_loading(&normalized);
+    references.opaque |= references_unconditional_execution_capability(&normalized);
     references.opaque |= has_opaque_process_bindings(&normalized) && !bindings::is_reviewed_surface(path, source);
     references
 }
@@ -81,7 +81,7 @@ pub(super) fn has_opaque_process_arguments(path: &str, source: &str) -> bool {
     if evaluation::has_non_ascii_code(&normalized) {
         return true;
     }
-    if references_native_extension_loading(&normalized) {
+    if references_unconditional_execution_capability(&normalized) {
         return true;
     }
     let reviewed_process_binding_surface = bindings::is_reviewed_surface(path, source);
@@ -449,7 +449,10 @@ fn is_os_process_api(name: &str) -> bool {
 }
 
 fn is_subprocess_process_api(name: &str) -> bool {
-    matches!(name, "call" | "check_call" | "check_output" | "getoutput" | "getstatusoutput" | "popen" | "run")
+    matches!(
+        name,
+        "_fork_exec" | "call" | "check_call" | "check_output" | "getoutput" | "getstatusoutput" | "popen" | "run"
+    )
 }
 
 fn references_command_capable_ffi(source: &str) -> bool {
@@ -476,19 +479,19 @@ fn references_command_capable_ffi(source: &str) -> bool {
     .any(|name| compact.contains(name))
 }
 
-fn references_native_extension_loading(source: &str) -> bool {
-    let executable = executable_code(source);
-    imports_native_loader_module(&executable)
+fn references_unconditional_execution_capability(source: &str) -> bool {
+    let executable = normalized_qualified_code(source);
+    imports_unconditional_execution_module(&executable)
         || ["enable_load_extension", "load_extension", "sqlite_dbconfig_enable_load_extension"]
             .iter()
             .any(|name| executable.match_indices(name).any(|(index, _)| identifier_is_exact_at(&executable, index, name.len())))
 }
 
-fn imports_native_loader_module(source: &str) -> bool {
+fn imports_unconditional_execution_module(source: &str) -> bool {
     source.lines().flat_map(|line| line.split(';')).any(|statement| {
         let statement = statement.rsplit(':').next().unwrap_or(statement);
         if let Some(imports) = strip_python_keyword(statement, "import") {
-            return imports.split(',').any(native_loader_module_binding);
+            return imports.split(',').any(unconditional_execution_module_binding);
         }
         let Some(from) = strip_python_keyword(statement, "from") else {
             return false;
@@ -497,16 +500,16 @@ fn imports_native_loader_module(source: &str) -> bool {
         let Some(module) = from.split_whitespace().next() else {
             return false;
         };
-        native_loader_module(module) && from.strip_prefix(module).and_then(|tail| strip_python_keyword(tail, "import")).is_some()
+        unconditional_execution_module(module) && from.strip_prefix(module).and_then(|tail| strip_python_keyword(tail, "import")).is_some()
     })
 }
 
-fn native_loader_module_binding(binding: &str) -> bool {
-    binding.split_whitespace().next().is_some_and(native_loader_module)
+fn unconditional_execution_module_binding(binding: &str) -> bool {
+    binding.split_whitespace().next().is_some_and(unconditional_execution_module)
 }
 
-fn native_loader_module(module: &str) -> bool {
-    NATIVE_LOADER_MODULES
+fn unconditional_execution_module(module: &str) -> bool {
+    UNCONDITIONAL_EXECUTION_MODULES
         .iter()
         .any(|candidate| module == *candidate || module.strip_prefix(candidate).is_some_and(|suffix| suffix.starts_with('.')))
 }

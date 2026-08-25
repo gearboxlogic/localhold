@@ -176,7 +176,7 @@ pub(super) fn process_kind(name: &str) -> Option<ProcessKind> {
     {
         return Some(ProcessKind::Unsupported);
     }
-    if name.contains('.') && super::rejected_python_module(&name) {
+    if name.contains('.') && (super::rejected_python_module(&name) || super::unconditional_execution_module(&name)) {
         return Some(ProcessKind::Unsupported);
     }
     if matches!(
@@ -197,6 +197,7 @@ pub(super) fn process_kind(name: &str) -> Option<ProcessKind> {
             | "posix_spawn"
             | "posix_spawnp"
             | "pty.spawn"
+            | "subprocess._fork_exec"
     ) || name.starts_with("os.exec")
         || name.starts_with("os.spawn")
         || name.starts_with("posix.exec")
@@ -320,6 +321,18 @@ subprocess . run(["quality/helper.exe"], check=True)
             "pty.spawn(['quality/hidden.py'])\nsubprocess.run(['git', 'status'])\n",
             "pydoc.pipepager('', 'sh quality/hidden.txt')\nsubprocess.run(['git', 'status'])\n",
             "webbrowser.BackgroundBrowser('sh').open('quality/hidden.txt')\nsubprocess.run(['git', 'status'])\n",
+        ] {
+            assert!(collect(source).opaque, "{source}");
+        }
+    }
+
+    #[test]
+    fn private_subprocess_dispatch_is_unsupported() {
+        for source in [
+            "subprocess._fork_exec(*arguments)",
+            "_posixsubprocess.fork_exec(*arguments)",
+            "pip._internal.cli.main.main(arguments)",
+            "ensurepip._run_pip(arguments)",
         ] {
             assert!(collect(source).opaque, "{source}");
         }

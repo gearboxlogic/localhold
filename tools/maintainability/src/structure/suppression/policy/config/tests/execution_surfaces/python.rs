@@ -838,6 +838,21 @@ fn command_policy_rejects_native_stdlib_execution_escape_hatches() {
 }
 
 #[test]
+fn command_policy_rejects_embedded_package_and_private_process_dispatch() {
+    assert_opaque_python_process_bindings(&[
+        "from _posixsubprocess import fork_exec as launch\nlaunch(*arguments)\n",
+        "import subprocess\nlaunch = subprocess._fork_exec\nlaunch(*arguments)\n",
+        "from subprocess import _fork_exec as launch\nlaunch.__call__(*arguments)\n",
+        "from pip._internal.cli.main import main\nmain(['install', 'quality/payload.tar.gz'])\n",
+        "from pip . _internal . cli . main import main\nmain(['wheel', 'quality/payload.tar.gz'])\n",
+        "from pip. \\\n+_internal.cli.main import main\nmain(['wheel', 'quality/payload.tar.gz'])\n",
+        "import pip._internal.cli.main as cli\nrunner = cli.main\nrunner(['wheel', 'quality/payload.tar.gz'])\n",
+        "from pip._internal.commands import create_command\ncreate_command('wheel').main(['quality/payload.tar.gz'])\n",
+        "from ensurepip import _run_pip as run\nrun(['install', 'quality/payload.tar.gz'])\n",
+    ]);
+}
+
+#[test]
 fn command_policy_rejects_multiprocessing_deserialization() {
     assert_opaque_python_process_bindings(&["from multiprocessing.reduction import ForkingPickler\nForkingPickler.loads(payload)\n"]);
 }

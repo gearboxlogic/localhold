@@ -62,6 +62,7 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "unittest.mock",
     "uuid",
     "venv",
+    "wave",
     "webbrowser",
     "zipfile._path",
 ];
@@ -138,6 +139,7 @@ pub(super) fn has_opaque_process_arguments(path: &str, source: &str) -> bool {
 
 pub(super) fn has_opaque_process_bindings(source: &str) -> bool {
     imports_command_capable_api(source)
+        || references_python_import_path(source)
         || uses_command_module_as_value(source)
         || uses_command_callable_as_value(source)
         || uses_dynamic_namespace_callable_as_value(source)
@@ -286,13 +288,18 @@ fn imports_command_capable_api(source: &str) -> bool {
                     "pty" => matches!(name, "*" | "spawn"),
                     "contextlib" => matches!(name, "*" | "chdir"),
                     "logging" => name == "config",
-                    "sys" => matches!(name, "*" | "meta_path" | "modules" | "path_hooks" | "path_importer_cache"),
+                    "sys" => matches!(name, "*" | "meta_path" | "modules" | "path" | "path_hooks" | "path_importer_cache"),
                     "typing" => matches!(name, "*" | "get_type_hints"),
                     "unittest" => name == "mock",
                     _ => false,
                 }
         })
     })
+}
+
+fn references_python_import_path(source: &str) -> bool {
+    let source = normalized_qualified_code(source);
+    source.match_indices("sys.path").any(|(index, path)| identifier_is_exact_at(&source, index, path.len()))
 }
 
 fn command_module_alias(binding: &str) -> bool {

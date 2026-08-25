@@ -56,6 +56,9 @@ pub(in crate::structure::suppression::policy::config::command) fn execution_inpu
 }
 
 fn execution_inputs_for_surface_with_policy(path: &str, source: &str, source_is_reviewed: bool, path_policy: Option<&mutation::PathPolicy>) -> model::ExecutionInputs {
+    if let Some(unresolved) = unknown::gitleaks_data_is_opaque(path, source) {
+        return model::ExecutionInputs::from_paths((BTreeSet::new(), unresolved));
+    }
     if let Some(inputs) = package_scripts::execution_inputs(path, source, source_is_reviewed, path_policy) {
         return inputs;
     }
@@ -341,7 +344,7 @@ fn record_shell_source_inputs(surface: ShellSurface<'_>, source: &str, inputs: &
     }
     *unresolved |= !source_inputs.is_empty()
         && super::has_untrusted_directory_change(source)
-        && !working_directory::is_reviewed_release_restoration(surface.path, surface.review.source, source);
+        && !working_directory::is_reviewed_relative_input_root(surface.path, surface.review.source, source);
     inputs.extend(source_inputs);
 }
 
@@ -381,7 +384,7 @@ fn command_position(tokens: &[String]) -> Option<CommandPosition<'_>> {
             tokens::update_substitution_state(token, &mut substitution_depth, &mut in_backticks);
             return false;
         }
-        !word.is_empty() && !is_execution_input_prefix(word)
+        !word.is_empty() && !unknown::is_execution_input_prefix(word)
     })?;
     let raw = tokens[index].as_str();
     Some(CommandPosition {
@@ -625,6 +628,9 @@ fn dispatch_external_input<'a>(input: DispatchInput<'a, '_>) -> (Vec<&'a str>, b
         "rg" | "rg.exe" | "ripgrep" | "ripgrep.exe" if program::ripgrep_preprocessor_with_semantics_is_opaque(arguments, surface.mode.value_semantics()) => SelectedInput::Opaque,
         "cargo" | "cargo.exe" if cargo::dispatch_with_semantics(arguments, surface.mode.value_semantics()) => SelectedInput::Opaque,
         "just" | "just.exe" if program::just_source_selection_with_semantics_is_opaque(arguments, surface.mode.value_semantics()) => SelectedInput::Opaque,
+        "gitleaks" | "gitleaks.exe" => {
+            return unknown::gitleaks_policy_inputs(arguments, surface.mode.value_semantics());
+        }
         "make" | "make.exe" | "gmake" | "gmake.exe" => {
             let (inputs, opaque) = makefile_inputs(arguments, surface.mode.value_semantics());
             return (inputs, opaque || tokens[..command_index].iter().any(|token| is_make_environment_selection(token)));
@@ -654,10 +660,6 @@ fn selected_input_result(selected: SelectedInput<'_>) -> (Vec<&str>, bool) {
         SelectedInput::Literal(candidate) => (vec![candidate], false),
         SelectedInput::Opaque => (Vec::new(), true),
     }
-}
-
-fn is_execution_input_prefix(word: &str) -> bool {
-    matches!(word, "!" | "if" | "then" | "elif" | "while" | "until" | "do") || word.starts_with('-')
 }
 
 fn argv_shell_only_program(command: &str) -> bool {

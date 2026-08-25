@@ -57,8 +57,17 @@ fn publication_hygiene_surface_is_closed() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = fs::read_to_string(workspace.join(path)).expect("publication hygiene script");
     let command_source = super::direct_command_source(path, &source);
-    let inputs = super::execution_inputs_for_surface(path, &command_source, false);
+    let inputs = super::execution_inputs_for_surface(path, &command_source, true);
     assert!(!inputs.unresolved, "unprofiled publication hygiene surface became opaque");
+    assert_eq!(
+        inputs.paths,
+        [".github/gitleaks.toml".to_owned(), ".github/gitleaksignore".to_owned()].into_iter().collect()
+    );
+}
+
+#[test]
+fn gitleaks_external_configuration_is_rejected() {
+    assert!(super::execution_inputs_for_surface(".github/gitleaks.toml", "[extend]\npath = 'quality/rules.toml'\n", false).unresolved);
 }
 
 #[test]

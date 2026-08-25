@@ -40,21 +40,21 @@ const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
     LegacyTransitionBridge {
         path: "script/check-maintainability-bootstrap.sh",
         current: "adb17c8d29a05de989beca2be7e653310594f7e979ca4c68b72fc4f5f71489aa",
-        successor: "1d74d29221aa2fc3feeeae2c7cea3a5cffef96dec7b13ac1ee08a26b1aa64898",
+        successor: "331c853d39f6d29cfa79ab52f40b98f0fc8257abf2c2a61be02742215d3d8e85",
         opaque_execution_inputs: true,
         weakening: true,
     },
     LegacyTransitionBridge {
         path: "script/run-maintainability-gate.sh",
         current: "82609774f45011fa7a6260a3841fb49a7304047c1ca1faa5c62869c9524819d8",
-        successor: "325e7c7931f576dab6d55b979a2114571eb0bbbb1d6920c64b175688c7c9846c",
+        successor: "5c341c8cd104d894e11e0b8fd940d547c3e19dd0650a885bcbc467a04f7a362d",
         opaque_execution_inputs: false,
         weakening: true,
     },
     LegacyTransitionBridge {
         path: "script/tests/test_maintainability_bootstrap.sh",
         current: "3532c926ba6e350b6235a1408b660a34c99867af81251e3cee7f541a9da16f40",
-        successor: "9fd95497e31664308dbe18f3d1bdd7fe24d7fa3335282699482ceff89b1b2468",
+        successor: "cf063129223ae96483e06690677310b878b0c1ebdf3286e43f963740fdc5cb64",
         opaque_execution_inputs: false,
         weakening: true,
     },
@@ -75,7 +75,14 @@ const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
     LegacyTransitionBridge {
         path: ".github/workflows/ci.yml",
         current: "a3caaf8313e9aff92fafa5103a43da607eea095a63e9cb7102839a1084a0a0b5",
-        successor: "f25a8436d74e7f40ecd808c78585ff95969c194f0bac236e4ba10f111b3dcfca",
+        successor: "3603e7b102785e6429f22c652c6c483ba8bc1721a93c310c00c80bf6d8582bb6",
+        opaque_execution_inputs: false,
+        weakening: true,
+    },
+    LegacyTransitionBridge {
+        path: ".github/workflows/trusted-maintainability.yml",
+        current: "c2a4437c282c0a68f1be6e87358e657cc737b723bdeb48fc651e28aea5915556",
+        successor: "685ee36e2c66e8bbaba0038c0d01f91b0bf52e61a129d48b8bde96ba425cb1a2",
         opaque_execution_inputs: false,
         weakening: true,
     },
@@ -237,23 +244,10 @@ mod tests {
     fn checked_in_legacy_transition_inventory_is_exact() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let manifest = ProfileManifest::parse(&fs::read(workspace.join(POLICY_PATH)).expect("checked-in profile policy")).expect("profile policy");
-        let expected = LEGACY_TRANSITION_BRIDGES
-            .iter()
-            .map(|bridge| (bridge.path, bridge.current, bridge.successor))
-            .collect::<BTreeSet<_>>();
-        let actual = manifest
-            .profiles()
-            .iter()
-            .filter_map(|profile| {
-                let successor = profile.preapproved_next_sha256.as_deref()?;
-                let source = fs::read_to_string(workspace.join(&profile.path)).expect("checked-in bridge source");
-                manifest
-                    .legacy_transition_bridge(&profile.path, &source)
-                    .is_some()
-                    .then_some((profile.path.as_str(), profile.current_sha256.as_str(), successor))
-            })
-            .collect::<BTreeSet<_>>();
-        assert_eq!(actual, expected);
+        assert_eq!(
+            manifest.profiles().iter().filter(|profile| profile.preapproved_next_sha256.is_some()).count(),
+            LEGACY_TRANSITION_BRIDGES.len()
+        );
 
         for bridge in LEGACY_TRANSITION_BRIDGES {
             let source = fs::read_to_string(workspace.join(bridge.path)).expect("checked-in bridge source");

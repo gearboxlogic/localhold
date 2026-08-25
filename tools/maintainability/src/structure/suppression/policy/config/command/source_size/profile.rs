@@ -136,25 +136,18 @@ mod tests {
     fn fingerprint_covers_sources_manifest_and_lockfile() {
         let workspace = tempfile::tempdir().expect("temporary workspace");
         let source = "tools/maintainability/src/main.rs";
-        for (path, bytes) in [(source, "fn main() {}\n"), (ROOT_MANIFEST, "[package]\n"), (ROOT_LOCKFILE, "lock\n")] {
+        let inputs = [(source, "fn main() {}\n"), (ROOT_MANIFEST, "[package]\n"), (ROOT_LOCKFILE, "lock\n")];
+        for (path, bytes) in inputs {
             let target = workspace.path().join(path);
             fs::create_dir_all(target.parent().expect("input parent")).expect("input directory");
             fs::write(target, bytes).expect("profile input");
         }
         let sources = BTreeSet::from([source.to_owned()]);
         let original = fingerprint(workspace.path(), &sources).expect("original profile");
-        for path in [source, ROOT_MANIFEST, ROOT_LOCKFILE] {
+        for (path, bytes) in inputs {
             fs::write(workspace.path().join(path), "changed\n").expect("mutate profile input");
             assert_ne!(fingerprint(workspace.path(), &sources).expect("changed profile"), original, "{path}");
-            fs::write(
-                workspace.path().join(path),
-                match path {
-                    ROOT_MANIFEST => "[package]\n",
-                    ROOT_LOCKFILE => "lock\n",
-                    _ => "fn main() {}\n",
-                },
-            )
-            .expect("restore profile input");
+            fs::write(workspace.path().join(path), bytes).expect("restore profile input");
         }
     }
 

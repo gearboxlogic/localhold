@@ -32,7 +32,7 @@ pub(super) fn action_is_opaque(surface: super::ShellSurface<'_>, arguments: &[St
 fn command_tree_is_opaque(surface: super::ShellSurface<'_>, command: &[String]) -> bool {
     let word = command.iter().find_map(|token| {
         let word = token.trim_matches(['(', ')', '{', '}']);
-        (!word.is_empty() && !super::is_execution_input_prefix(word) && (!super::super::is_environment_assignment(word) || word.contains("$(") || word.contains('`')))
+        (!word.is_empty() && !super::unknown::is_execution_input_prefix(word) && (!super::super::is_environment_assignment(word) || word.contains("$(") || word.contains('`')))
             .then_some(word)
     });
     if super::super::is_directory_change_command(command)

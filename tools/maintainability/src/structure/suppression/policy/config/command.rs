@@ -30,14 +30,13 @@ pub(super) use surfaces::without_reviewed_dispatch;
 
 #[cfg(test)]
 pub(super) fn checked_in_legacy_transition_capabilities(workspace: &Path, path: &str, source: &str) -> Option<(bool, bool)> {
-    let Ok(bytes) = fs::read(workspace.join(profile_policy::POLICY_PATH)) else {
-        return None;
-    };
+    let bytes = fs::read(workspace.join(profile_policy::POLICY_PATH)).ok()?;
     let bridge = profile_policy::ProfileManifest::parse(&bytes).ok()?.legacy_transition_bridge(path, source)?;
     Some((bridge.opaque_execution_inputs, bridge.weakening))
 }
 
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
+    "#!/usr/bin/env -S -u BASH_ENV -u BASHOPTS -u ENV -u SHELLOPTS /usr/bin/bash --noprofile --norc",
     "unset GCONV_PATH",
     "unset OPENSSL_CONF OPENSSL_CONF_INCLUDE OPENSSL_ENGINES OPENSSL_MODULES",
     "unset RIPGREP_CONFIG_PATH",
@@ -46,6 +45,7 @@ pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "export -n CDPATH IFS",
     "if /usr/bin/env | /usr/bin/grep '^BASH_FUNC_' >/dev/null; then",
     "    exit 1 # inherited exported functions are unsupported",
+    "if /usr/bin/env | /usr/bin/grep -E '^(BASHOPTS|SHELLOPTS)=' >/dev/null; then",
     "cargo_home=${CARGO_HOME:-}",
     "        cargo_home=\"$HOME/.cargo\"",
     "        cargo_home=\"$USERPROFILE/.cargo\"",
@@ -68,7 +68,7 @@ pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "                NVCC | NVCC_* | HOST_NVCC | TARGET_NVCC | RANLIB | RANLIB_* | HOST_RANLIB | TARGET_RANLIB | \\",
     "                LDFLAGS | LDFLAGS_* | HOST_LDFLAGS | TARGET_LDFLAGS | RANLIBFLAGS | RANLIBFLAGS_* | HOST_RANLIBFLAGS | TARGET_RANLIBFLAGS | CCC_OVERRIDE_OPTIONS | CL | \\",
     "                CMAKE_TOOLCHAIN_FILE | CMAKE_TOOLCHAIN_FILE_* | *_CMAKE_TOOLCHAIN_FILE | *_CMAKE_TOOLCHAIN_FILE_* | \\",
-    "                COMPILER_PATH | GCC_EXEC_PREFIX | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | \\",
+    "                COMPILER_PATH | CPATH | C_INCLUDE_PATH | CPLUS_INCLUDE_PATH | GCC_EXEC_PREFIX | OBJC_INCLUDE_PATH | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | \\",
     "                OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | PERL5LIB | PERL5OPT | PERLLIB | RIPGREP_CONFIG_PATH | \\",
     "                RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | \\",
     "                CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | RUSTC | RUSTDOC | RUSTC_WRAPPER | \\",
@@ -133,7 +133,7 @@ pub(super) const GATE_RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "                NVCC | NVCC_* | HOST_NVCC | TARGET_NVCC | RANLIB | RANLIB_* | HOST_RANLIB | TARGET_RANLIB | \\",
     "                LDFLAGS | LDFLAGS_* | HOST_LDFLAGS | TARGET_LDFLAGS | RANLIBFLAGS | RANLIBFLAGS_* | HOST_RANLIBFLAGS | TARGET_RANLIBFLAGS | CMAKE_TOOLCHAIN_FILE | \\",
     "                CMAKE_TOOLCHAIN_FILE_* | *_CMAKE_TOOLCHAIN_FILE | *_CMAKE_TOOLCHAIN_FILE_*)",
-    "    for name in BASH_ENV ENV CCC_OVERRIDE_OPTIONS CL COMPILER_PATH GCC_EXEC_PREFIX GCONV_PATH GITHUB_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD OPENSSL_CONF OPENSSL_CONF_INCLUDE OPENSSL_ENGINES OPENSSL_MODULES RIPGREP_CONFIG_PATH RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER ZIP ZIPOPT _CL_ \\",
+    "    for name in BASH_ENV ENV CCC_OVERRIDE_OPTIONS CL COMPILER_PATH CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH GCC_EXEC_PREFIX OBJC_INCLUDE_PATH GCONV_PATH GITHUB_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD OPENSSL_CONF OPENSSL_CONF_INCLUDE OPENSSL_ENGINES OPENSSL_MODULES PERL5LIB PERL5OPT PERLLIB RIPGREP_CONFIG_PATH RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER ZIP ZIPOPT _CL_ \\",
     "        RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS \\",
     "        CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do",
     "    [[ -n $LOCALHOLD_MAINTAINABILITY_CARGO && -n $LOCALHOLD_MAINTAINABILITY_CARGO_CLIPPY && -n $LOCALHOLD_MAINTAINABILITY_CARGO_FMT && -n $LOCALHOLD_MAINTAINABILITY_RUSTC && -n $LOCALHOLD_MAINTAINABILITY_RUSTUP && -n $git_command ]]",
@@ -212,7 +212,10 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "cargo_home=\"$fixture/cargo-home\"",
     "export CARGO_HOME=$cargo_home",
     "unset CARGO_HOME",
-    "for loader_variable in GCONV_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD; do",
+    "for loader_variable in BASHOPTS GCONV_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD PERL5LIB PERL5OPT PERLLIB; do",
+    "if ! env BASH_ENV=$shell_startup_file ENV=$shell_startup_file BASHOPTS=localvar_inherit SHELLOPTS=xtrace \\",
+    "    INHERITED_SHELL_OPTION_MARKER=$shell_option_marker PS4='$(printf executed >\"$INHERITED_SHELL_OPTION_MARKER\")' \\",
+    "    printf 'maintainability bootstrap executed inherited SHELLOPTS before sanitizing\\n' >&2",
     "FAKE_JUST_MARKER=$fake_just_marker FAKE_CARGO_MARKER=$fake_cargo_marker FAKE_RUSTUP_MARKER=$fake_rustup_marker PATH=\"$fake_bin:$PATH\" run_check --test-environment >/dev/null",
     "if LOCALHOLD_MAINTAINABILITY_RUSTUP=\"$fake_bin/rustup\" run_check --test-environment >/dev/null 2>&1; then",
     "if PATH=\"$fake_system_bin:$PATH\" run_check >/dev/null 2>&1; then",
@@ -229,7 +232,7 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "if RUSTUP_HOME=$fake_rustup_environment run_check --test-environment >/dev/null 2>&1; then",
     "CMAKE_TOOLCHAIN_FILE=untrusted CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu=untrusted HOST_CMAKE_TOOLCHAIN_FILE=untrusted \\",
     "    AWS_LC_SYS_CMAKE_TOOLCHAIN_FILE=untrusted AWS_LC_SYS_CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu=untrusted \\",
-    "BASH_ENV=$bash_env ENV=$bash_env AR=untrusted ARFLAGS=untrusted CC=untrusted CC_x86_64_unknown_linux_gnu=untrusted CFLAGS=untrusted CROSS_COMPILE=untrusted CXX=untrusted CXXFLAGS=untrusted HOST_CC=untrusted HOST_LDFLAGS=untrusted HOST_RANLIB=untrusted LDFLAGS=untrusted LDFLAGS_x86_64_unknown_linux_gnu=untrusted NVCC=untrusted RANLIBFLAGS=untrusted TARGET_CXX=untrusted TARGET_LDFLAGS=untrusted CCC_OVERRIDE_OPTIONS=untrusted CL=untrusted COMPILER_PATH=untrusted GCC_EXEC_PREFIX=untrusted GCONV_PATH=untrusted GITHUB_PATH=untrusted LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' OPENSSL_CONF=untrusted OPENSSL_CONF_INCLUDE=untrusted OPENSSL_ENGINES=untrusted OPENSSL_MODULES=untrusted RIPGREP_CONFIG_PATH=untrusted RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CARGO_HOME=\"$fixture/untrusted-cargo-home\" CARGO_TARGET_DIR=\"$fixture/untrusted-target\" CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted ZIP=untrusted ZIPOPT=untrusted _CL_=untrusted \\",
+    "BASH_ENV=$bash_env ENV=$bash_env AR=untrusted ARFLAGS=untrusted CC=untrusted CC_x86_64_unknown_linux_gnu=untrusted CFLAGS=untrusted CROSS_COMPILE=untrusted CXX=untrusted CXXFLAGS=untrusted HOST_CC=untrusted HOST_LDFLAGS=untrusted HOST_RANLIB=untrusted LDFLAGS=untrusted LDFLAGS_x86_64_unknown_linux_gnu=untrusted NVCC=untrusted RANLIBFLAGS=untrusted TARGET_CXX=untrusted TARGET_LDFLAGS=untrusted CCC_OVERRIDE_OPTIONS=untrusted CL=untrusted COMPILER_PATH=untrusted CPATH=untrusted C_INCLUDE_PATH=untrusted CPLUS_INCLUDE_PATH=untrusted GCC_EXEC_PREFIX=untrusted OBJC_INCLUDE_PATH=untrusted GCONV_PATH=untrusted GITHUB_PATH=untrusted LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' OPENSSL_CONF=untrusted OPENSSL_CONF_INCLUDE=untrusted OPENSSL_ENGINES=untrusted OPENSSL_MODULES=untrusted PERL5LIB=untrusted PERL5OPT=-MReviewMarker PERLLIB=untrusted RIPGREP_CONFIG_PATH=untrusted RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CARGO_HOME=\"$fixture/untrusted-cargo-home\" CARGO_TARGET_DIR=\"$fixture/untrusted-target\" CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted ZIP=untrusted ZIPOPT=untrusted _CL_=untrusted \\",
     "    RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \\",
     "    CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \\",
     "    run_check --test-environment >/dev/null",
@@ -244,14 +247,22 @@ pub(super) const MISE_ENVIRONMENT_LINES: &[&str] = &[
     "_.path = [\"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/cargo/bin\"]",
 ];
 pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
-    "        shell: /usr/bin/env -u BASH_ENV -u ENV -u GCONV_PATH -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
-    "        shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:ENV = $null; $env:GCONV_PATH = $null; $env:SHELLOPTS = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\\Program Files\\Git\\bin\\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE\"'",
+    "        shell: /usr/bin/env -u BASH_ENV -u BASHOPTS -u ENV -u GCONV_PATH -u SHELLOPTS -u PERL5LIB -u PERL5OPT -u PERLLIB -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
+    "        shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:BASHOPTS = $null; $env:ENV = $null; $env:GCONV_PATH = $null; $env:SHELLOPTS = $null; $env:PERL5LIB = $null; $env:PERL5OPT = $null; $env:PERLLIB = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\\Program Files\\Git\\bin\\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE\"'",
     "          BASH_ENV: ''",
     "          BASH_ENV: ''",
+    "          BASHOPTS: ''",
+    "          BASHOPTS: ''",
     "          GCONV_PATH: ''",
     "          GCONV_PATH: ''",
     "          SHELLOPTS: ''",
     "          SHELLOPTS: ''",
+    "          PERL5LIB: ''",
+    "          PERL5LIB: ''",
+    "          PERL5OPT: ''",
+    "          PERL5OPT: ''",
+    "          PERLLIB: ''",
+    "          PERLLIB: ''",
     "          GIT_CONFIG_COUNT: '1'",
     "          GIT_CONFIG_KEY_0: core.autocrlf",
     "          GIT_CONFIG_VALUE_0: 'false'",
@@ -269,7 +280,7 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
-    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 58831cb723e3656883c0a3ababa4be81402d5ed990d586810362c1ec20245c2e",
+    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 331c853d39f6d29cfa79ab52f40b98f0fc8257abf2c2a61be02742215d3d8e85",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
@@ -278,8 +289,8 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          if [[ \"$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256\" != \"$LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256\" ]]; then",
 ];
 pub(super) const TRUSTED_GATE_ENVIRONMENT_LINES: &[&str] = &[
-    "        shell: /usr/bin/env -u BASH_ENV -u ENV -u GCONV_PATH -u SHELLOPTS -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
-    "        shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:ENV = $null; $env:GCONV_PATH = $null; $env:SHELLOPTS = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\\Program Files\\Git\\bin\\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE\"'",
+    "        shell: /usr/bin/env -u BASH_ENV -u BASHOPTS -u ENV -u GCONV_PATH -u SHELLOPTS -u PERL5LIB -u PERL5OPT -u PERLLIB -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
+    "        shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = ''Stop''; $env:BASH_ENV = $null; $env:BASHOPTS = $null; $env:ENV = $null; $env:GCONV_PATH = $null; $env:SHELLOPTS = $null; $env:PERL5LIB = $null; $env:PERL5OPT = $null; $env:PERLLIB = $null; $env:LD_AUDIT = $null; $env:LD_LIBRARY_PATH = $null; $env:LD_PRELOAD = $null; & ''C:\\Program Files\\Git\\bin\\bash.exe'' --noprofile --norc -e -o pipefail ''{0}''; exit $LASTEXITCODE\"'",
     "          GIT_CONFIG_COUNT: '1'",
     "          GIT_CONFIG_COUNT: '1'",
     "          GIT_CONFIG_KEY_0: core.autocrlf",
@@ -357,16 +368,14 @@ fn reject_checked_in_weakening_with_mode(workspace: &Path, validation: Repositor
         let source_is_reviewed = surfaces.command_profiles.as_ref().is_some_and(|profiles| profiles.source_is_current(path, &source));
         let reviewed_source = surfaces::without_reviewed_dispatch(path, &source, source_is_reviewed);
         let filesystem_context = FilesystemContext::new(workspace, &surfaces.paths, &surfaces.tracked_paths);
+        let legacy_weakening = legacy_transition.is_some_and(|bridge| bridge.weakening);
         if weakening_token_for_surface_with_reviewed_source(filesystem_context, path, &reviewed_source, source_is_reviewed)
             && !reviewed_quality_command_exceptions_are_exact(path, &source, source_is_reviewed)
-            && !legacy_transition.is_some_and(|bridge| bridge.weakening)
+            && !legacy_weakening
         {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening argument");
         }
-        if weakening_environment_for_surface(path, &source)
-            && !scrubber_environment_references_are_exact(path, &source)
-            && !legacy_transition.is_some_and(|bridge| bridge.weakening)
-        {
+        if weakening_environment_for_surface(path, &source) && !scrubber_environment_references_are_exact(path, &source) && !legacy_weakening {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening environment channel");
         }
     }

@@ -39,7 +39,7 @@ pub(super) fn python_input(arguments: &[String]) -> SelectedInput<'_> {
 fn python_flag_without_operand(argument: &str) -> bool {
     matches!(
         argument,
-        "-b" | "-bb" | "-B" | "-d" | "-E" | "-i" | "-I" | "-O" | "-OO" | "-P" | "-q" | "-R" | "-s" | "-S" | "-u" | "-v" | "-x"
+        "-b" | "-bb" | "-B" | "-d" | "-E" | "-I" | "-O" | "-OO" | "-P" | "-q" | "-R" | "-s" | "-S" | "-u" | "-v" | "-x"
     ) || argument.starts_with("-W") && argument.len() > 2
         || argument.starts_with("-X") && argument.len() > 2
         || argument.starts_with("--check-hash-based-pycs=")

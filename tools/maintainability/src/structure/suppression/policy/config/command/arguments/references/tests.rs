@@ -723,6 +723,16 @@ fn language_and_git_dispatch_inputs_fail_closed() {
     assert_eq!(inputs("python -m quality.lint"), (Vec::new(), true));
     assert_eq!(inputs("python3 -m timeit 'import os; os.system(\"sh quality/lint.txt\")'"), (Vec::new(), true));
     assert_eq!(inputs("python -m $MODULE"), (Vec::new(), true));
+    for command in [
+        "python3 -i quality/lint.py",
+        "python3 -i -- quality/lint.py",
+        "python3 -Bi quality/lint.py",
+        "python3 -ib quality/lint.py",
+        "python3 -ii quality/lint.py",
+    ] {
+        assert_eq!(inputs(command), (Vec::new(), true), "{command}");
+    }
+    assert_eq!(inputs("python3 -B -q quality/lint.py"), (vec!["quality/lint.py".to_owned()], false));
     assert_eq!(inputs("pwsh -File quality/lint.ps1"), (vec!["quality/lint.ps1".to_owned()], false));
     assert_eq!(inputs("perl quality/lint.pl"), (Vec::new(), true));
     assert_eq!(inputs("ruby -- quality/lint.rb"), (Vec::new(), true));

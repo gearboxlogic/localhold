@@ -102,6 +102,10 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ),
     ("ssh-agent sh quality/lint.txt\n", "opaque interpreter program"),
     ("/usr/bin/python3.12 quality/lint.txt\n", "opaque interpreter program"),
+    (
+        "python3 -i quality/lint.py <<'PY'\nimport os\nos.system('sh quality/hidden.txt')\nPY\n",
+        "opaque interpreter program",
+    ),
     ("python3 -m timeit 'import os; os.system(\"sh quality/lint.txt\")'\n", "opaque interpreter program"),
     ("pydoc quality/lint.py\n", "opaque interpreter program"),
     ("sqlite3 :memory: '.shell sh quality/lint.txt'\n", "opaque interpreter program"),

@@ -101,13 +101,13 @@ fn rejected_execution_modules_fail_closed() {
     for source in [
         "import zipfile._path\n",
         "import imaplib\nimaplib.IMAP4_stream('sh quality/hidden.txt')\n",
-        "import imaplib as mail\nmail.IMAP4_stream('sh quality/hidden.txt')\n",
+        "from _aix_support import _read_cmd_output\n_read_cmd_output('sh quality/hidden.txt')\n",
         "from imaplib import IMAP4_stream as stream\nstream('sh quality/hidden.txt')\n",
         "import mailcap\nmailcap.test()\n",
-        "import mailcap as handlers\nhandlers.test()\n",
-        "from mailcap import test as dispatch\ndispatch()\n",
+        "from _pyrepl.console import InteractiveColoredConsole\nInteractiveColoredConsole().runsource(payload)\n",
+        "import typing\ntyping.get_type_hints(subject)\n",
         "import uuid\nuuid._get_command_stdout('sh', 'quality/hidden.txt')\n",
-        "import uuid as identifiers\nidentifiers._get_command_stdout('sh', 'quality/hidden.txt')\n",
+        "from typing import get_type_hints\nget_type_hints(subject)\n",
         "from uuid import _get_command_stdout as run\nrun('sh', 'quality/hidden.txt')\n",
     ] {
         assert!(has_opaque_process_arguments(source), "{source}");

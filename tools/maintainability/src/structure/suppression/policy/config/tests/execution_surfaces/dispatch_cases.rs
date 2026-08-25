@@ -127,6 +127,8 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("CARGO_DOC_BROWSER=quality/browser true\n", "lint-weakening environment channel"),
     ("cargo install --path quality/helper\n", "opaque interpreter program"),
     ("cargo rustc -- -C linker=quality/lint\n", "opaque interpreter program"),
+    ("rustc -Zcodegen-backend=quality/payload --version\n", "opaque interpreter program"),
+    ("clang --ptxas-path=quality/payload -c quality/input.c\n", "opaque interpreter program"),
     ("rustup toolchain link fake /tmp/toolchain\n", "lint-weakening argument"),
     ("setarch --uname-2.6 sh quality/lint.txt\n", "opaque interpreter program"),
     ("linux32 -- sh quality/lint.txt\n", "opaque interpreter program"),
@@ -387,6 +389,7 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
         "lint-weakening environment channel",
     ),
     ("ZIP='-T -TTsh${IFS}quality/hidden.txt' zip -q target/a.zip input\n", "lint-weakening environment channel"),
+    ("LDFLAGS='-Wl,--plugin=quality/payload' true\n", "lint-weakening environment channel"),
     (
         "CCC_OVERRIDE_OPTIONS='+-Xclang +-load +-Xclang +quality/payload' clang -fsyntax-only quality/input.c\n",
         "lint-weakening environment channel",

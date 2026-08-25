@@ -9,7 +9,7 @@ pub(super) fn dispatch_with_semantics(command: &str, arguments: &[String], seman
     compilation_tool(command) && arguments.iter().any(|argument| semantics.contains_dynamic(argument))
         || is_compiler_driver(command) && arguments.iter().any(|argument| is_dispatch_override(argument))
         || is_rust_compiler(command) && (custom_target_selection_is_opaque(arguments) || rust_compiler_dispatch_is_opaque(arguments))
-        || is_rustdoc(command) && rustdoc_dispatch_is_opaque(arguments)
+        || command.strip_suffix(".exe").unwrap_or(command) == "rustdoc" && rustdoc_dispatch_is_opaque(arguments)
         || is_linker_tool(command) && arguments.iter().any(|argument| linker_dispatch_override(argument))
         || is_archive_tool(command) && archive_dispatch_is_opaque(arguments, semantics)
         || is_binutils_plugin_tool(command)
@@ -142,7 +142,9 @@ fn rust_codegen_dispatch_option_is_opaque(option: &str) -> bool {
 }
 
 fn rust_unstable_dispatch_option_is_opaque(option: &str) -> bool {
-    option.split_once('=').is_some_and(|(name, _)| name.replace('_', "-") == "llvm-plugins")
+    option
+        .split_once('=')
+        .is_some_and(|(name, _)| matches!(name.replace('_', "-").as_str(), "llvm-plugins" | "codegen-backend"))
 }
 
 fn rustdoc_dispatch_is_opaque(arguments: &[String]) -> bool {
@@ -154,10 +156,6 @@ fn rustdoc_dispatch_is_opaque(arguments: &[String]) -> bool {
 
 fn is_rust_compiler(command: &str) -> bool {
     matches!(command.strip_suffix(".exe").unwrap_or(command), "rustc" | "rustdoc")
-}
-
-fn is_rustdoc(command: &str) -> bool {
-    command.strip_suffix(".exe").unwrap_or(command) == "rustdoc"
 }
 
 fn is_binutils_plugin_tool(command: &str) -> bool {
@@ -218,24 +216,19 @@ fn is_dispatch_override(argument: &str) -> bool {
         || argument == "-wrapper"
         || argument.starts_with("-fplugin=")
         || argument.starts_with("-fpass-plugin=")
-        || argument == "-specs"
-        || argument == "--specs"
-        || argument.starts_with("-specs=")
-        || argument.starts_with("--specs=")
+        || matches!(argument, "-specs" | "--specs")
+        || ["-specs=", "--specs="].iter().any(|prefix| argument.starts_with(prefix))
         || argument == "--config"
         || argument.starts_with("--config=")
-        || argument == "-Xclang"
-        || argument.starts_with("-Xclang=")
-        || argument == "-Xlinker"
-        || argument.starts_with("-Xlinker=")
+        || matches!(argument, "-Xclang" | "-Xlinker")
+        || ["-Xclang=", "-Xlinker="].iter().any(|prefix| argument.starts_with(prefix))
         || argument.starts_with("--for-linker=")
         || argument == "--for-linker"
         || argument == "-B"
         || argument.starts_with("-B") && argument.len() > 2
-        || argument.starts_with("--gcc-install-dir=")
-        || argument.starts_with("--gcc-toolchain=")
-        || argument.starts_with("--ld-path=")
-        || argument.starts_with("-fuse-ld=")
+        || argument == "--ptxas-path"
+        || ["--gcc-install-dir=", "--gcc-toolchain=", "--ld-path="].iter().any(|prefix| argument.starts_with(prefix))
+        || ["--ptxas-path=", "-fuse-ld="].iter().any(|prefix| argument.starts_with(prefix))
         || linker_plugin_argument(argument)
 }
 
@@ -360,6 +353,7 @@ mod tests {
             &["-Xclang", "-load", "-Xclang", "quality/lint.so"],
             &["-Wl,--plugin=quality/lint.so"],
             &["--ld-path=quality/ld"],
+            &["--ptxas-path", "quality/ptxas"],
             &["-Bquality/toolchain"],
         ] {
             assert!(dispatch_is_opaque("gcc", &arguments(values)), "{values:?}");
@@ -401,6 +395,7 @@ mod tests {
             &["-Zllvm-plugins=quality/payload", "quality/benign.rs"],
             &["-Z", "llvm_plugins=quality/payload", "quality/benign.rs"],
             &["-Zllvm_plugins=quality/payload", "quality/benign.rs"],
+            &["-Zcodegen_backend=quality/payload", "quality/benign.rs"],
         ] {
             assert!(dispatch_is_opaque("rustc", &arguments(values)), "{values:?}");
             assert!(dispatch_is_opaque("rustdoc", &arguments(values)), "{values:?}");

@@ -456,18 +456,23 @@ fn untrusted_directory_change_with_rust_tool(source: &str, case_insensitive_tool
                     && !is_informational_compiler_invocation(&tokens[index.saturating_add(1)..])
         })
     });
-    has_rust_execution
-        && commands
-            .iter()
-            .any(|tokens| is_directory_change_command(tokens) && !is_audited_repository_root_change(tokens, source))
+    has_rust_execution && has_untrusted_directory_change_in_commands(&commands, source)
 }
 
 fn untrusted_directory_change_with_quality_dispatcher(source: &str, case_insensitive_tools: bool) -> bool {
     let commands = tokens::normalized_shell_commands(source);
-    integrity::contains_quality_dispatcher(source, case_insensitive_tools)
-        && commands
-            .iter()
-            .any(|tokens| is_directory_change_command(tokens) && !is_audited_repository_root_change(tokens, source))
+    integrity::contains_quality_dispatcher(source, case_insensitive_tools) && has_untrusted_directory_change_in_commands(&commands, source)
+}
+
+fn has_untrusted_directory_change(source: &str) -> bool {
+    let commands = tokens::normalized_shell_commands(source);
+    has_untrusted_directory_change_in_commands(&commands, source)
+}
+
+fn has_untrusted_directory_change_in_commands(commands: &[Vec<String>], source: &str) -> bool {
+    commands
+        .iter()
+        .any(|tokens| is_directory_change_command(tokens) && !is_audited_repository_root_change(tokens, source))
 }
 
 fn is_directory_change_command(tokens: &[String]) -> bool {
@@ -478,7 +483,12 @@ fn is_directory_change_command(tokens: &[String]) -> bool {
         .iter()
         .map(|word| word.trim_matches(['(', ')', '{', '}']))
         .find(|word| !word.is_empty() && !is_shell_command_prefix(word) && !is_environment_assignment(word))
-        .is_some_and(|word| matches!(word.to_ascii_lowercase().as_str(), "cd" | "chdir" | "pushd" | "set-location"))
+        .is_some_and(|word| {
+            matches!(
+                word.to_ascii_lowercase().as_str(),
+                "cd" | "cdh" | "chdir" | "nextd" | "pop-location" | "popd" | "prevd" | "push-location" | "pushd" | "set-location" | "sl"
+            )
+        })
 }
 
 fn env_changes_directory(tokens: &[String]) -> bool {

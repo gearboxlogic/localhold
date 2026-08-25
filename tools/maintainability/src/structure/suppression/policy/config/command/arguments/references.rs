@@ -331,12 +331,21 @@ struct DispatchInput<'a, 'surface> {
 }
 
 fn record_shell_source_inputs(surface: ShellSurface<'_>, source: &str, inputs: &mut BTreeSet<String>, unresolved: &mut bool) {
+    let mut source_inputs = BTreeSet::new();
     for tokens in tokens::source_command_tokens(source) {
         if surface.mode.direct_program_paths && !surface.mode.make_surface && substitution_is_command_program(&tokens) {
             *unresolved = true;
         }
-        record_execution_inputs_from_tokens(surface, &tokens, inputs, unresolved);
+        record_execution_inputs_from_tokens(surface, &tokens, &mut source_inputs, unresolved);
     }
+    *unresolved |= !source_inputs.is_empty() && super::has_untrusted_directory_change(source) && !reviewed_release_directory_restoration(surface, source);
+    inputs.extend(source_inputs);
+}
+
+fn reviewed_release_directory_restoration(surface: ShellSurface<'_>, source: &str) -> bool {
+    const CHECKSUMS_AND_NOTES: &str =
+        "cd dist\nsha256sum -- ./*.tar.zst ./*.zip > SHA256SUMS\ncd ..\npython3 script/release.py notes \"$GITHUB_REF_NAME\" --output release-notes.md\n";
+    surface.path == ".github/workflows/release.yml" && surface.review.source && source == CHECKSUMS_AND_NOTES
 }
 
 fn substitution_is_command_program(tokens: &[String]) -> bool {

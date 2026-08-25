@@ -180,6 +180,70 @@ fn stdlib_code_evaluators_fail_closed_without_matching_unrelated_names() {
 }
 
 #[test]
+fn native_stdlib_execution_escape_hatches_fail_closed() {
+    for source in [
+        "import sqlite3\nsqlite3.connect(':memory:').enable_load_extension(True)\n",
+        "import _sqlite3 as database\ndatabase.connect(':memory:').load_extension('quality/payload')\n",
+        "from sqlite3 import connect\nconnect(':memory:').load_extension('quality/payload')\n",
+        "import dbm.sqlite3\ndatabase = dbm.sqlite3.open('quality/database')\ndatabase._cx.load_extension('quality/payload')\n",
+        "from dbm import sqlite3 as database\ndatabase.open('quality/database')._cx.load_extension('quality/payload')\n",
+        "connection.load_extension('quality/payload')\n",
+        "loader = connection.load_extension\nloader('quality/payload')\n",
+        "connection.setconfig(sqlite3.SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, True)\nconnection.execute('select load_extension(?)', (payload,))\n",
+        "getattr(connection, 'load_extension')('quality/payload')\n",
+        "vars(connection)['load_extension']('quality/payload')\n",
+        "connection.__dict__['load_extension']('quality/payload')\n",
+        "connection.__getattribute__('load_extension')('quality/payload')\n",
+        "import operator\noperator.attrgetter('load_extension')(connection)('quality/payload')\n",
+        "import operator\noperator.methodcaller('load_extension', 'quality/payload')(connection)\n",
+        "import tkinter\ntkinter.Tcl().call('exec', 'sh', 'quality/hidden.txt')\n",
+        "import tkinter\ntkinter.Tcl().eval('exec sh quality/hidden.txt')\n",
+        "import tkinter\ntkinter.Tcl().evalfile('quality/hidden.tcl')\n",
+        "import tkinter\ntkinter.Tcl().call('source', 'quality/hidden.tcl')\n",
+        "import tkinter\ntkinter.Tcl().call('open', '|sh quality/hidden.txt')\n",
+        "import tkinter\ninterpreter = tkinter.Tcl()\ninvoke = interpreter.call\ninvoke('exec', 'sh', 'quality/hidden.txt')\n",
+        "import _tkinter\nprint(_tkinter.TCL_VERSION)\n",
+        "from tkinter import Tcl\nTcl().eval('exec sh quality/hidden.txt')\n",
+        "import turtle\nturtle.TK.Tcl().call('exec', 'sh', 'quality/hidden.txt')\n",
+        "import idlelib.pyshell as shell\nshell.Tcl().call('exec', 'sh', 'quality/hidden.txt')\n",
+        "import turtledemo.__main__ as demo\ndemo.Tcl().call('exec', 'sh', 'quality/hidden.txt')\n",
+        "import test.test_tcl as tests\ntests.Tcl().call('exec', 'sh', 'quality/hidden.txt')\n",
+        "from test import test_tkinter\nprint(test_tkinter)\n",
+        "import _xxsubinterpreters\nfrom pathlib import Path\n_xxsubinterpreters.run_string(_xxsubinterpreters.create(), Path('quality/hidden.txt').read_text())\n",
+        "from _xxsubinterpreters import run_string as run\nrunner = run\nrunner.__call__(interpreter, payload)\n",
+        "import _testcapi\n_testcapi.run_in_subinterp(payload)\n",
+        "from _testcapi import run_in_subinterp as run\nrunner = run\nrunner(payload)\n",
+        "import _testinternalcapi as api\nrunner = api.run_in_subinterp_with_config\nrunner(payload, config)\n",
+        "from _testinternalcapi import exec_interpreter as run\nrun(interpreter, payload)\n",
+        "import _testlimitedcapi as api\ncompiler = api.run_compilestring\nloader = api.PyImport_ExecCodeModule\ncode = compiler(payload, b'<payload>', 257)\nloader('_localhold_payload', code)\n",
+        "from _interpreters import exec as run\nrun(interpreter, payload)\n",
+        "import concurrent.interpreters\ninterpreter = concurrent.interpreters.create()\ninterpreter.exec(payload)\n",
+        "from concurrent import interpreters\ninterpreter = interpreters.create()\ninterpreter.exec(payload)\n",
+        "from concurrent import (\n    interpreters,\n)\ninterpreter = interpreters.create()\ninterpreter.exec(payload)\n",
+        "from concurrent import (\n    interpreters,\n)\nprint(interpreters)\n",
+        "import test.support.interpreters\ninterpreter = test.support.interpreters.create()\ninterpreter.exec(payload)\n",
+        "from test.support import interpreters\ninterpreter = interpreters.create()\ninterpreter.exec(payload)\n",
+        "import test.test__interpreters as tests\ntests._interpreters.run_string(tests._interpreters.create(), payload)\n",
+        "import test.test_ttk as tests\ninterpreter = tests.tkinter.Tcl()\ninterpreter.call('exec', 'sh', 'quality/hidden.txt')\n",
+        "import test.test_ttk_textonly as tests\ntests.ttk.tkinter.Tcl().call('exec', 'sh', 'quality/hidden.txt')\n",
+    ] {
+        assert!(has_opaque_process_arguments(source), "{source}");
+    }
+    for source in [
+        "print('sqlite3.connect is inert text')\n",
+        "module_name = 'tkinter'\nprint(module_name)\n",
+        "def run_string(value): return value\nprint(run_string('safe'))\n",
+        "import concurrent.futures\nprint(concurrent.futures.ThreadPoolExecutor)\n",
+        "# connection.load_extension('quality/payload')\nprint('load_extension is inert text')\n",
+        "# import test.test_ttk\nprint('test.test__interpreters is inert text')\n",
+        "# _testcapi.run_in_subinterp(payload)\ndef run_in_subinterp(value): return value\nprint(run_in_subinterp('safe'))\n",
+        "def load_extensions(value): return value\nprint(load_extensions('safe'))\n",
+    ] {
+        assert!(!has_opaque_process_arguments(source), "{source}");
+    }
+}
+
+#[test]
 fn python_identifier_normalization_cannot_hide_process_calls_or_aliases() {
     for source in [
         "import os\nos.ｓｙｓｔｅｍ(bytes.fromhex(payload))\n",

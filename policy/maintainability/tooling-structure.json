@@ -8,13 +8,13 @@
   },
   "component": {
     "id": "maintainability-analyzer",
-    "physical_ceiling": 63355
+    "physical_ceiling": 63352
   },
   "source_profile": {
-    "current_sha256": "cfa9761934920a100e4050f3dca4989a1ff3a599a5875c5fab3256f3d9ced556",
+    "current_sha256": "a16769b54f46287d03c00cb14f0ccd2c597390ed1e2e57585a95bf5c4e2160a4",
     "preapproved_next_sha256": null,
     "retired_sha256": [
-      "a63420f1a1e0f6029b3416795584b8b085f339f70a1d8c79290d44fc9768217d"
+      "30ca835d3fe22955b26bfa08dd039c15562f1c520269bc4d4523a065232ac788"
     ]
   },
   "hotspots": [

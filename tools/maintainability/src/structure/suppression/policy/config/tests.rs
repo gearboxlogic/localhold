@@ -531,6 +531,8 @@ fn checked_in_bootstrap_matches_its_reviewed_environment_contract() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let path = "script/check-maintainability-bootstrap.sh";
     let source = fs::read_to_string(repository.join(path)).expect("read checked-in maintainability bootstrap");
+    let unreviewed = source.replacen("unset GCONV_PATH", "unset GCONV_PATH CMAKE_TOOLCHAIN_FILE", 1);
+    assert!(!scrubber_environment_references_are_exact(path, &unreviewed));
     if super::command::checked_in_legacy_transition_capabilities(&repository, path, &source).is_some_and(|(_, environment)| environment) {
         assert!(
             !scrubber_environment_references_are_exact(path, &source),

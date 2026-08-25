@@ -332,7 +332,7 @@ subprocess.run(["git", "status"], check=True)
     #[test]
     fn only_exact_python_process_profiles_can_override_argv_policy() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        for surface in ["script/database_fixtures.py", "script/package_release.py"] {
+        for surface in ["script/database_fixtures.py", "script/package_release.py", "script/validate_cuda_runtime.py"] {
             let source = fs::read_to_string(workspace.join(surface)).expect("reviewed Python process source");
             assert!(analyzer::is_reviewed_process_surface(surface, &source), "{surface}");
             assert!(!execution_inputs(surface, &source).unresolved, "{surface}");

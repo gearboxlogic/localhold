@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use super::super::{ignored_python_paths, parse_nul_paths, validate_relative_path};
 use super::actions::validate_local_actions;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use super::arguments::execution_inputs_for_surface;
 use super::arguments::{WorkspaceAnalyzer, WorkspaceContext, execution_inputs_for_surface_in_workspace};
 use super::is_execution_surface;

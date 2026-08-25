@@ -61,11 +61,15 @@ fn env_command(arguments: &[String]) -> Selection<'_> {
             _ if argument.starts_with("--unset=") || argument.starts_with("--chdir=") => index += 1,
             _ if attached_short_operand(argument, 'u') || attached_short_operand(argument, 'C') => index += 1,
             _ if argument.starts_with('-') => return Selection::Opaque,
-            _ if super::super::is_environment_assignment(argument) => index += 1,
+            _ if is_env_assignment(argument) => index += 1,
             _ => return Selection::Nested(&arguments[index..]),
         }
     }
     Selection::NoCommand
+}
+
+fn is_env_assignment(argument: &str) -> bool {
+    argument.split_once('=').is_some_and(|(name, _)| !name.is_empty())
 }
 
 fn exec_builtin(arguments: &[String]) -> Selection<'_> {

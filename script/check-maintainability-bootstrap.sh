@@ -23,38 +23,30 @@ script_directory=${script_path%/*}
 script_directory=$(cd -- "$script_directory" && pwd -P)
 script_path="$script_directory/${script_path##*/}"
 
-untrusted_environment_name() {
-    local uppercase=${1^^}
-    case "$uppercase" in
-        BASH_ENV | ENV | CDPATH | IFS | AR | AR_* | HOST_AR | TARGET_AR | ARFLAGS | ARFLAGS_* | HOST_ARFLAGS | TARGET_ARFLAGS | \
-            CC | CC_* | HOST_CC | TARGET_CC | CFLAGS | CFLAGS_* | HOST_CFLAGS | TARGET_CFLAGS | CROSS_COMPILE | \
-            CXX | CXX_* | HOST_CXX | TARGET_CXX | CXXFLAGS | CXXFLAGS_* | HOST_CXXFLAGS | TARGET_CXXFLAGS | \
-            NVCC | NVCC_* | HOST_NVCC | TARGET_NVCC | RANLIB | RANLIB_* | HOST_RANLIB | TARGET_RANLIB | \
-            RANLIBFLAGS | RANLIBFLAGS_* | HOST_RANLIBFLAGS | TARGET_RANLIBFLAGS | CCC_OVERRIDE_OPTIONS | CL | \
-            COMPILER_PATH | GCC_EXEC_PREFIX | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | \
-            OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | RIPGREP_CONFIG_PATH | \
-            RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | \
-            CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | RUSTC | RUSTDOC | RUSTC_WRAPPER | \
-            RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | \
-            CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | \
-            CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | \
-            EDITOR | GIT_* | LESS | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | LV | PAGER | SSH_ASKPASS | SSH_ASKPASS_REQUIRE | \
-            TAR_OPTIONS | VISUAL | ZIP | ZIPOPT | _CL_)
-            return 0
-            ;;
-    esac
-    return 1
-}
-
 scrub_untrusted_environment() {
-    local entry
-    local name
+    local environment_entry
+    local environment_name
     local -a removals=()
-    while IFS= read -r -d '' entry; do
-        name=${entry%%=*}
-        if untrusted_environment_name "$name"; then
-            removals+=(-u "$name")
-        fi
+    while IFS= read -r -d '' environment_entry; do
+        environment_name=${environment_entry%%=*}
+        case "${environment_name^^}" in
+            BASH_ENV | ENV | CDPATH | IFS | AR | AR_* | HOST_AR | TARGET_AR | ARFLAGS | ARFLAGS_* | HOST_ARFLAGS | TARGET_ARFLAGS | \
+                CC | CC_* | HOST_CC | TARGET_CC | CFLAGS | CFLAGS_* | HOST_CFLAGS | TARGET_CFLAGS | CROSS_COMPILE | \
+                CXX | CXX_* | HOST_CXX | TARGET_CXX | CXXFLAGS | CXXFLAGS_* | HOST_CXXFLAGS | TARGET_CXXFLAGS | \
+                NVCC | NVCC_* | HOST_NVCC | TARGET_NVCC | RANLIB | RANLIB_* | HOST_RANLIB | TARGET_RANLIB | \
+                RANLIBFLAGS | RANLIBFLAGS_* | HOST_RANLIBFLAGS | TARGET_RANLIBFLAGS | CCC_OVERRIDE_OPTIONS | CL | \
+                COMPILER_PATH | GCC_EXEC_PREFIX | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | \
+                OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | RIPGREP_CONFIG_PATH | \
+                RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | \
+                CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | RUSTC | RUSTDOC | RUSTC_WRAPPER | \
+                RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | \
+                CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | \
+                CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | \
+                EDITOR | GIT_* | LESS | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | LV | PAGER | SSH_ASKPASS | SSH_ASKPASS_REQUIRE | \
+                TAR_OPTIONS | VISUAL | ZIP | ZIPOPT | _CL_)
+                removals+=(-u "$environment_name")
+                ;;
+        esac
     done < <(/usr/bin/env -0)
     if (( ${#removals[@]} > 0 )); then
         exec /usr/bin/env "${removals[@]}" /usr/bin/bash "$script_path" "$@"
@@ -124,8 +116,8 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=cd756b8a6039e1192bb0c95e7c42e66148f7b883f3b12662b31c70269165a468
-readonly reviewed_bootstrap_tests_sha256=e1416d52e8c9e54eb4cefd69902a5edacd8ede0f5abbb5db096df151ff3aeb04
-readonly reviewed_gate_runner_sha256=ac1a38c2be00ff7d14100fa034e649d0b4687adb48e3b356ec0071742b93fe8f
+readonly reviewed_bootstrap_tests_sha256=1bb2803f7c2581455acefc719ca000afc99becb29f7826a4269a9a73ad4c8e9d
+readonly reviewed_gate_runner_sha256=e21e4eaccfb676eafd5516e71183aa0bf3375d25fc92fc703b32a2643c91b065
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then

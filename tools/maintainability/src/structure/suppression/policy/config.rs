@@ -23,10 +23,10 @@ pub(super) use command::reject_checked_in_weakening_fixture as reject_checked_in
 pub(super) use command::validate_guarded_configuration;
 #[cfg(test)]
 use command::{
-    BOOTSTRAP_ENVIRONMENT_LINES, BOOTSTRAP_TEST_ENVIRONMENT_LINES, CI_TRUST_ENVIRONMENT_LINES, CLAUDE_REVIEW_ENVIRONMENT_LINES, CLAUDE_REVIEW_TEST_ENVIRONMENT_LINES,
-    GATE_RUNNER_ENVIRONMENT_LINES, GPU_RELEASE_REVISION_ENVIRONMENT_LINES, INSTALL_ENVIRONMENT_LINES, MISE_ENVIRONMENT_LINES, RUNNER_COMMAND_LINES, RUNNER_ENVIRONMENT_LINES,
-    TRUSTED_GATE_ENVIRONMENT_LINES, has_sourced_file_indirection, is_execution_surface, scrubber_environment_references_are_exact, weakening_environment,
-    weakening_environment_for_surface, weakening_token, weakening_token_for_surface, without_reviewed_dispatch,
+    BOOTSTRAP_ENVIRONMENT_LINES, BOOTSTRAP_TEST_ENVIRONMENT_LINES, BOOTSTRAP_TEST_OPAQUE_COMMAND_LINES, CI_TRUST_ENVIRONMENT_LINES, CLAUDE_REVIEW_ENVIRONMENT_LINES,
+    CLAUDE_REVIEW_TEST_ENVIRONMENT_LINES, GATE_RUNNER_ENVIRONMENT_LINES, GPU_RELEASE_REVISION_ENVIRONMENT_LINES, INSTALL_ENVIRONMENT_LINES, MISE_ENVIRONMENT_LINES,
+    RUNNER_COMMAND_LINES, RUNNER_ENVIRONMENT_LINES, TRUSTED_GATE_ENVIRONMENT_LINES, has_sourced_file_indirection, is_execution_surface, scrubber_environment_references_are_exact,
+    weakening_environment, weakening_environment_for_surface, weakening_token, weakening_token_for_surface, without_reviewed_dispatch,
 };
 pub(super) use python_sources::validate as validate_python_sources;
 

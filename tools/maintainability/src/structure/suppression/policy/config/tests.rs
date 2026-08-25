@@ -543,6 +543,20 @@ fn checked_in_bootstrap_matches_its_reviewed_environment_contract() {
 }
 
 #[test]
+fn bootstrap_fixture_raw_environment_dispatch_requires_exact_reviewed_source() {
+    let path = "script/tests/test_maintainability_bootstrap.sh";
+    let line = BOOTSTRAP_TEST_OPAQUE_COMMAND_LINES[0];
+    let reviewed = format!("#!/usr/bin/bash\n{line}\n");
+    assert_eq!(without_reviewed_dispatch(path, &reviewed, true), "#!/usr/bin/bash\n:");
+    assert_eq!(without_reviewed_dispatch(path, &reviewed, false), reviewed);
+
+    let changed = reviewed.replace("untrusted", "changed");
+    assert_eq!(without_reviewed_dispatch(path, &changed, true), changed);
+    let duplicated = format!("{reviewed}{line}\n");
+    assert_eq!(without_reviewed_dispatch(path, &duplicated, true), duplicated);
+}
+
+#[test]
 fn trusted_gate_environment_allowance_is_closed() {
     let reviewed = TRUSTED_GATE_ENVIRONMENT_LINES.join("\n");
     for changed in [

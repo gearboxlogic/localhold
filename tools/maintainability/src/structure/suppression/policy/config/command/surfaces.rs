@@ -273,14 +273,26 @@ const TRUSTED_DISPATCH_JOBS: &[TrustedDispatchJob] = &[
 ];
 
 pub(in crate::structure::suppression::policy::config) fn without_reviewed_dispatch(surface: &str, source: &str, source_is_reviewed: bool) -> String {
-    let source = without_reviewed_protected_dispatch(surface, source);
-    if surface != "script/install.sh" || !super::reviewed_quality_command_exceptions_are_exact(surface, &source, source_is_reviewed) {
-        return source;
+    let mut source = without_reviewed_protected_dispatch(surface, source);
+    if super::reviewed_bootstrap_reexec_is_exact(surface, &source, source_is_reviewed) {
+        source = without_reviewed_bootstrap_reexec(&source);
     }
+    let reviewed_lines = match surface {
+        "script/install.sh" if super::reviewed_quality_command_exceptions_are_exact(surface, &source, source_is_reviewed) => super::INSTALL_COMMAND_LINES,
+        "script/tests/test_maintainability_bootstrap.sh"
+            if source_is_reviewed
+                && super::BOOTSTRAP_TEST_OPAQUE_COMMAND_LINES
+                    .iter()
+                    .all(|expected| source.lines().filter(|line| line == expected).count() == 1) =>
+        {
+            super::BOOTSTRAP_TEST_OPAQUE_COMMAND_LINES
+        }
+        _ => return source,
+    };
     source
         .lines()
         .map(|line| {
-            if super::INSTALL_COMMAND_LINES.contains(&line) {
+            if reviewed_lines.contains(&line) {
                 format!("{}:", &line[..line.len() - line.trim_start().len()])
             } else {
                 line.to_owned()
@@ -288,6 +300,14 @@ pub(in crate::structure::suppression::policy::config) fn without_reviewed_dispat
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn without_reviewed_bootstrap_reexec(source: &str) -> String {
+    const START: &str = "scrub_untrusted_environment() {";
+    const END: &str = "\nscrub_untrusted_environment \"$@\"";
+    let start = source.find(START).expect("reviewed bootstrap scrub start");
+    let end = source[start..].find(END).expect("reviewed bootstrap scrub end") + start + END.len();
+    format!("{}:{}", &source[..start], &source[end..])
 }
 
 fn without_reviewed_protected_dispatch(surface: &str, source: &str) -> String {

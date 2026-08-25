@@ -62,21 +62,20 @@ pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
     "        git_executable=$(\"$cygpath_command\" -w \"$git_executable\")",
     "    LOCALHOLD_MAINTAINABILITY_GIT=$git_executable",
     "    export LOCALHOLD_MAINTAINABILITY_GIT",
-    "        BASH_ENV | ENV | CDPATH | IFS | AR | AR_* | HOST_AR | TARGET_AR | ARFLAGS | ARFLAGS_* | HOST_ARFLAGS | TARGET_ARFLAGS | \\",
-    "            CC | CC_* | HOST_CC | TARGET_CC | CFLAGS | CFLAGS_* | HOST_CFLAGS | TARGET_CFLAGS | CROSS_COMPILE | \\",
-    "            CXX | CXX_* | HOST_CXX | TARGET_CXX | CXXFLAGS | CXXFLAGS_* | HOST_CXXFLAGS | TARGET_CXXFLAGS | \\",
-    "            NVCC | NVCC_* | HOST_NVCC | TARGET_NVCC | RANLIB | RANLIB_* | HOST_RANLIB | TARGET_RANLIB | \\",
-    "            RANLIBFLAGS | RANLIBFLAGS_* | HOST_RANLIBFLAGS | TARGET_RANLIBFLAGS | CCC_OVERRIDE_OPTIONS | CL | \\",
-    "            COMPILER_PATH | GCC_EXEC_PREFIX | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | \\",
-    "            OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | RIPGREP_CONFIG_PATH | \\",
-    "            RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | \\",
-    "            CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | RUSTC | RUSTDOC | RUSTC_WRAPPER | \\",
-    "            RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | \\",
-    "            CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | \\",
-    "            CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | \\",
-    "            EDITOR | GIT_* | LESS | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | LV | PAGER | SSH_ASKPASS | SSH_ASKPASS_REQUIRE | \\",
-    "            TAR_OPTIONS | VISUAL | ZIP | ZIPOPT | _CL_)",
-    "    while IFS= read -r -d '' entry; do",
+    "            BASH_ENV | ENV | CDPATH | IFS | AR | AR_* | HOST_AR | TARGET_AR | ARFLAGS | ARFLAGS_* | HOST_ARFLAGS | TARGET_ARFLAGS | \\",
+    "                CC | CC_* | HOST_CC | TARGET_CC | CFLAGS | CFLAGS_* | HOST_CFLAGS | TARGET_CFLAGS | CROSS_COMPILE | \\",
+    "                CXX | CXX_* | HOST_CXX | TARGET_CXX | CXXFLAGS | CXXFLAGS_* | HOST_CXXFLAGS | TARGET_CXXFLAGS | \\",
+    "                NVCC | NVCC_* | HOST_NVCC | TARGET_NVCC | RANLIB | RANLIB_* | HOST_RANLIB | TARGET_RANLIB | \\",
+    "                RANLIBFLAGS | RANLIBFLAGS_* | HOST_RANLIBFLAGS | TARGET_RANLIBFLAGS | CCC_OVERRIDE_OPTIONS | CL | \\",
+    "                COMPILER_PATH | GCC_EXEC_PREFIX | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | \\",
+    "                OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | PERL5LIB | PERL5OPT | PERLLIB | RIPGREP_CONFIG_PATH | \\",
+    "                RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | \\",
+    "                CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | RUSTC | RUSTDOC | RUSTC_WRAPPER | \\",
+    "                RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | \\",
+    "                CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | \\",
+    "                CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | \\",
+    "                EDITOR | GIT_* | LESS | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | LV | PAGER | SSH_ASKPASS | SSH_ASKPASS_REQUIRE | \\",
+    "                TAR_OPTIONS | VISUAL | ZIP | ZIPOPT | _CL_)",
     "if [[ -v GITHUB_ACTIONS || -v GITHUB_EVENT_PATH || -v GITHUB_SHA ]]; then",
     "        if [[ ${GITHUB_ACTIONS:-} != true || -z ${GITHUB_EVENT_PATH:-} || -z ${GITHUB_SHA:-} ]]; then",
     "        if [[ ! $GITHUB_SHA =~ ^[[:xdigit:]]{40}$ || ${checked_head,,} != \"${GITHUB_SHA,,}\" ]]; then",
@@ -232,6 +231,8 @@ pub(super) const BOOTSTRAP_TEST_ENVIRONMENT_LINES: &[&str] = &[
     "    run_check --test-environment >/dev/null",
     "/usr/bin/env 'CC_x86_64-unknown-linux-gnu=untrusted' \"$check\" --root \"$test_repository\" --test-environment >/dev/null",
 ];
+pub(super) const BOOTSTRAP_TEST_OPAQUE_COMMAND_LINES: &[&str] =
+    &["/usr/bin/env 'CC_x86_64-unknown-linux-gnu=untrusted' \"$check\" --root \"$test_repository\" --test-environment >/dev/null"];
 #[cfg(test)]
 pub(super) const MISE_ENVIRONMENT_LINES: &[&str] = &[
     "CARGO_HOME = \"{{ env.XDG_CACHE_HOME | default(value=env.HOME ~ \\\"/.cache\\\") }}/localhold/cargo\"",
@@ -264,7 +265,7 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
-    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: f5683779963a88b910bb83251794bca9a3a0dd2e77514da0180ac9b8ea91de70",
+    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: ce4c3b286f7acc16eb14326fcbc4799f159da39ae6d7a2ed7d569783cec625a5",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
@@ -350,8 +351,9 @@ fn reject_checked_in_weakening_with_mode(workspace: &Path, validation: Repositor
             bail!("checked-in Rust command surface {path:?} selects a Cargo manifest outside the audited manifest inventory");
         }
         let source_is_reviewed = surfaces.command_profiles.as_ref().is_some_and(|profiles| profiles.source_is_current(path, &source));
+        let reviewed_source = surfaces::without_reviewed_dispatch(path, &source, source_is_reviewed);
         let filesystem_context = FilesystemContext::new(workspace, &surfaces.paths, &surfaces.tracked_paths);
-        if weakening_token_for_surface_with_reviewed_source(filesystem_context, path, &source, source_is_reviewed)
+        if weakening_token_for_surface_with_reviewed_source(filesystem_context, path, &reviewed_source, source_is_reviewed)
             && !reviewed_quality_command_exceptions_are_exact(path, &source, source_is_reviewed)
             && !legacy_transition.is_some_and(|bridge| bridge.weakening)
         {
@@ -519,6 +521,21 @@ pub(super) fn scrubber_environment_references_are_exact(path: &str, source: &str
         .iter()
         .filter(|line| weakening_environment_for_surface("", line) || yaml_environment_lines.contains(line))
         .all(|line| allowed.contains(line))
+}
+
+pub(super) fn reviewed_bootstrap_reexec_is_exact(path: &str, source: &str, source_is_reviewed: bool) -> bool {
+    source_is_reviewed
+        && path == "script/check-maintainability-bootstrap.sh"
+        && source.matches("scrub_untrusted_environment() {").count() == 1
+        && source.lines().filter(|line| *line == "scrub_untrusted_environment \"$@\"").count() == 1
+        && scrubber_environment_references_are_exact(path, source)
+        && source.contains(
+            "scrub_untrusted_environment() {\n    local environment_entry\n    local environment_name\n    local -a removals=()\n    while IFS= read -r -d '' environment_entry; do\n        environment_name=${environment_entry%%=*}\n        case \"${environment_name^^}\" in",
+        )
+        && source.contains("                TAR_OPTIONS | VISUAL | ZIP | ZIPOPT | _CL_)\n                removals+=(-u \"$environment_name\")\n                ;;\n        esac")
+        && source.contains(
+            "    done < <(/usr/bin/env -0)\n    if (( ${#removals[@]} > 0 )); then\n        exec /usr/bin/env \"${removals[@]}\" /usr/bin/bash \"$script_path\" \"$@\"\n    fi\n}\n\nscrub_untrusted_environment \"$@\"",
+        )
 }
 
 pub(super) fn reviewed_quality_command_exceptions_are_exact(path: &str, source: &str, source_is_reviewed: bool) -> bool {

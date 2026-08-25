@@ -273,7 +273,7 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
-    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 8848922178cf938d952c81e046feea63315c8a00045ab1ee22c35b0c5f1a9f71",
+    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 1eba75af4f42f7904f485637bcce93616e5f7d897211b43e41ffb19f41d42273",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",

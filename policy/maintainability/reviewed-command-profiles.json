@@ -14,9 +14,9 @@
     {
       "id": "fixture-bootstrap",
       "path": "script/tests/test_maintainability_bootstrap.sh",
-      "current_sha256": "32bdfef132e64ba26754444a95524f492aca5106fa9e3233f8c40e92c08f4db1",
+      "current_sha256": "9fd95497e31664308dbe18f3d1bdd7fe24d7fa3335282699482ceff89b1b2468",
       "preapproved_next_sha256": null,
-      "retired_sha256": ["3532c926ba6e350b6235a1408b660a34c99867af81251e3cee7f541a9da16f40"],
+      "retired_sha256": ["9c40f5a103e6fdc364bdb6a4cc6afbdf982d8b1512229ff4c346ca58cdb818ad"],
       "issue": "https://github.com/gearboxlogic/localhold/issues/124",
       "rationale": "The bootstrap security fixture must construct and mutate only its isolated temporary repositories.",
       "safety_invariant": "Every accepted dynamic command is an exact argument tuple and the complete fixture source matches the current reviewed digest."
@@ -70,10 +70,10 @@
     {
       "id": "protected-bootstrap",
       "path": "script/check-maintainability-bootstrap.sh",
-      "current_sha256": "8df0b390d224efc5e4a6b1edb31d4ad432c12c83ae866464874fabca4094e52f",
+      "current_sha256": "1d74d29221aa2fc3feeeae2c7cea3a5cffef96dec7b13ac1ee08a26b1aa64898",
       "preapproved_next_sha256": null,
       "retired_sha256": [
-        "adb17c8d29a05de989beca2be7e653310594f7e979ca4c68b72fc4f5f71489aa"
+        "08f3aace60bc05b2a6a89806e6a0fc401b28c8e7afe444ac58bd369a5c7e1af2"
       ],
       "issue": "https://github.com/gearboxlogic/localhold/issues/124",
       "rationale": "The protected bootstrap constructs an isolated snapshot with authenticated system commands, runs only reviewed gate scripts, and preserves audit evidence beneath validated roots.",
@@ -82,9 +82,9 @@
     {
       "id": "gate-runner",
       "path": "script/run-maintainability-gate.sh",
-      "current_sha256": "fd239115622403fe2dfbc86f040060f00e460ea1a3cb452ed287e6fae5f636d4",
+      "current_sha256": "325e7c7931f576dab6d55b979a2114571eb0bbbb1d6920c64b175688c7c9846c",
       "preapproved_next_sha256": null,
-      "retired_sha256": ["82609774f45011fa7a6260a3841fb49a7304047c1ca1faa5c62869c9524819d8"],
+      "retired_sha256": ["569c208940d54d2f4a7ccb83e2ca1554a46ec8e99cd4b0179114f8820eb0c3bf"],
       "issue": "https://github.com/gearboxlogic/localhold/issues/124",
       "rationale": "The gate runner uses authenticated system and Rust-tool paths while preparing and executing the isolated maintainability check.",
       "safety_invariant": "Only exact authenticated setup, cleanup, bootstrap, Cargo, fmt, and Clippy invocations are accepted and the complete runner source matches the current reviewed digest."
@@ -132,10 +132,10 @@
     {
       "id": "ci-workflow",
       "path": ".github/workflows/ci.yml",
-      "current_sha256": "79cd54624d6227c610368a075a32e19c804b63b31ca219438092de597cb5029f",
+      "current_sha256": "f25a8436d74e7f40ecd808c78585ff95969c194f0bac236e4ba10f111b3dcfca",
       "preapproved_next_sha256": null,
       "retired_sha256": [
-        "a3caaf8313e9aff92fafa5103a43da607eea095a63e9cb7102839a1084a0a0b5"
+        "9bf3c4ff9c660547b7fa6225a5176a8d12046317ceea3fa58d0485b8b024ba35"
       ],
       "issue": "https://github.com/gearboxlogic/localhold/issues/124",
       "rationale": "CI packages and extracts the Linux and Windows preview artifacts, resolves the generated binaries, and exercises their version and help commands.",

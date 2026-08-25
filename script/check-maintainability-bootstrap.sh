@@ -121,8 +121,8 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=cd756b8a6039e1192bb0c95e7c42e66148f7b883f3b12662b31c70269165a468
-readonly reviewed_bootstrap_tests_sha256=32bdfef132e64ba26754444a95524f492aca5106fa9e3233f8c40e92c08f4db1
-readonly reviewed_gate_runner_sha256=fd239115622403fe2dfbc86f040060f00e460ea1a3cb452ed287e6fae5f636d4
+readonly reviewed_bootstrap_tests_sha256=9fd95497e31664308dbe18f3d1bdd7fe24d7fa3335282699482ceff89b1b2468
+readonly reviewed_gate_runner_sha256=325e7c7931f576dab6d55b979a2114571eb0bbbb1d6920c64b175688c7c9846c
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then

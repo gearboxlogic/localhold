@@ -20,7 +20,7 @@ mod toolchain;
 use analysis::Options as AnalysisOptions;
 use formats::{is_mise, is_python, is_yaml, supports_shell_source};
 pub(super) use integrity::contains_quality_command;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) use references::execution_inputs_for_surface;
 pub(super) use references::{WorkspaceAnalyzer, WorkspaceContext, cargo_manifest_paths_for_surface, execution_inputs_for_surface_in_workspace, reviewed_command_profiles};
 use surface::normalized_source_for_surface;

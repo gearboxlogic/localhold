@@ -286,6 +286,28 @@ posix.system("sh quality/posix.sh")
     }
 
     #[test]
+    fn readelf_accepts_only_the_fixed_standard_input_descriptor() {
+        let source = r#"subprocess.run(["readelf", "-d", "--", "/proc/self/fd/0"], check=False)"#;
+        assert!(!execution_inputs("script/validate_cuda_runtime.py", source).unresolved);
+        for source in [
+            r#"subprocess.run(["readelf", "-d", str(path)], check=False)"#,
+            r#"subprocess.run(["readelf", option, "--", str(path)], check=False)"#,
+            r#"subprocess.run(["readelf", "-d", "--", str(path), extra], check=False)"#,
+            r#"subprocess.run(["readelf", "-d", "--", "@response"], check=False)"#,
+            r#"subprocess.run(["env", "--", str(path)], check=False)"#,
+        ] {
+            assert!(execution_inputs("script/check.py", source).unresolved, "{source}");
+        }
+    }
+
+    #[test]
+    fn zstd_accepts_only_test_mode_from_standard_input() {
+        assert!(!execution_inputs("script/tests/test_cuda_release.py", r#"subprocess.run(["zstd", "--test", "-"], check=True)"#).unresolved);
+        assert!(execution_inputs("script/check.py", r#"subprocess.run(["zstd", "--test", path], check=True)"#).unresolved);
+        assert!(execution_inputs("script/check.py", r#"subprocess.run(["zstd", option, "-"], check=True)"#).unresolved);
+    }
+
+    #[test]
     fn ambient_environment_mutation_rejects_explicit_interpreter_launches() {
         let source = r#"
 os.environ.update(load_configuration())
@@ -332,7 +354,7 @@ subprocess.run(["git", "status"], check=True)
     #[test]
     fn only_exact_python_process_profiles_can_override_argv_policy() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        for surface in ["script/database_fixtures.py", "script/package_release.py", "script/validate_cuda_runtime.py"] {
+        for surface in ["script/database_fixtures.py", "script/package_release.py", "script/tests/test_database_fixtures.py"] {
             let source = fs::read_to_string(workspace.join(surface)).expect("reviewed Python process source");
             assert!(analyzer::is_reviewed_process_surface(surface, &source), "{surface}");
             assert!(!execution_inputs(surface, &source).unresolved, "{surface}");

@@ -539,6 +539,7 @@ fn jar_extraction_and_dynamic_operations_fail_closed() {
 
 #[test]
 fn unreviewed_compression_commands_fail_closed() {
+    assert!(!opaque("zstd", &["--test", "-"]));
     for (command, arguments) in [
         ("gzip", &["-dkf", "Justfile.gz"][..]),
         ("gzip.exe", &["--decompress", "--force", "Justfile.gz"]),

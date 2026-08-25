@@ -67,3 +67,13 @@ fn standalone_shells_cannot_assume_parent_errexit() {
         &masked.replace("#!/usr/bin/bash", "#!/usr/bin/pwsh -NoProfile")
     ));
 }
+
+#[test]
+fn python_identifiers_do_not_enter_shell_assignment_flow() {
+    let data_only = "cargo_manifest_path = Path('Cargo.toml')\nprint(cargo_manifest_path)\n";
+    assert!(!weakening_token_for_surface("script/check.py", data_only));
+    assert!(weakening_token_for_surface(
+        "script/check.py",
+        "import subprocess\ncargo = input()\nsubprocess.run([cargo, 'clippy'])\n"
+    ));
+}

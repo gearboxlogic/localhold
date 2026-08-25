@@ -85,6 +85,8 @@ fn command_policy_applies_direct_dispatch_rules_to_python_argv() {
         "import subprocess\nsubprocess.run(['ssh-keygen', '-D', 'quality/lint.so'])\n",
         "import subprocess\nsubprocess.run(['ld.so', 'quality/lint'])\n",
         "import subprocess\nsubprocess.run(['tar', '--to-command=quality/lint', '-xf', 'payload.tar', '-C', 'extracted'])\n",
+        "import subprocess\nsubprocess.run(['sed', '/foo;bar/e sh quality/hidden.txt', '/etc/hosts'], check=True)\n",
+        "import subprocess\nsubprocess.run(['sed', '/foo/Ie sh quality/hidden.txt', '/etc/hosts'], check=True)\n",
         "import subprocess\nsubprocess.run(['sort', '--compress-program=quality/lint', 'input'])\n",
         "import subprocess\nsubprocess.run(['rg', '--pre', 'quality/lint', 'pattern', '.'])\n",
         "import subprocess\nsubprocess.run(['just', '--justfile', 'quality/lint.data', 'check-quality'])\n",

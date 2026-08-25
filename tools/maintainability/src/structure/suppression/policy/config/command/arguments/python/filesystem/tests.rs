@@ -165,6 +165,46 @@ fn directory_selecting_copies_validate_the_implicit_child() {
 }
 
 #[test]
+fn archive_extraction_fails_closed() {
+    for source in [
+        "import shutil\nshutil.unpack_archive('quality/payload.tar', '.')\n",
+        "from shutil import unpack_archive\nunpack_archive('quality/payload.zip', 'target')\n",
+        "import shutil as files\nfiles.unpack_archive('quality/payload.tar', 'target')\n",
+        "import tarfile\ntarfile.open('q/p.tgz').extractall('.')\n",
+        "import tarfile\narchive = tarfile.open('q/p.tgz')\narchive.extract('Justfile')\n",
+        "import tarfile as archives\narchives.TarFile.open('q/p.tgz').extractall('target')\n",
+        "from tarfile import TarFile as Archive\nArchive.open('q/p.tgz').extract('Justfile')\n",
+        "import zipfile\nzipfile.ZipFile('quality/payload.zip').extractall('target')\n",
+        "import zipfile\narchive = zipfile.ZipFile('quality/payload.zip')\narchive.extract('Justfile')\n",
+        "import zipfile as archives\narchives.ZipFile('quality/payload.zip').extractall('target')\n",
+        "from zipfile import ZipFile as Archive\nArchive('quality/payload.zip').extract('Justfile')\n",
+        "import tarfile\narchive = tarfile.open('q/p.tgz')\nextract = archive.extractall\nextract('target')\n",
+        "import shutil\nextract = shutil.unpack_archive\nextract('quality/payload.zip', 'target')\n",
+        "import zipfile\narchive = zipfile.ZipFile('quality/payload.zip')\narchive.extractall.__call__('target')\n",
+        "import zipfile\ngetattr(zipfile.ZipFile('quality/payload.zip'), 'extractall')('target')\n",
+        "import tarfile\ngetattr(tarfile.open('q/p.tgz'), 'extractall')('target')\n",
+    ] {
+        assert!(has_opaque_write(source), "{source}");
+    }
+
+    for source in [
+        "import tarfile\ntarfile.open('q/p.tgz').extractall('target'\n",
+        "import zipfile\nzipfile.ZipFile('quality/payload.zip').extract('Justfile'\n",
+    ] {
+        assert!(has_opaque_write(source), "malformed archive extraction: {source}");
+    }
+
+    for source in [
+        "message = \"zipfile.ZipFile('payload.zip').extractall('.')\"\n",
+        "archive.extractfile('report.txt')\n",
+        "import tarfile\ntarfile.open('q/p.tgz').extractfile('report.txt')\n",
+        "import zipfile\nzipfile.ZipFile('quality/payload.zip').open('report.txt', mode='r')\n",
+    ] {
+        assert!(!has_opaque_write(source), "safe archive lookalike: {source}");
+    }
+}
+
+#[test]
 fn copying_symlinks_and_unpacked_writer_arguments_fail_closed() {
     for source in [
         r#"shutil.copy("payload/link", "target", follow_symlinks=False)"#,
@@ -448,6 +488,7 @@ fn modeled_mutator_capabilities_fail_closed() {
         "shutil.copytree",
         "shutil.move",
         "shutil.rmtree",
+        "shutil.unpack_archive",
         "tempfile.NamedTemporaryFile",
     ] {
         let source = format!("stored = {capability}\n");
@@ -457,6 +498,8 @@ fn modeled_mutator_capabilities_fail_closed() {
         "chmod",
         "copy",
         "copy_into",
+        "extract",
+        "extractall",
         "hardlink_to",
         "lchmod",
         "mkdir",

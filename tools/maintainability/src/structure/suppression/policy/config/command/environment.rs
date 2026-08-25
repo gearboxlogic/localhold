@@ -78,6 +78,7 @@ fn is_runtime_code_loading_environment_name(name: &str) -> bool {
             | "BASH_ENV"
             | "BROWSER"
             | "CARGO_DOC_BROWSER"
+            | "CCC_OVERRIDE_OPTIONS"
             | "GCONV_PATH"
             | "JAVA_TOOL_OPTIONS"
             | "JDK_JAVA_OPTIONS"
@@ -107,12 +108,19 @@ fn is_runtime_code_loading_environment_name(name: &str) -> bool {
             | "PYTHONWARNINGS"
             | "RIPGREP_CONFIG_PATH"
             | "RUBYOPT"
+            | "ZIPOPT"
+            | "_CL_"
             | "_JAVA_OPTIONS"
     )
 }
 
 pub(super) fn is_weakening_environment_assignment_name(name: &str) -> bool {
-    name.eq_ignore_ascii_case("CARGO") || name.eq_ignore_ascii_case("EDITOR") || name.eq_ignore_ascii_case("VISUAL") || is_weakening_environment_name(name)
+    name.eq_ignore_ascii_case("CARGO")
+        || name.eq_ignore_ascii_case("CL")
+        || name.eq_ignore_ascii_case("EDITOR")
+        || name.eq_ignore_ascii_case("VISUAL")
+        || name.eq_ignore_ascii_case("ZIP")
+        || is_weakening_environment_name(name)
 }
 
 pub(super) fn is_case_insensitive_weakening_environment_assignment_name(name: &str) -> bool {
@@ -168,10 +176,22 @@ mod tests {
 
     #[test]
     fn compiler_executable_search_paths_are_weakening() {
-        for name in ["COMPILER_PATH", "GCC_EXEC_PREFIX"] {
+        for name in ["CCC_OVERRIDE_OPTIONS", "COMPILER_PATH", "GCC_EXEC_PREFIX", "_CL_"] {
             assert!(is_weakening_environment_name(name), "{name}");
             assert!(is_weakening_environment_name(&name.to_ascii_lowercase()), "{name}");
         }
+        assert!(is_weakening_environment_assignment_name("CL"));
+        assert!(is_weakening_environment_assignment_name("cl"));
+        assert!(!is_weakening_environment_name("CL"));
+    }
+
+    #[test]
+    fn archive_command_environment_is_weakening() {
+        assert!(is_weakening_environment_name("ZIPOPT"));
+        assert!(is_weakening_environment_name("zipopt"));
+        assert!(is_weakening_environment_assignment_name("ZIP"));
+        assert!(is_weakening_environment_assignment_name("zip"));
+        assert!(!is_weakening_environment_name("ZIP"));
     }
 
     #[test]

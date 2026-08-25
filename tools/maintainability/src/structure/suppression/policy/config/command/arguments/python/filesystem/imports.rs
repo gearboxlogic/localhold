@@ -233,7 +233,9 @@ fn canonical_module(module: &str) -> Option<&'static str> {
         "nt" | "os" | "posix" => Some("os"),
         "pathlib" => Some("pathlib"),
         "shutil" => Some("shutil"),
+        "tarfile" => Some("tarfile"),
         "tempfile" => Some("tempfile"),
+        "zipfile" => Some("zipfile"),
         _ => None,
     }
 }

@@ -88,8 +88,8 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=cd756b8a6039e1192bb0c95e7c42e66148f7b883f3b12662b31c70269165a468
-readonly reviewed_bootstrap_tests_sha256=531c7e0db8f31538e8cdb6528c5765f5e930f3404b4f92642fe9943f26abc142
-readonly reviewed_gate_runner_sha256=7967bd6670b5d1849d290fc30447ad22a0b93497547c6dff4c90c99f32d4ff1d
+readonly reviewed_bootstrap_tests_sha256=b5876e4e08c2be96d5e383f5807fd045d5d1346ee08a9b94ff5f8c8c4f150df2
+readonly reviewed_gate_runner_sha256=0ab695e7c0fec9d290c12d1995a8eb6c27f649d26068589b2a865e0ed193db1c
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then
@@ -167,10 +167,10 @@ scrub_untrusted_environment() {
     while IFS= read -r name; do
         uppercase=${name^^}
         case "$uppercase" in
-            BASH_ENV | ENV | CDPATH | IFS | COMPILER_PATH | GCC_EXEC_PREFIX | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | PERL5LIB | PERL5OPT | PERLLIB | RIPGREP_CONFIG_PATH | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
+            BASH_ENV | ENV | CDPATH | IFS | CCC_OVERRIDE_OPTIONS | CL | COMPILER_PATH | GCC_EXEC_PREFIX | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | PERL5LIB | PERL5OPT | PERLLIB | RIPGREP_CONFIG_PATH | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
                 RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \
                 CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \
-                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | EDITOR | GIT_* | LESS | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | LV | PAGER | SSH_ASKPASS | SSH_ASKPASS_REQUIRE | TAR_OPTIONS | VISUAL)
+                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | EDITOR | GIT_* | LESS | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | LV | PAGER | SSH_ASKPASS | SSH_ASKPASS_REQUIRE | TAR_OPTIONS | VISUAL | ZIP | ZIPOPT | _CL_)
                 unset "$name"
                 ;;
         esac
@@ -530,6 +530,57 @@ if [[ $governed_snapshot == true ]]; then
     verify_reviewed_tracked_tree
 fi
 
+cleanup_snapshot() {
+    if [[ -n ${snapshot_root:-} && -e $snapshot_root ]]; then
+        "$chmod_command" -R u+w -- "$snapshot_root" 2>/dev/null || true
+        "$rm_command" -rf -- "$snapshot_root"
+    fi
+}
+
+preserve_audit_evidence() {
+    local snapshot_evidence_parent="$snapshot_root/target/dependency-unsafe"
+    if [[ ! -e $snapshot_evidence_parent && ! -L $snapshot_evidence_parent ]]; then
+        return 0
+    fi
+    if [[ ! -d $snapshot_evidence_parent || -L $snapshot_evidence_parent ]]; then
+        printf 'maintainability audit evidence parent must be a regular directory\n' >&2
+        return 1
+    fi
+
+    local evidence_parent="$target_parent/dependency-unsafe"
+    if [[ -L $evidence_parent || -e $evidence_parent && ! -d $evidence_parent ]]; then
+        printf 'maintainability durable evidence parent must be a regular non-symlink directory\n' >&2
+        return 1
+    fi
+    if [[ ! -d $evidence_parent ]]; then
+        "$mkdir_command" -- "$evidence_parent" || return
+    fi
+    evidence_parent=$(cd -- "$evidence_parent" && pwd -P)
+    if [[ $evidence_parent != "$target_parent/dependency-unsafe" ]]; then
+        printf 'maintainability durable evidence parent resolves outside the repository target directory\n' >&2
+        return 1
+    fi
+
+    local evidence
+    local evidence_name
+    local destination
+    for evidence in "$snapshot_evidence_parent"/actual-*; do
+        if [[ ! -e $evidence && ! -L $evidence ]]; then
+            continue
+        fi
+        if [[ ! -d $evidence || -L $evidence ]]; then
+            printf 'maintainability audit evidence must be a regular non-symlink directory\n' >&2
+            return 1
+        fi
+        evidence_name=${evidence##*/}
+        destination="$evidence_parent/$evidence_name"
+        if [[ -e $destination || -L $destination ]]; then
+            "$rm_command" -rf -- "$destination" || return
+        fi
+        "$mv_command" -- "$evidence" "$destination" || return
+    done
+}
+
 printf 'maintainability bootstrap check passed\n'
 
 if [[ $mode != verify ]]; then
@@ -566,55 +617,6 @@ if [[ $mode != verify ]]; then
     # still encounter MAX_PATH after adding their own temporary directories.
     snapshot_root=$("$mktemp_command" -d "$target_parent/s.XXXXXXXX")
     "$rmdir_command" -- "$snapshot_root"
-    cleanup_snapshot() {
-        if [[ -n ${snapshot_root:-} && -e $snapshot_root ]]; then
-            "$chmod_command" -R u+w -- "$snapshot_root" 2>/dev/null || true
-            "$rm_command" -rf -- "$snapshot_root"
-        fi
-    }
-    preserve_audit_evidence() {
-        local snapshot_evidence_parent="$snapshot_root/target/dependency-unsafe"
-        if [[ ! -e $snapshot_evidence_parent && ! -L $snapshot_evidence_parent ]]; then
-            return 0
-        fi
-        if [[ ! -d $snapshot_evidence_parent || -L $snapshot_evidence_parent ]]; then
-            printf 'maintainability audit evidence parent must be a regular directory\n' >&2
-            return 1
-        fi
-
-        local evidence_parent="$target_parent/dependency-unsafe"
-        if [[ -L $evidence_parent || -e $evidence_parent && ! -d $evidence_parent ]]; then
-            printf 'maintainability durable evidence parent must be a regular non-symlink directory\n' >&2
-            return 1
-        fi
-        if [[ ! -d $evidence_parent ]]; then
-            "$mkdir_command" -- "$evidence_parent" || return
-        fi
-        evidence_parent=$(cd -- "$evidence_parent" && pwd -P)
-        if [[ $evidence_parent != "$target_parent/dependency-unsafe" ]]; then
-            printf 'maintainability durable evidence parent resolves outside the repository target directory\n' >&2
-            return 1
-        fi
-
-        local evidence
-        local evidence_name
-        local destination
-        for evidence in "$snapshot_evidence_parent"/actual-*; do
-            if [[ ! -e $evidence && ! -L $evidence ]]; then
-                continue
-            fi
-            if [[ ! -d $evidence || -L $evidence ]]; then
-                printf 'maintainability audit evidence must be a regular non-symlink directory\n' >&2
-                return 1
-            fi
-            evidence_name=${evidence##*/}
-            destination="$evidence_parent/$evidence_name"
-            if [[ -e $destination || -L $destination ]]; then
-                "$rm_command" -rf -- "$destination" || return
-            fi
-            "$mv_command" -- "$evidence" "$destination" || return
-        done
-    }
     trap cleanup_snapshot EXIT
 
     git_checked clone --no-hardlinks --no-checkout --quiet -- "$repository_root" "$snapshot_root"

@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use super::super::{ignored_python_paths, parse_nul_paths, validate_relative_path};
 use super::actions::validate_local_actions;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use super::arguments::execution_inputs_for_surface;
 use super::arguments::{WorkspaceAnalyzer, WorkspaceContext, execution_inputs_for_surface_in_workspace};
 use super::is_execution_surface;
@@ -155,11 +155,10 @@ fn close_over_execution_inputs(
     });
     for surface in surfaces.iter() {
         let source = fs::read_to_string(workspace.join(surface)).with_context(|| format!("read command execution surface {surface}"))?;
-        let legacy_transition = command_profiles.and_then(|profiles| profiles.legacy_transition_bridge(surface, &source));
         let source_is_reviewed = command_profiles.is_some_and(|profiles| profiles.source_is_current(surface, &source));
         let reviewed_source = without_reviewed_dispatch(surface, &source, source_is_reviewed);
         let execution_inputs = analyzer.execution_inputs(surface, &reviewed_source, source_is_reviewed);
-        if execution_inputs.unresolved && !legacy_transition.is_some_and(|bridge| bridge.opaque_execution_inputs) {
+        if execution_inputs.unresolved {
             bail!("command execution surface {surface:?} uses an opaque interpreter program or makefile selection");
         }
     }

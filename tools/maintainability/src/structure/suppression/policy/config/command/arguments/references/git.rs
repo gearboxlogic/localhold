@@ -44,6 +44,7 @@ pub(super) fn reviewed_shell_wrappers(path: &str, source: &str, source_is_review
     }
     let lines = source.lines().collect::<Vec<_>>();
     super::super::dynamic::has_reviewed_trusted_system_command(source)
+        && !super::super::tokens::has_unsupported_shell_function(source)
         && lines
             .windows(REVIEWED_WRAPPER_DEFINITION.len())
             .filter(|window| *window == REVIEWED_WRAPPER_DEFINITION)

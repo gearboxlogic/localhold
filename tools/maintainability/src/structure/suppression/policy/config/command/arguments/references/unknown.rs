@@ -76,6 +76,7 @@ fn is_standard_utility(command: &str) -> bool {
             | "mktemp"
             | "mv"
             | "readarray"
+            | "readelf"
             | "readlink"
             | "realpath"
             | "rg"
@@ -98,6 +99,7 @@ fn is_standard_utility(command: &str) -> bool {
             | "unzip"
             | "wc"
             | "zip"
+            | "zstd"
     )
 }
 
@@ -174,7 +176,7 @@ mod tests {
 
     #[test]
     fn data_consumers_are_explicit_and_surface_specific() {
-        for command in ["wc", "head", "diff", "rg", "printf", "tee", "[["] {
+        for command in ["wc", "head", "diff", "rg", "readelf", "zstd", "printf", "tee", "[["] {
             assert!(is_preclassified_command("script/check.sh", command), "{command}");
         }
         assert!(is_preclassified_command("script/test-postgres-smoke.sh", "container_cli"));

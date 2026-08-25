@@ -1,6 +1,52 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+start_resistant_grandchild() {
+    rm -f -- "$capture/grandchild-ready"
+    bash -c 'trap "" TERM; : > "$1"; while :; do sleep 1; done' reviewer-grandchild "$capture/grandchild-ready" &
+    printf '%s\n' "$!" > "$capture/grandchild-pid"
+    while [[ ! -e "$capture/grandchild-ready" ]]; do
+        sleep 0.01
+    done
+}
+
+process_is_live() {
+    local pid=$1 state
+    kill -0 "$pid" 2>/dev/null || return 1
+    state=$(command -p ps -o stat= -p "$pid" 2>/dev/null) || return 1
+    [[ -n $state && $state != Z* ]]
+}
+
+assert_descendant_is_drained() {
+    local prompt=$1
+    local expected_status=$2
+    rm -rf -- "$test_root/capture"
+    mkdir -- "$test_root/capture"
+    if PATH="$test_root/bin:$PATH" "$repository_root/script/claude-review.sh" opus "$prompt" > "$test_root/descendant-output" 2> "$test_root/descendant-error"; then
+        status=0
+    else
+        status=$?
+    fi
+    if (( status != expected_status )); then
+        printf 'Claude review wrapper changed descendant test status: expected=%d actual=%d\n' "$expected_status" "$status" >&2
+        exit 1
+    fi
+    if (( expected_status == 1 )); then
+        grep -Fq 'Claude review process group survived TERM and KILL' "$test_root/descendant-error"
+    fi
+    grandchild_pid=$(< "$test_root/capture/grandchild-pid")
+    if process_is_live "$grandchild_pid"; then
+        printf 'Claude reviewer descendant survived completion: %s\n' "$grandchild_pid" >&2
+        exit 1
+    fi
+    grandchild_pid=
+    descendant_scratch=$(sed -n '1p' "$test_root/capture/temp-environment")
+    if [[ -e "$descendant_scratch" ]]; then
+        printf 'Claude review scratch survived descendant cleanup: %s\n' "$descendant_scratch" >&2
+        exit 1
+    fi
+}
+
 if [[ $(basename -- "$0") == ps ]]; then
     fake_root=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
     capture="$fake_root/capture"
@@ -46,15 +92,6 @@ if [[ $(basename -- "$0") == claude ]]; then
     mkdir -p -- "$TMPDIR/nested"
     printf 'temporary review data\n' > "$TMPDIR/nested/payload"
     printf '%s\n' "$BASHPID" > "$capture/child-pid"
-
-    start_resistant_grandchild() {
-        rm -f -- "$capture/grandchild-ready"
-        bash -c 'trap "" TERM; : > "$1"; while :; do sleep 1; done' reviewer-grandchild "$capture/grandchild-ready" &
-        printf '%s\n' "$!" > "$capture/grandchild-pid"
-        while [[ ! -e "$capture/grandchild-ready" ]]; do
-            sleep 0.01
-        done
-    }
 
     if [[ " $* " == *" Wait for a termination signal. "* ]]; then
         trap 'printf "TERM\n" > "$capture/signal"' TERM
@@ -272,43 +309,6 @@ if [[ -e "$failure_scratch" ]]; then
     printf 'Claude review scratch survived failed completion: %s\n' "$failure_scratch" >&2
     exit 1
 fi
-
-process_is_live() {
-    local pid=$1 state
-    kill -0 "$pid" 2>/dev/null || return 1
-    state=$(command -p ps -o stat= -p "$pid" 2>/dev/null) || return 1
-    [[ -n $state && $state != Z* ]]
-}
-
-assert_descendant_is_drained() {
-    local prompt=$1
-    local expected_status=$2
-    rm -rf -- "$test_root/capture"
-    mkdir -- "$test_root/capture"
-    if PATH="$test_root/bin:$PATH" "$repository_root/script/claude-review.sh" opus "$prompt" > "$test_root/descendant-output" 2> "$test_root/descendant-error"; then
-        status=0
-    else
-        status=$?
-    fi
-    if (( status != expected_status )); then
-        printf 'Claude review wrapper changed descendant test status: expected=%d actual=%d\n' "$expected_status" "$status" >&2
-        exit 1
-    fi
-    if (( expected_status == 1 )); then
-        grep -Fq 'Claude review process group survived TERM and KILL' "$test_root/descendant-error"
-    fi
-    grandchild_pid=$(< "$test_root/capture/grandchild-pid")
-    if process_is_live "$grandchild_pid"; then
-        printf 'Claude reviewer descendant survived completion: %s\n' "$grandchild_pid" >&2
-        exit 1
-    fi
-    grandchild_pid=
-    descendant_scratch=$(sed -n '1p' "$test_root/capture/temp-environment")
-    if [[ -e "$descendant_scratch" ]]; then
-        printf 'Claude review scratch survived descendant cleanup: %s\n' "$descendant_scratch" >&2
-        exit 1
-    fi
-}
 
 assert_descendant_is_drained "Leave a descendant after success." 0
 assert_descendant_is_drained "Leave a descendant after failure." 23

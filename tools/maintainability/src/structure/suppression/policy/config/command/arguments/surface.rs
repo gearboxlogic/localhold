@@ -83,7 +83,7 @@ fn options_for(path: &str) -> AnalysisOptions {
         options = options.ignore_command_substitutions();
     }
     if is_python(path) {
-        options = options.ignore_function_definitions();
+        options = options.ignore_function_definitions().ignore_shell_assignment_flow();
     }
     options
 }

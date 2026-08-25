@@ -15,10 +15,7 @@ const REVIEWED_DYNAMIC_CODE_SURFACES: &[ReviewedDynamicCodeSurface] = &[
     },
     ReviewedDynamicCodeSurface {
         path: "script/prepare_cuda_runtime.py",
-        sha256: &[
-            "dbad298e363fefdc0a557fa023c943337aa0d423794d78daf8fa7de9fe5dd494",
-            "b910ba9e57138f9381b02b154cae84c7c8f1ad1c4e2de510dd90fd9f3f727756",
-        ],
+        sha256: &["dbad298e363fefdc0a557fa023c943337aa0d423794d78daf8fa7de9fe5dd494"],
     },
 ];
 

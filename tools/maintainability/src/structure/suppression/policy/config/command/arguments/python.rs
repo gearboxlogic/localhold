@@ -40,6 +40,7 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "optparse",
     "pdb",
     "pickle",
+    "pipes",
     "pkgutil",
     "profile",
     "pydoc",
@@ -56,6 +57,7 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "types",
     "unittest.mock",
     "uuid",
+    "venv",
     "webbrowser",
     "zipfile._path",
 ];
@@ -465,7 +467,7 @@ fn is_os_process_api(name: &str) -> bool {
 fn is_subprocess_process_api(name: &str) -> bool {
     matches!(
         name,
-        "_fork_exec" | "call" | "check_call" | "check_output" | "getoutput" | "getstatusoutput" | "popen" | "run"
+        "Popen" | "_fork_exec" | "call" | "check_call" | "check_output" | "getoutput" | "getstatusoutput" | "popen" | "run"
     )
 }
 

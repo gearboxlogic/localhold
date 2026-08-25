@@ -100,6 +100,7 @@ fn parse_module_import(tokens: &[Token]) -> Option<ParsedAliases> {
             None
         };
         if let Some(canonical) = canonical_module(&module) {
+            let canonical = if explicit_alias.is_none() && module == "urllib.request" { "urllib" } else { canonical };
             let alias = explicit_alias.unwrap_or_else(|| module.split('.').next().unwrap_or(&module).to_owned());
             parsed.push((alias, Alias::Module(canonical)));
         } else if let Some(canonical) = reflection_module(&module) {
@@ -237,6 +238,7 @@ fn canonical_module(module: &str) -> Option<&'static str> {
         "shutil" => Some("shutil"),
         "tarfile" => Some("tarfile"),
         "tempfile" => Some("tempfile"),
+        "urllib.request" => Some("urllib.request"),
         "zipapp" => Some("zipapp"),
         "zipfile" => Some("zipfile"),
         _ => None,

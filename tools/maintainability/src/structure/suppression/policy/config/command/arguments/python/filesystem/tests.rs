@@ -115,6 +115,8 @@ fn filesystem_sources_without_reflection_remain_allowed() {
         "from pathlib import Path\nvalue = Path('target/report.txt').read_text()\n",
         "import os\nvalue = os.getcwd()\n",
         "import shutil\nshutil.copyfile('input.txt', 'target/report.txt')\n",
+        "import urllib.request\nresponse = urllib.request.urlopen(source)\n",
+        "from urllib.request import urlopen as open_url\nresponse = open_url(source)\n",
         "from pathlib import Path\nvalues = [Path('target/report.txt').exists()]\n",
         "from pathlib import Path\nprint('operator.attrgetter inspect.getattr_static')\n",
         "from pathlib import Path\n# operator.methodcaller('unlink')(Path('Justfile'))\nvalue = Path('target/report.txt').read_text()\n",
@@ -138,6 +140,9 @@ fn filesystem_copies_to_execution_surfaces_fail_closed() {
         r#"shutil.copytree("quality/data", dst=".github/actions/check/action.yml")"#,
         r#"os.replace("quality/lint.data", r".cargo\config.toml")"#,
         r#"shutil.move("quality/lint.data", "script/check=lint.sh")"#,
+        "import urllib.request\nurllib.request.urlretrieve(source, 'Justfile')\n",
+        "from urllib.request import urlretrieve as retrieve\nretrieve(source, 'script/check.sh')\n",
+        "from urllib.request import URLopener\nURLopener().retrieve(source, 'Justfile')\n",
     ] {
         assert!(has_opaque_write(source), "{source}");
     }

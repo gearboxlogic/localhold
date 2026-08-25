@@ -23,6 +23,7 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "_testlimitedcapi",
     "_tkinter",
     "_xxsubinterpreters",
+    "asyncio.windows_utils",
     "code",
     "concurrent.interpreters",
     "cprofile",
@@ -275,7 +276,7 @@ fn imports_command_capable_api(source: &str) -> bool {
             let name = binding.split_once("as").map_or(binding, |(name, _)| name);
             is_command_module(name)
                 || match module {
-                    "asyncio" | "asyncio.subprocess" => name == "*" || matches!(name, "create_subprocess_exec" | "create_subprocess_shell"),
+                    "asyncio" | "asyncio.subprocess" => name == "*" || matches!(name, "create_subprocess_exec" | "create_subprocess_shell" | "windows_utils"),
                     "concurrent" => name == "interpreters",
                     "dbm" => name == "sqlite3",
                     "os" | "posix" => name == "*" || is_os_process_api(name),
@@ -341,10 +342,8 @@ fn uses_dynamic_namespace_callable_as_value(source: &str) -> bool {
 
 fn callable_name_is_value(statement: &str, name: &str) -> bool {
     statement.match_indices(name).any(|(index, _)| {
-        let before = statement[..index].chars().next_back();
         let remainder = &statement[index + name.len()..];
-        let after = remainder.chars().next();
-        !before.is_some_and(is_identifier_character) && !after.is_some_and(is_identifier_character) && !remainder.trim_start().starts_with('(')
+        identifier_is_exact_at(statement, index, name.len()) && !remainder.trim_start().starts_with('(')
     })
 }
 
@@ -465,12 +464,12 @@ fn is_subprocess_process_api(name: &str) -> bool {
     )
 }
 
+fn compact_unquoted_code(source: &str) -> String {
+    lexical::without_literals(source).split_whitespace().collect::<String>().to_ascii_lowercase()
+}
+
 fn references_command_capable_ffi(source: &str) -> bool {
-    let compact = lexical::without_literals(source)
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect::<String>()
-        .to_ascii_lowercase();
+    let compact = compact_unquoted_code(source);
     [
         "importctypes",
         "fromctypesimport",
@@ -551,8 +550,7 @@ fn references_process_api(source: &str) -> bool {
 fn references_root_module(source: &str, module: &str) -> bool {
     source.match_indices(module).any(|(index, _)| {
         let before = source[..index].chars().next_back();
-        let after = source[index + module.len()..].chars().next();
-        before != Some('.') && !before.is_some_and(is_identifier_character) && after == Some('.')
+        before != Some('.') && identifier_is_exact_at(source, index, module.len()) && source[index + module.len()..].starts_with('.')
     })
 }
 
@@ -562,11 +560,7 @@ fn references_exec_or_spawn_api(source: &str) -> bool {
 }
 
 fn has_dynamic_process_resolution(source: &str) -> bool {
-    let compact = lexical::without_literals(source)
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect::<String>()
-        .to_ascii_lowercase();
+    let compact = compact_unquoted_code(source);
     [
         "__import__(",
         "getattr(",
@@ -583,11 +577,7 @@ fn has_dynamic_process_resolution(source: &str) -> bool {
 }
 
 fn has_direct_dynamic_process_resolution(source: &str) -> bool {
-    let compact = lexical::without_literals(source)
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect::<String>()
-        .to_ascii_lowercase();
+    let compact = compact_unquoted_code(source);
     if compact.contains("sys.modules")
         || [
             ".__dict__",

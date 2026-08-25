@@ -50,6 +50,7 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "pkgutil",
     "profile",
     "pydoc",
+    "pygments",
     "shelve",
     "site",
     "sqlite3",
@@ -66,6 +67,7 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "venv",
     "wave",
     "webbrowser",
+    "xml.etree",
     "zipfile._path",
 ];
 
@@ -264,15 +266,10 @@ fn imports_command_capable_api(source: &str) -> bool {
     executable_code(source).lines().flat_map(|line| line.split(';')).any(|statement| {
         let compact = statement.chars().filter(|character| !character.is_whitespace()).collect::<String>();
         let compact = compact.rsplit(':').next().unwrap_or(&compact);
-        if compact.strip_prefix("import").is_some_and(|imports| {
-            imports.split(',').any(|binding| {
-                rejected_python_module(binding)
-                    || binding
-                        .match_indices("as")
-                        .any(|(index, _)| index > 0 && index + 2 < binding.len() && rejected_python_module(&binding[..index]))
-                    || command_module_alias(binding)
-            })
-        }) {
+        if compact
+            .strip_prefix("import")
+            .is_some_and(|imports| imports.split(',').any(python_import_binding_is_command_capable))
+        {
             return true;
         }
         let Some((module, imports)) = compact.strip_prefix("from").and_then(|line| line.split_once("import")) else {
@@ -312,10 +309,12 @@ fn references_python_import_path(source: &str) -> bool {
     source.match_indices("sys.path").any(|(index, path)| identifier_is_exact_at(&source, index, path.len()))
 }
 
-fn command_module_alias(binding: &str) -> bool {
-    ["asyncio", "contextlib", "os", "posix", "pty", "subprocess", "sys"]
-        .iter()
-        .any(|module| binding.strip_prefix(module).is_some_and(|suffix| suffix.starts_with("as") && suffix.len() > 2))
+fn python_import_binding_is_command_capable(binding: &str) -> bool {
+    rejected_python_module(binding)
+        || REJECTED_PYTHON_MODULES
+            .iter()
+            .chain(&["asyncio", "contextlib", "os", "posix", "pty", "subprocess", "sys"])
+            .any(|module| binding.strip_prefix(*module).is_some_and(|suffix| suffix.starts_with("as") && suffix.len() > 2))
 }
 
 pub(super) fn rejected_python_module(name: &str) -> bool {

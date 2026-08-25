@@ -125,8 +125,7 @@ mod tests {
     fn gitleaks_configuration_is_an_execution_input() {
         let separate = ["git", "--config", ".github/gitleaks.toml", "--gitleaks-ignore-path", ".github/gitleaksignore"].map(str::to_owned);
         let (inputs, unresolved) = gitleaks_policy_inputs(&separate, super::ValueSemantics::Shell);
-        assert_eq!(inputs, [".github/gitleaks.toml", ".github/gitleaksignore"]);
-        assert!(!unresolved);
+        assert!(!unresolved && inputs == [".github/gitleaks.toml", ".github/gitleaksignore"]);
         let dynamic = ["git", "--config", "$CONFIG", "--gitleaks-ignore-path", ".ignore"].map(str::to_owned);
         assert!(gitleaks_policy_inputs(&dynamic, super::ValueSemantics::Shell).1);
         assert!(gitleaks_policy_inputs(&["git", "--config"].map(str::to_owned), super::ValueSemantics::Shell).1);

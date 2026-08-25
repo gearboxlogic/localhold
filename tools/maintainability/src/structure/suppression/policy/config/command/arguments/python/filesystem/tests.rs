@@ -387,6 +387,7 @@ fn direct_filesystem_writers_fail_closed() {
         r#"codecs.open("Justfile", "w").write(payload)"#,
         r#"codecs.open(filename="script/check.sh", mode="a").write(payload)"#,
         r#"io.open("mise.toml", mode)"#,
+        r#"io.FileIO("Justfile", "w").write(payload)"#,
         r#"Path("Justfile").unlink()"#,
         r#"Path("quality/lint.data").replace("Justfile")"#,
         r#"Path.write_text(Path("Justfile"), payload)"#,

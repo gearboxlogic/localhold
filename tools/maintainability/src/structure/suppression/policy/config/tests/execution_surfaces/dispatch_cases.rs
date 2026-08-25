@@ -269,6 +269,7 @@ pub(super) const SHELL_DISPATCH_CASES: &[(&str, &str)] = &[
     ("./gradlew --build-file quality/lint.data help\n", "opaque interpreter program"),
     ("just --justfile quality/lint.data check-quality\n", "opaque interpreter program"),
     ("make -E 'all:; sh quality/lint.txt' all\n", "opaque interpreter program"),
+    ("make '--ev=all:; sh quality/lint.txt' all\n", "opaque interpreter program"),
     ("HOME=quality bash -i quality/lint.txt\n", "opaque interpreter program"),
     ("rg --pre='sh quality/lint.txt' lint .\n", "opaque interpreter program"),
     ("cp quality/lint.data Justfile\n", "opaque interpreter program"),

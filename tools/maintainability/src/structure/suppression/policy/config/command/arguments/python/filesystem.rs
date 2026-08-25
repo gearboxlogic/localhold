@@ -269,19 +269,10 @@ fn chained_path_write_is_opaque(scanner: &CallScanner, call: &Call, method: &Cal
 
 fn direct_open_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
     let name = called_name(&call.name);
-    if !matches!(name, "builtins.open" | "codecs.open" | "io.open" | "open") {
-        return false;
-    }
-    if scanner.has_argument_unpack(call.opening_parenthesis) {
-        return true;
-    }
-    if name != "codecs.open" && opener_is_opaque(scanner, call.opening_parenthesis) {
-        return true;
-    }
-    if !writable_mode(scanner, call.opening_parenthesis, 1) {
-        return false;
-    }
-    path_argument_is_opaque(scanner, call.opening_parenthesis, ArgumentSpec::new(0, &["file", "filename"]))
+    matches!(name, "builtins.open" | "codecs.open" | "io.open" | "open")
+        && (scanner.has_argument_unpack(call.opening_parenthesis)
+            || name != "codecs.open" && opener_is_opaque(scanner, call.opening_parenthesis)
+            || writable_mode(scanner, call.opening_parenthesis, 1) && path_argument_is_opaque(scanner, call.opening_parenthesis, ArgumentSpec::new(0, &["file", "filename"])))
 }
 
 fn opener_is_opaque(scanner: &CallScanner, opening_parenthesis: usize) -> bool {

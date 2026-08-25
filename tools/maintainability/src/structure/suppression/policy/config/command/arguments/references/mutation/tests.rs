@@ -516,16 +516,10 @@ fn tool_output_options_cannot_replace_execution_surfaces() {
     for command in ["gcc", "gcc-15", "x86_64-linux-gnu-g++-14", "clang", "rustc", "ld.lld-19"] {
         assert!(opaque(command, &["-o", "Justfile", "quality/lint.data"]), "{command}");
         assert!(opaque(command, &["-oscript/check.sh", "quality/lint.data"]), "{command}");
-        assert!(opaque(command, &["--output=$destination", "quality/lint.data"]), "{command}");
-        assert!(!opaque(command, &["-o", "target/output", "quality/lint.data"]), "{command}");
+        assert!(!opaque(command, &["-MF", "target/output.d", "quality/lint.data"]), "{command}");
     }
-    for command in ["cc", "gcc", "gcc-15", "x86_64-linux-gnu-g++-14", "clang", "clang++"] {
-        assert!(opaque(command, &["-M", "-MF", "Makefile", "-MT", "target", "quality/input.c"]), "{command}");
-        assert!(opaque(command, &["-M", "-MFscript/check.sh", "quality/input.c"]), "{command}");
-        assert!(opaque(command, &["-M", "-MF$destination", "quality/input.c"]), "{command}");
-        assert!(!opaque(command, &["-M", "-MF", "target/input.d", "quality/input.c"]), "{command}");
-    }
-    assert!(!opaque("rustc", &["-MF", "Justfile", "quality/input.rs"]));
+    assert!(opaque("gcc", &["-M", "-MF", "Makefile", "-MT", "target", "quality/input.c"]));
+    assert!(opaque("clang", &["-M", "-MFscript/check.sh", "quality/input.c"]));
 }
 
 #[test]

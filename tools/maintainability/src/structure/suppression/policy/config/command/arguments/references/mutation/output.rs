@@ -74,28 +74,17 @@ fn sort_output_is_opaque(context: DispatchContext<'_>, arguments: &[String]) -> 
 }
 
 fn compiler_output_is_opaque(context: DispatchContext<'_>, command: &str, arguments: &[String]) -> bool {
+    let accepts_dependencies = super::super::compiler::is_compiler_driver(command);
     let mut index = 0;
     while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
-        let destination = long_output_target(argument, arguments, &mut index, "--output", "--output")
-            .or_else(|| {
-                if argument == "-o" {
-                    index += 1;
-                    arguments.get(index).map(String::as_str)
-                } else {
-                    argument.strip_prefix("-o").filter(|destination| !destination.is_empty())
-                }
-            })
-            .or_else(|| {
-                if !super::super::compiler::accepts_dependency_output_path(command) {
-                    return None;
-                }
-                if argument == "-MF" {
-                    index += 1;
-                    arguments.get(index).map(String::as_str)
-                } else {
-                    argument.strip_prefix("-MF").filter(|destination| !destination.is_empty())
-                }
-            });
+        let destination = long_output_target(argument, arguments, &mut index, "--output", "--output").or_else(|| {
+            let option = if accepts_dependencies && argument.starts_with("-MF") { "-MF" } else { "-o" };
+            if argument == option {
+                index += 1;
+                return arguments.get(index).map(String::as_str);
+            }
+            argument.strip_prefix(option).filter(|destination| !destination.is_empty())
+        });
         if destination.is_some_and(|destination| destination_is_opaque(context, destination)) {
             return true;
         }

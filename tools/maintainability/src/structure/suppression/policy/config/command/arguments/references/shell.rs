@@ -1,6 +1,6 @@
 use super::{SelectedInput, unknown};
 
-pub(super) fn is_additional(command: &str) -> bool {
+pub(in crate::structure::suppression::policy::config::command::arguments) fn is_additional(command: &str) -> bool {
     matches!(
         command,
         "ash"

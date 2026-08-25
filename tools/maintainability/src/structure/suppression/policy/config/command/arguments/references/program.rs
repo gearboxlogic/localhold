@@ -1,4 +1,4 @@
-use super::path;
+use super::{ValueSemantics, path};
 
 pub(super) fn dynamic_loader_is_opaque(command: &str) -> bool {
     command == "ld.so" || command.starts_with("ld.so.") || command.starts_with("ld-") && command.contains(".so")
@@ -8,16 +8,19 @@ pub(super) fn bash_enable_loads_builtin(arguments: &[String]) -> bool {
     arguments.iter().any(|argument| argument == "-f" || argument.starts_with("-f") && argument.len() > 2)
 }
 
-pub(super) fn split_filter_is_opaque(arguments: &[String]) -> bool {
-    dynamic_arguments_are_opaque(arguments)
+pub(super) fn split_filter_with_semantics_is_opaque(arguments: &[String], semantics: ValueSemantics) -> bool {
+    dynamic_arguments_are_opaque(arguments, semantics)
         || arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
             let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
             option.len() >= "--f".len() && "--filter".starts_with(option)
         })
 }
 
-pub(super) fn tar_dispatch_is_opaque(arguments: &[String]) -> bool {
-    if arguments.iter().any(|argument| path::contains_dynamic_value(argument) && !isolated_tar_directory(argument)) {
+pub(super) fn tar_dispatch_with_semantics_is_opaque(arguments: &[String], semantics: ValueSemantics) -> bool {
+    if arguments
+        .iter()
+        .any(|argument| semantics.contains_dynamic(argument) && !isolated_tar_directory(argument, semantics))
+    {
         return true;
     }
     let command_option = arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
@@ -38,7 +41,7 @@ pub(super) fn tar_dispatch_is_opaque(arguments: &[String]) -> bool {
             .iter()
             .any(|(full, minimum)| option.len() >= minimum.len() && full.starts_with(option))
     });
-    command_option || tar_extracts_files(arguments) && !tar_extracts_into_isolated_directory(arguments)
+    command_option || tar_extracts_files(arguments) && !tar_extracts_into_isolated_directory(arguments, semantics)
 }
 
 fn tar_extracts_files(arguments: &[String]) -> bool {
@@ -52,7 +55,7 @@ fn tar_extracts_files(arguments: &[String]) -> bool {
     })
 }
 
-fn tar_extracts_into_isolated_directory(arguments: &[String]) -> bool {
+fn tar_extracts_into_isolated_directory(arguments: &[String], semantics: ValueSemantics) -> bool {
     if arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
         let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
         matches!(option, "-P" | "--absolute-names" | "--transform" | "--xform")
@@ -72,7 +75,7 @@ fn tar_extracts_into_isolated_directory(arguments: &[String]) -> bool {
                 .or_else(|| argument.strip_prefix("-C").filter(|value| !value.is_empty()))
         };
         if let Some(destination) = destination {
-            if !isolated_tar_directory(destination) {
+            if !isolated_tar_directory(destination, semantics) {
                 return false;
             }
             isolated = true;
@@ -82,25 +85,26 @@ fn tar_extracts_into_isolated_directory(arguments: &[String]) -> bool {
     isolated
 }
 
-fn isolated_tar_directory(destination: &str) -> bool {
+fn isolated_tar_directory(destination: &str, semantics: ValueSemantics) -> bool {
     if path::normalize_literal(destination).as_deref() == Some("extracted") {
         return true;
     }
-    ["$RUNNER_TEMP/", "${RUNNER_TEMP}/"]
-        .iter()
-        .any(|prefix| destination.strip_prefix(prefix).is_some_and(|suffix| path::normalize_literal(suffix).is_some()))
+    semantics == ValueSemantics::Shell
+        && ["$RUNNER_TEMP/", "${RUNNER_TEMP}/"]
+            .iter()
+            .any(|prefix| destination.strip_prefix(prefix).is_some_and(|suffix| path::normalize_literal(suffix).is_some()))
 }
 
-pub(super) fn sort_compression_program_is_opaque(arguments: &[String]) -> bool {
-    dynamic_arguments_are_opaque(arguments)
+pub(super) fn sort_compression_program_with_semantics_is_opaque(arguments: &[String], semantics: ValueSemantics) -> bool {
+    dynamic_arguments_are_opaque(arguments, semantics)
         || arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
             let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
             option.len() >= "--co".len() && "--compress-program".starts_with(option)
         })
 }
 
-pub(super) fn zip_test_command_is_opaque(arguments: &[String]) -> bool {
-    dynamic_arguments_are_opaque(arguments)
+pub(super) fn zip_test_command_with_semantics_is_opaque(arguments: &[String], semantics: ValueSemantics) -> bool {
+    dynamic_arguments_are_opaque(arguments, semantics)
         || arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
             argument
                 .strip_prefix('-')
@@ -109,8 +113,8 @@ pub(super) fn zip_test_command_is_opaque(arguments: &[String]) -> bool {
         })
 }
 
-pub(super) fn openssl_module_selection_is_opaque(arguments: &[String]) -> bool {
-    dynamic_arguments_are_opaque(arguments)
+pub(super) fn openssl_module_selection_with_semantics_is_opaque(arguments: &[String], semantics: ValueSemantics) -> bool {
+    dynamic_arguments_are_opaque(arguments, semantics)
         || arguments.first().is_some_and(|argument| argument == "engine")
         || arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
             let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
@@ -132,16 +136,16 @@ pub(super) fn openssl_module_selection_is_opaque(arguments: &[String]) -> bool {
         })
 }
 
-pub(super) fn ripgrep_preprocessor_is_opaque(arguments: &[String]) -> bool {
-    dynamic_arguments_are_opaque(arguments)
+pub(super) fn ripgrep_preprocessor_with_semantics_is_opaque(arguments: &[String], semantics: ValueSemantics) -> bool {
+    dynamic_arguments_are_opaque(arguments, semantics)
         || arguments
             .iter()
             .take_while(|argument| argument.as_str() != "--")
             .any(|argument| argument == "--pre" || argument.starts_with("--pre="))
 }
 
-pub(super) fn just_source_selection_is_opaque(arguments: &[String]) -> bool {
-    dynamic_arguments_are_opaque(arguments)
+pub(super) fn just_source_selection_with_semantics_is_opaque(arguments: &[String], semantics: ValueSemantics) -> bool {
+    dynamic_arguments_are_opaque(arguments, semantics)
         || arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
             matches!(
                 argument.as_str(),
@@ -180,6 +184,6 @@ pub(super) fn just_source_selection_is_opaque(arguments: &[String]) -> bool {
         })
 }
 
-fn dynamic_arguments_are_opaque(arguments: &[String]) -> bool {
-    arguments.iter().any(|argument| path::contains_dynamic_value(argument))
+fn dynamic_arguments_are_opaque(arguments: &[String], semantics: ValueSemantics) -> bool {
+    arguments.iter().any(|argument| semantics.contains_dynamic(argument))
 }

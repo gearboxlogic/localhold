@@ -7,18 +7,37 @@ use std::path::{Component, Path, PathBuf};
 #[derive(Clone, Default)]
 pub(super) struct Policy {
     workspace: Option<PathBuf>,
-    execution_surfaces: BTreeSet<String>,
+    protected_inputs: BTreeSet<String>,
+    reject_all: bool,
 }
 
 impl Policy {
-    pub(super) fn for_workspace(workspace: &Path, execution_surfaces: &[String]) -> Self {
+    pub(super) fn for_workspace(workspace: &Path, execution_surfaces: &[String], tracked_paths: &BTreeSet<String>) -> Self {
+        let mut protected_inputs = execution_surfaces.iter().filter_map(|path| windows_equivalent(path)).collect::<BTreeSet<_>>();
+        protected_inputs.extend(
+            tracked_paths
+                .iter()
+                .filter_map(|path| windows_equivalent(path))
+                .filter(|path| is_protected_check_input(path)),
+        );
         Self {
             workspace: Some(workspace.to_path_buf()),
-            execution_surfaces: execution_surfaces.iter().filter_map(|path| windows_equivalent(path)).collect(),
+            protected_inputs,
+            reject_all: false,
+        }
+    }
+
+    pub(super) fn rejecting_all_writes() -> Self {
+        Self {
+            reject_all: true,
+            ..Self::default()
         }
     }
 
     pub(super) fn is_opaque(&self, value: &str) -> bool {
+        if self.reject_all {
+            return true;
+        }
         if value.contains(['$', '%', '{', '}', '*', '?']) {
             return true;
         }
@@ -34,7 +53,7 @@ impl Policy {
         let Some(normalized) = windows_equivalent(&value) else {
             return true;
         };
-        if is_execution_surface(&normalized) || self.is_execution_surface_or_ancestor(&normalized) {
+        if is_protected_check_input(&normalized) || self.is_protected_input_or_ancestor(&normalized) {
             return true;
         }
         self.workspace.as_deref().is_some_and(|workspace| self.redirected_path_is_opaque(workspace, path))
@@ -70,11 +89,11 @@ impl Policy {
         let Some(relative) = relative.to_str().and_then(windows_equivalent) else {
             return true;
         };
-        is_execution_surface(&relative) || self.is_execution_surface_or_ancestor(&relative)
+        is_protected_check_input(&relative) || self.is_protected_input_or_ancestor(&relative)
     }
 
-    fn is_execution_surface_or_ancestor(&self, path: &str) -> bool {
-        self.execution_surfaces
+    fn is_protected_input_or_ancestor(&self, path: &str) -> bool {
+        self.protected_inputs
             .iter()
             .any(|surface| surface == path || surface.strip_prefix(path).is_some_and(|descendant| descendant.starts_with('/')))
     }
@@ -147,7 +166,7 @@ fn windows_equivalent(value: &str) -> Option<String> {
     (!normalized.is_empty()).then(|| normalized.join("/"))
 }
 
-fn is_execution_surface(path: &str) -> bool {
+fn is_protected_check_input(path: &str) -> bool {
     let basename = path.rsplit('/').next().unwrap_or_default();
-    basename == "gnumakefile" || super::super::super::super::is_execution_surface(path)
+    basename == "gnumakefile" || super::super::super::super::is_protected_check_input(path)
 }

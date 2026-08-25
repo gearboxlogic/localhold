@@ -1,16 +1,16 @@
-use super::SelectedInput;
+use super::{SelectedInput, ValueSemantics};
 
 const PROGRAM_FILES: ProgramFileSyntax = ProgramFileSyntax::new(&["--file"], &['f'], &['e', 'i'], &[]);
 
-pub(super) fn program_is_opaque(path: &str, source_is_reviewed: bool, command: &str, arguments: &[String]) -> bool {
+pub(super) fn program_with_semantics_is_opaque(path: &str, source_is_reviewed: bool, command: &str, arguments: &[String], semantics: ValueSemantics) -> bool {
     if super::mutation::reviewed_arguments(path, source_is_reviewed, command, arguments) {
         return false;
     }
     let (inputs, opaque) = program_file_inputs(arguments, &PROGRAM_FILES);
-    opaque || !inputs.is_empty() || inline_program_is_opaque(arguments)
+    opaque || !inputs.is_empty() || inline_program_is_opaque(arguments, semantics)
 }
 
-fn inline_program_is_opaque(arguments: &[String]) -> bool {
+fn inline_program_is_opaque(arguments: &[String], semantics: ValueSemantics) -> bool {
     let mut index = 0;
     let mut program_selected = false;
     while let Some(argument) = arguments.get(index) {
@@ -25,18 +25,18 @@ fn inline_program_is_opaque(arguments: &[String]) -> bool {
             Expression::Following => {
                 program_selected = true;
                 index += 1;
-                if arguments.get(index).is_none_or(|program| program_is_dynamic_or_can_execute(program)) {
+                if arguments.get(index).is_none_or(|program| program_is_dynamic_or_can_execute(program, semantics)) {
                     return true;
                 }
             }
             Expression::Attached(program) => {
                 program_selected = true;
-                if program_is_dynamic_or_can_execute(program) {
+                if program_is_dynamic_or_can_execute(program, semantics) {
                     return true;
                 }
             }
             Expression::Other if !argument.starts_with('-') && !program_selected => {
-                return program_is_dynamic_or_can_execute(argument);
+                return program_is_dynamic_or_can_execute(argument, semantics);
             }
             Expression::Other => {}
         }
@@ -45,8 +45,8 @@ fn inline_program_is_opaque(arguments: &[String]) -> bool {
     false
 }
 
-fn program_is_dynamic_or_can_execute(program: &str) -> bool {
-    super::path::contains_dynamic_value(program) || program_can_execute(program)
+fn program_is_dynamic_or_can_execute(program: &str, semantics: ValueSemantics) -> bool {
+    semantics.contains_dynamic(program) || program_can_execute(program)
 }
 
 enum Expression<'a> {

@@ -62,7 +62,7 @@ fn command_policy_rejects_cargo_configuration_relocation() {
 
     fs::write(workspace.path().join("script/check.sh"), "cargo -Z unstable-options -C ../other check\n").expect("Cargo directory relocation");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
-    assert!(error.to_string().contains("lint-weakening argument"));
+    assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
 
     fs::remove_file(workspace.path().join("script/check.sh")).expect("delete command surface");
     reject_checked_in_weakening(workspace.path()).expect("deleted command surfaces are absent");
@@ -289,18 +289,65 @@ fn command_policy_rejects_unparsed_shell_dispatchers() {
     git(workspace.path(), &["init", "-q"]);
     git(workspace.path(), &["add", "."]);
 
-    for &(command, reason) in dispatch_cases::SHELL_DISPATCH_CASES {
+    for &(command, reason) in dispatch_cases::SHELL_DISPATCH_CASES.iter().chain(dispatch_cases::FUNCTION_INVENTORY_CASES) {
         fs::write(workspace.path().join("script/check.sh"), command).expect("opaque shell dispatcher");
         let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
         assert!(error.to_string().contains(reason), "{command}: {error:#}");
     }
 
-    fs::write(
-        workspace.path().join("script/check.sh"),
+    for command in [
         "printf '%s\\n' '<(sh quality/lint.txt)'\ncat <<'DOC'\n$(sh quality/lint.txt)\nDOC\n",
-    )
-    .expect("inert shell examples");
-    reject_checked_in_weakening(workspace.path()).expect("quoted shell examples are inert");
+        "cat <<'DOC' >/dev/null\ncat <<$'E\\x4fF'\nDOC\nprintf '%s\\n' safe\n",
+        "printf '%s' <<'DOC' \\|\n\"\nDOC\nprintf '%s\\n' safe\n",
+        "printf '%s\\n' 'fake() { :; }\nfake() { :; }' >/dev/null\nprintf '%s\\n' safe\n",
+        "printf '%s\\n' \"fake() { :; } fake() { :; }\" >/dev/null\nprintf '%s\\n' safe\n",
+        "cat <<'DOC' >/dev/null\nfake() { :; }\nfake() { :; }\nDOC\nprintf '%s\\n' safe\n",
+        "set -euo pipefail\nhelper() {\n    printf '%s\\n' safe\n}\nhelper\n",
+        "value=safe\nprintf '%s' \"${value}\"\n",
+        "printf '%s' '${ helper() { :; }; helper; }'\n",
+        "printf '%s' \"\\${ helper() { :; }; helper; }\"\n",
+        "cat <<'DOC' >/dev/null\n${ helper() { :; }; helper; }\nDOC\nprintf '%s\\n' safe\n",
+        "cat <<DOC >/dev/null\n\\${ helper() { :; }; helper; }\nDOC\nprintf '%s\\n' safe\n",
+        "set -euo pipefail\nprintf '%s' $'x\\'' >/dev/null\nvalue=safe\nprintf '%s' \"${value}\"\nhelper() {\n    printf '%s\\n' safe\n}\nhelper\n",
+        "set -euo pipefail\nprintf '%s' \"$(printf '%s' '\"')\" >/dev/null\nvalue=safe\nprintf '%s' \"${value}\"\nhelper() {\n    printf '%s\\n' safe\n}\nhelper\n",
+        "set -euo pipefail\nprintf '%s' \"`printf '%s' '\"'`\" >/dev/null\nvalue=safe\nprintf '%s' \"${value}\"\nhelper() {\n    printf '%s\\n' safe\n}\nhelper\n",
+        "values=(\"<(helper() { :; })\" '>(other() { :; })')\nprintf '%s\\n' \"${values[@]}\" >/dev/null\n",
+        "printf '%s' '<\\\n(helper() { :; })' >/dev/null\n",
+        "printf '%s' $'<\\\n(helper() { :; })' >/dev/null\n",
+        "printf '%s' '<\\\\\n(helper() { :; })' >/dev/null\n",
+        "printf '%s' '`cat <\\\n(sh quality/lint.txt)`' >/dev/null\n",
+        "cat <<'DOC' >/dev/null\n<(helper() { :; }; helper)\n>(other() { :; }; other)\nDOC\nprintf '%s\\n' safe\n",
+        "printf '%s' \"$(printf '%s' showcase)\" >/dev/null\nprintf '%s' \"$((1 << 2))\" >/dev/null\n",
+        "printf payload | tee target/report\n",
+        "unzip -Psecret -l payload.zip\n",
+    ] {
+        fs::write(workspace.path().join("script/check.sh"), command).expect("safe shell control");
+        reject_checked_in_weakening(workspace.path()).unwrap_or_else(|error| panic!("{command}: {error:#}"));
+    }
+}
+
+#[test]
+fn command_policy_rejects_continuations_inside_backticks() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    fs::write(workspace.path().join("quality/lint.txt"), "cargo clippy -- -A warnings\n").expect("opaque command payload");
+    fs::write(workspace.path().join("script/check.sh"), "printf safe\n").expect("initial shell dispatcher");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    for command in [
+        "value=`cat <\\\n(sh quality/lint.txt)`\n",
+        "value=`cat <\\\r\n(sh quality/lint.txt)`\r\n",
+        "value=`cat <\\\\\n(sh quality/lint.txt)`\n",
+        "value=`cat <\\\\\\\r\n(sh quality/lint.txt)`\r\n",
+        "value=\"$(printf '%s' `cat <\\\n(sh quality/lint.txt)`)\"\n",
+        "value=\"$(printf '%s' `cat <\\\\\n(sh quality/lint.txt)`)\"\n",
+    ] {
+        fs::write(workspace.path().join("script/check.sh"), command).expect("continued backtick substitution");
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("opaque interpreter program"), "{command}: {error:#}");
+    }
 }
 
 #[test]
@@ -738,6 +785,55 @@ fn command_policy_rejects_sourced_environment_files() {
             assert!(error.to_string().contains("sourced-file indirection"), "{command}: {error:#}");
         }
     }
+}
+
+#[test]
+fn command_policy_rechecks_shell_writes_to_discovered_inputs() {
+    assert_late_bound_input_write_is_rejected("script/check.sh", "#!/usr/bin/env bash\ncp data/replacement data/hook\nbash data/hook\n");
+}
+
+#[test]
+fn command_policy_rechecks_package_script_writes_to_discovered_inputs() {
+    for source in [
+        r#"{"scripts":{"check":"cp data/replacement data/hook && bash data/hook"}}"#,
+        r#"{"scripts":{"check":"rm -- --help Justfile"}}"#,
+        r#"{"scripts":{"check":"printf payload | tee -- --version Justfile"}}"#,
+        r#"{"scripts":{"check":"gzip --suffix --help -d Justfile--help"}}"#,
+        r#"{"scripts":{"check":"gzip --suffix --help Justfile"}}"#,
+        r#"{"scripts":{"check":"lz4 -D --help -d Justfile.lz4 Justfile"}}"#,
+        r#"{"scripts":{"check":"bzip2 -V Justfile"}}"#,
+        r#"{"scripts":{"check":"xz -Flzma Justfile"}}"#,
+        r#"{"scripts":{"check":"lz4 -f -l Justfile target/output"}}"#,
+        r#"{"scripts":{"check":"unzip -oq payload.zip -d -l"}}"#,
+    ] {
+        assert_late_bound_input_write_is_rejected("package.json", source);
+    }
+}
+
+#[test]
+fn command_policy_allows_writes_to_unexecuted_data() {
+    let workspace = late_bound_input_workspace("script/check.sh", "#!/usr/bin/env bash\ncp data/replacement data/report\n");
+    reject_checked_in_weakening(workspace.path()).expect("unexecuted data destination");
+    let workspace = late_bound_input_workspace("package.json", r#"{"scripts":{"check":"printf payload | tee target/report"}}"#);
+    reject_checked_in_weakening(workspace.path()).expect("package script data destination");
+}
+
+fn assert_late_bound_input_write_is_rejected(surface: &str, source: &str) {
+    let workspace = late_bound_input_workspace(surface, source);
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("opaque interpreter program"), "{surface}: {error:#}");
+}
+
+fn late_bound_input_workspace(surface: &str, source: &str) -> tempfile::TempDir {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    fs::create_dir_all(workspace.path().join("data")).expect("data directory");
+    fs::write(workspace.path().join(surface), source).expect("command surface");
+    fs::write(workspace.path().join("data/hook"), ":\n").expect("initial interpreter input");
+    fs::write(workspace.path().join("data/replacement"), "touch Justfile\n").expect("replacement payload");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+    workspace
 }
 
 #[test]

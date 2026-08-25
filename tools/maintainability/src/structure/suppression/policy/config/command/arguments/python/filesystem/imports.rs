@@ -80,6 +80,7 @@ fn statement_ranges(scanner: &CallScanner) -> Vec<Range<usize>> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Alias {
     Module(&'static str),
+    ReflectionModule(&'static str),
     Callable(String),
 }
 
@@ -101,6 +102,9 @@ fn parse_module_import(tokens: &[Token]) -> Option<ParsedAliases> {
         if let Some(canonical) = canonical_module(&module) {
             let alias = explicit_alias.unwrap_or_else(|| module.split('.').next().unwrap_or(&module).to_owned());
             parsed.push((alias, Alias::Module(canonical)));
+        } else if let Some(canonical) = reflection_module(&module) {
+            let alias = explicit_alias.unwrap_or_else(|| module.split('.').next().unwrap_or(&module).to_owned());
+            parsed.push((alias, Alias::ReflectionModule(canonical)));
         }
         if index == tokens.len() {
             break;
@@ -123,7 +127,7 @@ fn parse_from_import(tokens: &[Token]) -> Option<ParsedAliases> {
     if parenthesized {
         index += 1;
     }
-    let canonical_module = canonical_module(&module);
+    let canonical_module = canonical_module(&module).or_else(|| reflection_module(&module));
     let mut parsed = Vec::new();
     while index < tokens.len() {
         if parenthesized && tokens.get(index) == Some(&Token::RightParenthesis) {
@@ -145,7 +149,7 @@ fn parse_from_import(tokens: &[Token]) -> Option<ParsedAliases> {
         };
         if let Some(module) = canonical_module {
             let target = format!("{module}.{name}");
-            if is_direct_mutator(&target) || is_path_constructor(&target) {
+            if is_direct_mutator(&target) || is_path_constructor(&target) || super::reflection::is_reflection(&target) {
                 parsed.push((alias, Alias::Callable(target)));
             }
         }
@@ -203,11 +207,19 @@ fn rewrite_aliases(scanner: &CallScanner, aliases: &Aliases, ignored: &[bool]) -
         match alias {
             Alias::Callable(target) => output.push_str(target),
             Alias::Module(target) => {
-                let following = scanner.skip_whitespace(index);
+                let following = scanner.skip_trivia(index);
                 if scanner.characters.get(following) != Some(&'.') {
                     return None;
                 }
                 output.push_str(target);
+            }
+            Alias::ReflectionModule(target) => {
+                let following = scanner.skip_trivia(index);
+                if scanner.characters.get(following) == Some(&'.') {
+                    output.push_str(target);
+                } else {
+                    output.push_str(&name);
+                }
             }
         }
     }
@@ -226,12 +238,21 @@ fn canonical_module(module: &str) -> Option<&'static str> {
     }
 }
 
+fn reflection_module(module: &str) -> Option<&'static str> {
+    match module {
+        "inspect" => Some("inspect"),
+        "_operator" | "operator" => Some("operator"),
+        _ => None,
+    }
+}
+
 fn contains_relevant_inline_import(tokens: &[Token]) -> bool {
     tokens.windows(2).any(|tokens| {
-        matches!(&tokens[0], Token::Identifier(keyword) if keyword == "import") && matches!(&tokens[1], Token::Identifier(module) if canonical_module(module).is_some())
+        matches!(&tokens[0], Token::Identifier(keyword) if keyword == "import")
+            && matches!(&tokens[1], Token::Identifier(module) if canonical_module(module).is_some() || reflection_module(module).is_some())
     }) || tokens.windows(3).any(|tokens| {
         matches!(&tokens[0], Token::Identifier(keyword) if keyword == "from")
-            && matches!(&tokens[1], Token::Identifier(module) if canonical_module(module).is_some())
+            && matches!(&tokens[1], Token::Identifier(module) if canonical_module(module).is_some() || reflection_module(module).is_some())
             && matches!(&tokens[2], Token::Identifier(keyword) if keyword == "import")
     })
 }

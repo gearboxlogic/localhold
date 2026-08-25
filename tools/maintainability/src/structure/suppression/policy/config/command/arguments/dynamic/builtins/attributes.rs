@@ -1,34 +1,39 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct IntegerAttributes {
-    global: BTreeMap<String, bool>,
+    global: BTreeMap<String, IntegerState>,
     functions: Vec<FunctionAttributes>,
     brace_depth: usize,
-    pending_function: bool,
+    pending_function: Option<String>,
 }
 
+#[derive(Clone)]
 struct FunctionAttributes {
-    values: BTreeMap<String, bool>,
+    name: String,
+    values: BTreeMap<String, IntegerState>,
     closing_depth: usize,
 }
 
 impl IntegerAttributes {
     pub(super) fn enter_scope(&mut self, command: &super::tokens::StructuredCommand, functions: &BTreeSet<String>) {
-        let opens_function =
-            command.open_braces > 0 && (function_opener(&command.words, functions) || self.pending_function && command.words.first().is_some_and(|word| word == "{"));
-        if opens_function {
+        let inline = (command.open_braces > 0).then(|| function_opener(&command.words, functions)).flatten();
+        let pending = (command.open_braces > 0 && command.words.first().is_some_and(|word| word == "{"))
+            .then(|| self.pending_function.take())
+            .flatten();
+        if let Some(name) = inline.map(str::to_owned).or(pending) {
             let closing_depth = self.brace_depth;
             self.brace_depth += command.open_braces;
             self.functions.push(FunctionAttributes {
+                name,
                 values: BTreeMap::new(),
                 closing_depth,
             });
-            self.pending_function = false;
+            self.pending_function = None;
         } else {
             self.brace_depth += command.open_braces;
             if !command.words.is_empty() {
-                self.pending_function = command.open_braces == 0 && function_name(&command.words, functions).is_some();
+                self.pending_function = (command.open_braces == 0).then(|| function_name(&command.words, functions).map(str::to_owned)).flatten();
             }
         }
     }
@@ -49,47 +54,47 @@ impl IntegerAttributes {
             .find_map(|scope| scope.values.get(name))
             .or_else(|| self.global.get(name))
             .copied()
-            .unwrap_or(false)
+            .unwrap_or(IntegerState::Plain)
+            .may_be_integer()
     }
 
-    pub(super) fn update_declaration(&mut self, command: &str, arguments: &[String]) {
-        let mut options = DeclarationOptions::default();
-        for argument in arguments {
-            let word = argument.trim_matches(['\'', '"', ';']);
-            if options.consume(command, word) {
-                continue;
-            }
-            let target = word.split_once('=').map_or(word, |(target, _)| target);
-            let target = target.strip_suffix('+').unwrap_or(target);
-            let Some(name) = super::identifier(target) else {
-                continue;
-            };
-            self.set_declaration(name, options.integer_attribute, options.force_global, options.inherit);
+    pub(super) fn is_global_integer(&self, name: &str) -> bool {
+        self.global.get(name).copied().unwrap_or(IntegerState::Plain).may_be_integer()
+    }
+
+    pub(super) fn current_function(&self) -> Option<&str> {
+        self.functions.last().map(|scope| scope.name.as_str())
+    }
+
+    pub(super) fn apply_global_effect(&mut self, name: &str, effect: GlobalAttributeEffect, uncertain: bool) {
+        let effect = if uncertain { GlobalAttributeEffect::IDENTITY.join(effect) } else { effect };
+        let current = self.global.get(name).copied().unwrap_or(IntegerState::Plain);
+        self.global.insert(name.to_owned(), effect.apply(current));
+    }
+
+    pub(super) fn update_declaration(&mut self, command: &str, arguments: &[String], uncertain: bool) {
+        for assignment in declaration_assignments(command, arguments) {
+            self.set_declaration(assignment, uncertain);
         }
     }
 
     pub(super) fn declaration_initializer_is_opaque(&self, command: &str, arguments: &[String]) -> bool {
-        let mut options = DeclarationOptions::default();
-        for argument in arguments {
-            let word = argument.trim_matches(['\'', '"', ';']);
-            if options.consume(command, word) {
-                continue;
-            }
-            let Some((target, value)) = word.split_once('=') else {
-                continue;
-            };
-            let target = target.strip_suffix('+').unwrap_or(target);
-            let Some(name) = super::identifier(target) else {
-                continue;
-            };
-            if self.declared_integer(name, &options) && super::integer_value_is_opaque(value) {
-                return true;
-            }
-        }
-        false
+        declaration_assignments(command, arguments).into_iter().any(|assignment| {
+            assignment
+                .value
+                .is_some_and(|value| self.declared_integer(&assignment) && super::integer_value_is_opaque(value))
+        })
     }
 
-    pub(super) fn update_unset(&mut self, arguments: &[String]) {
+    pub(super) fn preserving_initializer_is_opaque(&self, command: &str, arguments: &[String]) -> bool {
+        declaration_assignments(command, arguments).into_iter().any(|assignment| {
+            assignment
+                .value
+                .is_some_and(|value| self.is_integer(assignment.name) && super::integer_value_is_opaque(value))
+        })
+    }
+
+    pub(super) fn update_unset(&mut self, arguments: &[String], uncertain: bool) {
         let mut variables = true;
         let mut options = true;
         let mut targets = Vec::new();
@@ -113,7 +118,7 @@ impl IntegerAttributes {
             }
         }
         for target in targets {
-            self.clear(target);
+            self.clear(target, uncertain);
         }
     }
 
@@ -140,39 +145,160 @@ impl IntegerAttributes {
         false
     }
 
-    fn set_declaration(&mut self, name: &str, integer_attribute: Option<bool>, force_global: bool, inherit: bool) {
-        if force_global || self.functions.is_empty() {
-            if let Some(integer) = integer_attribute {
-                self.global.insert(name.to_owned(), integer);
+    fn set_declaration(&mut self, assignment: DeclarationAssignment<'_>, uncertain: bool) {
+        if assignment.force_global {
+            if let Some(integer) = assignment.integer_attribute {
+                self.update_global(assignment.name, IntegerState::from(integer), uncertain || !self.functions.is_empty());
             }
             return;
         }
-        let integer_attribute = integer_attribute.or_else(|| inherit.then(|| self.is_integer(name)));
+        if self.functions.is_empty() {
+            if let Some(integer) = assignment.integer_attribute {
+                self.update_global(assignment.name, IntegerState::from(integer), uncertain);
+            }
+            return;
+        }
+        let inherited = self.state(assignment.name);
+        let state = assignment.integer_attribute.map(IntegerState::from).or_else(|| assignment.inherit.then_some(inherited));
         let values = &mut self.functions.last_mut().expect("function scope is active").values;
-        match integer_attribute {
-            Some(integer) => {
-                values.insert(name.to_owned(), integer);
-            }
-            None => {
-                values.entry(name.to_owned()).or_insert(false);
-            }
-        }
+        let new = state.unwrap_or_else(|| values.get(assignment.name).copied().unwrap_or(IntegerState::Plain));
+        let current = values.get(assignment.name).copied().unwrap_or(inherited);
+        values.insert(assignment.name.to_owned(), if uncertain { current.join(new) } else { new });
     }
 
-    fn declared_integer(&self, name: &str, options: &DeclarationOptions) -> bool {
-        if options.force_global || self.functions.is_empty() {
-            return options.integer_attribute.unwrap_or(false);
+    fn declared_integer(&self, assignment: &DeclarationAssignment<'_>) -> bool {
+        if assignment.force_global || self.functions.is_empty() {
+            return assignment.integer_attribute.unwrap_or_else(|| self.is_global_integer(assignment.name));
         }
-        options.integer_attribute.or_else(|| options.inherit.then(|| self.is_integer(name))).unwrap_or(false)
+        assignment
+            .integer_attribute
+            .map(IntegerState::from)
+            .or_else(|| assignment.inherit.then(|| self.state(assignment.name)))
+            .or_else(|| self.functions.last().and_then(|scope| scope.values.get(assignment.name)).copied())
+            .unwrap_or(IntegerState::Plain)
+            .may_be_integer()
     }
 
-    fn clear(&mut self, name: &str) {
+    fn clear(&mut self, name: &str, uncertain: bool) {
         if let Some(scope) = self.functions.iter_mut().rev().find(|scope| scope.values.contains_key(name)) {
-            scope.values.insert(name.to_owned(), false);
+            let current = scope.values.get(name).copied().unwrap_or(IntegerState::Plain);
+            scope
+                .values
+                .insert(name.to_owned(), if uncertain { current.join(IntegerState::Plain) } else { IntegerState::Plain });
         } else if self.global.contains_key(name) {
-            self.global.insert(name.to_owned(), false);
+            self.update_global(name, IntegerState::Plain, uncertain || !self.functions.is_empty());
         }
     }
+
+    fn state(&self, name: &str) -> IntegerState {
+        self.functions
+            .iter()
+            .rev()
+            .find_map(|scope| scope.values.get(name))
+            .or_else(|| self.global.get(name))
+            .copied()
+            .unwrap_or(IntegerState::Plain)
+    }
+
+    fn update_global(&mut self, name: &str, new: IntegerState, uncertain: bool) {
+        let current = self.global.get(name).copied().unwrap_or(IntegerState::Plain);
+        self.global.insert(name.to_owned(), if uncertain { current.join(new) } else { new });
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum IntegerState {
+    Plain,
+    Integer,
+    MaybeInteger,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct GlobalAttributeEffect(u8);
+
+impl GlobalAttributeEffect {
+    pub(super) const IDENTITY: Self = Self(0b_10_01);
+    const SET_PLAIN: Self = Self(0b_01_01);
+    const SET_INTEGER: Self = Self(0b_10_10);
+
+    pub(super) const fn from_integer(integer: bool) -> Self {
+        if integer { Self::SET_INTEGER } else { Self::SET_PLAIN }
+    }
+
+    pub(super) const fn join(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub(super) const fn then(self, next: Self) -> Self {
+        let plain = outputs_after(self.0 & 0b11, next);
+        let integer = outputs_after((self.0 >> 2) & 0b11, next);
+        Self(plain | integer << 2)
+    }
+
+    pub(super) const fn is_identity(self) -> bool {
+        self.0 == Self::IDENTITY.0
+    }
+
+    pub(super) const fn makes_plain_integer(self) -> bool {
+        self.0 & 0b10 != 0
+    }
+
+    pub(super) const fn keeps_integer_integer(self) -> bool {
+        self.0 & 0b_1000 != 0
+    }
+
+    const fn apply(self, state: IntegerState) -> IntegerState {
+        let outputs = match state {
+            IntegerState::Plain => self.0 & 0b11,
+            IntegerState::Integer => (self.0 >> 2) & 0b11,
+            IntegerState::MaybeInteger => (self.0 & 0b11) | ((self.0 >> 2) & 0b11),
+        };
+        match outputs {
+            0b01 => IntegerState::Plain,
+            0b10 => IntegerState::Integer,
+            _ => IntegerState::MaybeInteger,
+        }
+    }
+}
+
+const fn outputs_after(inputs: u8, effect: GlobalAttributeEffect) -> u8 {
+    let mut outputs = 0;
+    if inputs & 0b01 != 0 {
+        outputs |= effect.0 & 0b11;
+    }
+    if inputs & 0b10 != 0 {
+        outputs |= (effect.0 >> 2) & 0b11;
+    }
+    outputs
+}
+
+impl IntegerState {
+    const fn may_be_integer(self) -> bool {
+        !matches!(self, Self::Plain)
+    }
+
+    const fn join(self, other: Self) -> Self {
+        if matches!((self, other), (Self::Plain, Self::Integer) | (Self::Integer, Self::Plain)) || matches!(self, Self::MaybeInteger) || matches!(other, Self::MaybeInteger) {
+            Self::MaybeInteger
+        } else {
+            self
+        }
+    }
+}
+
+impl From<bool> for IntegerState {
+    fn from(integer: bool) -> Self {
+        if integer { Self::Integer } else { Self::Plain }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct DeclarationAssignment<'a> {
+    pub(super) name: &'a str,
+    pub(super) value: Option<&'a str>,
+    pub(super) integer_attribute: Option<bool>,
+    pub(super) force_global: bool,
+    pub(super) inherit: bool,
 }
 
 struct DeclarationOptions {
@@ -180,6 +306,30 @@ struct DeclarationOptions {
     integer_attribute: Option<bool>,
     force_global: bool,
     inherit: bool,
+}
+
+pub(super) fn declaration_assignments<'a>(command: &str, arguments: &'a [String]) -> Vec<DeclarationAssignment<'a>> {
+    let mut options = DeclarationOptions::default();
+    let mut assignments = Vec::new();
+    for argument in arguments {
+        let word = argument.trim_matches(['\'', '"', ';']);
+        if options.consume(command, word) {
+            continue;
+        }
+        let (target, value) = word.split_once('=').map_or((word, None), |(target, value)| (target, Some(value)));
+        let target = target.strip_suffix('+').unwrap_or(target);
+        let Some(name) = super::identifier(target) else {
+            continue;
+        };
+        assignments.push(DeclarationAssignment {
+            name,
+            value,
+            integer_attribute: options.integer_attribute,
+            force_global: options.force_global,
+            inherit: options.inherit,
+        });
+    }
+    assignments
 }
 
 impl Default for DeclarationOptions {
@@ -211,11 +361,9 @@ impl DeclarationOptions {
     }
 }
 
-fn function_opener(command: &[String], functions: &BTreeSet<String>) -> bool {
-    let Some(brace) = command.iter().position(|word| word == "{") else {
-        return false;
-    };
-    function_name(&command[..brace], functions).is_some()
+pub(super) fn function_opener<'a>(command: &'a [String], functions: &BTreeSet<String>) -> Option<&'a str> {
+    let brace = command.iter().position(|word| word == "{")?;
+    function_name(&command[..brace], functions)
 }
 
 fn function_name<'a>(command: &'a [String], functions: &BTreeSet<String>) -> Option<&'a str> {
@@ -230,7 +378,7 @@ fn function_name<'a>(command: &'a [String], functions: &BTreeSet<String>) -> Opt
     name.filter(|name| functions.contains(*name))
 }
 
-fn assignment(word: &str) -> Option<(&str, &str)> {
+pub(super) fn assignment(word: &str) -> Option<(&str, &str)> {
     let (target, value) = word.split_once('=')?;
     let target = target.strip_suffix('+').unwrap_or(target);
     let name = target.split_once('[').map_or(target, |(name, _)| name);

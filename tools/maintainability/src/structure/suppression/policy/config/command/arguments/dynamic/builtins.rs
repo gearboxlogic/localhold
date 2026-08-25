@@ -2,51 +2,14 @@ use std::collections::BTreeSet;
 
 use super::{is_environment_assignment, is_shell_command_prefix, tokens};
 
+mod analysis;
 mod arithmetic;
 mod attributes;
+mod flow;
+mod function_scope;
 
 pub(super) fn assigned_variables(source: &str) -> (BTreeSet<String>, bool) {
-    let mut names = BTreeSet::new();
-    let functions = tokens::declared_shell_functions(source);
-    let mut attributes = attributes::IntegerAttributes::default();
-    let mut opaque_target = tokens::has_opaque_heredoc_delimiter(source);
-    for command in tokens::structured_source_commands(source) {
-        attributes.enter_scope(&command, &functions);
-        opaque_target |= attributes.ordinary_assignment_is_opaque(&command.words);
-        let Some(index) = command_word_index(&command.words) else {
-            attributes.leave_scope(&command);
-            continue;
-        };
-        let arguments = &command.words[index.saturating_add(1)..];
-        let command_word = command.words[index].trim_matches(['(', ')', '{', '}']).to_ascii_lowercase();
-        match command_word.as_str() {
-            "declare" | "local" | "typeset" => {
-                opaque_target |= declaration_has_opaque_target(arguments, true, true);
-                opaque_target |= attributes.declaration_initializer_is_opaque(&command_word, arguments);
-                attributes.update_declaration(&command_word, arguments);
-            }
-            "readonly" => opaque_target |= declaration_has_opaque_target(arguments, false, false),
-            "export" if declaration_has_opaque_target(arguments, false, false) => opaque_target = true,
-            "unset" => attributes.update_unset(arguments),
-            "printf" | "read" | "readarray" | "mapfile" | "getopts" | "wait" => {
-                let mut assigned = BTreeSet::new();
-                match command_word.as_str() {
-                    "printf" => collect_printf_target(arguments, &mut assigned, &mut opaque_target),
-                    "read" | "readarray" | "mapfile" => collect_read_targets(&command_word, arguments, &mut assigned, &mut opaque_target),
-                    "getopts" => collect_getopts_target(arguments, &mut assigned, &mut opaque_target),
-                    "wait" => collect_wait_target(arguments, &mut assigned, &mut opaque_target),
-                    _ => unreachable!("matched assignment builtin"),
-                }
-                if command_word != "wait" {
-                    opaque_target |= assigned.iter().any(|name| attributes.is_integer(name));
-                }
-                names.extend(assigned);
-            }
-            _ => {}
-        }
-        attributes.leave_scope(&command);
-    }
-    (names, opaque_target)
+    analysis::assigned_variables(source)
 }
 
 pub(super) fn has_opaque_indexed_assignment(path: &str, source: &str, source_is_reviewed: bool) -> bool {
@@ -550,6 +513,30 @@ mod tests {
             "declare -i value=0\ncheck() {\n  local -I value=-12\n}\n",
             "declare value=plain\ncheck() {\n  local -I value=payload\n}\n",
             "declare -i value=0\ncheck() {\n  local +i -I value=payload\n}\n",
+        ] {
+            let (_, opaque) = assigned_variables(source);
+            assert!(!opaque, "{source}");
+        }
+    }
+
+    #[test]
+    fn attribute_preserving_declarations_evaluate_integer_initializers() {
+        for source in [
+            "declare -i value=0; export value=payload",
+            "declare -i value=0; readonly value=payload",
+            "declare -i value=0; declare value=payload",
+            "check() {\n  local -i value=0\n  export value=payload\n}\n",
+            "check() {\n  local -i value=0\n  readonly value=payload\n}\n",
+            "check() {\n  local -i value=0\n  local value=payload\n}\n",
+        ] {
+            let (_, opaque) = assigned_variables(source);
+            assert!(opaque, "{source}");
+        }
+        for source in [
+            "declare -i value=0; export value=-12",
+            "declare -i value=0; readonly value=12",
+            "declare -i value=0; declare +i value=payload",
+            "check() {\n  local -i value=0\n  local +i value=payload\n}\n",
         ] {
             let (_, opaque) = assigned_variables(source);
             assert!(!opaque, "{source}");

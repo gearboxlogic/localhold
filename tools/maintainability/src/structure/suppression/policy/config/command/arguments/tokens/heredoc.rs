@@ -1,7 +1,69 @@
+use std::collections::VecDeque;
+
+#[derive(Clone)]
 pub(super) struct Document {
     pub(super) delimiter: String,
     pub(super) strip_tabs: bool,
     pub(super) allows_expansion: bool,
+}
+
+pub(super) enum Line<'a> {
+    Command(&'a str),
+    Body { text: &'a str, document: Document, delimiter: bool },
+}
+
+pub(super) struct Lines<'a> {
+    source: std::str::Lines<'a>,
+    scan: Scan,
+    declared: VecDeque<Document>,
+    pending: VecDeque<Document>,
+}
+
+impl<'a> Lines<'a> {
+    pub(super) fn new(source: &'a str) -> Self {
+        Self {
+            source: source.lines(),
+            scan: Scan::default(),
+            declared: VecDeque::new(),
+            pending: VecDeque::new(),
+        }
+    }
+
+    pub(super) const fn has_opaque_delimiter(&self) -> bool {
+        self.scan.has_opaque_delimiter()
+    }
+}
+
+impl<'a> Iterator for Lines<'a> {
+    type Item = Line<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let line = self.source.next()?;
+        if let Some(document) = self.pending.front().cloned() {
+            let candidate = if document.strip_tabs { line.trim_start_matches('\t') } else { line };
+            let delimiter = candidate == document.delimiter;
+            if delimiter {
+                self.pending.pop_front();
+            }
+            return Some(Line::Body { text: line, document, delimiter });
+        }
+        self.declared.extend(self.scan.documents(line));
+        if !self.scan.command_continues() {
+            self.pending.append(&mut self.declared);
+        }
+        Some(Line::Command(line))
+    }
+}
+
+pub(super) fn command_source(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    for event in Lines::new(source) {
+        if let Line::Command(line) = event {
+            output.push_str(line);
+        }
+        output.push('\n');
+    }
+    output
 }
 
 #[cfg(test)]
@@ -10,32 +72,50 @@ mod tests;
 #[derive(Default)]
 pub(super) struct Scan {
     shell_quote: Option<char>,
+    shell_ansi_c_quote: Option<()>,
     arithmetic_quote: Option<char>,
     arithmetic_depth: usize,
     opaque_delimiter: bool,
+    line_continues: bool,
+    continued_less_than: bool,
 }
 
 impl Scan {
     pub(super) fn documents(&mut self, line: &str) -> Vec<Document> {
+        let continued_less_than = std::mem::take(&mut self.continued_less_than);
+        if continued_less_than && line.starts_with('<') {
+            self.opaque_delimiter = true;
+        }
         let characters = line.chars().collect::<Vec<_>>();
         let mut documents = Vec::new();
         let mut index = 0;
         let mut escaped = false;
+        let mut trailing_operator = String::new();
+        let mut active_previous = None;
         while index < characters.len() {
             let character = characters[index];
             if escaped {
                 escaped = false;
+                trailing_operator.clear();
+                active_previous = None;
             } else if self.arithmetic_depth > 0 {
                 self.update_arithmetic(character, &mut escaped);
-            } else if character == '\\' && self.shell_quote != Some('\'') {
+                trailing_operator.clear();
+                active_previous = None;
+            } else if character == '\\' && (self.shell_quote != Some('\'') || self.shell_ansi_c_quote.is_some()) {
                 escaped = true;
+                trailing_operator.clear();
             } else if matches!(character, '\'' | '"') {
-                self.shell_quote = updated_quote(self.shell_quote, character);
+                self.update_shell_quote(&characters, index, character);
+                trailing_operator.clear();
+                active_previous = None;
             } else if comment_opener(&characters, index, self.shell_quote) {
                 break;
             } else if arithmetic_opener(&characters, index, self.shell_quote) {
                 self.arithmetic_depth = 2;
                 self.arithmetic_quote = None;
+                trailing_operator.clear();
+                active_previous = None;
                 index += 2 + usize::from(character == '$');
                 continue;
             } else if heredoc_opener(&characters, index, self.shell_quote) {
@@ -44,16 +124,41 @@ impl Scan {
                     Some(document) => documents.push(document),
                     None => self.opaque_delimiter = true,
                 }
+                trailing_operator.clear();
+                active_previous = None;
                 index = end;
                 continue;
+            } else if self.shell_quote.is_none() && matches!(character, '&' | '|') {
+                trailing_operator.push(character);
+                active_previous = None;
+            } else if !character.is_whitespace() {
+                trailing_operator.clear();
+                active_previous = (character == '<').then_some(character);
+            } else {
+                active_previous = None;
             }
             index += 1;
         }
+        self.line_continues = self.shell_quote.is_some() || self.arithmetic_depth > 0 || escaped || continuation_operator(&trailing_operator);
+        self.continued_less_than = escaped && self.shell_quote.is_none() && self.arithmetic_depth == 0 && (continued_less_than && line == "\\" || active_previous == Some('<'));
         documents
     }
 
     pub(super) const fn has_opaque_delimiter(&self) -> bool {
         self.opaque_delimiter
+    }
+
+    fn update_shell_quote(&mut self, characters: &[char], index: usize, character: char) {
+        if self.shell_quote.is_none() {
+            self.shell_ansi_c_quote = (character == '\'' && ansi_c_quote_opener(characters, index)).then_some(());
+        } else if self.shell_quote == Some(character) {
+            self.shell_ansi_c_quote = None;
+        }
+        self.shell_quote = updated_quote(self.shell_quote, character);
+    }
+
+    const fn command_continues(&self) -> bool {
+        self.line_continues
     }
 
     fn update_arithmetic(&mut self, character: char, escaped: &mut bool) {
@@ -74,6 +179,22 @@ impl Scan {
             _ => {}
         }
     }
+}
+
+fn ansi_c_quote_opener(characters: &[char], quote_index: usize) -> bool {
+    let Some(dollar_index) = quote_index.checked_sub(1).filter(|index| characters.get(*index) == Some(&'$')) else {
+        return false;
+    };
+    characters[..dollar_index]
+        .iter()
+        .rev()
+        .take_while(|character| **character == '\\')
+        .count()
+        .is_multiple_of(2)
+}
+
+fn continuation_operator(operator: &str) -> bool {
+    matches!(operator, "&&" | "||" | "|&" | "|")
 }
 
 fn comment_opener(characters: &[char], index: usize, quote: Option<char>) -> bool {

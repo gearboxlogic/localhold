@@ -14,12 +14,19 @@ mod powershell;
 mod python;
 mod references;
 mod source;
+mod surface;
 mod tokens;
 mod toolchain;
 use analysis::Options as AnalysisOptions;
-use formats::{is_just, is_mise, is_powershell, is_python, is_standalone_shell_surface, is_windows_command, is_yaml, supports_shell_source};
+use formats::{is_mise, is_python, is_yaml, supports_shell_source};
 pub(super) use integrity::contains_quality_command;
-pub(super) use references::{cargo_manifest_paths_for_surface, execution_inputs_for_surface, reviewed_command_profiles};
+#[cfg(test)]
+pub(super) use references::execution_inputs_for_surface;
+pub(super) use references::{WorkspaceAnalyzer, WorkspaceContext, cargo_manifest_paths_for_surface, execution_inputs_for_surface_in_workspace, reviewed_command_profiles};
+use surface::normalized_source_for_surface;
+pub(super) use surface::{FilesystemContext, weakening_token_for_surface_with_reviewed_source};
+#[cfg(test)]
+pub(in crate::structure::suppression::policy::config) use surface::{weakening_token, weakening_token_for_surface};
 use tokens::{command_tokens, command_without_comment};
 
 pub(super) fn weakening_mise_environment(path: &str, source: &str) -> bool {
@@ -32,103 +39,6 @@ pub(super) fn mise_configuration_is_resolved(path: &str, source: &str) -> bool {
 
 pub(super) fn reviewed_mise_environment_is_exact(path: &str, source: &str) -> bool {
     path == "mise.toml" && mise::reviewed_environment_is_exact(source)
-}
-
-#[cfg(test)]
-pub(in crate::structure::suppression::policy::config) fn weakening_token(source: &str) -> bool {
-    weakening_token_with_options(source, AnalysisOptions::strict())
-}
-
-#[cfg(test)]
-pub(in crate::structure::suppression::policy::config) fn weakening_token_for_surface(path: &str, source: &str) -> bool {
-    weakening_token_for_surface_with_context(None, path, source, false)
-}
-
-pub(super) fn weakening_token_for_surface_with_reviewed_source(workspace: &Path, execution_surfaces: &[String], path: &str, source: &str, source_is_reviewed: bool) -> bool {
-    weakening_token_for_surface_with_context(Some((workspace, execution_surfaces)), path, source, source_is_reviewed)
-}
-
-type FilesystemContext<'a> = (&'a Path, &'a [String]);
-
-fn weakening_token_for_surface_with_context(filesystem_context: Option<FilesystemContext<'_>>, path: &str, source: &str, source_is_reviewed: bool) -> bool {
-    if mise::file_task_metadata_is_unresolved(source) {
-        return true;
-    }
-    if dynamic_program::is_unanalyzed_path(path) {
-        return true;
-    }
-    if is_python(path) && (python::has_opaque_process_arguments(path, source) || python_filesystem_write_is_opaque(filesystem_context, path, source)) {
-        return true;
-    }
-    if is_powershell(path) && powershell::has_constructed_rust_arguments(source) {
-        return true;
-    }
-    if is_powershell(path) && powershell::has_unchecked_native_quality_command(source) {
-        return true;
-    }
-    if is_powershell(path) {
-        let analysis = powershell::analyze_execution_commands(source);
-        if !powershell::unresolved_is_reviewed(path, source_is_reviewed, &analysis) {
-            return true;
-        }
-    }
-    if is_mise(path) {
-        let Ok(analysis) = mise::analyze(source) else {
-            return true;
-        };
-        return analysis.unresolved
-            || analysis
-                .commands
-                .iter()
-                .any(|command| weakening_token_with_options(command, AnalysisOptions::strict().with_case_insensitive_tools()));
-    }
-    let mut options = AnalysisOptions::strict();
-    options = options.with_case_insensitive_tools();
-    if is_powershell(path) {
-        options = options.allow_backticks();
-    }
-    if is_python(path) || is_windows_command(path) {
-        options = options.ignore_command_substitutions();
-    }
-    if is_python(path) {
-        options = options.ignore_function_definitions();
-    }
-    if is_just(path) && ignored_just_recipe_failure(source, options.case_insensitive_tools()) {
-        return true;
-    }
-    if let Some(scripts) = package_json::script_commands(path, source) {
-        let options = options.without_initial_errexit();
-        return scripts.map_or(true, |scripts| {
-            scripts.iter().any(|script| weakening_token_with_options(script, options.allow_just_interpolation()))
-        });
-    }
-    if is_standalone_shell_surface(path) && !shebang_enables_errexit(source) {
-        options = options.without_initial_errexit();
-    }
-    let source = normalized_source_for_surface(path, source);
-    let embedded_commands = super::yaml::run_commands(path, &source);
-    if is_yaml(path) {
-        if super::yaml::powershell_run_commands(path, &source).iter().any(|command| {
-            let analysis = powershell::analyze_execution_commands(command);
-            powershell::has_unchecked_native_quality_command(command) || !powershell::unresolved_is_reviewed(path, source_is_reviewed, &analysis)
-        }) {
-            return true;
-        }
-        return embedded_commands
-            .iter()
-            .any(|command| weakening_token_with_options(command, options.allow_just_interpolation()) || powershell::has_constructed_rust_arguments(command));
-    }
-    weakening_token_with_options(&source, if is_just(path) { options } else { options.allow_just_interpolation() })
-        || embedded_commands
-            .iter()
-            .any(|command| weakening_token_with_options(command, options.allow_just_interpolation()))
-}
-
-fn python_filesystem_write_is_opaque(filesystem_context: Option<FilesystemContext<'_>>, path: &str, source: &str) -> bool {
-    filesystem_context.map_or_else(
-        || python::has_opaque_filesystem_write(path, source),
-        |(workspace, execution_surfaces)| python::has_opaque_filesystem_write_in_workspace(workspace, execution_surfaces, path, source),
-    )
 }
 
 pub(super) fn weakening_token_in_reviewed_shell_remainder(source: &str) -> bool {
@@ -212,32 +122,8 @@ fn is_environment_assignment(word: &str) -> bool {
         .is_some_and(|(name, _)| !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') && !name.as_bytes()[0].is_ascii_digit())
 }
 
-fn shebang_enables_errexit(source: &str) -> bool {
-    let Some(interpreter) = source.lines().next().and_then(|line| line.strip_prefix("#!")) else {
-        return false;
-    };
-    let words = interpreter.split_whitespace().collect::<Vec<_>>();
-    let Some(shell_index) = words.iter().position(|word| matches!(tool_basename(word), "bash" | "dash" | "sh" | "zsh")) else {
-        return false;
-    };
-    let arguments = &words[shell_index + 1..];
-    arguments.iter().take_while(|word| **word != "--").any(|word| {
-        word.strip_prefix('-')
-            .is_some_and(|options| !options.starts_with('-') && !options.starts_with('o') && options.contains('e'))
-    }) || arguments.windows(2).any(|pair| pair[0] == "-o" && pair[1].eq_ignore_ascii_case("errexit"))
-}
-
-fn normalized_source_for_surface(path: &str, source: &str) -> String {
-    match Path::new(path).extension().and_then(|extension| extension.to_str()) {
-        Some(extension) if extension.eq_ignore_ascii_case("ps1") => powershell::normalize_escapes(source),
-        Some(extension) if matches!(extension.to_ascii_lowercase().as_str(), "cmd" | "bat") => join_command_continuations(source),
-        Some(extension) if extension.eq_ignore_ascii_case("py") => python::normalize_continuations(source),
-        _ => source.to_owned(),
-    }
-}
-
 fn weakening_token_with_options(source: &str, options: AnalysisOptions) -> bool {
-    if dynamic::has_rust_tool_assignment_flow(source, options.case_insensitive_tools()) {
+    if options.inspects_shell_assignment_flow() && dynamic::has_rust_tool_assignment_flow(source, options.case_insensitive_tools()) {
         return true;
     }
     let logical = join_command_continuations(source);

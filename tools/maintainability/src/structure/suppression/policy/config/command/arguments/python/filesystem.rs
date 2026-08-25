@@ -1,9 +1,11 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+mod call_arguments;
 mod capability;
 mod imports;
 mod literal;
+mod reflection;
 mod reviewed;
 mod temporary;
 mod write_path;
@@ -16,8 +18,8 @@ pub(super) fn has_opaque_write(source: &str) -> bool {
     has_opaque_write_with_policy(source, write_path::Policy::default())
 }
 
-pub(super) fn has_opaque_write_in_workspace(workspace: &Path, execution_surfaces: &[String], source: &str) -> bool {
-    has_opaque_write_with_policy(source, write_path::Policy::for_workspace(workspace, execution_surfaces))
+pub(super) fn has_opaque_write_in_workspace(workspace: &Path, execution_surfaces: &[String], tracked_paths: &BTreeSet<String>, source: &str) -> bool {
+    has_opaque_write_with_policy(source, write_path::Policy::for_workspace(workspace, execution_surfaces, tracked_paths))
 }
 
 fn has_opaque_write_with_policy(source: &str, write_policy: write_path::Policy) -> bool {
@@ -27,6 +29,14 @@ fn has_opaque_write_with_policy(source: &str, write_policy: write_path::Policy) 
     let Some(canonicalized) = imports::canonicalize(source) else {
         return true;
     };
+    if reflection::has_opaque_capability(source, &canonicalized.source, &canonicalized.aliases) {
+        return true;
+    }
+    if super::mutates_process_working_directory(&canonicalized.source)
+        && has_opaque_canonical_write(&canonicalized.source, canonicalized.aliases.clone(), write_path::Policy::rejecting_all_writes())
+    {
+        return true;
+    }
     has_opaque_canonical_write(&canonicalized.source, canonicalized.aliases, write_policy)
 }
 
@@ -49,6 +59,13 @@ fn has_opaque_canonical_write(source: &str, aliases: imports::Aliases, write_pol
             continue;
         }
         let chained_method = scanner.following_method(&call);
+        if modeled_call_is_malformed(&scanner, &call)
+            || chained_method
+                .as_ref()
+                .is_some_and(|method| is_path_mutation_method(called_name(&method.name)) && scanner.call_is_malformed(method.opening_parenthesis))
+        {
+            return true;
+        }
         if let Some(method) = &chained_method
             && is_path_mutation_method(called_name(&method.name))
         {
@@ -67,6 +84,12 @@ fn has_opaque_canonical_write(source: &str, aliases: imports::Aliases, write_pol
         }
     }
     scanner.opaque_formatted_write_expression || capability::has_opaque_reference(&scanner, &invoked_capabilities)
+}
+
+fn modeled_call_is_malformed(scanner: &CallScanner, call: &Call) -> bool {
+    let name = called_name(&call.name);
+    let method = name.rsplit('.').next().unwrap_or(name);
+    scanner.call_is_malformed(call.opening_parenthesis) && (is_direct_mutator(name) || is_path_mutation_method(method))
 }
 
 fn called_name(mut name: &str) -> &str {
@@ -124,35 +147,121 @@ fn is_direct_mutator(name: &str) -> bool {
 }
 
 fn mutation_arguments_are_opaque(scanner: &CallScanner, call: &Call) -> bool {
-    let arguments: &[ArgumentSpec] = match called_name(&call.name) {
-        "shutil.copy" | "shutil.copy2" | "shutil.copyfile" | "shutil.copytree" => &[ArgumentSpec::new(1, &["dst"])],
-        "shutil.move" | "os.link" | "os.rename" | "os.renames" | "os.replace" => &[ArgumentSpec::new(0, &["src"]), ArgumentSpec::new(1, &["dst"])],
+    let name = called_name(&call.name);
+    // A tree copy can materialize arbitrarily named protected inputs below an
+    // otherwise safe destination. Proving the complete tree stable would
+    // require modeling earlier mutations, so ordinary agent tooling fails closed.
+    if name == "shutil.copytree" {
+        return true;
+    }
+    let arguments: &[ArgumentSpec] = match name {
+        "shutil.copy" | "shutil.copy2" => return directory_destination_is_opaque(scanner, call, false),
+        "shutil.move" => return directory_destination_is_opaque(scanner, call, true),
+        "shutil.copyfile" => {
+            if !follows_symlinks(scanner, call.opening_parenthesis) {
+                return true;
+            }
+            &[ArgumentSpec::new(1, &["dst"])]
+        }
+        "os.link" | "os.rename" | "os.renames" | "os.replace" => &[ArgumentSpec::new(0, &["src"]), ArgumentSpec::new(1, &["dst"])],
         "os.chmod" | "os.chown" | "os.lchown" | "os.makedirs" | "os.mkdir" | "os.remove" | "os.removedirs" | "os.rmdir" | "os.truncate" | "os.unlink" | "os.utime"
         | "shutil.rmtree" => &[ArgumentSpec::new(0, &["path", "name"])],
         "os.symlink" => return true,
         _ => return false,
     };
-    arguments.iter().any(|argument| path_argument_is_opaque(scanner, call.opening_parenthesis, *argument))
+    directory_rebase_is_opaque(scanner, call.opening_parenthesis) || arguments.iter().any(|argument| path_argument_is_opaque(scanner, call.opening_parenthesis, *argument))
+}
+
+fn directory_destination_is_opaque(scanner: &CallScanner, call: &Call, mutates_source: bool) -> bool {
+    if directory_rebase_is_opaque(scanner, call.opening_parenthesis) || !follows_symlinks(scanner, call.opening_parenthesis) {
+        return true;
+    }
+    if called_name(&call.name) == "shutil.move" && scanner.call_argument(call.opening_parenthesis, ArgumentSpec::new(2, &["copy_function"])).is_some() {
+        return true;
+    }
+    let source = ArgumentSpec::new(0, &["src"]);
+    let destination = ArgumentSpec::new(1, &["dst"]);
+    if mutates_source && path_argument_is_opaque(scanner, call.opening_parenthesis, source) {
+        return true;
+    }
+    let Some(source) = literal_path_argument(scanner, call.opening_parenthesis, source) else {
+        return true;
+    };
+    let Some(destination) = literal_path_argument(scanner, call.opening_parenthesis, destination) else {
+        return true;
+    };
+    if scanner.write_policy.is_opaque(&destination) {
+        return true;
+    }
+    implicit_destination(&source, &destination).is_none_or(|candidate| scanner.write_policy.is_opaque(&candidate))
+}
+
+fn literal_path_argument(scanner: &CallScanner, opening_parenthesis: usize, argument: ArgumentSpec) -> Option<String> {
+    scanner.call_argument(opening_parenthesis, argument).and_then(|value| literal_value(&value))
+}
+
+fn implicit_destination(source: &str, destination: &str) -> Option<String> {
+    let source = source.replace('\\', "/");
+    let basename = Path::new(&source).file_name()?.to_str()?;
+    let destination = destination.replace('\\', "/");
+    Some(Path::new(&destination).join(basename).to_string_lossy().replace('\\', "/"))
+}
+
+fn follows_symlinks(scanner: &CallScanner, opening_parenthesis: usize) -> bool {
+    // `False` can copy a symlink into a currently missing destination, turning a
+    // later otherwise-safe path into a write-through path after analysis.
+    scanner
+        .call_argument(opening_parenthesis, ArgumentSpec::new(usize::MAX, &["follow_symlinks"]))
+        .is_none_or(|value| value.trim().trim_matches(['(', ')']).trim() == "True")
+}
+
+fn directory_rebase_is_opaque(scanner: &CallScanner, opening_parenthesis: usize) -> bool {
+    scanner.has_argument_unpack(opening_parenthesis)
+        || [
+            ArgumentSpec::new(usize::MAX, &["dir_fd"]),
+            ArgumentSpec::new(usize::MAX, &["src_dir_fd"]),
+            ArgumentSpec::new(usize::MAX, &["dst_dir_fd"]),
+        ]
+        .iter()
+        .any(|argument| scanner.call_argument(opening_parenthesis, *argument).is_some_and(|value| value.trim() != "None"))
 }
 
 fn chained_path_write_is_opaque(scanner: &CallScanner, call: &Call, method: &Call) -> bool {
     let receiver = ArgumentSpec::new(0, &[]);
     match called_name(&method.name) {
         "chmod" | "lchmod" | "mkdir" | "rmdir" | "touch" | "unlink" | "write_bytes" | "write_text" => path_argument_is_opaque(scanner, call.opening_parenthesis, receiver),
-        "open" => writable_mode(scanner, method.opening_parenthesis, 0) && path_argument_is_opaque(scanner, call.opening_parenthesis, receiver),
+        "open" => {
+            scanner.has_argument_unpack(method.opening_parenthesis)
+                || writable_mode(scanner, method.opening_parenthesis, 0) && path_argument_is_opaque(scanner, call.opening_parenthesis, receiver)
+        }
         "rename" | "replace" => {
             path_argument_is_opaque(scanner, call.opening_parenthesis, receiver) || path_argument_is_opaque(scanner, method.opening_parenthesis, ArgumentSpec::new(0, &["target"]))
         }
-        "hardlink_to" | "symlink_to" => true,
+        "copy" | "copy_into" | "hardlink_to" | "move" | "move_into" | "symlink_to" => true,
         _ => false,
     }
 }
 
 fn direct_open_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
-    if !matches!(called_name(&call.name), "builtins.open" | "io.open" | "open") || !writable_mode(scanner, call.opening_parenthesis, 1) {
+    if !matches!(called_name(&call.name), "builtins.open" | "io.open" | "open") {
+        return false;
+    }
+    if scanner.has_argument_unpack(call.opening_parenthesis) {
+        return true;
+    }
+    if opener_is_opaque(scanner, call.opening_parenthesis) {
+        return true;
+    }
+    if !writable_mode(scanner, call.opening_parenthesis, 1) {
         return false;
     }
     path_argument_is_opaque(scanner, call.opening_parenthesis, ArgumentSpec::new(0, &["file"]))
+}
+
+fn opener_is_opaque(scanner: &CallScanner, opening_parenthesis: usize) -> bool {
+    scanner
+        .call_argument(opening_parenthesis, ArgumentSpec::new(7, &["opener"]))
+        .is_some_and(|opener| opener.trim() != "None")
 }
 
 fn direct_path_method_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
@@ -164,19 +273,23 @@ fn direct_path_method_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
     let class_method = matches!(owner, "Path" | "PosixPath" | "WindowsPath" | "pathlib.Path" | "pathlib.PosixPath" | "pathlib.WindowsPath");
     if !class_method {
         return match method {
-            "chmod" | "hardlink_to" | "lchmod" | "mkdir" | "rename" | "replace" | "rmdir" | "symlink_to" | "touch" | "unlink" | "write_bytes" | "write_text" => true,
-            "open" => writable_mode(scanner, call.opening_parenthesis, 0),
+            "chmod" | "copy" | "copy_into" | "hardlink_to" | "lchmod" | "mkdir" | "move" | "move_into" | "rename" | "replace" | "rmdir" | "symlink_to" | "touch" | "unlink"
+            | "write_bytes" | "write_text" => true,
+            "open" => scanner.has_argument_unpack(call.opening_parenthesis) || writable_mode(scanner, call.opening_parenthesis, 0),
             _ => false,
         };
     }
     let receiver = ArgumentSpec::new(0, &["self"]);
     match method {
         "chmod" | "lchmod" | "mkdir" | "rmdir" | "touch" | "unlink" | "write_bytes" | "write_text" => path_argument_is_opaque(scanner, call.opening_parenthesis, receiver),
-        "open" => writable_mode(scanner, call.opening_parenthesis, 1) && path_argument_is_opaque(scanner, call.opening_parenthesis, receiver),
+        "open" => {
+            scanner.has_argument_unpack(call.opening_parenthesis)
+                || writable_mode(scanner, call.opening_parenthesis, 1) && path_argument_is_opaque(scanner, call.opening_parenthesis, receiver)
+        }
         "rename" | "replace" => {
             path_argument_is_opaque(scanner, call.opening_parenthesis, receiver) || path_argument_is_opaque(scanner, call.opening_parenthesis, ArgumentSpec::new(1, &["target"]))
         }
-        "hardlink_to" | "symlink_to" => true,
+        "copy" | "copy_into" | "hardlink_to" | "move" | "move_into" | "symlink_to" => true,
         _ => false,
     }
 }
@@ -184,19 +297,38 @@ fn direct_path_method_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
 fn is_path_mutation_method(method: &str) -> bool {
     matches!(
         method,
-        "chmod" | "hardlink_to" | "lchmod" | "mkdir" | "open" | "rename" | "replace" | "rmdir" | "symlink_to" | "touch" | "unlink" | "write_bytes" | "write_text"
+        "chmod"
+            | "copy"
+            | "copy_into"
+            | "hardlink_to"
+            | "lchmod"
+            | "mkdir"
+            | "move"
+            | "move_into"
+            | "open"
+            | "rename"
+            | "replace"
+            | "rmdir"
+            | "symlink_to"
+            | "touch"
+            | "unlink"
+            | "write_bytes"
+            | "write_text"
     )
 }
 
 fn descriptor_open_is_opaque(scanner: &CallScanner, call: &Call) -> bool {
     let name = called_name(&call.name);
     if name == "os.fdopen" {
+        if scanner.has_argument_unpack(call.opening_parenthesis) {
+            return true;
+        }
         return writable_mode(scanner, call.opening_parenthesis, 1);
     }
     if name != "os.open" || !writable_os_flags(scanner, call.opening_parenthesis) {
         return false;
     }
-    path_argument_is_opaque(scanner, call.opening_parenthesis, ArgumentSpec::new(0, &["path"]))
+    directory_rebase_is_opaque(scanner, call.opening_parenthesis) || path_argument_is_opaque(scanner, call.opening_parenthesis, ArgumentSpec::new(0, &["path"]))
 }
 
 fn writable_os_flags(scanner: &CallScanner, opening_parenthesis: usize) -> bool {
@@ -319,55 +451,6 @@ impl CallScanner {
         }
     }
 
-    fn argument(&self, opening_parenthesis: usize, selected: usize) -> Option<String> {
-        let mut index = opening_parenthesis + 1;
-        let mut start = index;
-        let mut argument = 0;
-        let mut depth = 0_u32;
-        while index < self.characters.len() {
-            if self.characters[index] == '#' && depth == 0 {
-                return None;
-            }
-            if let Some(end) = self.string_end(index) {
-                index = end;
-                continue;
-            }
-            match argument_boundary(self.characters[index], depth, argument, selected) {
-                ArgumentBoundary::Selected => return Some(self.characters[start..index].iter().collect()),
-                ArgumentBoundary::Next => {
-                    argument += 1;
-                    start = index + 1;
-                    index += 1;
-                    continue;
-                }
-                ArgumentBoundary::Missing => return None,
-                ArgumentBoundary::None => {}
-            }
-            match self.characters[index] {
-                '(' | '[' | '{' => depth += 1,
-                ')' | ']' | '}' => depth = depth.saturating_sub(1),
-                _ => {}
-            }
-            index += 1;
-        }
-        None
-    }
-
-    fn call_argument(&self, opening_parenthesis: usize, selected: ArgumentSpec) -> Option<String> {
-        let mut positional = 0;
-        let mut index = 0;
-        while let Some(argument) = self.argument(opening_parenthesis, index) {
-            match keyword_argument(&argument) {
-                Some((name, value)) if selected.names.contains(&name) => return Some(value.to_owned()),
-                Some(_) => {}
-                None if positional == selected.position => return Some(argument),
-                None => positional += 1,
-            }
-            index += 1;
-        }
-        None
-    }
-
     fn following_method(&self, call: &Call) -> Option<Call> {
         let method = self.following_method_reference(call)?;
         let direct_opening = self.skip_whitespace(method.end);
@@ -447,25 +530,6 @@ impl CallScanner {
             .checked_sub(1)
             .and_then(|index| self.characters.get(index))
             .is_some_and(|character| is_identifier_character(*character) || matches!(character, ')' | ']' | '}'))
-    }
-
-    fn closing_parenthesis(&self, opening_parenthesis: usize) -> Option<usize> {
-        let mut index = opening_parenthesis + 1;
-        let mut depth = 0_u32;
-        while index < self.characters.len() {
-            if let Some(end) = self.string_end(index) {
-                index = end;
-                continue;
-            }
-            match self.characters[index] {
-                '(' | '[' | '{' => depth += 1,
-                ')' if depth == 0 => return Some(index),
-                ')' | ']' | '}' => depth = depth.saturating_sub(1),
-                _ => {}
-            }
-            index += 1;
-        }
-        None
     }
 
     fn string_end(&self, start: usize) -> Option<usize> {
@@ -559,6 +623,16 @@ impl CallScanner {
         index
     }
 
+    fn skip_trivia(&self, mut index: usize) -> usize {
+        loop {
+            index = self.skip_whitespace(index);
+            if self.characters.get(index) != Some(&'#') {
+                return index;
+            }
+            index = self.comment_end(index);
+        }
+    }
+
     fn is_method_call(&self, start: usize) -> bool {
         self.characters[..start].iter().rev().find(|character| !character.is_whitespace()) == Some(&'.')
     }
@@ -569,28 +643,6 @@ struct StringLiteral {
     content_start: usize,
     content_end: usize,
     formatted: bool,
-}
-
-fn keyword_argument(argument: &str) -> Option<(&str, &str)> {
-    let (name, value) = argument.split_once('=')?;
-    let name = name.trim();
-    (!name.is_empty() && name.chars().all(is_identifier_character)).then_some((name, value.trim()))
-}
-
-enum ArgumentBoundary {
-    None,
-    Selected,
-    Next,
-    Missing,
-}
-
-const fn argument_boundary(character: char, depth: u32, argument: usize, selected: usize) -> ArgumentBoundary {
-    match (character, depth, argument == selected) {
-        (',' | ')', 0, true) => ArgumentBoundary::Selected,
-        (',', 0, false) => ArgumentBoundary::Next,
-        (')', 0, false) => ArgumentBoundary::Missing,
-        _ => ArgumentBoundary::None,
-    }
 }
 
 fn literal_value(argument: &str) -> Option<String> {

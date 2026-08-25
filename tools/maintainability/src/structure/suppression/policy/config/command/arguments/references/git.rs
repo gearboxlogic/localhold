@@ -11,16 +11,27 @@ const REVIEWED_WRAPPER_DEFINITION: &[&str] = &[
 ];
 
 pub(super) fn dispatch_is_opaque(path: &str, arguments: &[String]) -> bool {
+    dispatch_with_syntax(path, arguments, true)
+}
+
+pub(super) fn argv_dispatch_is_opaque(path: &str, arguments: &[String]) -> bool {
+    dispatch_with_syntax(path, arguments, false)
+}
+
+fn dispatch_with_syntax(path: &str, arguments: &[String], shell_expansion: bool) -> bool {
     if path == "script/tests/test_maintainability_bootstrap.sh" && fixture::is_reviewed_call(arguments) {
         return false;
     }
-    let Some((_, subcommand)) = git_subcommand(arguments) else {
+    let Some((subcommand_index, subcommand)) = git_subcommand(arguments) else {
         return true;
     };
-    let dynamic_arguments = arguments.iter().any(|argument| super::path::contains_dynamic_value(argument));
+    let dynamic_arguments = shell_expansion && arguments.iter().any(|argument| super::path::contains_dynamic_value(argument));
     configuration_is_opaque(arguments)
         || command_producing_subcommand(arguments)
-        || dynamic_arguments && subcommand != "grep"
+        || dynamic_arguments
+            && (subcommand != "grep"
+                || arguments[..subcommand_index].iter().any(|argument| super::path::contains_dynamic_value(argument))
+                || dynamic_grep_arguments_are_opaque(&arguments[subcommand_index + 1..]))
         || !matches!(
             subcommand,
             "cat-file" | "check-ignore" | "grep" | "hash-object" | "ls-files" | "ls-tree" | "merge-base" | "rev-list" | "rev-parse"
@@ -236,10 +247,61 @@ fn upload_pack_selection_is_opaque(arguments: &[String]) -> bool {
 }
 
 fn grep_dispatch_is_opaque(arguments: &[String]) -> bool {
-    arguments.iter().take_while(|argument| argument.as_str() != "--").any(|argument| {
-        let option = argument.split_once('=').map_or(argument.as_str(), |(option, _)| option);
-        argument == "-O" || argument.starts_with("-O") && argument.len() > 2 || option.len() >= "--open".len() && "--open-files-in-pager".starts_with(option)
-    })
+    let mut consumes_data = false;
+    for argument in arguments.iter().take_while(|argument| argument.as_str() != "--") {
+        if consumes_data {
+            consumes_data = false;
+            continue;
+        }
+        match grep_argument_effect(argument) {
+            GrepArgumentEffect::Pager => return true,
+            GrepArgumentEffect::ConsumesNext => consumes_data = true,
+            GrepArgumentEffect::Other => {}
+        }
+    }
+    false
+}
+
+fn dynamic_grep_arguments_are_opaque(arguments: &[String]) -> bool {
+    arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--")
+        .any(|argument| super::path::contains_dynamic_value(argument))
+}
+
+enum GrepArgumentEffect {
+    Pager,
+    ConsumesNext,
+    Other,
+}
+
+fn grep_argument_effect(argument: &str) -> GrepArgumentEffect {
+    if let Some(option) = argument.strip_prefix("--").map(|option| option.split_once('=').map_or(option, |(option, _)| option)) {
+        if option.len() >= "op".len() && "open-files-in-pager".starts_with(option) {
+            return GrepArgumentEffect::Pager;
+        }
+        return if !argument.contains('=') && matches!(option, "after-context" | "before-context" | "context" | "max-count" | "max-depth" | "threads") {
+            GrepArgumentEffect::ConsumesNext
+        } else {
+            GrepArgumentEffect::Other
+        };
+    }
+    let Some(options) = argument.strip_prefix('-') else {
+        return GrepArgumentEffect::Other;
+    };
+    for (index, option) in options.char_indices() {
+        if option == 'O' {
+            return GrepArgumentEffect::Pager;
+        }
+        if matches!(option, 'A' | 'B' | 'C' | 'e' | 'f' | 'm') {
+            return if index + option.len_utf8() == options.len() {
+                GrepArgumentEffect::ConsumesNext
+            } else {
+                GrepArgumentEffect::Other
+            };
+        }
+    }
+    GrepArgumentEffect::Other
 }
 
 fn config_dispatch_is_opaque(arguments: &[String]) -> bool {
@@ -473,11 +535,23 @@ mod tests {
     }
 
     #[test]
-    fn git_grep_allows_dynamic_data_but_not_pager_dispatch() {
-        assert!(!dispatch_is_opaque(&arguments(&["grep", "-E", "$pattern", "--", "${pathspecs[@]}"])));
+    fn git_grep_rejects_word_splitting_dynamic_operands() {
+        assert!(dispatch_is_opaque(&arguments(&["grep", "-E", "-e", "$pattern", "--", "${pathspecs[@]}"])));
+        assert!(dispatch_is_opaque(&arguments(&["grep", "-e$pattern", "--", "$pathspec"])));
+        assert!(dispatch_is_opaque(&arguments(&["grep", "-f", "$pattern_file", "--", "$pathspec"])));
+        assert!(dispatch_is_opaque(&arguments(&["grep", "-m", "$count", "-e", "literal", "--", "$pathspec"])));
+        assert!(dispatch_is_opaque(&arguments(&["grep", "-E", "$pattern", "--", "${pathspecs[@]}"])));
+        assert!(dispatch_is_opaque(&arguments(&["-C", "$root", "grep", "-e", "literal", "--", "."])));
+        assert!(dispatch_is_opaque(&arguments(&["grep", "$pager_option", "lint", "--", "."])));
         assert!(dispatch_is_opaque(&arguments(&["grep", "-O$pager", "$pattern", "--", "."])));
         assert!(dispatch_is_opaque(&arguments(&["grep", "--open-files-in-pager=$pager", "$pattern", "--", "."])));
+        assert!(dispatch_is_opaque(&arguments(&["grep", "--open=$pager", "$pattern", "--", "."])));
         assert!(dispatch_is_opaque(&arguments(&["-c", "$config", "grep", "$pattern", "--", "."])));
+        assert!(!dispatch_is_opaque(&arguments(&["grep", "-e", "literal", "--", "$pathspec"])));
+        assert!(!super::argv_dispatch_is_opaque(
+            "script/check.py",
+            &arguments(&["grep", "-e", "$literal_pattern", "--", "$literal_path"])
+        ));
     }
 
     #[test]
@@ -505,9 +579,17 @@ mod tests {
     fn pager_dispatch_fails_closed_but_explicit_no_pager_is_safe() {
         assert!(dispatch_is_opaque(&arguments(&["grep", "--open-files-in-pager=sh quality/lint.txt", "lint"])));
         assert!(dispatch_is_opaque(&arguments(&["grep", "--open-files", "lint"])));
+        assert!(dispatch_is_opaque(&arguments(&["grep", "--op=sh quality/lint.txt", "lint"])));
+        assert!(dispatch_is_opaque(&arguments(&["grep", "--ope=sh quality/lint.txt", "lint"])));
         assert!(dispatch_is_opaque(&arguments(&["grep", "-Osh quality/lint.txt", "lint"])));
+        assert!(dispatch_is_opaque(&arguments(&["grep", "-nOsh quality/lint.txt", "lint"])));
+        assert!(dispatch_is_opaque(&arguments(&["grep", "-inOsh quality/lint.txt", "lint"])));
         assert!(dispatch_is_opaque(&arguments(&["--paginate", "status"])));
         assert!(dispatch_is_opaque(&arguments(&["-p", "log"])));
+        assert!(!dispatch_is_opaque(&arguments(&["grep", "-e", "-Oliteral", "--", "."])));
+        assert!(!dispatch_is_opaque(&arguments(&["grep", "-ne", "-Oliteral", "--", "."])));
+        assert!(!dispatch_is_opaque(&arguments(&["grep", "-eliteral", "--", "."])));
+        assert!(!dispatch_is_opaque(&arguments(&["grep", "-fpatterns.txt", "--", "."])));
         assert!(!dispatch_is_opaque(&arguments(&["--no-pager", "grep", "lint"])));
     }
 

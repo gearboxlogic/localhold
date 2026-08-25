@@ -5,6 +5,7 @@ pub(super) struct Options {
     command_substitutions: CommandSubstitutionPolicy,
     just_interpolation: JustInterpolationPolicy,
     integrity: IntegrityInspection,
+    shell_assignment_flow: bool,
     initial_errexit: bool,
     nesting_depth: u8,
 }
@@ -48,6 +49,7 @@ impl Options {
             command_substitutions: CommandSubstitutionPolicy::Inspect,
             just_interpolation: JustInterpolationPolicy::Reject,
             integrity: IntegrityInspection::TopLevel,
+            shell_assignment_flow: true,
             initial_errexit: true,
             nesting_depth: 0,
         }
@@ -77,6 +79,11 @@ impl Options {
         if matches!(self.integrity, IntegrityInspection::TopLevel) {
             self.integrity = IntegrityInspection::CommandsOnly;
         }
+        self
+    }
+
+    pub(super) const fn ignore_shell_assignment_flow(mut self) -> Self {
+        self.shell_assignment_flow = false;
         self
     }
 
@@ -120,6 +127,10 @@ impl Options {
 
     pub(super) const fn inspects_function_definitions(self) -> bool {
         matches!(self.integrity, IntegrityInspection::TopLevel)
+    }
+
+    pub(super) const fn inspects_shell_assignment_flow(self) -> bool {
+        self.shell_assignment_flow
     }
 
     pub(super) const fn initial_errexit(self) -> bool {

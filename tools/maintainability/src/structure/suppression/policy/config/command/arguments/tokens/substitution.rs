@@ -1,3 +1,9 @@
+mod lexical;
+mod span;
+
+pub(super) use lexical::without_active_continuations;
+pub(super) use span::span_at;
+
 pub(super) fn process_commands(source: &str) -> (Vec<String>, bool) {
     substitution_commands(source, SubstitutionKind::Process, true)
 }
@@ -13,131 +19,54 @@ enum SubstitutionKind {
 }
 
 fn substitution_commands(source: &str, target: SubstitutionKind, include_backticks: bool) -> (Vec<String>, bool) {
-    let characters = source.chars().collect::<Vec<_>>();
     let mut commands = Vec::new();
-    let complete = collect_commands(&characters, &mut commands, target, include_backticks);
+    let complete = collect_commands(source, &mut commands, target, include_backticks);
     (commands, !complete)
 }
 
-fn collect_commands(characters: &[char], commands: &mut Vec<String>, target: SubstitutionKind, include_backticks: bool) -> bool {
+fn collect_commands(source: &str, commands: &mut Vec<String>, target: SubstitutionKind, include_backticks: bool) -> bool {
     let mut index = 0;
-    let mut quote = None;
-    let mut escaped = false;
-    let mut comment = false;
-    let mut previous = None;
-    while index < characters.len() {
-        let character = characters[index];
-        if comment {
-            comment = character != '\n';
-        } else if escaped {
-            escaped = false;
-        } else if quote == Some('\'') {
-            if character == '\'' {
-                quote = None;
-            }
-        } else if character == '\\' {
-            escaped = true;
-        } else if quote == Some('"') && character == '"' {
-            quote = None;
-        } else if quote.is_none() && matches!(character, '\'' | '"') {
-            quote = Some(character);
-        } else if quote.is_none() && character == '#' && comment_can_start_after(previous) {
-            comment = true;
-        } else if include_backticks && quote != Some('\'') && character == '`' {
-            let Some(end) = backtick_end(characters, index + 1) else {
+    let mut lexical = lexical::State::default();
+    while index < source.len() {
+        let Some(character) = source[index..].chars().next() else {
+            return false;
+        };
+        if lexical.can_open_substitution()
+            && let Some(span) = nested_span_at(source, index, character, include_backticks, lexical.can_open_process_substitution())
+        {
+            let Ok(span) = span else {
                 return false;
             };
-            let command = &characters[index + 1..end];
+            let command = &source[span.body_start..span.end];
             if !collect_commands(command, commands, target, include_backticks) {
                 return false;
             }
-            if target == SubstitutionKind::Command {
-                commands.push(command.iter().collect());
+            if records_substitution(target, character, command) {
+                commands.push(command.to_owned());
             }
-            index = end;
-        } else if quote != Some('\'') && character == '$' && characters.get(index + 1) == Some(&'(') {
-            let Some(end) = parenthesized_end(characters, index + 2) else {
-                return false;
-            };
-            let command = &characters[index + 2..end];
-            if !collect_commands(command, commands, target, include_backticks) {
-                return false;
-            }
-            if target == SubstitutionKind::Command && characters.get(index + 2) != Some(&'(') {
-                commands.push(command.iter().collect());
-            }
-            index = end;
-        } else if quote.is_none() && matches!(character, '<' | '>') && characters.get(index + 1) == Some(&'(') {
-            let Some(end) = parenthesized_end(characters, index + 2) else {
-                return false;
-            };
-            let command = &characters[index + 2..end];
-            if !collect_commands(command, commands, target, include_backticks) {
-                return false;
-            }
-            if target == SubstitutionKind::Process {
-                commands.push(command.iter().collect());
-            }
-            index = end;
+            index = span.end + 1;
+            continue;
         }
-        previous = Some(character);
-        index += 1;
+        lexical.advance(source, index, character);
+        index += character.len_utf8();
     }
     true
 }
 
-fn parenthesized_end(characters: &[char], start: usize) -> Option<usize> {
-    let mut depth = 1_usize;
-    let mut quote = None;
-    let mut escaped = false;
-    let mut comment = false;
-    let mut previous = None;
-    for (index, character) in characters.iter().copied().enumerate().skip(start) {
-        if comment {
-            comment = character != '\n';
-        } else if escaped {
-            escaped = false;
-        } else if quote == Some('\'') {
-            if character == '\'' {
-                quote = None;
-            }
-        } else if character == '\\' {
-            escaped = true;
-        } else if quote == Some('"') && character == '"' {
-            quote = None;
-        } else if quote.is_none() && matches!(character, '\'' | '"') {
-            quote = Some(character);
-        } else if quote.is_none() && character == '#' && comment_can_start_after(previous) {
-            comment = true;
-        } else if quote.is_none() && character == '(' {
-            depth += 1;
-        } else if quote.is_none() && character == ')' {
-            depth -= 1;
-            if depth == 0 {
-                return Some(index);
-            }
-        }
-        previous = Some(character);
+fn nested_span_at(source: &str, index: usize, character: char, include_backticks: bool, process_is_active: bool) -> Option<Result<span::Span, ()>> {
+    if (include_backticks || character != '`')
+        && let Some(span) = span::span_at(source, index)
+    {
+        return Some(span);
     }
-    None
+    process_is_active.then(|| span::process_span_at(source, index)).flatten()
 }
 
-fn comment_can_start_after(previous: Option<char>) -> bool {
-    previous.is_none_or(|character| character.is_whitespace() || matches!(character, ';' | '&' | '|' | '(' | ')'))
-}
-
-fn backtick_end(characters: &[char], start: usize) -> Option<usize> {
-    let mut escaped = false;
-    for (index, character) in characters.iter().copied().enumerate().skip(start) {
-        if escaped {
-            escaped = false;
-        } else if character == '\\' {
-            escaped = true;
-        } else if character == '`' {
-            return Some(index);
-        }
+fn records_substitution(target: SubstitutionKind, opener: char, command: &str) -> bool {
+    match target {
+        SubstitutionKind::Process => matches!(opener, '<' | '>'),
+        SubstitutionKind::Command => opener == '`' || opener == '$' && !command.starts_with('('),
     }
-    None
 }
 
 #[cfg(test)]
@@ -147,6 +76,10 @@ mod tests {
     #[test]
     fn executable_process_substitutions_are_extracted_without_inert_text() {
         assert_eq!(process_commands("cat <(sh quality/lint.txt)"), (vec!["sh quality/lint.txt".to_owned()], false));
+        assert_eq!(
+            process_commands("printf '%s' $'x\\''; cat <(sh quality/lint.txt)"),
+            (vec!["sh quality/lint.txt".to_owned()], false)
+        );
         assert_eq!(process_commands("printf '%s' '<(sh quality/lint.txt)'"), (Vec::new(), false));
         assert_eq!(process_commands("printf ok # <(sh quality/lint.txt)"), (Vec::new(), false));
     }
@@ -187,5 +120,6 @@ mod tests {
         assert_eq!(command_commands("printf `%s`", true), (vec!["%s".to_owned()], false));
         assert_eq!(command_commands("Write-Output \"build``stamp\"", false), (Vec::new(), false));
         assert_eq!(command_commands("printf \"$(just check-quality\"", true), (Vec::new(), true));
+        assert_eq!(command_commands("printf \"$(ca\\\nse x in x) printf safe ;; esac)\"", true), (Vec::new(), true));
     }
 }

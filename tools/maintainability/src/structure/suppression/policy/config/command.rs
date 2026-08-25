@@ -20,8 +20,8 @@ pub(super) use arguments::weakening_token;
 #[cfg(test)]
 pub(super) use arguments::weakening_token_for_surface;
 use arguments::{
-    cargo_manifest_paths_for_surface, direct_rust_sources_for_surface, mise_configuration_is_resolved, normalized_shell_tokens, normalized_shell_words, package_script_commands,
-    weakening_mise_environment, weakening_token_for_surface_with_reviewed_source, weakening_token_in_reviewed_shell_remainder,
+    FilesystemContext, cargo_manifest_paths_for_surface, direct_rust_sources_for_surface, mise_configuration_is_resolved, normalized_shell_tokens, normalized_shell_words,
+    package_script_commands, weakening_mise_environment, weakening_token_for_surface_with_reviewed_source, weakening_token_in_reviewed_shell_remainder,
 };
 use environment::{is_case_insensitive_weakening_environment_assignment_name, is_weakening_environment_assignment_name, is_weakening_environment_name};
 use surfaces::execution_surfaces;
@@ -332,7 +332,8 @@ fn reject_checked_in_weakening_with_mode(workspace: &Path, validation: Repositor
             bail!("checked-in Rust command surface {path:?} selects a Cargo manifest outside the audited manifest inventory");
         }
         let source_is_reviewed = surfaces.command_profiles.as_ref().is_some_and(|profiles| profiles.source_is_current(path, &source));
-        if weakening_token_for_surface_with_reviewed_source(workspace, &surfaces.paths, path, &source, source_is_reviewed)
+        let filesystem_context = FilesystemContext::new(workspace, &surfaces.paths, &surfaces.tracked_paths);
+        if weakening_token_for_surface_with_reviewed_source(filesystem_context, path, &source, source_is_reviewed)
             && !reviewed_quality_command_exceptions_are_exact(path, &source, source_is_reviewed)
         {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening argument");

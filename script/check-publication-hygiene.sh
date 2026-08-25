@@ -44,7 +44,7 @@ markers=(
 
 for marker in "${markers[@]}"; do
   pathspecs=(. ':(exclude)script/check-publication-hygiene.sh')
-  if matches="$(git grep -n -I -i -E "$marker" -- "${pathspecs[@]}" || true)" && [[ -n "$matches" ]]; then
+  if matches="$(printf '%s\n' "$marker" | git grep -n -I -i -E -f - -- "${pathspecs[@]}" || true)" && [[ -n "$matches" ]]; then
     printf 'forbidden publication marker %q:\n%s\n' "$marker" "$matches" >&2
     failed=1
   fi
@@ -60,7 +60,7 @@ retired_names=(
 )
 
 for marker in "${retired_names[@]}"; do
-  if matches="$(git grep -n -I -E "$marker" -- . ':(exclude)script/check-publication-hygiene.sh' || true)" && [[ -n "$matches" ]]; then
+  if matches="$(printf '%s\n' "$marker" | git grep -n -I -E -f - -- . ':(exclude)script/check-publication-hygiene.sh' || true)" && [[ -n "$matches" ]]; then
     printf 'retired LocalHold name %q:\n%s\n' "$marker" "$matches" >&2
     failed=1
   fi

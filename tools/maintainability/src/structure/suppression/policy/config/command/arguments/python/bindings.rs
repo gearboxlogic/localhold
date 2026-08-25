@@ -1,14 +1,17 @@
 use sha2::{Digest, Sha256};
 
-// These exact test sources patch statically named dependencies and never use
-// the resolved objects as dynamic command dispatchers. The pins apply only to
-// the otherwise opaque binding check; every other process check still runs.
+// These exact sources use one reviewed binding that the generic scanner cannot
+// prove safe. The pins apply only to that check; every other process check runs.
 struct ReviewedProcessBindingSurface {
     path: &'static str,
     sha256: &'static [&'static str],
 }
 
 const REVIEWED_PROCESS_BINDING_SURFACES: &[ReviewedProcessBindingSurface] = &[
+    ReviewedProcessBindingSurface {
+        path: "script/run-python-tests.py",
+        sha256: &["a916b28f12fc6e6b3370bfe2f24a331f39488a2f2ce184b23a6c645cc2dec85f"],
+    },
     ReviewedProcessBindingSurface {
         path: "script/tests/test_cuda_release.py",
         sha256: &[

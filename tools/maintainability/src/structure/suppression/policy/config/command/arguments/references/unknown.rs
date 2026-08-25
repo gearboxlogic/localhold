@@ -15,92 +15,20 @@ pub(super) fn is_preclassified_command(surface: &str, command: &str) -> bool {
 }
 
 fn is_shell_builtin(command: &str) -> bool {
-    matches!(
-        command,
-        "[" | "[["
-            | "break"
-            | "case"
-            | "compgen"
-            | "continue"
-            | "cd"
-            | "done"
-            | "echo"
-            | "else"
-            | "esac"
-            | "false"
-            | "export"
-            | "fi"
-            | "for"
-            | "in"
-            | "local"
-            | "printf"
-            | "pwd"
-            | "read"
-            | "return"
-            | "readonly"
-            | "set"
-            | "test"
-            | "true"
-            | "umask"
-            | "type"
-            | "unset"
-            | ":"
-            | "shift"
-            | "wait"
-            | "exit"
-    )
+    matches!(command, "[" | "[[" | ":" | "case" | "done" | "else" | "esac" | "fi" | "for" | "in")
+        || matches!(command, "break" | "continue" | "exit" | "false" | "return" | "shift" | "true" | "wait")
+        || matches!(command, "cd" | "export" | "local" | "read" | "readonly" | "set" | "umask" | "unset")
+        || matches!(command, "compgen" | "echo" | "printf" | "pwd" | "test" | "type")
 }
 
 fn is_standard_utility(command: &str) -> bool {
-    matches!(
-        command,
-        "basename"
-            | "cat"
-            | "cc"
-            | "chmod"
-            | "clang"
-            | "cmp"
-            | "cp"
-            | "copy-item"
-            | "diff"
-            | "dirname"
-            | "gcc"
-            | "gitleaks"
-            | "grep"
-            | "head"
-            | "install"
-            | "kill"
-            | "ln"
-            | "mapfile"
-            | "mkdir"
-            | "mktemp"
-            | "mv"
-            | "readarray"
-            | "readelf"
-            | "readlink"
-            | "realpath"
-            | "rg"
-            | "ripgrep"
-            | "rm"
-            | "rmdir"
-            | "rustc"
-            | "rustup"
-            | "seq"
-            | "sha256sum"
-            | "shasum"
-            | "sleep"
-            | "sort"
-            | "split"
-            | "tar"
-            | "tail"
-            | "tee"
-            | "touch"
-            | "uname"
-            | "unzip"
-            | "wc"
-            | "zip"
-            | "zstd"
-    )
+    matches!(command, "basename" | "cat" | "chmod" | "cmp" | "cp" | "copy-item" | "diff")
+        || matches!(command, "dirname" | "head" | "install" | "ln" | "mkdir" | "mktemp" | "mv")
+        || matches!(command, "readelf" | "readlink" | "realpath" | "rm" | "rmdir" | "split" | "tail")
+        || matches!(command, "tee" | "touch" | "unzip" | "grep" | "rg" | "ripgrep" | "seq" | "sort" | "wc")
+        || matches!(command, "cc" | "clang" | "gcc" | "gitleaks" | "rustc" | "rustup")
+        || matches!(command, "sha256sum" | "shasum" | "tar" | "uname" | "zip" | "zstd")
+        || matches!(command, "kill" | "mapfile" | "readarray" | "sleep")
 }
 
 #[cfg(test)]
@@ -113,13 +41,40 @@ pub(super) fn execution_inputs_with_semantics<'a>(command: &str, arguments: &'a 
     let literal_command = !contains_dynamic(semantics, command);
     let opaque = literal_command
         || !rust_sources.is_empty()
-        || arguments.iter().any(|argument| contains_rust_source_text(argument) || inline_code_option(argument))
-        || arguments.iter().any(|argument| !is_shell_structure(argument) && contains_dynamic(semantics, argument));
+        || arguments.iter().any(|argument| {
+            argument.to_ascii_lowercase().contains(".rs")
+                || matches!(argument.as_str(), "-c" | "--command" | "--eval" | "--execute")
+                || ["--command=", "--eval=", "--execute="].iter().any(|prefix| argument.starts_with(prefix))
+        })
+        || arguments
+            .iter()
+            .any(|argument| !matches!(argument.as_str(), "(" | ")" | "{" | "}") && contains_dynamic(semantics, argument));
     (rust_sources, opaque)
 }
 
-fn is_shell_structure(argument: &str) -> bool {
-    matches!(argument, "(" | ")" | "{" | "}")
+pub(super) fn gitleaks_policy_inputs(arguments: &[String], semantics: ValueSemantics) -> (Vec<&str>, bool) {
+    let inputs = ["--config", "--gitleaks-ignore-path"]
+        .into_iter()
+        .filter_map(|option| arguments.windows(2).find(|pair| pair[0] == option).map(|pair| pair[1].as_str()))
+        .collect::<Vec<_>>();
+    let unresolved = inputs.len() != 2 || inputs.iter().any(|input| input.starts_with('-') || semantics.contains_dynamic(input));
+    (inputs, unresolved)
+}
+
+pub(super) fn gitleaks_data_is_opaque(path: &str, source: &str) -> Option<bool> {
+    (path == ".github/gitleaks.toml")
+        .then(|| {
+            source.parse::<toml::Table>().map_or(true, |config| {
+                config
+                    .get("extend")
+                    .is_some_and(|extend| extend.as_table().is_none_or(|extend| extend.contains_key("path")))
+            })
+        })
+        .or_else(|| (path == ".github/gitleaksignore").then_some(false))
+}
+
+pub(super) fn is_execution_input_prefix(word: &str) -> bool {
+    matches!(word, "!" | "if" | "then" | "elif" | "while" | "until" | "do") || word.starts_with('-')
 }
 
 pub(super) fn is_rust_source(argument: &str) -> bool {
@@ -127,14 +82,6 @@ pub(super) fn is_rust_source(argument: &str) -> bool {
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
-}
-
-fn inline_code_option(argument: &str) -> bool {
-    matches!(argument, "-c" | "--command" | "--eval" | "--execute") || ["--command=", "--eval=", "--execute="].iter().any(|prefix| argument.starts_with(prefix))
-}
-
-fn contains_rust_source_text(argument: &str) -> bool {
-    argument.to_ascii_lowercase().contains(".rs")
 }
 
 fn contains_dynamic_value(value: &str) -> bool {
@@ -147,7 +94,7 @@ fn contains_dynamic(semantics: ValueSemantics, value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{execution_inputs, is_preclassified_command};
+    use super::{execution_inputs, gitleaks_policy_inputs, is_preclassified_command};
 
     fn inputs(command: &str) -> (Vec<String>, bool) {
         let (candidates, opaque) = super::super::collect_execution_inputs(std::iter::once(command), true, "script/check.sh", false);
@@ -172,6 +119,16 @@ mod tests {
             assert!(execution_inputs("script/check.sh", "unknown-interpreter", &arguments).1, "{arguments:?}");
         }
         assert!(execution_inputs("script/check.sh", "$reviewed_program", &["$reviewed_operand".to_owned()]).1);
+    }
+
+    #[test]
+    fn gitleaks_configuration_is_an_execution_input() {
+        let separate = ["git", "--config", ".github/gitleaks.toml", "--gitleaks-ignore-path", ".github/gitleaksignore"].map(str::to_owned);
+        let (inputs, unresolved) = gitleaks_policy_inputs(&separate, super::ValueSemantics::Shell);
+        assert!(!unresolved && inputs == [".github/gitleaks.toml", ".github/gitleaksignore"]);
+        let dynamic = ["git", "--config", "$CONFIG", "--gitleaks-ignore-path", ".ignore"].map(str::to_owned);
+        assert!(gitleaks_policy_inputs(&dynamic, super::ValueSemantics::Shell).1);
+        assert!(gitleaks_policy_inputs(&["git", "--config"].map(str::to_owned), super::ValueSemantics::Shell).1);
     }
 
     #[test]

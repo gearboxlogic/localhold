@@ -88,9 +88,13 @@ fn rejected_execution_modules_fail_closed() {
         "from imaplib import IMAP4_stream as stream\nstream('sh quality/hidden.txt')\n",
         "import mailcap\nmailcap.test()\n",
         "import pipes\npipeline = pipes.Template()\npipeline.append('sh quality/hidden.txt', '--')\npipeline.open_r('/dev/null').read()\n",
+        "import pygments.lexers\npygments.lexers.load_lexer_from_file('quality/hidden.txt')\n",
         "from _pyrepl.console import InteractiveColoredConsole\nInteractiveColoredConsole().runsource(payload)\n",
         "import typing\ntyping.get_type_hints(subject)\n",
         "import uuid\nuuid._get_command_stdout('sh', 'quality/hidden.txt')\n",
+        "import wave\nwave.open('script/check.sh', 'wb').writeframes(payload)\n",
+        "from wave import open as writer\nwriter('script/check.sh', 'wb').writeframes(payload)\n",
+        "from xml.etree import ElementTree as ET\nET.ElementTree(root).write('script/check.sh', encoding='unicode', method='text')\n",
         "from typing import get_type_hints\nget_type_hints(subject)\n",
         "from uuid import _get_command_stdout as run\nrun('sh', 'quality/hidden.txt')\n",
         "import venv\nvenv.EnvBuilder()._call_new_python(context, 'quality/hidden.txt')\n",
@@ -116,6 +120,8 @@ fn opaque_process_bindings_fail_closed() {
         "import os\nenvironment = os . environ\nenvironment['PATH'] = 'quality'\n",
         "import os\nchange = os.chdir.__call__\nchange('quality')\n",
         "import sys\nsys.modules['os'].system('sh quality/hidden.txt')\n",
+        "import sys\nsys.path.insert(0, '.cache')\nimport payload\n",
+        "from sys import path\npath.insert(0, '.cache')\nimport payload\n",
         "import sys as registry\nregistry.modules['os'].system('sh quality/hidden.txt')\n",
         "import os\nos.__getattribute__('system')('sh quality/hidden.txt')\n",
         "import os\nos.__getattribute__('environ')['PATH'] = 'quality'\n",
@@ -145,9 +151,10 @@ fn opaque_process_bindings_fail_closed() {
 
 #[test]
 fn stdlib_code_evaluators_fail_closed_without_matching_unrelated_names() {
-    assert!(super::imports_command_capable_api("import cProfile as profiler\n"));
     for source in [
         "import code\ncode.InteractiveInterpreter().runsource(payload, symbol='exec')\n",
+        "import annotationlib\nannotationlib.ForwardRef(payload).evaluate()\n",
+        "import http.server\nhttp.server.CGIHTTPRequestHandler(*arguments)\n",
         "import code as repl\nrepl.InteractiveConsole().push(payload)\n",
         "from code import InteractiveInterpreter as Runner\nRunner().runcode(compiled)\n",
         "from code import interact\ninteract(local={})\n",
@@ -172,6 +179,9 @@ fn stdlib_code_evaluators_fail_closed_without_matching_unrelated_names() {
         "import multiprocessing\nmultiprocessing.reduction.ForkingPickler.loads(payload)\n",
         "import _operator\n_operator.itemgetter('label')(record)\n",
         "from _operator import attrgetter as field\nfield('label')(record)\n",
+        "import tempfile\ntempfile._os.open('Justfile', flags)\n",
+        "import tempfile as scratch\nscratch._io.FileIO('Justfile', 'w')\n",
+        "from tempfile import _shutil as files\nfiles.copyfile('quality/hidden.txt', 'Justfile')\n",
     ] {
         assert!(has_opaque_process_arguments(source), "{source}");
     }

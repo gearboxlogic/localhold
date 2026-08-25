@@ -74,7 +74,8 @@ pub(super) fn is_weakening_environment_name(name: &str) -> bool {
 
 fn is_native_build_environment_name(name: &str) -> bool {
     const SELECTORS: &[&str] = &["AR", "ARFLAGS", "CC", "CFLAGS", "CXX", "CXXFLAGS", "LDFLAGS", "NVCC", "RANLIB", "RANLIBFLAGS"];
-    is_cmake_toolchain_environment_name(name)
+    matches!(name, "CPATH" | "C_INCLUDE_PATH" | "CPLUS_INCLUDE_PATH" | "OBJC_INCLUDE_PATH")
+        || is_cmake_toolchain_environment_name(name)
         || name == "CROSS_COMPILE"
         || SELECTORS.iter().any(|selector| {
             name == *selector
@@ -196,7 +197,10 @@ mod tests {
 
     #[test]
     fn compiler_executable_search_paths_are_weakening() {
-        for name in ["CCC_OVERRIDE_OPTIONS", "COMPILER_PATH", "GCC_EXEC_PREFIX", "_CL_"] {
+        for name in ["CCC_OVERRIDE_OPTIONS", "COMPILER_PATH", "GCC_EXEC_PREFIX", "_CL_"]
+            .into_iter()
+            .chain(["CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH"])
+        {
             assert!(is_weakening_environment_name(name), "{name}");
             assert!(is_weakening_environment_name(&name.to_ascii_lowercase()), "{name}");
         }

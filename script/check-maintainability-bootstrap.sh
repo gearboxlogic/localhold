@@ -40,7 +40,7 @@ scrub_untrusted_environment() {
                 NVCC | NVCC_* | HOST_NVCC | TARGET_NVCC | RANLIB | RANLIB_* | HOST_RANLIB | TARGET_RANLIB | \
                 LDFLAGS | LDFLAGS_* | HOST_LDFLAGS | TARGET_LDFLAGS | RANLIBFLAGS | RANLIBFLAGS_* | HOST_RANLIBFLAGS | TARGET_RANLIBFLAGS | CCC_OVERRIDE_OPTIONS | CL | \
                 CMAKE_TOOLCHAIN_FILE | CMAKE_TOOLCHAIN_FILE_* | *_CMAKE_TOOLCHAIN_FILE | *_CMAKE_TOOLCHAIN_FILE_* | \
-                COMPILER_PATH | GCC_EXEC_PREFIX | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | \
+                COMPILER_PATH | CPATH | C_INCLUDE_PATH | CPLUS_INCLUDE_PATH | GCC_EXEC_PREFIX | OBJC_INCLUDE_PATH | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | \
                 OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | PERL5LIB | PERL5OPT | PERLLIB | RIPGREP_CONFIG_PATH | \
                 RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | \
                 CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | RUSTC | RUSTDOC | RUSTC_WRAPPER | \
@@ -121,8 +121,8 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=cd756b8a6039e1192bb0c95e7c42e66148f7b883f3b12662b31c70269165a468
-readonly reviewed_bootstrap_tests_sha256=9fd95497e31664308dbe18f3d1bdd7fe24d7fa3335282699482ceff89b1b2468
-readonly reviewed_gate_runner_sha256=325e7c7931f576dab6d55b979a2114571eb0bbbb1d6920c64b175688c7c9846c
+readonly reviewed_bootstrap_tests_sha256=cf063129223ae96483e06690677310b878b0c1ebdf3286e43f963740fdc5cb64
+readonly reviewed_gate_runner_sha256=5c341c8cd104d894e11e0b8fd940d547c3e19dd0650a885bcbc467a04f7a362d
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then

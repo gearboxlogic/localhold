@@ -69,6 +69,7 @@ done
 printf '%s\n' 'scanning all reachable Git history for secrets'
 if ! gitleaks git \
   --config .github/gitleaks.toml \
+  --gitleaks-ignore-path .github/gitleaksignore \
   --redact \
   --no-banner \
   --verbose \
@@ -80,6 +81,7 @@ fi
 printf '%s\n' 'scanning the current working tree for secrets'
 if ! gitleaks dir \
   --config .github/gitleaks.toml \
+  --gitleaks-ignore-path .github/gitleaksignore \
   --redact \
   --no-banner \
   --verbose \

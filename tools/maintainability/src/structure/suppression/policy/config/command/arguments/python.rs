@@ -23,6 +23,7 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "_testlimitedcapi",
     "_tkinter",
     "_xxsubinterpreters",
+    "annotationlib",
     "antigravity",
     "asyncio.windows_utils",
     "code",
@@ -31,6 +32,7 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "dbm.sqlite3",
     "doctest",
     "gc",
+    "http.server",
     "idlelib",
     "imaplib",
     "inspect",
@@ -48,6 +50,7 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "pkgutil",
     "profile",
     "pydoc",
+    "pygments",
     "shelve",
     "site",
     "sqlite3",
@@ -62,7 +65,9 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "unittest.mock",
     "uuid",
     "venv",
+    "wave",
     "webbrowser",
+    "xml.etree",
     "zipfile._path",
 ];
 
@@ -138,6 +143,7 @@ pub(super) fn has_opaque_process_arguments(path: &str, source: &str) -> bool {
 
 pub(super) fn has_opaque_process_bindings(source: &str) -> bool {
     imports_command_capable_api(source)
+        || references_python_import_path(source)
         || uses_command_module_as_value(source)
         || uses_command_callable_as_value(source)
         || uses_dynamic_namespace_callable_as_value(source)
@@ -262,7 +268,7 @@ fn imports_command_capable_api(source: &str) -> bool {
         let compact = compact.rsplit(':').next().unwrap_or(&compact);
         if compact
             .strip_prefix("import")
-            .is_some_and(|imports| imports.split(',').any(|binding| rejected_module_binding(binding) || command_module_alias(binding)))
+            .is_some_and(|imports| imports.split(',').any(python_import_binding_is_command_capable))
         {
             return true;
         }
@@ -286,7 +292,10 @@ fn imports_command_capable_api(source: &str) -> bool {
                     "pty" => matches!(name, "*" | "spawn"),
                     "contextlib" => matches!(name, "*" | "chdir"),
                     "logging" => name == "config",
-                    "sys" => matches!(name, "*" | "meta_path" | "modules" | "path_hooks" | "path_importer_cache"),
+                    "sys" | "tempfile" => matches!(
+                        name,
+                        "*" | "_io" | "_os" | "_shutil" | "meta_path" | "modules" | "path" | "path_hooks" | "path_importer_cache"
+                    ),
                     "typing" => matches!(name, "*" | "get_type_hints"),
                     "unittest" => name == "mock",
                     _ => false,
@@ -295,17 +304,17 @@ fn imports_command_capable_api(source: &str) -> bool {
     })
 }
 
-fn command_module_alias(binding: &str) -> bool {
-    ["asyncio", "contextlib", "os", "posix", "pty", "subprocess", "sys"]
-        .iter()
-        .any(|module| binding.strip_prefix(module).is_some_and(|suffix| suffix.starts_with("as") && suffix.len() > 2))
+fn references_python_import_path(source: &str) -> bool {
+    let source = normalized_qualified_code(source);
+    source.match_indices("sys.path").any(|(index, path)| identifier_is_exact_at(&source, index, path.len()))
 }
 
-fn rejected_module_binding(binding: &str) -> bool {
+fn python_import_binding_is_command_capable(binding: &str) -> bool {
     rejected_python_module(binding)
         || REJECTED_PYTHON_MODULES
             .iter()
-            .any(|module| binding.strip_prefix(module).is_some_and(|suffix| suffix.starts_with("as") && suffix.len() > 2))
+            .chain(&["asyncio", "contextlib", "os", "posix", "pty", "subprocess", "sys"])
+            .any(|module| binding.strip_prefix(*module).is_some_and(|suffix| suffix.starts_with("as") && suffix.len() > 2))
 }
 
 pub(super) fn rejected_python_module(name: &str) -> bool {
@@ -491,13 +500,16 @@ fn references_unconditional_execution_capability(source: &str) -> bool {
         || ["enable_load_extension", "load_extension", "sqlite_dbconfig_enable_load_extension"]
             .iter()
             .any(|name| executable.match_indices(name).any(|(index, _)| identifier_is_exact_at(&executable, index, name.len())))
+        || ["._io", "._os", "._shutil"].iter().any(|module| executable.contains(module))
 }
 
 fn imports_unconditional_execution_module(source: &str) -> bool {
     source.lines().flat_map(|line| line.split(';')).any(|statement| {
         let statement = statement.rsplit(':').next().unwrap_or(statement);
         if let Some(imports) = strip_python_keyword(statement, "import") {
-            return imports.split(',').any(unconditional_execution_module_binding);
+            return imports
+                .split(',')
+                .any(|binding| binding.split_whitespace().next().is_some_and(unconditional_execution_module));
         }
         let Some(from) = strip_python_keyword(statement, "from") else {
             return false;
@@ -508,10 +520,6 @@ fn imports_unconditional_execution_module(source: &str) -> bool {
         };
         unconditional_execution_module(module) && from.strip_prefix(module).and_then(|tail| strip_python_keyword(tail, "import")).is_some()
     })
-}
-
-fn unconditional_execution_module_binding(binding: &str) -> bool {
-    binding.split_whitespace().next().is_some_and(unconditional_execution_module)
 }
 
 fn unconditional_execution_module(module: &str) -> bool {

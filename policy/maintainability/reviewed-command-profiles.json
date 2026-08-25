@@ -14,7 +14,7 @@
     {
       "id": "fixture-bootstrap",
       "path": "script/tests/test_maintainability_bootstrap.sh",
-      "current_sha256": "9fd95497e31664308dbe18f3d1bdd7fe24d7fa3335282699482ceff89b1b2468",
+      "current_sha256": "cf063129223ae96483e06690677310b878b0c1ebdf3286e43f963740fdc5cb64",
       "preapproved_next_sha256": null,
       "retired_sha256": ["3532c926ba6e350b6235a1408b660a34c99867af81251e3cee7f541a9da16f40"],
       "issue": "https://github.com/gearboxlogic/localhold/issues/124",
@@ -70,7 +70,7 @@
     {
       "id": "protected-bootstrap",
       "path": "script/check-maintainability-bootstrap.sh",
-      "current_sha256": "1d74d29221aa2fc3feeeae2c7cea3a5cffef96dec7b13ac1ee08a26b1aa64898",
+      "current_sha256": "331c853d39f6d29cfa79ab52f40b98f0fc8257abf2c2a61be02742215d3d8e85",
       "preapproved_next_sha256": null,
       "retired_sha256": [
         "adb17c8d29a05de989beca2be7e653310594f7e979ca4c68b72fc4f5f71489aa"
@@ -82,7 +82,7 @@
     {
       "id": "gate-runner",
       "path": "script/run-maintainability-gate.sh",
-      "current_sha256": "325e7c7931f576dab6d55b979a2114571eb0bbbb1d6920c64b175688c7c9846c",
+      "current_sha256": "5c341c8cd104d894e11e0b8fd940d547c3e19dd0650a885bcbc467a04f7a362d",
       "preapproved_next_sha256": null,
       "retired_sha256": ["82609774f45011fa7a6260a3841fb49a7304047c1ca1faa5c62869c9524819d8"],
       "issue": "https://github.com/gearboxlogic/localhold/issues/124",
@@ -132,7 +132,7 @@
     {
       "id": "ci-workflow",
       "path": ".github/workflows/ci.yml",
-      "current_sha256": "f25a8436d74e7f40ecd808c78585ff95969c194f0bac236e4ba10f111b3dcfca",
+      "current_sha256": "303a407a407d004e5c06f033fe1304bc61d5b58be192b37437763fd972d34006",
       "preapproved_next_sha256": null,
       "retired_sha256": [
         "a3caaf8313e9aff92fafa5103a43da607eea095a63e9cb7102839a1084a0a0b5"

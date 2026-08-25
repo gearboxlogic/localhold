@@ -23,6 +23,7 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "_testlimitedcapi",
     "_tkinter",
     "_xxsubinterpreters",
+    "antigravity",
     "asyncio.windows_utils",
     "code",
     "concurrent.interpreters",
@@ -35,6 +36,7 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "inspect",
     "interpreters",
     "logging",
+    "mailbox",
     "mailcap",
     "marshal",
     "multiprocessing",
@@ -274,7 +276,7 @@ fn imports_command_capable_api(source: &str) -> bool {
         imports.split(',').any(|binding| {
             let binding = binding.trim_matches(['(', ')']);
             let name = binding.split_once("as").map_or(binding, |(name, _)| name);
-            is_command_module(name)
+            matches!(name, "asyncio" | "contextlib" | "os" | "posix" | "pty" | "subprocess" | "sys")
                 || match module {
                     "asyncio" | "asyncio.subprocess" => name == "*" || matches!(name, "create_subprocess_exec" | "create_subprocess_shell" | "windows_utils"),
                     "concurrent" => name == "interpreters",
@@ -317,7 +319,7 @@ fn uses_command_module_as_value(source: &str) -> bool {
     executable
         .lines()
         .flat_map(|line| line.split(';'))
-        .filter(|statement| !starts_python_keyword(statement, "import") && !starts_python_keyword(statement, "from"))
+        .filter(|statement| strip_python_keyword(statement, "import").is_none() && strip_python_keyword(statement, "from").is_none())
         .any(|statement| {
             ["asyncio", "contextlib", "os", "posix", "pty", "subprocess", "sys"]
                 .iter()
@@ -423,10 +425,6 @@ fn command_attribute_prefix(module: &str, attribute: &str) -> Option<(CommandRef
     }
 }
 
-fn starts_python_keyword(statement: &str, keyword: &str) -> bool {
-    strip_python_keyword(statement, keyword).is_some()
-}
-
 fn strip_python_keyword<'a>(statement: &'a str, keyword: &str) -> Option<&'a str> {
     statement.trim_start().strip_prefix(keyword).filter(|tail| tail.starts_with(char::is_whitespace))
 }
@@ -443,10 +441,6 @@ fn nested_module_value(statement: &str, module: &str) -> bool {
     statement
         .match_indices(&reference)
         .any(|(index, _)| statement[..index].chars().next_back().is_some_and(is_identifier_character) && identifier_is_exact_at(statement, index + 1, module.len()))
-}
-
-fn is_command_module(name: &str) -> bool {
-    matches!(name, "asyncio" | "contextlib" | "os" | "posix" | "pty" | "subprocess" | "sys")
 }
 
 fn is_os_process_api(name: &str) -> bool {

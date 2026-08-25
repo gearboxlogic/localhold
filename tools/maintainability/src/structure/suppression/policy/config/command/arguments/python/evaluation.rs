@@ -460,6 +460,7 @@ fn dynamic_path(path: &[String]) -> bool {
                 | "currentframe"
                 | "exec_module"
                 | "f_globals"
+                | "get_annotations"
                 | "import_module"
                 | "load_module"
                 | "meta_path"
@@ -537,6 +538,7 @@ mod tests {
         assert!(has_dynamic_code("print.__self__.__import__('webbrowser')"));
         assert!(has_dynamic_code("print.__self__.eval(payload)"));
         assert!(has_dynamic_code("dataclasses._create_fn('run', [], body)"));
+        assert!(has_dynamic_code("dataclasses.inspect.get_annotations(cls, eval_str=True)"));
         assert!(has_dynamic_code(
             "spec = next(spec for finder in sys.meta_path if (spec := finder.find_spec('webbrowser')) is not None)\nspec.loader.load_module('webbrowser')"
         ));

@@ -845,6 +845,9 @@ fn command_policy_rejects_native_stdlib_execution_escape_hatches() {
         "import dataclasses\nfrom pathlib import Path\nbuilder = dataclasses._FuncBuilder(globals())\nbuilder.add_fn('payload', [], ['arg=' + Path('quality/hidden.txt').read_text()])\nbuilder.add_fns_to_class(Target)\n",
         "import dataclasses\nfrom pathlib import Path\ndataclasses._create_fn('run', [], Path('quality/hidden.txt').read_text().splitlines(), locals={'__dataclass_builtins_object__': object})()\n",
         "from pathlib import Path\nprint.__self__.eval(Path('quality/hidden.txt').read_text())\n",
+        "import dataclasses\nfrom pathlib import Path\nclass Target: __annotations__ = {'value': Path('quality/hidden.txt').read_text()}\ndataclasses.inspect.get_annotations(Target, eval_str=True)\n",
+        "import antigravity\nantigravity.webbrowser.BackgroundBrowser('sh').open('quality/hidden.txt')\n",
+        "import mailbox\nfrom pathlib import Path\nmailbox.mbox('script/check.sh').add(Path('quality/hidden.txt').read_text())\n",
     ]);
 }
 

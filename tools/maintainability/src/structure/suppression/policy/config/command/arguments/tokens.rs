@@ -1,56 +1,67 @@
+mod functions;
 mod heredoc;
+mod segments;
 mod structure;
 mod substitution;
 
+pub(super) use segments::CommandSeparator;
+
+pub(super) struct TokenizedCommand {
+    pub(super) words: Vec<String>,
+    pub(super) following: CommandSeparator,
+}
+
 pub(super) struct StructuredCommand {
+    pub(super) source: String,
     pub(super) words: Vec<String>,
     pub(super) open_braces: usize,
     pub(super) close_braces: usize,
+    pub(super) open_subshells: usize,
+    pub(super) close_subshells: usize,
+    pub(super) conditionally_executed: bool,
+    pub(super) isolated: bool,
+}
+
+pub(super) struct ShellFunctionDefinition {
+    pub(super) name: String,
+    pub(super) body: String,
 }
 
 pub(super) fn declared_shell_functions(source: &str) -> std::collections::BTreeSet<String> {
-    shell_function_declarations(source).into_iter().collect()
+    functions::inventory(source).definitions.into_iter().map(|definition| definition.name).collect()
+}
+
+pub(super) fn declared_shell_functions_in_active_source(source: &str) -> std::collections::BTreeSet<String> {
+    functions::inventory_from_active_source(source)
+        .definitions
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect()
+}
+
+pub(super) fn has_duplicate_shell_functions(source: &str) -> bool {
+    let mut names = std::collections::BTreeSet::new();
+    functions::inventory(source).definitions.into_iter().any(|definition| !names.insert(definition.name))
 }
 
 pub(super) fn declared_shell_function_count(source: &str, expected: &str) -> usize {
-    shell_function_declarations(source).iter().filter(|name| name.as_str() == expected).count()
+    functions::inventory(source).definitions.iter().filter(|definition| definition.name == expected).count()
 }
 
-fn shell_function_declarations(source: &str) -> Vec<String> {
-    let mut declarations = Vec::new();
-    let mut pending = None;
-    for line in source.lines() {
-        let line = line.trim();
-        if let Some(name) = pending.take() {
-            if line.is_empty() || line.starts_with('#') {
-                pending = Some(name);
-                continue;
-            }
-            if line.starts_with('{') {
-                declarations.push(name);
-                continue;
-            }
-        }
-        let (declaration, has_brace) = line.find('{').map_or((line, false), |brace| (&line[..brace], true));
-        let Some(name) = shell_function_name(declaration.trim_end()) else {
-            continue;
-        };
-        if has_brace {
-            declarations.push(name.to_owned());
-        } else {
-            pending = Some(name.to_owned());
-        }
-    }
-    declarations
+pub(super) fn shell_function_definitions(source: &str) -> Vec<ShellFunctionDefinition> {
+    functions::inventory(source).definitions
 }
 
-fn shell_function_name(declaration: &str) -> Option<&str> {
-    let name = if let Some(declaration) = declaration.strip_prefix("function ") {
-        declaration.trim().trim_end_matches("()").trim_end()
-    } else {
-        declaration.strip_suffix("()")?.trim_end()
-    };
-    (!name.is_empty() && !name.as_bytes()[0].is_ascii_digit() && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')).then_some(name)
+pub(super) fn shell_function_definitions_in_active_source(source: &str) -> Vec<ShellFunctionDefinition> {
+    functions::inventory_from_active_source(source).definitions
+}
+
+pub(super) fn has_unsupported_shell_function(source: &str) -> bool {
+    functions::inventory(source).unsupported
+}
+
+pub(super) fn active_source_has_unsupported_shell_function(source: &str) -> bool {
+    functions::inventory_from_active_source(source).unsupported
 }
 
 pub(super) fn process_substitution_commands(source: &str) -> (Vec<String>, bool) {
@@ -67,17 +78,24 @@ pub(super) fn normalized_shell_tokens(source: &str) -> Vec<String> {
 
 pub(super) fn normalized_shell_commands(source: &str) -> Vec<Vec<String>> {
     let logical = source.replace("\\\r\n", "").replace("\\\n", "");
-    shell_command_segments(&logical)
+    segments::shell_command_segments(&logical)
         .into_iter()
-        .map(|segment| command_tokens(command_without_comment(segment)))
+        .map(|segment| command_tokens(command_without_comment(segment.source)))
         .collect()
 }
 
 pub(super) fn source_command_tokens(source: &str) -> Vec<Vec<String>> {
+    source_command_tokens_with_separators(source).into_iter().map(|command| command.words).collect()
+}
+
+pub(super) fn source_command_tokens_with_separators(source: &str) -> Vec<TokenizedCommand> {
     let logical = source.replace("\\\r\n", "").replace("\\\n", "");
-    shell_command_segments(&logical)
+    segments::shell_command_segments(&logical)
         .into_iter()
-        .map(|segment| shell_tokens(command_without_comment(segment), false))
+        .map(|segment| TokenizedCommand {
+            words: shell_tokens(command_without_comment(segment.source), false),
+            following: segment.following,
+        })
         .collect()
 }
 
@@ -85,96 +103,15 @@ pub(super) fn structured_source_commands(source: &str) -> Vec<StructuredCommand>
     structure::commands(source)
 }
 
-fn shell_command_segments(source: &str) -> Vec<&str> {
-    let mut segments = Vec::new();
-    let mut start = 0;
-    let mut quote = None;
-    let mut escaped = false;
-    let mut comment = false;
-    let mut conditional = false;
-    let mut substitution_depth = 0_usize;
-    let mut previous: Option<char> = None;
-    for (index, character) in source.char_indices() {
-        if comment {
-            if character == '\n' && substitution_depth == 0 {
-                segments.push(&source[start..index]);
-                start = index + character.len_utf8();
-            }
-            if character == '\n' {
-                comment = false;
-            }
-        } else if escaped {
-            escaped = false;
-        } else if character == '\\' && quote != Some('\'') {
-            escaped = true;
-        } else if matches!(character, '\'' | '"') {
-            quote = if quote == Some(character) {
-                None
-            } else if quote.is_none() {
-                Some(character)
-            } else {
-                quote
-            };
-        } else if quote.is_none() && character == '#' && previous.is_none_or(|value| value.is_whitespace() || matches!(value, ';' | '&' | '|')) {
-            comment = true;
-        } else if quote.is_none()
-            && (source[index..].starts_with("$(")
-                || source[index..].starts_with("<(")
-                || source[index..].starts_with(">(")
-                || substitution_depth > 0 && character == '(' && !matches!(previous, Some('$' | '<' | '>')))
-        {
-            substitution_depth += 1;
-        } else if quote.is_none() && substitution_depth > 0 && character == ')' {
-            substitution_depth -= 1;
-        } else if quote.is_none()
-            && substitution_depth == 0
-            && !conditional
-            && (shell_conditional_opener(source, index, previous, "[[") || shell_conditional_opener(source, index, previous, "(("))
-        {
-            conditional = true;
-        } else if quote.is_none() && substitution_depth == 0 && conditional && (shell_conditional_closer(source, index, "]]") || shell_conditional_closer(source, index, "))")) {
-            conditional = false;
-        } else if quote.is_none()
-            && substitution_depth == 0
-            && !conditional
-            && (matches!(character, '\n' | ';' | '|') || character == '&' && !matches!(previous, Some('<' | '>')) && !source[index + character.len_utf8()..].starts_with('>'))
-        {
-            segments.push(&source[start..index]);
-            start = index + character.len_utf8();
-        }
-        previous = Some(character);
-    }
-    segments.push(&source[start..]);
-    segments
-}
-
-fn shell_conditional_opener(source: &str, index: usize, previous: Option<char>, delimiter: &str) -> bool {
-    source[index..].starts_with(delimiter) && previous.is_none_or(shell_word_boundary) && source[index + delimiter.len()..].chars().next().is_none_or(shell_word_boundary)
-}
-
-fn shell_conditional_closer(source: &str, index: usize, delimiter: &str) -> bool {
-    source[index..].starts_with(delimiter) && source[index + delimiter.len()..].chars().next().is_none_or(shell_word_boundary)
-}
-
-const fn shell_word_boundary(character: char) -> bool {
-    character.is_whitespace() || matches!(character, ';' | '&' | '|' | '(' | ')')
-}
-
 pub(super) fn without_noncommand_shell_data(source: &str) -> String {
     let mut output = String::with_capacity(source.len());
-    let mut pending = std::collections::VecDeque::<heredoc::Document>::new();
-    let mut heredoc_scan = heredoc::Scan::default();
     let mut array_assignment = false;
     let mut case_pattern_expected = Vec::new();
-    for line in source.lines() {
-        if let Some(heredoc) = pending.front() {
-            let candidate = if heredoc.strip_tabs { line.trim_start_matches('\t') } else { line };
-            if candidate == heredoc.delimiter {
-                pending.pop_front();
-            }
+    for event in heredoc::Lines::new(source) {
+        let heredoc::Line::Command(line) = event else {
             output.push('\n');
             continue;
-        }
+        };
         if array_assignment {
             if line.contains("$(") || line.contains('`') {
                 output.push_str(line);
@@ -211,7 +148,6 @@ pub(super) fn without_noncommand_shell_data(source: &str) -> String {
         }
         output.push_str(command);
         output.push('\n');
-        pending.extend(heredoc_scan.documents(line));
         if starts_case_statement(command) {
             case_pattern_expected.push(true);
         }
@@ -226,59 +162,39 @@ pub(super) fn without_noncommand_shell_data(source: &str) -> String {
 
 pub(super) fn shell_expansion_source(source: &str) -> String {
     let mut output = String::with_capacity(source.len());
-    let mut pending = std::collections::VecDeque::<heredoc::Document>::new();
-    let mut heredoc_scan = heredoc::Scan::default();
-    for line in source.lines() {
-        if let Some(heredoc) = pending.front() {
-            let candidate = if heredoc.strip_tabs { line.trim_start_matches('\t') } else { line };
-            if candidate == heredoc.delimiter {
-                pending.pop_front();
-            } else if heredoc.allows_expansion {
-                output.extend(line.chars().map(|character| match character {
+    for event in heredoc::Lines::new(source) {
+        match event {
+            heredoc::Line::Command(line) => output.push_str(line),
+            heredoc::Line::Body { text, document, delimiter: false } if document.allows_expansion => {
+                output.extend(text.chars().map(|character| match character {
                     '\'' | '"' | '#' => ' ',
                     _ => character,
                 }));
             }
-            output.push('\n');
-            continue;
+            heredoc::Line::Body { .. } => {}
         }
-        output.push_str(line);
         output.push('\n');
-        pending.extend(heredoc_scan.documents(line));
     }
     output
 }
 
 pub(super) fn has_executable_unquoted_heredoc(source: &str) -> bool {
-    let mut pending = std::collections::VecDeque::<heredoc::Document>::new();
-    let mut heredoc_scan = heredoc::Scan::default();
-    for line in source.lines() {
-        if let Some(heredoc) = pending.front() {
-            let candidate = if heredoc.strip_tabs { line.trim_start_matches('\t') } else { line };
-            if candidate == heredoc.delimiter {
-                pending.pop_front();
-            } else if heredoc.allows_expansion && active_heredoc_substitution(line) {
-                return true;
-            }
-            continue;
-        }
-        pending.extend(heredoc_scan.documents(line));
-        if heredoc_scan.has_opaque_delimiter() {
+    let mut lines = heredoc::Lines::new(source);
+    for event in lines.by_ref() {
+        if let heredoc::Line::Body { text, document, delimiter: false } = event
+            && document.allows_expansion
+            && active_heredoc_substitution(text)
+        {
             return true;
         }
     }
-    heredoc_scan.has_opaque_delimiter()
+    lines.has_opaque_delimiter()
 }
 
 pub(super) fn has_opaque_heredoc_delimiter(source: &str) -> bool {
-    let mut scan = heredoc::Scan::default();
-    for line in source.lines() {
-        scan.documents(line);
-        if scan.has_opaque_delimiter() {
-            return true;
-        }
-    }
-    false
+    let mut lines = heredoc::Lines::new(source);
+    lines.by_ref().for_each(drop);
+    lines.has_opaque_delimiter()
 }
 
 fn active_heredoc_substitution(source: &str) -> bool {
@@ -474,19 +390,144 @@ fn shell_tokens(command: &str, split_equals: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_substitution_commands, command_tokens, declared_shell_function_count, declared_shell_functions, has_executable_unquoted_heredoc, shell_expansion_source,
-        source_command_tokens, structured_source_commands, without_noncommand_shell_data,
+        command_substitution_commands, command_tokens, declared_shell_function_count, declared_shell_functions, has_duplicate_shell_functions, has_executable_unquoted_heredoc,
+        has_unsupported_shell_function, shell_expansion_source, source_command_tokens, structured_source_commands, without_noncommand_shell_data,
     };
 
     #[test]
     fn shell_function_declarations_require_valid_names_and_braces() {
         let functions = declared_shell_functions(concat!("alpha() ", "{\n  :\n}\nfunction beta() ", "{\n  :\n}\nfunction gamma ", "{\n  :\n}\n"));
         assert_eq!(functions.into_iter().collect::<Vec<_>>(), ["alpha", "beta", "gamma"]);
-        assert!(declared_shell_functions("9invalid() {\n}\nnot-a-name() {\n}\nname() not-a-body\nfunction\n").is_empty());
+        assert_eq!(
+            declared_shell_functions("9invalid() {\n}\nnot-a-name() {\n}\nname() not-a-body\nfunction\n"),
+            ["not-a-name".to_owned()].into()
+        );
         assert_eq!(
             declared_shell_function_count(concat!("function alpha\n", "{\n  :\n}\nalpha()\n", "{\n  :\n}\n"), "alpha"),
             2
         );
+    }
+
+    #[test]
+    fn function_inventory_uses_only_active_shell_syntax() {
+        for source in [
+            "printf '%s\\n' 'fake() { :; }\nfake() { :; }'\n",
+            "cat <<'DOC'\nfake() { :; }\nfake() { :; }\nDOC\nprintf '%s\\n' safe\n",
+        ] {
+            assert!(!has_duplicate_shell_functions(source), "{source}");
+            assert!(declared_shell_functions(source).is_empty(), "{source}");
+        }
+
+        let duplicate = "same() { :; }; same() { :; }\n";
+        assert!(has_duplicate_shell_functions(duplicate));
+        assert_eq!(declared_shell_function_count(duplicate, "same"), 2);
+    }
+
+    #[test]
+    fn unsupported_function_positions_and_control_shadows_fail_closed() {
+        assert!(has_unsupported_shell_function("if true; then nested() { :; }; fi\n"));
+        assert!(has_unsupported_shell_function("result=$(\nnested() { :; }\nnested\n)\n"));
+        assert!(has_unsupported_shell_function("(\nnested() { :; }\nnested\n)\n"));
+        assert!(has_unsupported_shell_function("return() { :; }\n"));
+        assert!(has_unsupported_shell_function("gate() ( : )\n"));
+        assert!(has_unsupported_shell_function("foo:bar() { :; }\n"));
+        assert!(!has_unsupported_shell_function("pkg-config() { :; }\npkg-config\n"));
+        assert!(!has_unsupported_shell_function("fragment() {"));
+        assert!(!has_unsupported_shell_function("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n"));
+    }
+
+    #[test]
+    fn function_inventory_rejects_ambiguous_declarations_and_modeled_command_shadows() {
+        for source in [
+            "unset() { :; }\n",
+            "unset() {",
+            "declare() { :; }\n",
+            "read() { :; }\n",
+            "command() { :; }\n",
+            "env() { :; }\n",
+            "let() { :; }\n",
+            "test() { :; }\n",
+            "function . { :; }\n",
+            "perl() { :; }\n",
+            "python3.13() { :; }\n",
+            "ksh() { :; }\n",
+            "pwsh() { :; }\n",
+            "TIMEOUT() { :; }\n",
+            "ash() { :; }\n",
+            "npx() { :; }\n",
+            "cargo() { :; }\n",
+            "cargo() {",
+            "cargo() \\\n{ :; }\n",
+            "cargo()\n# declaration interruption\n{ :; }\n",
+            "cargo() # declaration interruption\n{ :; }\n",
+            "cargo()\n\n{ :; }\n",
+            "if true\nthen\nsh() { :; }\nfi\n",
+            "outer() {\ninner() { :; }\n}\n",
+            "printf '%s' \"$(helper() { :; }; helper)\"\n",
+            "printf '%s' `helper() { :; }; helper`\n",
+            "cat <(helper() { :; }; helper)\n",
+            "printf '%s' \"${ helper() { :; }; helper; }\"\n",
+            "printf '%s' \"${| helper() { :; }; helper; }\"\n",
+            "printf '%s' \"${\\\n helper() { :; }; helper; }\"\n",
+            "printf '%s' $\"${ helper() { :; }; helper; }\"\n",
+            "cat <<DOC\n${ helper() { :; }; helper; }\nDOC\n",
+            "values=(\"${ helper() { :; }; helper; }\")\n",
+            "case x in\n${ helper() { :; }; helper; }x) : ;;\nesac\n",
+            "printf '%s' $'x\\'' >/dev/null\nprintf '%s' \"${ helper() { :; }; helper; }\"\n",
+            "printf '%s' $'x\\'' >/dev/null\ncat <<DOC\n${ helper() { :; }; helper; }\nDOC\n",
+            "printf '%s' \"$(printf '%s' '\"')\" >/dev/null\nprintf '%s' \"${ helper() { :; }; helper; }\"\n",
+            "printf '%s' \"`printf '%s' '\"'`\" >/dev/null\nprintf '%s' \"${ helper() { :; }; helper; }\"\n",
+            "printf '%s' \"$(printf '%s' \"$(printf '%s' '\"')\")\" >/dev/null\nprintf '%s' \"${ helper() { :; }; helper; }\"\n",
+            "printf '%s' \"$(printf '%s' \\\n'\"')\" >/dev/null\nprintf '%s' \"${ helper() { :; }; helper; }\"\n",
+            "printf '%s' \"$(printf '%s' \"${ helper() { :; }; helper; }\")\"\n",
+            "true && helper() { :; }\n",
+            "false || helper() { :; }\n",
+            "helper() { :; } && helper\n",
+            "helper() { :; } || helper\n",
+            "helper() { :; } | cat\n",
+            "helper() { :; } &\nwait\n",
+            "helper() { :; } 2>/dev/null && helper\n",
+            "helper() { :; } <<<safe && helper\n",
+            "helper() { :; } \\\n&& helper\n",
+        ] {
+            assert!(has_unsupported_shell_function(source), "{source}");
+        }
+    }
+
+    #[test]
+    fn function_inventory_preserves_inert_function_text() {
+        for source in [
+            "printf '%s' 'helper() { :; }'\n",
+            "printf '%s' \"helper() { :; }\"\n",
+            "cat <<'DOC'\nhelper() { :; }\nDOC\n",
+            "value=safe; printf '%s' \"${value}\"\n",
+            "value=safe; printf '%s' \"${\\\nvalue}\"\n",
+            "printf '%s' '${ helper() { :; }; helper; }'\n",
+            "printf '%s' \"\\${ helper() { :; }; helper; }\"\n",
+            "# ${ helper() { :; }; helper; }\n",
+            "cat <<'DOC'\n${ helper() { :; }; helper; }\nDOC\n",
+            "cat <<DOC\n\\${ helper() { :; }; helper; }\nDOC\n",
+            "values=('${ helper() { :; }; helper; }')\n",
+            "values=(\"\\${ helper() { :; }; helper; }\")\n",
+            "printf '%s' $'x\\'${ helper() { :; }; helper; }' >/dev/null\n",
+            "printf '%s' $'x\\'' >/dev/null\nvalue=safe\nprintf '%s' \"${value}\"\nhelper() { :; }\nhelper\n",
+            "printf '%s' $'x\\'' >/dev/null; cat <<'DOC'\n${ helper() { :; }; helper; }\nDOC\n",
+            "printf '%s' \"$(printf '%s' '\"')\" >/dev/null\nvalue=safe\nprintf '%s' \"${value}\"\nhelper() { :; }\nhelper\n",
+            "printf '%s' \"`printf '%s' '\"'`\" >/dev/null\nvalue=safe\nprintf '%s' \"${value}\"\nhelper() { :; }\nhelper\n",
+            "printf '%s' \"$(printf '%s' '${ helper() { :; }; helper; }')\" >/dev/null\nvalue=safe\nprintf '%s' \"${value}\"\n",
+            "printf '%s' \"$(printf '%s' \"$(printf '%s' '\"')\")\" >/dev/null\nvalue=safe\nprintf '%s' \"${value}\"\nhelper() { :; }\nhelper\n",
+            "helper() { :; }; helper\n",
+            "helper() { :; } # trailing comment\nhelper\n",
+            "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
+            "Write-Output 'cargo clippy -- --a`llow warnings'\n",
+            "values=(\"<(cargo() { :; })\" '>(just() { :; })')\n",
+            "printf '%s' '<\\\n(cargo() { :; })' >/dev/null\n",
+            "printf '%s' $'>\\\r\n(just() { :; })' >/dev/null\n",
+            "printf '%s' '<\\\\\n(cargo() { :; })' >/dev/null\n",
+            "cat <<'DOC'\n<(cargo() { :; })\n>(just() { :; })\nDOC\n",
+        ] {
+            assert!(!has_unsupported_shell_function(source), "{source}");
+        }
     }
 
     #[test]

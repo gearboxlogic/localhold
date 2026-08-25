@@ -69,6 +69,91 @@ fn command_policy_rejects_python_command_wrapper_dispatch() {
 }
 
 #[test]
+fn command_policy_applies_direct_dispatch_rules_to_python_argv() {
+    assert_opaque_python_process_bindings(&[
+        "import subprocess\nsubprocess.run(['awk', 'BEGIN { system(\"sh quality/lint.txt\") }'])\n",
+        "import subprocess\nsubprocess.run(['find', '.', '-exec', 'sh', 'quality/lint.txt', ';'])\n",
+        "import subprocess\nsubprocess.run(['git', '-c', 'alias.lint=!sh quality/lint.txt', 'lint'])\n",
+        "import subprocess\nsubprocess.run(['git', 'grep', '--open-files-in-pager=quality/lint', 'lint'])\n",
+        "import subprocess\nsubprocess.run(['cargo', 'run', '--manifest-path', 'quality/helper/Cargo.toml'])\n",
+        "import subprocess\nsubprocess.run([\"cargo\", \"--config\", 'target.x86_64-unknown-linux-gnu.runner=[\"sh\",\"-c\",\"touch Justfile\"]', \"run\", \"--manifest-path\", \"tools/maintainability/Cargo.toml\"])\n",
+        "import subprocess\nsubprocess.run(['cargo', '+nightly', '-Z', 'unstable-options', '-C', 'quality', 'build'])\n",
+        "import subprocess\nsubprocess.run(['cargo', 'build', '--target', 'quality/host.json'])\n",
+        "import subprocess\nsubprocess.run(['rustc', '--target=quality/host.json', '-', '-o', 'target/output'], input=source, text=True)\n",
+        "import subprocess\nsubprocess.run(['rustdoc', '--target', r'quality\\host.JSON', '-', '-o', 'target/output'], input=source, text=True)\n",
+        "import subprocess\nsubprocess.run(['gcc', '-fplugin=quality/lint.so', '-c', 'quality/input.c'])\n",
+        "import subprocess\nsubprocess.run(['ssh-keygen', '-D', 'quality/lint.so'])\n",
+        "import subprocess\nsubprocess.run(['ld.so', 'quality/lint'])\n",
+        "import subprocess\nsubprocess.run(['tar', '--to-command=quality/lint', '-xf', 'payload.tar', '-C', 'extracted'])\n",
+        "import subprocess\nsubprocess.run(['sort', '--compress-program=quality/lint', 'input'])\n",
+        "import subprocess\nsubprocess.run(['rg', '--pre', 'quality/lint', 'pattern', '.'])\n",
+        "import subprocess\nsubprocess.run(['just', '--justfile', 'quality/lint.data', 'check-quality'])\n",
+        "import subprocess\nsubprocess.run(['unknown-runner', '--eval', 'quality/lint'])\n",
+        "import subprocess\nsubprocess.run(['tools/mv', 'quality/lint.data', 'script/check.sh'])\n",
+        "import subprocess\nsubprocess.run(['/usr/bin/awk', 'BEGIN { system(\"true\") }'])\n",
+        "import subprocess\nsubprocess.run(['AWK.EXE', 'program'])\n",
+        "import subprocess\nsubprocess.run(['GIT.EXE', '-c', 'alias.lint=!quality/lint', 'lint'])\n",
+        "import subprocess\nsubprocess.run(['SSH-KEYGEN.EXE', '-D', 'quality/lint.dll'])\n",
+        "import subprocess\nsubprocess.run(['git', 'show', reference])\n",
+        "import subprocess\nsubprocess.run(['gcc', compiler_argument])\n",
+        "import subprocess\nsubprocess.run(['ssh-keygen', provider_option])\n",
+    ]);
+}
+
+#[test]
+fn command_policy_treats_python_argv_as_typed_values() {
+    assert_opaque_python_process_bindings(&[
+        "import subprocess\nsubprocess.run(['<', 'quality/lint'])\n",
+        "import subprocess\nsubprocess.run(['if', 'quality/lint'])\n",
+        "import subprocess\nsubprocess.run(['(', 'quality/lint'])\n",
+        "import subprocess\nsubprocess.run(['-runner', 'quality/lint'])\n",
+        "import subprocess\nsubprocess.run(['cd', 'quality'])\n",
+        "import subprocess\nsubprocess.run(['compgen', 'quality'])\n",
+        "import subprocess\nsubprocess.run(['mapfile', 'quality'])\n",
+        "import subprocess\nsubprocess.run(['readarray', 'quality'])\n",
+        "import subprocess\nsubprocess.run(['source', 'quality/lint'])\n",
+        "import subprocess\nsubprocess.run(['trap'])\n",
+        "import subprocess\nsubprocess.run(['git', 'grep', option])\n",
+        "import subprocess\nsubprocess.run(['wc', path])\n",
+        "import subprocess\nsubprocess.run(['quality/helper', option])\n",
+        "import subprocess\nsubprocess.run(['mv', 'target/input.txt', 'target/output.txt'])\n",
+    ]);
+}
+
+#[test]
+fn command_policy_allows_literal_python_argv_metacharacters() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::write(workspace.path().join("quality/$helper"), "#!/bin/sh\ntrue\n").expect("repository executable");
+    for program in ["if", "-runner", "cd", "mapfile", "source", "trap"] {
+        fs::write(workspace.path().join("quality").join(program), "#!/bin/sh\ntrue\n").expect("repository executable");
+    }
+    git(workspace.path(), &["init", "-q"]);
+    for source in [
+        "import subprocess\nsubprocess.run(['rg', '$*?[{~', '.'])\n",
+        "import subprocess\nsubprocess.run(['git', 'grep', '-e', '$*?[{~', '--', '.'])\n",
+        "import subprocess\nsubprocess.run(['gcc', '-c', 'quality/$input.c', '-o', 'target/$output.o'])\n",
+        "import subprocess\nsubprocess.run(['cp', 'quality/$report.txt', 'target/$report.txt'])\n",
+        "import subprocess\nsubprocess.run(['wc', 'quality/$report.txt'])\n",
+        "import subprocess\nsubprocess.run(['quality/$helper', '$*?[{~'])\n",
+        "import subprocess\nsubprocess.run(['quality/if', '--check'])\n",
+        "import subprocess\nsubprocess.run(['quality/-runner', '--check'])\n",
+        "import subprocess\nsubprocess.run(['quality/cd', '--check'])\n",
+        "import subprocess\nsubprocess.run(['quality/mapfile', '--check'])\n",
+        "import subprocess\nsubprocess.run(['quality/source', '--check'])\n",
+        "import subprocess\nsubprocess.run(['quality/trap', '--check'])\n",
+        "import subprocess\nsubprocess.run(['cargo', 'metadata', '--target', 'x86_64-unknown-linux-gnu'])\n",
+        "import subprocess\nsubprocess.run(['cargo', 'deny', 'check', '--config', 'deny.toml'])\n",
+        "import subprocess\nsubprocess.run(['rustc', '--target', 'x86_64-unknown-linux-gnu', '-', '-o', 'target/output'], input='fn main() {}', text=True)\n",
+    ] {
+        fs::write(workspace.path().join("script/check.py"), source).expect("typed Python argv");
+        git(workspace.path(), &["add", "."]);
+        assert!(reject_checked_in_weakening(workspace.path()).is_ok(), "{source}");
+    }
+}
+
+#[test]
 fn command_policy_rejects_python_filesystem_writes() {
     assert_opaque_python_filesystem_writes(&[
         "from pathlib import Path\nPath(\"Justfile\").write_text(Path(\"quality/Justfile\").read_text())\n",
@@ -133,6 +218,93 @@ fn command_policy_rejects_python_filesystem_writes() {
 }
 
 #[test]
+fn command_policy_rejects_python_filesystem_reflection() {
+    assert_opaque_python_process_bindings(&[
+        "from pathlib import Path\ngetattr(Path('target/input'), 'co' + 'py')('Justfile')\n",
+        "from pathlib import Path\noperation = f\"write_{kind}\"\ngetattr(Path('Justfile'), operation)(payload)\n",
+        "from pathlib import Path\ntarget = Path('Justfile')\nwriter = target.__getattribute__('write_text')\nwriter(payload)\n",
+        "from pathlib import Path\nPath('Justfile').__getattribute__('unlink')()\n",
+        "from pathlib import Path\n(Path('Justfile')).__getattribute__('unlink')()\n",
+        "from pathlib import Path\n(Path).__dict__['copy'](Path('target/input'), 'Justfile')\n",
+        "from pathlib import Path\nPath.__dict__['copy'](Path('target/input'), 'Justfile')\n",
+        "from pathlib import Path\nPath.__dict__.get('write_text')(Path('Justfile'), payload)\n",
+        "from pathlib import Path\nPath.__mro__[0].__dict__.__getitem__('unlink')(Path('Justfile'))\n",
+        "from pathlib import Path\nvars(Path)['move'](Path('target/input'), 'Justfile')\n",
+        "import os\ngetattr(os, 'remove')('Justfile')\n",
+        "import builtins\nfrom pathlib import Path\nbuiltins.getattr(Path('Justfile'), 'write_text')(payload)\n",
+        "import shutil\nfiles = shutil\ncopy = vars(files)['copyfile']\ncopy('target/input', 'Justfile')\n",
+        "import shutil\nfirst = files = shutil\nfiles.__dict__.get('copyfile')('target/input', 'Justfile')\n",
+        "from pathlib import Path\nfirst = target = Path('Justfile')\ngetattr(target, 'write_text')(payload)\n",
+        "from pathlib import Path\nholders = [Path('Justfile')]\ntarget = holders[0]\nvars(target)['write_text'](payload)\n",
+        "from pathlib import Path\nfactories = {'path': Path}\nfactory = factories['path']\nfactory.__dict__.get('move')(Path('target/input'), 'Justfile')\n",
+        "import pathlib as paths\nfactory = paths.Path\ntarget = factory('Justfile')\ngetattr(target, operation)(payload)\n",
+        "import pathlib as paths\nmessage = f\"{getattr(paths.Path('Justfile'), operation)(payload)}\"\n",
+        "from pathlib import Path\n[target] = [Path('Justfile')]\ngetattr(target, 'write_text')(payload)\n",
+        "from pathlib import Path\n(target := Path('Justfile'))\nvars(target)['unlink']()\n",
+        "from pathlib import Path\nitems = []\nitems.append(Path)\nfactory = items.pop()\ngetattr(factory('Justfile'), 'write_text')(payload)\n",
+        "from pathlib import Path\nholders = {'path': Path}\nfactory = holders.get('path')\nvars(factory)['copy'](Path('input'), 'Justfile')\n",
+        "from pathlib import Path\nwriter = (\n    Path.__mro__[0]\n).__dict__.get('write_text')\nwriter(Path('Justfile'), payload)\n",
+        "from pathlib import Path\nvalues = [Path('target/report.txt').exists()]\nvalue = values[0]\ngetattr(value, 'bit_length')()\n",
+        "import operator\nfrom pathlib import Path\nwriter = operator.attrgetter('write_text')(Path)\nwriter(Path('Justfile'), payload)\n",
+        "import operator\nfrom pathlib import Path\noperator.methodcaller('unlink')(Path('Justfile'))\n",
+        "import operator as operations\nfrom pathlib import Path\n(operations\n    # continued lookup\n    .methodcaller)('unlink')(Path('Justfile'))\n",
+        "import inspect\nfrom pathlib import Path\ninspect.getattr_static(Path, 'write_text')(Path('Justfile'), payload)\n",
+        "import inspect, os\ndict(inspect.getmembers_static(os))['remove']('Justfile')\n",
+        "from operator import methodcaller as invoke\nfrom pathlib import Path\ninvoke('write_text', payload)(Path('Justfile'))\n",
+        "from inspect import getmembers as fields\nimport shutil\ndict(fields(shutil))['copyfile']('target/input', 'Justfile')\n",
+        "import _operator\nfrom pathlib import Path\nwriter = _operator.attrgetter('write_text')(Path)\nwriter(Path('Justfile'), payload)\n",
+        "import _operator as operations\nfrom pathlib import Path\noperations.methodcaller('unlink')(Path('Justfile'))\n",
+        "from _operator import attrgetter as field\nfrom pathlib import Path\nfield('write_text')(Path)(Path('Justfile'), payload)\n",
+        "from _operator import methodcaller as invoke\nimport os\ninvoke('remove', 'Justfile')(os)\n",
+    ]);
+}
+
+#[test]
+fn command_policy_rejects_python_filesystem_reflection_reexports() {
+    assert_opaque_python_filesystem_writes(&[
+        "import dataclasses\nfrom pathlib import Path\nwriter = dataclasses.inspect.getattr_static(Path, 'write_text')\nwriter(Path('Justfile'), payload)\n",
+        "import dataclasses as records\nfrom pathlib import Path\nrecords.inspect.getattr_static(Path, 'unlink')(Path('Justfile'))\n",
+        "from dataclasses import inspect as introspection\nfrom pathlib import Path\nwriter = introspection.getattr_static(Path, 'write_text')\nwriter(Path('Justfile'), payload)\n",
+        "import dataclasses\nfrom pathlib import Path\nattributes = dataclasses.inspect.classify_class_attrs(Path)\nwriter = next(item.object for item in attributes if item.name == 'write_text')\nwriter(Path('Justfile'), payload)\n",
+        "import dataclasses as records\nfrom pathlib import Path\nnext(item.object for item in records.inspect.classify_class_attrs(Path) if item.name == 'unlink')(Path('Justfile'))\n",
+        "from pathlib import Path\nvalue = helpers.getattr_static(record, 'label')\nPath('target/report.txt').read_text()\n",
+    ]);
+}
+
+#[test]
+fn command_policy_rejects_python_argv_filesystem_mutations() {
+    assert_opaque_python_process_bindings(&[
+        "import subprocess\nsubprocess.run(['cp', 'quality/lint.data', 'Justfile'], check=True)\n",
+        "import subprocess\nsubprocess.run(['mv', 'quality/lint.data', 'script/check.sh'], check=True)\n",
+        "import subprocess\nsubprocess.run(['ln', '-s', 'script', 'docs-link'], check=True)\n",
+        "import subprocess\nsubprocess.run(['cp', source, destination], check=True)\n",
+        "import subprocess\nsubprocess.run(['ln', '-s', 'script', 'docs-link'], check=True)\nopen('docs-link/check.sh', 'w').write(payload)\n",
+        "import subprocess\nsubprocess.run(['gzip', '--suffix', '--help', '-d', 'Justfile--help'], check=True)\n",
+        "import subprocess\nsubprocess.run(['lz4', '-D', '--help', '-d', 'Justfile.lz4', 'Justfile'], check=True)\n",
+        "import subprocess\nsubprocess.run(['unzip', '-oq', 'payload.zip', '-d', '-l'], check=True)\n",
+        "import subprocess\nsubprocess.run(['unzip', '-P', '--help', 'payload.zip'], check=True)\n",
+        "import subprocess\nsubprocess.run(['unzip', '-P', '-l', 'payload.zip'], check=True)\n",
+        "import subprocess\nsubprocess.run(['tee', '--', '--help', 'Justfile'], check=True)\n",
+    ]);
+}
+
+#[test]
+fn command_policy_allows_non_filesystem_reflection_reexports() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    git(workspace.path(), &["init", "-q"]);
+    for source in [
+        "import dataclasses\nattributes = dataclasses.inspect.classify_class_attrs(str)\n",
+        "import dataclasses as records\nvalue = records.inspect.getattr_static(str, 'strip')\n",
+        "from dataclasses import inspect as introspection\nvalue = introspection.getattr_static(str, 'strip')\n",
+    ] {
+        fs::write(workspace.path().join("script/check.py"), source).expect("non-filesystem reflection re-export");
+        git(workspace.path(), &["add", "."]);
+        assert!(reject_checked_in_weakening(workspace.path()).is_ok(), "{source}");
+    }
+}
+
+#[test]
 fn command_policy_allows_inert_python_writer_binding_text() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     fs::create_dir_all(workspace.path().join("script")).expect("script directory");
@@ -158,6 +330,25 @@ fn command_policy_allows_inert_python_writer_binding_text() {
         "from _io import open as writer\nmessage = f\"{writer('target/report.txt', 'w')}\"\n",
         "from _pyio import open as writer\nmessage = f\"{writer('target/report.txt', 'w')}\"\n",
         "from posix import remove as erase\nmessage = f\"{erase('target/report.txt')}\"\n",
+        "from pathlib import Path\nprint('operator.attrgetter inspect.getattr_static')\nvalue = Path('target/report.txt').read_text()\n",
+        "from pathlib import Path\n# operator.methodcaller('unlink')(Path('Justfile'))\nvalue = Path('target/report.txt').read_text()\n",
+        "from pathlib import Path\nprint('_operator.attrgetter')\n# _operator.methodcaller('unlink')(Path('Justfile'))\nvalue = Path('target/report.txt').read_text()\n",
+        "from pathlib import Path\nprint('dataclasses.inspect.getattr_static classify_class_attrs')\n# helpers.classify_class_attrs(Path)\nvalue = Path('target/report.txt').read_text()\n",
+        "import subprocess\nsubprocess.run(['cp', 'quality/report.txt', 'target/report.txt'], check=True)\n",
+        "import subprocess\nsubprocess.run(['chmod', '600', 'target/input.txt'], check=True)\n",
+        "import subprocess\nsubprocess.run(['rg', 'pattern', '.'], check=True)\n",
+        "import subprocess\nsubprocess.run(['printf', '%s', '>Justfile'], check=True)\n",
+        "import subprocess\nsubprocess.run(['git', 'rev-parse', '--verify', 'HEAD'], check=True)\n",
+        "import subprocess\nsubprocess.run(['git', 'grep', '-e', '$*?[{~', '--', '.'], check=False)\n",
+        "import subprocess\nsubprocess.run(['cargo', 'metadata', '--no-deps'], check=True)\n",
+        "import subprocess\nsubprocess.run(['gcc', '-c', 'quality/input.c', '-o', 'target/input.o'], check=True)\n",
+        "import subprocess\nsubprocess.run(['tar', '-cf', 'target/archive.tar', 'data'], check=True)\n",
+        "import subprocess\nsubprocess.run(['tee', 'target/report.txt'], check=True)\n",
+        "import subprocess\nsubprocess.run(['unzip', '-P', 'secret', '-l', 'payload.zip'], check=True)\n",
+        "import subprocess\nsubprocess.run(['unzip', '-Psecret', '-l', 'payload.zip'], check=True)\n",
+        "import subprocess\nsubprocess.run(['unzip', '-Pindex', '-l', 'payload.zip'], check=True)\n",
+        "import subprocess\nsubprocess.run(['unzip', '-PTEST', '-l', 'payload.zip'], check=True)\n",
+        "import subprocess\nsubprocess.run(['/usr/bin/uname', '-a'], check=True)\n",
         "open('target/MAKEFILE.txt', 'w').write('report')\n",
         "open('.github/workflow/ci.yml', 'w').write('report')\n",
         "import tempfile\ntempfile.NamedTemporaryFile(dir='.GITHUB/artifacts', suffix='.yml')\n",
@@ -225,14 +416,30 @@ fn command_policy_resolves_python_writer_symlink_parents() {
     fs::create_dir_all(workspace.path().join("script")).expect("script directory");
     fs::create_dir_all(workspace.path().join("docs")).expect("documentation directory");
     fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::create_dir_all(workspace.path().join("payload")).expect("payload directory");
     fs::write(workspace.path().join("script/check"), "#!/bin/sh\ntrue\n").expect("safe command surface");
     fs::write(workspace.path().join("quality/check"), "#!/bin/sh\ntrue\n").expect("shebang-discovered command surface");
+    fs::write(workspace.path().join("payload/check"), "replacement\n").expect("copy payload");
+    symlink("../quality/check", workspace.path().join("payload/link")).expect("tracked source symlink");
     symlink("..", workspace.path().join("docs/root")).expect("repository-relative directory symlink");
     symlink("../quality", workspace.path().join("docs/bridge")).expect("relocatable internal directory symlink");
     fs::write(workspace.path().join("script/check.py"), "open('docs/root/script/check', 'w').write(payload)\n").expect("redirected Python writer");
     git(workspace.path(), &["init", "-q"]);
     git(workspace.path(), &["add", "."]);
+    symlink("../script/check", workspace.path().join("docs/check")).expect("implicit destination symlink");
 
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+
+    fs::write(workspace.path().join("script/check.py"), "import shutil\nshutil.copy('payload/check', 'docs')\n").expect("implicit symlink destination writer");
+    let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
+
+    fs::write(
+        workspace.path().join("script/check.py"),
+        "import shutil\nshutil.copy(\n    'payload/link',\n    'docs',\n    follow_symlinks=False  # preserve the link\n)\nopen('docs/link', 'w').write(payload)\n",
+    )
+    .expect("copied symlink write-through");
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
 
@@ -248,9 +455,14 @@ fn command_policy_resolves_python_writer_symlink_parents() {
     let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
     assert!(error.to_string().contains("lint-weakening argument"), "{error:#}");
 
-    fs::write(workspace.path().join("script/check.py"), "open('docs/report.txt', 'w').write(payload)\n").expect("safe Python writer");
     git(workspace.path(), &["add", "."]);
-    reject_checked_in_weakening(workspace.path()).expect("unrelated tracked symlink remains allowed");
+    for source in [
+        "open('docs/report.txt', 'w').write(payload)\n",
+        "import shutil\nshutil.copy(\n    'payload/link',\n    'docs',\n    follow_symlinks=True  # ordinary copy\n)\n",
+    ] {
+        fs::write(workspace.path().join("script/check.py"), source).expect("safe Python writer");
+        reject_checked_in_weakening(workspace.path()).unwrap_or_else(|error| panic!("{source}: {error:#}"));
+    }
 }
 
 #[test]
@@ -283,6 +495,219 @@ fn command_policy_rejects_dos_short_name_write_paths() {
         "open('target/rep ort~1.txt', 'w').write(payload)\n",
     ] {
         fs::write(workspace.path().join("script/check.py"), source).expect("safe tilde writer");
+        reject_checked_in_weakening(workspace.path()).unwrap_or_else(|error| panic!("{source}: {error:#}"));
+    }
+}
+
+#[test]
+fn command_policy_rejects_python_protected_input_mutations() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    fs::create_dir_all(workspace.path().join("src")).expect("source directory");
+    fs::create_dir_all(workspace.path().join("src-data")).expect("safe sibling directory");
+    fs::create_dir_all(workspace.path().join("payload")).expect("payload directory");
+    fs::write(workspace.path().join("src/lib.rs"), "pub fn library() {}\n").expect("protected Rust source");
+    fs::write(workspace.path().join("src-data/report.txt"), "report\n").expect("safe sibling content");
+    fs::write(workspace.path().join("payload/report.txt"), "replacement\n").expect("replacement content");
+    fs::write(workspace.path().join("script/check.py"), "print('initial')\n").expect("initial Python source");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    for source in [
+        "import shutil\nshutil.rmtree('src')\n",
+        "import shutil\nshutil.copytree('payload', 'src', dirs_exist_ok=True)\n",
+        "import os\nos.rename('src', 'archived')\n",
+        "import shutil\nshutil.copy('payload/report.txt', 'src')\n",
+        "import shutil\nshutil.move('payload/report.txt', 'src')\n",
+        "import shutil\nshutil.move('src/lib.rs', 'archived.rs')\n",
+        "from pathlib import Path\nPath('src/lib.rs').rename('archived.rs')\n",
+        "from pathlib import Path\nPath('payload/report.txt').replace('src/lib.rs')\n",
+        "from pathlib import Path\nPath('payload/report.txt').copy('src/lib.rs')\n",
+        "from pathlib import Path\nPath.copy(Path('payload/report.txt'), 'src/lib.rs')\n",
+        "from pathlib import Path\nPath('payload/report.txt').copy_into('src')\n",
+        "from pathlib import Path\nPath('payload/report.txt').move('src/lib.rs')\n",
+        "from pathlib import Path\nPath('payload/report.txt').move_into('src')\n",
+        "from pathlib import Path\nwriter = Path('payload/report.txt').copy\nwriter('src/lib.rs')\n",
+        "open('src/lib.rs', 'w').write(payload)\n",
+    ] {
+        fs::write(workspace.path().join("script/check.py"), source).expect("protected-input mutation");
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("lint-weakening argument"), "{source}: {error:#}");
+    }
+
+    // Python 3.14 tree and implicit-destination semantics are intentionally
+    // unmodeled, so data-only invocations also fail closed for now.
+    for source in [
+        "source.copy('src-data/copy.txt')\n",
+        "from pathlib import Path\nPath('payload/report.txt').copy('src-data/copy.txt')\n",
+        "from pathlib import Path\nPath('payload/report.txt').copy_into('src-data')\n",
+        "from pathlib import Path\nPath('payload/report.txt').move('src-data/moved.txt')\n",
+        "from pathlib import Path\nPath('payload/report.txt').move_into('src-data')\n",
+    ] {
+        fs::write(workspace.path().join("script/check.py"), source).expect("conservative Python 3.14 mutation");
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("lint-weakening argument"), "{source}: {error:#}");
+    }
+
+    fs::write(workspace.path().join("script/check.py"), "import shutil\nshutil.rmtree('src-data')\n").expect("safe sibling mutation");
+    reject_checked_in_weakening(workspace.path()).expect("similarly named data directory remains mutable");
+}
+
+#[test]
+fn command_policy_rejects_implicit_python_copy_destinations() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    for directory in ["script", "payload/tree", "generated", ".github/actions/check", "data"] {
+        fs::create_dir_all(workspace.path().join(directory)).expect("fixture directory");
+    }
+    for (path, contents) in [
+        ("payload/config.toml", "[build]\n"),
+        ("payload/check.py", "print('safe')\n"),
+        ("payload/report.txt", "report\n"),
+        ("payload/report.json", "{}\n"),
+        ("payload/tree/config.toml", "[build]\n"),
+        ("script/check.py", "print('initial')\n"),
+    ] {
+        fs::write(workspace.path().join(path), contents).expect("fixture file");
+    }
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    for source in [
+        "import os, shutil\nos.mkdir('.cargo')\nshutil.copy('payload/config.toml', '.cargo')\n",
+        "import shutil\nshutil.copy2('payload/check.py', 'generated')\n",
+        "import shutil\nshutil.copy('payload/action.yml', '.github/actions/check')\n",
+        "import os, shutil\nos.mkdir('.cargo')\nshutil.move('payload/config.toml', '.cargo')\n",
+        "import shutil\nshutil.copytree('payload/tree', '.cargo', dirs_exist_ok=True)\n",
+    ] {
+        fs::write(workspace.path().join("script/check.py"), source).expect("implicit protected destination");
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("lint-weakening argument"), "{source}: {error:#}");
+    }
+
+    for source in [
+        "import shutil\nshutil.copy('payload/report.txt', 'data')\n",
+        "import shutil\nshutil.copy2('payload/report.json', 'data')\n",
+        "import shutil\nshutil.move('payload/report.txt', 'data')\n",
+    ] {
+        fs::write(workspace.path().join("script/check.py"), source).expect("safe implicit destination");
+        reject_checked_in_weakening(workspace.path()).unwrap_or_else(|error| panic!("{source}: {error:#}"));
+    }
+}
+
+#[test]
+fn command_policy_rejects_python_working_directory_rebased_writes() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    fs::create_dir_all(workspace.path().join("quality")).expect("quality directory");
+    fs::create_dir_all(workspace.path().join("data")).expect("data directory");
+    fs::write(workspace.path().join("quality/check"), "#!/bin/sh\ntrue\n").expect("command surface");
+    fs::write(workspace.path().join("data/report.txt"), "report\n").expect("data file");
+    fs::write(workspace.path().join("script/check.py"), "print('initial')\n").expect("initial Python source");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    for source in [
+        "import os\nos.chdir('quality')\nos.remove('check')\n",
+        "import os\ndirectory = os.open('quality', os.O_RDONLY)\nos.fchdir(directory)\nos.remove('check')\n",
+        "import contextlib, os\nwith contextlib.chdir('quality'):\n    os.remove('check')\n",
+        "from contextlib import chdir as change\nimport os\nwith change('quality'):\n    os.remove('check')\n",
+        "from os import fchdir as change\nimport os\ndirectory = os.open('quality', os.O_RDONLY)\nchange(directory)\nos.remove('check')\n",
+        "import os\nos.chdir('quality')\nmessage = f\"{open('target/report.txt', 'w')}\"\n",
+    ] {
+        fs::write(workspace.path().join("script/check.py"), source).expect("working-directory rebased write");
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("lint-weakening argument") || message.contains("opaque interpreter program"),
+            "{source}: {error:#}"
+        );
+    }
+
+    for source in [
+        "import os\nos.chdir('quality')\n",
+        "import os\nos.remove('data/report.txt')\n",
+        "import os\nos.chdir('data')\nopen('report.txt', 'rb').read()\n",
+    ] {
+        fs::write(workspace.path().join("script/check.py"), source).expect("safe working-directory control");
+        reject_checked_in_weakening(workspace.path()).unwrap_or_else(|error| panic!("{source}: {error:#}"));
+    }
+}
+
+#[test]
+fn command_policy_rejects_python_directory_descriptor_rebasing() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    fs::create_dir_all(workspace.path().join("script")).expect("script directory");
+    fs::create_dir_all(workspace.path().join("quality/commands")).expect("command directory");
+    fs::create_dir_all(workspace.path().join("payload")).expect("payload directory");
+    fs::create_dir_all(workspace.path().join("data")).expect("data directory");
+    fs::write(workspace.path().join("quality/check"), "#!/bin/sh\ntrue\n").expect("command surface");
+    fs::write(workspace.path().join("quality/commands/check"), "#!/bin/sh\ntrue\n").expect("nested command surface");
+    fs::write(workspace.path().join("payload/report.txt"), "replacement\n").expect("replacement data");
+    fs::write(workspace.path().join("data/report.txt"), "report\n").expect("safe data");
+    fs::write(workspace.path().join("script/check.py"), "print('initial')\n").expect("initial Python source");
+    git(workspace.path(), &["init", "-q"]);
+    git(workspace.path(), &["add", "."]);
+
+    for source in [
+        "import os\ndirectory = os.open('quality', os.O_RDONLY)\nos.remove('check', dir_fd=directory)\n",
+        "open(\n    'quality/check',\n    # positional mode follows\n    'w'  # final positional\n).write(payload)\n",
+        "open(\n    file='quality/check',\n    # keyword mode follows\n    mode='w'  # final keyword\n).write(payload)\n",
+        "from pathlib import Path\nPath('quality/check').open(  # positional mode follows\n    'w'  # final positional\n)\n",
+        "import os\nos.fdopen(descriptor,  # positional mode follows\n    'w'  # final positional\n)\n",
+        "import os\ndirectory = os.open('quality', os.O_RDONLY)\nos.remove(\n    'check',\n    dir_fd=directory  # rebased destination\n)\n",
+        "open('data/report.txt', 'w',\n    opener=custom_opener  # custom destination resolution\n)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='data',\n    prefix='../quality/check-'  # traversing prefix\n)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target',\n    suffix='.rs'  # protected suffix\n)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(\n    dir='script'  # protected directory\n)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target', prefix=r'\\script\\check-', suffix='.txt')\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target', prefix=r'\\\\server\\share\\check-', suffix='.txt')\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target', prefix=r'C:\\script\\check-', suffix='.txt')\n",
+        "import os\nsource = os.open('payload', os.O_RDONLY)\ndestination = os.open('quality', os.O_RDONLY)\nos.rename('report.txt', 'check', src_dir_fd=source, dst_dir_fd=destination)\n",
+        "import os, shutil\ndirectory = os.open('quality', os.O_RDONLY)\nshutil.rmtree('commands', dir_fd=directory)\n",
+        "import os\ndirectory = os.open('quality', os.O_RDONLY)\nos.open('check', os.O_WRONLY, dir_fd=directory)\n",
+        "import os\ndirectory = os.open('quality', os.O_RDONLY)\noptions = {'dir_fd': directory}\nos.remove('check', **options)\n",
+        "import os\ndirectory = os.open('quality', os.O_RDONLY)\nopen('check', 'w', opener=lambda path, flags: os.open(path, flags, dir_fd=directory))\n",
+        "open('target/report.txt', **options)\n",
+        "open(*arguments)\n",
+        "import io\nio.open(*arguments)\n",
+        "import os\nos.fdopen(*arguments)\n",
+        "from pathlib import Path\nPath('target/report.txt').open(*arguments)\n",
+        "from pathlib import Path\nPath('Justfile').open(**options)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(**options)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(*arguments)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile()\n",
+        "import os, tempfile\nos.environ['TMPDIR'] = 'script'\ntempfile.NamedTemporaryFile(prefix='generated-', suffix='.py')\n",
+        "import tempfile\ntempfile.tempdir = 'script'\ntempfile.NamedTemporaryFile(prefix='generated-', suffix='.py')\n",
+        "open('data/report.txt', 'w'",
+        "from pathlib import Path\nPath('data/report.txt').open('w'",
+        "import os\nos.fdopen(descriptor, 'rb'",
+        "import shutil\nshutil.copy('payload/report.txt', 'data'",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target'",
+        "open('data/report.txt', 'w)",
+        "open('data/report.txt', 'w'])",
+    ] {
+        fs::write(workspace.path().join("script/check.py"), source).expect("directory-descriptor rebased write");
+        let error = reject_checked_in_weakening(workspace.path())
+            .err()
+            .unwrap_or_else(|| panic!("accepted opaque Python writer: {source}"));
+        assert!(error.to_string().contains("lint-weakening argument"), "{source}: {error:#}");
+    }
+
+    for source in [
+        "import os\ndirectory = os.open('quality', os.O_RDONLY)\nos.open('check', os.O_RDONLY, dir_fd=directory)\n",
+        "open('quality/check',\n    # read mode follows\n    'rb'  # final positional\n)\n",
+        "open(file='data/report.txt',\n    # safe keyword follows\n    mode='w'  # final keyword\n)\n",
+        "from pathlib import Path\nPath('data/report.txt').open(  # safe positional mode follows\n    'w'  # final positional\n)\n",
+        "import os\nos.fdopen(descriptor,  # read mode follows\n    'rb'  # final positional\n)\n",
+        "import os\nos.remove('data/report.txt', dir_fd=None)\n",
+        "import os\nos.remove('data/report.txt',\n    dir_fd=None  # no rebasing\n)\n",
+        "open('data/report.txt', 'w',\n    opener=None  # standard opener\n)\n",
+        "import os\nos.remove('data/report.txt')\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target', prefix='report-', suffix='.txt')\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(prefix='report-', suffix='.txt',\n    dir='target'  # explicit safe directory\n)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target', prefix=r'reports\\check-', suffix='.txt')\n",
+    ] {
+        fs::write(workspace.path().join("script/check.py"), source).expect("safe directory-descriptor control");
         reject_checked_in_weakening(workspace.path()).unwrap_or_else(|error| panic!("{source}: {error:#}"));
     }
 }

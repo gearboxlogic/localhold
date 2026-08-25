@@ -13,12 +13,24 @@ pub(in crate::structure::suppression::policy::config::command::arguments) struct
 #[derive(Default)]
 pub(in crate::structure::suppression::policy::config::command::arguments) struct References {
     pub(in crate::structure::suppression::policy::config::command::arguments) inputs: Vec<String>,
-    pub(in crate::structure::suppression::policy::config::command::arguments) programs: Vec<String>,
+    pub(in crate::structure::suppression::policy::config::command::arguments) argv_invocations: Vec<ArgvInvocation>,
     pub(in crate::structure::suppression::policy::config::command::arguments) shell_commands: Vec<String>,
     pub(in crate::structure::suppression::policy::config::command::arguments) overrides: ResolutionChannels,
     pub(in crate::structure::suppression::policy::config::command::arguments) ambient_mutations: ResolutionChannels,
     pub(in crate::structure::suppression::policy::config::command::arguments) process_invocation: bool,
     pub(in crate::structure::suppression::policy::config::command::arguments) opaque: bool,
+}
+
+#[derive(Debug)]
+pub(in crate::structure::suppression::policy::config::command::arguments) struct ArgvInvocation {
+    pub(in crate::structure::suppression::policy::config::command::arguments) program: String,
+    pub(in crate::structure::suppression::policy::config::command::arguments) arguments: Vec<ArgvArgument>,
+}
+
+#[derive(Debug)]
+pub(in crate::structure::suppression::policy::config::command::arguments) enum ArgvArgument {
+    Literal(String),
+    Unknown,
 }
 
 pub(super) fn collect(source: &str) -> References {
@@ -84,7 +96,11 @@ pub(super) fn collect(source: &str) -> References {
             references.opaque = true;
             continue;
         }
-        references.programs.push(program);
+        let arguments = expressions[1..]
+            .iter()
+            .map(|argument| scanner.literal(argument.clone()).map_or(ArgvArgument::Unknown, ArgvArgument::Literal))
+            .collect();
+        references.argv_invocations.push(ArgvInvocation { program, arguments });
     }
     references.opaque |= scanner.has_opaque_formatted_process_expression();
     references
@@ -235,7 +251,8 @@ posix.system("sh quality/posix.txt")
 "#,
         );
         assert_eq!(references.inputs, ["quality/hidden.py"]);
-        assert_eq!(references.programs, ["quality/helper.exe", "script/check-time-abstraction.sh"]);
+        assert_eq!(programs(&references), ["quality/helper.exe", "script/check-time-abstraction.sh"]);
+        assert_eq!(arguments(&references, 0), vec![Some("--check")]);
         assert_eq!(references.shell_commands, ["sh quality/lint.txt", "sh quality/posix.txt"]);
         assert!(references.overrides.environment);
         assert!(references.overrides.working_directory);
@@ -263,7 +280,7 @@ posix . popen("sh quality/posix.txt")
 subprocess . run(["quality/helper.exe"], check=True)
 "#,
         );
-        assert_eq!(references.programs, ["quality/helper.exe"]);
+        assert_eq!(programs(&references), ["quality/helper.exe"]);
         assert_eq!(references.shell_commands, ["sh quality/lint.txt", "sh quality/posix.txt"]);
         assert!(references.process_invocation);
         assert!(!references.opaque);
@@ -345,7 +362,17 @@ subprocess . run(["quality/helper.exe"], check=True)
     #[test]
     fn bare_programs_are_reported_for_windows_shadow_detection() {
         let references = collect(r#"subprocess.run(["GiT", "status"], check=True)"#);
-        assert_eq!(references.programs, ["GiT"]);
+        assert_eq!(programs(&references), ["GiT"]);
+        assert_eq!(arguments(&references, 0), vec![Some("status")]);
+        assert!(!references.opaque);
+    }
+
+    #[test]
+    fn argv_arguments_preserve_literal_and_unresolved_states() {
+        let references = collect("subprocess.run(['cp', 'quality/lint.data', 'Justfile'], check=True)\nsubprocess.run(['mv', source, destination], check=True)\n");
+        assert_eq!(programs(&references), ["cp", "mv"]);
+        assert_eq!(arguments(&references, 0), vec![Some("quality/lint.data"), Some("Justfile")]);
+        assert_eq!(arguments(&references, 1), vec![None, None]);
         assert!(!references.opaque);
     }
 
@@ -371,7 +398,7 @@ subprocess.run(["git", "status"], check=True)
     #[test]
     fn process_environment_and_working_directory_overrides_are_reported() {
         let references = collect(r#"subprocess.run(["quality/helper.exe"], env=environment, cwd=root)"#);
-        assert_eq!(references.programs, ["quality/helper.exe"]);
+        assert_eq!(programs(&references), ["quality/helper.exe"]);
         assert!(references.overrides.environment);
         assert!(references.overrides.working_directory);
         assert!(!references.opaque);
@@ -387,5 +414,20 @@ subprocess.run(["git", "status"], check=True)
             names.push(call.name);
         }
         assert!(names.iter().any(|name| name == "subprocess.run"), "{names:?}");
+    }
+
+    fn programs(references: &super::References) -> Vec<&str> {
+        references.argv_invocations.iter().map(|invocation| invocation.program.as_str()).collect()
+    }
+
+    fn arguments(references: &super::References, index: usize) -> Vec<Option<&str>> {
+        references.argv_invocations[index]
+            .arguments
+            .iter()
+            .map(|argument| match argument {
+                super::ArgvArgument::Literal(value) => Some(value.as_str()),
+                super::ArgvArgument::Unknown => None,
+            })
+            .collect()
     }
 }

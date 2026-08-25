@@ -5,8 +5,18 @@ enum ManifestSelection<'a> {
     Opaque,
 }
 
+use super::ValueSemantics;
+
+#[cfg(test)]
 pub(super) fn dispatch_is_opaque(arguments: &[String]) -> bool {
-    if arguments.iter().any(|argument| super::path::contains_dynamic_value(argument)) {
+    dispatch_with_semantics(arguments, ValueSemantics::Shell)
+}
+
+pub(super) fn dispatch_with_semantics(arguments: &[String], semantics: ValueSemantics) -> bool {
+    if arguments.iter().any(|argument| semantics.contains_dynamic(argument)) {
+        return true;
+    }
+    if cargo_global_execution_control_is_opaque(arguments) || super::compiler::custom_target_selection_is_opaque(arguments) {
         return true;
     }
     if uses_script_mode(arguments) {
@@ -36,6 +46,43 @@ pub(super) fn dispatch_is_opaque(arguments: &[String]) -> bool {
         return !matches!(manifest, ManifestSelection::Selected(path) if is_reviewed_tool_manifest(path));
     }
     matches!(manifest, ManifestSelection::Opaque) || matches!(manifest, ManifestSelection::Selected(path) if !is_reviewed_execution_manifest(path))
+}
+
+fn cargo_global_execution_control_is_opaque(arguments: &[String]) -> bool {
+    let mut index = 0;
+    let mut subcommand_seen = false;
+    while let Some(argument) = arguments.get(index) {
+        if argument == "--" {
+            return false;
+        }
+        if matches!(argument.as_str(), "--config" | "--change-directory" | "-C")
+            || argument.starts_with("--config=")
+            || argument.starts_with("--change-directory=")
+            || argument.starts_with("-C") && argument.len() > 2
+        {
+            return true;
+        }
+        if matches!(argument.as_str(), "--color" | "-Z") {
+            index += 2;
+            continue;
+        }
+        if argument.starts_with('+') || argument.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if !subcommand_seen {
+            if external_subcommand_owns_arguments(argument) {
+                return false;
+            }
+            subcommand_seen = true;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn external_subcommand_owns_arguments(subcommand: &str) -> bool {
+    matches!(subcommand, "audit" | "deny" | "machete" | "nextest" | "outdated")
 }
 
 fn is_known_subcommand(subcommand: &str) -> bool {
@@ -103,10 +150,10 @@ fn uses_script_mode(arguments: &[String]) -> bool {
 }
 
 fn rust_compiler_arguments_are_opaque(arguments: &[String]) -> bool {
-    arguments
-        .iter()
-        .position(|argument| argument == "--")
-        .is_some_and(|separator| super::compiler::rust_compiler_dispatch_is_opaque(&arguments[separator + 1..]))
+    arguments.iter().position(|argument| argument == "--").is_some_and(|separator| {
+        let compiler_arguments = &arguments[separator + 1..];
+        super::compiler::custom_target_selection_is_opaque(compiler_arguments) || super::compiler::rust_compiler_dispatch_is_opaque(compiler_arguments)
+    })
 }
 
 fn subcommand(arguments: &[String]) -> Option<&str> {
@@ -212,6 +259,39 @@ mod tests {
         assert!(dispatch_is_opaque(&arguments(&["rustc", "--", "-C", "linker=quality/lint"])));
         assert!(dispatch_is_opaque(&arguments(&["rustdoc", "--", "-Clinker=quality/lint"])));
         assert!(!dispatch_is_opaque(&arguments(&["rustc", "--", "-C", "opt-level=2"])));
+    }
+
+    #[test]
+    fn cargo_owned_configuration_and_relocation_fail_closed() {
+        for values in [
+            &["--config", "target.host.runner=['sh']", "build"][..],
+            &["--config=build.rustc-wrapper='quality/lint'", "check"],
+            &["build", "--config", "target.host.runner=['sh']"],
+            &["check", "--config=build.rustc-wrapper='quality/lint'"],
+            &["+nightly", "-Z", "unstable-options", "-C", "quality", "build"],
+            &["+nightly", "-Zunstable-options", "-Cquality", "test"],
+            &["+nightly", "--change-directory", "quality", "check"],
+            &["+nightly", "--change-directory=quality", "clippy"],
+        ] {
+            assert!(dispatch_is_opaque(&arguments(values)), "{values:?}");
+        }
+        assert!(!dispatch_is_opaque(&arguments(&["deny", "check", "--config", "deny.toml"])));
+        assert!(!dispatch_is_opaque(&arguments(&["deny", "--config=deny.toml", "check"])));
+        assert!(!dispatch_is_opaque(&arguments(&["nextest", "run", "--config-file", "config.toml"])));
+    }
+
+    #[test]
+    fn custom_target_specifications_fail_closed() {
+        for values in [
+            &["build", "--target", "quality/host.json"][..],
+            &["check", "--target=quality\\host.JSON"],
+            &["rustc", "--", "--target", "quality/host.json"],
+            &["rustdoc", "--", "--target=quality/host.json"],
+        ] {
+            assert!(dispatch_is_opaque(&arguments(values)), "{values:?}");
+        }
+        assert!(!dispatch_is_opaque(&arguments(&["metadata", "--target", "x86_64-unknown-linux-gnu"])));
+        assert!(!dispatch_is_opaque(&arguments(&["check", "--target=x86_64-pc-windows-msvc"])));
     }
 
     #[test]

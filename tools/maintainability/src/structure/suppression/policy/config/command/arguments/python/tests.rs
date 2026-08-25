@@ -1,20 +1,10 @@
 use std::fs;
 use std::path::Path;
 
-use super::{has_adjacent_string_literals, has_opaque_filesystem_write, mutates_process_environment, mutates_process_working_directory};
+use super::{has_opaque_filesystem_write, mutates_process_environment, mutates_process_working_directory};
 
 fn has_opaque_process_arguments(source: &str) -> bool {
     super::has_opaque_process_arguments("script/check.py", source)
-}
-
-#[test]
-fn adjacent_literals_are_detected_only_within_one_python_expression() {
-    assert!(has_adjacent_string_literals("subprocess.run([\"cargo\", \"clippy\", \"--\", \"-\" \"A\", \"warnings\"])\n"));
-    assert!(has_adjacent_string_literals("VALUES = (r\"cargo\"  f\" clippy\")\n"));
-    assert!(has_adjacent_string_literals("VALUE = \"cargo\" \\\n    \" clippy\"\n"));
-    assert!(!has_adjacent_string_literals("\"module doc\"\n\"second statement\"\n"));
-    assert!(!has_adjacent_string_literals("subprocess.run([\"cargo\", \"clippy\"])\n"));
-    assert!(!has_adjacent_string_literals("identifier\"invalid but not concatenated\"\n"));
 }
 
 #[test]
@@ -176,6 +166,8 @@ fn stdlib_code_evaluators_fail_closed_without_matching_unrelated_names() {
         "from multiprocessing.reduction import ForkingPickler\nForkingPickler.loads(payload)\n",
         "import multiprocessing.reduction as reduction\nreduction.ForkingPickler.loads(payload)\n",
         "import multiprocessing\nmultiprocessing.reduction.ForkingPickler.loads(payload)\n",
+        "import _operator\n_operator.itemgetter('label')(record)\n",
+        "from _operator import attrgetter as field\nfield('label')(record)\n",
     ] {
         assert!(has_opaque_process_arguments(source), "{source}");
     }

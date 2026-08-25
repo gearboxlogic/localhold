@@ -254,7 +254,7 @@ impl Scanner {
             let field_end = self.f_expression_end(expression_start, end)?;
             let field = self.f_field_parts(expression_start, field_end)?;
             let expression = self.characters[field.expression].iter().collect::<String>();
-            expressions.push(super::normalize_continuations(&expression));
+            expressions.push(super::lexical::normalize_continuations(&expression));
             if let Some(format_spec) = field.format_spec {
                 self.collect_f_string_code_expressions(format_spec.start, format_spec.end, false, expressions)?;
             }

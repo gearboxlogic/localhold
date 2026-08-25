@@ -203,6 +203,18 @@ pub(super) fn powershell_run_commands(path: &str, source: &str) -> Vec<String> {
         .collect()
 }
 
+pub(super) fn non_powershell_run_commands(path: &str, source: &str) -> Vec<String> {
+    if !is_github_yaml(path) {
+        return Vec::new();
+    }
+    let lines = source.lines().collect::<Vec<_>>();
+    parsed_run_commands(source)
+        .into_iter()
+        .filter(|command| !run_uses_powershell(&lines, command))
+        .map(|command| command.source)
+        .collect()
+}
+
 fn parsed_run_commands(source: &str) -> Vec<RunCommand> {
     let lines = source.lines().collect::<Vec<_>>();
     let mut commands = Vec::new();

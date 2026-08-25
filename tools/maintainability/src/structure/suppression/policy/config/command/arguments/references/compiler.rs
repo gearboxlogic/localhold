@@ -1,15 +1,46 @@
+use super::ValueSemantics;
+
+#[cfg(test)]
 pub(super) fn dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
-    compilation_tool(command) && arguments.iter().any(|argument| super::path::contains_dynamic_value(argument))
+    dispatch_with_semantics(command, arguments, ValueSemantics::Shell)
+}
+
+pub(super) fn dispatch_with_semantics(command: &str, arguments: &[String], semantics: ValueSemantics) -> bool {
+    compilation_tool(command) && arguments.iter().any(|argument| semantics.contains_dynamic(argument))
         || is_compiler_driver(command) && arguments.iter().any(|argument| is_dispatch_override(argument))
-        || is_rust_compiler(command) && rust_compiler_dispatch_is_opaque(arguments)
+        || is_rust_compiler(command) && (custom_target_selection_is_opaque(arguments) || rust_compiler_dispatch_is_opaque(arguments))
         || is_rustdoc(command) && rustdoc_dispatch_is_opaque(arguments)
         || is_linker_tool(command) && arguments.iter().any(|argument| linker_dispatch_override(argument))
-        || is_archive_tool(command) && archive_dispatch_is_opaque(arguments)
+        || is_archive_tool(command) && archive_dispatch_is_opaque(arguments, semantics)
         || is_binutils_plugin_tool(command)
             && arguments
                 .iter()
                 .take_while(|argument| argument.as_str() != "--")
                 .any(|argument| binutils_plugin_option(argument))
+}
+
+pub(super) fn custom_target_selection_is_opaque(arguments: &[String]) -> bool {
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index).filter(|argument| argument.as_str() != "--") {
+        let target = if argument == "--target" {
+            index += 1;
+            Some(arguments.get(index).map_or("", String::as_str))
+        } else {
+            argument.strip_prefix("--target=")
+        };
+        if target.is_some_and(custom_target_is_opaque) {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn custom_target_is_opaque(target: &str) -> bool {
+    target.is_empty()
+        || target.starts_with('.')
+        || target.contains(['/', '\\', ':'])
+        || target.rsplit_once('.').is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("json"))
 }
 
 fn compilation_tool(command: &str) -> bool {
@@ -29,7 +60,7 @@ fn is_archive_tool(command: &str) -> bool {
     unversioned == "ar" || unversioned.strip_suffix("ar").is_some_and(|prefix| prefix.ends_with('-'))
 }
 
-fn archive_dispatch_is_opaque(arguments: &[String]) -> bool {
+fn archive_dispatch_is_opaque(arguments: &[String], semantics: ValueSemantics) -> bool {
     let mut consumes_operand = false;
     for argument in arguments {
         if consumes_operand {
@@ -43,7 +74,7 @@ fn archive_dispatch_is_opaque(arguments: &[String]) -> bool {
         if argument == "--" || argument.starts_with("--") {
             continue;
         }
-        if super::path::contains_dynamic_value(argument) {
+        if semantics.contains_dynamic(argument) {
             return true;
         }
         let options = argument.strip_prefix('-').unwrap_or(argument);
@@ -304,6 +335,23 @@ mod tests {
             assert!(dispatch_is_opaque("rustc", &arguments(values)), "{values:?}");
         }
         assert!(!dispatch_is_opaque("rustc", &arguments(&["-C", "opt-level=2"])));
+    }
+
+    #[test]
+    fn custom_rust_target_specifications_are_opaque() {
+        for command in ["rustc", "rustc.exe", "rustdoc", "rustdoc.exe"] {
+            for values in [
+                &["--target", "quality/host.json", "-"][..],
+                &["--target=quality\\host.JSON", "-"],
+                &["--target", "/tmp/host", "-"],
+                &["--target=custom.json", "-"],
+                &["--target", "", "-"],
+            ] {
+                assert!(dispatch_is_opaque(command, &arguments(values)), "{command}: {values:?}");
+            }
+            assert!(!dispatch_is_opaque(command, &arguments(&["--target", "x86_64-unknown-linux-gnu", "-"])));
+            assert!(!dispatch_is_opaque(command, &arguments(&["--target=wasm32-wasip1", "-"])));
+        }
     }
 
     #[test]

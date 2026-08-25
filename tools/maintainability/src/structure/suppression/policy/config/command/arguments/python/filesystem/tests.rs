@@ -1,6 +1,136 @@
 use super::has_opaque_write;
 
 #[test]
+fn filesystem_reflection_capabilities_fail_closed() {
+    for source in [
+        "from pathlib import Path\ngetattr(Path('target/input'), 'co' + 'py')('Justfile')\n",
+        "from pathlib import Path\nname = f\"write_{kind}\"\ngetattr(Path('Justfile'), name)(payload)\n",
+        "from pathlib import Path\ntarget = Path('Justfile')\nwriter = target.__getattribute__('write_text')\nwriter(payload)\n",
+        "from pathlib import Path\nPath('Justfile').__getattribute__('unlink')()\n",
+        "from pathlib import Path\n(Path('Justfile')).__getattribute__('unlink')()\n",
+        "from pathlib import Path\n(Path).__dict__['copy'](Path('target/input'), 'Justfile')\n",
+        "from pathlib import Path\nPath.__dict__['copy'](Path('target/input'), 'Justfile')\n",
+        "from pathlib import Path\nPath.__dict__.get('write_text')(Path('Justfile'), payload)\n",
+        "from pathlib import Path\nwriter = Path.__dict__.__getitem__('unlink')\nwriter(Path('Justfile'))\n",
+        "from pathlib import Path\nPath.__mro__[0].__dict__['copy'](Path('target/input'), 'Justfile')\n",
+        "from pathlib import Path\npath_type = Path.__mro__[0]\nwriter = path_type.__dict__.get('write_text')\nwriter(Path('Justfile'), payload)\n",
+        "from pathlib import Path\npath_type = Path.__mro__.__getitem__(0)\nvars(path_type)['unlink'](Path('Justfile'))\n",
+        "from pathlib import Path\nvars(Path)['move'](Path('target/input'), 'Justfile')\n",
+        "from pathlib import Path\nobject.__getattribute__(Path('Justfile'), 'write_text')(payload)\n",
+        "from pathlib import Path\ntype.__getattribute__(Path, 'copy')(Path('target/input'), 'Justfile')\n",
+        "import os\ngetattr(os, 're' + 'move')('Justfile')\n",
+        "import builtins\nfrom pathlib import Path\nbuiltins.getattr(Path('Justfile'), 'write_text')(payload)\n",
+        "import shutil\nfiles = shutil\ncopy = vars(files)['copyfile']\ncopy('target/input', 'Justfile')\n",
+        "import shutil\nfiles = shutil\ncopy = files.__dict__.get('copyfile')\ncopy('target/input', 'Justfile')\n",
+        "from pathlib import Path\nfirst = target = Path('Justfile')\ngetattr(target, 'write_text')(payload)\n",
+        "from pathlib import Path\nfirst = factory = Path\nvars(factory)['move'](Path('target/input'), 'Justfile')\n",
+        "import shutil\nfirst = files = shutil\nvars(files)['copyfile']('target/input', 'Justfile')\n",
+        "from pathlib import Path\nholders = [Path('Justfile')]\ntarget = holders[0]\ngetattr(target, 'write_text')(payload)\n",
+        "from pathlib import Path\nfactories = {'path': Path}\nfactory = factories['path']\nvars(factory)['copy'](Path('target/input'), 'Justfile')\n",
+        "import shutil\nmodules = (shutil,)\nfiles = modules[0]\nfiles.__dict__.__getitem__('move')('target/input', 'Justfile')\n",
+        "import pathlib\nfactory = pathlib.Path\ntarget = factory('Justfile')\ngetattr(target, operation)(payload)\n",
+        "import pathlib\nfactory = (pathlib.Path)\ntarget = factory('Justfile')\nvars(target)[operation](payload)\n",
+        "import pathlib as paths\nmessage = f\"{getattr(paths.Path('Justfile'), operation)(payload)}\"\n",
+        "from pathlib import Path\n[target] = [Path('Justfile')]\ngetattr(target, 'write_text')(payload)\n",
+        "from pathlib import Path\ntarget, = (Path('Justfile'),)\nvars(target)['unlink']()\n",
+        "from pathlib import Path\n(target := Path('Justfile'))\ngetattr(target, 'write_text')(payload)\n",
+        "from pathlib import Path\nitems = []\nitems.append(Path)\nfactory = items.pop()\ngetattr(factory('Justfile'), 'write_text')(payload)\n",
+        "from pathlib import Path\nitems = (Path for _ in range(1))\nfactory = next(items)\nvars(factory)['copy'](Path('input'), 'Justfile')\n",
+        "from pathlib import Path\nholders = {'path': Path}\nfactory = holders.get('path')\ngetattr(factory('Justfile'), 'unlink')()\n",
+        "from pathlib import Path\nwriter = (\n    Path.__mro__[0]\n).__dict__.get('write_text')\nwriter(Path('Justfile'), payload)\n",
+        "from pathlib import Path\nvalues = [Path('target/report.txt').exists()]\nvalue = values[0]\ngetattr(value, 'bit_length')()\n",
+        "import os\nvalue = os.getcwd()\nvalue = getattr(value, 'strip')()\n",
+        "import os\nvalues = [os.getcwd()]\nvalue = values[0]\nvalue = getattr(value, 'strip')()\n",
+        "from pathlib import Path\nvalues = [Path('target/report.txt').read_text()]\nvalue = values[0]\nvalue = getattr(value, 'strip')()\n",
+        "from pathlib import Path\nPath\nrecord.__dict__.get('label')\n",
+        "from builtins import getattr as inspect\nfrom pathlib import Path\ntarget = Path('Justfile')\ninspect(target, 'write_text')(payload)\n",
+        "from pathlib import Path\nvalue = getattr(record, 'label')\n",
+        "from os import getcwd as current_directory\nvalue = getattr(current_directory(), 'strip')()\n",
+        "import operator\nfrom pathlib import Path\nwriter = operator.attrgetter('write_text')(Path)\nwriter(Path('Justfile'), payload)\n",
+        "import operator\nfrom pathlib import Path\noperator.methodcaller('unlink')(Path('Justfile'))\n",
+        "import inspect\nfrom pathlib import Path\nwriter = inspect.getattr_static(Path, 'write_text')\nwriter(Path('Justfile'), payload)\n",
+        "import inspect\nfrom pathlib import Path\ndict(inspect.getmembers(Path))['unlink'](Path('Justfile'))\n",
+        "import inspect\nfrom pathlib import Path\ndict(inspect.getmembers_static(Path))['write_text'](Path('Justfile'), payload)\n",
+        "import operator as operations\nfrom pathlib import Path\noperations.attrgetter('unlink')(Path)(Path('Justfile'))\n",
+        "import operator as operations\nfrom pathlib import Path\nwriter = (operations\n    # qualified reflection lookup\n    .attrgetter)('write_text')(Path)\nwriter(Path('Justfile'), payload)\n",
+        "from operator import attrgetter as field\nfrom pathlib import Path\nfield('write_text')(Path)(Path('Justfile'), payload)\n",
+        "from operator import methodcaller as invoke\nfrom pathlib import Path\ninvoke('write_text', payload)(Path('Justfile'))\n",
+        "from inspect import getattr_static as lookup\nfrom pathlib import Path\nlookup(Path, 'unlink')(Path('Justfile'))\n",
+        "from inspect import getmembers as fields\nimport os\ndict(fields(os))['remove']('Justfile')\n",
+        "from inspect import getmembers_static as fields\nimport shutil\ndict(fields(shutil))['copyfile']('target/input', 'Justfile')\n",
+        "import operator, shutil\ncopy = operator.attrgetter('copyfile')(shutil)\ncopy('target/input', 'Justfile')\n",
+        "import operator\nfrom pathlib import Path\nmessage = f\"{operator.methodcaller(operation, payload)(Path('Justfile'))}\"\n",
+        "import _operator\nfrom pathlib import Path\nwriter = _operator.attrgetter('write_text')(Path)\nwriter(Path('Justfile'), payload)\n",
+        "import _operator\nfrom pathlib import Path\n_operator.methodcaller('unlink')(Path('Justfile'))\n",
+        "import _operator as operations\nfrom pathlib import Path\noperations.attrgetter('unlink')(Path)(Path('Justfile'))\n",
+        "from _operator import attrgetter as field\nfrom pathlib import Path\nfield('write_text')(Path)(Path('Justfile'), payload)\n",
+        "from _operator import methodcaller as invoke\nfrom pathlib import Path\ninvoke('write_text', payload)(Path('Justfile'))\n",
+        "import _operator, os\nremove = _operator.attrgetter('remove')(os)\nremove('Justfile')\n",
+        "import dataclasses\nfrom pathlib import Path\nwriter = dataclasses.inspect.getattr_static(Path, 'write_text')\nwriter(Path('Justfile'), payload)\n",
+        "import dataclasses as records\nfrom pathlib import Path\nrecords.inspect.getattr_static(Path, 'unlink')(Path('Justfile'))\n",
+        "from dataclasses import inspect as introspection\nfrom pathlib import Path\nwriter = introspection.getattr_static(Path, 'write_text')\nwriter(Path('Justfile'), payload)\n",
+        "import dataclasses\nfrom pathlib import Path\nattributes = dataclasses.inspect.classify_class_attrs(Path)\nwriter = next(item.object for item in attributes if item.name == 'write_text')\nwriter(Path('Justfile'), payload)\n",
+        "import dataclasses as records\nfrom pathlib import Path\nnext(item.object for item in records.inspect.classify_class_attrs(Path) if item.name == 'unlink')(Path('Justfile'))\n",
+        "from pathlib import Path\nvalue = helpers.getattr_static(record, 'label')\nPath('target/report.txt').read_text()\n",
+    ] {
+        assert!(has_opaque_write(source), "{source}");
+    }
+}
+
+#[test]
+fn non_filesystem_reflection_remains_allowed() {
+    for source in [
+        "value = getattr(record, 'label')\n",
+        "value = getattr(record, 'la' + 'bel')\n",
+        "value = getattr(record, f'{prefix}_label')\n",
+        "value = getattr(record, field_name)\n",
+        "value = vars(record)['label']\n",
+        "value = record.__getattribute__('label')\n",
+        "value = record.__dict__['label']\n",
+        "alias = record\nvalue = vars(alias)[field_name]\n",
+        "records = {'item': record}\nitem = records['item']\nvalue = item.__dict__.get('label')\n",
+        "first = second = record\nvalue = vars(second)['label']\n",
+        "PathLabel.__dict__.get('label')\n",
+        "from builtins import getattr as inspect\nvalue = inspect(record, 'label')\n",
+        "from builtins import vars as fields\nvalue = fields(record)['label']\n",
+        "import operator as operations\nvalue = operations.attrgetter('label')(record)\n",
+        "import operator as operations\nmodules = [operations]\n",
+        "from operator import methodcaller as invoke\nvalue = invoke('strip')(' report ')\n",
+        "import inspect as inspection\nvalue = inspection.getattr_static(record, 'label')\n",
+        "import inspect as inspection\nvalue = inspection.signature(callback)\n",
+        "import dataclasses\nattributes = dataclasses.inspect.classify_class_attrs(str)\n",
+        "import dataclasses as records\nvalue = records.inspect.getattr_static(str, 'strip')\n",
+        "from dataclasses import inspect as introspection\nvalue = introspection.getattr_static(str, 'strip')\n",
+        "value = records.inspect.getattr_static(record, 'label')\n",
+        "attributes = helpers.classify_class_attrs(record)\n",
+        "value = helpers.attrgetter('label')(record)\n",
+    ] {
+        assert!(!has_opaque_write(source), "{source}");
+    }
+}
+
+#[test]
+fn filesystem_sources_without_reflection_remain_allowed() {
+    for source in [
+        "from pathlib import Path\nvalue = Path('target/report.txt').read_text()\n",
+        "import os\nvalue = os.getcwd()\n",
+        "import shutil\nshutil.copyfile('input.txt', 'target/report.txt')\n",
+        "from pathlib import Path\nvalues = [Path('target/report.txt').exists()]\n",
+        "from pathlib import Path\nprint('operator.attrgetter inspect.getattr_static')\n",
+        "from pathlib import Path\n# operator.methodcaller('unlink')(Path('Justfile'))\nvalue = Path('target/report.txt').read_text()\n",
+        "import inspect\nfrom pathlib import Path\nsignature = inspect.signature(callback)\nvalue = Path('target/report.txt').read_text()\n",
+        "import operator\nfrom pathlib import Path\nlabel = operator.itemgetter('label')(record)\nvalue = Path('target/report.txt').read_text()\n",
+        "import _operator\nfrom pathlib import Path\nlabel = _operator.itemgetter('label')(record)\nvalue = Path('target/report.txt').read_text()\n",
+        "from pathlib import Path\nprint('_operator.attrgetter')\nvalue = Path('target/report.txt').read_text()\n",
+        "from pathlib import Path\n# _operator.methodcaller('unlink')(Path('Justfile'))\nvalue = Path('target/report.txt').read_text()\n",
+        "from pathlib import Path\nprint('dataclasses.inspect.getattr_static classify_class_attrs')\nvalue = Path('target/report.txt').read_text()\n",
+        "from pathlib import Path\n# helpers.classify_class_attrs(Path)\nvalue = Path('target/report.txt').read_text()\n",
+    ] {
+        assert!(!has_opaque_write(source), "{source}");
+    }
+}
+
+#[test]
 fn filesystem_copies_to_execution_surfaces_fail_closed() {
     for source in [
         r#"shutil.copyfile("quality/lint.data", "Justfile")"#,
@@ -11,6 +141,126 @@ fn filesystem_copies_to_execution_surfaces_fail_closed() {
     ] {
         assert!(has_opaque_write(source), "{source}");
     }
+}
+
+#[test]
+fn directory_selecting_copies_validate_the_implicit_child() {
+    for source in [
+        r#"shutil.copy("payload/config.toml", ".cargo")"#,
+        r#"shutil.copy2("payload/check.py", "generated")"#,
+        r#"shutil.move("payload/action.yml", ".github/actions/check")"#,
+        r#"shutil.move("payload/report.txt", "target", copy_function=copy)"#,
+        r#"shutil.copytree("payload", "target/tree")"#,
+    ] {
+        assert!(has_opaque_write(source), "{source}");
+    }
+
+    for source in [
+        r#"shutil.copy("payload/report.txt", "target")"#,
+        r#"shutil.copy2("payload/report.json", "target/data")"#,
+        r#"shutil.move("payload/report.txt", "target")"#,
+    ] {
+        assert!(!has_opaque_write(source), "{source}");
+    }
+}
+
+#[test]
+fn copying_symlinks_and_unpacked_writer_arguments_fail_closed() {
+    for source in [
+        r#"shutil.copy("payload/link", "target", follow_symlinks=False)"#,
+        r#"shutil.copy2("payload/link", "target", follow_symlinks=setting)"#,
+        r#"shutil.copyfile("payload/link", "target/link", follow_symlinks=None)"#,
+        "open(*arguments)\n",
+        "open(  # forwarded writer\n    *arguments\n)\n",
+        "io.open(*arguments)\n",
+        "open('target/report.txt', *arguments)\n",
+        "os.fdopen(*arguments)\n",
+        "Path('target/report.txt').open(*arguments)\n",
+        "shutil.copyfile(*arguments)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(*arguments)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(**options)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(\n    # forwarded options\n    **options\n)\n",
+    ] {
+        assert!(has_opaque_write(source), "{source}");
+    }
+
+    for source in [
+        r#"shutil.copy("payload/report.txt", "target")"#,
+        r#"shutil.copy("payload/report.txt", "target", follow_symlinks=True)"#,
+        r#"shutil.copy("payload/report.txt", "target", follow_symlinks=(True))"#,
+        r#"shutil.copy2("payload/report.txt", "target", follow_symlinks=True)"#,
+        r#"shutil.copyfile("payload/report.txt", "target/report.txt", follow_symlinks=True)"#,
+    ] {
+        assert!(!has_opaque_write(source), "{source}");
+    }
+}
+
+#[test]
+fn filesystem_call_comments_preserve_argument_semantics() {
+    for source in [
+        "open(\n    'Justfile',\n    # positional mode follows\n    'w'  # positional mode ends\n).write(payload)\n",
+        "open(\n    file='Justfile',\n    # keyword mode follows\n    mode='w'  # keyword mode ends\n).write(payload)\n",
+        "from pathlib import Path\nPath('Justfile').open(  # positional mode follows\n    'w'  # final positional\n)\n",
+        "import os\nos.fdopen(descriptor,  # positional mode follows\n    'w'  # final positional\n)\n",
+        "import shutil\nshutil.copy('payload/link', 'target',\n    follow_symlinks=False  # preserve the link\n)\n",
+        "import os\nos.remove('report.txt',\n    dir_fd=directory  # rebased destination\n)\n",
+        "open('target/report.txt', 'w',\n    opener=custom_opener  # custom destination resolution\n)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target',\n    prefix='../script/check-'  # traversing prefix\n)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target',\n    suffix='.rs'  # protected suffix\n)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(\n    dir='script'  # protected directory\n)\n",
+    ] {
+        assert!(has_opaque_write(source), "{source}");
+    }
+
+    for source in [
+        "open('Justfile',\n    # read mode follows\n    'rb'  # final positional\n)\n",
+        "open(file='target/report.txt',\n    # safe keyword follows\n    mode='w'  # final keyword\n)\n",
+        "from pathlib import Path\nPath('target/report.txt').open(  # safe positional mode follows\n    'w'  # final positional\n)\n",
+        "import os\nos.fdopen(descriptor,  # read mode follows\n    'rb'  # final positional\n)\n",
+        "import shutil\nshutil.copy('payload/report.txt', 'target',\n    follow_symlinks=True  # ordinary copy\n)\n",
+        "import os\nos.remove('target/report.txt',\n    dir_fd=None  # no rebasing\n)\n",
+        "open('target/report.txt', 'w',\n    opener=None  # standard opener\n)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(prefix='report-', suffix='.txt',\n    dir='target'  # explicit safe directory\n)\n",
+    ] {
+        assert!(!has_opaque_write(source), "{source}");
+    }
+}
+
+#[test]
+fn malformed_modeled_filesystem_calls_fail_closed() {
+    for source in [
+        "open('target/report.txt', 'w'",
+        "from pathlib import Path\nPath('target/report.txt').open('w'",
+        "import os\nos.fdopen(descriptor, 'rb'",
+        "import shutil\nshutil.copy('payload/report.txt', 'target'",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target'",
+        "open('target/report.txt', 'w)",
+        "open('target/report.txt', 'w'])",
+    ] {
+        assert!(has_opaque_write(source), "{source}");
+    }
+
+    assert!(!has_opaque_write("print('ordinary call')\n"));
+}
+
+#[test]
+fn temporary_files_require_explicit_literal_directories() {
+    for source in [
+        "import tempfile\ntempfile.NamedTemporaryFile()\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir=None)\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(prefix='report-', suffix='.txt')\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target', prefix=r'\\script\\check-', suffix='.txt')\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target', prefix=r'\\\\server\\share\\check-', suffix='.txt')\n",
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target', prefix=r'C:\\script\\check-', suffix='.txt')\n",
+    ] {
+        assert!(has_opaque_write(source), "{source}");
+    }
+    assert!(!has_opaque_write(
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target', prefix='report-', suffix='.txt')\n"
+    ));
+    assert!(!has_opaque_write(
+        "import tempfile\ntempfile.NamedTemporaryFile(dir='target', prefix=r'reports\\check-', suffix='.txt')\n"
+    ));
 }
 
 #[test]
@@ -132,6 +382,34 @@ fn aliases_and_composed_writer_paths_fail_closed() {
 }
 
 #[test]
+fn python_314_path_tree_mutators_fail_closed() {
+    for source in [
+        "source.copy('Justfile')\n",
+        "Path.copy(Path('payload/replacement'), 'Justfile')\n",
+        "Path('payload/replacement').copy('Justfile')\n",
+        "Path('payload/config.toml').copy_into('.cargo')\n",
+        "Path('payload/replacement').move('Justfile')\n",
+        "Path('payload/action.yml').move_into('.github/workflows')\n",
+        "writer = Path('payload/replacement').copy\nwriter('Justfile')\n",
+        "writer = Path.copy\nwriter(Path('payload/replacement'), 'Justfile')\n",
+        "from pathlib import Path as FilePath\nFilePath('payload/replacement').move('Justfile')\n",
+    ] {
+        assert!(has_opaque_write(source), "{source}");
+    }
+
+    // Recursive trees, symlinks, and implicit destination basenames are not
+    // modeled yet, so even apparently safe data-path invocations fail closed.
+    for source in [
+        "Path('payload/report.txt').copy('target/report.txt')\n",
+        "Path('payload/report.txt').copy_into('target')\n",
+        "Path('payload/report.txt').move('target/report.txt')\n",
+        "Path('payload/report.txt').move_into('target')\n",
+    ] {
+        assert!(has_opaque_write(source), "conservative Python 3.14 mutator: {source}");
+    }
+}
+
+#[test]
 fn modeled_mutator_capabilities_fail_closed() {
     for capability in [
         "open",
@@ -177,9 +455,13 @@ fn modeled_mutator_capabilities_fail_closed() {
     }
     for method in [
         "chmod",
+        "copy",
+        "copy_into",
         "hardlink_to",
         "lchmod",
         "mkdir",
+        "move",
+        "move_into",
         "open",
         "rename",
         "replace",
@@ -219,7 +501,6 @@ fn filesystem_copies_to_data_paths_remain_allowed() {
     assert!(!has_opaque_write("message = \"\"\"safe; writer = open\n# writer = builtins.open\"\"\"\n"));
     assert!(!has_opaque_write("writer = (\n    Path('target/report.txt').write_text\n)\ncontainer = [writer]\n"));
     assert!(!has_opaque_write("import tempfile\ntempfile.NamedTemporaryFile(dir='target', suffix='.txt')\n"));
-    assert!(!has_opaque_write("import tempfile\ntempfile.NamedTemporaryFile()\n"));
     assert!(!has_opaque_write("import shutil as files\nfiles.copyfile('quality/report.txt', 'target/report.txt')\n"));
     assert!(!has_opaque_write("from shutil import copyfile as copy\ncopy('quality/report.txt', 'target/report.txt')\n"));
     assert!(!has_opaque_write("from os import remove as erase\nerase('target/report.txt')\n"));
@@ -230,7 +511,6 @@ fn filesystem_copies_to_data_paths_remain_allowed() {
     assert!(!has_opaque_write("open('target/' 'report.txt', 'w').write(payload)\n"));
     assert!(!has_opaque_write("Path('target/' + 'report.txt').write_text(payload)\n"));
     assert!(!has_opaque_write("import shutil as files\nprint('files.copyfile is documentation')\n"));
-    assert!(!has_opaque_write("import tempfile\ntempfile.NamedTemporaryFile(prefix='report-', suffix='.txt')\n"));
     assert!(!has_opaque_write(
         "import shutil as files\nmessage = f\"{files.copyfile('quality/report.txt', 'target/report.txt')}\"\n"
     ));

@@ -24,7 +24,7 @@ pub(super) fn has_non_literal_arguments(source: &str) -> bool {
 }
 
 pub(super) fn has_callable_reference(source: &str) -> bool {
-    super::normalized_qualified_code(source)
+    super::lexical::normalized_qualified_code(source)
         .lines()
         .any(|line| ProcessCallScanner::new(line).has_process_callable_reference())
 }

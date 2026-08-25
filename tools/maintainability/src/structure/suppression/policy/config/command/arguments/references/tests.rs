@@ -129,14 +129,16 @@ fn assert_reviewed_yaml_surface_is_closed(path: &str, analyzed_source: &str) {
             run.clone()
         };
         let normalized = tokens::without_noncommand_shell_data(&analysis_run);
-        let functions = tokens::declared_shell_functions(&normalized);
+        let functions = tokens::declared_shell_functions_in_active_source(&normalized);
         let surface = ShellSurface {
             path,
             mode: ShellMode {
                 direct_program_paths: true,
                 make_surface: false,
+                argv: false,
             },
             functions: &functions,
+            path_policy: None,
             review: ReviewState {
                 git_wrappers: false,
                 source: true,
@@ -208,14 +210,16 @@ fn assert_reviewed_shell_surface_is_closed(surface_path: &str) {
     let source = fs::read_to_string(workspace.join(surface_path)).expect("reviewed shell surface");
     let command_source = super::direct_command_source(surface_path, &source);
     let normalized = assert_reviewed_shell_preamble_is_closed(surface_path, &command_source);
-    let functions = tokens::declared_shell_functions(&normalized);
+    let functions = tokens::declared_shell_functions_in_active_source(&normalized);
     let surface = ShellSurface {
         path: surface_path,
         mode: ShellMode {
             direct_program_paths: true,
             make_surface: false,
+            argv: false,
         },
         functions: &functions,
+        path_policy: None,
         review: ReviewState {
             git_wrappers: git::reviewed_shell_wrappers(surface_path, &source, true),
             source: true,
@@ -492,8 +496,6 @@ fn more_indirect_command_execution_fails_closed() {
         "find /tmp -maxdepth 0 -print",
         "tar --checkpoint=1 -cf archive.tar .",
         "tar -cf archive.tar .",
-        "tar --zstd -xf dist/archive.tar.zst -C extracted",
-        "tar --zstd -xf dist/archive.tar.zst -C \"$RUNNER_TEMP/archive-extracted\"",
         "openssl version",
         "openssl dgst quality/input.txt",
         "openssl x509 -extfile quality/extensions.cnf",
@@ -596,6 +598,8 @@ fn archive_and_language_dispatch_fails_closed() {
         "tar --get --file=payload.tar",
         "tar --extr --file=payload.tar",
         "tar --ge --file=payload.tar",
+        "tar --zstd -xf dist/archive.tar.zst -C extracted",
+        "tar --zstd -xf dist/archive.tar.zst -C $RUNNER_TEMP/archive-extracted",
         "tar -xf payload.tar -C extracted --transform='s|payload|../Justfile|'",
         "tar -xf payload.tar -C extracted --to-command='sh quality/lint.txt'",
         "tar -I quality/lint.txt -xf payload.tar -C extracted",
@@ -612,6 +616,10 @@ fn archive_and_language_dispatch_fails_closed() {
         "unzip -oq -d extracted -: target/payload.zip",
         "unzip -T target/payload.zip -d extracted",
         "unzip -oq target/payload.zip -d $RUNNER_TEMP/extracted",
+        "unzip -oq target/payload.zip -d extracted",
+        "unzip -oqd extracted target/payload.zip",
+        "unzip -oqdextracted target/payload.zip",
+        "unzip -Ppassword -oq target/payload.zip -d extracted",
         "ar x quality/payload.a",
         "llvm-ar --output extracted -xv quality/payload.a",
         "gcc-ar $operation quality/payload.a",
@@ -621,10 +629,6 @@ fn archive_and_language_dispatch_fails_closed() {
     for command in [
         "unzip -l target/payload.zip",
         "unzip -p target/payload.zip Justfile",
-        "unzip -oq target/payload.zip -d extracted",
-        "unzip -oqd extracted target/payload.zip",
-        "unzip -oqdextracted target/payload.zip",
-        "unzip -Ppassword -oq target/payload.zip -d extracted",
         "ar t quality/payload.a",
         "ar p quality/payload.a member",
     ] {

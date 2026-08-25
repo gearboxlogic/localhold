@@ -1,6 +1,6 @@
-use super::{destination_is_opaque, path};
+use super::{DispatchContext, destination_is_opaque, path_policy};
 
-pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]) -> bool {
+pub(super) fn dispatch_is_opaque(context: DispatchContext<'_>, command: &str, arguments: &[String]) -> bool {
     if !is_strip_command(command) {
         return false;
     }
@@ -17,7 +17,7 @@ pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]
         }
         if let Some(output) = output_target(argument, arguments, &mut index) {
             output_selected = true;
-            if destination_is_opaque(path, output) {
+            if destination_is_opaque(context, output) {
                 return true;
             }
         } else if option_consumes_next(argument) {
@@ -30,7 +30,10 @@ pub(super) fn dispatch_is_opaque(path: &str, command: &str, arguments: &[String]
         }
         index += 1;
     }
-    !output_selected && inputs.into_iter().any(in_place_target_is_opaque)
+    !output_selected
+        && inputs
+            .into_iter()
+            .any(|target| path_policy::target_is_opaque(context.path_policy, target, context.semantics))
 }
 
 fn is_strip_command(command: &str) -> bool {
@@ -68,11 +71,4 @@ fn option_consumes_next(argument: &str) -> bool {
             | "--strip-symbol"
             | "--target"
     )
-}
-
-fn in_place_target_is_opaque(target: &str) -> bool {
-    if let Some(target) = path::normalize_literal(target) {
-        return super::super::super::super::is_protected_check_input(&target);
-    }
-    path::contains_dynamic_value(target) || !path::is_absolute(target)
 }

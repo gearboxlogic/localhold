@@ -8,7 +8,9 @@ use sha2::{Digest, Sha256};
 
 use super::super::{ignored_python_paths, parse_nul_paths, validate_relative_path};
 use super::actions::validate_local_actions;
+#[cfg(test)]
 use super::arguments::execution_inputs_for_surface;
+use super::arguments::{WorkspaceAnalyzer, WorkspaceContext, execution_inputs_for_surface_in_workspace};
 use super::is_execution_surface;
 use super::profile_policy::ProfileManifest;
 
@@ -110,7 +112,16 @@ fn close_over_execution_inputs(
         let source = fs::read_to_string(workspace.join(&surface)).with_context(|| format!("read command execution surface {surface}"))?;
         let source_is_reviewed = command_profiles.is_some_and(|profiles| profiles.source_is_current(&surface, &source));
         let reviewed_source = without_reviewed_dispatch(&surface, &source, source_is_reviewed);
-        let execution_inputs = execution_inputs_for_surface(&surface, &reviewed_source, source_is_reviewed);
+        let execution_inputs = execution_inputs_for_surface_in_workspace(
+            WorkspaceContext {
+                root: workspace,
+                execution_surfaces: surfaces,
+                tracked_paths,
+            },
+            &surface,
+            &reviewed_source,
+            source_is_reviewed,
+        );
         let mut referenced_inputs = execution_inputs.paths;
         referenced_inputs.extend(windows_bare_program_shadows(&execution_inputs.windows_bare_programs, checked_paths));
         if execution_inputs.unresolved {
@@ -135,6 +146,21 @@ fn close_over_execution_inputs(
             if surfaces.insert(input.clone()) {
                 pending.push(input);
             }
+        }
+    }
+    let analyzer = WorkspaceAnalyzer::new(WorkspaceContext {
+        root: workspace,
+        execution_surfaces: surfaces,
+        tracked_paths,
+    });
+    for surface in surfaces.iter() {
+        let source = fs::read_to_string(workspace.join(surface)).with_context(|| format!("read command execution surface {surface}"))?;
+        let legacy_transition = command_profiles.and_then(|profiles| profiles.legacy_transition_bridge(surface, &source));
+        let source_is_reviewed = command_profiles.is_some_and(|profiles| profiles.source_is_current(surface, &source));
+        let reviewed_source = without_reviewed_dispatch(surface, &source, source_is_reviewed);
+        let execution_inputs = analyzer.execution_inputs(surface, &reviewed_source, source_is_reviewed);
+        if execution_inputs.unresolved && !legacy_transition.is_some_and(|bridge| bridge.opaque_execution_inputs) {
+            bail!("command execution surface {surface:?} uses an opaque interpreter program or makefile selection");
         }
     }
     Ok(())
@@ -620,7 +646,7 @@ mod tests {
         fs::create_dir(repository.path().join("script")).expect("create script directory");
         fs::write(
             repository.path().join("script/check.py"),
-            "#!/usr/bin/env python3\nimport subprocess\nsubprocess.run(['git', 'status'], check=True)\n",
+            "#!/usr/bin/env python3\nimport subprocess\nsubprocess.run(['git', 'rev-parse', '--verify', 'HEAD'], check=True)\n",
         )
         .expect("write Python command surface");
         git(repository.path(), &["init", "--quiet"]);
@@ -665,7 +691,7 @@ mod tests {
             fs::create_dir_all(repository.path().join("quality")).expect("create shadow directory");
             fs::write(
                 repository.path().join("script/check.py"),
-                format!("#!/usr/bin/env python3\nimport os, subprocess\n{mutation}\nsubprocess.run(['git', 'status'], check=True)\n"),
+                format!("#!/usr/bin/env python3\nimport os, subprocess\n{mutation}\nsubprocess.run(['git', 'rev-parse', '--verify', 'HEAD'], check=True)\n"),
             )
             .expect("write Python command surface");
             fs::write(repository.path().join("quality/GIT.EXE"), "#!/bin/sh\nexit 0\n").expect("write Windows shadow");

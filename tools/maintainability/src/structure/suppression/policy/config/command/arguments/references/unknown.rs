@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use super::ValueSemantics;
+
 pub(super) fn reviewed_dynamic_program(surface: &str, command: &str, reviewed_git_wrappers: bool) -> Option<&'static str> {
     (reviewed_git_wrappers && surface == "script/check-maintainability-bootstrap.sh" && command == "git_command").then_some("git")
 }
@@ -90,6 +92,7 @@ fn is_standard_utility(command: &str) -> bool {
             | "split"
             | "tar"
             | "tail"
+            | "tee"
             | "touch"
             | "uname"
             | "unzip"
@@ -98,13 +101,18 @@ fn is_standard_utility(command: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 pub(super) fn execution_inputs<'a>(_surface: &str, command: &str, arguments: &'a [String]) -> (Vec<&'a str>, bool) {
+    execution_inputs_with_semantics(command, arguments, ValueSemantics::Shell)
+}
+
+pub(super) fn execution_inputs_with_semantics<'a>(command: &str, arguments: &'a [String], semantics: ValueSemantics) -> (Vec<&'a str>, bool) {
     let rust_sources = arguments.iter().map(String::as_str).filter(|argument| is_rust_source(argument)).collect::<Vec<_>>();
-    let literal_command = !contains_dynamic_value(command);
+    let literal_command = !contains_dynamic(semantics, command);
     let opaque = literal_command
         || !rust_sources.is_empty()
         || arguments.iter().any(|argument| contains_rust_source_text(argument) || inline_code_option(argument))
-        || arguments.iter().any(|argument| !is_shell_structure(argument) && contains_dynamic_value(argument));
+        || arguments.iter().any(|argument| !is_shell_structure(argument) && contains_dynamic(semantics, argument));
     (rust_sources, opaque)
 }
 
@@ -129,6 +137,10 @@ fn contains_rust_source_text(argument: &str) -> bool {
 
 fn contains_dynamic_value(value: &str) -> bool {
     value.contains('`') || value.contains(['*', '?', '[', '{', '~', '%', '!']) || value.as_bytes().windows(2).any(|pair| pair[0] == b'$' && pair[1] != b'\'')
+}
+
+fn contains_dynamic(semantics: ValueSemantics, value: &str) -> bool {
+    semantics == ValueSemantics::Shell && contains_dynamic_value(value)
 }
 
 #[cfg(test)]
@@ -162,7 +174,7 @@ mod tests {
 
     #[test]
     fn data_consumers_are_explicit_and_surface_specific() {
-        for command in ["wc", "head", "diff", "rg", "printf", "[["] {
+        for command in ["wc", "head", "diff", "rg", "printf", "tee", "[["] {
             assert!(is_preclassified_command("script/check.sh", command), "{command}");
         }
         assert!(is_preclassified_command("script/test-postgres-smoke.sh", "container_cli"));

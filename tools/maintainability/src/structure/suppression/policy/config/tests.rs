@@ -697,6 +697,10 @@ fn powershell_quality_steps_enforce_native_exit_status() {
         ".github/workflows/ci.yml",
         "steps:\n  - shell: bash\n    run: |\n      cargo clippy --locked -- -D warnings\n      exit 0\n"
     ));
+    assert!(!weakening_token_for_surface(
+        ".github/workflows/ci.yml",
+        "steps:\n  - shell: pwsh\n    run: Write-Output 'cargo clippy -- --a`llow warnings'\n"
+    ));
     assert!(weakening_token_for_surface(
         ".github/workflows/unreviewed.yml",
         "steps:\n  - shell: pwsh\n    run: $value = $(./quality/payload.ps1)\n"

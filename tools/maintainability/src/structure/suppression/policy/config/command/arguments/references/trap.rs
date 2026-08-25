@@ -57,8 +57,10 @@ mod tests {
             mode: super::super::ShellMode {
                 direct_program_paths: true,
                 make_surface: false,
+                argv: false,
             },
             functions: &functions,
+            path_policy: None,
             review: super::super::ReviewState {
                 git_wrappers: false,
                 source: false,

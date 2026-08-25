@@ -1,4 +1,4 @@
-use super::{REVIEWED_DYNAMIC_DESTINATIONS, dispatch_is_opaque};
+use super::{REVIEWED_DYNAMIC_DESTINATIONS, argv_dispatch_is_opaque, dispatch_is_opaque};
 
 fn dispatch(path: &str, command: &str, arguments: &[String]) -> bool {
     dispatch_is_opaque(path, true, command, arguments)
@@ -6,6 +6,52 @@ fn dispatch(path: &str, command: &str, arguments: &[String]) -> bool {
 
 fn opaque(command: &str, arguments: &[&str]) -> bool {
     dispatch("script/check.sh", command, &arguments.iter().map(|argument| (*argument).to_owned()).collect::<Vec<_>>())
+}
+
+#[test]
+fn argv_operands_do_not_gain_shell_redirection_semantics() {
+    let arguments = vec!["%s".to_owned(), ">Justfile".to_owned()];
+    assert!(dispatch_is_opaque("script/check.sh", false, "printf", &arguments));
+    assert!(!argv_dispatch_is_opaque("script/check.py", "printf", &arguments));
+}
+
+#[test]
+fn argv_literal_paths_do_not_gain_shell_expansion_semantics() {
+    let literal_paths = ["payload/report$*.txt", "target/report$*.txt"].map(str::to_owned);
+    assert!(dispatch_is_opaque("script/check.sh", false, "cp", &literal_paths));
+    assert!(!argv_dispatch_is_opaque("script/check.py", "cp", &literal_paths));
+
+    let protected = ["payload/report$*.txt", "target/Cargo.toml"].map(str::to_owned);
+    assert!(argv_dispatch_is_opaque("script/check.py", "cp", &protected));
+
+    let protected_with_literal_marker = ["payload/report$*.txt", "policy/maintainability/$draft.json"].map(str::to_owned);
+    assert!(argv_dispatch_is_opaque("script/check.py", "cp", &protected_with_literal_marker));
+
+    let chmod = ["0600", "target/report?[draft].txt"].map(str::to_owned);
+    assert!(dispatch_is_opaque("script/check.sh", false, "chmod", &chmod));
+    assert!(!argv_dispatch_is_opaque("script/check.py", "chmod", &chmod));
+}
+
+#[test]
+fn argv_literal_semantics_reach_output_removal_and_in_place_mutation() {
+    for (command, arguments) in [
+        ("rm", vec!["target/report$*.txt"]),
+        ("sort", vec!["-o", "target/report$*.txt", "payload/input.txt"]),
+        ("strip", vec!["target/report$*.bin"]),
+    ] {
+        let arguments = arguments.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        assert!(dispatch_is_opaque("script/check.sh", false, command, &arguments), "shell accepted {command}");
+        assert!(!argv_dispatch_is_opaque("script/check.py", command, &arguments), "argv rejected {command}");
+    }
+
+    for (command, arguments) in [
+        ("rm", vec!["policy/maintainability/$draft.json"]),
+        ("sort", vec!["-o", "policy/maintainability/$draft.json", "payload/input.txt"]),
+        ("strip", vec!["policy/maintainability/$draft.bin"]),
+    ] {
+        let arguments = arguments.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        assert!(argv_dispatch_is_opaque("script/check.py", command, &arguments), "argv accepted protected {command}");
+    }
 }
 
 #[test]
@@ -24,6 +70,8 @@ fn mutation_of_protected_check_inputs_fails_closed() {
     assert!(opaque("cp", &["--t=$destination", "quality/lint.data"]));
     assert!(opaque("cp", &["-t$destination", "quality/lint.data"]));
     assert!(opaque("cp", &["quality/lint.data", "../Justfile"]));
+    assert!(opaque("cp", &["--suffix", "--help", "quality/lint.data", "Justfile"]));
+    assert!(opaque("cp", &["-S", "--version", "quality/lint.data", "Justfile"]));
     for destination in ["clippy.toml", "Cargo.toml", "src/lib.rs", "policy/maintainability/structure.json"] {
         assert!(opaque("cp", &["quality/lint.data", destination]), "accepted {destination:?}");
     }
@@ -37,14 +85,191 @@ fn mutation_of_protected_check_inputs_fails_closed() {
     assert!(!opaque("unlink", &["--version"]));
     assert!(!opaque("cp", &["input.txt", "output.txt"]));
     assert!(!opaque("cp", &["-ttarget/output", "input.txt"]));
-    assert!(!opaque("cp", &["input.txt", "/tmp/output.txt"]));
-    assert!(!opaque("cp", &["input.txt", r"C:\tmp\output.txt"]));
+    assert!(opaque("cp", &["input.txt", "/proc/self/cwd/Justfile"]));
+    assert!(opaque("cp", &["input.txt", "/tmp/output.txt"]));
+    assert!(opaque("cp", &["input.txt", r"C:\tmp\output.txt"]));
     assert!(opaque("cp", &["input.txt", r"\repo\Justfile"]));
     assert!(!opaque("dd", &["if=quality/lint.data", "of=target/output.txt"]));
-    assert!(!opaque("ln", &["input.txt", "target/output.txt"]));
+    assert!(opaque("ln", &["input.txt", "target/output.txt"]));
     assert!(opaque("cp", &["$option", "quality/check", "target/missing"]));
     assert!(opaque("dd", &["if=quality/payload", "$output"]));
     assert!(opaque("gzip", &["$flags", "Justfile.gz"]));
+    assert!(!opaque("cp", &["--help"]));
+}
+
+#[test]
+fn permission_changes_to_protected_or_unresolved_inputs_fail_closed() {
+    for command in ["chmod", "chmod.exe"] {
+        assert!(opaque(command, &["+x", "script/check.sh"]), "{command}");
+        assert!(opaque(command, &["-R", "a-w", "quality"]), "{command}");
+        assert!(opaque(command, &["0700", "$target"]), "{command}");
+        assert!(opaque(command, &["0000", "src/../Justfile"]), "{command}");
+        assert!(opaque(command, &["0000", "/proc/self/cwd/Justfile"]), "{command}");
+        assert!(!opaque(command, &["0600", "target/report.txt"]), "{command}");
+        assert!(!opaque(command, &["--help"]), "{command}");
+        assert!(opaque(command, &["0000", "--", "-check.sh"]), "{command}");
+        assert!(!opaque(command, &["0600", "--", "-report.txt"]), "{command}");
+        assert!(!opaque(command, &["--reference", "Justfile", "target/report.txt"]), "{command}");
+        assert!(opaque(command, &["--reference", "--help", "Justfile"]), "{command}");
+        assert!(opaque(command, &["--reference"]), "{command}");
+    }
+
+    let reviewed = ["-R", "a-w", "--", "$snapshot_root"].map(str::to_owned);
+    assert!(!dispatch("script/check-maintainability-bootstrap.sh", "chmod_command", &reviewed));
+    assert!(dispatch("script/check.sh", "chmod", &reviewed));
+
+    let fixture = ["+x", "$fake_system_bin/git"].map(str::to_owned);
+    assert!(!dispatch("script/tests/test_maintainability_bootstrap.sh", "chmod", &fixture));
+    assert!(dispatch("script/check.sh", "chmod", &fixture));
+}
+
+#[test]
+fn mutating_operands_reject_traversal_and_windows_aliases() {
+    for (command, arguments) in [
+        ("copy-item", &["payload/report", "src/../Justfile"][..]),
+        ("copy-item", &["payload/report", r"src\..\Justfile"]),
+        ("set-content", &["src/../Justfile", "payload"]),
+        ("sed", &["-i", "s/check/skip/", "src/../Justfile"]),
+        ("perl", &["-i", "-pe", "s/check/skip/", "src/../Justfile"]),
+    ] {
+        assert!(opaque(command, arguments), "{command}: {arguments:?}");
+    }
+    assert!(opaque("ln", &["src/../Justfile", "pivot"]));
+    assert!(opaque("link", &["src/../Justfile", "pivot"]));
+    assert!(opaque("sed", &["-i", "s/check/skip/", "--", "-check.sh"]));
+    assert!(opaque("perl", &["-i", "-pe", "s/check/skip/", "--", "-check.sh"]));
+    assert!(opaque("sed", &["-ni", "s/check/skip/", "--", "-check.sh"]));
+    assert!(opaque("perl", &["-pi", "-e", "s/check/skip/", "--", "-check.sh"]));
+    assert!(!opaque("sed", &["-i", "s/check/skip/", "--", "-report.txt"]));
+    assert!(!opaque("perl", &["-i", "-pe", "s/check/skip/", "--", "-report.txt"]));
+    assert!(!opaque("sed", &["-i", "-e", r"/script\/check/d", "--", "-report.txt"]));
+    assert!(!opaque("perl", &["-i", "-e", r"/script\/check/", "--", "-report.txt"]));
+    assert!(!opaque("sed", &["-einsert", "Justfile"]));
+    assert!(!opaque("perl", &["-Mstrict", "script/check.pl", "Justfile"]));
+}
+
+#[test]
+fn abbreviated_sed_in_place_options_fail_closed() {
+    for option in ["--i", "--in", "--in-p", "--in-pl", "--in-plac", "--in-place"] {
+        assert!(opaque("sed", &[option, "s/check/skip/", "Justfile"]), "{option}");
+    }
+    assert!(!opaque("sed", &["--in", "s/check/skip/", "target/report.txt"]));
+    assert!(!opaque("sed", &["-n", "s/check/skip/", "Justfile"]));
+}
+
+#[test]
+fn copies_that_can_materialize_symbolic_links_fail_closed() {
+    for command in ["cp", "cp.exe"] {
+        for arguments in [
+            &["-P", "payload/link", "target/pivot"][..],
+            &["-a", "payload/tree", "target/tree"],
+            &["-d", "payload/link", "target/pivot"],
+            &["-R", "payload/tree", "target/tree"],
+            &["-rf", "payload/tree", "target/tree"],
+            &["-l", "payload/report", "target/pivot"],
+            &["-s", "payload/report", "target/pivot"],
+            &["-vl", "payload/report", "target/pivot"],
+            &["-vs", "payload/report", "target/pivot"],
+            &["--archive", "payload/tree", "target/tree"],
+            &["--l", "payload/report", "target/pivot"],
+            &["--link", "payload/report", "target/pivot"],
+            &["--no-dereference", "payload/link", "target/pivot"],
+            &["--recursive", "payload/tree", "target/tree"],
+            &["--symbolic-link", "payload/report", "target/pivot"],
+            &["--sy", "payload/report", "target/pivot"],
+            &["--pre=links", "payload/tree", "target/tree"],
+            &["--pre", "links", "payload/tree", "target/tree"],
+            &["--preserve=links", "payload/tree", "target/tree"],
+            &["--preserve", "all", "payload/tree", "target/tree"],
+        ] {
+            assert!(opaque(command, arguments), "{command}: {arguments:?}");
+        }
+        assert!(!opaque(command, &["payload/report.txt", "target/report.txt"]), "{command}");
+        assert!(!opaque(command, &["-L", "payload/link", "target/report.txt"]), "{command}");
+    }
+}
+
+#[test]
+fn relocations_fail_closed_without_an_exact_reviewed_profile() {
+    for command in ["mv", "mv.exe", "move", "move-item"] {
+        assert!(opaque(command, &["target/pivot", "target/report"]), "{command}");
+        assert!(opaque(command, &["payload/link", "quality/check"]), "{command}");
+        assert!(opaque(command, &["$source", "$destination"]), "{command}");
+        assert!(opaque(command, &["payload/report", "script", "--", "--help"]), "{command}");
+    }
+    for command in ["mv", "mv.exe"] {
+        assert!(!opaque(command, &["--help"]), "{command}");
+    }
+    for command in ["move", "move-item"] {
+        assert!(opaque(command, &["--help"]), "{command}");
+    }
+    for command in ["ln", "ln.exe", "link", "mv", "mv.exe"] {
+        assert!(opaque(command, &["payload/report", "script", "/?"]), "{command}");
+        assert!(opaque(command, &["/?"]), "{command}");
+    }
+    assert!(!opaque("move", &["/?"]));
+    assert!(opaque("move-item", &["/?"]));
+
+    let reviewed = ["$dependency", "$moved"].map(str::to_owned);
+    assert!(!dispatch(".github/workflows/gpu-release-gate.yml", "mv", &reviewed));
+    assert!(dispatch("script/check.sh", "mv", &reviewed));
+}
+
+#[test]
+fn archive_extraction_fails_closed_even_for_isolated_destinations() {
+    for command in ["tar", "tar.exe"] {
+        for arguments in [
+            &["-xf", "payload.tar", "-C", "extracted"][..],
+            &["xvf", "payload.tar"],
+            &["--extract", "--file=payload.tar", "--directory=extracted"],
+            &["--get", "--file=payload.tar"],
+            &["$operation", "payload.tar"],
+        ] {
+            assert!(opaque(command, arguments), "{command}: {arguments:?}");
+        }
+        assert!(!opaque(command, &["-tf", "payload.tar"]), "{command}");
+        assert!(!opaque(command, &["-cf", "target/archive.tar", "payload/report"]), "{command}");
+        for arguments in [
+            &["-cf", "Justfile", "payload/report"][..],
+            &["-rf", "Cargo.toml", "payload/report"],
+            &["-uf", "policy/maintainability/structure.json", "payload/report"],
+            &["-Af", "script/check.sh", "payload.tar"],
+            &["--delete", "--file", "policy/maintainability/structure.json", "member"],
+            &["--index-file=Justfile", "-cf", "target/archive.tar", "payload/report"],
+            &["-cg", "Cargo.toml", "-f", "target/archive.tar", "payload/report"],
+            &["--listed-incremental=policy/maintainability/state", "-cf", "target/archive.tar", "payload/report"],
+            &["--remove-files", "-cf", "target/archive.tar", "Justfile"],
+            &["cbf", "20", "Justfile", "payload/report"],
+            &["cfg", "target/archive.tar", "Justfile", "payload/report"],
+            &["-cf", "Justfile", "payload/report", "/?"],
+            &["-cf", "Justfile", "payload/report", "--", "--help"],
+        ] {
+            assert!(opaque(command, arguments), "{command}: {arguments:?}");
+        }
+    }
+    for command in ["unzip", "unzip.exe"] {
+        assert!(opaque(command, &["-oq", "payload.zip", "-d", "extracted"]), "{command}");
+        assert!(opaque(command, &["-oqdextracted", "payload.zip"]), "{command}");
+        assert!(opaque(command, &["-oq", "payload.zip", "-d", "--help"]), "{command}");
+        assert!(opaque(command, &["-oq", "payload.zip", "-d", "-l"]), "{command}");
+        assert!(opaque(command, &["-oq", "payload.zip", "-x", "--help"]), "{command}");
+        assert!(opaque(command, &["-P", "--help", "payload.zip"]), "{command}");
+        assert!(opaque(command, &["-P", "-l", "payload.zip"]), "{command}");
+        assert!(opaque(command, &["-P"]), "{command}");
+        assert!(!opaque(command, &["-l", "payload.zip"]), "{command}");
+        assert!(!opaque(command, &["-p", "payload.zip", "report.txt"]), "{command}");
+        assert!(!opaque(command, &["-q", "-t", "payload.zip"]), "{command}");
+        assert!(!opaque(command, &["-P", "secret", "-l", "payload.zip"]), "{command}");
+        assert!(!opaque(command, &["-Psecret", "-l", "payload.zip"]), "{command}");
+        assert!(!opaque(command, &["-Pindex", "-l", "payload.zip"]), "{command}");
+        assert!(!opaque(command, &["-PTEST", "-l", "payload.zip"]), "{command}");
+        assert!(opaque(command, &["-odPsecret", "payload.zip"]), "{command}");
+        assert!(!opaque(command, &["--help"]), "{command}");
+    }
+
+    let reviewed = ["--zstd", "-xf", "dist/*.tar.zst", "-C", "extracted"].map(str::to_owned);
+    assert!(!dispatch(".github/workflows/release.yml", "tar", &reviewed));
+    assert!(dispatch("script/check.sh", "tar", &reviewed));
 }
 
 #[test]
@@ -53,14 +278,19 @@ fn removal_of_protected_or_unresolved_inputs_fails_closed() {
         assert!(opaque(command, &["--", "clippy.toml"]), "{command}");
         assert!(opaque(command, &["$target"]), "{command}");
         assert!(!opaque(command, &["-f", "target/report.txt"]), "{command}");
-        assert!(!opaque(command, &["/tmp/report.txt"]), "{command}");
-        assert!(!opaque(command, &[r"C:\tmp\report.txt"]), "{command}");
+        assert!(opaque(command, &["/proc/self/cwd/Justfile"]), "{command}");
+        assert!(opaque(command, &["/tmp/report.txt"]), "{command}");
+        assert!(opaque(command, &[r"C:\tmp\report.txt"]), "{command}");
         assert!(opaque(command, &[r"\repo\Justfile"]), "{command}");
     }
     assert!(opaque("remove-item", &["-Path:Justfile"]));
     assert!(opaque("remove-item", &["-LiteralPath:$target"]));
     assert!(!opaque("rm", &["--help", "Justfile"]));
     assert!(!opaque("rm.exe", &["--version", "Justfile"]));
+    for marker in ["--help", "--version"] {
+        assert!(opaque("rm", &["--", marker, "Justfile"]), "{marker}");
+        assert!(!opaque("rm", &["--", marker, "target/report.txt"]), "{marker}");
+    }
 }
 
 #[test]
@@ -99,11 +329,25 @@ fn reviewed_dynamic_destinations_are_path_specific() {
 
     let reviewed = ["-s", "--", "$script_dir/test_claude_review.sh", "$test_root/bin/claude"].map(str::to_owned);
     assert!(!dispatch("script/tests/test_claude_review.sh", "ln", &reviewed));
+    assert!(dispatch_is_opaque("script/tests/test_claude_review.sh", false, "ln", &reviewed));
     assert!(dispatch("script/check.sh", "ln", &reviewed));
 
     let runner_temp = ["report".to_owned(), ">$RUNNER_TEMP/reports/check.txt".to_owned()];
     assert!(!dispatch(".github/workflows/check.yml", "printf", &runner_temp));
     assert!(dispatch("script/check.sh", "printf", &runner_temp));
+
+    assert!(dispatch_is_opaque(
+        ".github/workflows/check.yml",
+        false,
+        "printf",
+        &["report".to_owned(), ">$RUNNER_TEMP/Justfile".to_owned()],
+    ));
+    assert!(dispatch_is_opaque(
+        "script/tests/test_maintainability_bootstrap.sh",
+        false,
+        "printf",
+        &["report".to_owned(), ">$target".to_owned()],
+    ));
 }
 
 #[test]
@@ -149,6 +393,11 @@ fn every_tee_output_destination_fails_closed() {
         assert!(opaque("tee.exe", arguments), "{arguments:?}");
     }
     assert!(!opaque("tee", &["--append", "target/report", "target/summary"]));
+    assert!(!opaque("tee", &["--help", "Justfile"]));
+    for marker in ["--help", "--version"] {
+        assert!(opaque("tee", &["--", marker, "Justfile"]), "{marker}");
+        assert!(!opaque("tee", &["--", marker, "target/report"]), "{marker}");
+    }
 }
 
 #[test]
@@ -225,8 +474,8 @@ fn strip_outputs_and_in_place_targets_cannot_replace_protected_inputs() {
         assert!(opaque(command, &["$input"]), "{command}");
         assert!(!opaque(command, &["-o", "target/stripped", "clippy.toml"]), "{command}");
         assert!(!opaque(command, &["target/payload"]), "{command}");
-        assert!(!opaque(command, &["/tmp/payload"]), "{command}");
-        assert!(!opaque(command, &[r"C:\tmp\payload"]), "{command}");
+        assert!(opaque(command, &["/tmp/payload"]), "{command}");
+        assert!(opaque(command, &[r"C:\tmp\payload"]), "{command}");
         assert!(opaque(command, &[r"\repo\Justfile"]), "{command}");
         assert!(!opaque(command, &["-I", "Justfile", "target/payload"]), "{command}");
     }
@@ -289,7 +538,7 @@ fn jar_extraction_and_dynamic_operations_fail_closed() {
 }
 
 #[test]
-fn in_place_decompression_fails_closed() {
+fn unreviewed_compression_commands_fail_closed() {
     for (command, arguments) in [
         ("gzip", &["-dkf", "Justfile.gz"][..]),
         ("gzip.exe", &["--decompress", "--force", "Justfile.gz"]),
@@ -299,17 +548,30 @@ fn in_place_decompression_fails_closed() {
         ("zstd", &["--decompress", "Justfile.zst"]),
         ("unlz4.exe", &["Justfile.lz4"]),
         ("brotli", &["-d", "Justfile.br"]),
-    ] {
-        assert!(opaque(command, arguments), "{command}: {arguments:?}");
-    }
-    for (command, arguments) in [
+        ("gzip", &["--suffix", "--help", "-d", "Justfile--help"]),
+        ("gzip", &["-S", "-t", "-d", "Justfile-t"]),
+        ("gzip", &["-S-t", "-d", "Justfile-t"]),
+        ("gzip", &["--suffix=--help", "-d", "Justfile--help"]),
+        ("gzip", &["-S"]),
+        ("gzip", &["Justfile"]),
+        ("gzip", &["--suffix", "--help", "Justfile"]),
+        ("xz", &["Justfile"]),
         ("gzip", &["-dc", "Justfile.gz"][..]),
         ("gunzip", &["--stdout", "Justfile.gz"]),
         ("gzip", &["--list", "Justfile.gz"]),
         ("xz", &["--test", "Justfile.xz"]),
         ("zstd", &["--decompress", "--to-stdout", "Justfile.zst"]),
+        ("gunzip", &["--help"]),
+        ("gzip", &["-c", "Justfile"]),
+        ("lz4", &["-D", "--help", "-d", "Justfile.lz4", "Justfile"]),
+        ("bzip2", &["-V", "Justfile"]),
+        ("bzip2", &["--version", "Justfile"]),
+        ("bzip2", &["-L", "Justfile"]),
+        ("bzip2", &["--license", "Justfile"]),
+        ("xz", &["-Flzma", "Justfile"]),
+        ("lz4", &["-f", "-l", "Justfile", "target/output"]),
     ] {
-        assert!(!opaque(command, arguments), "{command}: {arguments:?}");
+        assert!(opaque(command, arguments), "{command}: {arguments:?}");
     }
 }
 

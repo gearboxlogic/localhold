@@ -1,5 +1,12 @@
+use super::ValueSemantics;
+
+#[cfg(test)]
 pub(super) fn dispatch_is_opaque(command: &str, arguments: &[String]) -> bool {
-    matches!(command, "ssh-keygen" | "ssh-keygen.exe") && (arguments.iter().any(|argument| super::path::contains_dynamic_value(argument)) || pkcs11_provider_is_selected(arguments))
+    dispatch_with_semantics(command, arguments, ValueSemantics::Shell)
+}
+
+pub(super) fn dispatch_with_semantics(command: &str, arguments: &[String], semantics: ValueSemantics) -> bool {
+    matches!(command, "ssh-keygen" | "ssh-keygen.exe") && (arguments.iter().any(|argument| semantics.contains_dynamic(argument)) || pkcs11_provider_is_selected(arguments))
 }
 
 fn pkcs11_provider_is_selected(arguments: &[String]) -> bool {

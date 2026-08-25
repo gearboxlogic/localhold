@@ -14,6 +14,7 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "_aix_support",
     "_interpreters",
     "_operator",
+    "_osx_support",
     "_pickle",
     "_pyrepl",
     "_sqlite3",
@@ -192,11 +193,9 @@ fn environment_reference_is_opaque(line: &str) -> bool {
 
 fn has_delete_keyword(head: &str) -> bool {
     let statement = head.rsplit(';').next().unwrap_or(head);
-    statement.match_indices("del").any(|(index, keyword)| {
-        let before = statement[..index].chars().next_back();
-        let after = statement[index + keyword.len()..].chars().next();
-        !before.is_some_and(is_identifier_character) && !after.is_some_and(is_identifier_character)
-    })
+    statement
+        .match_indices("del")
+        .any(|(index, keyword)| identifier_is_exact_at(statement, index, keyword.len()))
 }
 
 fn after_matching_subscript(source: &str) -> Option<&str> {
@@ -436,20 +435,15 @@ fn strip_python_keyword<'a>(statement: &'a str, keyword: &str) -> Option<&'a str
 fn standalone_module_value(statement: &str, module: &str) -> bool {
     statement.match_indices(module).any(|(index, _)| {
         let before = statement[..index].chars().next_back();
-        let after = statement[index + module.len()..].chars().next();
-        if before == Some('.') || before.is_some_and(is_identifier_character) || after.is_some_and(is_identifier_character) {
-            return false;
-        }
-        !statement[index + module.len()..].trim_start().starts_with('.')
+        before != Some('.') && identifier_is_exact_at(statement, index, module.len()) && !statement[index + module.len()..].trim_start().starts_with('.')
     })
 }
 
 fn nested_module_value(statement: &str, module: &str) -> bool {
     let reference = format!(".{module}");
-    statement.match_indices(&reference).any(|(index, _)| {
-        let end = index + reference.len();
-        statement[..index].chars().next_back().is_some_and(is_identifier_character) && !statement[end..].chars().next().is_some_and(is_identifier_character)
-    })
+    statement
+        .match_indices(&reference)
+        .any(|(index, _)| statement[..index].chars().next_back().is_some_and(is_identifier_character) && identifier_is_exact_at(statement, index + 1, module.len()))
 }
 
 fn is_command_module(name: &str) -> bool {

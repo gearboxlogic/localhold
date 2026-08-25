@@ -454,6 +454,7 @@ fn dynamic_path(path: &[String]) -> bool {
                 | "__breakpointhook__"
                 | "_getframe"
                 | "_current_frames"
+                | "_FuncBuilder"
                 | "currentframe"
                 | "exec_module"
                 | "f_globals"

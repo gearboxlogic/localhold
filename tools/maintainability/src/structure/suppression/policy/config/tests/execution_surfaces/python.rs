@@ -841,6 +841,8 @@ fn command_policy_rejects_native_stdlib_execution_escape_hatches() {
         "import test.test_ttk as tests\ninterpreter = tests.tkinter.Tcl()\ninterpreter.call('exec', 'sh', 'quality/hidden.txt')\n",
         "import pipes\npipeline = pipes.Template()\npipeline.append('sh quality/hidden.txt', '--')\npipeline.open_r('/dev/null').read()\n",
         "import venv\nvenv.EnvBuilder()._call_new_python(context, 'quality/hidden.txt')\n",
+        "import _osx_support\n_osx_support._read_output('sh quality/hidden.txt')\n",
+        "import dataclasses\nfrom pathlib import Path\nbuilder = dataclasses._FuncBuilder(globals())\nbuilder.add_fn('payload', [], ['arg=' + Path('quality/hidden.txt').read_text()])\nbuilder.add_fns_to_class(Target)\n",
     ]);
 }
 

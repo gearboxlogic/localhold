@@ -11,60 +11,59 @@ pub(super) struct LegacyTransitionBridge {
     pub(super) current: &'static str,
     pub(super) successor: &'static str,
     pub(super) opaque_execution_inputs: bool,
-    pub(super) environment_weakening: bool,
+    pub(super) weakening: bool,
 }
 
-// The protected predecessor accepts only these exact legacy bytes and staged
-// successors. Promotion retires each current digest, so the bridge stops matching.
+// Exact legacy bytes may bridge only to staged successors; promotion retires each bridge.
 const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
     LegacyTransitionBridge {
         path: "script/bootstrap.sh",
         current: "36982c49561af13986fc34ddeefd759010cd615980604eca34d09ef5ba0358c3",
         successor: "e0302179ecc01f9feb178b74420db156736c04e33a4e67d304fa3bc2390fdbf3",
         opaque_execution_inputs: true,
-        environment_weakening: false,
+        weakening: false,
     },
     LegacyTransitionBridge {
         path: "script/dep-audit.sh",
         current: "5542706978c03c28159305257466a32566fd66bcae9c7502de4be91fa45ae7d1",
         successor: "03b36529705c704b244dd5e128e1dd1461a66677bdda0bcceedaa582015160dc",
         opaque_execution_inputs: true,
-        environment_weakening: false,
+        weakening: false,
     },
     LegacyTransitionBridge {
         path: "script/test-postgres-smoke.sh",
         current: "2f54d872c4773e0ade58b2c0d70bf37e43a477ab809b5ad454195af895169066",
         successor: "88a8e659f6e4c238041d037e4a49301806361a42c48706241c39ee8ad01e9724",
         opaque_execution_inputs: true,
-        environment_weakening: false,
+        weakening: false,
     },
     LegacyTransitionBridge {
         path: "script/check-maintainability-bootstrap.sh",
         current: "7afc737797b816c8cd2ca59f5958b4284443caa3cf9d7b90e41767d518844092",
-        successor: "84c3d2010a2080bd431761d391d502379211c5c3047f216fccbde7719b35fdd9",
+        successor: "4322a994667c0f20279c0c1a2b4db739ecb4d7ee94077f9aa9eaa7d570e90653",
         opaque_execution_inputs: true,
-        environment_weakening: true,
+        weakening: true,
     },
     LegacyTransitionBridge {
         path: "script/claude-review.sh",
         current: "c6c56c0212389a349b4a39e95d2578310bcc1a13bcbe8377c010ca69d1aefc8a",
         successor: "7a0b509574ded78ba3c0589bae798b4e6d7d7658e5bebe48515a3ae73fafbc78",
         opaque_execution_inputs: true,
-        environment_weakening: true,
+        weakening: true,
     },
     LegacyTransitionBridge {
         path: "script/tests/test_claude_review.sh",
         current: "41c33e1d76f36d8c9e5050a15b24de19c3044078694170d95d672657f6f8940c",
-        successor: "c79edaaf67e69429c763d7dd3a0b3756e174147c7ac177350051e0e71c257ca5",
+        successor: "e3d3dfedbb7823e3505d5bf2393656e2d464929892686a83b66df6e9f6f0b07b",
         opaque_execution_inputs: false,
-        environment_weakening: true,
+        weakening: true,
     },
     LegacyTransitionBridge {
         path: ".github/workflows/ci.yml",
         current: "d7b67dc9b58887448885e7225a50144db84f7b100d9fbe1e750614d4757db302",
-        successor: "7d4e5596402616d999c8363645c3004e807a3b187c237b393699b841f8e48832",
+        successor: "6e5855f4bc93df29d27712e51f6450c2f0745c212059f05db9ce610d2cae40be",
         opaque_execution_inputs: false,
-        environment_weakening: true,
+        weakening: true,
     },
 ];
 

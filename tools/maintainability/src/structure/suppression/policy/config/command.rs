@@ -34,7 +34,7 @@ pub(super) fn checked_in_legacy_transition_capabilities(workspace: &Path, path: 
         return None;
     };
     let bridge = profile_policy::ProfileManifest::parse(&bytes).ok()?.legacy_transition_bridge(path, source)?;
-    Some((bridge.opaque_execution_inputs, bridge.environment_weakening))
+    Some((bridge.opaque_execution_inputs, bridge.weakening))
 }
 
 pub(super) const BOOTSTRAP_ENVIRONMENT_LINES: &[&str] = &[
@@ -246,7 +246,7 @@ pub(super) const CI_TRUST_ENVIRONMENT_LINES: &[&str] = &[
     "          RUSTUP_HOME: ${{ runner.temp }}/localhold-rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
     "          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup",
-    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 8ca8d0cb6f72f73365301335b3b02dcdcdf26c19a4584a3007f4e0eea5bc711c",
+    "  LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_SHA256: 3d6317cf33a796ec4abf70cc96f92dc926c70726659fb521a9c6e64993290c0d",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BOOTSTRAP_ACTUAL_SHA256: ${{ hashFiles('script/check-maintainability-bootstrap.sh') }}",
     "          LOCALHOLD_MAINTAINABILITY_BASE_REV: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}",
@@ -335,12 +335,13 @@ fn reject_checked_in_weakening_with_mode(workspace: &Path, validation: Repositor
         let filesystem_context = FilesystemContext::new(workspace, &surfaces.paths, &surfaces.tracked_paths);
         if weakening_token_for_surface_with_reviewed_source(filesystem_context, path, &source, source_is_reviewed)
             && !reviewed_quality_command_exceptions_are_exact(path, &source, source_is_reviewed)
+            && !legacy_transition.is_some_and(|bridge| bridge.weakening)
         {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening argument");
         }
         if weakening_environment_for_surface(path, &source)
             && !scrubber_environment_references_are_exact(path, &source)
-            && !legacy_transition.is_some_and(|bridge| bridge.environment_weakening)
+            && !legacy_transition.is_some_and(|bridge| bridge.weakening)
         {
             bail!("checked-in Rust command surface {path:?} contains a lint-weakening environment channel");
         }

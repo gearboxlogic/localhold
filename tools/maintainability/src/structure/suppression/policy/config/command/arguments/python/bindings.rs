@@ -11,10 +11,7 @@ struct ReviewedProcessBindingSurface {
 const REVIEWED_PROCESS_BINDING_SURFACES: &[ReviewedProcessBindingSurface] = &[
     ReviewedProcessBindingSurface {
         path: "script/tests/test_cuda_release.py",
-        sha256: &[
-            "850414f812aeddcf692d47b9cff1a820959aafea2fc25443161739010b6b850f",
-            "9b78de542a72594628965dff2d15d100463f128c93cb98dcab39ebf289a7ced3",
-        ],
+        sha256: &["850414f812aeddcf692d47b9cff1a820959aafea2fc25443161739010b6b850f"],
     },
     ReviewedProcessBindingSurface {
         path: "script/tests/test_database_fixtures.py",

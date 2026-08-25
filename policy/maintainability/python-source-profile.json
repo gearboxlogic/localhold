@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "python-source-tree",
   "current_sha256": "ce0a4da3632b8330d17dab95deaf7b26091b93c187aca809e1c657debb21e961",
-  "preapproved_next_sha256": null,
+  "preapproved_next_sha256": "25911928a29b0e1e4088a8a2d0e0fac97068bfc314d8cfc9e30202abac6e6969",
   "retired_sha256": [],
   "issue": "https://github.com/gearboxlogic/localhold/issues/124",
   "rationale": "Python command analysis is authorized only for one complete reviewed tree of tracked paths, Git modes, and source digests.",

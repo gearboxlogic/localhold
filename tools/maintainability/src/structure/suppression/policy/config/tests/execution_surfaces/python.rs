@@ -789,7 +789,6 @@ fn command_policy_rejects_opaque_python_process_bindings() {
         "from optparse import Values\nvalues = Values()\nvalues.read_module('webbrowser', 'loose')\nvalues.BackgroundBrowser('sh').open('quality/hidden.txt')\n",
         "import sys\nspec = next(spec for finder in sys.meta_path if (spec := finder.find_spec('webbrowser')) is not None)\nspec.loader.load_module('webbrowser').BackgroundBrowser('sh').open('quality/hidden.txt')\n",
         "print.__self__.__import__('webbrowser').BackgroundBrowser('sh').open('quality/hidden.txt')\n",
-        "from pathlib import Path\nprint.__self__.eval(Path('quality/hidden.txt').read_text())\n",
         "from unittest import mock\nmock.patch('webbrowser.BackgroundBrowser').getter().BackgroundBrowser('sh').open('quality/hidden.txt')\n",
         "import code\ncode.InteractiveInterpreter().runsource(Path('quality/hidden.txt').read_text(), symbol='exec')\n",
         "import code as repl\nrepl.InteractiveConsole().push(\"__import__('os').system('sh quality/hidden.txt')\")\n",
@@ -845,6 +844,7 @@ fn command_policy_rejects_native_stdlib_execution_escape_hatches() {
         "import _osx_support\n_osx_support._read_output('sh quality/hidden.txt')\n",
         "import dataclasses\nfrom pathlib import Path\nbuilder = dataclasses._FuncBuilder(globals())\nbuilder.add_fn('payload', [], ['arg=' + Path('quality/hidden.txt').read_text()])\nbuilder.add_fns_to_class(Target)\n",
         "import dataclasses\nfrom pathlib import Path\ndataclasses._create_fn('run', [], Path('quality/hidden.txt').read_text().splitlines(), locals={'__dataclass_builtins_object__': object})()\n",
+        "from pathlib import Path\nprint.__self__.eval(Path('quality/hidden.txt').read_text())\n",
     ]);
 }
 

@@ -252,9 +252,7 @@ mod tests {
 
     #[test]
     fn checked_in_python_tree_matches_one_atomic_profile() {
-        let workspace = std::env::var_os("LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+        let workspace = std::env::var_os("LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT").map_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."), std::path::PathBuf::from);
         validate(&workspace).expect("reviewed Python source profile");
     }
 

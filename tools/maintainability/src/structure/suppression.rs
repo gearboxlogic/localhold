@@ -305,16 +305,16 @@ fn tooling_paths(workspace: &Path) -> Result<Vec<String>> {
     if !output.status.success() {
         bail!("git ls-files failed while listing maintainer-tool Rust sources");
     }
-    let mut paths = Vec::new();
+    let mut paths = BTreeSet::new();
     for raw in output.stdout.split(|byte| *byte == b'\0').filter(|path| !path.is_empty()) {
         let path = std::str::from_utf8(raw).context("maintainer-tool source path is not UTF-8")?;
         let relative = Path::new(path);
         if relative.is_absolute() || !relative.starts_with("tools") || relative.components().any(|component| !matches!(component, Component::Normal(_))) {
             bail!("maintainer-tool path must be normalized under tools/: {path:?}");
         }
-        paths.push(path.to_owned());
+        if !fs::symlink_metadata(workspace.join(relative)).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
+            paths.insert(path.to_owned());
+        }
     }
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
+    Ok(paths.into_iter().collect())
 }

@@ -17,7 +17,7 @@ fn maintainer_tooling_rejects_real_suppressions_but_ignores_fixture_text() {
     )
     .expect("tool source");
     git(workspace.path(), &["init", "-q"]);
-    git(workspace.path(), &["add", "."]);
+    git(workspace.path(), &["add", "-f", "."]);
     reject_tooling_suppressions(workspace.path()).expect("attribute-like fixture text is not syntax");
 
     fs::write(source.join("main.rs"), "#[expect(clippy::too_many_lines, reason = \"checker shortcut\")]\nfn main() {}\n").expect("suppressed tool source");

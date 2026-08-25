@@ -529,6 +529,8 @@ fn checked_in_bootstrap_matches_its_reviewed_environment_contract() {
     let source = fs::read_to_string(bootstrap).expect("read checked-in maintainability bootstrap");
 
     assert!(scrubber_environment_references_are_exact("script/check-maintainability-bootstrap.sh", &source));
+    let unreviewed = source.replacen("unset GCONV_PATH", "unset GCONV_PATH CMAKE_TOOLCHAIN_FILE", 1);
+    assert!(!scrubber_environment_references_are_exact("script/check-maintainability-bootstrap.sh", &unreviewed));
 }
 
 #[test]

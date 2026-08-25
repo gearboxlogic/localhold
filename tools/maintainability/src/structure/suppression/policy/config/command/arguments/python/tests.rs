@@ -83,6 +83,8 @@ fn rejected_execution_modules_fail_closed() {
         "from _aix_support import _read_cmd_output\n_read_cmd_output('sh quality/hidden.txt')\n",
         "from _osx_support import _read_output as run\nrun('sh quality/hidden.txt')\n",
         "from dataclasses import _FuncBuilder as Builder\nBuilder().add_fn('payload', '', '', '', '')\n",
+        "from dataclasses import _create_fn\n_create_fn('run', [], ['print(1)'])\n",
+        "import asyncio.windows_utils as windows\nwindows.Popen(['python', 'quality/hidden.txt'])\n",
         "from imaplib import IMAP4_stream as stream\nstream('sh quality/hidden.txt')\n",
         "import mailcap\nmailcap.test()\n",
         "import pipes\npipeline = pipes.Template()\npipeline.append('sh quality/hidden.txt', '--')\npipeline.open_r('/dev/null').read()\n",

@@ -455,6 +455,8 @@ fn dynamic_path(path: &[String]) -> bool {
                 | "_getframe"
                 | "_current_frames"
                 | "_FuncBuilder"
+                | "_create_fn"
+                | "__self__"
                 | "currentframe"
                 | "exec_module"
                 | "f_globals"
@@ -533,6 +535,8 @@ mod tests {
         assert!(has_dynamic_code("from runpy import run_path as execute"));
         assert!(has_dynamic_code("pkgutil.resolve_name('webbrowser:BackgroundBrowser')"));
         assert!(has_dynamic_code("print.__self__.__import__('webbrowser')"));
+        assert!(has_dynamic_code("print.__self__.eval(payload)"));
+        assert!(has_dynamic_code("dataclasses._create_fn('run', [], body)"));
         assert!(has_dynamic_code(
             "spec = next(spec for finder in sys.meta_path if (spec := finder.find_spec('webbrowser')) is not None)\nspec.loader.load_module('webbrowser')"
         ));

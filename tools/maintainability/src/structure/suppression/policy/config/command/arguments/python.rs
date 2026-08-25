@@ -11,9 +11,11 @@ pub(super) use filesystem_write::{has_opaque_filesystem_write, has_opaque_filesy
 use lexical::{executable_code, normalized_qualified_code};
 
 const REJECTED_PYTHON_MODULES: &[&str] = &[
+    "_aix_support",
     "_interpreters",
     "_operator",
     "_pickle",
+    "_pyrepl",
     "_sqlite3",
     "_testcapi",
     "_testinternalcapi",
@@ -48,6 +50,7 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "timeit",
     "tkinter",
     "trace",
+    "typing",
     "turtle",
     "turtledemo",
     "types",
@@ -262,29 +265,28 @@ fn imports_command_capable_api(source: &str) -> bool {
         let Some((module, imports)) = compact.strip_prefix("from").and_then(|line| line.split_once("import")) else {
             return false;
         };
-        if rejected_python_module(module) {
+        if rejected_python_module(module) && module != "typing" {
             return true;
         }
         let imports = imports.trim_matches(['(', ')']);
         imports.split(',').any(|binding| {
             let binding = binding.trim_matches(['(', ')']);
             let name = binding.split_once("as").map_or(binding, |(name, _)| name);
-            if is_command_module(name) {
-                return true;
-            }
-            match module {
-                "asyncio" | "asyncio.subprocess" => name == "*" || matches!(name, "create_subprocess_exec" | "create_subprocess_shell"),
-                "concurrent" => name == "interpreters",
-                "dbm" => name == "sqlite3",
-                "os" | "posix" => name == "*" || is_os_process_api(name),
-                "subprocess" => name == "*" || is_subprocess_process_api(name),
-                "pty" => matches!(name, "*" | "spawn"),
-                "contextlib" => matches!(name, "*" | "chdir"),
-                "logging" => name == "config",
-                "sys" => matches!(name, "*" | "meta_path" | "modules" | "path_hooks" | "path_importer_cache"),
-                "unittest" => name == "mock",
-                _ => false,
-            }
+            is_command_module(name)
+                || match module {
+                    "asyncio" | "asyncio.subprocess" => name == "*" || matches!(name, "create_subprocess_exec" | "create_subprocess_shell"),
+                    "concurrent" => name == "interpreters",
+                    "dbm" => name == "sqlite3",
+                    "os" | "posix" => name == "*" || is_os_process_api(name),
+                    "subprocess" => name == "*" || is_subprocess_process_api(name),
+                    "pty" => matches!(name, "*" | "spawn"),
+                    "contextlib" => matches!(name, "*" | "chdir"),
+                    "logging" => name == "config",
+                    "sys" => matches!(name, "*" | "meta_path" | "modules" | "path_hooks" | "path_importer_cache"),
+                    "typing" => matches!(name, "*" | "get_type_hints"),
+                    "unittest" => name == "mock",
+                    _ => false,
+                }
         })
     })
 }
@@ -296,12 +298,10 @@ fn command_module_alias(binding: &str) -> bool {
 }
 
 fn rejected_module_binding(binding: &str) -> bool {
-    REJECTED_PYTHON_MODULES.iter().any(|module| {
-        binding == *module
-            || binding
-                .strip_prefix(module)
-                .is_some_and(|suffix| suffix.starts_with('.') || suffix.starts_with("as") && suffix.len() > 2)
-    })
+    rejected_python_module(binding)
+        || REJECTED_PYTHON_MODULES
+            .iter()
+            .any(|module| binding.strip_prefix(module).is_some_and(|suffix| suffix.starts_with("as") && suffix.len() > 2))
 }
 
 pub(super) fn rejected_python_module(name: &str) -> bool {

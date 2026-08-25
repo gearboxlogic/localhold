@@ -171,6 +171,10 @@ fn stdlib_code_evaluators_fail_closed_without_matching_unrelated_names() {
     ] {
         assert!(has_opaque_process_arguments(source), "{source}");
     }
+}
+
+#[test]
+fn stdlib_code_evaluator_lookalikes_remain_inert() {
     for source in [
         "import codecs\ncode = response.code\nprint(code)\n",
         "# import shelve\nprint('shelve.open is inert text')\n",
@@ -236,6 +240,10 @@ fn native_stdlib_execution_escape_hatches_fail_closed() {
     ] {
         assert!(has_opaque_process_arguments(source), "{source}");
     }
+}
+
+#[test]
+fn native_stdlib_execution_lookalikes_remain_inert() {
     for source in [
         "print('sqlite3.connect is inert text')\n",
         "module_name = 'tkinter'\nprint(module_name)\n",

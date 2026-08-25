@@ -200,6 +200,7 @@ fn command_policy_rejects_python_filesystem_writes() {
         "import tempfile\nfactory = tempfile.NamedTemporaryFile\nfactory(dir='target', suffix='.txt')\n",
         "import shutil as files\nfiles.copyfile('quality/Justfile', 'Justfile')\n",
         "from shutil import copyfile as copy\ncopy('quality/Justfile', 'Justfile')\n",
+        "import urllib.request\nurllib.request.urlretrieve(source, 'Justfile')\n",
         "import tempfile as scratch\nscratch.NamedTemporaryFile(dir='script', suffix='.sh')\n",
         "from os import remove as erase\nerase('Justfile')\n",
         "import tempfile\ntempfile.NamedTemporaryFile(dir='target', prefix='../script/check-', suffix='.sh', delete=False)\n",
@@ -838,6 +839,8 @@ fn command_policy_rejects_native_stdlib_execution_escape_hatches() {
         "from test.support import interpreters\ninterpreter = interpreters.create()\ninterpreter.exec(payload)\n",
         "import test.test__interpreters as tests\nrunner = tests._interpreters.run_string\nrunner(tests._interpreters.create(), payload)\n",
         "import test.test_ttk as tests\ninterpreter = tests.tkinter.Tcl()\ninterpreter.call('exec', 'sh', 'quality/hidden.txt')\n",
+        "import pipes\npipeline = pipes.Template()\npipeline.append('sh quality/hidden.txt', '--')\npipeline.open_r('/dev/null').read()\n",
+        "import venv\nvenv.EnvBuilder()._call_new_python(context, 'quality/hidden.txt')\n",
     ]);
 }
 
@@ -850,6 +853,7 @@ fn command_policy_rejects_embedded_package_and_private_process_dispatch() {
         "import asyncio.windows_utils as windows\nwindows._winapi.CreateProcess(*arguments)\n",
         "import subprocess\nlaunch = subprocess._fork_exec\nlaunch(*arguments)\n",
         "from subprocess import _fork_exec as launch\nlaunch.__call__(*arguments)\n",
+        "from subprocess import Popen as launch\nlaunch(['sh', 'quality/hidden.txt'])\n",
         "from pip._internal.cli.main import main\nmain(['install', 'quality/payload.tar.gz'])\n",
         "from pip . _internal . cli . main import main\nmain(['wheel', 'quality/payload.tar.gz'])\n",
         "from pip. \\\n+_internal.cli.main import main\nmain(['wheel', 'quality/payload.tar.gz'])\n",

@@ -19,81 +19,60 @@ fn explicit_line_continuations_cannot_hide_filesystem_writes() {
 
 #[test]
 fn opaque_process_arguments_detect_executable_code_without_matching_inert_text() {
-    assert!(has_opaque_process_arguments("subprocess.run([\"-\" \"A\"])\n"));
-    assert!(has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", "\x2dA", "warnings"])"#));
-    assert!(has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", b"\u002dA", "warnings"])"#));
-    assert!(has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", chr(45) + "A", "warnings"])"#));
-    assert!(has_opaque_process_arguments(
-        "import subprocess\narguments = ['cargo', 'clippy']\nsubprocess.run(arguments)\n"
-    ));
-    assert!(has_opaque_process_arguments(
-        "from subprocess import run\narguments = ['cargo', 'clippy']\nrun(arguments)\n"
-    ));
-    assert!(has_opaque_process_arguments(r#"os.execlp("cargo", "cargo", "clippy", "--", "-" + "A", "warnings")"#));
-    assert!(has_opaque_process_arguments(
+    for source in [
+        "subprocess.run([\"-\" \"A\"])\n",
+        r#"subprocess.run(["cargo", "clippy", "--", "\x2dA", "warnings"])"#,
+        r#"subprocess.run(["cargo", "clippy", "--", b"\u002dA", "warnings"])"#,
+        r#"subprocess.run(["cargo", "clippy", "--", chr(45) + "A", "warnings"])"#,
+        "import subprocess\narguments = ['cargo', 'clippy']\nsubprocess.run(arguments)\n",
+        "from subprocess import run\narguments = ['cargo', 'clippy']\nrun(arguments)\n",
+        r#"os.execlp("cargo", "cargo", "clippy", "--", "-" + "A", "warnings")"#,
         r#"from os import execvpe
-execvpe("cargo", ["cargo", "clippy", "--", "-" + "A", "warnings"], environment)"#
-    ));
-    assert!(has_opaque_process_arguments(
+execvpe("cargo", ["cargo", "clippy", "--", "-" + "A", "warnings"], environment)"#,
         r#"from os import system as run
-run(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
-    ));
-    assert!(has_opaque_process_arguments(
+run(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#,
         r#"from os import system
-system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
-    ));
-    assert!(has_opaque_process_arguments(
+system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#,
         r#"runner = __import__("sub" + "process")
-runner.run(["cargo", "clippy", "--", chr(45) + "A", "warnings"])"#
-    ));
-    assert!(has_opaque_process_arguments(
+runner.run(["cargo", "clippy", "--", chr(45) + "A", "warnings"])"#,
         r#"runner = getattr(importlib.import_module("sub" + "process"), "r" + "un")
-runner(["car" + "go", "clippy", "--", chr(45) + "A", "warnings"])"#
-    ));
-    assert!(has_opaque_process_arguments(
+runner(["car" + "go", "clippy", "--", chr(45) + "A", "warnings"])"#,
         r#"import ctypes
-ctypes.CDLL(None).system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
-    ));
-    assert!(has_opaque_process_arguments(
+ctypes.CDLL(None).system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#,
         r#"from cffi import FFI
-FFI().dlopen(None).system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
-    ));
-    assert!(has_opaque_process_arguments(
-        r#"os.system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
-    ));
-    assert!(has_opaque_process_arguments(
-        r#"posix.system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
-    ));
-    assert!(has_opaque_process_arguments(
-        r#"posix.popen(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
-    ));
-    assert!(has_opaque_process_arguments(
+FFI().dlopen(None).system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#,
+        r#"os.system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#,
+        r#"posix.system(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#,
+        r#"posix.popen(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#,
         r#"from posix import system as run
-run(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#
-    ));
-    assert!(has_opaque_process_arguments(r#"os.system("printf safe; " + command)"#));
-    assert!(has_opaque_process_arguments(r#"subprocess.run(bytes.fromhex("2f7573722f62696e2f636172676f"))"#));
-    assert!(has_opaque_process_arguments("subprocess.Popen(command)"));
-    assert!(has_opaque_process_arguments(
-        "import subprocess\nsubprocess.run([\"git\", \"status\"])\nrunner = subprocess.run\nrunner(bytes.fromhex(\"636172676f\").decode(), shell=True)\n"
-    ));
-    assert!(!has_opaque_process_arguments(r#"subprocess.run(["cargo", "clippy", "--", r"\x2dA", "warnings"])"#));
-    assert!(!has_opaque_process_arguments(
-        r#"subprocess.run(["cargo", "metadata", "--locked"], cwd=repository, check=True)"#
-    ));
-    assert!(!has_opaque_process_arguments(r#"subprocess.run(["git", "show", f"{reference}:{source}"], check=False)"#));
-    assert!(!has_opaque_process_arguments("message = f'{value:os.system(payload)}'"));
-    assert!(!has_opaque_process_arguments(r#"message = f"{len("safe")}""#));
-    assert!(!has_opaque_process_arguments(r#"subprocess.run([sys.executable, "script/check.py", value], check=True)"#));
-    assert!(!has_opaque_process_arguments("from os import path\nprint(path.basename('/tmp/report'))"));
-    assert!(!has_opaque_process_arguments("head = (f'<svg viewBox=\"0 0 64 64\" ' f'role=\"img\">')\n"));
-    assert!(!has_opaque_process_arguments(
-        "PATTERN = (r'^v[0-9]+' r'(?:-dev)?$')\nimport subprocess\nsubprocess.run(['git', 'status'])\n"
-    ));
-    assert!(!has_opaque_process_arguments("# import ctypes and run cargo\nprint('safe')\n"));
-    assert!(!has_opaque_process_arguments(
-        "\"\"\"getattr(importlib, 'run') and cargo are documentation only\"\"\"\nprint('safe')\n"
-    ));
+run(bytes.fromhex("636172676f20636c69707079202d2d202d41207761726e696e6773"))"#,
+        r#"os.system("printf safe; " + command)"#,
+        r#"subprocess.run(bytes.fromhex("2f7573722f62696e2f636172676f"))"#,
+        "subprocess.Popen(command)",
+        "import subprocess\nsubprocess.run([\"git\", \"status\"])\nrunner = subprocess.run\nrunner(bytes.fromhex(\"636172676f\").decode(), shell=True)\n",
+    ] {
+        assert!(has_opaque_process_arguments(source), "{source}");
+    }
+    for source in [
+        r#"subprocess.run(["cargo", "clippy", "--", r"\x2dA", "warnings"])"#,
+        r#"subprocess.run(["cargo", "metadata", "--locked"], cwd=repository, check=True)"#,
+        "message = f'{value:os.system(payload)}'",
+        r#"message = f"{len("safe")}""#,
+        r#"subprocess.run([sys.executable, "script/check.py", value], check=True)"#,
+        "from os import path\nprint(path.basename('/tmp/report'))",
+        "head = (f'<svg viewBox=\"0 0 64 64\" ' f'role=\"img\">')\n",
+        "PATTERN = (r'^v[0-9]+' r'(?:-dev)?$')\nimport subprocess\nsubprocess.run(['git', 'status'])\n",
+        "# import ctypes and run cargo\nprint('safe')\n",
+        "\"\"\"getattr(importlib, 'run') and cargo are documentation only\"\"\"\nprint('safe')\n",
+    ] {
+        assert!(!has_opaque_process_arguments(source), "{source}");
+    }
+    let safe_git_show = format!(
+        r#"subprocess.run(["git", "show", f"{{{reference}}}:{{{source}}}"], check=False)"#,
+        reference = "reference",
+        source = "source"
+    );
+    assert!(!has_opaque_process_arguments(&safe_git_show));
 }
 
 #[test]
@@ -104,11 +83,13 @@ fn rejected_execution_modules_fail_closed() {
         "from _aix_support import _read_cmd_output\n_read_cmd_output('sh quality/hidden.txt')\n",
         "from imaplib import IMAP4_stream as stream\nstream('sh quality/hidden.txt')\n",
         "import mailcap\nmailcap.test()\n",
+        "import pipes\npipeline = pipes.Template()\npipeline.append('sh quality/hidden.txt', '--')\npipeline.open_r('/dev/null').read()\n",
         "from _pyrepl.console import InteractiveColoredConsole\nInteractiveColoredConsole().runsource(payload)\n",
         "import typing\ntyping.get_type_hints(subject)\n",
         "import uuid\nuuid._get_command_stdout('sh', 'quality/hidden.txt')\n",
         "from typing import get_type_hints\nget_type_hints(subject)\n",
         "from uuid import _get_command_stdout as run\nrun('sh', 'quality/hidden.txt')\n",
+        "import venv\nvenv.EnvBuilder()._call_new_python(context, 'quality/hidden.txt')\n",
     ] {
         assert!(has_opaque_process_arguments(source), "{source}");
     }
@@ -118,6 +99,7 @@ fn rejected_execution_modules_fail_closed() {
 fn opaque_process_bindings_fail_closed() {
     for source in [
         "from os import (\n    system,\n)\nsystem('sh quality/hidden.txt')\n",
+        "from subprocess import Popen as launch\nlaunch(['sh', 'quality/hidden.txt'])\n",
         "import os\nprocess = os\nprocess.system('sh quality/hidden.txt')\n",
         "import json, subprocess as process\nprocess.run(['git'])\n",
         "import json; import os as process; process.system('sh quality/hidden.txt')\n",

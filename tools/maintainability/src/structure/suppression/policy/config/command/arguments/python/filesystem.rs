@@ -149,6 +149,8 @@ fn is_direct_mutator(name: &str) -> bool {
                 | "shutil.unpack_archive"
                 | "NamedTemporaryFile"
                 | "tempfile.NamedTemporaryFile"
+                | "urllib.request.URLopener"
+                | "urllib.request.urlretrieve"
         )
 }
 
@@ -169,6 +171,7 @@ fn mutation_arguments_are_opaque(scanner: &CallScanner, call: &Call) -> bool {
     let arguments: &[ArgumentSpec] = match name {
         "shutil.copy" | "shutil.copy2" => return directory_destination_is_opaque(scanner, call, false),
         "shutil.move" => return directory_destination_is_opaque(scanner, call, true),
+        "os.symlink" | "urllib.request.URLopener" | "urllib.request.urlretrieve" => return true,
         "shutil.copyfile" => {
             if !follows_symlinks(scanner, call.opening_parenthesis) {
                 return true;
@@ -178,7 +181,6 @@ fn mutation_arguments_are_opaque(scanner: &CallScanner, call: &Call) -> bool {
         "os.link" | "os.rename" | "os.renames" | "os.replace" => &[ArgumentSpec::new(0, &["src"]), ArgumentSpec::new(1, &["dst"])],
         "os.chmod" | "os.chown" | "os.lchown" | "os.makedirs" | "os.mkdir" | "os.remove" | "os.removedirs" | "os.rmdir" | "os.truncate" | "os.unlink" | "os.utime"
         | "shutil.rmtree" => &[ArgumentSpec::new(0, &["path", "name"])],
-        "os.symlink" => return true,
         _ => return false,
     };
     directory_rebase_is_opaque(scanner, call.opening_parenthesis) || arguments.iter().any(|argument| path_argument_is_opaque(scanner, call.opening_parenthesis, *argument))

@@ -123,20 +123,13 @@ mod tests {
 
     #[test]
     fn gitleaks_configuration_is_an_execution_input() {
-        let arguments = |values: &[&str]| values.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>();
-        let separate = arguments(&["git", "--config", ".github/gitleaks.toml", "--gitleaks-ignore-path", ".github/gitleaksignore"]);
-        assert_eq!(
-            gitleaks_policy_inputs(&separate, super::ValueSemantics::Shell),
-            (vec![".github/gitleaks.toml", ".github/gitleaksignore"], false)
-        );
-        assert!(
-            gitleaks_policy_inputs(
-                &arguments(&["git", "--config", "$CONFIG", "--gitleaks-ignore-path", ".ignore"]),
-                super::ValueSemantics::Shell
-            )
-            .1
-        );
-        assert!(gitleaks_policy_inputs(&arguments(&["git", "--config"]), super::ValueSemantics::Shell).1);
+        let separate = ["git", "--config", ".github/gitleaks.toml", "--gitleaks-ignore-path", ".github/gitleaksignore"].map(str::to_owned);
+        let (inputs, unresolved) = gitleaks_policy_inputs(&separate, super::ValueSemantics::Shell);
+        assert_eq!(inputs, [".github/gitleaks.toml", ".github/gitleaksignore"]);
+        assert!(!unresolved);
+        let dynamic = ["git", "--config", "$CONFIG", "--gitleaks-ignore-path", ".ignore"].map(str::to_owned);
+        assert!(gitleaks_policy_inputs(&dynamic, super::ValueSemantics::Shell).1);
+        assert!(gitleaks_policy_inputs(&["git", "--config"].map(str::to_owned), super::ValueSemantics::Shell).1);
     }
 
     #[test]

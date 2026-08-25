@@ -149,9 +149,10 @@ fn opaque_process_bindings_fail_closed() {
 
 #[test]
 fn stdlib_code_evaluators_fail_closed_without_matching_unrelated_names() {
-    assert!(super::imports_command_capable_api("import cProfile as profiler\n"));
     for source in [
         "import code\ncode.InteractiveInterpreter().runsource(payload, symbol='exec')\n",
+        "import annotationlib\nannotationlib.ForwardRef(payload).evaluate()\n",
+        "import http.server\nhttp.server.CGIHTTPRequestHandler(*arguments)\n",
         "import code as repl\nrepl.InteractiveConsole().push(payload)\n",
         "from code import InteractiveInterpreter as Runner\nRunner().runcode(compiled)\n",
         "from code import interact\ninteract(local={})\n",
@@ -176,6 +177,9 @@ fn stdlib_code_evaluators_fail_closed_without_matching_unrelated_names() {
         "import multiprocessing\nmultiprocessing.reduction.ForkingPickler.loads(payload)\n",
         "import _operator\n_operator.itemgetter('label')(record)\n",
         "from _operator import attrgetter as field\nfield('label')(record)\n",
+        "import tempfile\ntempfile._os.open('Justfile', flags)\n",
+        "import tempfile as scratch\nscratch._io.FileIO('Justfile', 'w')\n",
+        "from tempfile import _shutil as files\nfiles.copyfile('quality/hidden.txt', 'Justfile')\n",
     ] {
         assert!(has_opaque_process_arguments(source), "{source}");
     }

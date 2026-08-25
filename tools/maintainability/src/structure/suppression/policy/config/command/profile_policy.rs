@@ -75,7 +75,7 @@ const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
     LegacyTransitionBridge {
         path: ".github/workflows/ci.yml",
         current: "a3caaf8313e9aff92fafa5103a43da607eea095a63e9cb7102839a1084a0a0b5",
-        successor: "3603e7b102785e6429f22c652c6c483ba8bc1721a93c310c00c80bf6d8582bb6",
+        successor: "303a407a407d004e5c06f033fe1304bc61d5b58be192b37437763fd972d34006",
         opaque_execution_inputs: false,
         weakening: true,
     },

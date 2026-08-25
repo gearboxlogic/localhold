@@ -144,7 +144,7 @@ fn collect_python_input(scanner: &CallScanner, arguments: &[Range<usize>], refer
 fn python_flag_without_operand(argument: &str) -> bool {
     matches!(
         argument,
-        "-b" | "-bb" | "-B" | "-d" | "-E" | "-i" | "-I" | "-O" | "-OO" | "-P" | "-q" | "-R" | "-s" | "-S" | "-u" | "-v" | "-x"
+        "-b" | "-bb" | "-B" | "-d" | "-E" | "-I" | "-O" | "-OO" | "-P" | "-q" | "-R" | "-s" | "-S" | "-u" | "-v" | "-x"
     ) || argument.starts_with("-W") && argument.len() > 2
         || argument.starts_with("-X") && argument.len() > 2
         || argument.starts_with("--check-hash-based-pycs=")
@@ -270,6 +270,19 @@ posix.system("sh quality/posix.txt")
             assert!(collect(source).opaque, "{source}");
         }
         assert!(!collect(r#"subprocess.run([sys.executable, "quality/hidden.PY"], check=True)"#).opaque);
+    }
+
+    #[test]
+    fn python_interactive_mode_is_unsupported() {
+        for source in [
+            r#"subprocess.run([sys.executable, "-i", "quality/hidden.py"], check=True)"#,
+            r#"subprocess.run([sys.executable, "-Bi", "quality/hidden.py"], check=True)"#,
+            r#"subprocess.run([sys.executable, "-ib", "quality/hidden.py"], check=True)"#,
+            r#"subprocess.run([sys.executable, "-ii", "quality/hidden.py"], check=True)"#,
+        ] {
+            assert!(collect(source).opaque, "{source}");
+        }
+        assert!(!collect(r#"subprocess.run([sys.executable, "-B", "-q", "quality/hidden.py"], check=True)"#).opaque);
     }
 
     #[test]

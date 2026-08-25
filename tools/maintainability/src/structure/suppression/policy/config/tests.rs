@@ -583,6 +583,22 @@ fn compiler_driver_environment_overrides_are_governed() {
         "CL='/clang:-Xclang /clang:-load /clang:quality/payload'"
     ));
     assert!(weakening_environment("_CL_='/clang:-Xclang /clang:-load /clang:quality/payload'"));
+    for assignment in [
+        "CC='sh quality/hidden.txt'",
+        "CC_x86_64-unknown-linux-gnu='sh quality/hidden.txt'",
+        "CC_x86_64_unknown_linux_gnu='sh quality/hidden.txt'",
+        "HOST_CC='sh quality/hidden.txt'",
+        "TARGET_CXX='sh quality/hidden.txt'",
+        "AR='sh quality/hidden.txt'",
+        "CFLAGS='-fplugin=quality/payload.so'",
+        "CROSS_COMPILE='quality/tool-'",
+    ] {
+        assert!(weakening_environment(assignment), "{assignment}");
+    }
+    assert!(weakening_environment_for_surface(
+        ".github/workflows/ci.yml",
+        "jobs:\n  test:\n    env:\n      CC: sh quality/hidden.txt\n"
+    ));
     assert!(!weakening_environment("document the CL compiler mode"));
 }
 

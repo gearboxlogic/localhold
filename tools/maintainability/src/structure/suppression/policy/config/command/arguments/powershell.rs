@@ -399,7 +399,12 @@ fn has_opaque_dispatch(source: &str) -> bool {
         word.clear();
         match state {
             State::Code => match character {
-                '#' => state = State::LineComment,
+                '#' => {
+                    if line_prefix_is_whitespace && starts_requires_directive(characters.clone()) {
+                        return true;
+                    }
+                    state = State::LineComment;
+                }
                 '<' if characters.peek() == Some(&'#') => state = State::BlockComment,
                 '\'' => state = State::SingleQuoted,
                 '"' => state = State::DoubleQuoted,
@@ -435,6 +440,14 @@ fn has_opaque_dispatch(source: &str) -> bool {
         update_line_prefix(character, &mut line_prefix_is_whitespace);
     }
     matches!(state, State::Code) && (process_api_word(&word) || saw_script_block_type && word == "create" || saw_io_type && !word.is_empty())
+}
+
+fn starts_requires_directive(mut characters: Peekable<Chars<'_>>) -> bool {
+    let mut directive = String::new();
+    while characters.peek().is_some_and(|character| character.is_ascii_alphabetic()) {
+        directive.push(characters.next().expect("peeked directive character").to_ascii_lowercase());
+    }
+    directive == "requires" && characters.peek().is_none_or(|character| character.is_whitespace())
 }
 
 fn opaque_io_type_word(word: &str) -> bool {
@@ -730,6 +743,9 @@ mod tests {
         assert!(has_constructed_rust_arguments("[Diagnostics.Process]::new()"));
         assert!(has_constructed_rust_arguments("[scriptblock]::Create($source).Invoke()"));
         assert!(has_constructed_rust_arguments("[System.Management.Automation.ScriptBlock]::Create($source).Invoke()"));
+        assert!(analyze_execution_commands("$assembly = [System.Reflection.Assembly]::LoadFrom('quality/payload.dll')\n$assembly.EntryPoint.Invoke($null, @())").unresolved());
+        assert!(has_constructed_rust_arguments("#Requires -Modules ./quality/payload.dll\nWrite-Output safe"));
+        assert!(has_constructed_rust_arguments("#requires -PSSnapin Untrusted.SnapIn\nWrite-Output safe"));
         assert!(has_constructed_rust_arguments("[System.IO.File]::Copy('quality/Justfile', 'Justfile', $true)"));
         assert!(has_constructed_rust_arguments("[IO.Compression.ZipFile]::ExtractToDirectory($archive, '.')"));
         assert!(has_constructed_rust_arguments("New-Alias x ('Invoke-' + 'Expression'); x $decoded"));
@@ -743,6 +759,9 @@ mod tests {
         assert!(!has_constructed_rust_arguments("Write-Output 'New-Alias x Invoke-Expression'"));
         assert!(!has_constructed_rust_arguments("# Start-Process cargo"));
         assert!(!has_constructed_rust_arguments("# [System.Diagnostics.Process]::Start($tool)"));
+        assert!(!has_constructed_rust_arguments("# Requires -Modules ./quality/payload.dll"));
+        assert!(!has_constructed_rust_arguments("Write-Output '#Requires -Modules ./quality/payload.dll'"));
+        assert!(!has_constructed_rust_arguments("@'\n#Requires -Modules ./quality/payload.dll\n'@"));
         assert!(!has_constructed_rust_arguments("@'\nStart-Process cargo\n'@"));
         assert!(!has_constructed_rust_arguments("@'\n[System.Diagnostics.Process]::Start($tool)\n'@"));
         assert!(!has_constructed_rust_arguments("$actual = (Get-FileHash -Algorithm SHA256 $path).Hash"));

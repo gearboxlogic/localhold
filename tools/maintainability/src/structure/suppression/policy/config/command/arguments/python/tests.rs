@@ -292,6 +292,34 @@ fn unconditional_process_module_imports_fail_closed() {
 }
 
 #[test]
+fn debugger_string_execution_imports_fail_closed() {
+    for source in [
+        "from bdb import Bdb\nBdb().run(payload)\n",
+        "import bdb as debugger\nrunner = debugger.Bdb().run\nrunner.__call__(payload)\n",
+        "from bdb import Bdb as Debugger\nDebugger().runeval(payload)\n",
+        "import bdb\nbdb.Bdb().runctx(payload, globals(), locals())\n",
+        "from bdb import Tdb\nTdb().run(payload)\n",
+        "from bdb import *\nBdb().run(payload)\n",
+    ] {
+        assert!(has_opaque_process_arguments(source), "{source}");
+    }
+}
+
+#[test]
+fn debugger_string_execution_lookalikes_remain_inert() {
+    for source in [
+        "# import bdb\nprint('bdb.Bdb.run is inert text')\n",
+        "import bdatabase\nprint(bdatabase)\n",
+        "import bdbase\nprint(bdbase)\n",
+        "from bdatabase import Bdb\nprint(Bdb)\n",
+        "class Bdb:\n    def run(self, value): return value\nprint(Bdb().run('safe'))\n",
+        "def bdb_run(value): return value\nprint(bdb_run('safe'))\n",
+    ] {
+        assert!(!has_opaque_process_arguments(source), "{source}");
+    }
+}
+
+#[test]
 fn subprocess_fork_exec_reexport_fails_closed() {
     for source in [
         "import subprocess\nsubprocess._fork_exec(*arguments)\n",

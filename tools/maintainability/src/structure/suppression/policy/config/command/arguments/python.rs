@@ -53,7 +53,16 @@ const REJECTED_PYTHON_MODULES: &[&str] = &[
     "webbrowser",
 ];
 
-const UNCONDITIONAL_EXECUTION_MODULES: &[&str] = &["_ctypes", "_frozen_importlib", "_frozen_importlib_external", "_imp", "_posixsubprocess", "ensurepip", "pip"];
+const UNCONDITIONAL_EXECUTION_MODULES: &[&str] = &[
+    "_ctypes",
+    "_frozen_importlib",
+    "_frozen_importlib_external",
+    "_imp",
+    "_posixsubprocess",
+    "bdb",
+    "ensurepip",
+    "pip",
+];
 
 pub(super) fn execution_references(path: &str, source: &str) -> ExecutionReferences {
     let normalized = normalize_continuations(source);

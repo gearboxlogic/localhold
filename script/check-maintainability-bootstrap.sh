@@ -22,6 +22,46 @@ script_directory=${script_path%/*}
 [[ $script_directory != "$script_path" ]] || script_directory=.
 script_directory=$(cd -- "$script_directory" && pwd -P)
 script_path="$script_directory/${script_path##*/}"
+
+untrusted_environment_name() {
+    local uppercase=${1^^}
+    case "$uppercase" in
+        BASH_ENV | ENV | CDPATH | IFS | AR | AR_* | HOST_AR | TARGET_AR | ARFLAGS | ARFLAGS_* | HOST_ARFLAGS | TARGET_ARFLAGS | \
+            CC | CC_* | HOST_CC | TARGET_CC | CFLAGS | CFLAGS_* | HOST_CFLAGS | TARGET_CFLAGS | CROSS_COMPILE | \
+            CXX | CXX_* | HOST_CXX | TARGET_CXX | CXXFLAGS | CXXFLAGS_* | HOST_CXXFLAGS | TARGET_CXXFLAGS | \
+            NVCC | NVCC_* | HOST_NVCC | TARGET_NVCC | RANLIB | RANLIB_* | HOST_RANLIB | TARGET_RANLIB | \
+            RANLIBFLAGS | RANLIBFLAGS_* | HOST_RANLIBFLAGS | TARGET_RANLIBFLAGS | CCC_OVERRIDE_OPTIONS | CL | \
+            COMPILER_PATH | GCC_EXEC_PREFIX | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | \
+            OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | RIPGREP_CONFIG_PATH | \
+            RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | \
+            CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | RUSTC | RUSTDOC | RUSTC_WRAPPER | \
+            RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | \
+            CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | \
+            CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | \
+            EDITOR | GIT_* | LESS | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | LV | PAGER | SSH_ASKPASS | SSH_ASKPASS_REQUIRE | \
+            TAR_OPTIONS | VISUAL | ZIP | ZIPOPT | _CL_)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+scrub_untrusted_environment() {
+    local entry
+    local name
+    local -a removals=()
+    while IFS= read -r -d '' entry; do
+        name=${entry%%=*}
+        if untrusted_environment_name "$name"; then
+            removals+=(-u "$name")
+        fi
+    done < <(/usr/bin/env -0)
+    if (( ${#removals[@]} > 0 )); then
+        exec /usr/bin/env "${removals[@]}" /usr/bin/bash "$script_path" "$@"
+    fi
+}
+
+scrub_untrusted_environment "$@"
 implementation_root=$(cd -- "$script_directory/.." && pwd -P)
 repository_root=$implementation_root
 using_alternate_root=false
@@ -157,23 +197,6 @@ trusted_system_command() {
     printf '%s\n' "$candidate"
 }
 
-scrub_untrusted_environment() {
-    local name
-    local uppercase
-    while IFS= read -r name; do
-        uppercase=${name^^}
-        case "$uppercase" in
-            BASH_ENV | ENV | CDPATH | IFS | CCC_OVERRIDE_OPTIONS | CL | COMPILER_PATH | GCC_EXEC_PREFIX | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | RIPGREP_CONFIG_PATH | RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | \
-                RUSTC | RUSTDOC | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER | \
-                CARGO_BUILD_RUSTFLAGS | CARGO_BUILD_RUSTDOCFLAGS | CARGO_ALIAS_* | CARGO_TARGET_*_RUSTFLAGS | CARGO_TARGET_*_RUSTDOCFLAGS | \
-                CARGO_TARGET_*_LINKER | CARGO_TARGET_*_RUNNER | GIT_* | LOCALHOLD_MAINTAINABILITY_AUDIT_ROOT | TAR_OPTIONS | ZIP | ZIPOPT | _CL_)
-                unset "$name"
-                ;;
-        esac
-    done < <(compgen -e)
-}
-
-scrub_untrusted_environment
 GIT_CONFIG_NOSYSTEM=1
 GIT_CONFIG_GLOBAL=/dev/null
 readonly GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL

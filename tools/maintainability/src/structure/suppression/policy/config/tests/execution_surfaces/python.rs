@@ -853,6 +853,14 @@ fn command_policy_rejects_embedded_package_and_private_process_dispatch() {
 }
 
 #[test]
+fn command_policy_rejects_debugger_string_execution() {
+    assert_opaque_python_process_bindings(&[
+        "import bdb\nfrom pathlib import Path\nbdb.Bdb().run(Path('quality/hidden.txt').read_text())\n",
+        "from bdb import Bdb\nrunner = Bdb().runctx\nrunner.__call__(payload, globals(), locals())\n",
+    ]);
+}
+
+#[test]
 fn command_policy_rejects_multiprocessing_deserialization() {
     assert_opaque_python_process_bindings(&["from multiprocessing.reduction import ForkingPickler\nForkingPickler.loads(payload)\n"]);
 }

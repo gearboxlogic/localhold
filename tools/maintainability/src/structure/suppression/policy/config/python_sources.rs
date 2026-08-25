@@ -28,6 +28,7 @@ pub(in crate::structure::suppression::policy) fn validate(workspace: &Path) -> R
     let tracked = tracked_paths(workspace)?;
     let untracked = untracked_paths(workspace)?;
     reject_unsupported_python_entrypoints(workspace, tracked.iter().map(|entry| entry.path.as_str()).chain(untracked.iter().map(String::as_str)))?;
+    reject_interactive_python_shebangs(workspace, &tracked)?;
     if let Some(path) = untracked.iter().find(|path| has_extension(path, "py")) {
         bail!("untracked Python source is outside every reviewed profile: {path:?}");
     }
@@ -45,6 +46,37 @@ pub(in crate::structure::suppression::policy) fn validate(workspace: &Path) -> R
         );
     }
     Ok(())
+}
+
+fn reject_interactive_python_shebangs(workspace: &Path, paths: &[TrackedPath]) -> Result<()> {
+    for entry in paths.iter().filter(|entry| entry.mode & 0o111 != 0 && has_extension(&entry.path, "py")) {
+        let source = fs::read_to_string(workspace.join(&entry.path)).with_context(|| format!("read executable Python source {}", entry.path))?;
+        let first_line = source.lines().next().unwrap_or_default().trim_end_matches('\r');
+        if python_shebang_is_interactive(first_line) {
+            bail!("executable Python source cannot enable interactive mode in its shebang: {:?}", entry.path);
+        }
+    }
+    Ok(())
+}
+
+fn python_shebang_is_interactive(first_line: &str) -> bool {
+    let Some(interpreter) = first_line.strip_prefix("#!") else {
+        return false;
+    };
+    let words = interpreter.split_whitespace().collect::<Vec<_>>();
+    let Some(python) = words.iter().position(|word| word.to_ascii_lowercase().contains("python")) else {
+        return false;
+    };
+    words.iter().skip(python + 1).any(|word| {
+        let option = word.trim_matches(['\'', '"']);
+        option.strip_prefix('-').is_some_and(|flags| {
+            !flags.starts_with('-')
+                && flags.contains('i')
+                && flags
+                    .chars()
+                    .all(|flag| matches!(flag, 'b' | 'B' | 'd' | 'E' | 'i' | 'I' | 'O' | 'P' | 'q' | 'R' | 's' | 'S' | 'u' | 'v' | 'x'))
+        })
+    })
 }
 
 fn profile_digest(observed: &[ObservedSource]) -> String {
@@ -318,6 +350,28 @@ mod tests {
             let symlink = workspace.path().join("entrypoint-symlink");
             std::os::unix::fs::symlink("shell", &symlink).expect("entrypoint symlink fixture");
             assert!(has_unsupported_shebang(&symlink).expect("inspect entrypoint symlink"));
+        }
+    }
+
+    #[test]
+    fn executable_python_shebangs_cannot_enable_interactive_mode() {
+        for shebang in [
+            "#!/usr/bin/python3 -i",
+            "#!/usr/bin/python3 -Bi",
+            "#!/usr/bin/env -S python3 -ib",
+            "#!/usr/bin/env -Spython3 -ii",
+            "#!/usr/bin/env --split-string='python3 -i'",
+        ] {
+            assert!(python_shebang_is_interactive(shebang), "{shebang}");
+        }
+        for shebang in [
+            "#!/usr/bin/env python3",
+            "#!/usr/bin/python3 -I",
+            "#!/usr/bin/env -S python3 -B -q",
+            "#!/usr/bin/python3 -Wignore",
+            "#!/bin/sh -i",
+        ] {
+            assert!(!python_shebang_is_interactive(shebang), "{shebang}");
         }
     }
 

@@ -29,11 +29,12 @@ readonly uname_command=/usr/bin/uname
 readonly bash_command=/usr/bin/bash
 readonly chmod_command=/usr/bin/chmod
 readonly cp_command=/usr/bin/cp
+readonly env_command=/usr/bin/env
 readonly ln_command=/usr/bin/ln
 readonly mkdir_command=/usr/bin/mkdir
 readonly mktemp_command=/usr/bin/mktemp
 readonly rm_command=/usr/bin/rm
-for system_command in "$sha256_command" "$uname_command" "$bash_command" "$chmod_command" "$cp_command" "$ln_command" "$mkdir_command" "$mktemp_command" "$rm_command"; do
+for system_command in "$sha256_command" "$uname_command" "$bash_command" "$chmod_command" "$cp_command" "$env_command" "$ln_command" "$mkdir_command" "$mktemp_command" "$rm_command"; do
     if [[ ! -f $system_command || ! -x $system_command ]]; then
         printf 'maintainability gate requires an OS-owned executable: %s\n' "$system_command" >&2
         exit 1
@@ -359,7 +360,23 @@ run_dependency_unsafe() {
 }
 
 verify_test_environment() {
+    local entry
     local name
+    local uppercase
+    while IFS= read -r -d '' entry; do
+        name=${entry%%=*}
+        uppercase=${name^^}
+        case "$uppercase" in
+            AR | AR_* | HOST_AR | TARGET_AR | ARFLAGS | ARFLAGS_* | HOST_ARFLAGS | TARGET_ARFLAGS | \
+                CC | CC_* | HOST_CC | TARGET_CC | CFLAGS | CFLAGS_* | HOST_CFLAGS | TARGET_CFLAGS | CROSS_COMPILE | \
+                CXX | CXX_* | HOST_CXX | TARGET_CXX | CXXFLAGS | CXXFLAGS_* | HOST_CXXFLAGS | TARGET_CXXFLAGS | \
+                NVCC | NVCC_* | HOST_NVCC | TARGET_NVCC | RANLIB | RANLIB_* | HOST_RANLIB | TARGET_RANLIB | \
+                RANLIBFLAGS | RANLIBFLAGS_* | HOST_RANLIBFLAGS | TARGET_RANLIBFLAGS)
+                printf 'maintainability bootstrap retained an untrusted native build environment channel: %s\n' "$name" >&2
+                exit 1
+                ;;
+        esac
+    done < <("$env_command" -0)
     for name in BASH_ENV ENV CCC_OVERRIDE_OPTIONS CL COMPILER_PATH GCC_EXEC_PREFIX GCONV_PATH GITHUB_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD OPENSSL_CONF OPENSSL_CONF_INCLUDE OPENSSL_ENGINES OPENSSL_MODULES RIPGREP_CONFIG_PATH RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTC_BOOTSTRAP CLIPPY_CONF_DIR GIT_DIR RUSTC_WRAPPER ZIP ZIPOPT _CL_ \
         RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC CARGO_BUILD_RUSTDOC CARGO_BUILD_RUSTDOCFLAGS CARGO_TARGET_TEST_RUSTFLAGS \
         CARGO_TARGET_TEST_RUSTDOCFLAGS CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do

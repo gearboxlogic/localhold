@@ -66,9 +66,24 @@ pub(super) fn is_weakening_environment_name(name: &str) -> bool {
             | "MISE_SYSTEM_CONFIG_DIR"
             | "MISE_SYSTEM_CONFIG_FILE"
             | "MISE_SYSTEM_DIR"
-    ) || name.starts_with("CARGO_ALIAS_")
+    ) || is_native_build_environment_name(&name)
+        || name.starts_with("CARGO_ALIAS_")
         || name.starts_with("CARGO_TARGET_") && (name.ends_with("_RUSTFLAGS") || name.ends_with("_RUSTDOCFLAGS") || name.ends_with("_LINKER") || name.ends_with("_RUNNER"))
         || name.starts_with("GIT_")
+}
+
+fn is_native_build_environment_name(name: &str) -> bool {
+    const SELECTORS: &[&str] = &["AR", "ARFLAGS", "CC", "CFLAGS", "CXX", "CXXFLAGS", "NVCC", "RANLIB", "RANLIBFLAGS"];
+    name == "CROSS_COMPILE"
+        || SELECTORS.iter().any(|selector| {
+            name == *selector
+                || name
+                    .strip_prefix(selector)
+                    .and_then(|suffix| suffix.strip_prefix('_'))
+                    .is_some_and(|suffix| suffix.contains(['-', '_', '.']))
+                || name.strip_prefix("HOST_") == Some(*selector)
+                || name.strip_prefix("TARGET_") == Some(*selector)
+        })
 }
 
 fn is_runtime_code_loading_environment_name(name: &str) -> bool {
@@ -183,6 +198,32 @@ mod tests {
         assert!(is_weakening_environment_assignment_name("CL"));
         assert!(is_weakening_environment_assignment_name("cl"));
         assert!(!is_weakening_environment_name("CL"));
+    }
+
+    #[test]
+    fn native_build_tool_environment_is_weakening() {
+        for name in [
+            "CC",
+            "CC_x86_64-unknown-linux-gnu",
+            "CC_x86_64_unknown_linux_gnu",
+            "HOST_CC",
+            "TARGET_CC",
+            "CXX_aarch64-pc-windows-msvc",
+            "AR",
+            "TARGET_RANLIB",
+            "NVCC_x86_64_unknown_linux_gnu",
+            "CFLAGS",
+            "HOST_CXXFLAGS",
+            "ARFLAGS_x86_64_unknown_linux_gnu",
+            "TARGET_RANLIBFLAGS",
+            "CROSS_COMPILE",
+        ] {
+            assert!(is_weakening_environment_name(name), "{name}");
+            assert!(is_weakening_environment_name(&name.to_ascii_lowercase()), "{name}");
+        }
+        for name in ["CCACHE", "CCACHE_DIR", "ACCOUNT", "SUCCESS", "CXX_STANDARD", "HOST_CCACHE"] {
+            assert!(!is_weakening_environment_name(name), "{name}");
+        }
     }
 
     #[test]

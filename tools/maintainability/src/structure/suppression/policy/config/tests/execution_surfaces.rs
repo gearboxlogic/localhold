@@ -383,6 +383,17 @@ fn command_policy_rejects_dynamic_powershell_call_dispatch() {
     assert!(error.to_string().contains("opaque interpreter program"), "{error:#}");
 
     for source in [
+        "$assembly = [Reflection.Assembly]::LoadFrom('quality/payload.dll')\n$assembly.EntryPoint.Invoke($null, @())\n",
+        "#Requires -Modules ./quality/payload.dll\nWrite-Output safe\n",
+        "using assembly ./quality/payload.dll\nWrite-Output safe\n",
+        "using module ./quality/payload.dll\nWrite-Output safe\n",
+    ] {
+        fs::write(workspace.path().join("script/check.ps1"), source).expect("PowerShell managed code loader");
+        let error = reject_checked_in_weakening(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("opaque interpreter program"), "{source}: {error:#}");
+    }
+
+    for source in [
         "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$command}\n",
         "Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList $command\n",
         "[wmiclass]'Win32_Process'::Create($command)\n",

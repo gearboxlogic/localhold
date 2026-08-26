@@ -5,9 +5,18 @@ repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 readonly repository_root
 cd -- "$repository_root"
 
-say() { printf "\n==> %s\n" "$*"; }
-die() { printf "\nERROR: %s\n" "$*" >&2; exit 1; }
-need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"; }
+say() {
+  printf "\n==> %s\n" "$*"
+}
+
+die() {
+  printf "\nERROR: %s\n" "$*" >&2
+  exit 1
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
+}
 
 check_system_deps() {
   say "Checking system dependencies"

@@ -417,7 +417,7 @@ fn collect_tools(value: &Value, analysis: &mut Analysis) {
 
 fn collect_tool(value: &Value, analysis: &mut Analysis) {
     match value {
-        Value::String(_) => {}
+        Value::String(_) => analysis.unresolved |= path_backed_tool_tree(value),
         Value::Array(values) => {
             for value in values {
                 collect_tool(value, analysis);
@@ -426,13 +426,25 @@ fn collect_tool(value: &Value, analysis: &mut Analysis) {
         Value::Table(properties) => {
             for (key, value) in properties {
                 match key.as_str() {
-                    "version" | "os" => require_string_tree(value, &mut analysis.unresolved),
+                    "version" => {
+                        require_string_tree(value, &mut analysis.unresolved);
+                        analysis.unresolved |= path_backed_tool_tree(value);
+                    }
+                    "os" => require_string_tree(value, &mut analysis.unresolved),
                     "postinstall" => collect_run_value(value, analysis),
                     _ => analysis.unresolved = true,
                 }
             }
         }
         _ => analysis.unresolved = true,
+    }
+}
+
+fn path_backed_tool_tree(value: &Value) -> bool {
+    match value {
+        Value::String(version) => version.trim_start().to_ascii_lowercase().starts_with("path:"),
+        Value::Array(values) => values.iter().any(path_backed_tool_tree),
+        _ => false,
     }
 }
 
@@ -632,6 +644,9 @@ _.source = ["script/base.sh", { path = "script/local.sh", redact = true }]
             "[tools.rust]\npath = '../outside/rustc'\n",
             "[tools.rust]\ninstall_env = { RUSTFLAGS = '-A warnings' }\n",
             "[tools.rust]\nversion = '1.97.0'\nbinary_path = '../outside/rustc'\n",
+            "[tools]\ncargo = 'path:target/fake'\n",
+            "[tools.cargo]\nversion = 'path:target/fake'\n",
+            "[tools.cargo]\nversion = ['1.97.0', 'PATH:target/fake']\n",
             "[settings]\ntrusted_config_paths = ['../outside']\n",
             "[settings]\nshorthands_file = '../outside.toml'\n",
         ] {

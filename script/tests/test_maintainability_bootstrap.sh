@@ -53,7 +53,7 @@ if (( guard_count != 2 )); then
     printf 'every CI maintainability bootstrap execution must have an immediate workflow digest guard\n' >&2
     exit 1
 fi
-for loader_variable in GCONV_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD; do
+for loader_variable in BASHOPTS GCONV_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD PERL5LIB PERL5OPT PERLLIB; do
     loader_guard_count=$(grep -Fc "          $loader_variable: ''" "$ci_workflow" || true)
     if (( loader_guard_count != 2 )); then
         printf 'every CI maintainability bootstrap execution must clear %s before Bash starts\n' "$loader_variable" >&2
@@ -113,6 +113,19 @@ git -C "$test_repository" -c core.autocrlf=false -c user.name=LocalHold -c user.
 git -C "$test_repository" -c user.name=LocalHold -c user.email=localhold@example.invalid commit -qm 'reviewed fixture'
 test_base=$(git -C "$test_repository" rev-parse HEAD)
 run_check >/dev/null
+shell_option_marker="$fixture/inherited-shell-option"
+shell_startup_file="$fixture/inherited-shell-startup"
+printf '%s\n' 'printf executed >"$INHERITED_SHELL_OPTION_MARKER"' >"$shell_startup_file"
+if ! env BASH_ENV=$shell_startup_file ENV=$shell_startup_file BASHOPTS=localvar_inherit SHELLOPTS=xtrace \
+    INHERITED_SHELL_OPTION_MARKER=$shell_option_marker PS4='$(printf executed >"$INHERITED_SHELL_OPTION_MARKER")' \
+    "$check" --root "$test_repository" --test-environment >/dev/null 2>&1; then
+    printf 'maintainability bootstrap failed to sanitize inherited shell options\n' >&2
+    exit 1
+fi
+if [[ -e $shell_option_marker ]]; then
+    printf 'maintainability bootstrap executed inherited SHELLOPTS before sanitizing\n' >&2
+    exit 1
+fi
 
 inherited_config_marker="$fixture/global-git-config-ran"
 inherited_config_helper="$fixture/global-git-config-helper"
@@ -470,7 +483,7 @@ bash_env=$fixture/bash-env
 : >"$bash_env"
 CMAKE_TOOLCHAIN_FILE=untrusted CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu=untrusted HOST_CMAKE_TOOLCHAIN_FILE=untrusted \
     AWS_LC_SYS_CMAKE_TOOLCHAIN_FILE=untrusted AWS_LC_SYS_CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu=untrusted \
-BASH_ENV=$bash_env ENV=$bash_env AR=untrusted ARFLAGS=untrusted CC=untrusted CC_x86_64_unknown_linux_gnu=untrusted CFLAGS=untrusted CROSS_COMPILE=untrusted CXX=untrusted CXXFLAGS=untrusted HOST_CC=untrusted HOST_RANLIB=untrusted NVCC=untrusted RANLIBFLAGS=untrusted TARGET_CXX=untrusted CCC_OVERRIDE_OPTIONS=untrusted CL=untrusted COMPILER_PATH=untrusted GCC_EXEC_PREFIX=untrusted GCONV_PATH=untrusted GITHUB_PATH=untrusted LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' OPENSSL_CONF=untrusted OPENSSL_CONF_INCLUDE=untrusted OPENSSL_ENGINES=untrusted OPENSSL_MODULES=untrusted RIPGREP_CONFIG_PATH=untrusted RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CARGO_HOME="$fixture/untrusted-cargo-home" CARGO_TARGET_DIR="$fixture/untrusted-target" CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted ZIP=untrusted ZIPOPT=untrusted _CL_=untrusted \
+BASH_ENV=$bash_env ENV=$bash_env AR=untrusted ARFLAGS=untrusted CC=untrusted CC_x86_64_unknown_linux_gnu=untrusted CFLAGS=untrusted CROSS_COMPILE=untrusted CXX=untrusted CXXFLAGS=untrusted HOST_CC=untrusted HOST_LDFLAGS=untrusted HOST_RANLIB=untrusted LDFLAGS=untrusted LDFLAGS_x86_64_unknown_linux_gnu=untrusted NVCC=untrusted RANLIBFLAGS=untrusted TARGET_CXX=untrusted TARGET_LDFLAGS=untrusted CCC_OVERRIDE_OPTIONS=untrusted CL=untrusted COMPILER_PATH=untrusted CPATH=untrusted C_INCLUDE_PATH=untrusted CPLUS_INCLUDE_PATH=untrusted GCC_EXEC_PREFIX=untrusted OBJC_INCLUDE_PATH=untrusted GCONV_PATH=untrusted GITHUB_PATH=untrusted LD_AUDIT='' LD_LIBRARY_PATH='' LD_PRELOAD='' OPENSSL_CONF=untrusted OPENSSL_CONF_INCLUDE=untrusted OPENSSL_ENGINES=untrusted OPENSSL_MODULES=untrusted PERL5LIB=untrusted PERL5OPT=-MReviewMarker PERLLIB=untrusted RIPGREP_CONFIG_PATH=untrusted RUSTDOCFLAGS=untrusted CARGO_ENCODED_RUSTFLAGS=untrusted CARGO_ENCODED_RUSTDOCFLAGS=untrusted RUSTC_BOOTSTRAP=untrusted CARGO_HOME="$fixture/untrusted-cargo-home" CARGO_TARGET_DIR="$fixture/untrusted-target" CLIPPY_CONF_DIR=untrusted GIT_DIR=untrusted ZIP=untrusted ZIPOPT=untrusted _CL_=untrusted \
     RUSTDOC=untrusted RUSTC_WRAPPER=untrusted CARGO_BUILD_RUSTDOC=untrusted CARGO_BUILD_RUSTDOCFLAGS=untrusted \
     CARGO_TARGET_TEST_RUSTFLAGS=untrusted CARGO_TARGET_TEST_RUSTDOCFLAGS=untrusted CARGO_TARGET_TEST_LINKER=untrusted CARGO_TARGET_TEST_RUNNER=untrusted \
     run_check --test-environment >/dev/null

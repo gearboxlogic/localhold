@@ -14,7 +14,7 @@ pub(super) fn execution_inputs_with_path_policy<'a>(
     path_policy: Option<&super::mutation::PathPolicy>,
 ) -> ExecutionInputs {
     let arguments = arguments.into_iter().collect::<Vec<_>>();
-    let uncertain = arguments.iter().any(|argument| matches!(argument, Argument::Unknown));
+    let uncertain = has_uncertain_arguments(program, &arguments);
     let mut tokens = vec![program.to_owned()];
     tokens.extend(arguments.iter().filter_map(|argument| match argument {
         Argument::Literal(value) => Some((*value).to_owned()),
@@ -46,5 +46,13 @@ pub(super) fn execution_inputs_with_path_policy<'a>(
         paths: inputs,
         windows_bare_programs,
         unresolved,
+    }
+}
+
+fn has_uncertain_arguments(program: &str, arguments: &[Argument<'_>]) -> bool {
+    match program {
+        "readelf" => !matches!(arguments, [Argument::Literal("-d"), Argument::Literal("--"), Argument::Literal("/proc/self/fd/0")]),
+        "zstd" => !matches!(arguments, [Argument::Literal("--test"), Argument::Literal("-")]),
+        _ => arguments.iter().any(|argument| matches!(argument, Argument::Unknown)),
     }
 }

@@ -5,15 +5,29 @@ repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 readonly repository_root
 cd -- "$repository_root"
 
-say() { printf "\n==> %s\n" "$*"; }
-die() { printf "\nERROR: %s\n" "$*" >&2; exit 1; }
-need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"; }
+say() {
+  printf "\n==> %s\n" "$*"
+}
+
+die() {
+  printf "\nERROR: %s\n" "$*" >&2
+  exit 1
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
+}
 
 # pgvector/pgvector:0.8.5-pg16, pinned to its immutable registry digest.
 image="${LOCALHOLD_POSTGRES_IMAGE:-docker.io/pgvector/pgvector@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb}"
 container="${LOCALHOLD_POSTGRES_CONTAINER:-localhold-postgres-smoke}"
 port="${LOCALHOLD_POSTGRES_PORT:-55432}"
-container_cli="${LOCALHOLD_CONTAINER_CLI:-docker}"
+case "${LOCALHOLD_CONTAINER_CLI:-docker}" in
+  docker) container_cli=docker ;;
+  podman) container_cli=podman ;;
+  *) die "LOCALHOLD_CONTAINER_CLI must be docker or podman" ;;
+esac
+readonly container_cli
 url="postgres://localhold:localhold@127.0.0.1:${port}/localhold"
 
 print_sanitized_container_logs() {

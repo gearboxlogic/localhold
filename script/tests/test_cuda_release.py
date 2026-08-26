@@ -153,24 +153,21 @@ class ValidateCudaRuntimeTests(unittest.TestCase):
             (root / "lib").mkdir()
             (root / "licenses").mkdir()
             (root / "notices").mkdir()
-            library = root / "lib/libfixture.so"
+            library = root / "lib/@libfixture.so"
             shutil.copy2("/bin/true", library)
-            readelf = subprocess.run(
-                ["readelf", "-d", str(library)], check=True, capture_output=True, text=True
-            )
             manifest = {
                 "schema_version": 1,
-                "system_libraries": sorted(VALIDATE.parse_needed(readelf.stdout)),
+                "system_libraries": sorted(VALIDATE.needed_libraries(library)),
                 "prohibited_library_patterns": ["tensorrt"],
                 "files": [
                     {
-                        "path": "lib/libfixture.so",
+                        "path": "lib/@libfixture.so",
                         "size": library.stat().st_size,
                         "sha256": VALIDATE.sha256_file(library),
                     }
                 ],
             }
-            self.assertEqual(VALIDATE.validate_files(root, manifest), {"libfixture.so"})
+            self.assertEqual(VALIDATE.validate_files(root, manifest), {"@libfixture.so"})
 
             (root / "notices/unexpected.txt").write_text("unexpected", encoding="utf-8")
             with self.assertRaisesRegex(VALIDATE.ValidationError, "inventory mismatch"):
@@ -264,7 +261,8 @@ class PackageReleaseTests(unittest.TestCase):
             PACKAGE.write_tar_zst(stage, second, 1_700_000_000)
 
             self.assertEqual(first.read_bytes(), second.read_bytes())
-            subprocess.run(["zstd", "--test", str(first)], check=True, capture_output=True)
+            with first.open("rb") as archive:
+                subprocess.run(["zstd", "--test", "-"], check=True, stdin=archive, capture_output=True)
 
 
 class GpuReleaseWorkflowTests(unittest.TestCase):

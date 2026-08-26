@@ -1,10 +1,10 @@
 use sha2::{Digest, Sha256};
-// Exact pins temporarily permit legacy cwd or dynamic paths until delivery removes the indirection.
+
+// These legacy scripts use cwd overrides or dynamic repository-rooted paths.
+// Their exact sources remain accepted only until delivery removes that indirection.
 const REVIEWED_PROCESS_SURFACES: &[(&str, &str)] = &[
     ("script/database_fixtures.py", "698b288b56e2a16ea4878ec2f009b449fd4cd376d2e3c4358445ae4b4ed1fb3f"),
     ("script/package_release.py", "163b91d31ae73bdee732512ac56a615330507a978cfa78d5cd680e008d3a87a4"),
-    ("script/validate_cuda_runtime.py", "53b684a7e00c9bad1358ccd5baafa5b2039f4be706f2205a8b9bafc461623151"),
-    ("script/tests/test_cuda_release.py", "850414f812aeddcf692d47b9cff1a820959aafea2fc25443161739010b6b850f"),
     ("script/tests/test_database_fixtures.py", "616df3e8d2f444fcd24a0b668eb3e492100fc465f53f041e7a0ca41555247b57"),
 ];
 

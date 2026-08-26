@@ -1,4 +1,4 @@
-#!/usr/bin/bash
+#!/usr/bin/env -S -u BASH_ENV -u BASHOPTS -u ENV -u SHELLOPTS /usr/bin/bash --noprofile --norc
 set -euo pipefail
 unset GCONV_PATH
 unset OPENSSL_CONF OPENSSL_CONF_INCLUDE OPENSSL_ENGINES OPENSSL_MODULES
@@ -10,6 +10,10 @@ export -n CDPATH IFS
 if /usr/bin/env | /usr/bin/grep '^BASH_FUNC_' >/dev/null; then
     /usr/bin/printf 'maintainability bootstrap rejects inherited exported shell functions\n' >&2
     exit 1 # inherited exported functions are unsupported
+fi
+if /usr/bin/env | /usr/bin/grep -E '^(BASHOPTS|SHELLOPTS)=' >/dev/null; then
+    /usr/bin/printf 'maintainability bootstrap rejects inherited shell option channels\n' >&2
+    exit 1
 fi
 
 usage() {
@@ -34,10 +38,10 @@ scrub_untrusted_environment() {
                 CC | CC_* | HOST_CC | TARGET_CC | CFLAGS | CFLAGS_* | HOST_CFLAGS | TARGET_CFLAGS | CROSS_COMPILE | \
                 CXX | CXX_* | HOST_CXX | TARGET_CXX | CXXFLAGS | CXXFLAGS_* | HOST_CXXFLAGS | TARGET_CXXFLAGS | \
                 NVCC | NVCC_* | HOST_NVCC | TARGET_NVCC | RANLIB | RANLIB_* | HOST_RANLIB | TARGET_RANLIB | \
-                RANLIBFLAGS | RANLIBFLAGS_* | HOST_RANLIBFLAGS | TARGET_RANLIBFLAGS | CCC_OVERRIDE_OPTIONS | CL | \
+                LDFLAGS | LDFLAGS_* | HOST_LDFLAGS | TARGET_LDFLAGS | RANLIBFLAGS | RANLIBFLAGS_* | HOST_RANLIBFLAGS | TARGET_RANLIBFLAGS | CCC_OVERRIDE_OPTIONS | CL | \
                 CMAKE_TOOLCHAIN_FILE | CMAKE_TOOLCHAIN_FILE_* | *_CMAKE_TOOLCHAIN_FILE | *_CMAKE_TOOLCHAIN_FILE_* | \
-                COMPILER_PATH | GCC_EXEC_PREFIX | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | \
-                OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | RIPGREP_CONFIG_PATH | \
+                COMPILER_PATH | CPATH | C_INCLUDE_PATH | CPLUS_INCLUDE_PATH | GCC_EXEC_PREFIX | OBJC_INCLUDE_PATH | GCONV_PATH | GITHUB_PATH | LD_AUDIT | LD_LIBRARY_PATH | LD_PRELOAD | \
+                OPENSSL_CONF | OPENSSL_CONF_INCLUDE | OPENSSL_ENGINES | OPENSSL_MODULES | PERL5LIB | PERL5OPT | PERLLIB | RIPGREP_CONFIG_PATH | \
                 RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_ENCODED_RUSTDOCFLAGS | RUSTC_BOOTSTRAP | \
                 CARGO_BUILD_TARGET | CARGO_TARGET_DIR | CLIPPY_ARGS | CLIPPY_CONF_DIR | RUSTC | RUSTDOC | RUSTC_WRAPPER | \
                 RUSTC_WORKSPACE_WRAPPER | CARGO_BUILD_RUSTC | CARGO_BUILD_RUSTDOC | CARGO_BUILD_RUSTC_WRAPPER | \
@@ -111,14 +115,14 @@ mise_lockfile="$reviewed_root/mise.lock"
 runner="$reviewed_root/script/run-source-safety.sh"
 bootstrap_tests="$reviewed_root/script/tests/test_maintainability_bootstrap.sh"
 gate_runner="$reviewed_root/script/run-maintainability-gate.sh"
-readonly reviewed_manifest_sha256=cca207767614bd2c1d46bc06092b69e90157aeb450797fcc7cad4e1ed67c89b9
+readonly reviewed_manifest_sha256=2fb6fa0d187ccbbf380d756a95f134d3f843c93e704e3aa49c8dba375ab34e39
 readonly reviewed_lockfile_sha256=825c6448351761aa5c4c6e1ce6b3696c927c4f46c5d43642846380d24f10467c
 readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d1b3fd69aa74c0df6f1
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=cd756b8a6039e1192bb0c95e7c42e66148f7b883f3b12662b31c70269165a468
-readonly reviewed_bootstrap_tests_sha256=3532c926ba6e350b6235a1408b660a34c99867af81251e3cee7f541a9da16f40
-readonly reviewed_gate_runner_sha256=82609774f45011fa7a6260a3841fb49a7304047c1ca1faa5c62869c9524819d8
+readonly reviewed_bootstrap_tests_sha256=cf063129223ae96483e06690677310b878b0c1ebdf3286e43f963740fdc5cb64
+readonly reviewed_gate_runner_sha256=5c341c8cd104d894e11e0b8fd940d547c3e19dd0650a885bcbc467a04f7a362d
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then
@@ -192,8 +196,9 @@ trusted_system_command() {
 
 GIT_CONFIG_NOSYSTEM=1
 GIT_CONFIG_GLOBAL=/dev/null
-readonly GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL
-export GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL
+GIT_ATTR_NOSYSTEM=1
+readonly GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL GIT_ATTR_NOSYSTEM
+export GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL GIT_ATTR_NOSYSTEM
 git_command=$(trusted_system_command git)
 find_command=$(trusted_system_command find)
 mkdir_command=$(trusted_system_command mkdir)
@@ -213,7 +218,7 @@ has_write_mode_bits() {
 git_at() {
     local root=$1
     shift
-    "$git_command" --no-replace-objects -c core.autocrlf=false -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -C "$root" "$@"
+    "$git_command" --no-pager --no-replace-objects -c core.autocrlf=false -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.attributesFile=/dev/null -c diff.external= -C "$root" "$@"
 }
 
 git_checked() {
@@ -541,6 +546,57 @@ if [[ $governed_snapshot == true ]]; then
     verify_reviewed_tracked_tree
 fi
 
+cleanup_snapshot() {
+    if [[ -n ${snapshot_root:-} && -e $snapshot_root ]]; then
+        "$chmod_command" -R u+w -- "$snapshot_root" 2>/dev/null || true
+        "$rm_command" -rf -- "$snapshot_root"
+    fi
+}
+
+preserve_audit_evidence() {
+    local snapshot_evidence_parent="$snapshot_root/target/dependency-unsafe"
+    if [[ ! -e $snapshot_evidence_parent && ! -L $snapshot_evidence_parent ]]; then
+        return 0
+    fi
+    if [[ ! -d $snapshot_evidence_parent || -L $snapshot_evidence_parent ]]; then
+        printf 'maintainability audit evidence parent must be a regular directory\n' >&2
+        return 1
+    fi
+
+    local evidence_parent="$target_parent/dependency-unsafe"
+    if [[ -L $evidence_parent || -e $evidence_parent && ! -d $evidence_parent ]]; then
+        printf 'maintainability durable evidence parent must be a regular non-symlink directory\n' >&2
+        return 1
+    fi
+    if [[ ! -d $evidence_parent ]]; then
+        "$mkdir_command" -- "$evidence_parent" || return
+    fi
+    evidence_parent=$(cd -- "$evidence_parent" && pwd -P)
+    if [[ $evidence_parent != "$target_parent/dependency-unsafe" ]]; then
+        printf 'maintainability durable evidence parent resolves outside the repository target directory\n' >&2
+        return 1
+    fi
+
+    local evidence
+    local evidence_name
+    local destination
+    for evidence in "$snapshot_evidence_parent"/actual-*; do
+        if [[ ! -e $evidence && ! -L $evidence ]]; then
+            continue
+        fi
+        if [[ ! -d $evidence || -L $evidence ]]; then
+            printf 'maintainability audit evidence must be a regular non-symlink directory\n' >&2
+            return 1
+        fi
+        evidence_name=${evidence##*/}
+        destination="$evidence_parent/$evidence_name"
+        if [[ -e $destination || -L $destination ]]; then
+            "$rm_command" -rf -- "$destination" || return
+        fi
+        "$mv_command" -- "$evidence" "$destination" || return
+    done
+}
+
 printf 'maintainability bootstrap check passed\n'
 
 if [[ $mode != verify ]]; then
@@ -577,58 +633,10 @@ if [[ $mode != verify ]]; then
     # still encounter MAX_PATH after adding their own temporary directories.
     snapshot_root=$("$mktemp_command" -d "$target_parent/s.XXXXXXXX")
     "$rmdir_command" -- "$snapshot_root"
-    cleanup_snapshot() {
-        if [[ -n ${snapshot_root:-} && -e $snapshot_root ]]; then
-            "$chmod_command" -R u+w -- "$snapshot_root" 2>/dev/null || true
-            "$rm_command" -rf -- "$snapshot_root"
-        fi
-    }
-    preserve_audit_evidence() {
-        local snapshot_evidence_parent="$snapshot_root/target/dependency-unsafe"
-        if [[ ! -e $snapshot_evidence_parent && ! -L $snapshot_evidence_parent ]]; then
-            return 0
-        fi
-        if [[ ! -d $snapshot_evidence_parent || -L $snapshot_evidence_parent ]]; then
-            printf 'maintainability audit evidence parent must be a regular directory\n' >&2
-            return 1
-        fi
-
-        local evidence_parent="$target_parent/dependency-unsafe"
-        if [[ -L $evidence_parent || -e $evidence_parent && ! -d $evidence_parent ]]; then
-            printf 'maintainability durable evidence parent must be a regular non-symlink directory\n' >&2
-            return 1
-        fi
-        if [[ ! -d $evidence_parent ]]; then
-            "$mkdir_command" -- "$evidence_parent" || return
-        fi
-        evidence_parent=$(cd -- "$evidence_parent" && pwd -P)
-        if [[ $evidence_parent != "$target_parent/dependency-unsafe" ]]; then
-            printf 'maintainability durable evidence parent resolves outside the repository target directory\n' >&2
-            return 1
-        fi
-
-        local evidence
-        local evidence_name
-        local destination
-        for evidence in "$snapshot_evidence_parent"/actual-*; do
-            if [[ ! -e $evidence && ! -L $evidence ]]; then
-                continue
-            fi
-            if [[ ! -d $evidence || -L $evidence ]]; then
-                printf 'maintainability audit evidence must be a regular non-symlink directory\n' >&2
-                return 1
-            fi
-            evidence_name=${evidence##*/}
-            destination="$evidence_parent/$evidence_name"
-            if [[ -e $destination || -L $destination ]]; then
-                "$rm_command" -rf -- "$destination" || return
-            fi
-            "$mv_command" -- "$evidence" "$destination" || return
-        done
-    }
     trap cleanup_snapshot EXIT
 
     git_checked clone --no-hardlinks --no-checkout --quiet -- "$repository_root" "$snapshot_root"
+    printf '* -export-ignore -export-subst\n' >"$snapshot_root/.git/info/attributes"
     git_at "$snapshot_root" update-ref --no-deref HEAD "$checked_head"
     git_at "$snapshot_root" read-tree "$checked_head"
     git_at "$snapshot_root" archive --format=tar "$checked_head" | "$tar_command" -xf - -C "$snapshot_root"

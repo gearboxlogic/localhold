@@ -75,11 +75,11 @@ fn dispatch_with_context(context: DispatchContext<'_>, command: &str, arguments:
     if profiles::accepts_dynamic_arguments(context.surface, context.source_is_reviewed, command, arguments) {
         return false;
     }
-    if is_compression_command(command) {
-        return true;
-    }
     if inspection_only(command, arguments) {
         return false;
+    }
+    if is_compression_command(command) {
+        return true;
     }
     dynamic_mutation_arguments_are_opaque(command, arguments, context.semantics)
         || super::editor::is_command_capable(command)
@@ -276,9 +276,10 @@ fn cp_short_options_materialize_links(options: &str) -> bool {
 }
 
 fn inspection_only(command: &str, arguments: &[String]) -> bool {
-    arguments
-        .first()
-        .is_some_and(|argument| long_help_is_supported(command) && matches!(argument.as_str(), "--help" | "--version") || command == "move" && argument == "/?")
+    command == "zstd" && arguments == ["--test", "-"]
+        || arguments
+            .first()
+            .is_some_and(|argument| long_help_is_supported(command) && matches!(argument.as_str(), "--help" | "--version") || command == "move" && argument == "/?")
 }
 
 fn long_help_is_supported(command: &str) -> bool {

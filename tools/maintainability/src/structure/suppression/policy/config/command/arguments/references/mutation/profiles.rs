@@ -40,6 +40,7 @@ const ARGUMENT_PROFILES: &[ArgumentProfile] = &[
     profile("script/bootstrap.sh", "mise", &["lock"]),
     profile(".github/workflows/trusted-maintainability.yml", "git", &["rev-parse", "--verify", "${remote_ref}^{commit}"]),
     profile(FIXTURE, "check", &["--root", "$test_repository", "$@"]),
+    profile(FIXTURE, "check", &["--root", "$test_repository", "--test-environment", ">/dev/null", "2>&1"]),
     profile(FIXTURE, "check-maintainability-bootstrap.sh", &["$@"]),
     profile(FIXTURE, "trusted_check", &["--root", "$test_repository", "--test-environment", ">/dev/null"]),
     profile(FIXTURE, "trusted_check", &["--root", "$gate_candidate", "--test-environment", ">/dev/null"]),

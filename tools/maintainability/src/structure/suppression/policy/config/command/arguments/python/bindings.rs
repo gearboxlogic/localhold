@@ -14,7 +14,10 @@ const REVIEWED_PROCESS_BINDING_SURFACES: &[ReviewedProcessBindingSurface] = &[
     },
     ReviewedProcessBindingSurface {
         path: "script/tests/test_cuda_release.py",
-        sha256: &["850414f812aeddcf692d47b9cff1a820959aafea2fc25443161739010b6b850f"],
+        sha256: &[
+            "850414f812aeddcf692d47b9cff1a820959aafea2fc25443161739010b6b850f",
+            "8bf0e3be33b2ee524b88af08921b01bc7ce7bdb928be4a7e549a98333aced312",
+        ],
     },
     ReviewedProcessBindingSurface {
         path: "script/tests/test_database_fixtures.py",

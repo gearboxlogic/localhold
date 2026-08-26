@@ -21,7 +21,7 @@ struct TargetRoots {
     testing: BTreeSet<String>,
 }
 
-const LEGACY_ANALYZER_MANIFEST_SHA256: &str = "cca207767614bd2c1d46bc06092b69e90157aeb450797fcc7cad4e1ed67c89b9";
+const LEGACY_ANALYZER_MANIFEST_SHA256: &str = "2fb6fa0d187ccbbf380d756a95f134d3f843c93e704e3aa49c8dba375ab34e39";
 const LEGACY_AUTO_TARGET_PATHS: &[&str] = &[
     "tools/maintainability/src/lib.rs",
     "tools/maintainability/src/bin/",
@@ -689,7 +689,7 @@ mod tests {
                 "{declaration}: {error:#}"
             );
         }
-        let inherited = closed_manifest("").replace("workspace = {}", "[workspace.dependencies]\nhelper = { path = '../helper' }");
+        let inherited = closed_manifest("").replacen("workspace = {}", "[workspace.dependencies]\nhelper = { path = '../helper' }", 1);
         let error = validate_compiler_inputs(&sources, &inherited).unwrap_err();
         assert!(error.to_string().contains("workspace must remain an empty standalone workspace"), "{error:#}");
     }
